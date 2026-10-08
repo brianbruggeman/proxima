@@ -1,0 +1,7 @@
+Thu Oct  8 06:11:15 CDT 2026
+ 6:11  up 7 days, 16:15, 2 users, load averages: 3.75 4.56 5.16
+"Device Utilization %"=97
+  PID  %CPU COMM
+17029  81.1 <background daemon>
+  476  36.2 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+54533  13.4 /Applications/iTerm.app/Contents/MacOS/iTerm2

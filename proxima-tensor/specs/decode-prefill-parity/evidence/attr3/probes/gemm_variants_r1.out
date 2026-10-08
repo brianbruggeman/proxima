@@ -1,0 +1,22 @@
+ab capture excludes 24 unreplayable dispatches of 369
+ab capture: step=0 dispatches=345 groups=20
+ab bits sha=6cd35d1301ccafbb threads=2048 extents=[1000, 8, 1024, 512] arm=base elements=4096000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=6cd35d1301ccafbb threads=2048 extents=[1000, 8, 1024, 512] arm=6cd35d1301ccafbb.g0_control_parts2 elements=4096000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=6cd35d1301ccafbb threads=2048 extents=[1000, 8, 1024, 512] arm=6cd35d1301ccafbb.g1_parts1 elements=4096000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=6cd35d1301ccafbb threads=2048 extents=[1000, 8, 1024, 512] arm=6cd35d1301ccafbb.g4_parts4 elements=4096000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=6cd35d1301ccafbb threads=2048 extents=[1000, 8, 1024, 512] arm=6cd35d1301ccafbb.g8_parts8 elements=4096000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab group sha=6cd35d1301ccafbb threads=2048 extents=[1000, 8, 1024, 512] tg=Some(128) count=24 pass=0 arm=base marginal_us=2252.806 single_us=2217.333
+ab group sha=6cd35d1301ccafbb threads=2048 extents=[1000, 8, 1024, 512] tg=Some(128) count=24 pass=0 arm=6cd35d1301ccafbb.g0_control_parts2 marginal_us=2294.097 single_us=2225.458
+ab group sha=6cd35d1301ccafbb threads=2048 extents=[1000, 8, 1024, 512] tg=Some(128) count=24 pass=0 arm=6cd35d1301ccafbb.g1_parts1 marginal_us=2943.736 single_us=2947.750
+ab group sha=6cd35d1301ccafbb threads=2048 extents=[1000, 8, 1024, 512] tg=Some(128) count=24 pass=0 arm=6cd35d1301ccafbb.g4_parts4 marginal_us=2324.333 single_us=2351.167
+ab group sha=6cd35d1301ccafbb threads=2048 extents=[1000, 8, 1024, 512] tg=Some(128) count=24 pass=0 arm=6cd35d1301ccafbb.g8_parts8 marginal_us=2498.806 single_us=2495.500
+ab bits sha=6cd35d1301ccafbb threads=4096 extents=[1000, 8, 512, 1024] arm=base elements=8192000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=6cd35d1301ccafbb threads=4096 extents=[1000, 8, 512, 1024] arm=6cd35d1301ccafbb.g0_control_parts2 elements=8192000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=6cd35d1301ccafbb threads=4096 extents=[1000, 8, 512, 1024] arm=6cd35d1301ccafbb.g1_parts1 elements=8192000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=6cd35d1301ccafbb threads=4096 extents=[1000, 8, 512, 1024] arm=6cd35d1301ccafbb.g4_parts4 elements=8192000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=6cd35d1301ccafbb threads=4096 extents=[1000, 8, 512, 1024] arm=6cd35d1301ccafbb.g8_parts8 elements=8192000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab group sha=6cd35d1301ccafbb threads=4096 extents=[1000, 8, 512, 1024] tg=Some(128) count=24 pass=0 arm=base marginal_us=2397.917 single_us=2424.500
+ab group sha=6cd35d1301ccafbb threads=4096 extents=[1000, 8, 512, 1024] tg=Some(128) count=24 pass=0 arm=6cd35d1301ccafbb.g0_control_parts2 marginal_us=2423.569 single_us=2404.458
+ab group sha=6cd35d1301ccafbb threads=4096 extents=[1000, 8, 512, 1024] tg=Some(128) count=24 pass=0 arm=6cd35d1301ccafbb.g1_parts1 marginal_us=2185.458 single_us=2181.167
+ab group sha=6cd35d1301ccafbb threads=4096 extents=[1000, 8, 512, 1024] tg=Some(128) count=24 pass=0 arm=6cd35d1301ccafbb.g4_parts4 marginal_us=2592.792 single_us=2599.500
+ab group sha=6cd35d1301ccafbb threads=4096 extents=[1000, 8, 512, 1024] tg=Some(128) count=24 pass=0 arm=6cd35d1301ccafbb.g8_parts8 marginal_us=2984.389 single_us=2979.875

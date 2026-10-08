@@ -1,0 +1,6 @@
+  PID  %CPU COMM
+53816 120.9 /Users/brianbruggeman/.wakatime/wakatime-cli
+  711  57.4 /System/Library/PrivateFrameworks/CacheDelete.framework/deleted
+  476  47.4 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+17029  39.4 <background daemon>
+ 5:45  up 7 days, 15:49, 7 users, load averages: 6.58 6.83 7.56
