@@ -3149,3 +3149,147 @@ PROXIMA_DEBUG_METAL_SOURCE=1 PROXIMA_METAL_COMPARE_BOUND_NODE=<node> ... AB_DESC
 ```
 Missing for CI: no job runs the Metal tests, the censuses or the AB tool; every row re-proves on this box only. The binaries are under `.long_ctx_backups/attr3/bin/` (sha256 in `evidence/attr3/bin.sha256`).
 The two summarizers are single-file Rust programs, built with `rustc -O --edition 2024 evidence/attr3/tools/omission_summary.rs` and `.../step_timeline.rs`; they read the `.out` and event files in this directory and print the markdown tables kept beside them.
+
+## round three result (measured 2026-10-08, main 0688ae5b to the commit that adds this section)
+
+Slices applied: head chunk growth, capture and host phase events, fold and router, and the route series (segmented scan plus compacted prepass). Test models: gemma4 E2B and granite moe 1b; no 26B, no Ollama. The llama row is `evidence/slice0/ac1/decode_arms.out` (recorded 2026-10-07, different box state; not re-run). Every number below names its source under `evidence/round3/` (`conflicts.md`, `bench/`, `census/`, `rank/`, `timeline/`) or the gate logs under `.long_ctx_backups/combine3/logs/` (the counts are the lines the runs printed). Nothing here is a verdict: rows are measurements with the mechanism where one was traced; unexplained rows are listed last.
+
+### commits (20 on top of 0688ae5b before this section, linear, no trailer)
+
+Applied with `git am --3way` (`conflicts.md` 1-2): headchunk `ee4377ee 437a617e`; capture `730d4c6d 02686b04 48db85b8 7039668c`; foldrouter `fa80caad a6bf5cde` (its 0001 skipped: identical to headchunk 0001); route `3c734a3b 753c6b94 a9edcd40 54f6c58a ee18d084`.
+Integration commits, one change each: `7e7aa0db` lib tests compile at the std tier; `15bac657` a stale route compaction is reported by name; `c91aee63` route prepass items gated to the tiers that call them; `ee0355f1` arms bench records generation wall clock and cpu time (the requested subject was 79 characters, the commit hook limit is 72, so the subject reads "record generation wall clock and cpu time in arms bench"); `7bf4be63` compacted route is the default; `0a21a9ca` census invariant counts compacted route prepasses; `6d071c2b` timeline tool attaches chunk phase events to their own step.
+
+### gates at the final code tip (N is the count the run printed; `--cargo-profile gate`)
+
+| gate | command | N | source |
+|---|---|---|---|
+| tensor | `nextest run -p proxima-tensor` | 803 run, 803 passed, 8 skipped | `y1_tensor.log` |
+| omega | `-p omega --features metal` | 850 run, 850 passed, 16 skipped | `v2_omega_metal.log` |
+| omega instrument | `... --features metal,instrument` | 903 run, 903 passed, 22 skipped | `v3_omega_instr.log` |
+| omega feature-gated | `... metal,metal-buffer-pool,metal-moe-mul-mat-id,moe-topk-fusion,top-fraction-fusion,alloc-count` | 871 run, 871 passed, 16 skipped | `v4_omega_gated_a.log` |
+| omega split-k | `... metal,metal-q4k-split-k` | 842 run, 842 passed, 16 skipped (801 at 56d7d21d) | `v5_omega_splitk.log` |
+| omega std tier | `-p omega --no-default-features --features std --lib` | 151 run, 151 passed, 1 skipped (did not compile at 0688ae5b: 16 errors) | `v6_omega_std.log` |
+| omega std + metal-core | `... --features std,metal-core --lib` | 160 run, 160 passed, 1 skipped | `g6b_omega_metalcore.log` |
+| omega, route mode `segments` (env `OMEGA_GROUPED_GEMM_ROUTE_MODE`) | `... --features metal` | 850 run, 850 passed | `y7_segments_omega_metal.log` |
+| omega, route mode `compacted` (before it became the default) | `... metal`, `... metal,instrument` | 850 and 903 passed | `k1`, `k2` |
+| interop slice gate, 26B excluded | `nextest run -p proxima-model-interop --features std,metal --profile slice-gate -E 'not test(/gemma4_26b/)'` | 741 run, 741 passed, 128 skipped | `y8_interop_slice.log` |
+| interop descriptor tests, E2B and granite | `... std,metal,conflaguration`, 8 name filters | 10 run, 10 passed, 859 skipped | `y9_interop_descriptor.log` |
+| clippy `-D warnings --all-targets` | tensor+interop (std,metal); omega metal; omega metal+instrument; omega gated set; interop std,metal,instrument; the two arms examples; omega `std,metal-core`, `std,metal-tiled-gemm`, `std,metal-grouped-gemm` (lib and tests) | exit 0 each | `x1`-`x5`, `v7`, `v8`, `c6`, `c7`, `combo_*` |
+| tiers | `check -p proxima-tensor --no-default-features --features alloc`; `-p proxima-model-interop --no-default-features`; `-p omega --no-default-features --features alloc`; `--workspace --all-targets` | exit 0 each | `xt1`-`xt4`, `v9_check_ws.log` |
+| model-name grep (AC4 pattern, `combine3/ac4_pattern.txt`) | `git grep -nIiP` over the four crates' non-test source | 0 at the tip, 0 at 0688ae5b; 0 added lines in `git diff 0688ae5b..HEAD` outside the spec | session |
+
+AC mapping inside the 741 and the 10: `arch_data_digest_` 7 passed (gemma4 E2B, granite moe, openchat, qwen2, qwen3, qwen35, qwen35moe); `generic_verify_llama_parity_` E2B and granite 2 passed; `llama_parity_` E2B and granite 2 passed; `generic_binder_` E2B and granite 2 passed. Digests: none moved. No fixture file is in `git diff 0688ae5b..HEAD`; the graph is unchanged by head chunk (a submission policy), capture (instrument-only), fold and router (rendered kernel text, not `bind.ops`) and the route series (kernel text and an extra dispatch, not the graph). Not run: the 16 large-checkpoint tests of the round-two list and every 26B test.
+First gate pass (before the route series, tip `a6bf5cde`): tensor 803, omega metal 829, instrument 882, gated 850, split-k 821, all passed.
+
+### failures found, mechanism, fix
+
+1. Std tier lib tests did not compile (16 errors, `kernel_dispatch_shape` gated on `metal-core` while 16 tests call it). `7e7aa0db` puts `metal-core` on those tests and their helpers. Compiling them exposed 4 dead-code errors (helpers whose callers are gated) and 5 tests that failed at run time: they expect the 256-wide cooperative reduce (`slot * 256`, `partials0[4]`, `1872*8960*256` threads), and the tier without `metal-wide-cooperative-reduce` renders width 32 (`536739840 = 1872*8960*32`). Probe: with only `metal-wide-cooperative-reduce` added, the same lib build runs 429 tests, 429 passed (`g6_probe_wide.log`); the 5 tests and the flat-grid helpers carry that feature. `cached_attention_live_splits` was gated `any(test, metal macos)` but its callers need `metal-attn-split-rows` in test builds; the gate says that.
+2. The route series did not build at the std tier (an import of the new fault constant outside its gate, and stubs gated `any(test, ...)` with no test caller): `c91aee63`.
+3. A stale route compaction (header word zero) raised `GatherIndexOutOfRange` with index equal to the expert extent. `15bac657`: the kernel records `ROUTE_COMPACTION_MISMATCH_FAULT` (`u32::MAX`), the host reports `MetalError::RouteCompactionMismatch { node }`; the kernel check is unchanged; the rendered-kernel pin test names the constant; two host tests (`route_fault_decode_tests`) read a fault buffer holding that word and one holding an expert-source word. They skip on a host with no device, like the other Metal tests in that file. Limit: an expert-source miss with expert id `0x7ffffffe` or more clamps to the same word.
+4. Granite 25-token prefill regressed under the default `segments` mode (below). Not head chunk growth: the tip with `OMEGA_COMMAND_BUFFER_GROWTH_PERMILLE=1000` read 47.002 ms against 46.989 (`bench/runC_granite_short_growth/`). The segment count moves it (sweep below). `7bf4be63` makes `compacted` the default.
+5. The census aborted on its dispatch-count invariant under compacted mode (captured 383, physical 455: 72 prepasses the capture does not record). `0a21a9ca`: `CapturedDispatch.route_prepass_dispatches`, summed into the invariant.
+6. The timeline tool put step N's scheduled/gpu phases into step N-1's record (the handlers log after the next step started): `6d071c2b` keys them by `step=`. Before it, every decode `commit end to scheduled` cell read `missing`.
+7. Not closed: nothing red. The compacted ops cannot be timed per dispatch by the census (below).
+
+### bench (release `decode_gbps_baseline` with the new fields, `decode_arms`; 3 processes x (1 warm-up + 7 timed) = 21 timed runs per arm; arms interleaved per process)
+
+Binaries (`bench/binaries.sha256`): `base` = 0688ae5b library plus the arms-bench commit applied to an export (own target directory; sha256 `755cff47...`), `tip` = final tip (`d09f4db3...`), `control` = byte copy of `tip`. The export build of 0688ae5b before the arms-bench commit had sha256 `76849037...`, the value recorded for `decode_gbps_baseline_tip` in `evidence/round2fix/bench/binaries.sha256`. Tip is byte-identical to the build made with `OMEGA_GROUPED_GEMM_ROUTE_MODE=compacted`. Prompts `prompt1k.txt` (971 tokens E2B, 1000 granite) and `prompt_short_hippo.txt` (25 tokens), 128 new tokens. Box: `box_load_before.txt` per run; no cargo process of mine; `peers_present_at_exit=[]` on every launch of every run in `bench/` (18 of 18, 9 of 9 for the growth run). The GPU utilization sampler read 0, then 67-96 on settled samples while none of my processes ran (WindowServer and a browser are the busiest processes; `ps` shows no peer of mine), so "near 0" was not met; the per-launch ioreg reading in `decode_arms.out` is taken right after the previous child exits and reads 91-96 for every launch after the first (0 or 75 for the first), which fits the previous child still counting, so it is not evidence about peers. Load average 3.6-6.1. Only within-run differences are used. Medians are kept-run medians (outlier rule 3 x 1.4826 x MAD); the cell shows `median (CoV all / CoV kept; range of all; n kept)`. CPU is user+sys of the process over one generation (`getrusage`), cpu% = cpu/wall. GPU busy fraction needs the instrument build, which these binaries are not; the box-level sampler is above and the census timelines give the instrumented fraction.
+
+Final run, 1000-token prompt (`bench/runA_long/`; text hash equal on all 72 generations per model: E2B `8fec363180a250e0`, granite `c4625c1fb93f28b7`; token id lists equal across the 72):
+
+| arm | decode ms/token | prefill ms | TTFT ms | wall ms (128 tokens) | cpu ms | cpu % | RSS median of 3 | footprint | peak GPU bytes |
+|---|---|---|---|---|---|---|---|---|---|
+| E2B base | 11.141 (2.46/1.08; 10.911-11.970; 18) | 587.976 (1.90/0.23; 586.0-636.1; 18) | 588 (1.90/0.23; 586-636) | 2001.94 (2.13/0.79; 1974.6-2135.5; 18) | 306.6 (16.30/11.53; 250.2-491.8; 20) | 15.37 (15.16/11.23) | 3.781 GB | 434.4 MB | 3,622,256,640 |
+| E2B tip | 11.161 (0.57/0.57; 11.041-11.275; 21) | 588.018 (0.28/0.28; 586.0-592.0; 21) | 588 (0.28/0.28; 586-592) | 2006.54 (0.40/0.40; 1989.3-2018.9; 21) | 307.0 (13.97/13.97; 235.5-355.3; 21) | 15.35 (13.71/13.71) | 3.770 GB | 425.8 MB | 3,622,256,640 |
+| E2B control | 11.178 (1.01/1.01) | 588.023 (0.17/0.17) | 588 (0.17/0.17) | 2007.57 (0.70/0.70) | 301.5 (12.75/11.56) | 15.11 (12.40/11.33) | 3.790 GB | 435.4 MB | 3,622,256,640 |
+| E2B llama (recorded, 1000 tokens) | 9.017 (5.98/0.39; 8.967-11.588; 20) | 573.226 (2.98/0.69) | 575.655 (2.98/0.69) | 1718.4 (derived: prefill + 127 x ms/token) | not recorded | not recorded | 3.735 GB | 206.6 MB | not recorded |
+| granite base | 6.634 (1.33/1.33; 6.543-6.843; 21) | 266.012 (0.36/0.36; 265.0-268.0; 21) | 266 (0.36/0.36) | 1108.01 (0.99/0.91; 1097.0-1135.0; 20) | 222.0 (8.17/6.98; 195.9-271.1; 20) | 20.14 (7.61/7.61) | 2.145 GB | 368.9 MB | 1,728,069,632 |
+| granite tip | 6.664 (0.73/0.58; 6.603-6.814; 20) | 245.030 (0.44/0.44; 244.0-248.0; 21) | 245 (0.45/0.45) | 1091.41 (0.59/0.47; 1084.6-1111.3; 20) | 194.5 (7.23/4.39; 188.1-239.4; 16) | 17.87 (7.01/4.26) | 2.002 GB | 374.2 MB | 1,730,428,928 |
+| granite control | 6.652 (0.99/0.50) | 244.979 (0.44/0.44) | 245 (0.43/0.43) | 1091.07 (0.77/0.35) | 195.9 (5.71/3.62) | 17.97 (5.71/3.53) | 1.994 GB | 373.4 MB | 1,730,428,928 |
+| granite llama (recorded) | 5.215 (1.10/0.66; 5.062-5.278; 19) | 151.448 (0.32/0.32) | 153.237 (0.32/0.32) | 813.8 (derived) | not recorded | not recorded | 1.762 GB | 284.7 MB | not recorded |
+
+Bound lines, tip against base (`bound` lines in `runA_long/decode_arms.out`; time limit max(MAD, 2% of base), memory limit max(2% of base, |control - tip|); the tool's own memory limit is 2% only): E2B decode +0.020 (limit 0.2228), prefill +0.042 (11.76), TTFT 0.000, wall +4.60 (40.04), cpu +0.39 (36.79), RSS -10.3 MB (75.6), footprint -8.6 MB (8.69), GPU bytes 0. Granite decode +0.0295 (0.1327), prefill **-20.98** (5.32), TTFT -21 (5.32), wall -16.60 (22.16), cpu -27.5 (9.30), RSS -143.8 MB (limit max(42.9, 7.3) = 42.9), footprint +5.4 MB (7.38), GPU bytes +2.36 MB (34.56). Control against tip: every time metric within its limit; E2B footprint +9.55 MB against limit 8.52 (outside); granite decode -0.0115, prefill -0.051, wall -0.35, cpu +1.48, RSS -7.3 MB, footprint -0.8 MB.
+
+Final run, 25-token prompt (`bench/runB_short/`; text hash E2B `16f789b7871d97d1`, granite `fd64fab40cc5300b`, equal on 72 each; token ids equal):
+
+| arm | decode ms/token | prefill ms | TTFT ms | wall ms | cpu ms | cpu % | RSS | footprint | peak GPU bytes |
+|---|---|---|---|---|---|---|---|---|---|
+| E2B base | 11.685 (6.08/6.08; 10.56-12.76; 21) | 90.997 (7.81/4.00; 87.0-117.1; 19) | 91 (7.80/3.98) | 1574.83 (5.94/5.94; 1432-1714) | 450.9 (38.65/38.65; 242.8-684.2) | 29.10 (35.04) | 3.636 GB | 211.1 MB | 3,389,947,904 |
+| E2B tip | 10.865 (2.00/1.74; 10.69-11.47; 20) | 88.509 (2.26/2.01; 87.0-94.0; 20) | 88.5 (2.25/2.01) | 1470.16 (1.87/1.64; 1447-1545) | 307.1 (24.59/24.59; 224.9-443.9) | 20.74 (23.24) | 3.635 GB | 204.6 MB | 3,389,947,904 |
+| E2B control | 10.847 (3.21/2.29) | 88.026 (1.94/1.24) | 88 (1.96/1.26) | 1465.56 (3.07/2.22) | 247.5 (36.46/18.66) | 17.20 (33.11/24.98) | 3.638 GB | 208.2 MB | 3,389,947,904 |
+| granite base | 5.540 (0.38/0.17; 5.483-5.589; 18) | 42.005 (1.30/0.08; 41.94-43.97; 16) | 42 (1.29/1.29) | 745.71 (0.35/0.14; 738.4-751.9; 18) | 166.4 (9.35/2.19; 162.6-210.5; 13) | 22.38 (9.30/2.16) | 1.608 GB | 128.3 MB | 1,483,063,296 |
+| granite tip | 5.567 (0.49/0.49; 5.500-5.619; 21) | 40.022 (1.51/0.07; 39.02-42.06; 16) | 40 (1.52/1.52) | 747.89 (0.47/0.47; 738.5-753.7; 21) | 173.1 (7.18/5.84; 164.8-214.5; 20) | 23.09 (7.07/5.88) | 1.617 GB | 126.1 MB | 1,483,194,368 |
+| granite control | 5.560 (0.45/0.45) | 40.011 (0.57/0.10) | 40 (0.53/0.53) | 746.09 (0.42/0.42) | 171.5 (9.03/7.47) | 22.97 (9.26/7.72) | 1.613 GB | 127.9 MB | 1,483,194,368 |
+
+The E2B short run is the noisiest of the four (base CoV 6.1% on decode, 38.7% on cpu; the sampler read 94/71/0 before the run, 89/67/0 before the long run); the E2B decode -0.82 against base (limit 0.652) sits on a base median (11.685) above the same arm.s 10.831 in the pre-flip run of the same prompt, and control against tip reads -0.018. Granite short tip against base: prefill **-1.98** (limit 0.84), decode +0.0275 (0.111), wall +2.18 (14.91), cpu **+6.72 against limit 3.33 (outside)**, footprint -2.2 MB; control against base cpu +5.16 (outside), control against tip cpu -1.56 (within): the cpu rise is in both copies of the tip binary, so it is the build, not noise between processes.
+Before the default was flipped, the same two runs with `tip` = segments mode (`bench/preflip_runA_long/`, `preflip_runB_short/`): granite long prefill 246.993 against base 265.974; granite 25-token prefill **47.008 against base 41.999 (+5.01, limit 0.84)**; E2B unchanged (long decode +0.002, short decode -0.015); granite long RSS +98.5 MB against limit 39.6 MB (per-process RSS spread inside one arm is 1.90-2.00 GB for base, 1.88-2.15 GB for tip, 1.91-2.18 GB for control, so the medians of 3 do not separate; the flipped-default run reads -143.8 MB).
+
+### route mode sweep (granite, `bench/runD_route_sweep_{short,long}/`, 6 arms interleaved, 3 x (1 + 7); one binary per setting built with `OMEGA_GROUPED_GEMM_ROUTE_SEGMENTS` / `OMEGA_GROUPED_GEMM_ROUTE_MODE`; text hash `fd64fab40cc5300b` (short) and `c4625c1fb93f28b7` (long) on all 144 generations each, equal to base)
+
+| arm | 25 tokens: prefill ms (CoV all) | decode ms/token | wall ms | cpu ms | 1000 tokens: prefill ms (CoV all) | decode ms/token | wall ms | cpu ms | peak GPU bytes (long) | footprint (long) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| base 0688ae5b | 42.007 (0.08) | 5.546 | 746.4 | 164.9 | 265.959 (0.59) | 6.675 | 1111.6 | 202.4 | 1,728,069,632 | 369.6 MB |
+| segments 1 | 37.989 (0.08) | 5.566 | 745.1 | 164.0 | 259.993 (0.32) | 6.651 | 1105.0 | 189.3 | 1,728,069,632 | 365.4 MB |
+| segments 2 (the former default) | 46.988 (0.07) | 5.589 | 756.7 | 167.2 | 246.943 (0.26) | 6.674 | 1093.9 | 190.2 | 1,728,069,632 | 369.5 MB |
+| segments 4 | 61.030 (17.15; one run 111.99) | 5.572 | 768.7 | 163.8 | 241.009 (0.41) | 6.669 | 1087.6 | 190.0 | 1,728,069,632 | 367.4 MB |
+| segments 8 | 82.016 (0.26) | 5.571 | 789.5 | 164.9 | 254.983 (0.27) | 6.674 | 1102.4 | 190.6 | 1,728,069,632 | 367.4 MB |
+| compacted | 39.994 (0.54) | 5.561 | 746.6 | 165.7 | 246.016 (0.23) | 6.683 | 1093.8 | 191.6 | 1,730,428,928 | 371.2 MB |
+
+Flip rule (outside the bound, text-hash parity): compacted against segments 2 reads -6.994 ms on 25 tokens (limit max(MAD, 2%) = 0.94) and -0.927 ms on 1000 tokens (limit 4.94, within); segments 4 wins the long prompt by -5.93 (limit 4.94) and loses the short one by +14.04. `7bf4be63` flips the default to `compacted`. Memory in compacted mode (the writer did not check pool recycling of the per-encode compaction buffer): peak GPU bytes +2,359,296 B (limit 34.56 MB), footprint +1.7 MB; no growth beyond the bound in these 21 runs.
+Mechanism (traced as far as the toggle): the prefill time of the 25-token prompt rises with the segment count above 1 (37.99, 46.99, 61.03, 82.02 ms for 1, 2, 4, 8), the number follows the build-time key and nothing else differs (text hash equal, decode equal). The key's own note says each (expert, segment) pays a partial tail tile; at 25 tokens x 8 experts per token there are at most 200 route entries, so most segments carry a tile of few tokens. The per-threadgroup cost was not measured.
+
+### per-slice target and measured (census `rank/`, own-cb ms at granite 1000-token prefill; before = `evidence/attr3/rank/granite_prefill.md` at 56d7d21d)
+
+Segments-mode census (`census/census_granite_prefill_segments/`, all 383 dispatches timed, sum 232.92 ms against 285.10 before) is the one comparable to the earlier tables; the default (compacted) census (`census/census_granite_prefill/`) times 311 of 383 dispatches because the 72 compacted grouped GEMMs are unreplayable in capture (`census_groups.csv` failure `a compacted grouped gemm needs its route prepass, which the capture does not record`), so its stacked-expert row reads 0.00 and its class total (66.15 ms) excludes them. That is a limit of the tooling; the whole-step effect of compacted is in the wall figures above and the step GPU spans below.
+
+| slice class | before | target | measured, segments-mode census | measured, default (compacted) census |
+|---|---|---|---|---|
+| stacked expert GEMM `Q8_0 4194304`, 72 ops | 169.99 | 131.4 | 166.61 | not timeable (unreplayable) |
+| combine fold `F32 8192`, 24 ops | 13.63 | 5.30 | 5.32 | 5.30 |
+| router `F32 1024x32`, 24 ops | 11.52 | 5.0 | 5.09 | 5.10 |
+| twin rows (two kernels, 48 ops) | 35.75 | about 1.5 | 1.47 (0.98 + 0.49) | 1.25 (0.77 + 0.48) |
+| `omega_moe_topk_e32_k8_stacked`, 24 ops | no number (not replayable) | an own-cb number | 0.31 (12.9 us/op) | 0.31 (12.8 us/op) |
+| matmul class, 218 ops | 218.41 | | 200.27 | 33.68 (excludes the 72 grouped) |
+| census step 0 chunk busy sum / last gpu end (`timeline/granite_prefill*.md`) | 260.333 / 326.096 | | 241.453 / 298.165 | 241.839 / 298.348 |
+
+The stacked-expert target is not reached by 35.2 ms in segments mode; in compacted mode the census cannot time it, and the step-level GPU busy is 241.84 against 241.45 ms (segments), 260.33 before.
+Parity for each slice: tests (gate table), text hashes (bench tables, equal), `llama_parity_` and `generic_verify_llama_parity_` for E2B and granite (passed at the final default, `y8_interop_slice.log`).
+
+### timelines (`timeline/*.md`, instrument build, census runs; step 23 of 24 for decode, step 0 for prefill; before = `evidence/attr3/timeline/`)
+
+| | first boundary: GPU idle before chunk 2 (before / now) | median lead idle (before / now) | median inter-chunk idle (before / now) | median wall (before / now) | chunk busy sum / wall, derived (before / now) | chunks |
+|---|---|---|---|---|---|---|
+| E2B decode | 0.552 / 0.022 ms | 0.286 / 0.222 ms | 0.713 / 0.192 ms | 11.347 / 11.012 ms | 87.2% / 91.6% | first chunk 16 dispatches (24 ops), second 91 -> 28 dispatches |
+| granite decode | 0.212 / 0.022 ms | 0.341 / 0.210 ms | 0.372 / 0.180 ms | 6.468 / 6.377 ms | 83.1% / 88.3% | second chunk 55 -> 18 dispatches |
+
+These are census processes (capture and telemetry on), not the bench binaries; the bench decode ms/token did not move (E2B +0.020, granite +0.0295, both within). Host phases of one granite decode step (step 23): pre_encode 0.096, first chunk encode 0.262 ms, commit 0.006; GPU start of chunk 1 at 0.408 ms. Commit-to-GPU-start split (`commit end to scheduled`, `scheduled to gpu start`): granite decode step 23 chunks 1-8 = 0.072/0.068, 0.050/0.155, 0.058/0.083, 0.058/0.111, 0.061/0.053, 0.058/0.044, 0.058/0.043, 0.056/0.130 ms; E2B decode step 23 chunk 8 `scheduled to gpu start` 0.534 ms, chunks 1-7 0.042-0.107. Granite prefill step 0, one chunk of 383 ops: commit end to scheduled **49.890 ms** (segments-mode build 50.357), scheduled to GPU start 0.242 ms (0.041); lead idle 56.509 ms (56.712) against 65.763 before.
+
+### unexplained, unmeasured, assumed
+
+- The 49.9 ms between `commit` and the scheduled callback of the 1000-token prefill chunk (queueing, not GPU start: 0.24 ms). It appears in both route modes and in a single cold step with 33 pipeline compiles; its cause was not traced (candidates: first-use residency of the weight buffers; driver work for a 383-dispatch buffer).
+- Why the segment count costs the 25-token prefill 5 ms per doubling above 1 (mechanism hypothesis above is untraced).
+- The granite 25-token cpu ms rise (+6.72 ms, limit 3.33) present in tip and control; where the extra host cpu goes was not profiled.
+- Run-to-run drift in the E2B short-prompt figures; the GPU sampler never settled to 0 (WindowServer and a browser).
+- The stacked-expert GEMM cost in compacted mode per dispatch (unreplayable by capture; recording the prepass in the capture would give it).
+- Per-process RSS spread (about 250 MB inside one granite long arm): medians of 3 do not separate arms by less than that.
+- GPU busy fraction for the bench binaries (not instrument builds); the instrument census fractions are derived from medians of two different runs.
+- Large-checkpoint and 26B tests not run. CUDA and WGSL do not read the route keys.
+- Decisions that belong to the owner and are not taken here: the route default (set by `7bf4be63` on the numbers above), `route_segments` for the segments mode, the arms-bench fields.
+
+### re-prove
+
+```
+cargo nextest run -p proxima-tensor --cargo-profile gate                                                        # 803
+cargo nextest run -p omega --features metal --cargo-profile gate                                                 # 850
+cargo nextest run -p omega --features metal,instrument --cargo-profile gate                                      # 903
+cargo nextest run -p omega --features metal,metal-buffer-pool,metal-moe-mul-mat-id,moe-topk-fusion,top-fraction-fusion,alloc-count --cargo-profile gate   # 871
+cargo nextest run -p omega --features metal,metal-q4k-split-k --cargo-profile gate                               # 842
+cargo nextest run -p omega --no-default-features --features std --lib --cargo-profile gate                       # 151
+cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate -E 'not test(/gemma4_26b/)'   # 741
+decode_arms --prompt-file prompt1k.txt --processes 3 --runs 7 --arm base=<0688ae5b + arms-bench commit, own target dir> --arm tip=<tip> --arm control=<copy of tip> --case gemma4_e2b=<E2B blob> --case granite_moe=<granite blob>
+OMEGA_GROUPED_GEMM_ROUTE_SEGMENTS=<1|4|8> or OMEGA_GROUPED_GEMM_ROUTE_MODE=<segments|compacted> cargo build --release -p proxima-model-interop --example decode_gbps_baseline --features std,metal   # one binary per setting
+M0_OUT_DIR=<dir> M0_MODEL_GGUF=<granite blob> M0_MAX_TOKENS=2 M0_CAPTURE_STEPS=0 PROXIMA_PROMPT_FILE=prompt1k.txt gemma4_decode_kernel_census      # built --features std,metal,instrument; add M0_MAX_TOKENS=24 M0_CAPTURE_STEPS=23 for decode
+attribution_rank rank --census evidence/round3/census/census_granite_prefill_segments --llama evidence/slice0/llama_ops/granite_ops.tsv --ntok 512,488 --requests 3 --floor-us 4.0
+step_timeline evidence/round3/census/census_granite_decode/telemetry_events.log evidence/round3/census/census_granite_decode/census_dispatches.csv 23   # tools/step_timeline.rs
+```
+Missing for CI: no job runs the Metal tests, the arms bench or the censuses; every row re-proves on this box only. Bench binaries and raw logs are under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine3/` (`bin/`, `logs/`, `raw/` holds the 21-33 MB telemetry logs and timing samples that the evidence directories keep only as `telemetry_events.log`).
