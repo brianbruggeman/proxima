@@ -268,6 +268,8 @@ mod pipeline_disk_cache;
 mod resident_nocopy_cache;
 #[macro_use]
 mod arena_encode_dispatch_finish;
+#[cfg(feature = "metal-plan-stable-buffers")]
+mod arena_layout;
 pub use device_buffers_arena_plan::*;
 pub use execute_and_hazards::*;
 pub use placements_execute_named::*;
@@ -279,6 +281,8 @@ use pipeline_disk_cache::*;
 pub use pipeline_disk_cache::{pipeline_disk_cache_counts, set_runtime_config};
 pub use resident_nocopy_cache::*;
 use arena_encode_dispatch_finish::*;
+#[cfg(feature = "metal-plan-stable-buffers")]
+use arena_layout::{Allocation, lay_out_packed, lay_out_whole_slots, peak_live_bytes};
 #[cfg(feature = "instrument")]
 pub use arena_encode_dispatch_finish::{
     CapturedDispatch, flush_gpu_caches, take_captured_dispatches, time_empty_command_buffer_gpu_ns,
