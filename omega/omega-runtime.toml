@@ -476,6 +476,19 @@ os_headroom_bytes = 8_589_934_592
 # budget must be computed BEFORE the first weight upload.
 arena_allowance_bytes = 28_311_552
 
+# Bytes of `BufferArena` peak one prefill row adds on top of `arena_allowance_bytes`,
+# multiplied by `ServingConfig::ubatch_size` (the most rows one prefill evaluation
+# carries) by `proxima-model-interop`'s fit gate. The arena's own cap scales with the
+# bind-time row count (`arena.transient_cap` times rows), and so must the load-time
+# budget that predicts it. Worst witness: the ROW 391 incident, a 1100-row prefill whose
+# naive no-reuse peak was 984_110_552 bytes (`omega/src/metal/arena_encode_dispatch_finish.rs`
+# `thousand_row_prefill_shape_fits_the_scaled_cap`), ceil(984_110_552 / 1100) = 894_647;
+# the 1618-row gemma4-E2B witness is 495_315_984 bytes, 306_135 per row. Not covered:
+# the unfused two-range attention score tensors, which scale with cached keys as well as
+# rows. 0 restores the fixed allowance. Overridable per-build via
+# `OMEGA_LOAD_TIME_FIT_ARENA_BYTES_PER_PREFILL_ROW`.
+arena_bytes_per_prefill_row = 894_647
+
 [grid]
 # widest 1D grid, in threads, a Metal kernel's `uint gid
 # [[thread_position_in_grid]]` can address. A dispatch wider than this launches
