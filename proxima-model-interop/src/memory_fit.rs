@@ -194,6 +194,21 @@ impl HostMemoryLimit {
     }
 }
 
+/// The `BufferArena` allowance a prefill evaluating at most `ubatch_rows`
+/// rows at once needs: the fixed allowance plus `bytes_per_row` for each
+/// row. `ubatch_rows == 0` is the single-pass control, whose row count is the
+/// prompt's and unknown at load time, so only the fixed allowance applies.
+/// Both inputs are `omega::sized::LOAD_TIME_FIT_ARENA_*` data the caller
+/// resolves (`omega-runtime.toml`'s `[load_time_fit]`).
+#[must_use]
+pub const fn prefill_arena_allowance_bytes(
+    fixed_bytes: u64,
+    bytes_per_row: u64,
+    ubatch_rows: u32,
+) -> u64 {
+    fixed_bytes.saturating_add(bytes_per_row.saturating_mul(ubatch_rows as u64))
+}
+
 /// What [`fit_context_length`] did to reach a fitting budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FitOutcome {
@@ -403,6 +418,23 @@ mod tests {
             table_bytes: 0,
             ssm_state_bytes: 0,
         }
+    }
+
+    /// The serving default chunk (512 rows) at the ROW 391 worst-case per-row
+    /// peak adds 458 MB to the fixed allowance; the single-pass control adds
+    /// nothing because its row count is the prompt's.
+    #[test]
+    fn prefill_arena_allowance_scales_with_the_chunk_and_not_with_the_control() {
+        const FIXED: u64 = 28_311_552;
+        const PER_ROW: u64 = 894_647;
+
+        assert_eq!(super::prefill_arena_allowance_bytes(FIXED, PER_ROW, 0), FIXED);
+        assert_eq!(
+            super::prefill_arena_allowance_bytes(FIXED, PER_ROW, 512),
+            FIXED + 512 * PER_ROW
+        );
+        assert_eq!(super::prefill_arena_allowance_bytes(FIXED, 0, 512), FIXED);
+        assert_eq!(super::prefill_arena_allowance_bytes(u64::MAX, PER_ROW, 512), u64::MAX);
     }
 
     /// The exact formula `run_decode_loop_placed_kv` derives its own
