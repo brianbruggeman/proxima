@@ -167,24 +167,6 @@ max_width = 256
 # not been measured here.
 broadcast_max_width = 256
 
-# threadgroup width of the hidden-width norm class: a reduce that carries a
-# broadcast epilogue, folds exactly one row (every non-reduced extent is 1) of
-# at least this many elements, with the epilogue fused. The class takes this
-# many lanes instead of the one-lane-per-four sizing, so a 1536-wide row runs
-# 512 lanes (3 elements per lane, 16 simdgroups) and a 512-wide row runs 512
-# lanes; a shorter row keeps the one-lane-per-four sizing. Every other
-# reduce keeps `max_width` / `broadcast_max_width`. A value at or
-# below `broadcast_max_width` turns the class off and reproduces the widths
-# every build before this key used. Multiple of 32, inside the
-# pipeline's real `maxTotalThreadsPerThreadgroup`. MEASURED (E2B decode, the
-# captured step, three groups of 71, 70 and 35 norm dispatches): 512 lanes
-# against 256 changed no output bit in any group and shortened the step by
-# 0.611 ms on the step basis (0.16 ms on the sequence basis; the two bases
-# disagree and the combine bench decides). 128 and 192 lanes lengthened it.
-# A 1024-wide row takes 512 lanes under this rule and was not measured at
-# it.
-hidden_norm_width = 512
-
 [cooperative_reduce]
 # below this many elements in the reduced axis, `msl::reduce_is_cooperative`
 # routes to the one-thread-per-output serial fold (`push_serial_reduce_body`)
