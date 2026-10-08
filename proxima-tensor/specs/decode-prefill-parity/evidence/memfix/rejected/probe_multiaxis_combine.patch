@@ -1,0 +1,49 @@
+diff --git a/proxima-tensor/src/spec/gqa_layer_routed.rs b/proxima-tensor/src/spec/gqa_layer_routed.rs
+index 42bc8416..8a0d9971 100644
+--- a/proxima-tensor/src/spec/gqa_layer_routed.rs
++++ b/proxima-tensor/src/spec/gqa_layer_routed.rs
+@@ -1232,16 +1232,6 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
+             ScalarOp::Multiply,
+             &[(activated_gate, "sko->sko"), (up, "sko->sko")],
+         )?;
+-        let down_product = slotwise_gathered_expert_product(program, expert_w_down, routes, hidden);
+-        let down = reduce(
+-            program,
+-            DType::Float32,
+-            ScalarOp::Add,
+-            ReduceInit::Zero,
+-            down_product,
+-            "skio->skio",
+-            "sko->skio",
+-        )?;
+         let slot_weights = match expert_scale {
+             Some(scale) => {
+                 let gathered_scale = gather_expert_scale(program, scale, routes, 2);
+@@ -1254,20 +1244,22 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
+             }
+             None => stacked_weights,
+         };
+-        let weighted = elementwise(
++        let weighted_hidden = elementwise(
+             program,
+             DType::Float32,
+             ScalarOp::Multiply,
+-            &[(down, "sko->sko"), (slot_weights, "sk->sko")],
++            &[(hidden, "sko->sko"), (slot_weights, "sk->sko")],
+         )?;
++        let down_product =
++            slotwise_gathered_expert_product(program, expert_w_down, routes, weighted_hidden);
+         weighted_sum = Some(reduce(
+             program,
+             DType::Float32,
+             ScalarOp::Add,
+             ReduceInit::Zero,
+-            weighted,
+-            "sko->sko",
+-            "so->sko",
++            down_product,
++            "skio->skio",
++            "so->skio",
+         )?);
+         for weight in round_weights.iter().copied() {
+             weight_total = Some(match weight_total {

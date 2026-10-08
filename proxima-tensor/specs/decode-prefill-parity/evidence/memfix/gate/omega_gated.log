@@ -1,0 +1,31 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+   Compiling proxima-onnx v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-onnx)
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+   Compiling proxima-autograd v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-autograd)
+    Finished `gate` profile [optimized] target(s) in 46.90s
+────────────
+ Nextest run ID 6cd5fde8-d732-4bdc-86fe-aa9edd5448cd with nextest profile: default
+    Starting 20 tests across 7 binaries (98 binaries skipped)
+        PASS [   0.318s] ( 1/20) omega::elementwise_twin_dispatch the_metal_rope_pair_matches_the_cpu_reference_for_each_pairing::adjacent_pairs
+        PASS [   0.318s] ( 2/20) omega::elementwise_twin_dispatch the_metal_rope_pair_matches_the_cpu_reference_for_each_pairing::split_half_full_rotary
+        PASS [   0.319s] ( 3/20) omega::elementwise_twin_dispatch both_halves_land_in_caller_placed_cache_buffers_at_nonzero_offsets::adjacent_pairs
+        PASS [   0.319s] ( 4/20) omega::elementwise_twin_dispatch only_the_second_half_placed_still_writes_the_first_into_the_arena
+        PASS [   0.319s] ( 5/20) omega::elementwise_twin_dispatch the_twin_dispatch_reproduces_the_two_dispatch_plan_bit_for_bit::adjacent_pairs
+        PASS [   0.320s] ( 6/20) omega::elementwise_twin_dispatch the_twin_dispatch_reproduces_the_two_dispatch_plan_bit_for_bit::split_half_partial_rotary
+        PASS [   0.323s] ( 7/20) omega::elementwise_twin_dispatch the_twin_dispatch_reproduces_the_two_dispatch_plan_bit_for_bit::split_half_full_rotary
+        PASS [   0.327s] ( 8/20) omega::elementwise_twin_dispatch the_metal_rope_pair_matches_the_cpu_reference_for_each_pairing::split_half_partial_rotary
+        PASS [   0.333s] ( 9/20) omega::elementwise_twin_dispatch both_halves_land_in_caller_placed_cache_buffers_at_nonzero_offsets::split_half
+        PASS [   0.391s] (10/20) omega::gated_delta_net_parity a_warm_unplaced_state_out_step_allocates_no_device_buffers
+        PASS [   0.241s] (11/20) omega::gated_delta_net_parity metal_matches_cpu_at_small_gqa_shape
+        PASS [   0.237s] (12/20) omega::moe_topk_stacked_metal_parity a_short_prefill_matches_the_per_route_layer
+        PASS [   0.244s] (13/20) omega::moe_topk_stacked_metal_parity a_prefill_chunk_wider_than_the_tile_minimum_matches_the_per_route_layer
+        PASS [   0.249s] (14/20) omega::moe_round_batched_metal_consistency a_warm_round_batched_step_allocates_no_device_buffers
+        PASS [   0.250s] (15/20) omega::gated_delta_net_parity metal_matches_cpu_at_real_qwen35moe_gqa_shape
+        PASS [   0.238s] (16/20) omega::step_buffer_allocations lookup::a_recycled_fault_buffer_still_reports_an_out_of_range_gather_and_is_not_poisoned_by_it
+        PASS [   0.350s] (17/20) omega::moe_topk_stacked_metal_parity a_decode_step_of_one_token_matches_the_per_route_layer
+        PASS [   0.359s] (18/20) omega::moe_round_batched_metal_consistency round_batched_moe_over_host_routes_matches_the_per_round_dispatches_on_metal
+        PASS [   0.291s] (19/20) omega::step_buffer_allocations routed_moe::a_warm_routed_moe_step_allocates_no_device_buffers
+        PASS [   0.582s] (20/20) omega::moe_round_batched_metal_consistency round_batched_moe_matches_the_per_round_dispatches_on_metal
+────────────
+     Summary [   0.902s] 20 tests run: 20 passed, 0 skipped

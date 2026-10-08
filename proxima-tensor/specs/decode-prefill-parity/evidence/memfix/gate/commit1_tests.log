@@ -1,0 +1,25 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Finished `gate` profile [optimized] target(s) in 11.27s
+────────────
+ Nextest run ID ad22d61c-f986-4d02-a21f-de33cb063109 with nextest profile: default
+    Starting 18 tests across 105 binaries (771 tests skipped)
+        PASS [   0.296s] ( 1/18) omega metal::arena_encode_dispatch_finish::arena_tests::uniform_contents_change_per_step_while_the_buffer_identity_does_not
+        PASS [   0.297s] ( 2/18) omega metal::arena_encode_dispatch_finish::arena_tests::two_ops_with_identical_uniform_bytes_get_distinct_plan_owned_buffers
+        PASS [   0.297s] ( 3/18) omega metal::arena_encode_dispatch_finish::arena_tests::a_programs_output_buffer_is_never_in_the_free_list
+        PASS [   0.297s] ( 4/18) omega metal::arena_encode_dispatch_finish::arena_tests::a_pooled_slot_is_never_rebound_before_its_last_consumers_position
+        PASS [   0.297s] ( 5/18) omega metal::arena_encode_dispatch_finish::arena_tests::live_buffer_count_bounded_in_steady_state
+        PASS [   0.297s] ( 6/18) omega metal::arena_encode_dispatch_finish::arena_tests::an_extent_change_forces_a_documented_realloc
+        PASS [   0.013s] ( 7/18) omega metal::arena_layout::tests::packed_outputs_live_together_never_share_bytes
+        PASS [   0.311s] ( 8/18) omega metal::arena_encode_dispatch_finish::arena_tests::execute_plan_never_builds_the_arena_or_uniforms_for_the_unplaced_path
+        PASS [   0.013s] ( 9/18) omega metal::arena_layout::tests::packed_range_serves_a_later_output_of_a_different_length
+        PASS [   0.015s] (10/18) omega metal::arena_layout::tests::packed_buffer_is_never_smaller_than_the_live_peak
+        PASS [   0.014s] (11/18) omega metal::arena_layout::tests::packed_stacked_block_needs_the_hidden_and_down_buffers_not_the_sum_of_size_classes
+        PASS [   0.312s] (12/18) omega metal::arena_encode_dispatch_finish::arena_tests::pooled_output_equals_the_cpu_oracle_on_a_real_forward
+        PASS [   0.016s] (13/18) omega metal::arena_layout::tests::packing_an_empty_plan_allocates_only_the_empty_shared_buffer
+        PASS [   0.016s] (14/18) omega metal::arena_layout::tests::packed_placement_is_disjoint_for_pseudo_random_programs
+        PASS [   0.314s] (15/18) omega metal::arena_encode_dispatch_finish::arena_tests::serial_packed_and_concurrent_whole_slot_runs_return_the_same_bits
+        PASS [   0.317s] (16/18) omega metal::arena_encode_dispatch_finish::arena_tests::a_serial_plan_packs_released_outputs_of_different_lengths_into_one_buffer
+        PASS [   0.011s] (17/18) omega metal::arena_layout::tests::whole_slots_hand_a_released_buffer_to_a_later_output_of_the_same_length
+        PASS [   0.010s] (18/18) omega metal::arena_layout::tests::whole_slots_keep_a_resident_output_out_of_the_free_list
+────────────
+     Summary [   0.327s] 18 tests run: 18 passed, 771 skipped

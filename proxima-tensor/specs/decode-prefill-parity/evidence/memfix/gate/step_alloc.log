@@ -1,0 +1,10 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Finished `gate` profile [optimized] target(s) in 10.04s
+────────────
+ Nextest run ID 769fb1c6-daf0-402b-a6cd-993b3b862b12 with nextest profile: default
+    Starting 3 tests across 1 binary (104 binaries skipped)
+        PASS [   0.164s] (1/3) omega::step_buffer_allocations lookup::a_recycled_fault_buffer_still_reports_an_out_of_range_gather_and_is_not_poisoned_by_it
+        PASS [   0.170s] (2/3) omega::step_buffer_allocations routed_moe::a_warm_routed_moe_step_allocates_no_device_buffers
+        PASS [   0.178s] (3/3) omega::step_buffer_allocations routed_moe::a_warm_serial_routed_moe_step_allocates_no_device_buffers_and_matches_the_concurrent_step
+────────────
+     Summary [   0.179s] 3 tests run: 3 passed, 0 skipped
