@@ -1,0 +1,9 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+    Finished `gate` profile [optimized] target(s) in 37.59s
+────────────
+ Nextest run ID 67a8792e-ce9b-46d9-810b-a772d35446f3 with nextest profile: default
+    Starting 2 tests across 8 binaries (804 tests skipped)
+        PASS [   0.015s] (1/2) proxima-tensor spec::tests::stacked_projection_matches_the_per_route_moe_graph_and_issues_one_gather_per_projection
+        PASS [   0.060s] (2/2) proxima-tensor spec::tests::stacked_projection_over_packed_q4k_experts_matches_the_per_route_graph_at_every_token_count
+────────────
+     Summary [   0.066s] 2 tests run: 2 passed, 804 skipped

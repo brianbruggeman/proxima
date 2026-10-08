@@ -1,0 +1,10 @@
+== clippy
+    Checking proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.89s
+exit=0
+== alloc check
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.19s
+exit=0
+== interop no-default
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.12s
+exit=0

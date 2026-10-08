@@ -1,0 +1,29 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+    Finished `gate` profile [optimized] target(s) in 21.19s
+────────────
+ Nextest run ID 0c9b9019-da74-4f3e-8e1e-7e60b8dd0b50 with nextest profile: default
+    Starting 1 test across 8 binaries (806 tests skipped)
+        FAIL [   0.059s] (1/1) proxima-tensor spec::tests::stacked_projection_over_packed_q4k_experts_matches_the_per_route_graph_at_every_token_count
+  stdout ───
+
+    running 1 test
+    test spec::tests::stacked_projection_over_packed_q4k_experts_matches_the_per_route_graph_at_every_token_count ... FAILED
+
+    failures:
+
+    failures:
+        spec::tests::stacked_projection_over_packed_q4k_experts_matches_the_per_route_graph_at_every_token_count
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 777 filtered out; finished in 0.05s
+
+  stderr ───
+
+    thread 'spec::tests::stacked_projection_over_packed_q4k_experts_matches_the_per_route_graph_at_every_token_count' (73499292) panicked at proxima-tensor/src/spec/tests.rs:3387:18:
+    the stacked graph evaluates over packed Q4_K experts: NotLowerable { node: NodeId(55), reason: "quantized matmul batch shape does not evenly divide by its packed weight rows" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.065s] 1 test run: 0 passed, 1 failed, 806 skipped
+        FAIL [   0.059s] (1/1) proxima-tensor spec::tests::stacked_projection_over_packed_q4k_experts_matches_the_per_route_graph_at_every_token_count
+error: test run failed

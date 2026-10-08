@@ -1,0 +1,54 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `gate` profile [optimized] target(s) in 41.32s
+────────────
+ Nextest run ID fedc3a8a-fe4f-4fef-a0e3-a5c5faf51bb9 with nextest profile: default
+    Starting 4 tests across 1 binary (33 binaries skipped)
+        PASS [   0.189s] (1/4) proxima-model-interop::external_expert_paging evicting_every_expert_of_a_layer_fails_the_next_decode
+        FAIL [   0.181s] (2/4) proxima-model-interop::external_expert_paging paging_an_expert_between_steps_bumps_its_epoch_and_decode_continues
+  stdout ───
+
+    running 1 test
+    test paging_an_expert_between_steps_bumps_its_epoch_and_decode_continues ... FAILED
+
+    failures:
+
+    failures:
+        paging_an_expert_between_steps_bumps_its_epoch_and_decode_continues
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.17s
+
+  stderr ───
+
+    thread 'paging_an_expert_between_steps_bumps_its_epoch_and_decode_continues' (73484365) panicked at proxima-test/src/harness.rs:173:31:
+    the first two decode steps run before any paging: Backend(Tensor(NotLowerable { node: NodeId(132), reason: "quantized matmul batch shape does not evenly divide by its packed weight rows" })) (at proxima-model-interop/tests/external_expert_paging.rs:95:10)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.178s] (3/4) proxima-model-interop::external_expert_paging paging_an_out_of_range_expert_index_is_rejected
+        FAIL [   0.192s] (4/4) proxima-model-interop::external_expert_paging q2k_paging_actually_changes_the_decoded_ids
+  stdout ───
+
+    running 1 test
+    test q2k_paging_actually_changes_the_decoded_ids ... FAILED
+
+    failures:
+
+    failures:
+        q2k_paging_actually_changes_the_decoded_ids
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.18s
+
+  stderr ───
+
+    thread 'q2k_paging_actually_changes_the_decoded_ids' (73484432) panicked at proxima-test/src/harness.rs:173:31:
+    run A decodes before any paging: Backend(Tensor(NotLowerable { node: NodeId(132), reason: "quantized matmul batch shape does not evenly divide by its packed weight rows" })) (at proxima-model-interop/tests/external_expert_paging.rs:345:10)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.740s] 4 tests run: 2 passed, 2 failed, 0 skipped
+        FAIL [   0.181s] (2/4) proxima-model-interop::external_expert_paging paging_an_expert_between_steps_bumps_its_epoch_and_decode_continues
+        FAIL [   0.192s] (4/4) proxima-model-interop::external_expert_paging q2k_paging_actually_changes_the_decoded_ids
+error: test run failed
+cargo nextest run -p proxima-model-interop --features  --cargo-profile gate    300.37s user 15.65s system 730% cpu 43.257 total

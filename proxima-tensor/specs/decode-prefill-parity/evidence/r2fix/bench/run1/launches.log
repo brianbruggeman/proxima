@@ -1,0 +1,25 @@
+2026-10-08T04:15:54Z ollama quit requested
+2026-10-08T04:15:54Z LAUNCH decode_arms proxima arm=base process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r2fix/bench/bin/decode_gbps_base_c63d839d
+2026-10-08T04:16:08Z EXIT decode_arms proxima arm=base process=0 status=exit status: 0
+2026-10-08T04:16:08Z LAUNCH decode_arms proxima arm=tip process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r2fix/bench/bin/decode_gbps_tip
+2026-10-08T04:16:19Z EXIT decode_arms proxima arm=tip process=0 status=exit status: 0
+2026-10-08T04:16:19Z LAUNCH decode_arms proxima arm=control process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r2fix/bench/bin/decode_gbps_control
+2026-10-08T04:16:29Z EXIT decode_arms proxima arm=control process=0 status=exit status: 0
+2026-10-08T04:16:29Z LAUNCH decode_arms proxima arm=ref process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r2fix/bench/bin/decode_gbps_ref_ab69ec03
+2026-10-08T04:16:52Z EXIT decode_arms proxima arm=ref process=0 status=exit status: 0
+2026-10-08T04:16:52Z LAUNCH decode_arms proxima arm=tip process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r2fix/bench/bin/decode_gbps_tip
+2026-10-08T04:17:03Z EXIT decode_arms proxima arm=tip process=1 status=exit status: 0
+2026-10-08T04:17:03Z LAUNCH decode_arms proxima arm=control process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r2fix/bench/bin/decode_gbps_control
+2026-10-08T04:17:13Z EXIT decode_arms proxima arm=control process=1 status=exit status: 0
+2026-10-08T04:17:13Z LAUNCH decode_arms proxima arm=ref process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r2fix/bench/bin/decode_gbps_ref_ab69ec03
+2026-10-08T04:17:36Z EXIT decode_arms proxima arm=ref process=1 status=exit status: 0
+2026-10-08T04:17:36Z LAUNCH decode_arms proxima arm=base process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r2fix/bench/bin/decode_gbps_base_c63d839d
+2026-10-08T04:17:49Z EXIT decode_arms proxima arm=base process=1 status=exit status: 0
+2026-10-08T04:17:49Z LAUNCH decode_arms proxima arm=control process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r2fix/bench/bin/decode_gbps_control
+2026-10-08T04:18:00Z EXIT decode_arms proxima arm=control process=2 status=exit status: 0
+2026-10-08T04:18:00Z LAUNCH decode_arms proxima arm=ref process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r2fix/bench/bin/decode_gbps_ref_ab69ec03
+2026-10-08T04:18:22Z EXIT decode_arms proxima arm=ref process=2 status=exit status: 0
+2026-10-08T04:18:22Z LAUNCH decode_arms proxima arm=base process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r2fix/bench/bin/decode_gbps_base_c63d839d
+2026-10-08T04:18:35Z EXIT decode_arms proxima arm=base process=2 status=exit status: 0
+2026-10-08T04:18:35Z LAUNCH decode_arms proxima arm=tip process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r2fix/bench/bin/decode_gbps_tip
+2026-10-08T04:18:46Z EXIT decode_arms proxima arm=tip process=2 status=exit status: 0
