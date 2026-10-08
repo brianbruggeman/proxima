@@ -39,6 +39,7 @@ def main() -> int:
     cards_with_ac = 0
     captured_commands = 0
     precommit_checks = 0
+    plan_finalizers = 0
     finalizers = 0
     for path, contents in cards:
         for field in REQUIRED_FIELDS:
@@ -66,12 +67,14 @@ def main() -> int:
             command = regex.search(r"^\|\s*AC\d{2}\.\d+\s*\|\s*`([^`]+)`", row)
             if command is None:
                 errors.append(f"{path}: acceptance criterion has no complete command field")
-            elif "check_evidence.py" in command.group(1) and "--finalize" in command.group(1):
-                finalizers += 1
             elif "capture_validation.py" in command.group(1):
                 captured_commands += 1
                 if "--precommit" in command.group(1):
                     precommit_checks += 1
+                if "--finalize-plan" in command.group(1):
+                    plan_finalizers += 1
+            elif "check_evidence.py" in command.group(1) and "--finalize" in command.group(1):
+                finalizers += 1
             else:
                 errors.append(f"{path}: acceptance command does not capture output or finalize evidence")
         if arguments.check_evidence_plan:
@@ -85,6 +88,8 @@ def main() -> int:
         errors.append(f"expected one finalizer per card, found {finalizers}")
     if precommit_checks != len(cards):
         errors.append(f"expected one precommit check per card, found {precommit_checks}")
+    if plan_finalizers != 1:
+        errors.append(f"expected one final plan check, found {plan_finalizers}")
     if captured_commands < len(cards):
         errors.append(f"expected captured acceptance commands for all cards, found {captured_commands}")
 
@@ -102,11 +107,11 @@ def main() -> int:
         return 1
 
     if arguments.check_evidence_plan:
-        print(f"cards={len(cards)} captured_commands={captured_commands} precommit_checks={precommit_checks} postpush_finalizers={finalizers} external_evidence_paths={len(cards)} repository_evidence_paths=0 missing_fields=0")
+        print(f"cards={len(cards)} captured_commands={captured_commands} precommit_checks={precommit_checks} postpush_finalizers={finalizers} plan_finalizers={plan_finalizers} external_evidence_paths={len(cards)} repository_evidence_paths=0 missing_fields=0")
     elif arguments.check_card_order:
         print("card_order=14_ordered_cards architecture_before_implementation=1 cpu_slice_before_omega=1 model_load_after_omega=1 core_sugar_before_extended_sugar=1")
     else:
-        print(f"cards={len(cards)} unique_worktrees={len(worktrees)} unique_branches={len(branches)} cards_with_acceptance={cards_with_ac} acceptance_rows={ac_total} precommit_checks={precommit_checks} postpush_finalizers={finalizers} missing_fields=0")
+        print(f"cards={len(cards)} unique_worktrees={len(worktrees)} unique_branches={len(branches)} cards_with_acceptance={cards_with_ac} acceptance_rows={ac_total} precommit_checks={precommit_checks} postpush_finalizers={finalizers} plan_finalizers={plan_finalizers} missing_fields=0")
     return 0
 
 
