@@ -41,6 +41,14 @@ retries = 3
 filter = 'package(omega) and binary(packed_row_multi_row_index32_ab)'
 threads-required = "num-test-threads"
 
+# the selection-fold prefill chunk (120 tokens x 128 rows x 8 selected x k 256) is one serial-body
+# dispatch of about 80 ms of GPU time. Alone it passes (6 of 6 runs); with other omega GPU binaries
+# in flight the driver fails the command buffer ("Internal Error (0000000e)", status 5), the same
+# contention the index32 A/B above records, so it runs with no other test in flight.
+[[profile.default.overrides]]
+filter = 'package(omega) and binary(selection_fold_parity)'
+threads-required = "num-test-threads"
+
 # the qwen35 ssm mixer real-dims oracle runs production gdn shapes on the cpu:
 # alone in a debug build each case takes 25-32 s (2026-09-30, box load 12-55),
 # half of proxima::test's 60 s body_timeout. in parallel with the rest of the
