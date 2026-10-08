@@ -1,0 +1,5 @@
+"Device Utilization %"=97
+"Device Utilization %"=0
+"Device Utilization %"=0
+12:26  up 7 days, 22:30, 3 users, load averages: 4.00 5.87 8.90
+83935 /Users/brianbruggeman/.cargo/bin/sccache

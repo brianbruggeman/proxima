@@ -1,0 +1,38 @@
+z1_tensor: Summary [   6.775s] 803 tests run: 803 passed, 8 skipped EXIT=0
+z2_omega_metal: Summary [  55.284s] 875 tests run: 875 passed, 16 skipped EXIT=0
+z3_omega_instr: Summary [  64.065s] 929 tests run: 929 passed, 22 skipped EXIT=0
+z4_omega_gated: Summary [  54.910s] 896 tests run: 896 passed, 16 skipped EXIT=0
+z5_omega_splitk: Summary [  54.931s] 867 tests run: 867 passed, 16 skipped EXIT=0
+z6_omega_std: Summary [   0.297s] 151 tests run: 151 passed, 1 skipped EXIT=0
+z7_interop_slice: Summary [  89.307s] 746 tests run: 746 passed, 128 skipped EXIT=0
+z8_interop_descriptor: Summary [  14.426s] 10 tests run: 10 passed, 864 skipped EXIT=0
+z9_clippy_tensor_interop: EXIT=0
+z10_clippy_omega_metal: EXIT=0
+z11_clippy_omega_instr: EXIT=0
+z12_clippy_omega_gated: EXIT=0
+z13_clippy_interop_instr: EXIT=0
+z14_clippy_omega_stdcore: EXIT=0
+z15_clippy_omega_stdtiled: EXIT=0
+z16_clippy_omega_stdgrouped: EXIT=0
+z17_tensor_alloc: EXIT=0
+z18_interop_nodefault: EXIT=0
+z19_omega_alloc: EXIT=0
+z20_workspace: EXIT=0
+--- earlier passes at intermediate tips (before the norm revert), same commands:
+g1_omega_metal_pre_small: Summary [  54.339s] 870 tests run: 870 passed, 16 skipped 
+g2_tensor: Summary [   6.757s] 803 tests run: 803 passed, 8 skipped EXIT=0
+g3_omega_metal: Summary [  53.665s] 881 tests run: 881 passed, 16 skipped EXIT=0
+g4_omega_instr: Summary [  64.210s] 935 tests run: 935 passed, 22 skipped EXIT=0
+g5_omega_gated: Summary [  54.947s] 902 tests run: 902 passed, 16 skipped EXIT=0
+g6_omega_splitk: Summary [  55.845s] 873 tests run: 873 passed, 16 skipped EXIT=0
+g7_omega_std: Summary [   0.294s] 151 tests run: 151 passed, 1 skipped 
+h1_interop_slice: Summary [  87.853s] 746 tests run: 746 passed, 128 skipped 
+h2_interop_descriptor: Summary [  16.963s] 10 tests run: 10 passed, 864 skipped EXIT=0
+f1_tensor: Summary [   7.025s] 803 tests run: 803 passed, 8 skipped EXIT=0
+f2_omega_metal: Summary [  54.963s] 881 tests run: 881 passed, 16 skipped EXIT=0
+f3_omega_instr: Summary [  63.920s] 935 tests run: 935 passed, 22 skipped EXIT=0
+f4_omega_gated: Summary [  54.595s] 902 tests run: 902 passed, 16 skipped EXIT=0
+f5_omega_splitk: Summary [  55.342s] 873 tests run: 873 passed, 16 skipped EXIT=0
+f6_omega_std: Summary [   0.292s] 151 tests run: 151 passed, 1 skipped EXIT=0
+f7_interop_slice: Summary [  89.958s] 746 tests run: 746 passed, 128 skipped EXIT=0
+f15_interop_descriptor: Summary [  14.200s] 10 tests run: 10 passed, 864 skipped 
