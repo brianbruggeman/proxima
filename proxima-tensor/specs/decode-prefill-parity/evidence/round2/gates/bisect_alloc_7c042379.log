@@ -1,0 +1,36 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-combine2-base/omega)
+    Finished `gate` profile [optimized] target(s) in 5.03s
+────────────
+ Nextest run ID d0313333-a50a-4b6c-8b23-48acf6a150b6 with nextest profile: default
+    Starting 1 test across 1 binary (407 tests skipped)
+        FAIL [   0.014s] (1/1) omega msl::tests::encode_allocation_budget::encoding_a_decode_op_allocates_no_more_than_it_did_before_the_grid_decision
+  stdout ───
+
+    running 1 test
+    test msl::tests::encode_allocation_budget::encoding_a_decode_op_allocates_no_more_than_it_did_before_the_grid_decision ... FAILED
+
+    failures:
+
+    failures:
+        msl::tests::encode_allocation_budget::encoding_a_decode_op_allocates_no_more_than_it_did_before_the_grid_decision
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 407 filtered out; finished in 0.00s
+
+  stderr ───
+    encode_allocations label=q4k_matvec_decode measured=315
+    encode_allocations label=q6k_matvec_decode measured=315
+    encode_allocations label=tiled_gemm_prefill measured=318
+    encode_allocations label=f32_matmul measured=190
+    encode_allocations label=elementwise_tanh measured=11
+    encode_allocations label=cached_attention measured=12
+    encode_allocations label=cached_softmax_weights measured=8
+
+    thread 'msl::tests::encode_allocation_budget::encoding_a_decode_op_allocates_no_more_than_it_did_before_the_grid_decision' (74897897) panicked at omega/src/msl/tests.rs:7438:9:
+    (label, measured, base) over budget: [("q4k_matvec_decode", 315, 297), ("q6k_matvec_decode", 315, 258), ("tiled_gemm_prefill", 318, 254), ("f32_matmul", 190, 179)]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.016s] 1 test run: 0 passed, 1 failed, 407 skipped
+        FAIL [   0.014s] (1/1) omega msl::tests::encode_allocation_budget::encoding_a_decode_op_allocates_no_more_than_it_did_before_the_grid_decision
+error: test run failed

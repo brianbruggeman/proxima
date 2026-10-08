@@ -1,0 +1,19 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Finished `gate` profile [optimized] target(s) in 4.67s
+────────────
+ Nextest run ID 0efd8668-dbb7-4fa6-8d58-72b2292f8c22 with nextest profile: default
+    Starting 1 test across 106 binaries (825 tests skipped)
+       START [         ] (1/1) omega msl::tests::zz_probe_dump_operands
+
+running 1 test
+PROBE extents=[1, 2, 32, 4]
+PROBE operand 0: (NodeId(0), Layout { base: 0, strides: [0, 0, 1, 32] }, Some(Lookup { indices: NodeId(1), index_layout: Layout { base: 0, strides: [2, 1, 0, 0] }, element_stride: 128, extent: 2 }))
+PROBE operand 1: (NodeId(2), Layout { base: 0, strides: [64, 32, 1, 0] }, None)
+PROBE kind=Reduce { element_body: ComposedBody { steps: [BodyStep { op: Multiply, args: [Operand(0), Operand(1)] }] }, reduce_op: Add, init: Zero, keep: Reduce, operands: [(NodeId(0), Layout { base: 0, strides: [0, 0, 1, 32] }, Some(Lookup { indices: NodeId(1), index_layout: Layout { base: 0, strides: [2, 1, 0, 0] }, element_stride: 128, extent: 2 })), (NodeId(2), Layout { base: 0, strides: [64, 32, 1, 0] }, None)], output_axes: [0, 3], out_layout: Layout { base: 0, strides: [4, 0, 0, 1] }, out_scatter: None, epilogue_body: ComposedBody { steps: [BodyStep { op: Identity, args: [Operand(0)] }] }, epilogue_operands: [], epilogue_broadcast_axes: [] }
+test msl::tests::zz_probe_dump_operands ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 419 filtered out; finished in 0.00s
+
+        PASS [   0.011s] (1/1) omega msl::tests::zz_probe_dump_operands
+────────────
+     Summary [   0.014s] 1 test run: 1 passed, 825 skipped

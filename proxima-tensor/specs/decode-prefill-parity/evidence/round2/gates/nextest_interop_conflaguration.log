@@ -1,0 +1,16 @@
+    Finished `gate` profile [optimized] target(s) in 0.21s
+────────────
+ Nextest run ID 990b40d4-a092-4085-8d69-64a5b5a664aa with nextest profile: default
+    Starting 10 tests across 35 binaries (859 tests skipped)
+        PASS [   2.023s] ( 1/10) proxima-model-interop::arch_data_baseline generic_binder_gemma4_e2b
+        PASS [   0.795s] ( 2/10) proxima-model-interop::arch_data_baseline generic_binder_granite_moe
+        PASS [   0.193s] ( 3/10) proxima-model-interop::arch_data_baseline model_config_roundtrip_gemma4_e2b
+        PASS [   0.023s] ( 4/10) proxima-model-interop::arch_data_baseline model_config_roundtrip_granite_moe
+        PASS [   2.296s] ( 5/10) proxima-model-interop::arch_data_baseline serving_fsm_drives_a_plain_decode_through_prefill_then_decode_steps
+        PASS [   5.010s] ( 6/10) proxima-model-interop::arch_data_baseline serving_fsm_drives_speculative_verify_through_accept_and_rollback
+        PASS [   0.409s] ( 7/10) proxima-model-interop::arch_data_baseline window_ring_layers_equal_the_oracle_swa_flags_on_both_gemma4_checkpoints
+        PASS [   0.042s] ( 8/10) proxima-model-interop::arch_data_baseline window_ring_layers_follow_a_window_on_one_dense_layer
+        PASS [   2.805s] ( 9/10) proxima-model-interop::arch_data_baseline zero_rust_variant_full_attention_gemma4_e2b_lowers_and_runs
+        PASS [   0.193s] (10/10) proxima-model-interop::swa_rope_from_metadata swa_rope_from_metadata_gemma4_e2b
+────────────
+     Summary [  13.793s] 10 tests run: 10 passed, 859 skipped
