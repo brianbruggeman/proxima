@@ -113,12 +113,27 @@ def main() -> int:
         if card_id == "00a":
             if "--precommit" not in commands[1] or "--finalize" not in commands[2]:
                 errors.append(f"{path}: bootstrap AC2/AC3 must check precommit/finalize")
-            if "**Bootstrap argv:** `script -q /private/tmp/proxima-python-card-00a-bootstrap.log /bin/zsh`" not in contents:
+            if "**Bootstrap argv:** `script -q /private/tmp/proxima-python-card-00a-bootstrap.log /bin/zsh -f`" not in contents:
                 errors.append(f"{path}: bootstrap must use the exact continuous script argv")
-            if "**Bootstrap environment:** `ZDOTDIR=/private/tmp/proxima-python-frontend/bootstrap-zdotdir`" not in contents:
+            if "**Bootstrap environment:** `zsh -f`; first PTY command creates `/private/tmp/proxima-python-frontend/bootstrap-zdotdir/card-00a` with `.zshenv` and `.zshrc`, records both hashes, then exports `ZDOTDIR`" not in contents:
                 errors.append(f"{path}: bootstrap must record its isolated ZDOTDIR")
-            if "**Bootstrap event ledger:** `/private/tmp/proxima-python-frontend/evidence/card-00a/bootstrap-events.jsonl`" not in contents or "**Pre-PTY launcher receipt:** `/private/tmp/proxima-python-frontend/evidence/card-00a/launcher-receipt.json`" not in contents or "**Finalizer log:** `/private/tmp/proxima-python-card-00a-finalizer.log`" not in contents:
+            if "**Bootstrap event ledger:** `/private/tmp/proxima-python-frontend/evidence/card-00a/bootstrap-events.jsonl`" not in contents or "**Bootstrap receipt:** `/private/tmp/proxima-python-frontend/evidence/card-00a/launcher-receipt.json`" not in contents or "**Finalizer log:** `/private/tmp/proxima-python-card-00a-finalizer.log`" not in contents:
                 errors.append(f"{path}: bootstrap must index each command in one chronological event ledger")
+            bootstrap_section = contents.split("## Acceptance criteria", 1)[0]
+            if "no repository helper runs before the PTY" not in contents or "check_plan_bootstrap.py" in bootstrap_section:
+                errors.append(f"{path}: host bootstrap must not call a repository helper before PTY")
+            if "--repo-helper-absent" not in commands[0] or "--cwd /Users/brianbruggeman/repos/slot-0/proxima" not in commands[0] or "cwd_checked=1" not in acceptance_text or "receipt_schema_valid=1" not in acceptance_text or "hook_schema_valid=1" not in acceptance_text:
+                errors.append(f"{path}: AC1 must validate host bootstrap with the repo helper absent")
+            if "--check-zdotdir-files" not in commands[0] or "--check-receipt-process-fields" not in commands[0] or "--check-hook-event" not in commands[0] or "--check-forbidden-helper-control" not in commands[0] or "receipt_process_fields=1" not in acceptance_text or "hook_event_checked=1" not in acceptance_text or "zdotdir_created=1" not in acceptance_text or "zdotdir_files_checked=2" not in acceptance_text or "forbidden_prepty_helper_rejected=1" not in acceptance_text:
+                errors.append(f"{path}: AC1 must open and hash both isolated ZDOTDIR files")
+            if "malformed_receipt_rejected=1" not in acceptance_text or "malformed_hook_rejected=1" not in acceptance_text or "malformed_zdotdir_rejected=1" not in acceptance_text:
+                errors.append(f"{path}: AC1 must reject malformed receipt, hook, and ZDOTDIR controls")
+        if card_id == "00b":
+            prelaunch_section = contents.split("## Acceptance criteria", 1)[0]
+            if "no repository helper before the PTY starts" not in prelaunch_section or "check_plan_bootstrap.py" in prelaunch_section:
+                errors.append(f"{path}: first PTY launch must not depend on a repository helper")
+            if "bootstrap-zdotdir/card-00b" not in prelaunch_section or "exports `ZDOTDIR=/private/tmp/proxima-python-frontend/bootstrap-zdotdir/card-00b`" not in prelaunch_section or "sources the already-landed Card 00a hook" not in prelaunch_section:
+                errors.append(f"{path}: bootstrap must create isolated ZDOTDIR and source the landed hook before repository work")
         if arguments.check_evidence_plan:
             if f"/private/tmp/proxima-python-frontend/evidence/card-{card_id}/" not in contents:
                 errors.append(f"{path}: card-specific evidence path missing")
