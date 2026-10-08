@@ -187,3 +187,38 @@ fn a_fused_single_range_decode_plan_keeps_no_orphaned_mask_node() {
         "the fused attention op itself is live"
     );
 }
+
+#[test]
+fn an_op_stays_live_while_only_its_second_output_is_requested() {
+    use crate::spec::{RopePairing, fused_rope_pair, input_leaf};
+
+    let mut program = Vec::new();
+    let source = input_leaf(
+        &mut program,
+        DType::Float32,
+        vec![Extent::Static(3), Extent::Static(2), Extent::Static(8)],
+        "x",
+    );
+    let trig = || vec![Extent::Static(3), Extent::Static(4)];
+    let cosine = input_leaf(&mut program, DType::Float32, trig(), "cos");
+    let sine = input_leaf(&mut program, DType::Float32, trig(), "sin");
+    let (first, second) = fused_rope_pair(&mut program, source, 'h', cosine, sine, RopePairing::SplitHalf { pairs: 4 })
+        .expect("rope pair builds over a [seq, heads, head_dim] source");
+    let shapes = crate::shape::infer(&program, &[]).expect("rope program infers");
+    let bound = bind_plain(&program, &shapes, &[first, second], NumericPolicy::default())
+        .expect("rope program binds");
+    let twinned = fuse_twin_elementwise(bound, &program);
+    assert!(
+        twinned.iter().any(|op| matches!(op.kind, BoundOpKind::ElementwiseTwin { .. })),
+        "the fixture must produce a twin, or the liveness check proves nothing"
+    );
+
+    let dead = dead_resolved_nodes(&twinned, &[second]);
+
+    assert!(dead.is_empty(), "the twin writes the requested node: {dead:?}");
+    let control = dead_resolved_nodes(&twinned, &[]);
+    assert!(
+        !control.is_empty(),
+        "with nothing requested the same twin is dead, so the check can fail"
+    );
+}
