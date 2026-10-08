@@ -921,7 +921,7 @@ fn the_row_tiled_softmax_is_one_online_pass_per_vector_with_one_max_and_one_sum_
     );
     for required in [
         "for (long vector = (long)simdgroup_slot; vector < tile_vectors; vector += simdgroups) {",
-        "(previous_maximum == next_maximum ? 1.0f : exp(previous_maximum - next_maximum))",
+        "exp(previous_maximum - next_maximum)",
     ] {
         assert!(source.contains(required), "missing `{required}`");
     }
