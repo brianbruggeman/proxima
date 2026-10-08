@@ -1,0 +1,5 @@
+decode_gbps_baseline run=done run_index=0 wall_ms=898.882 cpu_user_ms=187.400 cpu_sys_ms=101.435 cpu_ms=288.835 cpu_pct=32.13 tokens_generated=128 prompt_token_count=35 text_hash=b2bf12885bdff68f stopped_by_eos=false decode_ms_per_token=5.857 ttft_ms=155 gpu_peak_bytes=1457635328 steady_rss_bytes=1536573440 steady_footprint_bytes=93721344 steady_gpu_bytes=1457635328 steady_samples=119 text="\n\nA hippopotamus is sign
+decode_gbps_baseline held_bytes run_index=0 prompt_cache_bytes=0 resident_prefill_plan_budget_bytes=536870912 speculative_types=SpeculativeTypeSet(64)
+        1.29 real         0.32 user         0.61 sys
+          1554448384  maximum resident set size
+           111399680  peak memory footprint

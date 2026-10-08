@@ -3874,3 +3874,182 @@ norm bases: AB_STEP_SEQUENCE=1 (or AB_SEQUENCE=1) AB_SPAN_FULL=1 AB_STEP=5 AB_RO
 frames: sample <pid> 3 1 -file sample.txt during a PROXIMA_RUNS=8 decode_gbps_baseline run; sample_diff <base sample.txt> <tip sample.txt>
 ```
 Missing for CI: no job runs the Metal tests, the arms bench, the censuses, the A/B tool or the fresh-process runs; every row re-proves on this box only. Binaries and raw logs are under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine4/` (`bin/`, `logs/`).
+
+### round four follow-up (measured 2026-10-08 on `8f6678f0` plus the commits below; evidence under `evidence/round4fix/`, raw logs under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fix4/`)
+
+Provenance tags: MEASURED is a counter, timer or printed value from a run named here; DERIVED is arithmetic on measured values; HYPOTHESIS is a mechanism no counter has confirmed. Models: gemma4 E2B and granite moe 1b; no Ollama process ran; the box sampler's first reading was 78 to 98 before every timed cell and the second and third 0 (the first is the sampler's own load and is discarded; all three are kept in each `box_load*.txt`).
+
+#### commits (linear, no trailer)
+
+`2ab1ee3b` revert the rescale-exp skip (`git revert` of `8694ec12`, kernel line only; the revert left its pin in `attn_rows_tests.rs` expecting the skip, so the pin line went back to `exp(previous_maximum - next_maximum)` in the same commit). `5579834a` stage the attention q tile only up to a sized byte budget. `fa559fc6` steady-state rss and footprint sampled per token in `decode_gbps_baseline` and read by `decode_arms`. `2a23f979` the footprint the telemetry recorder adds at install. `0209d9e3` one allocation event per device buffer with its owner. `7d8f9370` one event per hazard step and per internal barrier. `70e644af` host bytes held after each generation (kv mirror, resident plans, prompt cache). `3a208754` replay a captured step with empty kernels and chosen barriers (`examples/dispatch_floor.rs`). The commit that adds this section is the ninth.
+
+#### change 1 and 2: where the q tile is staged
+
+Rule (`omega/src/msl/cached_attention_row_tiled.rs`, `query_tile_staged` in `signature_tokens_prelude.rs`): a tile stages its query when `row_tile_bytes + query_stage_bytes <= [cached_attention].threadgroup_memory_bytes` and `query_stage_bytes <= [attention_rows].max_staged_query_bytes`. The key is in `omega/omega-runtime.toml` under `[attention_rows]`, default `8192`, override `OMEGA_ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES`, constant `crate::sized::ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES`. At `32768` the rule is the fit rule alone (`the_staged_byte_cap_at_the_threadgroup_budget_reproduces_the_fit_only_rule`). The fit-decision test (`the_query_tile_is_staged_only_while_it_fits_the_threadgroup_budget_and_the_staged_byte_cap`) pins four shapes: head dim 64, 5,120 staged bytes, stages; head dim 256 at 17 and at 49 query rows, 17,408 staged bytes, does not; head dim 512 does not fit at all. The default is pinned in the toml text by `the_runtime_toml_pins_the_staged_query_byte_cap_default`.
+
+Static threadgroup bytes of the compiled pipelines (MEASURED, Metal `staticThreadgroupMemoryLength` printed by the census at pipeline build; `census/*/attention_pipeline_footprint.txt`):
+
+| shape | base `8f6678f0` | tip | staged query bytes |
+|---|---|---|---|
+| granite head dim 64, 24 ops | 9,600 | 9,600 | 5,120 (stages in both) |
+| E2B sliding head dim 256, 28 ops | 25,984 | 8,576 | 17,408 (base stages, tip does not) |
+| E2B global head dim 512, 7 ops | 8,576 | 8,576 | 0 (does not fit in either) |
+
+The staged tile takes the head dim 256 pipeline from 8,576 to 25,984 bytes, 3.03 times (DERIVED).
+
+Own-command-buffer census, 3 runs per arm interleaved base, tip, per model (`census/`, `gemma4_decode_kernel_census` with the 1000-token prompt, prefill step 0; process columns are `/usr/bin/time -l` of the census process, which holds the captured buffers, so its footprint is 5.9 GB and is not the serving footprint):
+
+| cell | base warm us/op (3 runs; p50, CoV) | tip warm us/op (3 runs; p50, CoV) | tip minus base p50 | process columns |
+|---|---|---|---|---|
+| granite 1000-token attention per layer, 24 ops | 1083.0, 1085.1, 1092.7; 1085.1, 0.47% | 1102.9, 1106.8, 1105.1; 1105.1, 0.18% | +20.0 (+1.8%) | RSS 7.10 to 7.11 GB, footprint 5.92 to 5.93 GB (both arms), device 1,597,177,856 B (both arms), CPU 0.49 to 0.51 s user + 1.48 to 1.59 s sys |
+| E2B 1000-token sliding head dim 256, 28 ops | 1155.5, 1126.0, 1130.4; 1130.4, 1.40% | 926.7, 940.1, 940.1; 940.1, 0.83% | -190.3 (-16.8%) | RSS 8.90 to 8.93 GB, footprint 5.94 to 5.96 GB, device 3,567,501,312 B (both arms), CPU 1.32 to 1.43 s user + 2.79 to 3.22 s sys |
+| E2B global head dim 512, 7 ops (not staged either arm) | 2610.1, 2608.2, 2624.8; 2610.1, 0.35% | 2604.6, 2613.8, 2625.4; 2613.8, 0.40% | +3.7 | same process |
+
+The attribution class "cached attention partial" (own-cb us per op, `census/*/rank.md`): E2B 35 ops base 1446.4, 1422.4, 1429.3 (p50 1429.3, CoV 0.86%), tip 1262.3, 1274.8, 1277.1 (p50 1274.8, CoV 0.63%); granite 24 ops base 1083.0, 1085.1, 1092.7, tip 1102.9, 1106.8, 1105.1.
+
+Reverting the skip at head dim 64 with staging kept moved the granite census by +20.0 us/op (+1.8%; CoV of the six values 1.0%), where the round four section read the skip at about 0 at this shape (in-process A/B, production 1099.0 us/op). The two measurements disagree and the census one is the later; the cause is not traced.
+
+Mechanism for the head dim 256 loss: HYPOTHESIS, consistent with the measured bytes. Staging adds 17,408 bytes to a pipeline that needed 8,576, 25,984 against a 32,768 byte ceiling; Metal fits fewer resident threadgroups per core as threadgroup memory per threadgroup grows, and the staged tile saves a query reload per key block that the 8,576 byte pipeline already served from cache. No resident-threadgroup counter was read, so the occupancy step is not measured; the measured fact is the pair (25,984 B, 1130 us) against (8,576 B, 940 us) at an unchanged grid (tg 128, 28 ops).
+
+E2B 1000-token decode bench, 3 processes x (1 warm-up + 5 timed) per arm, interleaved base `8f6678f0` (rebuilt with the example sampling patch only), tip, control (byte copy of tip); all three text hashes `8fec363180a250e0` on all 18 generations per arm, 128 tokens per generation, 970 prompt tokens (`bench/hashes.txt`, `bench/decode_arms.out`):
+
+| metric (median of kept; CoV all / kept) | base | tip | control |
+|---|---|---|---|
+| decode ms/token | 11.1480 (0.30 / 0.19) | 11.1635 (1.08 / 0.25) | 11.1450 (0.36 / 0.18) |
+| prefill ms | 591.0290 (0.06 / 0.01) | 585.9825 (0.11 / 0.01) | 587.0185 (0.07 / 0.00) |
+| TTFT ms | 591 | 586 | 587 |
+| wall ms, 128 tokens | 2006.856 (0.22 / 0.22) | 2004.2325 (0.75 / 0.17) | 2002.401 (0.25 / 0.12) |
+| process CPU ms; CPU% | 193.184 (1.88); 9.63 | 190.238 (5.45 / 2.12); 9.47 | 190.999 (1.73); 9.56 |
+| peak RSS (3 processes) | 3,736,436,736 | 3,769,253,888 | 3,742,547,968 |
+| steady RSS (median after token 10) | 3,726,213,120 | 3,754,442,752 | 3,734,044,672 |
+| peak footprint | 427,698,560 | 427,600,064 | 423,913,856 |
+| steady footprint | 421,456,256 | 417,376,576 | 417,180,032 |
+| peak GPU bytes; steady | 3,621,748,736; 3,618,701,312 | 3,622,256,640; 3,618,701,312 | 3,621,748,736; 3,618,701,312 |
+
+Bound lines, tip against base: decode +0.0155 ms (limit 0.2230, within), prefill -5.0465 (11.8206, within), TTFT -5.0 (11.82, within), wall -2.6235 (40.14, within), CPU -2.946 (3.8637, within), peak RSS +32.8 MB (74.7 MB, within), peak footprint -98,496 B (8.55 MB, within), steady RSS +28.2 MB (74.5 MB, within), steady footprint -4.08 MB (8.43 MB, within), GPU bytes within. Control against tip: every line within. Prefill against the round three figure 588.0 at `b6463985`: tip 585.98 (-2.0, inside the 2% limit 11.76), base 591.03 (+3.0). Two earlier runs of the same cell are kept (`bench/earlier_runs/`). Before the sampling commit (binaries without steady columns): every bound line within, peak footprint tip 421.2 MB against base 427.2 MB. At the sampling commit (before the later instrumentation commits): `peak_footprint_bytes` tip 424.9 MB against base 414.2 MB, `within=false` (+10.7 MB over a limit of 8.3 MB), and control 422.6 MB `within=false` (+8.4 MB); the control is a byte copy of the tip. Base peak footprint across the three runs is 427.2, 414.2 and 427.7 MB, a spread of 13.5 MB, larger than the tip-base difference read in any one of them. The tip release binary measured above was built at `70e644af`; the later commit `3a208754` changes only `instrument`-gated omega code and an example.
+
+#### footprint census per owner (cell A)
+
+Method. `decode_gbps_baseline` built with `instrument` emits `token_breakdown_metal` per step (`phys_footprint_bytes`, `device_allocated_bytes`), one `device_buffer` event per `newBuffer*` call with owner, lifetime, name, bytes and whether it aliases caller memory (`omega/src/metal/resident_nocopy_cache.rs`, `record_device_buffer`), `buffer arena laid out` (allocated against live peak bytes), `resident_plans_held` and `kv_host_mirror` (`proxima-model-interop/src/generate/{resident_plans,device_kv}.rs`) and `held_bytes` (prompt cache bytes from `LoadedModel::prompt_cache_bytes`). The telemetry ring is excluded by measurement: the example reads `proc_pid_rusage` footprint immediately before and after `Recorder::builder()...install()` and prints both (`telemetry_recorder_footprint`); the delta is 1,455,131,328 B (E2B 1000), 1,455,147,776 (E2B 25), 1,455,147,776 (granite 1000), 1,455,164,224 (granite 35) and is subtracted from every instrument-build footprint as `footprint_minus_ring`. Steady state is the median over decode steps 10 to 127; peak is the maximum of the per-step samples; step 0 is the first sample, taken after prefill. The release build (no recorder) gives peak from `/usr/bin/time -l` and steady from the per-token samples (median after token 10) in the same `run=done` line. Steps are the 128-token generation of the 1000-token prompt (969 tokens E2B, 999 granite) and of the short chat prompt (25 tokens E2B and 35 granite as `decode_gbps_baseline` prints them; the same chat prompt is 26 tokens in `bench_local`'s count and in earlier rounds). `PROXIMA_RUNS=1`. `footprint_table.rs`, `hazard_table.rs`, `footprint_trace.rs` are single-file tools under `tools/`.
+
+Peak and steady side by side (MEASURED):
+
+| cell | footprint minus ring: step 0 / peak / steady | release footprint: peak (`time -l`) / steady | device allocated: step 0 / peak / steady | release RSS: peak / steady |
+|---|---|---|---|---|
+| E2B 1000 | 333,015,104 / 353,298,560 / 352,561,280 | 392,603,840 / 359,983,232 | 3,556,130,816 / 3,569,041,408 / 3,569,041,408 | 3,672,621,056 / 3,640,541,184 |
+| E2B 25 | 167,061,504 / 190,326,784 / 189,687,808 | 186,427,456 / 182,593,600 | 3,365,273,600 / 3,379,232,768 / 3,379,232,768 | 3,605,692,416 / 3,601,465,344 |
+| granite 1000 | 229,544,512 / 246,403,712 / 246,321,792 | 353,031,424 / 241,341,440 | 1,604,239,360 / 1,608,253,440 / 1,608,253,440 | 1,743,650,816 / 1,631,830,016 |
+| granite 35 | 83,284,416 / 97,178,176 / 96,784,960 | 111,399,680 / 93,721,344 | 1,453,752,320 / 1,457,635,328 / 1,457,635,328 | 1,554,448,384 / 1,536,573,440 |
+
+The peak minus steady row in the release build is 32.6 MB (E2B 1000), 3.8 MB (E2B 25), 111.7 MB (granite 1000), 17.7 MB (granite 35). Where it comes from (MEASURED): a 1 ms footprint trace of each release run (`trace/`, `tools/footprint_trace.rs`) shows the footprint flat through decode and then rising for 3 to 13 ms after the last token (E2B 1000: 344.2 MB at 3935 ms to 386.0 MB at 3939 ms, then falling to 60 MB as the process tears down; granite 1000: 238.6 MB at 1526 ms to 350.6 MB at 1539 ms). `DeviceKv::flush` (`generate/device_kv.rs`, called at `decode.rs:6486`) copies the device KV back into host layer caches at the end of every generation, "so `PrefixState` and the prompt cache see exactly what a host-only run would have left"; the new `kv_host_mirror` event reports its capacity: 27,242,496 B (E2B 1000), 5,664,768 (E2B 25), 110,690,304 (granite 1000), 15,925,248 (granite 35). It is that copy, freed with the generation; the E2B 1000 ramp (about 42 MB) exceeds the mirror (27.2 MB) by about 15 MB that the events do not name.
+
+Owner rows. Each row gives today's bytes (the four cells above in this order: E2B 1000 / E2B 25 / granite 1000 / granite 35) and the 2026-09-20 build `2cae43b3`. That build predates the events, so its per-owner cells are "did not exist" where the source file is absent from the export (`git archive`, checked) and "unavailable (no event)" otherwise; its aggregate figures are in the next table.
+
+| owner | today, bytes held (steady unless marked) | 2026-09-20 build |
+|---|---|---|
+| 1 prompt cache (`generate/prompt_cache.rs`) | `prompt_cache_bytes=0` after every run in all four cells: `decode_gbps_baseline` builds `PromptCacheConfig::off()` (`examples/decode_gbps_baseline.rs:312`); `prompt_cache_settings.rs` default budget (2 GiB) is a budget, not bytes held. No `prompt cache` line in the telemetry of either 1000-token cell | did not exist |
+| 2 resident prompt-width plans (`generate/resident_plans.rs`), held at the end of a generation | decode plans 1 (1,057,160 / 1,057,160 / 202,124 / 202,124 B); wide plans 2, 1, 1, 1 (147,419,384 / 3,889,288 / 54,158,028 / 1,901,900 B); budget `resident_prefill_plan_budget_bytes=536,870,912`; load-time allowance `arena_bytes_per_prefill_row = 894_647` x 969 rows = 866,912,943 B (DERIVED, taking rows as the 969 prompt tokens) against 145.0 MB packed live bytes of the E2B 1000 prefill arena | did not exist |
+| 3 prewarm queue and follow-up (`generate/prewarm*.rs`) | not active on this path: it feeds the prompt cache, which is off; zero `prewarm` lines in both 1000-token telemetry logs | did not exist |
+| 4 speculative drafter state (`speculative_settings.rs`) | `decode_arms` sets `PROXIMA_SPECULATIVE_TYPES=none` on its children but `decode_gbps_baseline` reads `PROXIMA_DECODE_SPECULATIVE`, so every arm ran `SpeculativeConfig::default()` (`speculative_types=SpeculativeTypeSet(64)`, printed per run). `Drafter` keeps no table (`generate/drafter.rs`: a closed enum drafting from the history slice). The cost is the verify plans it makes resident: with `PROXIMA_DECODE_SPECULATIVE=none` (arm `spec_none`, 3 processes x 6 runs, same hash `8fec363180a250e0`) steady footprint -52,396,352 B, steady device bytes -50,675,712 B, steady RSS -53,510,144 B against the default arm, decode ms/token +0.019 (limit 0.2237, within), prefill -0.98 ms (`owners_ab/decode_arms.out`) | did not exist |
+| 5 output and uniform arena (`build_buffer_arena`), allocated against live peak | arena slots created: 148,476,544 / 4,946,448 / 54,360,152 / 2,104,024 B across 3, 2, 2, 2 plans; live peak bytes 145,205,836 / 4,863,708 / 54,353,968 / 2,097,456; fragmentation 3,270,708 / 82,740 / 6,184 / 6,568 B. Serial dispatch lays the E2B prefill arena out packed (145,021,064 B allocated, 142,039,904 B live peak); concurrent dispatch lays it out in whole slots (327,850,888 B allocated, same live peak): 185.8 MB of fragmentation a concurrent run carries (`hazard/e2b_long_arena/`) | `BufferArena` did not exist |
+| 6 device KV placement (`allocate_placed_buffer`) | `placed_buffer` events: 44,695,552 / 10,485,760 / 119,734,284 / 25,362,444 B, of which logits buffers 1,048,576 / 1,048,576 / 196,620 / 196,620 and the rest KV rows in f32 (24 x 606,208 + 18 x 1,212,416 + 3 x 2,424,832 = 43,646,976 B for E2B 1000; 48 x 1,245,184 + 24 x 2,490,368 = 119,537,664 B for granite 1000), the dtype being `kv_cache_key_quant`/`kv_cache_value_quant` F32 and the byte length `rows x size_of::<f32>()` (`decode.rs:3330-3350`) | KV lived in host layer caches (no placement) |
+| 7 pipeline disk cache | 84 loaded archive hits and 0 stores in the E2B 1000 run (`pipeline_disk_cache run_index=0 hits=84 stores=0`); Metal exposes no byte size for a pipeline state. With `OMEGA_PIPELINE_CACHE=false` (arm `pipeline_cache_off`) steady footprint -4.13 MB (limit 8.31 MB), steady device bytes 0, hash equal: no measured memory effect | did not exist |
+| 8 output buffer pool and gather fault buffer pool | pool feature `metal-buffer-pool` is not compiled in these builds (feature list of the rustc line in `build_dispatch_floor.log`); fault buffers 3 events 12 B (E2B), 74 events 296 B (granite) | pool absent |
+| 9 route compaction buffers and prepass scratch | E2B none (dense route); granite 1000: 24 buffers, 871,776 B (36,324 B each); granite 35: 24 buffers, 39,264 B (1,636 each); `prepass_records=0` in the step 23 capture of both models | did not exist |
+| 10 ring checkpoint, prefix trie, prefix state file | held inside prompt cache entries; 0 B (cache off) | did not exist |
+| 11 resident weights | one aliased no-copy mapping buffer (3,349,528,576 B E2B, 1,422,245,888 B granite; counted in `device_allocated_bytes`, not in footprint); granite 24 named no-copy blocks 131,072 B each (3,145,728 B); copied weights 0; copying uploads per step `block_copy` 1,142 events 3,380,280 B over the E2B 1000 run, 768 events 298,288 B granite, created and freed per step | the mapping existed |
+| 12 telemetry ring | 1,455,131,328 B E2B 1000 (instrument builds only; excluded) | n/a |
+| 13 end-of-generation kv host mirror (new row) | 27,242,496 / 5,664,768 / 110,690,304 / 15,925,248 B, at the peak only (freed with the generation) | host layer caches held KV throughout (no copy back) |
+| unattributed device bytes | `device_allocated_bytes` minus the sum of live events: -2,181,984 (step 0) and -1,566,936 (step 10) for E2B 1000; +736,800 and +2,399,584 for E2B 25; -469,104 and +26,948 for granite 1000; +682,912 and +1,047,892 for granite 35. Events cover the device total to within 2.4 MB in every cell | unavailable |
+| unattributed footprint (E2B 1000, steady 352,561,280 B) | `footprint` categories at steady state (release, `footprint_categories.txt`): IOAccelerator (graphics) 243 MB dirty (217 regions) against 224.2 MB of non-aliased device events (arena 148.5 + scratch 27.6 + placed 44.7 + block copies 3.4), 19 MB unexplained (page and suballocation overhead is a HYPOTHESIS); host heap 156 MB (MALLOC nano 60, tiny 30, medium 31, large 24, small 5.5) with no per-site accounting in this build; page tables 2.7 MB | unavailable |
+
+Sept 20 build against today, same harness (`examples/bench_local.rs`, E2B blob, the 25-token chat prompt, 128 new tokens, `/usr/bin/time -l`, both built `--release --features std,metal` from `git archive` exports in their own target directories; `sept20/`):
+
+| quantity | 2026-09-20 `2cae43b3` | today `70e644af` |
+|---|---|---|
+| peak RSS | 3,553,918,976 B (3.31 GiB) | 3,545,006,080 B |
+| peak footprint | 134,931,712 B | 145,417,728 B |
+| ttft; ttnt | 3092.7 ms; 111.8 ms | 237.5 ms; 11.1 ms |
+| footprint at mid-run (`footprint` / `vmmap`, taken 9 s and 3.5 s in) | 119.3 MB (IOAccelerator 4.4 MB, malloc 111 MB) | about 60 MB in the dirty categories at 180 tokens (MALLOC_LARGE 24, nano 9.1, medium 7.7, IOAccelerator 6.1, tiny 5.1, small 3.9, page table 2.5 MB; the run stopped at 180 tokens, end of sequence; `vmmap` of that process returned nothing) |
+
+The journal figure of 3.29 GiB (2026-09-20, `decode-dense-landing-unattended.md`) is a peak RSS: this build reads 3,529,490,432 B = 3.287 GiB at 16 tokens with the same harness (`sept20/old16.err`). 3.29 GiB is 3,532,574,000 B; today's `decode_gbps_baseline` E2B short cell reads 3,605,692,416 B (release run, `footprint/e2b_short/release_time_and_run.txt`), 73.1 MB above it (the 3.64 GB quoted for that cell would be 107 MB). The 350 MB difference quoted from "3.64 GB minus 3.29 GB" mixes GB and GiB; in the same `bench_local` harness at the same token count the difference is -8.9 MB. The remaining 70 MB between `bench_local` (3,545,006,080 B) and `decode_gbps_baseline` (3,615,506,432 B) on the same engine commit is harness: `decode_gbps_baseline` shows MALLOC nano 59 MB + tiny 32 MB + medium 33 MB (124 MB) against 22 MB in `bench_local`, IOAccelerator 31 MB against 6 MB (`sept20/tip512.footprint_categories.txt`, `footprint/e2b_short/footprint_categories.txt`); the allocation behind the extra 100 MB of host heap is not named by any event (UNMEASURED).
+
+llama's recorded load lines for the E2B blob (`.long_ctx_backups/arch_data/phaseB/llama_server_gemma4_e2b.log`, 2026-10-04, n_ctx 4096, a different recording from the arms launch logs, which print no buffer sizes): non-SWA KV 24.00 MiB (3 layers, f16), SWA KV 30.00 MiB (12 layers, f16), Metal compute buffer 128.52 MiB, CPU compute buffers 30.02 MiB (two lines), CPU output buffer 4.00 MiB. The arms launch logs record only `peak memory footprint` for llama (`evidence/slice0/ac1/launches.raw.*llama-server*.err`): E2B 229.9, 202.6, 206.6 MB; granite 277.0, 285.8, 284.7 MB. Steady-state cells for llama: not recorded.
+
+#### cell B, barriers under concurrent dispatch (step 23, 1000-token prompt, 21 interleaved rounds per arm, whole step as one command buffer)
+
+Reasons the live tracker fires (MEASURED; `hazard/*/step23.txt`, events `hazard_op` and `hazard_internal_barrier`, `PROXIMA_DISPATCH=concurrent`; the counter `barriers` per step line agrees: 619 E2B, 348 granite):
+
+| model | hazard ops | op barriers | true_node_dependency | pointer_alias_without_node_dependency | arena_slot_reuse | internal (attention split to merge) | physical dispatches | longest run of ops without a barrier |
+|---|---|---|---|---|---|---|---|---|
+| E2B | 618 | 584 | 567 | 0 | 17 | 35 | 653 | 2 |
+| granite | 374 | 324 | 274 | 24 | 26 | 24 | 398 | 3 |
+
+Replay arms (`dispatch_floor` with `DF_MODE=barriers`; dispatches captured while the step ran under concurrent dispatch, each marked by the barrier the live tracker fired before it; `floor/*_barriers/out.txt`). Arm 1 `live_tracker`: barrier at the recorded flags. Arm 2 `node_keyed`: barrier only where a dispatch reads a node an earlier dispatch wrote with no barrier between, from each record's bindings. Arm 2b `node_and_slot_keyed`: arm 2 plus barriers where a dispatch writes a buffer an earlier dispatch wrote or read since the last barrier. Arm 3 `no_barriers`. Reference `serial_encoder`.
+
+| model, arm | barriers | p50 ms (CoV%) | longest barrier-free run (dispatches) | output equals serial encoder (last dispatch / every dispatch's output buffer, FNV-1a) | CPU ms p50 (cell) |
+|---|---|---|---|---|---|
+| E2B live_tracker | 620 | 10.5247 (2.36) | 2 | yes / yes | 2.670 |
+| E2B node_keyed | 602 | 10.4906 (1.75) | 3 | yes / yes | 2.666 |
+| E2B node_and_slot_keyed | 619 | 10.4789 (1.83) | 2 | yes / yes | 2.672 |
+| E2B no_barriers | 0 | 4.9704 (0.23) | 653 | no / no | 2.522 |
+| E2B serial_encoder | n/a | 10.5625 (3.12) | n/a | reference | 2.520 |
+| granite live_tracker | 349 | 5.6968 (0.83) | 3 | yes / yes | 1.658 |
+| granite node_keyed | 298 | 5.4457 (0.89) | 3 | yes / **no** | 1.649 |
+| granite node_and_slot_keyed | 324 | 5.5456 (0.93) | 3 | yes / **no** | 1.650 |
+| granite no_barriers | 0 | 2.8448 (0.37) | 398 | no / no | 1.591 |
+| granite serial_encoder | n/a | 5.8758 (1.39) | n/a | reference | 1.558 |
+
+Memory of these cells (the cell columns are process-wide and equal across arms): E2B peak RSS 3454 MB, footprint 504 to 506 MB, Metal allocated 3575.6 MB; granite 1638.8 MB, 336.1 MB, 1552.5 MB. The E2B footprint cell is 176 MB above the serial floor-mode cell (329.2 MB): concurrent dispatch lays the prefill arena out in whole slots (owner row 5).
+
+Reading the records. In E2B the live tracker's 620 barriers are 567 reads of a node the previous dispatch wrote (a serial chain, longest barrier-free run 2), 17 slot reuse, 35 attention merges; removing the 18 that are not node reads (arm 2) changes the step by -0.034 ms (p50 difference of the two arms; each arm's CoV is 1.8 to 2.4%), and the output stays bit-equal. Removing all barriers (arm 3) takes the step to 4.97 ms, 5.55 ms below the live tracker, with an invalid output. In granite arm 2 and arm 2b are not bit-equal to the serial encoder on the every-buffer digest while the final dispatch's output is. Arm 2 drops 51 of the live tracker's barriers: 24 before `omega_reduce_r4_o3_n2_multiply_add_zero_g10` (the gathered reduce that reads the placed KV rows), 24 before `omega_elementwise_twin_...` (the rotary key append that writes them) and 3 others (`floor/granite_barriers/tables/dispatch_table.csv`, rows with `live_barrier_before=1` and `node_keyed_barrier_before=0`). Arm 2b puts back 26 of them (the 24 twin dispatches and 2 others) and still drops 25: the 24 gathered reduces and dispatch 0, whose flag is the previous step's last barrier carried into the capture. The 24 gathered reduces read a placed buffer that another node's output wrote under a different node id, an edge through buffer placement that node ids do not show; the tracker's `pointer_alias_without_node_dependency` class (24 in granite, 0 in E2B) is those 24. Both arms 2 and 2b differ from the serial encoder on the every-buffer digest, so in these records the 24 are not false dependencies; this is MEASURED as a digest difference and read from the dispatch names, with no trace of the racing bytes. In E2B arm 2b restores 17 of the 18 and the digests are equal. The per-dispatch records are the CSVs under `floor/*_barriers/tables/` (index, node, kernel, grid, threadgroups, bindings, bytes bound, static and dynamic threadgroup bytes, pipeline switch, the three barrier flags, isolated marginal time, and each arm's whole-step p50 divided by the dispatch count, a mean); the per-kernel rollup is `group_rollup.csv`.
+
+#### cell F, the dispatch stream with no work in it (step 23, 1000-token prompt, serial capture, 21 interleaved rounds per arm, whole step as one serial command buffer)
+
+Arms (`dispatch_floor`, `DF_MODE=floor`): recorded; `empty_same_bindings` (every kernel replaced by an empty kernel declaring the same buffer indices and the same static threadgroup bytes, 12,656 B over 34 pipelines for E2B and 1,184 B over 24 for granite, equal to the originals', launched with the same grid, threadgroup shape and dynamic length); `empty_minimal_bindings` (one shared empty kernel, one 4 KiB buffer, no threadgroup memory, same grids); `empty_one_threadgroup` (`empty_same_bindings` with each grid cut to one threadgroup); `recorded_unordered` (the recorded kernels, concurrent encoder, no barrier; output invalid).
+
+| arm | E2B p50 ms (CoV%) | us per dispatch | granite p50 ms (CoV%) | us per dispatch |
+|---|---|---|---|---|
+| recorded | 10.5758 (3.34) | 16.196 | 5.9039 (1.93) | 14.834 |
+| empty_same_bindings | 1.2733 (6.60) | 1.950 | 0.8103 (5.38) | 2.036 |
+| empty_minimal_bindings | 1.2326 (6.31) | 1.888 | 0.7872 (5.86) | 1.978 |
+| empty_one_threadgroup | 1.0778 (5.75) | 1.651 | 0.7252 (1.33) | 1.822 |
+| recorded_unordered | 4.9679 (0.43) | 7.608 | 2.9023 (0.28) | 7.292 |
+
+Dispatches: E2B 653 records, 0 with a route prepass, 34 distinct pipeline states, 651 pipeline switches between consecutive dispatches; granite 398, 0, 24, 348. Per dispatch: buffer bindings median 8 (min 2, max 13) E2B and 6 (2, 21) granite; threadgroups median 8 (1 to 65,536) and 64 (1 to 6,145); single-threadgroup dispatches 255 and 129; bytes bound median 522,003,944 and 115,997,408 (the whole-mapping buffer counted at its full length from the binding offset: max 3,337,901,800 and 1,420,899,760). Resources of the cells (median of 21; process-wide RSS and footprint are equal across arms): E2B peak RSS 3439.1 MB, footprint 329.2 MB, Metal allocated 3400.5 MB, CPU ms recorded 2.438 (18.3% of wall), same bindings 1.124 (42.8%), minimal 0.337 (19.1%), one threadgroup 1.098 (45.7%), unordered 2.463; granite 1632.0 MB, 306.1 MB, 1524.8 MB, CPU 1.617, 0.751, 0.222, 0.732, 1.655 ms.
+
+Differences (DERIVED, p50): E2B recorded minus empty_same 9.3025 ms; empty_same minus empty_minimal 0.0407 ms (0.062 us per dispatch); empty_same minus empty_one_threadgroup 0.1955 ms; recorded minus recorded_unordered 5.6079 ms. Granite 5.0936; 0.0231 (0.058 us); 0.0851; 3.0016. llama's recorded per-op floor is `floor_us=4` in `evidence/attr3/rank/e2b_decode.md`; the empty-kernel stream here reads 1.95 us (E2B) and 2.04 us (granite) per dispatch in the same units (GPU span of the command buffer over the dispatch count), and 1.89 and 1.98 us with minimal bindings. The step arithmetic: E2B 653 x 1.95 us = 1.27 ms of the 10.58 ms; the isolated per-kernel marginals (a batch of 8 identical dispatches minus 1, over 7, median of 7; the census method) sum to 8.35 ms over the 653 dispatches (`df isolated_marginal`: 8.2129, 8.3511, 8.3003, 8.3431 in the four captures), against the in-stream recorded span 10.58 ms; 8.35 + 1.27 = 9.62 ms leaves 0.96 ms of the recorded span unnamed by these two numbers (MEASURED sums; the gap is not traced).
+
+Which dispatches carry the in-stream cost (`floor/e2b_floor/tables/group_rollup.csv`, `dispatch_table.csv`; isolated marginal ms by kernel group): 105 matvec reduces `omega_reduce_r3_o2_n2_multiply_add_zero` (530 threadgroups on average) 2.1254 ms; the logits head (dispatch 642, 65,536 threadgroups, 1080.4 us) and the first-layer reduce (dispatch 1, 8,960 threadgroups, 115.1 us); the 28 sliding attention partials (136 threadgroups) 0.6030 ms plus their merges 0.1510 and the 7 global partials 0.2830 plus merges; the 65 gathered reduces (183 threadgroups) 0.6013 ms; and 255 single-threadgroup dispatches (176 of them the three norm reduce groups of 70, 71 and 35 dispatches at 6.98, 5.89 and 6.51 us isolated each) whose isolated marginals sum to 1.4627 ms, 5.74 us each, against 1.651 us for an empty one-threadgroup dispatch: about 4 us of each of those is inside the kernel. In granite (`floor/granite_floor/tables/`): the 48 gathered reduces `omega_reduce_r4_o3_n2_multiply_add_zero_g10` 1.2013 ms, the 24 attention partials 1.0656 ms (44.4 us each, 512 threadgroups), 24 softmax-weighted gathers 0.4990 ms, 72 `omega_reduce_r4_o3` 0.4266 ms; 129 single-threadgroup dispatches sum to 0.5264 ms, 4.08 us each.
+
+#### recorded defects and corrections
+
+- The round four history is not bisect-green between `2ff64346` (the shared-route test) and `8a04ec27` (the std-tier fixture): the omega std-tier lib tests do not compile there (the fixture and imports were gated to the grouped gemm tier only in `8a04ec27`). It stays as landed; rewriting pushed history is not authorized.
+- The "zero-encode bound" of round four (`step_encode_bound`, `replay_one`) did not eliminate host encode: the replay arms encode every dispatch on the host (replay_one CPU 2.88 ms for the 653 dispatches), so that cell measured the chunking and the per-token re-encode difference between the live step and a replay, not a step encoded once. A step encoded once (an indirect command buffer or a cached encoded plan) has not been measured; the 0.55 ms (E2B) and 0.50 ms (granite) figures are bounds on live minus replay only and are not a bound on encoding once.
+- `decode_arms` passed `PROXIMA_SPECULATIVE_TYPES=none` to children that read `PROXIMA_DECODE_SPECULATIVE`; every round four and round three proxima arm ran speculation on (printed as `speculative_types=SpeculativeTypeSet(64)`), so the footprints in the bench rows above include the verify plans it keeps (-50.7 MB device bytes with it off, owner row 4). The arms tool itself was not changed.
+
+#### unexplained, unmeasured, assumed
+
+- Why head dim 64 loses 20 us/op with the skip reverted and staging kept (no kernel-level trace).
+- The occupancy step of the head dim 256 loss (no resident-threadgroup counter read).
+- 19 MB of IOAccelerator dirty footprint above the non-aliased device events (E2B 1000), and the 156 MB host heap (MALLOC zones), which have no per-site accounting; the 15 MB by which the end-of-generation ramp exceeds the kv mirror; the roughly 100 MB of host heap that `decode_gbps_baseline` holds above `bench_local` on one engine commit.
+- 0.96 ms of the E2B recorded step not named by the empty-stream plus isolated-marginal sums.
+- The racing bytes behind the granite digest mismatch (not traced); whether a placement-aware node-keyed tracker removes the 24 alias barriers safely is untested.
+- A step encoded once; the llama steady-state cells; llama's compute and KV sizes for the arms launches (only the 2026-10-04 recording prints them).
+
+#### re-prove
+
+```
+cargo nextest run -p omega --features metal --cargo-profile gate                      # 877
+cargo nextest run -p omega --features metal,instrument --cargo-profile gate           # 931
+cargo nextest run -p omega --no-default-features --features std --lib                 # 151
+cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate -E 'not test(/gemma4_26b/)'   # 746
+clippy -D warnings --all-targets: omega metal; omega metal,instrument; omega std; proxima-tensor std; proxima-model-interop std,metal; proxima-model-interop std,metal,instrument   # exit 0 each
+decode_arms --prompt-file prompt1k.txt --processes 3 --runs 5 --new-tokens 128 --arm base=<8f6678f0 export + example patch> --arm tip=<release> --arm control=<copy of tip> --case gemma4_e2b=<E2B blob>
+M0_OUT_DIR=<dir> M0_MODEL_GGUF=<blob> M0_MAX_TOKENS=2 M0_CAPTURE_STEPS=0 PROXIMA_PROMPT_FILE=prompt1k.txt gemma4_decode_kernel_census ; attribution_rank rank --census <dir> --llama evidence/slice0/llama_ops/<model>_ops.tsv --ntok <...> --requests 3 --floor-us 4.0
+env -i ... PROXIMA_MAX_TOKENS=128 PROXIMA_RUNS=1 RUST_LOG=proxima_model_interop=debug,omega::metal::resident_nocopy_cache=debug,omega::metal::arena_encode_dispatch_finish=debug PROXIMA_TELEMETRY_FILE=<log> decode_gbps_baseline (instrument)  ; footprint_table <label> <log> 10 127
+PROXIMA_DISPATCH=concurrent PROXIMA_MAX_TOKENS=24 RUST_LOG=proxima_model_interop::generate::load_model=info,omega::metal::execute_and_hazards=debug ... ; hazard_table <label> <log> 23
+DF_MODE=floor|barriers DF_ROUNDS=21 DF_OUT_DIR=<dir> PROXIMA_DECODE_MODEL_GGUF=<blob> PROXIMA_PROMPT_FILE=prompt1k.txt dispatch_floor      # built --features std,metal,instrument
+footprint_trace <trace.tsv> <stderr.log> -- decode_gbps_baseline      # 1 ms footprint trace
+```
+Missing for CI: no job runs the Metal tests, the arms bench, the censuses, the replay arms or the footprint tools; every row re-proves on this box only.

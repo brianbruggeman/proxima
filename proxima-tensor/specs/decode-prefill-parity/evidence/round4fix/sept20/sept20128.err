@@ -1,0 +1,19 @@
+bench_local: task=causal-generation generation_supported=true architecture=Some("gemma4") evidence=["decoder architecture family: gemma4"]
+       18.62 real         1.28 user         1.43 sys
+          3553918976  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              425037  page reclaims
+                   5  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                1067  involuntary context switches
+         15591167452  instructions retired
+          8482653052  cycles elapsed
+           134931712  peak memory footprint

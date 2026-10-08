@@ -1,0 +1,5 @@
+decode_gbps_baseline run=done run_index=0 wall_ms=1657.886 cpu_user_ms=210.933 cpu_sys_ms=145.709 cpu_ms=356.642 cpu_pct=21.51 tokens_generated=128 prompt_token_count=25 text_hash=431552f7eb4ab98a stopped_by_eos=false decode_ms_per_token=11.157 ttft_ms=241 gpu_peak_bytes=3379232768 steady_rss_bytes=3601465344 steady_footprint_bytes=182593600 steady_gpu_bytes=3379232768 steady_samples=119 text=" a **large office build
+decode_gbps_baseline held_bytes run_index=0 prompt_cache_bytes=0 resident_prefill_plan_budget_bytes=536870912 speculative_types=SpeculativeTypeSet(64)
+        3.46 real         1.46 user         1.36 sys
+          3605692416  maximum resident set size
+           186427456  peak memory footprint

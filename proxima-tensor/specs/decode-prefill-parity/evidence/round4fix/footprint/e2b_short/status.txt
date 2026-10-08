@@ -1,0 +1,3 @@
+instr exit=0
+release exit=0
+vm exit=0
