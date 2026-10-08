@@ -1,0 +1,23 @@
+decode_gbps_baseline warm_model_buffers=true warmed_buffers=1 warm_ms=0.483
+decode_gbps_baseline run=start prompt="<|turn>user\nWhich of these is smaller in size: a hippopotamus or a large office building?<turn|>\n<|turn>model" prompt_token_count=25 max_tokens=8
+decode_gbps_baseline token_ids run_index=0 ids=[496, 5213, 20619, 4408, 3788, 1018, 563, 7100]
+decode_gbps_baseline run=done run_index=0 wall_ms=347.705 cpu_user_ms=90.773 cpu_sys_ms=104.655 cpu_ms=195.428 cpu_pct=56.21 tokens_generated=8 prompt_token_count=25 text_hash=701cac4b1dce32f3 stopped_by_eos=false decode_ms_per_token=16.386 ttft_ms=233 gpu_peak_bytes=3374514176 text=" a **large office building** is smaller"
+decode_gbps_baseline pipeline_disk_cache run_index=0 hits=71 stores=0
+        2.24 real         1.32 user         1.42 sys
+          3579494400  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              424247  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                 537  involuntary context switches
+         12803337245  instructions retired
+          8550691946  cycles elapsed
+           181381056  peak memory footprint

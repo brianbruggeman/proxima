@@ -1,0 +1,11 @@
+ab capture excludes 0 unreplayable dispatches of 369
+ab capture: step=0 dispatches=369 groups=21
+ab res sha=732f8c6acf13698e arm=base tg_static_bytes=10368 max_threads=896 exec_width=32 bound_buffer_bytes=74063620 iters=50 cell label=732f8c6acf13698e:base wall_ms=116.618 cpu_ms=3.346 cpu_pct=2.9 rss_peak_mb=1618.6 footprint_mb=211.7 gpu_alloc_mb=1515.3 load_before=4.75 load_after=4.75
+ab res sha=732f8c6acf13698e arm=732f8c6acf13698e.oldgemm tg_static_bytes=10368 max_threads=896 exec_width=32 bound_buffer_bytes=74063620 iters=50 cell label=732f8c6acf13698e:732f8c6acf13698e.oldgemm wall_ms=110.831 cpu_ms=3.052 cpu_pct=2.8 rss_peak_mb=1618.6 footprint_mb=211.7 gpu_alloc_mb=1515.3 load_before=4.75 load_after=4.75
+ab bits sha=732f8c6acf13698e threads=577536 extents=[1000, 8, 512, 1024] arm=base elements=8192000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=732f8c6acf13698e threads=577536 extents=[1000, 8, 512, 1024] arm=732f8c6acf13698e.oldgemm elements=8192000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab compaction sha=732f8c6acf13698e extents=[1000, 8, 512, 1024] arm=base bytes=36356 differing=0
+ab compaction sha=732f8c6acf13698e extents=[1000, 8, 512, 1024] arm=732f8c6acf13698e.oldgemm bytes=36356 differing=0
+ab group sha=732f8c6acf13698e threads=577536 extents=[1000, 8, 512, 1024] tg=Some(128) count=24 pass=0 arm=base marginal_us=59.647 single_us=62.625
+ab group sha=732f8c6acf13698e threads=577536 extents=[1000, 8, 512, 1024] tg=Some(128) count=24 pass=0 arm=732f8c6acf13698e.oldgemm marginal_us=59.742 single_us=62.625
+ab cell label=process wall_ms=1120.943 cpu_ms=798.550 cpu_pct=71.2 rss_peak_mb=1618.6 footprint_mb=243.0 gpu_alloc_mb=1515.3 load_before=4.75 load_after=4.75
