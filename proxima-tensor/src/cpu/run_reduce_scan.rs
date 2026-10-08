@@ -273,7 +273,6 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // reduce's own `output_axes`/`extents` on a cached-attention fold (see
     // `ReduceAxisShape`'s own doc).
     let axis_shape = resolve_reduce_axis_shape(resolved, output_axes.as_slice());
-    let contraction_width: u64 = axis_shape.reduction_extents.iter().product();
     let shape_error = || TensorError::NotLowerable {
         node: resolved.node,
         reason: "quantized matmul batch shape does not evenly divide by its packed weight rows",
@@ -283,6 +282,38 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         reason: "quantized matmul activation varies along an output axis its packed weight also \
                  varies along -- not a flat weight matmul this interpreter can express",
     };
+    let weight_gather = resolved
+        .operands()
+        .iter()
+        .find(|(node, _, _)| *node == weight_node)
+        .and_then(|(_, _, gather)| gather.clone());
+    // A reduced axis the route index varies along (the selected-expert axis of
+    // a stacked down projection folded with its combine) is not part of the
+    // contraction one expert slab holds: each of its positions picks its own
+    // slab, and the per-slab results add into the same output row.
+    let selection_dims: Vec<u16> = axis_shape
+        .reduction_dims
+        .iter()
+        .copied()
+        .filter(|&dim| {
+            weight_gather
+                .as_ref()
+                .is_some_and(|gather| gather.index_layout.stride(dim) != 0)
+        })
+        .collect();
+    let selection_extents: Vec<u64> = selection_dims
+        .iter()
+        .map(|&dim| resolved.extents[dim as usize])
+        .collect();
+    let selection_total = usize::try_from(selection_extents.iter().product::<u64>())
+        .map_err(|_| shape_error())?
+        .max(1);
+    let contraction_width: u64 = axis_shape
+        .reduction_dims
+        .iter()
+        .filter(|dim| !selection_dims.contains(dim))
+        .map(|&dim| resolved.extents[dim as usize])
+        .product();
     let k = usize::try_from(contraction_width).map_err(|_| shape_error())?;
 
     let weight_layout = resolved
@@ -318,11 +349,6 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // as any other batch position. `leading_axes`/`leading_extents` are only
     // populated when a gather is present, so the non-gathered path (every
     // codec this crate ran before Mixtral) allocates nothing extra here.
-    let weight_gather = resolved
-        .operands()
-        .iter()
-        .find(|(node, _, _)| *node == weight_node)
-        .and_then(|(_, _, gather)| gather.clone());
     let mut rows_total: u64 = 1;
     let mut leading_total_u64: u64 = 1;
     let mut leading_axes: Vec<u16> = Vec::new();
@@ -590,14 +616,18 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
 
     #[cfg(feature = "instrument")]
     counter!(instrument::MATMUL_POSITION_LOOP_ITERS, leading_total as u64);
-    for position in 0..leading_total {
+    let mut selection_coordinate = vec![0u64; selection_dims.len()];
+    for step in 0..leading_total * selection_total {
+        let position = step / selection_total;
+        let selection = step % selection_total;
         if weight_gather.is_some() {
             unflatten_into(position as u64, &leading_extents, &mut leading_coordinate);
+            unflatten_into(selection as u64, &selection_extents, &mut selection_coordinate);
             merge_coordinates_into(
                 &leading_axes,
                 &leading_coordinate,
-                &[],
-                &[],
+                &selection_dims,
+                &selection_coordinate,
                 &mut full_coordinate,
             );
         }
@@ -791,7 +821,15 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 QuantizedBlock::Packed { .. } => {}
             }
         }
-        output[position * rows..(position + 1) * rows].copy_from_slice(&result);
+        let output_row = &mut output[position * rows..(position + 1) * rows];
+        if selection == 0 {
+            output_row.copy_from_slice(&result);
+        } else {
+            output_row
+                .iter_mut()
+                .zip(&result)
+                .for_each(|(slot, partial)| *slot += partial);
+        }
     }
     #[cfg(feature = "instrument")]
     counter!(

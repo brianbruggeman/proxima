@@ -160,6 +160,11 @@ metal-moe-mul-mat-id = []
 # stays a chain of elementwise nodes. `proxima-model-interop`'s `metal` set turns it on; the strategy
 # itself is always available to a caller that names it.
 moe-stacked-experts = ["moe-topk-fusion"]
+# Default-off. The routed feed-forward block folds the down projection over the selected axis in the
+# same reduce (`MoeProjectionStrategy::StackedCombined`), so the `[sequence, selected, width]` down
+# output is never materialized. Implies `moe-stacked-experts`; the strategy itself is always
+# available to a caller that names it.
+moe-stacked-combine = ["moe-stacked-experts"]
 # real execution-witness counters (elements/bytes/gather-vs-affine) plus
 # per-bound-op spans over `proxima-telemetry`'s legacy Metrics/Telemetry
 # surface — default-off, no effect on the default build or the no_std+alloc

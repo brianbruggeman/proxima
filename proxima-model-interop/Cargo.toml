@@ -240,6 +240,10 @@ moe-stacked-experts = [
     "proxima-tensor/moe-stacked-experts",
     "omega?/moe-stacked-experts",
 ]
+# Default-off passthrough to `proxima-tensor/moe-stacked-combine`: the stacked routed feed-forward
+# folds its down projection over the selected axis in one reduce instead of materializing the
+# `[sequence, selected, width]` down output.
+moe-stacked-combine = ["moe-stacked-experts", "proxima-tensor/moe-stacked-combine"]
 # Passthrough to `proxima-tensor/reduce-epilogue-fusion` and
 # `omega/reduce-epilogue-fusion` -- folded into `metal`'s default shape above
 # but kept individually selectable so this crate's own harness can exercise
