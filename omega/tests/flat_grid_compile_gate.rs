@@ -124,6 +124,9 @@ fn elementwise_tanh_2d() -> BoundOp {
     bound_of(&program)
 }
 
+/// The F16 projection stands for the cooperative reduce; F16 has a tiled
+/// decode description now, so [`every_flat_form_kernel_compiles_with_the_metal_toolchain`]
+/// keeps it off the tiled GEMM with `PROXIMA_TILED_GEMM_DISABLE=f16`.
 fn per_layer_projection() -> (BoundOp, BTreeMap<NodeId, Codec>) {
     let mut program = Vec::new();
     let weights = input(&mut program, DType::Float16, &[8960, 1536]);
@@ -468,7 +471,13 @@ fn expected_kernel_count() -> usize {
 
 #[test]
 fn every_flat_form_kernel_compiles_with_the_metal_toolchain() {
-    let kernels = temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("0"), flat_kernels);
+    let kernels = temp_env::with_vars(
+        [
+            ("PROXIMA_TILED_GEMM_GRID2D", Some("0")),
+            ("PROXIMA_TILED_GEMM_DISABLE", Some("f16")),
+        ],
+        flat_kernels,
+    );
     let expected = expected_kernel_count();
     assert_eq!(
         kernels.len(),
