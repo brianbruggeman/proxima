@@ -971,10 +971,50 @@ fn the_row_tiled_kernel_stages_the_query_tile_once_and_keeps_its_four_barriers()
 }
 
 #[test]
-fn the_query_tile_is_staged_only_while_it_fits_beside_the_score_tile_in_the_threadgroup_budget() {
+fn the_query_tile_is_staged_only_while_it_fits_the_threadgroup_budget_and_the_staged_byte_cap() {
     assert_default_sizing();
     let mut cells = 0_u32;
-    for (groups, head_dim, rows, staged) in [
+    for (groups, head_dim, rows, staged, staged_bytes) in [
+        (2_u64, 64_u64, 1000_u64, true, 5_120_u64),
+        (8, 256, 17, false, 17_408),
+        (16, 256, 49, false, 17_408),
+        (8, 512, 49, false, 0),
+    ] {
+        let op = attention_rows_op(9, groups, head_dim, 512, rows, GLOBAL_LOWER);
+        let Some(CachedAttentionForm::TwoRangeRowTiled {
+            rows_per_threadgroup: tile_rows,
+            ..
+        }) = relaxed_form(&op)
+        else {
+            panic!("groups {groups} head_dim {head_dim}: not the row-tiled form");
+        };
+        let block = row_tiled_block(head_dim);
+        let decided = query_tile_staged(
+            tile_rows,
+            groups,
+            head_dim,
+            block,
+            THREADGROUP_BUDGET,
+            crate::sized::ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES,
+        );
+        assert_eq!(decided, staged, "groups {groups} head_dim {head_dim} tile {tile_rows}");
+        if staged_bytes != 0 {
+            assert_eq!(query_stage_bytes(tile_rows, groups, head_dim), staged_bytes);
+        }
+        let source = row_tiled_source(&op);
+        assert!(
+            source.contains(&format!("constexpr bool stage_query = {staged};")),
+            "groups {groups} head_dim {head_dim}: the emitted gate disagrees with the rule"
+        );
+        cells += 1;
+    }
+    assert_eq!(cells, 4);
+}
+
+#[test]
+fn the_staged_byte_cap_at_the_threadgroup_budget_reproduces_the_fit_only_rule() {
+    assert_eq!(crate::sized::ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES, 8_192);
+    for (groups, head_dim, rows, fits) in [
         (2_u64, 64_u64, 1000_u64, true),
         (8, 256, 17, true),
         (16, 256, 49, true),
@@ -988,16 +1028,26 @@ fn the_query_tile_is_staged_only_while_it_fits_beside_the_score_tile_in_the_thre
         else {
             panic!("groups {groups} head_dim {head_dim}: not the row-tiled form");
         };
-        let fits = row_tile_bytes(tile_rows, groups, row_tiled_block(head_dim))
-            + query_stage_bytes(tile_rows, groups, head_dim)
-            <= THREADGROUP_BUDGET;
-        assert_eq!(fits, staged, "groups {groups} head_dim {head_dim} tile {tile_rows}");
-        let source = row_tiled_source(&op);
-        assert!(
-            source.contains(&format!("constexpr bool stage_query = {staged};")),
-            "groups {groups} head_dim {head_dim}: the emitted gate disagrees with the budget"
+        let uncapped = query_tile_staged(
+            tile_rows,
+            groups,
+            head_dim,
+            row_tiled_block(head_dim),
+            THREADGROUP_BUDGET,
+            THREADGROUP_BUDGET,
         );
-        cells += 1;
+        assert_eq!(uncapped, fits, "groups {groups} head_dim {head_dim} tile {tile_rows}");
     }
-    assert_eq!(cells, 4);
+    assert!(!query_tile_staged(8, 2, 64, row_tiled_block(64), THREADGROUP_BUDGET, 0));
+}
+
+#[test]
+fn the_runtime_toml_pins_the_staged_query_byte_cap_default() {
+    let toml_text = include_str!("../../omega-runtime.toml");
+    let section = toml_text
+        .split("[attention_rows]")
+        .nth(1)
+        .and_then(|rest| rest.split("\n[selection]").next())
+        .expect("the attention_rows section is in the sizing toml");
+    assert!(section.contains("\nmax_staged_query_bytes = 8192\n"));
 }

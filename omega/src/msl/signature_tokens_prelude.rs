@@ -2072,6 +2072,26 @@ pub(crate) fn query_stage_bytes(rows: u64, query_groups: u64, head_dim: u64) -> 
     4 * 2 * rows * query_groups * (head_dim / 2 + QUERY_STAGE_PAD)
 }
 
+/// Whether a row-tiled tile stages its query tile: the score tile plus the staged
+/// tile must fit `budget`, and the staged tile alone must not exceed
+/// `max_staged_bytes` (`[attention_rows].max_staged_query_bytes`). Staging saves
+/// one global query read per key block and costs threadgroup bytes that bound how
+/// many threadgroups a core keeps resident; `max_staged_bytes == budget` leaves
+/// only the fit rule.
+#[cfg(feature = "metal-attn-split-rows")]
+#[must_use]
+pub(crate) fn query_tile_staged(
+    rows: u64,
+    query_groups: u64,
+    head_dim: u64,
+    block: u64,
+    budget: u64,
+    max_staged_bytes: u64,
+) -> bool {
+    let staged = query_stage_bytes(rows, query_groups, head_dim);
+    row_tile_bytes(rows, query_groups, block) + staged <= budget && staged <= max_staged_bytes
+}
+
 /// Query rows one row-tiled threadgroup carries: a whole number of
 /// [`tile_unit`]s, at most `[attention_rows].vector_blocks_per_tile` vector
 /// blocks (the K and V fragment loads one tile shares), within the
