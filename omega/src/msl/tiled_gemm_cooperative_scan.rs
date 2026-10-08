@@ -1923,7 +1923,7 @@ pub(crate) fn wide_cooperative_reduce_width(reduction_total: u64) -> u64 {
 /// held to `cap` -- the rule both [`wide_cooperative_reduce_width`] and
 /// [`broadcast_cooperative_reduce_width`] apply; they differ only in the cap.
 #[cfg(feature = "metal-wide-cooperative-reduce")]
-fn quarter_width(reduction_total: u64, cap: u64) -> u64 {
+pub(super) fn quarter_width(reduction_total: u64, cap: u64) -> u64 {
     reduction_total
         .div_ceil(4)
         .max(1)
@@ -1941,8 +1941,31 @@ fn quarter_width(reduction_total: u64, cap: u64) -> u64 {
 /// cooperative cap: a row has no tile reuse to trade against occupancy, so
 /// the cap that protects the general fold has nothing to protect here.
 #[cfg(feature = "metal-wide-cooperative-reduce")]
-pub(crate) fn broadcast_cooperative_reduce_width(reduction_total: u64) -> u64 {
-    quarter_width(reduction_total, crate::sized::BROADCAST_REDUCE_MAX_WIDTH)
+pub(crate) fn broadcast_cooperative_reduce_width(reduction_total: u64, rows: u64) -> u64 {
+    broadcast_width_for(
+        reduction_total,
+        rows,
+        crate::sized::BROADCAST_REDUCE_MAX_WIDTH,
+        crate::sized::HIDDEN_NORM_REDUCE_WIDTH,
+    )
+}
+
+/// The pure core of [`broadcast_cooperative_reduce_width`], with both
+/// sizing constants as parameters so a test can hold either one.
+///
+/// The hidden-width norm class is a broadcast-epilogue reduce over exactly
+/// one row (`rows == 1`) at least `hidden_norm_cap` elements long: it takes
+/// `hidden_norm_cap` lanes, at most one lane per element. A `hidden_norm_cap` at
+/// or below `broadcast_cap` switches the class off and every broadcast reduce
+/// takes [`quarter_width`] under `broadcast_cap`, the widths before the key
+/// existed. Composes [`quarter_width`]; the class is a shape rule on top of
+/// it, not a second sizing path.
+#[cfg(feature = "metal-wide-cooperative-reduce")]
+pub(crate) fn broadcast_width_for(reduction_total: u64, rows: u64, broadcast_cap: u64, hidden_norm_cap: u64) -> u64 {
+    if rows == 1 && hidden_norm_cap > broadcast_cap && reduction_total >= hidden_norm_cap {
+        return hidden_norm_cap;
+    }
+    quarter_width(reduction_total, broadcast_cap)
 }
 
 /// Feature off: always `SIMD_WIDTH`, matching [`cooperative_reduce_width`]'s
@@ -1966,7 +1989,14 @@ pub(super) fn cooperative_reduce_width(
         .map(|&dim| resolved.extents[dim as usize])
         .product();
     if reduce_has_broadcast_epilogue(resolved) {
-        return broadcast_cooperative_reduce_width(reduction_total);
+        let rows: u64 = resolved
+            .extents
+            .iter()
+            .enumerate()
+            .filter(|(dim, _)| !reduce_dims.contains(&(*dim as u16)))
+            .map(|(_, &extent)| extent)
+            .product();
+        return broadcast_cooperative_reduce_width(reduction_total, rows);
     }
     wide_cooperative_reduce_width(reduction_total)
 }
