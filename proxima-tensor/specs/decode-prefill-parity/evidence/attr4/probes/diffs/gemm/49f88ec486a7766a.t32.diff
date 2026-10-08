@@ -1,0 +1,119 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/gemm_base_emitted.metal	2026-10-08 10:41:57
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/variants_t32/49f88ec486a7766a.t32.metal	2026-10-08 11:36:30
+@@ -892,13 +892,13 @@
+     long tiitg = (long)gid % 128;
+     long sgitg = tiitg / 32;
+     long group_index = (long)gid / 128;
+-    long row_tiles = (feature_extent + 63l) / 64l;
++    long row_tiles = (feature_extent + 31l) / 32l;
+     long tile_index = group_index / row_tiles;
+     long row_tile = group_index % row_tiles;
+     uint grouped_lane = (uint)(tiitg % 32);
+-    threadgroup uchar tg_shared[8192];
++    threadgroup uchar tg_shared[4096];
+     threadgroup half *weight_tile = (threadgroup half *)tg_shared;
+-    threadgroup half *act_tile = (threadgroup half *)(tg_shared + 4096);
++    threadgroup half *act_tile = (threadgroup half *)(tg_shared + 2048);
+     threadgroup float *out_tile = (threadgroup float *)tg_shared;
+     threadgroup int tile_token[544];
+     threadgroup uint scan_counts[4];
+@@ -933,13 +933,14 @@
+     threadgroup_barrier(mem_flags::mem_threadgroup);
+     long grouped_expert_base = grouped_expert * u.gather_element_stride[0];
+     {
+-            simdgroup_float8x8 acc[8];
+-            for (int i = 0; i < 8; ++i) { acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }
++            simdgroup_float8x8 acc[4];
++            for (int i = 0; i < 4; ++i) { acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }
+             long w_row = tiitg / 2;
+             long w_half = tiitg % 2;
+-            long w_feat = row_tile * 64 + w_row;
+-            bool w_valid = w_feat < feature_extent;
+-            threadgroup half *w_slot = weight_tile + 1024 * w_half + 64 * (w_row / 8) + (w_row % 8);
++            long w_feat = row_tile * 32 + w_row;
++            bool stager = tiitg < 64;
++            bool w_valid = stager && w_feat < feature_extent;
++            threadgroup half *w_slot = weight_tile + 512 * w_half + 64 * (w_row / 8) + (w_row % 8);
+             long w_elem = u.operand_base[0] + grouped_expert_base + (w_valid ? w_feat : 0) * u.operand_strides[0][3] + w_half * 16;
+             device const uchar *w_blk = weight_bytes + ((w_elem) / 32) * 34;
+             uint w_pos = (uint)((w_elem) % 32);
+@@ -975,6 +976,7 @@
+                     }
+                 }
+                 threadgroup_barrier(mem_flags::mem_threadgroup);
++                if (stager) {
+                 w_slot[0] = w_regs[0];
+                 w_slot[8] = w_regs[1];
+                 w_slot[16] = w_regs[2];
+@@ -983,26 +985,27 @@
+                 w_slot[40] = w_regs[5];
+                 w_slot[48] = w_regs[6];
+                 w_slot[56] = w_regs[7];
+-                w_slot[512] = w_regs[8];
+-                w_slot[520] = w_regs[9];
+-                w_slot[528] = w_regs[10];
+-                w_slot[536] = w_regs[11];
+-                w_slot[544] = w_regs[12];
+-                w_slot[552] = w_regs[13];
+-                w_slot[560] = w_regs[14];
+-                w_slot[568] = w_regs[15];
++                w_slot[256] = w_regs[8];
++                w_slot[264] = w_regs[9];
++                w_slot[272] = w_regs[10];
++                w_slot[280] = w_regs[11];
++                w_slot[288] = w_regs[12];
++                w_slot[296] = w_regs[13];
++                w_slot[304] = w_regs[14];
++                w_slot[312] = w_regs[15];
++                }
+                 if (a_staged) { a_slot[0] = a_regs[0]; a_slot[1] = a_regs[1]; }
+                 threadgroup_barrier(mem_flags::mem_threadgroup);
+                 if ((sgitg >> 1) == 0 || has_hi) {
+-                    threadgroup const half *lsma = weight_tile + 4 * 64 * (sgitg % 2);
++                    threadgroup const half *lsma = weight_tile + 2 * 64 * (sgitg % 2);
+                     threadgroup const half *lsmb = act_tile + 2 * 64 * (sgitg / 2);
+                     for (short ik = 0; ik < 4; ++ik) {
+-                        simdgroup_half8x8 ma[4];
++                        simdgroup_half8x8 ma[2];
+                         simdgroup_half8x8 mb[2];
+-                        for (short i = 0; i < 4; ++i) { simdgroup_load(ma[i], lsma + 64 * i, 8, ulong2(0), false); }
++                        for (short i = 0; i < 2; ++i) { simdgroup_load(ma[i], lsma + 64 * i, 8, ulong2(0), false); }
+                         for (short i = 0; i < 2; ++i) { simdgroup_load(mb[i], lsmb + 64 * i, 8, ulong2(0), false); }
+-                        for (short i = 0; i < 8; ++i) { simdgroup_multiply_accumulate(acc[i], mb[i / 4], ma[i % 4], acc[i]); }
+-                        lsma += 8 * 64;
++                        for (short i = 0; i < 4; ++i) { simdgroup_multiply_accumulate(acc[i], mb[i / 2], ma[i % 2], acc[i]); }
++                        lsma += 4 * 64;
+                         lsmb += 4 * 64;
+                     }
+                 }
+@@ -1011,9 +1014,9 @@
+             }
+             threadgroup_barrier(mem_flags::mem_threadgroup);
+             if ((sgitg >> 1) == 0 || has_hi) {
+-                threadgroup float *temp_str = out_tile + 32 * (sgitg & 1) + (16 * (sgitg >> 1)) * 64;
+-                for (short i = 0; i < 8; ++i) {
+-                    simdgroup_store(acc[i], temp_str + 8 * (i % 4) + 8 * 64 * (i / 4), 64, ulong2(0), false);
++                threadgroup float *temp_str = out_tile + 16 * (sgitg & 1) + (16 * (sgitg >> 1)) * 32;
++                for (short i = 0; i < 4; ++i) {
++                    simdgroup_store(acc[i], temp_str + 8 * (i % 2) + 8 * 32 * (i / 2), 32, ulong2(0), false);
+                 }
+             }
+             threadgroup_barrier(mem_flags::mem_threadgroup);
+@@ -1025,14 +1028,14 @@
+                 long o_c1 = (long)(o_c_rest % (uint)u.output_extents[1]);
+                 o_c_rest /= (uint)u.output_extents[1];
+                 long o_c0 = (long)o_c_rest;
+-                for (long o_col = (long)grouped_lane; o_col < 64; o_col += 32) {
+-                    long o_feat = row_tile * 64 + o_col;
++                for (long o_col = (long)grouped_lane; o_col < 32; o_col += 32) {
++                    long o_feat = row_tile * 32 + o_col;
+                     if (o_feat < feature_extent) {
+                         coord[3] = o_feat;
+                         coord[0] = o_c0;
+                         coord[1] = o_c1;
+                         long out_offset = u.out_base + o_feat * u.out_strides[3] + o_c0 * u.out_strides[0] + o_c1 * u.out_strides[1];
+-                        out[out_offset] = (float)out_tile[j * 64 + o_col];
++                        out[out_offset] = (float)out_tile[j * 32 + o_col];
+                     }
+                 }
+             }
