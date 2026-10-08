@@ -2178,6 +2178,18 @@ pub(crate) struct BackendRuntime {
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) placed_segment_plans:
         alloc::collections::BTreeMap<(usize, usize, usize, Vec<NodeId>, bool), omega::metal::Plan>,
+    /// The keys of [`Self::placed_plans`] in the order they were last used,
+    /// least recent first; [`resident_plans::evict_to`] reads it to decide
+    /// which prompt-width plan leaves when the byte budget is passed. A key
+    /// here with no plan, or a plan with no key here (the diagnostic paths
+    /// insert without recording a use), is handled by `evict_to`.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) placed_order: Vec<resident_plans::DecodePlanKey>,
+    /// `ServingConfig::resident_prefill_plan_bytes`, read once at
+    /// construction: the output-slot bytes [`Self::placed_plans`] may keep
+    /// resident, within a call and across calls through [`resident_plans`].
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) resident_prefill_plan_bytes: usize,
     /// Plans for the decode shape (`new_count == 1`) that
     /// [`Self::evaluate_with_placements`] keeps apart from `placed_plans`, so
     /// a prompt-shaped prefill miss never evicts them. They come from
@@ -2230,7 +2242,22 @@ pub(crate) struct BackendRuntime {
 impl Drop for BackendRuntime {
     fn drop(&mut self) {
         if let Some((owner, identity)) = self.resident_home.take() {
-            resident_plans::put(&owner, identity, core::mem::take(&mut self.decode_plans));
+            let mut wide = core::mem::take(&mut self.placed_plans);
+            wide.retain(|key, _| key.0 > 1);
+            let mut wide_order = core::mem::take(&mut self.placed_order);
+            drop(resident_plans::evict_to(
+                &mut wide,
+                &mut wide_order,
+                self.resident_prefill_plan_bytes,
+                None,
+                resident_plans::plan_bytes,
+            ));
+            let plans = resident_plans::ResidentPlans {
+                decode: core::mem::take(&mut self.decode_plans),
+                wide,
+                wide_order,
+            };
+            resident_plans::put(&owner, identity, plans);
         }
     }
 }
@@ -2252,6 +2279,10 @@ impl BackendRuntime {
             placed_plans: alloc::collections::BTreeMap::new(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             placed_segment_plans: alloc::collections::BTreeMap::new(),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            placed_order: Vec::new(),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            resident_prefill_plan_bytes: config.resident_prefill_plan_bytes,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             decode_plans: resident_plans::DecodePlans::new(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -2280,7 +2311,10 @@ impl BackendRuntime {
         let mut runtime = Self::new(config);
         if runtime.is_metal() {
             let identity = resident_plans::PlanIdentity::of(config);
-            runtime.decode_plans = resident_plans::take(owner, &identity);
+            let resident = resident_plans::take(owner, &identity);
+            runtime.decode_plans = resident.decode;
+            runtime.placed_plans = resident.wide;
+            runtime.placed_order = resident.wide_order;
             runtime.resident_home = Some((Arc::clone(owner), identity));
         }
         runtime
@@ -2823,21 +2857,33 @@ impl BackendRuntime {
             fuse_cached_attention: true,
         };
         let decode_shaped = shape.0 == 1;
-        // a decode lookup is the signal prefill is over: its plan's arena
-        // scales with the prompt (402 MB at 970 tokens), so it must not
-        // outlive that. With a decode plan already resident nothing is built
-        // here, so the release waits for the GPU; otherwise it is dropped
-        // before a build allocates beside it.
+        let budget = self.resident_prefill_plan_bytes;
+        // a decode lookup is the signal prefill is over: a prompt-width
+        // plan's arena scales with the prompt (402 MB at 970 tokens), so only
+        // what fits `resident_prefill_plan_bytes` outlives it. With a decode
+        // plan already resident nothing is built here, so the release waits
+        // for the GPU; otherwise it is dropped before a build allocates
+        // beside it.
         let defer_release =
             decode_shaped && !self.decode_plans.is_empty() && expert_sources.is_none();
-        if decode_shaped && !defer_release {
-            self.placed_plans.clear();
-        }
-        let retired_plans = if defer_release {
-            core::mem::take(&mut self.placed_plans)
+        let released = if decode_shaped {
+            resident_plans::evict_to(
+                &mut self.placed_plans,
+                &mut self.placed_order,
+                budget,
+                None,
+                resident_plans::plan_bytes,
+            )
         } else {
-            BTreeMap::new()
+            Vec::new()
         };
+        let retired_plans = if defer_release {
+            released
+        } else {
+            drop(released);
+            Vec::new()
+        };
+        let retained_key = shape.clone();
         let cache = if decode_shaped {
             &mut self.decode_plans
         } else {
@@ -2848,29 +2894,42 @@ impl BackendRuntime {
         } else {
             None
         };
-        let plan = Self::resolve_cached_plan(
-            cache,
-            &mut self.plan_hits,
-            &mut self.plan_misses,
-            shape,
-            || {
-                if let Some(mut near) = near_plan
-                    && near.refit_symbols(symbols)?
-                {
-                    self.plan_refits += 1;
-                    return Ok(near);
-                }
-                Self::build_placed_plan(
-                    program,
-                    symbols,
-                    named,
-                    outputs,
-                    resident_names,
-                    input_placements,
-                    &numerics,
-                )
-            },
-        )?;
+        let build = || {
+            if let Some(mut near) = near_plan
+                && near.refit_symbols(symbols)?
+            {
+                self.plan_refits += 1;
+                return Ok(near);
+            }
+            Self::build_placed_plan(
+                program,
+                symbols,
+                named,
+                outputs,
+                resident_names,
+                input_placements,
+                &numerics,
+            )
+        };
+        let plan = if decode_shaped {
+            Self::resolve_cached_plan(
+                &mut self.decode_plans,
+                &mut self.plan_hits,
+                &mut self.plan_misses,
+                shape,
+                build,
+            )?
+        } else {
+            Self::resolve_retained_plan(
+                &mut self.placed_plans,
+                &mut self.placed_order,
+                &mut self.plan_hits,
+                &mut self.plan_misses,
+                shape,
+                budget,
+                build,
+            )?
+        };
         let executed = if let Some(expert_sources) = expert_sources {
             execute_plan_named_with_placements_and_expert_sources(
                 plan,
@@ -2892,8 +2951,64 @@ impl BackendRuntime {
             // a plan whose execute failed may have work in flight against its
             // arena; it must not be resumed by a later generation
             self.decode_plans.clear();
+            self.placed_plans.clear();
+            self.placed_order.clear();
+        } else if !decode_shaped {
+            // the plan just run has built its arena, so its bytes are known
+            // only now; it stays, whatever it costs, and older plans pay
+            drop(resident_plans::evict_to(
+                &mut self.placed_plans,
+                &mut self.placed_order,
+                budget,
+                Some(&retained_key),
+                resident_plans::plan_bytes,
+            ));
         }
         Ok(executed?)
+    }
+
+    /// [`Self::resolve_cached_plan`] for prompt-width shapes: a miss keeps the
+    /// plans already cached instead of clearing them, so a request that
+    /// repeats an earlier shape finds its plan. `budget` bounds the output-slot
+    /// bytes kept (`ServingConfig::resident_prefill_plan_bytes`): before a
+    /// build, [`resident_plans::make_room`] evicts least recently used plans
+    /// until the plan about to be built is expected to fit beside what stays;
+    /// the caller evicts to `budget` once the plan has executed and its arena
+    /// size is known. `budget == 0` evicts everything on every miss, which is
+    /// `resolve_cached_plan`'s clear-on-miss.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn resolve_retained_plan<'cache>(
+        cache: &'cache mut alloc::collections::BTreeMap<resident_plans::DecodePlanKey, omega::metal::Plan>,
+        order: &mut Vec<resident_plans::DecodePlanKey>,
+        plan_hits: &mut usize,
+        plan_misses: &mut usize,
+        shape: resident_plans::DecodePlanKey,
+        budget: usize,
+        build: impl FnOnce() -> Result<omega::metal::Plan, InteropError>,
+    ) -> Result<&'cache mut omega::metal::Plan, InteropError> {
+        use alloc::collections::btree_map::Entry;
+
+        if !cache.contains_key(&shape) {
+            drop(resident_plans::make_room(
+                cache,
+                order,
+                budget,
+                shape.0,
+                resident_plans::plan_bytes,
+            ));
+        }
+        resident_plans::touch(order, &shape);
+        match cache.entry(shape) {
+            Entry::Occupied(entry) => {
+                *plan_hits += 1;
+                Ok(entry.into_mut())
+            }
+            Entry::Vacant(entry) => {
+                *plan_misses += 1;
+                let plan = build()?;
+                Ok(entry.insert(plan))
+            }
+        }
     }
 
     /// Every [`Self::placed_plans`] build closure's shared body -- the class

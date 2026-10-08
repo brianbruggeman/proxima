@@ -12,6 +12,10 @@ use crate::serving::{PromptCacheConfig, ServingConfig};
 
 const PROMPT: &str = "<|turn>user\nWhich of these is smaller in size: a hippopotamus or a large office building?<turn|>\n<|turn>model\n";
 
+/// A shorter prompt than [`PROMPT`], so its prefill is a different
+/// `new_count`; both stay inside one 32-token kv bucket for [`TOKENS`] steps.
+const OTHER_PROMPT: &str = "<|turn>user\nName a prime number greater than ten.<turn|>\n<|turn>model\n";
+
 /// The prompt is 26 tokens and `kv_bucket_tokens` is 32: five tokens keep every
 /// decode step of a generation in one bucket, so the plan one generation
 /// leaves resident is an exact hit for the next.
@@ -36,6 +40,10 @@ fn generate(model: &LoadedModel<'_>, config: &ServingConfig<'_>) -> Generation {
     run(model, config, ResumeFrom::Resident)
 }
 
+fn generate_prompt(model: &LoadedModel<'_>, prompt: &str, config: &ServingConfig<'_>) -> Generation {
+    run_prompt(model, prompt, config, ResumeFrom::Resident)
+}
+
 #[derive(Clone, Copy)]
 enum ResumeFrom {
     Resident,
@@ -43,6 +51,15 @@ enum ResumeFrom {
 }
 
 fn run(model: &LoadedModel<'_>, config: &ServingConfig<'_>, resume: ResumeFrom) -> Generation {
+    run_prompt(model, PROMPT, config, resume)
+}
+
+fn run_prompt(
+    model: &LoadedModel<'_>,
+    prompt: &str,
+    config: &ServingConfig<'_>,
+    resume: ResumeFrom,
+) -> Generation {
     let effective = model
         .effective_serving_config(config)
         .expect("the gemma4 config passes the model-dependent gates");
@@ -52,7 +69,7 @@ fn run(model: &LoadedModel<'_>, config: &ServingConfig<'_>, resume: ResumeFrom) 
     };
     let _ = PLAN_HANDOFF_REUSES.snapshot_and_reset();
     let (ids, _text, _stopped) = model
-        .run_decode_loop(PROMPT, TOKENS, &effective, &mut runtime)
+        .run_decode_loop(prompt, TOKENS, &effective, &mut runtime)
         .expect("greedy decode on the real gemma4-E2B checkpoint");
     Generation {
         ids,
@@ -64,7 +81,7 @@ fn run(model: &LoadedModel<'_>, config: &ServingConfig<'_>, resume: ResumeFrom) 
 }
 
 #[test]
-fn a_second_generation_on_the_same_model_builds_no_decode_plan() {
+fn a_second_generation_on_the_same_model_builds_no_plan() {
     with_model(|model| {
         let config = serving_config();
 
@@ -79,15 +96,14 @@ fn a_second_generation_on_the_same_model_builds_no_decode_plan() {
         );
         assert_eq!(
             (warm.plan_misses, warm.plan_refits),
-            (1, 0),
-            "the second generation builds only the prompt-shaped prefill plan"
+            (0, 0),
+            "the second generation resumes the prompt-shaped prefill plan and the decode plan"
         );
         assert_eq!(
-            warm.plan_hits,
-            TOKENS - 1,
-            "every decode step after the prefill reuses the resident decode plan"
+            warm.plan_hits, TOKENS,
+            "the prefill and every decode step after it find a resident plan"
         );
-        assert_eq!(third.plan_misses, 1);
+        assert_eq!(third.plan_misses, 0);
         assert_eq!(warm.ids, cold.ids, "a resumed plan decodes the same ids");
         assert_eq!(third.ids, cold.ids);
         assert!(
@@ -96,6 +112,60 @@ fn a_second_generation_on_the_same_model_builds_no_decode_plan() {
             cold.weight_blocks_rebound,
             warm.weight_blocks_rebound
         );
+    });
+}
+
+#[test]
+fn a_zero_prefill_budget_rebuilds_the_prompt_plan_and_keeps_only_the_decode_plan() {
+    with_model(|model| {
+        let config = ServingConfig {
+            resident_prefill_plan_bytes: 0,
+            ..serving_config()
+        };
+
+        let cold = generate(model, &config);
+        let warm = generate(model, &config);
+
+        assert_eq!(cold.plan_misses, 2);
+        assert_eq!(
+            (warm.plan_misses, warm.plan_hits),
+            (1, TOKENS - 1),
+            "with no prefill budget the next generation builds the prompt plan again"
+        );
+        assert_eq!(
+            resident_plans::resident_wide_len(&model.plan_life),
+            0,
+            "no prompt-width plan outlives the generation that built it"
+        );
+        assert_eq!(warm.ids, cold.ids);
+    });
+}
+
+#[test]
+fn a_prompt_of_another_length_leaves_the_first_prompt_plan_resident() {
+    with_model(|model| {
+        let config = serving_config();
+
+        let first = generate_prompt(model, PROMPT, &config);
+        let other = generate_prompt(model, OTHER_PROMPT, &config);
+        let first_again = generate_prompt(model, PROMPT, &config);
+
+        assert_eq!(first.plan_misses, 2, "the first prompt builds its prefill and the decode plan");
+        assert_eq!(
+            (other.plan_misses, other.plan_refits),
+            (1, 0),
+            "the other prompt builds its own prefill plan and reuses the decode plan"
+        );
+        assert_eq!(
+            first_again.plan_misses, 0,
+            "the first prompt's plan survived the other prompt's miss"
+        );
+        assert_eq!(
+            resident_plans::resident_wide_len(&model.plan_life),
+            2,
+            "both prompt-shaped plans are resident"
+        );
+        assert_eq!(first_again.ids, first.ids);
     });
 }
 
@@ -160,7 +230,7 @@ fn a_changed_dispatch_type_does_not_resume_the_resident_plan() {
         let switched = generate(model, &concurrent);
         let switched_back = generate(model, &serial);
 
-        assert_eq!(resumed.plan_misses, 1, "the same config resumes");
+        assert_eq!(resumed.plan_misses, 0, "the same config resumes every plan");
         assert_eq!(
             switched.plan_misses, 2,
             "a plan built under another dispatch type is not served"
@@ -180,8 +250,8 @@ fn dropping_the_model_frees_the_plans_it_left_resident() {
         generate(model, &serving_config());
         assert_eq!(
             resident_plans::resident_len(&model.plan_life),
-            1,
-            "one decode plan stays resident after a generation"
+            2,
+            "one decode plan and one prompt-shaped plan stay resident after a generation"
         );
         assert_eq!(resident_plans::entry_count(), 1);
     });

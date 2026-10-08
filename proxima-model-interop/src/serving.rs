@@ -151,6 +151,10 @@ pub const DEFAULT_GPU_LAYERS: i32 = if cfg!(feature = "metal") {
     0
 };
 
+/// [`ServingConfig::default`]'s `resident_prefill_plan_bytes`: 512 MiB holds
+/// one E2B prefill plan at a 970-token prompt (402 MB of output slots).
+pub const DEFAULT_RESIDENT_PREFILL_PLAN_BYTES: usize = 512 * 1024 * 1024;
+
 /// `--reasoning-budget -1` (upstream's own sentinel for "unbounded").
 pub const REASONING_BUDGET_UNBOUNDED: i32 = -1;
 
@@ -1076,6 +1080,18 @@ pub struct ServingConfig<'model> {
     /// exceeds it, instead of silently letting a future full-graph
     /// regression multiply command-buffer submissions per token.
     pub max_command_buffers_per_token: usize,
+    /// Not an upstream llama-server flag -- the most bytes of Metal output
+    /// slots the plans for prompt-width shapes (`new_count > 1`) may hold
+    /// resident between requests and between the shapes of one request.
+    /// A plan is a function of `(new_count, kv bucket, PlanIdentity)`, so a
+    /// request that repeats a shape skips the plan build, the arena build and
+    /// the plan-time constant dispatch (23-27 ms at a 970-token prompt). The
+    /// plans cost device memory for as long as they are held: a 970-token E2B
+    /// prefill plan is 402 MB. `0` keeps nothing past the call that built it
+    /// and frees a prompt-width plan when the shape changes, which is the
+    /// behaviour before this field existed. Decode-width (`new_count == 1`)
+    /// plans are not counted here; they are always resident.
+    pub resident_prefill_plan_bytes: usize,
     /// I3 (ROW 501 HeteGen/FlexGen): issue the next layer's expert-source
     /// uploads while the current layer's dispatches still run, instead of
     /// waiting for the dispatches to finish first. Gated on a lifetime
@@ -1231,6 +1247,7 @@ impl Default for ServingConfig<'static> {
             plan_refit: true,
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
+            resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
                 max_concurrent_requests: 0,
@@ -1666,6 +1683,7 @@ mod tests {
             plan_refit: true,
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
+            resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
                 max_concurrent_requests: 0,
@@ -1842,6 +1860,7 @@ mod tests {
             plan_refit: true,
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
+            resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
                 max_concurrent_requests: 0,
@@ -1963,6 +1982,7 @@ mod tests {
             plan_refit: true,
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
+            resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
                 max_concurrent_requests: 0,
@@ -2057,6 +2077,7 @@ mod tests {
             plan_refit: true,
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
+            resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
                 max_concurrent_requests: 0,
@@ -2141,6 +2162,7 @@ mod tests {
             plan_refit: true,
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
+            resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
                 max_concurrent_requests: 0,
