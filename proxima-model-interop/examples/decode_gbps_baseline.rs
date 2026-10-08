@@ -21,6 +21,10 @@
 //! `PROXIMA_RUNS=<n>` (default `1`) repeats the same generation `n` times in
 //! this one process, reusing the loaded model/runtime so runs after the
 //! first skip step-0 pipeline compilation.
+//! `PROXIMA_DECODE_SPECULATIVE=none` turns speculative decoding off
+//! (`SpeculativeConfig::none()`); unset keeps the serving default, ngram-simple.
+//! A half-width KV cache (`PROXIMA_KV_CACHE_TYPE=f16`) requires it, because a
+//! verify step reads the cache through a kernel that only reads f32.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use core::ops::ControlFlow;
@@ -39,7 +43,8 @@ use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{
-    GPU_LAYERS_ALL, LoadedModel, Phase, PromptCacheConfig, ServingConfig, TokenEvent,
+    GPU_LAYERS_ALL, LoadedModel, Phase, PromptCacheConfig, ServingConfig, SpeculativeConfig,
+    TokenEvent,
 };
 #[cfg(feature = "instrument")]
 use proxima_telemetry::export::Exporter;
@@ -232,7 +237,13 @@ fn main() {
         Ok("f32") | Err(_) => GgmlType::F32,
         Ok(other) => panic!("PROXIMA_KV_CACHE_TYPE={other}: expected `f32` or `f16`"),
     };
+    let speculative = match std::env::var("PROXIMA_DECODE_SPECULATIVE").as_deref() {
+        Ok("none") => SpeculativeConfig::none(),
+        Ok(other) => panic!("PROXIMA_DECODE_SPECULATIVE={other}: expected `none` or unset"),
+        Err(_) => SpeculativeConfig::default(),
+    };
     let serving_config = ServingConfig {
+        speculative,
         gpu_layers: GPU_LAYERS_ALL,
         numeric_policy,
         kv_cache_key_quant: kv_cache_type,
