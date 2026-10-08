@@ -1700,7 +1700,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         let kernel = emit(&bound, &packed_operands, NumericPolicy::llama_relaxed())
             .expect("two-token q4_0 matmul emits");
         assert!(
-            kernel.source.contains("q4_0_element(wblk0"),
+            kernel.source.contains("device const uchar *wblk0 = in0"),
             "precondition: default index32 must render the block-origin read"
         );
         assert_eq!(
