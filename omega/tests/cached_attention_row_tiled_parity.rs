@@ -178,7 +178,7 @@ fn the_row_tiled_kernels_hold_parity_with_the_cpu_evaluator_across_rows_and_cach
     for rows in VERIFY_ROWS {
         for cached_len in CACHED_LENGTHS {
             let (relative, control_relative) =
-                one_cell("e2b verify", Geometry::GEMMA4_E2B, rows, cached_len);
+                one_cell("one kv head verify", Geometry::ONE_KV_HEAD, rows, cached_len);
             assert!(
                 relative < TOLERANCE,
                 "rows {rows} cached_len {cached_len}: metal disagrees with cpu: relative={relative}"
@@ -199,20 +199,20 @@ fn the_row_tiled_kernels_hold_parity_with_the_cpu_evaluator_across_rows_and_cach
 
 /// Prefill-width cells: rows past the old 64-row limit, a window the new range
 /// itself crosses, a ragged tail of new keys past the last whole fragment, and
-/// granite's two query groups, whose fragments are eight rows of one head.
+/// a query-group size of two, whose fragments are eight rows of one head.
 #[test]
 fn the_row_tiled_kernels_hold_parity_with_the_cpu_evaluator_at_prefill_widths() {
-    let e2b = Geometry::GEMMA4_E2B;
-    let granite = Geometry::GRANITE_MOE;
+    let one_kv_head = Geometry::ONE_KV_HEAD;
+    let two_groups = Geometry::TWO_QUERY_GROUPS;
     let cells = [
-        ("e2b past the old row limit", e2b, 70, 33),
-        ("e2b window crosses the new range", e2b.with_window(40), 130, 199),
-        ("e2b window crosses, ragged tail", e2b.with_window(48), 101, 1),
-        ("e2b whole prompt", e2b, 600, 33),
-        ("granite eight rows", granite, 8, 33),
-        ("granite ragged rows", granite, 37, 100),
-        ("granite window crosses the new range", granite.with_window(24), 50, 40),
-        ("granite whole prompt", granite, 600, 33),
+        ("one kv head past the old row limit", one_kv_head, 70, 33),
+        ("one kv head window crosses the new range", one_kv_head.with_window(40), 130, 199),
+        ("one kv head window crosses, ragged tail", one_kv_head.with_window(48), 101, 1),
+        ("one kv head whole prompt", one_kv_head, 600, 33),
+        ("two groups eight rows", two_groups, 8, 33),
+        ("two groups ragged rows", two_groups, 37, 100),
+        ("two groups window crosses the new range", two_groups.with_window(24), 50, 40),
+        ("two groups whole prompt", two_groups, 600, 33),
     ];
     for (label, geometry, rows, cached_len) in cells {
         let (relative, control_relative) = one_cell(label, geometry, rows, cached_len);
@@ -237,7 +237,7 @@ fn rows_under_one_fragment_of_a_two_group_head_hold_one_dispatch_parity_with_the
     let rows = 5;
     let mut cells = 0_usize;
     for cached_len in [33_usize, 511] {
-        let fixture = fixture_with(rows, cached_len, Geometry::GRANITE_MOE);
+        let fixture = fixture_with(rows, cached_len, Geometry::TWO_QUERY_GROUPS);
         let named = as_named_blocks(&fixture.named);
         let roots = [fixture.logits];
         let cell = format!("rows {rows} cached_len {cached_len}");

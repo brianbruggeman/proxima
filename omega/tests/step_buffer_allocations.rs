@@ -4,7 +4,7 @@
 //!
 //! Counted through `OUTPUT_BUFFER_ALLOCATIONS` (`metal_stage_totals`), which
 //! `allocate_buffer` and `allocate_fault_buffer` both increment on a fresh
-//! `newBuffer`. A granite decode step reported 360 of them (the fused top-k's
+//! `newBuffer`. A routed decode step reported 360 of them (the fused top-k's
 //! extra outputs) before any fix, and a further 576, one fault buffer per
 //! gathered expert dispatch, once fault buffers were counted too.
 

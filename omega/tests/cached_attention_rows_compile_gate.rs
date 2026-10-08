@@ -1,5 +1,5 @@
 //! Compile gate for the K-row attention kernels: the row-tiled partial at the
-//! two gemma4-E2B layer shapes, and the K-row `CachedSoftmaxWeights`
+//! two sliding and global layer shapes, and the K-row `CachedSoftmaxWeights`
 //! at the widths its cached range selects, each handed to the real Metal
 //! compiler. The emitter's own tests check the text; only the toolchain checks
 //! that the text is Metal (`simdgroup_matrix` loads and transposes, threadgroup
@@ -108,8 +108,8 @@ fn the_row_tiled_partial_compiles_with_the_metal_toolchain() {
         ("sliding_one_split", 1, 8, 256, 32, 17, -511),
         ("sliding_prefill", 1, 8, 256, 512, 971, -511),
         ("global_prefill", 1, 8, 512, 992, 971, i64::MIN),
-        ("granite_prefill", 8, 2, 64, 1024, 1000, i64::MIN),
-        ("granite_one_fragment", 8, 2, 64, 32, 8, i64::MIN),
+        ("two_group_prefill", 8, 2, 64, 1024, 1000, i64::MIN),
+        ("two_group_one_fragment", 8, 2, 64, 32, 8, i64::MIN),
     ] {
         let op = row_tiled_attention(
             kv_heads,
@@ -126,7 +126,7 @@ fn the_row_tiled_partial_compiles_with_the_metal_toolchain() {
     }
     assert_eq!(
         compiled, 7,
-        "the two layer shapes, the one-split direct-output store, prefill widths and granite's two groups"
+        "the two layer shapes, the one-split direct-output store, prefill widths and a query-group size of two"
     );
 }
 

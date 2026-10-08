@@ -17,7 +17,7 @@ use super::*;
 /// factor (the lane-to-row map of an 8x8 fragment is the one MLX's steel
 /// attention uses). A vector block is eight heads of one query row when the query
 /// groups fill whole blocks, and eight consecutive rows of one head otherwise
-/// (granite's two groups), so every group size shares one kernel. The cached
+/// (a query-group size of two), so every group size shares one kernel. The cached
 /// range, then the new range, are walked with the same fragment code; the keys of
 /// the new range past its last whole 8-key fragment run on a scalar tail, so no
 /// fragment reads past the in-graph new keys. A block no row of the tile can

@@ -2045,14 +2045,14 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         }
     }
 
-    /// `MoeProjectionStrategy::Stacked` at granite moe 1b's real expert shape
+    /// `MoeProjectionStrategy::Stacked` on a routed block of 8 used of 32 experts
     /// (32 experts, 8 used, embedding 1024, expert feed-forward 512, `Q8_0`
     /// experts): gate, up and down are one reduce each. At a decode step of one
     /// token each is the packed matvec body, at prefill width each is the
     /// expert-grouped tiled GEMM, and none of the three materializes the
     /// `[.., d_in, d_out]` gathered product.
     #[test]
-    fn granite_shaped_stacked_append_moe_ffn_lowers_each_projection_to_one_reduce() {
+    fn eight_of_thirty_two_experts_stacked_append_moe_ffn_lowers_each_projection_to_one_reduce() {
         use proxima_tensor::spec::{Activation, ExpertGatingFunc};
 
         const EMBEDDING: u32 = 1024;
@@ -2109,7 +2109,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
             };
             let (root, _site) =
                 proxima_tensor::spec::append_moe_ffn(&mut program, 0, x_node, &moe_spec)
-                    .expect("the stacked routed block lowers at granite moe's shape");
+                    .expect("the stacked routed block lowers at 8 used of 32 experts, 1024 by 512");
 
             let shapes = infer(&program, &[sequence]).expect("the stacked block infers");
             let mut resolved =

@@ -2,8 +2,8 @@
 //! `cached_attention_row_tiled_parity.rs` assumes about its fixture, proven on
 //! the CPU so a Metal run is never the first time they are checked.
 //!
-//! On the gemma4-shaped two-layer program (`gemma4_rows_support`) at the
-//! speculative-verify and prefill shapes, and on granite's two-group shape,
+//! On the sliding-and-global two-layer program (`gemma4_rows_support`) at the
+//! speculative-verify and prefill shapes, and on a two-query-group shape,
 //! with the production policy:
 //! - both attention ops bind as `CachedAttention` and emit the row-tiled kernel
 //!   (entry `_rt`), with the form's split count and threadgroup count;
@@ -48,24 +48,24 @@ struct Cell {
 /// The verify cells, then the prefill cells: rows past the old 64-row limit, a
 /// window the new range itself crosses (the sliding layer's window set under
 /// `rows`), a row count that leaves a scalar tail of new keys past the last
-/// whole fragment, and granite's two query groups, which put eight rows of one
+/// whole fragment, and a query-group size of two, which put eight rows of one
 /// head in a fragment.
 fn all_cells() -> Vec<Cell> {
-    let e2b = Geometry::GEMMA4_E2B;
-    let granite = Geometry::GRANITE_MOE;
+    let one_kv_head = Geometry::ONE_KV_HEAD;
+    let two_groups = Geometry::TWO_QUERY_GROUPS;
     let verify = [(2, 33), (5, 199), (17, 511), (49, 1099)].map(|(rows, cached_len)| Cell {
-        label: "e2b verify",
-        geometry: e2b,
+        label: "one kv head verify",
+        geometry: one_kv_head,
         rows,
         cached_len,
     });
     let prefill = [
-        ("e2b past the old row limit", e2b, 70, 33),
-        ("e2b window crosses the new range", e2b.with_window(40), 130, 199),
-        ("e2b window crosses, ragged tail", e2b.with_window(48), 101, 1),
-        ("granite eight rows", granite, 8, 33),
-        ("granite ragged rows", granite, 37, 100),
-        ("granite window crosses the new range", granite.with_window(24), 50, 40),
+        ("one kv head past the old row limit", one_kv_head, 70, 33),
+        ("one kv head window crosses the new range", one_kv_head.with_window(40), 130, 199),
+        ("one kv head window crosses, ragged tail", one_kv_head.with_window(48), 101, 1),
+        ("two groups eight rows", two_groups, 8, 33),
+        ("two groups ragged rows", two_groups, 37, 100),
+        ("two groups window crosses the new range", two_groups.with_window(24), 50, 40),
     ]
     .map(|(label, geometry, rows, cached_len)| Cell {
         label,
@@ -370,7 +370,7 @@ fn rows_under_one_fragment_of_a_two_group_head_keep_the_one_dispatch_kernel_and_
     let policy = production_numeric_policy();
     let rows = 5;
     let cached_len = 33;
-    let fixture = fixture_with(rows, cached_len, Geometry::GRANITE_MOE);
+    let fixture = fixture_with(rows, cached_len, Geometry::TWO_QUERY_GROUPS);
     let roots = [fixture.logits];
     let shapes = infer(&fixture.program, &fixture.symbols).expect("the program infers");
     let resolved = bind_with_fusion(&fixture.program, &shapes, &roots, true, policy)

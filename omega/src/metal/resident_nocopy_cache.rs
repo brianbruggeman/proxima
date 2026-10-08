@@ -976,7 +976,7 @@ thread_local! {
     /// Fault buffers whose step has completed, keyed by gather count. A gathered
     /// dispatch takes one per call, zero-fills it and hands it back once
     /// [`check_gather_fault`] has read it, so a steady decode step allocates none:
-    /// 576 gathered expert dispatches per granite step were 576 `newBuffer`
+    /// 576 gathered expert dispatches per routed decode step were 576 `newBuffer`
     /// calls. Bounded by the largest count of gathered dispatches in one program.
     static FAULT_BUFFER_POOL: RefCell<BTreeMap<usize, Vec<MetalBuffer>>> =
         const { RefCell::new(BTreeMap::new()) };

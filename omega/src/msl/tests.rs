@@ -6379,7 +6379,7 @@ mod flat_grid_form {
             .expect("one bound emitted")
     }
 
-    /// gemma4-E2B's `per_layer_model_proj` shape: a `[features, k]` half-width
+    /// A per-layer-input projection shape: a `[features, k]` half-width
     /// weight against `[rows, k]` f32 activations. The F16 weight itself takes
     /// the tiled GEMM now (it has a `tiled_decode` description), so this fixture
     /// stands the shape with a BF16 weight, which has none and stays a
