@@ -303,6 +303,9 @@ struct ArmRuns {
     prefill_runs: Vec<(usize, usize, f64)>,
     ttft_runs: Vec<(usize, usize, f64)>,
     gpu_peak_runs: Vec<(usize, usize, f64)>,
+    steady_rss_runs: Vec<(usize, usize, f64)>,
+    steady_footprint_runs: Vec<(usize, usize, f64)>,
+    steady_gpu_runs: Vec<(usize, usize, f64)>,
     wall_runs: Vec<(usize, usize, f64)>,
     token_runs: Vec<(usize, usize, f64)>,
     cpu_ms_runs: Vec<(usize, usize, f64)>,
@@ -328,6 +331,9 @@ impl ArmRuns {
             prefill_runs: Vec::new(),
             ttft_runs: Vec::new(),
             gpu_peak_runs: Vec::new(),
+            steady_rss_runs: Vec::new(),
+            steady_footprint_runs: Vec::new(),
+            steady_gpu_runs: Vec::new(),
             wall_runs: Vec::new(),
             token_runs: Vec::new(),
             cpu_ms_runs: Vec::new(),
@@ -392,6 +398,9 @@ fn print_summary(arm: &ArmRuns) {
         ("tokens_generated", &arm.token_runs),
         ("cpu_ms", &arm.cpu_ms_runs),
         ("cpu_pct", &arm.cpu_pct_runs),
+        ("steady_rss_bytes", &arm.steady_rss_runs),
+        ("steady_footprint_bytes", &arm.steady_footprint_runs),
+        ("steady_gpu_bytes", &arm.steady_gpu_runs),
     ] {
         if !series.is_empty() {
             print_metric(&arm.label, name, series);
@@ -458,6 +467,9 @@ fn print_bounds(arms: &[ArmRuns]) {
             memory_bound_line(arm, reference, "peak_rss_bytes", |each| &each.rss_by_process);
             memory_bound_line(arm, reference, "peak_footprint_bytes", |each| &each.footprint_by_process);
             memory_bound_line(arm, reference, "peak_gpu_bytes", |each| &each.gpu_peak_runs);
+            memory_bound_line(arm, reference, "steady_rss_bytes", |each| &each.steady_rss_runs);
+            memory_bound_line(arm, reference, "steady_footprint_bytes", |each| &each.steady_footprint_runs);
+            memory_bound_line(arm, reference, "steady_gpu_bytes", |each| &each.steady_gpu_runs);
         }
     }
 }
@@ -631,6 +643,15 @@ fn run_proxima_process(
                 gpu_peak = gpu_peak.max(bytes);
             }
             if run_index > 0 {
+                for (key, series) in [
+                    ("steady_rss_bytes=", &mut arm.steady_rss_runs),
+                    ("steady_footprint_bytes=", &mut arm.steady_footprint_runs),
+                    ("steady_gpu_bytes=", &mut arm.steady_gpu_runs),
+                ] {
+                    if let Some(bytes) = field_after(line, key).and_then(|text| text.parse::<f64>().ok()) {
+                        series.push((process, run_index, bytes));
+                    }
+                }
                 arm.runs.push((process, run_index, value));
                 arm.prefill_runs.push((process, run_index, prefill_ms));
                 arm.wall_runs.push((process, run_index, wall_ms));

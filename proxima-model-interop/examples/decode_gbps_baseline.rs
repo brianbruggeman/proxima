@@ -65,6 +65,34 @@ fn process_cpu_ms() -> (f64, f64) {
     (millis(usage.ru_utime), millis(usage.ru_stime))
 }
 
+/// Resident set and physical footprint of this process right now, in bytes
+/// (`proc_pid_rusage`): the current values, not the peaks `/usr/bin/time -l`
+/// reports at exit. Footprint is what `footprint(1)` and Activity Monitor's
+/// memory column read. `(0, 0)` where the call is unavailable.
+fn process_memory_bytes() -> (u64, u64) {
+    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+    // SAFETY: `RUSAGE_INFO_V2` fills a `rusage_info_v2`; the C signature takes the struct's address cast to `rusage_info_t *`.
+    let status = unsafe {
+        libc::proc_pid_rusage(std::process::id() as libc::c_int, libc::RUSAGE_INFO_V2, info.as_mut_ptr().cast())
+    };
+    if status != 0 {
+        return (0, 0);
+    }
+    // SAFETY: the call returned 0, so the struct is filled.
+    let info = unsafe { info.assume_init() };
+    (info.ri_resident_size, info.ri_phys_footprint)
+}
+
+/// Generated tokens before the steady-state memory samples start: the first
+/// tokens still carry the prefill transient.
+const STEADY_FROM_TOKEN: usize = 10;
+
+fn median_bytes(samples: &[u64]) -> u64 {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    sorted.get(sorted.len() / 2).copied().unwrap_or(0)
+}
+
 /// FNV-1a 64-bit over `text`'s own UTF-8 bytes -- a cheap, dependency-free
 /// content fingerprint so `PROXIMA_RUNS` arms and on/off `PROXIMA_COMMAND_BUFFER_CHUNKS`
 /// arms can assert byte-identical generated text without diffing full strings
@@ -359,11 +387,23 @@ fn main() {
         // behind `instrument` -- see `TokenEvent`'s own field doc on why.
         let mut prefill_elapsed_ms: u64 = 0;
         let mut previous_elapsed_ms: u64 = 0;
+        let mut token_events: usize = 0;
+        let mut steady_rss: Vec<u64> = Vec::new();
+        let mut steady_footprint: Vec<u64> = Vec::new();
+        let mut steady_gpu: Vec<u64> = Vec::new();
         let mut on_token = |event: TokenEvent<'_>| {
             if matches!(event.phase, Phase::Prefill { .. }) {
                 prefill_elapsed_ms = event.elapsed_ms;
             }
-            gpu_peak_bytes = gpu_peak_bytes.max(gpu_allocated_bytes());
+            token_events += 1;
+            let gpu_now = gpu_allocated_bytes();
+            gpu_peak_bytes = gpu_peak_bytes.max(gpu_now);
+            if token_events > STEADY_FROM_TOKEN {
+                let (rss_now, footprint_now) = process_memory_bytes();
+                steady_rss.push(rss_now);
+                steady_footprint.push(footprint_now);
+                steady_gpu.push(gpu_now);
+            }
             if step_times {
                 let phase = if matches!(event.phase, Phase::Prefill { .. }) {
                     "prefill"
@@ -400,6 +440,10 @@ fn main() {
         let cpu_ms = cpu_user_ms + cpu_sys_ms;
         let cpu_pct = cpu_ms / wall_ms * 100.0;
         gpu_peak_bytes = gpu_peak_bytes.max(gpu_allocated_bytes());
+        let steady_rss_bytes = median_bytes(&steady_rss);
+        let steady_footprint_bytes = median_bytes(&steady_footprint);
+        let steady_gpu_bytes = median_bytes(&steady_gpu);
+        let steady_samples = steady_rss.len();
         let tokens_generated = token_ids.len();
         let text_hash = fnv64(&text);
         eprintln!("decode_gbps_baseline token_ids run_index={run_index} ids={token_ids:?}");
@@ -428,6 +472,10 @@ fn main() {
                 decode_ms_per_token,
                 ttft_ms = prefill_elapsed_ms,
                 gpu_peak_bytes,
+                steady_rss_bytes,
+                steady_footprint_bytes,
+                steady_gpu_bytes,
+                steady_samples = steady_samples as u64,
                 text = %text,
                 "decode_gbps_baseline"
             );
@@ -438,7 +486,9 @@ fn main() {
                  tokens_generated={tokens_generated} prompt_token_count={prompt_token_count} \
                  text_hash={text_hash:016x} stopped_by_eos={stopped_by_eos} \
                  decode_ms_per_token={decode_ms_per_token:.3} ttft_ms={prefill_elapsed_ms} \
-                 gpu_peak_bytes={gpu_peak_bytes} text={text:?}"
+                 gpu_peak_bytes={gpu_peak_bytes} steady_rss_bytes={steady_rss_bytes} \
+                 steady_footprint_bytes={steady_footprint_bytes} steady_gpu_bytes={steady_gpu_bytes} \
+                 steady_samples={steady_samples} text={text:?}"
             );
         } else {
             #[cfg(feature = "instrument")]
@@ -456,6 +506,10 @@ fn main() {
                 stopped_by_eos,
                 ttft_ms = prefill_elapsed_ms,
                 gpu_peak_bytes,
+                steady_rss_bytes,
+                steady_footprint_bytes,
+                steady_gpu_bytes,
+                steady_samples = steady_samples as u64,
                 text = %text,
                 "decode_gbps_baseline"
             );
@@ -465,7 +519,9 @@ fn main() {
                  cpu_user_ms={cpu_user_ms:.3} cpu_sys_ms={cpu_sys_ms:.3} cpu_ms={cpu_ms:.3} cpu_pct={cpu_pct:.2} \
                  tokens_generated={tokens_generated} prompt_token_count={prompt_token_count} \
                  text_hash={text_hash:016x} stopped_by_eos={stopped_by_eos} ttft_ms={prefill_elapsed_ms} \
-                 gpu_peak_bytes={gpu_peak_bytes} text={text:?}"
+                 gpu_peak_bytes={gpu_peak_bytes} steady_rss_bytes={steady_rss_bytes} \
+                 steady_footprint_bytes={steady_footprint_bytes} steady_gpu_bytes={steady_gpu_bytes} \
+                 steady_samples={steady_samples} text={text:?}"
             );
         }
         #[cfg(all(feature = "metal", target_os = "macos"))]
