@@ -154,6 +154,11 @@ pub const SIMD_WIDTH: u64 = 32;
 // the flat 2D form instead), and how many threadgroups that flat form puts on
 // its x axis before spilling into y. See `omega-runtime.toml`'s `[grid]`.
 
+// `ELEMENTWISE_RECIPROCAL_MIN_ELEMENTS` comes in through the `include!` above --
+// the grid size at which `msl::render_elementwise` swaps its per-axis integer
+// divide for the exact float-reciprocal decode; see `omega-runtime.toml`'s
+// `[elementwise]` doc for why a large grid is the case it targets.
+
 // `COMMAND_BUFFER_FIRST_CHUNK_OPS` comes in through the `include!` above --
 // the op count of a chunked decode step's first command buffer; see
 // `omega-runtime.toml`'s `[command_buffer]` doc for the measured rationale.
