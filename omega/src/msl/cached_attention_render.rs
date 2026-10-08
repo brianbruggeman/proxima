@@ -53,10 +53,60 @@ pub(super) fn cached_attention_scalar_score_body(pass_present: bool, new_range_w
     )
 }
 
+/// The operands of a cached attention bind that hold the cached K even plane,
+/// K odd plane and V rows -- the only ones that may be packed, and only as
+/// one `Codec::Float16` triple read by the decode split.
+const CACHED_KV_OPERANDS: [usize; 3] = [2, 3, 6];
+
+/// Classifies a cached attention bind's operand codecs: `None` when every
+/// operand is a plain buffer (every kernel form reads this), `Some(Float16)`
+/// when the cached K/V triple is half-width (only the decode split reads
+/// this), an error for any other packing. `quantized` is `operand_codecs`'
+/// answer; entries past its end count as plain, so a hand-built bind with no
+/// packed operands passes `&[]`.
+pub(super) fn cached_attention_kv_codec(
+    node: NodeId,
+    quantized: &[Option<Codec>],
+) -> Result<Option<Codec>, EmitError> {
+    let packed_elsewhere = quantized
+        .iter()
+        .enumerate()
+        .any(|(index, codec)| codec.is_some() && !CACHED_KV_OPERANDS.contains(&index));
+    if packed_elsewhere {
+        return Err(EmitError::CachedAttentionKvCodecNotSupported {
+            node,
+            reason: "only the cached K even/odd planes and V rows (operands 2, 3, 6) may be packed",
+        });
+    }
+    let [first, second, third] =
+        CACHED_KV_OPERANDS.map(|index| quantized.get(index).copied().flatten());
+    match (first, second, third) {
+        (None, None, None) => Ok(None),
+        (Some(Codec::Float16), Some(Codec::Float16), Some(Codec::Float16)) => {
+            Ok(Some(Codec::Float16))
+        }
+        _ => Err(EmitError::CachedAttentionKvCodecNotSupported {
+            node,
+            reason: "the cached K and V operands must be all plain or all Float16",
+        }),
+    }
+}
+
+#[cfg(feature = "metal-attn-split-decode")]
+fn form_reads_half_kv(form: CachedAttentionForm) -> bool {
+    matches!(form, CachedAttentionForm::TwoRangeDecodeSplit { .. })
+}
+
+#[cfg(not(feature = "metal-attn-split-decode"))]
+fn form_reads_half_kv(_form: CachedAttentionForm) -> bool {
+    false
+}
+
 pub(super) fn render_cached_attention(
     resolved: &BoundOp,
     entry: &str,
     numeric_policy: NumericPolicy,
+    cached_kv_codec: Option<Codec>,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         query_rows,
@@ -114,13 +164,19 @@ pub(super) fn render_cached_attention(
             found: resolved.kind.name(),
         });
     };
+    if cached_kv_codec.is_some() && !form_reads_half_kv(form) {
+        return Err(EmitError::CachedAttentionKvCodecNotSupported {
+            node: resolved.node,
+            reason: "this form reads an f32 cached K/V; only the decode split reads Float16",
+        });
+    }
     let (single_range_dynamic, two_range_cached_bound) = match form {
         CachedAttentionForm::Static => (false, false),
         CachedAttentionForm::SingleRangeDynamic { .. } => (true, false),
         CachedAttentionForm::TwoRangeCachedBound => (false, true),
         #[cfg(feature = "metal-attn-split-decode")]
         CachedAttentionForm::TwoRangeDecodeSplit { .. } => {
-            return render_cached_attention_decode_split(resolved, entry);
+            return render_cached_attention_decode_split(resolved, entry, cached_kv_codec);
         }
         #[cfg(feature = "metal-attn-split-rows")]
         CachedAttentionForm::TwoRangeRowTiled {

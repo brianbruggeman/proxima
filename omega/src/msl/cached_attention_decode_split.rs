@@ -32,6 +32,7 @@ use super::*;
 pub(super) fn render_cached_attention_decode_split(
     resolved: &BoundOp,
     entry: &str,
+    cached_kv_codec: Option<Codec>,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         kv_heads,
@@ -57,7 +58,21 @@ pub(super) fn render_cached_attention_decode_split(
     } else {
         format!("{cached_lower_inclusive}L")
     };
+    let (cached_kv_type, kv_pointers, key_load, value_load) = match cached_kv_codec {
+        None => (element_type, PLAIN_KV_POINTERS, PLAIN_KEY_LOAD, PLAIN_VALUE_LOAD),
+        Some(Codec::Float16) => ("half", HALF_KV_POINTERS, HALF_KEY_LOAD, HALF_VALUE_LOAD),
+        Some(_) => {
+            return Err(EmitError::CachedAttentionKvCodecNotSupported {
+                node: resolved.node,
+                reason: "the decode split reads a cached K/V that is plain or Float16",
+            });
+        }
+    };
     let substitutions = [
+        ("@KV_POINTERS@", kv_pointers.to_string()),
+        ("@KEY_LOAD@", key_load.to_string()),
+        ("@VALUE_LOAD@", value_load.to_string()),
+        ("@KV@", cached_kv_type.to_string()),
         ("@ENTRY@", entry.to_string()),
         ("@T@", element_type.to_string()),
         ("@KV_HEADS@", kv_heads.to_string()),
@@ -84,11 +99,34 @@ pub(super) fn render_cached_attention_decode_split(
     Ok(source)
 }
 
-const DECODE_SPLIT_KERNEL: &str = r#"struct Uniforms { long total_elements; long context_chunks; long splits; };
+const PLAIN_KV_POINTERS: &str = "device const @T@4* kr4 = (device const @T@4*)((cached ? in2 : in4) + kbase);
+                device const @T@4* ki4 = (device const @T@4*)((cached ? in3 : in5) + kbase);
+                device const @T@4* v4 = (device const @T@4*)((cached ? in6 : in7) + kbase * 2);";
+
+const PLAIN_KEY_LOAD: &str =
+    "key_real[step][slot] = float4(kr4[index]); key_imag[step][slot] = float4(ki4[index]);";
+
+const PLAIN_VALUE_LOAD: &str = "value_row[step][slot] = float4(v4[index]);";
+
+// the cached range is half-width and the new range is the op's own element
+// type, so one pointer cannot select between them as the plain form does
+const HALF_KV_POINTERS: &str = "device const @KV@4* kr4_cached = (device const @KV@4*)(in2 + kbase);
+                device const @KV@4* ki4_cached = (device const @KV@4*)(in3 + kbase);
+                device const @KV@4* v4_cached = (device const @KV@4*)(in6 + kbase * 2);
+                device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
+                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);
+                device const @T@4* v4_new = (device const @T@4*)(in7 + kbase * 2);";
+
+const HALF_KEY_LOAD: &str = "if (cached) { key_real[step][slot] = float4(kr4_cached[index]); key_imag[step][slot] = float4(ki4_cached[index]); } else { key_real[step][slot] = float4(kr4_new[index]); key_imag[step][slot] = float4(ki4_new[index]); }";
+
+const HALF_VALUE_LOAD: &str =
+    "if (cached) { value_row[step][slot] = float4(v4_cached[index]); } else { value_row[step][slot] = float4(v4_new[index]); }";
+
+const DECODE_SPLIT_KERNEL: &str =r#"struct Uniforms { long total_elements; long context_chunks; long splits; };
 
 #define OMEGA_UNROLL _Pragma("clang loop unroll(full)")
 
-kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [[buffer(1)]], device const @T@* in2 [[buffer(2)]], device const @T@* in3 [[buffer(3)]], device const @T@* in4 [[buffer(4)]], device const @T@* in5 [[buffer(5)]], device const @T@* in6 [[buffer(6)]], device const @T@* in7 [[buffer(7)]], device const @T@* in8 [[buffer(8)]], device @T@* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
+kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [[buffer(1)]], device const @KV@* in2 [[buffer(2)]], device const @KV@* in3 [[buffer(3)]], device const @T@* in4 [[buffer(4)]], device const @T@* in5 [[buffer(5)]], device const @KV@* in6 [[buffer(6)]], device const @T@* in7 [[buffer(7)]], device const @T@* in8 [[buffer(8)]], device @T@* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
     long splits = u.splits;
     if ((long)tgid >= u.total_elements * splits) { return; }
     constexpr long kv_heads = @KV_HEADS@; constexpr long query_groups = @QUERY_GROUPS@; constexpr long head_dim = @HEAD_DIM@; constexpr float scale = @SCALE@; constexpr long cached_lower = @CACHED_LOWER@; constexpr long new_upper = @NEW_UPPER@; constexpr long new_key_rows = @NEW_KEY_ROWS@; constexpr long cap = @CAP@;
@@ -141,18 +179,16 @@ kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [
                 }
                 valid[step] = live;
                 long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);
-                device const @T@4* kr4 = (device const @T@4*)((cached ? in2 : in4) + kbase);
-                device const @T@4* ki4 = (device const @T@4*)((cached ? in3 : in5) + kbase);
-                device const @T@4* v4 = (device const @T@4*)((cached ? in6 : in7) + kbase * 2);
+                @KV_POINTERS@
                 OMEGA_UNROLL for (short slot = 0; slot < plane_slots; slot++) {
                     short index = tx + slot * lanes_per_key;
                     key_real[step][slot] = float4(0.0f); key_imag[step][slot] = float4(0.0f);
-                    if (live && index < plane_vectors) { key_real[step][slot] = float4(kr4[index]); key_imag[step][slot] = float4(ki4[index]); }
+                    if (live && index < plane_vectors) { @KEY_LOAD@ }
                 }
                 OMEGA_UNROLL for (short slot = 0; slot < row_slots; slot++) {
                     short index = tx + slot * lanes_per_key;
                     value_row[step][slot] = float4(0.0f);
-                    if (live && index < row_vectors) { value_row[step][slot] = float4(v4[index]); }
+                    if (live && index < row_vectors) { @VALUE_LOAD@ }
                 }
             }
             float score[batch];
