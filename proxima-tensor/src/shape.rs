@@ -295,6 +295,24 @@ impl ShapeTable {
             }
         }
 
+        for entry in &refs {
+            let operand_shape = shapes.of(entry.node);
+            for (axis_index, axis) in entry.pattern.axes.iter().enumerate() {
+                if entry.skip_axis == Some(axis_index as u16) {
+                    continue;
+                }
+                let Some(&operand_extent) = operand_shape.get(axis_index) else {
+                    continue;
+                };
+                let split = split_outer_extent(axis, operand_extent, &self.symbols)?;
+                if let Some((outer, extent)) = split
+                    && resolved[outer as usize].is_none()
+                {
+                    resolved[outer as usize] = Some(extent);
+                }
+            }
+        }
+
         let extents: Vec<u64> = resolved
             .into_iter()
             .enumerate()
@@ -611,6 +629,23 @@ fn resolve_extent(extent: &crate::op::Extent, symbols: &[u64]) -> Result<u64, Te
     }
 }
 
+/// Size of the outer axis of a tiled split (`AxisIndex::split_outer_axis`):
+/// the operand's extent divided by the tile width. `None` when the axis is
+/// not a split, the declared `len` is not the tile width, or the operand's
+/// extent is not a whole number of tiles.
+fn split_outer_extent(
+    axis: &AxisIndex,
+    operand_extent: u64,
+    symbols: &[u64],
+) -> Result<Option<(u16, u64)>, TensorError> {
+    let (Some((outer, width)), Some(len)) = (axis.split_outer_axis(), axis.len.as_ref()) else {
+        return Ok(None);
+    };
+    let width = u64::from(width.unsigned_abs());
+    let whole_tiles = resolve_extent(len, symbols)? == width && operand_extent.is_multiple_of(width);
+    Ok(whole_tiles.then_some((outer, operand_extent / width)))
+}
+
 fn resolve_leaf_shape(
     shape: &[crate::op::Extent],
     symbols: &[u64],
@@ -730,14 +765,41 @@ fn axis_definition_mask(axis: &AxisIndex, operand_axis_mask: u64) -> Option<(u16
 /// `index_map` (the fetched-indices tensor's own shape) and `base` (the
 /// gathered operand, `skip_axis` excluded) both contribute the same way they
 /// do to a resolved extent.
-fn fold_operand_into_iteration_masks(entry: &MapRef<'_>, operand_axis_masks: &[u64], target: &mut [u64]) {
+fn fold_operand_into_iteration_masks(
+    entry: &MapRef<'_>,
+    operand_axis_masks: &[u64],
+    target: &mut [u64],
+    defined: &mut [bool],
+) {
     for (axis_index, axis) in entry.pattern.axes.iter().enumerate() {
         if entry.skip_axis == Some(axis_index as u16) {
             continue;
         }
         let operand_axis_mask = operand_axis_masks.get(axis_index).copied().unwrap_or(0);
         if let Some((axis, mask)) = axis_definition_mask(axis, operand_axis_mask) {
+            defined[axis as usize] = true;
             target[axis as usize] |= mask;
+        }
+    }
+}
+
+/// The mask-provenance twin of the split fallback in
+/// [`ShapeTable::unify_iteration_space`]: a tiled split's outer axis takes the
+/// operand axis's mask only where no other operand defined it.
+fn fold_split_into_iteration_masks(
+    entry: &MapRef<'_>,
+    operand_axis_masks: &[u64],
+    defined: &[bool],
+    target: &mut [u64],
+) {
+    for (axis_index, axis) in entry.pattern.axes.iter().enumerate() {
+        if entry.skip_axis == Some(axis_index as u16) {
+            continue;
+        }
+        if let Some((outer, _)) = axis.split_outer_axis()
+            && !defined[outer as usize]
+        {
+            target[outer as usize] |= operand_axis_masks.get(axis_index).copied().unwrap_or(0);
         }
     }
 }
@@ -754,10 +816,16 @@ fn elementwise_axis_masks(operands: &[(NodeId, IndexMap)], output_masks: &[Vec<u
         .max()
         .unwrap_or(0);
     let mut target = vec![0u64; iter_rank as usize];
+    let mut defined = vec![false; iter_rank as usize];
     let refs: Vec<(NodeId, &IndexMap)> = operands.iter().map(|(node, map)| (*node, map)).collect();
-    for entry in flatten_operand_maps(&refs) {
+    let entries = flatten_operand_maps(&refs);
+    for entry in &entries {
         let operand_axis_masks = &output_masks[entry.node.0 as usize];
-        fold_operand_into_iteration_masks(&entry, operand_axis_masks, &mut target);
+        fold_operand_into_iteration_masks(entry, operand_axis_masks, &mut target, &mut defined);
+    }
+    for entry in &entries {
+        let operand_axis_masks = &output_masks[entry.node.0 as usize];
+        fold_split_into_iteration_masks(entry, operand_axis_masks, &defined, &mut target);
     }
     target
 }
@@ -1164,6 +1232,68 @@ mod tests {
             &[4],
             "the declared len (4), not source's own on-disk width (8)"
         );
+    }
+
+    fn split_view_program(flat_width: u32, tile: i32, declared_tile: u32) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let source = leaf(&mut program, &[Extent::Static(2), Extent::Static(flat_width)]);
+        let split_map = IndexMap::Affine(map::IndexPattern {
+            iter_rank: 3,
+            axes: alloc::vec![
+                map::AxisIndex {
+                    terms: alloc::vec![AxisTerm::projection(0)].into_iter().collect(),
+                    offset: 0,
+                    len: None,
+                },
+                map::AxisIndex {
+                    terms: alloc::vec![AxisTerm::scaled(1, tile), AxisTerm::scaled(2, 1)]
+                        .into_iter()
+                        .collect(),
+                    offset: 0,
+                    len: Some(Extent::Static(declared_tile)),
+                },
+            ],
+        });
+        let view = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(source, split_map)],
+                name: None,
+            },
+        );
+        (program, view)
+    }
+
+    /// `tile*outer + inner@tile` over a flat axis of `outer * tile` elements
+    /// is a reshape `[outer * tile] -> [outer, tile]`: with no other operand
+    /// to size `outer`, the operand's extent divided by the tile does.
+    #[test]
+    fn a_tiled_split_sizes_its_outer_axis_from_the_operand_extent() {
+        let (program, view) = split_view_program(35 * 4, 4, 4);
+
+        let shapes = infer(&program, &[]).expect("a whole number of tiles splits");
+
+        assert_eq!(shapes.of(view), &[2, 35, 4]);
+    }
+
+    #[test]
+    fn a_split_over_a_partial_tile_is_unconstrained_not_rounded() {
+        let (program, _) = split_view_program(35 * 4 + 1, 4, 4);
+
+        let error = infer(&program, &[]).expect_err("141 is not a whole number of 4-wide tiles");
+
+        assert!(matches!(error, TensorError::UnconstrainedDim { dim: 1, .. }), "{error}");
+    }
+
+    #[test]
+    fn a_split_whose_declared_tile_is_not_its_stride_is_unconstrained() {
+        let (program, _) = split_view_program(35 * 4, 4, 2);
+
+        let error = infer(&program, &[]).expect_err("len 2 does not tile a stride of 4");
+
+        assert!(matches!(error, TensorError::UnconstrainedDim { dim: 1, .. }), "{error}");
     }
 
     /// `len` states a fact, not a wish: declaring a length wider than the

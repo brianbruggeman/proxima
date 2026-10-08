@@ -117,6 +117,34 @@ impl AxisIndex {
     }
 }
 
+impl AxisIndex {
+    /// The axis a tiled split names, with the tile width, when this operand
+    /// axis is `width*outer + inner@width`: one unit-coefficient term whose
+    /// declared [`Self::len`] is the tile, one other term whose coefficient
+    /// is that same width, and no offset. The operand's extent here is then
+    /// `outer_extent * width`, so `outer`'s extent is the operand's extent
+    /// divided by `width` -- the rule [`crate::shape::ShapeTable`] uses to
+    /// size `outer` when no other operand does. A reshape `[a*b] -> [a, b]`
+    /// is this pattern; it is how a flat axis is viewed as two without a
+    /// separate view op.
+    #[must_use]
+    pub fn split_outer_axis(&self) -> Option<(u16, i32)> {
+        let inner = self.len_target_axis()?;
+        self.len.as_ref()?;
+        if self.offset != 0 {
+            return None;
+        }
+        match self.terms.as_slice() {
+            [first, second] => {
+                let (unit, outer) = if first.axis == inner { (first, second) } else { (second, first) };
+                (unit.axis == inner && unit.coeff == 1 && outer.axis != inner && outer.coeff > 1)
+                    .then_some((outer.axis, outer.coeff))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Relates an iteration space of rank `iter_rank` to an operand's index space.
 ///
 /// `axes` holds one [`AxisIndex`] per operand axis, so the operand's rank is
