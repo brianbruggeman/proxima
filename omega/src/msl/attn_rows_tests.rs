@@ -895,3 +895,110 @@ fn a_partly_packed_or_misplaced_codec_is_declined_on_the_decode_split() {
         );
     }
 }
+
+fn row_tiled_source(op: &BoundOp) -> String {
+    let relaxed = NumericPolicy::bit_exact().with_contraction(true).with_reassociation(true);
+    emit(op, &PackedOperands::new(), relaxed)
+        .expect("the row-tiled kernel emits")
+        .source
+}
+
+fn prompt_1000_kernel() -> String {
+    row_tiled_source(&attention_rows_op(9, 2, 64, 24, 1000, GLOBAL_LOWER))
+}
+
+#[test]
+fn the_row_tiled_softmax_is_one_online_pass_per_vector_with_one_max_and_one_sum_reduction() {
+    assert_default_sizing();
+    let source = prompt_1000_kernel();
+
+    assert_eq!(source.matches("simd_max(").count(), 1, "one block max reduction");
+    assert_eq!(source.matches("simd_sum(").count(), 1, "one block sum reduction");
+    assert_eq!(
+        source.matches("exp(local_scores[item] - next_maximum)").count(),
+        1,
+        "the weights are written once, in f32, against the final block maximum"
+    );
+    for required in [
+        "constexpr long vectors_per_simdgroup = (tile_vectors + simdgroups - 1L) / simdgroups;",
+        "FOR_UNROLL for (long turn = 0L; turn < vectors_per_simdgroup; turn++) {",
+        "(previous_maximum == next_maximum ? 1.0f : exp(previous_maximum - next_maximum))",
+    ] {
+        assert!(source.contains(required), "missing `{required}`");
+    }
+    assert!(
+        !source.contains("vector += simdgroups"),
+        "the vector loop has a compile-time trip count"
+    );
+}
+
+#[test]
+fn the_row_tiled_kernel_stages_the_query_tile_once_and_keeps_its_four_barriers() {
+    assert_default_sizing();
+    let source = prompt_1000_kernel();
+
+    for required in [
+        "constexpr bool stage_query = true;",
+        "constexpr long query_stage_stride = half_dim + 8L;",
+        "threadgroup float query_stage[stage_query ? tile_blocks * 2L * 8L * query_stage_stride : 1L];",
+        "simdgroup_load(query_even[step_index], stage_even, (ulong)query_stage_stride);",
+        "constexpr long depth_unroll = ((half_dim / 8) % 2 == 0) ? 2 : 1;",
+    ] {
+        assert!(source.contains(required), "missing `{required}`");
+    }
+    assert_eq!(
+        source.matches("threadgroup_barrier(").count(),
+        4,
+        "one after the setup and the staging, three per key block"
+    );
+    let setup_end = source
+        .find("threadgroup_barrier(")
+        .expect("the setup barrier is in the kernel");
+    let staging = source
+        .find("query_stage[(vector_block * 16L + stage_row)")
+        .expect("the staging store is in the kernel");
+    let block_loop = source
+        .find("for (long step = 0L; step < cached_blocks")
+        .expect("the key block loop is in the kernel");
+    assert!(
+        staging < setup_end && setup_end < block_loop,
+        "staged before the first barrier, outside the block loop"
+    );
+
+    let static_bytes = row_tile_bytes(8, 2, row_tiled_block(64));
+    let staged_bytes = query_stage_bytes(8, 2, 64);
+    assert_eq!((static_bytes, staged_bytes), (4480, 5120));
+    assert!(static_bytes + staged_bytes <= THREADGROUP_BUDGET);
+}
+
+#[test]
+fn the_query_tile_is_staged_only_while_it_fits_beside_the_score_tile_in_the_threadgroup_budget() {
+    assert_default_sizing();
+    let mut cells = 0_u32;
+    for (groups, head_dim, rows, staged) in [
+        (2_u64, 64_u64, 1000_u64, true),
+        (8, 256, 17, true),
+        (16, 256, 49, true),
+        (8, 512, 49, false),
+    ] {
+        let op = attention_rows_op(9, groups, head_dim, 512, rows, GLOBAL_LOWER);
+        let Some(CachedAttentionForm::TwoRangeRowTiled {
+            rows_per_threadgroup: tile_rows,
+            ..
+        }) = relaxed_form(&op)
+        else {
+            panic!("groups {groups} head_dim {head_dim}: not the row-tiled form");
+        };
+        let fits = row_tile_bytes(tile_rows, groups, row_tiled_block(head_dim))
+            + query_stage_bytes(tile_rows, groups, head_dim)
+            <= THREADGROUP_BUDGET;
+        assert_eq!(fits, staged, "groups {groups} head_dim {head_dim} tile {tile_rows}");
+        let source = row_tiled_source(&op);
+        assert!(
+            source.contains(&format!("constexpr bool stage_query = {staged};")),
+            "groups {groups} head_dim {head_dim}: the emitted gate disagrees with the budget"
+        );
+        cells += 1;
+    }
+    assert_eq!(cells, 4);
+}
