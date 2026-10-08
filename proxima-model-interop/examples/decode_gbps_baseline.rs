@@ -51,6 +51,20 @@ use proxima_telemetry::export::Exporter;
 #[cfg(feature = "instrument")]
 use proxima_telemetry::recorder::Recorder;
 
+/// User and system CPU milliseconds the whole process has used so far
+/// (`getrusage(RUSAGE_SELF)`), so the difference across one generation is the
+/// CPU that generation cost every thread of this process.
+fn process_cpu_ms() -> (f64, f64) {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: `usage` is a valid, writable `rusage`; `RUSAGE_SELF` takes no other pointer.
+    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    assert_eq!(status, 0, "getrusage(RUSAGE_SELF) failed");
+    // SAFETY: `getrusage` returned 0, so it filled the struct.
+    let usage = unsafe { usage.assume_init() };
+    let millis = |time: libc::timeval| time.tv_sec as f64 * 1000.0 + time.tv_usec as f64 / 1000.0;
+    (millis(usage.ru_utime), millis(usage.ru_stime))
+}
+
 /// FNV-1a 64-bit over `text`'s own UTF-8 bytes -- a cheap, dependency-free
 /// content fingerprint so `PROXIMA_RUNS` arms and on/off `PROXIMA_COMMAND_BUFFER_CHUNKS`
 /// arms can assert byte-identical generated text without diffing full strings
@@ -355,11 +369,17 @@ fn main() {
             }
             ControlFlow::Continue(())
         };
+        let cpu_before = process_cpu_ms();
         let start = Instant::now();
         let (token_ids, text, stopped_by_eos) = model
             .generate_streaming(prompt, max_tokens, serving_config, &mut on_token)
             .expect("greedy decode on the real gemma4-E2B checkpoint");
         let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let cpu_after = process_cpu_ms();
+        let cpu_user_ms = cpu_after.0 - cpu_before.0;
+        let cpu_sys_ms = cpu_after.1 - cpu_before.1;
+        let cpu_ms = cpu_user_ms + cpu_sys_ms;
+        let cpu_pct = cpu_ms / wall_ms * 100.0;
         gpu_peak_bytes = gpu_peak_bytes.max(gpu_allocated_bytes());
         let tokens_generated = token_ids.len();
         let text_hash = fnv64(&text);
@@ -378,6 +398,10 @@ fn main() {
                 run = "done",
                 run_index = run_index as u64,
                 wall_ms,
+                cpu_user_ms,
+                cpu_sys_ms,
+                cpu_ms,
+                cpu_pct,
                 tokens_generated = tokens_generated as u64,
                 prompt_token_count = prompt_token_count as u64,
                 text_hash = %format!("{text_hash:016x}"),
@@ -391,6 +415,7 @@ fn main() {
             #[cfg(not(feature = "instrument"))]
             eprintln!(
                 "decode_gbps_baseline run=done run_index={run_index} wall_ms={wall_ms:.3} \
+                 cpu_user_ms={cpu_user_ms:.3} cpu_sys_ms={cpu_sys_ms:.3} cpu_ms={cpu_ms:.3} cpu_pct={cpu_pct:.2} \
                  tokens_generated={tokens_generated} prompt_token_count={prompt_token_count} \
                  text_hash={text_hash:016x} stopped_by_eos={stopped_by_eos} \
                  decode_ms_per_token={decode_ms_per_token:.3} ttft_ms={prefill_elapsed_ms} \
@@ -402,6 +427,10 @@ fn main() {
                 run = "done",
                 run_index = run_index as u64,
                 wall_ms,
+                cpu_user_ms,
+                cpu_sys_ms,
+                cpu_ms,
+                cpu_pct,
                 tokens_generated = tokens_generated as u64,
                 prompt_token_count = prompt_token_count as u64,
                 text_hash = %format!("{text_hash:016x}"),
@@ -414,6 +443,7 @@ fn main() {
             #[cfg(not(feature = "instrument"))]
             eprintln!(
                 "decode_gbps_baseline run=done run_index={run_index} wall_ms={wall_ms:.3} \
+                 cpu_user_ms={cpu_user_ms:.3} cpu_sys_ms={cpu_sys_ms:.3} cpu_ms={cpu_ms:.3} cpu_pct={cpu_pct:.2} \
                  tokens_generated={tokens_generated} prompt_token_count={prompt_token_count} \
                  text_hash={text_hash:016x} stopped_by_eos={stopped_by_eos} ttft_ms={prefill_elapsed_ms} \
                  gpu_peak_bytes={gpu_peak_bytes} text={text:?}"
