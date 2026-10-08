@@ -1266,9 +1266,10 @@ fn capture_dispatch(
                 None => unreplayable = Some(format!("binding {index} ({binding:?}) not resolvable")),
             }
         }
+        let route_prepass_dispatches = u64::from(crate::msl::route_prepass_active(bound, packed_operands));
         let extras_reason = live_extra_buffers(bound, bindings.len(), device_buffers, &mut live_buffers)
             .or_else(|| {
-                crate::msl::route_prepass_active(bound, packed_operands).then(|| {
+                (route_prepass_dispatches > 0).then(|| {
                     "a compacted grouped gemm needs its route prepass, which the capture does not record".to_string()
                 })
             });
@@ -1300,6 +1301,7 @@ fn capture_dispatch(
                 grid,
                 bindings: bindings.to_vec(),
                 unreplayable: unreplayable.or(extras_reason),
+                route_prepass_dispatches,
                 uniform_bytes,
                 pipeline: pipeline.clone(),
                 buffers: live_buffers,
@@ -1523,6 +1525,9 @@ pub struct CapturedDispatch {
     /// `Some(reason)` when a buffer this kernel needs was not recoverable
     /// at the dispatch site, so [`Self::time_gpu_ns`] refuses it
     pub unreplayable: Option<String>,
+    /// route-prepass dispatches the encoder issued for this op that are not
+    /// themselves captured: 1 for a compacted grouped gemm, else 0
+    pub route_prepass_dispatches: u64,
     /// raw bytes of the bound `Uniforms` struct at encode time
     pub uniform_bytes: Vec<u8>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
@@ -1660,6 +1665,7 @@ impl CapturedDispatch {
             grid,
             bindings: self.bindings.clone(),
             unreplayable: self.unreplayable.clone(),
+            route_prepass_dispatches: self.route_prepass_dispatches,
             uniform_bytes: self.uniform_bytes.clone(),
             pipeline,
             buffers: self.buffers.clone(),
@@ -1720,6 +1726,7 @@ impl CapturedDispatch {
             grid: template.grid,
             bindings: self.bindings.clone(),
             unreplayable: self.unreplayable.clone(),
+            route_prepass_dispatches: self.route_prepass_dispatches,
             uniform_bytes: self.uniform_bytes.clone(),
             pipeline: template.pipeline.clone(),
             buffers: self.buffers.clone(),
