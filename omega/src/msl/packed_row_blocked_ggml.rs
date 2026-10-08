@@ -763,6 +763,7 @@ pub(super) fn push_packed_row_blocked_body(
             rows,
             rank,
             output_axes,
+            packed_row_direct_output_axis(resolved, output_axes),
             element_type,
             epilogue_body,
             epilogue_operands,

@@ -947,14 +947,15 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         for (int q = 0; q < 4; ++q) { blk_ptr[q] += blk_step; }
         y4 += y4_step;
     }
-    for (int q = 0; q < 4; ++q) {
-        float reduced = simd_sum(sumf[q]);
-        long flat = group_first + q;
-        if (lane == 0u && flat < u.output_total) {
-            long out_offset = u.out_base;
-            out_offset += coord_q_cache[q][0] * u.out_strides[0];
-            out_offset += coord_q_cache[q][1] * u.out_strides[1];
-            out_offset += coord_q_cache[q][2] * u.out_strides[2];
+    float reduced_row0 = simd_sum(sumf[0]);
+    float reduced_row1 = simd_sum(sumf[1]);
+    float reduced_row2 = simd_sum(sumf[2]);
+    float reduced_row3 = simd_sum(sumf[3]);
+    if (lane < 4u) {
+        float reduced = (lane == 0u ? reduced_row0 : (lane == 1u ? reduced_row1 : (lane == 2u ? reduced_row2 : reduced_row3)));
+        long flat = group_first + (long)lane;
+        if (flat < u.output_total) {
+            long out_offset = u.out_base + flat * u.out_strides[1];
             out[out_offset] = reduced;
         }
     }
