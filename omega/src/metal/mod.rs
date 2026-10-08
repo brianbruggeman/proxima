@@ -229,6 +229,8 @@ use proxima_tensor::{
 };
 #[cfg(not(feature = "top-fraction-fusion"))]
 use proxima_tensor::bind_with_fusion;
+#[cfg(feature = "twin-elementwise-fusion")]
+use proxima_tensor::fuse_twin_elementwise;
 #[cfg(feature = "top-fraction-fusion")]
 use proxima_tensor::bind_with_top_fraction;
 #[cfg(any(not(feature = "metal-buffer-pool"), test))]
