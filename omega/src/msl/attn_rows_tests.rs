@@ -18,6 +18,7 @@ fn assert_default_sizing() {
     assert_eq!(crate::sized::ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE, 2);
     assert_eq!(crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS, 16);
     assert_eq!(crate::sized::ATTENTION_ROWS_TARGET_SIMDGROUPS, 256);
+    const { assert!(!crate::sized::ATTENTION_ROWS_MMA_HALF) };
     assert_eq!(
         crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES,
         THREADGROUP_BUDGET
@@ -1050,4 +1051,99 @@ fn the_runtime_toml_pins_the_staged_query_byte_cap_default() {
         .and_then(|rest| rest.split("\n[selection]").next())
         .expect("the attention_rows section is in the sizing toml");
     assert!(section.contains("\nmax_staged_query_bytes = 8192\n"));
+}
+
+fn rendered_with_operands(op: &BoundOp, half_operands: bool) -> String {
+    let Some(CachedAttentionForm::TwoRangeRowTiled {
+        rows_per_threadgroup,
+        simdgroups,
+        ..
+    }) = relaxed_form(op)
+    else {
+        panic!("not the row-tiled form");
+    };
+    cached_attention_row_tiled::render_cached_attention_row_tiled_with(
+        op,
+        "omega_cached_attention_probe",
+        rows_per_threadgroup,
+        simdgroups,
+        half_operands,
+    )
+    .expect("the row-tiled kernel renders")
+}
+
+#[test]
+fn the_float_setting_multiplies_float_fragments_and_names_no_half_type() {
+    for (groups, head_dim) in [(2_u64, 64_u64), (8, 256), (8, 512)] {
+        let op = attention_rows_op(9, groups, head_dim, 512, 971, SLIDING_LOWER);
+        let source = rendered_with_operands(&op, false);
+        for declaration in [
+            "simdgroup_float8x8 key_even_tile[key_tiles_per_group][depth_unroll];",
+            "simdgroup_float8x8 key_odd_tile[key_tiles_per_group][depth_unroll];",
+            "simdgroup_float8x8 query_even[depth_unroll];",
+            "simdgroup_float8x8 weights[tile_blocks];",
+            "simdgroup_float8x8 value;",
+            "simdgroup_float8x8 scores[key_tiles_per_group][tile_blocks];",
+            "simdgroup_float8x8 accumulated[dims_per_group][tile_blocks];",
+        ] {
+            assert!(
+                source.contains(declaration),
+                "head_dim {head_dim}: the float setting does not declare `{declaration}`"
+            );
+        }
+        assert!(!source.contains("simdgroup_half8x8"), "head_dim {head_dim}");
+    }
+}
+
+#[test]
+fn the_half_setting_narrows_the_operands_and_keeps_scores_accumulators_and_softmax_float() {
+    for (groups, head_dim) in [(2_u64, 64_u64), (8, 256), (8, 512)] {
+        let op = attention_rows_op(9, groups, head_dim, 512, 971, SLIDING_LOWER);
+        let source = rendered_with_operands(&op, true);
+        for declaration in [
+            "simdgroup_half8x8 key_even_tile[key_tiles_per_group][depth_unroll];",
+            "simdgroup_half8x8 key_odd_tile[key_tiles_per_group][depth_unroll];",
+            "simdgroup_half8x8 query_even[depth_unroll];",
+            "simdgroup_half8x8 query_odd[depth_unroll];",
+            "simdgroup_half8x8 weights[tile_blocks];",
+            "simdgroup_half8x8 value;",
+            "simdgroup_float8x8 scores[key_tiles_per_group][tile_blocks];",
+            "simdgroup_float8x8 accumulated[dims_per_group][tile_blocks];",
+            "threadgroup float score_tile[tile_vectors * block];",
+            "float local_scores[block / 32];",
+        ] {
+            assert!(
+                source.contains(declaration),
+                "head_dim {head_dim}: the half setting does not carry `{declaration}`"
+            );
+        }
+        assert!(source.contains("simdgroup_multiply_accumulate(scores[group][vector_block], query_even"));
+        assert!(source.contains("simdgroup_multiply_accumulate(accumulated[slot][vector_block], weights[vector_block], value"));
+    }
+}
+
+#[test]
+fn the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads() {
+    for (groups, head_dim) in [(2_u64, 64_u64), (8, 256), (8, 512)] {
+        let op = attention_rows_op(9, groups, head_dim, 512, 971, SLIDING_LOWER);
+        let float_source = rendered_with_operands(&op, false);
+        let half_source = rendered_with_operands(&op, true);
+        assert!(half_source.contains(cached_attention_row_tiled::HALF_OPERAND_HELPERS));
+        let restored = half_source
+            .replace(cached_attention_row_tiled::HALF_OPERAND_HELPERS, "")
+            .replace("simdgroup_half8x8 key_", "simdgroup_float8x8 key_")
+            .replace("simdgroup_half8x8 query_", "simdgroup_float8x8 query_")
+            .replace("simdgroup_half8x8 weights", "simdgroup_float8x8 weights")
+            .replace("simdgroup_half8x8 value", "simdgroup_float8x8 value");
+        assert_eq!(restored, float_source, "head_dim {head_dim}");
+    }
+}
+
+#[test]
+fn the_default_sizing_renders_the_float_setting() {
+    let op = attention_rows_op(9, 2, 64, 512, 1000, GLOBAL_LOWER);
+    let kernel = emit(&op, &PackedOperands::new(), NumericPolicy::llama_relaxed())
+        .expect("the row-tiled kernel emits");
+    assert!(kernel.source.contains("simdgroup_float8x8 weights[tile_blocks];"));
+    assert!(!kernel.source.contains("simdgroup_half8x8"));
 }
