@@ -13,7 +13,7 @@
 //! multiplier on the thread count, for a variant that changes how many rows one
 //! simdgroup folds.
 //!
-//! A `<sha16>.<tag>.f16` file lists comma-separated binding indices whose buffers the variant reads as `half` (the replay narrows them from f32). `AB_GEMM_ONLY` times a compacted gemm without its route prepass, `AB_PREPASS_ONLY` the prepass alone.
+//! A `<sha16>.<tag>.f16` file lists comma-separated binding indices whose buffers the variant reads as `half` (the replay narrows them from f32). `AB_GEMM_ONLY` times a compacted gemm without its route prepass (the compaction buffer is refilled by the prepass alone, which writes nothing else), `AB_PREPASS_ONLY` the prepass alone.
 //! Every kernel arm also prints an `ab res` line with its resources (static threadgroup bytes, bound buffer bytes, CPU, RSS, footprint, Metal bytes, load; `AB_RESOURCE_ITERS` replays).
 //!
 //! Knobs: `AB_VARIANT_DIR`, `AB_STEP` (5), `AB_ROUNDS` (60), `AB_BATCH` (16), `AB_SKIP_GROUPS`
@@ -331,9 +331,10 @@ mod harness {
                 if dispatch.route_prepass_dispatches == 0 {
                     return dispatch;
                 }
-                dispatch.time_gpu_ns(1).expect("fill the compaction buffer");
+                let prepass_alone = dispatch.prepass_only().expect("a record with a route prepass");
+                prepass_alone.time_gpu_ns(1).expect("fill the compaction buffer");
                 if std::env::var_os("AB_PREPASS_ONLY").is_some() {
-                    return dispatch.prepass_only().expect("a record with a route prepass");
+                    return prepass_alone;
                 }
                 dispatch.without_prepass()
             })
