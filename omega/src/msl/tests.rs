@@ -193,6 +193,77 @@ fn elementwise_unit_leading_axis_is_never_decoded() {
     assert!(!source.contains("remaining /="));
 }
 
+#[test]
+fn a_large_elementwise_grid_decodes_its_thread_index_without_an_integer_divide() {
+    let prefill_wide = broadcast_over_trailing_axes(64);
+
+    let source = render_elementwise(&prefill_wide, "wide_scale", &[None, None])
+        .expect("a 98,304-element plane scale renders");
+
+    assert!(source.contains("inline uint divmod_reciprocal("));
+    assert!(source.contains("remaining = divmod_reciprocal(remaining, (uint)u.extents[2], coord[2]);"));
+    assert!(!source.contains("remaining %"), "no runtime modulo survives in the wide form");
+    assert!(!source.contains("remaining /="), "no runtime divide survives in the wide form");
+}
+
+#[test]
+fn a_small_elementwise_grid_keeps_the_integer_decode() {
+    let small = broadcast_over_trailing_axes(2);
+
+    let source = render_elementwise(&small, "small_scale", &[None, None])
+        .expect("a 3,072-element plane scale renders");
+
+    assert!(!source.contains("divmod_reciprocal"));
+    assert!(source.contains("remaining % (uint)u.extents[2]"));
+}
+
+#[test]
+fn the_reciprocal_decode_is_part_of_the_pipeline_identity() {
+    let empty = BTreeMap::new();
+    let small = broadcast_over_trailing_axes(2);
+    let wide = broadcast_over_trailing_axes(64);
+
+    let small_token = elementwise_addressing_cache_token(&small).expect("elementwise has a token");
+    let wide_token = elementwise_addressing_cache_token(&wide).expect("elementwise has a token");
+
+    assert!(wide_token.starts_with("_ear"), "wide token {wide_token}");
+    assert!(small_token.starts_with("_ea4"), "small token {small_token}");
+    assert_ne!(
+        kernel_cache_key(&small, &empty, NumericPolicy::default()).expect("cache key builds"),
+        kernel_cache_key(&wide, &empty, NumericPolicy::default()).expect("cache key builds"),
+        "two sources that decode differently must not share a pipeline"
+    );
+}
+
+fn reciprocal_divmod(numerator: u32, divisor: u32) -> (u32, u32) {
+    let reciprocal = 1.0_f32 / divisor as f32;
+    let mut quotient = (numerator as f32 * reciprocal) as i32;
+    let residue = numerator as i32 - quotient * divisor as i32;
+    quotient += i32::from(residue >= divisor as i32) - i32::from(residue < 0);
+    let remainder = numerator - quotient as u32 * divisor;
+    (quotient as u32, remainder)
+}
+
+#[test]
+fn the_reciprocal_decode_equals_integer_division_for_every_numerator_up_to_its_ceiling() {
+    let divisors = [1_u32, 2, 3, 5, 6, 7, 16, 31, 32, 33, 64, 100, 127, 128, 1000, 1023, 4095];
+    let ceiling = RECIPROCAL_DECOMPOSITION_MAX_ELEMENTS as u32;
+    let mut checked = 0_u64;
+
+    for divisor in divisors {
+        for numerator in 0..=ceiling {
+            assert_eq!(
+                reciprocal_divmod(numerator, divisor),
+                (numerator / divisor, numerator % divisor),
+                "numerator {numerator} divisor {divisor}"
+            );
+            checked += 1;
+        }
+    }
+
+    assert_eq!(checked, divisors.len() as u64 * (u64::from(ceiling) + 1));
+}
+
 fn elementwise_tanh_op(extent: u32) -> BoundOp {
     let mut program = Vec::new();
     let source = append(

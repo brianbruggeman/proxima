@@ -203,6 +203,21 @@ max_split = 8
 # `classify_packed_row_block` derives per op, not a compile feature.
 group = 8
 
+[elementwise]
+# smallest element count at which an elementwise kernel decodes its linear thread
+# index into coordinates with a float reciprocal and one integer correction
+# (`msl::push_coordinate_decomposition`) instead of a runtime `%` and `/` per
+# axis. Apple GPUs have no integer divider: each runtime divide is a long
+# dependent multi-instruction sequence, and a rank-3 decode pays two divides and
+# two modulos in every thread before its first load, so a grid of hundreds of
+# thousands of threads is bound by that chain rather than by its memory
+# traffic. Below this count the grid is latency-floor bound and keeps the
+# integer form. The reciprocal form is exact for counts up to
+# `msl::RECIPROCAL_DECOMPOSITION_MAX_ELEMENTS` (a float32 mantissa fact, not a
+# policy). 0 admits every grid under that ceiling. Overridable per-build via
+# `OMEGA_ELEMENTWISE_RECIPROCAL_MIN_ELEMENTS`.
+reciprocal_min_elements = 65536
+
 [spans]
 # capacity of `metal::UNIFORM_BUFFERS`, the content-keyed cache of uploaded
 # uniform-blob `MTLBuffer`s (see `metal.rs`'s `upload_uniforms` and
