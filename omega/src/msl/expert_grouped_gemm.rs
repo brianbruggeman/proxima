@@ -1262,6 +1262,38 @@ pub(crate) fn route_prepass_active(_resolved: &BoundOp, _packed_operands: &Packe
     false
 }
 
+/// What one compaction is a function of: the route operand's node and the
+/// layout the prepass reads it through (base offset, the stride of the
+/// innermost token axis), plus the entry count and expert count that size it.
+/// Two compacted grouped ops with equal keys produce byte-identical
+/// compactions, so the host runs [`route_prepass`] once for both. `None` for
+/// every op that has no prepass.
+#[cfg(all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos"))))]
+pub(crate) fn route_compaction_key(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+) -> Option<(NodeId, i64, i64, u64, u64)> {
+    let quantized = operand_codecs(resolved, packed_operands);
+    let block = grouped_block(resolved, &quantized)?;
+    let lookup = resolved.operands()[block.weight].2.as_ref()?;
+    let innermost_axis = *block.token_axes.last()?;
+    Some((
+        lookup.indices,
+        lookup.index_layout.base,
+        lookup.index_layout.stride(innermost_axis),
+        grouped_token_total(resolved, &block),
+        grouped_expert_count(resolved, &block),
+    ))
+}
+
+#[cfg(all(not(feature = "metal-grouped-gemm"), feature = "metal", target_os = "macos"))]
+pub(crate) fn route_compaction_key(
+    _resolved: &BoundOp,
+    _packed_operands: &PackedOperands,
+) -> Option<(NodeId, i64, i64, u64, u64)> {
+    None
+}
+
 /// [`render_reduce`]'s hook: appends the prepass kernel after the GEMM's own
 /// when the op is a compacted expert-grouped block, nothing otherwise.
 #[cfg(feature = "metal-grouped-gemm")]
