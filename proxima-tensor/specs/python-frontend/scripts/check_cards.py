@@ -13,11 +13,11 @@ REQUIRED_FIELDS = (
     "**Dependency:**", "**Commit:**", "**Slice budget:**", "**Scope units:**", "**Timer window:**",
     "## Goal", "## Changes", "## Acceptance criteria", "## Complete when",
 )
-TOOL_IDS = [f"00{letter}" for letter in "abcdefghijkl"]
+TOOL_IDS = ["00a", "00a1", "00a2"] + [f"00{letter}" for letter in "bcdefghijkl"]
 FRONT_COUNTS = {1: "abcdef", 2: "ab", 3: "ab", 4: "ab", 5: "ab", 6: "ab", 7: "ab", 8: "ab", 9: "ab", 10: "ab", 11: "abc", 12: "abcd", 13: "abcd"}
 FRONT_IDS = [f"{number:02d}{suffix}" for number, suffixes in FRONT_COUNTS.items() for suffix in suffixes]
 EXPECTED_IDS = TOOL_IDS + FRONT_IDS
-CARD_PATTERN = re.compile(r"(?:00[a-l]|(?:0[1-9]|1[0-3])[a-f])-[a-z0-9-]+\.md$")
+CARD_PATTERN = re.compile(r"(?:00a[12]?|00[b-l]|(?:0[1-9]|1[0-3])[a-f])-[a-z0-9-]+\.md$")
 
 
 def main() -> int:
@@ -65,7 +65,7 @@ def main() -> int:
 
         dependency_match = re.search(r"^\*\*Dependency:\*\* (.+)$", contents, re.M)
         dependency_text = dependency_match.group(1) if dependency_match else ""
-        dependencies = re.findall(r"`((?:00[a-l]|(?:0[1-9]|1[0-3])[a-f]))`", dependency_text)
+        dependencies = re.findall(r"`((?:00a[12]?|00[b-l]|(?:0[1-9]|1[0-3])[a-f]))`", dependency_text)
         for dependency in dependencies:
             if dependency not in card_id_set:
                 errors.append(f"{path}: unknown dependency {dependency}")
@@ -100,7 +100,7 @@ def main() -> int:
                 if "/evidence/" in evidence_path or evidence_path.startswith("evidence/"):
                     if not evidence_path.startswith("/private/tmp/proxima-python-frontend/evidence/"):
                         repository_evidence_paths.add(evidence_path)
-            if "capture_validation.py" in command or "script -q" in command or (card_id in {"00a", "00b"} and "check_plan_bootstrap.py" in command):
+            if "capture_validation.py" in command or "script -q" in command or (card_id in {"00a", "00a1", "00a2", "00b"} and ("seed_bootstrap.py" in command or "check_plan_bootstrap.py" in command)):
                 captured_commands += 1
             if "--precommit" in command:
                 precommit_checks += 1
@@ -111,27 +111,23 @@ def main() -> int:
         if len(rows) == 3 and "elapsed_seconds<=1800" not in acceptance_text:
             errors.append(f"{path}: AC3 must assert captured card elapsed time <= 30 minutes")
         if card_id == "00a":
-            if "--precommit" not in commands[1] or "--finalize" not in commands[2]:
-                errors.append(f"{path}: bootstrap AC2/AC3 must check precommit/finalize")
-            if "**Bootstrap argv:** `script -q /private/tmp/proxima-python-card-00a-bootstrap.log /bin/zsh -f`" not in contents:
-                errors.append(f"{path}: bootstrap must use the exact continuous script argv")
-            if "**Bootstrap environment:** `zsh -f`; first PTY command creates `/private/tmp/proxima-python-frontend/bootstrap-zdotdir/card-00a` with `.zshenv` and `.zshrc`, records both hashes, then exports `ZDOTDIR`" not in contents:
-                errors.append(f"{path}: bootstrap must record its isolated ZDOTDIR")
-            if "**Bootstrap event ledger:** `/private/tmp/proxima-python-frontend/evidence/card-00a/bootstrap-events.jsonl`" not in contents or "**Bootstrap receipt:** `/private/tmp/proxima-python-frontend/evidence/card-00a/launcher-receipt.json`" not in contents or "**Finalizer log:** `/private/tmp/proxima-python-card-00a-finalizer.log`" not in contents:
-                errors.append(f"{path}: bootstrap must index each command in one chronological event ledger")
             bootstrap_section = contents.split("## Acceptance criteria", 1)[0]
-            if "no repository helper runs before the PTY" not in contents or "check_plan_bootstrap.py" in bootstrap_section:
-                errors.append(f"{path}: host bootstrap must not call a repository helper before PTY")
-            if "--repo-helper-absent" not in commands[0] or "--cwd /Users/brianbruggeman/repos/slot-0/proxima" not in commands[0] or "cwd_checked=1" not in acceptance_text or "receipt_schema_valid=1" not in acceptance_text or "hook_schema_valid=1" not in acceptance_text:
-                errors.append(f"{path}: AC1 must validate host bootstrap with the repo helper absent")
-            if "--check-zdotdir-files" not in commands[0] or "--check-receipt-process-fields" not in commands[0] or "--check-hook-event" not in commands[0] or "--check-forbidden-helper-control" not in commands[0] or "receipt_process_fields=1" not in acceptance_text or "hook_event_checked=1" not in acceptance_text or "zdotdir_created=1" not in acceptance_text or "zdotdir_files_checked=2" not in acceptance_text or "forbidden_prepty_helper_rejected=1" not in acceptance_text:
-                errors.append(f"{path}: AC1 must open and hash both isolated ZDOTDIR files")
-            if "malformed_receipt_rejected=1" not in acceptance_text or "malformed_hook_rejected=1" not in acceptance_text or "malformed_zdotdir_rejected=1" not in acceptance_text:
-                errors.append(f"{path}: AC1 must reject malformed receipt, hook, and ZDOTDIR controls")
+            if "**Bootstrap argv:** `script -q /private/tmp/proxima-python-card-00a-capture.log /bin/zsh -f`" not in bootstrap_section:
+                errors.append(f"{path}: host capture must use its declared exact script argv")
+            if "no repository helper runs before the PTY" not in bootstrap_section or "first PTY command" not in bootstrap_section:
+                errors.append(f"{path}: host entry must create evidence before any repository helper")
+            if "--verify-entry" not in commands[0] or "omitted_command_rejected=1" not in acceptance_text:
+                errors.append(f"{path}: AC1 must verify captured host entry and reject an omitted command")
+        if card_id in {"00a1", "00a2"} and "check_plan_bootstrap.py" not in commands[0]:
+            errors.append(f"{path}: bootstrap verifier card must exercise its checker")
+        if card_id == "00b" and "00a2" not in dependency_text:
+            errors.append(f"{path}: launcher card must depend on the landed closure reader")
         if card_id == "00b":
             prelaunch_section = contents.split("## Acceptance criteria", 1)[0]
             if "no repository helper before the PTY starts" not in prelaunch_section or "check_plan_bootstrap.py" in prelaunch_section:
                 errors.append(f"{path}: first PTY launch must not depend on a repository helper")
+            if "/evidence/card-00a/session-active/bootstrap-hook.zsh" not in prelaunch_section or "/evidence/card-00a/bootstrap-hook.zsh" in contents:
+                errors.append(f"{path}: launcher must consume the active Card 00a hook, not the historical hook")
             if "bootstrap-zdotdir/card-00b" not in prelaunch_section or "exports `ZDOTDIR=/private/tmp/proxima-python-frontend/bootstrap-zdotdir/card-00b`" not in prelaunch_section or "sources the already-landed Card 00a hook" not in prelaunch_section:
                 errors.append(f"{path}: bootstrap must create isolated ZDOTDIR and source the landed hook before repository work")
         if arguments.check_evidence_plan:
@@ -160,16 +156,16 @@ def main() -> int:
                         repository_evidence_paths.add(evidence_path)
     if repository_evidence_paths:
         errors.append(f"repository-local evidence destinations found: {sorted(repository_evidence_paths)}")
-    if card_ac_rows != 141:
-        errors.append(f"expected 141 card acceptance rows, found {card_ac_rows}")
+    if card_ac_rows != 147:
+        errors.append(f"expected 147 card acceptance rows, found {card_ac_rows}")
     if finalizers != len(cards):
         errors.append(f"expected one captured postpush stage reader per card, found {finalizers}")
     if precommit_checks != len(cards):
         errors.append(f"expected one captured precommit per card, found {precommit_checks}")
     if plan_finalizers != 1:
         errors.append(f"expected one plan-wide finalizer, found {plan_finalizers}")
-    if captured_commands != 142:
-        errors.append(f"expected 142 captured acceptance commands, found {captured_commands}")
+    if captured_commands != 148:
+        errors.append(f"expected 148 captured acceptance commands, found {captured_commands}")
 
     if arguments.check_card_order:
         positions = [EXPECTED_IDS.index(item) for item in EXPECTED_IDS]
@@ -183,13 +179,13 @@ def main() -> int:
         return 1
 
     if arguments.check_split_plan:
-        print(f"cards=47 card_acceptance_rows=141 total_acceptance_rows=142 unique_worktrees={len(worktrees)} precommit={precommit_checks} postpush_stage_checks={finalizers} plan_finalizers={plan_finalizers}")
+        print(f"cards=49 card_acceptance_rows=147 total_acceptance_rows=148 unique_worktrees={len(worktrees)} precommit={precommit_checks} postpush_stage_checks={finalizers} plan_finalizers={plan_finalizers}")
     elif arguments.check_evidence_plan:
-        print(f"cards=47 captured_commands={captured_commands} precommit_checks={precommit_checks} postpush_stage_checks={finalizers} plan_finalizers={plan_finalizers} external_evidence_paths=47 repository_evidence_paths={len(repository_evidence_paths)} missing_fields=0")
+        print(f"cards=49 captured_commands={captured_commands} precommit_checks={precommit_checks} postpush_stage_checks={finalizers} plan_finalizers={plan_finalizers} external_evidence_paths=49 repository_evidence_paths={len(repository_evidence_paths)} missing_fields=0")
     elif arguments.check_card_order:
-        print("card_order=47_ordered_cards evidence_tools_before_frontend=1 architecture_before_implementation=1 cpu_slice_before_omega=1 model_load_after_omega=1 core_sugar_before_extended_sugar=1")
+        print("card_order=49_ordered_cards evidence_tools_before_frontend=1 architecture_before_implementation=1 cpu_slice_before_omega=1 model_load_after_omega=1 core_sugar_before_extended_sugar=1")
     else:
-        print(f"cards=47 unique_worktrees={len(worktrees)} unique_branches={len(branches)} cards_with_acceptance={len(cards)} card_acceptance_rows={card_ac_rows} total_acceptance_rows=142 precommit_checks={precommit_checks} postpush_stage_checks={finalizers} plan_finalizers={plan_finalizers} missing_fields=0")
+        print(f"cards=49 unique_worktrees={len(worktrees)} unique_branches={len(branches)} cards_with_acceptance={len(cards)} card_acceptance_rows={card_ac_rows} total_acceptance_rows=148 precommit_checks={precommit_checks} postpush_stage_checks={finalizers} plan_finalizers={plan_finalizers} missing_fields=0")
     return 0
 
 
