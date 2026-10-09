@@ -60,7 +60,7 @@ pub mod oneshot;
 pub mod runtime_shaped;
 #[cfg(feature = "std")]
 mod rwlock;
-#[cfg(feature = "std")]
+#[cfg(feature = "alloc")]
 mod semaphore;
 // cross-core graceful shutdown (folded in from the former proxima-shutdown
 // satellite crate) — its ResourceRegistry primitive is no_std + alloc; the
@@ -90,7 +90,7 @@ pub use notify::{Notified, Notify};
 pub use once_cell::OnceCell;
 #[cfg(feature = "std")]
 pub use rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-#[cfg(feature = "std")]
+#[cfg(feature = "alloc")]
 pub use semaphore::{
     AcquireError, Semaphore, SemaphoreGuard, SemaphoreGuardArc, SemaphorePermit, TryAcquireError,
 };

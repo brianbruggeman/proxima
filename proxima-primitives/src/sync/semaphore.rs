@@ -79,7 +79,11 @@ impl Semaphore {
         if self.is_closed() {
             return Err(AcquireError(()));
         }
+        // seqcst preserves event-listener's check/listen/check lost-wake proof.
         let listener = self.close_event.listen();
+        if self.is_closed() {
+            return Err(AcquireError(()));
+        }
         let acquire_future = self.inner.acquire().fuse();
         let mut close_future = listener.fuse();
         futures::pin_mut!(acquire_future);
@@ -125,14 +129,14 @@ impl Semaphore {
     /// Close the semaphore. Pending and subsequent `acquire`s return
     /// `Err(AcquireError)`. Idempotent.
     pub fn close(&self) {
-        self.closed.store(true, Ordering::Release);
+        self.closed.store(true, Ordering::SeqCst);
         self.close_event.notify(usize::MAX);
     }
 
     /// `true` iff `close()` has been called.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire)
+        self.closed.load(Ordering::SeqCst)
     }
 }
 
@@ -198,7 +202,25 @@ mod tests {
         clippy::needless_range_loop,
         clippy::default_constructed_unit_structs
     )]
+    use core::future::Future;
+    use core::task::{Context, Poll, Waker};
+    use alloc::sync::Arc;
+    use alloc::task::Wake;
+
     use super::*;
+
+    #[derive(Default)]
+    struct WakeCounter(AtomicUsize);
+
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     #[proxima::test]
     async fn acquire_returns_ok_when_permit_available() {
@@ -229,19 +251,48 @@ mod tests {
 
     #[proxima::test]
     async fn close_wakes_pending_acquires() {
-        let semaphore = std::sync::Arc::new(Semaphore::new(1));
+        let semaphore = Semaphore::new(1);
         let held = semaphore.acquire().await.expect("first permit");
-        let pending_sem = semaphore.clone();
-        // collapse to bool inside the task: the permit's lifetime is
-        // bound to `pending_sem` which lives only inside the closure,
-        // so don't return the Result itself
-        let pending = tokio::spawn(async move { pending_sem.acquire().await.is_err() });
-        // give the pending task a chance to register the listener
-        tokio::task::yield_now().await;
+        let wake_counter = Arc::new(WakeCounter::default());
+        let waker = Waker::from(wake_counter.clone());
+        let mut context = Context::from_waker(&waker);
+        let mut pending_acquire = core::pin::pin!(semaphore.acquire());
+        assert!(matches!(
+            Future::poll(pending_acquire.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        assert_eq!(wake_counter.0.load(Ordering::Relaxed), 0);
         semaphore.close();
-        let pending_was_err = pending.await.expect("join");
-        assert!(pending_was_err);
+        assert_eq!(wake_counter.0.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            Future::poll(pending_acquire.as_mut(), &mut context),
+            Poll::Ready(Err(_))
+        ));
+        wake_counter.0.store(0, Ordering::Relaxed);
         drop(held);
+        assert_eq!(wake_counter.0.load(Ordering::Relaxed), 0);
+    }
+
+    #[proxima::test]
+    async fn release_wakes_one_pending_acquire() {
+        let semaphore = Semaphore::new(1);
+        let held = semaphore.acquire().await.expect("first permit");
+        let wake_counter = Arc::new(WakeCounter::default());
+        let waker = Waker::from(wake_counter.clone());
+        let mut context = Context::from_waker(&waker);
+        let mut pending_acquire = core::pin::pin!(semaphore.acquire());
+        assert!(matches!(
+            Future::poll(pending_acquire.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        assert_eq!(wake_counter.0.load(Ordering::Relaxed), 0);
+        drop(held);
+        assert_eq!(wake_counter.0.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            Future::poll(pending_acquire.as_mut(), &mut context),
+            Poll::Ready(Ok(_))
+        ));
+        assert_eq!(semaphore.available_permits(), 1);
     }
 
     #[proxima::test]
