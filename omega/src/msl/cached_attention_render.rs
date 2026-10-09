@@ -58,9 +58,11 @@ pub(super) fn cached_attention_scalar_score_body(pass_present: bool, new_range_w
 /// one `Codec::Float16`, `Codec::BFloat16` or `Codec::BFloat8` triple read by a narrow-K/V kernel form.
 const CACHED_KV_OPERANDS: [usize; 3] = [2, 3, 6];
 
+pub(super) const BF8_VECTOR_HELPER: &str = "static inline float omega_bf8_to_float(uchar value) { uint sign = ((uint)value & 0x80u) << 24u; uint exponent = ((uint)value >> 2u) & 0x1fu; uint mantissa = (uint)value & 0x3u; if (exponent == 0u) { float magnitude = ldexp((float)mantissa, -16); return sign == 0u ? magnitude : -magnitude; } if (exponent == 31u) { uint bits = 0x7f800000u | (mantissa << 21u); return as_type<float>(sign | bits); } uint bits = ((exponent + 112u) << 23u) | (mantissa << 21u); return as_type<float>(sign | bits); }\nstatic inline float4 omega_bf8x4_to_float4(uchar4 value) { return float4(omega_bf8_to_float(value.x), omega_bf8_to_float(value.y), omega_bf8_to_float(value.z), omega_bf8_to_float(value.w)); }\n";
+
 /// Classifies a cached attention bind's operand codecs: `None` when every
 /// operand is a plain buffer (every kernel form reads this), or a uniform
-/// Float16/BFloat16/BFloat8 cache triple (decode split reads all three; row-tiled reads BF16), an
+/// Float16/BFloat16/BFloat8 cache triple (decode split reads all three; row-tiled reads BF16 and BF8), an
 /// error for any other packing. `quantized` is `operand_codecs`'
 /// answer; entries past its end count as plain, so a hand-built bind with no
 /// packed operands passes `&[]`.
@@ -199,7 +201,7 @@ pub(super) fn render_cached_attention(
             #[cfg(feature = "metal-attn-split-rows")]
             {
                 matches!(form, CachedAttentionForm::TwoRangeRowTiled { .. })
-                    && cached_kv_codec == Some(Codec::BFloat16)
+                    && matches!(cached_kv_codec, Some(Codec::BFloat16 | Codec::BFloat8))
             }
             #[cfg(not(feature = "metal-attn-split-rows"))]
             {
@@ -211,7 +213,7 @@ pub(super) fn render_cached_attention(
     if cached_kv_codec.is_some() && !codec_supported_by_form {
         return Err(EmitError::CachedAttentionKvCodecNotSupported {
             node: resolved.node,
-            reason: "decode split reads Float16, BFloat16 or BFloat8; row-tiled reads BFloat16",
+            reason: "decode split reads Float16, BFloat16 or BFloat8; row-tiled reads BFloat16 or BFloat8",
         });
     }
     let (single_range_dynamic, two_range_cached_bound) = match form {

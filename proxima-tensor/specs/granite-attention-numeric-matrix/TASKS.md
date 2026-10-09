@@ -15,7 +15,7 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 | 08 | [card](cards/08-bf8-device-kv.md) | 02,07 | R3 | `cargo nextest run -p proxima-model-interop --features std,metal,metal-attn-split-rows --lib -E 'test(~card_08_bf8_device)'` | filter selects 2 tests; 2 passed | [x] | `2 passed; 720 filter-excluded; BF8 byte width, codec identity, adopt/append/flush checked` |
 | 09 | [card](cards/09-bf8-decode.md) | 08 | R4 | `cargo nextest run -p omega --features metal-attn-split-decode --test cached_attention_decode_split_parity -E 'test(~card_09_bf8_decode)'` | filter selects 2 tests; 2 passed; Metal output bits match F32-cache decode | [x] | `2 passed; 4 filter-excluded; BF8 decode uses a distinct codec-keyed pipeline identity` |
 | 10 | [card](cards/10-bf16-row.md) | 06 | R4 | `cargo nextest run -p omega --features metal-attn-split-rows --test cached_attention_row_tiled_parity -E 'test(~card_10_bf16_row)'` | filter selects 2 tests; 2 passed; BF16-exact Metal attention output bits match F32-cache output, plan kernel keys differ, and mixed cache codecs decline | [x] | `2 passed; BF16 cache uses F32 simdgroup MMA and preserves attention output bits` |
-| 11 | [card](cards/11-bf8-row.md) | 09,10 | R4 | `cargo nextest run -p omega --features metal-attn-split-rows --lib -E 'test(~card_11_bf8_row)'` | filter selects 2 tests; 2 passed | [ ] | |
+| 11 | [card](cards/11-bf8-row.md) | 09,10 | R4 | `cargo nextest run -p omega --features metal-attn-split-rows --test cached_attention_row_tiled_parity -E 'test(~card_11_bf8_row)'` | filter selects 2 tests; 2 passed; BF8-exact Metal attention output bits match F32-cache output, plan kernel keys differ, mixed cache codecs decline, and padded final cache row is masked | [x] | `2 passed; F32 MMA widens BF8 K/V fragments; padded V row +Inf flip preserves output bits; Card 09 BF8 decode and Card 10 BF16 row regressions each passed 2 tests after common-path padding repair` |
 | 12 | [card](cards/12-variant-config.md) | none | R5,R6 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_12_variant_config)'` | filter selects 2 tests; 2 passed; seven fields and explicit defaults | [ ] | |
 | 13 | [card](cards/13-mma-precision.md) | 10,11,12 | R5,R6 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_13_mma_precision)'` | filter selects 2 tests; 2 passed; operand choice independent of storage | [ ] | |
 | 14 | [card](cards/14-k-reuse.md) | 12,13 | R5 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_14_k_reuse)'` | filter selects 2 tests; 2 passed | [ ] | |
@@ -30,8 +30,8 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 
 ## resume
 
-Last landed slice: card 10 implementation and AC10
-Next action: card 11, read BF8 cache in row-tiled attention
+Last landed slice: card 11 implementation and AC11
+Next action: card 12, make attention variant configuration explicit
 Open question, if any: none; E5M2 is bound as Proxima-owned in SPEC.md
 
 ## struck

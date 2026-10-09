@@ -34,7 +34,7 @@ Use the existing Proxima numeric and Metal abstractions. Do not introduce num-tr
 
 | id | command | expected |
 |---|---|---|
-| AC11 | `cargo nextest run -p omega --features metal-attn-split-rows --lib -E 'test(~card_11_bf8_row)'` | filter selects 2 tests; 2 passed |
+| AC11 | `cargo nextest run -p omega --features metal-attn-split-rows --test cached_attention_row_tiled_parity -E 'test(~card_11_bf8_row)'` | filter selects 2 tests; 2 passed; BF8-exact Metal attention output bits match F32-cache output, plan kernel keys differ, mixed cache codecs decline, and a padded final cache row is masked |
 
 A zero-test match or a checker that does not open its fixture is failure. Run this local command after the edit. The expected count is part of the criterion.
 

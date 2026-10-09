@@ -42,8 +42,8 @@ use proxima_primitives::pipe::Pipe;
 use proxima_tensor::bind::{READY_BATCH_CAPACITY, ReadyBatch};
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::{
-    BoundOp, BoundOpKind, Interpreter, NodeId, NumericPolicy, Op, bind_with_fusion, block_node_ids,
-    infer,
+    BFloat8, BoundOp, BoundOpKind, Interpreter, NodeId, NumericPolicy, Op, bind_with_fusion,
+    block_node_ids, infer,
 };
 
 mod gemma4_rows_support;
@@ -467,6 +467,231 @@ fn card_10_bf16_row_selects_the_bf16_source_and_declines_mixed_cache_codecs() {
         .into_iter()
         .collect::<omega::PackedOperands>();
         let error = omega::emit(bound, &mixed, policy).expect_err("mixed cached codecs decline");
+        assert!(matches!(
+            error,
+            omega::EmitError::CachedAttentionKvCodecNotSupported { .. }
+        ));
+    }
+}
+
+fn bf8_cache_payload(fixture: &mut Fixture) -> Vec<(String, Vec<u8>)> {
+    let shapes = infer(&fixture.program, &fixture.symbols).expect("the fixture shapes infer");
+    for (name, values) in &mut fixture.named {
+        if name.contains(".attn_k.weight") || name.contains(".attn_v.weight") {
+            values.fill(0.0);
+        }
+    }
+    fixture
+        .named
+        .iter_mut()
+        .filter(|(name, _)| name.starts_with("kv_cache."))
+        .map(|(name, values)| {
+            let input_index = fixture
+                .program
+                .iter()
+                .enumerate()
+                .find_map(|(index, op)| match op {
+                    Op::Input {
+                        name: Some(input_name),
+                        ..
+                    } if input_name == name => Some(index),
+                    _ => None,
+                })
+                .expect("each cache block maps to a named input");
+            let cache_row_width: usize = shapes
+                .of(NodeId(input_index as u32))
+                .iter()
+                .skip(1)
+                .map(|extent| *extent as usize)
+                .product();
+            for (index, value) in values.iter_mut().enumerate() {
+                let row = index / cache_row_width;
+                let dimension = index % cache_row_width;
+                *value = if row == 31 {
+                    57_344.0
+                } else if name.ends_with(".v") {
+                    [0.0, 1.0, -1.0, 0.5][(row + dimension) % 4]
+                } else {
+                    [0.25, -0.5, 0.75, -1.0][(row + dimension) % 4]
+                };
+                assert_eq!(
+                    BFloat8::from_f32(*value).to_f32(),
+                    *value,
+                    "row {row} dimension {dimension} is exactly BF8"
+                );
+            }
+            let bytes = values
+                .iter()
+                .map(|value| BFloat8::from_f32(*value).to_bits())
+                .collect();
+            (name.clone(), bytes)
+        })
+        .collect()
+}
+
+#[test]
+fn card_11_bf8_row_matches_f32_cache_output_bits_and_masks_the_padded_row() {
+    let policy = production_numeric_policy();
+    let mut fixture = fixture_with(8, 31, Geometry::ONE_KV_HEAD);
+    let packed_cache = bf8_cache_payload(&mut fixture);
+    assert_eq!(
+        packed_cache.len(),
+        3 * 2,
+        "two layers each carry K even, K odd and V"
+    );
+    let attention = bound_attention(&fixture, policy)
+        .into_iter()
+        .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+        .collect::<Vec<_>>();
+    let root = attention
+        .last()
+        .expect("the fixture includes a global attention operation")
+        .node;
+    let roots = [root];
+    let f32_named = as_named_blocks(&fixture.named);
+    let bf8_named: Vec<(&str, QuantizedBlock<'_>)> = fixture
+        .named
+        .iter()
+        .map(|(name, values)| {
+            match packed_cache
+                .iter()
+                .find(|(packed_name, _)| packed_name == name)
+            {
+                Some((_, bytes)) => (
+                    name.as_str(),
+                    QuantizedBlock::Packed {
+                        codec: omega::Codec::BFloat8,
+                        bytes,
+                    },
+                ),
+                None => (name.as_str(), QuantizedBlock::Float32(values)),
+            }
+        })
+        .collect();
+    let f32_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &f32_named,
+        &roots,
+        policy,
+    )
+    .expect("the F32 row-tiled cache plans");
+    let bf8_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &bf8_named,
+        &roots,
+        policy,
+    )
+    .expect("the BF8 row-tiled cache plans");
+    assert_ne!(
+        f32_plan
+            .kernel_keys()
+            .expect("the F32 plan keys are collected"),
+        bf8_plan
+            .kernel_keys()
+            .expect("the BF8 plan keys are collected"),
+        "the BF8 plan must execute its codec-specific row shader"
+    );
+    let f32_output =
+        omega::execute_plan_named(&f32_plan, &f32_named).expect("the F32 row-tiled cache executes");
+    let bf8_output =
+        omega::execute_plan_named(&bf8_plan, &bf8_named).expect("the BF8 row-tiled cache executes");
+    let f32_bits: Vec<u32> = f32_output
+        .root()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    let bf8_bits: Vec<u32> = bf8_output
+        .root()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    assert_eq!(
+        bf8_bits, f32_bits,
+        "exact BF8 cache values preserve output bits"
+    );
+
+    let cache_bucket = 32_usize;
+    let mut invalid_row_infinity = packed_cache.clone();
+    for (name, bytes) in &mut invalid_row_infinity {
+        if name.ends_with(".v") {
+            let row_width = bytes.len() / cache_bucket;
+            bytes[31 * row_width..32 * row_width].fill(0x7c);
+        }
+    }
+    let infinity_named: Vec<(&str, QuantizedBlock<'_>)> = fixture
+        .named
+        .iter()
+        .map(|(name, values)| match invalid_row_infinity
+            .iter()
+            .find(|(packed_name, _)| packed_name == name)
+        {
+            Some((_, bytes)) => (
+                name.as_str(),
+                QuantizedBlock::Packed {
+                    codec: omega::Codec::BFloat8,
+                    bytes,
+                },
+            ),
+            None => (name.as_str(), QuantizedBlock::Float32(values)),
+        })
+        .collect();
+    let infinity_output = omega::execute_plan_named(&bf8_plan, &infinity_named)
+        .expect("the BF8 plan executes with infinity in the padded V row");
+    let infinity_bits: Vec<u32> = infinity_output
+        .root()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    assert_eq!(
+        infinity_bits, bf8_bits,
+        "padded V row values do not enter the attention output"
+    );
+}
+
+#[test]
+fn card_11_bf8_row_selects_the_bf8_source_and_declines_mixed_cache_codecs() {
+    let policy = production_numeric_policy();
+    let fixture = fixture_with(8, 31, Geometry::ONE_KV_HEAD);
+    let resolved = bound_attention(&fixture, policy);
+    let attention: Vec<&BoundOp> = resolved
+        .iter()
+        .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+        .collect();
+    assert_eq!(
+        attention.len(),
+        2,
+        "the fixture has sliding and global attention"
+    );
+    for bound in attention {
+        let packed = [2, 3, 6]
+            .into_iter()
+            .map(|index| (bound.operands()[index].0, omega::Codec::BFloat8))
+            .collect::<omega::PackedOperands>();
+        let emitted = omega::emit(bound, &packed, policy).expect("BF8 row source emits");
+        assert!(
+            emitted.entry.ends_with("_rt"),
+            "row-tiled entry: {}",
+            emitted.entry
+        );
+        assert!(emitted.source.contains("device const uchar* in2"));
+        assert!(emitted.source.contains("omega_bf8_load_matrix(even_float"));
+        assert!(emitted.source.contains("omega_bf8_to_float"));
+        assert!(emitted
+            .source
+            .contains("omega_zero_padded_value_rows(value_float"));
+        assert!(emitted.source.contains("simdgroup_float8x8"));
+        assert!(!emitted.source.contains("simdgroup_half8x8"));
+
+        let mixed = [
+            (bound.operands()[2].0, omega::Codec::BFloat8),
+            (bound.operands()[3].0, omega::Codec::BFloat8),
+            (bound.operands()[6].0, omega::Codec::BFloat16),
+        ]
+        .into_iter()
+        .collect::<omega::PackedOperands>();
+        let error = omega::emit(bound, &mixed, policy).expect_err("mixed cache codecs decline");
         assert!(matches!(
             error,
             omega::EmitError::CachedAttentionKvCodecNotSupported { .. }

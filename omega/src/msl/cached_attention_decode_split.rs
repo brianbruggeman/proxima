@@ -1,3 +1,4 @@
+use super::cached_attention_render::BF8_VECTOR_HELPER;
 use super::*;
 
 /// The split-KV partial for [`CachedAttentionForm::TwoRangeDecodeSplit`]: one
@@ -153,8 +154,6 @@ const BF8_KV_POINTERS: &str = "device const uchar4* kr4_cached = (device const u
 const BF8_KEY_LOAD: &str = "if (cached) { key_real[step][slot] = omega_bf8x4_to_float4(kr4_cached[index]); key_imag[step][slot] = omega_bf8x4_to_float4(ki4_cached[index]); } else { key_real[step][slot] = float4(kr4_new[index]); key_imag[step][slot] = float4(ki4_new[index]); }";
 
 const BF8_VALUE_LOAD: &str = "if (cached) { value_row[step][slot] = omega_bf8x4_to_float4(v4_cached[index]); } else { value_row[step][slot] = float4(v4_new[index]); }";
-
-const BF8_VECTOR_HELPER: &str = "static inline float omega_bf8_to_float(uchar value) { uint sign = ((uint)value & 0x80u) << 24u; uint exponent = ((uint)value >> 2u) & 0x1fu; uint mantissa = (uint)value & 0x3u; if (exponent == 0u) { float magnitude = ldexp((float)mantissa, -16); return sign == 0u ? magnitude : -magnitude; } if (exponent == 31u) { uint bits = 0x7f800000u | (mantissa << 21u); return as_type<float>(sign | bits); } uint bits = ((exponent + 112u) << 23u) | (mantissa << 21u); return as_type<float>(sign | bits); }\nstatic inline float4 omega_bf8x4_to_float4(uchar4 value) { return float4(omega_bf8_to_float(value.x), omega_bf8_to_float(value.y), omega_bf8_to_float(value.z), omega_bf8_to_float(value.w)); }\n";
 
 const DECODE_SPLIT_KERNEL: &str =r#"struct Uniforms { long total_elements; long context_chunks; long splits; };
 
