@@ -1308,7 +1308,7 @@ pub enum QuantizedBlock<'a> {
 /// [`QuantizedBlock::Packed`] actually carries -- the single Codec->GgmlType
 /// table [`QuantizedBlock::block_layout`] composes down to instead of
 /// restating [`proxima_gguf::GgmlType::block_layout`]'s own per-codec byte
-/// constants a second time. `None` for the 15 `Codec` variants this crate's
+/// constants a second time. `None` for the 16 `Codec` variants this crate's
 /// packed-block construction sites never produce (see [`QuantizedBlock`]'s
 /// own doc). Free function, not an inherent method or a trait -- `Codec` is
 /// `proxima_primitives::Codec`, foreign to this crate (guiding-principles
@@ -1330,6 +1330,7 @@ pub(super) const fn codec_to_decodable_ggml_type(codec: Codec) -> Option<proxima
         Codec::Iq3Xxs => Some(proxima_gguf::GgmlType::Iq3Xxs),
         Codec::Float16 => Some(proxima_gguf::GgmlType::F16),
         Codec::BFloat16 => Some(proxima_gguf::GgmlType::Bf16),
+        Codec::BFloat8 => None,
         Codec::Q4_1
         | Codec::Q8_1
         | Codec::Q8K
@@ -1377,6 +1378,7 @@ pub(super) const fn codec_matmul_f32_kernel(
         Codec::Iq3Xxs => Some(matmul_iq3_xxs_f32),
         Codec::Float16 => Some(matmul_f16_f32),
         Codec::BFloat16 => Some(matmul_bf16_f32),
+        Codec::BFloat8 => None,
         Codec::Q4K
         | Codec::Q5K
         | Codec::Q6K
@@ -1398,11 +1400,10 @@ pub(super) const fn codec_matmul_f32_kernel(
     }
 }
 
-/// This codec's single-shot `dequantize` decoder, or `None` for a codec with
-/// a [`codec_to_decodable_ggml_type`] entry but no row-level decode path
-/// (`Q4_0`/`Q5_0`/`Float16`/`BFloat16`) -- those stay
-/// [`crate::cpu::run_node::dequantize_row`]'s sole caller of `None` here
-/// rather than silently decoding through this table. Every other decodable
+/// This codec's single-shot `dequantize` decoder, or `None` when this table
+/// has no row-level decoder. `Q4_0`/`Q5_0`/`Float16`/`BFloat16` have a GGUF
+/// layout but are decoded by [`crate::cpu::run_node::dequantize_row`];
+/// `BFloat8` has no GGUF representation. Every other decodable
 /// codec's dispatch arm was already exactly one unconditional
 /// `xxx::dequantize(row_bytes, output)` call, so this returns that same
 /// function pointer rather than restating which decoder each codec maps to
@@ -1429,6 +1430,7 @@ pub(super) const fn codec_dequantize_fn(
         | Codec::Q5_0
         | Codec::Float16
         | Codec::BFloat16
+        | Codec::BFloat8
         | Codec::Q4_1
         | Codec::Q8_1
         | Codec::Q8K
@@ -1996,6 +1998,7 @@ const fn codec_name_for_error(codec: Codec) -> &'static str {
         Codec::Q4_0 => "q4_0",
         Codec::Float16 => "float16",
         Codec::BFloat16 => "bfloat16",
+        Codec::BFloat8 => "bfloat8",
         Codec::Q2K => "q2_k",
         Codec::Q5_1 => "q5_1",
         Codec::Q5_0 => "q5_0",
