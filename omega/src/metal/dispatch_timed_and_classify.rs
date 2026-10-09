@@ -37,7 +37,7 @@ pub(super) fn execute_op_timed(
     math_mode: MathMode,
     numeric_policy: NumericPolicy,
     attention_mma_selection: crate::msl::AttentionMmaSelection,
-    attention_kv_reuse_selection: crate::msl::AttentionKvReuseSelection,
+    attention_row_schedule: crate::msl::AttentionRowSchedule,
     expert_buffers: Option<&ExpertSourceBuffers>,
     cpu_reference: Option<&BTreeMap<NodeId, alloc::vec::Vec<f32>>>,
 ) -> Result<OpGpuTiming, MetalError> {
@@ -107,7 +107,7 @@ pub(super) fn execute_op_timed(
         math_mode,
         numeric_policy,
         attention_mma_selection,
-        attention_kv_reuse_selection,
+        attention_row_schedule,
         None,
         #[cfg(feature = "instrument")]
         1,
@@ -453,7 +453,7 @@ pub(super) fn execute_plan_op_timed_inner(
             plan.math_mode,
             plan.numeric_policy,
             plan.attention_mma_selection,
-            plan.attention_kv_reuse_selection,
+            plan.attention_row_schedule,
             expert_buffers,
             cpu_reference,
         )?;
@@ -622,7 +622,7 @@ pub fn execute_plan_with_placements_op_timed(
             plan.math_mode,
             plan.numeric_policy,
             plan.attention_mma_selection,
-            plan.attention_kv_reuse_selection,
+            plan.attention_row_schedule,
             None,
             None,
         )?;
@@ -1131,7 +1131,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
             plan.math_mode,
             plan.numeric_policy,
             plan.attention_mma_selection,
-            plan.attention_kv_reuse_selection,
+            plan.attention_row_schedule,
             None,
             #[cfg(feature = "instrument")]
             1,

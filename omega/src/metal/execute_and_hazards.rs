@@ -64,7 +64,7 @@ pub(super) fn plan_with_placed_inputs(
         math_mode: numeric_policy_as_metal_math_mode(numeric_policy),
         numeric_policy,
         attention_mma_selection: crate::msl::AttentionMmaSelection::Legacy,
-        attention_kv_reuse_selection: crate::msl::AttentionKvReuseSelection::Legacy,
+        attention_row_schedule: crate::msl::AttentionRowSchedule::legacy(),
         dispatch_type: DispatchType::default(),
         command_buffer_chunks: 0,
         command_buffer_chunks_decode_shaped: false,
@@ -359,7 +359,7 @@ pub(super) fn execute_plan_inner(
             plan.math_mode,
             plan.numeric_policy,
             plan.attention_mma_selection,
-            plan.attention_kv_reuse_selection,
+            plan.attention_row_schedule,
             None,
             #[cfg(feature = "instrument")]
             1,

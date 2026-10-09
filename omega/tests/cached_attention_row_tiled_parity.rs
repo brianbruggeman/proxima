@@ -1123,3 +1123,50 @@ fn card_15_v_reuse_device_keeps_query_rows_independent() {
         .collect();
     assert_eq!(infinity_bits, output_bits, "the padded V row stays masked");
 }
+
+#[test]
+fn card_16_tile_height_plan_dispatches_rows16_and_matches_cpu_payload() {
+    let policy = production_numeric_policy();
+    let fixture = fixture_with(16, 31, Geometry::TWO_QUERY_GROUPS);
+    let resolved = bound_attention(&fixture, policy);
+    let expected = run_resolved_on_cpu(&fixture, &resolved);
+    let named = as_named_blocks(&fixture.named);
+    let roots = [fixture.logits];
+    let legacy_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &named,
+        &roots,
+        policy,
+    )
+    .expect("the legacy plan resolves");
+    let mut rows16_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &named,
+        &roots,
+        policy,
+    )
+    .expect("the rows16 candidate plan resolves");
+    rows16_plan
+        .set_attention_variant(omega::AttentionVariant {
+            tile_height: omega::AttentionTileHeight::Rows16,
+            ..omega::AttentionVariant::default()
+        })
+        .expect("the 16-row tile fits the selected shape");
+    let legacy_keys = legacy_plan
+        .kernel_keys()
+        .expect("legacy keys are collected");
+    let rows16_keys = rows16_plan
+        .kernel_keys()
+        .expect("rows16 keys are collected");
+    assert_ne!(legacy_keys, rows16_keys);
+    assert!(rows16_keys.iter().any(|key| key.contains("_tile_rows16")));
+
+    let output = omega::execute_plan_named(&rows16_plan, &named)
+        .expect("the selected rows16 plan executes");
+    assert!(
+        relative_difference(&expected, output.root()) <= TOLERANCE,
+        "rows16 plan output matches the CPU payload"
+    );
+}
