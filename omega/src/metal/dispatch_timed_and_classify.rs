@@ -36,6 +36,7 @@ pub(super) fn execute_op_timed(
     always_live: &BTreeSet<NodeId>,
     math_mode: MathMode,
     numeric_policy: NumericPolicy,
+    attention_mma_selection: crate::msl::AttentionMmaSelection,
     expert_buffers: Option<&ExpertSourceBuffers>,
     cpu_reference: Option<&BTreeMap<NodeId, alloc::vec::Vec<f32>>>,
 ) -> Result<OpGpuTiming, MetalError> {
@@ -104,6 +105,7 @@ pub(super) fn execute_op_timed(
         plan_uniform,
         math_mode,
         numeric_policy,
+        attention_mma_selection,
         None,
         #[cfg(feature = "instrument")]
         1,
@@ -448,6 +450,7 @@ pub(super) fn execute_plan_op_timed_inner(
             &no_placements,
             plan.math_mode,
             plan.numeric_policy,
+            plan.attention_mma_selection,
             expert_buffers,
             cpu_reference,
         )?;
@@ -615,6 +618,7 @@ pub fn execute_plan_with_placements_op_timed(
             &always_live,
             plan.math_mode,
             plan.numeric_policy,
+            plan.attention_mma_selection,
             None,
             None,
         )?;
@@ -1122,6 +1126,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
             uniform_buffer,
             plan.math_mode,
             plan.numeric_policy,
+            plan.attention_mma_selection,
             None,
             #[cfg(feature = "instrument")]
             1,

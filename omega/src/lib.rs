@@ -126,6 +126,7 @@ pub use msl::{
 pub use msl::{
     AttentionKvReuse, AttentionKvStorage, AttentionMmaPrecision, AttentionPrefetch,
     AttentionQueryParallelism, AttentionSimdTopology, AttentionTileHeight, AttentionVariant,
+    emit_with_attention_variant,
 };
 #[cfg(feature = "wgpu-backend")]
 pub use wgpu_driver::{

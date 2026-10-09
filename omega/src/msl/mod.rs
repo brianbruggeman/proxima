@@ -128,6 +128,9 @@ mod expert_grouped_gemm;
 mod wide_grid;
 pub use kernel_types_identity::*;
 pub use emit_and_classify::*;
+pub(crate) use emit_and_classify::emit_inner_with_mma_selection;
+#[cfg(feature = "metal-attn-variants")]
+pub(crate) use emit_and_classify::validate_attention_variant_storage;
 pub(crate) use signature_tokens_prelude::*;
 #[cfg(feature = "metal-attn-variants")]
 pub use signature_tokens_prelude::{
@@ -155,7 +158,11 @@ pub use signature_tokens_prelude::context_chunks_for;
 use cached_attention_decode_split::render_cached_attention_decode_split;
 #[cfg(feature = "metal-attn-split-rows")]
 use cached_attention_row_tiled::render_cached_attention_row_tiled;
-use cached_attention_render::{cached_attention_kv_codec, render_cached_attention};
+use cached_attention_render::{
+    cached_attention_kv_codec, render_cached_attention_with_mma_selection,
+};
+#[cfg(test)]
+use cached_attention_render::render_cached_attention;
 // Same "plain reexport for descendant modules" shape as
 // `render_cached_attention` immediately above -- `render_cached_softmax_
 // weights` is `pub(super)` on its own definition (`cached_softmax_weights_

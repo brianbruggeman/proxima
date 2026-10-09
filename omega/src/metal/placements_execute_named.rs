@@ -1599,6 +1599,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 uniform_buffer,
                 plan.math_mode,
                 plan.numeric_policy,
+                plan.attention_mma_selection,
                 resolved_step,
                 #[cfg(feature = "instrument")]
                 capture_chunk_index,
@@ -2286,6 +2287,7 @@ pub fn execute_plan_timed(
             None,
             plan.math_mode,
             plan.numeric_policy,
+            plan.attention_mma_selection,
             None,
             #[cfg(feature = "instrument")]
             1,
