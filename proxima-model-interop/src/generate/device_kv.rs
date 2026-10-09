@@ -232,6 +232,7 @@ impl DeviceKvLayer {
     fn store_f32(&self, buffer: &PlacedBuffer, byte_offset: usize, values: &[f32]) {
         match self.element {
             GgmlType::F16 => omega::write_placed_buffer_f32_as_f16(buffer, byte_offset, values),
+            GgmlType::Bf16 => omega::write_placed_buffer_f32_as_bf16(buffer, byte_offset, values),
             _ => omega::write_placed_buffer_f32(buffer, byte_offset, values),
         }
     }
@@ -239,6 +240,7 @@ impl DeviceKvLayer {
     fn load_f32(&self, buffer: &PlacedBuffer, byte_offset: usize, count: usize) -> Vec<f32> {
         match self.element {
             GgmlType::F16 => omega::read_placed_buffer_f16_as_f32(buffer, byte_offset, count),
+            GgmlType::Bf16 => omega::read_placed_buffer_bf16_as_f32(buffer, byte_offset, count),
             _ => omega::read_placed_buffer_f32(buffer, byte_offset, count),
         }
     }
@@ -259,26 +261,29 @@ impl DeviceKvLayer {
             (staging_odd, &self.k_odd, self.even_odd_row_bytes, self.even_odd_row),
             (staging_value, &self.v, self.v_row_bytes, self.v_row),
         ] {
-            omega::narrow_placed_buffer_f32_to_f16(
-                staging,
-                0,
-                cache,
-                output_row * row_bytes,
-                new_count * row,
-            );
+            match self.element {
+                GgmlType::F16 => omega::narrow_placed_buffer_f32_to_f16(
+                    staging, 0, cache, output_row * row_bytes, new_count * row,
+                ),
+                GgmlType::Bf16 => omega::narrow_placed_buffer_f32_to_bf16(
+                    staging, 0, cache, output_row * row_bytes, new_count * row,
+                ),
+                other => unreachable!("staging only exists for narrow float caches, got {other:?}"),
+            }
         }
     }
 }
 
 /// Bytes per stored element of a device cache of type `element`: a plain f32
-/// buffer, or binary16 that the cached-attention decode kernel reads as
-/// `Codec::Float16`.
+/// buffer, or a two-byte float that cached-attention reads through its
+/// matching codec.
 fn element_bytes(element: GgmlType) -> Result<usize, InteropError> {
     match element {
         GgmlType::F32 => Ok(core::mem::size_of::<f32>()),
         GgmlType::F16 => Ok(core::mem::size_of::<u16>()),
+        GgmlType::Bf16 => Ok(core::mem::size_of::<u16>()),
         other => Err(InteropError::UnsupportedServingConfig(alloc::format!(
-            "device kv cache type {other:?}: the device-resident cache stores f32 or f16"
+            "device kv cache type {other:?}: the device-resident cache stores f32, f16, or bf16"
         ))),
     }
 }
@@ -362,10 +367,14 @@ impl DeviceKv {
         self.max_step_rows
     }
 
-    /// The packed codec the leaf placements read this cache as: `Some(Float16)`
-    /// for a binary16 cache, `None` for f32 (a plain buffer needs none).
+    /// The packed codec the leaf placements read this cache as, or `None` for
+    /// f32 (a plain buffer needs no codec).
     pub(super) fn cache_codec(&self) -> Option<Codec> {
-        (self.element == GgmlType::F16).then_some(Codec::Float16)
+        match self.element {
+            GgmlType::F16 => Some(Codec::Float16),
+            GgmlType::Bf16 => Some(Codec::BFloat16),
+            _ => None,
+        }
     }
 
     /// Moves what a finished step wrote into the cache, for every layer whose
@@ -982,6 +991,96 @@ mod tests {
         .expect("device kv allocates on the real Metal device")
         .expect("a plain attention cache is adoptable");
         (device, caches)
+    }
+
+    fn bf16_exact_rows(first: usize, count: usize, width: usize, leaf: usize) -> Vec<f32> {
+        (first..first + count)
+            .flat_map(|position| {
+                (0..width).map(move |column| (position * 2 + column) as f32 + leaf as f32 * 0.5)
+            })
+            .collect()
+    }
+
+    fn bf16_exact_cache(positions: usize) -> LayerCache {
+        let mut cache = attention_cache(None, 2, EVEN_ODD_ROW, V_ROW, 0, positions);
+        cache.append_at(
+            0,
+            &bf16_exact_rows(0, positions, EVEN_ODD_ROW, 0),
+            &bf16_exact_rows(0, positions, EVEN_ODD_ROW, 1),
+            &bf16_exact_rows(0, positions, V_ROW, 2),
+        );
+        cache
+    }
+
+    fn adopted_bf16(positions: usize, total_positions: usize) -> (DeviceKv, Vec<LayerCacheState>) {
+        let mut caches = alloc::vec![LayerCacheState::Attention(bf16_exact_cache(positions))];
+        let widths = [LayerPadRowWidths::Attention {
+            even_odd_row: EVEN_ODD_ROW,
+            v_row: V_ROW,
+        }];
+        let device = DeviceKv::adopt(
+            &mut caches,
+            &widths,
+            positions,
+            total_positions,
+            4,
+            3,
+            allocate_placed_buffer,
+            GgmlType::Bf16,
+        )
+        .expect("device kv allocates on the real Metal device")
+        .expect("a plain attention cache is adoptable");
+        (device, caches)
+    }
+
+    #[test]
+    fn card_05_bf16_device_adopts_appends_and_flushes_rows() {
+        let cached_len = 5;
+        let (device, mut caches) = adopted_bf16(cached_len, 80);
+        let layer = device.layers[0].as_ref().expect("layer 0 is resident");
+        assert_eq!(layer.even_odd_row_bytes, EVEN_ODD_ROW * 2);
+        assert_eq!(layer.v_row_bytes, V_ROW * 2);
+        assert_eq!(device.cache_codec(), Some(Codec::BFloat16));
+        assert!(layer.staging.is_some(), "BF16 cache rows stage f32 outputs");
+
+        let [staging_even, staging_odd, staging_value] = layer.staging.as_ref().expect("BF16 cache has three f32 staging buffers");
+        let even = [0.1f32, 0.2, 0.3, 0.4];
+        let odd = [-0.1f32, -0.2, -0.3, -0.4];
+        let value = [1.1f32, 1.2, 1.3, 1.4, 1.5, 1.6];
+        omega::write_placed_buffer_f32(staging_even, 0, &even);
+        omega::write_placed_buffer_f32(staging_odd, 0, &odd);
+        omega::write_placed_buffer_f32(staging_value, 0, &value);
+        device.commit_step(cached_len, 1);
+        device.flush(&mut caches, cached_len + 1, 80);
+
+        let LayerCacheState::Attention(restored) = &caches[0] else {
+            panic!("layer 0 stays an attention cache");
+        };
+        let rounded = |values: &[f32]| values.iter().map(|value| half::bf16::from_f32(*value).to_f32()).collect::<Vec<_>>();
+        let mut expected_even = bf16_exact_rows(0, cached_len, EVEN_ODD_ROW, 0);
+        expected_even.extend(rounded(&even));
+        let mut expected_odd = bf16_exact_rows(0, cached_len, EVEN_ODD_ROW, 1);
+        expected_odd.extend(rounded(&odd));
+        let mut expected_value = bf16_exact_rows(0, cached_len, V_ROW, 2);
+        expected_value.extend(rounded(&value));
+        assert_eq!(restored.k_even, expected_even);
+        assert_eq!(restored.k_odd, expected_odd);
+        assert_eq!(restored.v, expected_value);
+    }
+
+    #[test]
+    fn card_05_bf16_device_declines_unsupported_codec() {
+        let mut caches = alloc::vec![LayerCacheState::Attention(host_cache(None, 10))];
+        let widths = [LayerPadRowWidths::Attention {
+            even_odd_row: EVEN_ODD_ROW,
+            v_row: V_ROW,
+        }];
+        let error = DeviceKv::adopt(
+            &mut caches, &widths, 10, 40, 4, 3, allocate_placed_buffer, GgmlType::Q8_0,
+        )
+        .err()
+        .expect("a Q8_0 device cache has no read path");
+        assert!(error.to_string().contains("device kv cache type"));
     }
 
     #[test]
