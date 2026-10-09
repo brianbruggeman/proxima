@@ -68,15 +68,15 @@ The attention output fixture uses Q/K/V values from `{0, ±0.5, ±1, ±2}`; thes
 
 ## acceptance criteria
 
-The per-card ACs in `cards/` are the executable requirements. Each nextest filter is a uniquely named new test pair and must report **2 tests run: 2 passed, 0 skipped**; a zero-match result is failure. Card 00 has a checker with two independent gates. The dispatch cards additionally assert the selected manifest and baseline source/grid comparison inside those two tests. Tests inspect structure and payload, not timing. Run no benchmark or model measurement during card authoring.
+The per-card ACs in `cards/` are the executable requirements. Each nextest filter uniquely selects two named tests and must report **2 passed**; a zero-match result is failure. Nextest also reports package tests excluded by the filter as skipped, so the skipped count is not expected to be zero. Card 00 has a checker with two independent gates. The dispatch cards additionally assert the selected manifest and baseline source/grid comparison inside those two tests. Tests inspect structure and payload, not timing. Run no benchmark or model measurement during card authoring.
 
 | id | discharges | command | expected |
 |---|---|---|---|
-| AC1 | R1, R2 | `cargo nextest run -p proxima-tensor --lib -E 'test(~card_03_bf8_element)'` | 2 tests run: 2 passed, 0 skipped; after cards 00-03 |
-| AC2 | R3 | `cargo nextest run -p proxima-model-interop --features std,metal,metal-attn-split-rows --lib -E 'test(~card_08_bf8_device)'` | 2 tests run: 2 passed, 0 skipped; after cards 04-08 |
-| AC3 | R4 | `cargo nextest run -p omega --features metal-attn-split-rows --lib -E 'test(~card_11_bf8_row)'` | 2 tests run: 2 passed, 0 skipped; after cards 06,09-11 |
-| AC4 | R5, R6 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_20_dispatch_matrix)'` | 2 tests run: 2 passed, 0 skipped; legacy identity and seven one-factor flips after cards 12-19 |
-| AC5 | R5, R6 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_21_cross_axis)'` | 2 tests run: 2 passed, 0 skipped; supported multi-axis manifest and `prefetch` decline at 42,368 required / 32,768 available bytes after card 20 |
+| AC1 | R1, R2 | `cargo nextest run -p proxima-tensor --lib -E 'test(~card_03_bf8_element)'` | filter selects 2 tests; 2 passed; after cards 00-03 |
+| AC2 | R3 | `cargo nextest run -p proxima-model-interop --features std,metal,metal-attn-split-rows --lib -E 'test(~card_08_bf8_device)'` | filter selects 2 tests; 2 passed; after cards 04-08 |
+| AC3 | R4 | `cargo nextest run -p omega --features metal-attn-split-rows --lib -E 'test(~card_11_bf8_row)'` | filter selects 2 tests; 2 passed; after cards 06,09-11 |
+| AC4 | R5, R6 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_20_dispatch_matrix)'` | filter selects 2 tests; 2 passed; legacy identity and seven one-factor flips after cards 12-19 |
+| AC5 | R5, R6 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_21_cross_axis)'` | filter selects 2 tests; 2 passed; supported multi-axis manifest and `prefetch` decline at 42,368 required / 32,768 available bytes after card 20 |
 | AC6a | R7 | `AB_ATTENTION_VARIANT='kv_storage=f32,mma_precision=legacy,kv_reuse=legacy,tile_height=legacy,query_parallelism=legacy,simd_topology=legacy,prefetch=off' AB_VARIANT_DESCRIBE_ONLY=1 cargo run -p proxima-model-interop --example norm_variant_ab --features std,metal,instrument,metal-attn-split-rows,metal-attn-variants --` | 1 legacy `ab variant` line with seven named values, selected entry/source hash/grid and zero timed cells; after card 22 |
 | AC6b | R7 | `AB_ATTENTION_VARIANT='kv_storage=bf16,mma_precision=f16,kv_reuse=shared_k,tile_height=rows_8,query_parallelism=simdgroup_rows,simd_topology=per_head,prefetch=off' AB_VARIANT_DESCRIBE_ONLY=1 cargo run -p proxima-model-interop --example norm_variant_ab --features std,metal,instrument,metal-attn-split-rows,metal-attn-variants --` | 1 non-legacy `ab variant` line with seven selected values, changed source/grid identity and zero timed cells; after card 22 |
 
