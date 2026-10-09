@@ -126,6 +126,12 @@ use omega::backend::set_dispatch_type;
 // only means anything on a build carrying `omega::metal::Plan`.
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::backend::set_command_buffer_chunks;
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-attn-variants",
+    target_os = "macos"
+))]
+use omega::backend::set_attention_variant;
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::metal::OpGpuTiming;
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]

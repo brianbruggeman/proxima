@@ -75,6 +75,9 @@ pub(super) struct PlanIdentity {
     math_mode: MathMode,
     /// Encoder dispatch mode applied to the plan.
     dispatch_type: DispatchType,
+    /// Cached-attention source and grid selection applied to the plan.
+    #[cfg(feature = "metal-attn-variants")]
+    attention_variant: Option<omega::AttentionVariant>,
     /// Plan-time constants kept resident after their first dispatch.
     plan_time_constants: bool,
     /// Command-buffer split the plan was stamped with.
@@ -149,6 +152,8 @@ impl PlanIdentity {
             math_mode,
             numeric_policy,
             dispatch_type,
+            #[cfg(feature = "metal-attn-variants")]
+            attention_variant,
             // CPU reference path only; a resident plan is a Metal plan
             exact_activations: _,
             // bind-time recode applied once at load
@@ -191,6 +196,8 @@ impl PlanIdentity {
             numeric_policy,
             math_mode,
             dispatch_type,
+            #[cfg(feature = "metal-attn-variants")]
+            attention_variant,
             plan_time_constants,
             command_buffer_chunks,
             cached_attention_fusion,

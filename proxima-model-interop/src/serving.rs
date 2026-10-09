@@ -50,6 +50,12 @@ use alloc::string::String;
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::{DispatchType, MathMode};
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-attn-variants",
+    target_os = "macos"
+))]
+use omega::AttentionVariant;
 use proxima_gguf::types::GgmlType;
 use proxima_tensor::NumericPolicy;
 
@@ -919,6 +925,14 @@ pub struct ServingConfig<'model> {
     /// non-Metal build still has an `apply_serving_config` walk that should
     /// see it.
     pub numeric_policy: NumericPolicy,
+    /// Optional cached-attention selector for model-backed Metal plans.
+    /// `None` keeps the plan's existing legacy selection.
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-attn-variants",
+        target_os = "macos"
+    ))]
+    pub attention_variant: Option<AttentionVariant>,
     /// Not an upstream llama-server flag -- `omega::metal::DispatchType` for
     /// the one compute encoder every call's `Plan`s dispatch through on the
     /// Metal backend (`generate.rs`'s `BackendRuntime::new` reads this once
@@ -1240,6 +1254,12 @@ impl Default for ServingConfig<'static> {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
             numeric_policy: NumericPolicy::llama_relaxed().with_epilogue_sources(true),
+            #[cfg(all(
+                feature = "metal",
+                feature = "metal-attn-variants",
+                target_os = "macos"
+            ))]
+            attention_variant: None,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Serial,
             // Correctness-first default: CPU uses the scalar/dequantized
