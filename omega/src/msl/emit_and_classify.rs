@@ -1805,13 +1805,22 @@ pub(crate) fn kernel_cache_key_for_grid(
     // it, so this stays the one place that fails fast on a dtype `emit`
     // would also reject.
     type_token(resolved.node, resolved.dtype)?;
-    Ok(crate::identity::kernel_identity(
+    let mut identity = crate::identity::kernel_identity(
         crate::identity::KernelLanguage::Metal,
         resolved,
         packed_operands,
         metal_specialization(resolved, packed_operands, numeric_policy, grid),
         numeric_policy,
-    ))
+    );
+    if let Some((_, _, _, tokens, experts)) =
+        crate::msl::route_compaction_key(resolved, packed_operands)
+    {
+        identity.push_str("_route");
+        identity.push_str(&tokens.to_string());
+        identity.push('_');
+        identity.push_str(&experts.to_string());
+    }
+    Ok(identity)
 }
 
 /// The dispatch-time shape of `resolved`'s kernel — buffer bindings and

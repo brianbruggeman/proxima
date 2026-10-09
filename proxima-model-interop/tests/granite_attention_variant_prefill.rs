@@ -8,13 +8,17 @@ use std::fs::File;
 use std::path::Path;
 
 use memmap2::Mmap;
+use omega::metal::MetalError;
+use omega::msl::Binding;
 use omega::{
     AttentionKvReuse, AttentionVariant, CapturedDispatch, set_capture_step,
     take_captured_dispatches,
 };
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
-use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, PromptCacheConfig, ServingConfig};
+use proxima_model_interop::{
+    GPU_LAYERS_ALL, InteropError, LoadedModel, PromptCacheConfig, ServingConfig,
+};
 
 const GRANITE_MOE_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
 const GRANITE_MOE_ENV: &str = "PROXIMA_ARCH_GRANITE_MOE_GGUF";
@@ -165,6 +169,79 @@ fn compare_token_ids(expected: &[u32], actual: &[u32]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn route_mismatch_node(error: &InteropError) -> u32 {
+    match error {
+        InteropError::Metal(MetalError::RouteCompactionMismatch { node, .. }) => node.0,
+        _ => u32::MAX,
+    }
+}
+
+fn captured_route_prepass_summary(node: u32) -> String {
+    take_captured_dispatches()
+        .into_iter()
+        .filter(|dispatch| dispatch.node == node)
+        .map(|dispatch| {
+            let route_inputs = dispatch
+                .bindings
+                .iter()
+                .enumerate()
+                .filter(|(_, binding)| matches!(binding, Binding::Indices(_)))
+                .map(|(index, binding)| {
+                    let head = dispatch
+                        .bound_buffer_bytes_at(index)
+                        .map(|bytes| {
+                            bytes
+                                .get(..bytes.len().min(32))
+                                .unwrap_or_default()
+                                .chunks_exact(4)
+                                .map(|word| {
+                                    f32::from_ne_bytes([word[0], word[1], word[2], word[3]])
+                                })
+                                .collect::<Vec<_>>()
+                        });
+                    format!("({index}, {binding:?}, {head:?})")
+                })
+                .collect::<Vec<_>>();
+            let live_header = dispatch
+                .bound_buffer_bytes_at(dispatch.bindings.len())
+                .and_then(|bytes| {
+                    bytes.get(..4).map(|header| {
+                        u32::from_ne_bytes([header[0], header[1], header[2], header[3]])
+                    })
+                });
+            let compaction_bytes = dispatch
+                .bound_buffer_bytes_at(dispatch.bindings.len())
+                .map(|bytes| bytes.len());
+            let compact_head = dispatch
+                .bound_buffer_bytes_at(dispatch.bindings.len())
+                .map(|bytes| {
+                    bytes
+                        .get(..bytes.len().min(128))
+                        .unwrap_or_default()
+                        .chunks_exact(4)
+                        .map(|word| u32::from_ne_bytes([word[0], word[1], word[2], word[3]]))
+                        .collect::<Vec<_>>()
+                });
+            format!(
+                "(node={}, step={}, chunk={}, entry={}, sha={}, bindings={:?}, prepass_dispatches={}, prepass_grid={:?}, max_threads={:?}, owner={:?}, compaction_bytes={compaction_bytes:?}, route_inputs={route_inputs:?}, uniforms_head={:?}, live_header={live_header:?}, compact_head={compact_head:?}, unreplayable={:?})",
+                dispatch.node,
+                dispatch.step,
+                dispatch.chunk_index,
+                dispatch.entry,
+                dispatch.msl_sha256,
+                dispatch.bindings,
+                dispatch.route_prepass_dispatches,
+                dispatch.route_prepass_grid,
+                dispatch.route_prepass_max_threads,
+                dispatch.prepass_owner,
+                dispatch.uniform_bytes.get(..dispatch.uniform_bytes.len().min(32)),
+                dispatch.unreplayable,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn require_expected_answer(response: &str, expected_fact: &str) -> Result<(), String> {
@@ -493,6 +570,93 @@ async fn card_24_granite_viability_ant_vs_briefcase() {
 #[proxima::test]
 async fn card_24_granite_viability_hippo_vs_building() {
     run_granite_viability_case(granite_viability_checks().remove(3));
+}
+
+#[proxima::test]
+async fn card_25_granite_sequential_public_requests_complete_on_one_model() {
+    let path = granite_checkpoint_path();
+    let file = File::open(&path).expect("open the real Granite checkpoint");
+    // SAFETY: this test only reads the checkpoint and does not mutate it.
+    let mapping = unsafe { Mmap::map(&file) }.expect("mmap the Granite checkpoint");
+    let parsed = parse_complete(&mapping).expect("parse the Granite checkpoint");
+    let model = LoadedModel::load(&parsed, &mapping).expect("bind the Granite checkpoint");
+
+    let (fixture_prompt, _, fixture_expected_ids) = granite_long_prompt_oracle();
+    let (fixture_legacy_ids, fixture_legacy_text, _) = model
+        .generate_with_serving_config(&fixture_prompt, 128, serving_config(None))
+        .unwrap_or_else(|error| panic!("fixture legacy request failed: {error:?}"));
+    let (fixture_selected_ids, fixture_selected_text, _) = model
+        .generate_with_serving_config(
+            &fixture_prompt,
+            128,
+            serving_config(Some(shared_k_variant())),
+        )
+        .unwrap_or_else(|error| panic!("fixture selected request failed: {error:?}"));
+    compare_token_ids(&fixture_expected_ids, &fixture_legacy_ids)
+        .unwrap_or_else(|error| panic!("fixture legacy output differs: {error}"));
+    compare_token_ids(&fixture_expected_ids, &fixture_selected_ids)
+        .unwrap_or_else(|error| panic!("fixture selected output differs: {error}"));
+    assert_eq!(fixture_legacy_text, fixture_selected_text);
+    println!(
+        "card_25 fixture prompt_ids=1000 generated_ids={} legacy_text_bytes={} selected_text_bytes={}",
+        fixture_expected_ids.len(),
+        fixture_legacy_text.len(),
+        fixture_selected_text.len()
+    );
+
+    for check in granite_viability_checks() {
+        let _ = take_captured_dispatches();
+        let (legacy_ids, legacy_text, _) = model
+            .generate_with_serving_config(&check.prompt, 48, serving_config(None))
+            .unwrap_or_else(|error| {
+                let node = route_mismatch_node(&error);
+                let route_state = captured_route_prepass_summary(node);
+                panic!(
+                    "{} legacy request failed: {error:?}; route prepass captures: {route_state}",
+                    check.name
+                )
+            });
+        let (selected_ids, selected_text, _) = match model.generate_with_serving_config(
+                &check.prompt,
+                48,
+                serving_config(Some(shared_k_variant())),
+            ) {
+            Ok(result) => result,
+            Err(error) => {
+                let node = route_mismatch_node(&error);
+                let route_state = captured_route_prepass_summary(node);
+                panic!(
+                    "{} selected request failed: {error:?}; route prepass captures: {route_state}",
+                    check.name
+                );
+            }
+        };
+        assert!(
+            !legacy_ids.is_empty()
+                && !selected_ids.is_empty()
+                && !legacy_text.trim().is_empty()
+                && !selected_text.trim().is_empty(),
+            "{} repeated request returned an empty result: legacy_ids={legacy_ids:?}, legacy_text={legacy_text:?}, selected_ids={selected_ids:?}, selected_text={selected_text:?}",
+            check.name
+        );
+        compare_token_ids(&legacy_ids, &selected_ids).unwrap_or_else(|error| {
+            panic!("{} repeated request arms differ: {error}", check.name)
+        });
+        assert_eq!(legacy_text, selected_text, "{} repeated request text", check.name);
+        let answer_check = require_expected_answer(&selected_text, check.expected_answer);
+        let relation_check = check.expected_relation.map(|(relation, comparison_term)| {
+            require_comparison_answer(
+                &selected_text,
+                check.expected_answer,
+                relation,
+                comparison_term,
+            )
+        });
+        println!(
+            "card_25 request name={} answer_check={answer_check:?} relation_check={relation_check:?} legacy_ids={legacy_ids:?} selected_ids={selected_ids:?} legacy_text={legacy_text:?} selected_text={selected_text:?}",
+            check.name
+        );
+    }
 }
 
 fn shared_k_variant() -> AttentionVariant {

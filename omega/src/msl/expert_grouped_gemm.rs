@@ -1286,7 +1286,7 @@ pub(crate) fn route_compaction_key(
     ))
 }
 
-#[cfg(all(not(feature = "metal-grouped-gemm"), feature = "metal", target_os = "macos"))]
+#[cfg(not(feature = "metal-grouped-gemm"))]
 pub(crate) fn route_compaction_key(
     _resolved: &BoundOp,
     _packed_operands: &PackedOperands,

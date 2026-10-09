@@ -1084,6 +1084,8 @@ pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan)
 /// env vars per call (`PROXIMA_CAPTURE_NODES`, parsed once per call rather
 /// than cached, since this only ever fires under `instrument` for a handful
 /// of explicitly named nodes) -- never on the default decode hot path.
+/// `PROXIMA_CAPTURE_NODES=route-prepass` matches only compacted grouped GEMMs,
+/// so their prepass owner/reuse and launch records can be inspected alone.
 ///
 /// `PROXIMA_CAPTURE_DUMP_DIR=<dir>`, on top of a `PROXIMA_CAPTURE_NODES`
 /// match: stashes this dispatch's resolved buffer handles (not their bytes
@@ -1139,7 +1141,9 @@ fn capture_dispatch(
         return;
     };
     let output_only = wanted.trim() == "packed-multi-token";
+    let route_prepass_only = wanted.trim() == "route-prepass";
     let matched = wanted.trim() == "all"
+        || (route_prepass_only && prepass.is_some())
         || (output_only && is_packed_multi_token_projection(bound, packed_operands))
         || wanted
             .split(',')
@@ -1341,6 +1345,10 @@ fn capture_dispatch(
                 bindings: bindings.to_vec(),
                 unreplayable: unreplayable.or(extras_reason),
                 route_prepass_dispatches,
+                route_prepass_grid: captured_prepass.as_ref().map(|prepass| prepass.grid),
+                route_prepass_max_threads: captured_prepass.as_ref().map(|prepass| {
+                    prepass.pipeline.maxTotalThreadsPerThreadgroup() as usize
+                }),
                 uniform_bytes,
                 pipeline: pipeline.clone(),
                 buffers: live_buffers,
@@ -1568,9 +1576,13 @@ pub struct CapturedDispatch {
     /// at the dispatch site, so [`Self::time_gpu_ns`] refuses it
     pub unreplayable: Option<String>,
     /// route-prepass dispatches the encoder issued for this op, replayed
-    /// inside this record ahead of the gemm: 1 for a compacted grouped gemm,
+    /// inside this record ahead of the GEMM: 2 for a compacted grouped GEMM,
     /// else 0
     pub route_prepass_dispatches: u64,
+    /// requested launch grid and compiled threadgroup cap for the route prepass
+    pub route_prepass_grid: Option<GridSpec>,
+    /// `maxTotalThreadsPerThreadgroup` of the route-prepass count pipeline
+    pub route_prepass_max_threads: Option<usize>,
     /// raw bytes of the bound `Uniforms` struct at encode time
     pub uniform_bytes: Vec<u8>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
@@ -2025,6 +2037,8 @@ impl CapturedDispatch {
             bindings: self.bindings.clone(),
             unreplayable: self.unreplayable.clone(),
             route_prepass_dispatches: self.route_prepass_dispatches,
+            route_prepass_grid: self.route_prepass_grid,
+            route_prepass_max_threads: self.route_prepass_max_threads,
             uniform_bytes: self.uniform_bytes.clone(),
             pipeline,
             buffers: self.buffers.clone(),
@@ -2106,6 +2120,8 @@ impl CapturedDispatch {
             bindings: self.bindings.clone(),
             unreplayable: self.unreplayable.clone(),
             route_prepass_dispatches: self.route_prepass_dispatches,
+            route_prepass_grid: self.route_prepass_grid,
+            route_prepass_max_threads: self.route_prepass_max_threads,
             uniform_bytes: self.uniform_bytes.clone(),
             pipeline: self.pipeline.clone(),
             buffers,
@@ -2251,6 +2267,8 @@ impl CapturedDispatch {
             bindings: self.bindings.clone(),
             unreplayable: self.unreplayable.clone(),
             route_prepass_dispatches: self.route_prepass_dispatches,
+            route_prepass_grid: self.route_prepass_grid,
+            route_prepass_max_threads: self.route_prepass_max_threads,
             uniform_bytes: self.uniform_bytes.clone(),
             pipeline: template.pipeline.clone(),
             buffers: self.buffers.clone(),
@@ -3510,6 +3528,15 @@ pub(super) fn encode_op(
                     (compaction, bound.node, false)
                 }
             };
+            trace!(
+                node = bound.node.0,
+                key = ?shared_key,
+                owner = ?owner,
+                reused,
+                grid = ?prepass.grid,
+                compaction = Retained::as_ptr(&compaction) as usize,
+                "route_prepass_binding"
+            );
             if reused {
                 // SAFETY: the shared compaction is a live shared-storage buffer the owner's prepass filled.
                 unsafe { encoder.setBuffer_offset_atIndex(Some(&compaction), 0, bindings.len()) };
