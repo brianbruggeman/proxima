@@ -1807,7 +1807,8 @@ impl AttentionMmaSelection {
             return Err(("tile_height", "row-tiled attention feature is disabled"));
         }
         if variant.query_parallelism != AttentionQueryParallelism::Legacy {
-            return Err(("query_parallelism", "simdgroup_rows"));
+            #[cfg(not(feature = "metal-attn-split-rows"))]
+            return Err(("query_parallelism", "row-tiled attention feature is disabled"));
         }
         if variant.simd_topology != AttentionSimdTopology::Legacy {
             return Err(("simd_topology", match variant.simd_topology {
@@ -1832,6 +1833,10 @@ impl AttentionMmaSelection {
                     AttentionKvReuse::SharedKv => AttentionRowSchedule::shared_kv(),
                 }
                 .with_tile_height(tile_height)
+                .with_query_parallelism(match variant.query_parallelism {
+                    AttentionQueryParallelism::Legacy => AttentionQueryParallelismSelection::Legacy,
+                    AttentionQueryParallelism::SimdgroupRows => AttentionQueryParallelismSelection::SimdgroupRows,
+                })
             },
         ))
     }
@@ -1850,6 +1855,14 @@ enum AttentionKvReuseMode {
 pub(crate) struct AttentionRowSchedule {
     kv_reuse: AttentionKvReuseMode,
     tile_height: AttentionTileHeightSelection,
+    query_parallelism: AttentionQueryParallelismSelection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AttentionQueryParallelismSelection {
+    Legacy,
+    #[cfg(feature = "metal-attn-variants")]
+    SimdgroupRows,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1901,6 +1914,7 @@ impl AttentionRowSchedule {
         Self {
             kv_reuse: AttentionKvReuseMode::Legacy,
             tile_height: AttentionTileHeightSelection::Legacy,
+            query_parallelism: AttentionQueryParallelismSelection::Legacy,
         }
     }
 
@@ -1908,6 +1922,7 @@ impl AttentionRowSchedule {
     pub(crate) const fn is_legacy(self) -> bool {
         matches!(self.kv_reuse, AttentionKvReuseMode::Legacy)
             && matches!(self.tile_height, AttentionTileHeightSelection::Legacy)
+            && matches!(self.query_parallelism, AttentionQueryParallelismSelection::Legacy)
     }
 
     #[cfg(feature = "metal-attn-variants")]
@@ -1915,6 +1930,7 @@ impl AttentionRowSchedule {
         Self {
             kv_reuse: AttentionKvReuseMode::SharedK,
             tile_height: AttentionTileHeightSelection::Legacy,
+            query_parallelism: AttentionQueryParallelismSelection::Legacy,
         }
     }
 
@@ -1923,6 +1939,7 @@ impl AttentionRowSchedule {
         Self {
             kv_reuse: AttentionKvReuseMode::SharedKv,
             tile_height: AttentionTileHeightSelection::Legacy,
+            query_parallelism: AttentionQueryParallelismSelection::Legacy,
         }
     }
 
@@ -1948,6 +1965,19 @@ impl AttentionRowSchedule {
         Self { tile_height, ..self }
     }
 
+    #[cfg(feature = "metal-attn-variants")]
+    const fn with_query_parallelism(
+        self,
+        query_parallelism: AttentionQueryParallelismSelection,
+    ) -> Self {
+        Self { query_parallelism, ..self }
+    }
+
+    #[cfg(feature = "metal-attn-variants")]
+    pub(crate) const fn is_simdgroup_rows(self) -> bool {
+        matches!(self.query_parallelism, AttentionQueryParallelismSelection::SimdgroupRows)
+    }
+
     pub(crate) fn cache_token(self) -> String {
         let reuse = match self.kv_reuse {
             AttentionKvReuseMode::Legacy => "",
@@ -1956,7 +1986,12 @@ impl AttentionRowSchedule {
             #[cfg(feature = "metal-attn-variants")]
             AttentionKvReuseMode::SharedKv => "_kv_shared_kv",
         };
-        alloc::format!("{reuse}{}", self.tile_height.cache_token())
+        let query = match self.query_parallelism {
+            AttentionQueryParallelismSelection::Legacy => "",
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionQueryParallelismSelection::SimdgroupRows => "_query_simdgroup_rows",
+        };
+        alloc::format!("{reuse}{}{query}", self.tile_height.cache_token())
     }
 
     pub(crate) fn cache_token_for(self, bound: &BoundOp) -> String {
@@ -2233,6 +2268,42 @@ pub(crate) fn validate_tile_height_selection(
         rows,
         reason,
     })
+}
+
+#[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
+pub(crate) fn validate_query_parallelism_selection(
+    resolved: &BoundOp,
+    policy: NumericPolicy,
+    schedule: AttentionRowSchedule,
+) -> Result<(), EmitError> {
+    if !schedule.is_simdgroup_rows() {
+        return Ok(());
+    }
+    let BoundOpKind::CachedAttention { query_rows, .. } = &resolved.kind else {
+        return Ok(());
+    };
+    let reason = if *query_rows == 1 {
+        Some("simdgroup row ownership requires at least two query rows")
+    } else if !matches!(
+        cached_attention_form_with_tile_height(
+            &resolved.kind,
+            policy,
+            schedule.tile_height(),
+        ),
+        Some(CachedAttentionForm::TwoRangeRowTiled { .. })
+    ) {
+        Some("simdgroup row ownership requires the row-tiled attention form")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        return Err(EmitError::CachedAttentionQueryParallelismNotSupported {
+            node: resolved.node,
+            query_rows: *query_rows,
+            reason,
+        });
+    }
+    Ok(())
 }
 
 /// The decode split form of a two-range cached-bound op, when the op and the

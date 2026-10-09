@@ -109,6 +109,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
     row_schedule: AttentionRowSchedule,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
+        query_rows,
         kv_heads,
         query_groups,
         head_dim,
@@ -148,10 +149,14 @@ pub(super) fn render_cached_attention_row_tiled_with(
     let shared_k = row_schedule.has_shared_k();
     #[cfg(feature = "metal-attn-variants")]
     let shared_v = row_schedule.is_shared_kv();
+    #[cfg(feature = "metal-attn-variants")]
+    let query_parallel_rows = row_schedule.is_simdgroup_rows();
     #[cfg(not(feature = "metal-attn-variants"))]
     let shared_k = false;
     #[cfg(not(feature = "metal-attn-variants"))]
     let shared_v = false;
+    #[cfg(not(feature = "metal-attn-variants"))]
+    let query_parallel_rows = false;
     #[cfg(not(feature = "metal-attn-variants"))]
     let _ = row_schedule;
     let block = row_tiled_block(*head_dim);
@@ -162,9 +167,23 @@ pub(super) fn render_cached_attention_row_tiled_with(
     } else {
         (rows_per_threadgroup * *query_groups) / 8
     };
-    let score_vectors = if shared_k { query_blocks.div_ceil(simdgroups) } else { query_blocks };
-    let shared_v_accumulator_fragments = (*head_dim / 8) * score_vectors;
-    if shared_v && shared_v_accumulator_fragments > crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS {
+    let query_owner_rows = shared_v || query_parallel_rows;
+    let score_vectors = if shared_k || query_owner_rows {
+        query_blocks.div_ceil(simdgroups)
+    } else {
+        query_blocks
+    };
+    let query_owner_accumulator_fragments = (*head_dim / 8) * score_vectors;
+    if query_owner_rows
+        && query_owner_accumulator_fragments > crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS
+    {
+        if query_parallel_rows {
+            return Err(EmitError::CachedAttentionQueryParallelismNotSupported {
+                node: resolved.node,
+                query_rows: *query_rows,
+                reason: "simdgroup row ownership exceeds the configured accumulator-fragment budget",
+            });
+        }
         return Err(EmitError::CachedAttentionKvReuseNotSupported {
             node: resolved.node,
             reason: "shared K/V query ownership exceeds the configured accumulator-fragment budget",
@@ -280,6 +299,8 @@ pub(super) fn render_cached_attention_row_tiled_with(
         ),
         ("@KV_REUSE_SHARED_K@", shared_k.to_string()),
         ("@KV_REUSE_SHARED_V@", shared_v.to_string()),
+        ("@QUERY_PARALLEL_ROWS@", query_parallel_rows.to_string()),
+        ("@QUERY_OWNER_ROWS@", query_owner_rows.to_string()),
         (
             "@SHARED_K_LOAD@",
             if half_operands {
@@ -370,12 +391,13 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
     constexpr long tile_blocks = rows_in_fragment ? (tile_rows / 8) * query_groups : (tile_rows * query_groups) / 8;
     constexpr long tile_vectors = tile_blocks * 8; constexpr long threads = simdgroups * 32;
     constexpr long dims_per_group = head_dim / 8 / simdgroups; constexpr long depth_unroll = ((half_dim / 8) % 2 == 0) ? 2 : 1;
-    constexpr bool shared_k = @KV_REUSE_SHARED_K@; constexpr bool shared_v = @KV_REUSE_SHARED_V@;
+    constexpr bool shared_k = @KV_REUSE_SHARED_K@; constexpr bool shared_v = @KV_REUSE_SHARED_V@; constexpr bool query_parallel_rows = @QUERY_PARALLEL_ROWS@; constexpr bool query_owner_rows = @QUERY_OWNER_ROWS@;
     constexpr long key_tiles_per_group = (block / 8) / simdgroups;
-    constexpr long score_key_tiles = shared_k ? (block / 8) : key_tiles_per_group;
-    constexpr long score_vectors_per_simdgroup = shared_k ? (tile_blocks + simdgroups - 1) / simdgroups : tile_blocks;
-    constexpr long accumulator_dimensions = shared_v ? (head_dim / 8) : dims_per_group;
-    constexpr long accumulator_vectors = shared_v ? score_vectors_per_simdgroup : tile_blocks;
+    constexpr long score_key_tiles = (shared_k || query_parallel_rows) ? (block / 8) : key_tiles_per_group;
+    constexpr long key_tiles_per_simdgroup = (!shared_k && query_parallel_rows) ? (block / 8) : key_tiles_per_group;
+    constexpr long score_vectors_per_simdgroup = query_owner_rows ? (tile_blocks + simdgroups - 1) / simdgroups : tile_blocks;
+    constexpr long accumulator_dimensions = query_owner_rows ? (head_dim / 8) : dims_per_group;
+    constexpr long accumulator_vectors = query_owner_rows ? score_vectors_per_simdgroup : tile_blocks;
     constexpr long query_stride = rows_in_fragment ? kv_heads * query_groups * half_dim : half_dim;
     long splits = u.splits;
     long total_rows = u.total_elements / (kv_heads * query_groups);
@@ -459,9 +481,9 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
             simdgroup_float8x8 scores[score_key_tiles][score_vectors_per_simdgroup];
             FOR_UNROLL for (int key_slot = 0; key_slot < (int)score_key_tiles; key_slot++) { FOR_UNROLL for (int vector_slot = 0; vector_slot < (int)score_vectors_per_simdgroup; vector_slot++) { scores[key_slot][vector_slot] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f); } }
             for (int depth = 0; depth < (int)half_dim; depth += 8 * (int)depth_unroll) {
-                @OPERAND@ key_even_tile[key_tiles_per_group][depth_unroll]; @OPERAND@ key_odd_tile[key_tiles_per_group][depth_unroll];
-                FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) {
-                    int key_tile = (int)simdgroup_slot + group * (int)simdgroups;
+                @OPERAND@ key_even_tile[key_tiles_per_simdgroup][depth_unroll]; @OPERAND@ key_odd_tile[key_tiles_per_simdgroup][depth_unroll];
+                FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_simdgroup; group++) {
+                    int key_tile = (!shared_k && query_parallel_rows) ? group : ((int)simdgroup_slot + group * (int)simdgroups);
                     if (key_tile < fragments) {
                         device const float* key_even_ptr = key_even + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
                         device const float* key_odd_ptr = key_odd + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
@@ -532,6 +554,8 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                     }
                 } else {
                     FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) {
+                        if (query_parallel_rows && vector_block % (int)simdgroups != (int)simdgroup_slot) { continue; }
+                        int vector_slot = query_parallel_rows ? vector_block / (int)simdgroups : vector_block;
                         long query_offset = (block_row[vector_block] * (kv_heads * query_groups) + kv_head * query_groups + block_head[vector_block]) * half_dim + depth;
                         @OPERAND@ query_even[depth_unroll]; @OPERAND@ query_odd[depth_unroll];
                         FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
@@ -544,11 +568,12 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                                 simdgroup_load(query_odd[step_index], in1 + query_offset + 8 * step_index, (ulong)query_stride);
                             }
                         }
-                        FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) {
-                            if ((int)simdgroup_slot + group * (int)simdgroups < fragments) {
+                        FOR_UNROLL for (int group = 0; group < (int)score_key_tiles; group++) {
+                            int key_tile = query_parallel_rows ? group : ((int)simdgroup_slot + group * (int)simdgroups);
+                            if (key_tile < fragments) {
                                 FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
-                                    simdgroup_multiply_accumulate(scores[group][vector_block], query_even[step_index], key_even_tile[group][step_index], scores[group][vector_block]);
-                                    simdgroup_multiply_accumulate(scores[group][vector_block], query_odd[step_index], key_odd_tile[group][step_index], scores[group][vector_block]);
+                                    simdgroup_multiply_accumulate(scores[group][vector_slot], query_even[step_index], key_even_tile[group][step_index], scores[group][vector_slot]);
+                                    simdgroup_multiply_accumulate(scores[group][vector_slot], query_odd[step_index], key_odd_tile[group][step_index], scores[group][vector_slot]);
                                 }
                             }
                         }
@@ -557,6 +582,13 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                 if (@KV_REUSE_SHARED_K@) { threadgroup_barrier(mem_flags::mem_threadgroup); }
             }
             if (@KV_REUSE_SHARED_K@) {
+                for (int key_tile = 0; key_tile < fragments; key_tile++) {
+                    for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups) {
+                        int vector_slot = vector_block / (int)simdgroups;
+                        simdgroup_store(scores[key_tile][vector_slot], score_tile + vector_block * 8 * (int)block + key_tile * 8, (ulong)block);
+                    }
+                }
+            } else if (query_parallel_rows) {
                 for (int key_tile = 0; key_tile < fragments; key_tile++) {
                     for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups) {
                         int vector_slot = vector_block / (int)simdgroups;
@@ -638,7 +670,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
             if (lane == 0) { row_maximum[vector] = next_maximum; row_sum[vector] = row_sum[vector] * rescale + block_sum; rescale_tile[vector] = rescale; }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (@KV_REUSE_SHARED_V@) {
+        if (@QUERY_OWNER_ROWS@) {
             for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups) {
                 int vector_slot = vector_block / (int)simdgroups;
                 float row_scale = rescale_tile[vector_block * 8 + fragment_row];
@@ -700,6 +732,32 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                         threadgroup_barrier(mem_flags::mem_threadgroup);
                     }
                 }
+            } else if (@QUERY_PARALLEL_ROWS@) {
+                for (int key_tile = 0; key_tile < fragments; key_tile++) {
+                    @OPERAND@ weights[score_vectors_per_simdgroup];
+                    for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups) {
+                        int vector_slot = vector_block / (int)simdgroups;
+                        simdgroup_load(weights[vector_slot], score_tile + vector_block * 8 * (int)block + key_tile * 8, (ulong)block);
+                    }
+                    FOR_UNROLL for (int dimension_block = 0; dimension_block < (int)(head_dim / 8); dimension_block++) {
+                        simdgroup_float8x8 value_float;
+                        if (@BF16_CACHE@ && mode == 0L) {
+                            device const ushort* cached_value = (device const ushort*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
+                            omega_bf16_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                        } else if (@BF8_CACHE@ && mode == 0L) {
+                            device const uchar* cached_value = (device const uchar*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
+                            omega_bf8_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                        } else {
+                            simdgroup_load(value_float, value_ptr + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8, (ulong)(kv_heads * head_dim));
+                        }
+                        omega_zero_padded_value_rows(value_float, key0 + (long)key_tile * 8L, mode == 0L ? slice_end : mma_end, lane);
+                        @OPERAND@ value = @NARROW_TO_OPERAND_VALUE@;
+                        for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups) {
+                            int vector_slot = vector_block / (int)simdgroups;
+                            simdgroup_multiply_accumulate(accumulated[dimension_block][vector_slot], weights[vector_slot], value, accumulated[dimension_block][vector_slot]);
+                        }
+                    }
+                }
             } else {
                 for (int key_tile = 0; key_tile < fragments; key_tile++) {
                     @OPERAND@ weights[tile_blocks];
@@ -722,7 +780,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                     }
                 }
             }
-        } else if (@KV_REUSE_SHARED_V@) {
+        } else if (@QUERY_OWNER_ROWS@) {
             FOR_UNROLL for (int dimension_block = 0; dimension_block < (int)(head_dim / 8); dimension_block++) {
                 long dimension = (long)dimension_block * 8L + (long)fragment_column;
                 for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups) {
@@ -756,7 +814,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    if (@KV_REUSE_SHARED_V@) {
+    if (@QUERY_OWNER_ROWS@) {
         for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups) {
             int vector_slot = vector_block / (int)simdgroups;
             long vector = (long)vector_block * 8L + (long)fragment_row;

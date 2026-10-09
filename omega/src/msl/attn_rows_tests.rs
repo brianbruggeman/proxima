@@ -1511,3 +1511,112 @@ fn card_16_tile_height_declines_the_exact_threadgroup_memory_overflow() {
         }
     ));
 }
+
+#[cfg(feature = "metal-attn-variants")]
+fn card_17_granite_attention(rows: u64) -> BoundOp {
+    let mut op = attention_rows_op(9, 2, 64, 512, rows, SLIDING_LOWER);
+    op.extents = vec![rows, 8, 2, 64];
+    let BoundOpKind::CachedAttention { kv_heads, .. } = &mut op.kind else {
+        panic!("attention_rows_op returns cached attention");
+    };
+    *kv_heads = 8;
+    op
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_17_query_parallelism_assigns_each_granite_query_block_once() {
+    let capture = include_str!("../../../proxima-tensor/specs/decode-prefill-parity/evidence/attn5/raw/probe/granite.out");
+    assert!(capture.lines().any(|line| {
+        line.contains("extents=[1000, 8, 2, 64]")
+    }));
+    let op = card_17_granite_attention(1000);
+    let packed = PackedOperands::new();
+    let policy = NumericPolicy::llama_relaxed();
+    let legacy = emit_with_attention_variant(
+        &op,
+        &packed,
+        policy,
+        AttentionVariant {
+            kv_reuse: AttentionKvReuse::SharedKv,
+            tile_height: AttentionTileHeight::Rows8,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("the shared K/V legacy-row control emits");
+    let parallel = emit_with_attention_variant(
+        &op,
+        &packed,
+        policy,
+        AttentionVariant {
+            kv_reuse: AttentionKvReuse::SharedKv,
+            tile_height: AttentionTileHeight::Rows8,
+            query_parallelism: AttentionQueryParallelism::SimdgroupRows,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("the captured shape admits simdgroup row ownership");
+    let tile_blocks = (8_u64 / 8) * 2;
+    let simdgroups = row_tiled_simdgroups(64);
+    let mut coverage = vec![0_u8; 1000 * 8 * 2];
+    for kv_head in 0..8_u64 {
+        for tile_start in (0..1000_u64).step_by(8) {
+            for simdgroup_slot in 0..simdgroups {
+                for vector_block in (simdgroup_slot..tile_blocks).step_by(simdgroups as usize) {
+                    let query_group = vector_block % 2;
+                    for row_within_block in 0..8_u64 {
+                        let query_row = tile_start + vector_block / 2 * 8 + row_within_block;
+                        let query_index =
+                            ((kv_head * 1000 + query_row) * 2 + query_group) as usize;
+                        coverage[query_index] += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(coverage.iter().all(|count| *count == 1));
+    assert_eq!(tile_blocks, simdgroups);
+    assert!(parallel.source.contains("constexpr bool query_parallel_rows = true"));
+    assert!(parallel.source.contains("constexpr bool query_owner_rows = true"));
+    let staged_declarations = |source: &str| -> Vec<String> {
+        source
+            .lines()
+            .filter(|line| line.contains("shared_key_even") || line.contains("shared_value["))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        staged_declarations(&legacy.source),
+        staged_declarations(&parallel.source),
+        "query ownership preserves the selected K/V staging declarations"
+    );
+    assert_ne!(legacy.entry, parallel.entry);
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_17_query_parallelism_declines_one_row_and_legacy_keeps_decode_split() {
+    let op = attention_op(9, 2, 64, 32, 1, SLIDING_LOWER);
+    let packed = PackedOperands::new();
+    let policy = NumericPolicy::llama_relaxed();
+    let legacy = emit(&op, &packed, policy).expect("one-row legacy decode emits");
+    assert!(legacy.entry.ends_with("_ds"), "legacy decode entry: {}", legacy.entry);
+    let error = emit_with_attention_variant(
+        &op,
+        &packed,
+        policy,
+        AttentionVariant {
+            query_parallelism: AttentionQueryParallelism::SimdgroupRows,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect_err("one query row cannot be split between simdgroups");
+    assert!(matches!(
+        error,
+        EmitError::CachedAttentionQueryParallelismNotSupported {
+            query_rows: 1,
+            reason: "simdgroup row ownership requires at least two query rows",
+            ..
+        }
+    ));
+}
