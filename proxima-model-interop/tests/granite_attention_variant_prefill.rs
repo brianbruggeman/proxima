@@ -34,6 +34,19 @@ struct DispatchIdentity {
     grid: omega::msl::GridSpec,
 }
 
+struct CapturedReplay {
+    dispatch: CapturedDispatch,
+    output: Vec<u8>,
+    token_ids: Vec<u32>,
+}
+
+#[derive(Clone)]
+struct ReplayEvidence {
+    identity: DispatchIdentity,
+    bindings: Vec<Binding>,
+    output: Vec<u8>,
+}
+
 fn identity(dispatch: &CapturedDispatch) -> DispatchIdentity {
     DispatchIdentity {
         node: dispatch.node,
@@ -139,18 +152,149 @@ fn capture_prompt_dispatches(
     prompt: &str,
     variant: Option<AttentionVariant>,
 ) -> (Vec<DispatchIdentity>, Vec<u32>) {
-    let _ = take_captured_dispatches();
-    set_capture_step(0);
-    let (token_ids, _text, _stopped) = model
-        .generate_with_serving_config(prompt, 1, serving_config(variant))
-        .expect("Granite prefill and one-token forward run");
-    let records = take_captured_dispatches();
+    let (records, token_ids) = capture_prompt_records(model, prompt, variant);
     let identities = records
         .iter()
         .filter(|record| record.kind_name == "cached_attention")
         .map(identity)
         .collect();
     (identities, token_ids)
+}
+
+fn capture_prompt_records(
+    model: &LoadedModel<'_>,
+    prompt: &str,
+    variant: Option<AttentionVariant>,
+) -> (Vec<CapturedDispatch>, Vec<u32>) {
+    let _ = take_captured_dispatches();
+    set_capture_step(0);
+    let (token_ids, _text, _stopped) = model
+        .generate_with_serving_config(prompt, 1, serving_config(variant))
+        .expect("Granite prefill and one-token forward run");
+    let records = take_captured_dispatches();
+    (records, token_ids)
+}
+
+fn capture_attention_replay(
+    model: &LoadedModel<'_>,
+    prompt: &str,
+    variant: Option<AttentionVariant>,
+    match_identity: Option<&CapturedDispatch>,
+) -> CapturedReplay {
+    let (records, token_ids) = capture_prompt_records(model, prompt, variant);
+    let mut attention_records = records
+        .into_iter()
+        .filter(|record| record.kind_name == "cached_attention")
+        .collect::<Vec<_>>();
+    attention_records
+        .sort_by(|left, right| (left.node, &left.extents).cmp(&(right.node, &right.extents)));
+    let matching_records = attention_records
+        .into_iter()
+        .filter(|record| {
+            record.extents.len() == 4
+                && record.extents[0] > 1
+                && record.extents[1..] == [8, 2, 64]
+                && match_identity.is_none_or(|identity| {
+                    record.node == identity.node && record.extents == identity.extents
+                })
+        })
+        .collect::<Vec<_>>();
+    if match_identity.is_some() {
+        assert_eq!(
+            matching_records.len(),
+            1,
+            "selected request must capture exactly one record matching legacy node and extents"
+        );
+    }
+    let dispatch = matching_records
+        .into_iter()
+        .next()
+        .expect("request captured a multi-row cached-attention dispatch");
+    assert!(
+        !dispatch
+            .bindings
+            .iter()
+            .any(|binding| matches!(binding, Binding::Fault)),
+        "selected cached-attention dispatch contains a fault binding"
+    );
+    assert!(
+        dispatch.grid.threads > 0,
+        "captured attention grid is empty"
+    );
+    assert!(
+        dispatch.unreplayable.is_none(),
+        "captured attention is unreplayable"
+    );
+    let expected_bytes = dispatch.extents.iter().product::<u64>() as usize * 4;
+    let output = dispatch
+        .replay_output_elements(Some(dispatch.extents.iter().product()))
+        .expect("replay the complete captured attention output span");
+    assert_eq!(
+        output.len(),
+        expected_bytes,
+        "replay output span is incomplete"
+    );
+    assert!(
+        output.chunks_exact(4).any(|word| word != [0x55; 4]),
+        "replayed attention output contains only poison bytes"
+    );
+    CapturedReplay {
+        dispatch,
+        output,
+        token_ids,
+    }
+}
+
+fn replay_evidence(replay: &CapturedReplay) -> ReplayEvidence {
+    ReplayEvidence {
+        identity: identity(&replay.dispatch),
+        bindings: replay.dispatch.bindings.clone(),
+        output: replay.output.clone(),
+    }
+}
+
+#[must_use]
+fn compare_replay_pair(
+    legacy: Option<&ReplayEvidence>,
+    selected: Option<&ReplayEvidence>,
+) -> Result<(), String> {
+    let legacy = legacy.ok_or_else(|| "legacy dispatch record is missing".to_string())?;
+    let selected = selected.ok_or_else(|| "selected dispatch record is missing".to_string())?;
+    for (arm, evidence) in [("legacy", legacy), ("selected", selected)] {
+        if evidence
+            .bindings
+            .iter()
+            .any(|binding| matches!(binding, Binding::Fault))
+        {
+            return Err(format!("{arm} dispatch contains a fault binding"));
+        }
+    }
+    if legacy.identity.node != selected.identity.node
+        || legacy.identity.extents != selected.identity.extents
+    {
+        return Err("captured dispatch node or extents differ".to_string());
+    }
+    if legacy.identity.entry == selected.identity.entry {
+        return Err("selected dispatch kept the legacy entry".to_string());
+    }
+    if legacy.identity.source_sha == selected.identity.source_sha {
+        return Err("selected dispatch kept the legacy source SHA".to_string());
+    }
+    if legacy.output.is_empty() || legacy.output.len() != selected.output.len() {
+        return Err("captured output spans are empty or have different lengths".to_string());
+    }
+    if let Some((offset, (expected, actual))) = legacy
+        .output
+        .iter()
+        .zip(&selected.output)
+        .enumerate()
+        .find(|(_, (expected, actual))| expected != actual)
+    {
+        return Err(format!(
+            "output byte {offset} differs: legacy={expected:#04x} selected={actual:#04x}"
+        ));
+    }
+    Ok(())
 }
 
 fn compare_token_ids(expected: &[u32], actual: &[u32]) -> Result<(), String> {
@@ -617,10 +761,10 @@ async fn card_25_granite_sequential_public_requests_complete_on_one_model() {
                 )
             });
         let (selected_ids, selected_text, _) = match model.generate_with_serving_config(
-                &check.prompt,
-                48,
-                serving_config(Some(shared_k_variant())),
-            ) {
+            &check.prompt,
+            48,
+            serving_config(Some(shared_k_variant())),
+        ) {
             Ok(result) => result,
             Err(error) => {
                 let node = route_mismatch_node(&error);
@@ -639,10 +783,13 @@ async fn card_25_granite_sequential_public_requests_complete_on_one_model() {
             "{} repeated request returned an empty result: legacy_ids={legacy_ids:?}, legacy_text={legacy_text:?}, selected_ids={selected_ids:?}, selected_text={selected_text:?}",
             check.name
         );
-        compare_token_ids(&legacy_ids, &selected_ids).unwrap_or_else(|error| {
-            panic!("{} repeated request arms differ: {error}", check.name)
-        });
-        assert_eq!(legacy_text, selected_text, "{} repeated request text", check.name);
+        compare_token_ids(&legacy_ids, &selected_ids)
+            .unwrap_or_else(|error| panic!("{} repeated request arms differ: {error}", check.name));
+        assert_eq!(
+            legacy_text, selected_text,
+            "{} repeated request text",
+            check.name
+        );
         let answer_check = require_expected_answer(&selected_text, check.expected_answer);
         let relation_check = check.expected_relation.map(|(relation, comparison_term)| {
             require_comparison_answer(
@@ -703,4 +850,123 @@ async fn card_24_wrong_oracle_and_wrong_fact_are_rejected() {
     )
     .expect_err("a reversed hippo comparison must fail");
     assert!(error.contains("hippopotamus"));
+}
+
+#[proxima::test]
+async fn card_26_granite_attention_replay_pair_matches_complete_output() {
+    assert!(
+        std::env::var_os("PROXIMA_CAPTURE_LIVE").is_some(),
+        "run with PROXIMA_CAPTURE_LIVE=1"
+    );
+    let path = granite_checkpoint_path();
+    let file = File::open(&path).expect("open the real Granite checkpoint");
+    // SAFETY: this test only reads the checkpoint and does not mutate it.
+    let mapping = unsafe { Mmap::map(&file) }.expect("mmap the Granite checkpoint");
+    let parsed = parse_complete(&mapping).expect("parse the Granite checkpoint");
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .expect("build the Granite checkpoint vocab");
+    let (prompt, prompt_tokens) = prompt_of_971_tokens(&vocab);
+    assert!(prompt_tokens >= PROMPT_TOKENS);
+    let model = LoadedModel::load(&parsed, &mapping).expect("bind the Granite checkpoint");
+
+    let legacy = capture_attention_replay(&model, &prompt, None, None);
+    let legacy_evidence = replay_evidence(&legacy);
+    let selected = capture_attention_replay(
+        &model,
+        &prompt,
+        Some(shared_k_variant()),
+        Some(&legacy.dispatch),
+    );
+    let selected_evidence = replay_evidence(&selected);
+    compare_replay_pair(Some(&legacy_evidence), Some(&selected_evidence)).unwrap_or_else(|error| {
+        panic!(
+            "captured Granite attention outputs differ: {error}; legacy_node={} legacy_extents={:?} legacy_entry={} legacy_sha={} legacy_grid={:?}; selected_node={} selected_extents={:?} selected_entry={} selected_sha={} selected_grid={:?}",
+            legacy.dispatch.node,
+            legacy.dispatch.extents,
+            legacy.dispatch.entry,
+            legacy.dispatch.msl_sha256,
+            legacy.dispatch.grid,
+            selected.dispatch.node,
+            selected.dispatch.extents,
+            selected.dispatch.entry,
+            selected.dispatch.msl_sha256,
+            selected.dispatch.grid
+        )
+    });
+    assert!(
+        !legacy.token_ids.is_empty(),
+        "legacy request produced no generated token IDs"
+    );
+    compare_token_ids(&legacy.token_ids, &selected.token_ids)
+        .unwrap_or_else(|error| panic!("captured Granite request IDs differ: {error}"));
+    println!(
+        "card_26 matched_dispatch node={} extents={:?} legacy_entry={} selected_entry={} legacy_sha={} selected_sha={} legacy_grid={:?} selected_grid={:?} legacy_output_bytes={} selected_output_bytes={} output_equal=true legacy_ids={:?} selected_ids={:?} ids_equal=true fault_bindings=0",
+        legacy.dispatch.node,
+        legacy.dispatch.extents,
+        legacy.dispatch.entry,
+        selected.dispatch.entry,
+        legacy.dispatch.msl_sha256,
+        selected.dispatch.msl_sha256,
+        legacy.dispatch.grid,
+        selected.dispatch.grid,
+        legacy.output.len(),
+        selected.output.len(),
+        legacy.token_ids,
+        selected.token_ids,
+    );
+}
+
+#[proxima::test]
+async fn card_26_replay_comparator_rejects_three_false_pairs() {
+    let identity_for = |entry: &str, source_sha: &str| DispatchIdentity {
+        node: 12,
+        extents: vec![1000, 8, 2, 64],
+        entry: entry.to_string(),
+        source_sha: source_sha.to_string(),
+        grid: omega::msl::GridSpec {
+            threads: 64,
+            threadgroup_width: Some(64),
+            depth: 1,
+            grid2d: None,
+        },
+    };
+    let reference_output = [0.25f32, -0.5, 1.0, 2.0]
+        .into_iter()
+        .flat_map(f32::to_ne_bytes)
+        .collect::<Vec<_>>();
+    let legacy = ReplayEvidence {
+        identity: identity_for("legacy_entry", "legacy_sha"),
+        bindings: Vec::new(),
+        output: reference_output.clone(),
+    };
+    let selected = ReplayEvidence {
+        identity: identity_for("selected_entry", "selected_sha"),
+        bindings: Vec::new(),
+        output: reference_output,
+    };
+    compare_replay_pair(Some(&legacy), Some(&selected))
+        .expect("matching captured replay evidence is admitted");
+
+    let mut changed_output = selected.output.clone();
+    changed_output[2] ^= 1;
+    let changed = ReplayEvidence {
+        output: changed_output,
+        ..selected.clone()
+    };
+    let changed_error = compare_replay_pair(Some(&legacy), Some(&changed))
+        .expect_err("a changed output byte must be rejected");
+    assert!(changed_error.contains("output byte 2"));
+
+    let missing_error = compare_replay_pair(Some(&legacy), None)
+        .expect_err("an absent selected record must be rejected");
+    assert!(missing_error.contains("selected dispatch record is missing"));
+
+    let fault_bound = ReplayEvidence {
+        bindings: vec![Binding::Fault],
+        ..selected
+    };
+    let fault_error = compare_replay_pair(Some(&legacy), Some(&fault_bound))
+        .expect_err("a fault-bound selected record must be rejected");
+    assert!(fault_error.contains("selected dispatch contains a fault binding"));
+    println!("card_26 comparator_controls=3 rejected=3");
 }
