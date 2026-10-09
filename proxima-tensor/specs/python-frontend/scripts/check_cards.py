@@ -104,18 +104,18 @@ def main() -> int:
                 captured_commands += 1
             if "--precommit" in command:
                 precommit_checks += 1
-            if re.search(r"\s--finalize(?:\s|$)", command):
+            if re.search(r"\s--finalize(?:\s|$)", command) or (card_id == "00a" and "--verify-closed" in command):
                 finalizers += 1
-        if commands and ("--precommit" not in commands[1] or "--finalize" not in commands[2]):
-            errors.append(f"{path}: AC2 must be captured precommit and AC3 captured postpush finalizer")
+        if commands and ("--precommit" not in commands[1] or ("--verify-closed" not in commands[2] if card_id == "00a" else "--finalize" not in commands[2])):
+            errors.append(f"{path}: AC2 must be captured precommit and AC3 must run its terminal postpush reader")
         if len(rows) == 3 and "elapsed_seconds<=1800" not in acceptance_text:
             errors.append(f"{path}: AC3 must assert captured card elapsed time <= 30 minutes")
         if card_id == "00a":
             bootstrap_section = contents.split("## Acceptance criteria", 1)[0]
-            if "**Bootstrap argv:** `script -q /private/tmp/proxima-python-card-00a-capture.log /bin/zsh -f`" not in bootstrap_section:
+            if "**Bootstrap argv:** `/usr/bin/script -q /private/tmp/proxima-python-card-00a-attempt-07.log /bin/zsh`" not in bootstrap_section:
                 errors.append(f"{path}: host capture must use its declared exact script argv")
-            if "no repository helper runs before the PTY" not in bootstrap_section or "first PTY command" not in bootstrap_section:
-                errors.append(f"{path}: host entry must create evidence before any repository helper")
+            if "host wrapper creates the external evidence directory" not in bootstrap_section or "sources the hash-pinned hook during shell startup" not in bootstrap_section or "hook source marker before the first repository command" not in bootstrap_section:
+                errors.append(f"{path}: host wrapper must source the active hook before repository commands")
             if "--verify-entry" not in commands[0] or "omitted_command_rejected=1" not in acceptance_text:
                 errors.append(f"{path}: AC1 must verify captured host entry and reject an omitted command")
         if card_id in {"00a1", "00a2"} and "check_plan_bootstrap.py" not in commands[0]:
@@ -126,7 +126,7 @@ def main() -> int:
             prelaunch_section = contents.split("## Acceptance criteria", 1)[0]
             if "no repository helper before the PTY starts" not in prelaunch_section or "check_plan_bootstrap.py" in prelaunch_section:
                 errors.append(f"{path}: first PTY launch must not depend on a repository helper")
-            if "/evidence/card-00a/session-active/bootstrap-hook.zsh" not in prelaunch_section or "/evidence/card-00a/bootstrap-hook.zsh" in contents:
+            if "/evidence/card-00a/session-attempt-07/bootstrap-hook.zsh" not in prelaunch_section or "/evidence/card-00a/bootstrap-hook.zsh" in contents:
                 errors.append(f"{path}: launcher must consume the active Card 00a hook, not the historical hook")
             if "bootstrap-zdotdir/card-00b" not in prelaunch_section or "exports `ZDOTDIR=/private/tmp/proxima-python-frontend/bootstrap-zdotdir/card-00b`" not in prelaunch_section or "sources the already-landed Card 00a hook" not in prelaunch_section:
                 errors.append(f"{path}: bootstrap must create isolated ZDOTDIR and source the landed hook before repository work")
