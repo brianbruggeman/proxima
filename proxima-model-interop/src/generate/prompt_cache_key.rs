@@ -20,6 +20,12 @@
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::MathMode;
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-attn-variants",
+    target_os = "macos"
+))]
+use omega::AttentionVariant;
 use proxima_tensor::NumericPolicy;
 
 use crate::rope_scaling::RopeScaling;
@@ -43,6 +49,13 @@ pub(super) struct CacheKey {
     /// that is applied to the compiled plans.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub(super) math_mode: MathMode,
+    /// Cached-attention selection changes the rows computed for this prefix.
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-attn-variants",
+        target_os = "macos"
+    ))]
+    pub(super) attention_variant: Option<AttentionVariant>,
     /// CPU quantized dots: exact dequantize-then-fold or int8 fast path.
     pub(super) exact_activations: bool,
     /// Fused cached-attention kernel instead of the unfused graph.
@@ -141,6 +154,12 @@ impl CacheKey {
             kv_bucket_tokens: _,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode,
+            #[cfg(all(
+                feature = "metal",
+                feature = "metal-attn-variants",
+                target_os = "macos"
+            ))]
+            attention_variant,
             numeric_policy,
             // serial vs concurrent encoder: scheduling, same arithmetic
             #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -194,6 +213,12 @@ impl CacheKey {
             numeric_policy,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode,
+            #[cfg(all(
+                feature = "metal",
+                feature = "metal-attn-variants",
+                target_os = "macos"
+            ))]
+            attention_variant,
             exact_activations,
             cached_attention_fusion,
             gated_delta_net_fusion,

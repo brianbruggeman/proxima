@@ -301,6 +301,14 @@ pub enum BackendError {
     #[error(transparent)]
     Metal(#[from] MetalError),
 
+    #[cfg(all(feature = "metal", target_os = "macos", feature = "metal-attn-variants"))]
+    #[error(transparent)]
+    Attention(#[from] crate::EmitError),
+
+    #[cfg(all(feature = "metal", target_os = "macos", feature = "metal-attn-variants"))]
+    #[error("attention variants require a Metal plan")]
+    AttentionVariantRequiresMetal,
+
     #[cfg(feature = "wgpu-backend")]
     #[error(transparent)]
     Wgpu(#[from] WgpuError),
@@ -736,6 +744,26 @@ pub fn set_dispatch_type(plan: &mut Plan, dispatch_type: metal::DispatchType) {
             feature = "wgpu-backend",
             feature = "cuda-driver"
         )))]
+        _ => match *plan {},
+    }
+}
+
+/// Applies the selected cached-attention axes to a Metal plan before its
+/// attention pipelines resolve.
+#[cfg(all(feature = "metal", target_os = "macos", feature = "metal-attn-variants"))]
+pub fn set_attention_variant(
+    plan: &mut Plan,
+    variant: crate::AttentionVariant,
+) -> Result<(), BackendError> {
+    match plan {
+        #[cfg(feature = "cpu")]
+        Plan::Cpu(_) => Err(BackendError::AttentionVariantRequiresMetal),
+        Plan::Metal(metal_plan) => Ok(metal_plan.set_attention_variant(variant)?),
+        #[cfg(feature = "wgpu-backend")]
+        Plan::Wgpu(_) => Err(BackendError::AttentionVariantRequiresMetal),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Cuda(_) => Err(BackendError::AttentionVariantRequiresMetal),
+        #[cfg(not(any(feature = "cpu", feature = "wgpu-backend", feature = "cuda-driver")))]
         _ => match *plan {},
     }
 }
