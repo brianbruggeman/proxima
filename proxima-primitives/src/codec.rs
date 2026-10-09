@@ -43,6 +43,8 @@ pub enum Codec {
     Q1_0,
     Q2_0,
     BFloat8,
+    Bf8E5M2,
+    Bf4E2M1,
 }
 
 impl Codec {
@@ -81,6 +83,8 @@ impl Codec {
             Codec::Q1_0 => 27,
             Codec::Q2_0 => 28,
             Codec::BFloat8 => 29,
+            Codec::Bf8E5M2 => 30,
+            Codec::Bf4E2M1 => 31,
         }
     }
 
@@ -118,6 +122,8 @@ impl Codec {
             27 => Some(Codec::Q1_0),
             28 => Some(Codec::Q2_0),
             29 => Some(Codec::BFloat8),
+            30 => Some(Codec::Bf8E5M2),
+            31 => Some(Codec::Bf4E2M1),
             _ => None,
         }
     }
@@ -160,8 +166,10 @@ mod tests {
             (Codec::Q1_0, 27),
             (Codec::Q2_0, 28),
             (Codec::BFloat8, 29),
+            (Codec::Bf8E5M2, 30),
+            (Codec::Bf4E2M1, 31),
         ];
-        assert_eq!(variants.len(), 30);
+        assert_eq!(variants.len(), 32);
         for (codec, stable_tag) in variants {
             assert_eq!(codec.tag(), stable_tag);
             assert_eq!(Codec::from_tag(stable_tag), Some(codec));
@@ -170,7 +178,7 @@ mod tests {
 
     #[test]
     fn card_02_bf8_codec_rejects_unassigned_tag() {
-        assert_eq!(Codec::from_tag(30), None);
+        assert_eq!(Codec::from_tag(32), None);
         assert_eq!(Codec::from_tag(255), None);
     }
 }

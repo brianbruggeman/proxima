@@ -14,6 +14,8 @@
 //! a widening convert composed from the existing `half` crate dependency.
 
 pub mod bf16;
+pub mod bf4_e2m1;
+pub mod bf8_e5m2;
 pub mod dispatch;
 pub mod f16;
 pub mod iq2_xs;
@@ -47,6 +49,8 @@ use thiserror::Error;
 pub enum QuantError {
     #[error("no dequantizer is registered for GGML codec {codec}")]
     UnsupportedCodec { codec: &'static str },
+    #[error("codec {codec} cannot represent a non-finite input")]
+    NonFiniteInput { codec: &'static str },
     #[error("input length {found} bytes is not a multiple of the {codec} block size {block_bytes}")]
     InputNotBlockMultiple {
         codec: &'static str,
