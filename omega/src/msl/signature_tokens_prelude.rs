@@ -2394,9 +2394,9 @@ pub(crate) fn validate_prefetch_selection(
         ),
         Some(CachedAttentionForm::TwoRangeRowTiled { .. })
     ) {
-        return Err(EmitError::CachedAttentionPrefetchNotSupported {
-            node: resolved.node,
-            reason: "next-block prefetch requires the row-tiled attention form",
+        return Err(EmitError::CachedAttentionVariantAxisNotSupported {
+            axis: "prefetch",
+            value: "next-block prefetch requires the row-tiled attention form",
         });
     }
     Ok(())

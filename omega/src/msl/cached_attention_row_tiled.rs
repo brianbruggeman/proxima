@@ -234,6 +234,8 @@ pub(super) fn render_cached_attention_row_tiled_with(
     {
         return Err(EmitError::CachedAttentionPrefetchNotSupported {
             node: resolved.node,
+            required_bytes: threadgroup_bytes,
+            available_bytes: crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES,
             reason: "double-buffered K/V staging exceeds the configured threadgroup-memory budget",
         });
     }
