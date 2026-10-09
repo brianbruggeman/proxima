@@ -193,6 +193,7 @@ extern crate alloc;
 // surfaces rather than minting a parallel graph representation.
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod align;
+pub mod bfloat8;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod bind;
 #[cfg(feature = "config")]
@@ -245,6 +246,8 @@ pub mod spec;
 // an ordinary `cargo test`/`nextest run`.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+
+pub use bfloat8::BFloat8;
 
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use align::AlignedBuffer;

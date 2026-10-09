@@ -39,6 +39,8 @@ use core::marker::PhantomData;
 use half::{bf16, f16};
 use proxima_primitives::block_on;
 
+use crate::bfloat8::BFloat8;
+
 /// Unwraps a `Result` whose error type is uninhabited — every
 /// `Convert<From, To>::call` returns `Result<To, Infallible>`, so this can
 /// never reach the `Err` arm; the `match` on an empty enum is exhaustive by
@@ -208,6 +210,24 @@ impl Pipe for Convert<bf16, f32> {
     type Err = Infallible;
 
     fn call(&self, input: bf16) -> impl Future<Output = Result<f32, Infallible>> {
+        async move { Ok(input.to_f32()) }
+    }
+}
+impl Pipe for Convert<f32, BFloat8> {
+    type In = f32;
+    type Out = BFloat8;
+    type Err = Infallible;
+
+    fn call(&self, input: f32) -> impl Future<Output = Result<BFloat8, Infallible>> {
+        async move { Ok(BFloat8::from_f32(input)) }
+    }
+}
+impl Pipe for Convert<BFloat8, f32> {
+    type In = BFloat8;
+    type Out = f32;
+    type Err = Infallible;
+
+    fn call(&self, input: BFloat8) -> impl Future<Output = Result<f32, Infallible>> {
         async move { Ok(input.to_f32()) }
     }
 }
