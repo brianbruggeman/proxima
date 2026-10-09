@@ -43,6 +43,24 @@ fn dense_layout_accepts_contiguous_and_rejects_broadcast() {
 }
 
 #[test]
+fn brain_float_scalar_codecs_read_packed_bytes_directly() {
+    let bf8_read =
+        signature_tokens_prelude::operand_read(0, "native_packed_index", Some(Codec::Bf8E5M2));
+    assert_eq!(bf8_read, "bf8_e5m2_element(in0 + native_packed_index, 0u)");
+    assert!(BRAIN_FLOAT_SCALAR_UNPACK_MSL.contains("static inline float bf8_e5m2_element"));
+    assert!(BRAIN_FLOAT_SCALAR_UNPACK_MSL.contains("payload[0]"));
+
+    let bf4_read =
+        signature_tokens_prelude::operand_read(0, "native_packed_index", Some(Codec::Bf4E2M1));
+    assert_eq!(
+        bf4_read,
+        "bf4_e2m1_element(in0 + (native_packed_index / 2), (uint)(native_packed_index % 2))"
+    );
+    assert!(BRAIN_FLOAT_SCALAR_UNPACK_MSL.contains("(packed & 0x0fu)"));
+    assert!(BRAIN_FLOAT_SCALAR_UNPACK_MSL.contains("(packed >> 4u)"));
+}
+
+#[test]
 fn elementwise_broadcast_decodes_omitted_axes_before_selected_axes() {
     let mut program = Vec::new();
     let matrix = append(

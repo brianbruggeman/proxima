@@ -1,0 +1,13 @@
+# Metal packed BF4/BF8 MoE backward step -- slices
+
+| # | slice | discharges | validation command | expected | done | note |
+|---|---|---|---|---|---|---|
+| 1 | Admit differentiated Metal training-step contract | AC1-AC3 | `rg -c '^VERDICT: ADMIT$' proxima-tensor/specs/metal_packed_brain_float_moe_training/ADMISSION.md` | one admitted revision | [x] | Auditor admitted the packed Metal input binding, twelve compact-gradient values, sparse host update, and two-record schema. |
+| 2 | Execute the differentiated packed graph on Metal and compare compact gradients | AC1 | `test "$(uname -s)" = Darwin && cargo test -p omega --test packed_brain_float_moe_training_metal metal_differentiated_packed_moe_matches_cpu -- --exact` | one device test passes for both codecs with full CPU/Metal payload equality | [x] | AC1: 1 passed, 0 failed; CPU and Metal predictions, loss, and all 12 compact-gradient values matched for BF8 and BF4. |
+| 3 | Apply sparse FP32 optimizer update from Metal compact gradients and retain evidence | AC2-AC3 | `test "$(uname -s)" = Darwin && cargo test -p omega --test packed_brain_float_moe_training_metal metal_compact_gradient_drives_sparse_master_update -- --exact && RUSTC_WRAPPER= cargo test -p omega --test packed_brain_float_moe_training_metal metal_training_payload_record_is_complete -- --exact --nocapture > /tmp/metal-packed-training-test.log && python3 -c 'from pathlib import Path; import json; log=Path("/tmp/metal-packed-training-test.log").read_text(); marker="METAL_TRAINING_JSON="; start=log.index(marker)+len(marker); records,_=json.JSONDecoder().raw_decode(log[start:].lstrip()); assert len(records)==2; out=Path("proxima-tensor/specs/metal_packed_brain_float_moe_training/results/metal-packed-training.json"); out.parent.mkdir(parents=True,exist_ok=True); out.write_text(json.dumps(records,indent=2)+"\n")' && jq -e 'length == 2 and all(.[]; .backend == "metal" and .cpu_reference.backend == "cpu" and .scalar_reference.backend == "scalar")' proxima-tensor/specs/metal_packed_brain_float_moe_training/results/metal-packed-training.json` | two tests pass; full updated arrays match reference and exactly two codec records are retained | [x] | AC2: 1 passed, 0 failed. AC3: 1 passed, 0 failed; the captured two-record artifact parses, and each record contains separate differentiated CPU and independent scalar references. The schema test round-trips in a tempfile. |
+
+## resume
+
+Last completed slice: 3
+Next action: continue through `metal_packed_brain_float_moe_training_loop`; the admitted scope currently covers two Metal steps with host sparse coalescing and Adam
+Open question, if any: none; optimizer and sparse coalescing remain host-side in this slice

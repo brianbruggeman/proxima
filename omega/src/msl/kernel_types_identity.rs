@@ -1571,6 +1571,34 @@ static inline float bf16_element(device const uchar *block, uint index) {
 }
 "#;
 
+/// MSL decoders for scalar brain-float payloads; BF4 stores the first value
+/// in the low nibble and the second in the high nibble.
+pub const BRAIN_FLOAT_SCALAR_UNPACK_MSL: &str = r#"
+static inline float bf8_e5m2_element(device const uchar *payload, uint index) {
+    (void)index;
+    uchar encoded = payload[0];
+    float sign = (encoded & 0x80u) == 0u ? 1.0f : -1.0f;
+    uint exponent = (uint)((encoded >> 2u) & 0x1fu);
+    uint fraction = (uint)(encoded & 0x03u);
+    if (exponent == 0u) {
+        return sign * (float)fraction * 0.0000152587890625f;
+    }
+    return sign * (1.0f + (float)fraction * 0.25f) * exp2((float)exponent - 15.0f);
+}
+
+static inline float bf4_e2m1_element(device const uchar *payload, uint index) {
+    uchar packed = payload[0];
+    uchar encoded = (index & 1u) == 0u ? (packed & 0x0fu) : (packed >> 4u);
+    float sign = (encoded & 0x08u) == 0u ? 1.0f : -1.0f;
+    uint exponent = (uint)((encoded >> 1u) & 0x03u);
+    uint fraction = (uint)(encoded & 0x01u);
+    if (exponent == 0u) {
+        return sign * (float)fraction * 0.5f;
+    }
+    return sign * (1.0f + (float)fraction * 0.5f) * exp2((float)exponent - 1.0f);
+}
+"#;
+
 /// The [`Codec`] a raw [`QuantizedBlock`] carries, if any — the one place
 /// every driver (`cuda_driver::packed_codec`, `wgpu_driver::
 /// packed_operands_of`, `metal::device_buffers_arena_plan::
@@ -1615,7 +1643,9 @@ pub(crate) const fn codec_from_quantized_block(block: &QuantizedBlock<'_>) -> Op
         | Codec::Q5_0
         | Codec::Float16
         | Codec::BFloat16
-        | Codec::BFloat8 => Some(*codec),
+        | Codec::BFloat8
+        | Codec::Bf8E5M2
+        | Codec::Bf4E2M1 => Some(*codec),
         _ => None,
     }
 }
@@ -1634,6 +1664,8 @@ pub(crate) const fn codec_cache_token(codec: Codec) -> &'static str {
         Codec::Float16 => "f16",
         Codec::BFloat16 => "bf16",
         Codec::BFloat8 => "bf8",
+        Codec::Bf8E5M2 => "bf8_e5m2",
+        Codec::Bf4E2M1 => "bf4_e2m1",
         // No Metal unpack kernel exists for any of these 18 -- `PackedOperands`
         // is only ever populated via `codec_from_quantized_block`
         // (this module's own fn), which maps just the 11 codecs above, so
@@ -1680,6 +1712,7 @@ pub(crate) const fn codec_block_bytes(codec: Codec) -> usize {
         Codec::Float16 => FLOAT16_BLOCK_BYTES,
         Codec::BFloat16 => BFLOAT16_BLOCK_BYTES,
         Codec::BFloat8 => 1,
+        Codec::Bf8E5M2 | Codec::Bf4E2M1 => 1,
         // Unreachable by construction -- see `codec_cache_token`'s doc.
         // Sourced from `GgmlType::block_layout`, the authoritative block
         // shape table, never hand-invented.
@@ -1742,6 +1775,8 @@ pub(crate) const fn codec_block_elements(codec: Codec) -> usize {
         Codec::Float16 => FLOAT16_BLOCK_ELEMENTS,
         Codec::BFloat16 => BFLOAT16_BLOCK_ELEMENTS,
         Codec::BFloat8 => 1,
+        Codec::Bf8E5M2 => 1,
+        Codec::Bf4E2M1 => 2,
         // Unreachable by construction -- see `codec_cache_token`'s doc.
         Codec::Q4_1 => GgmlType::Q4_1.block_layout().block_elements as usize,
         Codec::Q8_1 => GgmlType::Q8_1.block_layout().block_elements as usize,
@@ -2112,6 +2147,7 @@ pub(crate) const fn tiled_decode(codec: Codec) -> Option<TiledDecode> {
         | Codec::Q1_0
         | Codec::Q2_0
         | Codec::BFloat8 => None,
+        Codec::Bf8E5M2 | Codec::Bf4E2M1 => None,
     }
 }
 
@@ -2151,7 +2187,11 @@ pub(crate) const fn tiled_gemm_codec_chunk_width(codec: Codec) -> u64 {
 /// here rather than overrun in the tile.
 #[cfg(feature = "metal-tiled-gemm")]
 pub(crate) const fn tiled_gemm_block_k_chunk_aligned(block_k: u64, chunk_width: u64) -> bool {
-    let staged_width = if block_k < chunk_width { block_k } else { chunk_width };
+    let staged_width = if block_k < chunk_width {
+        block_k
+    } else {
+        chunk_width
+    };
     chunk_width != 0
         && staged_width.is_multiple_of(DECODE_RUN_ELEMENTS)
         && (block_k <= chunk_width || block_k.is_multiple_of(chunk_width))
@@ -2267,7 +2307,8 @@ pub(crate) fn codec_rows_per_simdgroup(codec: Codec) -> usize {
 /// own posture (a cold-path emit decision, not a hot inner loop).
 #[cfg(feature = "std")]
 pub(super) fn q4_0_multi_row_hoist_override() -> bool {
-    let active = matches!(std::env::var("PROXIMA_Q4_0_MULTI_ROW_HOIST"), Ok(value) if value.trim() == "1");
+    let active =
+        matches!(std::env::var("PROXIMA_Q4_0_MULTI_ROW_HOIST"), Ok(value) if value.trim() == "1");
     log_q4_0_multi_row_hoist_once(active);
     active
 }
@@ -2340,8 +2381,10 @@ pub(super) const fn q4_0_multi_row_pair_lane_override() -> bool {
 /// Unset or empty disables nothing (the default).
 #[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
 pub(super) fn tiled_gemm_codec_disabled(codec: Codec) -> bool {
-    std::env::var("PROXIMA_TILED_GEMM_DISABLE")
-        .is_ok_and(|list| list.split(',').any(|name| name.trim() == codec_cache_token(codec)))
+    std::env::var("PROXIMA_TILED_GEMM_DISABLE").is_ok_and(|list| {
+        list.split(',')
+            .any(|name| name.trim() == codec_cache_token(codec))
+    })
 }
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
@@ -2371,7 +2414,8 @@ pub(super) const fn tiled_gemm_codec_disabled(_codec: Codec) -> bool {
 // its own unconditional seam.
 #[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
 pub(super) fn tiled_gemm_q4_0_override() -> bool {
-    let active = !matches!(std::env::var("PROXIMA_TILED_GEMM_Q4_0"), Ok(value) if value.trim() == "0");
+    let active =
+        !matches!(std::env::var("PROXIMA_TILED_GEMM_Q4_0"), Ok(value) if value.trim() == "0");
     log_tiled_gemm_q4_0_once(active);
     active
 }
@@ -2389,7 +2433,11 @@ fn log_tiled_gemm_q4_0_once(active: bool) {
     });
 }
 
-#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+#[cfg(all(
+    feature = "std",
+    feature = "metal-tiled-gemm",
+    not(feature = "instrument")
+))]
 fn log_tiled_gemm_q4_0_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
@@ -2411,7 +2459,8 @@ pub(super) const fn tiled_gemm_q4_0_override() -> bool {
 /// [`tiled_gemm_q4_0_override`]'s own posture.
 #[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
 pub(super) fn tiled_gemm_dense_override() -> bool {
-    let active = !matches!(std::env::var("PROXIMA_TILED_GEMM_DENSE"), Ok(value) if value.trim() == "0");
+    let active =
+        !matches!(std::env::var("PROXIMA_TILED_GEMM_DENSE"), Ok(value) if value.trim() == "0");
     log_tiled_gemm_dense_once(active);
     active
 }
@@ -2427,7 +2476,11 @@ fn log_tiled_gemm_dense_once(active: bool) {
     });
 }
 
-#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+#[cfg(all(
+    feature = "std",
+    feature = "metal-tiled-gemm",
+    not(feature = "instrument")
+))]
 fn log_tiled_gemm_dense_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
@@ -2448,8 +2501,7 @@ pub(super) const fn tiled_gemm_dense_override() -> bool {
 /// scalar-per-element load for every tile.
 #[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
 pub(super) fn wide_activation_load_override() -> bool {
-    let active =
-        !matches!(std::env::var("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD"), Ok(value) if value.trim() == "0");
+    let active = !matches!(std::env::var("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD"), Ok(value) if value.trim() == "0");
     log_wide_activation_load_once(active);
     active
 }
@@ -2463,7 +2515,11 @@ fn log_wide_activation_load_once(active: bool) {
     });
 }
 
-#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+#[cfg(all(
+    feature = "std",
+    feature = "metal-tiled-gemm",
+    not(feature = "instrument")
+))]
 fn log_wide_activation_load_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
@@ -2485,7 +2541,8 @@ pub(super) const fn wide_activation_load_override() -> bool {
 /// three-array layout.
 #[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
 pub(super) fn slim_tgmem_override() -> bool {
-    let active = !matches!(std::env::var("PROXIMA_TILED_GEMM_SLIM_TGMEM"), Ok(value) if value.trim() == "0");
+    let active =
+        !matches!(std::env::var("PROXIMA_TILED_GEMM_SLIM_TGMEM"), Ok(value) if value.trim() == "0");
     log_slim_tgmem_once(active);
     active
 }
@@ -2499,7 +2556,11 @@ fn log_slim_tgmem_once(active: bool) {
     });
 }
 
-#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+#[cfg(all(
+    feature = "std",
+    feature = "metal-tiled-gemm",
+    not(feature = "instrument")
+))]
 fn log_slim_tgmem_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
@@ -2539,7 +2600,11 @@ fn log_tiled_gemm_direct_store_once(active: bool) {
     });
 }
 
-#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+#[cfg(all(
+    feature = "std",
+    feature = "metal-tiled-gemm",
+    not(feature = "instrument")
+))]
 fn log_tiled_gemm_direct_store_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
@@ -2571,7 +2636,11 @@ fn log_tiled_gemm_wide_weight_stage_once(active: bool) {
     });
 }
 
-#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+#[cfg(all(
+    feature = "std",
+    feature = "metal-tiled-gemm",
+    not(feature = "instrument")
+))]
 fn log_tiled_gemm_wide_weight_stage_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
@@ -2603,7 +2672,11 @@ fn log_tiled_gemm_grid2d_once(active: bool) {
     });
 }
 
-#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+#[cfg(all(
+    feature = "std",
+    feature = "metal-tiled-gemm",
+    not(feature = "instrument")
+))]
 fn log_tiled_gemm_grid2d_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
@@ -2634,7 +2707,11 @@ fn log_tiled_gemm_mm_layout_once(active: bool) {
     });
 }
 
-#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+#[cfg(all(
+    feature = "std",
+    feature = "metal-tiled-gemm",
+    not(feature = "instrument")
+))]
 fn log_tiled_gemm_mm_layout_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
@@ -2665,7 +2742,11 @@ fn log_tiled_gemm_dynamic_tgmem_once(active: bool) {
     });
 }
 
-#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+#[cfg(all(
+    feature = "std",
+    feature = "metal-tiled-gemm",
+    not(feature = "instrument")
+))]
 fn log_tiled_gemm_dynamic_tgmem_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
@@ -2682,7 +2763,8 @@ pub(super) const fn tiled_gemm_dynamic_tgmem_override() -> bool {
 /// dynamically-indexed loop.
 #[cfg(feature = "std")]
 pub(super) fn multi_row_unroll_override() -> bool {
-    let active = !matches!(std::env::var("PROXIMA_MULTI_ROW_UNROLL"), Ok(value) if value.trim() == "0");
+    let active =
+        !matches!(std::env::var("PROXIMA_MULTI_ROW_UNROLL"), Ok(value) if value.trim() == "0");
     log_multi_row_unroll_once(active);
     active
 }
@@ -2723,7 +2805,8 @@ pub(super) const fn multi_row_unroll_override() -> bool {
 /// falls back to today's `long`-indexed emit unconditionally.
 #[cfg(feature = "std")]
 pub(super) fn multi_row_index32_override() -> bool {
-    let active = !matches!(std::env::var("PROXIMA_MULTI_ROW_INDEX32"), Ok(value) if value.trim() == "0");
+    let active =
+        !matches!(std::env::var("PROXIMA_MULTI_ROW_INDEX32"), Ok(value) if value.trim() == "0");
     log_multi_row_index32_once(active);
     active
 }
@@ -2763,7 +2846,8 @@ pub(super) const fn multi_row_index32_override() -> bool {
 /// `"0"` falls back to today's `long`-decomposed emit unconditionally.
 #[cfg(feature = "std")]
 pub(super) fn coord_index32_override() -> bool {
-    let active = !matches!(std::env::var("PROXIMA_COORD_INDEX32"), Ok(value) if value.trim() == "0");
+    let active =
+        !matches!(std::env::var("PROXIMA_COORD_INDEX32"), Ok(value) if value.trim() == "0");
     log_coord_index32_once(active);
     active
 }
@@ -2951,7 +3035,10 @@ pub(crate) fn operand_aliases(operands: &[(NodeId, Layout, Option<Lookup>)]) -> 
 }
 
 fn has_duplicate_operand(aliases: &[usize]) -> bool {
-    aliases.iter().enumerate().any(|(index, alias)| *alias != index)
+    aliases
+        .iter()
+        .enumerate()
+        .any(|(index, alias)| *alias != index)
 }
 
 /// The pipeline-cache fragment for [`operand_aliases`] over a reduce's epilogue
@@ -2972,8 +3059,8 @@ pub(crate) fn operand_alias_cache_token(resolved: &BoundOp) -> Option<String> {
     };
     let aliases = operand_aliases(epilogue_operands);
     has_duplicate_operand(&aliases).then(|| {
-        aliases
-            .iter()
-            .fold(String::from("_al_e"), |token, alias| format!("{token}_{alias}"))
+        aliases.iter().fold(String::from("_al_e"), |token, alias| {
+            format!("{token}_{alias}")
+        })
     })
 }

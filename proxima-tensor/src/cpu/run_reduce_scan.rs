@@ -644,6 +644,8 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             .get(activation_start..activation_start + k)
             .ok_or_else(shape_error)?;
         let mut expert_entry: Option<ExpertEntry<'_>> = None;
+        #[cfg(feature = "instrument")]
+        let mut selected_expert_index = None;
         let weights: &[u8] = if let Some(gather) = weight_gather.as_ref() {
             let index_buffer = buffer_of(buffers, gather.indices)?;
             let index_offset = usize::try_from(gather.index_layout.offset_of(&full_coordinate))
@@ -656,6 +658,10 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                     index: expert_index,
                     extent: gather.extent,
                 });
+            }
+            #[cfg(feature = "instrument")]
+            {
+                selected_expert_index = Some(expert_index as u32);
             }
             record_expert_selection(resolved.node, expert_index as u32);
             #[cfg(feature = "instrument")]
@@ -773,6 +779,20 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             // is off.
             QuantizedBlock::Packed { .. } => {
                 let kernel = dispatch_block.matmul_f32_kernel().ok_or_else(shape_error)?;
+                #[cfg(feature = "instrument")]
+                if let Some(expert_index) = selected_expert_index
+                    && let QuantizedBlock::Packed { codec, .. } = dispatch_block
+                    && matches!(codec, Codec::Bf8E5M2 | Codec::Bf4E2M1)
+                {
+                    debug!(
+                        event = "packed_brain_float_dispatch",
+                        position = position,
+                        expert_index = expert_index,
+                        codec = ?codec,
+                        selected_packed_bytes = ?weights,
+                        "cpu dispatched the selected packed brain-float expert span"
+                    );
+                }
                 kernel(weights, rows, activation_row)?
             }
         };

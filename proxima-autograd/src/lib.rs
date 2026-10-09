@@ -90,6 +90,7 @@ pub mod conv;
 pub mod error;
 pub(crate) mod expr;
 pub mod loss;
+pub mod low_precision;
 pub mod norm;
 pub mod optimizer;
 // `save_state`/`load_state`: `train::State` through `proxima-safetensors`'s
