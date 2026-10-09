@@ -1125,7 +1125,7 @@ impl MappedExpertSidecar {
                     let expected = crate::bind::codec_byte_len_for(
                         codec,
                         descriptor.out_dim as usize * descriptor.in_dim as usize,
-                    );
+                    )?;
                     if byte_length != expected {
                         return Err(invalid_sidecar(format!(
                             "high expert range has {byte_length} bytes, expected {expected}"
@@ -1314,7 +1314,7 @@ impl MappedExpertSidecar {
         let expected_elements = (descriptor.out_dim as usize)
             .checked_mul(descriptor.in_dim as usize)
             .ok_or(InteropError::SidecarSizeOverflow)?;
-        let expected_bytes = crate::bind::codec_byte_len_for(codec, expected_elements);
+        let expected_bytes = crate::bind::codec_byte_len_for(codec, expected_elements)?;
         if length != expected_bytes {
             return Err(invalid_sidecar(format!(
                 "layer {} expert {} projection {} has {length} bytes, expected {expected_bytes}",
@@ -1593,8 +1593,8 @@ impl ExpertSidecar {
                 })
                 .ok_or(InteropError::SidecarSizeOverflow)?;
             let expected_source_bytes =
-                crate::bind::codec_byte_len_for(source_codec, element_count);
-            let expected_data_bytes = crate::bind::codec_byte_len_for(target_codec, element_count);
+                crate::bind::codec_byte_len_for(source_codec, element_count)?;
+            let expected_data_bytes = crate::bind::codec_byte_len_for(target_codec, element_count)?;
             if source_bytes != expected_source_bytes as u64 {
                 return Err(invalid_sidecar(format!(
                     "descriptor {descriptor_index} source bytes {source_bytes} do not match {expected_source_bytes} bytes for {out_dim}x{in_dim}"
@@ -1774,7 +1774,7 @@ pub fn write_expert_sidecar<W: Write + Seek>(
                 },
             ));
         }
-        let expected_output = crate::bind::codec_byte_len_for(spec.target_codec, expected_elements);
+        let expected_output = crate::bind::codec_byte_len_for(spec.target_codec, expected_elements)?;
         if output.len() < expected_output {
             return Err(InteropError::Quant(
                 proxima_gguf::quant::QuantError::OutputSizeMismatch {
