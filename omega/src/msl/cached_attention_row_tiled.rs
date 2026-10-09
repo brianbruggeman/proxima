@@ -151,12 +151,16 @@ pub(super) fn render_cached_attention_row_tiled_with(
     let shared_v = row_schedule.is_shared_kv();
     #[cfg(feature = "metal-attn-variants")]
     let query_parallel_rows = row_schedule.is_simdgroup_rows();
+    #[cfg(feature = "metal-attn-variants")]
+    let prefetch_next_block = row_schedule.is_prefetch_next_block();
     #[cfg(not(feature = "metal-attn-variants"))]
     let shared_k = false;
     #[cfg(not(feature = "metal-attn-variants"))]
     let shared_v = false;
     #[cfg(not(feature = "metal-attn-variants"))]
     let query_parallel_rows = false;
+    #[cfg(not(feature = "metal-attn-variants"))]
+    let prefetch_next_block = false;
     #[cfg(not(feature = "metal-attn-variants"))]
     let _ = row_schedule;
     let block = row_tiled_block(*head_dim);
@@ -167,7 +171,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
     } else {
         (rows_per_threadgroup * *query_groups) / 8
     };
-    let query_owner_rows = shared_v || query_parallel_rows;
+    let query_owner_rows = shared_v || query_parallel_rows || prefetch_next_block;
     let score_vectors = if shared_k || query_owner_rows {
         query_blocks.div_ceil(simdgroups)
     } else {
@@ -194,6 +198,12 @@ pub(super) fn render_cached_attention_row_tiled_with(
     } else {
         0
     };
+    let operand_bytes = if half_operands { 2 } else { 4 };
+    let prefetch_bytes = if prefetch_next_block {
+        2 * block * *head_dim * operand_bytes
+    } else {
+        0
+    };
     let base_threadgroup_bytes = row_tile_bytes(rows_per_threadgroup, *query_groups, block)
         + if stages_query {
             query_stage_bytes(rows_per_threadgroup, *query_groups, *head_dim)
@@ -214,7 +224,15 @@ pub(super) fn render_cached_attention_row_tiled_with(
     } else {
         0
     };
-    let threadgroup_bytes = shared_kv_bytes + shared_v_bytes;
+    let threadgroup_bytes = shared_kv_bytes + shared_v_bytes + prefetch_bytes;
+    if prefetch_next_block
+        && threadgroup_bytes > crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES
+    {
+        return Err(EmitError::CachedAttentionPrefetchNotSupported {
+            node: resolved.node,
+            reason: "double-buffered K/V staging exceeds the configured threadgroup-memory budget",
+        });
+    }
     if shared_v && shared_v_dimension_blocks == 0 {
         return Err(EmitError::CachedAttentionKvReuseNotSupported {
             node: resolved.node,
@@ -301,6 +319,23 @@ pub(super) fn render_cached_attention_row_tiled_with(
         ("@KV_REUSE_SHARED_V@", shared_v.to_string()),
         ("@QUERY_PARALLEL_ROWS@", query_parallel_rows.to_string()),
         ("@QUERY_OWNER_ROWS@", query_owner_rows.to_string()),
+        ("@PREFETCH_NEXT_BLOCK@", prefetch_next_block.to_string()),
+        (
+            "@PREFETCH_KEY_ELEMENTS@",
+            if prefetch_next_block {
+                (block * half_dim).to_string()
+            } else {
+                "1".to_string()
+            },
+        ),
+        (
+            "@PREFETCH_VALUE_ELEMENTS@",
+            if prefetch_next_block {
+                (block * *head_dim).to_string()
+            } else {
+                "1".to_string()
+            },
+        ),
         (
             "@SHARED_K_LOAD@",
             if half_operands {
@@ -322,6 +357,15 @@ pub(super) fn render_cached_attention_row_tiled_with(
             "@SHARED_V_LOAD@",
             if half_operands {
                 "omega_load_shared_half"
+            } else {
+                "omega_load_shared_float"
+            }
+            .to_string(),
+        ),
+        (
+            "@PREFETCH_LOAD@",
+            if half_operands {
+                "omega_load_prefetched_half"
             } else {
                 "omega_load_shared_float"
             }
@@ -373,6 +417,7 @@ inline void simdgroup_load(thread simdgroup_half8x8& destination, device const f
 inline void simdgroup_load(thread simdgroup_half8x8& destination, device const float* source, ulong stride) { simdgroup_float8x8 loaded; simdgroup_load(loaded, source, stride); destination = narrow_fragment(loaded); }
 inline void simdgroup_load(thread simdgroup_half8x8& destination, threadgroup const float* source, ulong stride) { simdgroup_float8x8 loaded; simdgroup_load(loaded, source, stride); destination = narrow_fragment(loaded); }
 inline void omega_load_shared_half(thread simdgroup_half8x8& destination, threadgroup const half* source, ulong stride, ushort lane) { short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4)); short column = (short)((quad & 2) * 2 + (lane % 2) * 2); destination.thread_elements()[0] = source[(long)row * stride + column]; destination.thread_elements()[1] = source[(long)row * stride + column + 1]; }
+inline void omega_load_prefetched_half(thread simdgroup_float8x8& destination, threadgroup const half* source, ulong stride, ushort lane) { short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4)); short column = (short)((quad & 2) * 2 + (lane % 2) * 2); destination.thread_elements()[0] = float(source[(long)row * stride + column]); destination.thread_elements()[1] = float(source[(long)row * stride + column + 1]); }
 "#;
 
 pub(super) const SHARED_K_FLOAT_HELPER: &str = r#"
@@ -391,10 +436,10 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
     constexpr long tile_blocks = rows_in_fragment ? (tile_rows / 8) * query_groups : (tile_rows * query_groups) / 8;
     constexpr long tile_vectors = tile_blocks * 8; constexpr long threads = simdgroups * 32;
     constexpr long dims_per_group = head_dim / 8 / simdgroups; constexpr long depth_unroll = ((half_dim / 8) % 2 == 0) ? 2 : 1;
-    constexpr bool shared_k = @KV_REUSE_SHARED_K@; constexpr bool shared_v = @KV_REUSE_SHARED_V@; constexpr bool query_parallel_rows = @QUERY_PARALLEL_ROWS@; constexpr bool query_owner_rows = @QUERY_OWNER_ROWS@;
+    constexpr bool shared_k = @KV_REUSE_SHARED_K@; constexpr bool shared_v = @KV_REUSE_SHARED_V@; constexpr bool query_parallel_rows = @QUERY_PARALLEL_ROWS@; constexpr bool prefetch_next_block = @PREFETCH_NEXT_BLOCK@; constexpr bool query_owner_rows = @QUERY_OWNER_ROWS@;
     constexpr long key_tiles_per_group = (block / 8) / simdgroups;
-    constexpr long score_key_tiles = (shared_k || query_parallel_rows) ? (block / 8) : key_tiles_per_group;
-    constexpr long key_tiles_per_simdgroup = (!shared_k && query_parallel_rows) ? (block / 8) : key_tiles_per_group;
+    constexpr long score_key_tiles = (shared_k || query_owner_rows) ? (block / 8) : key_tiles_per_group;
+    constexpr long key_tiles_per_simdgroup = (!shared_k && query_owner_rows) ? (block / 8) : key_tiles_per_group;
     constexpr long score_vectors_per_simdgroup = query_owner_rows ? (tile_blocks + simdgroups - 1) / simdgroups : tile_blocks;
     constexpr long accumulator_dimensions = query_owner_rows ? (head_dim / 8) : dims_per_group;
     constexpr long accumulator_vectors = query_owner_rows ? score_vectors_per_simdgroup : tile_blocks;
@@ -415,6 +460,9 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
     threadgroup int vector_row[tile_vectors]; threadgroup int vector_head[tile_vectors]; threadgroup int vector_live[tile_vectors];
     threadgroup @OPERAND_SCALAR@ shared_key_even[@SHARED_K_ELEMENTS@]; threadgroup @OPERAND_SCALAR@ shared_key_odd[@SHARED_K_ELEMENTS@];
     threadgroup @OPERAND_SCALAR@ shared_value[@SHARED_V_ELEMENTS@];
+    threadgroup @OPERAND_SCALAR@ prefetched_key_even[@PREFETCH_KEY_ELEMENTS@];
+    threadgroup @OPERAND_SCALAR@ prefetched_key_odd[@PREFETCH_KEY_ELEMENTS@];
+    threadgroup @OPERAND_SCALAR@ prefetched_value[@PREFETCH_VALUE_ELEMENTS@];
     constexpr long shared_v_dimension_blocks = @SHARED_V_DIMENSION_BLOCKS@;
     constexpr bool stage_query = @STAGE_QUERY@; constexpr long query_stage_stride = half_dim + @QUERY_STAGE_PAD@L;
     threadgroup float query_stage[stage_query ? tile_blocks * 2L * 8L * query_stage_stride : 1L];
@@ -488,7 +536,11 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                         device const float* key_even_ptr = key_even + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
                         device const float* key_odd_ptr = key_odd + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
                         FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
-                            if (@BF16_CACHE@ && mode == 0L) {
+                            if (prefetch_next_block && mode == 0L && step > 0L) {
+                                long fragment_offset = ((long)key_tile * (half_dim / 8L) + (depth / 8L) + step_index) * 64L;
+                                @SHARED_K_LOAD@(key_even_tile[group][step_index], prefetched_key_even + fragment_offset, 8, lane);
+                                @SHARED_K_LOAD@(key_odd_tile[group][step_index], prefetched_key_odd + fragment_offset, 8, lane);
+                            } else if (@BF16_CACHE@ && mode == 0L) {
                                 device const ushort* cached_even = (device const ushort*)in2 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
                                 device const ushort* cached_odd = (device const ushort*)in3 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
                                 simdgroup_float8x8 even_float; simdgroup_float8x8 odd_float;
@@ -554,8 +606,8 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                     }
                 } else {
                     FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) {
-                        if (query_parallel_rows && vector_block % (int)simdgroups != (int)simdgroup_slot) { continue; }
-                        int vector_slot = query_parallel_rows ? vector_block / (int)simdgroups : vector_block;
+                        if (query_owner_rows && vector_block % (int)simdgroups != (int)simdgroup_slot) { continue; }
+                        int vector_slot = query_owner_rows ? vector_block / (int)simdgroups : vector_block;
                         long query_offset = (block_row[vector_block] * (kv_heads * query_groups) + kv_head * query_groups + block_head[vector_block]) * half_dim + depth;
                         @OPERAND@ query_even[depth_unroll]; @OPERAND@ query_odd[depth_unroll];
                         FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
@@ -569,7 +621,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                             }
                         }
                         FOR_UNROLL for (int group = 0; group < (int)score_key_tiles; group++) {
-                            int key_tile = query_parallel_rows ? group : ((int)simdgroup_slot + group * (int)simdgroups);
+                            int key_tile = query_owner_rows ? group : ((int)simdgroup_slot + group * (int)simdgroups);
                             if (key_tile < fragments) {
                                 FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
                                     simdgroup_multiply_accumulate(scores[group][vector_slot], query_even[step_index], key_even_tile[group][step_index], scores[group][vector_slot]);
@@ -588,7 +640,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                         simdgroup_store(scores[key_tile][vector_slot], score_tile + vector_block * 8 * (int)block + key_tile * 8, (ulong)block);
                     }
                 }
-            } else if (query_parallel_rows) {
+            } else if (query_owner_rows) {
                 for (int key_tile = 0; key_tile < fragments; key_tile++) {
                     for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups) {
                         int vector_slot = vector_block / (int)simdgroups;
@@ -705,7 +757,10 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                             int dimension_block = dimension_base + slab_slot;
                             if (dimension_block % (int)simdgroups == (int)simdgroup_slot) {
                                 simdgroup_float8x8 value_float;
-                                if (@BF16_CACHE@ && mode == 0L) {
+                                if (prefetch_next_block && mode == 0L && step > 0L) {
+                                    long fragment_offset = ((long)key_tile * (head_dim / 8L) + dimension_block) * 64L;
+                                    @PREFETCH_LOAD@(value_float, prefetched_value + fragment_offset, 8, lane);
+                                } else if (@BF16_CACHE@ && mode == 0L) {
                                     device const ushort* cached_value = (device const ushort*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
                                     omega_bf16_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
                                 } else if (@BF8_CACHE@ && mode == 0L) {
@@ -741,7 +796,10 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                     }
                     FOR_UNROLL for (int dimension_block = 0; dimension_block < (int)(head_dim / 8); dimension_block++) {
                         simdgroup_float8x8 value_float;
-                        if (@BF16_CACHE@ && mode == 0L) {
+                        if (prefetch_next_block && mode == 0L && step > 0L) {
+                            long fragment_offset = ((long)key_tile * (head_dim / 8L) + dimension_block) * 64L;
+                            @PREFETCH_LOAD@(value_float, prefetched_value + fragment_offset, 8, lane);
+                        } else if (@BF16_CACHE@ && mode == 0L) {
                             device const ushort* cached_value = (device const ushort*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
                             omega_bf16_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
                         } else if (@BF8_CACHE@ && mode == 0L) {
@@ -765,7 +823,10 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                     FOR_UNROLL for (int slot = 0; slot < (int)dims_per_group; slot++) {
                         int dimension_block = (int)simdgroup_slot + slot * (int)simdgroups;
                         simdgroup_float8x8 value_float;
-                        if (@BF16_CACHE@ && mode == 0L) {
+                        if (prefetch_next_block && mode == 0L && step > 0L) {
+                            long fragment_offset = ((long)key_tile * (head_dim / 8L) + dimension_block) * 64L;
+                            @PREFETCH_LOAD@(value_float, prefetched_value + fragment_offset, 8, lane);
+                        } else if (@BF16_CACHE@ && mode == 0L) {
                             device const ushort* cached_value = (device const ushort*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
                             omega_bf16_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
                         } else if (@BF8_CACHE@ && mode == 0L) {
@@ -811,6 +872,60 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                     accumulated[slot][vector_block].thread_elements()[1] += sum_odd;
                 }
             }
+        }
+        if (prefetch_next_block && mode == 0L && step + 1L < cached_blocks) {
+            long next_key0 = key0 + block;
+            long next_columns = min(block, slice_end - next_key0);
+            int next_fragments = (int)((next_columns + 7L) / 8L);
+            int depth_fragments = (int)(half_dim / 8L);
+            int value_fragments = (int)(head_dim / 8L);
+            for (int fragment_index = (int)simdgroup_slot; fragment_index < next_fragments * depth_fragments; fragment_index += (int)simdgroups) {
+                int key_tile = fragment_index / depth_fragments;
+                int depth_tile = fragment_index % depth_fragments;
+                long fragment_offset = (long)fragment_index * 64L;
+                device const float* key_even_ptr = (device const float*)in2 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
+                device const float* key_odd_ptr = (device const float*)in3 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
+                simdgroup_float8x8 even_float;
+                simdgroup_float8x8 odd_float;
+                if (@BF16_CACHE@) {
+                    device const ushort* cached_even = (device const ushort*)in2 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
+                    device const ushort* cached_odd = (device const ushort*)in3 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
+                    omega_bf16_load_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, true);
+                    omega_bf16_load_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, true);
+                } else if (@BF8_CACHE@) {
+                    device const uchar* cached_even = (device const uchar*)in2 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
+                    device const uchar* cached_odd = (device const uchar*)in3 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
+                    omega_bf8_load_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, true);
+                    omega_bf8_load_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, true);
+                } else {
+                    simdgroup_load(even_float, key_even_ptr, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                    simdgroup_load(odd_float, key_odd_ptr, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                }
+                @OPERAND@ even_operand = @NARROW_TO_OPERAND_EVEN@;
+                @OPERAND@ odd_operand = @NARROW_TO_OPERAND_ODD@;
+                simdgroup_store(even_operand, prefetched_key_even + fragment_offset, 8);
+                simdgroup_store(odd_operand, prefetched_key_odd + fragment_offset, 8);
+            }
+            for (int fragment_index = (int)simdgroup_slot; fragment_index < next_fragments * value_fragments; fragment_index += (int)simdgroups) {
+                int key_tile = fragment_index / value_fragments;
+                int dimension_block = fragment_index % value_fragments;
+                long fragment_offset = (long)fragment_index * 64L;
+                device const float* value_ptr = (device const float*)in6 + next_key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8L;
+                simdgroup_float8x8 value_float;
+                if (@BF16_CACHE@) {
+                    device const ushort* cached_value = (device const ushort*)in6 + next_key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8L;
+                    omega_bf16_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                } else if (@BF8_CACHE@) {
+                    device const uchar* cached_value = (device const uchar*)in6 + next_key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8L;
+                    omega_bf8_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                } else {
+                    simdgroup_load(value_float, value_ptr, (ulong)(kv_heads * head_dim));
+                }
+                omega_zero_padded_value_rows(value_float, next_key0 + (long)key_tile * 8L, slice_end, lane);
+                @OPERAND@ value_operand = @NARROW_TO_OPERAND_VALUE@;
+                simdgroup_store(value_operand, prefetched_value + fragment_offset, 8);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
