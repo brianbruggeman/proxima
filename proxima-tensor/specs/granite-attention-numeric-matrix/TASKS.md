@@ -19,7 +19,7 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 | 12 | [card](cards/12-variant-config.md) | none | R5,R6 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_12_variant_config)'` | filter selects 2 tests; 2 passed; all seven defaults and explicit values | [x] | `2 passed; public feature-gated record stores all seven axes independently; feature-only no-default check and default-feature check both compiled` |
 | 13 | [card](cards/13-mma-precision.md) | 10,11,12 | R5,R6 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_13_mma_precision)'` | filter selects 2 tests; 2 passed; operand choice independent of matching storage, mismatched storage declines, and executed F16/F32 outputs match on an F16-exact fixture | [x] | `2 passed; F16/F32 plans have distinct attention keys and preserve exact-fixture output bits; mismatched storage declines in emit and plan APIs; default and instrument+variant feature checks passed` |
 | 14 | [card](cards/14-k-reuse.md) | 12,13 | R5 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_14_k_reuse)'` | filter selects 2 tests; 2 passed | [x] | `2 passed; K fragments have unique simdgroup producers, cross-simdgroup consumers, disjoint query-block score writers, unchanged masks, and a threadgroup-budget decline; no global K-load reduction claimed` |
-| 15 | [card](cards/15-v-reuse.md) | 14 | R5 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_15_v_reuse)'` | filter selects 2 tests; 2 passed | [ ] | |
+| 15 | [card](cards/15-v-reuse.md) | 14 | R5 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_15_v_reuse)'` | filter selects 2 tests; 2 passed | [x] | `2 passed; Metal device acceptance 1 passed; Legacy/SharedK/SharedKv agree with CPU payloads, distinct query rows differ, padded-V +Inf preserves output bits; Card14 and Card13 regression gates each 2 passed` |
 | 16 | [card](cards/16-tile-height.md) | 12 | R5 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_16_tile_height)'` | filter selects 2 tests; 2 passed; rows_16 admitted and both exact declines asserted | [ ] | |
 | 17 | [card](cards/17-query-parallelism.md) | 12,14,15,16 | R5 | `cargo nextest run -p omega --features metal-attn-split-decode,metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_17_query_parallelism)'` | filter selects 2 tests; 2 passed; explicit one-row decline and legacy decode-split control | [ ] | |
 | 18 | [card](cards/18-prefetch.md) | 12,14,15 | R5 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_18_prefetch)'` | filter selects 2 tests; 2 passed | [ ] | |
@@ -30,8 +30,8 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 
 ## resume
 
-Last landed slice: card 14 implementation and AC14
-Next action: card 15, implement selectable V reuse for row-tiled attention
+Last landed slice: card 15 implementation and AC15
+Next action: card 16, implement selectable tile height for row-tiled attention
 Open question, if any: none; E5M2 is bound as Proxima-owned in SPEC.md
 
 ## struck

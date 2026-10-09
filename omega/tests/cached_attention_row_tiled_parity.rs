@@ -78,6 +78,10 @@ fn bound_attention(fixture: &Fixture, policy: NumericPolicy) -> Vec<BoundOp> {
 
 /// `resolved` run on the CPU interpreter over the fixture's named inputs.
 fn run_resolved_on_cpu(fixture: &Fixture, resolved: &[BoundOp]) -> Vec<f32> {
+    run_resolved_root_on_cpu(fixture, resolved, fixture.logits)
+}
+
+fn run_resolved_root_on_cpu(fixture: &Fixture, resolved: &[BoundOp], root: NodeId) -> Vec<f32> {
     let mut buffers: Vec<Option<Vec<f32>>> = vec![None; fixture.program.len()];
     for node in block_node_ids(&fixture.program) {
         let Op::Input {
@@ -106,9 +110,9 @@ fn run_resolved_on_cpu(fixture: &Fixture, resolved: &[BoundOp]) -> Vec<f32> {
             Poll::Pending => unreachable!("cpu pipes never yield: no internal .await"),
         }
     }
-    buffers[fixture.logits.0 as usize]
+    buffers[root.0 as usize]
         .clone()
-        .expect("the logits root was computed")
+        .expect("the selected cpu root was computed")
 }
 
 fn one_cell(label: &str, geometry: Geometry, rows: usize, cached_len: usize) -> (f32, f32) {
@@ -759,7 +763,7 @@ fn card_13_mma_precision_selects_f32_and_f16_for_each_cache_storage() {
             assert!(emitted.source.contains(conversion));
             assert!(emitted
                 .source
-                .contains("simdgroup_float8x8 accumulated[dims_per_group][tile_blocks];"));
+                .contains("simdgroup_float8x8 accumulated[accumulator_dimensions][accumulator_vectors];"));
             assert!(emitted.source.contains("threadgroup float score_tile"));
             assert!(emitted.source.contains("float local_scores"));
             assert!(emitted.entry.ends_with(match precision {
@@ -912,4 +916,210 @@ fn card_13_mma_precision_f16_exact_fixture_preserves_attention_output_bits() {
         .collect();
     assert!(f32_output.root().iter().all(|value| *value == 0.5));
     assert_eq!(f16_bits, f32_bits, "F16-exact operands preserve output bits");
+}
+
+#[test]
+fn card_15_v_reuse_device_keeps_query_rows_independent() {
+    let policy = production_numeric_policy();
+    let mut fixture = fixture_with(8, 31, Geometry::TWO_QUERY_GROUPS);
+    let cache_bucket = bucket_for(31);
+    for (name, values) in &mut fixture.named {
+        if name.starts_with("kv_cache.") && name.ends_with(".v") {
+            let row_width = values.len() / cache_bucket;
+            for key_row in 0..cache_bucket {
+                let row_value = (key_row as f32 + 1.0) / 64.0;
+                values[key_row * row_width..(key_row + 1) * row_width].fill(row_value);
+            }
+        }
+    }
+
+    let attention = bound_attention(&fixture, policy)
+        .into_iter()
+        .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+        .collect::<Vec<_>>();
+    let root = attention
+        .last()
+        .expect("the fixture includes a global attention operation")
+        .node;
+    let roots = [root];
+    let named = as_named_blocks(&fixture.named);
+    let mut legacy_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &named,
+        &roots,
+        policy,
+    )
+    .expect("the legacy row-tiled plan builds");
+    legacy_plan
+        .set_attention_variant(omega::AttentionVariant {
+            mma_precision: omega::AttentionMmaPrecision::F32,
+            ..omega::AttentionVariant::default()
+        })
+        .expect("the explicit F32 legacy plan is admitted");
+    let mut shared_k_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &named,
+        &roots,
+        policy,
+    )
+    .expect("the shared K control plan builds");
+    shared_k_plan
+        .set_attention_variant(omega::AttentionVariant {
+            mma_precision: omega::AttentionMmaPrecision::F32,
+            kv_reuse: omega::AttentionKvReuse::SharedK,
+            ..omega::AttentionVariant::default()
+        })
+        .expect("the shared K control is admitted");
+    let mut shared_kv_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &named,
+        &roots,
+        policy,
+    )
+    .expect("the shared K/V plan builds");
+    shared_kv_plan
+        .set_attention_variant(omega::AttentionVariant {
+            mma_precision: omega::AttentionMmaPrecision::F32,
+            kv_reuse: omega::AttentionKvReuse::SharedKv,
+            ..omega::AttentionVariant::default()
+        })
+        .expect("the shared K/V plan is admitted");
+    let mut shared_k_f16_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &named,
+        &roots,
+        policy,
+    )
+    .expect("the F16 shared K control plan builds");
+    shared_k_f16_plan
+        .set_attention_variant(omega::AttentionVariant {
+            mma_precision: omega::AttentionMmaPrecision::F16,
+            kv_reuse: omega::AttentionKvReuse::SharedK,
+            ..omega::AttentionVariant::default()
+        })
+        .expect("the F16 shared K control is admitted");
+    let mut shared_kv_f16_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &named,
+        &roots,
+        policy,
+    )
+    .expect("the F16 shared K/V plan builds");
+    shared_kv_f16_plan
+        .set_attention_variant(omega::AttentionVariant {
+            mma_precision: omega::AttentionMmaPrecision::F16,
+            kv_reuse: omega::AttentionKvReuse::SharedKv,
+            ..omega::AttentionVariant::default()
+        })
+        .expect("the F16 shared K/V plan is admitted");
+
+    let legacy_keys = legacy_plan
+        .kernel_keys()
+        .expect("legacy pipeline identities are collected");
+    let shared_k_keys = shared_k_plan
+        .kernel_keys()
+        .expect("shared K pipeline identities are collected");
+    let shared_kv_keys = shared_kv_plan
+        .kernel_keys()
+        .expect("shared K/V pipeline identities are collected");
+    assert_ne!(legacy_keys, shared_k_keys);
+    assert_ne!(shared_k_keys, shared_kv_keys);
+
+    let legacy = omega::execute_plan_named(&legacy_plan, &named)
+        .expect("the legacy control executes");
+    let shared_k = omega::execute_plan_named(&shared_k_plan, &named)
+        .expect("the shared K control executes");
+    let shared_kv = omega::execute_plan_named(&shared_kv_plan, &named)
+        .expect("the shared K/V plan executes");
+    let shared_k_f16 = omega::execute_plan_named(&shared_k_f16_plan, &named)
+        .expect("the F16 shared K plan executes");
+    let shared_kv_f16 = omega::execute_plan_named(&shared_kv_f16_plan, &named)
+        .expect("the F16 shared K/V plan executes");
+    let expected = run_resolved_root_on_cpu(
+        &fixture,
+        &bind_with_fusion(
+            &fixture.program,
+            &infer(&fixture.program, &fixture.symbols).expect("the fixture infers"),
+            &roots,
+            false,
+            policy,
+        )
+        .expect("the unfused CPU reference binds"),
+        root,
+    );
+    let legacy_output = legacy
+        .get(root)
+        .expect("the legacy attention output is retained")
+        .0;
+    let shared_k_output = shared_k
+        .get(root)
+        .expect("the shared K attention output is retained")
+        .0;
+    let shared_kv_output = shared_kv
+        .get(root)
+        .expect("the shared K/V attention output is retained")
+        .0;
+    let shared_k_f16_output = shared_k_f16
+        .get(root)
+        .expect("the F16 shared K output is retained")
+        .0;
+    let shared_kv_f16_output = shared_kv_f16
+        .get(root)
+        .expect("the F16 shared K/V output is retained")
+        .0;
+    for (label, output) in [
+        ("legacy", legacy_output),
+        ("shared K", shared_k_output),
+        ("shared K/V", shared_kv_output),
+    ] {
+        let relative = relative_difference(&expected, output);
+        assert!(relative < TOLERANCE, "{label} differs from CPU: {relative}");
+    }
+    let row_width = shared_kv_output.len() / 8;
+    assert_ne!(
+        &shared_kv_output[..row_width],
+        &shared_kv_output[row_width..2 * row_width],
+        "the two query rows retain distinct weighted outputs"
+    );
+    let shared_k_f16_bits: Vec<u32> = shared_k_f16_output
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    let shared_kv_f16_bits: Vec<u32> = shared_kv_f16_output
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    assert_eq!(
+        shared_kv_f16_bits, shared_k_f16_bits,
+        "V sharing preserves outputs at the selected F16 MMA precision"
+    );
+
+    let mut infinity_fixture_values = fixture.named.clone();
+    for (name, values) in &mut infinity_fixture_values {
+        if name.starts_with("kv_cache.") && name.ends_with(".v") {
+            let row_width = values.len() / cache_bucket;
+            values[(cache_bucket - 1) * row_width..].fill(f32::INFINITY);
+        }
+    }
+    let infinity_named = as_named_blocks(&infinity_fixture_values);
+    let infinity_output = omega::execute_plan_named(&shared_kv_plan, &infinity_named)
+        .expect("the shared K/V plan executes with infinity in a padded V row");
+    let infinity_values = infinity_output
+        .get(root)
+        .expect("the infinity attention output is retained")
+        .0;
+    let output_bits: Vec<u32> = shared_kv_output
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    let infinity_bits: Vec<u32> = infinity_values
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    assert_eq!(infinity_bits, output_bits, "the padded V row stays masked");
 }
