@@ -129,6 +129,11 @@ mod wide_grid;
 pub use kernel_types_identity::*;
 pub use emit_and_classify::*;
 pub(crate) use signature_tokens_prelude::*;
+#[cfg(feature = "metal-attn-variants")]
+pub use signature_tokens_prelude::{
+    AttentionKvReuse, AttentionKvStorage, AttentionMmaPrecision, AttentionPrefetch,
+    AttentionQueryParallelism, AttentionSimdTopology, AttentionTileHeight, AttentionVariant,
+};
 pub use signature_tokens_prelude::context_chunks_for;
 // plain (non-pub) reexports: `render_cached_attention`/
 // `render_cached_attention_merge` only need to reach `msl`'s own child

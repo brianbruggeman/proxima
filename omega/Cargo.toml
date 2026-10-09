@@ -37,6 +37,8 @@ metal-attn-split-decode = ["metal-fuse-attn-decode", "proxima-tensor/metal-attn-
 # The row-tiled cached-attention form (`CachedAttentionForm::TwoRangeRowTiled`) for K > 1 query rows and the generalized K-row
 # `CachedSoftmaxWeights` lowering; implies the decode split form. Joins `metal`'s default list with it.
 metal-attn-split-rows = ["metal-attn-split-decode", "proxima-tensor/metal-attn-split-rows"]
+# default-off because each dispatch must opt into named cached-attention variants.
+metal-attn-variants = ["alloc", "metal-attn-split-rows"]
 # Default-off passthrough to `proxima-tensor/gated-delta-net-fusion` (the
 # `BoundOpKind::GatedDeltaNet` bind-time matcher) -- same shape as
 # `cached-attention-streaming` above. `crate::msl::render_gated_delta_net`

@@ -122,6 +122,11 @@ pub use msl::{
     Q5_1_UNPACK_MSL, Q6K_BLOCK_BYTES, Q6K_UNPACK_MSL,
     Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS, Q8_0_UNPACK_MSL, emit, context_chunks_for,
 };
+#[cfg(all(feature = "alloc", feature = "metal-attn-variants"))]
+pub use msl::{
+    AttentionKvReuse, AttentionKvStorage, AttentionMmaPrecision, AttentionPrefetch,
+    AttentionQueryParallelism, AttentionSimdTopology, AttentionTileHeight, AttentionVariant,
+};
 #[cfg(feature = "wgpu-backend")]
 pub use wgpu_driver::{
     WgpuDeviceInfo, WgpuError, WgpuPlan, execute_plan as execute_plan_wgpu,
