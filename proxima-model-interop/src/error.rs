@@ -91,11 +91,8 @@ pub enum InteropError {
     #[error("prefault: {0}")]
     PrefaultPoolUnavailable(String),
 
-    /// `crate::bind::as_block` was asked for `codec`, and no
-    /// `proxima_tensor::cpu::QuantizedBlock` variant decodes it -- one of
-    /// the codecs [`Codec`] recognizes for GPU-select/sidecar identity but
-    /// that this crate's CPU decode path has never implemented.
-    #[error("codec {codec:?} has no QuantizedBlock decoder")]
+    /// `codec` has no decoder or GGML wire-layout mapping in this crate.
+    #[error("codec {codec:?} is unsupported by this interop path")]
     UnsupportedCodec { codec: Codec },
 
     /// `crate::bind::gguf_tensor_as_packed_block` (`std`-gated) found `tensor` stored as

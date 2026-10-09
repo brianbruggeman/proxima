@@ -1054,7 +1054,8 @@ pub(crate) fn as_block(codec: Codec, bytes: &[u8]) -> Option<proxima_tensor::cpu
         | Codec::Mxfp4
         | Codec::Nvfp4
         | Codec::Q1_0
-        | Codec::Q2_0 => None,
+        | Codec::Q2_0
+        | Codec::BFloat8 => None,
     }
 }
 
@@ -1135,6 +1136,7 @@ fn codec_name_suffix(codec: Codec) -> &'static str {
         Codec::Q4_0 => "q4_0",
         Codec::Float16 => "f16",
         Codec::BFloat16 => "bf16",
+        Codec::BFloat8 => "bf8",
         Codec::Q2K => "q2_k",
         Codec::Q5_1 => "q5_1",
         Codec::Q5_0 => "q5_0",
@@ -1162,10 +1164,11 @@ fn codec_name_suffix(codec: Codec) -> &'static str {
 /// The on-disk [`GgmlType`] `codec` packs bytes as -- the reverse of
 /// [`codec_from_ggml_type`], needed by [`codec_byte_len_for`] to look up a
 /// codec's block layout without re-typing [`GgmlType::block_layout`]'s
-/// numbers a second time here.
+/// numbers a second time here. BF8 has no GGML wire type and returns
+/// [`InteropError::UnsupportedCodec`].
 #[cfg(feature = "std")]
-pub(crate) fn codec_to_ggml_type(codec: Codec) -> GgmlType {
-    match codec {
+pub(crate) fn codec_to_ggml_type(codec: Codec) -> Result<GgmlType, InteropError> {
+    Ok(match codec {
         Codec::Q4K => GgmlType::Q4_K,
         Codec::Q5K => GgmlType::Q5_K,
         Codec::Q6K => GgmlType::Q6_K,
@@ -1195,18 +1198,20 @@ pub(crate) fn codec_to_ggml_type(codec: Codec) -> GgmlType {
         Codec::Nvfp4 => GgmlType::Nvfp4,
         Codec::Q1_0 => GgmlType::Q1_0,
         Codec::Q2_0 => GgmlType::Q2_0,
-    }
+        Codec::BFloat8 => return Err(InteropError::UnsupportedCodec { codec }),
+    })
 }
 
 /// Packed byte length for `element_count` elements of `codec` --
 /// `element_count / block_elements * block_bytes`, the same arithmetic
 /// [`recode_tensor`] already does inline for its own `layout` lookup.
 /// [`crate::expert_slab::encode_expert_copy`] uses this to size the
-/// encode buffer before calling [`quantize_to_kind`].
+/// encode buffer before calling [`quantize_to_kind`]. BF8 returns
+/// [`InteropError::UnsupportedCodec`] before any layout arithmetic.
 #[cfg(feature = "std")]
-pub(crate) fn codec_byte_len_for(codec: Codec, element_count: usize) -> usize {
-    let layout = codec_to_ggml_type(codec).block_layout();
-    (element_count as u64 / layout.block_elements * layout.block_bytes) as usize
+pub(crate) fn codec_byte_len_for(codec: Codec, element_count: usize) -> Result<usize, InteropError> {
+    let layout = codec_to_ggml_type(codec)?.block_layout();
+    Ok((element_count as u64 / layout.block_elements * layout.block_bytes) as usize)
 }
 
 /// A learned 1-D scale (RMSNorm weight) or `token_embd.weight` (indexed by
@@ -1656,6 +1661,7 @@ pub(crate) fn quantize_to_kind(
         Codec::Nvfp4 => Err(QuantError::UnsupportedCodec { codec: "nvfp4" }),
         Codec::Q1_0 => Err(QuantError::UnsupportedCodec { codec: "q1_0" }),
         Codec::Q2_0 => Err(QuantError::UnsupportedCodec { codec: "q2_0" }),
+        Codec::BFloat8 => Err(QuantError::UnsupportedCodec { codec: "bf8" }),
     }
 }
 

@@ -9,6 +9,21 @@ fn dims(values: &[u64]) -> arrayvec::ArrayVec<u64, { proxima_gguf::tensor::MAX_D
     values.iter().copied().collect()
 }
 
+#[cfg(feature = "std")]
+#[test]
+fn bf8_refuses_ggml_layout_and_cpu_packed_decode() {
+    let codec = Codec::BFloat8;
+    assert!(as_block(codec, &[0x3c]).is_none());
+    assert!(matches!(
+        codec_to_ggml_type(codec),
+        Err(InteropError::UnsupportedCodec { codec: Codec::BFloat8 })
+    ));
+    assert!(matches!(
+        codec_byte_len_for(codec, 1),
+        Err(InteropError::UnsupportedCodec { codec: Codec::BFloat8 })
+    ));
+}
+
 /// The decisive proof for this file's own fix: a raw-packed `F32` matmul
 /// weight bound through [`bind_matmul_weight_as`] must land in
 /// [`BoundWeights::owned`], transposed, and produce the exact same

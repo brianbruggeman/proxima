@@ -101,7 +101,7 @@ pub fn encode_expert_copy(
     codec: Codec,
 ) -> Result<Vec<u8>, InteropError> {
     let element_count = out_dim as usize * in_dim as usize;
-    let mut encoded = vec![0u8; crate::bind::codec_byte_len_for(codec, element_count)];
+    let mut encoded = vec![0u8; crate::bind::codec_byte_len_for(codec, element_count)?];
     quantize_to_kind(codec, rows, &mut encoded)?;
     Ok(encoded)
 }
@@ -120,7 +120,7 @@ pub fn encode_expert_copy_into(
     output: &mut [u8],
 ) -> Result<(), InteropError> {
     let element_count = out_dim as usize * in_dim as usize;
-    let expected_bytes = crate::bind::codec_byte_len_for(codec, element_count);
+    let expected_bytes = crate::bind::codec_byte_len_for(codec, element_count)?;
     if output.len() != expected_bytes {
         return Err(InteropError::Quant(
             proxima_gguf::quant::QuantError::OutputSizeMismatch {
@@ -152,7 +152,7 @@ pub fn recode_expert_into(
     scratch: &mut [f32],
     output: &mut [u8],
 ) -> Result<usize, InteropError> {
-    let source_layout = crate::bind::codec_to_ggml_type(source_codec).block_layout();
+    let source_layout = crate::bind::codec_to_ggml_type(source_codec)?.block_layout();
     let block_bytes = source_layout.block_bytes as usize;
     let block_elements = source_layout.block_elements as usize;
     if !source_bytes.len().is_multiple_of(block_bytes) {
@@ -173,7 +173,7 @@ pub fn recode_expert_into(
             },
         ));
     }
-    let target_bytes = crate::bind::codec_byte_len_for(target_codec, element_count);
+    let target_bytes = crate::bind::codec_byte_len_for(target_codec, element_count)?;
     if output.len() != target_bytes {
         return Err(InteropError::Quant(
             proxima_gguf::quant::QuantError::OutputSizeMismatch {
@@ -198,6 +198,7 @@ fn source_codec_name(codec: Codec) -> &'static str {
         Codec::Q4_0 => "q4_0",
         Codec::Float16 => "f16",
         Codec::BFloat16 => "bf16",
+        Codec::BFloat8 => "bf8",
         Codec::Q5_1 => "q5_1",
         Codec::Q5_0 => "q5_0",
         Codec::Q4_1 => "q4_1",
@@ -232,6 +233,7 @@ fn dequantize_expert(codec: Codec, source: &[u8], output: &mut [f32]) -> Result<
         Codec::Q4_0 => q4_0::dequantize(source, output),
         Codec::Float16 => f16::dequantize(source, output),
         Codec::BFloat16 => bf16::dequantize(source, output),
+        Codec::BFloat8 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "bf8" }),
         Codec::Q5_1 => q5_1::dequantize(source, output),
         Codec::Q5_0 => q5_0::dequantize(source, output),
         // The 15 newly-recognized codecs with no `proxima_tensor::cpu`
