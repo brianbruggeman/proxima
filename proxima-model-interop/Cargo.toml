@@ -211,6 +211,8 @@ metal-attn-split-rows = [
     "proxima-tensor/metal-attn-split-rows",
     "omega?/metal-attn-split-rows",
 ]
+# Default-off typed selector surface for the captured attention A/B example.
+metal-attn-variants = ["metal-attn-split-rows", "omega?/metal-attn-variants"]
 # Passthrough to `proxima-tensor/gated-delta-net-fusion` and
 # `omega/gated-delta-net-fusion` -- same shape as `cached-attention-streaming`
 # above: default-off, individually selectable so a caller can exercise the
@@ -623,7 +625,7 @@ required-features = ["std", "metal", "instrument"]
 # Interleaved A/B replay of kernel-body variants on captured decode dispatches.
 [[example]]
 name = "norm_variant_ab"
-required-features = ["std", "metal", "instrument"]
+required-features = ["std", "metal", "instrument", "metal-attn-variants"]
 
 # The live decode step against the same captured step replayed with no host
 # encode on the critical path (the ceiling a pre-encoded step could win).

@@ -25,8 +25,8 @@
 //! engine (same `BoundOp` descriptor, same emit-then-drive split, an MSL vs
 //! a WGSL emitter), which [`GpuDriver`] now names; `Vulkan`/`Npu`/`Ane` were
 //! name reservations with no lowering and are deleted, not carried; `Cuda`
-//! remains only as `crate::cuda`'s source EMITTER (structural tests only, no
-//! driver) and is not a variant of either enum. See
+//! is an optional driver (`cuda-driver`) over `crate::cuda`'s source emitter,
+//! and is a variant of [`GpuDriver`] only when that feature is enabled. See
 //! `docs/bench-campaigns/2026-09-03-gpu-one-risc/design-2026-09-04/design-final.md`
 //! §B.4 for the collapse this replaces (`Backend`'s prior seven variants,
 //! three of which executed).
