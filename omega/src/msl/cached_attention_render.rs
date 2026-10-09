@@ -218,10 +218,10 @@ pub(super) fn render_cached_attention_with_mma_selection(
         });
     }
     #[cfg(feature = "metal-attn-variants")]
-    if kv_reuse_selection == AttentionKvReuseSelection::SharedK && !has_row_tiled_mma {
+    if !matches!(kv_reuse_selection, AttentionKvReuseSelection::Legacy) && !has_row_tiled_mma {
         return Err(EmitError::CachedAttentionKvReuseNotSupported {
             node: resolved.node,
-            reason: "shared K reuse requires the row-tiled simdgroup-matrix form",
+            reason: "shared K/V reuse requires the row-tiled simdgroup-matrix form",
         });
     }
     let codec_supported_by_form = {
