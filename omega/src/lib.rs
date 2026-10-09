@@ -89,8 +89,9 @@ pub use metal::{
     execute_plan_named_with_placements_and_expert_sources,
     execute_plan_named_with_placements_overlapping, execute_plan_with_placements,
     move_placed_buffer_bytes, narrow_placed_buffer_f32_to_f16, plan_named_with_placed_inputs,
-    read_placed_buffer_f16_as_f32, read_placed_buffer_f32, write_placed_buffer_f32,
-    write_placed_buffer_f32_as_f16, zero_placed_buffer, zero_placed_buffer_range,
+    read_placed_buffer_bf16_as_f32, read_placed_buffer_f16_as_f32, read_placed_buffer_f32,
+    write_placed_buffer_f32, write_placed_buffer_f32_as_bf16, write_placed_buffer_f32_as_f16,
+    zero_placed_buffer, zero_placed_buffer_range,
 };
 #[cfg(all(
     feature = "metal-output-placement",

@@ -20,7 +20,7 @@ In scope: one behavior, the two acceptance tests (or two checker gates for card 
 
 ## Edit
 
-- `omega/src/metal/execute_and_hazards.rs`
+- `omega/src/metal/execute_and_hazards.rs` (helpers and the two named acceptance tests)
 - `omega/src/lib.rs`
 - `proxima-tensor/specs/granite-attention-numeric-matrix/TASKS.md` (row and resume only)
 

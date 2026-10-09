@@ -1229,6 +1229,46 @@ pub fn read_placed_buffer_f16_as_f32(
     source.iter().map(|value| value.to_f32()).collect()
 }
 
+/// Stores `f32` values as two-byte `half::bf16` elements at `byte_offset`.
+#[cfg(feature = "metal-output-placement")]
+pub fn write_placed_buffer_f32_as_bf16(
+    buffer: &PlacedBuffer,
+    byte_offset: usize,
+    values: &[f32],
+) {
+    let pointer = buffer.contents();
+    // SAFETY: shared storage is CPU-writable with no command buffer in flight;
+    // the caller keeps this aligned range inside the allocation.
+    let destination = unsafe {
+        core::slice::from_raw_parts_mut(
+            pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<half::bf16>(),
+            values.len(),
+        )
+    };
+    for (slot, value) in destination.iter_mut().zip(values) {
+        *slot = half::bf16::from_f32(*value);
+    }
+}
+
+/// Reads two-byte `half::bf16` elements at `byte_offset` and widens them to `f32`.
+#[cfg(feature = "metal-output-placement")]
+#[must_use]
+pub fn read_placed_buffer_bf16_as_f32(
+    buffer: &PlacedBuffer,
+    byte_offset: usize,
+    element_count: usize,
+) -> Vec<f32> {
+    let pointer = buffer.contents();
+    // SAFETY: the caller keeps the aligned source range inside shared storage.
+    let source = unsafe {
+        core::slice::from_raw_parts(
+            pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<half::bf16>(),
+            element_count,
+        )
+    };
+    source.iter().map(|value| value.to_f32()).collect()
+}
+
 /// Rounds `element_count` f32s of `source` (read at `source_byte_offset`) to
 /// binary16 and stores them in `destination` at `destination_byte_offset`,
 /// with no host allocation: the step-end narrowing of a half-width KV cache,
@@ -1913,4 +1953,36 @@ pub(super) fn register_skipped_output(
     };
     device_buffers.insert(bound.node, (buffer, offset));
     Ok(())
+}
+
+#[cfg(all(test, feature = "metal-output-placement"))]
+mod card_04_tests {
+    use super::*;
+
+    #[test]
+    fn card_04_bf16_placed_roundtrips_special_values() {
+        let buffer = allocate_placed_buffer(16).expect("allocates BF16 fixture bytes");
+        let values = [0.0f32, -0.0, 1.5, f32::INFINITY, f32::NEG_INFINITY, f32::NAN];
+        write_placed_buffer_f32_as_bf16(&buffer, 0, &values);
+        let actual = read_placed_buffer_bf16_as_f32(&buffer, 0, values.len());
+
+        assert_eq!(actual[0].to_bits(), 0x0000_0000);
+        assert_eq!(actual[1].to_bits(), 0x8000_0000);
+        assert_eq!(actual[2], 1.5);
+        assert_eq!(actual[3], f32::INFINITY);
+        assert_eq!(actual[4], f32::NEG_INFINITY);
+        assert!(actual[5].is_nan());
+    }
+
+    #[test]
+    fn card_04_bf16_placed_preserves_adjacent_bytes_at_nonzero_offset() {
+        let buffer = allocate_placed_buffer(16).expect("allocates sentinel fixture bytes");
+        write_placed_buffer_f32(&buffer, 0, &[9.0]);
+        write_placed_buffer_f32(&buffer, 12, &[-7.0]);
+        write_placed_buffer_f32_as_bf16(&buffer, 8, &[1.5, 2.5]);
+
+        assert_eq!(read_placed_buffer_f32(&buffer, 0, 1), vec![9.0]);
+        assert_eq!(read_placed_buffer_bf16_as_f32(&buffer, 8, 2), vec![1.5, 2.5]);
+        assert_eq!(read_placed_buffer_f32(&buffer, 12, 1), vec![-7.0]);
+    }
 }

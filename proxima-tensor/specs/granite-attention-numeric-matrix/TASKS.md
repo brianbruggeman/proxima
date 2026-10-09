@@ -7,8 +7,8 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 | 00 | [card](cards/00-bf8-contract.md) | none | R1 | `python3 proxima-tensor/specs/granite-attention-numeric-matrix/check_bf8_contract.py` | checks=2 vectors=16 | [x] | `checks=2 vectors=16` |
 | 01 | [card](cards/01-bf8-convert.md) | 00 | R1,R2 | `cargo nextest run -p proxima-tensor --lib -E 'test(~card_01_bf8_convert)'` | filter selects 2 tests; 2 passed | [x] | `2 passed; 782 filter-excluded` |
 | 02 | [card](cards/02-bf8-identities.md) | 01 | R2 | `cargo nextest run -p proxima-primitives --lib -E 'test(~card_02_bf8_codec)' && cargo nextest run -p proxima-tensor --lib -E 'test(~card_02_bf8_dtype)'` | 4 tests total: each command selects 2 tests; 2 passed | [x] | `codec: 2 passed, 425 filter-excluded; dtype: 2 passed, 784 filter-excluded` |
-| 03 | [card](cards/03-bf8-element.md) | 01,02 | R2 | `cargo nextest run -p proxima-tensor --lib -E 'test(~card_03_bf8_element)'` | filter selects 2 tests; 2 passed | [x] | `2 passed; 786 filter-excluded` |
-| 04 | [card](cards/04-bf16-placed.md) | none | R3 | `cargo nextest run -p omega --lib -E 'test(~card_04_bf16_placed)'` | filter selects 2 tests; 2 passed | [ ] | |
+| 03 | [card](cards/03-bf8-element.md) | 01,02 | R2 | `cargo nextest run -p proxima-tensor --lib -E 'test(~card_03_bf8_element)'` | filter selects 2 tests; 2 passed | [x] | `2 passed; 786 filter-excluded; Omega BF8 exhaustiveness repaired in 09d2fc21; cargo check -p omega --lib passed` |
+| 04 | [card](cards/04-bf16-placed.md) | none | R3 | `cargo nextest run -p omega --lib -E 'test(~card_04_bf16_placed)'` | filter selects 2 tests; 2 passed | [x] | `2 passed; 482 filter-excluded` |
 | 05 | [card](cards/05-bf16-device-kv.md) | 04 | R3 | `cargo nextest run -p proxima-model-interop --features std,metal,metal-attn-split-rows --lib -E 'test(~card_05_bf16_device)'` | filter selects 2 tests; 2 passed | [ ] | |
 | 06 | [card](cards/06-bf16-decode.md) | 05 | R4 | `cargo nextest run -p omega --features metal-attn-split-decode --lib -E 'test(~card_06_bf16_decode)'` | filter selects 2 tests; 2 passed | [ ] | |
 | 07 | [card](cards/07-bf8-placed.md) | 01 | R3 | `cargo nextest run -p omega --lib -E 'test(~card_07_bf8_placed)'` | filter selects 2 tests; 2 passed | [ ] | |
@@ -30,8 +30,8 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 
 ## resume
 
-Last landed slice: card 03 implementation and AC03
-Next action: card 04, verify BF16 cache placement and preserve the F32 baseline
+Last landed slice: card 04 implementation and AC04
+Next action: card 05, seed and append device BF16 K/V cache rows
 Open question, if any: none; E5M2 is bound as Proxima-owned in SPEC.md
 
 ## struck
