@@ -1614,8 +1614,8 @@ pub(crate) const fn codec_from_quantized_block(block: &QuantizedBlock<'_>) -> Op
         | Codec::Q5_1
         | Codec::Q5_0
         | Codec::Float16
-        | Codec::BFloat16 => Some(*codec),
-        Codec::BFloat8 => None,
+        | Codec::BFloat16
+        | Codec::BFloat8 => Some(*codec),
         _ => None,
     }
 }

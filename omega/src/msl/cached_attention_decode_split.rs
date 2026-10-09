@@ -62,10 +62,11 @@ pub(super) fn render_cached_attention_decode_split(
         None => (element_type, PLAIN_KV_POINTERS, PLAIN_KEY_LOAD, PLAIN_VALUE_LOAD),
         Some(Codec::Float16) => ("half", HALF_KV_POINTERS, HALF_KEY_LOAD, HALF_VALUE_LOAD),
         Some(Codec::BFloat16) => ("ushort", BF16_KV_POINTERS, BF16_KEY_LOAD, BF16_VALUE_LOAD),
+        Some(Codec::BFloat8) => ("uchar", BF8_KV_POINTERS, BF8_KEY_LOAD, BF8_VALUE_LOAD),
         Some(_) => {
             return Err(EmitError::CachedAttentionKvCodecNotSupported {
                 node: resolved.node,
-                reason: "the decode split reads cached K/V that is plain, Float16, or BFloat16",
+                reason: "the decode split reads cached K/V that is plain, Float16, BFloat16, or BFloat8",
             });
         }
     };
@@ -94,6 +95,9 @@ pub(super) fn render_cached_attention_decode_split(
     preamble(&mut source, None);
     if cached_kv_codec == Some(Codec::BFloat16) {
         source.push_str(BF16_VECTOR_HELPER);
+    }
+    if cached_kv_codec == Some(Codec::BFloat8) {
+        source.push_str(BF8_VECTOR_HELPER);
     }
     let mut body = DECODE_SPLIT_KERNEL.to_string();
     for (token, value) in &substitutions {
@@ -138,6 +142,19 @@ const BF16_KEY_LOAD: &str = "if (cached) { key_real[step][slot] = omega_bf16x4_t
 const BF16_VALUE_LOAD: &str = "if (cached) { value_row[step][slot] = omega_bf16x4_to_float4(v4_cached[index]); } else { value_row[step][slot] = float4(v4_new[index]); }";
 
 const BF16_VECTOR_HELPER: &str = "static inline float4 omega_bf16x4_to_float4(ushort4 value) { return float4(as_type<float>((uint)value.x << 16u), as_type<float>((uint)value.y << 16u), as_type<float>((uint)value.z << 16u), as_type<float>((uint)value.w << 16u)); }\n";
+
+const BF8_KV_POINTERS: &str = "device const uchar4* kr4_cached = (device const uchar4*)(in2 + kbase);
+                device const uchar4* ki4_cached = (device const uchar4*)(in3 + kbase);
+                device const uchar4* v4_cached = (device const uchar4*)(in6 + kbase * 2);
+                device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
+                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);
+                device const @T@4* v4_new = (device const @T@4*)(in7 + kbase * 2);";
+
+const BF8_KEY_LOAD: &str = "if (cached) { key_real[step][slot] = omega_bf8x4_to_float4(kr4_cached[index]); key_imag[step][slot] = omega_bf8x4_to_float4(ki4_cached[index]); } else { key_real[step][slot] = float4(kr4_new[index]); key_imag[step][slot] = float4(ki4_new[index]); }";
+
+const BF8_VALUE_LOAD: &str = "if (cached) { value_row[step][slot] = omega_bf8x4_to_float4(v4_cached[index]); } else { value_row[step][slot] = float4(v4_new[index]); }";
+
+const BF8_VECTOR_HELPER: &str = "static inline float omega_bf8_to_float(uchar value) { uint sign = ((uint)value & 0x80u) << 24u; uint exponent = ((uint)value >> 2u) & 0x1fu; uint mantissa = (uint)value & 0x3u; if (exponent == 0u) { float magnitude = ldexp((float)mantissa, -16); return sign == 0u ? magnitude : -magnitude; } if (exponent == 31u) { uint bits = 0x7f800000u | (mantissa << 21u); return as_type<float>(sign | bits); } uint bits = ((exponent + 112u) << 23u) | (mantissa << 21u); return as_type<float>(sign | bits); }\nstatic inline float4 omega_bf8x4_to_float4(uchar4 value) { return float4(omega_bf8_to_float(value.x), omega_bf8_to_float(value.y), omega_bf8_to_float(value.z), omega_bf8_to_float(value.w)); }\n";
 
 const DECODE_SPLIT_KERNEL: &str =r#"struct Uniforms { long total_elements; long context_chunks; long splits; };
 
