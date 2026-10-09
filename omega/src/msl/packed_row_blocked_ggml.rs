@@ -719,6 +719,12 @@ pub(super) fn push_packed_row_blocked_body(
                         codec: "bfloat16",
                     });
                 }
+                Codec::BFloat8 => {
+                    return Err(EmitError::NonKQuantCodec {
+                        node: resolved.node,
+                        codec: "bfloat8",
+                    });
+                }
                 // Unreachable by construction (see `operand_read`'s doc on
                 // `PackedOperands`'s closed population), kept exhaustive.
                 Codec::Q4_1

@@ -1251,6 +1251,7 @@ pub(super) fn upload_block(
         | DType::UInt64
         | DType::Int128
         | DType::UInt128
+        | DType::BFloat8
         | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }.into()),
     }
 }

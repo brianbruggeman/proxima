@@ -284,6 +284,7 @@ pub(super) fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, Emi
         | DType::UInt64
         | DType::Int128
         | DType::UInt128
+        | DType::BFloat8
         | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }),
     }
 }
@@ -1026,7 +1027,8 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> 
             | Codec::Mxfp4
             | Codec::Nvfp4
             | Codec::Q1_0
-            | Codec::Q2_0,
+            | Codec::Q2_0
+            | Codec::BFloat8,
         ) => format!("in{index}[{offset}]"),
     }
 }
@@ -1094,7 +1096,8 @@ fn codec_element_fn_name(codec: Codec) -> &'static str {
         | Codec::Mxfp4
         | Codec::Nvfp4
         | Codec::Q1_0
-        | Codec::Q2_0 => "unreachable_element_fn",
+        | Codec::Q2_0
+        | Codec::BFloat8 => "unreachable_element_fn",
     }
 }
 
