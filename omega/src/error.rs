@@ -183,6 +183,13 @@ pub enum EmitError {
         reason: &'static str,
     },
 
+    #[error("node {node} cannot apply its simdgroup lane topology to {query_rows} query rows: {reason}")]
+    CachedAttentionSimdTopologyNotSupported {
+        node: NodeId,
+        query_rows: u64,
+        reason: &'static str,
+    },
+
     #[error("cached-attention variant selects {selected} K/V storage but the bound operands use {bound}")]
     CachedAttentionVariantStorageMismatch {
         selected: &'static str,

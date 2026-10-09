@@ -1814,13 +1814,6 @@ impl AttentionMmaSelection {
             #[cfg(not(feature = "metal-attn-split-rows"))]
             return Err(("prefetch", "row-tiled attention feature is disabled"));
         }
-        if variant.simd_topology != AttentionSimdTopology::Legacy {
-            return Err(("simd_topology", match variant.simd_topology {
-                AttentionSimdTopology::Legacy => "legacy",
-                AttentionSimdTopology::PerHead => "per_head",
-                AttentionSimdTopology::GroupedQueries => "grouped_queries",
-            }));
-        }
         Ok((
             match variant.mma_precision {
                 AttentionMmaPrecision::Legacy => Self::Legacy,
@@ -1842,6 +1835,13 @@ impl AttentionMmaSelection {
                     AttentionPrefetch::Off => AttentionPrefetchSelection::Off,
                     AttentionPrefetch::NextBlock => AttentionPrefetchSelection::NextBlock,
                 })
+                .with_simd_topology(match variant.simd_topology {
+                    AttentionSimdTopology::Legacy => AttentionSimdTopologySelection::Legacy,
+                    AttentionSimdTopology::PerHead => AttentionSimdTopologySelection::PerHead,
+                    AttentionSimdTopology::GroupedQueries => {
+                        AttentionSimdTopologySelection::GroupedQueries
+                    }
+                })
             },
         ))
     }
@@ -1862,6 +1862,7 @@ pub(crate) struct AttentionRowSchedule {
     tile_height: AttentionTileHeightSelection,
     query_parallelism: AttentionQueryParallelismSelection,
     prefetch: AttentionPrefetchSelection,
+    simd_topology: AttentionSimdTopologySelection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1876,6 +1877,15 @@ enum AttentionPrefetchSelection {
     Off,
     #[cfg(feature = "metal-attn-variants")]
     NextBlock,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AttentionSimdTopologySelection {
+    Legacy,
+    #[cfg(feature = "metal-attn-variants")]
+    PerHead,
+    #[cfg(feature = "metal-attn-variants")]
+    GroupedQueries,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1929,6 +1939,7 @@ impl AttentionRowSchedule {
             tile_height: AttentionTileHeightSelection::Legacy,
             query_parallelism: AttentionQueryParallelismSelection::Legacy,
             prefetch: AttentionPrefetchSelection::Off,
+            simd_topology: AttentionSimdTopologySelection::Legacy,
         }
     }
 
@@ -1938,6 +1949,7 @@ impl AttentionRowSchedule {
             && matches!(self.tile_height, AttentionTileHeightSelection::Legacy)
             && matches!(self.query_parallelism, AttentionQueryParallelismSelection::Legacy)
             && matches!(self.prefetch, AttentionPrefetchSelection::Off)
+            && matches!(self.simd_topology, AttentionSimdTopologySelection::Legacy)
     }
 
     #[cfg(feature = "metal-attn-variants")]
@@ -1947,6 +1959,7 @@ impl AttentionRowSchedule {
             tile_height: AttentionTileHeightSelection::Legacy,
             query_parallelism: AttentionQueryParallelismSelection::Legacy,
             prefetch: AttentionPrefetchSelection::Off,
+            simd_topology: AttentionSimdTopologySelection::Legacy,
         }
     }
 
@@ -1957,6 +1970,7 @@ impl AttentionRowSchedule {
             tile_height: AttentionTileHeightSelection::Legacy,
             query_parallelism: AttentionQueryParallelismSelection::Legacy,
             prefetch: AttentionPrefetchSelection::Off,
+            simd_topology: AttentionSimdTopologySelection::Legacy,
         }
     }
 
@@ -2001,6 +2015,21 @@ impl AttentionRowSchedule {
     }
 
     #[cfg(feature = "metal-attn-variants")]
+    const fn with_simd_topology(self, simd_topology: AttentionSimdTopologySelection) -> Self {
+        Self { simd_topology, ..self }
+    }
+
+    #[cfg(feature = "metal-attn-variants")]
+    pub(crate) const fn is_per_head_topology(self) -> bool {
+        matches!(self.simd_topology, AttentionSimdTopologySelection::PerHead)
+    }
+
+    #[cfg(feature = "metal-attn-variants")]
+    const fn has_explicit_simd_topology(self) -> bool {
+        !matches!(self.simd_topology, AttentionSimdTopologySelection::Legacy)
+    }
+
+    #[cfg(feature = "metal-attn-variants")]
     pub(crate) const fn is_simdgroup_rows(self) -> bool {
         matches!(self.query_parallelism, AttentionQueryParallelismSelection::SimdgroupRows)
     }
@@ -2023,7 +2052,14 @@ impl AttentionRowSchedule {
             #[cfg(feature = "metal-attn-variants")]
             AttentionPrefetchSelection::NextBlock => "_prefetch_next_block",
         };
-        alloc::format!("{reuse}{}{query}{prefetch}", self.tile_height.cache_token())
+        let topology = match self.simd_topology {
+            AttentionSimdTopologySelection::Legacy => "",
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionSimdTopologySelection::PerHead => "_simd_per_head",
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionSimdTopologySelection::GroupedQueries => "_simd_grouped_queries",
+        };
+        alloc::format!("{reuse}{}{query}{prefetch}{topology}", self.tile_height.cache_token())
     }
 
     pub(crate) fn cache_token_for(self, bound: &BoundOp) -> String {
@@ -2361,6 +2397,52 @@ pub(crate) fn validate_prefetch_selection(
         return Err(EmitError::CachedAttentionPrefetchNotSupported {
             node: resolved.node,
             reason: "next-block prefetch requires the row-tiled attention form",
+        });
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
+pub(crate) fn validate_simd_topology_selection(
+    resolved: &BoundOp,
+    policy: NumericPolicy,
+    schedule: AttentionRowSchedule,
+) -> Result<(), EmitError> {
+    if !schedule.has_explicit_simd_topology() {
+        return Ok(());
+    }
+    let BoundOpKind::CachedAttention {
+        query_rows,
+        query_groups,
+        head_dim,
+        ..
+    } = &resolved.kind
+    else {
+        return Ok(());
+    };
+    let reason = if !matches!(
+        cached_attention_form_with_tile_height(
+            &resolved.kind,
+            policy,
+            schedule.tile_height(),
+        ),
+        Some(CachedAttentionForm::TwoRangeRowTiled { .. })
+    ) {
+        Some("SIMD topology requires the row-tiled attention form")
+    } else if *query_groups < 2 {
+        Some("SIMD topology requires grouped query heads")
+    } else if schedule.is_per_head_topology()
+        && !head_dim.is_multiple_of(16 * row_tiled_simdgroups(*head_dim))
+    {
+        Some("per-head topology requires at least two 8-wide fragments per simdgroup")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        return Err(EmitError::CachedAttentionSimdTopologyNotSupported {
+            node: resolved.node,
+            query_rows: *query_rows,
+            reason,
         });
     }
     Ok(())
