@@ -55,13 +55,13 @@ pub(super) fn cached_attention_scalar_score_body(pass_present: bool, new_range_w
 
 /// The operands of a cached attention bind that hold the cached K even plane,
 /// K odd plane and V rows -- the only ones that may be packed, and only as
-/// one `Codec::Float16` triple read by the decode split.
+/// one `Codec::Float16` or `Codec::BFloat16` triple read by the decode split.
 const CACHED_KV_OPERANDS: [usize; 3] = [2, 3, 6];
 
 /// Classifies a cached attention bind's operand codecs: `None` when every
-/// operand is a plain buffer (every kernel form reads this), `Some(Float16)`
-/// when the cached K/V triple is half-width (only the decode split reads
-/// this), an error for any other packing. `quantized` is `operand_codecs`'
+/// operand is a plain buffer (every kernel form reads this), or a uniform
+/// Float16/BFloat16 cache triple (only the decode split reads these), an
+/// error for any other packing. `quantized` is `operand_codecs`'
 /// answer; entries past its end count as plain, so a hand-built bind with no
 /// packed operands passes `&[]`.
 pub(super) fn cached_attention_kv_codec(
@@ -85,20 +85,23 @@ pub(super) fn cached_attention_kv_codec(
         (Some(Codec::Float16), Some(Codec::Float16), Some(Codec::Float16)) => {
             Ok(Some(Codec::Float16))
         }
+        (Some(Codec::BFloat16), Some(Codec::BFloat16), Some(Codec::BFloat16)) => {
+            Ok(Some(Codec::BFloat16))
+        }
         _ => Err(EmitError::CachedAttentionKvCodecNotSupported {
             node,
-            reason: "the cached K and V operands must be all plain or all Float16",
+            reason: "the cached K and V operands must be all plain, all Float16, or all BFloat16",
         }),
     }
 }
 
 #[cfg(feature = "metal-attn-split-decode")]
-fn form_reads_half_kv(form: CachedAttentionForm) -> bool {
+fn form_reads_narrow_kv(form: CachedAttentionForm) -> bool {
     matches!(form, CachedAttentionForm::TwoRangeDecodeSplit { .. })
 }
 
 #[cfg(not(feature = "metal-attn-split-decode"))]
-fn form_reads_half_kv(_form: CachedAttentionForm) -> bool {
+fn form_reads_narrow_kv(_form: CachedAttentionForm) -> bool {
     false
 }
 
@@ -164,10 +167,10 @@ pub(super) fn render_cached_attention(
             found: resolved.kind.name(),
         });
     };
-    if cached_kv_codec.is_some() && !form_reads_half_kv(form) {
+    if cached_kv_codec.is_some() && !form_reads_narrow_kv(form) {
         return Err(EmitError::CachedAttentionKvCodecNotSupported {
             node: resolved.node,
-            reason: "this form reads an f32 cached K/V; only the decode split reads Float16",
+            reason: "this form reads f32 cached K/V; only decode split reads Float16 or BFloat16",
         });
     }
     let (single_range_dynamic, two_range_cached_bound) = match form {

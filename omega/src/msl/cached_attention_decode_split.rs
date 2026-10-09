@@ -61,10 +61,11 @@ pub(super) fn render_cached_attention_decode_split(
     let (cached_kv_type, kv_pointers, key_load, value_load) = match cached_kv_codec {
         None => (element_type, PLAIN_KV_POINTERS, PLAIN_KEY_LOAD, PLAIN_VALUE_LOAD),
         Some(Codec::Float16) => ("half", HALF_KV_POINTERS, HALF_KEY_LOAD, HALF_VALUE_LOAD),
+        Some(Codec::BFloat16) => ("ushort", BF16_KV_POINTERS, BF16_KEY_LOAD, BF16_VALUE_LOAD),
         Some(_) => {
             return Err(EmitError::CachedAttentionKvCodecNotSupported {
                 node: resolved.node,
-                reason: "the decode split reads a cached K/V that is plain or Float16",
+                reason: "the decode split reads cached K/V that is plain, Float16, or BFloat16",
             });
         }
     };
@@ -91,6 +92,9 @@ pub(super) fn render_cached_attention_decode_split(
     ];
     let mut source = String::new();
     preamble(&mut source, None);
+    if cached_kv_codec == Some(Codec::BFloat16) {
+        source.push_str(BF16_VECTOR_HELPER);
+    }
     let mut body = DECODE_SPLIT_KERNEL.to_string();
     for (token, value) in &substitutions {
         body = body.replace(token, value);
@@ -121,6 +125,19 @@ const HALF_KEY_LOAD: &str = "if (cached) { key_real[step][slot] = float4(kr4_cac
 
 const HALF_VALUE_LOAD: &str =
     "if (cached) { value_row[step][slot] = float4(v4_cached[index]); } else { value_row[step][slot] = float4(v4_new[index]); }";
+
+const BF16_KV_POINTERS: &str = "device const ushort4* kr4_cached = (device const ushort4*)(in2 + kbase);
+                device const ushort4* ki4_cached = (device const ushort4*)(in3 + kbase);
+                device const ushort4* v4_cached = (device const ushort4*)(in6 + kbase * 2);
+                device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
+                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);
+                device const @T@4* v4_new = (device const @T@4*)(in7 + kbase * 2);";
+
+const BF16_KEY_LOAD: &str = "if (cached) { key_real[step][slot] = omega_bf16x4_to_float4(kr4_cached[index]); key_imag[step][slot] = omega_bf16x4_to_float4(ki4_cached[index]); } else { key_real[step][slot] = float4(kr4_new[index]); key_imag[step][slot] = float4(ki4_new[index]); }";
+
+const BF16_VALUE_LOAD: &str = "if (cached) { value_row[step][slot] = omega_bf16x4_to_float4(v4_cached[index]); } else { value_row[step][slot] = float4(v4_new[index]); }";
+
+const BF16_VECTOR_HELPER: &str = "static inline float4 omega_bf16x4_to_float4(ushort4 value) { return float4(as_type<float>((uint)value.x << 16u), as_type<float>((uint)value.y << 16u), as_type<float>((uint)value.z << 16u), as_type<float>((uint)value.w << 16u)); }\n";
 
 const DECODE_SPLIT_KERNEL: &str =r#"struct Uniforms { long total_elements; long context_chunks; long splits; };
 
