@@ -698,3 +698,218 @@ fn card_11_bf8_row_selects_the_bf8_source_and_declines_mixed_cache_codecs() {
         ));
     }
 }
+
+#[test]
+fn card_13_mma_precision_selects_f32_and_f16_for_each_cache_storage() {
+    let policy = production_numeric_policy();
+    let fixture = fixture_with(8, 31, Geometry::ONE_KV_HEAD);
+    let attention = bound_attention(&fixture, policy)
+        .into_iter()
+        .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+        .collect::<Vec<_>>();
+    let row_op = attention
+        .last()
+        .expect("the fixture includes a global row-tiled attention operation");
+
+    for (storage, codec, type_token, loader_token) in [
+        (omega::AttentionKvStorage::F32, None, "float* in2", None),
+        (
+            omega::AttentionKvStorage::Bf16,
+            Some(omega::Codec::BFloat16),
+            "ushort* in2",
+            Some("omega_bf16_load_matrix"),
+        ),
+        (
+            omega::AttentionKvStorage::Bf8,
+            Some(omega::Codec::BFloat8),
+            "uchar* in2",
+            Some("omega_bf8_load_matrix"),
+        ),
+    ] {
+        let packed = codec.map_or_else(omega::PackedOperands::new, |codec| {
+            [2, 3, 6]
+                .into_iter()
+                .map(|index| (row_op.operands()[index].0, codec))
+                .collect()
+        });
+        for (precision, fragment, conversion) in [
+            (
+                omega::AttentionMmaPrecision::F32,
+                "simdgroup_float8x8 weights[tile_blocks];",
+                "= value_float;",
+            ),
+            (
+                omega::AttentionMmaPrecision::F16,
+                "simdgroup_half8x8 weights[tile_blocks];",
+                "= narrow_fragment(value_float);",
+            ),
+        ] {
+            let variant = omega::AttentionVariant {
+                kv_storage: storage,
+                mma_precision: precision,
+                ..omega::AttentionVariant::default()
+            };
+            let emitted = omega::emit_with_attention_variant(row_op, &packed, policy, variant)
+                .expect("the selected row-tiled MMA variant emits");
+            assert!(emitted.source.contains(type_token));
+            if let Some(loader_token) = loader_token {
+                assert!(emitted.source.contains(loader_token));
+            }
+            assert!(emitted.source.contains(fragment));
+            assert!(emitted.source.contains(conversion));
+            assert!(emitted
+                .source
+                .contains("simdgroup_float8x8 accumulated[dims_per_group][tile_blocks];"));
+            assert!(emitted.source.contains("threadgroup float score_tile"));
+            assert!(emitted.source.contains("float local_scores"));
+            assert!(emitted.entry.ends_with(match precision {
+                omega::AttentionMmaPrecision::F32 => "_mma_f32",
+                omega::AttentionMmaPrecision::F16 => "_mma_f16",
+                omega::AttentionMmaPrecision::Legacy => unreachable!(),
+            }));
+        }
+    }
+
+    let decode_fixture = fixture_with(1, 31, Geometry::ONE_KV_HEAD);
+    let decode_op = bound_attention(&decode_fixture, policy)
+        .into_iter()
+        .find(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+        .expect("the fixture includes decode attention");
+    let error = omega::emit_with_attention_variant(
+        &decode_op,
+        &omega::PackedOperands::new(),
+        policy,
+        omega::AttentionVariant {
+            mma_precision: omega::AttentionMmaPrecision::F16,
+            ..omega::AttentionVariant::default()
+        },
+    )
+    .expect_err("F16 MMA declines outside the row-tiled form");
+    assert!(matches!(
+        error,
+        omega::EmitError::CachedAttentionMmaPrecisionNotSupported { .. }
+    ));
+    let unsupported_storage = omega::emit_with_attention_variant(
+        row_op,
+        &omega::PackedOperands::new(),
+        policy,
+        omega::AttentionVariant {
+            kv_storage: omega::AttentionKvStorage::Bf8,
+            ..omega::AttentionVariant::default()
+        },
+    )
+    .expect_err("unimplemented storage selection declines instead of being ignored");
+    assert!(matches!(
+        unsupported_storage,
+        omega::EmitError::CachedAttentionVariantStorageMismatch {
+            selected: "bf8",
+            bound: "f32"
+        }
+    ));
+}
+
+#[test]
+fn card_13_mma_precision_f16_exact_fixture_preserves_attention_output_bits() {
+    let policy = production_numeric_policy();
+    let mut fixture = fixture_with(8, 31, Geometry::ONE_KV_HEAD);
+    for (name, values) in &mut fixture.named {
+        if name == "ids" {
+            continue;
+        }
+        if name == "eps" {
+            values.fill(0.0);
+        } else if name == "token_embd.weight" {
+            values.fill(1.0);
+        } else if name.ends_with("attn_q.weight") {
+            values.fill(1.0 / 256.0);
+        } else if name.ends_with("norm.weight") || name.ends_with("layer_output_scale.weight") {
+            values.fill(1.0);
+        } else if name.starts_with("rope_cos") {
+            values.fill(1.0);
+        } else if name.starts_with("rope_sin") {
+            values.fill(0.0);
+        } else if name.starts_with("kv_cache.") {
+            let row_width = values.len() / bucket_for(31);
+            values.fill(0.0);
+            let row_start = 30 * row_width;
+            let row_end = row_start + row_width;
+            if name.ends_with(".v") {
+                values[row_start..row_end].fill(0.5);
+            } else {
+                values[row_start..row_end].fill(2.0);
+            }
+        } else {
+            values.fill(0.0);
+        }
+    }
+    let attention = bound_attention(&fixture, policy)
+        .into_iter()
+        .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+        .collect::<Vec<_>>();
+    let root = attention
+        .last()
+        .expect("the fixture includes a global attention operation")
+        .node;
+    let roots = [root];
+    let named = as_named_blocks(&fixture.named);
+    let mut f32_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &named,
+        &roots,
+        policy,
+    )
+    .expect("the explicit F32 MMA plan builds");
+    let plan_storage_mismatch = f32_plan.set_attention_variant(omega::AttentionVariant {
+        kv_storage: omega::AttentionKvStorage::Bf8,
+        ..omega::AttentionVariant::default()
+    });
+    assert!(matches!(
+        plan_storage_mismatch,
+        Err(omega::EmitError::CachedAttentionVariantStorageMismatch {
+            selected: "bf8",
+            bound: "f32"
+        })
+    ));
+    f32_plan.set_attention_variant(omega::AttentionVariant {
+        mma_precision: omega::AttentionMmaPrecision::F32,
+        ..omega::AttentionVariant::default()
+    })
+    .expect("F32 MMA is an admitted variant");
+    let mut f16_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &named,
+        &roots,
+        policy,
+    )
+    .expect("the explicit F16 MMA plan builds");
+    f16_plan.set_attention_variant(omega::AttentionVariant {
+        mma_precision: omega::AttentionMmaPrecision::F16,
+        ..omega::AttentionVariant::default()
+    })
+    .expect("F16 MMA is an admitted variant");
+    let f32_keys = f32_plan
+        .kernel_keys()
+        .expect("F32 plan exposes its pipeline identities");
+    let f16_keys = f16_plan
+        .kernel_keys()
+        .expect("F16 plan exposes its pipeline identities");
+    assert_ne!(f16_keys, f32_keys, "MMA precision participates in kernel identity");
+    let f32_output = omega::execute_plan_named(&f32_plan, &named)
+        .expect("the explicit F32 MMA plan executes");
+    let f16_output = omega::execute_plan_named(&f16_plan, &named)
+        .expect("the explicit F16 MMA plan executes");
+    let f32_bits: Vec<u32> = f32_output
+        .root()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    let f16_bits: Vec<u32> = f16_output
+        .root()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    assert!(f32_output.root().iter().all(|value| *value == 0.5));
+    assert_eq!(f16_bits, f32_bits, "F16-exact operands preserve output bits");
+}

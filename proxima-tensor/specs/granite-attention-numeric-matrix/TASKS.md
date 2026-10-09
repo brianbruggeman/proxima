@@ -17,7 +17,7 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 | 10 | [card](cards/10-bf16-row.md) | 06 | R4 | `cargo nextest run -p omega --features metal-attn-split-rows --test cached_attention_row_tiled_parity -E 'test(~card_10_bf16_row)'` | filter selects 2 tests; 2 passed; BF16-exact Metal attention output bits match F32-cache output, plan kernel keys differ, and mixed cache codecs decline | [x] | `2 passed; BF16 cache uses F32 simdgroup MMA and preserves attention output bits` |
 | 11 | [card](cards/11-bf8-row.md) | 09,10 | R4 | `cargo nextest run -p omega --features metal-attn-split-rows --test cached_attention_row_tiled_parity -E 'test(~card_11_bf8_row)'` | filter selects 2 tests; 2 passed; BF8-exact Metal attention output bits match F32-cache output, plan kernel keys differ, mixed cache codecs decline, and padded final cache row is masked | [x] | `2 passed; F32 MMA widens BF8 K/V fragments; padded V row +Inf flip preserves output bits; Card 09 BF8 decode and Card 10 BF16 row regressions each passed 2 tests after common-path padding repair` |
 | 12 | [card](cards/12-variant-config.md) | none | R5,R6 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_12_variant_config)'` | filter selects 2 tests; 2 passed; all seven defaults and explicit values | [x] | `2 passed; public feature-gated record stores all seven axes independently; feature-only no-default check and default-feature check both compiled` |
-| 13 | [card](cards/13-mma-precision.md) | 10,11,12 | R5,R6 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_13_mma_precision)'` | filter selects 2 tests; 2 passed; operand choice independent of storage | [ ] | |
+| 13 | [card](cards/13-mma-precision.md) | 10,11,12 | R5,R6 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_13_mma_precision)'` | filter selects 2 tests; 2 passed; operand choice independent of matching storage, mismatched storage declines, and executed F16/F32 outputs match on an F16-exact fixture | [x] | `2 passed; F16/F32 plans have distinct attention keys and preserve exact-fixture output bits; mismatched storage declines in emit and plan APIs; default and instrument+variant feature checks passed` |
 | 14 | [card](cards/14-k-reuse.md) | 12,13 | R5 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_14_k_reuse)'` | filter selects 2 tests; 2 passed | [ ] | |
 | 15 | [card](cards/15-v-reuse.md) | 14 | R5 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_15_v_reuse)'` | filter selects 2 tests; 2 passed | [ ] | |
 | 16 | [card](cards/16-tile-height.md) | 12 | R5 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_16_tile_height)'` | filter selects 2 tests; 2 passed; rows_16 admitted and both exact declines asserted | [ ] | |
@@ -30,8 +30,8 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 
 ## resume
 
-Last landed slice: card 12 implementation and AC12
-Next action: card 13, select row-tiled MMA precision independently of cache storage
+Last landed slice: card 13 implementation and AC13
+Next action: card 14, implement selectable K reuse for row-tiled attention
 Open question, if any: none; E5M2 is bound as Proxima-owned in SPEC.md
 
 ## struck

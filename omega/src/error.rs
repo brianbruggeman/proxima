@@ -150,6 +150,25 @@ pub enum EmitError {
     #[error("node {node} is a cached attention bind with a packed operand the kernel cannot read: {reason}")]
     CachedAttentionKvCodecNotSupported { node: NodeId, reason: &'static str },
 
+    #[error("node {node} cannot select cached-attention MMA precision {precision}: {reason}")]
+    CachedAttentionMmaPrecisionNotSupported {
+        node: NodeId,
+        precision: &'static str,
+        reason: &'static str,
+    },
+
+    #[error("cached-attention variant axis {axis} does not support value {value} yet")]
+    CachedAttentionVariantAxisNotSupported {
+        axis: &'static str,
+        value: &'static str,
+    },
+
+    #[error("cached-attention variant selects {selected} K/V storage but the bound operands use {bound}")]
+    CachedAttentionVariantStorageMismatch {
+        selected: &'static str,
+        bound: &'static str,
+    },
+
     /// A packed scalar codec reached an op whose renderer has no reader for it.
     #[error("node {node} reads packed codec {codec:?}, which this metal renderer does not support")]
     PackedCodecNotSupported { node: NodeId, codec: Codec },

@@ -78,13 +78,21 @@ pub(super) fn render_cached_attention_row_tiled(
     rows_per_threadgroup: u64,
     simdgroups: u64,
     cached_kv_codec: Option<Codec>,
+    mma_selection: AttentionMmaSelection,
 ) -> Result<String, EmitError> {
+    let half_operands = match mma_selection {
+        AttentionMmaSelection::Legacy => crate::sized::ATTENTION_ROWS_MMA_HALF,
+        #[cfg(feature = "metal-attn-variants")]
+        AttentionMmaSelection::F32 => false,
+        #[cfg(feature = "metal-attn-variants")]
+        AttentionMmaSelection::F16 => true,
+    };
     render_cached_attention_row_tiled_with(
         resolved,
         entry,
         rows_per_threadgroup,
         simdgroups,
-        crate::sized::ATTENTION_ROWS_MMA_HALF,
+        half_operands,
         cached_kv_codec,
     )
 }
