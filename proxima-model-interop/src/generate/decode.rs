@@ -4090,7 +4090,7 @@ only the single-row decode kernel reads the half-width device cache",
                             serving_config.kv_bucket_tokens,
                             device_kv_step_rows,
                             self.kv_buffer_source,
-                            serving_config.kv_cache_key_quant,
+                            serving_config.kv_cache_key_quant.into(),
                         )?;
                         if let Some(device) = &device_kv {
                             device_resident_flags = device.resident_layers();
