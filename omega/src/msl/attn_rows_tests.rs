@@ -3,6 +3,63 @@ use std::collections::BTreeSet;
 use super::attn_golden_tests::{attention_op, attention_rows_op};
 use super::*;
 
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_12_variant_config_defaults_preserve_the_legacy_axes() {
+    assert_eq!(
+        AttentionVariant::default(),
+        AttentionVariant {
+            kv_storage: AttentionKvStorage::F32,
+            mma_precision: AttentionMmaPrecision::Legacy,
+            kv_reuse: AttentionKvReuse::Legacy,
+            tile_height: AttentionTileHeight::Legacy,
+            query_parallelism: AttentionQueryParallelism::Legacy,
+            simd_topology: AttentionSimdTopology::Legacy,
+            prefetch: AttentionPrefetch::Off,
+        }
+    );
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_12_variant_config_stores_each_axis_independently() {
+    let selected = AttentionVariant {
+        kv_storage: AttentionKvStorage::Bf8,
+        mma_precision: AttentionMmaPrecision::F16,
+        kv_reuse: AttentionKvReuse::SharedK,
+        tile_height: AttentionTileHeight::Rows8,
+        query_parallelism: AttentionQueryParallelism::SimdgroupRows,
+        simd_topology: AttentionSimdTopology::PerHead,
+        prefetch: AttentionPrefetch::NextBlock,
+    };
+    let root_export: crate::AttentionVariant = selected;
+    assert_eq!(root_export, selected);
+    assert_eq!(selected.kv_storage, AttentionKvStorage::Bf8);
+    assert_eq!(selected.mma_precision, AttentionMmaPrecision::F16);
+    assert_eq!(selected.kv_reuse, AttentionKvReuse::SharedK);
+    assert_eq!(selected.tile_height, AttentionTileHeight::Rows8);
+    assert_eq!(
+        selected.query_parallelism,
+        AttentionQueryParallelism::SimdgroupRows
+    );
+    assert_eq!(selected.simd_topology, AttentionSimdTopology::PerHead);
+    assert_eq!(selected.prefetch, AttentionPrefetch::NextBlock);
+    let prefetch_only = AttentionVariant {
+        prefetch: AttentionPrefetch::NextBlock,
+        ..AttentionVariant::default()
+    };
+    assert_eq!(prefetch_only.prefetch, AttentionPrefetch::NextBlock);
+    assert_eq!(prefetch_only.kv_storage, AttentionKvStorage::F32);
+    assert_eq!(prefetch_only.mma_precision, AttentionMmaPrecision::Legacy);
+    assert_eq!(prefetch_only.kv_reuse, AttentionKvReuse::Legacy);
+    assert_eq!(prefetch_only.tile_height, AttentionTileHeight::Legacy);
+    assert_eq!(
+        prefetch_only.query_parallelism,
+        AttentionQueryParallelism::Legacy
+    );
+    assert_eq!(prefetch_only.simd_topology, AttentionSimdTopology::Legacy);
+}
+
 const SLIDING_LOWER: i64 = -511;
 const GLOBAL_LOWER: i64 = i64::MIN;
 const VERIFY_ROWS: [u64; 4] = [2, 5, 17, 49];

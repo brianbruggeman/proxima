@@ -1626,6 +1626,107 @@ pub(crate) fn cached_attention_merge_needed(kind: &BoundOpKind, policy: NumericP
     cached_attention_form(kind, policy).is_some_and(CachedAttentionForm::needs_merge)
 }
 
+/// One explicit cached-attention selection across seven independent axes.
+/// The default preserves F32 cache storage, the sized MMA rule, and the
+/// current scheduling choices; a Granite caller can override one axis, such
+/// as `tile_height: AttentionTileHeight::Rows8`, without changing the others.
+#[cfg(feature = "metal-attn-variants")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AttentionVariant {
+    /// Cached K/V byte representation, independent of MMA operand precision.
+    pub kv_storage: AttentionKvStorage,
+    /// Q/K/V matrix operand precision; `Legacy` follows the sized rule.
+    pub mma_precision: AttentionMmaPrecision,
+    /// Whether row-tiled query vectors share decoded cached K/V fragments.
+    pub kv_reuse: AttentionKvReuse,
+    /// Query rows assigned to one threadgroup, or the existing sizing rule.
+    pub tile_height: AttentionTileHeight,
+    /// Whether query rows are assigned concurrently to separate simdgroups.
+    pub query_parallelism: AttentionQueryParallelism,
+    /// Lane mapping across one head or grouped query heads.
+    pub simd_topology: AttentionSimdTopology,
+    /// Whether the following cached K/V block is prefetched.
+    pub prefetch: AttentionPrefetch,
+}
+
+#[cfg(feature = "metal-attn-variants")]
+impl Default for AttentionVariant {
+    fn default() -> Self {
+        Self {
+            kv_storage: AttentionKvStorage::F32,
+            mma_precision: AttentionMmaPrecision::Legacy,
+            kv_reuse: AttentionKvReuse::Legacy,
+            tile_height: AttentionTileHeight::Legacy,
+            query_parallelism: AttentionQueryParallelism::Legacy,
+            simd_topology: AttentionSimdTopology::Legacy,
+            prefetch: AttentionPrefetch::Off,
+        }
+    }
+}
+
+/// Cached K/V representation selected independently from matrix arithmetic.
+#[cfg(feature = "metal-attn-variants")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttentionKvStorage {
+    F32,
+    Bf16,
+    Bf8,
+}
+
+/// MMA operand selection, where `Legacy` uses the build's sized rule.
+#[cfg(feature = "metal-attn-variants")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttentionMmaPrecision {
+    Legacy,
+    F32,
+    F16,
+}
+
+/// Cached K/V fragment reuse across query rows.
+#[cfg(feature = "metal-attn-variants")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttentionKvReuse {
+    Legacy,
+    SharedK,
+    SharedKv,
+}
+
+/// Query-row count owned by the row-tiled threadgroup.
+#[cfg(feature = "metal-attn-variants")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttentionTileHeight {
+    Legacy,
+    Rows2,
+    Rows4,
+    Rows8,
+    Rows16,
+}
+
+/// Assignment of query rows to simdgroups.
+#[cfg(feature = "metal-attn-variants")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttentionQueryParallelism {
+    Legacy,
+    SimdgroupRows,
+}
+
+/// Lane mapping inside each simdgroup.
+#[cfg(feature = "metal-attn-variants")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttentionSimdTopology {
+    Legacy,
+    PerHead,
+    GroupedQueries,
+}
+
+/// Cached key/value prefetch choice.
+#[cfg(feature = "metal-attn-variants")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttentionPrefetch {
+    Off,
+    NextBlock,
+}
+
 /// The dispatch shape one `BoundOpKind::CachedAttention` op takes, decided
 /// once from the op's operand count, `cached_key_rows` discriminator and the
 /// active [`NumericPolicy`]. Every site that used to recompute

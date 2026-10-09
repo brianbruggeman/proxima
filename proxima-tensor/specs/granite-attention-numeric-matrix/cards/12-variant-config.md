@@ -21,6 +21,8 @@ In scope: one behavior, the two acceptance tests (or two checker gates for card 
 ## Edit
 
 - `omega/src/msl/signature_tokens_prelude.rs`
+- `omega/src/msl/mod.rs` and `omega/src/lib.rs` (public feature-gated exports)
+- `omega/src/msl/attn_rows_tests.rs` (two acceptance tests)
 - `omega/Cargo.toml`
 - `proxima-tensor/specs/granite-attention-numeric-matrix/TASKS.md` (row and resume only)
 
