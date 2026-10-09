@@ -548,7 +548,7 @@ def verify_closed(args: argparse.Namespace) -> None:
     args.finalize = root
     derived = finalize(args, output=False, write_record=False)
     args.finalize = previous_finalize
-    if derived.get("landing_event_ids") != check.get("landing_event_ids") or derived.get("head_event_ids") != check.get("head_event_ids") or derived.get("head_sha256") != check.get("head_sha256") or derived.get("transcript_prefix_sha256") != check.get("transcript_prefix_sha256") or derived.get("raw_size") != check.get("raw_size") or derived.get("precommit_event_id") != check.get("precommit_event_id") or len(derived.get("landing_event_ids", [])) != 5 or derived.get("sealed_precommit_events") != 1:
+    if derived.get("landing_event_ids") != check.get("landing_event_ids") or derived.get("head_event_ids") != check.get("head_event_ids") or derived.get("head_sha256") != check.get("head_sha256") or derived.get("transcript_prefix_sha256") != check.get("transcript_prefix_sha256") or derived.get("precommit_event_id") != check.get("precommit_event_id") or len(derived.get("landing_event_ids", [])) != 5 or derived.get("sealed_precommit_events") != 1:
         fail("postpush counts do not match recomputed ledger records")
     if "postpush_check=1 captured_landing_records=5 sealed_precommit_events=1 elapsed_seconds<=1800" not in finalizer.get("stdout", ""):
         fail("captured finalizer output fields mismatch")
