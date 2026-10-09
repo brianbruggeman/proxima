@@ -14,6 +14,7 @@
 //!   (including the old one *during* a refresh-ahead fetch), else `Await`.
 
 use alloc::string::String;
+use core::fmt;
 
 use zeroize::{Zeroize, Zeroizing};
 
@@ -30,13 +31,23 @@ pub struct AuthTime(pub u64);
 /// a computed signature are sensitive, so they must not linger in freed heap.
 /// Because [`Drop`] forbids moving out of a field, read the inner value via
 /// [`Credential::secret`] (a clone) rather than destructuring.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Credential {
     /// a bearer/access token value
     Bearer(String),
     /// a computed signature credential (e.g. an AWS `SigV4` `Authorization`
     /// value the request-signing edge derived from the request + key)
     Signature(String),
+}
+
+impl fmt::Debug for Credential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self {
+            Self::Bearer(_) => "Bearer",
+            Self::Signature(_) => "Signature",
+        };
+        formatter.debug_tuple(kind).field(&"[REDACTED]").finish()
+    }
 }
 
 impl Credential {

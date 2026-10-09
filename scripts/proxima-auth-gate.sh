@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # proxima-auth-gate.sh — feature-matrix gate for proxima-auth.
 #
-# Why it exists: the crate is `default = ["std"]` and its three form features —
-# `signing` (AWS SigV4), `digest` (RFC 7616) and `negotiate` (RFC 4559 SPNEGO)
-# — are all off there, so a crate-scoped command compiles ONE of the crate's
-# four modules. Nothing in the dev graph turns them back on, and no workspace
+# Why it exists: the crate is `default = ["std"]` and its default-off form
+# features — `signing` (AWS SigV4), `digest` (RFC 7616), `negotiate` (RFC 4559
+# SPNEGO), and `oauth-authorization-code` (RFC 6749 + RFC 7636)
+# — are all off there, so a crate-scoped command compiles only the default
+# forms. Nothing in the dev graph turns default-off forms back on, and no workspace
 # command reaches them either: the only consumers are proxima-pgwire (which
 # takes `alloc` alone) and proxima-patterns (behind its own default-off
 # `middleware` feature). Measured 2026-08-05 on the pre-audit tree:
@@ -50,6 +51,14 @@ declare -a cells=(
     "all-features clippy|cargo clippy -p proxima-auth --all-targets --all-features -- -D warnings"
     "all-features rustdoc|RUSTDOCFLAGS='-D warnings' cargo doc -p proxima-auth --no-deps --all-features"
 
+    # OAuth authorization-code stays usable at the no_std + alloc floor; the
+    # optional browser/configuration edge is tested independently at std.
+    "oauth core tests|cargo nextest run -p proxima-auth --no-default-features --features alloc,oauth-authorization-code --no-fail-fast"
+    "oauth core clippy|cargo clippy -p proxima-auth --all-targets --no-default-features --features alloc,oauth-authorization-code -- -D warnings"
+    "oauth browser tests|cargo nextest run -p proxima-auth --no-default-features --features oauth-browser --no-fail-fast"
+    "oauth browser clippy|cargo clippy -p proxima-auth --all-targets --no-default-features --features oauth-browser -- -D warnings"
+    "client credentials oauth regression|cargo nextest run -p proxima-patterns --features middleware oauth"
+
     # each form ALONE — unification must not be what makes it compile, and each
     # form's tests must run without its siblings' dependencies in the graph
     "signing alone tests|cargo nextest run -p proxima-auth --no-default-features --features std,signing --no-fail-fast"
@@ -61,8 +70,8 @@ declare -a cells=(
 
     # the alloc floor on the host: every form declares `alloc`, so selecting one
     # without `std` must still resolve to a buildable tier
-    "alloc floor clippy|cargo clippy -p proxima-auth --no-default-features --features alloc,signing,digest,negotiate -- -D warnings"
-    "alloc floor rustdoc|RUSTDOCFLAGS='-D warnings' cargo doc -p proxima-auth --no-deps --no-default-features --features alloc,signing,digest,negotiate"
+    "alloc floor clippy|cargo clippy -p proxima-auth --no-default-features --features alloc,signing,digest,negotiate,oauth-authorization-code -- -D warnings"
+    "alloc floor rustdoc|RUSTDOCFLAGS='-D warnings' cargo doc -p proxima-auth --no-deps --no-default-features --features alloc,signing,digest,negotiate,oauth-authorization-code"
 )
 
 passed=0
