@@ -263,6 +263,7 @@ fn audit_pipeline_key_on_hit(
     packed_operands: &PackedOperands,
     cache_key: &str,
     numeric_policy: NumericPolicy,
+    attention_mma_selection: crate::msl::AttentionMmaSelection,
 ) -> Result<(), MetalError> {
     if !pipeline_key_audit_enabled() {
         return Ok(());
@@ -276,7 +277,13 @@ fn audit_pipeline_key_on_hit(
     let Some(recorded) = recorded else {
         return Ok(());
     };
-    let kernel = emit(bound, packed_operands, numeric_policy)?;
+    let kernel = crate::msl::emit_inner_with_mma_selection(
+        bound,
+        packed_operands,
+        numeric_policy,
+        false,
+        attention_mma_selection,
+    )?;
     let recomputed_sha256 = sha256_hex(kernel.source.as_bytes());
     super::device_buffers_arena_plan::PIPELINE_KEY_AUDIT_AUDITED
         .with(|counter| counter.set(counter.get() + 1));
@@ -338,6 +345,7 @@ pub(super) fn pipeline_for(
     cache_key: &str,
     math_mode: MathMode,
     numeric_policy: NumericPolicy,
+    attention_mma_selection: crate::msl::AttentionMmaSelection,
 ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
     // `cache_key` already carries BOTH axes `compile_pipeline` reads: the
     // numeric-policy token from `kernel_cache_key`
@@ -358,7 +366,14 @@ pub(super) fn pipeline_for(
         #[cfg(feature = "instrument")]
         counter!(PIPELINE_HITS, 1);
         #[cfg(feature = "instrument")]
-        audit_pipeline_key_on_hit(&pipeline, bound, packed_operands, cache_key, numeric_policy)?;
+        audit_pipeline_key_on_hit(
+            &pipeline,
+            bound,
+            packed_operands,
+            cache_key,
+            numeric_policy,
+            attention_mma_selection,
+        )?;
         return Ok(pipeline);
     }
     trace!(cache_key = %cache_key, hit = false, "pipeline cache lookup");
@@ -390,7 +405,13 @@ pub(super) fn pipeline_for(
     }
     #[cfg(feature = "instrument")]
     let compile_started = read_ticks();
-    let kernel = emit(bound, packed_operands, numeric_policy)?;
+    let kernel = crate::msl::emit_inner_with_mma_selection(
+        bound,
+        packed_operands,
+        numeric_policy,
+        false,
+        attention_mma_selection,
+    )?;
     if env_flags::debug_metal_source() && env_flags::compare_bound_node() == Some(bound.node)
     {
         eprintln!(

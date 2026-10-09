@@ -63,6 +63,7 @@ pub(super) fn plan_with_placed_inputs(
         resident_nodes: BTreeSet::new(),
         math_mode: numeric_policy_as_metal_math_mode(numeric_policy),
         numeric_policy,
+        attention_mma_selection: crate::msl::AttentionMmaSelection::Legacy,
         dispatch_type: DispatchType::default(),
         command_buffer_chunks: 0,
         command_buffer_chunks_decode_shaped: false,
@@ -356,6 +357,7 @@ pub(super) fn execute_plan_inner(
             None,
             plan.math_mode,
             plan.numeric_policy,
+            plan.attention_mma_selection,
             None,
             #[cfg(feature = "instrument")]
             1,

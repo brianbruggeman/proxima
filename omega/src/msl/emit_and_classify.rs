@@ -24,7 +24,64 @@ pub fn emit(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
 ) -> Result<Kernel, EmitError> {
-    emit_inner(resolved, packed_operands, numeric_policy, false)
+    emit_inner_with_mma_selection(
+        resolved,
+        packed_operands,
+        numeric_policy,
+        false,
+        AttentionMmaSelection::Legacy,
+    )
+}
+
+#[cfg(feature = "metal-attn-variants")]
+pub fn emit_with_attention_variant(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    variant: AttentionVariant,
+) -> Result<Kernel, EmitError> {
+    validate_attention_variant_storage(resolved, packed_operands, variant.kv_storage)?;
+    emit_inner_with_mma_selection(
+        resolved,
+        packed_operands,
+        numeric_policy,
+        false,
+        AttentionMmaSelection::from_variant(variant).map_err(|(axis, value)| {
+            EmitError::CachedAttentionVariantAxisNotSupported { axis, value }
+        })?,
+    )
+}
+
+#[cfg(feature = "metal-attn-variants")]
+pub(crate) fn validate_attention_variant_storage(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    storage: AttentionKvStorage,
+) -> Result<(), EmitError> {
+    if !matches!(resolved.kind, BoundOpKind::CachedAttention { .. }) {
+        return Ok(());
+    }
+    let quantized = operand_codecs(resolved, packed_operands);
+    let codec = cached_attention_kv_codec(resolved.node, &quantized)?;
+    let bound_storage = match codec {
+        None => "f32",
+        Some(Codec::BFloat16) => "bf16",
+        Some(Codec::BFloat8) => "bf8",
+        Some(Codec::Float16) => "f16",
+        Some(_) => "unsupported packed storage",
+    };
+    let selected_storage = match storage {
+        AttentionKvStorage::F32 => "f32",
+        AttentionKvStorage::Bf16 => "bf16",
+        AttentionKvStorage::Bf8 => "bf8",
+    };
+    if selected_storage != bound_storage {
+        return Err(EmitError::CachedAttentionVariantStorageMismatch {
+            selected: selected_storage,
+            bound: bound_storage,
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn emit_inner(
@@ -33,8 +90,27 @@ pub(super) fn emit_inner(
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
 ) -> Result<Kernel, EmitError> {
+    emit_inner_with_mma_selection(
+        resolved,
+        packed_operands,
+        numeric_policy,
+        expert_source_mode,
+        AttentionMmaSelection::Legacy,
+    )
+}
+
+pub(crate) fn emit_inner_with_mma_selection(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    expert_source_mode: bool,
+    mma_selection: AttentionMmaSelection,
+) -> Result<Kernel, EmitError> {
     validate(resolved)?;
-    let entry = entry_name(resolved, numeric_policy);
+    let mut entry = entry_name(resolved, numeric_policy);
+    if matches!(resolved.kind, BoundOpKind::CachedAttention { .. }) {
+        entry.push_str(mma_selection.cache_token());
+    }
     let quantized = operand_codecs(resolved, packed_operands);
     if !matches!(resolved.kind, BoundOpKind::CachedAttention { .. })
         && let Some(codec) = quantized.iter().flatten().find(|codec| **codec == Codec::BFloat8)
@@ -49,7 +125,13 @@ pub(super) fn emit_inner(
     let source = match &resolved.kind {
         BoundOpKind::CachedAttention { .. } => {
             cached_attention_kv_codec(resolved.node, &quantized).and_then(|cached_kv_codec| {
-                render_cached_attention(resolved, &entry, numeric_policy, cached_kv_codec)
+                render_cached_attention_with_mma_selection(
+                    resolved,
+                    &entry,
+                    numeric_policy,
+                    cached_kv_codec,
+                    mma_selection,
+                )
             })
         }
         BoundOpKind::CachedSoftmaxWeights { .. } => {

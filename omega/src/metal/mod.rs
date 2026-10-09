@@ -248,7 +248,9 @@ use crate::msl::{
 use crate::sized::ARENA_TRANSIENT_CAP;
 #[cfg(feature = "metal-buffer-pool")]
 use crate::sized::OUTPUT_POOL_MAX_PER_BUCKET;
-use crate::{Binding, GridSpec, Kernel, Codec, PackedOperands, emit};
+use crate::{Binding, Codec, GridSpec, Kernel, PackedOperands};
+#[cfg(feature = "instrument")]
+use crate::emit;
 
 
 #[macro_use]

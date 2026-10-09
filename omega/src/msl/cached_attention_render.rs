@@ -124,11 +124,28 @@ fn form_reads_narrow_kv(form: CachedAttentionForm) -> bool {
     decode || rows
 }
 
+#[cfg(test)]
 pub(super) fn render_cached_attention(
     resolved: &BoundOp,
     entry: &str,
     numeric_policy: NumericPolicy,
     cached_kv_codec: Option<Codec>,
+) -> Result<String, EmitError> {
+    render_cached_attention_with_mma_selection(
+        resolved,
+        entry,
+        numeric_policy,
+        cached_kv_codec,
+        AttentionMmaSelection::Legacy,
+    )
+}
+
+pub(super) fn render_cached_attention_with_mma_selection(
+    resolved: &BoundOp,
+    entry: &str,
+    numeric_policy: NumericPolicy,
+    cached_kv_codec: Option<Codec>,
+    mma_selection: AttentionMmaSelection,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         query_rows,
@@ -186,6 +203,18 @@ pub(super) fn render_cached_attention(
             found: resolved.kind.name(),
         });
     };
+    #[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
+    let has_row_tiled_mma = matches!(form, CachedAttentionForm::TwoRangeRowTiled { .. });
+    #[cfg(all(feature = "metal-attn-variants", not(feature = "metal-attn-split-rows")))]
+    let has_row_tiled_mma = false;
+    #[cfg(feature = "metal-attn-variants")]
+    if mma_selection == AttentionMmaSelection::F16 && !has_row_tiled_mma {
+        return Err(EmitError::CachedAttentionMmaPrecisionNotSupported {
+            node: resolved.node,
+            precision: "f16",
+            reason: "F16 MMA operands require the row-tiled simdgroup-matrix form",
+        });
+    }
     let codec_supported_by_form = {
         let decode = {
             #[cfg(feature = "metal-attn-split-decode")]
@@ -236,6 +265,7 @@ pub(super) fn render_cached_attention(
                 rows_per_threadgroup,
                 simdgroups,
                 cached_kv_codec,
+                mma_selection,
             );
         }
     };

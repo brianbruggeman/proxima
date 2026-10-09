@@ -1727,6 +1727,73 @@ pub enum AttentionPrefetch {
     NextBlock,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum AttentionMmaSelection {
+    Legacy,
+    #[cfg(feature = "metal-attn-variants")]
+    F32,
+    #[cfg(feature = "metal-attn-variants")]
+    F16,
+}
+
+impl AttentionMmaSelection {
+    pub(crate) const fn cache_token(self) -> &'static str {
+        match self {
+            Self::Legacy => "",
+            #[cfg(feature = "metal-attn-variants")]
+            Self::F32 => "_mma_f32",
+            #[cfg(feature = "metal-attn-variants")]
+            Self::F16 => "_mma_f16",
+        }
+    }
+
+    pub(crate) fn cache_token_for(self, bound: &BoundOp) -> &'static str {
+        if matches!(bound.kind, BoundOpKind::CachedAttention { .. }) {
+            self.cache_token()
+        } else {
+            ""
+        }
+    }
+
+    #[cfg(feature = "metal-attn-variants")]
+    pub(crate) fn from_variant(variant: AttentionVariant) -> Result<Self, (&'static str, &'static str)> {
+        if variant.kv_reuse != AttentionKvReuse::Legacy {
+            return Err(("kv_reuse", match variant.kv_reuse {
+                AttentionKvReuse::Legacy => "legacy",
+                AttentionKvReuse::SharedK => "shared_k",
+                AttentionKvReuse::SharedKv => "shared_kv",
+            }));
+        }
+        if variant.tile_height != AttentionTileHeight::Legacy {
+            return Err(("tile_height", match variant.tile_height {
+                AttentionTileHeight::Legacy => "legacy",
+                AttentionTileHeight::Rows2 => "rows_2",
+                AttentionTileHeight::Rows4 => "rows_4",
+                AttentionTileHeight::Rows8 => "rows_8",
+                AttentionTileHeight::Rows16 => "rows_16",
+            }));
+        }
+        if variant.query_parallelism != AttentionQueryParallelism::Legacy {
+            return Err(("query_parallelism", "simdgroup_rows"));
+        }
+        if variant.simd_topology != AttentionSimdTopology::Legacy {
+            return Err(("simd_topology", match variant.simd_topology {
+                AttentionSimdTopology::Legacy => "legacy",
+                AttentionSimdTopology::PerHead => "per_head",
+                AttentionSimdTopology::GroupedQueries => "grouped_queries",
+            }));
+        }
+        if variant.prefetch != AttentionPrefetch::Off {
+            return Err(("prefetch", "next_block"));
+        }
+        Ok(match variant.mma_precision {
+            AttentionMmaPrecision::Legacy => Self::Legacy,
+            AttentionMmaPrecision::F32 => Self::F32,
+            AttentionMmaPrecision::F16 => Self::F16,
+        })
+    }
+}
+
 /// The dispatch shape one `BoundOpKind::CachedAttention` op takes, decided
 /// once from the op's operand count, `cached_key_rows` discriminator and the
 /// active [`NumericPolicy`]. Every site that used to recompute
