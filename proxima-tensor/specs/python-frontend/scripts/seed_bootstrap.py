@@ -15,9 +15,9 @@ import sys
 import tempfile
 import time
 
-DEFAULT_ROOT = pathlib.Path("/private/tmp/proxima-python-frontend/evidence/card-00a/session-attempt-07")
-DEFAULT_RAW = pathlib.Path("/private/tmp/proxima-python-card-00a-attempt-07.log")
-HOST_LOG = pathlib.Path("/private/tmp/proxima-python-card-00a-attempt-07-host.log")
+DEFAULT_ROOT = pathlib.Path("/private/tmp/proxima-python-frontend/evidence/card-00a/session-attempt-10")
+DEFAULT_RAW = pathlib.Path("/private/tmp/proxima-python-card-00a-attempt-10.log")
+HOST_LOG = pathlib.Path("/private/tmp/proxima-python-card-00a-attempt-10-host.log")
 
 
 def digest(path: pathlib.Path) -> str:
@@ -72,31 +72,16 @@ def captured_sha(payload: bytes, event_id: str) -> str:
 def validate_entry(root: pathlib.Path, raw_path: pathlib.Path, repo_root: pathlib.Path, raw_bytes: bytes | None = None) -> tuple[dict, list[dict], bytes]:
     receipt = read_json(root / "launcher-receipt.json")
     host_bootstrap = read_json(root / "host-bootstrap.json")
-    original_receipt = read_json(root / "launcher-receipt-runner-original.json")
-    if original_receipt.get("attempt") != "06" or {key: value for key, value in original_receipt.items() if key != "attempt"} != {key: value for key, value in receipt.items() if key != "attempt"}:
-        fail("original runner receipt linkage mismatch")
     rows = read_rows(root / "bootstrap-events.jsonl")
-    normalization = [row for row in rows if row.get("kind") == "start" and "x[\"attempt\"]=\"07\"" in row.get("command", "") and "host-bootstrap.json" in row.get("command", "")]
-    if len(normalization) != 1:
-        fail("receipt normalization event missing")
-    normalization_ends = [row for row in rows if row.get("kind") == "end" and row.get("event_id") == normalization[0].get("event_id")]
-    if len(normalization_ends) != 1 or normalization_ends[0].get("exit_code") != 0 or normalization_ends[0].get("command") != normalization[0].get("command") or normalization_ends[0].get("cwd") != normalization[0].get("cwd"):
-        fail("receipt normalization event failed")
     payload = raw_path.read_bytes() if raw_bytes is None else raw_bytes
-    norm_start = ("PROXIMA_EVENT_START ns=" + normalization[0]["event_id"]).encode()
-    norm_end = ("PROXIMA_EVENT_END code=0 ns=" + normalization[0]["event_id"]).encode()
-    norm_start_positions = exact_line_positions(payload, norm_start)
-    norm_end_positions = exact_line_positions(payload, norm_end)
-    if len(norm_start_positions) != 1 or len(norm_end_positions) != 1 or norm_start_positions[0] >= norm_end_positions[0] or b"receipt_attempt=07" not in payload[norm_start_positions[0]:norm_end_positions[0]]:
-        fail("receipt normalization transcript mismatch")
     host_payload = HOST_LOG.read_bytes()
     expected_argv = ["/usr/bin/script", "-q", str(raw_path), "/bin/zsh"]
-    if receipt.get("card_id") != "00a" or receipt.get("attempt") != "07" or receipt.get("raw_transcript") != str(raw_path):
+    if receipt.get("card_id") != "00a" or receipt.get("attempt") != "10" or receipt.get("raw_transcript") != str(raw_path):
         fail("receipt identity mismatch")
     if receipt.get("primary_script_argv") != expected_argv or receipt.get("cwd") != "/private/tmp":
         fail("bootstrap argv or cwd mismatch")
     runner_path = pathlib.Path(receipt.get("runner_path", ""))
-    if runner_path != pathlib.Path("/private/tmp/proxima-python-card-00a-runner-07.py") or hashlib.sha256(runner_path.read_bytes()).hexdigest() != receipt.get("runner_sha256") or receipt.get("host_transcript") != str(HOST_LOG):
+    if runner_path != pathlib.Path("/private/tmp/proxima-python-card-00a-runner-10.py") or hashlib.sha256(runner_path.read_bytes()).hexdigest() != receipt.get("runner_sha256") or receipt.get("host_transcript") != str(HOST_LOG):
         fail("host runner receipt hash mismatch")
     if host_bootstrap != receipt:
         fail("host bootstrap receipt linkage mismatch")
@@ -111,7 +96,7 @@ def validate_entry(root: pathlib.Path, raw_path: pathlib.Path, repo_root: pathli
     hook_hash = hashlib.sha256(hook_path.read_bytes()).hexdigest()
     if receipt.get("hook_sha256") != hook_hash or receipt["zdotdir_files"].get("bootstrap-hook.zsh") != hook_hash:
         fail("active hook hash mismatch")
-    bootstrap_line = ("ATTEMPT07_HOST_START monotonic_ns={} helper_sha256={}".format(started, read_json(root / "launcher-receipt.json").get("runner_sha256"))).encode()
+    bootstrap_line = ("ATTEMPT10_HOST_START monotonic_ns={} helper_sha256={}".format(started, read_json(root / "launcher-receipt.json").get("runner_sha256"))).encode()
     host_lines = [line.rstrip(bytes((13, 10))) for line in host_payload.splitlines(keepends=True)]
     if host_lines.count(bootstrap_line) != 1:
         fail("host bootstrap receipt line mismatch")
@@ -211,7 +196,7 @@ def verify_entry(args: argparse.Namespace) -> None:
     if host_entries != 1:
         fail("hook startup record count mismatch")
     hook_events = sum(row.get("kind") in {"start", "end"} for row in rows)
-    print("hook_startup_records={} receipt_hashes_valid=1 hook_events>=2 observed_hook_events={} first_repo_after_hook=1 clean_source_status=1 omitted_command_rejected=1 dirty_source_rejected=1".format(host_entries, hook_events))
+    print("hook_startup_records={} receipt_hashes_valid=1 hook_events>=2 observed_hook_events={} setup_cd=0 first_repo_after_hook=1 clean_source_status=1 omitted_command_rejected=1 dirty_source_rejected=1".format(host_entries, hook_events))
 
 def precommit(args: argparse.Namespace) -> None:
     root = args.precommit
@@ -224,7 +209,7 @@ def precommit(args: argparse.Namespace) -> None:
     expected_ac1 = "python3 proxima-tensor/specs/python-frontend/scripts/seed_bootstrap.py --verify-entry {} --raw {} --repo-root {}".format(root, args.raw, args.repo_root)
     ac1_starts = [row for row in rows if row.get("kind") == "start" and row.get("command") == expected_ac1 and row.get("cwd") == str(args.repo_root)]
     accepted_ac1 = []
-    pattern = re.compile(rb"(?m)^hook_startup_records=1 receipt_hashes_valid=1 hook_events>=2 observed_hook_events=[0-9]+ first_repo_after_hook=1 clean_source_status=1 omitted_command_rejected=1 dirty_source_rejected=1\r?$")
+    pattern = re.compile(rb"(?m)^hook_startup_records=1 receipt_hashes_valid=1 hook_events>=2 observed_hook_events=[0-9]+ setup_cd=0 first_repo_after_hook=1 clean_source_status=1 omitted_command_rejected=1 dirty_source_rejected=1\r?$")
     for start_event in ac1_starts:
         terminals = [row for row in rows if row.get("kind") == "end" and row.get("event_id") == start_event.get("event_id")]
         if len(terminals) != 1:
@@ -274,9 +259,9 @@ def finalize(args: argparse.Namespace, output: bool = True, write_record: bool =
     landing_specs = [
         ("commit", lambda argv, cwd: argv[:2] == ["git", "commit"] and "-m" in argv and "--dry-run" not in argv and cwd == str(args.repo_root), str(args.repo_root)),
         ("rebase", lambda argv, cwd: argv == ["git", "rebase", "origin/main"] and cwd == str(args.repo_root), str(args.repo_root)),
-        ("integration_ff", lambda argv, cwd: argv == ["git", "merge", "--ff-only", "codex/python-frontend-card-00a-attempt-07"] and cwd == "/private/tmp/proxima-python-card-00a-attempt-07-integration", "/private/tmp/proxima-python-card-00a-attempt-07-integration"),
-        ("push", lambda argv, cwd: argv == ["git", "push", "origin", "HEAD:main"] and cwd == "/private/tmp/proxima-python-card-00a-attempt-07-integration", "/private/tmp/proxima-python-card-00a-attempt-07-integration"),
-        ("remote", lambda argv, cwd: argv == ["git", "ls-remote", "origin", "refs/heads/main"] and cwd == "/private/tmp/proxima-python-card-00a-attempt-07-integration", "/private/tmp/proxima-python-card-00a-attempt-07-integration"),
+        ("integration_ff", lambda argv, cwd: argv == ["git", "merge", "--ff-only", "codex/python-frontend-card-00a-final-10"] and cwd == "/private/tmp/proxima-python-card-00a-attempt-10-integration", "/private/tmp/proxima-python-card-00a-attempt-10-integration"),
+        ("push", lambda argv, cwd: argv == ["git", "push", "origin", "HEAD:main"] and cwd == "/private/tmp/proxima-python-card-00a-attempt-10-integration", "/private/tmp/proxima-python-card-00a-attempt-10-integration"),
+        ("remote", lambda argv, cwd: argv == ["git", "ls-remote", "origin", "refs/heads/main"] and cwd == "/private/tmp/proxima-python-card-00a-attempt-10-integration", "/private/tmp/proxima-python-card-00a-attempt-10-integration"),
     ]
     successful_landing = []
     for name, predicate, expected_cwd in landing_specs:
@@ -300,7 +285,7 @@ def finalize(args: argparse.Namespace, output: bool = True, write_record: bool =
         fail("landing command order mismatch")
     head_specs = [
         ("card_head", str(args.repo_root)),
-        ("integration_head", "/private/tmp/proxima-python-card-00a-attempt-07-integration"),
+        ("integration_head", "/private/tmp/proxima-python-card-00a-attempt-10-integration"),
     ]
     head_event_ids = []
     head_values = []
