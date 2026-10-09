@@ -4143,9 +4143,12 @@ name = "proxima-auth"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bon",
+ "conflaguration",
  "hex",
  "hmac 0.12.1",
  "md-5 0.10.6",
+ "serde",
  "sha2 0.10.9",
  "subtle",
  "thiserror 2.0.19",
