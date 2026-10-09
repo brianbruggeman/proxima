@@ -30,6 +30,7 @@ pub fn emit(
         numeric_policy,
         false,
         AttentionMmaSelection::Legacy,
+        AttentionKvReuseSelection::Legacy,
     )
 }
 
@@ -41,14 +42,17 @@ pub fn emit_with_attention_variant(
     variant: AttentionVariant,
 ) -> Result<Kernel, EmitError> {
     validate_attention_variant_storage(resolved, packed_operands, variant.kv_storage)?;
+    let (mma_selection, kv_reuse_selection) =
+        AttentionMmaSelection::from_variant(variant).map_err(|(axis, value)| {
+            EmitError::CachedAttentionVariantAxisNotSupported { axis, value }
+        })?;
     emit_inner_with_mma_selection(
         resolved,
         packed_operands,
         numeric_policy,
         false,
-        AttentionMmaSelection::from_variant(variant).map_err(|(axis, value)| {
-            EmitError::CachedAttentionVariantAxisNotSupported { axis, value }
-        })?,
+        mma_selection,
+        kv_reuse_selection,
     )
 }
 
@@ -96,6 +100,7 @@ pub(super) fn emit_inner(
         numeric_policy,
         expert_source_mode,
         AttentionMmaSelection::Legacy,
+        AttentionKvReuseSelection::Legacy,
     )
 }
 
@@ -105,11 +110,13 @@ pub(crate) fn emit_inner_with_mma_selection(
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
     mma_selection: AttentionMmaSelection,
+    kv_reuse_selection: AttentionKvReuseSelection,
 ) -> Result<Kernel, EmitError> {
     validate(resolved)?;
     let mut entry = entry_name(resolved, numeric_policy);
     if matches!(resolved.kind, BoundOpKind::CachedAttention { .. }) {
         entry.push_str(mma_selection.cache_token());
+        entry.push_str(kv_reuse_selection.cache_token());
     }
     let quantized = operand_codecs(resolved, packed_operands);
     if !matches!(resolved.kind, BoundOpKind::CachedAttention { .. })
@@ -131,6 +138,7 @@ pub(crate) fn emit_inner_with_mma_selection(
                     numeric_policy,
                     cached_kv_codec,
                     mma_selection,
+                    kv_reuse_selection,
                 )
             })
         }

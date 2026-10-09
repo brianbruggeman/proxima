@@ -1126,8 +1126,114 @@ fn rendered_with_operands(op: &BoundOp, half_operands: bool) -> String {
         simdgroups,
         half_operands,
         None,
+        AttentionKvReuseSelection::Legacy,
     )
     .expect("the row-tiled kernel renders")
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_14_k_reuse_stages_each_k_fragment_and_preserves_row_masks() {
+    let operation = attention_rows_op(9, 8, 256, 512, 971, SLIDING_LOWER);
+    let packed_operands = PackedOperands::new();
+    let policy = NumericPolicy::llama_relaxed();
+    let legacy = emit_with_attention_variant(
+        &operation,
+        &packed_operands,
+        policy,
+        AttentionVariant {
+            mma_precision: AttentionMmaPrecision::F32,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("the legacy K reuse source emits");
+    let shared_k = emit_with_attention_variant(
+        &operation,
+        &packed_operands,
+        policy,
+        AttentionVariant {
+            mma_precision: AttentionMmaPrecision::F32,
+            kv_reuse: AttentionKvReuse::SharedK,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("the shared K source emits");
+    let shared_k_f16 = emit_with_attention_variant(
+        &operation,
+        &packed_operands,
+        policy,
+        AttentionVariant {
+            mma_precision: AttentionMmaPrecision::F16,
+            kv_reuse: AttentionKvReuse::SharedK,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("the half-width shared K source emits");
+
+    assert_ne!(legacy.entry, shared_k.entry);
+    assert_ne!(legacy.source, shared_k.source);
+    assert!(shared_k.source.contains("threadgroup float shared_key_even"));
+    assert!(shared_k.source.contains("simdgroup_store(key_even_tile"));
+    assert!(shared_k.source.contains("threadgroup_barrier(mem_flags::mem_threadgroup)"));
+    assert!(shared_k.source.contains("omega_load_shared_float"));
+    assert_eq!(shared_k.source.matches("simdgroup_store(key_even_tile").count(), 1);
+    assert_eq!(shared_k.source.matches("simdgroup_store(key_odd_tile").count(), 1);
+    assert!(shared_k.source.contains(
+        "int key_tile = (int)simdgroup_slot + group * (int)simdgroups;"
+    ));
+    assert!(shared_k.source.contains(
+        "for (int key_tile = 0; key_tile < fragments; key_tile++)"
+    ));
+    assert!(shared_k.source.contains(
+        "for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups)"
+    ));
+    assert!(shared_k.source.contains("int vector_slot = vector_block / (int)simdgroups;"));
+    assert!(shared_k.source.contains(
+        "simdgroup_store(scores[key_tile][vector_slot], score_tile + vector_block * 8 * (int)block + key_tile * 8"
+    ));
+    assert!(shared_k.source.contains("relative <= new_upper && relative >= cached_lower"));
+    assert!(legacy.source.contains("relative <= new_upper && relative >= cached_lower"));
+    assert!(legacy.source.contains("if (false) {"));
+    assert!(shared_k.source.contains("if (true) {"));
+    assert!(shared_k_f16.source.contains("threadgroup half shared_key_even"));
+    assert!(shared_k_f16.source.contains("omega_load_shared_half"));
+    assert!(shared_k_f16.entry.ends_with("_mma_f16_kv_shared_k"));
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_14_k_reuse_declines_when_staging_exceeds_threadgroup_budget() {
+    let operation = attention_rows_op(9, 8, 512, 512, 4, SLIDING_LOWER);
+    let legacy = cached_attention_row_tiled::render_cached_attention_row_tiled_with(
+        &operation,
+        "omega_card_14_legacy",
+        4,
+        8,
+        false,
+        None,
+        AttentionKvReuseSelection::Legacy,
+    )
+    .expect("the same tile fits before K staging");
+    assert!(legacy.contains("shared_key_even[1]"));
+    assert!(legacy.contains("if (false) {"));
+
+    let error = cached_attention_row_tiled::render_cached_attention_row_tiled_with(
+        &operation,
+        "omega_card_14_shared_k",
+        4,
+        8,
+        false,
+        None,
+        AttentionKvReuseSelection::SharedK,
+    )
+    .expect_err("K staging is rejected when it exceeds threadgroup memory");
+    assert!(matches!(
+        error,
+        EmitError::CachedAttentionKvReuseNotSupported {
+            reason: "shared K staging exceeds the configured threadgroup-memory budget",
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -1140,8 +1246,8 @@ fn the_float_setting_multiplies_float_fragments_and_names_no_half_type() {
             "simdgroup_float8x8 key_odd_tile[key_tiles_per_group][depth_unroll];",
             "simdgroup_float8x8 query_even[depth_unroll];",
             "simdgroup_float8x8 weights[tile_blocks];",
-            "simdgroup_float8x8 value;",
-            "simdgroup_float8x8 scores[key_tiles_per_group][tile_blocks];",
+            "simdgroup_float8x8 value = value_float;",
+            "simdgroup_float8x8 scores[score_key_tiles][score_vectors_per_simdgroup];",
             "simdgroup_float8x8 accumulated[dims_per_group][tile_blocks];",
         ] {
             assert!(
@@ -1164,8 +1270,8 @@ fn the_half_setting_narrows_the_operands_and_keeps_scores_accumulators_and_softm
             "simdgroup_half8x8 query_even[depth_unroll];",
             "simdgroup_half8x8 query_odd[depth_unroll];",
             "simdgroup_half8x8 weights[tile_blocks];",
-            "simdgroup_half8x8 value;",
-            "simdgroup_float8x8 scores[key_tiles_per_group][tile_blocks];",
+            "simdgroup_half8x8 value = narrow_fragment(value_float);",
+            "simdgroup_float8x8 scores[score_key_tiles][score_vectors_per_simdgroup];",
             "simdgroup_float8x8 accumulated[dims_per_group][tile_blocks];",
             "threadgroup float score_tile[tile_vectors * block];",
             "float local_scores[block / 32];",
@@ -1184,16 +1290,34 @@ fn the_half_setting_narrows_the_operands_and_keeps_scores_accumulators_and_softm
 fn the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads() {
     for (groups, head_dim) in [(2_u64, 64_u64), (8, 256), (8, 512)] {
         let op = attention_rows_op(9, groups, head_dim, 512, 971, SLIDING_LOWER);
-        let float_source = rendered_with_operands(&op, false);
+        let float_source = rendered_with_operands(&op, false)
+            .replace(cached_attention_row_tiled::SHARED_K_FLOAT_HELPER, "");
         let half_source = rendered_with_operands(&op, true);
         assert!(half_source.contains(cached_attention_row_tiled::HALF_OPERAND_HELPERS));
         let restored = half_source
             .replace(cached_attention_row_tiled::HALF_OPERAND_HELPERS, "")
+            .replace("threadgroup half shared_key_even", "threadgroup float shared_key_even")
+            .replace("threadgroup half shared_key_odd", "threadgroup float shared_key_odd")
+            .replace("omega_load_shared_half", "omega_load_shared_float")
             .replace("simdgroup_half8x8 key_", "simdgroup_float8x8 key_")
+            .replace("simdgroup_half8x8 shared_even", "simdgroup_float8x8 shared_even")
+            .replace("simdgroup_half8x8 shared_odd", "simdgroup_float8x8 shared_odd")
             .replace("simdgroup_half8x8 query_", "simdgroup_float8x8 query_")
             .replace("simdgroup_half8x8 weights", "simdgroup_float8x8 weights")
-            .replace("simdgroup_half8x8 value", "simdgroup_float8x8 value");
-        assert_eq!(restored, float_source, "head_dim {head_dim}");
+            .replace("narrow_fragment(even_float)", "even_float")
+            .replace("narrow_fragment(odd_float)", "odd_float")
+            .replace(
+                "simdgroup_half8x8 value = narrow_fragment(value_float);",
+                "simdgroup_float8x8 value = value_float;",
+            );
+        if restored != float_source {
+            let mismatch = restored
+                .lines()
+                .zip(float_source.lines())
+                .enumerate()
+                .find(|(_, (restored_line, float_line))| restored_line != float_line);
+            panic!("head_dim {head_dim}: first mismatch {mismatch:?}");
+        }
     }
 }
 
