@@ -769,6 +769,7 @@ pub(super) fn resolve_step(
     numeric_policy: NumericPolicy,
     math_mode: MathMode,
     attention_mma_selection: crate::msl::AttentionMmaSelection,
+    attention_kv_reuse_selection: crate::msl::AttentionKvReuseSelection,
 ) -> Result<ResolvedStep, MetalError> {
     let (bindings, grid) =
         kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
@@ -776,6 +777,7 @@ pub(super) fn resolve_step(
         kernel_cache_key_for_grid(bound, packed_operands, numeric_policy, &grid)?;
     cache_key.push(math_mode.cache_token());
     cache_key.push_str(attention_mma_selection.cache_token_for(bound));
+    cache_key.push_str(attention_kv_reuse_selection.cache_token_for(bound));
     #[cfg(feature = "instrument")]
     if let BoundOpKind::Reduce {
         reduce_op,
@@ -807,6 +809,7 @@ pub(super) fn resolve_step(
         math_mode,
         numeric_policy,
         attention_mma_selection,
+        attention_kv_reuse_selection,
     )?;
     // Redesign §4c: a `CachedAttention` position under a policy that
     // admits `ContextSplitMerge` resolves a SECOND pipeline for the
@@ -909,6 +912,7 @@ fn refit_steps(
         .is_some_and(|resolved| {
             resolved.math_mode == plan.math_mode
                 && resolved.attention_mma_selection == plan.attention_mma_selection
+                && resolved.attention_kv_reuse_selection == plan.attention_kv_reuse_selection
         })
     {
         return Ok(None);
@@ -923,6 +927,7 @@ fn refit_steps(
                 plan.numeric_policy,
                 plan.math_mode,
                 plan.attention_mma_selection,
+                plan.attention_kv_reuse_selection,
             )
             .map(|step| (*position, step))
         })
@@ -975,6 +980,7 @@ pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan)
         .is_none_or(|resolved| {
             resolved.math_mode != plan.math_mode
                 || resolved.attention_mma_selection != plan.attention_mma_selection
+                || resolved.attention_kv_reuse_selection != plan.attention_kv_reuse_selection
         });
     if !stale {
         return Ok(());
@@ -996,6 +1002,7 @@ pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan)
             plan.numeric_policy,
             plan.math_mode,
             plan.attention_mma_selection,
+            plan.attention_kv_reuse_selection,
         )?);
     }
     #[cfg(feature = "metal-horizontal-merge")]
@@ -1024,6 +1031,7 @@ pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan)
     *plan.resolved_steps.borrow_mut() = Some(ResolvedSteps {
         math_mode: plan.math_mode,
         attention_mma_selection: plan.attention_mma_selection,
+        attention_kv_reuse_selection: plan.attention_kv_reuse_selection,
         steps,
         #[cfg(feature = "metal-horizontal-merge")]
         merge_candidates,
@@ -2998,6 +3006,7 @@ pub(super) fn encode_op(
     math_mode: MathMode,
     numeric_policy: NumericPolicy,
     attention_mma_selection: crate::msl::AttentionMmaSelection,
+    attention_kv_reuse_selection: crate::msl::AttentionKvReuseSelection,
     resolved: Option<&ResolvedStep>,
     #[cfg(feature = "instrument")]
     capture_chunk_index: usize,
@@ -3097,6 +3106,7 @@ pub(super) fn encode_op(
         let mut cache_key = kernel_cache_key_for_grid(bound, packed_operands, numeric_policy, &grid)?;
         cache_key.push(math_mode.cache_token());
         cache_key.push_str(attention_mma_selection.cache_token_for(bound));
+        cache_key.push_str(attention_kv_reuse_selection.cache_token_for(bound));
         let uniform_codec = expert_buffers.and_then(|buffers| {
             let mut codecs = buffers
                 .descriptor_records
@@ -3168,6 +3178,7 @@ pub(super) fn encode_op(
         let mut cache_key = kernel_cache_key_for_grid(bound, packed_operands, numeric_policy, &grid)?;
         cache_key.push(math_mode.cache_token());
         cache_key.push_str(attention_mma_selection.cache_token_for(bound));
+        cache_key.push_str(attention_kv_reuse_selection.cache_token_for(bound));
         #[cfg(feature = "instrument")]
         {
             counter!(EMIT_CALLS, 1);
@@ -3183,6 +3194,7 @@ pub(super) fn encode_op(
             math_mode,
             numeric_policy,
             attention_mma_selection,
+            attention_kv_reuse_selection,
         )?;
         #[cfg(feature = "instrument")]
         {

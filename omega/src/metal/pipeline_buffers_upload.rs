@@ -264,6 +264,7 @@ fn audit_pipeline_key_on_hit(
     cache_key: &str,
     numeric_policy: NumericPolicy,
     attention_mma_selection: crate::msl::AttentionMmaSelection,
+    attention_kv_reuse_selection: crate::msl::AttentionKvReuseSelection,
 ) -> Result<(), MetalError> {
     if !pipeline_key_audit_enabled() {
         return Ok(());
@@ -283,6 +284,7 @@ fn audit_pipeline_key_on_hit(
         numeric_policy,
         false,
         attention_mma_selection,
+        attention_kv_reuse_selection,
     )?;
     let recomputed_sha256 = sha256_hex(kernel.source.as_bytes());
     super::device_buffers_arena_plan::PIPELINE_KEY_AUDIT_AUDITED
@@ -346,6 +348,7 @@ pub(super) fn pipeline_for(
     math_mode: MathMode,
     numeric_policy: NumericPolicy,
     attention_mma_selection: crate::msl::AttentionMmaSelection,
+    attention_kv_reuse_selection: crate::msl::AttentionKvReuseSelection,
 ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
     // `cache_key` already carries BOTH axes `compile_pipeline` reads: the
     // numeric-policy token from `kernel_cache_key`
@@ -373,6 +376,7 @@ pub(super) fn pipeline_for(
             cache_key,
             numeric_policy,
             attention_mma_selection,
+            attention_kv_reuse_selection,
         )?;
         return Ok(pipeline);
     }
@@ -411,6 +415,7 @@ pub(super) fn pipeline_for(
         numeric_policy,
         false,
         attention_mma_selection,
+            attention_kv_reuse_selection,
     )?;
     if env_flags::debug_metal_source() && env_flags::compare_bound_node() == Some(bound.node)
     {

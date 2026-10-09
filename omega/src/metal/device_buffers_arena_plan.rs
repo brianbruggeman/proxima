@@ -790,6 +790,8 @@ pub struct Plan {
     pub(super) numeric_policy: NumericPolicy,
     /// MMA selection that keys every attention pipeline this plan resolves.
     pub(super) attention_mma_selection: crate::msl::AttentionMmaSelection,
+    /// K/V reuse selection that keys every attention pipeline this plan resolves.
+    pub(super) attention_kv_reuse_selection: crate::msl::AttentionKvReuseSelection,
     /// Which [`MTLDispatchType`] [`execute_plan_with_placements`] opens its
     /// compute encoder with -- [`DispatchType::default`] (`Concurrent`)
     /// until a caller overrides it with [`Plan::set_dispatch_type`]. See
@@ -951,6 +953,7 @@ pub struct Plan {
 pub(super) struct ResolvedSteps {
     pub(super) math_mode: MathMode,
     pub(super) attention_mma_selection: crate::msl::AttentionMmaSelection,
+    pub(super) attention_kv_reuse_selection: crate::msl::AttentionKvReuseSelection,
     pub(super) steps: Vec<ResolvedStep>,
     /// Structural merge candidates (`group_mergeable_positions`, pipeline
     /// identity + no-dataflow-edge only -- no buffer identity check yet: that
@@ -1757,8 +1760,8 @@ pub(super) struct MergedPlanState {
 
 impl Plan {
     /// Selects the cached-attention variant before the next execution.
-    /// Resolved pipelines are discarded so the selected MMA precision is
-    /// compiled and keyed independently from this plan's previous choice.
+    /// Resolved pipelines are discarded so selected attention axes receive
+    /// independent compiled pipelines.
     #[cfg(feature = "metal-attn-variants")]
     pub fn set_attention_variant(
         &mut self,
@@ -1771,10 +1774,13 @@ impl Plan {
                 variant.kv_storage,
             )?;
         }
-        self.attention_mma_selection = crate::msl::AttentionMmaSelection::from_variant(variant)
+        let (mma_selection, kv_reuse_selection) =
+            crate::msl::AttentionMmaSelection::from_variant(variant)
             .map_err(|(axis, value)| {
                 EmitError::CachedAttentionVariantAxisNotSupported { axis, value }
             })?;
+        self.attention_mma_selection = mma_selection;
+        self.attention_kv_reuse_selection = kv_reuse_selection;
         self.resolved_steps.get_mut().take();
         #[cfg(feature = "metal-horizontal-merge")]
         self.merged.get_mut().take();
@@ -2310,6 +2316,7 @@ impl Plan {
                     .map(|mut key| {
                         key.push(self.math_mode.cache_token());
                         key.push_str(self.attention_mma_selection.cache_token_for(bound));
+                        key.push_str(self.attention_kv_reuse_selection.cache_token_for(bound));
                         key
                     })
                     .map_err(MetalError::from)

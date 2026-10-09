@@ -1756,14 +1756,14 @@ impl AttentionMmaSelection {
     }
 
     #[cfg(feature = "metal-attn-variants")]
-    pub(crate) fn from_variant(variant: AttentionVariant) -> Result<Self, (&'static str, &'static str)> {
-        if variant.kv_reuse != AttentionKvReuse::Legacy {
-            return Err(("kv_reuse", match variant.kv_reuse {
-                AttentionKvReuse::Legacy => "legacy",
-                AttentionKvReuse::SharedK => "shared_k",
-                AttentionKvReuse::SharedKv => "shared_kv",
-            }));
-        }
+    pub(crate) fn from_variant(
+        variant: AttentionVariant,
+    ) -> Result<(Self, AttentionKvReuseSelection), (&'static str, &'static str)> {
+        let kv_reuse = match variant.kv_reuse {
+            AttentionKvReuse::Legacy => AttentionKvReuseSelection::Legacy,
+            AttentionKvReuse::SharedK => AttentionKvReuseSelection::SharedK,
+            AttentionKvReuse::SharedKv => return Err(("kv_reuse", "shared_kv")),
+        };
         if variant.tile_height != AttentionTileHeight::Legacy {
             return Err(("tile_height", match variant.tile_height {
                 AttentionTileHeight::Legacy => "legacy",
@@ -1786,11 +1786,39 @@ impl AttentionMmaSelection {
         if variant.prefetch != AttentionPrefetch::Off {
             return Err(("prefetch", "next_block"));
         }
-        Ok(match variant.mma_precision {
-            AttentionMmaPrecision::Legacy => Self::Legacy,
-            AttentionMmaPrecision::F32 => Self::F32,
-            AttentionMmaPrecision::F16 => Self::F16,
-        })
+        Ok((
+            match variant.mma_precision {
+                AttentionMmaPrecision::Legacy => Self::Legacy,
+                AttentionMmaPrecision::F32 => Self::F32,
+                AttentionMmaPrecision::F16 => Self::F16,
+            },
+            kv_reuse,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum AttentionKvReuseSelection {
+    Legacy,
+    #[cfg(feature = "metal-attn-variants")]
+    SharedK,
+}
+
+impl AttentionKvReuseSelection {
+    pub(crate) const fn cache_token(self) -> &'static str {
+        match self {
+            Self::Legacy => "",
+            #[cfg(feature = "metal-attn-variants")]
+            Self::SharedK => "_kv_shared_k",
+        }
+    }
+
+    pub(crate) fn cache_token_for(self, bound: &BoundOp) -> &'static str {
+        if matches!(bound.kind, BoundOpKind::CachedAttention { .. }) {
+            self.cache_token()
+        } else {
+            ""
+        }
     }
 }
 
