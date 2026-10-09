@@ -20,11 +20,14 @@ In scope: one behavior, the two acceptance tests (or two checker gates for card 
 ## Edit
 
 - `proxima-model-interop/src/generate/device_kv.rs`
+- `proxima-model-interop/src/generate/decode.rs` (map existing GGUF cache config into the Proxima-owned device element selector)
 - `proxima-tensor/specs/granite-attention-numeric-matrix/TASKS.md` (row and resume only)
 
 ## Steps
 
 Extend size, seed/read, staged append and codec selection using existing owner. Preserve sliding and prefix rewind. Test BF8 representable rows across adopt/commit/flush and unsupported type decline.
+
+The device element selector is Proxima-owned because BF8 is not a GGUF wire dtype. Existing GGUF F32/F16/BF16 settings map into this selector; unsupported GGUF types remain explicit declines.
 
 Use the existing Proxima numeric and Metal abstractions. Do not introduce num-traits, model-name special cases, or a silent fallback. Storage width, MMA operand width and f32 accumulator are different contracts. The two AC checks must cover a normal case and a refusing or degenerate case. Inspect assertions and emitted payloads, not merely the runner summary.
 

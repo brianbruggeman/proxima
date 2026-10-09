@@ -28,6 +28,26 @@
 
 use super::*;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum KvElement {
+    F32,
+    F16,
+    Bf16,
+    Bf8,
+    Unsupported(GgmlType),
+}
+
+impl From<GgmlType> for KvElement {
+    fn from(element: GgmlType) -> Self {
+        match element {
+            GgmlType::F32 => Self::F32,
+            GgmlType::F16 => Self::F16,
+            GgmlType::Bf16 => Self::Bf16,
+            other => Self::Unsupported(other),
+        }
+    }
+}
+
 /// The placement hook of the device kv: the allocator the three buffers of each layer come from; the default is [`omega::allocate_placed_buffer`]; [`omega::allocate_placed_buffer_over`] wraps memory a caller owns.
 pub(super) type KvBufferSource = fn(usize) -> Result<PlacedBuffer, omega::MetalError>;
 
@@ -55,7 +75,7 @@ struct DeviceKvLayer {
     /// f32 outputs in them), and [`DeviceKvLayer::commit`] rounds them into
     /// the cache once the step's command buffers have completed.
     staging: Option<[PlacedBuffer; 3]>,
-    element: GgmlType,
+    element: KvElement,
     even_odd_row: usize,
     v_row: usize,
     even_odd_row_bytes: usize,
@@ -74,7 +94,7 @@ struct DeviceKvLayer {
 pub(super) struct DeviceKv {
     layers: Vec<Option<DeviceKvLayer>>,
     max_step_rows: usize,
-    element: GgmlType,
+    element: KvElement,
 }
 
 impl DeviceKvLayer {
@@ -85,7 +105,7 @@ impl DeviceKvLayer {
         full_capacity_rows: usize,
         max_step_rows: usize,
         source: KvBufferSource,
-        element: GgmlType,
+        element: KvElement,
     ) -> Result<Self, InteropError> {
         let element_bytes = element_bytes(element)?;
         let window = cache.ring_geometry().map(|ring| ring.window);
@@ -100,7 +120,7 @@ impl DeviceKvLayer {
         let k_even = source(capacity_rows * even_odd_row_bytes)?;
         let k_odd = source(capacity_rows * even_odd_row_bytes)?;
         let v = source(capacity_rows * v_row_bytes)?;
-        let staging = if element == GgmlType::F32 {
+        let staging = if element == KvElement::F32 {
             None
         } else {
             let f32_bytes = core::mem::size_of::<f32>();
@@ -231,17 +251,21 @@ impl DeviceKvLayer {
 
     fn store_f32(&self, buffer: &PlacedBuffer, byte_offset: usize, values: &[f32]) {
         match self.element {
-            GgmlType::F16 => omega::write_placed_buffer_f32_as_f16(buffer, byte_offset, values),
-            GgmlType::Bf16 => omega::write_placed_buffer_f32_as_bf16(buffer, byte_offset, values),
-            _ => omega::write_placed_buffer_f32(buffer, byte_offset, values),
+            KvElement::F16 => omega::write_placed_buffer_f32_as_f16(buffer, byte_offset, values),
+            KvElement::Bf16 => omega::write_placed_buffer_f32_as_bf16(buffer, byte_offset, values),
+            KvElement::Bf8 => omega::write_placed_buffer_f32_as_bf8(buffer, byte_offset, values),
+            KvElement::F32 => omega::write_placed_buffer_f32(buffer, byte_offset, values),
+            KvElement::Unsupported(_) => unreachable!("unsupported KV elements fail allocation"),
         }
     }
 
     fn load_f32(&self, buffer: &PlacedBuffer, byte_offset: usize, count: usize) -> Vec<f32> {
         match self.element {
-            GgmlType::F16 => omega::read_placed_buffer_f16_as_f32(buffer, byte_offset, count),
-            GgmlType::Bf16 => omega::read_placed_buffer_bf16_as_f32(buffer, byte_offset, count),
-            _ => omega::read_placed_buffer_f32(buffer, byte_offset, count),
+            KvElement::F16 => omega::read_placed_buffer_f16_as_f32(buffer, byte_offset, count),
+            KvElement::Bf16 => omega::read_placed_buffer_bf16_as_f32(buffer, byte_offset, count),
+            KvElement::Bf8 => omega::read_placed_buffer_bf8_as_f32(buffer, byte_offset, count),
+            KvElement::F32 => omega::read_placed_buffer_f32(buffer, byte_offset, count),
+            KvElement::Unsupported(_) => unreachable!("unsupported KV elements fail allocation"),
         }
     }
 
@@ -262,13 +286,17 @@ impl DeviceKvLayer {
             (staging_value, &self.v, self.v_row_bytes, self.v_row),
         ] {
             match self.element {
-                GgmlType::F16 => omega::narrow_placed_buffer_f32_to_f16(
+                KvElement::F16 => omega::narrow_placed_buffer_f32_to_f16(
                     staging, 0, cache, output_row * row_bytes, new_count * row,
                 ),
-                GgmlType::Bf16 => omega::narrow_placed_buffer_f32_to_bf16(
+                KvElement::Bf16 => omega::narrow_placed_buffer_f32_to_bf16(
                     staging, 0, cache, output_row * row_bytes, new_count * row,
                 ),
-                other => unreachable!("staging only exists for narrow float caches, got {other:?}"),
+                KvElement::Bf8 => omega::narrow_placed_buffer_f32_to_bf8(
+                    staging, 0, cache, output_row * row_bytes, new_count * row,
+                ),
+                KvElement::F32 => unreachable!("F32 cache rows do not use staging"),
+                KvElement::Unsupported(_) => unreachable!("unsupported KV elements fail allocation"),
             }
         }
     }
@@ -277,13 +305,13 @@ impl DeviceKvLayer {
 /// Bytes per stored element of a device cache of type `element`: a plain f32
 /// buffer, or a two-byte float that cached-attention reads through its
 /// matching codec.
-fn element_bytes(element: GgmlType) -> Result<usize, InteropError> {
+fn element_bytes(element: KvElement) -> Result<usize, InteropError> {
     match element {
-        GgmlType::F32 => Ok(core::mem::size_of::<f32>()),
-        GgmlType::F16 => Ok(core::mem::size_of::<u16>()),
-        GgmlType::Bf16 => Ok(core::mem::size_of::<u16>()),
-        other => Err(InteropError::UnsupportedServingConfig(alloc::format!(
-            "device kv cache type {other:?}: the device-resident cache stores f32, f16, or bf16"
+        KvElement::F32 => Ok(core::mem::size_of::<f32>()),
+        KvElement::F16 | KvElement::Bf16 => Ok(core::mem::size_of::<u16>()),
+        KvElement::Bf8 => Ok(core::mem::size_of::<u8>()),
+        KvElement::Unsupported(other) => Err(InteropError::UnsupportedServingConfig(alloc::format!(
+            "device kv cache type {other:?}: the device-resident cache stores f32, f16, bf16, or Proxima bf8"
         ))),
     }
 }
@@ -311,7 +339,7 @@ impl DeviceKv {
         bucket_tokens: usize,
         max_step_rows: usize,
         source: KvBufferSource,
-        element: GgmlType,
+        element: KvElement,
     ) -> Result<Option<Self>, InteropError> {
         let full_capacity_rows =
             kv_extent(capacity_positions, usize::MAX, bucket_tokens) + bucket_tokens;
@@ -371,8 +399,9 @@ impl DeviceKv {
     /// f32 (a plain buffer needs no codec).
     pub(super) fn cache_codec(&self) -> Option<Codec> {
         match self.element {
-            GgmlType::F16 => Some(Codec::Float16),
-            GgmlType::Bf16 => Some(Codec::BFloat16),
+            KvElement::F16 => Some(Codec::Float16),
+            KvElement::Bf16 => Some(Codec::BFloat16),
+            KvElement::Bf8 => Some(Codec::BFloat8),
             _ => None,
         }
     }
@@ -592,7 +621,7 @@ mod tests {
             4,
             3,
             allocate_placed_buffer,
-            GgmlType::F32,
+            GgmlType::F32.into(),
         )
             .expect("device kv allocates on the real Metal device")
             .expect("a plain attention cache is adoptable");
@@ -727,7 +756,7 @@ mod tests {
             capacity_rows,
             3,
             allocate_placed_buffer,
-            GgmlType::F32,
+            GgmlType::F32.into(),
         )
             .expect("device kv allocates on the real Metal device");
         let dirty = alloc::vec![f32::NAN; capacity_rows * EVEN_ODD_ROW.max(V_ROW)];
@@ -774,7 +803,7 @@ mod tests {
             4,
             prefill_rows,
             allocate_placed_buffer,
-            GgmlType::F32,
+            GgmlType::F32.into(),
         )
             .expect("device kv allocates on the real Metal device")
             .expect("an empty attention cache is adoptable");
@@ -896,7 +925,7 @@ mod tests {
             4,
             3,
             recording_source,
-            GgmlType::F32,
+            GgmlType::F32.into(),
         )
             .expect("device kv allocates on the real Metal device");
 
@@ -931,7 +960,7 @@ mod tests {
             4,
             3,
             allocate_placed_buffer,
-            GgmlType::F32,
+            GgmlType::F32.into(),
         )
             .expect("the allocation path itself succeeds");
         assert!(
@@ -986,7 +1015,7 @@ mod tests {
             4,
             3,
             allocate_placed_buffer,
-            GgmlType::F16,
+            GgmlType::F16.into(),
         )
         .expect("device kv allocates on the real Metal device")
         .expect("a plain attention cache is adoptable");
@@ -1026,7 +1055,7 @@ mod tests {
             4,
             3,
             allocate_placed_buffer,
-            GgmlType::Bf16,
+            GgmlType::Bf16.into(),
         )
         .expect("device kv allocates on the real Metal device")
         .expect("a plain attention cache is adoptable");
@@ -1076,10 +1105,106 @@ mod tests {
             v_row: V_ROW,
         }];
         let error = DeviceKv::adopt(
-            &mut caches, &widths, 10, 40, 4, 3, allocate_placed_buffer, GgmlType::Q8_0,
+            &mut caches, &widths, 10, 40, 4, 3, allocate_placed_buffer, GgmlType::Q8_0.into(),
         )
         .err()
         .expect("a Q8_0 device cache has no read path");
+        assert!(error.to_string().contains("device kv cache type"));
+    }
+
+    fn bf8_exact_rows(first: usize, count: usize, width: usize, leaf: usize) -> Vec<f32> {
+        let values = [0.0, 0.5, -0.5, 1.0, -1.0, 2.0, -2.0, 0.25];
+        (first..first + count)
+            .flat_map(|position| {
+                (0..width).map(move |column| values[(position + column + leaf) % values.len()])
+            })
+            .collect()
+    }
+
+    fn adopted_bf8(positions: usize, total_positions: usize) -> (DeviceKv, Vec<LayerCacheState>) {
+        let mut cache = attention_cache(None, 2, EVEN_ODD_ROW, V_ROW, 0, positions);
+        cache.append_at(
+            0,
+            &bf8_exact_rows(0, positions, EVEN_ODD_ROW, 0),
+            &bf8_exact_rows(0, positions, EVEN_ODD_ROW, 1),
+            &bf8_exact_rows(0, positions, V_ROW, 2),
+        );
+        let mut caches = alloc::vec![LayerCacheState::Attention(cache)];
+        let widths = [LayerPadRowWidths::Attention {
+            even_odd_row: EVEN_ODD_ROW,
+            v_row: V_ROW,
+        }];
+        let device = DeviceKv::adopt(
+            &mut caches,
+            &widths,
+            positions,
+            total_positions,
+            4,
+            3,
+            allocate_placed_buffer,
+            KvElement::Bf8,
+        )
+        .expect("device kv allocates on the real Metal device")
+        .expect("a plain attention cache is adoptable");
+        (device, caches)
+    }
+
+    #[test]
+    fn card_08_bf8_device_adopts_appends_and_flushes_rows() {
+        let cached_len = 5;
+        let (device, mut caches) = adopted_bf8(cached_len, 80);
+        let layer = device.layers[0].as_ref().expect("layer 0 is resident");
+        assert_eq!(layer.even_odd_row_bytes, EVEN_ODD_ROW);
+        assert_eq!(layer.v_row_bytes, V_ROW);
+        assert_eq!(device.cache_codec(), Some(Codec::BFloat8));
+        assert!(layer.staging.is_some(), "BF8 cache rows stage f32 outputs");
+
+        let [staging_even, staging_odd, staging_value] = layer
+            .staging
+            .as_ref()
+            .expect("BF8 cache has three f32 staging buffers");
+        let even = [0.5f32, -0.5, 1.0, -1.0];
+        let odd = [-1.0f32, 1.0, -2.0, 2.0];
+        let value = [2.0f32, -2.0, 0.25, -0.25, 0.5, -0.5];
+        omega::write_placed_buffer_f32(staging_even, 0, &even);
+        omega::write_placed_buffer_f32(staging_odd, 0, &odd);
+        omega::write_placed_buffer_f32(staging_value, 0, &value);
+        device.commit_step(cached_len, 1);
+        device.flush(&mut caches, cached_len + 1, 80);
+
+        let LayerCacheState::Attention(restored) = &caches[0] else {
+            panic!("layer 0 stays an attention cache");
+        };
+        let mut expected_even = bf8_exact_rows(0, cached_len, EVEN_ODD_ROW, 0);
+        expected_even.extend(even);
+        let mut expected_odd = bf8_exact_rows(0, cached_len, EVEN_ODD_ROW, 1);
+        expected_odd.extend(odd);
+        let mut expected_value = bf8_exact_rows(0, cached_len, V_ROW, 2);
+        expected_value.extend(value);
+        assert_eq!(restored.k_even, expected_even);
+        assert_eq!(restored.k_odd, expected_odd);
+        assert_eq!(restored.v, expected_value);
+    }
+
+    #[test]
+    fn card_08_bf8_device_declines_gguf_quantized_cache_type() {
+        let mut caches = alloc::vec![LayerCacheState::Attention(host_cache(None, 10))];
+        let widths = [LayerPadRowWidths::Attention {
+            even_odd_row: EVEN_ODD_ROW,
+            v_row: V_ROW,
+        }];
+        let error = DeviceKv::adopt(
+            &mut caches,
+            &widths,
+            10,
+            40,
+            4,
+            3,
+            allocate_placed_buffer,
+            GgmlType::Q8_0.into(),
+        )
+        .err()
+        .expect("a GGUF quantized cache type has no scalar cache reader");
         assert!(error.to_string().contains("device kv cache type"));
     }
 
@@ -1219,7 +1344,7 @@ mod tests {
             4,
             3,
             allocate_placed_buffer,
-            GgmlType::Q8_0,
+            GgmlType::Q8_0.into(),
         )
         .err()
         .expect("a Q8_0 device cache has no read path");
