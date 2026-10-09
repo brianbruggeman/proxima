@@ -1692,3 +1692,107 @@ fn card_18_prefetch_guards_a_partial_final_cached_block() {
     assert!(kernel.source.contains("fragment_index < next_fragments * depth_fragments"));
     assert!(kernel.source.contains("next_key0 + (long)key_tile * 8L"));
 }
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_19_simd_topology_assigns_each_granite_query_head_once() {
+    let capture = include_str!("../../../proxima-tensor/specs/decode-prefill-parity/evidence/attn5/raw/probe/granite.out");
+    assert!(capture.lines().any(|line| {
+        line.contains("extents=[1000, 8, 2, 64]")
+    }));
+    let op = card_17_granite_attention(1000);
+    let packed = PackedOperands::new();
+    let policy = NumericPolicy::llama_relaxed();
+    let per_head = emit_with_attention_variant(
+        &op,
+        &packed,
+        policy,
+        AttentionVariant {
+            kv_reuse: AttentionKvReuse::SharedKv,
+            tile_height: AttentionTileHeight::Rows16,
+            simd_topology: AttentionSimdTopology::PerHead,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("per-head topology emits for Granite GQA");
+    let grouped = emit_with_attention_variant(
+        &op,
+        &packed,
+        policy,
+        AttentionVariant {
+            kv_reuse: AttentionKvReuse::SharedKv,
+            tile_height: AttentionTileHeight::Rows16,
+            simd_topology: AttentionSimdTopology::GroupedQueries,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("grouped-query topology emits for Granite GQA");
+    assert!(per_head.source.contains("constexpr bool simd_per_head = true"));
+    assert!(grouped.source.contains("constexpr bool simd_per_head = false"));
+    assert!(per_head.source.contains("constexpr bool query_parallel_rows = false"));
+    assert!(grouped.source.contains("constexpr bool query_parallel_rows = false"));
+    assert!(per_head.source.contains("constexpr long tile_rows = 16;"));
+    assert!(grouped.source.contains("constexpr long tile_rows = 16;"));
+    assert!(per_head.source.contains("block_index % (tile_rows / 8L)"));
+    assert!(grouped.source.contains("block_index / query_groups"));
+    assert!(per_head.entry.contains("_simd_per_head"));
+    assert!(grouped.entry.contains("_simd_grouped_queries"));
+
+    let simdgroups = row_tiled_simdgroups(64);
+    for per_head_topology in [false, true] {
+        let mut coverage = vec![0_u8; 1000 * 8 * 2];
+        for kv_head in 0..8_u64 {
+            for tile_start in (0..1000_u64).step_by(16) {
+                for simdgroup_slot in 0..simdgroups {
+                    for vector_block in (simdgroup_slot..4).step_by(simdgroups as usize) {
+                        let row_block = if per_head_topology {
+                            vector_block % 2
+                        } else {
+                            vector_block / 2
+                        };
+                        let query_group = if per_head_topology {
+                            vector_block / 2
+                        } else {
+                            vector_block % 2
+                        };
+                        let owned_from = tile_start + row_block * 8;
+                        let mapped_start = owned_from.min(1000 - 8);
+                        for row_within_block in 0..8_u64 {
+                            let query_row = mapped_start + row_within_block;
+                            if query_row >= owned_from && query_row < 1000 {
+                                let index = ((kv_head * 1000 + query_row) * 2 + query_group) as usize;
+                                coverage[index] += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(coverage.iter().all(|owners| *owners == 1));
+    }
+    assert_ne!(per_head.entry, grouped.entry);
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_19_simd_topology_declines_an_insufficient_head_width() {
+    let op = attention_rows_op(9, 2, 48, 512, 1000, SLIDING_LOWER);
+    let error = emit_with_attention_variant(
+        &op,
+        &PackedOperands::new(),
+        NumericPolicy::llama_relaxed(),
+        AttentionVariant {
+            tile_height: AttentionTileHeight::Rows8,
+            simd_topology: AttentionSimdTopology::PerHead,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect_err("per-head lane mapping needs two 8-wide fragments per simdgroup");
+    assert!(matches!(
+        error,
+        EmitError::CachedAttentionSimdTopologyNotSupported {
+            reason: "per-head topology requires at least two 8-wide fragments per simdgroup",
+            ..
+        }
+    ));
+}

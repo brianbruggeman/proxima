@@ -1792,6 +1792,11 @@ impl Plan {
                 row_schedule,
             )?;
             crate::msl::validate_prefetch_selection(bound, self.numeric_policy, row_schedule)?;
+            crate::msl::validate_simd_topology_selection(
+                bound,
+                self.numeric_policy,
+                row_schedule,
+            )?;
         }
         self.attention_mma_selection = mma_selection;
         self.attention_row_schedule = row_schedule;
