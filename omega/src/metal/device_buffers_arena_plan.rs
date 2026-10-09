@@ -790,8 +790,8 @@ pub struct Plan {
     pub(super) numeric_policy: NumericPolicy,
     /// MMA selection that keys every attention pipeline this plan resolves.
     pub(super) attention_mma_selection: crate::msl::AttentionMmaSelection,
-    /// K/V reuse selection that keys every attention pipeline this plan resolves.
-    pub(super) attention_kv_reuse_selection: crate::msl::AttentionKvReuseSelection,
+    /// Row schedule (K/V reuse and tile height) that keys every attention pipeline this plan resolves.
+    pub(super) attention_row_schedule: crate::msl::AttentionRowSchedule,
     /// Which [`MTLDispatchType`] [`execute_plan_with_placements`] opens its
     /// compute encoder with -- [`DispatchType::default`] (`Concurrent`)
     /// until a caller overrides it with [`Plan::set_dispatch_type`]. See
@@ -953,7 +953,7 @@ pub struct Plan {
 pub(super) struct ResolvedSteps {
     pub(super) math_mode: MathMode,
     pub(super) attention_mma_selection: crate::msl::AttentionMmaSelection,
-    pub(super) attention_kv_reuse_selection: crate::msl::AttentionKvReuseSelection,
+    pub(super) attention_row_schedule: crate::msl::AttentionRowSchedule,
     pub(super) steps: Vec<ResolvedStep>,
     /// Structural merge candidates (`group_mergeable_positions`, pipeline
     /// identity + no-dataflow-edge only -- no buffer identity check yet: that
@@ -1774,13 +1774,21 @@ impl Plan {
                 variant.kv_storage,
             )?;
         }
-        let (mma_selection, kv_reuse_selection) =
+        let (mma_selection, row_schedule) =
             crate::msl::AttentionMmaSelection::from_variant(variant)
             .map_err(|(axis, value)| {
                 EmitError::CachedAttentionVariantAxisNotSupported { axis, value }
             })?;
+        #[cfg(feature = "metal-attn-split-rows")]
+        for bound in &self.prepared.resolved {
+            crate::msl::validate_tile_height_selection(
+                bound,
+                self.numeric_policy,
+                row_schedule.tile_height(),
+            )?;
+        }
         self.attention_mma_selection = mma_selection;
-        self.attention_kv_reuse_selection = kv_reuse_selection;
+        self.attention_row_schedule = row_schedule;
         self.resolved_steps.get_mut().take();
         #[cfg(feature = "metal-horizontal-merge")]
         self.merged.get_mut().take();
@@ -2316,7 +2324,7 @@ impl Plan {
                     .map(|mut key| {
                         key.push(self.math_mode.cache_token());
                         key.push_str(self.attention_mma_selection.cache_token_for(bound));
-                        key.push_str(self.attention_kv_reuse_selection.cache_token_for(bound));
+                        key.push_str(&self.attention_row_schedule.cache_token_for(bound));
                         key
                     })
                     .map_err(MetalError::from)

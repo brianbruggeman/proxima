@@ -163,6 +163,13 @@ pub enum EmitError {
         value: &'static str,
     },
 
+    #[error("node {node} cannot select a {rows}-row attention tile: {reason}")]
+    CachedAttentionTileHeightNotSupported {
+        node: NodeId,
+        rows: u64,
+        reason: &'static str,
+    },
+
     #[error("cached-attention variant selects {selected} K/V storage but the bound operands use {bound}")]
     CachedAttentionVariantStorageMismatch {
         selected: &'static str,

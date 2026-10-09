@@ -8,6 +8,22 @@ pub(super) fn grid_threads(
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
 ) -> Result<u64, EmitError> {
+    grid_threads_with_tile_height(
+        resolved,
+        quantized,
+        numeric_policy,
+        expert_source_mode,
+        AttentionTileHeightSelection::Legacy,
+    )
+}
+
+pub(super) fn grid_threads_with_tile_height(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+    expert_source_mode: bool,
+    tile_height_selection: AttentionTileHeightSelection,
+) -> Result<u64, EmitError> {
     let threads = match &resolved.kind {
         BoundOpKind::CachedAttention {
             head_dim,
@@ -44,7 +60,11 @@ pub(super) fn grid_threads(
             // single-range path's do (`render_cached_attention`'s own doc).
             // The decode split form dispatches exactly its bind-time
             // `(splits, chunks)`: one threadgroup per `(head, split)`.
-            let (chunks, splits) = match cached_attention_form(&resolved.kind, numeric_policy) {
+            let (chunks, splits) = match cached_attention_form_with_tile_height(
+                &resolved.kind,
+                numeric_policy,
+                tile_height_selection,
+            ) {
                 Some(CachedAttentionForm::SingleRangeDynamic { merge }) => (
                     effective_context_chunk_cap(*query_groups, *head_dim),
                     if merge {
@@ -296,6 +316,18 @@ pub(super) fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, Emi
 /// only when at least one operand gathers, so a gather-free `BoundOp`'s name is
 /// unchanged from before this existed.
 pub(super) fn entry_name(resolved: &BoundOp, numeric_policy: NumericPolicy) -> String {
+    entry_name_with_tile_height(
+        resolved,
+        numeric_policy,
+        AttentionTileHeightSelection::Legacy,
+    )
+}
+
+pub(super) fn entry_name_with_tile_height(
+    resolved: &BoundOp,
+    numeric_policy: NumericPolicy,
+    tile_height_selection: AttentionTileHeightSelection,
+) -> String {
     let rank = resolved.extents.len();
     let operand_count = resolved.operands().len();
     let base = match &resolved.kind {
@@ -322,7 +354,11 @@ pub(super) fn entry_name(resolved: &BoundOp, numeric_policy: NumericPolicy) -> S
             // range's own live row count, but `new_upper_inclusive` is still
             // the real, query-independent compiled bound (this path's causal
             // band never depends on it), so that token is real, not "dyn".
-            let form = cached_attention_form(&resolved.kind, numeric_policy);
+            let form = cached_attention_form_with_tile_height(
+                &resolved.kind,
+                numeric_policy,
+                tile_height_selection,
+            );
             let single_range_dynamic =
                 matches!(form, Some(CachedAttentionForm::SingleRangeDynamic { .. }));
             let two_range_cached_bound =
@@ -1758,20 +1794,17 @@ impl AttentionMmaSelection {
     #[cfg(feature = "metal-attn-variants")]
     pub(crate) fn from_variant(
         variant: AttentionVariant,
-    ) -> Result<(Self, AttentionKvReuseSelection), (&'static str, &'static str)> {
-        let kv_reuse = match variant.kv_reuse {
-            AttentionKvReuse::Legacy => AttentionKvReuseSelection::Legacy,
-            AttentionKvReuse::SharedK => AttentionKvReuseSelection::SharedK,
-            AttentionKvReuse::SharedKv => AttentionKvReuseSelection::SharedKv,
+    ) -> Result<(Self, AttentionRowSchedule), (&'static str, &'static str)> {
+        let tile_height = match variant.tile_height {
+            AttentionTileHeight::Legacy => AttentionTileHeightSelection::Legacy,
+            AttentionTileHeight::Rows2 => AttentionTileHeightSelection::Rows2,
+            AttentionTileHeight::Rows4 => AttentionTileHeightSelection::Rows4,
+            AttentionTileHeight::Rows8 => AttentionTileHeightSelection::Rows8,
+            AttentionTileHeight::Rows16 => AttentionTileHeightSelection::Rows16,
         };
-        if variant.tile_height != AttentionTileHeight::Legacy {
-            return Err(("tile_height", match variant.tile_height {
-                AttentionTileHeight::Legacy => "legacy",
-                AttentionTileHeight::Rows2 => "rows_2",
-                AttentionTileHeight::Rows4 => "rows_4",
-                AttentionTileHeight::Rows8 => "rows_8",
-                AttentionTileHeight::Rows16 => "rows_16",
-            }));
+        #[cfg(not(feature = "metal-attn-split-rows"))]
+        if tile_height != AttentionTileHeightSelection::Legacy {
+            return Err(("tile_height", "row-tiled attention feature is disabled"));
         }
         if variant.query_parallelism != AttentionQueryParallelism::Legacy {
             return Err(("query_parallelism", "simdgroup_rows"));
@@ -1792,13 +1825,20 @@ impl AttentionMmaSelection {
                 AttentionMmaPrecision::F32 => Self::F32,
                 AttentionMmaPrecision::F16 => Self::F16,
             },
-            kv_reuse,
+            AttentionRowSchedule {
+                ..match variant.kv_reuse {
+                    AttentionKvReuse::Legacy => AttentionRowSchedule::legacy(),
+                    AttentionKvReuse::SharedK => AttentionRowSchedule::shared_k(),
+                    AttentionKvReuse::SharedKv => AttentionRowSchedule::shared_kv(),
+                }
+                .with_tile_height(tile_height)
+            },
         ))
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum AttentionKvReuseSelection {
+enum AttentionKvReuseMode {
     Legacy,
     #[cfg(feature = "metal-attn-variants")]
     SharedK,
@@ -1806,22 +1846,124 @@ pub(crate) enum AttentionKvReuseSelection {
     SharedKv,
 }
 
-impl AttentionKvReuseSelection {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct AttentionRowSchedule {
+    kv_reuse: AttentionKvReuseMode,
+    tile_height: AttentionTileHeightSelection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum AttentionTileHeightSelection {
+    Legacy,
+    #[cfg(feature = "metal-attn-variants")]
+    Rows2,
+    #[cfg(feature = "metal-attn-variants")]
+    Rows4,
+    #[cfg(feature = "metal-attn-variants")]
+    Rows8,
+    #[cfg(feature = "metal-attn-variants")]
+    Rows16,
+}
+
+impl AttentionTileHeightSelection {
+    const fn explicit_rows(self) -> Option<u64> {
+        match self {
+            Self::Legacy => None,
+            #[cfg(feature = "metal-attn-variants")]
+            Self::Rows2 => Some(2),
+            #[cfg(feature = "metal-attn-variants")]
+            Self::Rows4 => Some(4),
+            #[cfg(feature = "metal-attn-variants")]
+            Self::Rows8 => Some(8),
+            #[cfg(feature = "metal-attn-variants")]
+            Self::Rows16 => Some(16),
+        }
+    }
+
     pub(crate) const fn cache_token(self) -> &'static str {
         match self {
             Self::Legacy => "",
             #[cfg(feature = "metal-attn-variants")]
-            Self::SharedK => "_kv_shared_k",
+            Self::Rows2 => "_tile_rows2",
             #[cfg(feature = "metal-attn-variants")]
-            Self::SharedKv => "_kv_shared_kv",
+            Self::Rows4 => "_tile_rows4",
+            #[cfg(feature = "metal-attn-variants")]
+            Self::Rows8 => "_tile_rows8",
+            #[cfg(feature = "metal-attn-variants")]
+            Self::Rows16 => "_tile_rows16",
         }
     }
 
-    pub(crate) fn cache_token_for(self, bound: &BoundOp) -> &'static str {
+}
+
+impl AttentionRowSchedule {
+    pub(crate) const fn legacy() -> Self {
+        Self {
+            kv_reuse: AttentionKvReuseMode::Legacy,
+            tile_height: AttentionTileHeightSelection::Legacy,
+        }
+    }
+
+    #[cfg(feature = "metal-attn-variants")]
+    pub(crate) const fn is_legacy(self) -> bool {
+        matches!(self.kv_reuse, AttentionKvReuseMode::Legacy)
+            && matches!(self.tile_height, AttentionTileHeightSelection::Legacy)
+    }
+
+    #[cfg(feature = "metal-attn-variants")]
+    pub(crate) const fn shared_k() -> Self {
+        Self {
+            kv_reuse: AttentionKvReuseMode::SharedK,
+            tile_height: AttentionTileHeightSelection::Legacy,
+        }
+    }
+
+    #[cfg(feature = "metal-attn-variants")]
+    pub(crate) const fn shared_kv() -> Self {
+        Self {
+            kv_reuse: AttentionKvReuseMode::SharedKv,
+            tile_height: AttentionTileHeightSelection::Legacy,
+        }
+    }
+
+    #[cfg(feature = "metal-attn-variants")]
+    pub(crate) const fn is_shared_kv(self) -> bool {
+        matches!(self.kv_reuse, AttentionKvReuseMode::SharedKv)
+    }
+
+    #[cfg(feature = "metal-attn-variants")]
+    pub(crate) const fn has_shared_k(self) -> bool {
+        matches!(
+            self.kv_reuse,
+            AttentionKvReuseMode::SharedK | AttentionKvReuseMode::SharedKv
+        )
+    }
+
+    pub(crate) const fn tile_height(self) -> AttentionTileHeightSelection {
+        self.tile_height
+    }
+
+    #[cfg(feature = "metal-attn-variants")]
+    const fn with_tile_height(self, tile_height: AttentionTileHeightSelection) -> Self {
+        Self { tile_height, ..self }
+    }
+
+    pub(crate) fn cache_token(self) -> String {
+        let reuse = match self.kv_reuse {
+            AttentionKvReuseMode::Legacy => "",
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionKvReuseMode::SharedK => "_kv_shared_k",
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionKvReuseMode::SharedKv => "_kv_shared_kv",
+        };
+        alloc::format!("{reuse}{}", self.tile_height.cache_token())
+    }
+
+    pub(crate) fn cache_token_for(self, bound: &BoundOp) -> String {
         if matches!(bound.kind, BoundOpKind::CachedAttention { .. }) {
             self.cache_token()
         } else {
-            ""
+            String::new()
         }
     }
 }
@@ -2002,6 +2144,18 @@ pub(crate) fn cached_attention_form(
     kind: &BoundOpKind,
     policy: NumericPolicy,
 ) -> Option<CachedAttentionForm> {
+    cached_attention_form_with_tile_height(
+        kind,
+        policy,
+        AttentionTileHeightSelection::Legacy,
+    )
+}
+
+pub(crate) fn cached_attention_form_with_tile_height(
+    kind: &BoundOpKind,
+    policy: NumericPolicy,
+    tile_height_selection: AttentionTileHeightSelection,
+) -> Option<CachedAttentionForm> {
     let BoundOpKind::CachedAttention {
         operands,
         cached_key_rows,
@@ -2024,7 +2178,7 @@ pub(crate) fn cached_attention_form(
         return Some(CachedAttentionForm::SingleRangeDynamic { merge });
     }
     #[cfg(feature = "metal-attn-split-rows")]
-    if let Some(tiled) = row_tiled_form(kind, policy) {
+    if let Some(tiled) = row_tiled_form(kind, policy, tile_height_selection) {
         return Some(tiled);
     }
     #[cfg(feature = "metal-attn-split-decode")]
@@ -2032,6 +2186,53 @@ pub(crate) fn cached_attention_form(
         return Some(split);
     }
     Some(CachedAttentionForm::TwoRangeCachedBound)
+}
+
+#[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
+pub(crate) fn validate_tile_height_selection(
+    resolved: &BoundOp,
+    policy: NumericPolicy,
+    selection: AttentionTileHeightSelection,
+) -> Result<(), EmitError> {
+    let Some(rows) = selection.explicit_rows() else {
+        return Ok(());
+    };
+    let BoundOpKind::CachedAttention {
+        query_rows,
+        query_groups,
+        head_dim,
+        ..
+    } = &resolved.kind
+    else {
+        return Ok(());
+    };
+    if matches!(
+        cached_attention_form_with_tile_height(&resolved.kind, policy, selection),
+        Some(CachedAttentionForm::TwoRangeRowTiled { .. })
+    ) {
+        return Ok(());
+    }
+    let (unit_rows, _) = tile_unit(*query_groups);
+    let reason = if !rows.is_multiple_of(unit_rows) {
+        "requested rows do not form whole query tile units"
+    } else if rows > *query_rows {
+        "requested tile is taller than the bound query extent"
+    } else if row_tile_bytes(rows, *query_groups, row_tiled_block(*head_dim))
+        > crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES
+    {
+        "requested tile exceeds the configured threadgroup-memory budget"
+    } else if (rows / unit_rows) * tile_unit_fragments(*query_groups, *head_dim)
+        > crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS
+    {
+        "requested tile exceeds the configured accumulator-fragment budget"
+    } else {
+        "bound shape or numeric policy does not admit row-tiled attention"
+    };
+    Err(EmitError::CachedAttentionTileHeightNotSupported {
+        node: resolved.node,
+        rows,
+        reason,
+    })
 }
 
 /// The decode split form of a two-range cached-bound op, when the op and the
@@ -2157,7 +2358,11 @@ fn decode_split_serves_rows(query_rows: u64) -> bool {
 /// [`decode_split_form`] or [`CachedAttentionForm::TwoRangeCachedBound`].
 #[cfg(feature = "metal-attn-split-rows")]
 #[must_use]
-fn row_tiled_form(kind: &BoundOpKind, policy: NumericPolicy) -> Option<CachedAttentionForm> {
+fn row_tiled_form(
+    kind: &BoundOpKind,
+    policy: NumericPolicy,
+    tile_height_selection: AttentionTileHeightSelection,
+) -> Option<CachedAttentionForm> {
     let BoundOpKind::CachedAttention {
         query_rows,
         cached_key_rows,
@@ -2175,9 +2380,21 @@ fn row_tiled_form(kind: &BoundOpKind, policy: NumericPolicy) -> Option<CachedAtt
         && admit(policy, NumericRewrite::TreeReduce).is_ok();
     let simdgroups = row_tiled_simdgroups(*head_dim);
     let (unit_rows, _) = tile_unit(*query_groups);
+    let selected_rows = tile_height_selection.explicit_rows();
+    let requested_rows = selected_rows.unwrap_or(unit_rows);
+    let units = requested_rows.checked_div(unit_rows).unwrap_or(0);
+    let requested_fits = selected_rows.is_none()
+        || (units > 0
+            && requested_rows.is_multiple_of(unit_rows)
+            && requested_rows <= *query_rows
+            && units * tile_unit_fragments(*query_groups, *head_dim)
+                <= crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS
+            && row_tile_bytes(requested_rows, *query_groups, row_tiled_block(*head_dim))
+                <= crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES);
     let shape_fits = *query_rows == *new_key_rows
         && *query_rows >= crate::sized::ATTENTION_ROWS_MMA_MIN_QUERY_ROWS
         && *query_rows >= unit_rows
+        && requested_fits
         && rotary_dim == head_dim
         && head_dim.is_multiple_of(16)
         && head_dim.is_multiple_of(8 * simdgroups)
@@ -2191,8 +2408,9 @@ fn row_tiled_form(kind: &BoundOpKind, policy: NumericPolicy) -> Option<CachedAtt
         return None;
     }
     let capacity = cached_key_rows + new_key_rows;
-    let rows_per_threadgroup =
-        rows_per_threadgroup(*query_rows, *kv_heads, *query_groups, *head_dim, capacity);
+    let rows_per_threadgroup = selected_rows.unwrap_or_else(|| {
+        rows_per_threadgroup(*query_rows, *kv_heads, *query_groups, *head_dim, capacity)
+    });
     let tiles = query_rows.div_ceil(rows_per_threadgroup);
     Some(CachedAttentionForm::TwoRangeRowTiled {
         splits: row_tiled_splits(capacity, *kv_heads, tiles, simdgroups),

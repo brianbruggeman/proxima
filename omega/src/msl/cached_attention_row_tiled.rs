@@ -79,7 +79,7 @@ pub(super) fn render_cached_attention_row_tiled(
     simdgroups: u64,
     cached_kv_codec: Option<Codec>,
     mma_selection: AttentionMmaSelection,
-    kv_reuse_selection: AttentionKvReuseSelection,
+    row_schedule: AttentionRowSchedule,
 ) -> Result<String, EmitError> {
     let half_operands = match mma_selection {
         AttentionMmaSelection::Legacy => crate::sized::ATTENTION_ROWS_MMA_HALF,
@@ -95,7 +95,7 @@ pub(super) fn render_cached_attention_row_tiled(
         simdgroups,
         half_operands,
         cached_kv_codec,
-        kv_reuse_selection,
+        row_schedule,
     )
 }
 
@@ -106,7 +106,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
     simdgroups: u64,
     half_operands: bool,
     cached_kv_codec: Option<Codec>,
-    kv_reuse_selection: AttentionKvReuseSelection,
+    row_schedule: AttentionRowSchedule,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         kv_heads,
@@ -145,15 +145,15 @@ pub(super) fn render_cached_attention_row_tiled_with(
         crate::sized::ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES,
     );
     #[cfg(feature = "metal-attn-variants")]
-    let shared_k = !matches!(kv_reuse_selection, AttentionKvReuseSelection::Legacy);
+    let shared_k = row_schedule.has_shared_k();
     #[cfg(feature = "metal-attn-variants")]
-    let shared_v = kv_reuse_selection == AttentionKvReuseSelection::SharedKv;
+    let shared_v = row_schedule.is_shared_kv();
     #[cfg(not(feature = "metal-attn-variants"))]
     let shared_k = false;
     #[cfg(not(feature = "metal-attn-variants"))]
     let shared_v = false;
     #[cfg(not(feature = "metal-attn-variants"))]
-    let _ = kv_reuse_selection;
+    let _ = row_schedule;
     let block = row_tiled_block(*head_dim);
     let half_dim = *head_dim / 2;
     let depth_unroll = if (half_dim / 8).is_multiple_of(2) { 2 } else { 1 };

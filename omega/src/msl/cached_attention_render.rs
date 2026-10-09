@@ -137,7 +137,7 @@ pub(super) fn render_cached_attention(
         numeric_policy,
         cached_kv_codec,
         AttentionMmaSelection::Legacy,
-        AttentionKvReuseSelection::Legacy,
+        AttentionRowSchedule::legacy(),
     )
 }
 
@@ -147,7 +147,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
     numeric_policy: NumericPolicy,
     cached_kv_codec: Option<Codec>,
     mma_selection: AttentionMmaSelection,
-    kv_reuse_selection: AttentionKvReuseSelection,
+    row_schedule: AttentionRowSchedule,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         query_rows,
@@ -198,7 +198,11 @@ pub(super) fn render_cached_attention_with_mma_selection(
     // needs no dynamic `new_upper` at all, since its "new" range is never
     // bucketed. `entry_name`'s own "dyn"/"cb" markers are what let one
     // compiled kernel serve every live value on each path.
-    let Some(form) = cached_attention_form(&resolved.kind, numeric_policy) else {
+    let Some(form) = cached_attention_form_with_tile_height(
+        &resolved.kind,
+        numeric_policy,
+        row_schedule.tile_height(),
+    ) else {
         return Err(EmitError::RenderKindMismatch {
             node: resolved.node,
             expected: "cached_attention",
@@ -218,7 +222,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
         });
     }
     #[cfg(feature = "metal-attn-variants")]
-    if !matches!(kv_reuse_selection, AttentionKvReuseSelection::Legacy) && !has_row_tiled_mma {
+    if !row_schedule.is_legacy() && !has_row_tiled_mma {
         return Err(EmitError::CachedAttentionKvReuseNotSupported {
             node: resolved.node,
             reason: "shared K/V reuse requires the row-tiled simdgroup-matrix form",
@@ -275,7 +279,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
                 simdgroups,
                 cached_kv_codec,
                 mma_selection,
-                kv_reuse_selection,
+                row_schedule,
             );
         }
     };
