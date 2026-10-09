@@ -83,7 +83,7 @@ The per-card ACs in `cards/` are the executable requirements. Each nextest filte
 ## out of scope
 
 - CUDA and WGSL execution paths, model weight quantization, and any BF8 block floating layout.
-- Running timing, throughput, or model quality measurements while authoring these cards. The implementation cards capture dispatch and numeric payload evidence; any performance conclusion needs a separate measurement protocol.
+- Running timing, throughput, or model quality measurements in this implementation-card set. Its cards capture dispatch and numeric payload evidence only. The separate `../granite-attention-variant-performance/SPEC.md` owns measured Granite A/B replay cells and their report validation.
 - An implicit default change. The current attention path remains selectable for each axis.
 
 ## risks
@@ -102,3 +102,4 @@ The per-card ACs in `cards/` are the executable requirements. Each nextest filte
 - The local llama.cpp checkout used here is revision `f1ea206218210afb913ae2f5d2c51faed35915da`; Proxima source was read at `b4e441eb962e96aa31aff2d5ea59ff4024579c45` with unrelated dirty files preserved.
 - `proxima-model-interop/src/generate/device_kv.rs:1-27,232-279,365-369` names the existing resident cache ownership and F16 conversion points.
 - `omega/src/msl/cached_attention_render.rs:61-103,160-193` currently admits half cache only in decode split, so row tiled BF16/BF8 cache precision requires a separate slice.
+- `../granite-attention-variant-performance/SPEC.md` starts after Card 26's real captured output-byte gate and owns the two-prompt-size timing protocol; this numeric-matrix spec does not render a performance conclusion.
