@@ -1810,15 +1810,16 @@ impl AttentionMmaSelection {
             #[cfg(not(feature = "metal-attn-split-rows"))]
             return Err(("query_parallelism", "row-tiled attention feature is disabled"));
         }
+        if variant.prefetch != AttentionPrefetch::Off {
+            #[cfg(not(feature = "metal-attn-split-rows"))]
+            return Err(("prefetch", "row-tiled attention feature is disabled"));
+        }
         if variant.simd_topology != AttentionSimdTopology::Legacy {
             return Err(("simd_topology", match variant.simd_topology {
                 AttentionSimdTopology::Legacy => "legacy",
                 AttentionSimdTopology::PerHead => "per_head",
                 AttentionSimdTopology::GroupedQueries => "grouped_queries",
             }));
-        }
-        if variant.prefetch != AttentionPrefetch::Off {
-            return Err(("prefetch", "next_block"));
         }
         Ok((
             match variant.mma_precision {
@@ -1836,6 +1837,10 @@ impl AttentionMmaSelection {
                 .with_query_parallelism(match variant.query_parallelism {
                     AttentionQueryParallelism::Legacy => AttentionQueryParallelismSelection::Legacy,
                     AttentionQueryParallelism::SimdgroupRows => AttentionQueryParallelismSelection::SimdgroupRows,
+                })
+                .with_prefetch(match variant.prefetch {
+                    AttentionPrefetch::Off => AttentionPrefetchSelection::Off,
+                    AttentionPrefetch::NextBlock => AttentionPrefetchSelection::NextBlock,
                 })
             },
         ))
@@ -1856,6 +1861,7 @@ pub(crate) struct AttentionRowSchedule {
     kv_reuse: AttentionKvReuseMode,
     tile_height: AttentionTileHeightSelection,
     query_parallelism: AttentionQueryParallelismSelection,
+    prefetch: AttentionPrefetchSelection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1863,6 +1869,13 @@ enum AttentionQueryParallelismSelection {
     Legacy,
     #[cfg(feature = "metal-attn-variants")]
     SimdgroupRows,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AttentionPrefetchSelection {
+    Off,
+    #[cfg(feature = "metal-attn-variants")]
+    NextBlock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1915,6 +1928,7 @@ impl AttentionRowSchedule {
             kv_reuse: AttentionKvReuseMode::Legacy,
             tile_height: AttentionTileHeightSelection::Legacy,
             query_parallelism: AttentionQueryParallelismSelection::Legacy,
+            prefetch: AttentionPrefetchSelection::Off,
         }
     }
 
@@ -1923,6 +1937,7 @@ impl AttentionRowSchedule {
         matches!(self.kv_reuse, AttentionKvReuseMode::Legacy)
             && matches!(self.tile_height, AttentionTileHeightSelection::Legacy)
             && matches!(self.query_parallelism, AttentionQueryParallelismSelection::Legacy)
+            && matches!(self.prefetch, AttentionPrefetchSelection::Off)
     }
 
     #[cfg(feature = "metal-attn-variants")]
@@ -1931,6 +1946,7 @@ impl AttentionRowSchedule {
             kv_reuse: AttentionKvReuseMode::SharedK,
             tile_height: AttentionTileHeightSelection::Legacy,
             query_parallelism: AttentionQueryParallelismSelection::Legacy,
+            prefetch: AttentionPrefetchSelection::Off,
         }
     }
 
@@ -1940,6 +1956,7 @@ impl AttentionRowSchedule {
             kv_reuse: AttentionKvReuseMode::SharedKv,
             tile_height: AttentionTileHeightSelection::Legacy,
             query_parallelism: AttentionQueryParallelismSelection::Legacy,
+            prefetch: AttentionPrefetchSelection::Off,
         }
     }
 
@@ -1974,6 +1991,16 @@ impl AttentionRowSchedule {
     }
 
     #[cfg(feature = "metal-attn-variants")]
+    const fn with_prefetch(self, prefetch: AttentionPrefetchSelection) -> Self {
+        Self { prefetch, ..self }
+    }
+
+    #[cfg(feature = "metal-attn-variants")]
+    pub(crate) const fn is_prefetch_next_block(self) -> bool {
+        matches!(self.prefetch, AttentionPrefetchSelection::NextBlock)
+    }
+
+    #[cfg(feature = "metal-attn-variants")]
     pub(crate) const fn is_simdgroup_rows(self) -> bool {
         matches!(self.query_parallelism, AttentionQueryParallelismSelection::SimdgroupRows)
     }
@@ -1991,7 +2018,12 @@ impl AttentionRowSchedule {
             #[cfg(feature = "metal-attn-variants")]
             AttentionQueryParallelismSelection::SimdgroupRows => "_query_simdgroup_rows",
         };
-        alloc::format!("{reuse}{}{query}", self.tile_height.cache_token())
+        let prefetch = match self.prefetch {
+            AttentionPrefetchSelection::Off => "",
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionPrefetchSelection::NextBlock => "_prefetch_next_block",
+        };
+        alloc::format!("{reuse}{}{query}{prefetch}", self.tile_height.cache_token())
     }
 
     pub(crate) fn cache_token_for(self, bound: &BoundOp) -> String {
@@ -2301,6 +2333,34 @@ pub(crate) fn validate_query_parallelism_selection(
             node: resolved.node,
             query_rows: *query_rows,
             reason,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
+pub(crate) fn validate_prefetch_selection(
+    resolved: &BoundOp,
+    policy: NumericPolicy,
+    schedule: AttentionRowSchedule,
+) -> Result<(), EmitError> {
+    if !schedule.is_prefetch_next_block() {
+        return Ok(());
+    }
+    if !matches!(resolved.kind, BoundOpKind::CachedAttention { .. }) {
+        return Ok(());
+    }
+    if !matches!(
+        cached_attention_form_with_tile_height(
+            &resolved.kind,
+            policy,
+            schedule.tile_height(),
+        ),
+        Some(CachedAttentionForm::TwoRangeRowTiled { .. })
+    ) {
+        return Err(EmitError::CachedAttentionPrefetchNotSupported {
+            node: resolved.node,
+            reason: "next-block prefetch requires the row-tiled attention form",
         });
     }
     Ok(())

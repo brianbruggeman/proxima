@@ -1620,3 +1620,75 @@ fn card_17_query_parallelism_declines_one_row_and_legacy_keeps_decode_split() {
         }
     ));
 }
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_18_prefetch_stages_the_next_kv_block_in_f16_operands() {
+    let op = card_17_granite_attention(1000);
+    let parallel = emit_with_attention_variant(
+        &op,
+        &PackedOperands::new(),
+        NumericPolicy::llama_relaxed(),
+        AttentionVariant {
+            kv_reuse: AttentionKvReuse::SharedKv,
+            tile_height: AttentionTileHeight::Rows8,
+            query_parallelism: AttentionQueryParallelism::SimdgroupRows,
+            mma_precision: AttentionMmaPrecision::F16,
+            prefetch: AttentionPrefetch::NextBlock,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("the F16 Granite-shaped K/V prefetch fits the threadgroup budget");
+    assert!(parallel.entry.contains("_prefetch_next_block"));
+    assert!(parallel.source.contains("constexpr bool prefetch_next_block = true"));
+    assert!(parallel.source.contains("threadgroup half prefetched_key_even[2048]"));
+    assert!(parallel.source.contains("threadgroup half prefetched_key_odd[2048]"));
+    assert!(parallel.source.contains("threadgroup half prefetched_value[4096]"));
+    assert!(parallel.source.contains("simdgroup_store(value_operand, prefetched_value"));
+    assert!(!parallel.source.contains('@'));
+
+    let f32_error = emit_with_attention_variant(
+        &op,
+        &PackedOperands::new(),
+        NumericPolicy::llama_relaxed(),
+        AttentionVariant {
+            kv_reuse: AttentionKvReuse::SharedKv,
+            tile_height: AttentionTileHeight::Rows8,
+            query_parallelism: AttentionQueryParallelism::SimdgroupRows,
+            mma_precision: AttentionMmaPrecision::F32,
+            prefetch: AttentionPrefetch::NextBlock,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect_err("F32 double-buffered K/V exceeds the threadgroup budget");
+    assert!(matches!(
+        f32_error,
+        EmitError::CachedAttentionPrefetchNotSupported {
+            reason: "double-buffered K/V staging exceeds the configured threadgroup-memory budget",
+            ..
+        }
+    ));
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_18_prefetch_guards_a_partial_final_cached_block() {
+    let op = attention_rows_op(9, 2, 64, 520, 1000, SLIDING_LOWER);
+    let kernel = emit_with_attention_variant(
+        &op,
+        &PackedOperands::new(),
+        NumericPolicy::llama_relaxed(),
+        AttentionVariant {
+            tile_height: AttentionTileHeight::Rows8,
+            mma_precision: AttentionMmaPrecision::F16,
+            prefetch: AttentionPrefetch::NextBlock,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("a partial final cached block remains admissible");
+    assert!(kernel.source.contains("step + 1L < cached_blocks"));
+    assert!(kernel.source.contains("long next_columns = min(block, slice_end - next_key0)"));
+    assert!(kernel.source.contains("int next_fragments = (int)((next_columns + 7L) / 8L)"));
+    assert!(kernel.source.contains("fragment_index < next_fragments * depth_fragments"));
+    assert!(kernel.source.contains("next_key0 + (long)key_tile * 8L"));
+}
