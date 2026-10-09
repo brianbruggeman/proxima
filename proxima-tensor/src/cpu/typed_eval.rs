@@ -1,4 +1,5 @@
 use super::*;
+use crate::BFloat8;
 
 // ---------------------------------------------------------------------
 // Typed elementwise evaluator: every dtype `reject_non_float32` used to
@@ -319,14 +320,11 @@ impl Element for f64 {
     }
 }
 
-/// Shared body for [`f16`] and [`bf16`]'s [`Element`] impl: neither type has
-/// stable-Rust arithmetic operators (`convert.rs`'s own doc), so every op
-/// round-trips through `f32` — widen both operands, run the existing f32
-/// scalar table ([`apply_scalar_op`]), narrow the result back. This is a
-/// real semantic (one rounding step per op, not the fused half-precision
-/// arithmetic a hardware FPU would give), documented here rather than
-/// silently assumed by a caller.
-macro_rules! impl_element_half_float {
+/// Shared body for the narrow-float [`Element`] impls: widen operands to
+/// `f32`, run the scalar table ([`apply_scalar_op`]), then narrow through
+/// each type's own conversion and rounding rules. Each op rounds once; a
+/// reduction that needs wider accumulation uses a separate accumulator type.
+macro_rules! impl_element_narrow_float {
     ($ty:ty, $dtype:expr, $variant:ident) => {
         impl Element for $ty {
             const DTYPE: DType = $dtype;
@@ -362,8 +360,9 @@ macro_rules! impl_element_half_float {
     };
 }
 
-impl_element_half_float!(f16, DType::Float16, Float16);
-impl_element_half_float!(bf16, DType::BFloat16, BFloat16);
+impl_element_narrow_float!(f16, DType::Float16, Float16);
+impl_element_narrow_float!(bf16, DType::BFloat16, BFloat16);
+impl_element_narrow_float!(BFloat8, DType::BFloat8, BFloat8);
 
 /// One contiguous typed buffer, tagged by which native type backs it — the
 /// storage half of [`evaluate_typed`]'s runtime dispatch. Every variant is a
@@ -372,9 +371,8 @@ impl_element_half_float!(bf16, DType::BFloat16, BFloat16);
 /// written for it (see this module's typed-evaluator doc). `Bool` has no
 /// variant yet — its storage convention (packed bits vs. one byte per
 /// element) is undecided; see `typed_program_plan` for the boundary this
-/// actually enforces today. `Float16`/`BFloat16` route every arithmetic op
-/// through an `f32` round-trip (`Element`'s half-float impl, above) since
-/// neither has stable-Rust arithmetic operators of its own.
+/// actually enforces today. `Float16`/`BFloat16`/`BFloat8` route each
+/// arithmetic op through `f32` and narrow through their scalar contract.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedBuffer {
     Int8(Vec<i8>),
@@ -389,6 +387,7 @@ pub enum TypedBuffer {
     UInt128(Vec<u128>),
     Float16(Vec<f16>),
     BFloat16(Vec<bf16>),
+    BFloat8(Vec<BFloat8>),
     Float32(Vec<f32>),
     Float64(Vec<f64>),
 }
@@ -409,6 +408,7 @@ impl TypedBuffer {
             Self::UInt128(_) => DType::UInt128,
             Self::Float16(_) => DType::Float16,
             Self::BFloat16(_) => DType::BFloat16,
+            Self::BFloat8(_) => DType::BFloat8,
             Self::Float32(_) => DType::Float32,
             Self::Float64(_) => DType::Float64,
         }
@@ -429,6 +429,7 @@ impl TypedBuffer {
             Self::UInt128(data) => data.len(),
             Self::Float16(data) => data.len(),
             Self::BFloat16(data) => data.len(),
+            Self::BFloat8(data) => data.len(),
             Self::Float32(data) => data.len(),
             Self::Float64(data) => data.len(),
         }
@@ -493,8 +494,9 @@ pub(super) enum TypedPlan {
 /// Any dtype change outside those shapes (a third distinct non-index dtype,
 /// or a change at a non-`Reduce` node) is rejected with an honest
 /// `NotLowerable` rather than silently picked apart. `Bool` is out at any
-/// non-index position — see [`TypedBuffer`]'s doc; `BFloat16`/`Float16` are
-/// typed elements like any other (see `Element`'s half-float impl).
+/// non-index position — see [`TypedBuffer`]'s doc; `BFloat16`/`Float16`/
+/// `BFloat8` are typed elements, but BF8 reductions require an F32
+/// accumulator rather than a BF8 fold.
 pub(super) fn typed_program_plan(program: &[Op]) -> Result<TypedPlan, TensorError> {
     let index_nodes = index_node_ids(program);
     let base_dtype = program
@@ -520,6 +522,12 @@ pub(super) fn typed_program_plan(program: &[Op]) -> Result<TypedPlan, TensorErro
             return Err(TensorError::NotLowerable {
                 node,
                 reason: "the typed evaluator does not support Bool yet",
+            });
+        }
+        if dtype == DType::BFloat8 && matches!(expr, Op::Reduce(_)) {
+            return Err(TensorError::NotLowerable {
+                node,
+                reason: "bfloat8 reductions require an f32 accumulator",
             });
         }
         if dtype == base_dtype {
@@ -617,12 +625,7 @@ pub(super) fn evaluate_uniform_typed(
         DType::BFloat16 => dispatch!(bf16, BFloat16),
         DType::Float32 => dispatch!(f32, Float32),
         DType::Float64 => dispatch!(f64, Float64),
-        DType::BFloat8 => {
-            return Err(TensorError::NotLowerable {
-                node: NodeId(0),
-                reason: "bfloat8 typed evaluation requires the scalar element implementation",
-            });
-        }
+        DType::BFloat8 => dispatch!(BFloat8, BFloat8),
         DType::Bool => unreachable!("typed_program_plan already rejected this dtype"),
     })
 }
@@ -632,9 +635,9 @@ pub(super) fn evaluate_uniform_typed(
 /// the full `DType x DType` cross product: `(Int8, Int32)` (the
 /// quantized-accumulate case `typed_program_plan`'s doc names), `(Int16,
 /// Int64)` and `(UInt8, UInt32)` (the same accumulation-overflow shape at
-/// other integer widths), and `(Float16, Float32)`/`(BFloat16, Float32)`
-/// (a half-precision reduce folded into an f32 accumulator, the same
-/// widen-before-fold shape at floating-point widths). Any other pair is an
+/// other integer widths), and `(Float16, Float32)`/`(BFloat16, Float32)`/
+/// `(BFloat8, Float32)` (narrow float operands folded into an f32
+/// accumulator). Any other pair is an
 /// honest [`TensorError::NotLowerable`] — never a silent wrong result from
 /// picking the nearer-available width.
 pub(super) fn evaluate_widened_typed(
@@ -676,6 +679,12 @@ pub(super) fn evaluate_widened_typed(
         .into_iter()
         .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))
         .collect()),
+        (DType::BFloat8, DType::Float32) => Ok(run_widened_program::<BFloat8, f32>(
+            program, symbols, blocks, outputs,
+        )?
+        .into_iter()
+        .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))
+        .collect()),
         _ => Err(TensorError::NotLowerable {
             node: NodeId(0),
             reason: "the typed evaluator does not ship a mixed-precision reduce pair for this \
@@ -710,6 +719,7 @@ pub(super) fn typed_buffer_to_index(
         TypedBuffer::UInt128(data) => Ok(data.iter().map(|&value| value as i64).collect()),
         TypedBuffer::Float16(_)
         | TypedBuffer::BFloat16(_)
+        | TypedBuffer::BFloat8(_)
         | TypedBuffer::Float32(_)
         | TypedBuffer::Float64(_) => Err(TensorError::NotLowerable {
             node,
