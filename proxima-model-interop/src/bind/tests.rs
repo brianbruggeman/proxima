@@ -24,6 +24,22 @@ fn bf8_refuses_ggml_layout_and_cpu_packed_decode() {
     ));
 }
 
+#[cfg(feature = "std")]
+#[test]
+fn scalar_brain_float_codecs_refuse_ggml_block_layout_and_cpu_packed_decode() {
+    for codec in [Codec::Bf8E5M2, Codec::Bf4E2M1] {
+        assert!(as_block(codec, &[0x3c]).is_none());
+        assert!(matches!(
+            codec_to_ggml_type(codec),
+            Err(InteropError::UnsupportedCodec { codec: unsupported }) if unsupported == codec
+        ));
+        assert!(matches!(
+            codec_byte_len_for(codec, 1),
+            Err(InteropError::UnsupportedCodec { codec: unsupported }) if unsupported == codec
+        ));
+    }
+}
+
 /// The decisive proof for this file's own fix: a raw-packed `F32` matmul
 /// weight bound through [`bind_matmul_weight_as`] must land in
 /// [`BoundWeights::owned`], transposed, and produce the exact same
