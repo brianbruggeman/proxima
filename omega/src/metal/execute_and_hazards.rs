@@ -1269,6 +1269,44 @@ pub fn read_placed_buffer_bf16_as_f32(
     source.iter().map(|value| value.to_f32()).collect()
 }
 
+/// Narrows an f32 placed staging range into a two-byte BF16 cache range.
+#[cfg(feature = "metal-output-placement")]
+pub fn narrow_placed_buffer_f32_to_bf16(
+    source: &PlacedBuffer,
+    source_byte_offset: usize,
+    destination: &PlacedBuffer,
+    destination_byte_offset: usize,
+    element_count: usize,
+) {
+    // SAFETY: both buffers are shared and idle, ranges are in bounds, and the
+    // staging and cache allocations are distinct.
+    let (rows, narrowed) = unsafe {
+        (
+            core::slice::from_raw_parts(
+                source
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(source_byte_offset)
+                    .cast::<f32>(),
+                element_count,
+            ),
+            core::slice::from_raw_parts_mut(
+                destination
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(destination_byte_offset)
+                    .cast::<half::bf16>(),
+                element_count,
+            ),
+        )
+    };
+    for (destination_value, source_value) in narrowed.iter_mut().zip(rows) {
+        *destination_value = half::bf16::from_f32(*source_value);
+    }
+}
+
 /// Rounds `element_count` f32s of `source` (read at `source_byte_offset`) to
 /// binary16 and stores them in `destination` at `destination_byte_offset`,
 /// with no host allocation: the step-end narrowing of a half-width KV cache,
@@ -1976,13 +2014,16 @@ mod card_04_tests {
 
     #[test]
     fn card_04_bf16_placed_preserves_adjacent_bytes_at_nonzero_offset() {
-        let buffer = allocate_placed_buffer(16).expect("allocates sentinel fixture bytes");
-        write_placed_buffer_f32(&buffer, 0, &[9.0]);
-        write_placed_buffer_f32(&buffer, 12, &[-7.0]);
-        write_placed_buffer_f32_as_bf16(&buffer, 8, &[1.5, 2.5]);
+        let staging = allocate_placed_buffer(16).expect("allocates f32 staging bytes");
+        let cache = allocate_placed_buffer(16).expect("allocates BF16 cache bytes");
+        write_placed_buffer_f32(&staging, 0, &[9.0, 1.5, 2.5, -7.0]);
+        write_placed_buffer_f32_as_bf16(&cache, 0, &[9.0]);
+        write_placed_buffer_f32_as_bf16(&cache, 12, &[-7.0]);
 
-        assert_eq!(read_placed_buffer_f32(&buffer, 0, 1), vec![9.0]);
-        assert_eq!(read_placed_buffer_bf16_as_f32(&buffer, 8, 2), vec![1.5, 2.5]);
-        assert_eq!(read_placed_buffer_f32(&buffer, 12, 1), vec![-7.0]);
+        narrow_placed_buffer_f32_to_bf16(&staging, 4, &cache, 8, 2);
+
+        assert_eq!(read_placed_buffer_bf16_as_f32(&cache, 0, 1), vec![9.0]);
+        assert_eq!(read_placed_buffer_bf16_as_f32(&cache, 8, 2), vec![1.5, 2.5]);
+        assert_eq!(read_placed_buffer_bf16_as_f32(&cache, 12, 1), vec![-7.0]);
     }
 }
