@@ -1,6 +1,20 @@
 use super::signature_tokens_prelude::{QUERY_STAGE_PAD, query_tile_staged};
 use super::*;
 
+const BF16_CACHE_HELPER: &str = r#"
+inline float omega_bf16_to_float(ushort value) { return as_type<float>((uint)value << 16); }
+inline void omega_bf16_load_matrix(thread simdgroup_float8x8& destination, device const ushort* source, ulong stride, ushort lane, bool transposed) {
+    short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4)); short column = (short)((quad & 2) * 2 + (lane % 2) * 2);
+    if (transposed) {
+        destination.thread_elements()[0] = omega_bf16_to_float(source[(long)(column) * stride + row]);
+        destination.thread_elements()[1] = omega_bf16_to_float(source[(long)(column + 1) * stride + row]);
+    } else {
+        destination.thread_elements()[0] = omega_bf16_to_float(source[(long)row * stride + column]);
+        destination.thread_elements()[1] = omega_bf16_to_float(source[(long)row * stride + column + 1]);
+    }
+}
+"#;
+
 /// The split-KV partial for [`CachedAttentionForm::TwoRangeRowTiled`]: one
 /// threadgroup per `(kv_head, row tile, split)` of `simdgroups` simdgroups,
 /// for `K = query_rows = new_key_rows` rows, from a verify of two rows to a
@@ -37,13 +51,16 @@ use super::*;
 /// The operand precision of the two matrix multiplies is `[attention_rows].mma_precision`:
 /// `float` multiplies `simdgroup_float8x8` fragments; `half` narrows each fragment to
 /// `simdgroup_half8x8` as it is loaded (the `simdgroup_load` overloads in
-/// [`HALF_OPERAND_HELPERS`]) and still accumulates into `simdgroup_float8x8`, the way
-/// llama.cpp's half flash attention does over a half K/V. The softmax is float in both.
+/// [`HALF_OPERAND_HELPERS`]) and still accumulates into `simdgroup_float8x8`. Cached
+/// K/V storage is independent: F32 loads directly, while BF16 widens into float
+/// fragments before the selected MMA operand conversion. New-range buffers,
+/// softmax and output accumulation remain F32. This is not llama.cpp's F16 K/V path.
 pub(super) fn render_cached_attention_row_tiled(
     resolved: &BoundOp,
     entry: &str,
     rows_per_threadgroup: u64,
     simdgroups: u64,
+    cached_kv_codec: Option<Codec>,
 ) -> Result<String, EmitError> {
     render_cached_attention_row_tiled_with(
         resolved,
@@ -51,6 +68,7 @@ pub(super) fn render_cached_attention_row_tiled(
         rows_per_threadgroup,
         simdgroups,
         crate::sized::ATTENTION_ROWS_MMA_HALF,
+        cached_kv_codec,
     )
 }
 
@@ -60,6 +78,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
     rows_per_threadgroup: u64,
     simdgroups: u64,
     half_operands: bool,
+    cached_kv_codec: Option<Codec>,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         kv_heads,
@@ -97,9 +116,67 @@ pub(super) fn render_cached_attention_row_tiled_with(
         crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES,
         crate::sized::ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES,
     );
+    let cached_type = match cached_kv_codec {
+        None => "float",
+        Some(Codec::BFloat16) => "ushort",
+        Some(_) => {
+            return Err(EmitError::CachedAttentionKvCodecNotSupported {
+                node: resolved.node,
+                reason: "row-tiled attention reads cached K/V as F32 or BFloat16",
+            });
+        }
+    };
     let substitutions = [
-        ("@MMA_HELPERS@", if half_operands { HALF_OPERAND_HELPERS } else { "" }.to_string()),
-        ("@OPERAND@", if half_operands { "simdgroup_half8x8" } else { "simdgroup_float8x8" }.to_string()),
+        ("@KV_TYPE@", cached_type.to_string()),
+        (
+            "@BF16_TO_OPERAND_EVEN@",
+            if half_operands {
+                "narrow_fragment(even_float)"
+            } else {
+                "even_float"
+            }
+            .to_string(),
+        ),
+        (
+            "@BF16_TO_OPERAND_ODD@",
+            if half_operands {
+                "narrow_fragment(odd_float)"
+            } else {
+                "odd_float"
+            }
+            .to_string(),
+        ),
+        (
+            "@BF16_TO_OPERAND_VALUE@",
+            if half_operands {
+                "narrow_fragment(value_float)"
+            } else {
+                "value_float"
+            }
+            .to_string(),
+        ),
+        (
+            "@BF16_CACHE@",
+            (cached_kv_codec == Some(Codec::BFloat16)).to_string(),
+        ),
+        (
+            "@MMA_HELPERS@",
+            if half_operands {
+                HALF_OPERAND_HELPERS
+            } else {
+                ""
+            }
+            .to_string(),
+        ),
+        (
+            "@OPERAND@",
+            if half_operands {
+                "simdgroup_half8x8"
+            } else {
+                "simdgroup_float8x8"
+            }
+            .to_string(),
+        ),
         ("@ENTRY@", entry.to_string()),
         ("@KV_HEADS@", kv_heads.to_string()),
         ("@QUERY_GROUPS@", query_groups.to_string()),
@@ -119,6 +196,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
     ];
     let mut source = String::new();
     preamble(&mut source, None);
+    source.push_str(BF16_CACHE_HELPER);
     let mut body = ROW_TILED_KERNEL.to_string();
     for (token, value) in &substitutions {
         body = body.replace(token, value);
@@ -138,7 +216,7 @@ const ROW_TILED_KERNEL: &str = r#"struct Uniforms { long total_elements; long sp
 
 #define FOR_UNROLL _Pragma("clang loop unroll(full)")
 
-kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const float* in2 [[buffer(2)]], device const float* in3 [[buffer(3)]], device const float* in4 [[buffer(4)]], device const float* in5 [[buffer(5)]], device const float* in6 [[buffer(6)]], device const float* in7 [[buffer(7)]], device const float* in8 [[buffer(8)]], device float* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
+kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const @KV_TYPE@* in2 [[buffer(2)]], device const @KV_TYPE@* in3 [[buffer(3)]], device const float* in4 [[buffer(4)]], device const float* in5 [[buffer(5)]], device const @KV_TYPE@* in6 [[buffer(6)]], device const float* in7 [[buffer(7)]], device const float* in8 [[buffer(8)]], device float* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
     constexpr long kv_heads = @KV_HEADS@; constexpr long query_groups = @QUERY_GROUPS@; constexpr long head_dim = @HEAD_DIM@; constexpr long half_dim = head_dim / 2; constexpr float scale = @SCALE@; constexpr long cached_lower = @CACHED_LOWER@; constexpr long new_upper = @NEW_UPPER@;
     constexpr long tile_rows = @TILE_ROWS@; constexpr long simdgroups = @SIMDGROUPS@; constexpr long block = @BLOCK@; constexpr long split_keys = @SPLIT_KEYS@;
     constexpr bool rows_in_fragment = (query_groups % 8) != 0;
@@ -221,8 +299,8 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
         long key0 = mode == 0L ? slice_start + step * block : (mode == 1L ? new_start + (step - cached_blocks) * block : total_aligned);
         long columns = mode == 0L ? min(block, slice_end - key0) : (mode == 1L ? min(block, mma_end - key0) : total_rows - total_aligned);
         if (mode != 2L) {
-            device const float* key_even = mode == 0L ? in2 : in4;
-            device const float* key_odd = mode == 0L ? in3 : in5;
+            device const float* key_even = mode == 0L ? (device const float*)in2 : in4;
+            device const float* key_odd = mode == 0L ? (device const float*)in3 : in5;
             int fragments = (int)((columns + 7L) / 8L);
             simdgroup_float8x8 scores[key_tiles_per_group][tile_blocks];
             FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) { FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { scores[group][vector_block] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f); } }
@@ -234,8 +312,18 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                         device const float* key_even_ptr = key_even + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
                         device const float* key_odd_ptr = key_odd + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
                         FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
-                            simdgroup_load(key_even_tile[group][step_index], key_even_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
-                            simdgroup_load(key_odd_tile[group][step_index], key_odd_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                            if (@BF16_CACHE@ && mode == 0L) {
+                                device const ushort* cached_even = (device const ushort*)in2 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
+                                device const ushort* cached_odd = (device const ushort*)in3 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
+                                simdgroup_float8x8 even_float; simdgroup_float8x8 odd_float;
+                                omega_bf16_load_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, true);
+                                omega_bf16_load_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, true);
+                                key_even_tile[group][step_index] = @BF16_TO_OPERAND_EVEN@;
+                                key_odd_tile[group][step_index] = @BF16_TO_OPERAND_ODD@;
+                            } else {
+                                simdgroup_load(key_even_tile[group][step_index], key_even_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                                simdgroup_load(key_odd_tile[group][step_index], key_odd_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                            }
                         }
                     }
                 }
@@ -343,7 +431,8 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
             }
         }
         if (mode != 2L) {
-            device const float* value_ptr = (mode == 0L ? in6 : in7) + key0 * (kv_heads * head_dim) + kv_head * head_dim;
+            device const float* value_base = mode == 0L ? (device const float*)in6 : in7;
+            device const float* value_ptr = value_base + key0 * (kv_heads * head_dim) + kv_head * head_dim;
             int fragments = (int)((columns + 7L) / 8L);
             for (int key_tile = 0; key_tile < fragments; key_tile++) {
                 @OPERAND@ weights[tile_blocks];
@@ -351,7 +440,14 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                 FOR_UNROLL for (int slot = 0; slot < (int)dims_per_group; slot++) {
                     int dimension_block = (int)simdgroup_slot + slot * (int)simdgroups;
                     @OPERAND@ value;
-                    simdgroup_load(value, value_ptr + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8, (ulong)(kv_heads * head_dim));
+                    if (@BF16_CACHE@ && mode == 0L) {
+                        device const ushort* cached_value = (device const ushort*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
+                        simdgroup_float8x8 value_float;
+                        omega_bf16_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                        value = @BF16_TO_OPERAND_VALUE@;
+                    } else {
+                        simdgroup_load(value, value_ptr + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8, (ulong)(kv_heads * head_dim));
+                    }
                     FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { simdgroup_multiply_accumulate(accumulated[slot][vector_block], weights[vector_block], value, accumulated[slot][vector_block]); }
                 }
             }

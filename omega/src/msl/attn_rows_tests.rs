@@ -1068,6 +1068,7 @@ fn rendered_with_operands(op: &BoundOp, half_operands: bool) -> String {
         rows_per_threadgroup,
         simdgroups,
         half_operands,
+        None,
     )
     .expect("the row-tiled kernel renders")
 }
