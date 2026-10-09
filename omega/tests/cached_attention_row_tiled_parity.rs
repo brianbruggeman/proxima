@@ -1264,3 +1264,71 @@ fn card_18_prefetch_plan_executes_with_a_partial_live_cache_block() {
     let prefetch_bits: Vec<u32> = output.root().iter().map(|value| value.to_bits()).collect();
     assert_eq!(prefetch_bits, baseline_bits, "prefetch preserves the F16 output payload");
 }
+
+#[test]
+fn card_19_simd_topology_plans_match_cpu_and_keep_axes_fixed() {
+    let policy = production_numeric_policy();
+    let fixture = fixture_with(16, 31, Geometry::TWO_QUERY_GROUPS);
+    let resolved = bound_attention(&fixture, policy);
+    let expected = run_resolved_on_cpu(&fixture, &resolved);
+    let named = as_named_blocks(&fixture.named);
+    let roots = [fixture.logits];
+    let mut per_head_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &named,
+        &roots,
+        policy,
+    )
+    .expect("the per-head topology plan resolves");
+    per_head_plan
+        .set_attention_variant(omega::AttentionVariant {
+            mma_precision: omega::AttentionMmaPrecision::F32,
+            kv_reuse: omega::AttentionKvReuse::SharedKv,
+            tile_height: omega::AttentionTileHeight::Rows16,
+            simd_topology: omega::AttentionSimdTopology::PerHead,
+            ..omega::AttentionVariant::default()
+        })
+        .expect("the per-head topology is admitted");
+    let mut grouped_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &named,
+        &roots,
+        policy,
+    )
+    .expect("the grouped-query topology plan resolves");
+    grouped_plan
+        .set_attention_variant(omega::AttentionVariant {
+            mma_precision: omega::AttentionMmaPrecision::F32,
+            kv_reuse: omega::AttentionKvReuse::SharedKv,
+            tile_height: omega::AttentionTileHeight::Rows16,
+            simd_topology: omega::AttentionSimdTopology::GroupedQueries,
+            ..omega::AttentionVariant::default()
+        })
+        .expect("the grouped-query topology is admitted");
+    let per_head_keys = per_head_plan
+        .kernel_keys()
+        .expect("per-head pipeline identities are collected");
+    let grouped_keys = grouped_plan
+        .kernel_keys()
+        .expect("grouped-query pipeline identities are collected");
+    assert_ne!(per_head_keys, grouped_keys);
+    assert!(per_head_keys.iter().any(|key| key.contains("_simd_per_head")));
+    assert!(grouped_keys
+        .iter()
+        .any(|key| key.contains("_simd_grouped_queries")));
+
+    let per_head_output = omega::execute_plan_named(&per_head_plan, &named)
+        .expect("the per-head topology plan executes");
+    let grouped_output = omega::execute_plan_named(&grouped_plan, &named)
+        .expect("the grouped-query topology plan executes");
+    assert!(
+        relative_difference(&expected, per_head_output.root()) <= TOLERANCE,
+        "per-head topology output matches the CPU payload"
+    );
+    assert!(
+        relative_difference(&expected, grouped_output.root()) <= TOLERANCE,
+        "grouped-query topology output matches the CPU payload"
+    );
+}

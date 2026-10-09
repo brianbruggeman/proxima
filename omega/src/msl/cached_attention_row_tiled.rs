@@ -153,6 +153,8 @@ pub(super) fn render_cached_attention_row_tiled_with(
     let query_parallel_rows = row_schedule.is_simdgroup_rows();
     #[cfg(feature = "metal-attn-variants")]
     let prefetch_next_block = row_schedule.is_prefetch_next_block();
+    #[cfg(feature = "metal-attn-variants")]
+    let simd_per_head = row_schedule.is_per_head_topology();
     #[cfg(not(feature = "metal-attn-variants"))]
     let shared_k = false;
     #[cfg(not(feature = "metal-attn-variants"))]
@@ -161,6 +163,8 @@ pub(super) fn render_cached_attention_row_tiled_with(
     let query_parallel_rows = false;
     #[cfg(not(feature = "metal-attn-variants"))]
     let prefetch_next_block = false;
+    #[cfg(not(feature = "metal-attn-variants"))]
+    let simd_per_head = false;
     #[cfg(not(feature = "metal-attn-variants"))]
     let _ = row_schedule;
     let block = row_tiled_block(*head_dim);
@@ -320,6 +324,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
         ("@QUERY_PARALLEL_ROWS@", query_parallel_rows.to_string()),
         ("@QUERY_OWNER_ROWS@", query_owner_rows.to_string()),
         ("@PREFETCH_NEXT_BLOCK@", prefetch_next_block.to_string()),
+        ("@SIMD_TOPOLOGY_PER_HEAD@", simd_per_head.to_string()),
         (
             "@PREFETCH_KEY_ELEMENTS@",
             if prefetch_next_block {
@@ -436,7 +441,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
     constexpr long tile_blocks = rows_in_fragment ? (tile_rows / 8) * query_groups : (tile_rows * query_groups) / 8;
     constexpr long tile_vectors = tile_blocks * 8; constexpr long threads = simdgroups * 32;
     constexpr long dims_per_group = head_dim / 8 / simdgroups; constexpr long depth_unroll = ((half_dim / 8) % 2 == 0) ? 2 : 1;
-    constexpr bool shared_k = @KV_REUSE_SHARED_K@; constexpr bool shared_v = @KV_REUSE_SHARED_V@; constexpr bool query_parallel_rows = @QUERY_PARALLEL_ROWS@; constexpr bool prefetch_next_block = @PREFETCH_NEXT_BLOCK@; constexpr bool query_owner_rows = @QUERY_OWNER_ROWS@;
+    constexpr bool shared_k = @KV_REUSE_SHARED_K@; constexpr bool shared_v = @KV_REUSE_SHARED_V@; constexpr bool query_parallel_rows = @QUERY_PARALLEL_ROWS@; constexpr bool prefetch_next_block = @PREFETCH_NEXT_BLOCK@; constexpr bool simd_per_head = @SIMD_TOPOLOGY_PER_HEAD@; constexpr bool query_owner_rows = @QUERY_OWNER_ROWS@;
     constexpr long key_tiles_per_group = (block / 8) / simdgroups;
     constexpr long score_key_tiles = (shared_k || query_owner_rows) ? (block / 8) : key_tiles_per_group;
     constexpr long key_tiles_per_simdgroup = (!shared_k && query_owner_rows) ? (block / 8) : key_tiles_per_group;
@@ -470,12 +475,14 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
         long block_index = index / 8L; long within = index % 8L;
         long row; long head; long owned;
         if (rows_in_fragment) {
-            long row_block = block_index / query_groups;
+            long row_block = simd_per_head ? block_index % (tile_rows / 8L) : block_index / query_groups;
             long owned_from = row0 + row_block * 8L;
-            row = min(owned_from, total_rows - 8L) + within; head = block_index % query_groups;
+            row = min(owned_from, total_rows - 8L) + within;
+            head = simd_per_head ? block_index / (tile_rows / 8L) : block_index % query_groups;
             owned = (row >= owned_from && row < total_rows) ? 1L : 0L;
         } else {
-            row = row0 + index / query_groups; head = index % query_groups;
+            row = simd_per_head ? row0 + (index / 8L) % tile_rows : row0 + index / query_groups;
+            head = simd_per_head ? (index / (tile_rows * 8L)) * 8L + index % 8L : index % query_groups;
             owned = (row < total_rows) ? 1L : 0L;
         }
         vector_row[index] = (int)row; vector_head[index] = (int)head; vector_live[index] = (int)owned;
@@ -484,9 +491,12 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
     long block_row[tile_blocks]; long block_head[tile_blocks];
     FOR_UNROLL for (long vector_block = 0L; vector_block < tile_blocks; vector_block++) {
         if (rows_in_fragment) {
-            block_row[vector_block] = min(row0 + (vector_block / query_groups) * 8L, total_rows - 8L); block_head[vector_block] = vector_block % query_groups;
+            long row_block = simd_per_head ? vector_block % (tile_rows / 8L) : vector_block / query_groups;
+            block_row[vector_block] = min(row0 + row_block * 8L, total_rows - 8L);
+            block_head[vector_block] = simd_per_head ? vector_block / (tile_rows / 8L) : vector_block % query_groups;
         } else {
-            block_row[vector_block] = min(row0 + vector_block / groups_per_row, total_rows - 1L); block_head[vector_block] = (vector_block % groups_per_row) * 8L;
+            block_row[vector_block] = simd_per_head ? min(row0 + vector_block % tile_rows, total_rows - 1L) : min(row0 + vector_block / groups_per_row, total_rows - 1L);
+            block_head[vector_block] = simd_per_head ? (vector_block / tile_rows) * 8L : (vector_block % groups_per_row) * 8L;
         }
     }
     simdgroup_float8x8 accumulated[accumulator_dimensions][accumulator_vectors];
