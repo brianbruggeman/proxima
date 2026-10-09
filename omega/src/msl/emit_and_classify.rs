@@ -36,6 +36,14 @@ pub(super) fn emit_inner(
     validate(resolved)?;
     let entry = entry_name(resolved, numeric_policy);
     let quantized = operand_codecs(resolved, packed_operands);
+    if !matches!(resolved.kind, BoundOpKind::CachedAttention { .. })
+        && let Some(codec) = quantized.iter().flatten().find(|codec| **codec == Codec::BFloat8)
+    {
+        return Err(EmitError::PackedCodecNotSupported {
+            node: resolved.node,
+            codec: *codec,
+        });
+    }
     let grid = grid_spec(resolved, &quantized, numeric_policy, expert_source_mode)?;
     let extras = metal_specialization(resolved, packed_operands, numeric_policy, &grid);
     let source = match &resolved.kind {

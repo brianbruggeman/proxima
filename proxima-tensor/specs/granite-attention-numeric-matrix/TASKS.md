@@ -13,7 +13,7 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 | 06 | [card](cards/06-bf16-decode.md) | 05 | R4 | `cargo nextest run -p omega --features metal-attn-split-decode --test cached_attention_decode_split_parity -E 'test(~card_06_bf16_decode)'` | filter selects 2 tests; 2 passed; Metal output bits match F32-cache decode | [x] | `2 passed; 2 filter-excluded` |
 | 07 | [card](cards/07-bf8-placed.md) | 01 | R3 | `cargo nextest run -p omega --lib -E 'test(~card_07_bf8_placed)'` | filter selects 2 tests; 2 passed | [x] | `2 passed; 484 filter-excluded; BF8 vectors and sentinel bytes checked` |
 | 08 | [card](cards/08-bf8-device-kv.md) | 02,07 | R3 | `cargo nextest run -p proxima-model-interop --features std,metal,metal-attn-split-rows --lib -E 'test(~card_08_bf8_device)'` | filter selects 2 tests; 2 passed | [x] | `2 passed; 720 filter-excluded; BF8 byte width, codec identity, adopt/append/flush checked` |
-| 09 | [card](cards/09-bf8-decode.md) | 08 | R4 | `cargo nextest run -p omega --features metal-attn-split-decode --lib -E 'test(~card_09_bf8_decode)'` | filter selects 2 tests; 2 passed | [ ] | |
+| 09 | [card](cards/09-bf8-decode.md) | 08 | R4 | `cargo nextest run -p omega --features metal-attn-split-decode --test cached_attention_decode_split_parity -E 'test(~card_09_bf8_decode)'` | filter selects 2 tests; 2 passed; Metal output bits match F32-cache decode | [x] | `2 passed; 4 filter-excluded; BF8 decode uses a distinct codec-keyed pipeline identity` |
 | 10 | [card](cards/10-bf16-row.md) | 06 | R4 | `cargo nextest run -p omega --features metal-attn-split-rows --lib -E 'test(~card_10_bf16_row)'` | filter selects 2 tests; 2 passed | [ ] | |
 | 11 | [card](cards/11-bf8-row.md) | 09,10 | R4 | `cargo nextest run -p omega --features metal-attn-split-rows --lib -E 'test(~card_11_bf8_row)'` | filter selects 2 tests; 2 passed | [ ] | |
 | 12 | [card](cards/12-variant-config.md) | none | R5,R6 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_12_variant_config)'` | filter selects 2 tests; 2 passed; seven fields and explicit defaults | [ ] | |
@@ -30,8 +30,8 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 
 ## resume
 
-Last landed slice: card 08 implementation and AC08
-Next action: card 09, read BF8 cache in split decode
+Last landed slice: card 09 implementation and AC09
+Next action: card 10, read BF16 cache in row-tiled attention
 Open question, if any: none; E5M2 is bound as Proxima-owned in SPEC.md
 
 ## struck
