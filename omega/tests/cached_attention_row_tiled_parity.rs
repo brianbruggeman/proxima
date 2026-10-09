@@ -37,10 +37,13 @@
 use core::pin::pin;
 use core::task::{Context, Poll, Waker};
 
+use half::bf16;
 use proxima_primitives::pipe::Pipe;
 use proxima_tensor::bind::{READY_BATCH_CAPACITY, ReadyBatch};
+use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::{
-    BoundOp, BoundOpKind, Interpreter, NumericPolicy, Op, bind_with_fusion, block_node_ids, infer,
+    BoundOp, BoundOpKind, Interpreter, NodeId, NumericPolicy, Op, bind_with_fusion, block_node_ids,
+    infer,
 };
 
 mod gemma4_rows_support;
@@ -177,8 +180,12 @@ fn the_row_tiled_kernels_hold_parity_with_the_cpu_evaluator_across_rows_and_cach
     let mut cells = 0_usize;
     for rows in VERIFY_ROWS {
         for cached_len in CACHED_LENGTHS {
-            let (relative, control_relative) =
-                one_cell("one kv head verify", Geometry::ONE_KV_HEAD, rows, cached_len);
+            let (relative, control_relative) = one_cell(
+                "one kv head verify",
+                Geometry::ONE_KV_HEAD,
+                rows,
+                cached_len,
+            );
             assert!(
                 relative < TOLERANCE,
                 "rows {rows} cached_len {cached_len}: metal disagrees with cpu: relative={relative}"
@@ -206,12 +213,27 @@ fn the_row_tiled_kernels_hold_parity_with_the_cpu_evaluator_at_prefill_widths() 
     let two_groups = Geometry::TWO_QUERY_GROUPS;
     let cells = [
         ("one kv head past the old row limit", one_kv_head, 70, 33),
-        ("one kv head window crosses the new range", one_kv_head.with_window(40), 130, 199),
-        ("one kv head window crosses, ragged tail", one_kv_head.with_window(48), 101, 1),
+        (
+            "one kv head window crosses the new range",
+            one_kv_head.with_window(40),
+            130,
+            199,
+        ),
+        (
+            "one kv head window crosses, ragged tail",
+            one_kv_head.with_window(48),
+            101,
+            1,
+        ),
         ("one kv head whole prompt", one_kv_head, 600, 33),
         ("two groups eight rows", two_groups, 8, 33),
         ("two groups ragged rows", two_groups, 37, 100),
-        ("two groups window crosses the new range", two_groups.with_window(24), 50, 40),
+        (
+            "two groups window crosses the new range",
+            two_groups.with_window(24),
+            50,
+            40,
+        ),
         ("two groups whole prompt", two_groups, 600, 33),
     ];
     for (label, geometry, rows, cached_len) in cells {
@@ -263,4 +285,191 @@ fn rows_under_one_fragment_of_a_two_group_head_hold_one_dispatch_parity_with_the
         cells += 1;
     }
     assert_eq!(cells, 2);
+}
+
+fn bf16_cache_payload(fixture: &mut Fixture) -> Vec<(String, Vec<u8>)> {
+    let shapes = infer(&fixture.program, &fixture.symbols).expect("the fixture shapes infer");
+    for (name, values) in &mut fixture.named {
+        if name.contains(".attn_k.weight") || name.contains(".attn_v.weight") {
+            values.fill(0.0);
+        }
+    }
+    fixture
+        .named
+        .iter_mut()
+        .filter(|(name, _)| name.starts_with("kv_cache."))
+        .map(|(name, values)| {
+            let input_index = fixture
+                .program
+                .iter()
+                .enumerate()
+                .find_map(|(index, op)| match op {
+                    Op::Input {
+                        name: Some(input_name),
+                        ..
+                    } if input_name == name => Some(index),
+                    _ => None,
+                })
+                .expect("each cache block maps to a named input");
+            let cache_row_width: usize = shapes
+                .of(NodeId(input_index as u32))
+                .iter()
+                .skip(1)
+                .map(|extent| *extent as usize)
+                .product();
+            for (index, value) in values.iter_mut().enumerate() {
+                let row = index / cache_row_width;
+                let dimension = index % cache_row_width;
+                *value = if name.ends_with(".v") {
+                    [0.0, 1.0, -1.0, 0.5][(row + dimension) % 4]
+                } else {
+                    [0.25, -0.5, 0.75, -1.0][(row + dimension) % 4]
+                };
+            }
+            assert!(
+                values
+                    .iter()
+                    .all(|value| bf16::from_f32(*value).to_f32() == *value)
+            );
+            let bytes = values
+                .iter()
+                .flat_map(|value| bf16::from_f32(*value).to_bits().to_le_bytes())
+                .collect();
+            (name.clone(), bytes)
+        })
+        .collect()
+}
+
+#[test]
+fn card_10_bf16_row_matches_f32_cache_output_bits_with_f32_mma() {
+    let policy = production_numeric_policy();
+    let mut fixture = fixture_with(8, 31, Geometry::ONE_KV_HEAD);
+    let packed_cache = bf16_cache_payload(&mut fixture);
+    assert_eq!(
+        packed_cache.len(),
+        3 * 2,
+        "two layers each carry K even, K odd and V"
+    );
+    let attention = bound_attention(&fixture, policy)
+        .into_iter()
+        .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+        .collect::<Vec<_>>();
+    let root = attention
+        .last()
+        .expect("the fixture includes a global attention operation")
+        .node;
+    let roots = [root];
+    let f32_named = as_named_blocks(&fixture.named);
+    let bf16_named: Vec<(&str, QuantizedBlock<'_>)> = fixture
+        .named
+        .iter()
+        .map(|(name, values)| {
+            match packed_cache
+                .iter()
+                .find(|(packed_name, _)| packed_name == name)
+            {
+                Some((_, bytes)) => (
+                    name.as_str(),
+                    QuantizedBlock::Packed {
+                        codec: omega::Codec::BFloat16,
+                        bytes,
+                    },
+                ),
+                None => (name.as_str(), QuantizedBlock::Float32(values)),
+            }
+        })
+        .collect();
+    let f32_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &f32_named,
+        &roots,
+        policy,
+    )
+    .expect("the f32 row-tiled cache plans");
+    let bf16_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &bf16_named,
+        &roots,
+        policy,
+    )
+    .expect("the BF16 row-tiled cache plans");
+    assert_ne!(
+        f32_plan
+            .kernel_keys()
+            .expect("the F32 plan keys are collected"),
+        bf16_plan
+            .kernel_keys()
+            .expect("the BF16 plan keys are collected"),
+        "the BF16 plan must execute its codec-specific row shader"
+    );
+    let f32_output =
+        omega::execute_plan_named(&f32_plan, &f32_named).expect("the f32 row-tiled cache executes");
+    let bf16_output = omega::execute_plan_named(&bf16_plan, &bf16_named)
+        .expect("the BF16 row-tiled cache executes");
+    let f32_bits: Vec<u32> = f32_output
+        .root()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    let bf16_bits: Vec<u32> = bf16_output
+        .root()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    assert_eq!(
+        bf16_bits, f32_bits,
+        "BF16-exact K/V values preserve output bits"
+    );
+}
+
+#[test]
+fn card_10_bf16_row_selects_the_bf16_source_and_declines_mixed_cache_codecs() {
+    let policy = production_numeric_policy();
+    let fixture = fixture_with(8, 31, Geometry::ONE_KV_HEAD);
+    let resolved = bound_attention(&fixture, policy);
+    let attention: Vec<&BoundOp> = resolved
+        .iter()
+        .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+        .collect();
+    assert_eq!(
+        attention.len(),
+        2,
+        "the fixture has sliding and global attention"
+    );
+    for bound in attention {
+        let packed = [2, 3, 6]
+            .into_iter()
+            .map(|index| (bound.operands()[index].0, omega::Codec::BFloat16))
+            .collect::<omega::PackedOperands>();
+        let emitted = omega::emit(bound, &packed, policy).expect("BF16 row source emits");
+        assert!(
+            emitted.entry.ends_with("_rt"),
+            "row-tiled entry: {}",
+            emitted.entry
+        );
+        assert!(emitted.source.contains("device const ushort* in2"));
+        assert!(emitted.source.contains("omega_bf16_load_matrix(even_float"));
+        assert!(
+            emitted
+                .source
+                .contains("key_even_tile[group][step_index] = even_float;")
+        );
+        assert!(emitted.source.contains("simdgroup_float8x8"));
+        assert!(!emitted.source.contains("simdgroup_half8x8"));
+
+        let mixed = [
+            (bound.operands()[2].0, omega::Codec::BFloat16),
+            (bound.operands()[3].0, omega::Codec::BFloat16),
+            (bound.operands()[6].0, omega::Codec::Float16),
+        ]
+        .into_iter()
+        .collect::<omega::PackedOperands>();
+        let error = omega::emit(bound, &mixed, policy).expect_err("mixed cached codecs decline");
+        assert!(matches!(
+            error,
+            omega::EmitError::CachedAttentionKvCodecNotSupported { .. }
+        ));
+    }
 }
