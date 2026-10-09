@@ -177,6 +177,12 @@ pub enum EmitError {
         reason: &'static str,
     },
 
+    #[error("node {node} cannot prefetch cached K/V blocks: {reason}")]
+    CachedAttentionPrefetchNotSupported {
+        node: NodeId,
+        reason: &'static str,
+    },
+
     #[error("cached-attention variant selects {selected} K/V storage but the bound operands use {bound}")]
     CachedAttentionVariantStorageMismatch {
         selected: &'static str,

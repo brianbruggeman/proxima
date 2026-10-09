@@ -1209,3 +1209,58 @@ fn card_17_query_parallelism_plan_preserves_shared_kv_and_matches_cpu_payload() 
         "query-parallel SharedKv output matches the CPU payload"
     );
 }
+
+#[test]
+fn card_18_prefetch_plan_executes_with_a_partial_live_cache_block() {
+    let policy = production_numeric_policy();
+    let fixture = fixture_with(8, 31, Geometry::TWO_QUERY_GROUPS);
+    let named = as_named_blocks(&fixture.named);
+    let roots = [fixture.logits];
+    let mut baseline_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &named,
+        &roots,
+        policy,
+    )
+    .expect("the F16 baseline plan resolves");
+    baseline_plan
+        .set_attention_variant(omega::AttentionVariant {
+            mma_precision: omega::AttentionMmaPrecision::F16,
+            kv_reuse: omega::AttentionKvReuse::SharedKv,
+            tile_height: omega::AttentionTileHeight::Rows8,
+            query_parallelism: omega::AttentionQueryParallelism::SimdgroupRows,
+            ..omega::AttentionVariant::default()
+        })
+        .expect("the F16 SharedKv baseline is admitted");
+    let baseline = omega::execute_plan_named(&baseline_plan, &named)
+        .expect("the F16 SharedKv baseline executes");
+    let mut prefetch_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &named,
+        &roots,
+        policy,
+    )
+    .expect("the partial-cache prefetch plan resolves");
+    prefetch_plan
+        .set_attention_variant(omega::AttentionVariant {
+            mma_precision: omega::AttentionMmaPrecision::F16,
+            kv_reuse: omega::AttentionKvReuse::SharedKv,
+            tile_height: omega::AttentionTileHeight::Rows8,
+            query_parallelism: omega::AttentionQueryParallelism::SimdgroupRows,
+            prefetch: omega::AttentionPrefetch::NextBlock,
+            ..omega::AttentionVariant::default()
+        })
+        .expect("the F16 prefetch variant fits the partial-cache fixture");
+    let keys = prefetch_plan
+        .kernel_keys()
+        .expect("prefetch pipeline identities are collected");
+    assert!(keys.iter().any(|key| key.contains("_prefetch_next_block")));
+
+    let output = omega::execute_plan_named(&prefetch_plan, &named)
+        .expect("the partial-cache prefetch plan executes");
+    let baseline_bits: Vec<u32> = baseline.root().iter().map(|value| value.to_bits()).collect();
+    let prefetch_bits: Vec<u32> = output.root().iter().map(|value| value.to_bits()).collect();
+    assert_eq!(prefetch_bits, baseline_bits, "prefetch preserves the F16 output payload");
+}
