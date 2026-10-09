@@ -42,6 +42,7 @@ pub enum Codec {
     Nvfp4,
     Q1_0,
     Q2_0,
+    BFloat8,
 }
 
 impl Codec {
@@ -79,6 +80,7 @@ impl Codec {
             Codec::Nvfp4 => 26,
             Codec::Q1_0 => 27,
             Codec::Q2_0 => 28,
+            Codec::BFloat8 => 29,
         }
     }
 
@@ -115,6 +117,7 @@ impl Codec {
             26 => Some(Codec::Nvfp4),
             27 => Some(Codec::Q1_0),
             28 => Some(Codec::Q2_0),
+            29 => Some(Codec::BFloat8),
             _ => None,
         }
     }
@@ -125,45 +128,49 @@ mod tests {
     use super::Codec;
 
     #[test]
-    fn tag_round_trips_every_variant() {
+    fn card_02_bf8_codec_round_trips_all_stable_tags() {
         let variants = [
-            Codec::Q4K,
-            Codec::Q5K,
-            Codec::Q6K,
-            Codec::Q8_0,
-            Codec::Q3K,
-            Codec::Q4_0,
-            Codec::Float16,
-            Codec::BFloat16,
-            Codec::Q2K,
-            Codec::Q5_1,
-            Codec::Q5_0,
-            Codec::Q4_1,
-            Codec::Q8_1,
-            Codec::Q8K,
-            Codec::Iq1S,
-            Codec::Iq1M,
-            Codec::Iq2Xxs,
-            Codec::Iq2Xs,
-            Codec::Iq2S,
-            Codec::Iq3Xxs,
-            Codec::Iq3S,
-            Codec::Iq4Nl,
-            Codec::Iq4Xs,
-            Codec::Tq10,
-            Codec::Tq20,
-            Codec::Mxfp4,
-            Codec::Nvfp4,
-            Codec::Q1_0,
-            Codec::Q2_0,
+            (Codec::Q2K, 0),
+            (Codec::Q3K, 1),
+            (Codec::Q4K, 2),
+            (Codec::Q5K, 3),
+            (Codec::Q6K, 4),
+            (Codec::Q8_0, 5),
+            (Codec::Q4_0, 6),
+            (Codec::Float16, 7),
+            (Codec::BFloat16, 8),
+            (Codec::Q5_1, 9),
+            (Codec::Q5_0, 10),
+            (Codec::Q4_1, 11),
+            (Codec::Q8_1, 12),
+            (Codec::Q8K, 13),
+            (Codec::Iq1S, 14),
+            (Codec::Iq1M, 15),
+            (Codec::Iq2Xxs, 16),
+            (Codec::Iq2Xs, 17),
+            (Codec::Iq2S, 18),
+            (Codec::Iq3Xxs, 19),
+            (Codec::Iq3S, 20),
+            (Codec::Iq4Nl, 21),
+            (Codec::Iq4Xs, 22),
+            (Codec::Tq10, 23),
+            (Codec::Tq20, 24),
+            (Codec::Mxfp4, 25),
+            (Codec::Nvfp4, 26),
+            (Codec::Q1_0, 27),
+            (Codec::Q2_0, 28),
+            (Codec::BFloat8, 29),
         ];
-        for codec in variants {
-            assert_eq!(Codec::from_tag(codec.tag()), Some(codec));
+        assert_eq!(variants.len(), 30);
+        for (codec, stable_tag) in variants {
+            assert_eq!(codec.tag(), stable_tag);
+            assert_eq!(Codec::from_tag(stable_tag), Some(codec));
         }
     }
 
     #[test]
-    fn from_tag_rejects_unknown_byte() {
+    fn card_02_bf8_codec_rejects_unassigned_tag() {
+        assert_eq!(Codec::from_tag(30), None);
         assert_eq!(Codec::from_tag(255), None);
     }
 }

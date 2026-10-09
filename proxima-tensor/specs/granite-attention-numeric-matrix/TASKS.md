@@ -6,7 +6,7 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 |---|---|---|---|---|---|---|---|
 | 00 | [card](cards/00-bf8-contract.md) | none | R1 | `python3 proxima-tensor/specs/granite-attention-numeric-matrix/check_bf8_contract.py` | checks=2 vectors=16 | [x] | `checks=2 vectors=16` |
 | 01 | [card](cards/01-bf8-convert.md) | 00 | R1,R2 | `cargo nextest run -p proxima-tensor --lib -E 'test(~card_01_bf8_convert)'` | filter selects 2 tests; 2 passed | [x] | `2 passed; 782 filter-excluded` |
-| 02 | [card](cards/02-bf8-identities.md) | 01 | R2 | `cargo nextest run -p proxima-primitives --lib -E 'test(~card_02_bf8_codec)' && cargo nextest run -p proxima-tensor --lib -E 'test(~card_02_bf8_dtype)'` | 4 tests total: each command selects 2 tests; 2 passed | [ ] | |
+| 02 | [card](cards/02-bf8-identities.md) | 01 | R2 | `cargo nextest run -p proxima-primitives --lib -E 'test(~card_02_bf8_codec)' && cargo nextest run -p proxima-tensor --lib -E 'test(~card_02_bf8_dtype)'` | 4 tests total: each command selects 2 tests; 2 passed | [x] | `codec: 2 passed, 425 filter-excluded; dtype: 2 passed, 784 filter-excluded` |
 | 03 | [card](cards/03-bf8-element.md) | 01,02 | R2 | `cargo nextest run -p proxima-tensor --lib -E 'test(~card_03_bf8_element)'` | filter selects 2 tests; 2 passed | [ ] | |
 | 04 | [card](cards/04-bf16-placed.md) | none | R3 | `cargo nextest run -p omega --lib -E 'test(~card_04_bf16_placed)'` | filter selects 2 tests; 2 passed | [ ] | |
 | 05 | [card](cards/05-bf16-device-kv.md) | 04 | R3 | `cargo nextest run -p proxima-model-interop --features std,metal,metal-attn-split-rows --lib -E 'test(~card_05_bf16_device)'` | filter selects 2 tests; 2 passed | [ ] | |
@@ -30,8 +30,8 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 
 ## resume
 
-Last landed slice: card 01 implementation and AC01
-Next action: card 02, add BF8 dtype and codec identities
+Last landed slice: card 02 implementation and AC02a/AC02b
+Next action: card 03, add BF8 CPU Element support
 Open question, if any: none; E5M2 is bound as Proxima-owned in SPEC.md
 
 ## struck

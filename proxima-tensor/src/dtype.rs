@@ -27,6 +27,7 @@ pub enum DType {
     Int128,
     UInt128,
     BFloat16,
+    BFloat8,
     Float16,
     Float32,
     Float64,
@@ -36,7 +37,7 @@ impl DType {
     #[must_use]
     pub const fn size_bytes(self) -> usize {
         match self {
-            Self::Bool | Self::Int8 | Self::UInt8 => 1,
+            Self::Bool | Self::Int8 | Self::UInt8 | Self::BFloat8 => 1,
             Self::Int16 | Self::UInt16 | Self::BFloat16 | Self::Float16 => 2,
             Self::Int32 | Self::UInt32 | Self::Float32 => 4,
             Self::Int64 | Self::UInt64 | Self::Float64 => 8,
@@ -48,7 +49,7 @@ impl DType {
     pub const fn is_float(self) -> bool {
         matches!(
             self,
-            Self::BFloat16 | Self::Float16 | Self::Float32 | Self::Float64
+            Self::BFloat16 | Self::BFloat8 | Self::Float16 | Self::Float32 | Self::Float64
         )
     }
 
@@ -128,6 +129,23 @@ mod tests {
     #[case::uint128(DType::UInt128, 16)]
     async fn size_bytes_matches_width(#[case] dtype: DType, #[case] expected: usize) {
         assert_eq!(dtype.size_bytes(), expected);
+    }
+
+    #[test]
+    fn card_02_bf8_dtype_has_one_byte_float_identity_without_self_accumulation() {
+        assert_eq!(DType::BFloat8.size_bytes(), 1);
+        assert!(DType::BFloat8.is_float());
+        assert!(!DType::BFloat8.accumulates_in_place());
+    }
+
+    #[test]
+    fn card_02_bf8_dtype_preserves_existing_half_and_single_widths() {
+        assert_eq!(DType::BFloat16.size_bytes(), 2);
+        assert_eq!(DType::Float16.size_bytes(), 2);
+        assert_eq!(DType::Float32.size_bytes(), 4);
+        assert!(DType::BFloat16.is_float());
+        assert!(DType::Float16.is_float());
+        assert!(DType::Float32.is_float());
     }
 
     #[proxima::test]
