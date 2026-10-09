@@ -177,9 +177,13 @@ pub enum EmitError {
         reason: &'static str,
     },
 
-    #[error("node {node} cannot prefetch cached K/V blocks: {reason}")]
+    #[error(
+        "node {node} cannot prefetch cached K/V blocks ({required_bytes} bytes required, {available_bytes} available): {reason}"
+    )]
     CachedAttentionPrefetchNotSupported {
         node: NodeId,
+        required_bytes: u64,
+        available_bytes: u64,
         reason: &'static str,
     },
 
