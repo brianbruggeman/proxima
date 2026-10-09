@@ -42,6 +42,7 @@ pub fn dtype_to_ggml(dtype: DType) -> Option<GgmlType> {
         DType::Int64 => Some(GgmlType::I64),
         DType::Float64 => Some(GgmlType::F64),
         DType::Bool
+        | DType::BFloat8
         | DType::UInt8
         | DType::UInt16
         | DType::UInt32
@@ -92,7 +93,7 @@ mod tests {
 
     #[test]
     fn safetensors_only_dtypes_have_no_ggml_counterpart() {
-        for dtype in [DType::Bool, DType::UInt8, DType::UInt32, DType::Int128] {
+        for dtype in [DType::Bool, DType::BFloat8, DType::UInt8, DType::UInt32, DType::Int128] {
             assert_eq!(dtype_to_ggml(dtype), None, "{dtype:?}");
         }
     }

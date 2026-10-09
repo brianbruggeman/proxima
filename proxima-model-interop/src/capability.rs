@@ -309,6 +309,7 @@ pub mod quant_format {
             Codec::Iq3Xxs => "IQ3_XXS",
             Codec::Float16 => "F16",
             Codec::BFloat16 => "BF16",
+            Codec::BFloat8 => "BF8",
             Codec::Q4_1 => "Q4_1",
             Codec::Q8_1 => "Q8_1",
             Codec::Q8K => "Q8_K",
