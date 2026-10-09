@@ -1924,3 +1924,75 @@ fn card_20_dispatch_matrix_refuses_a_cache_storage_mismatch() {
         }
     ));
 }
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_21_cross_axis_admits_the_selected_granite_composition() {
+    let operation = card_17_granite_attention(1000);
+    let mut packed_operands = PackedOperands::new();
+    for operand_index in [2, 3, 6] {
+        packed_operands.insert(NodeId(operand_index), Codec::BFloat16);
+    }
+    let selected = AttentionVariant {
+        kv_storage: AttentionKvStorage::Bf16,
+        mma_precision: AttentionMmaPrecision::F16,
+        kv_reuse: AttentionKvReuse::SharedK,
+        tile_height: AttentionTileHeight::Rows8,
+        query_parallelism: AttentionQueryParallelism::SimdgroupRows,
+        simd_topology: AttentionSimdTopology::PerHead,
+        prefetch: AttentionPrefetch::Off,
+    };
+    let manifest = inspect_attention_variant(
+        &operation,
+        &packed_operands,
+        NumericPolicy::llama_relaxed(),
+        selected,
+    )
+    .expect("the selected seven-axis composition fits");
+
+    assert_eq!(manifest.variant, selected);
+    assert_eq!(manifest.cache_codec, Some(Codec::BFloat16));
+    assert_eq!(manifest.accumulator, DType::Float32);
+    assert_eq!(manifest.kernel.grid.threads, 64_000);
+    assert_eq!(manifest.kernel.grid.threadgroup_width, Some(64));
+    assert_eq!(manifest.kernel.grid.depth, 1);
+    assert!(manifest.kernel.source.contains("simd_per_head = true"));
+    assert!(manifest.kernel.source.contains("query_parallel_rows = true"));
+    assert!(manifest.kernel.source.contains("shared_key_even"));
+    assert!(manifest.dispatch_identity.contains("simd_topology: PerHead"));
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_21_cross_axis_reports_exact_prefetch_budget_decline() {
+    let operation = card_17_granite_attention(1000);
+    let mut packed_operands = PackedOperands::new();
+    for operand_index in [2, 3, 6] {
+        packed_operands.insert(NodeId(operand_index), Codec::BFloat16);
+    }
+    let error = inspect_attention_variant(
+        &operation,
+        &packed_operands,
+        NumericPolicy::llama_relaxed(),
+        AttentionVariant {
+            kv_storage: AttentionKvStorage::Bf16,
+            mma_precision: AttentionMmaPrecision::F32,
+            kv_reuse: AttentionKvReuse::SharedKv,
+            tile_height: AttentionTileHeight::Rows8,
+            query_parallelism: AttentionQueryParallelism::SimdgroupRows,
+            simd_topology: AttentionSimdTopology::PerHead,
+            prefetch: AttentionPrefetch::NextBlock,
+        },
+    )
+    .expect_err("F32 shared V plus next-block prefetch exceeds 32 KiB");
+
+    assert!(matches!(
+        error,
+        EmitError::CachedAttentionPrefetchNotSupported {
+            required_bytes: 52_608,
+            available_bytes: 32_768,
+            reason: "double-buffered K/V staging exceeds the configured threadgroup-memory budget",
+            ..
+        }
+    ));
+}
