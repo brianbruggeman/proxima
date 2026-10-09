@@ -33,6 +33,7 @@ pub(super) enum KvElement {
     F32,
     F16,
     Bf16,
+    #[cfg(test)]
     Bf8,
     Unsupported(GgmlType),
 }
@@ -253,6 +254,7 @@ impl DeviceKvLayer {
         match self.element {
             KvElement::F16 => omega::write_placed_buffer_f32_as_f16(buffer, byte_offset, values),
             KvElement::Bf16 => omega::write_placed_buffer_f32_as_bf16(buffer, byte_offset, values),
+            #[cfg(test)]
             KvElement::Bf8 => omega::write_placed_buffer_f32_as_bf8(buffer, byte_offset, values),
             KvElement::F32 => omega::write_placed_buffer_f32(buffer, byte_offset, values),
             KvElement::Unsupported(_) => unreachable!("unsupported KV elements fail allocation"),
@@ -263,6 +265,7 @@ impl DeviceKvLayer {
         match self.element {
             KvElement::F16 => omega::read_placed_buffer_f16_as_f32(buffer, byte_offset, count),
             KvElement::Bf16 => omega::read_placed_buffer_bf16_as_f32(buffer, byte_offset, count),
+            #[cfg(test)]
             KvElement::Bf8 => omega::read_placed_buffer_bf8_as_f32(buffer, byte_offset, count),
             KvElement::F32 => omega::read_placed_buffer_f32(buffer, byte_offset, count),
             KvElement::Unsupported(_) => unreachable!("unsupported KV elements fail allocation"),
@@ -292,6 +295,7 @@ impl DeviceKvLayer {
                 KvElement::Bf16 => omega::narrow_placed_buffer_f32_to_bf16(
                     staging, 0, cache, output_row * row_bytes, new_count * row,
                 ),
+                #[cfg(test)]
                 KvElement::Bf8 => omega::narrow_placed_buffer_f32_to_bf8(
                     staging, 0, cache, output_row * row_bytes, new_count * row,
                 ),
@@ -309,6 +313,7 @@ fn element_bytes(element: KvElement) -> Result<usize, InteropError> {
     match element {
         KvElement::F32 => Ok(core::mem::size_of::<f32>()),
         KvElement::F16 | KvElement::Bf16 => Ok(core::mem::size_of::<u16>()),
+        #[cfg(test)]
         KvElement::Bf8 => Ok(core::mem::size_of::<u8>()),
         KvElement::Unsupported(other) => Err(InteropError::UnsupportedServingConfig(alloc::format!(
             "device kv cache type {other:?}: the device-resident cache stores f32, f16, bf16, or Proxima bf8"
@@ -401,6 +406,7 @@ impl DeviceKv {
         match self.element {
             KvElement::F16 => Some(Codec::Float16),
             KvElement::Bf16 => Some(Codec::BFloat16),
+            #[cfg(test)]
             KvElement::Bf8 => Some(Codec::BFloat8),
             _ => None,
         }

@@ -43,6 +43,290 @@
 //! GPU kept busy, unlike an isolated single-dispatch command buffer).
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+#[cfg(feature = "metal-attn-variants")]
+use std::collections::BTreeSet;
+
+#[cfg(feature = "metal-attn-variants")]
+use sha2::{Digest, Sha256};
+
+#[cfg(feature = "metal-attn-variants")]
+use omega::{
+    AttentionDispatchManifest, AttentionKvReuse, AttentionKvStorage, AttentionMmaPrecision,
+    AttentionPrefetch, AttentionQueryParallelism, AttentionSimdTopology, AttentionTileHeight,
+    AttentionVariant, PackedOperands, inspect_attention_variant,
+};
+
+#[cfg(feature = "metal-attn-variants")]
+use proxima_tensor::{BoundOp, BoundOpKind, DType, Layout, NodeId, NumericPolicy};
+
+#[cfg(feature = "metal-attn-variants")]
+fn parse_attention_variant(value: &str) -> Result<AttentionVariant, String> {
+    let mut selected = AttentionVariant::default();
+    let mut seen = BTreeSet::new();
+    for field in value.split(',') {
+        let (name, selected_value) = field
+            .split_once('=')
+            .ok_or_else(|| format!("invalid attention variant field `{field}`"))?;
+        if !seen.insert(name) {
+            return Err(format!("duplicate attention variant field `{name}`"));
+        }
+        match (name, selected_value) {
+            ("kv_storage", "f32") => selected.kv_storage = AttentionKvStorage::F32,
+            ("kv_storage", "bf16") => selected.kv_storage = AttentionKvStorage::Bf16,
+            ("kv_storage", "bf8") => selected.kv_storage = AttentionKvStorage::Bf8,
+            ("mma_precision", "legacy") => selected.mma_precision = AttentionMmaPrecision::Legacy,
+            ("mma_precision", "f32") => selected.mma_precision = AttentionMmaPrecision::F32,
+            ("mma_precision", "f16") => selected.mma_precision = AttentionMmaPrecision::F16,
+            ("kv_reuse", "legacy") => selected.kv_reuse = AttentionKvReuse::Legacy,
+            ("kv_reuse", "shared_k") => selected.kv_reuse = AttentionKvReuse::SharedK,
+            ("kv_reuse", "shared_kv") => selected.kv_reuse = AttentionKvReuse::SharedKv,
+            ("tile_height", "legacy") => selected.tile_height = AttentionTileHeight::Legacy,
+            ("tile_height", "rows_2") => selected.tile_height = AttentionTileHeight::Rows2,
+            ("tile_height", "rows_4") => selected.tile_height = AttentionTileHeight::Rows4,
+            ("tile_height", "rows_8") => selected.tile_height = AttentionTileHeight::Rows8,
+            ("tile_height", "rows_16") => selected.tile_height = AttentionTileHeight::Rows16,
+            ("query_parallelism", "legacy") => {
+                selected.query_parallelism = AttentionQueryParallelism::Legacy;
+            }
+            ("query_parallelism", "simdgroup_rows") => {
+                selected.query_parallelism = AttentionQueryParallelism::SimdgroupRows;
+            }
+            ("simd_topology", "legacy") => selected.simd_topology = AttentionSimdTopology::Legacy,
+            ("simd_topology", "per_head") => selected.simd_topology = AttentionSimdTopology::PerHead,
+            ("simd_topology", "grouped_queries") => {
+                selected.simd_topology = AttentionSimdTopology::GroupedQueries;
+            }
+            ("prefetch", "off") => selected.prefetch = AttentionPrefetch::Off,
+            ("prefetch", "next_block") => selected.prefetch = AttentionPrefetch::NextBlock,
+            ("kv_storage", _) => return Err(format!("invalid kv_storage `{selected_value}`")),
+            ("mma_precision", _) => return Err(format!("invalid mma_precision `{selected_value}`")),
+            ("kv_reuse", _) => return Err(format!("invalid kv_reuse `{selected_value}`")),
+            ("tile_height", _) => return Err(format!("invalid tile_height `{selected_value}`")),
+            ("query_parallelism", _) => {
+                return Err(format!("invalid query_parallelism `{selected_value}`"));
+            }
+            ("simd_topology", _) => return Err(format!("invalid simd_topology `{selected_value}`")),
+            ("prefetch", _) => return Err(format!("invalid prefetch `{selected_value}`")),
+            _ => return Err(format!("unknown attention variant field `{name}`")),
+        }
+    }
+    let expected = [
+        "kv_storage",
+        "mma_precision",
+        "kv_reuse",
+        "tile_height",
+        "query_parallelism",
+        "simd_topology",
+        "prefetch",
+    ];
+    if seen.len() != expected.len() || expected.iter().any(|name| !seen.contains(name)) {
+        return Err("attention variant requires all seven named fields".to_string());
+    }
+    Ok(selected)
+}
+
+#[cfg(feature = "metal-attn-variants")]
+fn granite_dispatch_manifest(
+    variant: AttentionVariant,
+) -> Result<AttentionDispatchManifest, String> {
+    let operation = BoundOp {
+        node: NodeId(9),
+        dtype: DType::Float32,
+        extents: vec![1000, 8, 2, 64],
+        kind: BoundOpKind::CachedAttention {
+            operands: (0..9)
+                .map(|index| {
+                    (
+                        NodeId(index),
+                        Layout {
+                            base: 0,
+                            strides: vec![1_i64].into(),
+                        },
+                        None,
+                    )
+                })
+                .collect(),
+            query_rows: 1000,
+            cached_key_rows: 512,
+            new_key_rows: 1000,
+            kv_heads: 8,
+            query_groups: 2,
+            head_dim: 64,
+            rotary_dim: 64,
+            scale: 1.0,
+            cached_lower_inclusive: -511,
+            new_upper_inclusive: 0,
+        },
+    };
+    let mut packed_operands = PackedOperands::new();
+    let codec = match variant.kv_storage {
+        AttentionKvStorage::F32 => None,
+        AttentionKvStorage::Bf16 => Some(omega::Codec::BFloat16),
+        AttentionKvStorage::Bf8 => Some(omega::Codec::BFloat8),
+    };
+    if let Some(codec) = codec {
+        for operand_index in [2, 3, 6] {
+            packed_operands.insert(NodeId(operand_index), codec);
+        }
+    }
+    inspect_attention_variant(
+        &operation,
+        &packed_operands,
+        NumericPolicy::llama_relaxed(),
+        variant,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "metal-attn-variants")]
+fn describe_attention_variant(variant: AttentionVariant) -> Result<(), String> {
+    let manifest = granite_dispatch_manifest(variant)?;
+    let digest = Sha256::digest(manifest.kernel.source.as_bytes());
+    let source_sha = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let selected = manifest.variant;
+    let labels = attention_variant_labels(selected);
+    println!(
+        "ab variant kv_storage={} mma_precision={} kv_reuse={} tile_height={} query_parallelism={} simd_topology={} prefetch={} form={:?} cache_codec={:?} accumulator={:?} entry={} msl_sha256={source_sha} grid_threads={} threadgroup_width={:?} grid_depth={} dispatch_identity={}",
+        labels[0],
+        labels[1],
+        labels[2],
+        labels[3],
+        labels[4],
+        labels[5],
+        labels[6],
+        manifest.form,
+        manifest.cache_codec,
+        manifest.accumulator,
+        manifest.kernel.entry,
+        manifest.kernel.grid.threads,
+        manifest.kernel.grid.threadgroup_width,
+        manifest.kernel.grid.depth,
+        manifest.dispatch_identity,
+    );
+    Ok(())
+}
+
+#[cfg(feature = "metal-attn-variants")]
+fn attention_variant_labels(variant: AttentionVariant) -> [&'static str; 7] {
+    let kv_storage = match variant.kv_storage {
+        AttentionKvStorage::F32 => "f32",
+        AttentionKvStorage::Bf16 => "bf16",
+        AttentionKvStorage::Bf8 => "bf8",
+    };
+    let mma_precision = match variant.mma_precision {
+        AttentionMmaPrecision::Legacy => "legacy",
+        AttentionMmaPrecision::F32 => "f32",
+        AttentionMmaPrecision::F16 => "f16",
+    };
+    let kv_reuse = match variant.kv_reuse {
+        AttentionKvReuse::Legacy => "legacy",
+        AttentionKvReuse::SharedK => "shared_k",
+        AttentionKvReuse::SharedKv => "shared_kv",
+    };
+    let tile_height = match variant.tile_height {
+        AttentionTileHeight::Legacy => "legacy",
+        AttentionTileHeight::Rows2 => "rows_2",
+        AttentionTileHeight::Rows4 => "rows_4",
+        AttentionTileHeight::Rows8 => "rows_8",
+        AttentionTileHeight::Rows16 => "rows_16",
+    };
+    let query_parallelism = match variant.query_parallelism {
+        AttentionQueryParallelism::Legacy => "legacy",
+        AttentionQueryParallelism::SimdgroupRows => "simdgroup_rows",
+    };
+    let simd_topology = match variant.simd_topology {
+        AttentionSimdTopology::Legacy => "legacy",
+        AttentionSimdTopology::PerHead => "per_head",
+        AttentionSimdTopology::GroupedQueries => "grouped_queries",
+    };
+    let prefetch = match variant.prefetch {
+        AttentionPrefetch::Off => "off",
+        AttentionPrefetch::NextBlock => "next_block",
+    };
+    [
+        kv_storage,
+        mma_precision,
+        kv_reuse,
+        tile_height,
+        query_parallelism,
+        simd_topology,
+        prefetch,
+    ]
+}
+
+#[cfg(all(test, feature = "metal-attn-variants"))]
+mod attention_variant_tests {
+    use super::{
+        AttentionVariant, attention_variant_labels, granite_dispatch_manifest,
+        parse_attention_variant,
+    };
+
+    #[test]
+    fn card_22_bench_entry_inspects_legacy_and_granite_variants() {
+        let legacy_selector = parse_attention_variant(
+            "kv_storage=f32,mma_precision=legacy,kv_reuse=legacy,tile_height=legacy,query_parallelism=legacy,simd_topology=legacy,prefetch=off",
+        )
+        .expect("all seven legacy fields parse");
+        assert_eq!(legacy_selector, AttentionVariant::default());
+        let legacy_manifest = granite_dispatch_manifest(legacy_selector)
+            .expect("all-legacy Granite dispatch inspects");
+        assert_eq!(legacy_manifest.variant, legacy_selector);
+        assert_eq!(legacy_manifest.cache_codec, None);
+        assert_eq!(legacy_manifest.kernel.grid.threads, 64_000);
+        assert_eq!(legacy_manifest.kernel.grid.threadgroup_width, Some(64));
+        assert!(legacy_manifest.kernel.entry.starts_with("omega_cached_attention_"));
+
+        let selected = parse_attention_variant(
+            "kv_storage=bf16,mma_precision=f16,kv_reuse=shared_k,tile_height=rows_8,query_parallelism=simdgroup_rows,simd_topology=per_head,prefetch=off",
+        )
+        .expect("the seven-axis Granite selection parses");
+        assert_eq!(
+            attention_variant_labels(selected),
+            [
+                "bf16",
+                "f16",
+                "shared_k",
+                "rows_8",
+                "simdgroup_rows",
+                "per_head",
+                "off",
+            ]
+        );
+        let selected_manifest = granite_dispatch_manifest(selected)
+            .expect("the multi-axis Granite dispatch inspects");
+        assert_eq!(selected_manifest.variant, selected);
+        assert_eq!(
+            selected_manifest.cache_codec,
+            Some(omega::Codec::BFloat16)
+        );
+        assert_eq!(selected_manifest.accumulator, proxima_tensor::DType::Float32);
+        assert_ne!(
+            selected_manifest.dispatch_identity,
+            legacy_manifest.dispatch_identity
+        );
+        assert!(selected_manifest.kernel.source.contains("shared_key_even"));
+        assert!(selected_manifest.kernel.source.contains("simd_per_head = true"));
+        assert!(selected_manifest.kernel.source.contains("query_parallel_rows = true"));
+    }
+
+    #[test]
+    fn card_22_bench_entry_refuses_duplicate_and_missing_fields() {
+        let duplicate = parse_attention_variant(
+            "kv_storage=f32,kv_storage=bf16,mma_precision=legacy,kv_reuse=legacy,tile_height=legacy,query_parallelism=legacy,simd_topology=legacy,prefetch=off",
+        )
+        .expect_err("duplicate fields are not accepted");
+        assert!(duplicate.contains("duplicate attention variant field"));
+        let missing = parse_attention_variant(
+            "kv_storage=f32,mma_precision=legacy,kv_reuse=legacy,tile_height=legacy,query_parallelism=legacy,simd_topology=legacy",
+        )
+        .expect_err("every one of the seven named fields is required");
+        assert!(missing.contains("requires all seven named fields"));
+    }
+}
+
 #[cfg(all(feature = "metal", target_os = "macos"))]
 #[path = "cell_resources/attention_reference.rs"]
 mod attention_reference;
@@ -66,6 +350,7 @@ mod harness {
 
     use super::attention_reference;
     use super::cell::Cell;
+    use super::{describe_attention_variant, parse_attention_variant};
 
     const MODEL_ENV: &str = "PROXIMA_GEMMA4_E2B_GGUF";
     const SHA_PREFIX_CHARS: usize = 16;
@@ -367,6 +652,21 @@ mod harness {
     }
 
     pub fn run() {
+        let attention_variant = std::env::var("AB_ATTENTION_VARIANT")
+            .ok()
+            .map(|value| {
+                parse_attention_variant(&value)
+                    .unwrap_or_else(|error| panic!("AB_ATTENTION_VARIANT: {error}"))
+            });
+        if std::env::var("AB_VARIANT_DESCRIBE_ONLY").as_deref() == Ok("1") {
+            describe_attention_variant(attention_variant.unwrap_or_default())
+                .unwrap_or_else(|error| panic!("describe attention variant: {error}"));
+            return;
+        }
+        assert!(
+            attention_variant.is_none(),
+            "AB_ATTENTION_VARIANT is currently supported only with AB_VARIANT_DESCRIBE_ONLY=1"
+        );
         let process_cell = Cell::begin();
         let resource_iterations = env_usize("AB_RESOURCE_ITERS", 50);
         let step = env_usize("AB_STEP", 5);

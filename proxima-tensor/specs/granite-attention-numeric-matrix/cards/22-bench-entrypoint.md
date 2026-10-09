@@ -24,6 +24,8 @@ In scope: one parser/forwarding path in the existing example and a describe-only
 
 - `proxima-model-interop/examples/norm_variant_ab.rs`
 - `proxima-model-interop/Cargo.toml` (feature pass-through only; no dependency changes)
+- `omega/src/backend.rs` and `omega/src/cuda.rs` (correct the documented CUDA driver boundary; no runtime changes)
+- `proxima-model-interop/src/generate/device_kv.rs` (keep the test-only BF8 fixture out of non-test builds)
 - `proxima-tensor/specs/granite-attention-numeric-matrix/TASKS.md` (row and resume only)
 
 ## Steps
@@ -34,9 +36,9 @@ Add an off-by-default `metal-attn-variants` interop feature forwarding to omega'
 
 | id | command | expected |
 |---|---|---|
-| AC22a | `cargo nextest run -p proxima-model-interop --features std,metal,instrument,metal-attn-split-rows,metal-attn-variants --all-targets -E 'test(~card_22_bench_entry)'` | filter selects 2 tests; 2 passed; one valid seven-field selector and one malformed/missing-field refusal |
+| AC22a | `cargo nextest run -p proxima-model-interop --example norm_variant_ab --features std,metal,instrument,metal-attn-split-rows,metal-attn-variants -E 'test(~card_22_bench_entry)'` | filter selects 2 tests; 2 passed; one valid seven-field selector and one malformed/missing-field refusal |
 | AC22b | `AB_ATTENTION_VARIANT='kv_storage=f32,mma_precision=legacy,kv_reuse=legacy,tile_height=legacy,query_parallelism=legacy,simd_topology=legacy,prefetch=off' AB_VARIANT_DESCRIBE_ONLY=1 cargo run -p proxima-model-interop --example norm_variant_ab --features std,metal,instrument,metal-attn-split-rows,metal-attn-variants --` | exactly 1 `ab variant` line with all 7 fields, selected entry/source hash/grid, and 0 `ab res` timed-cell lines |
-| AC22c | `AB_ATTENTION_VARIANT='kv_storage=bf16,mma_precision=f16,kv_reuse=shared_k,tile_height=rows_8,query_parallelism=simdgroup_rows,simd_topology=per_head,prefetch=off' AB_VARIANT_DESCRIBE_ONLY=1 cargo run -p proxima-model-interop --example norm_variant_ab --features std,metal,instrument,metal-attn-split-rows,metal-attn-variants --` | exactly 1 `ab variant` line with all 7 selected values, non-legacy entry/source hash/grid distinct from AC22b, and 0 `ab res` timed-cell lines |
+| AC22c | `AB_ATTENTION_VARIANT='kv_storage=bf16,mma_precision=f16,kv_reuse=shared_k,tile_height=rows_8,query_parallelism=simdgroup_rows,simd_topology=per_head,prefetch=off' AB_VARIANT_DESCRIBE_ONLY=1 cargo run -p proxima-model-interop --example norm_variant_ab --features std,metal,instrument,metal-attn-split-rows,metal-attn-variants --` | exactly 1 `ab variant` line with all 7 selected values, selected entry and source hash distinct from AC22b, reported grid, and 0 `ab res` timed-cell lines |
 
 The parser tests must inspect the selected dispatch fields; a returned config object alone is insufficient. AC22b and AC22c are dry describe paths, not timing runs. All three commands assert their counts, including zero timed cells.
 
