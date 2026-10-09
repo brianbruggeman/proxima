@@ -55,12 +55,12 @@ pub(super) fn cached_attention_scalar_score_body(pass_present: bool, new_range_w
 
 /// The operands of a cached attention bind that hold the cached K even plane,
 /// K odd plane and V rows -- the only ones that may be packed, and only as
-/// one `Codec::Float16` or `Codec::BFloat16` triple read by the decode split.
+/// one `Codec::Float16`, `Codec::BFloat16` or `Codec::BFloat8` triple read by the decode split.
 const CACHED_KV_OPERANDS: [usize; 3] = [2, 3, 6];
 
 /// Classifies a cached attention bind's operand codecs: `None` when every
 /// operand is a plain buffer (every kernel form reads this), or a uniform
-/// Float16/BFloat16 cache triple (only the decode split reads these), an
+/// Float16/BFloat16/BFloat8 cache triple (only the decode split reads these), an
 /// error for any other packing. `quantized` is `operand_codecs`'
 /// answer; entries past its end count as plain, so a hand-built bind with no
 /// packed operands passes `&[]`.
@@ -88,9 +88,12 @@ pub(super) fn cached_attention_kv_codec(
         (Some(Codec::BFloat16), Some(Codec::BFloat16), Some(Codec::BFloat16)) => {
             Ok(Some(Codec::BFloat16))
         }
+        (Some(Codec::BFloat8), Some(Codec::BFloat8), Some(Codec::BFloat8)) => {
+            Ok(Some(Codec::BFloat8))
+        }
         _ => Err(EmitError::CachedAttentionKvCodecNotSupported {
             node,
-            reason: "the cached K and V operands must be all plain, all Float16, or all BFloat16",
+            reason: "the cached K and V operands must be all plain, all Float16, all BFloat16, or all BFloat8",
         }),
     }
 }

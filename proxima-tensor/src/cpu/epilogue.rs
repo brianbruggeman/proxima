@@ -1948,9 +1948,8 @@ impl<'a> QuantizedBlock<'a> {
                     iq3_xxs::BLOCK_BYTES,
                     iq3_xxs::blocks_for_bytes(bytes.len()).map(iq3_xxs::elements_for_blocks),
                 ),
-                // f16/bf16 blocks are one element wide (`QK_F16`/`QK_BF16` ==
-                // 1), so a block count already IS the element count -- neither
-                // module exposes its own `elements_for_blocks`.
+                // f16/bf16 blocks and scalar bf8 bytes each hold one element,
+                // so their storage-unit count is already the element count.
                 Codec::Float16 => (
                     "float16",
                     bytes.len(),
@@ -1963,6 +1962,7 @@ impl<'a> QuantizedBlock<'a> {
                     gguf_bf16::BLOCK_BYTES,
                     gguf_bf16::blocks_for_bytes(bytes.len()),
                 ),
+                Codec::BFloat8 => ("bfloat8", bytes.len(), 1, Some(bytes.len())),
                 // No packed-block construction site (`gguf_tensor_as_packed_block`/
                 // `as_block` in `proxima-model-interop`) ever produces a
                 // `Packed` carrying one of these 15 undecodable codecs -- see

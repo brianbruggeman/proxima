@@ -1,3 +1,4 @@
+use proxima_primitives::Codec;
 use proxima_tensor::{DType, NodeId};
 
 /// Everything [`crate::msl::emit`] can reject.
@@ -148,6 +149,10 @@ pub enum EmitError {
     /// without any error.
     #[error("node {node} is a cached attention bind with a packed operand the kernel cannot read: {reason}")]
     CachedAttentionKvCodecNotSupported { node: NodeId, reason: &'static str },
+
+    /// A packed scalar codec reached an op whose renderer has no reader for it.
+    #[error("node {node} reads packed codec {codec:?}, which this metal renderer does not support")]
+    PackedCodecNotSupported { node: NodeId, codec: Codec },
 
     /// `omega::execute`'s own upstream gate (`reject_unsupported_gpu_dtype`)
     /// never lets anything but `Float32`/`Float16` reach [`crate::msl::emit`]
