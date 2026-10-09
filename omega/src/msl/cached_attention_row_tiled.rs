@@ -145,26 +145,63 @@ pub(super) fn render_cached_attention_row_tiled_with(
         crate::sized::ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES,
     );
     #[cfg(feature = "metal-attn-variants")]
-    let shared_k = kv_reuse_selection == AttentionKvReuseSelection::SharedK;
+    let shared_k = !matches!(kv_reuse_selection, AttentionKvReuseSelection::Legacy);
+    #[cfg(feature = "metal-attn-variants")]
+    let shared_v = kv_reuse_selection == AttentionKvReuseSelection::SharedKv;
     #[cfg(not(feature = "metal-attn-variants"))]
     let shared_k = false;
+    #[cfg(not(feature = "metal-attn-variants"))]
+    let shared_v = false;
     #[cfg(not(feature = "metal-attn-variants"))]
     let _ = kv_reuse_selection;
     let block = row_tiled_block(*head_dim);
     let half_dim = *head_dim / 2;
     let depth_unroll = if (half_dim / 8).is_multiple_of(2) { 2 } else { 1 };
+    let query_blocks = if !(*query_groups).is_multiple_of(8) {
+        (rows_per_threadgroup / 8) * *query_groups
+    } else {
+        (rows_per_threadgroup * *query_groups) / 8
+    };
+    let score_vectors = if shared_k { query_blocks.div_ceil(simdgroups) } else { query_blocks };
+    let shared_v_accumulator_fragments = (*head_dim / 8) * score_vectors;
+    if shared_v && shared_v_accumulator_fragments > crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS {
+        return Err(EmitError::CachedAttentionKvReuseNotSupported {
+            node: resolved.node,
+            reason: "shared K/V query ownership exceeds the configured accumulator-fragment budget",
+        });
+    }
     let shared_k_bytes = if shared_k {
         2 * block * 8 * depth_unroll * if half_operands { 2 } else { 4 }
     } else {
         0
     };
-    let threadgroup_bytes = row_tile_bytes(rows_per_threadgroup, *query_groups, block)
+    let base_threadgroup_bytes = row_tile_bytes(rows_per_threadgroup, *query_groups, block)
         + if stages_query {
             query_stage_bytes(rows_per_threadgroup, *query_groups, *head_dim)
         } else {
             0
-        }
-        + shared_k_bytes;
+        };
+    let shared_kv_bytes = base_threadgroup_bytes + shared_k_bytes;
+    let value_fragment_bytes = 64 * if half_operands { 2 } else { 4 };
+    let shared_v_dimension_blocks = if shared_v {
+        let available = crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES
+            .saturating_sub(shared_kv_bytes);
+        (available / value_fragment_bytes).min(*head_dim / 8)
+    } else {
+        1
+    };
+    let shared_v_bytes = if shared_v {
+        shared_v_dimension_blocks * value_fragment_bytes
+    } else {
+        0
+    };
+    let threadgroup_bytes = shared_kv_bytes + shared_v_bytes;
+    if shared_v && shared_v_dimension_blocks == 0 {
+        return Err(EmitError::CachedAttentionKvReuseNotSupported {
+            node: resolved.node,
+            reason: "shared K/V staging exceeds the configured threadgroup-memory budget",
+        });
+    }
     if threadgroup_bytes > crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES {
         return Err(EmitError::CachedAttentionKvReuseNotSupported {
             node: resolved.node,
@@ -242,6 +279,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
             if half_operands { "half" } else { "float" }.to_string(),
         ),
         ("@KV_REUSE_SHARED_K@", shared_k.to_string()),
+        ("@KV_REUSE_SHARED_V@", shared_v.to_string()),
         (
             "@SHARED_K_LOAD@",
             if half_operands {
@@ -258,6 +296,23 @@ pub(super) fn render_cached_attention_row_tiled_with(
             } else {
                 "1".to_string()
             },
+        ),
+        (
+            "@SHARED_V_LOAD@",
+            if half_operands {
+                "omega_load_shared_half"
+            } else {
+                "omega_load_shared_float"
+            }
+            .to_string(),
+        ),
+        (
+            "@SHARED_V_ELEMENTS@",
+            (64 * shared_v_dimension_blocks).to_string(),
+        ),
+        (
+            "@SHARED_V_DIMENSION_BLOCKS@",
+            shared_v_dimension_blocks.to_string(),
         ),
         ("@ENTRY@", entry.to_string()),
         ("@KV_HEADS@", kv_heads.to_string()),
@@ -315,10 +370,12 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
     constexpr long tile_blocks = rows_in_fragment ? (tile_rows / 8) * query_groups : (tile_rows * query_groups) / 8;
     constexpr long tile_vectors = tile_blocks * 8; constexpr long threads = simdgroups * 32;
     constexpr long dims_per_group = head_dim / 8 / simdgroups; constexpr long depth_unroll = ((half_dim / 8) % 2 == 0) ? 2 : 1;
-    constexpr bool shared_k = @KV_REUSE_SHARED_K@;
+    constexpr bool shared_k = @KV_REUSE_SHARED_K@; constexpr bool shared_v = @KV_REUSE_SHARED_V@;
     constexpr long key_tiles_per_group = (block / 8) / simdgroups;
     constexpr long score_key_tiles = shared_k ? (block / 8) : key_tiles_per_group;
     constexpr long score_vectors_per_simdgroup = shared_k ? (tile_blocks + simdgroups - 1) / simdgroups : tile_blocks;
+    constexpr long accumulator_dimensions = shared_v ? (head_dim / 8) : dims_per_group;
+    constexpr long accumulator_vectors = shared_v ? score_vectors_per_simdgroup : tile_blocks;
     constexpr long query_stride = rows_in_fragment ? kv_heads * query_groups * half_dim : half_dim;
     long splits = u.splits;
     long total_rows = u.total_elements / (kv_heads * query_groups);
@@ -335,6 +392,8 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
     threadgroup float score_tile[tile_vectors * block]; threadgroup float row_maximum[tile_vectors]; threadgroup float row_sum[tile_vectors]; threadgroup float rescale_tile[tile_vectors];
     threadgroup int vector_row[tile_vectors]; threadgroup int vector_head[tile_vectors]; threadgroup int vector_live[tile_vectors];
     threadgroup @OPERAND_SCALAR@ shared_key_even[@SHARED_K_ELEMENTS@]; threadgroup @OPERAND_SCALAR@ shared_key_odd[@SHARED_K_ELEMENTS@];
+    threadgroup @OPERAND_SCALAR@ shared_value[@SHARED_V_ELEMENTS@];
+    constexpr long shared_v_dimension_blocks = @SHARED_V_DIMENSION_BLOCKS@;
     constexpr bool stage_query = @STAGE_QUERY@; constexpr long query_stage_stride = half_dim + @QUERY_STAGE_PAD@L;
     threadgroup float query_stage[stage_query ? tile_blocks * 2L * 8L * query_stage_stride : 1L];
     for (long index = thread_id; index < tile_vectors; index += threads) {
@@ -360,8 +419,8 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
             block_row[vector_block] = min(row0 + vector_block / groups_per_row, total_rows - 1L); block_head[vector_block] = (vector_block % groups_per_row) * 8L;
         }
     }
-    simdgroup_float8x8 accumulated[dims_per_group][tile_blocks];
-    FOR_UNROLL for (long slot = 0L; slot < dims_per_group; slot++) { FOR_UNROLL for (long vector_block = 0L; vector_block < tile_blocks; vector_block++) { accumulated[slot][vector_block] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f); } }
+    simdgroup_float8x8 accumulated[accumulator_dimensions][accumulator_vectors];
+    FOR_UNROLL for (long slot = 0L; slot < accumulator_dimensions; slot++) { FOR_UNROLL for (long vector_block = 0L; vector_block < accumulator_vectors; vector_block++) { accumulated[slot][vector_block] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f); } }
     if (stage_query) {
         FOR_UNROLL for (long vector_block = 0L; vector_block < tile_blocks; vector_block++) {
             long query_base = (block_row[vector_block] * (kv_heads * query_groups) + kv_head * query_groups + block_head[vector_block]) * half_dim;
@@ -579,35 +638,104 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
             if (lane == 0) { row_maximum[vector] = next_maximum; row_sum[vector] = row_sum[vector] * rescale + block_sum; rescale_tile[vector] = rescale; }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) {
-            float row_scale = rescale_tile[vector_block * 8 + fragment_row];
-            FOR_UNROLL for (int slot = 0; slot < (int)dims_per_group; slot++) {
-                accumulated[slot][vector_block].thread_elements()[0] *= row_scale;
-                accumulated[slot][vector_block].thread_elements()[1] *= row_scale;
+        if (@KV_REUSE_SHARED_V@) {
+            for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups) {
+                int vector_slot = vector_block / (int)simdgroups;
+                float row_scale = rescale_tile[vector_block * 8 + fragment_row];
+                FOR_UNROLL for (int dimension_block = 0; dimension_block < (int)(head_dim / 8); dimension_block++) {
+                    accumulated[dimension_block][vector_slot].thread_elements()[0] *= row_scale;
+                    accumulated[dimension_block][vector_slot].thread_elements()[1] *= row_scale;
+                }
+            }
+        } else {
+            FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) {
+                float row_scale = rescale_tile[vector_block * 8 + fragment_row];
+                FOR_UNROLL for (int slot = 0; slot < (int)dims_per_group; slot++) {
+                    accumulated[slot][vector_block].thread_elements()[0] *= row_scale;
+                    accumulated[slot][vector_block].thread_elements()[1] *= row_scale;
+                }
             }
         }
         if (mode != 2L) {
             device const float* value_base = mode == 0L ? (device const float*)in6 : in7;
             device const float* value_ptr = value_base + key0 * (kv_heads * head_dim) + kv_head * head_dim;
             int fragments = (int)((columns + 7L) / 8L);
-            for (int key_tile = 0; key_tile < fragments; key_tile++) {
-                @OPERAND@ weights[tile_blocks];
-                FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { simdgroup_load(weights[vector_block], score_tile + vector_block * 8 * (int)block + key_tile * 8, (ulong)block); }
-                FOR_UNROLL for (int slot = 0; slot < (int)dims_per_group; slot++) {
-                    int dimension_block = (int)simdgroup_slot + slot * (int)simdgroups;
-                    simdgroup_float8x8 value_float;
-                    if (@BF16_CACHE@ && mode == 0L) {
-                        device const ushort* cached_value = (device const ushort*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
-                        omega_bf16_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
-                    } else if (@BF8_CACHE@ && mode == 0L) {
-                        device const uchar* cached_value = (device const uchar*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
-                        omega_bf8_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
-                    } else {
-                        simdgroup_load(value_float, value_ptr + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8, (ulong)(kv_heads * head_dim));
+            if (@KV_REUSE_SHARED_V@) {
+                for (int key_tile = 0; key_tile < fragments; key_tile++) {
+                    @OPERAND@ weights[score_vectors_per_simdgroup];
+                    for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups) {
+                        int vector_slot = vector_block / (int)simdgroups;
+                        simdgroup_load(weights[vector_slot], score_tile + vector_block * 8 * (int)block + key_tile * 8, (ulong)block);
                     }
-                    omega_zero_padded_value_rows(value_float, key0 + (long)key_tile * 8L, mode == 0L ? slice_end : mma_end, lane);
-                    @OPERAND@ value = @NARROW_TO_OPERAND_VALUE@;
-                    FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { simdgroup_multiply_accumulate(accumulated[slot][vector_block], weights[vector_block], value, accumulated[slot][vector_block]); }
+                    for (int dimension_base = 0; dimension_base < (int)(head_dim / 8); dimension_base += (int)shared_v_dimension_blocks) {
+                        int dimension_count = min((int)shared_v_dimension_blocks, (int)(head_dim / 8) - dimension_base);
+                        for (int slab_slot = 0; slab_slot < dimension_count; slab_slot++) {
+                            int dimension_block = dimension_base + slab_slot;
+                            if (dimension_block % (int)simdgroups == (int)simdgroup_slot) {
+                                simdgroup_float8x8 value_float;
+                                if (@BF16_CACHE@ && mode == 0L) {
+                                    device const ushort* cached_value = (device const ushort*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
+                                    omega_bf16_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                                } else if (@BF8_CACHE@ && mode == 0L) {
+                                    device const uchar* cached_value = (device const uchar*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
+                                    omega_bf8_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                                } else {
+                                    simdgroup_load(value_float, value_ptr + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8, (ulong)(kv_heads * head_dim));
+                                }
+                                omega_zero_padded_value_rows(value_float, key0 + (long)key_tile * 8L, mode == 0L ? slice_end : mma_end, lane);
+                                @OPERAND@ value_operand = @NARROW_TO_OPERAND_VALUE@;
+                                simdgroup_store(value_operand, shared_value + slab_slot * 64, 8);
+                            }
+                        }
+                        threadgroup_barrier(mem_flags::mem_threadgroup);
+                        for (int slab_slot = 0; slab_slot < dimension_count; slab_slot++) {
+                            int dimension_block = dimension_base + slab_slot;
+                            @OPERAND@ value_operand;
+                            @SHARED_V_LOAD@(value_operand, shared_value + slab_slot * 64, 8, lane);
+                            for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups) {
+                                int vector_slot = vector_block / (int)simdgroups;
+                                simdgroup_multiply_accumulate(accumulated[dimension_block][vector_slot], weights[vector_slot], value_operand, accumulated[dimension_block][vector_slot]);
+                            }
+                        }
+                        threadgroup_barrier(mem_flags::mem_threadgroup);
+                    }
+                }
+            } else {
+                for (int key_tile = 0; key_tile < fragments; key_tile++) {
+                    @OPERAND@ weights[tile_blocks];
+                    FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { simdgroup_load(weights[vector_block], score_tile + vector_block * 8 * (int)block + key_tile * 8, (ulong)block); }
+                    FOR_UNROLL for (int slot = 0; slot < (int)dims_per_group; slot++) {
+                        int dimension_block = (int)simdgroup_slot + slot * (int)simdgroups;
+                        simdgroup_float8x8 value_float;
+                        if (@BF16_CACHE@ && mode == 0L) {
+                            device const ushort* cached_value = (device const ushort*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
+                            omega_bf16_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                        } else if (@BF8_CACHE@ && mode == 0L) {
+                            device const uchar* cached_value = (device const uchar*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
+                            omega_bf8_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                        } else {
+                            simdgroup_load(value_float, value_ptr + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8, (ulong)(kv_heads * head_dim));
+                        }
+                        omega_zero_padded_value_rows(value_float, key0 + (long)key_tile * 8L, mode == 0L ? slice_end : mma_end, lane);
+                        @OPERAND@ value = @NARROW_TO_OPERAND_VALUE@;
+                        FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { simdgroup_multiply_accumulate(accumulated[slot][vector_block], weights[vector_block], value, accumulated[slot][vector_block]); }
+                    }
+                }
+            }
+        } else if (@KV_REUSE_SHARED_V@) {
+            FOR_UNROLL for (int dimension_block = 0; dimension_block < (int)(head_dim / 8); dimension_block++) {
+                long dimension = (long)dimension_block * 8L + (long)fragment_column;
+                for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups) {
+                    int vector_slot = vector_block / (int)simdgroups;
+                    float sum_even = 0.0f; float sum_odd = 0.0f;
+                    for (long column = 0L; column < columns; column++) {
+                        float weight = score_tile[(vector_block * 8 + fragment_row) * block + column];
+                        long value_offset = (key0 + column) * (kv_heads * head_dim) + kv_head * head_dim + dimension;
+                        sum_even += weight * in7[value_offset];
+                        sum_odd += weight * in7[value_offset + 1L];
+                    }
+                    accumulated[dimension_block][vector_slot].thread_elements()[0] += sum_even;
+                    accumulated[dimension_block][vector_slot].thread_elements()[1] += sum_odd;
                 }
             }
         } else {
@@ -628,22 +756,46 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    FOR_UNROLL for (int slot = 0; slot < (int)dims_per_group; slot++) {
-        long dimension = ((long)simdgroup_slot + (long)slot * simdgroups) * 8L + (long)fragment_column;
-        FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) {
+    if (@KV_REUSE_SHARED_V@) {
+        for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups) {
+            int vector_slot = vector_block / (int)simdgroups;
             long vector = (long)vector_block * 8L + (long)fragment_row;
             if (vector_live[vector] != 0) {
                 long query_index = (long)vector_row[vector] * (kv_heads * query_groups) + kv_head * query_groups + (long)vector_head[vector];
-                if (splits == 1L) {
-                    float sum = row_sum[vector];
-                    float inverse = sum == 0.0f ? 0.0f : 1.0f / sum;
-                    out[query_index * head_dim + dimension] = accumulated[slot][vector_block].thread_elements()[0] * inverse;
-                    out[query_index * head_dim + dimension + 1L] = accumulated[slot][vector_block].thread_elements()[1] * inverse;
-                } else {
-                    device float* attn_scratch = out;
-                    long base = ((query_index * (head_dim / 4L) + (dimension >> 2)) * splits + split) * 4L + (dimension & 3L);
-                    attn_scratch[base] = accumulated[slot][vector_block].thread_elements()[0];
-                    attn_scratch[base + 1L] = accumulated[slot][vector_block].thread_elements()[1];
+                float sum = row_sum[vector];
+                float inverse = sum == 0.0f ? 0.0f : 1.0f / sum;
+                FOR_UNROLL for (int dimension_block = 0; dimension_block < (int)(head_dim / 8); dimension_block++) {
+                    long dimension = (long)dimension_block * 8L + (long)fragment_column;
+                    if (splits == 1L) {
+                        out[query_index * head_dim + dimension] = accumulated[dimension_block][vector_slot].thread_elements()[0] * inverse;
+                        out[query_index * head_dim + dimension + 1L] = accumulated[dimension_block][vector_slot].thread_elements()[1] * inverse;
+                    } else {
+                        device float* attn_scratch = out;
+                        long base = ((query_index * (head_dim / 4L) + (dimension >> 2)) * splits + split) * 4L + (dimension & 3L);
+                        attn_scratch[base] = accumulated[dimension_block][vector_slot].thread_elements()[0];
+                        attn_scratch[base + 1L] = accumulated[dimension_block][vector_slot].thread_elements()[1];
+                    }
+                }
+            }
+        }
+    } else {
+        FOR_UNROLL for (int slot = 0; slot < (int)dims_per_group; slot++) {
+            long dimension = ((long)simdgroup_slot + (long)slot * simdgroups) * 8L + (long)fragment_column;
+            FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) {
+                long vector = (long)vector_block * 8L + (long)fragment_row;
+                if (vector_live[vector] != 0) {
+                    long query_index = (long)vector_row[vector] * (kv_heads * query_groups) + kv_head * query_groups + (long)vector_head[vector];
+                    if (splits == 1L) {
+                        float sum = row_sum[vector];
+                        float inverse = sum == 0.0f ? 0.0f : 1.0f / sum;
+                        out[query_index * head_dim + dimension] = accumulated[slot][vector_block].thread_elements()[0] * inverse;
+                        out[query_index * head_dim + dimension + 1L] = accumulated[slot][vector_block].thread_elements()[1] * inverse;
+                    } else {
+                        device float* attn_scratch = out;
+                        long base = ((query_index * (head_dim / 4L) + (dimension >> 2)) * splits + split) * 4L + (dimension & 3L);
+                        attn_scratch[base] = accumulated[slot][vector_block].thread_elements()[0];
+                        attn_scratch[base + 1L] = accumulated[slot][vector_block].thread_elements()[1];
+                    }
                 }
             }
         }

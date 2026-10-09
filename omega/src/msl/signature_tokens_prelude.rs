@@ -1762,7 +1762,7 @@ impl AttentionMmaSelection {
         let kv_reuse = match variant.kv_reuse {
             AttentionKvReuse::Legacy => AttentionKvReuseSelection::Legacy,
             AttentionKvReuse::SharedK => AttentionKvReuseSelection::SharedK,
-            AttentionKvReuse::SharedKv => return Err(("kv_reuse", "shared_kv")),
+            AttentionKvReuse::SharedKv => AttentionKvReuseSelection::SharedKv,
         };
         if variant.tile_height != AttentionTileHeight::Legacy {
             return Err(("tile_height", match variant.tile_height {
@@ -1802,6 +1802,8 @@ pub(crate) enum AttentionKvReuseSelection {
     Legacy,
     #[cfg(feature = "metal-attn-variants")]
     SharedK,
+    #[cfg(feature = "metal-attn-variants")]
+    SharedKv,
 }
 
 impl AttentionKvReuseSelection {
@@ -1810,6 +1812,8 @@ impl AttentionKvReuseSelection {
             Self::Legacy => "",
             #[cfg(feature = "metal-attn-variants")]
             Self::SharedK => "_kv_shared_k",
+            #[cfg(feature = "metal-attn-variants")]
+            Self::SharedKv => "_kv_shared_kv",
         }
     }
 

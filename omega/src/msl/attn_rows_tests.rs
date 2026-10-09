@@ -1236,6 +1236,108 @@ fn card_14_k_reuse_declines_when_staging_exceeds_threadgroup_budget() {
     ));
 }
 
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_15_v_reuse_stages_v_for_distinct_query_owners() {
+    let operation = attention_rows_op(9, 2, 64, 512, 8, SLIDING_LOWER);
+    let packed_operands = PackedOperands::new();
+    let policy = NumericPolicy::llama_relaxed();
+    let shared_k = emit_with_attention_variant(
+        &operation,
+        &packed_operands,
+        policy,
+        AttentionVariant {
+            mma_precision: AttentionMmaPrecision::F32,
+            kv_reuse: AttentionKvReuse::SharedK,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("the K-only control emits");
+    let shared_kv = emit_with_attention_variant(
+        &operation,
+        &packed_operands,
+        policy,
+        AttentionVariant {
+            mma_precision: AttentionMmaPrecision::F32,
+            kv_reuse: AttentionKvReuse::SharedKv,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("the shared K/V source emits");
+    let shared_kv_f16 = emit_with_attention_variant(
+        &operation,
+        &packed_operands,
+        policy,
+        AttentionVariant {
+            mma_precision: AttentionMmaPrecision::F16,
+            kv_reuse: AttentionKvReuse::SharedKv,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("the half-width shared K/V source emits");
+
+    assert_ne!(shared_k.entry, shared_kv.entry);
+    assert_ne!(shared_k.source, shared_kv.source);
+    assert!(shared_kv.entry.ends_with("_mma_f32_kv_shared_kv"));
+    assert!(shared_kv.source.contains("threadgroup float shared_value[512]"));
+    assert!(shared_kv.source.contains("simdgroup_store(value_operand, shared_value"));
+    assert!(shared_kv.source.contains("dimension_block % (int)simdgroups == (int)simdgroup_slot"));
+    assert!(shared_kv.source.contains("omega_load_shared_float"));
+    assert!(shared_kv.source.contains("weights[vector_slot]"));
+    assert!(shared_kv.source.contains("accumulated[dimension_block][vector_slot]"));
+    assert!(shared_kv.source.contains("row_sum[vector]"));
+    assert!(shared_kv_f16.source.contains("threadgroup half shared_value[512]"));
+    assert!(shared_kv_f16.source.contains("omega_load_shared_half"));
+
+    let bf16 = cached_attention_row_tiled::render_cached_attention_row_tiled_with(
+        &operation,
+        "omega_card_15_bf16",
+        8,
+        2,
+        false,
+        Some(Codec::BFloat16),
+        AttentionKvReuseSelection::SharedKv,
+    )
+    .expect("BF16 cached V decodes before shared staging");
+    let bf8 = cached_attention_row_tiled::render_cached_attention_row_tiled_with(
+        &operation,
+        "omega_card_15_bf8",
+        8,
+        2,
+        true,
+        Some(Codec::BFloat8),
+        AttentionKvReuseSelection::SharedKv,
+    )
+    .expect("BF8 cached V decodes before shared staging");
+    assert!(bf16.contains("omega_bf16_load_matrix(value_float"));
+    assert!(bf8.contains("omega_bf8_load_matrix(value_float"));
+    assert!(bf16.contains("omega_zero_padded_value_rows(value_float"));
+    assert!(bf8.contains("omega_zero_padded_value_rows(value_float"));
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_15_v_reuse_declines_when_persistent_accumulators_exceed_budget() {
+    let operation = attention_rows_op(9, 8, 512, 512, 4, SLIDING_LOWER);
+    let error = cached_attention_row_tiled::render_cached_attention_row_tiled_with(
+        &operation,
+        "omega_card_15_accumulator_decline",
+        4,
+        8,
+        false,
+        None,
+        AttentionKvReuseSelection::SharedKv,
+    )
+    .expect_err("the query-owned V path declines above the accumulator budget");
+    assert!(matches!(
+        error,
+        EmitError::CachedAttentionKvReuseNotSupported {
+            reason: "shared K/V query ownership exceeds the configured accumulator-fragment budget",
+            ..
+        }
+    ));
+}
+
 #[test]
 fn the_float_setting_multiplies_float_fragments_and_names_no_half_type() {
     for (groups, head_dim) in [(2_u64, 64_u64), (8, 256), (8, 512)] {
@@ -1248,7 +1350,7 @@ fn the_float_setting_multiplies_float_fragments_and_names_no_half_type() {
             "simdgroup_float8x8 weights[tile_blocks];",
             "simdgroup_float8x8 value = value_float;",
             "simdgroup_float8x8 scores[score_key_tiles][score_vectors_per_simdgroup];",
-            "simdgroup_float8x8 accumulated[dims_per_group][tile_blocks];",
+            "simdgroup_float8x8 accumulated[accumulator_dimensions][accumulator_vectors];",
         ] {
             assert!(
                 source.contains(declaration),
@@ -1272,7 +1374,7 @@ fn the_half_setting_narrows_the_operands_and_keeps_scores_accumulators_and_softm
             "simdgroup_half8x8 weights[tile_blocks];",
             "simdgroup_half8x8 value = narrow_fragment(value_float);",
             "simdgroup_float8x8 scores[score_key_tiles][score_vectors_per_simdgroup];",
-            "simdgroup_float8x8 accumulated[dims_per_group][tile_blocks];",
+            "simdgroup_float8x8 accumulated[accumulator_dimensions][accumulator_vectors];",
             "threadgroup float score_tile[tile_vectors * block];",
             "float local_scores[block / 32];",
         ] {
@@ -1298,7 +1400,10 @@ fn the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads(
             .replace(cached_attention_row_tiled::HALF_OPERAND_HELPERS, "")
             .replace("threadgroup half shared_key_even", "threadgroup float shared_key_even")
             .replace("threadgroup half shared_key_odd", "threadgroup float shared_key_odd")
+            .replace("threadgroup half shared_value", "threadgroup float shared_value")
             .replace("omega_load_shared_half", "omega_load_shared_float")
+            .replace("simdgroup_half8x8", "simdgroup_float8x8")
+            .replace("narrow_fragment(value_float)", "value_float")
             .replace("simdgroup_half8x8 key_", "simdgroup_float8x8 key_")
             .replace("simdgroup_half8x8 shared_even", "simdgroup_float8x8 shared_even")
             .replace("simdgroup_half8x8 shared_odd", "simdgroup_float8x8 shared_odd")
@@ -1309,6 +1414,10 @@ fn the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads(
             .replace(
                 "simdgroup_half8x8 value = narrow_fragment(value_float);",
                 "simdgroup_float8x8 value = value_float;",
+            )
+            .replace(
+                "simdgroup_half8x8 value_operand = narrow_fragment(value_float);",
+                "simdgroup_float8x8 value_operand = value_float;",
             );
         if restored != float_source {
             let mismatch = restored
