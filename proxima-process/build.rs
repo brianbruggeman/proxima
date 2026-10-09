@@ -17,10 +17,11 @@ fn main() {
     let source = manifest_dir.join("src").join("interpose.c");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS");
+    let target_family = env::var("CARGO_CFG_TARGET_FAMILY").expect("CARGO_CFG_TARGET_FAMILY");
 
     println!("cargo:rerun-if-changed={}", source.display());
 
-    if target_os == "windows" {
+    if !target_family.split(',').any(|family| family == "unix") {
         return;
     }
 
