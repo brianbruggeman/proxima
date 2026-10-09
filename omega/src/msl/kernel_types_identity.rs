@@ -1615,6 +1615,7 @@ pub(crate) const fn codec_from_quantized_block(block: &QuantizedBlock<'_>) -> Op
         | Codec::Q5_0
         | Codec::Float16
         | Codec::BFloat16 => Some(*codec),
+        Codec::BFloat8 => None,
         _ => None,
     }
 }
@@ -1632,6 +1633,7 @@ pub(crate) const fn codec_cache_token(codec: Codec) -> &'static str {
         Codec::Q5_0 => "q5_0",
         Codec::Float16 => "f16",
         Codec::BFloat16 => "bf16",
+        Codec::BFloat8 => "bf8",
         // No Metal unpack kernel exists for any of these 18 -- `PackedOperands`
         // is only ever populated via `codec_from_quantized_block`
         // (this module's own fn), which maps just the 11 codecs above, so
@@ -1677,6 +1679,7 @@ pub(crate) const fn codec_block_bytes(codec: Codec) -> usize {
         Codec::Q5_0 => Q5_0_BLOCK_BYTES,
         Codec::Float16 => FLOAT16_BLOCK_BYTES,
         Codec::BFloat16 => BFLOAT16_BLOCK_BYTES,
+        Codec::BFloat8 => 1,
         // Unreachable by construction -- see `codec_cache_token`'s doc.
         // Sourced from `GgmlType::block_layout`, the authoritative block
         // shape table, never hand-invented.
@@ -1738,6 +1741,7 @@ pub(crate) const fn codec_block_elements(codec: Codec) -> usize {
         Codec::Q5_0 => Q5_0_BLOCK_ELEMENTS,
         Codec::Float16 => FLOAT16_BLOCK_ELEMENTS,
         Codec::BFloat16 => BFLOAT16_BLOCK_ELEMENTS,
+        Codec::BFloat8 => 1,
         // Unreachable by construction -- see `codec_cache_token`'s doc.
         Codec::Q4_1 => GgmlType::Q4_1.block_layout().block_elements as usize,
         Codec::Q8_1 => GgmlType::Q8_1.block_layout().block_elements as usize,
@@ -2106,7 +2110,8 @@ pub(crate) const fn tiled_decode(codec: Codec) -> Option<TiledDecode> {
         | Codec::Mxfp4
         | Codec::Nvfp4
         | Codec::Q1_0
-        | Codec::Q2_0 => None,
+        | Codec::Q2_0
+        | Codec::BFloat8 => None,
     }
 }
 
