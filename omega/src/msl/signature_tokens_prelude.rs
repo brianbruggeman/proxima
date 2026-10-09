@@ -2025,6 +2025,14 @@ impl AttentionRowSchedule {
         )
     }
 
+    #[cfg(feature = "metal-attn-variants")]
+    pub(crate) const fn without_kv_reuse(self) -> Self {
+        Self {
+            kv_reuse: AttentionKvReuseMode::Legacy,
+            ..self
+        }
+    }
+
     pub(crate) const fn tile_height(self) -> AttentionTileHeightSelection {
         self.tile_height
     }

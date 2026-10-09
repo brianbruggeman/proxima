@@ -1202,6 +1202,44 @@ fn card_14_k_reuse_stages_each_k_fragment_and_preserves_row_masks() {
 
 #[cfg(feature = "metal-attn-variants")]
 #[test]
+fn shared_k_variant_falls_back_for_single_query_row_dispatch() {
+    let operation = attention_rows_op(9, 8, 256, 512, 1, SLIDING_LOWER);
+    let packed_operands = PackedOperands::new();
+    let policy = NumericPolicy::llama_relaxed();
+    let legacy = emit(&operation, &packed_operands, policy)
+        .expect("the one-query-row legacy operation emits");
+    let selected = emit_with_attention_variant(
+        &operation,
+        &packed_operands,
+        policy,
+        AttentionVariant {
+            kv_reuse: AttentionKvReuse::SharedK,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("SharedK falls back when row-tiled MMA cannot serve one query row");
+    let manifest = inspect_attention_variant(
+        &operation,
+        &packed_operands,
+        policy,
+        AttentionVariant {
+            kv_reuse: AttentionKvReuse::SharedK,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("the fallback dispatch has an inspectable manifest");
+
+    assert_eq!(selected.entry, legacy.entry);
+    assert_eq!(selected.source, legacy.source);
+    assert_eq!(selected.grid, legacy.grid);
+    assert_eq!(manifest.variant.kv_reuse, AttentionKvReuse::Legacy);
+    assert_eq!(manifest.kernel.entry, legacy.entry);
+    assert_eq!(manifest.kernel.source, legacy.source);
+    assert_eq!(manifest.kernel.grid, legacy.grid);
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
 fn card_14_k_reuse_declines_when_staging_exceeds_threadgroup_budget() {
     let operation = attention_rows_op(9, 8, 512, 512, 4, SLIDING_LOWER);
     let legacy = cached_attention_row_tiled::render_cached_attention_row_tiled_with(

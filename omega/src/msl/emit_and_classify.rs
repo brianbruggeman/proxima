@@ -2,6 +2,31 @@ use alloc::borrow::ToOwned;
 
 use super::*;
 
+#[cfg(feature = "metal-attn-variants")]
+fn effective_attention_row_schedule(
+    resolved: &BoundOp,
+    numeric_policy: NumericPolicy,
+    row_schedule: AttentionRowSchedule,
+) -> AttentionRowSchedule {
+    if !row_schedule.has_shared_k() {
+        return row_schedule;
+    }
+    #[cfg(feature = "metal-attn-split-rows")]
+    if matches!(
+        cached_attention_form_with_tile_height(
+            &resolved.kind,
+            numeric_policy,
+            row_schedule.tile_height(),
+        ),
+        Some(CachedAttentionForm::TwoRangeRowTiled { .. })
+    ) {
+        return row_schedule;
+    }
+    #[cfg(not(feature = "metal-attn-split-rows"))]
+    let _ = (resolved, numeric_policy);
+    row_schedule.without_kv_reuse()
+}
+
 /// `PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES` -- a `std`-only escape knob
 /// (env reads do not exist on the alloc-only `metal-core` tier build,
 /// `cargo check -p omega --no-default-features --features metal-core
@@ -46,6 +71,7 @@ pub fn emit_with_attention_variant(
         AttentionMmaSelection::from_variant(variant).map_err(|(axis, value)| {
             EmitError::CachedAttentionVariantAxisNotSupported { axis, value }
         })?;
+    let row_schedule = effective_attention_row_schedule(resolved, numeric_policy, row_schedule);
     #[cfg(feature = "metal-attn-split-rows")]
     validate_tile_height_selection(resolved, numeric_policy, row_schedule.tile_height())?;
     #[cfg(feature = "metal-attn-split-rows")]
@@ -80,18 +106,23 @@ pub fn inspect_attention_variant(
             value: "dispatch manifests require a supported cached-attention form",
         },
     )?;
-    let (mma_selection, row_schedule) =
-        AttentionMmaSelection::from_variant(variant).map_err(|(axis, value)| {
-            EmitError::CachedAttentionVariantAxisNotSupported { axis, value }
-        })?;
+    let (mma_selection, selected_schedule) = AttentionMmaSelection::from_variant(variant).map_err(
+        |(axis, value)| EmitError::CachedAttentionVariantAxisNotSupported { axis, value },
+    )?;
+    let row_schedule =
+        effective_attention_row_schedule(resolved, numeric_policy, selected_schedule);
+    let mut effective_variant = variant;
+    if selected_schedule.has_shared_k() && !row_schedule.has_shared_k() {
+        effective_variant.kv_reuse = AttentionKvReuse::Legacy;
+    }
     let dispatch_identity = alloc::format!(
-        "{}{}{}_variant_{variant:?}",
+        "{}{}{}_variant_{effective_variant:?}",
         kernel.entry,
         mma_selection.cache_token_for(resolved),
         row_schedule.cache_token_for(resolved),
     );
     Ok(AttentionDispatchManifest {
-        variant,
+        variant: effective_variant,
         form,
         cache_codec,
         accumulator: DType::Float32,
@@ -175,6 +206,8 @@ pub(crate) fn emit_inner_with_mma_selection(
     row_schedule: AttentionRowSchedule,
 ) -> Result<Kernel, EmitError> {
     validate(resolved)?;
+    #[cfg(feature = "metal-attn-variants")]
+    let row_schedule = effective_attention_row_schedule(resolved, numeric_policy, row_schedule);
     let tile_height_selection = row_schedule.tile_height();
     let mut entry = entry_name_with_tile_height(resolved, numeric_policy, tile_height_selection);
     if matches!(resolved.kind, BoundOpKind::CachedAttention { .. }) {

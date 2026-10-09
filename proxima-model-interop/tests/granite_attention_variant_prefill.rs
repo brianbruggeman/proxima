@@ -149,6 +149,204 @@ fn capture_prompt_dispatches(
     (identities, token_ids)
 }
 
+fn compare_token_ids(expected: &[u32], actual: &[u32]) -> Result<(), String> {
+    if expected.len() != actual.len() {
+        return Err(format!(
+            "token count differs: expected {}, received {}",
+            expected.len(),
+            actual.len()
+        ));
+    }
+    for (index, (expected_id, actual_id)) in expected.iter().zip(actual).enumerate() {
+        if expected_id != actual_id {
+            return Err(format!(
+                "token {index} differs: expected {expected_id}, received {actual_id}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn require_expected_answer(response: &str, expected_fact: &str) -> Result<(), String> {
+    let normalized = response.to_lowercase();
+    let expected_fact = expected_fact.to_lowercase();
+    let has_negation =
+        normalized.contains(" not ") || normalized.contains("n't") || normalized.contains("never");
+    if normalized.contains(&expected_fact) && !has_negation {
+        Ok(())
+    } else {
+        Err(format!(
+            "response does not contain {expected_fact:?}: {response:?}"
+        ))
+    }
+}
+
+fn require_comparison_answer(
+    response: &str,
+    expected_answer: &str,
+    expected_relation: &str,
+    comparison_term: &str,
+) -> Result<(), String> {
+    let normalized = response.to_lowercase();
+    let expected_answer = expected_answer.to_lowercase();
+    let expected_relation = expected_relation.to_lowercase();
+    let comparison_term = comparison_term.to_lowercase();
+    let opposite_relation = if expected_relation == "bigger" {
+        "smaller"
+    } else {
+        "bigger"
+    };
+    let expected_relation_present = normalized.contains(&expected_relation)
+        || (expected_relation == "bigger" && normalized.contains("larger"));
+    let opposite_relation_present = normalized.contains(opposite_relation)
+        || (opposite_relation == "bigger" && normalized.contains("larger"));
+    let answer_is_subject = normalized.contains(&format!("{expected_answer} is"));
+    let comparison_is_subject = normalized.contains(&format!("{comparison_term} is"));
+    let has_negation =
+        normalized.contains(" not ") || normalized.contains("n't") || normalized.contains("never");
+    if normalized.contains(&expected_answer)
+        && normalized.contains(&comparison_term)
+        && expected_relation_present
+        && !opposite_relation_present
+        && answer_is_subject
+        && !comparison_is_subject
+        && !has_negation
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "response does not affirm {expected_answer} as {expected_relation} than {comparison_term}: {response:?}"
+        ))
+    }
+}
+
+fn granite_chat_prompt(user_turn: &str) -> String {
+    format!("<|turn>user\n{user_turn}<turn|>\n<|turn>model\n")
+}
+
+struct ViabilityCheck {
+    name: &'static str,
+    prompt: String,
+    expected_answer: &'static str,
+    expected_relation: Option<(&'static str, &'static str)>,
+}
+
+fn granite_viability_checks() -> Vec<ViabilityCheck> {
+    vec![
+        ViabilityCheck {
+            name: "paris",
+            prompt: granite_chat_prompt("The capital of France is"),
+            expected_answer: "paris",
+            expected_relation: None,
+        },
+        ViabilityCheck {
+            name: "soliloquy",
+            prompt: granite_chat_prompt(
+                "In drama, what is a speech in which a character, alone on stage, speaks their inner thoughts aloud called?",
+            ),
+            expected_answer: "soliloquy",
+            expected_relation: None,
+        },
+        ViabilityCheck {
+            name: "ant_vs_briefcase",
+            prompt: granite_chat_prompt("Which is bigger, an ant or a briefcase?"),
+            expected_answer: "briefcase",
+            expected_relation: Some(("bigger", "ant")),
+        },
+        ViabilityCheck {
+            name: "hippo_vs_building",
+            prompt: granite_chat_prompt(
+                "Which of these is smaller in size: a hippopotamus or a large office building?",
+            ),
+            expected_answer: "hippopotamus",
+            expected_relation: Some(("smaller", "building")),
+        },
+    ]
+}
+
+fn granite_long_prompt_oracle() -> (String, Vec<u32>, Vec<u32>) {
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/llama-parity/granite_moe/long_prompt_llama_ids.json");
+    let fixture_text = std::fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display()));
+    let records: Vec<serde_json::Value> =
+        serde_json::from_str(&fixture_text).expect("parse Granite llama prompt fixture");
+    assert_eq!(records.len(), 1, "fixture must contain exactly one case");
+    let record = &records[0];
+    let prompt = record["prompt"]
+        .as_str()
+        .expect("fixture case has a prompt")
+        .to_string();
+    let ids = |field: &str| {
+        record[field]
+            .as_array()
+            .unwrap_or_else(|| panic!("fixture field {field} must be an array"))
+            .iter()
+            .map(|value| {
+                u32::try_from(
+                    value
+                        .as_u64()
+                        .expect("fixture token ids must be unsigned integers"),
+                )
+                .expect("fixture token id fits u32")
+            })
+            .collect::<Vec<_>>()
+    };
+    (prompt, ids("prompt_ids"), ids("generated_ids"))
+}
+
+fn run_granite_viability_case(check: ViabilityCheck) {
+    let path = granite_checkpoint_path();
+    let file = File::open(&path).expect("open the real Granite checkpoint");
+    // SAFETY: this test only reads the checkpoint and does not mutate it.
+    let mapping = unsafe { Mmap::map(&file) }.expect("mmap the Granite checkpoint");
+    let parsed = parse_complete(&mapping).expect("parse the Granite checkpoint");
+    let model = LoadedModel::load(&parsed, &mapping)
+        .unwrap_or_else(|error| panic!("bind Granite for {}: {error:?}", check.name));
+    let (legacy_ids, legacy_text, _) = model
+        .generate_with_serving_config(&check.prompt, 48, serving_config(None))
+        .unwrap_or_else(|error| panic!("legacy {} request failed: {error:?}", check.name));
+    let (selected_ids, selected_text, _) = model
+        .generate_with_serving_config(&check.prompt, 48, serving_config(Some(shared_k_variant())))
+        .unwrap_or_else(|error| panic!("selected {} request failed: {error:?}", check.name));
+    assert!(
+        !legacy_ids.is_empty() && !selected_ids.is_empty(),
+        "{} returned empty token IDs; legacy={legacy_ids:?}; selected={selected_ids:?}; legacy_text={legacy_text:?}; selected_text={selected_text:?}",
+        check.name
+    );
+    compare_token_ids(&legacy_ids, &selected_ids).unwrap_or_else(|error| {
+        panic!(
+            "{} token IDs differ; prompt={:?}; legacy_ids={legacy_ids:?}; selected_ids={selected_ids:?}; legacy_text={legacy_text:?}; selected_text={selected_text:?}; {error}",
+            check.name, check.prompt
+        )
+    });
+    assert_eq!(
+        legacy_text, selected_text,
+        "{} text differs; prompt={:?}; legacy_ids={legacy_ids:?}; selected_ids={selected_ids:?}",
+        check.name, check.prompt
+    );
+    let mut semantic_matches = Vec::new();
+    for (arm, response) in [
+        ("legacy", legacy_text.as_str()),
+        ("selected", selected_text.as_str()),
+    ] {
+        let answer_check = require_expected_answer(response, check.expected_answer);
+        let relation_check = check.expected_relation.map(|(relation, comparison_term)| {
+            require_comparison_answer(response, check.expected_answer, relation, comparison_term)
+        });
+        let matched = answer_check.is_ok() && relation_check.as_ref().is_none_or(Result::is_ok);
+        semantic_matches.push((arm, matched));
+        println!(
+            "card_24 semantic name={} arm={} answer_check={:?} relation_check={:?}",
+            check.name, arm, answer_check, relation_check
+        );
+    }
+    println!(
+        "card_24 viability name={} expected={:?} prompt={:?} semantic_matches={semantic_matches:?} legacy_ids={legacy_ids:?} selected_ids={selected_ids:?} legacy_text={legacy_text:?} selected_text={selected_text:?}",
+        check.name, check.expected_answer, check.prompt
+    );
+}
+
 #[proxima::test]
 async fn card_23_granite_prefill_uses_selected_attention_dispatch() {
     assert!(
@@ -205,4 +403,140 @@ async fn card_23_legacy_dispatch_fails_selected_identity_control() {
     let error = assert_selected_dispatch_pair(&[legacy.clone()], &[legacy])
         .expect_err("the control must reject identical legacy and selected identities");
     assert!(error.contains("kept legacy entry"));
+}
+
+#[proxima::test]
+async fn card_24_granite_continuation_viability_and_public_request() {
+    let path = granite_checkpoint_path();
+    let file = File::open(&path).expect("open the real Granite checkpoint");
+    // SAFETY: this test only reads the checkpoint and does not mutate it.
+    let mapping = unsafe { Mmap::map(&file) }.expect("mmap the Granite checkpoint");
+    let parsed = parse_complete(&mapping).expect("parse the Granite checkpoint");
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .expect("build the Granite checkpoint vocab");
+    let (fixture_prompt, prompt_ids, llama_ids) = granite_long_prompt_oracle();
+    assert_eq!(prompt_ids.len(), 1_000, "fixture prompt id count");
+    assert_eq!(llama_ids.len(), 128, "fixture generated id count");
+    let wants_bos = vocab
+        .add_bos_token()
+        .unwrap_or_else(|| vocab.bos_token_id().is_some());
+    let wants_eos = vocab.add_eos_token().unwrap_or(false);
+    let encoded_prompt =
+        proxima_tokenizer::encode_with_bos_eos(&fixture_prompt, &vocab, wants_bos, wants_eos)
+            .expect("encode the recorded Granite prompt");
+    assert_eq!(
+        encoded_prompt, prompt_ids,
+        "text request tokenization must match the recorded llama prompt ids"
+    );
+
+    let model = LoadedModel::load(&parsed, &mapping).expect("bind the Granite checkpoint");
+    let (legacy_ids, legacy_text, _) = model
+        .generate_with_serving_config(&fixture_prompt, 128, serving_config(None))
+        .unwrap_or_else(|error| panic!("legacy Granite request failed: {error:?}"));
+    let (selected_ids, selected_text, _) = model
+        .generate_with_serving_config(
+            &fixture_prompt,
+            128,
+            serving_config(Some(shared_k_variant())),
+        )
+        .unwrap_or_else(|error| panic!("selected Granite request failed: {error:?}"));
+
+    assert_eq!(legacy_ids.len(), 128, "legacy request must return 128 ids");
+    assert_eq!(
+        selected_ids.len(),
+        128,
+        "selected request must return 128 ids"
+    );
+    compare_token_ids(&llama_ids, &legacy_ids).unwrap_or_else(|error| {
+        panic!("legacy output differs from the recorded llama ids: {error}")
+    });
+    compare_token_ids(&llama_ids, &selected_ids).unwrap_or_else(|error| {
+        panic!("selected output differs from the recorded llama ids: {error}")
+    });
+    compare_token_ids(&legacy_ids, &selected_ids)
+        .unwrap_or_else(|error| panic!("legacy and selected outputs differ: {error}"));
+    assert!(
+        !selected_text.trim().is_empty(),
+        "selected public request returned no text"
+    );
+    compare_token_ids(&llama_ids[..8], &selected_ids[..8]).unwrap_or_else(|error| {
+        panic!("selected public request prefix differs from the oracle: {error}")
+    });
+
+    println!(
+        "card_24 oracle_cases=1 prompt_ids={} generated_ids={} selected_request_text_bytes={}",
+        prompt_ids.len(),
+        selected_ids.len(),
+        selected_text.len(),
+    );
+    assert!(
+        !legacy_text.trim().is_empty(),
+        "legacy request returned no text"
+    );
+}
+
+#[proxima::test]
+async fn card_24_granite_viability_paris() {
+    run_granite_viability_case(granite_viability_checks().remove(0));
+}
+
+#[proxima::test]
+async fn card_24_granite_viability_soliloquy() {
+    run_granite_viability_case(granite_viability_checks().remove(1));
+}
+
+#[proxima::test]
+async fn card_24_granite_viability_ant_vs_briefcase() {
+    run_granite_viability_case(granite_viability_checks().remove(2));
+}
+
+#[proxima::test]
+async fn card_24_granite_viability_hippo_vs_building() {
+    run_granite_viability_case(granite_viability_checks().remove(3));
+}
+
+fn shared_k_variant() -> AttentionVariant {
+    let mut variant = AttentionVariant::default();
+    variant.kv_reuse = AttentionKvReuse::SharedK;
+    variant
+}
+
+#[proxima::test]
+async fn card_24_wrong_oracle_and_wrong_fact_are_rejected() {
+    let expected_ids = [203, 433, 19482, 1236, 47615, 8558, 12011, 2783];
+    let mut wrong_ids = expected_ids;
+    wrong_ids[0] = 204;
+    let error = compare_token_ids(&wrong_ids, &expected_ids)
+        .expect_err("a changed llama token must be rejected");
+    assert!(error.contains("token 0"), "unexpected mismatch: {error}");
+
+    let error = require_expected_answer("The answer is unknown.", "paris")
+        .expect_err("an answer without the expected fact must be rejected");
+    assert!(
+        error.contains("paris"),
+        "unexpected fact rejection: {error}"
+    );
+
+    require_expected_answer("The capital of France is not Paris.", "paris")
+        .expect_err("a negated Paris answer must be rejected");
+    require_expected_answer("It isn't called a soliloquy.", "soliloquy")
+        .expect_err("a negated soliloquy answer must be rejected");
+
+    let error = require_comparison_answer(
+        "The briefcase is bigger than an ant? No, it isn't.",
+        "briefcase",
+        "bigger",
+        "ant",
+    )
+    .expect_err("a negated ant comparison must fail");
+    assert!(error.contains("briefcase"));
+
+    let error = require_comparison_answer(
+        "A large office building is smaller than a hippopotamus.",
+        "hippopotamus",
+        "smaller",
+        "building",
+    )
+    .expect_err("a reversed hippo comparison must fail");
+    assert!(error.contains("hippopotamus"));
 }
