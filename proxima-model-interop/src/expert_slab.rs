@@ -199,6 +199,8 @@ fn source_codec_name(codec: Codec) -> &'static str {
         Codec::Float16 => "f16",
         Codec::BFloat16 => "bf16",
         Codec::BFloat8 => "bf8",
+        Codec::Bf8E5M2 => "bf8_e5m2",
+        Codec::Bf4E2M1 => "bf4_e2m1",
         Codec::Q5_1 => "q5_1",
         Codec::Q5_0 => "q5_0",
         Codec::Q4_1 => "q4_1",
@@ -234,6 +236,12 @@ fn dequantize_expert(codec: Codec, source: &[u8], output: &mut [f32]) -> Result<
         Codec::Float16 => f16::dequantize(source, output),
         Codec::BFloat16 => bf16::dequantize(source, output),
         Codec::BFloat8 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "bf8" }),
+        Codec::Bf8E5M2 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec {
+            codec: "bf8_e5m2",
+        }),
+        Codec::Bf4E2M1 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec {
+            codec: "bf4_e2m1",
+        }),
         Codec::Q5_1 => q5_1::dequantize(source, output),
         Codec::Q5_0 => q5_0::dequantize(source, output),
         // The 15 newly-recognized codecs with no `proxima_tensor::cpu`

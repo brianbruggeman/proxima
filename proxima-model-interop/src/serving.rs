@@ -1254,12 +1254,6 @@ impl Default for ServingConfig<'static> {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
             numeric_policy: NumericPolicy::llama_relaxed().with_epilogue_sources(true),
-            #[cfg(all(
-                feature = "metal",
-                feature = "metal-attn-variants",
-                target_os = "macos"
-            ))]
-            attention_variant: None,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Serial,
             // Correctness-first default: CPU uses the scalar/dequantized
@@ -1307,6 +1301,12 @@ impl Default for ServingConfig<'static> {
             },
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
+            #[cfg(all(
+                feature = "metal",
+                feature = "metal-attn-variants",
+                target_os = "macos"
+            ))]
+            attention_variant: None,
             attention: AttentionConfig::default(),
             prefill: PrefillConfig::default(),
         }
@@ -1784,6 +1784,12 @@ mod tests {
             },
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
+            #[cfg(all(
+                feature = "metal",
+                feature = "metal-attn-variants",
+                target_os = "macos"
+            ))]
+            attention_variant: None,
             attention: AttentionConfig::default(),
             prefill: PrefillConfig::default(),
         };
@@ -1962,6 +1968,12 @@ mod tests {
             },
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
+            #[cfg(all(
+                feature = "metal",
+                feature = "metal-attn-variants",
+                target_os = "macos"
+            ))]
+            attention_variant: None,
             attention: AttentionConfig::default(),
             prefill: PrefillConfig::default(),
         };
@@ -2085,6 +2097,12 @@ mod tests {
             },
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
+            #[cfg(all(
+                feature = "metal",
+                feature = "metal-attn-variants",
+                target_os = "macos"
+            ))]
+            attention_variant: None,
             attention: AttentionConfig::default(),
             prefill: PrefillConfig::default(),
         };
@@ -2181,6 +2199,12 @@ mod tests {
             },
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
+            #[cfg(all(
+                feature = "metal",
+                feature = "metal-attn-variants",
+                target_os = "macos"
+            ))]
+            attention_variant: None,
             attention: AttentionConfig::default(),
             prefill: PrefillConfig::default(),
         };
@@ -2267,6 +2291,12 @@ mod tests {
             },
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
+            #[cfg(all(
+                feature = "metal",
+                feature = "metal-attn-variants",
+                target_os = "macos"
+            ))]
+            attention_variant: None,
             attention: AttentionConfig::default(),
             prefill: PrefillConfig::default(),
         };

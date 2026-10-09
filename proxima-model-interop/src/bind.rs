@@ -1018,7 +1018,7 @@ pub use proxima_primitives::Codec;
 /// `codec` names -- the deferred half of the split [`BoundWeights::packed_owned`]'s
 /// own doc describes. `None` for a codec [`Codec`] now identifies (GPU
 /// dispatch, sidecar wire tag) that [`proxima_tensor::cpu::QuantizedBlock`]
-/// has never grown a CPU decode variant for -- the 15 newly-recognized
+/// has never grown a CPU decode variant for -- the recognized
 /// formats (`Q4_1`/`Q8_1`/`Q8K`/the `Iq*` family minus `Iq4Nl`/`Iq2Xs`/
 /// `Iq3Xxs`/`Tq10`/`Tq20`/`Mxfp4`/`Nvfp4`/`Q1_0`/`Q2_0`) are identity-only
 /// today; a caller reaching one propagates [`InteropError::UnsupportedCodec`]
@@ -1055,7 +1055,9 @@ pub(crate) fn as_block(codec: Codec, bytes: &[u8]) -> Option<proxima_tensor::cpu
         | Codec::Nvfp4
         | Codec::Q1_0
         | Codec::Q2_0
-        | Codec::BFloat8 => None,
+        | Codec::BFloat8
+        | Codec::Bf8E5M2
+        | Codec::Bf4E2M1 => None,
     }
 }
 
@@ -1137,6 +1139,8 @@ fn codec_name_suffix(codec: Codec) -> &'static str {
         Codec::Float16 => "f16",
         Codec::BFloat16 => "bf16",
         Codec::BFloat8 => "bf8",
+        Codec::Bf8E5M2 => "bf8_e5m2",
+        Codec::Bf4E2M1 => "bf4_e2m1",
         Codec::Q2K => "q2_k",
         Codec::Q5_1 => "q5_1",
         Codec::Q5_0 => "q5_0",
@@ -1164,8 +1168,8 @@ fn codec_name_suffix(codec: Codec) -> &'static str {
 /// The on-disk [`GgmlType`] `codec` packs bytes as -- the reverse of
 /// [`codec_from_ggml_type`], needed by [`codec_byte_len_for`] to look up a
 /// codec's block layout without re-typing [`GgmlType::block_layout`]'s
-/// numbers a second time here. BF8 has no GGML wire type and returns
-/// [`InteropError::UnsupportedCodec`].
+/// numbers a second time here. Proxima brain-float encodings have no GGML
+/// wire type and return [`InteropError::UnsupportedCodec`].
 #[cfg(feature = "std")]
 pub(crate) fn codec_to_ggml_type(codec: Codec) -> Result<GgmlType, InteropError> {
     Ok(match codec {
@@ -1198,7 +1202,9 @@ pub(crate) fn codec_to_ggml_type(codec: Codec) -> Result<GgmlType, InteropError>
         Codec::Nvfp4 => GgmlType::Nvfp4,
         Codec::Q1_0 => GgmlType::Q1_0,
         Codec::Q2_0 => GgmlType::Q2_0,
-        Codec::BFloat8 => return Err(InteropError::UnsupportedCodec { codec }),
+        Codec::BFloat8 | Codec::Bf8E5M2 | Codec::Bf4E2M1 => {
+            return Err(InteropError::UnsupportedCodec { codec });
+        }
     })
 }
 
@@ -1662,6 +1668,8 @@ pub(crate) fn quantize_to_kind(
         Codec::Q1_0 => Err(QuantError::UnsupportedCodec { codec: "q1_0" }),
         Codec::Q2_0 => Err(QuantError::UnsupportedCodec { codec: "q2_0" }),
         Codec::BFloat8 => Err(QuantError::UnsupportedCodec { codec: "bf8" }),
+        Codec::Bf8E5M2 => Err(QuantError::UnsupportedCodec { codec: "bf8_e5m2" }),
+        Codec::Bf4E2M1 => Err(QuantError::UnsupportedCodec { codec: "bf4_e2m1" }),
     }
 }
 

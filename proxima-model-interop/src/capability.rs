@@ -270,10 +270,10 @@ pub fn supported_dense_cpu_codecs() -> Vec<GgmlType> {
 /// gaining a 30th codec fails this crate's own build before it can silently
 /// fail to appear here.
 ///
-/// `Codec` carries 29 variants; only 14 have a CPU decode/matmul path
+/// `Codec` carries 32 variants; only 14 have a CPU decode/matmul path
 /// (`proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type` returns
 /// `Some`, mirrored by `ALL_CODECS`'s `cpu_supported` field below) -- the
-/// other 15 are recognized (this table names every one) but no construction
+/// other 18 are recognized (this table names every one) but no construction
 /// site in this crate or `proxima_tensor` ever builds a
 /// [`proxima_tensor::cpu::QuantizedBlock::Packed`] carrying one, matching
 /// `codec_to_decodable_ggml_type`'s own doc for why. This mirrors the CPU
@@ -310,6 +310,8 @@ pub mod quant_format {
             Codec::Float16 => "F16",
             Codec::BFloat16 => "BF16",
             Codec::BFloat8 => "BF8",
+            Codec::Bf8E5M2 => "BF8_E5M2",
+            Codec::Bf4E2M1 => "BF4_E2M1",
             Codec::Q4_1 => "Q4_1",
             Codec::Q8_1 => "Q8_1",
             Codec::Q8K => "Q8_K",
@@ -330,7 +332,7 @@ pub mod quant_format {
 
     /// `true` for exactly the 14 [`Codec`] variants
     /// `proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type` maps to
-    /// `Some` (a CPU decode path exists); `false` for the other 15, which
+    /// `Some` (a CPU decode path exists); `false` for the other 18, which
     /// that same function maps to `None` -- no construction site in this
     /// crate or `proxima_tensor` ever builds a `QuantizedBlock::Packed`
     /// carrying one of them.
@@ -354,7 +356,7 @@ pub mod quant_format {
         )
     }
 
-    /// Every [`Codec`] variant, exhaustively -- adding a 30th to
+    /// Every [`Codec`] variant, exhaustively -- adding another to
     /// `proxima_primitives::Codec` without adding it here is a compile
     /// error, not a silently stale doc.
     ///
@@ -390,6 +392,9 @@ pub mod quant_format {
         Codec::Nvfp4,
         Codec::Q1_0,
         Codec::Q2_0,
+        Codec::BFloat8,
+        Codec::Bf8E5M2,
+        Codec::Bf4E2M1,
     ];
 
     #[must_use]
@@ -481,8 +486,8 @@ mod quant_format_tests {
     fn all_codecs_covers_every_codec_variant_exactly_once() {
         assert_eq!(
             ALL_CODECS.len(),
-            29,
-            "proxima_primitives::Codec carries 29 variants today"
+            32,
+            "proxima_primitives::Codec carries 32 variants today"
         );
     }
 

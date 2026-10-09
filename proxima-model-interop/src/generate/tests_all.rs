@@ -2390,6 +2390,8 @@ pub(super) mod placed_plan_mode_tests {
                 math_mode: omega::metal::MathMode::Safe,
                 numeric_policy: proxima_tensor::NumericPolicy::bit_exact(),
                 dispatch_type: omega::metal::DispatchType::Serial,
+                #[cfg(feature = "metal-attn-variants")]
+                attention_variant: None,
                 plan_time_constants: false,
                 command_buffer_chunks: 1,
                 fuse_cached_attention: true,
@@ -2444,6 +2446,8 @@ pub(super) mod placed_plan_mode_tests {
                 math_mode: omega::metal::MathMode::Safe,
                 numeric_policy: proxima_tensor::NumericPolicy::llama_relaxed(),
                 dispatch_type: omega::metal::DispatchType::Serial,
+                #[cfg(feature = "metal-attn-variants")]
+                attention_variant: None,
                 plan_time_constants: false,
                 command_buffer_chunks: 1,
                 fuse_cached_attention: true,
@@ -2481,6 +2485,8 @@ pub(super) mod placed_plan_mode_tests {
                 math_mode: omega::metal::MathMode::Fast,
                 numeric_policy: proxima_tensor::NumericPolicy::bit_exact(),
                 dispatch_type: omega::metal::DispatchType::Serial,
+                #[cfg(feature = "metal-attn-variants")]
+                attention_variant: None,
                 plan_time_constants: false,
                 command_buffer_chunks: 1,
                 fuse_cached_attention: true,
