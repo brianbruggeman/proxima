@@ -26,6 +26,8 @@ alloc = [
     # backs sync::notify (re-gated from std, see sync/mod.rs) — event-listener
     # supports no_std + alloc, so Notify never needs proxima-primitives/std.
     "dep:event-listener",
+    # async-lock's semaphore is usable with alloc without its std feature.
+    "dep:async-lock",
 ]
 std = [
     "alloc",
@@ -55,7 +57,6 @@ std = [
     "dep:arrayvec",
     "dep:async-broadcast",
     "dep:async-channel",
-    "dep:async-lock",
     "dep:parking_lot",
 ]
 # Retained for cargo-feature-graph compatibility: several downstream crates'
