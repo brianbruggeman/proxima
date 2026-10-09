@@ -10,7 +10,7 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 | 03 | [card](cards/03-bf8-element.md) | 01,02 | R2 | `cargo nextest run -p proxima-tensor --lib -E 'test(~card_03_bf8_element)'` | filter selects 2 tests; 2 passed | [x] | `2 passed; 786 filter-excluded; Omega BF8 exhaustiveness repaired in 09d2fc21; model-interop/GGML BF8 refusal in 0fe4b71c` |
 | 04 | [card](cards/04-bf16-placed.md) | none | R3 | `cargo nextest run -p omega --lib -E 'test(~card_04_bf16_placed)'` | filter selects 2 tests; 2 passed | [x] | `2 passed; 482 filter-excluded; BF16 staging narrow added in f8a391d0` |
 | 05 | [card](cards/05-bf16-device-kv.md) | 04 | R3 | `cargo nextest run -p proxima-model-interop --features std,metal,metal-attn-split-rows --lib -E 'test(~card_05_bf16_device)'` | filter selects 2 tests; 2 passed | [x] | `2 passed; 718 filter-excluded` |
-| 06 | [card](cards/06-bf16-decode.md) | 05 | R4 | `cargo nextest run -p omega --features metal-attn-split-decode --lib -E 'test(~card_06_bf16_decode)'` | filter selects 2 tests; 2 passed | [ ] | |
+| 06 | [card](cards/06-bf16-decode.md) | 05 | R4 | `cargo nextest run -p omega --features metal-attn-split-decode --test cached_attention_decode_split_parity -E 'test(~card_06_bf16_decode)'` | filter selects 2 tests; 2 passed; Metal output bits match F32-cache decode | [x] | `2 passed; 2 filter-excluded` |
 | 07 | [card](cards/07-bf8-placed.md) | 01 | R3 | `cargo nextest run -p omega --lib -E 'test(~card_07_bf8_placed)'` | filter selects 2 tests; 2 passed | [ ] | |
 | 08 | [card](cards/08-bf8-device-kv.md) | 02,07 | R3 | `cargo nextest run -p proxima-model-interop --features std,metal,metal-attn-split-rows --lib -E 'test(~card_08_bf8_device)'` | filter selects 2 tests; 2 passed | [ ] | |
 | 09 | [card](cards/09-bf8-decode.md) | 08 | R4 | `cargo nextest run -p omega --features metal-attn-split-decode --lib -E 'test(~card_09_bf8_decode)'` | filter selects 2 tests; 2 passed | [ ] | |
@@ -30,8 +30,8 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 
 ## resume
 
-Last landed slice: card 05 implementation and AC05
-Next action: card 06, decode BF16 K/V in the split decode kernel
+Last landed slice: card 06 implementation and AC06
+Next action: card 07, add BF8 placed-buffer conversion helpers
 Open question, if any: none; E5M2 is bound as Proxima-owned in SPEC.md
 
 ## struck

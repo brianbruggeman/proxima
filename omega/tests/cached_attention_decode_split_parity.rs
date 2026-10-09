@@ -19,7 +19,7 @@
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use half::f16;
+use half::{bf16, f16};
 use proxima_tensor::cpu::{QuantizedBlock, evaluate_quantized_named_with_scratch};
 use proxima_tensor::spec::qk_norm_cached_forward_program;
 use proxima_tensor::test_support::Lcg;
@@ -115,6 +115,17 @@ fn half_bytes(values: &[f32]) -> Vec<u8> {
     values
         .iter()
         .flat_map(|value| f16::from_f32(*value).to_le_bytes())
+        .collect()
+}
+
+fn round_to_bf16(values: &[f32]) -> Vec<f32> {
+    values.iter().map(|value| bf16::from_f32(*value).to_f32()).collect()
+}
+
+fn bf16_bytes(values: &[f32]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| bf16::from_f32(*value).to_bits().to_le_bytes())
         .collect()
 }
 
@@ -267,4 +278,108 @@ fn the_decode_split_reads_a_float16_cache_as_the_cpu_reads_the_same_rounded_valu
         }
     }
     assert_eq!(cells, 12, "3 head dims x 4 cached lengths");
+}
+
+#[test]
+fn card_06_bf16_decode_matches_f32_decode_output_bits() {
+    let policy = production_numeric_policy();
+    let mut fixture = gqa_decode_fixture(31, 64);
+    let exact_values = [0.0f32, 0.5, -0.5, 1.0, -1.0, 2.0, -2.0];
+    let bf16_blocks: Vec<(String, Vec<u8>)> = fixture
+        .named
+        .iter_mut()
+        .filter(|(name, _)| is_kv_cache(name))
+        .map(|(name, values)| {
+            for (index, value) in values.iter_mut().enumerate() {
+                *value = exact_values[index % exact_values.len()];
+            }
+            assert_eq!(*values, round_to_bf16(values), "fixture values are exact BF16 values");
+            (name.clone(), bf16_bytes(values))
+        })
+        .collect();
+    assert_eq!(bf16_blocks.len(), 3 * LAYERS as usize);
+
+    let output_roots = [fixture.roots[0]];
+    let f32_named = as_named_blocks(&fixture.named);
+    let bf16_named: Vec<(&str, QuantizedBlock<'_>)> = fixture
+        .named
+        .iter()
+        .map(|(name, values)| match bf16_blocks.iter().find(|(cache_name, _)| cache_name == name) {
+            Some((_, bytes)) => (
+                name.as_str(),
+                QuantizedBlock::Packed {
+                    codec: omega::Codec::BFloat16,
+                    bytes,
+                },
+            ),
+            None => (
+                name.as_str(),
+                QuantizedBlock::Float32(values),
+            ),
+        })
+        .collect();
+    let f32_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &f32_named,
+        &output_roots,
+        policy,
+    )
+    .expect("F32 cache dispatch plans");
+    let bf16_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &bf16_named,
+        &output_roots,
+        policy,
+    )
+    .expect("BF16 cache dispatch plans");
+
+    let f32_output = omega::execute_plan_named(&f32_plan, &f32_named)
+        .expect("F32 cache decode executes")
+        .root()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect::<Vec<_>>();
+    let bf16_output = omega::execute_plan_named(&bf16_plan, &bf16_named)
+        .expect("BF16 cache decode executes")
+        .root()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect::<Vec<_>>();
+    assert_eq!(bf16_output, f32_output, "the cache decode has the same f32 inputs and operations");
+}
+
+#[test]
+fn card_06_bf16_decode_selects_source_and_declines_mixed_cache_codecs() {
+    let policy = production_numeric_policy();
+    let fixture = gqa_decode_fixture(31, 64);
+    let output_roots = [fixture.roots[0]];
+    let shapes = infer(&fixture.program, &fixture.symbols).expect("the decode program infers");
+    let resolved = bind(&fixture.program, &shapes, &output_roots, policy)
+        .expect("the decode program binds");
+    let attention = resolved
+        .iter()
+        .find(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+        .expect("the fixture contains a cached attention operation");
+    let bf16 = [2, 3, 6]
+        .into_iter()
+        .map(|index| (attention.operands()[index].0, omega::Codec::BFloat16))
+        .collect::<omega::PackedOperands>();
+    let emitted = omega::emit(attention, &bf16, policy).expect("BF16 decode source emits");
+    assert!(emitted.entry.ends_with("_ds"), "selected source is decode split");
+    assert!(emitted.source.contains("device const ushort* in2"));
+    assert!(emitted.source.contains("omega_bf16x4_to_float4"));
+    assert!(emitted.source.contains("float4(kr4_new[index])"));
+
+    let mixed = [
+        (attention.operands()[2].0, omega::Codec::BFloat16),
+        (attention.operands()[3].0, omega::Codec::BFloat16),
+        (attention.operands()[6].0, omega::Codec::Float16),
+    ]
+    .into_iter()
+    .collect::<omega::PackedOperands>();
+    let error = omega::emit(attention, &mixed, policy)
+        .expect_err("mixed BF16 and F16 cache operands must decline");
+    assert!(matches!(error, omega::EmitError::CachedAttentionKvCodecNotSupported { .. }));
 }
