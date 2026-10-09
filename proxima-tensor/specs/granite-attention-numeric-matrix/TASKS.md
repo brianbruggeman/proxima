@@ -33,9 +33,9 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 
 ## resume
 
-Last landed slice: card 24 implementation and AC24/AC24b; card 25 source and both acceptance checks are complete and ready to commit
-Next action: commit card 25 as one fix and push it to origin/main
-Open question, if any: the route-prepass cache identity now distinguishes the baked token/expert counts; this sequence does not cover other request orders or concurrency
+Last landed slice: card 25 implementation and AC25a/AC25b, pushed to origin/main as `36db6571`
+Next action: none; cards 00–25 are all recorded complete
+Open question, if any: none in this card set; card 25 records the tested Granite checkpoint, device, serving configuration, and request sequence
 
 ## struck
 
