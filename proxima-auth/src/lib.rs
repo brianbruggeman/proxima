@@ -11,6 +11,8 @@
 //!   attach edge.
 //! - **lifecycle** ([`token::TokenLifecycle`]) — exchange creds for a
 //!   short-lived token, refresh before expiry, single-flight. The novel core.
+//! - **authorization code** (behind `oauth-authorization-code`) — one consent
+//!   transaction with S256 PKCE, callback validation, and a one-use exchange.
 //! - **handshake** ([`Handshake`]) — multi-round challenge/response (SCRAM,
 //!   Digest, Kerberos); `proxima_pgwire::ScramClient` is the reference instance.
 //! - **signing** (`sigv4::SigV4Signer`, behind the `signing` feature) —
@@ -18,8 +20,9 @@
 //!   (AWS `SigV4`, HMAC, RFC 9421).
 //!
 //! Each form past the first two is a default-off feature (`signing`, `digest`,
-//! `negotiate`), so a plain `-p proxima-auth` command compiles one module of
-//! four. `scripts/proxima-auth-gate.sh` is what covers the rest.
+//! `negotiate`, and `oauth-authorization-code`); the optional `oauth-browser`
+//! feature adds only the std-tier configuration and injected browser edge. A
+//! plain `-p proxima-auth` command compiles the base forms.
 //!
 //! Sans-IO discipline (principle 11): no clock reads — the edge stamps
 //! [`token::AuthTime`] (mirrors `proxima_protocols::quic::Instant`); no sockets.
@@ -29,6 +32,12 @@
 extern crate alloc;
 
 pub mod token;
+
+#[cfg(feature = "oauth-authorization-code")]
+pub mod authorization_code;
+
+#[cfg(feature = "oauth-browser")]
+pub mod browser;
 
 #[cfg(feature = "signing")]
 pub mod sigv4;
@@ -40,6 +49,15 @@ pub mod digest;
 pub mod spnego;
 
 pub use token::{AuthTime, Credential, TokenLifecycle, TokenStep};
+
+#[cfg(feature = "oauth-authorization-code")]
+pub use authorization_code::{
+    AuthorizationCodeConfig, AuthorizationCodeTransaction, AuthorizationError,
+    AuthorizationRequest, AuthorizationResponse, MAX_CALLBACK_URI_BYTES, TokenRequest,
+};
+
+#[cfg(feature = "oauth-browser")]
+pub use browser::{BrowserOpener, OAuthBrowserConfig};
 
 #[cfg(feature = "signing")]
 pub use sigv4::{SecretKey, SigV4Signer, SignedHeader};
