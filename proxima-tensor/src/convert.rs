@@ -2,9 +2,9 @@
 //! target scalar, no new trait. [`Convert`] is the one generic type: a
 //! `PhantomData` marker, monomorphized per pair by one concrete `Pipe` impl
 //! per pair of the machine scalar types
-//! ([`crate::dtype::DType`]'s `Int8`/`UInt8`/`Int32`/`UInt32`/`BFloat16`/
-//! `Float16`/`Float32`, `Bool` as `bool`) the caller names. A pair not wired
-//! directly (say `Int8 -> Float32`) composes for free through
+//! ([`crate::dtype::DType`]'s `Int8`/`UInt8`/`Int32`/`UInt32`/`BFloat8`/
+//! `BFloat16`/`Float16`/`Float32`, `Bool` as `bool`) the caller names. A pair
+//! not wired directly (say `Int8 -> Float32`) composes for free through
 //! `proxima_primitives::PipeExt::and_then` (`Int8 -> Int32 -> Float32`) —
 //! that is the algebra doing its job, not a gap. `SimdConvert`'s scalar
 //! fallback (below) calls straight through this same `Pipe::call` via

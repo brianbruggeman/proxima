@@ -617,6 +617,12 @@ pub(super) fn evaluate_uniform_typed(
         DType::BFloat16 => dispatch!(bf16, BFloat16),
         DType::Float32 => dispatch!(f32, Float32),
         DType::Float64 => dispatch!(f64, Float64),
+        DType::BFloat8 => {
+            return Err(TensorError::NotLowerable {
+                node: NodeId(0),
+                reason: "bfloat8 typed evaluation requires the scalar element implementation",
+            });
+        }
         DType::Bool => unreachable!("typed_program_plan already rejected this dtype"),
     })
 }
