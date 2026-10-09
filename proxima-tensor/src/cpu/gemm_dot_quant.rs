@@ -2259,3 +2259,59 @@ pub fn matmul_bf16_f32(
         dot_bf16_f32,
     )
 }
+
+pub fn matmul_bf8_e5m2_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_bf8_e5m2_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        |weight_row, activation_row| {
+            if weight_row.len() != activation_row.len() {
+                return Err(TensorError::QuantizedShapeMismatch {
+                    reason: "activation length does not match the bf8_e5m2 weight row's element count",
+                });
+            }
+            Ok(weight_row.iter().zip(activation_row).fold(
+                0.0f32,
+                |accumulator, (&weight, &input)| {
+                    proxima_gguf::quant::bf8_e5m2::decode(weight).mul_add(input, accumulator)
+                },
+            ))
+        },
+    )
+}
+
+pub fn matmul_bf4_e2m1_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_bf4_e2m1_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        |weight_row, activation_row| {
+            if weight_row.len().saturating_mul(2) != activation_row.len() {
+                return Err(TensorError::QuantizedShapeMismatch {
+                    reason: "activation length does not match the bf4_e2m1 weight row's element count",
+                });
+            }
+            Ok(activation_row
+                .iter()
+                .enumerate()
+                .fold(0.0f32, |accumulator, (index, &input)| {
+                    let packed = weight_row[index / 2];
+                    let nibble = (packed >> (4 * (index % 2))) & 0x0f;
+                    proxima_gguf::quant::bf4_e2m1::decode(nibble).mul_add(input, accumulator)
+                }))
+        },
+    )
+}

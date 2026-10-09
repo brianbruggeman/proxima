@@ -102,7 +102,10 @@ pub(super) fn grid_threads_with_tile_height(
                 checked_product(resolved.node, resolved.extents.iter().copied())?
                     .checked_div(*head_dim)
                     .unwrap_or(0);
-            checked_product(resolved.node, [attention_vectors, chunks, splits, SIMD_WIDTH])?
+            checked_product(
+                resolved.node,
+                [attention_vectors, chunks, splits, SIMD_WIDTH],
+            )?
         }
         BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. } => {
             checked_product(resolved.node, resolved.extents.iter().copied())?
@@ -116,7 +119,9 @@ pub(super) fn grid_threads_with_tile_height(
         } => {
             let output_total: u64 = checked_product(
                 resolved.node,
-                output_axes.iter().map(|dim| resolved.extents[*dim as usize]),
+                output_axes
+                    .iter()
+                    .map(|dim| resolved.extents[*dim as usize]),
             )?;
             if let Some(block) =
                 tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes)
@@ -255,9 +260,10 @@ pub(super) fn grid_threads_with_tile_height(
         // what `render_moe_topk`'s own threadgroup reduction (`sg_max`/`sg_idx`
         // are `threadgroup` arrays, coherent only within one threadgroup)
         // requires.
-        BoundOpKind::MoeTopK { expert_count, .. } => {
-            checked_product(resolved.node, [*expert_count, resolved.extents.iter().product()])?
-        }
+        BoundOpKind::MoeTopK { expert_count, .. } => checked_product(
+            resolved.node,
+            [*expert_count, resolved.extents.iter().product()],
+        )?,
         BoundOpKind::TopFractionSelect { .. } => SELECTION_THREADGROUP_WIDTH,
         // One threadgroup per attention row, `width` lanes cooperating --
         // `render_cached_softmax_weights`'s own doc; `tiled_gemm_
@@ -270,7 +276,10 @@ pub(super) fn grid_threads_with_tile_height(
             ..
         } => checked_product(
             resolved.node,
-            [*attention_rows, wide_cooperative_reduce_width(*cached_key_rows)],
+            [
+                *attention_rows,
+                wide_cooperative_reduce_width(*cached_key_rows),
+            ],
         )?,
     };
     Ok(threads)
@@ -523,9 +532,9 @@ pub(super) fn entry_name_with_tile_height(
             head_k_dim,
             head_v_dim,
             ..
-        } => format!(
-            "omega_gated_delta_net_h{kv_heads}_v{num_v_heads}_k{head_k_dim}_d{head_v_dim}"
-        ),
+        } => {
+            format!("omega_gated_delta_net_h{kv_heads}_v{num_v_heads}_k{head_k_dim}_d{head_v_dim}")
+        }
         BoundOpKind::MoeTopK {
             expert_count,
             top_k,
@@ -768,7 +777,11 @@ pub(super) fn kernel_signature_with_extra_outputs(
 /// [`push_gather_fetch`] emits). Declared only when `gather_count > 0`, so a
 /// gather-free kernel's `Uniforms` struct is byte-for-byte what it was
 /// before gather existed.
-pub(super) fn push_gather_uniform_fields(source: &mut String, gather_count: usize, rank_len: usize) {
+pub(super) fn push_gather_uniform_fields(
+    source: &mut String,
+    gather_count: usize,
+    rank_len: usize,
+) {
     if gather_count == 0 {
         return;
     }
@@ -976,6 +989,8 @@ pub(super) fn preamble(source: &mut String, tiled_decode_codec: Option<Codec>) {
     source.push('\n');
     source.push_str(BF16_UNPACK_MSL);
     source.push('\n');
+    source.push_str(BRAIN_FLOAT_SCALAR_UNPACK_MSL);
+    source.push('\n');
     if let Some(decode) = tiled_decode_codec.and_then(tiled_decode) {
         source.push_str(decode.msl);
         source.push('\n');
@@ -1040,6 +1055,10 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> 
         Some(Codec::BFloat16) => format!(
             "bf16_element(in{index} + ({offset} / {BFLOAT16_BLOCK_ELEMENTS}) * {BFLOAT16_BLOCK_BYTES}, (uint)({offset} % {BFLOAT16_BLOCK_ELEMENTS}))"
         ),
+        Some(Codec::Bf8E5M2) => format!("bf8_e5m2_element(in{index} + {offset}, 0u)"),
+        Some(Codec::Bf4E2M1) => {
+            format!("bf4_e2m1_element(in{index} + ({offset} / 2), (uint)({offset} % 2))")
+        }
         // No Metal unpack kernel exists for any of these 18 -- `PackedOperands`
         // is only ever populated via `codec_from_quantized_block`, which
         // maps just the 11 codecs above, so this arm is unreachable by
@@ -1084,7 +1103,11 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> 
 /// (unlike `operand_read`'s `Option<Codec>`): this form only makes sense for
 /// a genuinely packed operand, so the caller (already inside the packed-row
 /// weight-decode path) always has a concrete [`Codec`] in hand.
-pub(super) fn operand_read_from_block_origin(block_origin: &str, relative: &str, codec: Codec) -> String {
+pub(super) fn operand_read_from_block_origin(
+    block_origin: &str,
+    relative: &str,
+    codec: Codec,
+) -> String {
     let block_elements = codec_block_elements(codec);
     let block_bytes = codec_block_bytes(codec);
     let element_fn = codec_element_fn_name(codec);
@@ -1114,6 +1137,8 @@ fn codec_element_fn_name(codec: Codec) -> &'static str {
         Codec::Q5_1 => "q5_1_element",
         Codec::Q5_0 => "q5_0_element",
         Codec::BFloat16 => "bf16_element",
+        Codec::Bf8E5M2 => "bf8_e5m2_element",
+        Codec::Bf4E2M1 => "bf4_e2m1_element",
         Codec::Float16
         | Codec::Q4_1
         | Codec::Q8_1
@@ -1167,7 +1192,11 @@ pub(super) fn render_iota(resolved: &BoundOp, entry: &str) -> Result<String, Emi
 /// byte-identical to `render_iota`'s and both share
 /// [`crate::metal`]'s `pack_leaf_uniforms`; `kernel_entry` folds the value's
 /// bits into the entry name to keep the kernel cache correct.
-pub(super) fn render_constant(resolved: &BoundOp, entry: &str, value: f32) -> Result<String, EmitError> {
+pub(super) fn render_constant(
+    resolved: &BoundOp,
+    entry: &str,
+    value: f32,
+) -> Result<String, EmitError> {
     let element_type = type_token(resolved.node, resolved.dtype)?;
 
     let mut source = String::new();
@@ -1398,7 +1427,9 @@ pub(super) fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String,
          \tuint sg_id [[simdgroup_index_in_threadgroup]],\n\
          \tuint sg_lane [[thread_index_in_simdgroup]]) {\n",
     );
-    let extra_params: Vec<String> = (0..extra_count).map(|index| format!("extra{index}")).collect();
+    let extra_params: Vec<String> = (0..extra_count)
+        .map(|index| format!("extra{index}"))
+        .collect();
     source.push_str(&format!(
         "    device float* extras[{extra_count}] = {{ {} }};\n",
         extra_params.join(", ")
@@ -1808,7 +1839,10 @@ impl AttentionMmaSelection {
         }
         if variant.query_parallelism != AttentionQueryParallelism::Legacy {
             #[cfg(not(feature = "metal-attn-split-rows"))]
-            return Err(("query_parallelism", "row-tiled attention feature is disabled"));
+            return Err((
+                "query_parallelism",
+                "row-tiled attention feature is disabled",
+            ));
         }
         if variant.prefetch != AttentionPrefetch::Off {
             #[cfg(not(feature = "metal-attn-split-rows"))]
@@ -1829,7 +1863,9 @@ impl AttentionMmaSelection {
                 .with_tile_height(tile_height)
                 .with_query_parallelism(match variant.query_parallelism {
                     AttentionQueryParallelism::Legacy => AttentionQueryParallelismSelection::Legacy,
-                    AttentionQueryParallelism::SimdgroupRows => AttentionQueryParallelismSelection::SimdgroupRows,
+                    AttentionQueryParallelism::SimdgroupRows => {
+                        AttentionQueryParallelismSelection::SimdgroupRows
+                    }
                 })
                 .with_prefetch(match variant.prefetch {
                     AttentionPrefetch::Off => AttentionPrefetchSelection::Off,
@@ -1929,7 +1965,6 @@ impl AttentionTileHeightSelection {
             Self::Rows16 => "_tile_rows16",
         }
     }
-
 }
 
 impl AttentionRowSchedule {
@@ -1947,7 +1982,10 @@ impl AttentionRowSchedule {
     pub(crate) const fn is_legacy(self) -> bool {
         matches!(self.kv_reuse, AttentionKvReuseMode::Legacy)
             && matches!(self.tile_height, AttentionTileHeightSelection::Legacy)
-            && matches!(self.query_parallelism, AttentionQueryParallelismSelection::Legacy)
+            && matches!(
+                self.query_parallelism,
+                AttentionQueryParallelismSelection::Legacy
+            )
             && matches!(self.prefetch, AttentionPrefetchSelection::Off)
             && matches!(self.simd_topology, AttentionSimdTopologySelection::Legacy)
     }
@@ -1993,7 +2031,10 @@ impl AttentionRowSchedule {
 
     #[cfg(feature = "metal-attn-variants")]
     const fn with_tile_height(self, tile_height: AttentionTileHeightSelection) -> Self {
-        Self { tile_height, ..self }
+        Self {
+            tile_height,
+            ..self
+        }
     }
 
     #[cfg(feature = "metal-attn-variants")]
@@ -2001,7 +2042,10 @@ impl AttentionRowSchedule {
         self,
         query_parallelism: AttentionQueryParallelismSelection,
     ) -> Self {
-        Self { query_parallelism, ..self }
+        Self {
+            query_parallelism,
+            ..self
+        }
     }
 
     #[cfg(feature = "metal-attn-variants")]
@@ -2016,7 +2060,10 @@ impl AttentionRowSchedule {
 
     #[cfg(feature = "metal-attn-variants")]
     const fn with_simd_topology(self, simd_topology: AttentionSimdTopologySelection) -> Self {
-        Self { simd_topology, ..self }
+        Self {
+            simd_topology,
+            ..self
+        }
     }
 
     #[cfg(feature = "metal-attn-variants")]
@@ -2031,7 +2078,10 @@ impl AttentionRowSchedule {
 
     #[cfg(feature = "metal-attn-variants")]
     pub(crate) const fn is_simdgroup_rows(self) -> bool {
-        matches!(self.query_parallelism, AttentionQueryParallelismSelection::SimdgroupRows)
+        matches!(
+            self.query_parallelism,
+            AttentionQueryParallelismSelection::SimdgroupRows
+        )
     }
 
     pub(crate) fn cache_token(self) -> String {
@@ -2059,7 +2109,10 @@ impl AttentionRowSchedule {
             #[cfg(feature = "metal-attn-variants")]
             AttentionSimdTopologySelection::GroupedQueries => "_simd_grouped_queries",
         };
-        alloc::format!("{reuse}{}{query}{prefetch}{topology}", self.tile_height.cache_token())
+        alloc::format!(
+            "{reuse}{}{query}{prefetch}{topology}",
+            self.tile_height.cache_token()
+        )
     }
 
     pub(crate) fn cache_token_for(self, bound: &BoundOp) -> String {
@@ -2138,7 +2191,11 @@ impl CachedAttentionForm {
     /// scratch buffer. Only attention ops of different layers do, and each
     /// layer's partial reads the previous layer's output, so no two are in
     /// flight together; the decode split keeps a buffer per position.
-    #[cfg(all(feature = "metal", target_os = "macos", any(test, feature = "metal-plan-stable-buffers")))]
+    #[cfg(all(
+        feature = "metal",
+        target_os = "macos",
+        any(test, feature = "metal-plan-stable-buffers")
+    ))]
     #[must_use]
     pub(crate) const fn shares_scratch(self) -> bool {
         match self {
@@ -2247,11 +2304,7 @@ pub(crate) fn cached_attention_form(
     kind: &BoundOpKind,
     policy: NumericPolicy,
 ) -> Option<CachedAttentionForm> {
-    cached_attention_form_with_tile_height(
-        kind,
-        policy,
-        AttentionTileHeightSelection::Legacy,
-    )
+    cached_attention_form_with_tile_height(kind, policy, AttentionTileHeightSelection::Legacy)
 }
 
 pub(crate) fn cached_attention_form_with_tile_height(
@@ -2353,11 +2406,7 @@ pub(crate) fn validate_query_parallelism_selection(
     let reason = if *query_rows == 1 {
         Some("simdgroup row ownership requires at least two query rows")
     } else if !matches!(
-        cached_attention_form_with_tile_height(
-            &resolved.kind,
-            policy,
-            schedule.tile_height(),
-        ),
+        cached_attention_form_with_tile_height(&resolved.kind, policy, schedule.tile_height(),),
         Some(CachedAttentionForm::TwoRangeRowTiled { .. })
     ) {
         Some("simdgroup row ownership requires the row-tiled attention form")
@@ -2387,11 +2436,7 @@ pub(crate) fn validate_prefetch_selection(
         return Ok(());
     }
     if !matches!(
-        cached_attention_form_with_tile_height(
-            &resolved.kind,
-            policy,
-            schedule.tile_height(),
-        ),
+        cached_attention_form_with_tile_height(&resolved.kind, policy, schedule.tile_height(),),
         Some(CachedAttentionForm::TwoRangeRowTiled { .. })
     ) {
         return Err(EmitError::CachedAttentionVariantAxisNotSupported {
@@ -2421,11 +2466,7 @@ pub(crate) fn validate_simd_topology_selection(
         return Ok(());
     };
     let reason = if !matches!(
-        cached_attention_form_with_tile_height(
-            &resolved.kind,
-            policy,
-            schedule.tile_height(),
-        ),
+        cached_attention_form_with_tile_height(&resolved.kind, policy, schedule.tile_height(),),
         Some(CachedAttentionForm::TwoRangeRowTiled { .. })
     ) {
         Some("SIMD topology requires the row-tiled attention form")
@@ -2538,7 +2579,6 @@ pub(crate) fn decode_simdgroup_cap(head_dim: u64) -> u64 {
 pub(crate) fn decode_lanes_per_key() -> u64 {
     SIMD_WIDTH / crate::sized::ATTENTION_DECODE_KEYS_IN_FLIGHT
 }
-
 
 /// Whether the decode split serves `query_rows` new rows: the single decode
 /// row always, and with `metal-attn-split-rows` also the rows below
@@ -2748,7 +2788,11 @@ pub(crate) fn rows_per_threadgroup(
     let by_registers = crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS
         / tile_unit_fragments(query_groups, head_dim);
     let by_memory = crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES
-        .checked_div(row_tile_bytes(unit_rows, query_groups, row_tiled_block(head_dim)))
+        .checked_div(row_tile_bytes(
+            unit_rows,
+            query_groups,
+            row_tiled_block(head_dim),
+        ))
         .unwrap_or(1);
     let by_reuse = crate::sized::ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE / unit_blocks;
     let widest = by_registers.min(by_memory).min(by_reuse).max(1);
@@ -2758,7 +2802,10 @@ pub(crate) fn rows_per_threadgroup(
         kv_heads * tiles * row_tiled_splits(context_capacity, kv_heads, tiles, simdgroups)
             >= row_tiled_target_threadgroups(simdgroups)
     };
-    let units = (1..=widest).rev().find(|units| fills_the_gpu(*units)).unwrap_or(1);
+    let units = (1..=widest)
+        .rev()
+        .find(|units| fills_the_gpu(*units))
+        .unwrap_or(1);
     units * unit_rows
 }
 
@@ -2898,4 +2945,3 @@ pub(crate) fn cached_attention_per_query_head_grid(
 ) -> bool {
     dynamic_cached_len && context_length < crate::sized::ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE
 }
-

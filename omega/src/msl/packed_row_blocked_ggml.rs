@@ -196,10 +196,7 @@ pub(super) fn push_packed_row_blocked_body(
         // simply never read). `Q5_K` now has its own body
         // ([`push_q5k_ggml_port_body`]) instead of falling through to `Q4_K`'s.
         let use_ggml_port = plain_product
-            && matches!(
-                codec,
-                Codec::Q4K | Codec::Q5K | Codec::Q6K
-            )
+            && matches!(codec, Codec::Q4K | Codec::Q5K | Codec::Q6K)
             && cfg!(feature = "metal-q4k-ggml-port")
             && !cfg!(feature = "metal-q4k-split-k");
         // `metal-q4_0-native` (part of `metal`): ggml's OWN `Q4_0` lane geometry
@@ -725,6 +722,12 @@ pub(super) fn push_packed_row_blocked_body(
                         codec: "bfloat8",
                     });
                 }
+                Codec::Bf8E5M2 | Codec::Bf4E2M1 => {
+                    return Err(EmitError::NonKQuantCodec {
+                        node: resolved.node,
+                        codec: "brain-float scalar",
+                    });
+                }
                 // Unreachable by construction (see `operand_read`'s doc on
                 // `PackedOperands`'s closed population), kept exhaustive.
                 Codec::Q4_1
@@ -954,7 +957,11 @@ pub(super) fn push_q4k_single_fetch_body(
 /// specialization (drop the runtime `other_stride` multiply when the layout
 /// proves it is 1, see the caller's own `other_stride_is_one` doc) applies
 /// identically to both instead of drifting.
-pub(super) fn push_q4k_plain_product_y4_address(source: &mut String, other: usize, other_stride_is_one: bool) {
+pub(super) fn push_q4k_plain_product_y4_address(
+    source: &mut String,
+    other: usize,
+    other_stride_is_one: bool,
+) {
     push_packed_row_plain_product_y4_address(
         source,
         other,
@@ -1296,7 +1303,7 @@ pub(super) fn push_q4_0_native_body(
     source.push_str("    for (int ib = ib_first; ib < nb; ib += ib_step) {\n");
     source.push_str("        float sumy0 = 0.0f; float sumy1 = 0.0f;\n");
     if other_stride_is_one {
-    push_full_unroll(source);
+        push_full_unroll(source);
         source.push_str("        for (uint i = 0u; i < 8u; i += 2u) {\n");
         source.push_str("            sumy0 += y4[i + 0u] + y4[i + 1u];\n");
         source.push_str("            yl[i + 0u] = y4[i + 0u];\n");
@@ -1306,7 +1313,7 @@ pub(super) fn push_q4_0_native_body(
         source.push_str("            yl[i + 9u] = y4[i + 17u] * (1.0f / 4096.0f);\n");
         source.push_str("        }\n");
     } else {
-    push_full_unroll(source);
+        push_full_unroll(source);
         source.push_str("        for (uint i = 0u; i < 8u; i += 2u) {\n");
         source.push_str("            float y0 = y4[(long)(i + 0u) * other_stride];\n");
         source.push_str("            float y1 = y4[(long)(i + 1u) * other_stride];\n");
@@ -1628,10 +1635,10 @@ pub(super) fn push_q6k_ggml_port_body(
     push_packed_row_plain_product_y4_address(source, other, other_stride_is_one, "128u * ip + l0");
     source.push_str("    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {\n");
     if other_stride_is_one {
-    push_full_unroll(source);
+        push_full_unroll(source);
         source.push_str("        for (uint l = 0u; l < 4u; ++l) {\n            yl[4u * l + 0u] = y4[l]; yl[4u * l + 1u] = y4[l + 32u]; yl[4u * l + 2u] = y4[l + 64u]; yl[4u * l + 3u] = y4[l + 96u];\n        }\n");
     } else {
-    push_full_unroll(source);
+        push_full_unroll(source);
         source.push_str("        for (uint l = 0u; l < 4u; ++l) {\n            yl[4u * l + 0u] = y4[(long)l * other_stride]; yl[4u * l + 1u] = y4[(long)(l + 32u) * other_stride]; yl[4u * l + 2u] = y4[(long)(l + 64u) * other_stride]; yl[4u * l + 3u] = y4[(long)(l + 96u) * other_stride];\n        }\n");
     }
     push_full_unroll(source);
@@ -1676,7 +1683,6 @@ pub(super) fn push_q6k_ggml_port_body(
     source.push_str("        y4 += y4_step;\n");
     source.push_str("    }\n");
 }
-
 
 /// Emits the pragma that makes the next `for` unroll completely. ggml spells
 /// this `FOR_UNROLL` on every row, lane and nibble loop of its matvec bodies:

@@ -549,6 +549,8 @@ mod gated {
             Some(Codec::Float16) => 'h',
             Some(Codec::BFloat16) => 'b',
             Some(Codec::BFloat8) => 'w',
+            Some(Codec::Bf8E5M2) => 'E',
+            Some(Codec::Bf4E2M1) => 'X',
             Some(Codec::Q4_1) => 'a',
             Some(Codec::Q8_1) => 'c',
             Some(Codec::Q8K) => 'e',

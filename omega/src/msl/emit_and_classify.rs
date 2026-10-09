@@ -80,9 +80,10 @@ pub fn inspect_attention_variant(
             value: "dispatch manifests require a supported cached-attention form",
         },
     )?;
-    let (mma_selection, row_schedule) = AttentionMmaSelection::from_variant(variant).map_err(
-        |(axis, value)| EmitError::CachedAttentionVariantAxisNotSupported { axis, value },
-    )?;
+    let (mma_selection, row_schedule) =
+        AttentionMmaSelection::from_variant(variant).map_err(|(axis, value)| {
+            EmitError::CachedAttentionVariantAxisNotSupported { axis, value }
+        })?;
     let dispatch_identity = alloc::format!(
         "{}{}{}_variant_{variant:?}",
         kernel.entry,
@@ -182,7 +183,10 @@ pub(crate) fn emit_inner_with_mma_selection(
     }
     let quantized = operand_codecs(resolved, packed_operands);
     if !matches!(resolved.kind, BoundOpKind::CachedAttention { .. })
-        && let Some(codec) = quantized.iter().flatten().find(|codec| **codec == Codec::BFloat8)
+        && let Some(codec) = quantized
+            .iter()
+            .flatten()
+            .find(|codec| **codec == Codec::BFloat8)
     {
         return Err(EmitError::PackedCodecNotSupported {
             node: resolved.node,
@@ -198,8 +202,8 @@ pub(crate) fn emit_inner_with_mma_selection(
     )?;
     let extras = metal_specialization(resolved, packed_operands, numeric_policy, &grid);
     let source = match &resolved.kind {
-        BoundOpKind::CachedAttention { .. } => {
-            cached_attention_kv_codec(resolved.node, &quantized).and_then(|cached_kv_codec| {
+        BoundOpKind::CachedAttention { .. } => cached_attention_kv_codec(resolved.node, &quantized)
+            .and_then(|cached_kv_codec| {
                 render_cached_attention_with_mma_selection(
                     resolved,
                     &entry,
@@ -208,11 +212,8 @@ pub(crate) fn emit_inner_with_mma_selection(
                     mma_selection,
                     row_schedule,
                 )
-            })
-        }
-        BoundOpKind::CachedSoftmaxWeights { .. } => {
-            render_cached_softmax_weights(resolved, &entry)
-        }
+            }),
+        BoundOpKind::CachedSoftmaxWeights { .. } => render_cached_softmax_weights(resolved, &entry),
         BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. } => {
             render_elementwise(resolved, &entry, &quantized)
         }
@@ -402,15 +403,14 @@ pub(crate) fn splice_round_batched_reduce_base_table(
     let element_type = type_token(resolved.node, resolved.dtype)?;
     let struct_decl = "struct RoundBase { ulong output_base; };\n";
     let signature = format!("kernel void {}(", kernel.entry);
-    let signature_start =
-        kernel
-            .source
-            .find(&signature)
-            .ok_or(EmitError::RenderKindMismatch {
-                node: resolved.node,
-                expected: "emitted kernel signature",
-                found: "missing",
-            })?;
+    let signature_start = kernel
+        .source
+        .find(&signature)
+        .ok_or(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "emitted kernel signature",
+            found: "missing",
+        })?;
     let body_start = kernel.source[signature_start..]
         .find(")\n{\n")
         .map(|offset| signature_start + offset)
@@ -871,15 +871,14 @@ pub(crate) fn splice_horizontal_merge_base_table(
     let struct_decl =
         "struct SliceBase { ulong weight_base; ulong activation_base; ulong output_base; };\n";
     let signature = format!("kernel void {}(", kernel.entry);
-    let signature_start =
-        kernel
-            .source
-            .find(&signature)
-            .ok_or(EmitError::RenderKindMismatch {
-                node,
-                expected: "emitted kernel signature",
-                found: "missing",
-            })?;
+    let signature_start = kernel
+        .source
+        .find(&signature)
+        .ok_or(EmitError::RenderKindMismatch {
+            node,
+            expected: "emitted kernel signature",
+            found: "missing",
+        })?;
     let body_start = kernel.source[signature_start..]
         .find(")\n{\n")
         .map(|offset| signature_start + offset)
@@ -1023,7 +1022,10 @@ pub(super) fn is_expert_grouped(block: &TiledGemmBlock) -> bool {
 /// 'S' (fully serial, every non-`Reduce` op and every `Reduce` neither path
 /// claims). Kept here, not in `identity.rs`: every function it calls is
 /// Metal-only private state ([`PackedRowBlock`], [`tiled_gemm_block`]).
-pub(super) fn packed_row_block_shape_token(resolved: &BoundOp, quantized: &[Option<Codec>]) -> char {
+pub(super) fn packed_row_block_shape_token(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+) -> char {
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -1466,7 +1468,10 @@ pub(super) fn fast_q4_0_pair_lane_active(
     expert_source_mode: bool,
 ) -> bool {
     fast_q4_0_admitted(resolved, quantized, block, reduce_op, expert_source_mode)
-        && resolved.operands()[block.other].1.stride(block.reduce_dim as u16) == 1
+        && resolved.operands()[block.other]
+            .1
+            .stride(block.reduce_dim as u16)
+            == 1
         && q4_0_multi_row_pair_lane_override()
         && multi_row_index32_active(resolved, quantized, expert_source_mode)
 }
@@ -1555,7 +1560,9 @@ fn reduction_literal_value(
         return None;
     }
     let block = packed_row_block(resolved, quantized)?;
-    if reduction_literal_decode_only() && packed_row_block_token_total(&block, &resolved.extents) > 1 {
+    if reduction_literal_decode_only()
+        && packed_row_block_token_total(&block, &resolved.extents) > 1
+    {
         return None;
     }
     Some(reduction_len(resolved, output_axes))
@@ -1634,27 +1641,32 @@ pub(super) fn metal_specialization(
                 init,
                 output_axes,
                 ..
-            } => dense_batched_gemm_block(resolved, &quantized, *reduce_op, *init, output_axes).map(
-                |block| {
+            } => dense_batched_gemm_block(resolved, &quantized, *reduce_op, *init, output_axes)
+                .map(|block| {
                     (
                         *block.feature_axes.last().unwrap_or(&0),
                         *block.token_axes.last().unwrap_or(&0),
                         block.batch_axes,
                     )
-                },
-            ),
+                }),
             _ => None,
         },
         tiled_gemm_wide_act_load: match &resolved.kind {
-            BoundOpKind::Reduce { reduce_op, init, output_axes, .. } => {
-                wide_activation_load_active(resolved, &quantized, *reduce_op, *init, output_axes)
-            }
+            BoundOpKind::Reduce {
+                reduce_op,
+                init,
+                output_axes,
+                ..
+            } => wide_activation_load_active(resolved, &quantized, *reduce_op, *init, output_axes),
             _ => false,
         },
         tiled_gemm_slim_tgmem: match &resolved.kind {
-            BoundOpKind::Reduce { reduce_op, init, output_axes, .. } => {
-                slim_tgmem_active(resolved, &quantized, *reduce_op, *init, output_axes)
-            }
+            BoundOpKind::Reduce {
+                reduce_op,
+                init,
+                output_axes,
+                ..
+            } => slim_tgmem_active(resolved, &quantized, *reduce_op, *init, output_axes),
             _ => false,
         },
         tiled_gemm_direct_store: match &resolved.kind {
@@ -1677,32 +1689,47 @@ pub(super) fn metal_specialization(
             _ => false,
         },
         tiled_gemm_wide_weight_stage: match &resolved.kind {
-            BoundOpKind::Reduce { reduce_op, init, output_axes, .. } => {
-                wide_weight_stage_active(resolved, &quantized, *reduce_op, *init, output_axes)
-            }
+            BoundOpKind::Reduce {
+                reduce_op,
+                init,
+                output_axes,
+                ..
+            } => wide_weight_stage_active(resolved, &quantized, *reduce_op, *init, output_axes),
             _ => false,
         },
         tiled_gemm_grid2d: match &resolved.kind {
-            BoundOpKind::Reduce { reduce_op, init, output_axes, .. } => {
-                tiled_gemm_grid2d_active(resolved, &quantized, *reduce_op, *init, output_axes)
-            }
+            BoundOpKind::Reduce {
+                reduce_op,
+                init,
+                output_axes,
+                ..
+            } => tiled_gemm_grid2d_active(resolved, &quantized, *reduce_op, *init, output_axes),
             _ => false,
         },
         tiled_gemm_mm_layout: match &resolved.kind {
-            BoundOpKind::Reduce { reduce_op, init, output_axes, .. } => {
-                mm_layout_active(resolved, &quantized, *reduce_op, *init, output_axes)
-            }
+            BoundOpKind::Reduce {
+                reduce_op,
+                init,
+                output_axes,
+                ..
+            } => mm_layout_active(resolved, &quantized, *reduce_op, *init, output_axes),
             _ => false,
         },
         tiled_gemm_dynamic_tgmem: match &resolved.kind {
-            BoundOpKind::Reduce { reduce_op, init, output_axes, .. } => {
-                dynamic_tgmem_active(resolved, &quantized, *reduce_op, *init, output_axes)
-            }
+            BoundOpKind::Reduce {
+                reduce_op,
+                init,
+                output_axes,
+                ..
+            } => dynamic_tgmem_active(resolved, &quantized, *reduce_op, *init, output_axes),
             _ => false,
         },
         wide_grid: matches!(
             grid.grid2d,
-            Some(Grid2DSpec { form: Grid2DForm::FlatThreadgroupIndex, .. })
+            Some(Grid2DSpec {
+                form: Grid2DForm::FlatThreadgroupIndex,
+                ..
+            })
         ),
     }
 }
@@ -1866,7 +1893,13 @@ pub(crate) fn grid_spec_with_tile_height(
         threads,
         threadgroup_width: tiled_gemm_threadgroup_width(resolved, quantized, numeric_policy),
         depth: grid_depth_for(resolved, quantized),
-        grid2d: grid2d_for(resolved, quantized, numeric_policy, expert_source_mode, threads)?,
+        grid2d: grid2d_for(
+            resolved,
+            quantized,
+            numeric_policy,
+            expert_source_mode,
+            threads,
+        )?,
     })
 }
 
@@ -2316,7 +2349,10 @@ pub(super) fn simd_combine_fn(node: NodeId, op: ScalarOp) -> Result<&'static str
 /// 0 alone carries the real seed, so it is folded into the group exactly
 /// once, matching `cpu::run_reduce`'s single-seed semantics regardless of
 /// how many idle lanes there are.
-pub(super) fn cooperative_identity_token(node: NodeId, op: ScalarOp) -> Result<&'static str, EmitError> {
+pub(super) fn cooperative_identity_token(
+    node: NodeId,
+    op: ScalarOp,
+) -> Result<&'static str, EmitError> {
     match op {
         ScalarOp::Add => Ok("0.0f"),
         ScalarOp::Multiply => Ok("1.0f"),
@@ -2445,7 +2481,12 @@ pub(super) fn bindings(resolved: &BoundOp) -> Vec<Binding> {
         bindings.push(Binding::Fault);
     }
     if let BoundOpKind::RoundBatchedReduce { round_routes, .. } = &resolved.kind {
-        bindings.extend(round_routes.iter().skip(1).map(|route| Binding::Indices(*route)));
+        bindings.extend(
+            round_routes
+                .iter()
+                .skip(1)
+                .map(|route| Binding::Indices(*route)),
+        );
     }
     bindings
 }
@@ -2811,7 +2852,9 @@ const fn row_block_extent_multiple(codec: Codec) -> Option<usize> {
         | Codec::Nvfp4
         | Codec::Q1_0
         | Codec::Q2_0
-        | Codec::BFloat8 => None,
+        | Codec::BFloat8
+        | Codec::Bf8E5M2
+        | Codec::Bf4E2M1 => None,
     }
 }
 
@@ -2967,7 +3010,9 @@ fn routed_axes_leave_one_token_row(
     output_axes: &[u16],
 ) -> (Vec<u16>, Vec<u16>) {
     let token_total = |axes: &[u16]| -> u64 {
-        axes.iter().map(|&axis| resolved.extents[axis as usize]).product()
+        axes.iter()
+            .map(|&axis| resolved.extents[axis as usize])
+            .product()
     };
     let weight_layout = &resolved.operands()[weight].1;
     let routed_rows: Vec<u16> = output_axes
@@ -3208,7 +3253,8 @@ pub(super) fn classify_tiled_gemm(
         // unset admits, only explicit `"0"` falls back) which the row-blocked
         // `Q4_0` tests rely on, and `PROXIMA_TILED_GEMM_DISABLE`, the same
         // control for any codec.
-        if (codec == Codec::Q4_0 && !tiled_gemm_q4_0_override()) || tiled_gemm_codec_disabled(codec) {
+        if (codec == Codec::Q4_0 && !tiled_gemm_q4_0_override()) || tiled_gemm_codec_disabled(codec)
+        {
             return Err(TiledGemmRejection::CodecSwitchedOff { codec });
         }
         // `simdgroup_multiply_accumulate` IS a sum-of-products -- there is
@@ -3294,9 +3340,12 @@ pub(super) fn classify_tiled_gemm(
         }
         if let Some(gather) = gathered.as_mut() {
             expert_route_follows_token_axes(resolved, weight, &token_axes)?;
-            gather.route_flat = resolved.operands()[weight].2.as_ref().is_some_and(|lookup| {
-                axes_fold_contiguously(&token_axes, &resolved.extents, &lookup.index_layout)
-            });
+            gather.route_flat = resolved.operands()[weight]
+                .2
+                .as_ref()
+                .is_some_and(|lookup| {
+                    axes_fold_contiguously(&token_axes, &resolved.extents, &lookup.index_layout)
+                });
             if other_layout.stride(reduce_dim as u16) != 1 {
                 return Err(TiledGemmRejection::GatheredActivationNotUnitStride);
             }
@@ -3526,7 +3575,10 @@ pub(super) fn wide_activation_load_active(
     // PHYSICALLY consecutive device floats) -- generalizes
     // `classify_packed_row_block`'s own `NonUnitWeightStride` gate to the
     // dense activation operand this path reads, never assumed.
-    resolved.operands()[block.other].1.stride(block.reduce_dim as u16) == 1
+    resolved.operands()[block.other]
+        .1
+        .stride(block.reduce_dim as u16)
+        == 1
 }
 
 #[cfg(not(feature = "metal-tiled-gemm"))]
@@ -3798,7 +3850,13 @@ pub(super) fn tiled_gemm_grid2d_spec(
         threadgroups_y: row_tiles,
         threads_per_threadgroup_x: SIMD_WIDTH,
         threads_per_threadgroup_y: TILED_GEMM_NSG as u64,
-        threadgroup_bytes: if dynamic_tgmem_active(resolved, quantized, reduce_op, init, output_axes) {
+        threadgroup_bytes: if dynamic_tgmem_active(
+            resolved,
+            quantized,
+            reduce_op,
+            init,
+            output_axes,
+        ) {
             tiled_gemm_shared_bytes()
         } else {
             0
@@ -4018,7 +4076,10 @@ pub(super) fn tiled_gemm_threadgroups(
     {
         let row_tiles = feature_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_M);
         let col_tiles = token_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_N);
-        checked_product(node, [row_tiles, col_tiles, TILED_GEMM_NSG as u64, SIMD_WIDTH])
+        checked_product(
+            node,
+            [row_tiles, col_tiles, TILED_GEMM_NSG as u64, SIMD_WIDTH],
+        )
     }
 }
 
@@ -4091,7 +4152,11 @@ pub(crate) fn packed_row_activation_cap(token_total: u64) -> u64 {
 /// axis, or exactly one activation row) collapses the token factor to `1`,
 /// so a caller passing `feature_total` for the whole output and `token_total
 /// == 1` gets today's byte-identical single-row dispatch shape.
-pub(super) fn packed_row_dispatch(feature_total: u64, token_total: u64, codec: Codec) -> (u64, u64) {
+pub(super) fn packed_row_dispatch(
+    feature_total: u64,
+    token_total: u64,
+    codec: Codec,
+) -> (u64, u64) {
     let base = feature_total.div_ceil(codec_rows_per_simdgroup(codec) as u64);
     let split = packed_row_split_factor(base, feature_total);
     let token_groups = token_total.div_ceil(packed_row_activation_cap(token_total));
@@ -4368,12 +4433,13 @@ pub(super) fn classify_dense_batched_gemm(
         // element would still be caught here) and to confirm the chosen
         // axis is real (nonzero stride) in the op's own output layout,
         // which a genuinely degenerate binding could still violate.
-        let groups_contiguous = axes_fold_contiguously(&token_axes, &resolved.extents, other_layout)
-            && axes_fold_contiguously(&feature_axes, &resolved.extents, weight_layout)
-            && axes_fold_contiguously(&token_axes, &resolved.extents, out_layout)
-            && axes_fold_contiguously(&feature_axes, &resolved.extents, out_layout)
-            && out_layout.stride(feature_axis) != 0
-            && out_layout.stride(token_axis) != 0;
+        let groups_contiguous =
+            axes_fold_contiguously(&token_axes, &resolved.extents, other_layout)
+                && axes_fold_contiguously(&feature_axes, &resolved.extents, weight_layout)
+                && axes_fold_contiguously(&token_axes, &resolved.extents, out_layout)
+                && axes_fold_contiguously(&feature_axes, &resolved.extents, out_layout)
+                && out_layout.stride(feature_axis) != 0
+                && out_layout.stride(token_axis) != 0;
         if !groups_contiguous {
             return Err(DenseBatchedGemmRejection::AxisGroupNotContiguous);
         }
@@ -4439,7 +4505,10 @@ pub fn diagnose_dense_batched_gemm_block(
 /// cache-hit re-dispatch can never disagree with its cache-miss render --
 /// the same hazard [`reduce_round_count`]'s own doc names for
 /// `RoundBatchedReduce`.
-pub(super) fn dense_batched_gemm_depth(resolved: &BoundOp, quantized: &[Option<Codec>]) -> Option<u64> {
+pub(super) fn dense_batched_gemm_depth(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+) -> Option<u64> {
     let BoundOpKind::Reduce {
         reduce_op,
         init,

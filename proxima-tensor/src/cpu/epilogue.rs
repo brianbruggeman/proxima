@@ -1,5 +1,39 @@
 use super::*;
 
+fn dequantize_bf8_e5m2(
+    bytes: &[u8],
+    output: &mut [f32],
+) -> Result<(), proxima_gguf::quant::QuantError> {
+    if output.len() != bytes.len() {
+        return Err(proxima_gguf::quant::QuantError::OutputSizeMismatch {
+            found: output.len(),
+            expected: bytes.len(),
+        });
+    }
+    for (value, &encoded) in output.iter_mut().zip(bytes) {
+        *value = proxima_gguf::quant::bf8_e5m2::decode(encoded);
+    }
+    Ok(())
+}
+
+fn dequantize_bf4_e2m1(
+    bytes: &[u8],
+    output: &mut [f32],
+) -> Result<(), proxima_gguf::quant::QuantError> {
+    if output.len() != bytes.len() * 2 {
+        return Err(proxima_gguf::quant::QuantError::OutputSizeMismatch {
+            found: output.len(),
+            expected: bytes.len() * 2,
+        });
+    }
+    for (index, value) in output.iter_mut().enumerate() {
+        let packed = bytes[index / 2];
+        let nibble = (packed >> (4 * (index % 2))) & 0x0f;
+        *value = proxima_gguf::quant::bf4_e2m1::decode(nibble);
+    }
+    Ok(())
+}
+
 /// `docs/discipline.md` ROW 184 Phase 3: `epilogue_fuse_plan`'s own
 /// [`EpilogueKind`] classification, walked by a monomorphized loop instead of
 /// ROW 183's per-element [`apply_body`] interpreter (measured 32.90 ns/element,
@@ -1330,6 +1364,7 @@ pub(super) const fn codec_to_decodable_ggml_type(codec: Codec) -> Option<proxima
         Codec::Iq3Xxs => Some(proxima_gguf::GgmlType::Iq3Xxs),
         Codec::Float16 => Some(proxima_gguf::GgmlType::F16),
         Codec::BFloat16 => Some(proxima_gguf::GgmlType::Bf16),
+        Codec::Bf8E5M2 | Codec::Bf4E2M1 => None,
         Codec::BFloat8 => None,
         Codec::Q4_1
         | Codec::Q8_1
@@ -1378,6 +1413,8 @@ pub(super) const fn codec_matmul_f32_kernel(
         Codec::Iq3Xxs => Some(matmul_iq3_xxs_f32),
         Codec::Float16 => Some(matmul_f16_f32),
         Codec::BFloat16 => Some(matmul_bf16_f32),
+        Codec::Bf8E5M2 => Some(matmul_bf8_e5m2_f32),
+        Codec::Bf4E2M1 => Some(matmul_bf4_e2m1_f32),
         Codec::BFloat8 => None,
         Codec::Q4K
         | Codec::Q5K
@@ -1426,10 +1463,12 @@ pub(super) const fn codec_dequantize_fn(
         Codec::Q5_1 => Some(q5_1::dequantize),
         Codec::Iq2Xs => Some(iq2_xs::dequantize),
         Codec::Iq3Xxs => Some(iq3_xxs::dequantize),
+        Codec::Float16 => Some(gguf_f16::dequantize),
+        Codec::BFloat16 => Some(gguf_bf16::dequantize),
+        Codec::Bf8E5M2 => Some(dequantize_bf8_e5m2),
+        Codec::Bf4E2M1 => Some(dequantize_bf4_e2m1),
         Codec::Q4_0
         | Codec::Q5_0
-        | Codec::Float16
-        | Codec::BFloat16
         | Codec::BFloat8
         | Codec::Q4_1
         | Codec::Q8_1
@@ -1792,6 +1831,11 @@ impl<'a> QuantizedBlock<'a> {
         let QuantizedBlock::Packed { codec, .. } = self else {
             return None;
         };
+        match codec {
+            Codec::Bf8E5M2 => return Some((1, 1)),
+            Codec::Bf4E2M1 => return Some((1, 2)),
+            _ => {}
+        }
         let Some(ggml_type) = codec_to_decodable_ggml_type(*codec) else {
             return None;
         };
@@ -1845,10 +1889,14 @@ impl<'a> QuantizedBlock<'a> {
     #[must_use]
     pub const fn with_bytes(&self, bytes: &'a [u8]) -> Self {
         match self {
-            QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => {
-                QuantizedBlock::Packed { codec: Codec::Q4K, bytes }
-            }
-            QuantizedBlock::Packed { codec, .. } => QuantizedBlock::Packed { codec: *codec, bytes },
+            QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes,
+            },
+            QuantizedBlock::Packed { codec, .. } => QuantizedBlock::Packed {
+                codec: *codec,
+                bytes,
+            },
         }
     }
 
@@ -1963,6 +2011,8 @@ impl<'a> QuantizedBlock<'a> {
                     gguf_bf16::blocks_for_bytes(bytes.len()),
                 ),
                 Codec::BFloat8 => ("bfloat8", bytes.len(), 1, Some(bytes.len())),
+                Codec::Bf8E5M2 => ("bf8_e5m2", bytes.len(), 1, Some(bytes.len())),
+                Codec::Bf4E2M1 => ("bf4_e2m1", bytes.len(), 1, Some(bytes.len() * 2)),
                 // No packed-block construction site (`gguf_tensor_as_packed_block`/
                 // `as_block` in `proxima-model-interop`) ever produces a
                 // `Packed` carrying one of these 15 undecodable codecs -- see
@@ -1999,6 +2049,8 @@ const fn codec_name_for_error(codec: Codec) -> &'static str {
         Codec::Float16 => "float16",
         Codec::BFloat16 => "bfloat16",
         Codec::BFloat8 => "bfloat8",
+        Codec::Bf8E5M2 => "bf8_e5m2",
+        Codec::Bf4E2M1 => "bf4_e2m1",
         Codec::Q2K => "q2_k",
         Codec::Q5_1 => "q5_1",
         Codec::Q5_0 => "q5_0",
