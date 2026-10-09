@@ -30,7 +30,7 @@ pub fn emit(
         numeric_policy,
         false,
         AttentionMmaSelection::Legacy,
-        AttentionKvReuseSelection::Legacy,
+        AttentionRowSchedule::legacy(),
     )
 }
 
@@ -42,17 +42,19 @@ pub fn emit_with_attention_variant(
     variant: AttentionVariant,
 ) -> Result<Kernel, EmitError> {
     validate_attention_variant_storage(resolved, packed_operands, variant.kv_storage)?;
-    let (mma_selection, kv_reuse_selection) =
+    let (mma_selection, row_schedule) =
         AttentionMmaSelection::from_variant(variant).map_err(|(axis, value)| {
             EmitError::CachedAttentionVariantAxisNotSupported { axis, value }
         })?;
+    #[cfg(feature = "metal-attn-split-rows")]
+    validate_tile_height_selection(resolved, numeric_policy, row_schedule.tile_height())?;
     emit_inner_with_mma_selection(
         resolved,
         packed_operands,
         numeric_policy,
         false,
         mma_selection,
-        kv_reuse_selection,
+        row_schedule,
     )
 }
 
@@ -100,7 +102,7 @@ pub(super) fn emit_inner(
         numeric_policy,
         expert_source_mode,
         AttentionMmaSelection::Legacy,
-        AttentionKvReuseSelection::Legacy,
+        AttentionRowSchedule::legacy(),
     )
 }
 
@@ -110,13 +112,14 @@ pub(crate) fn emit_inner_with_mma_selection(
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
     mma_selection: AttentionMmaSelection,
-    kv_reuse_selection: AttentionKvReuseSelection,
+    row_schedule: AttentionRowSchedule,
 ) -> Result<Kernel, EmitError> {
     validate(resolved)?;
-    let mut entry = entry_name(resolved, numeric_policy);
+    let tile_height_selection = row_schedule.tile_height();
+    let mut entry = entry_name_with_tile_height(resolved, numeric_policy, tile_height_selection);
     if matches!(resolved.kind, BoundOpKind::CachedAttention { .. }) {
         entry.push_str(mma_selection.cache_token());
-        entry.push_str(kv_reuse_selection.cache_token());
+        entry.push_str(&row_schedule.cache_token());
     }
     let quantized = operand_codecs(resolved, packed_operands);
     if !matches!(resolved.kind, BoundOpKind::CachedAttention { .. })
@@ -127,7 +130,13 @@ pub(crate) fn emit_inner_with_mma_selection(
             codec: *codec,
         });
     }
-    let grid = grid_spec(resolved, &quantized, numeric_policy, expert_source_mode)?;
+    let grid = grid_spec_with_tile_height(
+        resolved,
+        &quantized,
+        numeric_policy,
+        expert_source_mode,
+        row_schedule,
+    )?;
     let extras = metal_specialization(resolved, packed_operands, numeric_policy, &grid);
     let source = match &resolved.kind {
         BoundOpKind::CachedAttention { .. } => {
@@ -138,7 +147,7 @@ pub(crate) fn emit_inner_with_mma_selection(
                     numeric_policy,
                     cached_kv_codec,
                     mma_selection,
-                    kv_reuse_selection,
+                    row_schedule,
                 )
             })
         }
@@ -1709,13 +1718,32 @@ pub(crate) fn kernel_dispatch_shape(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
 ) -> Result<(Vec<Binding>, GridSpec), EmitError> {
+    kernel_dispatch_shape_with_schedule(
+        resolved,
+        packed_operands,
+        numeric_policy,
+        AttentionRowSchedule::legacy(),
+    )
+}
+
+pub(crate) fn kernel_dispatch_shape_with_schedule(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    schedule: AttentionRowSchedule,
+) -> Result<(Vec<Binding>, GridSpec), EmitError> {
     validate(resolved)?;
     let quantized = operand_codecs(resolved, packed_operands);
-    let is_split_cached_attention = cached_attention_merge_needed(&resolved.kind, numeric_policy);
+    let is_split_cached_attention = cached_attention_form_with_tile_height(
+        &resolved.kind,
+        numeric_policy,
+        schedule.tile_height(),
+    )
+    .is_some_and(CachedAttentionForm::needs_merge);
     // `kernel_dispatch_shape` has no expert-source caller (it never took
     // `expert_source_mode` before this parameter existed either) -- `false`
     // reproduces that pre-existing scope exactly.
-    let grid = grid_spec(resolved, &quantized, numeric_policy, false)?;
+    let grid = grid_spec_with_tile_height(resolved, &quantized, numeric_policy, false, schedule)?;
     Ok((
         if is_split_cached_attention {
             split_bindings_with_scratch(resolved)
@@ -1748,7 +1776,33 @@ pub(super) fn grid_spec(
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
 ) -> Result<GridSpec, EmitError> {
-    let threads = grid_threads(resolved, quantized, numeric_policy, expert_source_mode)?;
+    grid_spec_with_tile_height(
+        resolved,
+        quantized,
+        numeric_policy,
+        expert_source_mode,
+        AttentionRowSchedule::legacy(),
+    )
+}
+
+pub(crate) fn grid_spec_with_tile_height(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+    expert_source_mode: bool,
+    schedule: AttentionRowSchedule,
+) -> Result<GridSpec, EmitError> {
+    let threads = if schedule.tile_height() == AttentionTileHeightSelection::Legacy {
+        grid_threads(resolved, quantized, numeric_policy, expert_source_mode)?
+    } else {
+        grid_threads_with_tile_height(
+            resolved,
+            quantized,
+            numeric_policy,
+            expert_source_mode,
+            schedule.tile_height(),
+        )?
+    };
     Ok(GridSpec {
         threads,
         threadgroup_width: tiled_gemm_threadgroup_width(resolved, quantized, numeric_policy),

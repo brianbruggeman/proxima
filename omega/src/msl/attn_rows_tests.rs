@@ -1126,7 +1126,7 @@ fn rendered_with_operands(op: &BoundOp, half_operands: bool) -> String {
         simdgroups,
         half_operands,
         None,
-        AttentionKvReuseSelection::Legacy,
+        AttentionRowSchedule::legacy(),
     )
     .expect("the row-tiled kernel renders")
 }
@@ -1211,7 +1211,7 @@ fn card_14_k_reuse_declines_when_staging_exceeds_threadgroup_budget() {
         8,
         false,
         None,
-        AttentionKvReuseSelection::Legacy,
+        AttentionRowSchedule::legacy(),
     )
     .expect("the same tile fits before K staging");
     assert!(legacy.contains("shared_key_even[1]"));
@@ -1224,7 +1224,7 @@ fn card_14_k_reuse_declines_when_staging_exceeds_threadgroup_budget() {
         8,
         false,
         None,
-        AttentionKvReuseSelection::SharedK,
+        AttentionRowSchedule::shared_k(),
     )
     .expect_err("K staging is rejected when it exceeds threadgroup memory");
     assert!(matches!(
@@ -1296,7 +1296,7 @@ fn card_15_v_reuse_stages_v_for_distinct_query_owners() {
         2,
         false,
         Some(Codec::BFloat16),
-        AttentionKvReuseSelection::SharedKv,
+        AttentionRowSchedule::shared_kv(),
     )
     .expect("BF16 cached V decodes before shared staging");
     let bf8 = cached_attention_row_tiled::render_cached_attention_row_tiled_with(
@@ -1306,7 +1306,7 @@ fn card_15_v_reuse_stages_v_for_distinct_query_owners() {
         2,
         true,
         Some(Codec::BFloat8),
-        AttentionKvReuseSelection::SharedKv,
+        AttentionRowSchedule::shared_kv(),
     )
     .expect("BF8 cached V decodes before shared staging");
     assert!(bf16.contains("omega_bf16_load_matrix(value_float"));
@@ -1326,7 +1326,7 @@ fn card_15_v_reuse_declines_when_persistent_accumulators_exceed_budget() {
         8,
         false,
         None,
-        AttentionKvReuseSelection::SharedKv,
+        AttentionRowSchedule::shared_kv(),
     )
     .expect_err("the query-owned V path declines above the accumulator budget");
     assert!(matches!(
@@ -1437,4 +1437,77 @@ fn the_default_sizing_renders_the_float_setting() {
         .expect("the row-tiled kernel emits");
     assert!(kernel.source.contains("simdgroup_float8x8 weights[tile_blocks];"));
     assert!(!kernel.source.contains("simdgroup_half8x8"));
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_16_tile_height_selects_rows16_and_declines_nonintegral_rows4() {
+    let capture = include_str!("../../../proxima-tensor/specs/decode-prefill-parity/evidence/attn5/raw/probe/granite.out");
+    assert!(capture.lines().any(|line| {
+        line.contains("extents=[1000, 8, 2, 64]")
+    }));
+
+    let captured_shape = attention_rows_op(9, 2, 64, 512, 1000, SLIDING_LOWER);
+    let packed = PackedOperands::new();
+    let policy = NumericPolicy::llama_relaxed();
+    let legacy = emit(&captured_shape, &packed, policy).expect("legacy shape emits");
+    let rows16 = emit_with_attention_variant(
+        &captured_shape,
+        &packed,
+        policy,
+        AttentionVariant {
+            tile_height: AttentionTileHeight::Rows16,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("captured shape admits rows16");
+    assert_ne!(legacy.grid.threads, rows16.grid.threads);
+    assert!(rows16.entry.contains("_r16_"));
+    assert!(rows16.entry.contains("_tile_rows16"));
+
+    let rows4_error = emit_with_attention_variant(
+        &captured_shape,
+        &packed,
+        policy,
+        AttentionVariant {
+            tile_height: AttentionTileHeight::Rows4,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect_err("rows4 cannot represent the two-group eight-row tile unit");
+    assert!(matches!(
+        rows4_error,
+        EmitError::CachedAttentionTileHeightNotSupported {
+            rows: 4,
+            reason: "requested rows do not form whole query tile units",
+            ..
+        }
+    ));
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_16_tile_height_declines_the_exact_threadgroup_memory_overflow() {
+    let shape = attention_rows_op(9, 8, 64, 512, 16, SLIDING_LOWER);
+    let required = row_tile_bytes(16, 8, row_tiled_block(64));
+    assert_eq!(required, 35_840);
+    assert_eq!(crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES, 32_768);
+    let error = emit_with_attention_variant(
+        &shape,
+        &PackedOperands::new(),
+        NumericPolicy::llama_relaxed(),
+        AttentionVariant {
+            tile_height: AttentionTileHeight::Rows16,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect_err("rows16 exceeds the threadgroup-memory budget");
+    assert!(matches!(
+        error,
+        EmitError::CachedAttentionTileHeightNotSupported {
+            rows: 16,
+            reason: "requested tile exceeds the configured threadgroup-memory budget",
+            ..
+        }
+    ));
 }
