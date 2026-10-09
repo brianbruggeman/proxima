@@ -79,6 +79,17 @@ impl Semaphore {
         if self.is_closed() {
             return Err(AcquireError(()));
         }
+        match self.try_acquire() {
+            Ok(permit) => {
+                if self.is_closed() {
+                    drop(permit);
+                    return Err(AcquireError(()));
+                }
+                return Ok(permit);
+            }
+            Err(TryAcquireError::Closed) => return Err(AcquireError(())),
+            Err(TryAcquireError::NoPermits) => {}
+        }
         // seqcst preserves event-listener's check/listen/check lost-wake proof.
         let listener = self.close_event.listen();
         if self.is_closed() {
