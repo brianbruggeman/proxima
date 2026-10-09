@@ -256,6 +256,13 @@ def finalize(args: argparse.Namespace, output: bool = True, write_record: bool =
             fail("required AC output missing: {}".format(token))
     ended = {row.get("event_id"): row for row in rows if row.get("kind") == "end"}
     starts = [row for row in rows if row.get("kind") == "start"]
+    precommit_record = read_json(root / "precommit-check.json")
+    precommit_event_id = precommit_record.get("event_id")
+    precommit_start = next((row for row in starts if row.get("event_id") == precommit_event_id), None)
+    precommit_end = ended.get(precommit_event_id)
+    if precommit_start is None or "--precommit" not in precommit_start.get("command", "") or precommit_end is None or precommit_end.get("command") != precommit_start.get("command") or precommit_end.get("cwd") != precommit_start.get("cwd") or precommit_end.get("started_monotonic_ns") != precommit_start.get("started_monotonic_ns") or precommit_end.get("exit_code") != 0:
+        fail("accepted precommit event pair missing")
+    landing_floor = precommit_end.get("ended_monotonic_ns", 0)
     landing_specs = [
         ("commit", lambda argv, cwd: argv[:2] == ["git", "commit"] and "-m" in argv and "--dry-run" not in argv and cwd == str(args.repo_root), str(args.repo_root)),
         ("rebase", lambda argv, cwd: argv == ["git", "rebase", "origin/main"] and cwd == str(args.repo_root), str(args.repo_root)),
@@ -271,7 +278,7 @@ def finalize(args: argparse.Namespace, output: bool = True, write_record: bool =
                 command_argv = shlex.split(row.get("command", ""))
             except ValueError:
                 continue
-            if predicate(command_argv, row.get("cwd", "")):
+            if predicate(command_argv, row.get("cwd", "")) and row.get("started_monotonic_ns", 0) > landing_floor:
                 matches.append(row)
         successful_matches = []
         for candidate in matches:
