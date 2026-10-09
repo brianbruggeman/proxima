@@ -1786,6 +1786,11 @@ impl Plan {
                 self.numeric_policy,
                 row_schedule.tile_height(),
             )?;
+            crate::msl::validate_query_parallelism_selection(
+                bound,
+                self.numeric_policy,
+                row_schedule,
+            )?;
         }
         self.attention_mma_selection = mma_selection;
         self.attention_row_schedule = row_schedule;

@@ -1170,3 +1170,42 @@ fn card_16_tile_height_plan_dispatches_rows16_and_matches_cpu_payload() {
         "rows16 plan output matches the CPU payload"
     );
 }
+
+#[test]
+fn card_17_query_parallelism_plan_preserves_shared_kv_and_matches_cpu_payload() {
+    let policy = production_numeric_policy();
+    let fixture = fixture_with(8, 31, Geometry::TWO_QUERY_GROUPS);
+    let resolved = bound_attention(&fixture, policy);
+    let expected = run_resolved_on_cpu(&fixture, &resolved);
+    let named = as_named_blocks(&fixture.named);
+    let roots = [fixture.logits];
+    let mut query_parallel_plan = omega::plan_named(
+        &fixture.program,
+        &fixture.symbols,
+        &named,
+        &roots,
+        policy,
+    )
+    .expect("the Granite-shaped query-parallel plan resolves");
+    query_parallel_plan
+        .set_attention_variant(omega::AttentionVariant {
+            kv_reuse: omega::AttentionKvReuse::SharedKv,
+            tile_height: omega::AttentionTileHeight::Rows8,
+            query_parallelism: omega::AttentionQueryParallelism::SimdgroupRows,
+            ..omega::AttentionVariant::default()
+        })
+        .expect("query parallelism composes with shared K/V staging");
+    let keys = query_parallel_plan
+        .kernel_keys()
+        .expect("query-parallel pipeline identities are collected");
+    assert!(keys.iter().any(|key| key.contains("_query_simdgroup_rows")));
+    assert!(keys.iter().any(|key| key.contains("_kv_shared_kv")));
+    assert!(keys.iter().any(|key| key.contains("_tile_rows8")));
+
+    let output = omega::execute_plan_named(&query_parallel_plan, &named)
+        .expect("the selected query-parallel plan executes");
+    assert!(
+        relative_difference(&expected, output.root()) <= TOLERANCE,
+        "query-parallel SharedKv output matches the CPU payload"
+    );
+}

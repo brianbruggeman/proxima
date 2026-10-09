@@ -48,6 +48,8 @@ pub fn emit_with_attention_variant(
         })?;
     #[cfg(feature = "metal-attn-split-rows")]
     validate_tile_height_selection(resolved, numeric_policy, row_schedule.tile_height())?;
+    #[cfg(feature = "metal-attn-split-rows")]
+    validate_query_parallelism_selection(resolved, numeric_policy, row_schedule)?;
     emit_inner_with_mma_selection(
         resolved,
         packed_operands,

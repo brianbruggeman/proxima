@@ -23,6 +23,11 @@ In scope: one behavior, the two acceptance tests (or two checker gates for card 
 
 - `omega/src/msl/signature_tokens_prelude.rs`
 - `omega/src/msl/cached_attention_row_tiled.rs`
+- `omega/src/error.rs`
+- `omega/src/msl/emit_and_classify.rs`
+- `omega/src/metal/device_buffers_arena_plan.rs`
+- `omega/src/msl/attn_rows_tests.rs`
+- `omega/tests/cached_attention_row_tiled_parity.rs`
 - `proxima-tensor/specs/granite-attention-numeric-matrix/TASKS.md` (row and resume only)
 
 ## Steps
@@ -36,6 +41,7 @@ Use the existing Proxima numeric and Metal abstractions. Do not introduce num-tr
 | id | command | expected |
 |---|---|---|
 | AC17 | `cargo nextest run -p omega --features metal-attn-split-decode,metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_17_query_parallelism)'` | filter selects 2 tests; 2 passed; row coverage plus explicit one-row decline and legacy decode-split control |
+| AC17b | `cargo nextest run -p omega --features metal,metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_17_query_parallelism_plan)'` | filter selects 1 test; 1 passed; selected SharedKv/Rows8/query-parallel pipeline executes and its output payload compares with the CPU reference |
 
 A zero-test match or a checker that does not open its fixture is failure. Run this local command after the edit. The expected count is part of the criterion.
 
