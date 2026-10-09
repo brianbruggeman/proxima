@@ -132,6 +132,7 @@ pub(crate) use emit_and_classify::emit_inner_with_mma_selection;
 #[cfg(feature = "metal-attn-variants")]
 pub(crate) use emit_and_classify::validate_attention_variant_storage;
 pub(crate) use signature_tokens_prelude::*;
+pub use signature_tokens_prelude::CachedAttentionForm;
 #[cfg(feature = "metal-attn-variants")]
 pub use signature_tokens_prelude::{
     AttentionKvReuse, AttentionKvStorage, AttentionMmaPrecision, AttentionPrefetch,

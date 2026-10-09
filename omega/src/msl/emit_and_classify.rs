@@ -65,6 +65,59 @@ pub fn emit_with_attention_variant(
 }
 
 #[cfg(feature = "metal-attn-variants")]
+pub fn inspect_attention_variant(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    variant: AttentionVariant,
+) -> Result<AttentionDispatchManifest, EmitError> {
+    let kernel = emit_with_attention_variant(resolved, packed_operands, numeric_policy, variant)?;
+    let quantized = operand_codecs(resolved, packed_operands);
+    let cache_codec = cached_attention_kv_codec(resolved.node, &quantized)?;
+    let form = cached_attention_form(&resolved.kind, numeric_policy).ok_or(
+        EmitError::CachedAttentionVariantAxisNotSupported {
+            axis: "operation",
+            value: "dispatch manifests require a supported cached-attention form",
+        },
+    )?;
+    let (mma_selection, row_schedule) = AttentionMmaSelection::from_variant(variant).map_err(
+        |(axis, value)| EmitError::CachedAttentionVariantAxisNotSupported { axis, value },
+    )?;
+    let dispatch_identity = alloc::format!(
+        "{}{}{}_variant_{variant:?}",
+        kernel.entry,
+        mma_selection.cache_token_for(resolved),
+        row_schedule.cache_token_for(resolved),
+    );
+    Ok(AttentionDispatchManifest {
+        variant,
+        form,
+        cache_codec,
+        accumulator: DType::Float32,
+        dispatch_identity,
+        kernel,
+    })
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttentionDispatchManifest {
+    pub variant: AttentionVariant,
+    pub form: CachedAttentionForm,
+    pub cache_codec: Option<Codec>,
+    pub accumulator: DType,
+    pub dispatch_identity: String,
+    pub kernel: Kernel,
+}
+
+#[cfg(feature = "metal-attn-variants")]
+impl AttentionDispatchManifest {
+    pub fn matches_selector(&self, selector: AttentionVariant) -> bool {
+        self.variant == selector
+    }
+}
+
+#[cfg(feature = "metal-attn-variants")]
 pub(crate) fn validate_attention_variant_storage(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
