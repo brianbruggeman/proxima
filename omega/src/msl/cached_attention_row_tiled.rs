@@ -79,6 +79,7 @@ pub(super) fn render_cached_attention_row_tiled(
     simdgroups: u64,
     cached_kv_codec: Option<Codec>,
     mma_selection: AttentionMmaSelection,
+    kv_reuse_selection: AttentionKvReuseSelection,
 ) -> Result<String, EmitError> {
     let half_operands = match mma_selection {
         AttentionMmaSelection::Legacy => crate::sized::ATTENTION_ROWS_MMA_HALF,
@@ -94,6 +95,7 @@ pub(super) fn render_cached_attention_row_tiled(
         simdgroups,
         half_operands,
         cached_kv_codec,
+        kv_reuse_selection,
     )
 }
 
@@ -104,6 +106,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
     simdgroups: u64,
     half_operands: bool,
     cached_kv_codec: Option<Codec>,
+    kv_reuse_selection: AttentionKvReuseSelection,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         kv_heads,
@@ -141,6 +144,33 @@ pub(super) fn render_cached_attention_row_tiled_with(
         crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES,
         crate::sized::ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES,
     );
+    #[cfg(feature = "metal-attn-variants")]
+    let shared_k = kv_reuse_selection == AttentionKvReuseSelection::SharedK;
+    #[cfg(not(feature = "metal-attn-variants"))]
+    let shared_k = false;
+    #[cfg(not(feature = "metal-attn-variants"))]
+    let _ = kv_reuse_selection;
+    let block = row_tiled_block(*head_dim);
+    let half_dim = *head_dim / 2;
+    let depth_unroll = if (half_dim / 8).is_multiple_of(2) { 2 } else { 1 };
+    let shared_k_bytes = if shared_k {
+        2 * block * 8 * depth_unroll * if half_operands { 2 } else { 4 }
+    } else {
+        0
+    };
+    let threadgroup_bytes = row_tile_bytes(rows_per_threadgroup, *query_groups, block)
+        + if stages_query {
+            query_stage_bytes(rows_per_threadgroup, *query_groups, *head_dim)
+        } else {
+            0
+        }
+        + shared_k_bytes;
+    if threadgroup_bytes > crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES {
+        return Err(EmitError::CachedAttentionKvReuseNotSupported {
+            node: resolved.node,
+            reason: "shared K staging exceeds the configured threadgroup-memory budget",
+        });
+    }
     let cached_type = match cached_kv_codec {
         None => "float",
         Some(Codec::BFloat16) => "ushort",
@@ -207,6 +237,28 @@ pub(super) fn render_cached_attention_row_tiled_with(
             }
             .to_string(),
         ),
+        (
+            "@OPERAND_SCALAR@",
+            if half_operands { "half" } else { "float" }.to_string(),
+        ),
+        ("@KV_REUSE_SHARED_K@", shared_k.to_string()),
+        (
+            "@SHARED_K_LOAD@",
+            if half_operands {
+                "omega_load_shared_half"
+            } else {
+                "omega_load_shared_float"
+            }
+            .to_string(),
+        ),
+        (
+            "@SHARED_K_ELEMENTS@",
+            if shared_k {
+                (block * 8 * depth_unroll).to_string()
+            } else {
+                "1".to_string()
+            },
+        ),
         ("@ENTRY@", entry.to_string()),
         ("@KV_HEADS@", kv_heads.to_string()),
         ("@QUERY_GROUPS@", query_groups.to_string()),
@@ -218,7 +270,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
         ("@STAGE_QUERY@", stages_query.to_string()),
         ("@QUERY_STAGE_PAD@", QUERY_STAGE_PAD.to_string()),
         ("@SIMDGROUPS@", simdgroups.to_string()),
-        ("@BLOCK@", row_tiled_block(*head_dim).to_string()),
+        ("@BLOCK@", block.to_string()),
         (
             "@SPLIT_KEYS@",
             crate::sized::ATTENTION_ROWS_KEYS_PER_SPLIT.to_string(),
@@ -228,6 +280,9 @@ pub(super) fn render_cached_attention_row_tiled_with(
     preamble(&mut source, None);
     source.push_str(super::cached_attention_render::BF8_VECTOR_HELPER);
     source.push_str(BF16_CACHE_HELPER);
+    if !half_operands {
+        source.push_str(SHARED_K_FLOAT_HELPER);
+    }
     let mut body = ROW_TILED_KERNEL.to_string();
     for (token, value) in &substitutions {
         body = body.replace(token, value);
@@ -241,6 +296,11 @@ inline simdgroup_half8x8 narrow_fragment(simdgroup_float8x8 wide) { simdgroup_ha
 inline void simdgroup_load(thread simdgroup_half8x8& destination, device const float* source, ulong stride, ulong2 origin, bool transposed) { simdgroup_float8x8 loaded; simdgroup_load(loaded, source, stride, origin, transposed); destination = narrow_fragment(loaded); }
 inline void simdgroup_load(thread simdgroup_half8x8& destination, device const float* source, ulong stride) { simdgroup_float8x8 loaded; simdgroup_load(loaded, source, stride); destination = narrow_fragment(loaded); }
 inline void simdgroup_load(thread simdgroup_half8x8& destination, threadgroup const float* source, ulong stride) { simdgroup_float8x8 loaded; simdgroup_load(loaded, source, stride); destination = narrow_fragment(loaded); }
+inline void omega_load_shared_half(thread simdgroup_half8x8& destination, threadgroup const half* source, ulong stride, ushort lane) { short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4)); short column = (short)((quad & 2) * 2 + (lane % 2) * 2); destination.thread_elements()[0] = source[(long)row * stride + column]; destination.thread_elements()[1] = source[(long)row * stride + column + 1]; }
+"#;
+
+pub(super) const SHARED_K_FLOAT_HELPER: &str = r#"
+inline void omega_load_shared_float(thread simdgroup_float8x8& destination, threadgroup const float* source, ulong stride, ushort lane) { (void)lane; simdgroup_load(destination, source, stride); }
 "#;
 
 const ROW_TILED_KERNEL: &str = r#"struct Uniforms { long total_elements; long splits; };@MMA_HELPERS@
@@ -255,7 +315,10 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
     constexpr long tile_blocks = rows_in_fragment ? (tile_rows / 8) * query_groups : (tile_rows * query_groups) / 8;
     constexpr long tile_vectors = tile_blocks * 8; constexpr long threads = simdgroups * 32;
     constexpr long dims_per_group = head_dim / 8 / simdgroups; constexpr long depth_unroll = ((half_dim / 8) % 2 == 0) ? 2 : 1;
+    constexpr bool shared_k = @KV_REUSE_SHARED_K@;
     constexpr long key_tiles_per_group = (block / 8) / simdgroups;
+    constexpr long score_key_tiles = shared_k ? (block / 8) : key_tiles_per_group;
+    constexpr long score_vectors_per_simdgroup = shared_k ? (tile_blocks + simdgroups - 1) / simdgroups : tile_blocks;
     constexpr long query_stride = rows_in_fragment ? kv_heads * query_groups * half_dim : half_dim;
     long splits = u.splits;
     long total_rows = u.total_elements / (kv_heads * query_groups);
@@ -271,6 +334,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
     short quad = (short)(lane / 4); short fragment_row = (short)((quad & 4) + ((lane / 2) % 4)); short fragment_column = (short)((quad & 2) * 2 + (lane % 2) * 2);
     threadgroup float score_tile[tile_vectors * block]; threadgroup float row_maximum[tile_vectors]; threadgroup float row_sum[tile_vectors]; threadgroup float rescale_tile[tile_vectors];
     threadgroup int vector_row[tile_vectors]; threadgroup int vector_head[tile_vectors]; threadgroup int vector_live[tile_vectors];
+    threadgroup @OPERAND_SCALAR@ shared_key_even[@SHARED_K_ELEMENTS@]; threadgroup @OPERAND_SCALAR@ shared_key_odd[@SHARED_K_ELEMENTS@];
     constexpr bool stage_query = @STAGE_QUERY@; constexpr long query_stage_stride = half_dim + @QUERY_STAGE_PAD@L;
     threadgroup float query_stage[stage_query ? tile_blocks * 2L * 8L * query_stage_stride : 1L];
     for (long index = thread_id; index < tile_vectors; index += threads) {
@@ -333,8 +397,8 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
             device const float* key_even = mode == 0L ? (device const float*)in2 : in4;
             device const float* key_odd = mode == 0L ? (device const float*)in3 : in5;
             int fragments = (int)((columns + 7L) / 8L);
-            simdgroup_float8x8 scores[key_tiles_per_group][tile_blocks];
-            FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) { FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { scores[group][vector_block] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f); } }
+            simdgroup_float8x8 scores[score_key_tiles][score_vectors_per_simdgroup];
+            FOR_UNROLL for (int key_slot = 0; key_slot < (int)score_key_tiles; key_slot++) { FOR_UNROLL for (int vector_slot = 0; vector_slot < (int)score_vectors_per_simdgroup; vector_slot++) { scores[key_slot][vector_slot] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f); } }
             for (int depth = 0; depth < (int)half_dim; depth += 8 * (int)depth_unroll) {
                 @OPERAND@ key_even_tile[key_tiles_per_group][depth_unroll]; @OPERAND@ key_odd_tile[key_tiles_per_group][depth_unroll];
                 FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) {
@@ -366,33 +430,86 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                         }
                     }
                 }
-                FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) {
-                    long query_offset = (block_row[vector_block] * (kv_heads * query_groups) + kv_head * query_groups + block_head[vector_block]) * half_dim + depth;
-                    @OPERAND@ query_even[depth_unroll]; @OPERAND@ query_odd[depth_unroll];
-                    FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
-                        if (stage_query) {
-                            threadgroup const float* stage_even = query_stage + (long)vector_block * 16L * query_stage_stride + depth + 8 * step_index;
-                            simdgroup_load(query_even[step_index], stage_even, (ulong)query_stage_stride);
-                            simdgroup_load(query_odd[step_index], stage_even + 8L * query_stage_stride, (ulong)query_stage_stride);
-                        } else {
-                            simdgroup_load(query_even[step_index], in0 + query_offset + 8 * step_index, (ulong)query_stride);
-                            simdgroup_load(query_odd[step_index], in1 + query_offset + 8 * step_index, (ulong)query_stride);
+                if (@KV_REUSE_SHARED_K@) {
+                    FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) {
+                        int key_tile = (int)simdgroup_slot + group * (int)simdgroups;
+                        if (key_tile < fragments) {
+                            FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
+                                int shared_index = (key_tile * (int)depth_unroll + step_index) * 64;
+                                simdgroup_store(key_even_tile[group][step_index], shared_key_even + shared_index, 8);
+                                simdgroup_store(key_odd_tile[group][step_index], shared_key_odd + shared_index, 8);
+                            }
                         }
                     }
-                    FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) {
-                        if ((int)simdgroup_slot + group * (int)simdgroups < fragments) {
+                    threadgroup_barrier(mem_flags::mem_threadgroup);
+                }
+                if (@KV_REUSE_SHARED_K@) {
+                    threadgroup_barrier(mem_flags::mem_threadgroup);
+                    FOR_UNROLL for (int key_tile = 0; key_tile < fragments; key_tile++) {
+                        int shared_index = (key_tile * (int)depth_unroll) * 64;
+                        @OPERAND@ shared_even[depth_unroll]; @OPERAND@ shared_odd[depth_unroll];
+                        FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
+                            int fragment_index = shared_index + step_index * 64;
+                            @SHARED_K_LOAD@(shared_even[step_index], shared_key_even + fragment_index, 8, lane);
+                            @SHARED_K_LOAD@(shared_odd[step_index], shared_key_odd + fragment_index, 8, lane);
+                        }
+                        for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups) {
+                            int vector_slot = vector_block / (int)simdgroups;
+                            long query_offset = (block_row[vector_block] * (kv_heads * query_groups) + kv_head * query_groups + block_head[vector_block]) * half_dim + depth;
+                            @OPERAND@ query_even[depth_unroll]; @OPERAND@ query_odd[depth_unroll];
                             FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
-                                simdgroup_multiply_accumulate(scores[group][vector_block], query_even[step_index], key_even_tile[group][step_index], scores[group][vector_block]);
-                                simdgroup_multiply_accumulate(scores[group][vector_block], query_odd[step_index], key_odd_tile[group][step_index], scores[group][vector_block]);
+                                if (stage_query) {
+                                    threadgroup const float* stage_even = query_stage + (long)vector_block * 16L * query_stage_stride + depth + 8 * step_index;
+                                    simdgroup_load(query_even[step_index], stage_even, (ulong)query_stage_stride);
+                                    simdgroup_load(query_odd[step_index], stage_even + 8L * query_stage_stride, (ulong)query_stage_stride);
+                                } else {
+                                    simdgroup_load(query_even[step_index], in0 + query_offset + 8 * step_index, (ulong)query_stride);
+                                    simdgroup_load(query_odd[step_index], in1 + query_offset + 8 * step_index, (ulong)query_stride);
+                                }
+                                simdgroup_multiply_accumulate(scores[key_tile][vector_slot], query_even[step_index], shared_even[step_index], scores[key_tile][vector_slot]);
+                                simdgroup_multiply_accumulate(scores[key_tile][vector_slot], query_odd[step_index], shared_odd[step_index], scores[key_tile][vector_slot]);
+                            }
+                        }
+                    }
+                } else {
+                    FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) {
+                        long query_offset = (block_row[vector_block] * (kv_heads * query_groups) + kv_head * query_groups + block_head[vector_block]) * half_dim + depth;
+                        @OPERAND@ query_even[depth_unroll]; @OPERAND@ query_odd[depth_unroll];
+                        FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
+                            if (stage_query) {
+                                threadgroup const float* stage_even = query_stage + (long)vector_block * 16L * query_stage_stride + depth + 8 * step_index;
+                                simdgroup_load(query_even[step_index], stage_even, (ulong)query_stage_stride);
+                                simdgroup_load(query_odd[step_index], stage_even + 8L * query_stage_stride, (ulong)query_stage_stride);
+                            } else {
+                                simdgroup_load(query_even[step_index], in0 + query_offset + 8 * step_index, (ulong)query_stride);
+                                simdgroup_load(query_odd[step_index], in1 + query_offset + 8 * step_index, (ulong)query_stride);
+                            }
+                        }
+                        FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) {
+                            if ((int)simdgroup_slot + group * (int)simdgroups < fragments) {
+                                FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
+                                    simdgroup_multiply_accumulate(scores[group][vector_block], query_even[step_index], key_even_tile[group][step_index], scores[group][vector_block]);
+                                    simdgroup_multiply_accumulate(scores[group][vector_block], query_odd[step_index], key_odd_tile[group][step_index], scores[group][vector_block]);
+                                }
                             }
                         }
                     }
                 }
+                if (@KV_REUSE_SHARED_K@) { threadgroup_barrier(mem_flags::mem_threadgroup); }
             }
-            FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) {
-                int key_tile = (int)simdgroup_slot + group * (int)simdgroups;
-                if (key_tile < fragments) {
-                    FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { simdgroup_store(scores[group][vector_block], score_tile + vector_block * 8 * (int)block + key_tile * 8, (ulong)block); }
+            if (@KV_REUSE_SHARED_K@) {
+                for (int key_tile = 0; key_tile < fragments; key_tile++) {
+                    for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups) {
+                        int vector_slot = vector_block / (int)simdgroups;
+                        simdgroup_store(scores[key_tile][vector_slot], score_tile + vector_block * 8 * (int)block + key_tile * 8, (ulong)block);
+                    }
+                }
+            } else {
+                FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) {
+                    int key_tile = (int)simdgroup_slot + group * (int)simdgroups;
+                    if (key_tile < fragments) {
+                        FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { simdgroup_store(scores[group][vector_block], score_tile + vector_block * 8 * (int)block + key_tile * 8, (ulong)block); }
+                    }
                 }
             }
         } else {

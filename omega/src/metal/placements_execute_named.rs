@@ -1600,6 +1600,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 plan.math_mode,
                 plan.numeric_policy,
                 plan.attention_mma_selection,
+                plan.attention_kv_reuse_selection,
                 resolved_step,
                 #[cfg(feature = "instrument")]
                 capture_chunk_index,
@@ -2288,6 +2289,7 @@ pub fn execute_plan_timed(
             plan.math_mode,
             plan.numeric_policy,
             plan.attention_mma_selection,
+            plan.attention_kv_reuse_selection,
             None,
             #[cfg(feature = "instrument")]
             1,

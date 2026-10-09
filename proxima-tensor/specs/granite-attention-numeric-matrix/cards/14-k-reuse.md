@@ -20,12 +20,17 @@ In scope: one behavior, the two acceptance tests (or two checker gates for card 
 
 ## Edit
 
-- `omega/src/msl/cached_attention_row_tiled.rs`
+- `omega/src/msl/signature_tokens_prelude.rs` (variant field parsing and stable K-reuse identity)
+- `omega/src/msl/cached_attention_row_tiled.rs` (staging, cross-simdgroup consumption, memory admission)
+- `omega/src/msl/cached_attention_render.rs`, `omega/src/msl/emit_and_classify.rs` (variant selection and source rendering)
+- `omega/src/metal/` plan, pipeline, and dispatch modules that preserve the selection through compilation and execution
+- `omega/src/error.rs` (typed refusal when shared staging exceeds the threadgroup budget)
+- `omega/src/msl/attn_rows_tests.rs` (positive structural assertions and budget-refusal control)
 - `proxima-tensor/specs/granite-attention-numeric-matrix/TASKS.md` (row and resume only)
 
 ## Steps
 
-The current row renderer already reuses a K fragment across query vectors inside one simdgroup (`cached_attention_row_tiled.rs:235-260`). Implement `kv_reuse=shared_k`: decode each cached K block, convert it to the selected MMA operand representation, stage it once in threadgroup memory for all simdgroups of a row tile, then consume it under a barrier; V remains on the legacy path. `kv_reuse=shared_kv` is reserved for card 15. Charge the actual two- or four-byte staged operand width to the existing threadgroup budget. Assert one staged K fetch per block, unchanged per-row causal masks, distinct emitted source/entry, and a budget-refusal control.
+The legacy row renderer distributes K fragments across simdgroups and reuses each register fragment across query vectors owned by that simdgroup. Implement `kv_reuse=shared_k`: convert each K fragment to the selected MMA operand representation, stage each fragment once in threadgroup memory, synchronize, then let simdgroups consume staged fragments while owning disjoint query blocks; V remains on the legacy path. This couples K sharing to query-block ownership in this card; card 17 exposes query parallelism as a separate dispatch axis. Do not claim fewer global K loads than Legacy: both paths load each K fragment once per row tile; this card changes which simdgroup consumes the fragment. `kv_reuse=shared_kv` is reserved for card 15. Charge the actual two- or four-byte staged operand width to the existing threadgroup budget. Assert unique K-fragment producers, cross-simdgroup consumers, unique score writers, unchanged per-row causal masks, distinct emitted source/entry, and a budget-refusal control.
 
 Use the existing Proxima numeric and Metal abstractions. Do not introduce num-traits, model-name special cases, or a silent fallback. Storage width, MMA operand width and f32 accumulator are different contracts. The two AC checks must cover a normal case and a refusing or degenerate case. Inspect assertions and emitted payloads, not merely the runner summary.
 

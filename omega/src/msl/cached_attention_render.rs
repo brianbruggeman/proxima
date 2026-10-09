@@ -137,6 +137,7 @@ pub(super) fn render_cached_attention(
         numeric_policy,
         cached_kv_codec,
         AttentionMmaSelection::Legacy,
+        AttentionKvReuseSelection::Legacy,
     )
 }
 
@@ -146,6 +147,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
     numeric_policy: NumericPolicy,
     cached_kv_codec: Option<Codec>,
     mma_selection: AttentionMmaSelection,
+    kv_reuse_selection: AttentionKvReuseSelection,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         query_rows,
@@ -215,6 +217,13 @@ pub(super) fn render_cached_attention_with_mma_selection(
             reason: "F16 MMA operands require the row-tiled simdgroup-matrix form",
         });
     }
+    #[cfg(feature = "metal-attn-variants")]
+    if kv_reuse_selection == AttentionKvReuseSelection::SharedK && !has_row_tiled_mma {
+        return Err(EmitError::CachedAttentionKvReuseNotSupported {
+            node: resolved.node,
+            reason: "shared K reuse requires the row-tiled simdgroup-matrix form",
+        });
+    }
     let codec_supported_by_form = {
         let decode = {
             #[cfg(feature = "metal-attn-split-decode")]
@@ -266,6 +275,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
                 simdgroups,
                 cached_kv_codec,
                 mma_selection,
+                kv_reuse_selection,
             );
         }
     };

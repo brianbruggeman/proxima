@@ -169,6 +169,12 @@ pub enum EmitError {
         bound: &'static str,
     },
 
+    #[error("node {node} cannot select cached-attention K reuse: {reason}")]
+    CachedAttentionKvReuseNotSupported {
+        node: NodeId,
+        reason: &'static str,
+    },
+
     /// A packed scalar codec reached an op whose renderer has no reader for it.
     #[error("node {node} reads packed codec {codec:?}, which this metal renderer does not support")]
     PackedCodecNotSupported { node: NodeId, codec: Codec },
