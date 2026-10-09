@@ -55,12 +55,12 @@ pub(super) fn cached_attention_scalar_score_body(pass_present: bool, new_range_w
 
 /// The operands of a cached attention bind that hold the cached K even plane,
 /// K odd plane and V rows -- the only ones that may be packed, and only as
-/// one `Codec::Float16`, `Codec::BFloat16` or `Codec::BFloat8` triple read by the decode split.
+/// one `Codec::Float16`, `Codec::BFloat16` or `Codec::BFloat8` triple read by a narrow-K/V kernel form.
 const CACHED_KV_OPERANDS: [usize; 3] = [2, 3, 6];
 
 /// Classifies a cached attention bind's operand codecs: `None` when every
 /// operand is a plain buffer (every kernel form reads this), or a uniform
-/// Float16/BFloat16/BFloat8 cache triple (only the decode split reads these), an
+/// Float16/BFloat16/BFloat8 cache triple (decode split reads all three; row-tiled reads BF16), an
 /// error for any other packing. `quantized` is `operand_codecs`'
 /// answer; entries past its end count as plain, so a hand-built bind with no
 /// packed operands passes `&[]`.
@@ -98,14 +98,28 @@ pub(super) fn cached_attention_kv_codec(
     }
 }
 
-#[cfg(feature = "metal-attn-split-decode")]
 fn form_reads_narrow_kv(form: CachedAttentionForm) -> bool {
-    matches!(form, CachedAttentionForm::TwoRangeDecodeSplit { .. })
-}
-
-#[cfg(not(feature = "metal-attn-split-decode"))]
-fn form_reads_narrow_kv(_form: CachedAttentionForm) -> bool {
-    false
+    let decode = {
+        #[cfg(feature = "metal-attn-split-decode")]
+        {
+            matches!(form, CachedAttentionForm::TwoRangeDecodeSplit { .. })
+        }
+        #[cfg(not(feature = "metal-attn-split-decode"))]
+        {
+            false
+        }
+    };
+    let rows = {
+        #[cfg(feature = "metal-attn-split-rows")]
+        {
+            matches!(form, CachedAttentionForm::TwoRangeRowTiled { .. })
+        }
+        #[cfg(not(feature = "metal-attn-split-rows"))]
+        {
+            false
+        }
+    };
+    decode || rows
 }
 
 pub(super) fn render_cached_attention(
@@ -170,10 +184,34 @@ pub(super) fn render_cached_attention(
             found: resolved.kind.name(),
         });
     };
-    if cached_kv_codec.is_some() && !form_reads_narrow_kv(form) {
+    let codec_supported_by_form = {
+        let decode = {
+            #[cfg(feature = "metal-attn-split-decode")]
+            {
+                matches!(form, CachedAttentionForm::TwoRangeDecodeSplit { .. })
+            }
+            #[cfg(not(feature = "metal-attn-split-decode"))]
+            {
+                false
+            }
+        };
+        let rows = {
+            #[cfg(feature = "metal-attn-split-rows")]
+            {
+                matches!(form, CachedAttentionForm::TwoRangeRowTiled { .. })
+                    && cached_kv_codec == Some(Codec::BFloat16)
+            }
+            #[cfg(not(feature = "metal-attn-split-rows"))]
+            {
+                false
+            }
+        };
+        (decode || rows) && form_reads_narrow_kv(form)
+    };
+    if cached_kv_codec.is_some() && !codec_supported_by_form {
         return Err(EmitError::CachedAttentionKvCodecNotSupported {
             node: resolved.node,
-            reason: "this form reads f32 cached K/V; only decode split reads Float16 or BFloat16",
+            reason: "decode split reads Float16, BFloat16 or BFloat8; row-tiled reads BFloat16",
         });
     }
     let (single_range_dynamic, two_range_cached_bound) = match form {
@@ -195,6 +233,7 @@ pub(super) fn render_cached_attention(
                 entry,
                 rows_per_threadgroup,
                 simdgroups,
+                cached_kv_codec,
             );
         }
     };
