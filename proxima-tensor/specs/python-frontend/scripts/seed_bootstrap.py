@@ -474,7 +474,8 @@ def seal_closed(args: argparse.Namespace) -> None:
         fail("closed host wrapper transcript receipt mismatch")
     if full.exists():
         prior = full.with_name("full.log.preclose")
-        prior.write_bytes(full.read_bytes())
+        if not prior.exists():
+            prior.write_bytes(full.read_bytes())
         prior_hash = hashlib.sha256(prior.read_bytes()).hexdigest()
         postseal_record = read_json(root / "postseal.json")
         if postseal_record.get("raw_sha256") != prior_hash or postseal_record.get("full_log_sha256") != prior_hash:
