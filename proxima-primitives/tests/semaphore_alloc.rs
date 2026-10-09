@@ -22,11 +22,11 @@ fn measure_uncontended_acquire_allocations() {
     );
 
     let single_acquire_allocations = measure_acquires(1);
-    assert!(single_acquire_allocations >= 1);
+    assert_eq!(single_acquire_allocations, 0);
     emit_record("uncontended_acquire_once", 1, single_acquire_allocations);
 
     let repeated_acquire_allocations = measure_acquires(16);
-    assert!(repeated_acquire_allocations >= 16);
+    assert_eq!(repeated_acquire_allocations, 0);
     emit_record(
         "uncontended_acquire_repeated",
         16,
