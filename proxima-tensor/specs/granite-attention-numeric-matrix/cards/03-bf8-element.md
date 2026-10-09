@@ -20,6 +20,7 @@ In scope: one behavior, the two acceptance tests (or two checker gates for card 
 ## Edit
 
 - `proxima-tensor/src/cpu/typed_eval.rs`
+- `proxima-tensor/src/cpu/tests.rs` (the two named acceptance tests)
 - `proxima-tensor/specs/granite-attention-numeric-matrix/TASKS.md` (row and resume only)
 
 ## Steps

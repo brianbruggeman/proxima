@@ -1,4 +1,5 @@
 use super::*;
+use crate::BFloat8;
 use crate::bind::BodyStep;
 use crate::map::{self, AxisTerm, IndexMap};
 use crate::op::{Extent, Reduce, append};
@@ -7056,6 +7057,50 @@ fn bf16_reduce_widens_into_an_f32_accumulator_exactly() {
     let results = evaluate_typed(&program, &[], &[operand], &[])
         .expect("a bf16-operand, f32-accumulator reduce evaluates");
     assert_eq!(results[0].2, TypedBuffer::Float32(alloc::vec![6.0]));
+}
+
+#[test]
+fn card_03_bf8_element_rounds_each_elementwise_result_by_contract() {
+    let (program, _, _, _) = typed_add_program(DType::BFloat8, 1);
+    let lhs = TypedBuffer::BFloat8(alloc::vec![BFloat8::from_bits(0x3c)]);
+    let rhs = TypedBuffer::BFloat8(alloc::vec![BFloat8::from_bits(0x30)]);
+    let results = evaluate_typed(&program, &[], &[lhs, rhs], &[])
+        .expect("a BF8 elementwise add executes through its f32 scalar bridge");
+
+    assert_eq!(
+        results[0].2,
+        TypedBuffer::BFloat8(alloc::vec![BFloat8::from_bits(0x3c)]),
+        "1.0 + 0.125 is an RNE tie that rounds to the even 1.0 encoding"
+    );
+    assert_eq!(results[0].2.dtype(), DType::BFloat8);
+    assert_eq!(results[0].2.len(), 1);
+}
+
+#[test]
+fn card_03_bf8_element_widens_reduce_and_rejects_bf8_accumulation() {
+    let values = [1.0f32, 0.125, 0.125, 0.125];
+    let operand = TypedBuffer::BFloat8(values.map(BFloat8::from_f32).to_vec());
+    let (widened_program, _) =
+        typed_widened_reduce_program(DType::BFloat8, DType::Float32, values.len() as u32);
+    let widened = evaluate_typed(&widened_program, &[], &[operand.clone()], &[])
+        .expect("BF8 inputs reduce into the explicitly selected F32 accumulator");
+    assert_eq!(widened[0].2, TypedBuffer::Float32(alloc::vec![1.375]));
+
+    let mut per_step_bf8 = BFloat8::from_f32(0.0);
+    for value in values {
+        per_step_bf8 = BFloat8::from_f32(per_step_bf8.to_f32() + value);
+    }
+    assert_eq!(per_step_bf8.to_f32(), 1.0);
+    assert_ne!(widened[0].2, TypedBuffer::Float32(alloc::vec![per_step_bf8.to_f32()]));
+
+    let (narrow_program, _) =
+        typed_reduce_vector_to_scalar_program(DType::BFloat8, values.len() as u32);
+    let error = evaluate_typed(&narrow_program, &[], &[operand], &[])
+        .expect_err("BF8 reduction without an explicit wider accumulator is declined");
+    assert!(
+        matches!(error, TensorError::NotLowerable { .. }),
+        "BF8 accumulation must request the F32 path: {error}"
+    );
 }
 
 #[test]
