@@ -1,4 +1,5 @@
 use super::*;
+use proxima_tensor::BFloat8;
 
 /// Resolves a program into a reusable [`Plan`]. `blocks` is read for its
 /// CODECS and shapes only — the data is not captured, so the same plan runs
@@ -1269,6 +1270,79 @@ pub fn read_placed_buffer_bf16_as_f32(
     source.iter().map(|value| value.to_f32()).collect()
 }
 
+/// Stores `f32` values as one-byte Proxima BF8 elements at `byte_offset`.
+#[cfg(feature = "metal-output-placement")]
+pub fn write_placed_buffer_f32_as_bf8(buffer: &PlacedBuffer, byte_offset: usize, values: &[f32]) {
+    // SAFETY: the caller provides an in-bounds byte range in idle shared storage.
+    let destination = unsafe {
+        core::slice::from_raw_parts_mut(
+            buffer.contents().as_ptr().cast::<u8>().add(byte_offset),
+            values.len(),
+        )
+    };
+    for (slot, value) in destination.iter_mut().zip(values) {
+        *slot = BFloat8::from_f32(*value).to_bits();
+    }
+}
+
+/// Reads one-byte Proxima BF8 elements and widens them to `f32`.
+#[cfg(feature = "metal-output-placement")]
+#[must_use]
+pub fn read_placed_buffer_bf8_as_f32(
+    buffer: &PlacedBuffer,
+    byte_offset: usize,
+    element_count: usize,
+) -> Vec<f32> {
+    // SAFETY: the caller provides an in-bounds byte range in shared storage.
+    let source = unsafe {
+        core::slice::from_raw_parts(
+            buffer.contents().as_ptr().cast::<u8>().add(byte_offset),
+            element_count,
+        )
+    };
+    source
+        .iter()
+        .map(|value| BFloat8::from_bits(*value).to_f32())
+        .collect()
+}
+
+/// Narrows an f32 placed staging range into a one-byte BF8 cache range.
+#[cfg(feature = "metal-output-placement")]
+pub fn narrow_placed_buffer_f32_to_bf8(
+    source: &PlacedBuffer,
+    source_byte_offset: usize,
+    destination: &PlacedBuffer,
+    destination_byte_offset: usize,
+    element_count: usize,
+) {
+    // SAFETY: the caller provides in-bounds f32 and byte ranges in distinct,
+    // idle shared buffers.
+    let (rows, narrowed) = unsafe {
+        (
+            core::slice::from_raw_parts(
+                source
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(source_byte_offset)
+                    .cast::<f32>(),
+                element_count,
+            ),
+            core::slice::from_raw_parts_mut(
+                destination
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(destination_byte_offset),
+                element_count,
+            ),
+        )
+    };
+    for (destination_value, source_value) in narrowed.iter_mut().zip(rows) {
+        *destination_value = BFloat8::from_f32(*source_value).to_bits();
+    }
+}
+
 /// Narrows an f32 placed staging range into a two-byte BF16 cache range.
 #[cfg(feature = "metal-output-placement")]
 pub fn narrow_placed_buffer_f32_to_bf16(
@@ -2025,5 +2099,68 @@ mod card_04_tests {
         assert_eq!(read_placed_buffer_bf16_as_f32(&cache, 0, 1), vec![9.0]);
         assert_eq!(read_placed_buffer_bf16_as_f32(&cache, 8, 2), vec![1.5, 2.5]);
         assert_eq!(read_placed_buffer_bf16_as_f32(&cache, 12, 1), vec![-7.0]);
+    }
+}
+
+#[cfg(all(test, feature = "metal-output-placement"))]
+mod card_07_tests {
+    use super::*;
+
+    #[test]
+    fn card_07_bf8_placed_matches_golden_vectors() {
+        let buffer = allocate_placed_buffer(16).expect("allocates BF8 fixture bytes");
+        let values = [
+            0x0000_0000,
+            0x8000_0000,
+            0x3f80_0000,
+            0xbf80_0000,
+            0x3fa0_0000,
+            0x3fc0_0000,
+            0x3f90_0000,
+            0x3fb0_0000,
+            0x3880_0000,
+            0x3780_0000,
+            0x4760_0000,
+            0x4770_0000,
+            0x7f80_0000,
+            0xff80_0000,
+            0x7fc0_0000,
+            0xffc0_0000,
+        ]
+        .map(f32::from_bits);
+        let expected = [
+            0x00, 0x80, 0x3c, 0xbc, 0x3d, 0x3e, 0x3c, 0x3e, 0x04, 0x01, 0x7b, 0x7c, 0x7c, 0xfc,
+            0x7e, 0xfe,
+        ];
+
+        write_placed_buffer_f32_as_bf8(&buffer, 0, &values);
+
+        let stored = unsafe {
+            core::slice::from_raw_parts(buffer.contents().as_ptr().cast::<u8>(), expected.len())
+        };
+        assert_eq!(stored, expected);
+        assert_eq!(
+            read_placed_buffer_bf8_as_f32(&buffer, 0, expected.len())
+                .iter()
+                .map(|value| BFloat8::from_f32(*value).to_bits())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn card_07_bf8_placed_narrows_at_nonzero_offsets_without_touching_sentinels() {
+        let staging = allocate_placed_buffer(16).expect("allocates f32 staging bytes");
+        let cache = allocate_placed_buffer(8).expect("allocates BF8 cache bytes");
+        write_placed_buffer_f32(&staging, 0, &[9.0, 1.5, 2.5, -7.0]);
+        write_placed_buffer_f32_as_bf8(&cache, 0, &[9.0]);
+        write_placed_buffer_f32_as_bf8(&cache, 7, &[-7.0]);
+
+        narrow_placed_buffer_f32_to_bf8(&staging, 4, &cache, 2, 2);
+
+        let stored =
+            unsafe { core::slice::from_raw_parts(cache.contents().as_ptr().cast::<u8>(), 8) };
+        assert_eq!(stored, &[0x48, 0, 0x3e, 0x41, 0, 0, 0, 0xc7]);
+        assert_eq!(read_placed_buffer_bf8_as_f32(&cache, 2, 2), [1.5, 2.5]);
     }
 }
