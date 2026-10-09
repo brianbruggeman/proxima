@@ -9520,6 +9520,29 @@ mod expert_grouped_route_segments {
         assert!(source.contains(&reader_slot), "{source}");
         assert!(source.contains("route_compaction[0] = running;"), "{source}");
         assert!(source.contains("simd_prefix_exclusive_sum(hit)"), "{source}");
+
+        let adjacent = gathered_matmul_op(301, 8, 192, 512);
+        let (_, bound_grid) = kernel_dispatch_shape(&bound, &packed, NumericPolicy::default())
+            .expect("first grouped shape has a grid");
+        let (_, adjacent_grid) =
+            kernel_dispatch_shape(&adjacent, &packed, NumericPolicy::default())
+                .expect("adjacent grouped shape has a grid");
+        assert_eq!(bound_grid, adjacent_grid);
+        let bound_key = kernel_cache_key_for_grid(
+            &bound,
+            &packed,
+            NumericPolicy::default(),
+            &bound_grid,
+        )
+        .expect("first grouped shape has a pipeline identity");
+        let adjacent_key = kernel_cache_key_for_grid(
+            &adjacent,
+            &packed,
+            NumericPolicy::default(),
+            &adjacent_grid,
+        )
+        .expect("adjacent grouped shape has a pipeline identity");
+        assert_ne!(bound_key, adjacent_key, "the source bakes token count into scratch_base");
     }
 
     #[test]
