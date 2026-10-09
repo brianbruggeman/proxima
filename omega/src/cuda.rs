@@ -10,22 +10,21 @@
 //! have no port here yet, so every op renders through the generic per-thread
 //! (elementwise/scan) or per-output-element (reduce) path.
 //!
-//! # No CUDA toolchain on this host
+//! # Emitter and driver boundary
 //!
 //! This module is pure string generation over an already-bound [`BoundOp`] —
 //! it never links `libcuda`, `nvrtc`, or any NVIDIA driver, and has zero
 //! dependencies (`cuda = []` in `Cargo.toml`). That is what lets it build and
 //! its tests run on a machine with no NVIDIA GPU, including the macOS CI host
 //! that gates this crate. The emitted CUDA C source is never compiled here
-//! (`nvcc`/`nvrtc` are not available), so this crate proves emission
-//! STRUCTURE only — that the right buffers, the right unpack calls, and the
-//! right control flow appear in the text — never numeric execution parity
-//! with a real device. A driver half (`cudarc`/`cust`, actual `cuModuleLoad`
-//! and `cuLaunchKernel`) is future work behind its own std-gated,
-//! dependency-bearing feature. `crate::backend::Engine`/`GpuDriver` carry no
-//! `Cuda` variant at all -- this module is the source EMITTER only, never a
-//! third engine or a third driver (see `crate::backend`'s own doc, §B.4 of
-//! the 2026-09-04 design).
+//! (`nvcc`/`nvrtc` are not invoked by this module), so this module's tests
+//! prove emission STRUCTURE only — that the right buffers, unpack calls, and
+//! control flow appear in the text — not numeric execution parity. The
+//! separately gated `cuda-driver` module uses cudarc and NVRTC to compile and
+//! launch the supported emitted graph subset. This module remains the source
+//! EMITTER; `crate::backend::GpuDriver::Cuda` exists only when that driver
+//! feature is enabled (see `crate::backend`'s own doc, §B.4 of the
+//! 2026-09-04 design).
 //!
 //! # v1 scope
 //!
