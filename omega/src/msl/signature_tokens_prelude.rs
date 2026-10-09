@@ -2081,7 +2081,7 @@ impl AttentionRowSchedule {
 /// Compose with [`cached_attention_merge_needed`], [`splits_for`] and
 /// [`context_chunks_for`], which answer the per-form sizing questions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CachedAttentionForm {
+pub enum CachedAttentionForm {
     /// 8 or 11 operands: row counts compiled in, one dispatch.
     Static,
     /// 9 or 12 operands with `cached_key_rows == 0`: one merged range, the

@@ -1796,3 +1796,131 @@ fn card_19_simd_topology_declines_an_insufficient_head_width() {
         }
     ));
 }
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_20_dispatch_matrix_exposes_legacy_and_seven_one_factor_flips() {
+    let capture = include_str!("../../../proxima-tensor/specs/decode-prefill-parity/evidence/attn5/raw/probe/granite.out");
+    assert!(capture
+        .lines()
+        .any(|line| line.contains("extents=[1000, 8, 2, 64]")));
+    let operation = card_17_granite_attention(1000);
+    let policy = NumericPolicy::llama_relaxed();
+    let legacy = inspect_attention_variant(
+        &operation,
+        &PackedOperands::new(),
+        policy,
+        AttentionVariant::default(),
+    )
+    .expect("the legacy Granite dispatch has an inspectable manifest");
+    let pre_variant = emit(&operation, &PackedOperands::new(), policy)
+        .expect("the captured Granite operation emits through the base path");
+    assert_eq!(legacy.kernel.source, pre_variant.source);
+    assert_eq!(legacy.kernel.entry, pre_variant.entry);
+    assert_eq!(legacy.kernel.grid, pre_variant.grid);
+    assert_eq!(legacy.form, cached_attention_form(&operation.kind, policy).expect("form classified"));
+    assert_eq!(legacy.cache_codec, None);
+    assert_eq!(legacy.accumulator, DType::Float32);
+    assert!(legacy.matches_selector(AttentionVariant::default()));
+    assert!(!legacy.matches_selector(AttentionVariant {
+        prefetch: AttentionPrefetch::NextBlock,
+        ..AttentionVariant::default()
+    }));
+
+    let matrix_base_variant = AttentionVariant {
+        mma_precision: AttentionMmaPrecision::F16,
+        kv_reuse: AttentionKvReuse::SharedKv,
+        tile_height: AttentionTileHeight::Rows8,
+        query_parallelism: AttentionQueryParallelism::SimdgroupRows,
+        ..AttentionVariant::default()
+    };
+    let matrix_base = inspect_attention_variant(
+        &operation,
+        &PackedOperands::new(),
+        policy,
+        matrix_base_variant,
+    )
+    .expect("the F16 shared-K/V schedule admits prefetch");
+    let flips = [
+        AttentionVariant {
+            kv_storage: AttentionKvStorage::Bf16,
+            ..matrix_base_variant
+        },
+        AttentionVariant {
+            mma_precision: AttentionMmaPrecision::F32,
+            ..matrix_base_variant
+        },
+        AttentionVariant {
+            kv_reuse: AttentionKvReuse::SharedK,
+            ..matrix_base_variant
+        },
+        AttentionVariant {
+            tile_height: AttentionTileHeight::Rows16,
+            ..matrix_base_variant
+        },
+        AttentionVariant {
+            query_parallelism: AttentionQueryParallelism::Legacy,
+            ..matrix_base_variant
+        },
+        AttentionVariant {
+            simd_topology: AttentionSimdTopology::PerHead,
+            ..matrix_base_variant
+        },
+        AttentionVariant {
+            prefetch: AttentionPrefetch::NextBlock,
+            ..matrix_base_variant
+        },
+    ];
+    for selected in flips {
+        let mut packed_operands = PackedOperands::new();
+        let codec = match selected.kv_storage {
+            AttentionKvStorage::F32 => None,
+            AttentionKvStorage::Bf16 => Some(Codec::BFloat16),
+            AttentionKvStorage::Bf8 => Some(Codec::BFloat8),
+        };
+        if let Some(codec) = codec {
+            for operand_index in [2, 3, 6] {
+                packed_operands.insert(NodeId(operand_index), codec);
+            }
+        }
+        let manifest = inspect_attention_variant(&operation, &packed_operands, policy, selected)
+            .expect("each axis admits a standalone captured-shape dispatch");
+        let changed_axes = usize::from(selected.kv_storage != matrix_base.variant.kv_storage)
+            + usize::from(selected.mma_precision != matrix_base.variant.mma_precision)
+            + usize::from(selected.kv_reuse != matrix_base.variant.kv_reuse)
+            + usize::from(selected.tile_height != matrix_base.variant.tile_height)
+            + usize::from(selected.query_parallelism != matrix_base.variant.query_parallelism)
+            + usize::from(selected.simd_topology != matrix_base.variant.simd_topology)
+            + usize::from(selected.prefetch != matrix_base.variant.prefetch);
+        assert_eq!(changed_axes, 1, "selector must flip exactly one typed axis");
+        assert_eq!(manifest.variant, selected);
+        assert_eq!(manifest.accumulator, DType::Float32);
+        assert_ne!(manifest.dispatch_identity, matrix_base.dispatch_identity);
+        if selected.kv_storage == AttentionKvStorage::Bf16 {
+            assert_eq!(manifest.cache_codec, Some(Codec::BFloat16));
+        }
+    }
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_20_dispatch_matrix_refuses_a_cache_storage_mismatch() {
+    let operation = card_17_granite_attention(1000);
+    let error = inspect_attention_variant(
+        &operation,
+        &PackedOperands::new(),
+        NumericPolicy::llama_relaxed(),
+        AttentionVariant {
+            kv_storage: AttentionKvStorage::Bf16,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect_err("a BF16 selector cannot describe plain F32 cache buffers");
+    assert!(matches!(
+        error,
+        EmitError::CachedAttentionVariantStorageMismatch {
+            selected: "bf16",
+            bound: "f32",
+        }
+    ));
+}

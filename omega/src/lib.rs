@@ -120,13 +120,15 @@ pub use msl::{
     Q4K_UNPACK_MSL, Q5K_BLOCK_BYTES, Q5K_UNPACK_MSL, Q5_0_BLOCK_BYTES, Q5_0_BLOCK_ELEMENTS,
     Q5_0_UNPACK_MSL, Q5_1_BLOCK_BYTES, Q5_1_BLOCK_ELEMENTS,
     Q5_1_UNPACK_MSL, Q6K_BLOCK_BYTES, Q6K_UNPACK_MSL,
-    Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS, Q8_0_UNPACK_MSL, emit, context_chunks_for,
+    Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS, Q8_0_UNPACK_MSL, CachedAttentionForm, emit,
+    context_chunks_for,
 };
 #[cfg(all(feature = "alloc", feature = "metal-attn-variants"))]
 pub use msl::{
-    AttentionKvReuse, AttentionKvStorage, AttentionMmaPrecision, AttentionPrefetch,
+    AttentionDispatchManifest, AttentionKvReuse, AttentionKvStorage, AttentionMmaPrecision,
+    AttentionPrefetch,
     AttentionQueryParallelism, AttentionSimdTopology, AttentionTileHeight, AttentionVariant,
-    emit_with_attention_variant,
+    emit_with_attention_variant, inspect_attention_variant,
 };
 #[cfg(feature = "wgpu-backend")]
 pub use wgpu_driver::{
