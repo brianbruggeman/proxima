@@ -27,11 +27,12 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 | 20 | [card](cards/20-dispatch-matrix.md) | 06,09,11,13,14,15,16,17,18,19 | R5,R6 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_20_dispatch_matrix)'` | filter selects 2 tests; 2 passed; legacy identity, seven one-factor flips from admitted control and false-selector refusal | [x] | `legacy source/entry/grid equal the base emitter; manifest records typed axes/form/codec/F32 accumulator/entry/grid; seven admitted one-factor flips have distinct identities; false selector and BF16-vs-F32 cache mismatch refuse` |
 | 21 | [card](cards/21-cross-axis-admission.md) | 06,09,11,13,14,15,16,17,18,19,20 | R5,R6 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_21_cross_axis)'` | filter selects 2 tests; 2 passed; supported composition and exact F32 `prefetch` budget decline | [x] | `BF16/F16 SharedKv+prefetch computes 31,104 bytes and is admitted; F32 operands compute 52,608 and refuse against 32,768; typed error carries both byte counts` |
 | 22 | [card](cards/22-bench-entrypoint.md) | 12,19,20,21 | R7 | `cargo nextest run -p proxima-model-interop --example norm_variant_ab --features std,metal,instrument,metal-attn-split-rows,metal-attn-variants -E 'test(~card_22_bench_entry)'`; then the two `AB_VARIANT_DESCRIBE_ONLY=1 cargo run` commands in the card | filter selects 2 tests; each describe run emits 1 `ab variant` and 0 `ab res` lines; selected entry/source hash differ | [x] | `2 parser/dispatch tests passed; both describe records appeared once, had zero timed-cell rows, and had distinct entry/source hashes; --all-targets nextest listing failed on gemma4_forward_decomposition benchmark chatter, so AC22a scopes to its example` |
+| 23 | [card](cards/23-model-backed-prefill.md) | 22 | R5,R7 | `PROXIMA_TEST_TIMEOUT_MS=900000 PROXIMA_CAPTURE_LIVE=1 PROXIMA_CAPTURE_NODES=all PROXIMA_CAPTURE_STEPS=0 cargo nextest run -p proxima-model-interop --features std,metal,instrument,metal-attn-split-rows,metal-attn-variants --test granite_attention_variant_prefill -E 'test(~card_23_)' -j 1` | filter selects exactly 2 tests; 2 passed; real Granite prefill captures selected multi-row attention identity and generated token ids agree; negative control rejects false identity | [x] | `2 passed; 24 matched multi-row dispatches; 1 generated token id agrees; node 89 extents [972,8,2,64] legacy entry/SHA differ from shared_k entry/SHA; selected grid threads=62464 width=64` |
 
 ## resume
 
-Last landed slice: card 22 implementation and AC22
-Next action: none; cards 00-22 are complete
+Last landed slice: card 23 implementation and AC23
+Next action: none; cards 00-23 are complete
 Open question, if any: none; E5M2 is bound as Proxima-owned in SPEC.md
 
 ## struck

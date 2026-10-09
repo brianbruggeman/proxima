@@ -2077,6 +2077,8 @@ pub(super) struct PlanNumerics {
     pub(super) math_mode: omega::metal::MathMode,
     pub(super) numeric_policy: proxima_tensor::NumericPolicy,
     pub(super) dispatch_type: omega::metal::DispatchType,
+    #[cfg(feature = "metal-attn-variants")]
+    pub(super) attention_variant: Option<omega::AttentionVariant>,
     /// `ServingConfig::plan_time_constants` -- [`BackendRuntime::build_placed_plan`]'s
     /// own doc for how this reaches [`omega::metal::Plan::mark_plan_time_constants_resident`].
     pub(super) plan_time_constants: bool,
@@ -2167,6 +2169,12 @@ pub(crate) struct BackendRuntime {
     /// plan_named`'s signature now takes it on every engine arm, not only
     /// the Metal one.
     pub(super) numeric_policy: proxima_tensor::NumericPolicy,
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-attn-variants",
+        target_os = "macos"
+    ))]
+    pub(super) attention_variant: Option<omega::AttentionVariant>,
     /// `ServingConfig::dispatch_type`, read once at construction and applied
     /// to every freshly-built [`Plan`] below (`set_dispatch_type`'s own call
     /// sites) -- same pattern as `math_mode` immediately above.
@@ -2283,6 +2291,12 @@ impl BackendRuntime {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: config.math_mode,
             numeric_policy: config.numeric_policy,
+            #[cfg(all(
+                feature = "metal",
+                feature = "metal-attn-variants",
+                target_os = "macos"
+            ))]
+            attention_variant: config.attention_variant,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: config.dispatch_type,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -2444,6 +2458,16 @@ impl BackendRuntime {
                         self.numeric_policy,
                     )?
                 };
+                #[cfg(all(
+                    feature = "metal",
+                    feature = "metal-attn-variants",
+                    target_os = "macos"
+                ))]
+                if symbols.first().is_some_and(|query_rows| *query_rows > 1) {
+                    if let Some(variant) = self.attention_variant {
+                        set_attention_variant(&mut plan, variant)?;
+                    }
+                }
                 mark_resident(&mut plan, resident_names);
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 if self.plan_time_constants {
@@ -2543,6 +2567,16 @@ impl BackendRuntime {
                         self.numeric_policy,
                     )?
                 };
+                #[cfg(all(
+                    feature = "metal",
+                    feature = "metal-attn-variants",
+                    target_os = "macos"
+                ))]
+                if symbols.first().is_some_and(|query_rows| *query_rows > 1) {
+                    if let Some(variant) = self.attention_variant {
+                        set_attention_variant(&mut plan, variant)?;
+                    }
+                }
                 mark_resident(&mut plan, resident_names);
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 if self.plan_time_constants {
@@ -2677,6 +2711,16 @@ impl BackendRuntime {
                         self.numeric_policy,
                     )?
                 };
+                #[cfg(all(
+                    feature = "metal",
+                    feature = "metal-attn-variants",
+                    target_os = "macos"
+                ))]
+                if symbols.first().is_some_and(|query_rows| *query_rows > 1) {
+                    if let Some(variant) = self.attention_variant {
+                        set_attention_variant(&mut plan, variant)?;
+                    }
+                }
                 mark_resident(&mut plan, resident_names);
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 if self.plan_time_constants {
@@ -2739,6 +2783,8 @@ impl BackendRuntime {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
             dispatch_type: self.dispatch_type,
+            #[cfg(feature = "metal-attn-variants")]
+            attention_variant: self.attention_variant,
             plan_time_constants: self.plan_time_constants,
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
@@ -2804,6 +2850,8 @@ impl BackendRuntime {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
             dispatch_type: omega::metal::DispatchType::Serial,
+            #[cfg(feature = "metal-attn-variants")]
+            attention_variant: self.attention_variant,
             plan_time_constants: self.plan_time_constants,
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
@@ -2870,6 +2918,8 @@ impl BackendRuntime {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
             dispatch_type: self.dispatch_type,
+            #[cfg(feature = "metal-attn-variants")]
+            attention_variant: self.attention_variant,
             plan_time_constants: self.plan_time_constants,
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
@@ -3081,6 +3131,13 @@ impl BackendRuntime {
             plan.mark_plan_time_constants_resident();
         }
         plan.set_math_mode(numerics.math_mode)?;
+        #[cfg(feature = "metal-attn-variants")]
+        if symbols.first().is_some_and(|query_rows| *query_rows > 1) {
+            if let Some(variant) = numerics.attention_variant {
+                plan.set_attention_variant(variant)
+                    .map_err(omega::backend::BackendError::from)?;
+            }
+        }
         plan.set_dispatch_type(numerics.dispatch_type);
         // Decode-shaped: this plan's own new-token count (`symbols[0]`, the
         // same convention `resolve_cached_plan`'s own `shape` key reads) is
@@ -3130,6 +3187,8 @@ impl BackendRuntime {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
             dispatch_type: self.dispatch_type,
+            #[cfg(feature = "metal-attn-variants")]
+            attention_variant: self.attention_variant,
             plan_time_constants: self.plan_time_constants,
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
@@ -3208,6 +3267,8 @@ impl BackendRuntime {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
             dispatch_type: self.dispatch_type,
+            #[cfg(feature = "metal-attn-variants")]
+            attention_variant: self.attention_variant,
             plan_time_constants: self.plan_time_constants,
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
@@ -3546,6 +3607,16 @@ impl BackendRuntime {
                     outputs,
                     self.numeric_policy,
                 )?;
+                #[cfg(all(
+                    feature = "metal",
+                    feature = "metal-attn-variants",
+                    target_os = "macos"
+                ))]
+                if symbols.first().is_some_and(|query_rows| *query_rows > 1) {
+                    if let Some(variant) = self.attention_variant {
+                        set_attention_variant(&mut plan, variant)?;
+                    }
+                }
                 mark_resident(&mut plan, resident_names);
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 if self.plan_time_constants {
@@ -3616,6 +3687,16 @@ impl BackendRuntime {
                     &profile_outputs,
                     self.numeric_policy,
                 )?;
+                #[cfg(all(
+                    feature = "metal",
+                    feature = "metal-attn-variants",
+                    target_os = "macos"
+                ))]
+                if symbols.first().is_some_and(|query_rows| *query_rows > 1) {
+                    if let Some(variant) = self.attention_variant {
+                        set_attention_variant(&mut plan, variant)?;
+                    }
+                }
                 mark_resident(&mut plan, resident_names);
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 if self.plan_time_constants {
