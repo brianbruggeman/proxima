@@ -170,6 +170,13 @@ pub enum EmitError {
         reason: &'static str,
     },
 
+    #[error("node {node} cannot parallelize {query_rows} query rows across simdgroups: {reason}")]
+    CachedAttentionQueryParallelismNotSupported {
+        node: NodeId,
+        query_rows: u64,
+        reason: &'static str,
+    },
+
     #[error("cached-attention variant selects {selected} K/V storage but the bound operands use {bound}")]
     CachedAttentionVariantStorageMismatch {
         selected: &'static str,

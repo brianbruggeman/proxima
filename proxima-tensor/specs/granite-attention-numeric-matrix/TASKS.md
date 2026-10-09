@@ -21,7 +21,7 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 | 14 | [card](cards/14-k-reuse.md) | 12,13 | R5 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_14_k_reuse)'` | filter selects 2 tests; 2 passed | [x] | `2 passed; K fragments have unique simdgroup producers, cross-simdgroup consumers, disjoint query-block score writers, unchanged masks, and a threadgroup-budget decline; no global K-load reduction claimed` |
 | 15 | [card](cards/15-v-reuse.md) | 14 | R5 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_15_v_reuse)'` | filter selects 2 tests; 2 passed | [x] | `2 passed; Metal device acceptance 1 passed; Legacy/SharedK/SharedKv agree with CPU payloads, distinct query rows differ, padded-V +Inf preserves output bits; Card14 and Card13 regression gates each 2 passed` |
 | 16 | [card](cards/16-tile-height.md) | 12 | R5 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_16_tile_height)' && cargo nextest run -p omega --features metal,metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_16_tile_height_plan)'` | lib filter selects 2 tests; 2 passed; Metal filter selects 1; 1 passed | [x] | `2 source/grid checks passed; Metal Plan execution 1 passed against CPU payload; default, variants-only, and split-rows feature checks passed` |
-| 17 | [card](cards/17-query-parallelism.md) | 12,14,15,16 | R5 | `cargo nextest run -p omega --features metal-attn-split-decode,metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_17_query_parallelism)'` | filter selects 2 tests; 2 passed; explicit one-row decline and legacy decode-split control | [ ] | |
+| 17 | [card](cards/17-query-parallelism.md) | 12,14,15,16 | R5 | `cargo nextest run -p omega --features metal-attn-split-decode,metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_17_query_parallelism)'` and `cargo nextest run -p omega --features metal,metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_17_query_parallelism_plan)'` | lib selects 2 and passes 2; Metal selects 1 and passes 1 with output payload compared against CPU | [x] | `2 source/ownership/refusal checks passed; Metal SharedKv+Rows8+simdgroup_rows execution 1 passed against CPU output; default, variants-only, split-rows and split-decode feature checks compiled` |
 | 18 | [card](cards/18-prefetch.md) | 12,14,15 | R5 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_18_prefetch)'` | filter selects 2 tests; 2 passed | [ ] | |
 | 19 | [card](cards/19-simd-topology.md) | 12 | R5 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_19_simd_topology)'` | filter selects 2 tests; 2 passed | [ ] | |
 | 20 | [card](cards/20-dispatch-matrix.md) | 06,09,11,13,14,15,16,17,18,19 | R5,R6 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_20_dispatch_matrix)'` | filter selects 2 tests; 2 passed; seven one-factor flips | [ ] | |
@@ -30,8 +30,8 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 
 ## resume
 
-Last landed slice: card 16 implementation and AC16
-Next action: card 17, implement query parallelism variants
+Last landed slice: card 17 implementation and AC17/AC17b
+Next action: card 18, implement query prefetch selection
 Open question, if any: none; E5M2 is bound as Proxima-owned in SPEC.md
 
 ## struck
