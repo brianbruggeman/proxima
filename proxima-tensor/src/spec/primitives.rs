@@ -546,7 +546,7 @@ pub fn rmsnorm(
         program,
         DType::Float32,
         ScalarOp::Add,
-        &[(mean_square, "s->s"), (eps, "s->s")],
+        &[(mean_square, "s->s"), (eps, "->s")],
     )?;
     let rms = elementwise(
         program,

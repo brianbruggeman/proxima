@@ -1,0 +1,63 @@
+LFM cached-convolution and prefill-mixer acceptance
+
+Host: Darwin Thor-43.local 24.6.0; RELEASE_ARM64_T6000 arm64
+Rust: rustc 1.99.0 (b940084d7 2026-09-28), aarch64-apple-darwin,
+      LLVM 23.1.1
+Cargo: cargo 1.99.0 (5f94df478 2026-08-27)
+Target dir: /tmp/cargo_target
+Priority and build settings: taskpolicy -b nice -n 20; CARGO_BUILD_JOBS=1;
+CARGO_INCREMENTAL=0; RUSTC_WRAPPER empty
+
+Final acceptance commands, run sequentially; each exit status is 0:
+
+1. `taskpolicy -b nice -n 20 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-tensor --lib architecture_matrix_lfm_conv_step -- --nocapture`
+   `steps=2 reference_pairs=2 state_values=6`; `1 passed; 0 failed; 0 ignored; 0 measured; 791 filtered out; finished in 0.02s`.
+2. `taskpolicy -b nice -n 20 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-tensor --lib architecture_matrix_lfm_conv_cache -- --nocapture`
+   `prefills=1 decodes=2 state_updates=3 wrong_state_rejected=1 tail_controls=2 long_prefill_decode_controls=1`; `1 passed; 0 failed; 0 ignored; 0 measured; 791 filtered out; finished in 0.02s`.
+3. `taskpolicy -b nice -n 20 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-tensor --lib architecture_matrix_lfm_cached_mixer_step -- --nocapture`
+   `decode_tokens=1 reference_pairs=1 state_values=3`; `1 passed; 0 failed; 0 ignored; 0 measured; 791 filtered out; finished in 0.02s`.
+4. `taskpolicy -b nice -n 20 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-tensor --lib architecture_matrix_lfm_prefill_mixer_state -- --nocapture`
+   `prefill_output=[4800.993] prefill_state=[0.0, 0.0, 7.9999924] decode_output=[481.99985] decode_state=[0.0, 7.999998, 0.0] reference_output=[4800.993, 5281.9976] zero_history_output=[481.99985] fifo_output=5281.9976`
+   `prefill_tokens=1 prefill_pairs=1 decode_pairs=1 state_values=3 zero_history_control=1 fifo_divergence=1 invalid_cache_rejected=1 partial_graph_rejected=1`
+   `two_token_prefill=[4800.993, 5281.9976] history=[0.0, 7.9999924, 7.999998] decode=[5330.999] state=[7.9999924, 7.999998, 7.999999] zero_history=[4802.999]`
+   `two_token_prefill=2 carried_pairs=1 state_values=3 zero_history_rejected=1`; `1 passed; 0 failed; 0 ignored; 0 measured; 791 filtered out; finished in 0.05s`.
+
+`git diff --check` exited 0 after the final source and evidence edits.
+
+The latest rerun of command 4, after changing the shape carrier to an exact
+scalar-true select and adding explicit output-shape/length assertions, exited
+0: `1 passed; 0 failed; 0 ignored; 0 measured; 791 filtered out; finished in
+0.03s`. It printed the same one-token and two-token vectors above. Compilation
+reported `Finished test profile [unoptimized + debuginfo] ... in 3m 37s`.
+An earlier run of this exact change failed at `UnconstrainedDim { node:
+NodeId(86), dim: 0 }`; the condition was changed from a broadcast-shaped mask
+to a scalar equality, so the state tensor supplies the dynamic extent. The
+final run also checks every returned tensor shape and value count before
+comparing vector elements.
+
+The test vectors use synthetic scalar projections and hand-computed float32
+equations. They evaluate Proxima's CPU operator graph; they do not invoke the
+Transformers runtime or compare a full model's semantic output. The retained
+upstream source is
+`fixtures/upstream-source/f399fa2a111dac8c7fc07b2717abb10ee3e82468851321f45553ebb10fbd28b1.py.gz`:
+its non-CUDA path selects `slow_forward` at lines 522-524 and rolls, clamps,
+overwrites, and sums the cache at lines 491-499. This evidence does not assert
+equivalence with its CUDA `causal_conv1d_update` path at lines 455-463.
+
+Failure and correction record:
+- The first position-indexed update run reported `ExtentMismatch`; its slot
+  mask used the wrong rank and was changed to `[channels, taps]`.
+- The next run reported an `InputCountMismatch` in the separate full-sequence
+  graph; the cloned fixture was completed with its unused input leaves.
+- A stale assertion expected the non-CUDA position-indexed decode to equal the
+  full-sequence causal result; it now checks their observed divergence.
+- The first two-token mixer control exposed an extent mismatch at the cached
+  state select: the decode mask carrier used the symbolic sequence extent (2)
+  against one channel. The carrier now derives its shape from `state_in` using
+  a scalar-true select, which returns exact zero even if cached values are NaN.
+- An attempted edit applied that shape carrier to the prefill helper and
+  changed its required cache-width extent; the prefill helper was restored to
+  `[Symbolic(0), l_cache]`, and the shape-derived carrier remains only in the
+  cached step. The final four acceptance commands above passed before the
+  latest carrier/assertion edits; command 4 was rerun afterward as recorded
+  above.
