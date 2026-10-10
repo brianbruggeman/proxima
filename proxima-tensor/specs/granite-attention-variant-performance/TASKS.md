@@ -25,12 +25,14 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update its c
 
 | 13 | [card](cards/13-granite-rows8-vs-rows16-groups4.md) | 12 | Rows8 vs Rows16 at fixed Groups4 | compile the focused integration binary; run its copied test serially three times at nominal 256/971 tokens | Each process selects 1 test, passes 1, skips 27; each captures 2 shapes × 20 paired samples, with full output equality and equal IDs. | [x] | Logs `evidence/card13-rows8-rows16-groups4-run{1,2,3}-2026-10-10.log`. Actual shapes were 256/971 tokens; all six pairs had `changed_bits=0`, no non-finite values, and IDs `[322]`. Derived p50 ns (Rows8/Rows16), signs selected-minus-baseline positive/negative/zero, runs 1–3: 256: 142,666.744/171,708.292, 20/0/0; 142,791.658/171,624.939, 20/0/0; 143,375.015/172,375.003, 20/0/0. 971: 1,043,791.650/1,101,250.061, 19/1/0; 1,058,833.324/1,091,125.072, 16/4/0; 1,056,291.629/1,091,166.749, 16/4/0. CoV stayed below 3.22% for all arms/cells. Full sample arrays, source hashes, grids, and pipeline resources remain in the logs. Rows16's higher p50 across these cells is plausible as a per-dispatch timing relationship; the cause is unexplained and no default was changed. The sandboxed launch's `Metal(NoDevice)` payload is retained separately; all three recorded runs used the unsandboxed Metal device. |
 
+| 14 | [card](cards/14-serving-tile-height-setting.md) | 13 | conflaguration-controlled Rows8/Rows16 serving dispatch at fixed Groups4 | focused setting test, focused integration build, then copied Granite replay three times serially | TOML/builder/environment parity; default Legacy; invalid value rejected; each replay selects 1, passes 1, skips 28 and retains 2 shapes × 20 paired samples with exact output/ID equality | [x] | Focused setting test: 1 passed, 735 filtered; TOML/builder/environment agree for Rows8/Rows16 with Groups4; default Legacy and invalid `rows32` behavior recorded in Card 14. Three serial logs each select 1, pass 1, filter 28, and capture 256/971 tokens × 20 paired samples with exact output equality and IDs `[322]`. Independently recomputed p50 ns Rows8/Rows16, run 1/2/3: 256: 137,958.326/180,937.583; 138,354.197/182,833.348; 138,208.328/182,937.481. 971: 1,038,187.474/1,144,791.604; 1,038,895.804/1,137,229.207; 1,012,145.774/1,120,437.519. All six cells had 20/0/0 positive/negative/zero Rows16-minus-Rows8 deltas. Timing cause unexplained; no default changed. Raw arrays, entries, hashes, grids, and resources are in `evidence/card14-serving-tile-height-run{1,2,3}-2026-10-10.log` and Card 14. |
+
 ## resume
 
-Last completed slice: Card 13 Rows8 versus Rows16 at fixed Groups4, replayed at actual 256 and 971 tokens.
-Current slice: Card 14 exposes the Rows8/Rows16 tile-height choice through ServingSettings.
-Next action: add builder/TOML/environment parity and default/rejection checks for the tile-height setting, then replay through the serving config.
-Open question, if any: Rows16 has higher captured per-dispatch p50 in all six rows of Card13; the timing cause remains unexplained and no default changed.
+Last completed slice: Card 14 serving-configured Rows8 versus Rows16 at fixed Groups4, with three serial two-shape replays.
+Current slice: Card 15 compares configured Legacy tile height with Rows8 while Groups4 stays fixed.
+Next action: capture three serial paired replays through ServingSettings and inspect whether the two tile-height choices emit different MSL and dispatch grids.
+Open question, if any: Rows16 p50 is higher than Rows8 in all six Card14 cells, but the cause remains unexplained and the default remains Legacy.
 
 ## struck
 
