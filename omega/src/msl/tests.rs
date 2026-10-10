@@ -92,11 +92,16 @@ fn elementwise_broadcast_decodes_omitted_axes_before_selected_axes() {
         },
     );
     let shapes = infer(&program, &[]).expect("broadcast elementwise infers");
-    let bound = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("broadcast elementwise lowers")
-        .into_iter()
-        .find(|candidate| candidate.node == equal)
-        .expect("broadcast elementwise bound op");
+    let bound = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("broadcast elementwise lowers")
+    .into_iter()
+    .find(|candidate| candidate.node == equal)
+    .expect("broadcast elementwise bound op");
     let source = render_elementwise(&bound, "broadcast_test", &[None, None])
         .expect("broadcast elementwise renders");
     let divide_axis_one = "remaining /= (uint)u.extents[1];";
@@ -146,11 +151,16 @@ fn broadcast_over_trailing_axes(leading_extent: u32) -> BoundOp {
         },
     );
     let shapes = infer(&program, &[]).expect("plane scale infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("plane scale lowers")
-        .into_iter()
-        .find(|candidate| candidate.node == scaled)
-        .expect("plane scale bound op")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("plane scale lowers")
+    .into_iter()
+    .find(|candidate| candidate.node == scaled)
+    .expect("plane scale bound op")
 }
 
 #[test]
@@ -168,8 +178,10 @@ fn elementwise_outermost_modulo_elision_changes_the_kernel_cache_key() {
 
     assert_ne!(unit_source, wide_source);
     assert_ne!(
-        kernel_cache_key(&unit_leading, &empty, NumericPolicy::default()).expect("cache key builds"),
-        kernel_cache_key(&wide_leading, &empty, NumericPolicy::default()).expect("cache key builds"),
+        kernel_cache_key(&unit_leading, &empty, NumericPolicy::default())
+            .expect("cache key builds"),
+        kernel_cache_key(&wide_leading, &empty, NumericPolicy::default())
+            .expect("cache key builds"),
         "two sources that differ on whether axis 1 is reduced modulo its extent must not share a pipeline"
     );
 }
@@ -206,11 +218,16 @@ fn elementwise_unit_leading_axis_is_never_decoded() {
         },
     );
     let shapes = infer(&program, &[]).expect("hidden-width scale infers");
-    let bound = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("hidden-width scale lowers")
-        .into_iter()
-        .find(|candidate| candidate.node == scaled)
-        .expect("hidden-width scale bound op");
+    let bound = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("hidden-width scale lowers")
+    .into_iter()
+    .find(|candidate| candidate.node == scaled)
+    .expect("hidden-width scale bound op");
     let source = render_elementwise(&bound, "unit_axis_test", &[None, None])
         .expect("hidden-width scale renders");
     assert!(source.contains("coord[1] = remaining;"));
@@ -226,9 +243,17 @@ fn a_large_elementwise_grid_decodes_its_thread_index_without_an_integer_divide()
         .expect("a 98,304-element plane scale renders");
 
     assert!(source.contains("inline uint divmod_reciprocal("));
-    assert!(source.contains("remaining = divmod_reciprocal(remaining, (uint)u.extents[2], coord[2]);"));
-    assert!(!source.contains("remaining %"), "no runtime modulo survives in the wide form");
-    assert!(!source.contains("remaining /="), "no runtime divide survives in the wide form");
+    assert!(
+        source.contains("remaining = divmod_reciprocal(remaining, (uint)u.extents[2], coord[2]);")
+    );
+    assert!(
+        !source.contains("remaining %"),
+        "no runtime modulo survives in the wide form"
+    );
+    assert!(
+        !source.contains("remaining /="),
+        "no runtime divide survives in the wide form"
+    );
 }
 
 #[test]
@@ -271,7 +296,9 @@ fn reciprocal_divmod(numerator: u32, divisor: u32) -> (u32, u32) {
 
 #[test]
 fn the_reciprocal_decode_equals_integer_division_for_every_numerator_up_to_its_ceiling() {
-    let divisors = [1_u32, 2, 3, 5, 6, 7, 16, 31, 32, 33, 64, 100, 127, 128, 1000, 1023, 4095];
+    let divisors = [
+        1_u32, 2, 3, 5, 6, 7, 16, 31, 32, 33, 64, 100, 127, 128, 1000, 1023, 4095,
+    ];
     let ceiling = RECIPROCAL_DECOMPOSITION_MAX_ELEMENTS as u32;
     let mut checked = 0_u64;
 
@@ -309,11 +336,16 @@ fn elementwise_tanh_op(extent: u32) -> BoundOp {
         },
     );
     let shapes = infer(&program, &[]).expect("elementwise infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("elementwise lowers")
-        .into_iter()
-        .next()
-        .expect("one bound emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("elementwise lowers")
+    .into_iter()
+    .next()
+    .expect("one bound emitted")
 }
 
 fn matmul_op(m: u32, k: u32, n: u32) -> BoundOp {
@@ -360,11 +392,16 @@ fn matmul_op(m: u32, k: u32, n: u32) -> BoundOp {
         }),
     );
     let shapes = infer(&program, &[]).expect("matmul infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("matmul lowers")
-        .into_iter()
-        .next()
-        .expect("one fused bound emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("matmul lowers")
+    .into_iter()
+    .next()
+    .expect("one fused bound emitted")
 }
 
 /// `[rows, k] x [tokens, k] -> [tokens, rows]`, reduced over `k`, with the
@@ -424,11 +461,16 @@ fn packed_row_multi_token_op(tokens: u32, k: u32, rows: u32) -> BoundOp {
         }),
     );
     let shapes = infer(&program, &[]).expect("packed row multi-token op infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("packed row multi-token op lowers")
-        .into_iter()
-        .next()
-        .expect("one fused bound emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("packed row multi-token op lowers")
+    .into_iter()
+    .next()
+    .expect("one fused bound emitted")
 }
 
 /// Whether the single-activation Q4_0 plain-product body is ggml's inline
@@ -615,11 +657,16 @@ fn stacked_gathered_matmul_op(
         }),
     );
     let shapes = infer(&program, &[]).expect("stacked gathered matmul infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("stacked gathered matmul lowers")
-        .into_iter()
-        .next()
-        .expect("one fused bound emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("stacked gathered matmul lowers")
+    .into_iter()
+    .next()
+    .expect("one fused bound emitted")
 }
 
 /// A stacked down projection folded over its selected axis in the same reduce:
@@ -716,11 +763,16 @@ fn selection_folded_matmul_op(
         }),
     );
     let shapes = infer(&program, &[]).expect("selection folded matmul infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("selection folded matmul lowers")
-        .into_iter()
-        .next()
-        .expect("one fused bound emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("selection folded matmul lowers")
+    .into_iter()
+    .next()
+    .expect("one fused bound emitted")
 }
 
 /// A route that moves along a reduced axis cannot share one fetched expert
@@ -751,7 +803,11 @@ async fn a_route_that_moves_along_a_reduced_axis_renders_the_serial_body_fetchin
         .source
         .find("gather_idx0[gather_off0]")
         .expect("the route is read");
-    assert!(fetch > loop_start, "the route read must sit inside the reduction loop: {}", kernel.source);
+    assert!(
+        fetch > loop_start,
+        "the route read must sit inside the reduction loop: {}",
+        kernel.source
+    );
     assert!(!kernel.source.contains("simd_sum"), "{}", kernel.source);
 }
 
@@ -834,11 +890,16 @@ fn gathered_matmul_op(tokens: u32, experts: u32, rows: u32, k: u32) -> BoundOp {
         }),
     );
     let shapes = infer(&program, &[]).expect("gathered matmul infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("gathered matmul lowers")
-        .into_iter()
-        .next()
-        .expect("one fused bound emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("gathered matmul lowers")
+    .into_iter()
+    .next()
+    .expect("one fused bound emitted")
 }
 
 #[cfg(feature = "metal-grouped-gemm")]
@@ -864,14 +925,25 @@ pub(crate) fn stacked_moe_layers(
     let mut layer_inputs = Vec::new();
     for layer in 0..layers {
         let logits = leaf(vec![sequence, experts], &format!("logits_{layer}"));
-        let expert_w_gate = leaf(vec![experts, embedding, hidden], &format!("expert_w_gate_{layer}"));
-        let expert_w_up = leaf(vec![experts, embedding, hidden], &format!("expert_w_up_{layer}"));
-        let expert_w_down = leaf(vec![experts, hidden, embedding], &format!("expert_w_down_{layer}"));
+        let expert_w_gate = leaf(
+            vec![experts, embedding, hidden],
+            &format!("expert_w_gate_{layer}"),
+        );
+        let expert_w_up = leaf(
+            vec![experts, embedding, hidden],
+            &format!("expert_w_up_{layer}"),
+        );
+        let expert_w_down = leaf(
+            vec![experts, hidden, embedding],
+            &format!("expert_w_down_{layer}"),
+        );
         weights.extend([expert_w_gate, expert_w_up, expert_w_down]);
         layer_inputs.push((logits, expert_w_gate, expert_w_up, expert_w_down));
     }
     let ones = scalar_constant(&mut program, 1.0);
-    for (layer, (logits, expert_w_gate, expert_w_up, expert_w_down)) in layer_inputs.into_iter().enumerate() {
+    for (layer, (logits, expert_w_gate, expert_w_up, expert_w_down)) in
+        layer_inputs.into_iter().enumerate()
+    {
         let moe_spec = MoeFfnSpec {
             router: MoeRouter::Logits(logits),
             expert_w_gate,
@@ -891,10 +963,18 @@ pub(crate) fn stacked_moe_layers(
         hidden_states = output;
     }
     let shapes = infer(&program, &[]).expect("stacked routed ffn infers");
-    let mut bound = bind(&program, &shapes, &[hidden_states], NumericPolicy::default())
-        .expect("stacked routed ffn binds");
+    let mut bound = bind(
+        &program,
+        &shapes,
+        &[hidden_states],
+        NumericPolicy::default(),
+    )
+    .expect("stacked routed ffn binds");
     correct_packed_matmul_layouts(&mut bound, &weights.iter().copied().collect());
-    let packed = weights.into_iter().map(|weight| (weight, Codec::Q8_0)).collect();
+    let packed = weights
+        .into_iter()
+        .map(|weight| (weight, Codec::Q8_0))
+        .collect();
     (bound, packed)
 }
 
@@ -938,8 +1018,13 @@ fn permuted_reduction_matmul_op() -> BoundOp {
     )
     .expect("permuted reduce builds");
     let shapes = infer(&program, &[]).expect("permuted reduction matmul infers");
-    let mut resolved = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("permuted reduction matmul lowers");
+    let mut resolved = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("permuted reduction matmul lowers");
     let mut packed = BTreeSet::new();
     packed.insert(weight);
     proxima_tensor::correct_packed_matmul_layouts(&mut resolved, &packed);
@@ -1078,11 +1163,16 @@ fn matmul_op_with_reduce(m: u32, k: u32, n: u32, reduce_op: ScalarOp) -> BoundOp
         }),
     );
     let shapes = infer(&program, &[]).expect("matmul infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("matmul lowers")
-        .into_iter()
-        .next()
-        .expect("one fused bound emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("matmul lowers")
+    .into_iter()
+    .next()
+    .expect("one fused bound emitted")
 }
 
 /// [`matmul_op`]'s `Float16` counterpart -- `q4k_pair_dot`'s own
@@ -1135,11 +1225,16 @@ fn matmul_op_f16(m: u32, k: u32, n: u32) -> BoundOp {
         }),
     );
     let shapes = infer(&program, &[]).expect("f16 matmul infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("f16 matmul lowers")
-        .into_iter()
-        .next()
-        .expect("one fused bound emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("f16 matmul lowers")
+    .into_iter()
+    .next()
+    .expect("one fused bound emitted")
 }
 
 #[test]
@@ -1182,7 +1277,7 @@ mod horizontal_merge_base_table_splice_tests {
 
     use proxima_tensor::NumericPolicy;
 
-    use super::super::{EmitError, Codec, emit, splice_horizontal_merge_base_table};
+    use super::super::{Codec, EmitError, emit, splice_horizontal_merge_base_table};
     use super::matmul_op;
     use crate::identity::{KernelLanguage, MetalOnlyExtras, kernel_identity};
 
@@ -1228,7 +1323,9 @@ mod horizontal_merge_base_table_splice_tests {
         // `gid` parameter to `uint3 merge_gid` instead of adding a
         // second, separately-attributed parameter.
         assert!(
-            !merged.source.contains("uint gid [[thread_position_in_grid]]"),
+            !merged
+                .source
+                .contains("uint gid [[thread_position_in_grid]]"),
             "the merged kernel must not keep the scalar gid parameter:\n{}",
             merged.source
         );
@@ -1406,7 +1503,9 @@ mod round_batched_reduce_base_table_splice_tests {
             spliced.source
         );
         assert!(
-            !spliced.source.contains("uint gid [[thread_position_in_grid]]"),
+            !spliced
+                .source
+                .contains("uint gid [[thread_position_in_grid]]"),
             "the spliced kernel must not keep the scalar gid parameter:\n{}",
             spliced.source
         );
@@ -1753,8 +1852,7 @@ fn gathered_packed_row_reads_each_selected_experts_slab_exactly_once() {
         .iter()
         .map(|&axis| gathered.extents[axis as usize])
         .product();
-    let gathered_token_total =
-        packed_row_block_token_total(&gathered_block, &gathered.extents);
+    let gathered_token_total = packed_row_block_token_total(&gathered_block, &gathered.extents);
 
     assert_eq!(
         gathered_feature_total,
@@ -1779,7 +1877,9 @@ fn gathered_packed_row_reads_each_selected_experts_slab_exactly_once() {
     let mut dense_codecs = BTreeMap::new();
     dense_codecs.insert(dense_weight, Codec::Q4K);
     let dense_block = classify_packed_row_block(&dense, &operand_codecs(&dense, &dense_codecs))
-        .expect("the dense decode matvec of the identical [rows, k] shape classifies as packed-row");
+        .expect(
+            "the dense decode matvec of the identical [rows, k] shape classifies as packed-row",
+        );
     let dense_feature_total: u64 = dense_block
         .feature_axes
         .iter()
@@ -2104,11 +2204,16 @@ fn tiled_gemm_op(tokens: u32, k: u32, features: u32) -> BoundOp {
         }),
     );
     let shapes = infer(&program, &[]).expect("tiled gemm op infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("tiled gemm op lowers")
-        .into_iter()
-        .next()
-        .expect("one fused bound emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("tiled gemm op lowers")
+    .into_iter()
+    .next()
+    .expect("one fused bound emitted")
 }
 
 /// Same fused body as [`matmul_op`], but a 3-output-axis shape (`h`, `d`
@@ -2187,11 +2292,16 @@ fn multi_head_matmul_op(seq: u32, heads: u32, head_dim: u32, embed: u32) -> Boun
         }),
     );
     let shapes = infer(&program, &[]).expect("multi-head matmul infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("multi-head matmul lowers")
-        .into_iter()
-        .next()
-        .expect("one fused bound emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("multi-head matmul lowers")
+    .into_iter()
+    .next()
+    .expect("one fused bound emitted")
 }
 
 /// The REAL node-139-shaped ("score", this repo's own admitted
@@ -2254,11 +2364,16 @@ fn dense_batched_score_shaped_op(token: u32, feature: u32, batch: u32, reduce_le
         }),
     );
     let shapes = infer(&program, &[]).expect("dense batched score op infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("dense batched score op lowers")
-        .into_iter()
-        .next()
-        .expect("one fused bound emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("dense batched score op lowers")
+    .into_iter()
+    .next()
+    .expect("one fused bound emitted")
 }
 
 /// Dumps the dense-batched (`score_even`/`score_odd`) copy-out loop's
@@ -2307,17 +2422,36 @@ fn dense_weight_staging_loads_a_register_array_before_the_tile_stores() {
     });
 
     let block_k = crate::sized::TILED_GEMM_BLOCK_K;
-    assert!(source.contains("simdgroup_float8x8"), "the dense GEMM body must render\n{source}");
-    assert!(source.contains(&format!("float w_regs[{block_k}];")), "{source}");
+    assert!(
+        source.contains("simdgroup_float8x8"),
+        "the dense GEMM body must render\n{source}"
+    );
+    assert!(
+        source.contains(&format!("float w_regs[{block_k}];")),
+        "{source}"
+    );
     assert!(source.contains(
         "w_regs[w_k] = (k0 + w_k < u.reduction_total) ? in0[row_base + (long)w_k * w_stride] : 0.0f;"
     ), "the partial-k guard stays per load\n{source}");
-    assert!(source.contains(&format!("weight_tile[w_row * {block_k} + w_k] = w_regs[w_k];")));
-    assert!(!source.contains("long w_off = row_base"), "the serial per-element staging is gone");
-    let loads = source.find("w_regs[w_k] = (k0").expect("register loads render");
+    assert!(source.contains(&format!(
+        "weight_tile[w_row * {block_k} + w_k] = w_regs[w_k];"
+    )));
+    assert!(
+        !source.contains("long w_off = row_base"),
+        "the serial per-element staging is gone"
+    );
+    let loads = source
+        .find("w_regs[w_k] = (k0")
+        .expect("register loads render");
     let stores = source.find("= w_regs[w_k];").expect("tile stores render");
-    assert!(loads < stores, "all loads are issued before the first tile store");
-    assert!(source.matches("#pragma unroll").count() >= 2, "both staging loops unroll");
+    assert!(
+        loads < stores,
+        "all loads are issued before the first tile store"
+    );
+    assert!(
+        source.matches("#pragma unroll").count() >= 2,
+        "both staging loops unroll"
+    );
 }
 
 /// Coordinator-required proof (2026-09-27 mid-task addition, updated when
@@ -2347,11 +2481,17 @@ fn dense_batched_gemm_admission_is_switch_gated() {
                 .filter(|&&(token, feature, batch, reduce_len)| {
                     let bound = dense_batched_score_shaped_op(token, feature, batch, reduce_len);
                     let codecs = operand_codecs(&bound, &BTreeMap::new());
-                    let BoundOpKind::Reduce { reduce_op, init, ref output_axes, .. } = bound.kind
+                    let BoundOpKind::Reduce {
+                        reduce_op,
+                        init,
+                        ref output_axes,
+                        ..
+                    } = bound.kind
                     else {
                         panic!("dense_batched_score_shaped_op always builds a Keep::Reduce fold")
                     };
-                    classify_dense_batched_gemm(&bound, &codecs, reduce_op, init, output_axes).is_ok()
+                    classify_dense_batched_gemm(&bound, &codecs, reduce_op, init, output_axes)
+                        .is_ok()
                 })
                 .count()
         })
@@ -2447,7 +2587,10 @@ fn dense_batched_gemm_grid_spec_matches_tiled_shape() {
                     .unwrap_or_else(|err| {
                         panic!("{name}: kernel_dispatch_shape must not error: {err:?}")
                     });
-            assert_eq!(grid.threads, expected_threads, "{name}: GridSpec.threads mismatch");
+            assert_eq!(
+                grid.threads, expected_threads,
+                "{name}: GridSpec.threads mismatch"
+            );
             assert_eq!(
                 grid.threadgroup_width,
                 Some(block_threads),
@@ -2651,8 +2794,8 @@ fn multi_row_unroll_decode_shape_keeps_current_key_source_grid_and_width() {
     q4_0.insert(weight_node, Codec::Q4_0);
 
     let (baseline_key, baseline_source, baseline_dispatch) = with_every_multi_row_env_unset(|| {
-        let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
-            .expect("baseline cache key");
+        let key =
+            kernel_cache_key(&bound, &q4_0, NumericPolicy::default()).expect("baseline cache key");
         let source = emit(&bound, &q4_0, NumericPolicy::default())
             .expect("baseline emits")
             .source;
@@ -2864,8 +3007,8 @@ fn multi_row_index32_decode_shape_keeps_current_key_source_grid_and_width() {
     q4_0.insert(weight_node, Codec::Q4_0);
 
     let (baseline_key, baseline_source, baseline_dispatch) = with_every_multi_row_env_unset(|| {
-        let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
-            .expect("baseline cache key");
+        let key =
+            kernel_cache_key(&bound, &q4_0, NumericPolicy::default()).expect("baseline cache key");
         let source = emit(&bound, &q4_0, NumericPolicy::default())
             .expect("baseline emits")
             .source;
@@ -2977,8 +3120,8 @@ fn multi_row_index32_oversized_shape_not_admitted() {
     q4_0.insert(weight_node, Codec::Q4_0);
 
     let (baseline_key, baseline_source, baseline_dispatch) = with_every_multi_row_env_unset(|| {
-        let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
-            .expect("baseline cache key");
+        let key =
+            kernel_cache_key(&bound, &q4_0, NumericPolicy::default()).expect("baseline cache key");
         let source = emit(&bound, &q4_0, NumericPolicy::default())
             .expect("baseline emits")
             .source;
@@ -3047,8 +3190,9 @@ fn coord_index32_generic_reduce_source_differs_only_in_coordinate_lines() {
             let source = emit(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
                 .expect("baseline emits")
                 .source;
-            let dispatch = kernel_dispatch_shape(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
-                .expect("baseline dispatch shape");
+            let dispatch =
+                kernel_dispatch_shape(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
+                    .expect("baseline dispatch shape");
             (key, source, dispatch)
         });
 
@@ -3059,8 +3203,9 @@ fn coord_index32_generic_reduce_source_differs_only_in_coordinate_lines() {
             let source = emit(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
                 .expect("coord-index32-env emits")
                 .source;
-            let dispatch = kernel_dispatch_shape(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
-                .expect("coord-index32-env dispatch shape");
+            let dispatch =
+                kernel_dispatch_shape(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
+                    .expect("coord-index32-env dispatch shape");
             (key, source, dispatch)
         });
 
@@ -3090,7 +3235,9 @@ fn coord_index32_generic_reduce_source_differs_only_in_coordinate_lines() {
         "override must not add or remove lines, only change coordinate-decomposition lines"
     );
     let mut differing_lines = Vec::new();
-    for (index, (baseline_line, shared_line)) in baseline_lines.iter().zip(shared_lines.iter()).enumerate() {
+    for (index, (baseline_line, shared_line)) in
+        baseline_lines.iter().zip(shared_lines.iter()).enumerate()
+    {
         if baseline_line != shared_line {
             differing_lines.push((index, *baseline_line, *shared_line));
         }
@@ -3100,7 +3247,8 @@ fn coord_index32_generic_reduce_source_differs_only_in_coordinate_lines() {
         "coord_index32 must change at least one line when admitted"
     );
     for (index, baseline_line, shared_line) in &differing_lines {
-        let touches_remaining = baseline_line.contains("remaining") && shared_line.contains("remaining");
+        let touches_remaining =
+            baseline_line.contains("remaining") && shared_line.contains("remaining");
         assert!(
             touches_remaining,
             "line {index} differs but is not a coordinate-decomposition line: \
@@ -3184,7 +3332,11 @@ fn many_token_matmul_takes_the_tiled_gemm_path() {
 /// item 3c (`wide_activation_load`, needs `k` contiguous on the
 /// activation) actually admits.
 #[cfg(feature = "metal-tiled-gemm")]
-fn real_shaped_tiled_gemm_op(tokens: u32, k: u32, features: u32) -> (BoundOp, proxima_tensor::NodeId) {
+fn real_shaped_tiled_gemm_op(
+    tokens: u32,
+    k: u32,
+    features: u32,
+) -> (BoundOp, proxima_tensor::NodeId) {
     let mut program = Vec::new();
     let activation = append(
         &mut program,
@@ -3228,11 +3380,16 @@ fn real_shaped_tiled_gemm_op(tokens: u32, k: u32, features: u32) -> (BoundOp, pr
         }),
     );
     let shapes = infer(&program, &[]).expect("real-shaped tiled gemm op infers");
-    let bound = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("real-shaped tiled gemm op lowers")
-        .into_iter()
-        .next()
-        .expect("one fused bound emitted");
+    let bound = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("real-shaped tiled gemm op lowers")
+    .into_iter()
+    .next()
+    .expect("one fused bound emitted");
     (bound, weight)
 }
 
@@ -3250,12 +3407,19 @@ fn wide_weight_stage_msl_dump_for_the_real_q4_0_shape() {
     q4_0.insert(weight_node, Codec::Q4_0);
 
     let off_source = temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("0"), || {
-        emit(&bound, &q4_0, NumericPolicy::default()).expect("emits").source
+        emit(&bound, &q4_0, NumericPolicy::default())
+            .expect("emits")
+            .source
     });
     let on_source = temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("1"), || {
-        emit(&bound, &q4_0, NumericPolicy::default()).expect("emits").source
+        emit(&bound, &q4_0, NumericPolicy::default())
+            .expect("emits")
+            .source
     });
-    assert_ne!(off_source, on_source, "the switch must change the emitted source");
+    assert_ne!(
+        off_source, on_source,
+        "the switch must change the emitted source"
+    );
 
     if let Ok(dir) = std::env::var("PROXIMA_STAGE_DUMP_DIR") {
         std::fs::write(format!("{dir}/q4_0_wide_off.metal"), &off_source)
@@ -3287,7 +3451,11 @@ fn staging_switches_default_on_render_unless_explicitly_disabled() {
             ("PROXIMA_TILED_GEMM_SLIM_TGMEM", Some("0")),
             ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
         ],
-        || emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source,
+        || {
+            emit(&bound, &q4k, NumericPolicy::default())
+                .expect("emits")
+                .source
+        },
     );
     let off_key = temp_env::with_vars(
         [
@@ -3323,14 +3491,31 @@ fn staging_switches_default_on_render_unless_explicitly_disabled() {
     ];
     for &(var, other_var, marker) in cases {
         let source_with = |value: Option<&str>| {
-            temp_env::with_vars([(var, value), (other_var, Some("0")), ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0"))], || {
-                emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source
-            })
+            temp_env::with_vars(
+                [
+                    (var, value),
+                    (other_var, Some("0")),
+                    ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
+                ],
+                || {
+                    emit(&bound, &q4k, NumericPolicy::default())
+                        .expect("emits")
+                        .source
+                },
+            )
         };
         let key_with = |value: Option<&str>| {
-            temp_env::with_vars([(var, value), (other_var, Some("0")), ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0"))], || {
-                kernel_cache_key(&bound, &q4k, NumericPolicy::default()).expect("cache key derives")
-            })
+            temp_env::with_vars(
+                [
+                    (var, value),
+                    (other_var, Some("0")),
+                    ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
+                ],
+                || {
+                    kernel_cache_key(&bound, &q4k, NumericPolicy::default())
+                        .expect("cache key derives")
+                },
+            )
         };
 
         let on_source = source_with(Some("1"));
@@ -3351,10 +3536,16 @@ fn staging_switches_default_on_render_unless_explicitly_disabled() {
             "{var} unset (new default) must be byte-identical to explicit \"1\""
         );
         let unset_key = key_with(None);
-        assert_eq!(unset_key, on_key, "{var} unset (new default) must share explicit \"1\"'s cache key");
+        assert_eq!(
+            unset_key, on_key,
+            "{var} unset (new default) must share explicit \"1\"'s cache key"
+        );
 
         let zero_source = source_with(Some("0"));
-        assert_eq!(zero_source, off_source, "{var}=0 must be byte-identical to the all-off baseline");
+        assert_eq!(
+            zero_source, off_source,
+            "{var}=0 must be byte-identical to the all-off baseline"
+        );
     }
 }
 
@@ -3364,12 +3555,18 @@ fn staging_switches_default_on_render_unless_explicitly_disabled() {
 #[case::bfloat16(Codec::BFloat16)]
 #[case::q4_1(Codec::Q4_1)]
 #[case::iq4_nl(Codec::Iq4Nl)]
-async fn codec_without_a_tiled_decode_description_never_takes_the_tiled_gemm_path(#[case] codec: Codec) {
+async fn codec_without_a_tiled_decode_description_never_takes_the_tiled_gemm_path(
+    #[case] codec: Codec,
+) {
     let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let weight_node = bound.operands()[0].0;
     let packed = BTreeMap::from([(weight_node, codec)]);
 
-    assert_eq!(tiled_decode(codec), None, "{codec:?} must have no description for this test to mean anything");
+    assert_eq!(
+        tiled_decode(codec),
+        None,
+        "{codec:?} must have no description for this test to mean anything"
+    );
     assert_eq!(
         classify_tiled_gemm(
             &bound,
@@ -3379,7 +3576,9 @@ async fn codec_without_a_tiled_decode_description_never_takes_the_tiled_gemm_pat
             &[1, 0]
         )
         .err(),
-        Some(TiledGemmRejection::NotPackedRowBlock(PackedRowBlockRejection::NotKQuantCodec)),
+        Some(TiledGemmRejection::NotPackedRowBlock(
+            PackedRowBlockRejection::NotKQuantCodec
+        )),
         "a {codec:?} weight has no decode description and must be rejected by codec"
     );
     let source = emit(&bound, &packed, NumericPolicy::default())
@@ -3405,7 +3604,9 @@ fn wide_weight_stage_emits_wide_decode_and_vector_stores_when_switch_on() {
     q4k.insert(weight_node, Codec::Q4K);
 
     let off_source = temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("0"), || {
-        emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source
+        emit(&bound, &q4k, NumericPolicy::default())
+            .expect("emits")
+            .source
     });
     assert!(
         !off_source.contains("wws_blk0"),
@@ -3417,7 +3618,11 @@ fn wide_weight_stage_emits_wide_decode_and_vector_stores_when_switch_on() {
             ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", None::<&str>),
             ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
         ],
-        || emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source,
+        || {
+            emit(&bound, &q4k, NumericPolicy::default())
+                .expect("emits")
+                .source
+        },
     );
     assert!(
         on_source.contains("wws_blk0") && on_source.contains("half4("),
@@ -3448,7 +3653,11 @@ fn wide_weight_stage_emits_the_described_q4_0_decode_when_switch_on() {
             ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("1")),
             ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
         ],
-        || emit(&bound, &q4_0, NumericPolicy::default()).expect("emits").source,
+        || {
+            emit(&bound, &q4_0, NumericPolicy::default())
+                .expect("emits")
+                .source
+        },
     );
     assert!(
         on_source.contains("q4_0_dequant_half16(wws_blk0, wws_slot0, wws_decoded)"),
@@ -3469,7 +3678,8 @@ fn wide_weight_stage_emits_the_described_q4_0_decode_when_switch_on() {
 /// existed.
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
-fn wide_weight_stage_unset_stages_tiled_q4_0_through_the_cursor_decoder_and_packed_row_q4_0_never_carries_it() {
+fn wide_weight_stage_unset_stages_tiled_q4_0_through_the_cursor_decoder_and_packed_row_q4_0_never_carries_it()
+ {
     let tiled_bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let tiled_weight = tiled_bound.operands()[0].0;
     let mut tiled_q4_0 = BTreeMap::new();
@@ -3512,16 +3722,26 @@ fn wide_weight_stage_unset_stages_tiled_q4_0_through_the_cursor_decoder_and_pack
     let packed_row_weight = packed_row_bound.operands()[0].0;
     let mut packed_row_q4_0 = BTreeMap::new();
     packed_row_q4_0.insert(packed_row_weight, Codec::Q4_0);
-    let unset_source = temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", None::<&str>, || {
-        emit(&packed_row_bound, &packed_row_q4_0, NumericPolicy::default())
+    let unset_source =
+        temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", None::<&str>, || {
+            emit(
+                &packed_row_bound,
+                &packed_row_q4_0,
+                NumericPolicy::default(),
+            )
             .expect("emits")
             .source
-    });
-    let disabled_source = temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("0"), || {
-        emit(&packed_row_bound, &packed_row_q4_0, NumericPolicy::default())
+        });
+    let disabled_source =
+        temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("0"), || {
+            emit(
+                &packed_row_bound,
+                &packed_row_q4_0,
+                NumericPolicy::default(),
+            )
             .expect("emits")
             .source
-    });
+        });
     assert_eq!(
         unset_source, disabled_source,
         "a packed-row (non-tiled) Q4_0 shape must render identically whether the switch is \
@@ -3543,32 +3763,47 @@ fn wide_weight_stage_unset_stages_tiled_q4_0_through_the_cursor_decoder_and_pack
 fn mm_layout_default_on_renders_unless_explicitly_disabled_or_the_weight_stage_is_off() {
     let (bound, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 1536, 128);
     let q4_0 = BTreeMap::from([(weight_node, Codec::Q4_0)]);
-    let render = |mm_layout: Option<&str>, weight_stage: Option<&str>, packed: &BTreeMap<NodeId, Codec>| {
-        temp_env::with_vars(
-            [
-                ("PROXIMA_TILED_GEMM_MM_LAYOUT", mm_layout),
-                ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", weight_stage),
-            ],
-            || {
-                let source = emit(&bound, packed, NumericPolicy::default()).expect("emits").source;
-                let key = kernel_cache_key(&bound, packed, NumericPolicy::default()).expect("cache key derives");
-                (source, key)
-            },
-        )
-    };
+    let render =
+        |mm_layout: Option<&str>, weight_stage: Option<&str>, packed: &BTreeMap<NodeId, Codec>| {
+            temp_env::with_vars(
+                [
+                    ("PROXIMA_TILED_GEMM_MM_LAYOUT", mm_layout),
+                    ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", weight_stage),
+                ],
+                || {
+                    let source = emit(&bound, packed, NumericPolicy::default())
+                        .expect("emits")
+                        .source;
+                    let key = kernel_cache_key(&bound, packed, NumericPolicy::default())
+                        .expect("cache key derives");
+                    (source, key)
+                },
+            )
+        };
 
     let (unset_source, unset_key) = render(None, None, &q4_0);
     let (enabled_source, enabled_key) = render(Some("1"), None, &q4_0);
     let (disabled_source, disabled_key) = render(Some("0"), None, &q4_0);
-    assert_eq!(unset_source, enabled_source, "unset must render exactly what explicit \"1\" renders");
-    assert_eq!(unset_key, enabled_key, "unset must share explicit \"1\"'s cache key");
-    assert_ne!(unset_key, disabled_key, "the two tile layouts must never share a pipeline cache entry");
+    assert_eq!(
+        unset_source, enabled_source,
+        "unset must render exactly what explicit \"1\" renders"
+    );
+    assert_eq!(
+        unset_key, enabled_key,
+        "unset must share explicit \"1\"'s cache key"
+    );
+    assert_ne!(
+        unset_key, disabled_key,
+        "the two tile layouts must never share a pipeline cache entry"
+    );
     assert!(
-        unset_source.contains("mm_weight_store") && unset_source.contains("q4_0_dequant_half16(wws_blk0"),
+        unset_source.contains("mm_weight_store")
+            && unset_source.contains("q4_0_dequant_half16(wws_blk0"),
         "the default must stage the weight in the mm layout and decode with the fused form:\n{unset_source}"
     );
     assert!(
-        !disabled_source.contains("mm_weight_store") && disabled_source.contains("*(threadgroup half4 *)&weight_tile["),
+        !disabled_source.contains("mm_weight_store")
+            && disabled_source.contains("*(threadgroup half4 *)&weight_tile["),
         "an explicit \"0\" must keep the row-major tile:\n{disabled_source}"
     );
 
@@ -3591,7 +3826,9 @@ fn mm_layout_loads_fragments_untransposed_and_stores_the_accumulators_transposed
     let q4_0 = BTreeMap::from([(weight_node, Codec::Q4_0)]);
     let render = |mm_layout: &str| {
         temp_env::with_var("PROXIMA_TILED_GEMM_MM_LAYOUT", Some(mm_layout), || {
-            emit(&bound, &q4_0, NumericPolicy::default()).expect("emits").source
+            emit(&bound, &q4_0, NumericPolicy::default())
+                .expect("emits")
+                .source
         })
     };
 
@@ -3617,7 +3854,8 @@ fn mm_layout_loads_fragments_untransposed_and_stores_the_accumulators_transposed
     assert!(
         row_major
             .lines()
-            .any(|line| line.contains("simdgroup_load(b_frag[j]") && line.contains("ulong2(0), true")),
+            .any(|line| line.contains("simdgroup_load(b_frag[j]")
+                && line.contains("ulong2(0), true")),
         "the row-major layout keeps the transposed activation fragment load:\n{row_major}"
     );
 }
@@ -3641,12 +3879,19 @@ fn mm_layout_reads_a_unit_stride_activation_at_k0_and_a_strided_one_through_the_
                 ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("1")),
                 ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", Some(wide_activation)),
             ],
-            || emit(bound, codecs, NumericPolicy::default()).expect("emits").source,
+            || {
+                emit(bound, codecs, NumericPolicy::default())
+                    .expect("emits")
+                    .source
+            },
         )
     };
 
     let unit_stride = render(&unit_bound, &unit_codecs, "1");
-    assert!(unit_stride.contains("device const float *mm_act_ptr = in"), "{unit_stride}");
+    assert!(
+        unit_stride.contains("device const float *mm_act_ptr = in"),
+        "{unit_stride}"
+    );
     assert!(unit_stride.contains("mm_act_ptr += 32;"), "{unit_stride}");
     assert!(
         unit_stride.contains("q4k_dequant_half16(wws_blk0, wws_slot0, decoded)"),
@@ -3654,14 +3899,23 @@ fn mm_layout_reads_a_unit_stride_activation_at_k0_and_a_strided_one_through_the_
     );
 
     for (label, source) in [
-        ("wide activation load off", render(&unit_bound, &unit_codecs, "0")),
-        ("activation K axis not contiguous", render(&strided_bound, &strided_codecs, "1")),
+        (
+            "wide activation load off",
+            render(&unit_bound, &unit_codecs, "0"),
+        ),
+        (
+            "activation K axis not contiguous",
+            render(&strided_bound, &strided_codecs, "1"),
+        ),
     ] {
         assert!(
             source.contains("mm_act_offset = mm_act_base + k0 * u.operand_strides["),
             "{label}:\n{source}"
         );
-        assert!(source.contains("float act_scalar[8];"), "{label}:\n{source}");
+        assert!(
+            source.contains("float act_scalar[8];"),
+            "{label}:\n{source}"
+        );
     }
 }
 
@@ -3676,7 +3930,9 @@ fn mm_layout_reads_a_unit_stride_activation_at_k0_and_a_strided_one_through_the_
 fn mm_layout_decodes_before_the_first_barrier_and_ends_the_loop_on_the_multiplies() {
     let (bound, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 1536, 128);
     let q4_0 = BTreeMap::from([(weight_node, Codec::Q4_0)]);
-    let source = emit(&bound, &q4_0, NumericPolicy::default()).expect("emits").source;
+    let source = emit(&bound, &q4_0, NumericPolicy::default())
+        .expect("emits")
+        .source;
     let position = |needle: &str, from: usize| {
         source[from..]
             .find(needle)
@@ -3687,18 +3943,31 @@ fn mm_layout_decodes_before_the_first_barrier_and_ends_the_loop_on_the_multiplie
     let decode = position("q4_0_dequant_half16(wws_blk0", 0);
     let first_barrier = position("threadgroup_barrier(mem_flags::mem_threadgroup);", decode);
     let store = position("weight_tile[mm_weight_store", decode);
-    assert!(decode < first_barrier && first_barrier < store, "decode, barrier, store:\n{source}");
+    assert!(
+        decode < first_barrier && first_barrier < store,
+        "decode, barrier, store:\n{source}"
+    );
 
     let multiply = position("simdgroup_multiply_accumulate(", store);
-    let loop_end = position("\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n", multiply);
+    let loop_end = position(
+        "\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n",
+        multiply,
+    );
     assert!(
         !source[multiply..loop_end].contains("threadgroup_barrier("),
         "no threadgroup barrier may sit between the multiplies and the end of the loop:\n{source}"
     );
-    let unrolled = source.matches("_Pragma(\"clang loop unroll(full)\")").count();
-    assert_eq!(unrolled, 4, "the multiply step has four fully unrolled loops:\n{source}");
+    let unrolled = source
+        .matches("_Pragma(\"clang loop unroll(full)\")")
+        .count();
     assert_eq!(
-        source.matches("simdgroup_barrier(mem_flags::mem_none);").count(),
+        unrolled, 4,
+        "the multiply step has four fully unrolled loops:\n{source}"
+    );
+    assert_eq!(
+        source
+            .matches("simdgroup_barrier(mem_flags::mem_none);")
+            .count(),
         3,
         "the loads are fenced from the multiplies by three simdgroup barriers:\n{source}"
     );
@@ -3714,7 +3983,11 @@ fn dynamic_tgmem_kernel_argument_and_launch_length_always_agree() {
     let q4_0 = BTreeMap::from([(weight_node, Codec::Q4_0)]);
     let q4k = BTreeMap::from([(weight_node, Codec::Q4K)]);
     let dense = dense_batched_score_shaped_op(510, 512, 8, 128);
-    let render = |bound: &BoundOp, codecs: &BTreeMap<NodeId, Codec>, lever: Option<&str>, slim: Option<&str>, grid2d: Option<&str>| {
+    let render = |bound: &BoundOp,
+                  codecs: &BTreeMap<NodeId, Codec>,
+                  lever: Option<&str>,
+                  slim: Option<&str>,
+                  grid2d: Option<&str>| {
         temp_env::with_vars(
             [
                 ("PROXIMA_TILED_GEMM_DYNAMIC_TGMEM", lever),
@@ -3734,20 +4007,42 @@ fn dynamic_tgmem_kernel_argument_and_launch_length_always_agree() {
     for (label, codecs) in [("q4_0", &q4_0), ("q4k", &q4k)] {
         let (declared, bytes) = render(&packed, codecs, None, None, None);
         assert!(declared, "{label}: the default declares the argument");
-        assert_eq!(bytes, tiled_gemm_shared_bytes(), "{label}: the default binds the array's size");
-        assert_eq!(tiled_gemm_shared_bytes(), 8192, "the 64 x 32 x 32 tile is ggml's 8192 bytes");
+        assert_eq!(
+            bytes,
+            tiled_gemm_shared_bytes(),
+            "{label}: the default binds the array's size"
+        );
+        assert_eq!(
+            tiled_gemm_shared_bytes(),
+            8192,
+            "the 64 x 32 x 32 tile is ggml's 8192 bytes"
+        );
 
         for (reason, off) in [
             ("lever off", render(&packed, codecs, Some("0"), None, None)),
-            ("slim store off", render(&packed, codecs, None, Some("0"), None)),
-            ("grid launch off", render(&packed, codecs, None, None, Some("0"))),
+            (
+                "slim store off",
+                render(&packed, codecs, None, Some("0"), None),
+            ),
+            (
+                "grid launch off",
+                render(&packed, codecs, None, None, Some("0")),
+            ),
         ] {
-            assert_eq!(off, (false, 0), "{label}: {reason} must declare no argument and bind no length");
+            assert_eq!(
+                off,
+                (false, 0),
+                "{label}: {reason} must declare no argument and bind no length"
+            );
         }
     }
 
     let (declared, bytes) = render(&dense, &none, None, None, None);
-    assert_eq!((declared, bytes), (false, 0), "the dense-batched path keeps its declared array");
+    assert_eq!(
+        (declared, bytes),
+        (false, 0),
+        "the dense-batched path keeps its declared array"
+    );
 }
 
 /// The dense-batched-gemm path (`push_dense_batched_gemm_body`) has no
@@ -3809,7 +4104,9 @@ fn grid2d_kernel_attribute_form_and_dispatched_grid_always_agree() {
             let (_, tiled_grid) =
                 kernel_dispatch_shape(&tiled_bound, &tiled_q4_0, NumericPolicy::default())
                     .expect("tiled dispatch shape");
-            let tiled_2d_attrs = tiled_kernel.source.contains("[[threadgroup_position_in_grid]]");
+            let tiled_2d_attrs = tiled_kernel
+                .source
+                .contains("[[threadgroup_position_in_grid]]");
             assert_eq!(
                 tiled_2d_attrs,
                 tiled_grid.grid2d.is_some(),
@@ -3824,7 +4121,8 @@ fn grid2d_kernel_attribute_form_and_dispatched_grid_always_agree() {
                     "the tiled-GEMM lever's launch reads tile coordinates, never the flat thread index"
                 );
                 assert_eq!(
-                    grid2d.threadgroups_x * grid2d.threadgroups_y
+                    grid2d.threadgroups_x
+                        * grid2d.threadgroups_y
                         * grid2d.threads_per_threadgroup_x
                         * grid2d.threads_per_threadgroup_y,
                     tiled_grid.threads,
@@ -3833,12 +4131,14 @@ fn grid2d_kernel_attribute_form_and_dispatched_grid_always_agree() {
                 );
             }
 
-            let dense_kernel =
-                emit(&dense_bound, &BTreeMap::new(), NumericPolicy::default()).expect("dense emits");
+            let dense_kernel = emit(&dense_bound, &BTreeMap::new(), NumericPolicy::default())
+                .expect("dense emits");
             let (_, dense_grid) =
                 kernel_dispatch_shape(&dense_bound, &BTreeMap::new(), NumericPolicy::default())
                     .expect("dense dispatch shape");
-            let dense_2d_attrs = dense_kernel.source.contains("[[threadgroup_position_in_grid]]");
+            let dense_2d_attrs = dense_kernel
+                .source
+                .contains("[[threadgroup_position_in_grid]]");
             assert_eq!(
                 dense_2d_attrs,
                 dense_grid.grid2d.is_some(),
@@ -4017,7 +4317,8 @@ fn q4_0_broadcast_epilogue_declines_tiled_gemm_admission_without_erroring() {
 
     let codecs = operand_codecs(&bound, &q4_0);
     temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("1"), || {
-        let admission = classify_tiled_gemm(&bound, &codecs, ScalarOp::Add, ReduceInit::Zero, &[1, 0]);
+        let admission =
+            classify_tiled_gemm(&bound, &codecs, ScalarOp::Add, ReduceInit::Zero, &[1, 0]);
         assert!(
             matches!(
                 admission,
@@ -4089,8 +4390,7 @@ fn classify_tiled_gemm_admits_todays_real_sized_block_k_for_both_codecs() {
     let mut q4k = BTreeMap::new();
     q4k.insert(weight_node, Codec::Q4K);
     let codecs = operand_codecs(&bound, &q4k);
-    let admission =
-        classify_tiled_gemm(&bound, &codecs, ScalarOp::Add, ReduceInit::Zero, &[1, 0]);
+    let admission = classify_tiled_gemm(&bound, &codecs, ScalarOp::Add, ReduceInit::Zero, &[1, 0]);
     assert!(
         admission.is_ok(),
         "today's build-time TILED_GEMM_BLOCK_K must stay chunk-aligned for Q4_K"
@@ -4178,11 +4478,16 @@ fn cumsum_op(extent: u32) -> BoundOp {
         }),
     );
     let shapes = infer(&program, &[]).expect("cumsum infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("cumsum lowers")
-        .into_iter()
-        .next()
-        .expect("one bound emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("cumsum lowers")
+    .into_iter()
+    .next()
+    .expect("one bound emitted")
 }
 
 /// `table[ids[s], d]` over iteration space `(s, d)`: the same worked
@@ -4231,18 +4536,22 @@ fn embedding_lookup_op(vocab: u32, dim: u32, seq: u32) -> BoundOp {
         },
     );
     let shapes = infer(&program, &[]).expect("embedding lookup infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("embedding lookup lowers")
-        .into_iter()
-        .next()
-        .expect("one bound emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("embedding lookup lowers")
+    .into_iter()
+    .next()
+    .expect("one bound emitted")
 }
 
 #[test]
 fn a_gather_op_emits_an_indices_binding_and_the_fetch_uniforms() {
     let bound = embedding_lookup_op(50_000, 8, 4);
-    let kernel =
-        emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("gather emits");
+    let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("gather emits");
 
     assert_eq!(
         kernel.entry, "omega_elementwise_r2_n1_identity_g1",
@@ -4355,11 +4664,16 @@ fn routed_q4k_reduce_kernel() -> Kernel {
         }),
     );
     let shapes = infer(&program, &[]).expect("routed reduction infers");
-    let bound = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("routed reduction lowers")
-        .into_iter()
-        .find(|bound| matches!(bound.kind, BoundOpKind::Reduce { .. }))
-        .expect("reduction bound op exists");
+    let bound = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("routed reduction lowers")
+    .into_iter()
+    .find(|bound| matches!(bound.kind, BoundOpKind::Reduce { .. }))
+    .expect("reduction bound op exists");
     let mut packed = BTreeMap::new();
     packed.insert(bound.operands()[0].0, Codec::Q4K);
     emit_with_expert_sources(
@@ -4394,12 +4708,16 @@ fn routed_q4k_reduce_uses_cooperative_gather_fetch() {
 fn expert_codec_declared_once_when_both_substitution_markers_fire() {
     let kernel = routed_q4k_reduce_kernel();
     assert!(
-        kernel.source.contains("fetched0 = max((long)0, min(fetched0"),
+        kernel
+            .source
+            .contains("fetched0 = max((long)0, min(fetched0"),
         "fixture must exercise the clamp marker for this regression to mean anything:\n{}",
         kernel.source
     );
     assert!(
-        kernel.source.contains("fetched0 = (long)simd_broadcast_first"),
+        kernel
+            .source
+            .contains("fetched0 = (long)simd_broadcast_first"),
         "fixture must exercise the broadcast marker for this regression to mean anything:\n{}",
         kernel.source
     );
@@ -4416,8 +4734,7 @@ fn expert_codec_declared_once_when_both_substitution_markers_fire() {
 #[test]
 fn a_gather_kernel_binds_and_declares_the_fault_buffer() {
     let bound = embedding_lookup_op(50_000, 8, 4);
-    let kernel =
-        emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("gather emits");
+    let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("gather emits");
 
     assert!(
         kernel.bindings.contains(&Binding::Fault),
@@ -4482,7 +4799,11 @@ fn elementwise_op_emits_one_input_one_output_and_a_matching_grid() {
             .source
             .contains("kernel void omega_elementwise_r1_n1_tanh")
     );
-    assert!(kernel.source.contains("tanh(clamp(scratch[0], -20.0f, 20.0f))"));
+    assert!(
+        kernel
+            .source
+            .contains("tanh(clamp(scratch[0], -20.0f, 20.0f))")
+    );
     assert_eq!(kernel.grid.threads, 10);
 }
 
@@ -4519,11 +4840,16 @@ fn rank3_identity_sum_op(output_rank_axes: &[u16]) -> BoundOp {
         }),
     );
     let shapes = infer(&program, &[]).expect("rank3 identity sum infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("rank3 identity sum lowers")
-        .into_iter()
-        .next()
-        .expect("one bound emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("rank3 identity sum lowers")
+    .into_iter()
+    .next()
+    .expect("one bound emitted")
 }
 
 #[test]
@@ -4663,10 +4989,8 @@ fn every_axis_that_changes_emitted_source_also_changes_kernel_cache_key() {
         "dtype must change the emitted body (half vs. float declarations)"
     );
     assert_ne!(
-        kernel_cache_key(&f32_bound, &empty, NumericPolicy::default())
-            .expect("cache key builds"),
-        kernel_cache_key(&f16_bound, &empty, NumericPolicy::default())
-            .expect("cache key builds"),
+        kernel_cache_key(&f32_bound, &empty, NumericPolicy::default()).expect("cache key builds"),
+        kernel_cache_key(&f16_bound, &empty, NumericPolicy::default()).expect("cache key builds"),
         "dtype must change the identity"
     );
 
@@ -4713,14 +5037,12 @@ fn every_axis_that_changes_emitted_source_also_changes_kernel_cache_key() {
     );
     assert_ne!(
         kernel_cache_key(&bound, &q4k, NumericPolicy::bit_exact()).expect("cache key builds"),
-        kernel_cache_key(&bound, &q4k, NumericPolicy::llama_relaxed())
-            .expect("cache key builds"),
+        kernel_cache_key(&bound, &q4k, NumericPolicy::llama_relaxed()).expect("cache key builds"),
         "numeric policy must change the identity, or a bit_exact- and a \
          llama_relaxed-compiled kernel could share one PIPELINE_CACHE entry"
     );
     assert_ne!(
-        kernel_cache_key(&bound, &q4k, NumericPolicy::llama_relaxed())
-            .expect("cache key builds"),
+        kernel_cache_key(&bound, &q4k, NumericPolicy::llama_relaxed()).expect("cache key builds"),
         kernel_cache_key(&bound, &q4k, NumericPolicy::fast()).expect("cache key builds"),
         "numeric policy must change the identity, or a llama_relaxed- and a \
          fast-compiled kernel could share one PIPELINE_CACHE entry"
@@ -4733,10 +5055,8 @@ fn every_axis_that_changes_emitted_source_also_changes_kernel_cache_key() {
         let narrow = single_axis_sum_op(34);
         let wide = single_axis_sum_op(4096);
         assert_ne!(
-            kernel_cache_key(&narrow, &empty, NumericPolicy::default())
-                .expect("cache key builds"),
-            kernel_cache_key(&wide, &empty, NumericPolicy::default())
-                .expect("cache key builds"),
+            kernel_cache_key(&narrow, &empty, NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&wide, &empty, NumericPolicy::default()).expect("cache key builds"),
             "two cooperative reduces at different widths must never share a pipeline \
              (ROW 290: a stale narrower kernel silently drops reduction terms)"
         );
@@ -4794,10 +5114,10 @@ fn output_axis_order_at_the_same_axis_set_yields_distinct_cache_keys_and_source(
     let descending = rank3_identity_sum_op(&[1, 0]);
     let empty = BTreeMap::new();
 
-    let key_ascending = kernel_cache_key(&ascending, &empty, NumericPolicy::default())
-        .expect("cache key builds");
-    let key_descending = kernel_cache_key(&descending, &empty, NumericPolicy::default())
-        .expect("cache key builds");
+    let key_ascending =
+        kernel_cache_key(&ascending, &empty, NumericPolicy::default()).expect("cache key builds");
+    let key_descending =
+        kernel_cache_key(&descending, &empty, NumericPolicy::default()).expect("cache key builds");
     assert_ne!(
         key_ascending, key_descending,
         "the SEQUENCE order of output_axes selects which u.output_extents slot each dim reads"
@@ -4867,11 +5187,16 @@ fn distinct_dtype_on_the_same_shape_yields_distinct_cache_keys_and_source() {
         },
     );
     let shapes = infer(&program, &[]).expect("f32 elementwise infers");
-    let f32_bound = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("f32 elementwise lowers")
-        .into_iter()
-        .next()
-        .expect("one bound emitted");
+    let f32_bound = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("f32 elementwise lowers")
+    .into_iter()
+    .next()
+    .expect("one bound emitted");
 
     let mut half_program = Vec::new();
     let half_source = append(
@@ -4898,16 +5223,16 @@ fn distinct_dtype_on_the_same_shape_yields_distinct_cache_keys_and_source() {
         &[terminal(&half_program)],
         NumericPolicy::default(),
     )
-        .expect("f16 elementwise lowers")
-        .into_iter()
-        .next()
-        .expect("one bound emitted");
+    .expect("f16 elementwise lowers")
+    .into_iter()
+    .next()
+    .expect("one bound emitted");
 
     let empty = BTreeMap::new();
-    let key_f32 = kernel_cache_key(&f32_bound, &empty, NumericPolicy::default())
-        .expect("cache key builds");
-    let key_f16 = kernel_cache_key(&f16_bound, &empty, NumericPolicy::default())
-        .expect("cache key builds");
+    let key_f32 =
+        kernel_cache_key(&f32_bound, &empty, NumericPolicy::default()).expect("cache key builds");
+    let key_f16 =
+        kernel_cache_key(&f16_bound, &empty, NumericPolicy::default()).expect("cache key builds");
     assert_ne!(
         key_f32, key_f16,
         "entry_name does not encode dtype on its own"
@@ -4945,8 +5270,7 @@ fn fused_matmul_op_emits_two_inputs_a_reduction_loop_and_a_row_by_col_grid() {
         matches!(bound.kind, BoundOpKind::Reduce { .. }),
         "the elementwise op must have fused into the reduce"
     );
-    let kernel =
-        emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("matmul emits");
+    let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("matmul emits");
 
     assert_eq!(kernel.entry, "omega_reduce_r3_o2_n2_multiply_add_zero");
     assert_eq!(kernel.bindings.len(), 4, "two inputs, one output, uniforms");
@@ -5020,11 +5344,16 @@ fn single_axis_sum_op(reduce_len: u32) -> BoundOp {
         }),
     );
     let shapes = infer(&program, &[]).expect("single-axis sum infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("single-axis sum lowers")
-        .into_iter()
-        .next()
-        .expect("one bound emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("single-axis sum lowers")
+    .into_iter()
+    .next()
+    .expect("one bound emitted")
 }
 
 fn rowwise_sum_op(outputs: u32, reduce_len: u32) -> BoundOp {
@@ -5051,11 +5380,16 @@ fn rowwise_sum_op(outputs: u32, reduce_len: u32) -> BoundOp {
         }),
     );
     let shapes = infer(&program, &[]).expect("row-wise sum infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("row-wise sum lowers")
-        .into_iter()
-        .next()
-        .expect("one bound emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("row-wise sum lowers")
+    .into_iter()
+    .next()
+    .expect("one bound emitted")
 }
 
 /// Proves the short-fold rule reads output count and length together, at the
@@ -5083,7 +5417,8 @@ async fn short_folds_route_on_output_count_and_length_together(
         "outputs={outputs} reduce_len={reduce_len}"
     );
 
-    let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::llama_relaxed()).expect("row-wise sum emits");
+    let kernel =
+        emit(&bound, &BTreeMap::new(), NumericPolicy::llama_relaxed()).expect("row-wise sum emits");
     assert_eq!(
         kernel.source.contains("simd_sum(accumulator)"),
         expected_cooperative,
@@ -5140,8 +5475,8 @@ async fn reduce_routes_on_reduced_axis_length_against_min_len(#[case] reduce_len
 #[test]
 fn cached_attention_emits_one_online_softmax_dispatch() {
     let bound = cached_attention_op();
-    let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default())
-        .expect("cached attention emits");
+    let kernel =
+        emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("cached attention emits");
 
     let BoundOpKind::CachedAttention {
         cached_key_rows,
@@ -5229,8 +5564,8 @@ fn cached_attention_at_one_chunk_never_emits_context_chunk_machinery() {
         return;
     }
 
-    let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default())
-        .expect("cached attention emits");
+    let kernel =
+        emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("cached attention emits");
     assert!(!kernel.source.contains("context_chunks"));
     assert!(!kernel.source.contains("long chunk ="));
     assert!(!kernel.source.contains("shared_m["));
@@ -5240,8 +5575,7 @@ fn cached_attention_at_one_chunk_never_emits_context_chunk_machinery() {
 #[test]
 fn cumsum_op_emits_a_scan_kernel_with_one_thread_per_line() {
     let bound = cumsum_op(8);
-    let kernel =
-        emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("cumsum emits");
+    let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("cumsum emits");
 
     assert_eq!(kernel.entry, "omega_scan_r1_o1_n1_identity_add_zero");
     assert!(kernel.source.contains("inner_len"));
@@ -5328,7 +5662,7 @@ fn render_reduce_rejects_an_elementwise_bound_op() {
         false,
         &MetalOnlyExtras::default(),
     )
-        .expect_err("an elementwise chain is not a Reduce fold");
+    .expect_err("an elementwise chain is not a Reduce fold");
     assert!(matches!(
         error,
         EmitError::RenderKindMismatch {
@@ -5368,7 +5702,7 @@ fn render_reduce_rejects_a_broadcast_reduce_epilogue() {
         false,
         &MetalOnlyExtras::default(),
     )
-        .expect_err("a broadcast-reduce epilogue has no Metal renderer yet");
+    .expect_err("a broadcast-reduce epilogue has no Metal renderer yet");
     assert!(
         matches!(error, EmitError::EpilogueNotSupported { .. }),
         "{error}"
@@ -5717,8 +6051,9 @@ fn packed_row_nsg2_off_leaves_the_threadgroup_width_unchanged() {
     q4k.insert(weight_node, Codec::Q4K);
     let quantized = operand_codecs(&bound, &q4k);
 
-    let block = packed_row_block(&bound, &quantized)
-        .expect("test fixture must actually take the row-blocked path for this assertion to mean anything");
+    let block = packed_row_block(&bound, &quantized).expect(
+        "test fixture must actually take the row-blocked path for this assertion to mean anything",
+    );
 
     let feature_total: u64 = block
         .feature_axes
@@ -5895,7 +6230,12 @@ fn render_cached_attention_omits_the_merge_block_under_bit_exact_policy() {
 #[test]
 fn cached_attention_two_dispatch_form_is_inert_under_bit_exact() {
     let mut bound = cached_attention_op_dynamic(200, 56);
-    let BoundOpKind::CachedAttention { head_dim, rotary_dim, .. } = &mut bound.kind else {
+    let BoundOpKind::CachedAttention {
+        head_dim,
+        rotary_dim,
+        ..
+    } = &mut bound.kind
+    else {
         unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
     };
     // multiple of 8, `render_cached_attention`'s own alignment
@@ -5983,7 +6323,12 @@ fn cached_attention_two_dispatch_form_is_inert_under_bit_exact() {
 #[test]
 fn forty_key_plan_uses_the_per_query_head_grid_with_no_merge_under_either_policy() {
     let mut bound = cached_attention_op_dynamic(32, 8);
-    let BoundOpKind::CachedAttention { head_dim, rotary_dim, .. } = &mut bound.kind else {
+    let BoundOpKind::CachedAttention {
+        head_dim,
+        rotary_dim,
+        ..
+    } = &mut bound.kind
+    else {
         unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
     };
     *head_dim = 8;
@@ -6056,9 +6401,8 @@ fn per_query_head_grid_narrows_threadgroup_width_without_changing_total_threads(
     let narrow_width =
         tiled_gemm_threadgroup_width(&narrow, &quantized, NumericPolicy::bit_exact())
             .expect("a CachedAttention op always has a threadgroup width");
-    let wide_width =
-        tiled_gemm_threadgroup_width(&wide, &quantized, NumericPolicy::bit_exact())
-            .expect("a CachedAttention op always has a threadgroup width");
+    let wide_width = tiled_gemm_threadgroup_width(&wide, &quantized, NumericPolicy::bit_exact())
+        .expect("a CachedAttention op always has a threadgroup width");
     assert_eq!(
         wide_width,
         4 * narrow_width,
@@ -6087,7 +6431,12 @@ fn per_query_head_grid_narrows_threadgroup_width_without_changing_total_threads(
 #[test]
 fn split_kernel_emits_the_slice_formula_and_scratch_index() {
     let mut bound = cached_attention_op_dynamic(200, 56);
-    let BoundOpKind::CachedAttention { head_dim, rotary_dim, .. } = &mut bound.kind else {
+    let BoundOpKind::CachedAttention {
+        head_dim,
+        rotary_dim,
+        ..
+    } = &mut bound.kind
+    else {
         unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
     };
     *head_dim = 8;
@@ -6107,8 +6456,7 @@ fn split_kernel_emits_the_slice_formula_and_scratch_index() {
         "the slice formula must be exactly ceil_div(live, splits), [lo, hi)"
     );
     assert!(
-        source
-            .contains("long scratch_index = (query_index * splits + split) * (2L + head_dim);"),
+        source.contains("long scratch_index = (query_index * splits + split) * (2L + head_dim);"),
         "the scratch write must index by (query_index * splits + split) using the LIVE \
          u.splits value cached_attention_scratch_len sized the buffer with, not the \
          compiled ATTENTION_SPLIT_MAX -- ROW: production, 2026-09-07, striding by the \
@@ -6138,8 +6486,9 @@ fn split_kernel_emits_the_slice_formula_and_scratch_index() {
          threadgroup's own [lo, hi) slice, not the whole live range"
     );
 
-    let sequential_source = render_cached_attention(&bound, "entry", NumericPolicy::default(), None)
-        .expect("bit_exact still renders (splits collapse to 1, but the shape is shared)");
+    let sequential_source =
+        render_cached_attention(&bound, "entry", NumericPolicy::default(), None)
+            .expect("bit_exact still renders (splits collapse to 1, but the shape is shared)");
     assert!(
         sequential_source.contains("for (long key = lo + chunk; key < hi; key += chunks)"),
         "the strictly-sequential per-key walk must be bounded to this threadgroup's own \
@@ -6155,8 +6504,8 @@ fn split_kernel_emits_the_slice_formula_and_scratch_index() {
 #[test]
 fn merge_kernel_emits_the_online_softmax_combine() {
     let bound = cached_attention_op_dynamic(200, 56);
-    let source = render_cached_attention_merge(&bound, "entry")
-        .expect("the merge kernel always renders");
+    let source =
+        render_cached_attention_merge(&bound, "entry").expect("the merge kernel always renders");
 
     assert!(source.contains("long splits = u.splits;"));
     assert!(source.contains("float global_max = simd_max(own_max);"));
@@ -6267,7 +6616,12 @@ fn block_width_one_renders_the_strictly_sequential_body_never_the_block_staged_o
 #[test]
 fn block_width_above_one_renders_the_block_staged_body_under_llama_relaxed() {
     let mut bound = cached_attention_op_dynamic(32, 7);
-    let BoundOpKind::CachedAttention { head_dim, rotary_dim, .. } = &mut bound.kind else {
+    let BoundOpKind::CachedAttention {
+        head_dim,
+        rotary_dim,
+        ..
+    } = &mut bound.kind
+    else {
         unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
     };
     *head_dim = 8; // a multiple of 8, so the float4 K/Q loads stay aligned
@@ -6308,7 +6662,12 @@ fn block_width_above_one_renders_the_block_staged_body_under_llama_relaxed() {
 #[test]
 fn block_staged_v_accumulate_uses_float4_and_a_cross_ty_reduce_when_aligned() {
     let mut bound = cached_attention_op_dynamic(32, 7);
-    let BoundOpKind::CachedAttention { head_dim, rotary_dim, .. } = &mut bound.kind else {
+    let BoundOpKind::CachedAttention {
+        head_dim,
+        rotary_dim,
+        ..
+    } = &mut bound.kind
+    else {
         unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
     };
     *head_dim = 32; // a multiple of 32, so the V float4 loads stay aligned
@@ -6318,8 +6677,7 @@ fn block_staged_v_accumulate_uses_float4_and_a_cross_ty_reduce_when_aligned() {
         .expect("llama_relaxed renders the block-staged body for a 32-aligned head_dim");
 
     assert!(
-        source
-            .contains("float4* v4 = (device const float4*)((cached ? in6 : in7) + kbase * 2)"),
+        source.contains("float4* v4 = (device const float4*)((cached ? in6 : in7) + kbase * 2)"),
         "V must be reinterpreted as a float4 pointer at the same kbase * 2 offset the \
          scalar form used"
     );
@@ -6329,9 +6687,8 @@ fn block_staged_v_accumulate_uses_float4_and_a_cross_ty_reduce_when_aligned() {
     );
     assert!(
         source.contains("v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 8)")
-            && source.contains(
-                "v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 16)"
-            ),
+            && source
+                .contains("v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 16)"),
         "the four ty groups' partials must be folded together by a butterfly \
          simd_shuffle_xor reduce (strides 8 then 16), not left un-combined"
     );
@@ -6350,7 +6707,12 @@ fn block_staged_v_accumulate_uses_float4_and_a_cross_ty_reduce_when_aligned() {
 #[test]
 fn block_staged_v_accumulate_falls_back_to_scalar_when_head_dim_not_32_aligned() {
     let mut bound = cached_attention_op_dynamic(32, 7);
-    let BoundOpKind::CachedAttention { head_dim, rotary_dim, .. } = &mut bound.kind else {
+    let BoundOpKind::CachedAttention {
+        head_dim,
+        rotary_dim,
+        ..
+    } = &mut bound.kind
+    else {
         unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
     };
     *head_dim = 8; // multiple of 8 (Q/K stays aligned) but not of 32
@@ -6454,7 +6816,12 @@ fn split_count_never_exceeds_the_compiled_maximum() {
 #[test]
 fn block_staged_attention_rejects_a_head_dim_not_a_multiple_of_eight() {
     let mut bound = cached_attention_op_dynamic(32, 7);
-    let BoundOpKind::CachedAttention { head_dim, rotary_dim, .. } = &mut bound.kind else {
+    let BoundOpKind::CachedAttention {
+        head_dim,
+        rotary_dim,
+        ..
+    } = &mut bound.kind
+    else {
         unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
     };
     *head_dim = 12; // not a multiple of 8
@@ -6546,18 +6913,31 @@ fn cached_softmax_weights_render_is_deterministic_and_width_dependent() {
     let wide_a = cached_softmax_weights_op(8, 512, 256);
     let wide_b = cached_softmax_weights_op(8, 512, 256);
 
-    let narrow_text_a = render_cached_softmax_weights(&narrow_a, "omega_cached_softmax_weights_c32_a8_d256")
-        .expect("narrow shape renders");
-    let narrow_text_b = render_cached_softmax_weights(&narrow_b, "omega_cached_softmax_weights_c32_a8_d256")
-        .expect("narrow shape renders (second construction)");
-    let wide_text_a = render_cached_softmax_weights(&wide_a, "omega_cached_softmax_weights_c512_a8_d256")
-        .expect("wide shape renders");
-    let wide_text_b = render_cached_softmax_weights(&wide_b, "omega_cached_softmax_weights_c512_a8_d256")
-        .expect("wide shape renders (second construction)");
+    let narrow_text_a =
+        render_cached_softmax_weights(&narrow_a, "omega_cached_softmax_weights_c32_a8_d256")
+            .expect("narrow shape renders");
+    let narrow_text_b =
+        render_cached_softmax_weights(&narrow_b, "omega_cached_softmax_weights_c32_a8_d256")
+            .expect("narrow shape renders (second construction)");
+    let wide_text_a =
+        render_cached_softmax_weights(&wide_a, "omega_cached_softmax_weights_c512_a8_d256")
+            .expect("wide shape renders");
+    let wide_text_b =
+        render_cached_softmax_weights(&wide_b, "omega_cached_softmax_weights_c512_a8_d256")
+            .expect("wide shape renders (second construction)");
 
-    assert_eq!(narrow_text_a, narrow_text_b, "narrow shape must render byte-identical text across constructions");
-    assert_eq!(wide_text_a, wide_text_b, "wide shape must render byte-identical text across constructions");
-    assert_ne!(narrow_text_a, wide_text_a, "narrow and wide shapes take structurally different cooperative-fold paths");
+    assert_eq!(
+        narrow_text_a, narrow_text_b,
+        "narrow shape must render byte-identical text across constructions"
+    );
+    assert_eq!(
+        wide_text_a, wide_text_b,
+        "wide shape must render byte-identical text across constructions"
+    );
+    assert_ne!(
+        narrow_text_a, wide_text_a,
+        "narrow and wide shapes take structurally different cooperative-fold paths"
+    );
 
     // narrow: one physical simdgroup, direct `simd_max`/`simd_sum`, no
     // threadgroup partials array.
@@ -6687,8 +7067,7 @@ fn softmax_runtime_rows_on_changes_only_the_bound_and_the_name() {
             let key = kernel_cache_key(&narrow, &BTreeMap::new(), NumericPolicy::default())
                 .expect("switch-on cache key computes");
             (text, entry, key)
-        },
-    );
+        });
 
     assert_eq!(
         on_entry, "omega_cached_softmax_weights_rtrows_a8_d256",
@@ -6754,7 +7133,6 @@ fn softmax_runtime_rows_on_changes_only_the_bound_and_the_name() {
     );
 }
 
-
 /// A grid wider than the 32 bits of `uint gid [[thread_position_in_grid]]`
 /// (Metal launches `threads mod 2^32` of it, no error) must be described by
 /// ONE decision -- `grid2d_for` -- that the kernel text, the launch shape and
@@ -6801,11 +7179,16 @@ mod flat_grid_form {
             },
         );
         let shapes = infer(&program, &[]).expect("elementwise infers");
-        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-            .expect("elementwise lowers")
-            .into_iter()
-            .next()
-            .expect("one bound emitted")
+        bind(
+            &program,
+            &shapes,
+            &[terminal(&program)],
+            NumericPolicy::default(),
+        )
+        .expect("elementwise lowers")
+        .into_iter()
+        .next()
+        .expect("one bound emitted")
     }
 
     #[cfg(feature = "metal-wide-cooperative-reduce")]
@@ -6837,11 +7220,16 @@ mod flat_grid_form {
             }),
         );
         let shapes = infer(&program, &[]).expect("cumsum infers");
-        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-            .expect("cumsum lowers")
-            .into_iter()
-            .next()
-            .expect("one bound emitted")
+        bind(
+            &program,
+            &shapes,
+            &[terminal(&program)],
+            NumericPolicy::default(),
+        )
+        .expect("cumsum lowers")
+        .into_iter()
+        .next()
+        .expect("one bound emitted")
     }
 
     /// A per-layer-input projection shape: a `[features, k]` half-width
@@ -6898,11 +7286,16 @@ mod flat_grid_form {
             }),
         );
         let shapes = infer(&program, &[]).expect("projection infers");
-        let bound = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-            .expect("projection lowers")
-            .into_iter()
-            .next()
-            .expect("one fused bound emitted");
+        let bound = bind(
+            &program,
+            &shapes,
+            &[terminal(&program)],
+            NumericPolicy::default(),
+        )
+        .expect("projection lowers")
+        .into_iter()
+        .next()
+        .expect("one fused bound emitted");
         let weight_node = bound.operands()[0].0;
         (bound, BTreeMap::from([(weight_node, Codec::BFloat16)]))
     }
@@ -7055,7 +7448,11 @@ mod flat_grid_form {
     fn every_kernel_past_the_thread_index_renders_and_dispatches_the_flat_form_together() {
         let limit = u64::from(u32::MAX);
         let cases = flat_cases();
-        assert_eq!(cases.len(), 10, "one case per kernel form that can take the flat path");
+        assert_eq!(
+            cases.len(),
+            10,
+            "one case per kernel form that can take the flat path"
+        );
 
         for case in &cases {
             let kernel = emit(&case.bound, &case.packed, case.policy)
@@ -7069,11 +7466,23 @@ mod flat_grid_form {
                 case.label,
                 kernel.grid.threads
             );
-            assert_eq!(kernel.grid, shape, "{}: emit and the cache-hit dispatch shape disagree", case.label);
-            let spec = shape
-                .grid2d
-                .unwrap_or_else(|| panic!("{}: a {}-thread grid dispatched 1D", case.label, shape.threads));
-            assert_eq!(spec.form, Grid2DForm::FlatThreadgroupIndex, "{}", case.label);
+            assert_eq!(
+                kernel.grid, shape,
+                "{}: emit and the cache-hit dispatch shape disagree",
+                case.label
+            );
+            let spec = shape.grid2d.unwrap_or_else(|| {
+                panic!(
+                    "{}: a {}-thread grid dispatched 1D",
+                    case.label, shape.threads
+                )
+            });
+            assert_eq!(
+                spec.form,
+                Grid2DForm::FlatThreadgroupIndex,
+                "{}",
+                case.label
+            );
 
             assert!(
                 kernel.source.contains(FLAT_MARKER),
@@ -7108,9 +7517,14 @@ mod flat_grid_form {
                 case.label
             );
 
-            let narrow = emit(&case.narrow, &case.packed, case.policy)
-                .unwrap_or_else(|error| panic!("{}: narrow sibling emit failed: {error}", case.label));
-            assert_eq!(narrow.grid.grid2d, None, "{}: the narrow sibling must stay 1D", case.label);
+            let narrow = emit(&case.narrow, &case.packed, case.policy).unwrap_or_else(|error| {
+                panic!("{}: narrow sibling emit failed: {error}", case.label)
+            });
+            assert_eq!(
+                narrow.grid.grid2d, None,
+                "{}: the narrow sibling must stay 1D",
+                case.label
+            );
             assert!(
                 !narrow.source.contains(FLAT_MARKER),
                 "{}: the narrow sibling must not carry the flat form",
@@ -7125,13 +7539,25 @@ mod flat_grid_form {
                 "{}: the rectangle must hold exactly the threadgroups the grid needs",
                 case.label
             );
-            assert!(spec.threadgroups_x <= crate::sized::GRID_MAX_THREADGROUPS_X, "{}", case.label);
+            assert!(
+                spec.threadgroups_x <= crate::sized::GRID_MAX_THREADGROUPS_X,
+                "{}",
+                case.label
+            );
             assert!(spec.threadgroups_y <= limit, "{}", case.label);
             match shape.threadgroup_width {
                 Some(pinned) if shape.threads % pinned == 0 => {
-                    assert_eq!(width, pinned, "{}: a pinned width that divides the grid is launched as-is", case.label);
+                    assert_eq!(
+                        width, pinned,
+                        "{}: a pinned width that divides the grid is launched as-is",
+                        case.label
+                    );
                 }
-                Some(_) => assert_eq!(width, SIMD_WIDTH, "{}: a pinned width that does not divide the grid falls back to one simdgroup", case.label),
+                Some(_) => assert_eq!(
+                    width, SIMD_WIDTH,
+                    "{}: a pinned width that does not divide the grid falls back to one simdgroup",
+                    case.label
+                ),
                 None => assert_eq!(width, SIMD_WIDTH, "{}", case.label),
             }
         }
@@ -7144,7 +7570,9 @@ mod flat_grid_form {
             let wide_key = kernel_cache_key(&case.bound, &case.packed, case.policy)
                 .unwrap_or_else(|error| panic!("{}: cache key failed: {error}", case.label));
             let narrow_key = kernel_cache_key(&case.narrow, &case.packed, case.policy)
-                .unwrap_or_else(|error| panic!("{}: sibling cache key failed: {error}", case.label));
+                .unwrap_or_else(|error| {
+                    panic!("{}: sibling cache key failed: {error}", case.label)
+                });
 
             assert!(wide_key.contains("_wg"), "{}: {wide_key}", case.label);
             assert!(!narrow_key.contains("_wg"), "{}: {narrow_key}", case.label);
@@ -7158,7 +7586,11 @@ mod flat_grid_form {
 
         let kernel = emit(&bound, &packed, NumericPolicy::llama_relaxed()).expect("emits");
 
-        assert_eq!(kernel.grid.threads, 1872 * 8960 * 256, "the last row count that fits is 4_294_082_560 threads");
+        assert_eq!(
+            kernel.grid.threads,
+            1872 * 8960 * 256,
+            "the last row count that fits is 4_294_082_560 threads"
+        );
         assert!(kernel.grid.threads <= u64::from(u32::MAX));
         assert_eq!(kernel.grid.grid2d, None);
         assert!(kernel.source.contains(LINEAR_SIGNATURE));
@@ -7235,7 +7667,8 @@ mod flat_grid_form {
 
     #[test]
     fn the_rectangle_never_launches_a_threadgroup_the_grid_does_not_need() {
-        let spec = flat_grid2d(NodeId(17), 1873 * 8960 * 256, Some(256), false).expect("node 17 at 1873 rows");
+        let spec = flat_grid2d(NodeId(17), 1873 * 8960 * 256, Some(256), false)
+            .expect("node 17 at 1873 rows");
 
         assert_eq!(spec.threadgroups_x * spec.threadgroups_y, 1873 * 8960);
         assert!(spec.threadgroups_x <= crate::sized::GRID_MAX_THREADGROUPS_X);
@@ -7246,10 +7679,14 @@ mod flat_grid_form {
     fn a_pinned_threadgroup_width_that_does_not_divide_the_grid_launches_one_simdgroup_wide() {
         let threads = SIMD_WIDTH * 4_000_000_001;
 
-        let spec = flat_grid2d(NodeId(5), threads, Some(64), true).expect("an odd number of simdgroups still launches");
+        let spec = flat_grid2d(NodeId(5), threads, Some(64), true)
+            .expect("an odd number of simdgroups still launches");
 
         assert_eq!(spec.threads_per_threadgroup_x, SIMD_WIDTH);
-        assert_eq!(spec.threadgroups_x * spec.threadgroups_y, threads.div_ceil(SIMD_WIDTH));
+        assert_eq!(
+            spec.threadgroups_x * spec.threadgroups_y,
+            threads.div_ceil(SIMD_WIDTH)
+        );
     }
 
     #[cfg(feature = "metal-wide-cooperative-reduce")]
@@ -7258,9 +7695,17 @@ mod flat_grid_form {
         let (bound, packed) = per_layer_projection_op(1873, 1536, 8960);
 
         let codecs = operand_codecs(&bound, &packed);
-        let threads = grid_threads(&bound, &codecs, NumericPolicy::llama_relaxed(), true).expect("threads");
+        let threads =
+            grid_threads(&bound, &codecs, NumericPolicy::llama_relaxed(), true).expect("threads");
 
-        let refused = grid2d_for(&bound, &codecs, NumericPolicy::llama_relaxed(), true, threads);
+        let refused = grid2d_for(
+            &bound,
+            &codecs,
+            NumericPolicy::llama_relaxed(),
+            true,
+            threads,
+            AttentionRowSchedule::legacy(),
+        );
 
         assert!(
             matches!(refused, Err(EmitError::WideGridUnsupported { .. })),
@@ -7282,7 +7727,11 @@ mod flat_grid_form {
             Some(Grid2DForm::FlatThreadgroupIndex)
         );
         assert_eq!(kernel.grid.depth, 3, "the round axis stays the z extent");
-        assert!(kernel.source.contains("round_table[wide_group.z]"), "{}", kernel.source);
+        assert!(
+            kernel.source.contains("round_table[wide_group.z]"),
+            "{}",
+            kernel.source
+        );
         assert!(!kernel.source.contains("round_gid"), "{}", kernel.source);
         assert!(kernel.source.contains("ulong gid = "));
     }
@@ -7297,15 +7746,29 @@ mod flat_grid_form {
 
         temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("0"), || {
             let kernel = emit(&wide, &packed, NumericPolicy::default()).expect("wide tiled emits");
-            let sibling = emit(&narrow, &packed, NumericPolicy::default()).expect("narrow tiled emits");
+            let sibling =
+                emit(&narrow, &packed, NumericPolicy::default()).expect("narrow tiled emits");
 
             assert!(kernel.grid.threads > u64::from(u32::MAX));
-            let spec = kernel.grid.grid2d.expect("a tiled grid past u32::MAX threads cannot dispatch 1D");
+            let spec = kernel
+                .grid
+                .grid2d
+                .expect("a tiled grid past u32::MAX threads cannot dispatch 1D");
             assert_eq!(spec.form, Grid2DForm::FlatThreadgroupIndex);
-            assert_eq!(spec.threads_per_threadgroup_x, (TILED_GEMM_NSG as u64) * SIMD_WIDTH);
-            assert_eq!(spec.threadgroups_x * spec.threadgroups_y * spec.threads_per_threadgroup_x, kernel.grid.threads);
+            assert_eq!(
+                spec.threads_per_threadgroup_x,
+                (TILED_GEMM_NSG as u64) * SIMD_WIDTH
+            );
+            assert_eq!(
+                spec.threadgroups_x * spec.threadgroups_y * spec.threads_per_threadgroup_x,
+                kernel.grid.threads
+            );
             assert!(kernel.source.contains(FLAT_MARKER), "{}", kernel.source);
-            assert!(!kernel.source.contains(LINEAR_SIGNATURE), "{}", kernel.source);
+            assert!(
+                !kernel.source.contains(LINEAR_SIGNATURE),
+                "{}",
+                kernel.source
+            );
             assert_eq!(sibling.grid.grid2d, None);
             assert!(!sibling.source.contains(FLAT_MARKER));
         });
@@ -7322,7 +7785,10 @@ mod flat_grid_form {
             let kernel = emit(&wide, &packed, NumericPolicy::default()).expect("wide tiled emits");
 
             assert!(kernel.grid.threads > u64::from(u32::MAX));
-            let spec = kernel.grid.grid2d.expect("the lever dispatches threadgroup coordinates");
+            let spec = kernel
+                .grid
+                .grid2d
+                .expect("the lever dispatches threadgroup coordinates");
             assert_eq!(spec.form, Grid2DForm::TileCoordinates);
             assert!(!kernel.source.contains(FLAT_MARKER), "{}", kernel.source);
         });
@@ -7330,11 +7796,13 @@ mod flat_grid_form {
 
     #[cfg(feature = "metal-tiled-gemm")]
     #[test]
-    fn the_dense_batched_gemm_one_d_form_past_the_thread_index_reads_its_batch_from_the_flat_group_z() {
+    fn the_dense_batched_gemm_one_d_form_past_the_thread_index_reads_its_batch_from_the_flat_group_z()
+     {
         let bound = dense_batched_score_shaped_op(2_000_000, 2_000_000, 8, 128);
 
         temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("0"), || {
-            let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("dense batched emits");
+            let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default())
+                .expect("dense batched emits");
 
             assert!(kernel.grid.threads > u64::from(u32::MAX));
             assert_eq!(kernel.grid.depth, 8, "the batch axis stays the z extent");
@@ -7342,8 +7810,16 @@ mod flat_grid_form {
                 kernel.grid.grid2d.map(|spec| spec.form),
                 Some(Grid2DForm::FlatThreadgroupIndex)
             );
-            assert!(kernel.source.contains("(long)wide_group.z"), "{}", kernel.source);
-            assert!(!kernel.source.contains("dense_batch_gid"), "{}", kernel.source);
+            assert!(
+                kernel.source.contains("(long)wide_group.z"),
+                "{}",
+                kernel.source
+            );
+            assert!(
+                !kernel.source.contains("dense_batch_gid"),
+                "{}",
+                kernel.source
+            );
             assert!(kernel.source.contains(FLAT_MARKER));
         });
     }
@@ -7356,7 +7832,11 @@ mod flat_grid_form {
         temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("0"), || {
             let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("emits");
 
-            assert!(kernel.grid.threads <= u64::from(u32::MAX), "one z slice fits: {}", kernel.grid.threads);
+            assert!(
+                kernel.grid.threads <= u64::from(u32::MAX),
+                "one z slice fits: {}",
+                kernel.grid.threads
+            );
             assert_eq!(kernel.grid.depth, 8);
             assert!(kernel.grid.threads * kernel.grid.depth > u64::from(u32::MAX));
             assert_eq!(
@@ -7399,7 +7879,8 @@ mod flat_grid_form {
 
     #[test]
     fn a_flat_launch_is_re_cut_for_a_pipeline_that_cannot_run_the_pinned_width() {
-        let spec = flat_grid2d(NodeId(17), 1873 * 8960 * 256, Some(256), false).expect("node 17 at 1873 rows");
+        let spec = flat_grid2d(NodeId(17), 1873 * 8960 * 256, Some(256), false)
+            .expect("node 17 at 1873 rows");
 
         let fitted = fit_flat_width(spec, 128);
 
@@ -7410,7 +7891,11 @@ mod flat_grid_form {
             "halving the width doubles the threadgroups and launches the same threads"
         );
         assert!(fitted.threadgroups_x <= crate::sized::GRID_MAX_THREADGROUPS_X);
-        assert_eq!(fit_flat_width(spec, 256), spec, "a width the pipeline allows is left alone");
+        assert_eq!(
+            fit_flat_width(spec, 256),
+            spec,
+            "a width the pipeline allows is left alone"
+        );
         assert_eq!(fit_flat_width(spec, 1024), spec);
     }
 
@@ -7442,7 +7927,9 @@ mod flat_grid_form {
             .arg("-o")
             .arg(directory.path().join("kernel.air"))
             .output()
-            .unwrap_or_else(|error| panic!("metal toolchain unavailable ({error}) -- a red gate, not a skip"));
+            .unwrap_or_else(|error| {
+                panic!("metal toolchain unavailable ({error}) -- a red gate, not a skip")
+            });
         assert!(
             output.status.success(),
             "{label}: metal compile failed:\n--- source ---\n{source}\n--- stderr ---\n{}",
@@ -7470,15 +7957,23 @@ mod flat_grid_form {
             .expect("emits")
             .expect("a long context under the relaxed policy needs the merge dispatch");
 
-        assert!(merge.grid.threads > u64::from(u32::MAX), "{}", merge.grid.threads);
-        assert_eq!(merge.grid.grid2d.map(|spec| spec.form), Some(Grid2DForm::FlatThreadgroupIndex));
+        assert!(
+            merge.grid.threads > u64::from(u32::MAX),
+            "{}",
+            merge.grid.threads
+        );
+        assert_eq!(
+            merge.grid.grid2d.map(|spec| spec.form),
+            Some(Grid2DForm::FlatThreadgroupIndex)
+        );
         assert!(merge.source.contains(FLAT_MARKER), "{}", merge.source);
         assert_compiles_with_the_metal_toolchain("cached attention merge", &merge.source);
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn cached_attention_with_grouped_queries_past_the_thread_index_launches_its_pinned_width_and_compiles() {
+    fn cached_attention_with_grouped_queries_past_the_thread_index_launches_its_pinned_width_and_compiles()
+     {
         let mut bound = cached_attention_op_dynamic(0, 1_000_000);
         bound.extents = vec![300_000_000, 1, 1, 4];
         let BoundOpKind::CachedAttention { query_groups, .. } = &mut bound.kind else {
@@ -7487,11 +7982,24 @@ mod flat_grid_form {
         *query_groups = 4;
 
         let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("emits");
-        let spec = kernel.grid.grid2d.expect("a grid past u32::MAX cannot dispatch 1D");
+        let spec = kernel
+            .grid
+            .grid2d
+            .expect("a grid past u32::MAX cannot dispatch 1D");
 
-        assert_eq!(Some(spec.threads_per_threadgroup_x), kernel.grid.threadgroup_width, "pinned width is launched as pinned");
-        assert!(spec.threads_per_threadgroup_x > SIMD_WIDTH, "the four query groups share one threadgroup");
-        assert_compiles_with_the_metal_toolchain("cached attention, query_groups=4", &kernel.source);
+        assert_eq!(
+            Some(spec.threads_per_threadgroup_x),
+            kernel.grid.threadgroup_width,
+            "pinned width is launched as pinned"
+        );
+        assert!(
+            spec.threads_per_threadgroup_x > SIMD_WIDTH,
+            "the four query groups share one threadgroup"
+        );
+        assert_compiles_with_the_metal_toolchain(
+            "cached attention, query_groups=4",
+            &kernel.source,
+        );
     }
 
     #[cfg(all(target_os = "macos", feature = "metal-moe-mul-mat-id"))]
@@ -7513,7 +8021,10 @@ mod flat_grid_form {
 
         let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("emits");
 
-        assert_compiles_with_the_metal_toolchain("round-batched reduce, scalar gid", &kernel.source);
+        assert_compiles_with_the_metal_toolchain(
+            "round-batched reduce, scalar gid",
+            &kernel.source,
+        );
     }
 
     #[cfg(feature = "metal-q4k-split-k")]
@@ -7525,7 +8036,11 @@ mod flat_grid_form {
 
         let kernel = emit(&bound, &packed, NumericPolicy::default()).expect("emits");
 
-        assert!(kernel.source.contains("uint tptg = wide_width.x;"), "{}", kernel.source);
+        assert!(
+            kernel.source.contains("uint tptg = wide_width.x;"),
+            "{}",
+            kernel.source
+        );
         assert!(!kernel.source.contains("uint tptg [["), "{}", kernel.source);
     }
 }
@@ -7638,7 +8153,10 @@ mod encode_allocation_budget {
             encode_pair(&case);
             reset();
             let measured = encode_pair(&case);
-            eprintln!("encode_allocations label={} measured={measured}", case.label);
+            eprintln!(
+                "encode_allocations label={} measured={measured}",
+                case.label
+            );
             if measured > case.base_allocations {
                 over_budget.push((case.label, measured, case.base_allocations));
             }
@@ -7732,12 +8250,8 @@ fn packed_row_activation_cap_is_the_smallest_power_of_two_holding_the_tokens_up_
 #[test]
 fn q6k_multi_row_kernel_decodes_each_super_block_once_for_the_token_group() {
     let rows = crate::sized::PACKED_ROWS_PER_GROUP_Q6K;
-    let cases: [(u32, &str, usize); 4] = [
-        (2, "_ac2", 2),
-        (3, "_ac4", 4),
-        (4, "_ac4", 4),
-        (5, "", 8),
-    ];
+    let cases: [(u32, &str, usize); 4] =
+        [(2, "_ac2", 2), (3, "_ac4", 4), (4, "_ac4", 4), (5, "", 8)];
 
     for (tokens, cap_suffix, accumulator_cap) in cases {
         let accumulator_decl = format!("float sumf[{accumulator_cap}][{rows}];");
@@ -7812,8 +8326,14 @@ fn multi_row_kernel_folds_only_the_activation_rows_the_op_has() {
         });
 
         match cap_suffix {
-            Some(suffix) => assert!(key.contains(suffix), "{tokens} tokens: {key} lacks {suffix}"),
-            None => assert!(!key.contains("_ac"), "{tokens} tokens: {key} must carry no cap"),
+            Some(suffix) => assert!(
+                key.contains(suffix),
+                "{tokens} tokens: {key} lacks {suffix}"
+            ),
+            None => assert!(
+                !key.contains("_ac"),
+                "{tokens} tokens: {key} must carry no cap"
+            ),
         }
         assert!(
             source.contains(accumulator_decl),
@@ -7828,7 +8348,10 @@ fn multi_row_kernel_folds_only_the_activation_rows_the_op_has() {
              simdgroups, each {split} simdgroup(s) wide"
         );
         if cfg!(feature = "metal-q4k-split-k") {
-            assert!(split > 1, "a 256-row op sits under split-k's row ceiling and simdgroup target");
+            assert!(
+                split > 1,
+                "a 256-row op sits under split-k's row ceiling and simdgroup target"
+            );
             assert_eq!(
                 threadgroup_width,
                 Some(32 * split),
@@ -7868,16 +8391,29 @@ fn rank_select_entry_and_grid_follow_rows_and_keep_flag() {
     let policy = NumericPolicy::default();
     let plain = top_fraction_select_op(12, false);
     let unioned = top_fraction_select_op(12, true);
-    assert_eq!(entry_name(&plain, policy), "omega_top_fraction_select_r12_k0");
-    assert_eq!(entry_name(&unioned, policy), "omega_top_fraction_select_r12_k1");
-    assert_eq!(grid_threads(&plain, &[], policy, false).expect("grid resolves"), 1024);
+    assert_eq!(
+        entry_name(&plain, policy),
+        "omega_top_fraction_select_r12_k0"
+    );
+    assert_eq!(
+        entry_name(&unioned, policy),
+        "omega_top_fraction_select_r12_k1"
+    );
+    assert_eq!(
+        grid_threads(&plain, &[], policy, false).expect("grid resolves"),
+        1024
+    );
 }
 
 #[test]
 fn rank_select_render_emits_kernel_entry_bindings_and_grid() {
     let policy = NumericPolicy::default();
-    let kernel = emit(&top_fraction_select_op(12, false), &PackedOperands::new(), policy)
-        .expect("selection kernel emits");
+    let kernel = emit(
+        &top_fraction_select_op(12, false),
+        &PackedOperands::new(),
+        policy,
+    )
+    .expect("selection kernel emits");
     assert_eq!(kernel.entry, "omega_top_fraction_select_r12_k0");
     assert_eq!(kernel.bindings.len(), 4);
     assert_eq!(kernel.grid.threads, 1024);
@@ -7886,18 +8422,36 @@ fn rank_select_render_emits_kernel_entry_bindings_and_grid() {
 #[test]
 fn rank_select_render_declares_four_passes() {
     let policy = NumericPolicy::default();
-    let kernel = emit(&top_fraction_select_op(12, false), &PackedOperands::new(), policy)
-        .expect("selection kernel emits");
+    let kernel = emit(
+        &top_fraction_select_op(12, false),
+        &PackedOperands::new(),
+        policy,
+    )
+    .expect("selection kernel emits");
     assert!(kernel.source.contains("constexpr uint ROWS = 12u"));
-    assert_eq!(kernel.source.matches("simd_prefix_exclusive_sum").count(), 1);
     assert_eq!(
-        kernel.source.matches("atomic_fetch_add_explicit(&histogram").count(),
+        kernel.source.matches("simd_prefix_exclusive_sum").count(),
+        1
+    );
+    assert_eq!(
+        kernel
+            .source
+            .matches("atomic_fetch_add_explicit(&histogram")
+            .count(),
         4
     );
     assert!(!kernel.source.contains("keep_rows"));
-    let unioned = emit(&top_fraction_select_op(12, true), &PackedOperands::new(), policy)
-        .expect("union kernel emits");
-    assert!(unioned.source.contains("device const float* keep_rows [[buffer(2)]]"));
+    let unioned = emit(
+        &top_fraction_select_op(12, true),
+        &PackedOperands::new(),
+        policy,
+    )
+    .expect("union kernel emits");
+    assert!(
+        unioned
+            .source
+            .contains("device const float* keep_rows [[buffer(2)]]")
+    );
     assert!(unioned.source.contains("device float* out [[buffer(3)]]"));
 }
 
@@ -7958,9 +8512,15 @@ mod expert_grouped_gemm {
 
         let row_tiles = u64::from(ROWS).div_ceil(GROUPED_TILE_ROWS);
         let (depth, token_tiles) = if crate::sized::GROUPED_GEMM_ROUTE_COMPACTED {
-            (1, u64::from(TOKENS).div_ceil(GROUPED_TILE_TOKENS) + u64::from(EXPERTS))
+            (
+                1,
+                u64::from(TOKENS).div_ceil(GROUPED_TILE_TOKENS) + u64::from(EXPERTS),
+            )
         } else {
-            (u64::from(EXPERTS), crate::sized::GROUPED_GEMM_ROUTE_SEGMENTS)
+            (
+                u64::from(EXPERTS),
+                crate::sized::GROUPED_GEMM_ROUTE_SEGMENTS,
+            )
         };
         assert_eq!(kernel.grid.depth, depth);
         assert_eq!(kernel.grid.threads, row_tiles * token_tiles * 128);
@@ -7976,15 +8536,33 @@ mod expert_grouped_gemm {
             .expect("grouped kernel emits")
             .source;
 
-        assert!(source.contains("uint3 grouped_gid [[thread_position_in_grid]]"), "{source}");
-        assert!(source.contains("atomic_fetch_max_explicit(&fault[0]"), "{source}");
-        assert!(source.contains("grouped_expert * u.gather_element_stride[0]"), "{source}");
+        assert!(
+            source.contains("uint3 grouped_gid [[thread_position_in_grid]]"),
+            "{source}"
+        );
+        assert!(
+            source.contains("atomic_fetch_max_explicit(&fault[0]"),
+            "{source}"
+        );
+        assert!(
+            source.contains("grouped_expert * u.gather_element_stride[0]"),
+            "{source}"
+        );
         if crate::sized::GROUPED_GEMM_ROUTE_COMPACTED {
-            assert!(source.contains("simd_prefix_exclusive_sum(hit)"), "{source}");
+            assert!(
+                source.contains("simd_prefix_exclusive_sum(hit)"),
+                "{source}"
+            );
             assert!(source.contains("= (uint)entry_token; }"), "{source}");
         } else {
-            assert!(source.contains("simd_prefix_exclusive_sum(own_count)"), "{source}");
-            assert!(source.contains("tile_token[write_at] = (int)(own_base + entry)"), "{source}");
+            assert!(
+                source.contains("simd_prefix_exclusive_sum(own_count)"),
+                "{source}"
+            );
+            assert!(
+                source.contains("tile_token[write_at] = (int)(own_base + entry)"),
+                "{source}"
+            );
         }
     }
 
@@ -7998,8 +8576,14 @@ mod expert_grouped_gemm {
             .source;
 
         let capacity = format!("threadgroup int tile_token[{}];", 32 + step_entries);
-        assert!(source.contains(&capacity), "{capacity} missing from {source}");
-        let step = format!("scan_base += 128l * {}l;", crate::sized::GROUPED_GEMM_SCAN_AHEAD);
+        assert!(
+            source.contains(&capacity),
+            "{capacity} missing from {source}"
+        );
+        let step = format!(
+            "scan_base += 128l * {}l;",
+            crate::sized::GROUPED_GEMM_SCAN_AHEAD
+        );
         assert_eq!(
             source.contains(&step),
             !crate::sized::GROUPED_GEMM_ROUTE_COMPACTED,
@@ -8016,11 +8600,18 @@ mod expert_grouped_gemm {
             .source;
 
         if crate::sized::GROUPED_GEMM_ROUTE_COMPACTED {
-            assert!(!source.contains("long own_base"), "the gemm no longer scans the route\n{source}");
+            assert!(
+                !source.contains("long own_base"),
+                "the gemm no longer scans the route\n{source}"
+            );
             return;
         }
-        let scan_start = source.find("long own_base").expect("the scan step is emitted");
-        let scan_end = source.find("uint tile_count").expect("the tile follows the scan");
+        let scan_start = source
+            .find("long own_base")
+            .expect("the scan step is emitted");
+        let scan_end = source
+            .find("uint tile_count")
+            .expect("the tile follows the scan");
         let scan = &source[scan_start..scan_end];
         assert_eq!(scan.matches("threadgroup_barrier").count(), 2, "{scan}");
         assert_eq!(scan.matches("gather_idx0[").count(), 1, "{scan}");
@@ -8029,8 +8620,8 @@ mod expert_grouped_gemm {
     fn the_pipeline_identity_names_the_expert_grouped_body() {
         let (bound, packed) = gathered_q8_0(TOKENS);
 
-        let identity = kernel_cache_key(&bound, &packed, NumericPolicy::default())
-            .expect("identity resolves");
+        let identity =
+            kernel_cache_key(&bound, &packed, NumericPolicy::default()).expect("identity resolves");
 
         assert!(identity.contains("_g10"), "{identity}");
         assert!(identity.contains("E_w128"), "{identity}");
@@ -8065,7 +8656,10 @@ mod expert_grouped_gemm {
             .expect("a short prefill is not grouped");
 
         assert!(
-            matches!(rejection, TiledGemmRejection::TokenExtentBelowMinimum { .. }),
+            matches!(
+                rejection,
+                TiledGemmRejection::TokenExtentBelowMinimum { .. }
+            ),
             "{rejection:?}"
         );
     }
@@ -8137,10 +8731,26 @@ mod expert_grouped_gemm {
 
         let kernel = emit(&bound, &packed, NumericPolicy::default()).expect("stacked kernel emits");
 
-        let depth = if crate::sized::GROUPED_GEMM_ROUTE_COMPACTED { 1 } else { u64::from(EXPERTS) };
+        let depth = if crate::sized::GROUPED_GEMM_ROUTE_COMPACTED {
+            1
+        } else {
+            u64::from(EXPERTS)
+        };
         assert_eq!(kernel.grid.depth, depth);
-        assert!(kernel.source.contains("a_c1 = (long)(a_c_rest % (uint)u.output_extents[1])"), "{}", kernel.source);
-        assert!(kernel.source.contains("o_c1 = (long)(o_c_rest % (uint)u.output_extents[1])"), "{}", kernel.source);
+        assert!(
+            kernel
+                .source
+                .contains("a_c1 = (long)(a_c_rest % (uint)u.output_extents[1])"),
+            "{}",
+            kernel.source
+        );
+        assert!(
+            kernel
+                .source
+                .contains("o_c1 = (long)(o_c_rest % (uint)u.output_extents[1])"),
+            "{}",
+            kernel.source
+        );
         assert!(!kernel.source.contains("route_c_rest"), "{}", kernel.source);
     }
 
@@ -8167,7 +8777,10 @@ mod expert_grouped_gemm {
             .expect("eight slots of one token are not a prefill");
 
         assert!(
-            matches!(rejection, TiledGemmRejection::TokenExtentBelowMinimum { .. }),
+            matches!(
+                rejection,
+                TiledGemmRejection::TokenExtentBelowMinimum { .. }
+            ),
             "{rejection:?}"
         );
     }
@@ -8188,7 +8801,11 @@ mod expert_grouped_gemm {
             let block = packed_row_block_of(&bound, &packed)
                 .expect("a verify-width routed projection takes the packed matvec");
 
-            assert!(block.token_axes.is_empty(), "{tokens} tokens: token axes {:?}", block.token_axes);
+            assert!(
+                block.token_axes.is_empty(),
+                "{tokens} tokens: token axes {:?}",
+                block.token_axes
+            );
             assert_eq!(block.feature_axes, vec![0, 1], "{tokens} tokens");
         }
     }
@@ -8212,8 +8829,16 @@ mod expert_grouped_gemm {
             let block = packed_row_block_of(&bound, &packed)
                 .expect("a stacked down at decode or verify width takes the packed matvec");
 
-            assert!(block.token_axes.is_empty(), "{sequence} tokens: token axes {:?}", block.token_axes);
-            assert_eq!(block.feature_axes, STACKED_OUTPUT_AXES.to_vec(), "{sequence} tokens");
+            assert!(
+                block.token_axes.is_empty(),
+                "{sequence} tokens: token axes {:?}",
+                block.token_axes
+            );
+            assert_eq!(
+                block.feature_axes,
+                STACKED_OUTPUT_AXES.to_vec(),
+                "{sequence} tokens"
+            );
         }
     }
 
@@ -8395,11 +9020,16 @@ mod epilogue_operand_reuse {
             }),
         );
         let shapes = infer(&program, &[]).expect("sum of squares infers");
-        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-            .expect("sum of squares lowers")
-            .into_iter()
-            .next()
-            .expect("one fused bound emitted")
+        bind(
+            &program,
+            &shapes,
+            &[terminal(&program)],
+            NumericPolicy::default(),
+        )
+        .expect("sum of squares lowers")
+        .into_iter()
+        .next()
+        .expect("one fused bound emitted")
     }
 
     #[test]
@@ -8551,7 +9181,8 @@ mod epilogue_operand_reuse {
                 "the combined total is stored at the row's cached coordinate:\n{source}"
             );
             assert!(
-                !source.contains("if (lane < 4u) {") && !source.contains("if (lane == 0u && flat < u.output_total)"),
+                !source.contains("if (lane < 4u) {")
+                    && !source.contains("if (lane == 0u && flat < u.output_total)"),
                 "no row finishes on its own lane, and none waits behind a per-row lane-0 test:\n{source}"
             );
             return;
@@ -8635,23 +9266,44 @@ mod tiled_decode_description {
                 "{codec:?}: a K step never straddles a block, so one of the two must divide the other"
             );
             if codec == Codec::Float16 {
-                assert_eq!(decode.block_bytes, decode.block_elements * 2, "a flat half array");
+                assert_eq!(
+                    decode.block_bytes,
+                    decode.block_elements * 2,
+                    "a flat half array"
+                );
             } else {
-                assert_eq!(decode.block_elements, codec_block_elements(codec) as u64, "{codec:?}");
-                assert_eq!(decode.block_bytes, codec_block_bytes(codec) as u64, "{codec:?}");
+                assert_eq!(
+                    decode.block_elements,
+                    codec_block_elements(codec) as u64,
+                    "{codec:?}"
+                );
+                assert_eq!(
+                    decode.block_bytes,
+                    codec_block_bytes(codec) as u64,
+                    "{codec:?}"
+                );
             }
             let signature = format!(
                 "static inline void {}(device const uchar *block, uint slot, thread half *out)",
                 decode.function
             );
-            assert!(decode.msl.contains(&signature), "{codec:?}: `{signature}` missing from its msl");
+            assert!(
+                decode.msl.contains(&signature),
+                "{codec:?}: `{signature}` missing from its msl"
+            );
             assert_eq!(
                 decode.msl.matches("static inline void").count(),
                 1,
                 "{codec:?}: a description's msl defines only its own function"
             );
-            assert_eq!(decode.call("blk", "slot", "out"), format!("{}(blk, slot, out)", decode.function));
-            assert!(functions.insert(decode.function), "{codec:?}: function names are unique");
+            assert_eq!(
+                decode.call("blk", "slot", "out"),
+                format!("{}(blk, slot, out)", decode.function)
+            );
+            assert!(
+                functions.insert(decode.function),
+                "{codec:?}: function names are unique"
+            );
         }
         assert_eq!(functions.len(), DESCRIBED_CODECS.len());
     }
@@ -8666,13 +9318,20 @@ mod tiled_decode_description {
     async fn codecs_without_a_description_have_no_chunk_width(#[case] codec: Codec) {
         assert_eq!(tiled_decode(codec), None);
         assert_eq!(tiled_gemm_codec_chunk_width(codec), 0);
-        assert!(!tiled_gemm_block_k_chunk_aligned(32, tiled_gemm_codec_chunk_width(codec)));
+        assert!(!tiled_gemm_block_k_chunk_aligned(
+            32,
+            tiled_gemm_codec_chunk_width(codec)
+        ));
     }
 
     #[test]
     fn every_described_codec_stages_one_k_step_per_chunk_and_block_k_must_be_whole_decode_runs() {
         for codec in DESCRIBED_CODECS {
-            assert_eq!(tiled_gemm_codec_chunk_width(codec), STAGED_K_STEP_ELEMENTS, "{codec:?}");
+            assert_eq!(
+                tiled_gemm_codec_chunk_width(codec),
+                STAGED_K_STEP_ELEMENTS,
+                "{codec:?}"
+            );
         }
         let cases: [(u64, u64, bool); 7] = [
             (32, 32, true),
@@ -8727,7 +9386,10 @@ mod tiled_decode_description {
             source.contains(&decode.call("wws_blk0", "wws_slot0", "decoded")),
             "{codec:?} must decode at the per-thread cursor:\n{source}"
         );
-        assert!(source.contains(decode.msl), "{codec:?}: its description's msl is spliced:\n{source}");
+        assert!(
+            source.contains(decode.msl),
+            "{codec:?}: its description's msl is spliced:\n{source}"
+        );
         for other in DESCRIBED_CODECS.into_iter().filter(|other| *other != codec) {
             assert!(
                 !source.contains(described(other).msl),
@@ -8750,7 +9412,9 @@ mod tiled_decode_description {
     #[case::q4k(Codec::Q4K)]
     #[case::q5k(Codec::Q5K)]
     #[case::q6k(Codec::Q6K)]
-    async fn the_wide_and_per_row_schedules_decode_through_the_same_description(#[case] codec: Codec) {
+    async fn the_wide_and_per_row_schedules_decode_through_the_same_description(
+        #[case] codec: Codec,
+    ) {
         let decode = described(codec);
 
         let wide = dense_source(codec, WIDE_SCHEDULE);
@@ -8758,19 +9422,29 @@ mod tiled_decode_description {
             wide.contains(&decode.call("wws_blk0", "wws_slot0", "wws_decoded")),
             "{codec:?} wide schedule:\n{wide}"
         );
-        assert!(!wide.contains("mm_weight_store"), "{codec:?}: the wide schedule keeps the row-major tile");
+        assert!(
+            !wide.contains("mm_weight_store"),
+            "{codec:?}: the wide schedule keeps the row-major tile"
+        );
 
         let per_row = dense_source(codec, PER_ROW_SCHEDULE);
         assert!(
             per_row.contains(&decode.call("blk", "slot + 0u", "decoded")),
             "{codec:?} per-row schedule:\n{per_row}"
         );
-        assert!(!per_row.contains("wws_blk0"), "{codec:?}: the per-row schedule has no per-thread cursor");
-        assert!(per_row.contains(decode.msl), "{codec:?}: its description's msl is spliced");
+        assert!(
+            !per_row.contains("wws_blk0"),
+            "{codec:?}: the per-row schedule has no per-thread cursor"
+        );
+        assert!(
+            per_row.contains(decode.msl),
+            "{codec:?}: its description's msl is spliced"
+        );
     }
 
     #[test]
-    fn the_cursor_advances_a_whole_block_when_the_block_divides_the_k_step_and_wraps_the_slot_otherwise() {
+    fn the_cursor_advances_a_whole_block_when_the_block_divides_the_k_step_and_wraps_the_slot_otherwise()
+     {
         let whole_block = [
             (Codec::Q4_0, Q4_0_BLOCK_BYTES),
             (Codec::Q5_0, Q5_0_BLOCK_BYTES),
@@ -8784,7 +9458,10 @@ mod tiled_decode_description {
                 source.contains(&format!("wws_blk0 += 1u * {block_bytes};")),
                 "{codec:?}: one block per K step:\n{source}"
             );
-            assert!(!source.contains("wws_slot0 +="), "{codec:?}: the slot never moves");
+            assert!(
+                !source.contains("wws_slot0 +="),
+                "{codec:?}: the slot never moves"
+            );
         }
 
         let wrapping = [
@@ -8809,7 +9486,10 @@ mod tiled_decode_description {
     fn a_float16_weight_binds_as_half_and_is_viewed_as_bytes_for_the_cursor() {
         let source = dense_source(Codec::Float16, DEFAULT_SCHEDULE);
 
-        assert!(source.contains("device const half* in0 [[buffer(0)]]"), "{source}");
+        assert!(
+            source.contains("device const half* in0 [[buffer(0)]]"),
+            "{source}"
+        );
         assert!(
             source.contains("device const uchar *weight_bytes = (device const uchar *)in0;"),
             "{source}"
@@ -8832,7 +9512,11 @@ mod tiled_decode_description {
         let tiled = classify_tiled_gemm(&bound, &codecs, ScalarOp::Add, ReduceInit::Zero, &[1, 0]);
         let row_blocked = classify_packed_row_block(&bound, &codecs);
 
-        assert!(tiled.is_ok(), "{codec:?} at K={reduction}: {:?}", tiled.err());
+        assert!(
+            tiled.is_ok(),
+            "{codec:?} at K={reduction}: {:?}",
+            tiled.err()
+        );
         assert!(
             row_blocked.is_err(),
             "{codec:?} at K={reduction} is not a multiple of the 256-element row-blocked span"
@@ -8843,7 +9527,9 @@ mod tiled_decode_description {
     #[case::q3k(Codec::Q3K)]
     #[case::q5k(Codec::Q5K)]
     #[case::q6k(Codec::Q6K)]
-    async fn a_k_quant_extent_that_is_not_a_whole_super_block_is_refused_by_extent(#[case] codec: Codec) {
+    async fn a_k_quant_extent_that_is_not_a_whole_super_block_is_refused_by_extent(
+        #[case] codec: Codec,
+    ) {
         let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 288, 4);
         let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
 
@@ -8888,7 +9574,10 @@ mod tiled_decode_description {
             )
         };
 
-        assert_eq!(classify(&q4_0), Some(TiledGemmRejection::CodecSwitchedOff { codec: Codec::Q4_0 }));
+        assert_eq!(
+            classify(&q4_0),
+            Some(TiledGemmRejection::CodecSwitchedOff { codec: Codec::Q4_0 })
+        );
         assert_eq!(classify(&q8_0), None, "the Q4_0 switch is Q4_0's alone");
     }
 
@@ -8927,14 +9616,26 @@ mod tiled_decode_description {
         let listed = format!("q4_0, {name} ,q4k");
         let others = "q4_0,q4k,not_a_codec";
 
-        assert_eq!(classify(None), None, "{codec:?}: nothing is disabled by default");
-        assert_eq!(classify(Some("")), None, "{codec:?}: an empty list disables nothing");
+        assert_eq!(
+            classify(None),
+            None,
+            "{codec:?}: nothing is disabled by default"
+        );
+        assert_eq!(
+            classify(Some("")),
+            None,
+            "{codec:?}: an empty list disables nothing"
+        );
         assert_eq!(
             classify(Some(&listed)),
             Some(TiledGemmRejection::CodecSwitchedOff { codec }),
             "{codec:?}: a listed codec is kept off, spaces around a name are ignored"
         );
-        assert_eq!(classify(Some(others)), None, "{codec:?}: a list naming other codecs leaves it on");
+        assert_eq!(
+            classify(Some(others)),
+            None,
+            "{codec:?}: a list naming other codecs leaves it on"
+        );
     }
 
     #[test]
@@ -8942,7 +9643,9 @@ mod tiled_decode_description {
         let bound = matmul_op(4, 256, 5);
         let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q5_0)]);
 
-        let source = emit(&bound, &packed, NumericPolicy::default()).expect("emits").source;
+        let source = emit(&bound, &packed, NumericPolicy::default())
+            .expect("emits")
+            .source;
 
         assert!(!source.contains("dequant_half16"), "{source}");
     }
@@ -8998,7 +9701,9 @@ mod expert_grouped_decode_description {
     #[case::q4k(Codec::Q4K)]
     #[case::q5k(Codec::Q5K)]
     #[case::q6k(Codec::Q6K)]
-    async fn a_described_expert_codec_is_admitted_and_stages_through_the_shared_cursor(#[case] codec: Codec) {
+    async fn a_described_expert_codec_is_admitted_and_stages_through_the_shared_cursor(
+        #[case] codec: Codec,
+    ) {
         let (bound, packed) = gathered(codec);
         let decode = tiled_decode(codec).expect("described");
 
@@ -9010,22 +9715,38 @@ mod expert_grouped_decode_description {
                 ReduceInit::Zero,
                 &[0, 1],
             )
-            .unwrap_or_else(|rejection| panic!("{codec:?} experts at prefill width: {rejection:?}"));
-            let source = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits").source;
+            .unwrap_or_else(|rejection| {
+                panic!("{codec:?} experts at prefill width: {rejection:?}")
+            });
+            let source = emit(&bound, &packed, NumericPolicy::default())
+                .expect("grouped kernel emits")
+                .source;
             (block, source)
         });
-        assert_eq!(block.gathered, Some(ExpertGather { slot: 0, route_flat: true }));
+        assert_eq!(
+            block.gathered,
+            Some(ExpertGather {
+                slot: 0,
+                route_flat: true
+            })
+        );
         assert_eq!(block.codec, codec);
         assert!(
             source.contains(&format!("{};", decode.call("w_blk", "w_pos", "w_regs"))),
             "{codec:?}:\n{source}"
         );
-        assert!(source.contains(decode.msl), "{codec:?}: its description's msl is spliced");
+        assert!(
+            source.contains(decode.msl),
+            "{codec:?}: its description's msl is spliced"
+        );
         assert!(
             source.contains("device const uchar *weight_bytes = (device const uchar *)in0;"),
             "{codec:?}:\n{source}"
         );
-        assert!(source.contains("long w_elem = u.operand_base[0] + grouped_expert_base"), "{codec:?}:\n{source}");
+        assert!(
+            source.contains("long w_elem = u.operand_base[0] + grouped_expert_base"),
+            "{codec:?}:\n{source}"
+        );
         assert!(source.contains("half w_regs[16];"), "{codec:?}:\n{source}");
         let advance_is_block = GROUPED_TILE_DEPTH.is_multiple_of(decode.block_elements);
         assert_eq!(
@@ -9039,7 +9760,9 @@ mod expert_grouped_decode_description {
     fn the_grouped_kernel_no_longer_hard_codes_a_q8_0_block() {
         let (bound, packed) = gathered(Codec::Q6K);
 
-        let source = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits").source;
+        let source = emit(&bound, &packed, NumericPolicy::default())
+            .expect("grouped kernel emits")
+            .source;
 
         assert!(!source.contains("packed_char4 *levels"), "{source}");
         assert!(!source.contains("w_blk += 34"), "{source}");
@@ -9073,10 +9796,18 @@ fn q6k_single_token_matvec_folds_the_configured_rows_per_simdgroup() {
     let codecs = operand_codecs(&bound, &q6k);
 
     assert_eq!(codec_rows_per_simdgroup(Codec::Q6K), rows);
-    assert!(packed_row_block(&bound, &codecs).is_some(), "fixture must take the row-blocked path");
-    let source = emit(&bound, &q6k, NumericPolicy::default()).expect("emits").source;
+    assert!(
+        packed_row_block(&bound, &codecs).is_some(),
+        "fixture must take the row-blocked path"
+    );
+    let source = emit(&bound, &q6k, NumericPolicy::default())
+        .expect("emits")
+        .source;
     assert!(source.contains(&format!("float sumf[{rows}];")), "{source}");
-    assert!(source.contains(&format!("long group_first = output_index * {rows};")), "{source}");
+    assert!(
+        source.contains(&format!("long group_first = output_index * {rows};")),
+        "{source}"
+    );
     let (groups, split) = packed_row_dispatch(8, 1, Codec::Q6K);
     let base_simdgroups = 8u64.div_ceil(rows as u64);
     assert_eq!(
@@ -9103,9 +9834,13 @@ fn ported_matvec_bodies_unroll_their_row_and_lane_loops_fully() {
     for codec in [Codec::Q4_0, Codec::Q6K] {
         let bound = matmul_op(1, 512, 8);
         let weight_node = bound.operands()[0].0;
-        let source = emit(&bound, &BTreeMap::from([(weight_node, codec)]), NumericPolicy::default())
-            .expect("emits")
-            .source;
+        let source = emit(
+            &bound,
+            &BTreeMap::from([(weight_node, codec)]),
+            NumericPolicy::default(),
+        )
+        .expect("emits")
+        .source;
         let rows_loop = "device const uchar *blk = blk_ptr[q];";
         assert!(
             trimmed_line_above(&source, rows_loop, 1).starts_with("for (int q = 0; q <"),
@@ -9169,15 +9904,23 @@ mod expert_grouped_route_segments {
 
     fn top_k_route() -> Vec<usize> {
         let mut state = 0x5EED_0FC0_DEAD_BEEFu64;
-        let router: Vec<f32> = (0..EXPERTS * HIDDEN).map(|_| next_unit(&mut state)).collect();
-        let bias: Vec<f32> = (0..EXPERTS).map(|expert| 1.5 / ((expert + 1) as f32).powf(0.8)).collect();
+        let router: Vec<f32> = (0..EXPERTS * HIDDEN)
+            .map(|_| next_unit(&mut state))
+            .collect();
+        let bias: Vec<f32> = (0..EXPERTS)
+            .map(|expert| 1.5 / ((expert + 1) as f32).powf(0.8))
+            .collect();
         let mut route = Vec::with_capacity(SEQUENCE * SELECTED);
         for _ in 0..SEQUENCE {
             let activation: Vec<f32> = (0..HIDDEN).map(|_| next_unit(&mut state)).collect();
             let mut logits: Vec<(usize, f32)> = (0..EXPERTS)
                 .map(|expert| {
                     let weights = &router[expert * HIDDEN..(expert + 1) * HIDDEN];
-                    let dot: f32 = weights.iter().zip(&activation).map(|(weight, value)| weight * value).sum();
+                    let dot: f32 = weights
+                        .iter()
+                        .zip(&activation)
+                        .map(|(weight, value)| weight * value)
+                        .sum();
                     (expert, dot + bias[expert])
                 })
                 .collect();
@@ -9198,16 +9941,25 @@ mod expert_grouped_route_segments {
         for expert in 0..EXPERTS {
             for segment in 0..segments {
                 let (begin, end) = segment_bounds(route.len(), segments, segment);
-                let matched: Vec<usize> = (begin..end).filter(|&token| route[token] == expert).collect();
-                work.extend(matched.chunks(TILE_TOKENS).map(|tile| (expert, segment, tile.to_vec())));
+                let matched: Vec<usize> = (begin..end)
+                    .filter(|&token| route[token] == expert)
+                    .collect();
+                work.extend(
+                    matched
+                        .chunks(TILE_TOKENS)
+                        .map(|tile| (expert, segment, tile.to_vec())),
+                );
             }
         }
         work
     }
 
     fn assignments(route: &[usize]) -> Vec<(usize, usize)> {
-        let mut pairs: Vec<(usize, usize)> =
-            route.iter().enumerate().map(|(token, &expert)| (expert, token)).collect();
+        let mut pairs: Vec<(usize, usize)> = route
+            .iter()
+            .enumerate()
+            .map(|(token, &expert)| (expert, token))
+            .collect();
         pairs.sort_unstable();
         pairs
     }
@@ -9242,7 +9994,11 @@ mod expert_grouped_route_segments {
     fn shared_route_gate_up_and_down_of_one_layer_have_the_same_compaction_key() {
         let keys = compaction_keys(1);
 
-        assert_eq!(keys.len(), 3, "gate, up and down each take the compacted route: {keys:?}");
+        assert_eq!(
+            keys.len(),
+            3,
+            "gate, up and down each take the compacted route: {keys:?}"
+        );
         assert_eq!(keys.iter().collect::<BTreeSet<_>>().len(), 1, "{keys:?}");
     }
 
@@ -9265,15 +10021,32 @@ mod expert_grouped_route_segments {
 
         assert_eq!(keys.len(), 6, "{keys:?}");
         assert_eq!(distinct.len(), 2, "{keys:?}");
-        assert!(distinct.iter().all(|key| keys.iter().filter(|candidate| candidate == key).count() == 3));
+        assert!(
+            distinct
+                .iter()
+                .all(|key| keys.iter().filter(|candidate| candidate == key).count() == 3)
+        );
     }
 
     #[test]
     fn shared_route_a_key_exists_exactly_where_a_prepass_does() {
-        let (bound, packed) = stacked_moe_layers(1, SEQUENCE as u32, EXPERTS as u32, SELECTED as u32, EMBEDDING, EXPERT_HIDDEN);
+        let (bound, packed) = stacked_moe_layers(
+            1,
+            SEQUENCE as u32,
+            EXPERTS as u32,
+            SELECTED as u32,
+            EMBEDDING,
+            EXPERT_HIDDEN,
+        );
 
-        let with_prepass = bound.iter().filter(|op| route_prepass_active(op, &packed)).count();
-        let with_key = bound.iter().filter(|op| route_compaction_key(op, &packed).is_some()).count();
+        let with_prepass = bound
+            .iter()
+            .filter(|op| route_prepass_active(op, &packed))
+            .count();
+        let with_key = bound
+            .iter()
+            .filter(|op| route_compaction_key(op, &packed).is_some())
+            .count();
 
         assert_eq!(with_prepass, 3);
         assert_eq!(with_key, with_prepass);
@@ -9287,8 +10060,15 @@ mod expert_grouped_route_segments {
         assert_eq!(route.len(), SEQUENCE * SELECTED);
         assert_eq!(counts.iter().sum::<usize>(), SEQUENCE * SELECTED);
         let mean = SEQUENCE * SELECTED / EXPERTS;
-        assert!(counts.iter().copied().max().unwrap_or(0) >= 2 * mean, "{counts:?}");
-        assert!(counts.iter().copied().max().unwrap_or(0) >= 5 * counts.iter().copied().min().unwrap_or(0), "{counts:?}");
+        assert!(
+            counts.iter().copied().max().unwrap_or(0) >= 2 * mean,
+            "{counts:?}"
+        );
+        assert!(
+            counts.iter().copied().max().unwrap_or(0)
+                >= 5 * counts.iter().copied().min().unwrap_or(0),
+            "{counts:?}"
+        );
     }
 
     #[proxima::test]
@@ -9298,7 +10078,9 @@ mod expert_grouped_route_segments {
     #[case::eight_segments(8)]
     #[case::sixteen_segments(16)]
     #[case::the_sized_default(crate::sized::GROUPED_GEMM_ROUTE_SEGMENTS as usize)]
-    async fn the_segment_work_lists_cover_every_assigned_token_exactly_once(#[case] segments: usize) {
+    async fn the_segment_work_lists_cover_every_assigned_token_exactly_once(
+        #[case] segments: usize,
+    ) {
         let route = top_k_route();
 
         let work = threadgroup_work(&route, segments);
@@ -9314,7 +10096,9 @@ mod expert_grouped_route_segments {
     #[proxima::test]
     #[case::two_segments(2)]
     #[case::eight_segments(8)]
-    async fn a_tile_is_at_most_one_tile_of_ascending_tokens_inside_its_segment(#[case] segments: usize) {
+    async fn a_tile_is_at_most_one_tile_of_ascending_tokens_inside_its_segment(
+        #[case] segments: usize,
+    ) {
         let route = top_k_route();
 
         let work = threadgroup_work(&route, segments);
@@ -9323,7 +10107,11 @@ mod expert_grouped_route_segments {
             let (begin, end) = segment_bounds(route.len(), segments, *segment);
             assert!(tokens.len() <= TILE_TOKENS && !tokens.is_empty());
             assert!(tokens.windows(2).all(|pair| pair[0] < pair[1]));
-            assert!(tokens.iter().all(|&token| (begin..end).contains(&token) && route[token] == *expert));
+            assert!(
+                tokens
+                    .iter()
+                    .all(|&token| (begin..end).contains(&token) && route[token] == *expert)
+            );
         }
     }
 
@@ -9350,17 +10138,30 @@ mod expert_grouped_route_segments {
         let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
         let segments = crate::sized::GROUPED_GEMM_ROUTE_SEGMENTS;
 
-        let source = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits").source;
+        let source = emit(&bound, &packed, NumericPolicy::default())
+            .expect("grouped kernel emits")
+            .source;
 
         if crate::sized::GROUPED_GEMM_ROUTE_COMPACTED {
             assert!(!source.contains("segment_length"), "{source}");
             return;
         }
-        let length = format!("long segment_length = (token_extent + {segments}l - 1l) / {segments}l;");
+        let length =
+            format!("long segment_length = (token_extent + {segments}l - 1l) / {segments}l;");
         assert!(source.contains(&length), "{length} missing from {source}");
-        assert!(source.contains("long segment_begin = route_segment * segment_length;"), "{source}");
-        assert!(source.contains("long segment_end = min(token_extent, segment_begin + segment_length);"), "{source}");
-        assert!(source.contains("long scan_base = segment_begin;"), "{source}");
+        assert!(
+            source.contains("long segment_begin = route_segment * segment_length;"),
+            "{source}"
+        );
+        assert!(
+            source
+                .contains("long segment_end = min(token_extent, segment_begin + segment_length);"),
+            "{source}"
+        );
+        assert!(
+            source.contains("long scan_base = segment_begin;"),
+            "{source}"
+        );
         assert!(source.contains("scan_base < segment_end"), "{source}");
         assert!(!source.contains("scan_base < token_extent"), "{source}");
         assert!(!source.contains("tile_ordinal"), "{source}");
@@ -9371,9 +10172,12 @@ mod expert_grouped_route_segments {
         let bound = gathered_matmul_op(300, 8, 192, 512);
         let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
 
-        let source = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits").source;
+        let source = emit(&bound, &packed, NumericPolicy::default())
+            .expect("grouped kernel emits")
+            .source;
 
-        let k_loop = format!("for (long k0 = 0; k0 < u.reduction_total; k0 += {GROUPED_TILE_DEPTH})");
+        let k_loop =
+            format!("for (long k0 = 0; k0 < u.reduction_total; k0 += {GROUPED_TILE_DEPTH})");
         assert_eq!(source.matches(&k_loop).count(), 1, "{source}");
         let accumulate = "simdgroup_multiply_accumulate(acc[i], mb[i / 4], ma[i % 4], acc[i])";
         assert_eq!(source.matches(accumulate).count(), 1, "{source}");
@@ -9434,7 +10238,10 @@ mod expert_grouped_route_segments {
         let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(route.len());
         for expert in 0..EXPERTS {
             let span = offsets[expert] as usize..(offsets[expert] + counts[expert]) as usize;
-            assert!(list[span.clone()].windows(2).all(|pair| pair[0] < pair[1]), "expert {expert} not ascending");
+            assert!(
+                list[span.clone()].windows(2).all(|pair| pair[0] < pair[1]),
+                "expert {expert} not ascending"
+            );
             pairs.extend(list[span].iter().map(|&token| (expert, token as usize)));
         }
         assert_eq!(pairs, assignments(&route));
@@ -9446,16 +10253,24 @@ mod expert_grouped_route_segments {
         let counts = expert_counts(&route);
         let offsets = exclusive_offsets(&counts);
         let list = expert_major_list(&route, &offsets);
-        let realized: usize = counts.iter().map(|&count| (count as usize).div_ceil(TILE_TOKENS)).sum();
+        let realized: usize = counts
+            .iter()
+            .map(|&count| (count as usize).div_ceil(TILE_TOKENS))
+            .sum();
 
         let mut located = Vec::new();
         let mut covered = Vec::new();
         for tile_index in 0..realized {
-            let (expert, local) = tile_location(&counts, tile_index).expect("a realized tile has an expert");
+            let (expert, local) =
+                tile_location(&counts, tile_index).expect("a realized tile has an expert");
             let start = offsets[expert] as usize + local * TILE_TOKENS;
             let tokens = (counts[expert] as usize - local * TILE_TOKENS).min(TILE_TOKENS);
             located.push((expert, local));
-            covered.extend(list[start..start + tokens].iter().map(|&token| (expert, token as usize)));
+            covered.extend(
+                list[start..start + tokens]
+                    .iter()
+                    .map(|&token| (expert, token as usize)),
+            );
         }
 
         let mut distinct = located.clone();
@@ -9470,11 +10285,19 @@ mod expert_grouped_route_segments {
     fn tiles_past_the_realized_total_find_no_expert_and_the_launch_covers_the_realized_ones() {
         let route = top_k_route();
         let counts = expert_counts(&route);
-        let realized: usize = counts.iter().map(|&count| (count as usize).div_ceil(TILE_TOKENS)).sum();
+        let realized: usize = counts
+            .iter()
+            .map(|&count| (count as usize).div_ceil(TILE_TOKENS))
+            .sum();
         let launched = tile_upper_bound(route.len());
 
-        assert!(realized <= launched, "{realized} realized tiles against {launched} launched");
-        assert!((realized..launched).all(|tile_index| tile_location(&counts, tile_index).is_none()));
+        assert!(
+            realized <= launched,
+            "{realized} realized tiles against {launched} launched"
+        );
+        assert!(
+            (realized..launched).all(|tile_index| tile_location(&counts, tile_index).is_none())
+        );
         assert!((0..realized).all(|tile_index| tile_location(&counts, tile_index).is_some()));
     }
 
@@ -9482,14 +10305,29 @@ mod expert_grouped_route_segments {
     fn a_heavy_expert_gets_proportionally_more_tiles_than_a_light_one() {
         let route = top_k_route();
         let counts = expert_counts(&route);
-        let heaviest = counts.iter().enumerate().max_by_key(|(_, count)| **count).map(|(expert, _)| expert).unwrap_or(0);
-        let lightest = counts.iter().enumerate().min_by_key(|(_, count)| **count).map(|(expert, _)| expert).unwrap_or(0);
+        let heaviest = counts
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, count)| **count)
+            .map(|(expert, _)| expert)
+            .unwrap_or(0);
+        let lightest = counts
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, count)| **count)
+            .map(|(expert, _)| expert)
+            .unwrap_or(0);
 
         let tiles_of = |expert: usize| (counts[expert] as usize).div_ceil(TILE_TOKENS);
 
         assert_eq!(counts[heaviest], 885);
         assert_eq!(tiles_of(heaviest), 28);
-        assert!(tiles_of(lightest) <= 4, "{} tiles for {} tokens", tiles_of(lightest), counts[lightest]);
+        assert!(
+            tiles_of(lightest) <= 4,
+            "{} tiles for {} tokens",
+            tiles_of(lightest),
+            counts[lightest]
+        );
     }
 
     #[test]
@@ -9497,8 +10335,11 @@ mod expert_grouped_route_segments {
         let bound = gathered_matmul_op(300, 8, 192, 512);
         let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
 
-        let prepass = route_prepass(&bound, &packed, NumericPolicy::default()).expect("prepass emits");
-        let source = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits").source;
+        let prepass =
+            route_prepass(&bound, &packed, NumericPolicy::default()).expect("prepass emits");
+        let source = emit(&bound, &packed, NumericPolicy::default())
+            .expect("grouped kernel emits")
+            .source;
 
         let Some(([count, place], words)) = prepass else {
             assert!(!source.contains("route_compaction"), "{source}");
@@ -9507,7 +10348,11 @@ mod expert_grouped_route_segments {
         let threadgroups = grouped_prepass_threadgroups(300);
         assert_eq!(words as u64, 1 + 2 * 8 + 300 + threadgroups * 8);
         assert!(count.entry.ends_with("_route_prepass"), "{}", count.entry);
-        assert!(place.entry.ends_with("_route_prepass_place"), "{}", place.entry);
+        assert!(
+            place.entry.ends_with("_route_prepass_place"),
+            "{}",
+            place.entry
+        );
         for pass in [&count, &place] {
             assert_eq!(pass.grid.depth, 1);
             assert_eq!(pass.grid.threadgroup_width, Some(1024));
@@ -9518,8 +10363,14 @@ mod expert_grouped_route_segments {
         let reader_slot = format!("device const uint *route_compaction [[buffer({main_slots})]]");
         assert!(source.contains(&compaction_slot), "{source}");
         assert!(source.contains(&reader_slot), "{source}");
-        assert!(source.contains("route_compaction[0] = running;"), "{source}");
-        assert!(source.contains("simd_prefix_exclusive_sum(hit)"), "{source}");
+        assert!(
+            source.contains("route_compaction[0] = running;"),
+            "{source}"
+        );
+        assert!(
+            source.contains("simd_prefix_exclusive_sum(hit)"),
+            "{source}"
+        );
 
         let adjacent = gathered_matmul_op(301, 8, 192, 512);
         let (_, bound_grid) = kernel_dispatch_shape(&bound, &packed, NumericPolicy::default())
@@ -9528,21 +10379,16 @@ mod expert_grouped_route_segments {
             kernel_dispatch_shape(&adjacent, &packed, NumericPolicy::default())
                 .expect("adjacent grouped shape has a grid");
         assert_eq!(bound_grid, adjacent_grid);
-        let bound_key = kernel_cache_key_for_grid(
-            &bound,
-            &packed,
-            NumericPolicy::default(),
-            &bound_grid,
-        )
-        .expect("first grouped shape has a pipeline identity");
-        let adjacent_key = kernel_cache_key_for_grid(
-            &adjacent,
-            &packed,
-            NumericPolicy::default(),
-            &adjacent_grid,
-        )
-        .expect("adjacent grouped shape has a pipeline identity");
-        assert_ne!(bound_key, adjacent_key, "the source bakes token count into scratch_base");
+        let bound_key =
+            kernel_cache_key_for_grid(&bound, &packed, NumericPolicy::default(), &bound_grid)
+                .expect("first grouped shape has a pipeline identity");
+        let adjacent_key =
+            kernel_cache_key_for_grid(&adjacent, &packed, NumericPolicy::default(), &adjacent_grid)
+                .expect("adjacent grouped shape has a pipeline identity");
+        assert_ne!(
+            bound_key, adjacent_key,
+            "the source bakes token count into scratch_base"
+        );
     }
 
     #[test]
@@ -9553,15 +10399,24 @@ mod expert_grouped_route_segments {
         let bound = gathered_matmul_op(300, 8, 192, 512);
         let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
 
-        let source = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits").source;
+        let source = emit(&bound, &packed, NumericPolicy::default())
+            .expect("grouped kernel emits")
+            .source;
 
-        assert!(source.contains("if (route_compaction[0] != (uint)token_extent) {"), "{source}");
+        assert!(
+            source.contains("if (route_compaction[0] != (uint)token_extent) {"),
+            "{source}"
+        );
         assert!(
             source.contains(&format!("atomic_fetch_max_explicit(&fault[0], {ROUTE_COMPACTION_MISMATCH_FAULT}u, memory_order_relaxed);")),
             "{source}"
         );
-        assert!(source.contains("if (grouped_expert < 0) { return; }"), "{source}");
-        let k_loop = format!("for (long k0 = 0; k0 < u.reduction_total; k0 += {GROUPED_TILE_DEPTH})");
+        assert!(
+            source.contains("if (grouped_expert < 0) { return; }"),
+            "{source}"
+        );
+        let k_loop =
+            format!("for (long k0 = 0; k0 < u.reduction_total; k0 += {GROUPED_TILE_DEPTH})");
         assert_eq!(source.matches(&k_loop).count(), 1, "{source}");
     }
 
@@ -9586,7 +10441,9 @@ mod expert_grouped_route_segments {
         (0..route.len().div_ceil(entries))
             .map(|threadgroup| {
                 let mut row = [0u32; EXPERTS];
-                route[chunk_of(route.len(), entries, threadgroup)].iter().for_each(|&expert| row[expert] += 1);
+                route[chunk_of(route.len(), entries, threadgroup)]
+                    .iter()
+                    .for_each(|&expert| row[expert] += 1);
                 row
             })
             .collect()
@@ -9595,7 +10452,9 @@ mod expert_grouped_route_segments {
     fn place_pass(route: &[usize], entries: usize, scratch: &[[u32; EXPERTS]]) -> Vec<u32> {
         let list_base = 1 + 2 * EXPERTS;
         let mut words = vec![0u32; list_base + route.len()];
-        let totals: Vec<u32> = (0..EXPERTS).map(|expert| scratch.iter().map(|row| row[expert]).sum()).collect();
+        let totals: Vec<u32> = (0..EXPERTS)
+            .map(|expert| scratch.iter().map(|row| row[expert]).sum())
+            .collect();
         let offsets = exclusive_offsets(&totals);
         words[0] = route.len() as u32;
         words[1..1 + EXPERTS].copy_from_slice(&totals);
@@ -9610,7 +10469,9 @@ mod expert_grouped_route_segments {
                     let lanes = step..chunk.end.min(step + SIMD_STEP);
                     for (lane, &routed) in route[lanes].iter().enumerate() {
                         if routed == expert {
-                            words[list_base + (offsets[expert] + before + placed + rank) as usize] = (step + lane) as u32;
+                            words
+                                [list_base + (offsets[expert] + before + placed + rank) as usize] =
+                                (step + lane) as u32;
                             rank += 1;
                         }
                     }
@@ -9627,9 +10488,13 @@ mod expert_grouped_route_segments {
     }
 
     fn kernel_text<'source>(source: &'source str, entry: &str) -> &'source str {
-        let start = source.find(&format!("kernel void {entry}(")).expect("the prepass kernel is in the source");
+        let start = source
+            .find(&format!("kernel void {entry}("))
+            .expect("the prepass kernel is in the source");
         let rest = &source[start + 1..];
-        let end = rest.find("\nkernel void ").map_or(source.len(), |next| start + 1 + next);
+        let end = rest
+            .find("\nkernel void ")
+            .map_or(source.len(), |next| start + 1 + next);
         &source[start..end]
     }
 
@@ -9651,8 +10516,15 @@ mod expert_grouped_route_segments {
         for (threadgroups, entries) in cases {
             let compaction = two_pass_compaction(&route, entries);
 
-            assert_eq!(route.len().div_ceil(entries), threadgroups, "{entries} entries per threadgroup");
-            assert_eq!(compaction, reference, "{threadgroups} threadgroups of {entries} entries");
+            assert_eq!(
+                route.len().div_ceil(entries),
+                threadgroups,
+                "{entries} entries per threadgroup"
+            );
+            assert_eq!(
+                compaction, reference,
+                "{threadgroups} threadgroups of {entries} entries"
+            );
         }
     }
 
@@ -9678,9 +10550,14 @@ mod expert_grouped_route_segments {
 
         assert_eq!(scratch.len(), 32);
         for (threadgroup, row) in scratch.iter().enumerate() {
-            assert_eq!(row.iter().sum::<u32>() as usize, chunk_of(route.len(), entries, threadgroup).len());
+            assert_eq!(
+                row.iter().sum::<u32>() as usize,
+                chunk_of(route.len(), entries, threadgroup).len()
+            );
         }
-        let totals: Vec<u32> = (0..EXPERTS).map(|expert| scratch.iter().map(|row| row[expert]).sum()).collect();
+        let totals: Vec<u32> = (0..EXPERTS)
+            .map(|expert| scratch.iter().map(|row| row[expert]).sum())
+            .collect();
         assert_eq!(totals, expert_counts(&route));
     }
 
@@ -9693,15 +10570,26 @@ mod expert_grouped_route_segments {
         assert_eq!(grouped_prepass_threadgroups(0), 1);
         assert_eq!(grouped_prepass_threadgroups(entries), 1);
         assert_eq!(grouped_prepass_threadgroups(entries + 1), 2);
-        assert_eq!(grouped_compaction_words(8000, 32), 1 + 2 * 32 + 8000 + threadgroups * 32);
+        assert_eq!(
+            grouped_compaction_words(8000, 32),
+            1 + 2 * 32 + 8000 + threadgroups * 32
+        );
     }
 
     #[test]
     fn the_prepass_chunk_default_is_256_entries_and_whole_simd_steps() {
         let manifest = include_str!("../../omega-runtime.toml");
 
-        assert!(manifest.lines().any(|line| line.trim() == "prepass_entries = 256"), "{manifest}");
-        assert_eq!(crate::sized::GROUPED_GEMM_PREPASS_ENTRIES % SIMD_STEP as u64, 0);
+        assert!(
+            manifest
+                .lines()
+                .any(|line| line.trim() == "prepass_entries = 256"),
+            "{manifest}"
+        );
+        assert_eq!(
+            crate::sized::GROUPED_GEMM_PREPASS_ENTRIES % SIMD_STEP as u64,
+            0
+        );
         if option_env!("OMEGA_GROUPED_GEMM_PREPASS_ENTRIES").is_none() {
             assert_eq!(crate::sized::GROUPED_GEMM_PREPASS_ENTRIES, 256);
             assert_eq!(grouped_prepass_threadgroups(8000), 32);
@@ -9712,7 +10600,8 @@ mod expert_grouped_route_segments {
     fn the_count_pass_kernel_tallies_its_chunk_into_its_scratch_row_without_placing() {
         let bound = gathered_matmul_op(300, 8, 192, 512);
         let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
-        let Some(([count, _], _)) = route_prepass(&bound, &packed, NumericPolicy::default()).expect("prepass emits")
+        let Some(([count, _], _)) =
+            route_prepass(&bound, &packed, NumericPolicy::default()).expect("prepass emits")
         else {
             return;
         };
@@ -9720,10 +10609,16 @@ mod expert_grouped_route_segments {
 
         let text = kernel_text(&count.source, &count.entry);
 
-        assert!(text.contains(&format!("long chunk_begin = (long)tgid * {entries}l;")), "{text}");
+        assert!(
+            text.contains(&format!("long chunk_begin = (long)tgid * {entries}l;")),
+            "{text}"
+        );
         assert!(text.contains("scan_base < chunk_end"), "{text}");
         assert!(text.contains("tally = simd_sum(tally);"), "{text}");
-        assert!(text.contains("route_compaction[scratch_base + tgid * experts + scan_expert] = tally;"), "{text}");
+        assert!(
+            text.contains("route_compaction[scratch_base + tgid * experts + scan_expert] = tally;"),
+            "{text}"
+        );
         assert!(text.contains("atomic_fetch_max_explicit(&fault["), "{text}");
         assert!(!text.contains("simd_prefix_exclusive_sum"), "{text}");
         assert!(!text.contains("(uint)entry_token; }"), "{text}");
@@ -9734,19 +10629,38 @@ mod expert_grouped_route_segments {
     fn the_place_pass_kernel_prefixes_the_scratch_and_places_in_ascending_route_order() {
         let bound = gathered_matmul_op(300, 8, 192, 512);
         let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
-        let Some(([_, place], _)) = route_prepass(&bound, &packed, NumericPolicy::default()).expect("prepass emits")
+        let Some(([_, place], _)) =
+            route_prepass(&bound, &packed, NumericPolicy::default()).expect("prepass emits")
         else {
             return;
         };
 
         let text = kernel_text(&place.source, &place.entry);
 
-        assert!(text.contains("uint tgcount [[threadgroups_per_grid]]"), "{text}");
-        assert!(text.contains("for (uint row = tiisg; row < tgcount; row += 32u)"), "{text}");
-        assert!(text.contains("before += (row < tgid) ? partial : 0u;"), "{text}");
-        assert!(text.contains("expert_base_tg[expert] = running + expert_before_tg[expert];"), "{text}");
-        assert!(text.contains("if (tgid == 0u) {\n            route_compaction[0] = running;"), "{text}");
-        assert!(text.contains("uint rank = simd_prefix_exclusive_sum(hit);"), "{text}");
+        assert!(
+            text.contains("uint tgcount [[threadgroups_per_grid]]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("for (uint row = tiisg; row < tgcount; row += 32u)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("before += (row < tgid) ? partial : 0u;"),
+            "{text}"
+        );
+        assert!(
+            text.contains("expert_base_tg[expert] = running + expert_before_tg[expert];"),
+            "{text}"
+        );
+        assert!(
+            text.contains("if (tgid == 0u) {\n            route_compaction[0] = running;"),
+            "{text}"
+        );
+        assert!(
+            text.contains("uint rank = simd_prefix_exclusive_sum(hit);"),
+            "{text}"
+        );
         assert!(
             text.contains("route_compaction[list_base + expert_base_tg[scan_expert] + placed + rank] = (uint)entry_token;"),
             "{text}"

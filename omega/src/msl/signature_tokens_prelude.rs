@@ -8,21 +8,21 @@ pub(super) fn grid_threads(
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
 ) -> Result<u64, EmitError> {
-    grid_threads_with_tile_height(
+    grid_threads_with_schedule(
         resolved,
         quantized,
         numeric_policy,
         expert_source_mode,
-        AttentionTileHeightSelection::Legacy,
+        AttentionRowSchedule::legacy(),
     )
 }
 
-pub(super) fn grid_threads_with_tile_height(
+pub(super) fn grid_threads_with_schedule(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
-    tile_height_selection: AttentionTileHeightSelection,
+    schedule: AttentionRowSchedule,
 ) -> Result<u64, EmitError> {
     let threads = match &resolved.kind {
         BoundOpKind::CachedAttention {
@@ -60,44 +60,53 @@ pub(super) fn grid_threads_with_tile_height(
             // single-range path's do (`render_cached_attention`'s own doc).
             // The decode split form dispatches exactly its bind-time
             // `(splits, chunks)`: one threadgroup per `(head, split)`.
-            let (chunks, splits) = match cached_attention_form_with_tile_height(
-                &resolved.kind,
-                numeric_policy,
-                tile_height_selection,
-            ) {
-                Some(CachedAttentionForm::SingleRangeDynamic { merge }) => (
-                    effective_context_chunk_cap(*query_groups, *head_dim),
-                    if merge {
-                        crate::sized::ATTENTION_SPLIT_MAX
-                    } else {
-                        1
-                    },
-                ),
-                #[cfg(feature = "metal-attn-split-decode")]
-                Some(CachedAttentionForm::TwoRangeDecodeSplit { splits, chunks }) => {
-                    (chunks, splits)
-                }
-                #[cfg(feature = "metal-attn-split-rows")]
-                Some(CachedAttentionForm::TwoRangeRowTiled {
-                    splits,
-                    rows_per_threadgroup,
-                    simdgroups,
-                }) => {
-                    return checked_product(
-                        resolved.node,
-                        [
-                            row_tiled_threadgroups(&resolved.kind, rows_per_threadgroup, splits),
-                            simdgroups,
-                            SIMD_WIDTH,
-                        ],
-                    );
-                }
-                Some(CachedAttentionForm::Static | CachedAttentionForm::TwoRangeCachedBound)
-                | None => (
-                    context_chunks_for(context_length, *query_groups, *head_dim, numeric_policy),
-                    1,
-                ),
-            };
+            let (chunks, splits) =
+                match cached_attention_form_with_schedule(&resolved.kind, numeric_policy, schedule)
+                {
+                    Some(CachedAttentionForm::SingleRangeDynamic { merge }) => (
+                        effective_context_chunk_cap(*query_groups, *head_dim),
+                        if merge {
+                            crate::sized::ATTENTION_SPLIT_MAX
+                        } else {
+                            1
+                        },
+                    ),
+                    #[cfg(feature = "metal-attn-split-decode")]
+                    Some(CachedAttentionForm::TwoRangeDecodeSplit { splits, chunks }) => {
+                        (chunks, splits)
+                    }
+                    #[cfg(feature = "metal-attn-split-rows")]
+                    Some(CachedAttentionForm::TwoRangeRowTiled {
+                        splits,
+                        rows_per_threadgroup,
+                        simdgroups,
+                    }) => {
+                        return checked_product(
+                            resolved.node,
+                            [
+                                row_tiled_threadgroups(
+                                    &resolved.kind,
+                                    rows_per_threadgroup,
+                                    splits,
+                                ),
+                                simdgroups,
+                                SIMD_WIDTH,
+                            ],
+                        );
+                    }
+                    Some(
+                        CachedAttentionForm::Static | CachedAttentionForm::TwoRangeCachedBound,
+                    )
+                    | None => (
+                        context_chunks_for(
+                            context_length,
+                            *query_groups,
+                            *head_dim,
+                            numeric_policy,
+                        ),
+                        1,
+                    ),
+                };
             let attention_vectors =
                 checked_product(resolved.node, resolved.extents.iter().copied())?
                     .checked_div(*head_dim)
@@ -324,6 +333,7 @@ pub(super) fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, Emi
 /// fetch code) — which operands gather. That last part is a suffix appended
 /// only when at least one operand gathers, so a gather-free `BoundOp`'s name is
 /// unchanged from before this existed.
+#[cfg(test)]
 pub(super) fn entry_name(resolved: &BoundOp, numeric_policy: NumericPolicy) -> String {
     entry_name_with_tile_height(
         resolved,
@@ -332,10 +342,26 @@ pub(super) fn entry_name(resolved: &BoundOp, numeric_policy: NumericPolicy) -> S
     )
 }
 
+#[cfg(test)]
 pub(super) fn entry_name_with_tile_height(
     resolved: &BoundOp,
     numeric_policy: NumericPolicy,
     tile_height_selection: AttentionTileHeightSelection,
+) -> String {
+    entry_name_with_schedule(
+        resolved,
+        numeric_policy,
+        AttentionRowSchedule {
+            tile_height: tile_height_selection,
+            ..AttentionRowSchedule::legacy()
+        },
+    )
+}
+
+pub(super) fn entry_name_with_schedule(
+    resolved: &BoundOp,
+    numeric_policy: NumericPolicy,
+    schedule: AttentionRowSchedule,
 ) -> String {
     let rank = resolved.extents.len();
     let operand_count = resolved.operands().len();
@@ -363,11 +389,8 @@ pub(super) fn entry_name_with_tile_height(
             // range's own live row count, but `new_upper_inclusive` is still
             // the real, query-independent compiled bound (this path's causal
             // band never depends on it), so that token is real, not "dyn".
-            let form = cached_attention_form_with_tile_height(
-                &resolved.kind,
-                numeric_policy,
-                tile_height_selection,
-            );
+            let form =
+                cached_attention_form_with_schedule(&resolved.kind, numeric_policy, schedule);
             let single_range_dynamic =
                 matches!(form, Some(CachedAttentionForm::SingleRangeDynamic { .. }));
             let two_range_cached_bound =
@@ -1689,8 +1712,18 @@ pub(crate) fn splits_for(context_length: u64, policy: NumericPolicy) -> u64 {
 /// SAME discriminator [`render_cached_attention`] (`:3414`) and `grid_threads`
 /// (`:2477`) already compute correctly, so all four call sites now agree by
 /// construction instead of by convention.
+#[cfg(test)]
 pub(crate) fn cached_attention_merge_needed(kind: &BoundOpKind, policy: NumericPolicy) -> bool {
-    cached_attention_form(kind, policy).is_some_and(CachedAttentionForm::needs_merge)
+    cached_attention_merge_needed_with_schedule(kind, policy, AttentionRowSchedule::legacy())
+}
+
+pub(crate) fn cached_attention_merge_needed_with_schedule(
+    kind: &BoundOpKind,
+    policy: NumericPolicy,
+    schedule: AttentionRowSchedule,
+) -> bool {
+    cached_attention_form_with_schedule(kind, policy, schedule)
+        .is_some_and(CachedAttentionForm::needs_merge)
 }
 
 /// One explicit cached-attention selection across seven independent axes.
@@ -1712,6 +1745,8 @@ pub struct AttentionVariant {
     pub query_parallelism: AttentionQueryParallelism,
     /// Lane mapping across one head or grouped query heads.
     pub simd_topology: AttentionSimdTopology,
+    /// Simdgroups per row-tiled threadgroup, or the existing sized rule.
+    pub simdgroup_count: AttentionSimdgroupCount,
     /// Whether the following cached K/V block is prefetched.
     pub prefetch: AttentionPrefetch,
 }
@@ -1726,6 +1761,7 @@ impl Default for AttentionVariant {
             tile_height: AttentionTileHeight::Legacy,
             query_parallelism: AttentionQueryParallelism::Legacy,
             simd_topology: AttentionSimdTopology::Legacy,
+            simdgroup_count: AttentionSimdgroupCount::Legacy,
             prefetch: AttentionPrefetch::Off,
         }
     }
@@ -1784,6 +1820,15 @@ pub enum AttentionSimdTopology {
     Legacy,
     PerHead,
     GroupedQueries,
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttentionSimdgroupCount {
+    Legacy,
+    Groups2,
+    Groups4,
+    Groups8,
 }
 
 /// Cached key/value prefetch choice.
@@ -1848,6 +1893,10 @@ impl AttentionMmaSelection {
             #[cfg(not(feature = "metal-attn-split-rows"))]
             return Err(("prefetch", "row-tiled attention feature is disabled"));
         }
+        #[cfg(not(feature = "metal-attn-split-rows"))]
+        if variant.simdgroup_count != AttentionSimdgroupCount::Legacy {
+            return Err(("simdgroup_count", "row-tiled attention feature is disabled"));
+        }
         Ok((
             match variant.mma_precision {
                 AttentionMmaPrecision::Legacy => Self::Legacy,
@@ -1878,6 +1927,12 @@ impl AttentionMmaSelection {
                         AttentionSimdTopologySelection::GroupedQueries
                     }
                 })
+                .with_simdgroup_count(match variant.simdgroup_count {
+                    AttentionSimdgroupCount::Legacy => AttentionSimdgroupCountSelection::Legacy,
+                    AttentionSimdgroupCount::Groups2 => AttentionSimdgroupCountSelection::Groups2,
+                    AttentionSimdgroupCount::Groups4 => AttentionSimdgroupCountSelection::Groups4,
+                    AttentionSimdgroupCount::Groups8 => AttentionSimdgroupCountSelection::Groups8,
+                })
             },
         ))
     }
@@ -1899,6 +1954,18 @@ pub(crate) struct AttentionRowSchedule {
     query_parallelism: AttentionQueryParallelismSelection,
     prefetch: AttentionPrefetchSelection,
     simd_topology: AttentionSimdTopologySelection,
+    simdgroup_count: AttentionSimdgroupCountSelection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AttentionSimdgroupCountSelection {
+    Legacy,
+    #[cfg(feature = "metal-attn-variants")]
+    Groups2,
+    #[cfg(feature = "metal-attn-variants")]
+    Groups4,
+    #[cfg(feature = "metal-attn-variants")]
+    Groups8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1975,6 +2042,7 @@ impl AttentionRowSchedule {
             query_parallelism: AttentionQueryParallelismSelection::Legacy,
             prefetch: AttentionPrefetchSelection::Off,
             simd_topology: AttentionSimdTopologySelection::Legacy,
+            simdgroup_count: AttentionSimdgroupCountSelection::Legacy,
         }
     }
 
@@ -1988,6 +2056,10 @@ impl AttentionRowSchedule {
             )
             && matches!(self.prefetch, AttentionPrefetchSelection::Off)
             && matches!(self.simd_topology, AttentionSimdTopologySelection::Legacy)
+            && matches!(
+                self.simdgroup_count,
+                AttentionSimdgroupCountSelection::Legacy
+            )
     }
 
     #[cfg(feature = "metal-attn-variants")]
@@ -1998,6 +2070,7 @@ impl AttentionRowSchedule {
             query_parallelism: AttentionQueryParallelismSelection::Legacy,
             prefetch: AttentionPrefetchSelection::Off,
             simd_topology: AttentionSimdTopologySelection::Legacy,
+            simdgroup_count: AttentionSimdgroupCountSelection::Legacy,
         }
     }
 
@@ -2009,6 +2082,7 @@ impl AttentionRowSchedule {
             query_parallelism: AttentionQueryParallelismSelection::Legacy,
             prefetch: AttentionPrefetchSelection::Off,
             simd_topology: AttentionSimdTopologySelection::Legacy,
+            simdgroup_count: AttentionSimdgroupCountSelection::Legacy,
         }
     }
 
@@ -2075,6 +2149,31 @@ impl AttentionRowSchedule {
     }
 
     #[cfg(feature = "metal-attn-variants")]
+    const fn with_simdgroup_count(self, simdgroup_count: AttentionSimdgroupCountSelection) -> Self {
+        Self {
+            simdgroup_count,
+            ..self
+        }
+    }
+
+    const fn simdgroup_count(self) -> AttentionSimdgroupCountSelection {
+        self.simdgroup_count
+    }
+
+    #[cfg(feature = "metal-attn-split-rows")]
+    fn resolved_simdgroup_count(self, head_dim: u64) -> u64 {
+        match self.simdgroup_count {
+            AttentionSimdgroupCountSelection::Legacy => row_tiled_simdgroups(head_dim),
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionSimdgroupCountSelection::Groups2 => 2,
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionSimdgroupCountSelection::Groups4 => 4,
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionSimdgroupCountSelection::Groups8 => 8,
+        }
+    }
+
+    #[cfg(feature = "metal-attn-variants")]
     pub(crate) const fn is_per_head_topology(self) -> bool {
         matches!(self.simd_topology, AttentionSimdTopologySelection::PerHead)
     }
@@ -2117,8 +2216,17 @@ impl AttentionRowSchedule {
             #[cfg(feature = "metal-attn-variants")]
             AttentionSimdTopologySelection::GroupedQueries => "_simd_grouped_queries",
         };
+        let simdgroup_count = match self.simdgroup_count {
+            AttentionSimdgroupCountSelection::Legacy => "",
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionSimdgroupCountSelection::Groups2 => "_simdgroups2",
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionSimdgroupCountSelection::Groups4 => "_simdgroups4",
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionSimdgroupCountSelection::Groups8 => "_simdgroups8",
+        };
         alloc::format!(
-            "{reuse}{}{query}{prefetch}{topology}",
+            "{reuse}{}{query}{prefetch}{topology}{simdgroup_count}",
             self.tile_height.cache_token()
         )
     }
@@ -2320,6 +2428,21 @@ pub(crate) fn cached_attention_form_with_tile_height(
     policy: NumericPolicy,
     tile_height_selection: AttentionTileHeightSelection,
 ) -> Option<CachedAttentionForm> {
+    cached_attention_form_with_schedule(
+        kind,
+        policy,
+        AttentionRowSchedule {
+            tile_height: tile_height_selection,
+            ..AttentionRowSchedule::legacy()
+        },
+    )
+}
+
+pub(crate) fn cached_attention_form_with_schedule(
+    kind: &BoundOpKind,
+    policy: NumericPolicy,
+    schedule: AttentionRowSchedule,
+) -> Option<CachedAttentionForm> {
     let BoundOpKind::CachedAttention {
         operands,
         cached_key_rows,
@@ -2342,7 +2465,7 @@ pub(crate) fn cached_attention_form_with_tile_height(
         return Some(CachedAttentionForm::SingleRangeDynamic { merge });
     }
     #[cfg(feature = "metal-attn-split-rows")]
-    if let Some(tiled) = row_tiled_form(kind, policy, tile_height_selection) {
+    if let Some(tiled) = row_tiled_form(kind, policy, schedule) {
         return Some(tiled);
     }
     #[cfg(feature = "metal-attn-split-decode")]
@@ -2356,8 +2479,9 @@ pub(crate) fn cached_attention_form_with_tile_height(
 pub(crate) fn validate_tile_height_selection(
     resolved: &BoundOp,
     policy: NumericPolicy,
-    selection: AttentionTileHeightSelection,
+    schedule: AttentionRowSchedule,
 ) -> Result<(), EmitError> {
+    let selection = schedule.tile_height();
     let Some(rows) = selection.explicit_rows() else {
         return Ok(());
     };
@@ -2371,7 +2495,7 @@ pub(crate) fn validate_tile_height_selection(
         return Ok(());
     };
     if matches!(
-        cached_attention_form_with_tile_height(&resolved.kind, policy, selection),
+        cached_attention_form_with_schedule(&resolved.kind, policy, schedule),
         Some(CachedAttentionForm::TwoRangeRowTiled { .. })
     ) {
         return Ok(());
@@ -2385,7 +2509,12 @@ pub(crate) fn validate_tile_height_selection(
         > crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES
     {
         "requested tile exceeds the configured threadgroup-memory budget"
-    } else if (rows / unit_rows) * tile_unit_fragments(*query_groups, *head_dim)
+    } else if (rows / unit_rows)
+        * tile_unit_fragments_for(
+            *query_groups,
+            *head_dim,
+            schedule.resolved_simdgroup_count(*head_dim),
+        )
         > crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS
     {
         "requested tile exceeds the configured accumulator-fragment budget"
@@ -2414,7 +2543,7 @@ pub(crate) fn validate_query_parallelism_selection(
     let reason = if *query_rows == 1 {
         Some("simdgroup row ownership requires at least two query rows")
     } else if !matches!(
-        cached_attention_form_with_tile_height(&resolved.kind, policy, schedule.tile_height(),),
+        cached_attention_form_with_schedule(&resolved.kind, policy, schedule),
         Some(CachedAttentionForm::TwoRangeRowTiled { .. })
     ) {
         Some("simdgroup row ownership requires the row-tiled attention form")
@@ -2444,7 +2573,7 @@ pub(crate) fn validate_prefetch_selection(
         return Ok(());
     }
     if !matches!(
-        cached_attention_form_with_tile_height(&resolved.kind, policy, schedule.tile_height(),),
+        cached_attention_form_with_schedule(&resolved.kind, policy, schedule),
         Some(CachedAttentionForm::TwoRangeRowTiled { .. })
     ) {
         return Err(EmitError::CachedAttentionVariantAxisNotSupported {
@@ -2474,14 +2603,14 @@ pub(crate) fn validate_simd_topology_selection(
         return Ok(());
     };
     let reason = if !matches!(
-        cached_attention_form_with_tile_height(&resolved.kind, policy, schedule.tile_height(),),
+        cached_attention_form_with_schedule(&resolved.kind, policy, schedule),
         Some(CachedAttentionForm::TwoRangeRowTiled { .. })
     ) {
         Some("SIMD topology requires the row-tiled attention form")
     } else if *query_groups < 2 {
         Some("SIMD topology requires grouped query heads")
     } else if schedule.is_per_head_topology()
-        && !head_dim.is_multiple_of(16 * row_tiled_simdgroups(*head_dim))
+        && !head_dim.is_multiple_of(16 * schedule.resolved_simdgroup_count(*head_dim))
     {
         Some("per-head topology requires at least two 8-wide fragments per simdgroup")
     } else {
@@ -2495,6 +2624,30 @@ pub(crate) fn validate_simd_topology_selection(
         });
     }
     Ok(())
+}
+
+#[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
+pub(crate) fn validate_simdgroup_count_selection(
+    resolved: &BoundOp,
+    policy: NumericPolicy,
+    schedule: AttentionRowSchedule,
+) -> Result<(), EmitError> {
+    if matches!(
+        schedule.simdgroup_count(),
+        AttentionSimdgroupCountSelection::Legacy
+    ) {
+        return Ok(());
+    }
+    if matches!(
+        cached_attention_form_with_schedule(&resolved.kind, policy, schedule),
+        Some(CachedAttentionForm::TwoRangeRowTiled { .. })
+    ) {
+        return Ok(());
+    }
+    Err(EmitError::CachedAttentionVariantAxisNotSupported {
+        axis: "simdgroup_count",
+        value: "explicit simdgroup count requires a legal row-tiled attention form",
+    })
 }
 
 /// The decode split form of a two-range cached-bound op, when the op and the
@@ -2622,7 +2775,7 @@ fn decode_split_serves_rows(query_rows: u64) -> bool {
 fn row_tiled_form(
     kind: &BoundOpKind,
     policy: NumericPolicy,
-    tile_height_selection: AttentionTileHeightSelection,
+    schedule: AttentionRowSchedule,
 ) -> Option<CachedAttentionForm> {
     let BoundOpKind::CachedAttention {
         query_rows,
@@ -2639,7 +2792,8 @@ fn row_tiled_form(
     };
     let admitted = admit(policy, NumericRewrite::ContextSplitMerge).is_ok()
         && admit(policy, NumericRewrite::TreeReduce).is_ok();
-    let simdgroups = row_tiled_simdgroups(*head_dim);
+    let simdgroups = schedule.resolved_simdgroup_count(*head_dim);
+    let tile_height_selection = schedule.tile_height();
     let (unit_rows, _) = tile_unit(*query_groups);
     let selected_rows = tile_height_selection.explicit_rows();
     let requested_rows = selected_rows.unwrap_or(unit_rows);
@@ -2648,7 +2802,7 @@ fn row_tiled_form(
         || (units > 0
             && requested_rows.is_multiple_of(unit_rows)
             && requested_rows <= *query_rows
-            && units * tile_unit_fragments(*query_groups, *head_dim)
+            && units * tile_unit_fragments_for(*query_groups, *head_dim, simdgroups)
                 <= crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS
             && row_tile_bytes(requested_rows, *query_groups, row_tiled_block(*head_dim))
                 <= crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES);
@@ -2661,7 +2815,7 @@ fn row_tiled_form(
         && head_dim.is_multiple_of(8 * simdgroups)
         && cached_key_rows.is_multiple_of(8)
         && (row_tiled_block(*head_dim) / 8).is_multiple_of(simdgroups)
-        && tile_unit_fragments(*query_groups, *head_dim)
+        && tile_unit_fragments_for(*query_groups, *head_dim, simdgroups)
             <= crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS
         && row_tile_bytes(unit_rows, *query_groups, row_tiled_block(*head_dim))
             <= crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES;
@@ -2670,7 +2824,14 @@ fn row_tiled_form(
     }
     let capacity = cached_key_rows + new_key_rows;
     let rows_per_threadgroup = selected_rows.unwrap_or_else(|| {
-        rows_per_threadgroup(*query_rows, *kv_heads, *query_groups, *head_dim, capacity)
+        rows_per_threadgroup_for(
+            *query_rows,
+            *kv_heads,
+            *query_groups,
+            *head_dim,
+            capacity,
+            simdgroups,
+        )
     });
     let tiles = query_rows.div_ceil(rows_per_threadgroup);
     Some(CachedAttentionForm::TwoRangeRowTiled {
@@ -2721,9 +2882,16 @@ pub(crate) fn tile_unit(query_groups: u64) -> (u64, u64) {
 /// the unit's vector blocks.
 #[cfg(feature = "metal-attn-split-rows")]
 #[must_use]
+#[cfg(test)]
 pub(crate) fn tile_unit_fragments(query_groups: u64, head_dim: u64) -> u64 {
+    tile_unit_fragments_for(query_groups, head_dim, row_tiled_simdgroups(head_dim))
+}
+
+#[cfg(feature = "metal-attn-split-rows")]
+#[must_use]
+fn tile_unit_fragments_for(query_groups: u64, head_dim: u64, simdgroups: u64) -> u64 {
     let (_, unit_blocks) = tile_unit(query_groups);
-    (head_dim / 8 / row_tiled_simdgroups(head_dim)).max(1) * unit_blocks
+    (head_dim / 8 / simdgroups).max(1) * unit_blocks
 }
 
 /// Threadgroup bytes of a row-tiled tile of `rows` query rows with a `block`-key
@@ -2785,6 +2953,7 @@ pub(crate) fn query_tile_staged(
 /// tile, a prefill takes the full height.
 #[cfg(feature = "metal-attn-split-rows")]
 #[must_use]
+#[cfg(test)]
 pub(crate) fn rows_per_threadgroup(
     query_rows: u64,
     kv_heads: u64,
@@ -2792,9 +2961,29 @@ pub(crate) fn rows_per_threadgroup(
     head_dim: u64,
     context_capacity: u64,
 ) -> u64 {
+    rows_per_threadgroup_for(
+        query_rows,
+        kv_heads,
+        query_groups,
+        head_dim,
+        context_capacity,
+        row_tiled_simdgroups(head_dim),
+    )
+}
+
+#[cfg(feature = "metal-attn-split-rows")]
+#[must_use]
+fn rows_per_threadgroup_for(
+    query_rows: u64,
+    kv_heads: u64,
+    query_groups: u64,
+    head_dim: u64,
+    context_capacity: u64,
+    simdgroups: u64,
+) -> u64 {
     let (unit_rows, unit_blocks) = tile_unit(query_groups);
     let by_registers = crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS
-        / tile_unit_fragments(query_groups, head_dim);
+        / tile_unit_fragments_for(query_groups, head_dim, simdgroups);
     let by_memory = crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES
         .checked_div(row_tile_bytes(
             unit_rows,
@@ -2804,7 +2993,6 @@ pub(crate) fn rows_per_threadgroup(
         .unwrap_or(1);
     let by_reuse = crate::sized::ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE / unit_blocks;
     let widest = by_registers.min(by_memory).min(by_reuse).max(1);
-    let simdgroups = row_tiled_simdgroups(head_dim);
     let fills_the_gpu = |units: u64| {
         let tiles = query_rows.div_ceil(units * unit_rows);
         kv_heads * tiles * row_tiled_splits(context_capacity, kv_heads, tiles, simdgroups)
@@ -2878,13 +3066,23 @@ pub(crate) fn row_tiled_splits(
 /// forms' bind-time `splits`, otherwise [`splits_for`] over the compiled
 /// capacity. One source for the split writer's `u.splits` and the merge's, so
 /// the two dispatches cannot disagree on the scratch stride.
+#[cfg(all(test, feature = "metal-attn-split-rows"))]
+#[must_use]
+pub(crate) fn cached_attention_live_splits(kind: &BoundOpKind, policy: NumericPolicy) -> u64 {
+    cached_attention_live_splits_with_schedule(kind, policy, AttentionRowSchedule::legacy())
+}
+
 #[cfg(any(
     all(test, feature = "metal-attn-split-rows"),
     all(feature = "metal", target_os = "macos")
 ))]
 #[must_use]
-pub(crate) fn cached_attention_live_splits(kind: &BoundOpKind, policy: NumericPolicy) -> u64 {
-    match cached_attention_form(kind, policy) {
+pub(crate) fn cached_attention_live_splits_with_schedule(
+    kind: &BoundOpKind,
+    policy: NumericPolicy,
+    schedule: AttentionRowSchedule,
+) -> u64 {
+    match cached_attention_form_with_schedule(kind, policy, schedule) {
         #[cfg(feature = "metal-attn-split-decode")]
         Some(CachedAttentionForm::TwoRangeDecodeSplit { splits, .. }) => splits,
         #[cfg(feature = "metal-attn-split-rows")]

@@ -220,14 +220,20 @@ pub(super) fn prepare(
             if env_flags::repeat_verify() {
                 std::eprintln!(
                     "repeat_nodes targets={:?} count={} refusals={:?} pairs={:?}",
-                    targets.iter().map(|node| node.0).collect::<alloc::vec::Vec<_>>(),
+                    targets
+                        .iter()
+                        .map(|node| node.0)
+                        .collect::<alloc::vec::Vec<_>>(),
                     repeat_count,
                     refusals,
                     repeat_verify_pairs
                         .iter()
                         .map(|(original, copies)| (
                             original.0,
-                            copies.iter().map(|copy| copy.0).collect::<alloc::vec::Vec<_>>()
+                            copies
+                                .iter()
+                                .map(|copy| copy.0)
+                                .collect::<alloc::vec::Vec<_>>()
                         ))
                         .collect::<alloc::vec::Vec<_>>(),
                 );
@@ -533,7 +539,10 @@ pub(super) fn operand_tensor_bytes(
 /// backwards), so every candidate with a real dependency has a target
 /// position provably `<=` its current one -- this only ever pulls a node
 /// EARLIER, never later, so it cannot itself introduce a forward reference.
-pub(super) fn promote_output_placed_nodes(resolved: &mut Vec<BoundOp>, effective_outputs: &[NodeId]) {
+pub(super) fn promote_output_placed_nodes(
+    resolved: &mut Vec<BoundOp>,
+    effective_outputs: &[NodeId],
+) {
     let outputs: BTreeSet<NodeId> = effective_outputs.iter().copied().collect();
     if outputs.is_empty() {
         return;
@@ -670,7 +679,12 @@ pub(super) fn push_extent_row(bytes: &mut Vec<u8>, extents: &[u64], width: usize
 /// gather into a temporary `Vec<i64>` first (ROW 303's residual, this
 /// landing's own removal). `width` zero-pads past `axes.len()`, same
 /// contract as [`push_i64_row`].
-pub(super) fn push_gathered_extent_row(bytes: &mut Vec<u8>, extents: &[u64], axes: &[u16], width: usize) {
+pub(super) fn push_gathered_extent_row(
+    bytes: &mut Vec<u8>,
+    extents: &[u64],
+    axes: &[u16],
+    width: usize,
+) {
     for slot in 0..width {
         let value = axes
             .get(slot)
@@ -875,24 +889,40 @@ pub(super) fn pack_uniforms_byte_len(bound: &BoundOp, numeric_policy: NumericPol
     }
 }
 
-pub(super) fn pack_uniforms(bound: &BoundOp, numeric_policy: NumericPolicy) -> Result<Vec<u8>, EmitError> {
+pub(super) fn pack_uniforms(
+    bound: &BoundOp,
+    numeric_policy: NumericPolicy,
+) -> Result<Vec<u8>, EmitError> {
+    pack_uniforms_with_schedule(
+        bound,
+        numeric_policy,
+        crate::msl::AttentionRowSchedule::legacy(),
+    )
+}
+
+pub(super) fn pack_uniforms_with_schedule(
+    bound: &BoundOp,
+    numeric_policy: NumericPolicy,
+    schedule: crate::msl::AttentionRowSchedule,
+) -> Result<Vec<u8>, EmitError> {
     let mut bytes = Vec::new();
-    pack_uniforms_into(bound, numeric_policy, &mut bytes)?;
+    pack_uniforms_into_with_schedule(bound, numeric_policy, schedule, &mut bytes)?;
     Ok(bytes)
 }
 
 /// [`pack_uniforms`], writing into caller-owned storage. Stable plans call
 /// this once while initializing each per-position uniform buffer; the
 /// unplaced path uses the owned wrapper above.
-pub(super) fn pack_uniforms_into(
+pub(super) fn pack_uniforms_into_with_schedule(
     bound: &BoundOp,
     numeric_policy: NumericPolicy,
+    schedule: crate::msl::AttentionRowSchedule,
     scratch: &mut Vec<u8>,
 ) -> Result<(), EmitError> {
     scratch.clear();
     match &bound.kind {
         BoundOpKind::CachedAttention { .. } => {
-            pack_cached_attention_uniforms(bound, numeric_policy, scratch)
+            pack_cached_attention_uniforms_with_schedule(bound, numeric_policy, schedule, scratch)
         }
         BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. } => {
             pack_elementwise_uniforms(bound, scratch);
@@ -1407,11 +1437,16 @@ pub(super) mod pack_uniforms_byte_len_tests {
             },
         );
         let shapes = infer(&program, &[]).expect("elementwise infers");
-        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-            .expect("elementwise lowers")
-            .into_iter()
-            .next_back()
-            .expect("one bound op emitted")
+        bind(
+            &program,
+            &shapes,
+            &[terminal(&program)],
+            NumericPolicy::default(),
+        )
+        .expect("elementwise lowers")
+        .into_iter()
+        .next_back()
+        .expect("one bound op emitted")
     }
 
     fn matmul_reduce_op(m: u32, k: u32, n: u32) -> BoundOp {
@@ -1458,11 +1493,16 @@ pub(super) mod pack_uniforms_byte_len_tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("matmul infers");
-        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-            .expect("matmul lowers")
-            .into_iter()
-            .next_back()
-            .expect("one fused bound op emitted")
+        bind(
+            &program,
+            &shapes,
+            &[terminal(&program)],
+            NumericPolicy::default(),
+        )
+        .expect("matmul lowers")
+        .into_iter()
+        .next_back()
+        .expect("one fused bound op emitted")
     }
 
     #[test]
@@ -1502,9 +1542,10 @@ pub(super) mod pack_uniforms_byte_len_tests {
     }
 }
 
-pub(super) fn pack_cached_attention_uniforms(
+pub(super) fn pack_cached_attention_uniforms_with_schedule(
     bound: &BoundOp,
     numeric_policy: NumericPolicy,
+    schedule: crate::msl::AttentionRowSchedule,
     bytes: &mut Vec<u8>,
 ) -> Result<(), EmitError> {
     let BoundOpKind::CachedAttention {
@@ -1527,7 +1568,8 @@ pub(super) fn pack_cached_attention_uniforms(
     // inside the kernel body instead of widening the dispatch or the
     // uniforms struct, so it takes the same path as the eight-operand,
     // unbucketed case below.
-    let form = crate::msl::cached_attention_form(&bound.kind, numeric_policy);
+    let form =
+        crate::msl::cached_attention_form_with_schedule(&bound.kind, numeric_policy, schedule);
     #[cfg(feature = "metal-attn-split-decode")]
     if let Some(crate::msl::CachedAttentionForm::TwoRangeDecodeSplit { splits, chunks }) = form {
         // one uniforms blob for the split kernel: the `(row, head)` count the
@@ -1580,13 +1622,20 @@ pub(super) fn pack_cached_attention_uniforms(
     // a chunk, cannot be widened unconditionally without racing the real
     // dispatch's output write; this must stay in lock-step with that gate.
     let dispatch_chunks = if dynamic_cached_len {
-        i64::try_from(crate::msl::effective_context_chunk_cap(*query_groups, *head_dim))
-            .unwrap_or(chunks)
+        i64::try_from(crate::msl::effective_context_chunk_cap(
+            *query_groups,
+            *head_dim,
+        ))
+        .unwrap_or(chunks)
     } else {
         chunks
     };
     let dispatch_splits = if dynamic_cached_len
-        && crate::msl::cached_attention_merge_needed(&bound.kind, numeric_policy)
+        && crate::msl::cached_attention_merge_needed_with_schedule(
+            &bound.kind,
+            numeric_policy,
+            schedule,
+        )
     {
         i64::try_from(crate::sized::ATTENTION_SPLIT_MAX).unwrap_or(splits)
     } else {
@@ -1626,8 +1675,11 @@ pub(super) fn pack_cached_attention_uniforms(
         // own raw result -- the kernel body's `slice_len = ceil(live/splits)`
         // would otherwise slice off keys with no second dispatch left to
         // merge the slices back, an out-of-bounds-shaped undercount.
-        let live_splits = if crate::msl::cached_attention_merge_needed(&bound.kind, numeric_policy)
-        {
+        let live_splits = if crate::msl::cached_attention_merge_needed_with_schedule(
+            &bound.kind,
+            numeric_policy,
+            schedule,
+        ) {
             splits
         } else {
             1
@@ -1650,9 +1702,10 @@ pub(super) fn pack_cached_attention_uniforms(
 /// not a `Plan`-owned buffer like the split kernel's own `plan_uniform`) --
 /// this slice's own scope boundary, named in `encode_op`'s call site;
 /// folding it into `PlanUniforms` is follow-up work, not a correctness gap.
-pub(super) fn pack_cached_attention_merge_uniforms(
+pub(super) fn pack_cached_attention_merge_uniforms_with_schedule(
     bound: &BoundOp,
     numeric_policy: NumericPolicy,
+    schedule: crate::msl::AttentionRowSchedule,
 ) -> Result<Vec<u8>, EmitError> {
     let BoundOpKind::CachedAttention { head_dim, .. } = &bound.kind else {
         return Err(EmitError::RenderKindMismatch {
@@ -1667,9 +1720,10 @@ pub(super) fn pack_cached_attention_merge_uniforms(
         .map(|extent| *extent as i64)
         .product::<i64>()
         / *head_dim as i64;
-    let splits = i64::try_from(crate::msl::cached_attention_live_splits(
+    let splits = i64::try_from(crate::msl::cached_attention_live_splits_with_schedule(
         &bound.kind,
         numeric_policy,
+        schedule,
     ))
     .unwrap_or(1);
     let mut bytes = Vec::with_capacity(16);
@@ -1851,4 +1905,3 @@ pub(super) fn pack_scan_uniforms(bound: &BoundOp, bytes: &mut Vec<u8>) -> Result
 pub(super) fn nserror_description(error: &NSError) -> String {
     error.localizedDescription().to_string()
 }
-

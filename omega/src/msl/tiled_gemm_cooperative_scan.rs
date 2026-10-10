@@ -184,11 +184,13 @@ pub(super) fn push_tiled_gemm_body(
             ushort tiitg [[thread_index_in_threadgroup]],\n    \
             ushort sgitg [[simdgroup_index_in_threadgroup]]{threadgroup_argument}"
         );
-        let gid_offset = source.find(scalar_gid).ok_or(EmitError::RenderKindMismatch {
-            node,
-            expected: "scalar thread_position_in_grid parameter",
-            found: "missing",
-        })?;
+        let gid_offset = source
+            .find(scalar_gid)
+            .ok_or(EmitError::RenderKindMismatch {
+                node,
+                expected: "scalar thread_position_in_grid parameter",
+                found: "missing",
+            })?;
         source.replace_range(gid_offset..gid_offset + scalar_gid.len(), &vector_attrs);
     }
     source.push_str(&format!(
@@ -304,7 +306,15 @@ pub(super) fn push_tiled_gemm_body(
         && half_width == DECODE_RUN_ELEMENTS;
 
     if mm_layout_schedule {
-        push_mm_layout_k_loop(source, block, &decode, token_axis, feature_axis, metal, grid2d_active);
+        push_mm_layout_k_loop(
+            source,
+            block,
+            &decode,
+            token_axis,
+            feature_axis,
+            metal,
+            grid2d_active,
+        );
     } else {
         if wide_weight_stage_eligible {
             push_wide_weight_stage_setup(
@@ -350,7 +360,14 @@ pub(super) fn push_tiled_gemm_body(
                 source.push_str(&format!(
                     "                    long slot_off = row_base + {chunk_offset};\n"
                 ));
-                push_weight_cursor(source, "                    ", &decode, "blk", "slot", "slot_off");
+                push_weight_cursor(
+                    source,
+                    "                    ",
+                    &decode,
+                    "blk",
+                    "slot",
+                    "slot_off",
+                );
                 for run_index in 0..chunk_width / DECODE_RUN_ELEMENTS {
                     let run_offset = run_index * DECODE_RUN_ELEMENTS;
                     source.push_str("                    {\n");
@@ -362,7 +379,8 @@ pub(super) fn push_tiled_gemm_body(
                         &format!("slot + {run_offset}u"),
                         "decoded",
                     );
-                    let weight_index = format!("w_row * {block_k} + {chunk_offset} + {run_offset} + j");
+                    let weight_index =
+                        format!("w_row * {block_k} + {chunk_offset} + {run_offset} + j");
                     source.push_str(&format!(
                         "                        for (int j = 0; j < {DECODE_RUN_ELEMENTS}; ++j) {{ weight_tile[{weight_index}] = decoded[j]; }}\n"
                     ));
@@ -568,10 +586,15 @@ pub(super) const fn mm_layout_geometry_supported() -> bool {
 /// kernel's declared array and `Grid2DSpec::threadgroup_bytes` both read.
 #[cfg(feature = "metal-tiled-gemm")]
 pub(super) const fn tiled_gemm_shared_bytes() -> u64 {
-    let weight_and_activation = crate::sized::TILED_GEMM_BLOCK_M * crate::sized::TILED_GEMM_BLOCK_K * 2
-        + crate::sized::TILED_GEMM_BLOCK_N * crate::sized::TILED_GEMM_BLOCK_K * 4;
+    let weight_and_activation =
+        crate::sized::TILED_GEMM_BLOCK_M * crate::sized::TILED_GEMM_BLOCK_K * 2
+            + crate::sized::TILED_GEMM_BLOCK_N * crate::sized::TILED_GEMM_BLOCK_K * 4;
     let output = crate::sized::TILED_GEMM_BLOCK_M * crate::sized::TILED_GEMM_BLOCK_N * 4;
-    if weight_and_activation > output { weight_and_activation } else { output }
+    if weight_and_activation > output {
+        weight_and_activation
+    } else {
+        output
+    }
 }
 
 /// The K-reduction loop of [`push_tiled_gemm_body`] in ggml's own tile layout
@@ -636,7 +659,14 @@ fn push_mm_layout_k_loop(
     source.push_str(&format!(
         "    for ({k0_counter_type} k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"
     ));
-    push_weight_decode(source, "        ", decode, "wws_blk0", "wws_slot0", "decoded");
+    push_weight_decode(
+        source,
+        "        ",
+        decode,
+        "wws_blk0",
+        "wws_slot0",
+        "decoded",
+    );
     push_block_cursor_advance(source, "        ", "wws_blk0", "wws_slot0", block_k, decode);
     source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     for run in 0..DECODE_RUN_ELEMENTS / 8 {
@@ -810,17 +840,25 @@ fn push_mm_layout_multiply(source: &mut String) {
     let unroll = "_Pragma(\"clang loop unroll(full)\")";
     source.push_str("        threadgroup const half *lsma = weight_tile + 4 * 64 * (sgitg % 2);\n");
     source.push_str("        threadgroup const float *lsmb = act_tile + 2 * 64 * (sgitg / 2);\n");
-    source.push_str(&format!("        {unroll} for (short ik = 0; ik < 4; ik++) {{\n"));
+    source.push_str(&format!(
+        "        {unroll} for (short ik = 0; ik < 4; ik++) {{\n"
+    ));
     source.push_str("            simdgroup_barrier(mem_flags::mem_none);\n");
-    source.push_str(&format!("            {unroll} for (short i = 0; i < 4; i++) {{\n"));
+    source.push_str(&format!(
+        "            {unroll} for (short i = 0; i < 4; i++) {{\n"
+    ));
     source.push_str("                simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);\n");
     source.push_str("            }\n");
     source.push_str("            simdgroup_barrier(mem_flags::mem_none);\n");
-    source.push_str(&format!("            {unroll} for (short i = 0; i < 2; i++) {{\n"));
+    source.push_str(&format!(
+        "            {unroll} for (short i = 0; i < 2; i++) {{\n"
+    ));
     source.push_str("                simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);\n");
     source.push_str("            }\n");
     source.push_str("            simdgroup_barrier(mem_flags::mem_none);\n");
-    source.push_str(&format!("            {unroll} for (short i = 0; i < 8; i++) {{\n"));
+    source.push_str(&format!(
+        "            {unroll} for (short i = 0; i < 8; i++) {{\n"
+    ));
     source.push_str(
         "                simdgroup_multiply_accumulate(acc[(i % 4) * 2 + i / 4], mb[i / 4], ma[i % 4], acc[(i % 4) * 2 + i / 4]);\n",
     );
@@ -860,9 +898,7 @@ fn push_wide_weight_stage_setup(
     let chunks_times_two = num_chunks * 2;
     for unit in 0..half_units {
         let h_offset = unit * block_threads_const();
-        source.push_str(&format!(
-            "    long wws_h{unit} = tiitg + {h_offset};\n"
-        ));
+        source.push_str(&format!("    long wws_h{unit} = tiitg + {h_offset};\n"));
         source.push_str(&format!(
             "    device const uchar *wws_blk{unit} = weight_bytes;\n"
         ));
@@ -870,9 +906,7 @@ fn push_wide_weight_stage_setup(
         source.push_str(&format!("    long wws_row{unit} = 0;\n"));
         source.push_str(&format!("    long wws_koff{unit} = 0;\n"));
         source.push_str(&format!("    bool wws_active{unit} = false;\n"));
-        source.push_str(&format!(
-            "    if (wws_h{unit} < {total_halves}) {{\n"
-        ));
+        source.push_str(&format!("    if (wws_h{unit} < {total_halves}) {{\n"));
         source.push_str(&format!(
             "        wws_row{unit} = wws_h{unit} / {chunks_times_two};\n"
         ));
@@ -1028,7 +1062,11 @@ fn push_tiled_gemm_direct_store_arm(
     acc_token_major: bool,
 ) {
     let rank_len = rank.max(1);
-    let store_tail = if acc_token_major { "" } else { ", ulong2(0), true" };
+    let store_tail = if acc_token_major {
+        ""
+    } else {
+        ", ulong2(0), true"
+    };
     // A tile is safe to store directly only when NO row or column of it
     // falls outside the real extents (no mask needed) AND the output's own
     // FEATURE axis is unit-stride: `acc`'s fragment is [row=feature,
@@ -1110,7 +1148,11 @@ fn push_tiled_gemm_restage_writeback(
     acc_token_major: bool,
 ) {
     let rank_len = rank.max(1);
-    let store_tail = if acc_token_major { ", ulong2(0), true" } else { "" };
+    let store_tail = if acc_token_major {
+        ", ulong2(0), true"
+    } else {
+        ""
+    };
     source.push_str(&format!(
         "    for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
     ));
@@ -1146,9 +1188,7 @@ fn push_tiled_gemm_restage_writeback(
         "    for (int d = 0; d < {rank}; ++d) {{ coord[d] = 0; }}\n"
     ));
     for &axis in batch_axes {
-        source.push_str(&format!(
-            "    coord[{axis}] = dense_batch_coord_{axis};\n"
-        ));
+        source.push_str(&format!("    coord[{axis}] = dense_batch_coord_{axis};\n"));
     }
     source.push_str("    long out_offset_base = u.out_base;\n");
     for &axis in batch_axes {
@@ -1336,11 +1376,13 @@ pub(super) fn push_dense_batched_gemm_body(
         let vector_attrs = "uint3 tgpig [[threadgroup_position_in_grid]],\n    \
             ushort tiitg [[thread_index_in_threadgroup]],\n    \
             ushort sgitg [[simdgroup_index_in_threadgroup]]";
-        let gid_offset = source.find(scalar_gid).ok_or(EmitError::RenderKindMismatch {
-            node,
-            expected: "scalar thread_position_in_grid parameter",
-            found: "missing",
-        })?;
+        let gid_offset = source
+            .find(scalar_gid)
+            .ok_or(EmitError::RenderKindMismatch {
+                node,
+                expected: "scalar thread_position_in_grid parameter",
+                found: "missing",
+            })?;
         source.replace_range(gid_offset..gid_offset + scalar_gid.len(), vector_attrs);
         source.push_str("    long dense_batch_index = (long)tgpig.z;\n");
     } else {
@@ -1467,7 +1509,9 @@ pub(super) fn push_dense_batched_gemm_body(
     // `token_extent`. Every guarded global load is issued into `w_regs`
     // before the first threadgroup store, so the loads are independent of one
     // another instead of each waiting behind the previous store.
-    source.push_str(&format!("                {dense_element_type} w_regs[{block_k}];\n"));
+    source.push_str(&format!(
+        "                {dense_element_type} w_regs[{block_k}];\n"
+    ));
     source.push_str(&format!(
         "                long w_stride = u.operand_strides[{weight}][{reduce_dim}];\n"
     ));
@@ -1672,6 +1716,20 @@ pub(super) fn tiled_gemm_threadgroup_width(
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
 ) -> Option<u64> {
+    tiled_gemm_threadgroup_width_with_schedule(
+        resolved,
+        quantized,
+        numeric_policy,
+        AttentionRowSchedule::legacy(),
+    )
+}
+
+pub(super) fn tiled_gemm_threadgroup_width_with_schedule(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+    schedule: AttentionRowSchedule,
+) -> Option<u64> {
     // `round_zero_reduce_bound`'s own doc: a round-batched fold's per-round
     // dispatch geometry is whatever the round-0 `Reduce` this collapse
     // replaced would use -- delegating keeps this in lock-step with
@@ -1680,7 +1738,12 @@ pub(super) fn tiled_gemm_threadgroup_width(
     #[cfg(feature = "metal-moe-mul-mat-id")]
     if let BoundOpKind::RoundBatchedReduce { .. } = &resolved.kind {
         let round_zero = round_zero_reduce_bound(resolved);
-        return tiled_gemm_threadgroup_width(&round_zero, quantized, numeric_policy);
+        return tiled_gemm_threadgroup_width_with_schedule(
+            &round_zero,
+            quantized,
+            numeric_policy,
+            schedule,
+        );
     }
     // `head_v_dim` threads per threadgroup -- correctness-load-bearing, not
     // an occupancy hint: `grid_threads`' own `GatedDeltaNet` arm dispatches
@@ -1742,7 +1805,7 @@ pub(super) fn tiled_gemm_threadgroup_width(
         // threadgroup, so its width carries no `query_groups` factor.
         let context_length = *cached_key_rows + *new_key_rows;
         let (dynamic_cached_len, chunks) =
-            match cached_attention_form(&resolved.kind, numeric_policy) {
+            match cached_attention_form_with_schedule(&resolved.kind, numeric_policy, schedule) {
                 Some(CachedAttentionForm::SingleRangeDynamic { .. }) => {
                     (true, effective_context_chunk_cap(*query_groups, *head_dim))
                 }
@@ -1916,7 +1979,10 @@ pub(super) fn q4k_super_block_tiled(
 /// resolving its own `reduction_total` from `reduce_dims`.
 #[cfg(feature = "metal-wide-cooperative-reduce")]
 pub(crate) fn wide_cooperative_reduce_width(reduction_total: u64) -> u64 {
-    quarter_width(reduction_total, crate::sized::WIDE_COOPERATIVE_REDUCE_MAX_WIDTH)
+    quarter_width(
+        reduction_total,
+        crate::sized::WIDE_COOPERATIVE_REDUCE_MAX_WIDTH,
+    )
 }
 
 /// One lane per four reduced elements, rounded up to whole simdgroups and
@@ -2083,7 +2149,8 @@ pub(super) fn push_cooperative_reduce_body(
     // above by construction: `classify_dense_batched_gemm` requires BOTH
     // operands unquantized, `classify_tiled_gemm` requires exactly ONE
     // packed. Same preamble ownership as the arm above.
-    if let Some(block) = dense_batched_gemm_block(resolved, quantized, reduce_op, init, output_axes) {
+    if let Some(block) = dense_batched_gemm_block(resolved, quantized, reduce_op, init, output_axes)
+    {
         push_dense_batched_gemm_body(
             source,
             resolved.node,
@@ -2258,7 +2325,8 @@ pub(super) fn push_cooperative_reduce_body(
             !is_broadcast_epilogue && q4k_super_block_tiled(resolved, quantized, reduce_dims);
         if tiled {
             let weight = packed[0];
-            for (index, gather_slot) in gather_slots.iter().copied().enumerate().take(operand_count) {
+            for (index, gather_slot) in gather_slots.iter().copied().enumerate().take(operand_count)
+            {
                 source.push_str(&format!(
                     "    long base{index} = u.operand_base[{index}];\n"
                 ));
@@ -2928,7 +2996,9 @@ fn push_batched_accumulate_loop(
     source.push_str("            }\n");
     source.push_str("        }\n");
     for index in 0..operand_count {
-        source.push_str(&format!("        walk{index} += {unroll} * advance{index};\n"));
+        source.push_str(&format!(
+            "        walk{index} += {unroll} * advance{index};\n"
+        ));
     }
     source.push_str("    }\n");
 }
@@ -2952,7 +3022,9 @@ pub(super) fn broadcast_epilogue_prefetch_unroll(
     let applies = unroll > 1
         && reduce_dims.len() == 1
         && !reduce_epilogue_is_identity(epilogue_body, epilogue_operands)
-        && epilogue_operands.iter().all(|(_, _, lookup)| lookup.is_none());
+        && epilogue_operands
+            .iter()
+            .all(|(_, _, lookup)| lookup.is_none());
     if !applies {
         return None;
     }
@@ -2990,8 +3062,9 @@ fn push_epilogue_scratch_and_invariant_reads(
     ));
     push_epilogue_operand_reads(
         source,
-        (0..operand_count)
-            .filter(|&index| epilogue_operand_is_loop_invariant(epilogue_operands, reduce_dims, index)),
+        (0..operand_count).filter(|&index| {
+            epilogue_operand_is_loop_invariant(epilogue_operands, reduce_dims, index)
+        }),
         &operand_aliases(epilogue_operands),
         rank,
         "    ",
@@ -3306,4 +3379,3 @@ pub(super) fn render_scan(
     source.push_str("}\n");
     Ok(source)
 }
-
