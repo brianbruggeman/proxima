@@ -1105,6 +1105,12 @@ fn f16_rows16_variant() -> AttentionVariant {
     variant
 }
 
+fn f16_rows16_simdgroup_rows_variant() -> AttentionVariant {
+    let mut variant = f16_rows16_variant();
+    variant.query_parallelism = omega::AttentionQueryParallelism::SimdgroupRows;
+    variant
+}
+
 fn f32_output_difference(left: &[u8], right: &[u8]) -> Value {
     assert_eq!(left.len(), right.len(), "attention output byte lengths");
     assert_eq!(left.len() % 4, 0, "attention output is packed f32");
@@ -1700,6 +1706,16 @@ async fn perf_granite_shared_kv_simdgroup_rows() {
         "f16_shared_kv_simdgroup_rows",
         Some(f16_variant()),
         f16_shared_kv_simdgroup_rows_variant(),
+        &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
+    );
+}
+
+#[proxima::test]
+async fn perf_granite_rows16_simdgroup_rows() {
+    run_variant_prefill_probe_shapes(
+        "f16_rows16_simdgroup_rows",
+        Some(f16_variant()),
+        f16_rows16_simdgroup_rows_variant(),
         &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
     );
 }
