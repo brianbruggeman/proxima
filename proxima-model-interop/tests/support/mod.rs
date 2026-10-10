@@ -27,6 +27,8 @@ use proxima_gguf::{
 use proxima_tensor::test_support::Lcg;
 use proxima_tokenizer::byte_level::byte_to_char;
 
+pub mod trial;
+
 /// The "in" dimension of every projection weight this fixture writes --
 /// exactly one `Q4_K`/`Q5_K`/`Q6_K` super-block (`QK_K == 256`) wide, so
 /// every row of every quantized weight is exactly one packed block, with
