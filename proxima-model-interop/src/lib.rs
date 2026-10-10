@@ -176,6 +176,13 @@ pub use serving_settings::{
     AdmissionScheduleSettings, CacheType, ExpertResidencyScheduleSettings, PhaseScheduleSettings,
     ServingSettings, WeightPrecisionRuleSettings,
 };
+#[cfg(all(
+    feature = "std",
+    feature = "metal",
+    feature = "metal-attn-variants",
+    target_os = "macos"
+))]
+pub use serving_settings::AttentionTileHeightSetting;
 #[cfg(all(feature = "std", feature = "proxima-storage"))]
 pub use source::{CheckpointMapping, CheckpointSourceError};
 pub use task::{ModelTask, TaskProfile, classify_task};
