@@ -1919,6 +1919,30 @@ async fn perf_granite_simdgroup_count_warmup_control_two_shapes_against_f16_lega
     );
 }
 
+#[proxima::test]
+async fn perf_granite_query_rows_warmup_control_two_shapes_against_f16_legacy() {
+    let baseline = f16_variant();
+    let selected = AttentionVariant {
+        query_parallelism: omega::AttentionQueryParallelism::SimdgroupRows,
+        ..baseline
+    };
+    assert_eq!(
+        AttentionVariant {
+            query_parallelism: omega::AttentionQueryParallelism::Legacy,
+            ..selected
+        },
+        baseline,
+        "the selected replay must change only query_parallelism"
+    );
+    run_granite_attention_measurement_with_warmup(
+        &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
+        Some(baseline),
+        selected,
+        "query_simdgroup_rows",
+        2,
+    );
+}
+
 
 #[proxima::test]
 async fn perf_granite_simdgroup_count_against_f16_legacy() {
