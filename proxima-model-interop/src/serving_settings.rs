@@ -5,7 +5,7 @@ use conflaguration::Settings;
     feature = "metal-attn-variants",
     target_os = "macos"
 ))]
-use omega::{AttentionSimdgroupCount, AttentionVariant};
+use omega::{AttentionSimdgroupCount, AttentionTileHeight, AttentionVariant};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::{DispatchType, MathMode};
 use proxima_gguf::types::GgmlType;
@@ -272,6 +272,15 @@ pub struct ServingSettings {
     #[setting(resolve_with = "from_name", default_str = "legacy")]
     #[builder(default = AttentionSimdgroupCount::Legacy)]
     pub attention_simdgroup_count: AttentionSimdgroupCount,
+    /// row count assigned to each cached-attention threadgroup.
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-attn-variants",
+        target_os = "macos"
+    ))]
+    #[setting(resolve_with = "from_name", default_str = "legacy")]
+    #[builder(default = AttentionTileHeightSetting::Legacy)]
+    pub attention_tile_height: AttentionTileHeightSetting,
     /// `ServingConfig::weight_precision`: ordered per-tensor recode rules, first match wins.
     #[setting(resolve_with = "from_json", default_str = "[]")]
     #[builder(default)]
@@ -419,12 +428,17 @@ impl ServingSettings {
                 feature = "metal-attn-variants",
                 target_os = "macos"
             ))]
-            attention_variant: match self.attention_simdgroup_count {
-                AttentionSimdgroupCount::Legacy => None,
-                simdgroup_count => Some(AttentionVariant {
-                    simdgroup_count,
-                    ..AttentionVariant::default()
-                }),
+            attention_variant: {
+                let mut variant = AttentionVariant::default();
+                variant.simdgroup_count = self.attention_simdgroup_count;
+                variant.tile_height = self.attention_tile_height.as_tile_height();
+                if variant.simdgroup_count == AttentionSimdgroupCount::Legacy
+                    && variant.tile_height == AttentionTileHeight::Legacy
+                {
+                    None
+                } else {
+                    Some(variant)
+                }
             },
             weight_precision,
             gdn_prefill_backend: self.gdn_prefill_backend,
@@ -853,6 +867,55 @@ epilogue_sources = true
             conflaguration::from_toml_str("attention_simdgroup_count = \"groups16\"");
         assert!(invalid.is_err(), "unsupported simdgroup counts are rejected");
     }
+
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-attn-variants",
+        target_os = "macos"
+    ))]
+    #[test]
+    fn attention_tile_height_setting_round_trips_and_reaches_serving_config() {
+        for (name, tile_height) in [
+            ("rows8", AttentionTileHeightSetting::Rows8),
+            ("rows16", AttentionTileHeightSetting::Rows16),
+        ] {
+            let setting = format!(
+                "attention_simdgroup_count = \"groups4\"\nattention_tile_height = \"{name}\""
+            );
+            let built = ServingSettings::builder()
+                .attention_simdgroup_count(AttentionSimdgroupCount::Groups4)
+                .attention_tile_height(tile_height)
+                .build();
+            round_trip::assert_three_ways(
+                &setting,
+                &[
+                    ("PROXIMA_SERVING_ATTENTION_SIMDGROUP_COUNT", "groups4"),
+                    ("PROXIMA_SERVING_ATTENTION_TILE_HEIGHT", name),
+                ],
+                &built,
+            );
+
+            let lowered = built
+                .as_serving_config(&[])
+                .attention_variant
+                .expect("an explicit tile height lowers to an attention variant");
+            assert_eq!(lowered.tile_height, tile_height.as_tile_height());
+            assert_eq!(lowered.simdgroup_count, AttentionSimdgroupCount::Groups4);
+            assert_eq!(lowered.mma_precision, omega::AttentionMmaPrecision::Legacy);
+        }
+
+        let default = ServingSettings::default();
+        assert_eq!(default.attention_tile_height, AttentionTileHeightSetting::Legacy);
+        assert!(
+            default.as_serving_config(&[]).attention_variant.is_none(),
+            "legacy tile height and count preserve the default dispatch"
+        );
+
+        let invalid: Result<ServingSettings, _> =
+            conflaguration::from_toml_str("attention_tile_height = \"rows32\"");
+        assert!(invalid.is_err(), "unsupported tile heights are rejected");
+    }
+
 
     #[test]
     fn serving_scalars_weight_precision_and_fallbacks_lower_and_round_trip() {

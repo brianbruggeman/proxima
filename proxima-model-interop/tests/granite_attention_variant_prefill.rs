@@ -22,7 +22,8 @@ use proxima_gguf::parse_complete;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{
-    GPU_LAYERS_ALL, InteropError, LoadedModel, PromptCacheConfig, ServingConfig, ServingSettings,
+    AttentionTileHeightSetting, GPU_LAYERS_ALL, InteropError, LoadedModel, PromptCacheConfig,
+    ServingConfig, ServingSettings,
     SpeculativeConfig,
 };
 use serde_json::{Value, json};
@@ -1970,6 +1971,46 @@ async fn perf_granite_rows8_vs_rows16_groups4() {
         "f16_rows8_vs_rows16_groups4",
         Some(baseline),
         selected,
+        &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
+        false,
+        true,
+    );
+}
+
+
+#[proxima::test]
+async fn perf_granite_serving_tile_height_rows8_vs_rows16_groups4() {
+    let rows8_settings = ServingSettings::builder()
+        .attention_simdgroup_count(AttentionSimdgroupCount::Groups4)
+        .attention_tile_height(AttentionTileHeightSetting::Rows8)
+        .build();
+    let rows16_settings = ServingSettings::builder()
+        .attention_simdgroup_count(AttentionSimdgroupCount::Groups4)
+        .attention_tile_height(AttentionTileHeightSetting::Rows16)
+        .build();
+    let rows8_config = rows8_settings.as_serving_config(&[]);
+    let rows16_config = rows16_settings.as_serving_config(&[]);
+    let rows8 = rows8_config
+        .attention_variant
+        .expect("Rows8 serving setting lowers to an attention variant");
+    let rows16 = rows16_config
+        .attention_variant
+        .expect("Rows16 serving setting lowers to an attention variant");
+
+    assert_eq!(rows8.tile_height, AttentionTileHeight::Rows8);
+    assert_eq!(rows16.tile_height, AttentionTileHeight::Rows16);
+    assert_eq!(rows8.simdgroup_count, AttentionSimdgroupCount::Groups4);
+    assert_eq!(rows16.simdgroup_count, AttentionSimdgroupCount::Groups4);
+    assert_eq!(rows8.mma_precision, rows16.mma_precision);
+    assert_eq!(rows8.kv_reuse, rows16.kv_reuse);
+    assert_eq!(rows8.query_parallelism, rows16.query_parallelism);
+    assert_eq!(rows8.simd_topology, rows16.simd_topology);
+    assert_eq!(rows8.prefetch, rows16.prefetch);
+
+    run_variant_prefill_probe_shapes_with_grid_requirement(
+        "serving_tile_height_rows8_vs_rows16_groups4",
+        Some(rows8),
+        rows16,
         &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
         false,
         true,
