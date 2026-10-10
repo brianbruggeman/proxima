@@ -64,3 +64,8 @@ The feature-only check
 `CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo check -p omega --features metal,metal-attn-variants,metal-attn-split-rows`
 also exited 0 after the final source changes. `git diff --check` returned no
 diagnostics.
+
+
+## Path-context diagnosis follow-up
+
+A later bounded probe compared the same executable bytes in the Cargo `deps` directory and child directories. Direct executables in `/private/tmp/cargo_target/debug/deps` stalled in `--list` and `codesign --verify`; the identical executable in a new child directory under that target completed `--list` in 0.427 seconds and code-sign verification in 0.063 seconds. A fresh `/private/tmp` child completed `--list` in 0.455 seconds. `/tmp` resolves to `/private/tmp`, all locations are on the same device, and the `deps` directory had 65,535 entries. This isolates the direct flat `deps` directory context as the trigger; the dyld/macOS sub-operation remains unexplained. Detailed command output is recorded in `evidence/card12-revalidation-2026-10-10.md`.
