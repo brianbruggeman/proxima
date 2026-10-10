@@ -1,0 +1,11 @@
+
+running 1 test
+granite ab arm nominal=256 actual=256 arm=legacy samples=20 resource=cell label=legacy wall_ms=2.312 cpu_ms=0.631 cpu_pct=27.3 rss_peak_mb=1509.6 footprint_mb=116.6 gpu_alloc_mb=1418.9 load_before=3.52 load_after=3.52
+granite ab arm nominal=256 actual=256 arm=topology_per_head samples=20 resource=cell label=topology_per_head wall_ms=2.397 cpu_ms=0.622 cpu_pct=25.9 rss_peak_mb=1509.6 footprint_mb=116.6 gpu_alloc_mb=1418.9 load_before=3.52 load_after=3.52
+granite ab arm nominal=971 actual=972 arm=legacy samples=20 resource=cell label=legacy wall_ms=7.035 cpu_ms=0.647 cpu_pct=9.2 rss_peak_mb=1684.8 footprint_mb=257.3 gpu_alloc_mb=1563.9 load_before=3.52 load_after=3.52
+granite ab arm nominal=971 actual=972 arm=topology_per_head samples=20 resource=cell label=topology_per_head wall_ms=6.968 cpu_ms=0.649 cpu_pct=9.3 rss_peak_mb=1684.8 footprint_mb=257.3 gpu_alloc_mb=1563.9 load_before=3.52 load_after=3.52
+granite ab report=/private/tmp/proxima-granite-main/proxima-tensor/specs/granite-attention-variant-performance/evidence/card23-per-head-run2-report.json
+test perf_granite_per_head_topology_warmup_control_two_shapes_against_f16_legacy ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 14.09s
+

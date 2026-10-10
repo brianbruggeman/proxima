@@ -1,0 +1,3 @@
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-granite-main/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.07s
+  Executable tests/granite_attention_variant_prefill.rs (/tmp/cargo_target/debug/deps/granite_attention_variant_prefill-4c29247f309c5b09)

@@ -177,8 +177,11 @@ def validate_arm(arm: dict, name: str, selected_name: str, shape_index: int, act
             require(entry.endswith(f"_{selected_name}"), f"{where} entry lacks _{selected_name} suffix")
         else:
             require(not entry.endswith(f"_{selected_name}"), f"{where} legacy entry has _{selected_name} suffix")
-    elif selected_name == "query_simdgroup_rows":
-        suffix = "_query_simdgroup_rows"
+    elif selected_name in ("query_simdgroup_rows", "topology_per_head"):
+        suffix = {
+            "query_simdgroup_rows": "_query_simdgroup_rows",
+            "topology_per_head": "_simd_per_head",
+        }[selected_name]
         require(arm["grid"].get("threadgroup_width") == 64, f"{where} threadgroup width must remain 64")
         if name == selected_name:
             require(entry.endswith(suffix), f"{where} entry lacks {suffix} suffix")
@@ -272,7 +275,7 @@ def validate_shape(shape: dict, shape_index: int, selected_name: str) -> tuple[i
 def validate_report(report: dict, expected_shapes: int, selected_name: str = DEFAULT_SELECTED_ARM) -> tuple[int, int]:
     require(isinstance(report, dict), "report must be an object")
     validate_provenance(report)
-    if selected_name.startswith("simdgroups") or selected_name == "query_simdgroup_rows":
+    if selected_name.startswith("simdgroups") or selected_name in ("query_simdgroup_rows", "topology_per_head"):
         require(report.get("selected_arm") == selected_name, "selected simdgroup count metadata mismatch")
     shapes = array_field(report, "shapes", "report")
     require(len(shapes) == expected_shapes, f"report must have {expected_shapes} shapes")
@@ -324,18 +327,22 @@ def reject_mutations(report: dict, expected_shapes: int, selected_name: str) -> 
         lambda record: record.pop("device_description"),
         reorder_resource_fields,
     ]
-    if selected_name.startswith("simdgroups") or selected_name == "query_simdgroup_rows":
+    if selected_name.startswith("simdgroups") or selected_name in ("query_simdgroup_rows", "topology_per_head"):
+        suffix = {
+            "query_simdgroup_rows": "_query_simdgroup_rows",
+            "topology_per_head": "_simd_per_head",
+        }.get(selected_name, f"_{selected_name}")
         mutations.append(
-            lambda record: record["shapes"][0]["arms"][1].update(entry=record["shapes"][0]["arms"][1]["entry"].removesuffix(
-                "_query_simdgroup_rows" if selected_name == "query_simdgroup_rows" else f"_{selected_name}"
-            ))
+            lambda record: record["shapes"][0]["arms"][1].update(
+                entry=record["shapes"][0]["arms"][1]["entry"].removesuffix(suffix)
+            )
         )
     rejected = 0
     for mutation in mutations:
         changed = copy.deepcopy(report)
         mutation(changed)
         try:
-            validate_report(changed, expected_shapes)
+            validate_report(changed, expected_shapes, selected_name)
         except ReportError:
             rejected += 1
     return rejected
@@ -347,7 +354,7 @@ def main() -> int:
     parser.add_argument("--negative-controls", action="store_true")
     parser.add_argument(
         "--selected-arm",
-        choices=("shared_k", "simdgroups2", "simdgroups4", "simdgroups8", "query_simdgroup_rows"),
+        choices=("shared_k", "simdgroups2", "simdgroups4", "simdgroups8", "query_simdgroup_rows", "topology_per_head"),
         default=DEFAULT_SELECTED_ARM,
     )
     parser.add_argument("report", type=pathlib.Path)
@@ -357,7 +364,7 @@ def main() -> int:
         report = json.loads(original)
         positive, negative = validate_report(report, arguments.expected_shapes, arguments.selected_arm)
         if arguments.negative_controls:
-            expected_controls = 13 if arguments.selected_arm.startswith("simdgroups") or arguments.selected_arm == "query_simdgroup_rows" else 12
+            expected_controls = 13 if arguments.selected_arm.startswith("simdgroups") or arguments.selected_arm in ("query_simdgroup_rows", "topology_per_head") else 12
             rejected = reject_mutations(report, arguments.expected_shapes, arguments.selected_arm)
             require(rejected == expected_controls, f"only {rejected} of {expected_controls} negative controls were rejected")
             require(arguments.report.read_bytes() == original, "negative controls changed the original report")

@@ -1,15 +1,15 @@
-run=1 positive
+run=1 positive (selected arm passed explicitly)
 prompt_shapes=2 arms=4 samples_per_arm=20 resource_cells=4 matching_pairs=2 errors=0
 round_differences_positive=40 negative=0 zero=0
-run=1 negative-controls
+run=1 negative-controls (selected arm passed explicitly)
 negative_controls=13 rejected=13
-run=2 positive
+run=2 positive (selected arm passed explicitly)
 prompt_shapes=2 arms=4 samples_per_arm=20 resource_cells=4 matching_pairs=2 errors=0
 round_differences_positive=40 negative=0 zero=0
-run=2 negative-controls
+run=2 negative-controls (selected arm passed explicitly)
 negative_controls=13 rejected=13
-run=3 positive
+run=3 positive (selected arm passed explicitly)
 prompt_shapes=2 arms=4 samples_per_arm=20 resource_cells=4 matching_pairs=2 errors=0
 round_differences_positive=40 negative=0 zero=0
-run=3 negative-controls
+run=3 negative-controls (selected arm passed explicitly)
 negative_controls=13 rejected=13
