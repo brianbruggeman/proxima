@@ -3050,6 +3050,10 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
 pub enum LayerCacheRoots {
     Attention(CachedLayerRoots),
     DenseAttention(DenseAttentionRoots),
+    /// The LFM short-convolution history produced by the cached mixer step.
+    ShortConv {
+        state_out: NodeId,
+    },
     Ssm {
         qkv_mixed: NodeId,
         state_out: NodeId,

@@ -982,6 +982,14 @@ pub(super) type TwoRangeForwardProgram = (
     alloc::vec::Vec<NodeId>,
 );
 
+pub(super) type TwoRangeLayerRootForwardProgram = (
+    Vec<Op>,
+    NodeId,
+    Vec<LayerCacheRoots>,
+    MoeSites,
+    alloc::vec::Vec<NodeId>,
+);
+
 #[allow(clippy::too_many_arguments)]
 pub fn scheduled_two_range_cached_forward_program_with_experts(
     vocab: u32,
@@ -1052,17 +1060,78 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
     sliding_kv_ring: bool,
     head_repeats: u32,
 ) -> Result<TwoRangeForwardProgram, TensorError> {
+    let (program, logits, layer_roots, moe_sites, duplicate_head_roots) =
+        scheduled_two_range_cached_forward_program_with_layer_roots(
+            vocab,
+            embedding,
+            feed_forward,
+            expert_feed_forward,
+            query_heads,
+            block_count,
+            expert_count,
+            expert_used_count,
+            leading_dense_block_count,
+            schedule,
+            embedding_scale,
+            logit_softcap,
+            last_row_only,
+            ple_dim,
+            sliding_kv_ring,
+            0,
+            head_repeats,
+        )?;
+    let mut cache_roots = Vec::with_capacity(layer_roots.len());
+    for roots in layer_roots {
+        match roots {
+            LayerCacheRoots::Attention(roots) => cache_roots.push(roots),
+            LayerCacheRoots::SharedFromLayer(_) => {}
+            LayerCacheRoots::DenseAttention(_)
+            | LayerCacheRoots::ShortConv { .. }
+            | LayerCacheRoots::Ssm { .. } => {
+                return Err(TensorError::UnsupportedInBuilder {
+                    builder: "scheduled_two_range_cached_forward_program_with_experts_and_head_repeats",
+                    feature: "non-attention cache root in the legacy tuple result",
+                });
+            }
+        }
+    }
+    Ok((program, logits, cache_roots, moe_sites, duplicate_head_roots))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
+    vocab: u32,
+    embedding: u32,
+    feed_forward: u32,
+    expert_feed_forward: u32,
+    query_heads: u32,
+    block_count: u32,
+    expert_count: u32,
+    expert_used_count: u32,
+    leading_dense_block_count: u32,
+    schedule: &[LayerSchedule],
+    embedding_scale: Option<EmbeddingScale>,
+    logit_softcap: Option<f32>,
+    last_row_only: bool,
+    ple_dim: Option<u32>,
+    sliding_kv_ring: bool,
+    short_conv_cache_len: u32,
+    head_repeats: u32,
+) -> Result<TwoRangeLayerRootForwardProgram, TensorError> {
     if schedule.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
             expected: block_count,
             found: schedule.len(),
         });
     }
-    if schedule.iter().any(|entry| entry.kind != LayerKind::Attention) {
+    if schedule.iter().any(|entry| entry.kind == LayerKind::Gdn) {
         return Err(TensorError::UnsupportedInBuilder {
             builder: "scheduled_two_range_cached_forward_program_with_experts",
-            feature: "LayerKind::ShortConv (no two-range cache-state contract yet)",
+            feature: "LayerKind::Gdn",
         });
+    }
+    if short_conv_cache_len == 0 && schedule.iter().any(|entry| entry.kind == LayerKind::ShortConv) {
+        return Err(TensorError::InvalidConvConfig { l_cache: short_conv_cache_len });
     }
     if sliding_kv_ring {
         let mut windows = schedule
@@ -1175,7 +1244,7 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
         cached_masks.push(pair);
     }
 
-    let mut cache_roots: Vec<CachedLayerRoots> = Vec::with_capacity(block_count as usize);
+    let mut cache_roots: Vec<LayerCacheRoots> = Vec::with_capacity(block_count as usize);
     let mut moe_sites: Vec<MoeSite> = Vec::new();
     // One slot per block, populated only for a layer that owns a real
     // `K`/`V` projection and its own `kv_cache.{layer}.*` leaves -- a later
@@ -1187,18 +1256,13 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
     // the cacheless path (`attention_forward.rs`'s own doc on it). See
     // [`StoredSharedKv`] for what each field carries.
     let mut stored_kv: Vec<Option<StoredSharedKv>> = alloc::vec![None; block_count as usize];
+    let mut attention_resource_index = 0usize;
 
     for (layer, entry) in schedule.iter().enumerate() {
         let layer = layer as u32;
         let config = &entry.attention;
         let ffn_config = &entry.ffn;
-        let resources = &attention_resources[layer as usize];
         let (is_future_cached, neg_infinity_cached) = cached_masks[layer as usize];
-
-        let head_dim = config.head_dim;
-        let kv_heads = config.kv_heads;
-        let pairs = head_dim / 2;
-        let group = resources.group;
 
         let attn_norm_weight = input_leaf(
             &mut program,
@@ -1227,6 +1291,104 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
                 Some(ple_layer_input(&mut program, shared, layer)?);
         }
 
+        if entry.kind == LayerKind::ShortConv {
+            let in_proj = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding * 3), Extent::Static(embedding)],
+                &alloc::format!("blk.{layer}.shortconv.in_proj.weight"),
+            );
+            let b_proj_map = alloc::format!("d+0@{embedding},i->di");
+            let b_proj = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Identity,
+                &[(in_proj, b_proj_map.as_str())],
+            )?;
+            let c_proj_map = alloc::format!("d+{embedding}@{embedding},i->di");
+            let c_proj = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Identity,
+                &[(in_proj, c_proj_map.as_str())],
+            )?;
+            let x_offset = embedding * 2;
+            let x_proj_map = alloc::format!("d+{x_offset}@{embedding},i->di");
+            let x_proj = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Identity,
+                &[(in_proj, x_proj_map.as_str())],
+            )?;
+            let conv_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(short_conv_cache_len)],
+                &alloc::format!("blk.{layer}.shortconv.conv.weight"),
+            );
+            let out_proj = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(embedding)],
+                &alloc::format!("blk.{layer}.shortconv.out_proj.weight"),
+            );
+            let state_in = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(short_conv_cache_len)],
+                &alloc::format!("shortconv_cache.{layer}.history"),
+            );
+            let roll_indices = input_leaf(
+                &mut program,
+                DType::Int32,
+                alloc::vec![Extent::Static(short_conv_cache_len)],
+                &alloc::format!("shortconv_cache.{layer}.roll_indices"),
+            );
+            let (post_mixer, state_out) = append_short_conv_cached_mixer_step(
+                &mut program,
+                x,
+                inv_dim,
+                eps,
+                attn_norm_weight,
+                b_proj,
+                c_proj,
+                x_proj,
+                conv_weight,
+                out_proj,
+                state_in,
+                cached_len,
+                roll_indices,
+                short_conv_cache_len,
+            )?;
+            x = append_layer_ffn(
+                &mut program,
+                layer,
+                post_mixer,
+                ffn_norm_weight,
+                embedding,
+                feed_forward,
+                expert_feed_forward,
+                expert_count,
+                expert_used_count,
+                leading_dense_block_count,
+                ones,
+                inv_dim,
+                eps,
+                ffn_config,
+                ple_layer_inputs[layer as usize],
+                ple_dim.unwrap_or(0),
+                &mut moe_sites,
+            )?;
+            cache_roots.push(LayerCacheRoots::ShortConv { state_out });
+            continue;
+        }
+
+        let resources = &attention_resources[attention_resource_index];
+        attention_resource_index += 1;
+        let head_dim = config.head_dim;
+        let kv_heads = config.kv_heads;
+        let pairs = head_dim / 2;
+        let group = resources.group;
 
         let wq = input_leaf(
             &mut program,
@@ -1434,8 +1596,9 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
         // default for a layer this engine's cache does not cover" shape
         // `descriptor::build_forward`'s own `CacheStrategy::Cacheless` arm
         // already sets for `cache_roots` as a whole.
-        if shared_source.is_none() {
-            cache_roots.push(layer_roots);
+        match shared_source {
+            Some(source) => cache_roots.push(LayerCacheRoots::SharedFromLayer(source)),
+            None => cache_roots.push(LayerCacheRoots::Attention(layer_roots)),
         }
     }
 
