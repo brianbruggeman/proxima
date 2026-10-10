@@ -33,12 +33,14 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update its c
 
 | 17 | [card](cards/17-groups4-warmup-two-shape-replay.md) | 16 | check the warmup-controlled Groups4 count cell at both Granite prompt lengths through the serving setting | compile the focused integration binary; run copied test three times serially with `PROXIMA_SERVING_ATTENTION_SIMDGROUP_COUNT=groups4`; check 2-shape reports and 13 controls | Each run selects 1 test, passes 1, filters 31; 2 shapes × 2 warmup pairs × 2 arms and 20 measured pairs × 2 arms; complete output and ID equality per shape | [x] | Three serial Metal runs passed and each report passed its positive checker and rejected all 13 negative controls. Actual 256/972-token output hashes and IDs matched between F16-MMA/F32-KV Legacy and configured Groups4 in all six pairs. Groups4 p50 was lower in all six cells; the 972-token run1 p99 and mixed paired signs remain counter-evidence; timing mechanism unexplained. Reports, logs, full sample arrays, hashes, entry/source identities, grids and resources: Card 17. |
 
+| 18 | [card](cards/18-warmup-groups2-groups8-two-shape.md) | 17 | compare the remaining supported simdgroup counts using Card17's warmup protocol at both Granite prompt lengths | compile once; run three serial Groups2 and three serial Groups8 processes through the setting; positively check each report and reject all 13 negative controls | Each run selects 1 test, passes 1, filters 32; 2 shapes × 2 warmup pairs × 2 arms and 20 measured pairs × 2 arms; complete output and ID equality per shape | [x] | Six serial invocations passed; all six reports passed positive checks and rejected 13/13 negative controls. Actual 256/972-token outputs and IDs `[322]` matched in each pair. Groups2 paired signs remain mixed, with p50 directions varying across processes. Groups8 selected p50 is higher in all six cells, with 20/20 positive paired rounds in five and 18/2 in the other short cell. Captured MSL changes Groups8 to 256 threads and one depth/key fragment per group; timing cause remains unexplained. Raw per-round data, hashes, grids, resources, load context, and source captures are in Card18/evidence. |
+
 ## resume
 
-Last completed slice: Card 17 warmup-controlled configured Groups4 versus F16-MMA/F32-KV sized Legacy at actual 256 and 972 tokens, across three serial processes.
-Current slice: Card 18 applies the same warmup and two-shape protocol to Groups2 and Groups8.
-Next action: run three Groups2 and three Groups8 processes serially, check all reports and negative controls, and compare their source and raw timing payloads with Card17.
-Open question, if any: Groups4 has lower p50 in all six cells, while the 972-token p99 and paired-sign records include reversals; no timing cause is established.
+Last completed slice: Card 18 warmup-controlled Groups2 and Groups8 against F16-MMA/F32-KV sized Legacy at actual 256 and 972 tokens.
+Current slice: complete through Card 18.
+Next action: none for this count-sweep card.
+Open question, if any: what kernel-level effect produces the Groups4 timing distribution and Groups8 slowdown; captured source establishes the schedule changes but not the timing cause.
 
 ## struck
 
