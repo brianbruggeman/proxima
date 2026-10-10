@@ -130,7 +130,10 @@ pub use generate::{
     SpeculativeDecodeStats, SpeculativeTypeStats, TokenEvent,
 };
 #[cfg(feature = "std")]
-pub use hf_bind::{names as hf_names, node_names as hf_node_names, permute_rope_rows};
+pub use hf_bind::{
+    bind_safetensors_program_leaves, names as hf_names, node_names as hf_node_names,
+    permute_rope_rows,
+};
 pub use hf_config::{
     HfConfig, architecture_from_hf_config, lfm_layer_kinds_from_manifest, parse_hf_config,
 };

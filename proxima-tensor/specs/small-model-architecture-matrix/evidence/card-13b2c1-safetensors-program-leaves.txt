@@ -1,0 +1,79 @@
+Card 13b2c1 acceptance evidence
+
+Host: Darwin MacBookPro.attlocal.net 24.6.0 arm64
+Compiler: rustc 1.99.0 (b940084d7 2026-09-28)
+Cargo: cargo 1.99.0 (5f94df478 2026-08-27)
+
+Command:
+env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-model-interop --features std --test safetensors_program_leaves architecture_matrix_safetensors_program_leaves -- --nocapture
+
+Output:
+Finished `test` profile [unoptimized + debuginfo] target(s) in 7.19s
+Running tests/safetensors_program_leaves.rs
+
+running 1 test
+dtypes=3 bound_leaves=9 runtime_inputs_skipped=3 packed_matmuls=2 native_decodes=4 f32_transposes=1 alias_matches=3 evaluated_matmuls=3 decode_rules=1 extra_weights=1 overlapping_ranges_rejected=1 native_f32_borrows=1 misaligned_f32_decodes=1 missing_weights_rejected=1 wrong_axes_rejected=1 dtype_byte_length_rejected=1 short_payload_rejected=1 offset_overflow_rejected=1 part_alias_rejected=1 join_alias_rejected=1 gathered_role_rejected=1 symbolic_weight_rejected=1
+test architecture_matrix_safetensors_program_leaves ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Exit status: 0
+
+`git diff --check` emitted no diagnostics; exit status 0.
+
+Scope: synthetic safetensors tensors exercise the generic binder and Proxima CPU evaluator. These records show binding and exact fixture outputs; they do not establish model invocation, model quality, or runtime parity.
+
+Review rerun before fixture correction (2026-10-10):
+Command:
+env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-model-interop --features std --test safetensors_program_leaves architecture_matrix_safetensors_program_leaves -- --nocapture
+Output:
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-model-matrix/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.27s
+     Running tests/safetensors_program_leaves.rs (/tmp/cargo_target/debug/deps/safetensors_program_leaves-2da3e7ce498d75cb)
+
+running 1 test
+
+thread 'architecture_matrix_safetensors_program_leaves' (87372547) panicked at proxima-model-interop/tests/safetensors_program_leaves.rs:365:18:
+configured f16 decode is owned as f32
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test architecture_matrix_safetensors_program_leaves ... FAILED
+
+failures:
+
+    architecture_matrix_safetensors_program_leaves
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p proxima-model-interop --test safetensors_program_leaves`
+Exit status: 101
+
+Corrected fixture rerun (2026-10-10):
+Command:
+env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-model-interop --features std --test safetensors_program_leaves architecture_matrix_safetensors_program_leaves -- --nocapture
+Output:
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-model-matrix/proxima-model-interop)
+error[E0614]: type `Codec` cannot be dereferenced
+   --> proxima-model-interop/tests/safetensors_program_leaves.rs:331:24
+    |
+331 |             assert_eq!(*codec, expected_codec);
+    |                        ^^^^^^ can't be dereferenced
+
+For more information about this error, try `rustc --explain E0614`.
+error: could not compile `proxima-model-interop` (test "safetensors_program_leaves") due to 1 previous error
+Exit status: 101
+
+Corrected fixture compile rerun (2026-10-10):
+Command:
+env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-model-interop --features std --test safetensors_program_leaves architecture_matrix_safetensors_program_leaves -- --nocapture
+Output:
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-model-matrix/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.49s
+     Running tests/safetensors_program_leaves.rs (/tmp/cargo_target/debug/deps/safetensors_program_leaves-2da3e7ce498d75cb)
+
+running 1 test
+dtypes=3 bound_leaves=9 runtime_inputs_skipped=3 packed_matmuls=2 native_decodes=4 f32_transposes=1 alias_matches=3 evaluated_matmuls=3 decode_rules=1 extra_weights=1 overlapping_ranges_rejected=1 native_f32_borrows=1 misaligned_f32_decodes=1 missing_weights_rejected=1 wrong_axes_rejected=1 dtype_byte_length_rejected=1 short_payload_rejected=1 offset_overflow_rejected=1 part_alias_rejected=1 join_alias_rejected=1 gathered_role_rejected=1 symbolic_weight_rejected=1
+test architecture_matrix_safetensors_program_leaves ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+Exit status: 0
