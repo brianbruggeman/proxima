@@ -1,0 +1,119 @@
+# small-model-architecture-matrix
+
+status: draft
+owner: brian
+created: 2026-10-09
+
+## problem
+
+Proxima's small-model trial set lacks executable coverage for the requested LFM, Sori, Nanbeige, MiniCPM/OpenBMB, Nemotron, Granite 4, and Gemma 4 E2B checkpoint families, so architecture support and request viability will be measured by executing pinned checkpoint revisions through the Proxima loader and the ant, hippo, soliloquy, and paris requests.
+
+## refutation condition
+
+If every listed checkpoint already loads and executes its intended request through Proxima with retained output payloads and its architecture parameters round-trip through the existing conflaguration surface, adding this matrix would duplicate existing capability.
+
+## requirements
+
+| id | requirement | testable in isolation |
+|---|---|---|
+| R1 | Each requested family maps to pinned checkpoint IDs, revisions, licenses, parameter counts, modality, base/post-trained status, and an architecture description from its upstream config/model card. | yes |
+| R2 | Checkpoint metadata determines architecture identity and structural topology; runtime configuration cannot override those facts. | yes |
+| R3 | Every supported architecture exposes its legal runtime implementation choices through typed `conflaguration::{Settings, Validate}`, serde file/environment loading, and a fluent builder; these settings cannot replace checkpoint-derived topology. | yes |
+| R4 | Each checkpoint with readable weights has an attempted Proxima load-and-request trial retaining input IDs/modal payload descriptors, load/bind result, generated/task output payload, exact error if any, and reference comparison where an upstream executable exists; an inaccessible checkpoint records the exact access attempt and no fabricated invocation. | yes |
+| R5 | Trial evidence separately answers: can the request be completed, are outputs semantically coherent under the named task rubric, and do numeric outputs agree with an independent reference at the named boundary. | yes |
+| R6 | Architecture implementation is shared by topology and operator where semantics match, with separate kernels/state contracts where they do not; no family label alone justifies a duplicate primitive. | yes |
+| R7 | The trial matrix includes every family named by the owner and records unsupported modality/path outcomes as explicit typed results rather than silently skipping them. | yes |
+| R8 | Existing uncommitted work is preserved; every landed implementation slice is one coherent commit and is pushed to `origin/main` under the owner's standing authorization. | yes |
+| R9 | Each public checkpoint trial retains one tokenizer-verified full-request prefill record with raw timing and resource samples, correctness status, throughput, latency percentiles, real-client latency, CPU, RSS, errors, CoV, and host/loadout provenance; gated Sori has no prefill claim. | yes |
+| R10 | Both Granite 4 base checkpoints receive paired full-prefill comparisons against a pinned baseline at two tokenizer-verified prompt sizes with identical IDs and output gates; isolated attention-dispatch replay is reported separately. | yes |
+| R11 | A Granite dispatch optimization uses captured input/bind/grid/output payloads and a single implementation-variable forward/reverse toggle; retain or roll back from the paired raw data, with no presumed speedup. | yes |
+
+## architecture
+
+On current `origin/main`, model execution is assembled by HF/GGUF parsing, embedded family profiles and architecture-specific bind functions into `proxima_tensor::spec::ModelDescriptor` and a forward program. There is no `ArchitectureRegistry` module. Structural values such as layer ordering, expert counts, head sizes, convolution/state dimensions, shared-layer loop counts, and modality towers must be derived from checkpoint metadata and validated against tensor names/shapes. `ModelDescriptor` already derives conflaguration `Settings` under the `config` feature; family-specific execution settings belong in that surface only where they select a legal implementation choice and do not override parsed topology.
+
+The architecture matrix must distinguish these candidates. The revision pins below are discovery anchors; every parameter and training claim is taken only from the corresponding pinned config/card and tensor index recorded in `inventory.jsonl`.
+
+| family | trial checkpoint candidate | structural difference to exercise | trial disposition |
+|---|---|---|---|
+| LFM text | `LiquidAI/LFM2.5-1.2B-Base` at `7453bca97ca1e67754c4035a4b4c584e1c9dd725` | LFM2 short-convolution and GQA blocks; inspect exact `layer_types`/tensor schedule | four owner requests |
+| LFM vision | `LiquidAI/LFM2.5-VL-3B` at `35a118d938ce6d123ac2d371649f24a8efb69058` | 27-layer SigLIP2 vision tower, projector, and a distinct 30-layer LFM2 text backbone; image tiling/patch placement comes from pinned config | image request plus text control |
+| LFM audio | `LiquidAI/LFM2.5-Audio-1.5B` at `c362a0625dfe45aa588dce5f0ada28a7e5707628` | 16 kHz/128-feature audio frontend, 17-layer encoder, tied six-layer DepthFormer, 16-layer LFM2 text decoder, and interleaved text/audio output | audio request |
+| Sori | `snkii/Sori-1B` at `125455cd7876eaaf985747923255401146300957` | audio encoder/projector and LFM2.5 language component per public metadata; gated weights | audio request only if authenticated account receives repository approval |
+| Nanbeige | `Nanbeige/Nanbeige4.2-3B-Base` at `4a38e817c14b9f2c4b69b1e05cbda90395872f6b` | `nanbeige` checkpoint metadata and tensor names determine whether looped execution differs from the earlier Llama-shaped Nanbeige base | four owner requests |
+| MiniCPM | `openbmb/MiniCPM5-1B-Base` at `156170697656c48f69915b33a2fb44110242187c` | Llama-compatible GQA with explicit 128-wide heads (not `hidden_size / num_attention_heads`), 16/2 Q/KV heads, RoPE theta 5000000, and two EOS IDs; this pinned base config has no MiniCPM scales or LongRoPE | four owner requests |
+| OpenBMB distinct architecture | `openbmb/MiniCPM-SALA` at `9180fe1db74f71fb81bc7105efe88f6b19c959b0` | 25% InfLLM-v2 sparse attention + 75% Lightning Attention; 9B-scale and continued-training provenance | four owner requests; report size/provenance separately |
+| Nemotron | `nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16` at `dfaf35de3e30f1867dd8dbc38a7fc9fb52d3914f` | Nemotron-H/Mamba2 + attention + expert layer schedule and recurrent cache state | four owner requests; report checkpoint training stage |
+| Granite 4 Micro | `ibm-granite/granite-4.0-micro-base` at `98e1d641451818f6c8e6b17c1c359b5b4ac495d0` | all-attention RoPE schedule, no experts in the pinned config despite the shared `granitemoehybrid` model type | four owner requests |
+| Gemma 4 E2B | `google/gemma-4-E2B` at `d29ff6b45f081a49ee2733a859c9c9c2d95d1a6f` | pretrained base; 2.3B effective but 5.1B total incl. per-layer embeddings, so it only fits a ≤4B effective-parameter limit; 35 text layers with sliding/global attention, PLE, 16-layer vision encoder, and 12-layer audio encoder | text, image, audio, and video trial; released 2026-03-31, before the July 2026 release cutoff |
+| Granite 4 H-Tiny MoE | `ibm-granite/granite-4.0-h-tiny-base` at `f95c8e83b06c12f877486f18d2e2d109ab252bd0` | Mamba/attention schedule and routed experts | four owner requests and routed-expert output capture |
+
+The four owner requests are the existing ant, hippo, soliloquy, and paris payloads in `gemma4_ring_parity.rs`. Every text-capable checkpoint runs all four and one coding request with a hand-checkable output contract. Modality checkpoints also run a fixed image or audio payload and retain the exact bytes/hash and decoded model input. The word “tried” means a retained invocation record for the pinned checkpoint through Proxima; a model-card summary or successful download does not count. Sori's gated artifact is presently unavailable to this authenticated account; no actual Sori invocation may be claimed until the repository grants access. Candidates above 4B total remain in the architecture survey because the owner named them explicitly; their parameter and active-parameter counts stay visible and are not presented as meeting the earlier ≤4B preference.
+
+The request ledger uses JSON version 1 with required top-level fields `version`, `case`, `checkpoint`, `input`, `proxima`, `result`, `semantic`, and `numeric`. `checkpoint` contains `repo`, a full 40-character lowercase hexadecimal immutable revision, `config_sha256`, and `weights_sha256` (`null` only for access-only records). `input` is discriminated by `kind`: `text` requires a nonempty prompt hash, nonempty nonnegative `token_ids`, and token-ID hash; ``image`, `audio`, or `video` requires payload hash, source format, and decoded-input descriptor/hash. `proxima` contains load, bind, and invocation statuses (`completed|failed|not_attempted`) plus `invocation`, which is null exactly when invocation is `not_attempted`, otherwise `{call_id, request_sha256, output_sha256}`. `call_id` and `request_sha256` are required for both completed and failed calls; `output_sha256` is a hash for completed calls and null for failed calls. Load, bind, and invocation follow that order: failed or unattempted load forbids bind and invocation; failed or unattempted bind forbids invocation. `result` is exactly a completed output `{status, generated_ids, output_utf8_sha256}` or typed failure `{status, stage, code, message}`. Completed output requires completed invocation and at least one generated ID; typed failure requires the matching failed stage and preserves nonempty exact stage/code/message. `semantic` always carries rubric and either coherent/incoherent status with evidence hash, or unavailable status with reason if there is no output. `numeric` always carries boundary and either matched/mismatched status with comparator name, absolute/relative tolerances, reference runtime/revision, reference payload artifact path/hash, and output payload artifact path/hash, or unavailable status with reason. Supported comparators are `sha256_exact_v1` and `f32_le_allclose_v1`. The former compares raw payload hashes and requires zero tolerances; `matched` requires equal hashes and `mismatched` requires unequal hashes. The latter interprets each artifact as a little-endian f32 vector with explicit nonempty shapes; shapes must agree for a match, all values must be finite, and every element must satisfy `abs(output-reference) <= atol + rtol*abs(reference)`. Numeric comparison requires output and all reference fields; hashes identify the raw payloads, while comparator and tolerances explain whether differing payload bytes still compare as matched. Access-only records require null weight hash, all Proxima stages `not_attempted`, null invocation, typed failure at `access`, and unavailable semantic/numeric results. Hashes are 64 lowercase hexadecimal characters; identifiers, artifact paths, and text fields are nonempty; tolerances are finite nonnegative numbers. These rules are enforced by the same validator used for trial records, not inferred from row counts.
+
+Conflaguration owns serializable/runtime settings and implementation toggles, not checkpoint topology. In the retained Granite 3.1 1B A400M Instruct Q8_0 attention-dispatch replay, SharedK took longer than legacy in all 40 paired samples across actual 256/972-token shapes (`proxima-tensor/specs/granite-attention-variant-performance/TASKS.md:9`). The signed quantity was SharedK time minus legacy time, so all 40 deltas were positive. Those are isolated Metal dispatch samples, not full Granite 4 prefill times. This matrix will record full-request prefill separately, including raw paired samples and correctness; it must report measured better, measured worse, or unresolved per cell without inferring a whole-request speedup from the older result.
+
+The Granite 4 prefill incumbent is `ggml-org/llama.cpp` commit `f1ea206218210afb913ae2f5d2c51faed35915da`, built from the checked-out source with the Metal backend and recorded binary SHA. It must consume the same official IBM BF16 GGUF bytes as Proxima in each cell: `ibm-granite/granite-4.0-micro-base-GGUF` at `4a6c034845e314924ab1e64e183a1454ff1ea159`, file `granite-4.0-micro-base-bf16.gguf`; and `ibm-granite/granite-4.0-h-tiny-base-GGUF` at `27f75056a8aabab6377df1d9dd4f37c9b1fbe14`, file `granite-4.0-h-tiny-base-bf16.gguf`. Each record retains the file SHA256, tokenizer revision/hash, llama.cpp build flags, binary SHA256, and prompt IDs. This fixes the two baseline revisions counted by AC10.
+
+The Granite Micro dispatch ablation changes exactly one `AttentionVariant` field: `tile_height` from `AttentionTileHeight::Legacy` (the existing size rule) to `AttentionTileHeight::Rows16`; all other fields remain `AttentionVariant::default()`. The forward arm selects Rows16 and the reverse arm returns to Legacy. Capture the actual selected entry, grid, resource use, and output on both shapes before timing. The typed selector and mapping are defined in `omega/src/msl/signature_tokens_prelude.rs:1696-1717,1761-1770,1825-1882`.
+
+Settings must have defaults seeded from the sized/build-time floor where applicable and use the existing std/alloc settings surface. Topology-specific shapes remain immutable values parsed from the checkpoint. Each settings selector must reject unsupported combinations during validation before graph construction.
+
+### decisions
+
+| decision | chosen | why not the alternative |
+|---|---|---|
+| architecture selection | derive from checkpoint architecture metadata and validate tensors | a user-selected string can make an incompatible tensor layout appear valid |
+| family implementation | one shared implementation for identical tensor semantics, separate architecture/state contract for distinct semantics | model names are not sufficient evidence for either sharing or duplication |
+| configuration | conflaguration settings select legal runtime variants after metadata binding | putting checkpoint shape in mutable serving config creates two sources of truth |
+| unsupported models | preserve a typed load/request failure with exact checkpoint and missing contract | dropping the row makes the requested model set appear smaller than it is |
+| reference outputs | use pinned upstream runtime/reference and identical token/audio/image payloads where available | semantic review alone cannot identify tensor-boundary errors, and numeric parity alone cannot establish task quality |
+| fine-tuned candidates | prefer official base checkpoints; mark post-trained-only models explicitly and require a separate row | a derivative's behavior/provenance cannot stand in for base-model capability |
+
+## acceptance criteria
+
+| id | discharges | command | expected |
+|---|---|---|---|
+| AC1 | R1, R7 | `python3 proxima-tensor/specs/small-model-architecture-matrix/validate_matrix.py --inventory` | `candidates=11 missing_fields=0 revision_mismatches=0 case_errors=0 gemma_fact_errors=0` |
+| AC2 | R2 | `cargo test -p proxima-model-interop --lib architecture_matrix_config_fixtures` | `config_cases=11 passed=11 rejected_controls=1`; every pinned candidate config yields exact family/topology fields, and one deliberately incomplete config is rejected |
+| AC3 | R3 | `cargo test -p proxima-tensor --lib architecture_matrix_settings_fixtures` | `families=8 surfaces=4 matched=32 rejected_controls=8`; TOML, environment, serde, and builder all resolve the same legal implementation choice while a topology override is rejected |
+| AC4 | R4, R7 | `python3 proxima-tensor/specs/small-model-architecture-matrix/validate_matrix.py --trials` | `cases=56 records=56 public_trial_attempts=55 sori_access_records=1 omitted=0`; each public case records its real Proxima load/request attempt and exact output or typed error; Sori's access record carries zero Proxima invocations |
+| AC5 | R4, R5 | `python3 proxima-tensor/specs/small-model-architecture-matrix/validate_matrix.py --semantic-results` | `candidate_cases=56 classified=56 missing=0 baseline=ollama-gemma4 baseline_controls=5 baseline_pass=5`; controls are the four owner prompts plus the hand-checkable coding prompt |
+| AC6 | R4, R5 | `python3 proxima-tensor/specs/small-model-architecture-matrix/validate_matrix.py --numeric-parity` | `numeric_statuses=56 public_statuses=55 sori_no_oracle=1 missing=0 positive_controls=2 wrong_output_rejected=1`; each public status records the named boundary and matched, mismatched, or explicitly unavailable independent reference with raw payload when available; no Sori numeric comparison is claimed |
+| AC7 | R3, R8 | `git diff --check -- proxima-model-interop proxima-tensor/specs/small-model-architecture-matrix && python3 proxima-tensor/specs/small-model-architecture-matrix/validate_matrix.py --slice-ledger` | `whitespace_errors=0 landed_slices=98 origin_main_slices=98 open_slices=0`; report actual commit hashes, and do not emit this expected result until every card is landed and pushed |
+| AC8 | R6 | `python3 proxima-tensor/specs/small-model-architecture-matrix/validate_matrix.py --semantic-pairs` | `candidate_pairs=6 reuse_pairs=2 distinct_pairs=4 wrong_substitutions_rejected=4 missing_evidence=0`; each row cites pinned config/operator code, an input/state/output vector, and the exact shared primitive or separate contract; the negative controls feed a distinct mixer/state to the wrong implementation and must disagree or reject |
+| AC9 | R9 | `python3 proxima-tensor/specs/small-model-architecture-matrix/validate_matrix.py --prefill-records` | `public_models=10 prefill_records=10 sori_prefill_records=0 missing_metric_axes=0 tokenizer_mismatches=0`; each record retains at least 3 raw runs, throughput, p50/p90/p99/p99.9, one real-client latency, CPU utilization, steady/peak RSS, errors, CoV, host/loadout, and output gate |
+| AC10 | R10 | `python3 proxima-tensor/specs/small-model-architecture-matrix/validate_matrix.py --granite-prefill` | `models=2 shapes_per_model=2 paired_cells=4 baseline_revisions=2 tokenizer_mismatches=0 output_mismatches=0 missing_metric_axes=0`; every cell uses the exact BF16 GGUF and llama.cpp revisions above, matched ID hashes, 5 raw runs per arm, correctness vectors, and per-cell measured-better/measured-worse/unresolved status |
+| AC11 | R11 | `python3 proxima-tensor/specs/small-model-architecture-matrix/validate_matrix.py --granite-dispatch-toggle` | `captured_shapes=2 forward_flips=2 reverse_flips=2 output_mismatches=0 disposition_records=2`; each captured Granite Micro shape compares only `AttentionTileHeight::Legacy` to `AttentionTileHeight::Rows16`, with all other fields default, and retains raw paired times plus keep/rollback rationale; the Granite 3.1 SharedK result remains a separate negative observation |
+
+Card 2's `--schema-fixtures` mode reads four valid fixture records (exact-hash text, f32 vector, modal load failure, and video input) and rejects fourteen named mutations: absent completed invocation evidence (`invocation_evidence_missing`), absent result (`result_missing`), absent reference payload path (`reference_missing`), omitted required `invocation` key (`missing_field`), omitted required `weights_sha256` key (`missing_field`), failed invocation without the required null `output_sha256` key (`invocation_evidence_missing`), extra fields on completed output (`result_inconsistent`), floating-point version `1.0` (`wrong_version`), illegal load/bind order (`stage_order_invalid`), and exact-hash status conflicting with payload hashes (`numeric_comparison_inconsistent`), f32 values contradicting a matched status (`numeric_comparison_inconsistent`), f32 payload length contradicting shape (`numeric_payload_shape_mismatch`), a missing numeric artifact (`numeric_artifact_invalid`), and an unsupported input modality (`invalid_input`). It verifies each artifact bytes against SHA-256 and applies the declared little-endian f32 comparator to the bytes. Three malformed fixture container/control shapes are counted as fixture errors, not tracebacks. It prints `accepted=4 rejected_controls=14 missing_fields=0 error_classes=11 exact_control_codes=14 fixture_shape_rejections=3`; each mutation must produce its named validator error, not only a nonzero exit status. `missing_fields=0` counts required fields on the four valid fixture records; intentionally malformed controls are counted only in their named rejection category.
+
+## out of scope
+
+- substituting quantized derivatives for a requested base checkpoint without retaining a separate format-specific row
+- claiming capability from a model leaderboard or model card without a Proxima invocation
+- treating semantic coherence review as a numeric reference comparison, or numeric parity as a semantic quality judgment
+- adding architecture-specific code for a difference already represented by the shared descriptor/operator contract
+
+## risks
+
+| risk | likelihood | what it costs | what we do about it |
+|---|---|---|---|
+| a named family has no eligible base checkpoint or public stable revision | medium | the requested model cannot be compared under the base-only preference | retain the upstream config/card evidence and typed unavailable disposition; test only after an eligible checkpoint is available |
+| hybrid Mamba/attention, looped layers, and multimodal towers exceed the existing one-request graph contract | high | a new state or modality boundary may be required | implement and validate each architecture contract as its own small slice before full-model trials |
+| checkpoint downloads exceed available disk or memory | medium | trial set becomes incomplete or disturbs existing artifacts | inspect file manifests and available storage before each fetch; use one pinned checkpoint at a time and retain hashes |
+| the dirty worktree contains overlapping model changes | high | edits can overwrite active work | inspect each target diff before editing and limit each slice to its own newly added files or narrowly scoped hunks |
+
+## context
+
+- `proxima-model-interop/src/hf_config.rs`: current Hugging Face config parser; it currently reduces configs to `ModelHparams`, so family-specific topology fields need an explicit typed representation.
+- `proxima-model-interop/src/bind.rs`: GGUF metadata-to-architecture and tensor-binding contracts.
+- `proxima-model-interop/src/profiles/mod.rs` and `src/profiles/*.toml`: current architecture-family profiles and schedule selection.
+- `proxima-tensor/src/spec/descriptor.rs` and `src/spec/layer_runs.rs`: current conflaguration-backed model descriptor and per-layer schedule representation.
+- `proxima-model-interop/src/recurrent_interval.rs` and `src/short_conv.rs`: current recurrent and short-convolution binding paths; neither is evidence of Mamba2 or looped-layer support.
+- `proxima-model-interop/src/hf_config.rs`: Hugging Face config metadata adapter.
+- `proxima-model-interop/src/recurrent_settings.rs` and `src/speculative_settings.rs`: conflaguration settings patterns.
+- `proxima-model-interop/src/generate/load_model.rs`: model load and request entry points.
+- `proxima-model-interop/examples/gemma4_ring_parity.rs:119-155`: the four request payloads and expected fact substrings.
+- Upstream checkpoint configs/model cards are pinned and recorded in `inventory.jsonl` with source URLs and revision hashes.
