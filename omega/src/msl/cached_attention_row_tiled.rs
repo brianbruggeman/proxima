@@ -589,7 +589,6 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                     threadgroup_barrier(mem_flags::mem_threadgroup);
                 }
                 if (@KV_REUSE_SHARED_K@) {
-                    threadgroup_barrier(mem_flags::mem_threadgroup);
                     FOR_UNROLL for (int key_tile = 0; key_tile < fragments; key_tile++) {
                         int shared_index = (key_tile * (int)depth_unroll) * 64;
                         @OPERAND@ shared_even[depth_unroll]; @OPERAND@ shared_odd[depth_unroll];
