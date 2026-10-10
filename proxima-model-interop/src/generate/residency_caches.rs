@@ -1131,6 +1131,62 @@ impl SsmLayerCache {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct ShortConvLayerCache {
+    pub(super) history: Vec<f32>,
+    pub(super) roll_indices: Vec<i32>,
+}
+
+impl ShortConvLayerCache {
+    pub(super) fn new(history_len: usize, cache_len: usize) -> Self {
+        let mut roll_indices = Vec::with_capacity(cache_len);
+        for index in 1..cache_len {
+            roll_indices.push(index as i32);
+        }
+        if cache_len > 0 {
+            roll_indices.push(0);
+        }
+        Self {
+            history: vec![0.0; history_len],
+            roll_indices,
+        }
+    }
+
+    pub(super) fn named_blocks<'cache>(
+        &'cache self,
+        history_name: &'cache str,
+        roll_indices_name: &'cache str,
+    ) -> [(&'cache str, QuantizedBlock<'cache>); 2] {
+        [
+            (
+                history_name,
+                QuantizedBlock::Float32(self.history.as_slice()),
+            ),
+            (
+                roll_indices_name,
+                QuantizedBlock::Int32(self.roll_indices.as_slice()),
+            ),
+        ]
+    }
+
+    pub(super) fn replace_history(
+        &mut self,
+        history: &[f32],
+        layer: usize,
+    ) -> Result<(), InteropError> {
+        if history.len() != self.history.len() {
+            return Err(InteropError::CacheScratchShapeMismatch {
+                layer,
+                leaf: "shortconv state",
+                expected: self.history.len(),
+                found: history.len(),
+            });
+        }
+        self.history.copy_from_slice(history);
+        Ok(())
+    }
+}
+
 /// [`LayerCache::new`]/[`SsmLayerCache::new`] threaded per forward-program
 /// layer, matching [`LoadedModel::layer_roots`]'s own per-layer discriminant
 /// -- an attention layer's cache append/readback shape genuinely differs
@@ -1140,6 +1196,7 @@ impl SsmLayerCache {
 pub(super) enum LayerCacheState {
     Attention(LayerCache),
     DenseAttention(DenseAttentionCache),
+    ShortConv(ShortConvLayerCache),
     Ssm(SsmLayerCache),
     /// the E2B checkpoint's cross-layer shared-KV layer
     /// ([`LayerCacheRoots::SharedFromLayer`]'s own doc): no state of its
@@ -1171,6 +1228,9 @@ pub(super) fn layer_cache_checksum(cache: &LayerCacheState) -> (usize, f64) {
                 + sum_abs(&cache.k_pass)
                 + sum_abs(&cache.v),
         ),
+        LayerCacheState::ShortConv(cache) => {
+            (cache.history.len(), sum_abs(&cache.history))
+        }
         LayerCacheState::Ssm(cache) => (
             cache.conv_history.len() + cache.state.len(),
             sum_abs(&cache.conv_history) + sum_abs(&cache.state),
@@ -1244,6 +1304,10 @@ pub(super) enum LayerCacheNames {
         conv_history: String,
         state: String,
     },
+    ShortConv {
+        history: String,
+        roll_indices: String,
+    },
     /// the E2B checkpoint's cross-layer shared-KV layer -- declares no
     /// `Op::Input` leaf at all (`DeclaredCacheKind::SharedFromLayer`'s own
     /// doc), so this variant carries no names to feed at step time.
@@ -1263,6 +1327,7 @@ pub(super) enum LayerCacheNames {
 pub(super) enum DeclaredCacheKind {
     Attention,
     DenseAttention,
+    ShortConv,
     Ssm,
     /// the E2B checkpoint's cross-layer shared-KV layer
     /// ([`LayerCacheRoots::SharedFromLayer`]'s own doc): this layer
@@ -1280,6 +1345,7 @@ impl DeclaredCacheKind {
         match self {
             Self::Attention => "kv_cache.{layer}.{k_even,k_odd,v}",
             Self::DenseAttention => "kv_cache.{layer}.{k_first,k_second,k_pass,v}",
+            Self::ShortConv => "shortconv_cache.{layer}.{history,roll_indices}",
             Self::Ssm => "ssm_cache.{layer}.{conv_history,state}",
             Self::SharedFromLayer => "(none -- reads a donor layer's own leaves)",
         }
@@ -1305,6 +1371,10 @@ impl DeclaredCacheKind {
                 "kv_cache.{layer}.k_pass",
                 "kv_cache.{layer}.v",
             ],
+            Self::ShortConv => &[
+                "shortconv_cache.{layer}.history",
+                "shortconv_cache.{layer}.roll_indices",
+            ],
             Self::Ssm => &["ssm_cache.{layer}.conv_history", "ssm_cache.{layer}.state"],
             Self::SharedFromLayer => &[],
         }
@@ -1327,6 +1397,10 @@ pub(super) fn declared_cache_kind(
     } else if program_input_names.contains(alloc::format!("kv_cache.{layer}.k_even").as_str()) {
         Some(DeclaredCacheKind::Attention)
     } else if program_input_names
+        .contains(alloc::format!("shortconv_cache.{layer}.history").as_str())
+    {
+        Some(DeclaredCacheKind::ShortConv)
+    } else if program_input_names
         .contains(alloc::format!("ssm_cache.{layer}.conv_history").as_str())
     {
         Some(DeclaredCacheKind::Ssm)
@@ -1342,6 +1416,7 @@ pub(super) fn bound_cache_kind(roots: &LayerCacheRoots) -> DeclaredCacheKind {
     match roots {
         LayerCacheRoots::Attention(_) => DeclaredCacheKind::Attention,
         LayerCacheRoots::DenseAttention(_) => DeclaredCacheKind::DenseAttention,
+        LayerCacheRoots::ShortConv { .. } => DeclaredCacheKind::ShortConv,
         LayerCacheRoots::Ssm { .. } => DeclaredCacheKind::Ssm,
         LayerCacheRoots::SharedFromLayer(_) => DeclaredCacheKind::SharedFromLayer,
     }
@@ -1458,6 +1533,10 @@ pub(super) enum LayerPadRowWidths {
         pass_row: usize,
         v_row: usize,
     },
+    ShortConv {
+        history_len: usize,
+        roll_indices_len: usize,
+    },
     /// [`SsmLayerCache::new`]/[`SsmLayerCache::advance`]'s own initial and
     /// steady-state window sizes -- the flat element count of
     /// `ssm_cache.{layer}.conv_history`/`.state` as the program itself
@@ -1493,6 +1572,13 @@ pub(super) fn layer_pad_row_widths(program: &[Op], names: &LayerCacheNames) -> L
             even_odd_row: cache_leaf_row_elements(program, k_first).unwrap_or(0),
             pass_row: cache_leaf_row_elements(program, k_pass).unwrap_or(0),
             v_row: cache_leaf_row_elements(program, v).unwrap_or(0),
+        },
+        LayerCacheNames::ShortConv {
+            history,
+            roll_indices,
+        } => LayerPadRowWidths::ShortConv {
+            history_len: cache_leaf_total_elements(program, history).unwrap_or(0),
+            roll_indices_len: cache_leaf_total_elements(program, roll_indices).unwrap_or(0),
         },
         LayerCacheNames::Ssm {
             conv_history,
@@ -1587,6 +1673,7 @@ pub(super) fn push_kv_named_blocks<'call>(
                 };
                 dense_attention_pad_scratch[layer].fill(cache, &shape, layer)?;
             }
+            (LayerCacheState::ShortConv(_), LayerPadRowWidths::ShortConv { .. }) => {}
             (LayerCacheState::Ssm(_), LayerPadRowWidths::Ssm { .. }) => {}
             (LayerCacheState::SharedFromLayer, LayerPadRowWidths::SharedFromLayer) => {}
             _ => unreachable!(
@@ -1653,6 +1740,16 @@ pub(super) fn push_kv_named_blocks<'call>(
                 LayerPadRowWidths::Ssm { .. },
             ) => {
                 named_blocks.extend(cache.named_blocks(conv_history, state));
+            }
+            (
+                LayerCacheNames::ShortConv {
+                    history,
+                    roll_indices,
+                },
+                LayerCacheState::ShortConv(cache),
+                LayerPadRowWidths::ShortConv { .. },
+            ) => {
+                named_blocks.extend(cache.named_blocks(history, roll_indices));
             }
             (
                 LayerCacheNames::SharedFromLayer,

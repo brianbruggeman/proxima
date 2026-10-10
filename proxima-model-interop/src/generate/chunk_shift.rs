@@ -288,7 +288,9 @@ impl PrefixState {
                 .ring_geometry()
                 .is_none_or(|ring| ring.write_offset == 0),
             LayerCacheState::SharedFromLayer => true,
-            LayerCacheState::DenseAttention(_) | LayerCacheState::Ssm(_) => false,
+            LayerCacheState::DenseAttention(_)
+            | LayerCacheState::ShortConv(_)
+            | LayerCacheState::Ssm(_) => false,
         })
     }
 
