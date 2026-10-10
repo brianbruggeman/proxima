@@ -34,6 +34,7 @@ const GRANITE_MOE_ENV: &str = "PROXIMA_ARCH_GRANITE_MOE_GGUF";
 const GRANITE_EXPECTED_SHA256: &str =
     "cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
 const PROMPT_TOKENS: usize = 971;
+const SHORT_PROMPT_TOKENS: usize = 256;
 const PASSAGE: &str = "To Sherlock Holmes she is always THE woman. I have seldom heard him mention her under any other name. In his eyes she eclipses and predominates the whole of her sex. It was not that he felt any emotion akin to love for Irene Adler. All emotions, and that one particularly, were abhorrent to his cold, precise but admirably balanced mind. He was, I take it, the most perfect reasoning and observing machine that the world has seen, but as a lover he would have placed himself in a false position. He never spoke of the softer passions, save with a gibe and a sneer. They were admirable things for the observer—excellent for drawing the veil from men's motives and actions. But for the trained reasoner to admit such intrusions into his own delicate and finely adjusted temperament was to introduce a distracting factor which might throw a doubt upon all his mental results.\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,19 +206,38 @@ fn clear_previous_report(path: &Path, checkpoint_path: &Path) {
     }
 }
 
-fn prompt_of_971_tokens(vocab: &proxima_tokenizer::Vocab) -> (String, usize) {
-    let corpus = PASSAGE.repeat(PROMPT_TOKENS.div_ceil(40));
+fn prompt_of_tokens(vocab: &proxima_tokenizer::Vocab, target_tokens: usize) -> (String, usize) {
+    let corpus = PASSAGE.repeat(target_tokens.div_ceil(40));
     let mut prompt = String::new();
     for word in corpus.split_inclusive(char::is_whitespace) {
         prompt.push_str(word);
         let token_count = proxima_tokenizer::encode(&prompt, vocab)
             .expect("tokenize prompt with the Granite vocab")
             .len();
-        if token_count >= PROMPT_TOKENS {
+        if token_count >= target_tokens {
             return (prompt, token_count);
         }
     }
-    panic!("repeated Sherlock passage never reached {PROMPT_TOKENS} tokens");
+    panic!("repeated Sherlock passage never reached {target_tokens} tokens");
+}
+
+fn prompt_prefix_of_tokens(
+    vocab: &proxima_tokenizer::Vocab,
+    target_tokens: usize,
+) -> (String, usize) {
+    let corpus = PASSAGE.repeat(target_tokens.div_ceil(40));
+    let mut prompt = String::new();
+    for word in corpus.split_inclusive(char::is_whitespace) {
+        prompt.push_str(word);
+        let candidate = prompt.trim_end_matches(char::is_whitespace);
+        let token_count = proxima_tokenizer::encode(candidate, vocab)
+            .expect("tokenize the word-bounded Granite prefix")
+            .len();
+        if token_count >= target_tokens {
+            return (candidate.to_string(), token_count);
+        }
+    }
+    panic!("repeated Sherlock passage never reached {target_tokens} tokens");
 }
 
 fn capture_prompt_dispatches(
@@ -796,7 +816,7 @@ async fn card_23_granite_prefill_uses_selected_attention_dispatch() {
     let parsed = parse_complete(&mapping).expect("parse the Granite checkpoint");
     let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
         .expect("build the Granite checkpoint vocab");
-    let (prompt, prompt_tokens) = prompt_of_971_tokens(&vocab);
+    let (prompt, prompt_tokens) = prompt_of_tokens(&vocab, PROMPT_TOKENS);
     assert!(prompt_tokens >= PROMPT_TOKENS);
     let model = LoadedModel::load(&parsed, &mapping).expect("bind the Granite checkpoint");
     let (legacy_dispatches, legacy_tokens) = capture_prompt_dispatches(&model, &prompt, None);
@@ -1080,7 +1100,7 @@ async fn card_26_granite_attention_replay_pair_matches_complete_output() {
     let parsed = parse_complete(&mapping).expect("parse the Granite checkpoint");
     let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
         .expect("build the Granite checkpoint vocab");
-    let (prompt, prompt_tokens) = prompt_of_971_tokens(&vocab);
+    let (prompt, prompt_tokens) = prompt_of_tokens(&vocab, PROMPT_TOKENS);
     assert!(prompt_tokens >= PROMPT_TOKENS);
     let model = LoadedModel::load(&parsed, &mapping).expect("bind the Granite checkpoint");
 
@@ -1186,41 +1206,17 @@ async fn card_26_replay_comparator_rejects_three_false_pairs() {
     println!("card_26 comparator_controls=3 rejected=3");
 }
 
-#[proxima::test]
-async fn perf_card_00_granite_attention_replay_cell() {
-    assert!(
-        env::var_os("PROXIMA_CAPTURE_LIVE").is_some(),
-        "run with PROXIMA_CAPTURE_LIVE=1"
-    );
-    let report_path = env::var_os("PROXIMA_GRANITE_AB_REPORT")
-        .map(PathBuf::from)
-        .expect("set PROXIMA_GRANITE_AB_REPORT to the report destination");
-    let checkpoint_path = granite_checkpoint_path();
-    clear_previous_report(&report_path, Path::new(&checkpoint_path));
-    assert!(
-        !report_path.exists(),
-        "previous Granite attention report remains at {}",
-        report_path.display()
-    );
-    let file = File::open(&checkpoint_path).expect("open the real Granite checkpoint");
-    // SAFETY: this test only reads the checkpoint and does not mutate it.
-    let mapping = unsafe { Mmap::map(&file) }.expect("mmap the Granite checkpoint");
-    let checkpoint_bytes = mapping.len() as u64;
-    let parsed = parse_complete(&mapping).expect("parse the Granite checkpoint");
-    let (model_name, checkpoint_sha256) = verify_granite_checkpoint(&parsed, mapping.as_ref());
-    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
-        .expect("build the Granite checkpoint vocab");
-    let (prompt, prompt_tokens) = prompt_of_971_tokens(&vocab);
-    let prompt_ids =
-        proxima_tokenizer::encode(&prompt, &vocab).expect("encode the measured Granite prompt");
-    assert_eq!(prompt_ids.len(), prompt_tokens, "prompt tokenizer count");
-    let model = LoadedModel::load(&parsed, &mapping).expect("bind the Granite checkpoint");
-
-    let legacy = capture_attention_replay(&model, &prompt, None, None);
+fn measure_granite_attention_shape(
+    model: &LoadedModel<'_>,
+    nominal_prompt_tokens: usize,
+    prompt: &str,
+    prompt_ids: &[u32],
+) -> Value {
+    let legacy = capture_attention_replay(model, prompt, None, None);
     let legacy_evidence = replay_evidence(&legacy);
     let selected = capture_attention_replay(
-        &model,
-        &prompt,
+        model,
+        prompt,
         Some(shared_k_variant()),
         Some(&legacy.dispatch),
     );
@@ -1235,6 +1231,11 @@ async fn perf_card_00_granite_attention_replay_cell() {
     );
     compare_token_ids(&legacy.token_ids, &selected.token_ids)
         .unwrap_or_else(|error| panic!("captured Granite request IDs differ: {error}"));
+    assert_eq!(
+        legacy.dispatch.extents[0],
+        prompt_ids.len() as u64,
+        "captured attention query extent differs from tokenizer count"
+    );
 
     let mut legacy_samples = Vec::with_capacity(20);
     let mut selected_samples = Vec::with_capacity(20);
@@ -1288,6 +1289,131 @@ async fn perf_card_00_granite_attention_replay_cell() {
 
     let legacy_resource = resource_replays(&legacy.dispatch, "legacy");
     let selected_resource = resource_replays(&selected.dispatch, "shared_k");
+    json!({
+        "nominal_prompt_tokens": nominal_prompt_tokens,
+        "actual_prompt_tokens": prompt_ids.len(),
+        "prompt_ids_sha256": prompt_ids_sha256(prompt_ids),
+        "output_equal": true,
+        "ids_equal": true,
+        "rounds": rounds,
+        "arms": [
+            measured_arm_report("legacy", &legacy, legacy_samples, legacy_resource),
+            measured_arm_report("shared_k", &selected, selected_samples, selected_resource),
+        ],
+    })
+}
+
+fn run_granite_attention_measurement(nominal_targets: &[usize]) {
+    assert!(
+        env::var_os("PROXIMA_CAPTURE_LIVE").is_some(),
+        "run with PROXIMA_CAPTURE_LIVE=1"
+    );
+    let report_path = env::var_os("PROXIMA_GRANITE_AB_REPORT")
+        .map(PathBuf::from)
+        .expect("set PROXIMA_GRANITE_AB_REPORT to the report destination");
+    let checkpoint_path = granite_checkpoint_path();
+    clear_previous_report(&report_path, Path::new(&checkpoint_path));
+    assert!(
+        !report_path.exists(),
+        "previous Granite attention report remains at {}",
+        report_path.display()
+    );
+    let file = File::open(&checkpoint_path).expect("open the real Granite checkpoint");
+    // SAFETY: this test only reads the checkpoint and does not mutate it.
+    let mapping = unsafe { Mmap::map(&file) }.expect("mmap the Granite checkpoint");
+    let checkpoint_bytes = mapping.len() as u64;
+    let parsed = parse_complete(&mapping).expect("parse the Granite checkpoint");
+    let (model_name, checkpoint_sha256) = verify_granite_checkpoint(&parsed, mapping.as_ref());
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .expect("build the Granite checkpoint vocab");
+    let prompt_shapes = nominal_targets
+        .iter()
+        .map(|&nominal| {
+            let (prompt, actual) = if nominal == SHORT_PROMPT_TOKENS {
+                prompt_prefix_of_tokens(&vocab, nominal)
+            } else {
+                prompt_of_tokens(&vocab, nominal)
+            };
+            let prompt_ids = proxima_tokenizer::encode(&prompt, &vocab)
+                .expect("encode the measured Granite prompt");
+            assert_eq!(prompt_ids.len(), actual, "prompt tokenizer count");
+            assert!(
+                actual >= nominal,
+                "prompt did not reach nominal token target"
+            );
+            (nominal, prompt, prompt_ids)
+        })
+        .collect::<Vec<_>>();
+    if prompt_shapes.len() == 2 {
+        let (short_target, short_prompt, short_ids) = &prompt_shapes[0];
+        let (long_target, long_prompt, long_ids) = &prompt_shapes[1];
+        assert_eq!(*short_target, SHORT_PROMPT_TOKENS, "short prompt target");
+        assert_eq!(*long_target, PROMPT_TOKENS, "long prompt target");
+        assert!(
+            long_prompt.starts_with(short_prompt),
+            "short prompt text is not a prefix"
+        );
+        let first_mismatch = short_ids
+            .iter()
+            .zip(long_ids)
+            .position(|(short, long)| short != long)
+            .unwrap_or(short_ids.len());
+        let context_start = first_mismatch.saturating_sub(4);
+        let short_context_end = (first_mismatch + 8).min(short_ids.len());
+        let long_context_end = (first_mismatch + 8).min(long_ids.len());
+        let text_suffix = short_prompt
+            .chars()
+            .rev()
+            .take(40)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<String>();
+        let text_continuation = long_prompt[short_prompt.len()..]
+            .chars()
+            .take(40)
+            .collect::<String>();
+        let short_pieces = short_ids[context_start..short_context_end]
+            .iter()
+            .map(|&token_id| {
+                (
+                    token_id,
+                    vocab.token_str(token_id),
+                    vocab.token_bytes(token_id).map(String::from_utf8_lossy),
+                )
+            })
+            .collect::<Vec<_>>();
+        let long_pieces = long_ids[context_start..long_context_end]
+            .iter()
+            .map(|&token_id| {
+                (
+                    token_id,
+                    vocab.token_str(token_id),
+                    vocab.token_bytes(token_id).map(String::from_utf8_lossy),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            long_ids.starts_with(short_ids),
+            "short prompt IDs are not a prefix: short_count={} long_count={} first_mismatch={} short_ids={:?} long_ids={:?} short_pieces={short_pieces:?} long_pieces={long_pieces:?} short_text_suffix={text_suffix:?} long_text_continuation={text_continuation:?}",
+            short_ids.len(),
+            long_ids.len(),
+            first_mismatch,
+            &short_ids[context_start..short_context_end],
+            &long_ids[context_start..long_context_end]
+        );
+        assert!(
+            short_ids.len() < long_ids.len(),
+            "prompt token counts are not distinct"
+        );
+    }
+    let model = LoadedModel::load(&parsed, &mapping).expect("bind the Granite checkpoint");
+    let shapes = prompt_shapes
+        .iter()
+        .map(|(nominal, prompt, prompt_ids)| {
+            measure_granite_attention_shape(&model, *nominal, prompt, prompt_ids)
+        })
+        .collect::<Vec<_>>();
     let report = json!({
         "version": 1,
         "model": "Granite 3.1 1B A400M Instruct",
@@ -1316,30 +1442,34 @@ async fn perf_card_00_granite_attention_replay_cell() {
             "ubatch_size": 0,
             "generated_tokens": 1,
         },
-        "shapes": [{
-            "nominal_prompt_tokens": PROMPT_TOKENS,
-            "actual_prompt_tokens": prompt_tokens,
-            "prompt_ids_sha256": prompt_ids_sha256(&prompt_ids),
-            "output_equal": true,
-            "ids_equal": true,
-            "rounds": rounds,
-            "arms": [
-                measured_arm_report("legacy", &legacy, legacy_samples, legacy_resource),
-                measured_arm_report("shared_k", &selected, selected_samples, selected_resource),
-            ],
-        }],
+        "shapes": shapes,
     });
     write_report(&report_path, &report);
-    for arm in report["shapes"][0]["arms"]
-        .as_array()
-        .expect("two arm records")
-    {
-        println!(
-            "granite ab arm arm={} samples={} resource={}",
-            arm["arm"].as_str().expect("arm label"),
-            arm["samples"].as_array().expect("raw samples").len(),
-            arm["resource"].as_str().expect("resource observation")
-        );
+    for shape in report["shapes"].as_array().expect("shape records") {
+        for arm in shape["arms"].as_array().expect("two arm records") {
+            println!(
+                "granite ab arm nominal={} actual={} arm={} samples={} resource={}",
+                shape["nominal_prompt_tokens"]
+                    .as_u64()
+                    .expect("nominal count"),
+                shape["actual_prompt_tokens"]
+                    .as_u64()
+                    .expect("actual count"),
+                arm["arm"].as_str().expect("arm label"),
+                arm["samples"].as_array().expect("raw samples").len(),
+                arm["resource"].as_str().expect("resource observation")
+            );
+        }
     }
     println!("granite ab report={}", report_path.display());
+}
+
+#[proxima::test]
+async fn perf_card_00_granite_attention_replay_cell() {
+    run_granite_attention_measurement(&[PROMPT_TOKENS]);
+}
+
+#[proxima::test]
+async fn perf_card_02_granite_two_prefill_shapes() {
+    run_granite_attention_measurement(&[SHORT_PROMPT_TOKENS, PROMPT_TOKENS]);
 }
