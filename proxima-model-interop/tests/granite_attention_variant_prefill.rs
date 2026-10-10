@@ -1506,6 +1506,7 @@ fn measure_granite_attention_shape(
     baseline_variant: Option<AttentionVariant>,
     selected_variant: AttentionVariant,
     selected_label: &str,
+    warmup_rounds: usize,
 ) -> Value {
     let legacy = capture_attention_replay(model, prompt, baseline_variant, None);
     let legacy_evidence = replay_evidence(&legacy);
@@ -1531,6 +1532,36 @@ fn measure_granite_attention_shape(
         prompt_ids.len() as u64,
         "captured attention query extent differs from tokenizer count"
     );
+
+    let mut warmups = Vec::with_capacity(warmup_rounds);
+    for round in 0..warmup_rounds {
+        let arm_order = if round % 2 == 0 {
+            ["legacy", selected_label]
+        } else {
+            [selected_label, "legacy"]
+        };
+        let mut samples = Vec::with_capacity(2);
+        for (position, arm_name) in arm_order.iter().enumerate() {
+            let dispatch = match *arm_name {
+                "legacy" => &legacy.dispatch,
+                label if label == selected_label => &selected.dispatch,
+                _ => unreachable!("warmup order contains only admitted arms"),
+            };
+            let gpu_ns = dispatch
+                .time_gpu_ns(1)
+                .expect("single-dispatch GPU warmup completes");
+            assert!(
+                gpu_ns.is_finite() && gpu_ns > 0.0,
+                "GPU warmup time must be finite and positive: {gpu_ns}"
+            );
+            samples.push(json!({
+                "arm": arm_name,
+                "position": position,
+                "gpu_ns": gpu_ns,
+            }));
+        }
+        warmups.push(json!({ "round": round, "arm_order": arm_order, "samples": samples }));
+    }
 
     let mut legacy_samples = Vec::with_capacity(20);
     let mut selected_samples = Vec::with_capacity(20);
@@ -1590,6 +1621,7 @@ fn measure_granite_attention_shape(
         "prompt_ids_sha256": prompt_ids_sha256(prompt_ids),
         "output_equal": true,
         "ids_equal": true,
+        "warmup_rounds": warmups,
         "rounds": rounds,
         "arms": [
             measured_arm_report("legacy", &legacy, legacy_samples, legacy_resource),
@@ -1598,11 +1630,28 @@ fn measure_granite_attention_shape(
     })
 }
 
+
 fn run_granite_attention_measurement(
     nominal_targets: &[usize],
     baseline_variant: Option<AttentionVariant>,
     selected_variant: AttentionVariant,
     selected_label: &str,
+) {
+    run_granite_attention_measurement_with_warmup(
+        nominal_targets,
+        baseline_variant,
+        selected_variant,
+        selected_label,
+        0,
+    );
+}
+
+fn run_granite_attention_measurement_with_warmup(
+    nominal_targets: &[usize],
+    baseline_variant: Option<AttentionVariant>,
+    selected_variant: AttentionVariant,
+    selected_label: &str,
+    warmup_rounds: usize,
 ) {
     assert!(
         env::var_os("PROXIMA_CAPTURE_LIVE").is_some(),
@@ -1719,6 +1768,7 @@ fn run_granite_attention_measurement(
                 baseline_variant,
                 selected_variant,
                 selected_label,
+                warmup_rounds,
             )
         })
         .collect::<Vec<_>>();
@@ -1787,6 +1837,24 @@ async fn perf_card_02_granite_two_prefill_shapes() {
         "shared_k",
     );
 }
+
+
+#[proxima::test]
+async fn perf_granite_simdgroups4_warmup_control_against_f16_legacy() {
+    let baseline = f16_variant();
+    let selected = AttentionVariant {
+        simdgroup_count: AttentionSimdgroupCount::Groups4,
+        ..baseline
+    };
+    run_granite_attention_measurement_with_warmup(
+        &[PROMPT_TOKENS],
+        Some(baseline),
+        selected,
+        "simdgroups4",
+        2,
+    );
+}
+
 
 #[proxima::test]
 async fn perf_granite_simdgroup_count_against_f16_legacy() {

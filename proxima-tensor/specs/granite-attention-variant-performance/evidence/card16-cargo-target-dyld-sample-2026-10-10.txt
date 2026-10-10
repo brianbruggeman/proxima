@@ -1,0 +1,31 @@
+Analysis of sampling granite_attention_variant_prefill-4c29247f309c5b09 (pid 98263) every 1 millisecond
+Process:         granite_attention_variant_prefill-4c29247f309c5b09 [98263]
+Path:            /private/tmp/*/granite_attention_variant_prefill-4c29247f309c5b09
+Load Address:    0x1000f8000
+Identifier:      granite_attention_variant_prefill-4c29247f309c5b09
+Version:         ???
+Code Type:       ARM64
+Parent Process:  Python [98255]
+Target Type:     live task
+
+Date/Time:       2026-10-10 11:44:55.296 -0500
+Launch Time:     2026-10-10 11:44:54.231 -0500
+OS Version:      macOS 15.8 (24H20)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         96K
+Physical footprint (peak):  96K
+Idle exit:                  untracked
+----
+
+Call graph:
+    1714 Thread_87964506: Main Thread   DispatchQueue_<multiple>
+      1714 _dyld_start  (in dyld) + 0  [0x102cc87c0]
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        _dyld_start  (in dyld)        1714
+
+Binary images description not available

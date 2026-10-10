@@ -1,0 +1,9 @@
+prompt_shapes=1 arms=2 samples_per_arm=20 resource_cells=2 matching_pairs=1 errors=0
+round_differences_positive=2 negative=18 zero=0
+negative_controls=13 rejected=13
+prompt_shapes=1 arms=2 samples_per_arm=20 resource_cells=2 matching_pairs=1 errors=0
+round_differences_positive=2 negative=18 zero=0
+negative_controls=13 rejected=13
+prompt_shapes=1 arms=2 samples_per_arm=20 resource_cells=2 matching_pairs=1 errors=0
+round_differences_positive=6 negative=14 zero=0
+negative_controls=13 rejected=13
