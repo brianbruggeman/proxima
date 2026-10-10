@@ -10,6 +10,7 @@
 //! skip the cases where decode would drop the mapping anyway.
 
 use super::*;
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 use crate::serving::GPU_LAYERS_ALL;
 
 /// Whether a warm-up should run for this configuration: the setting is on,
