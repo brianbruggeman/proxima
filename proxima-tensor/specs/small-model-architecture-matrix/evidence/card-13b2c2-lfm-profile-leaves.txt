@@ -1,0 +1,97 @@
+Card 13b2c2 source-binding evidence
+Base HEAD: a6a4445910d55fb74b0c3011a3086975a7435ca8
+Host: Darwin MacBookPro.attlocal.net 24.6.0 arm64 (Darwin Kernel Version 24.6.0, RELEASE_ARM64_T6000)
+Compiler: rustc 1.99.0 (b940084d7 2026-09-28)
+Pinned schedule: 16 layers, 10 convolution + 6 attention; generated profile rows: 146 (80 + 66), each source present in retained header.
+
+run 1: profile aliases absent after formatting cleanup
+$ nice -n 20 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-model-interop --features std --lib architecture_matrix_lfm_layer_bind -- --nocapture
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-model-matrix/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.27s
+     Running unittests src/lib.rs (/tmp/cargo_target/debug/deps/proxima_model_interop-2174f8f667b70c0d)
+
+running 1 test
+
+thread 'hf_bind::matrix_lfm_bind::architecture_matrix_lfm_layer_bind' (87397022) panicked at proxima-model-interop/src/hf_bind/matrix_lfm_bind.rs:155:10:
+program leaves resolve through the profile: UnknownTensor { name: "model.layers.0.norm.pre_mixer.weight" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test hf_bind::matrix_lfm_bind::architecture_matrix_lfm_layer_bind ... FAILED
+
+failures:
+
+failures:
+    hf_bind::matrix_lfm_bind::architecture_matrix_lfm_layer_bind
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 572 filtered out; finished in 0.79s
+
+error: test failed, to rerun pass `-p proxima-model-interop --lib`
+exit status: 101
+
+run 2: provisional model.layers leaf aliases
+$ nice -n 20 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-model-interop --features std --lib architecture_matrix_lfm_layer_bind -- --nocapture
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-model-matrix/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.08s
+     Running unittests src/lib.rs (/tmp/cargo_target/debug/deps/proxima_model_interop-2174f8f667b70c0d)
+
+running 1 test
+layers=16 shortconv=10 attention=6 profile_matches=19 bad_shapes_rejected=2 model_binder_symbols=0
+test hf_bind::matrix_lfm_bind::architecture_matrix_lfm_layer_bind ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 572 filtered out; finished in 0.77s
+
+exit status: 0
+
+run 3: explicit matrix roles with provisional leaf aliases
+$ nice -n 20 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-model-interop --features std --lib architecture_matrix_lfm_layer_bind -- --nocapture
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-model-matrix/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.13s
+     Running unittests src/lib.rs (/tmp/cargo_target/debug/deps/proxima_model_interop-2174f8f667b70c0d)
+
+running 1 test
+layers=16 shortconv=10 attention=6 profile_matches=19 bad_shapes_rejected=2 model_binder_symbols=0
+test hf_bind::matrix_lfm_bind::architecture_matrix_lfm_layer_bind ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 572 filtered out; finished in 0.79s
+
+exit status: 0
+
+run 4: real blk.N graph names and 146 fully qualified profile aliases
+$ nice -n 20 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-model-interop --features std --lib architecture_matrix_lfm_layer_bind -- --nocapture
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-model-matrix/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.17s
+     Running unittests src/lib.rs (/tmp/cargo_target/debug/deps/proxima_model_interop-2174f8f667b70c0d)
+
+running 1 test
+layers=16 shortconv=10 attention=6 profile_matches=19 bad_shapes_rejected=2 model_binder_symbols=0
+test hf_bind::matrix_lfm_bind::architecture_matrix_lfm_layer_bind ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 572 filtered out; finished in 0.77s
+
+exit status: 0
+
+shared resolver regression after source refactor
+$ env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-model-interop --features std --test safetensors_program_leaves architecture_matrix_safetensors_program_leaves -- --nocapture
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-model-matrix/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.82s
+     Running tests/safetensors_program_leaves.rs (/tmp/cargo_target/debug/deps/safetensors_program_leaves-2da3e7ce498d75cb)
+
+running 1 test
+dtypes=3 bound_leaves=9 runtime_inputs_skipped=3 packed_matmuls=2 native_decodes=4 f32_transposes=1 alias_matches=3 evaluated_matmuls=3 decode_rules=1 extra_weights=1 overlapping_ranges_rejected=1 native_f32_borrows=1 misaligned_f32_decodes=1 missing_weights_rejected=1 wrong_axes_rejected=1 dtype_byte_length_rejected=1 short_payload_rejected=1 offset_overflow_rejected=1 part_alias_rejected=1 join_alias_rejected=1 gathered_role_rejected=1 symbolic_weight_rejected=1
+test architecture_matrix_safetensors_program_leaves ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+exit status: 0
+
+model binder symbol search
+$ rg -n 'Lfm(TensorView|CommonLayerWeights|MixerWeights|LayerWeights)|bind_lfm_layer|mod lfm_bind' proxima-model-interop/src
+exit status: 1 (1 means zero matches)
+
+diff whitespace check after final source and ledger edits
+$ git diff --check -- proxima-model-interop proxima-tensor/specs/small-model-architecture-matrix
+proxima-model-interop/src/profiles/binding/lfm2.toml:756: new blank line at EOF.
+exit status: 2
+
+corrected final diff whitespace check
+$ git diff --check -- proxima-model-interop proxima-tensor/specs/small-model-architecture-matrix
+exit status: 0
