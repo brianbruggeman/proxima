@@ -155,6 +155,41 @@ pub enum InteropError {
     #[error("leaf {leaf:?} interleaves its contracted and kept axes; a stored matrix cannot match that order")]
     LeafAxesInterleaved { leaf: String },
 
+    /// A safetensors weight and its lowered program input declare different
+    /// axes, even though their element counts happen to match.
+    #[error("safetensors tensor {tensor:?} axes {tensor_axes:?} do not match leaf {leaf:?} axes {leaf_axes:?}")]
+    SafetensorsAxesMismatch {
+        leaf: String,
+        tensor: String,
+        leaf_axes: Vec<u64>,
+        tensor_axes: Vec<u64>,
+    },
+
+    /// A safetensors program leaf needs a role or alias layout the generic
+    /// binder does not support yet.
+    #[error("safetensors leaf {leaf:?} has unsupported {feature} binding")]
+    SafetensorsBindingUnsupported { leaf: String, feature: String },
+
+    /// A safetensors manifest range does not contain the bytes its shape and
+    /// dtype declare.
+    #[error("safetensors tensor {tensor:?} declares {expected} bytes but its range contains {actual}")]
+    SafetensorsByteLengthMismatch {
+        tensor: String,
+        expected: u64,
+        actual: u64,
+    },
+
+    /// A safetensors tensor range is outside the data section or overlaps
+    /// another tensor range in the supplied manifest.
+    #[error("safetensors tensor {tensor:?} has an invalid data range: {reason}")]
+    SafetensorsDataRangeInvalid {
+        tensor: String,
+        reason: &'static str,
+    },
+
+    #[error("safetensors tensors {first:?} and {second:?} have overlapping data ranges")]
+    SafetensorsDataRangesOverlap { first: String, second: String },
+
     /// `crate::bind_leaves::bind_program_leaves`: a `part` alias cannot cut
     /// `tensor` into equal whole-block row slices.
     #[error("tensor {tensor:?} has {rows} rows, which do not split into {of} whole-block parts")]

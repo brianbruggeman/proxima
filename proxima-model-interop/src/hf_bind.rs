@@ -29,6 +29,7 @@
 //! this host is MLX's packed `weight`/`scales`/`biases` layout, explicitly
 //! out of scope for this crate).
 
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -36,13 +37,16 @@ use alloc::vec::Vec;
 use proxima_safetensors::Manifest;
 use proxima_tensor::DType;
 use proxima_tensor::cpu::QuantizedBlock;
+use proxima_tensor::op::{Extent, Op};
 
 use crate::Codec;
 use crate::bind::{
     BoundWeights, ModelHparams, aligned_f32_view, dequantize, reinterpret_f32,
     transpose_out_in_to_in_out,
 };
+use crate::bind_leaves::{Role, consumers_of, role_of};
 use crate::error::InteropError;
+use crate::profiles::{BindingProfile, TensorAlias};
 
 fn find_entry<'manifest>(
     manifest: &'manifest Manifest,
@@ -93,6 +97,293 @@ fn tensor_bytes<'file>(
     }
 }
 
+/// Binds safetensors by walking the same lowered program leaves as the GGUF
+/// binder, while using the existing HF scalar decode and layout routines.
+/// Family differences belong in `binding`; the program determines each
+/// tensor's storage role.
+/// `manifest`, `file_bytes`, and `data_start` must come from the same parsed
+/// safetensors file so offsets cannot select unrelated bytes.
+pub fn bind_safetensors_program_leaves<'file>(
+    manifest: &Manifest,
+    file_bytes: &'file [u8],
+    data_start: u64,
+    program: &[Op],
+    binding: &BindingProfile,
+    runtime_inputs: &[String],
+) -> Result<BoundWeights<'file>, InteropError> {
+    let mut weights = BoundWeights::new(&[]);
+    weights.resident_bytes = file_bytes.len();
+    let consumers = consumers_of(program);
+    let runtime_inputs: BTreeSet<&str> = runtime_inputs.iter().map(String::as_str).collect();
+    let mut bound = BTreeSet::new();
+    let mut ranges_validated = false;
+
+    for (index, operation) in program.iter().enumerate() {
+        let Op::Input {
+            shape,
+            name: Some(leaf),
+            ..
+        } = operation
+        else {
+            continue;
+        };
+        if runtime_inputs.contains(leaf.as_str()) || !bound.insert(leaf.as_str()) {
+            continue;
+        }
+        let role = role_of(program, &consumers, index, leaf, shape)?;
+        if role == Role::Gathered {
+            return Err(InteropError::SafetensorsBindingUnsupported {
+                leaf: leaf.clone(),
+                feature: "gathered role".into(),
+            });
+        }
+        if !ranges_validated {
+            validate_safetensors_data_ranges(manifest, file_bytes, data_start)?;
+            ranges_validated = true;
+        }
+        let entry = safetensors_source(manifest, binding, leaf)?;
+        bind_safetensors_leaf(
+            manifest,
+            file_bytes,
+            data_start,
+            binding,
+            leaf,
+            shape,
+            role,
+            entry,
+            &mut weights,
+        )?;
+    }
+
+    for name in &binding.extra {
+        if bound.insert(name.as_str()) {
+            if !ranges_validated {
+                validate_safetensors_data_ranges(manifest, file_bytes, data_start)?;
+                ranges_validated = true;
+            }
+            let entry = find_entry(manifest, name)?;
+            let shape = entry
+                .shape
+                .iter()
+                .map(|axis| {
+                    u32::try_from(*axis).map(Extent::Static).map_err(|_| {
+                        InteropError::SafetensorsBindingUnsupported {
+                            leaf: name.clone(),
+                            feature: "extent larger than u32".into(),
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            bind_safetensors_leaf(
+                manifest,
+                file_bytes,
+                data_start,
+                binding,
+                name,
+                &shape,
+                Role::Native,
+                entry,
+                &mut weights,
+            )?;
+        }
+    }
+    Ok(weights)
+}
+
+fn validate_safetensors_data_ranges(
+    manifest: &Manifest,
+    file_bytes: &[u8],
+    data_start: u64,
+) -> Result<(), InteropError> {
+    let data_start =
+        usize::try_from(data_start).map_err(|_| InteropError::SafetensorsDataRangeInvalid {
+            tensor: "<data section>".into(),
+            reason: "data section start exceeds address space",
+        })?;
+    let data_length = file_bytes.len().checked_sub(data_start).ok_or_else(|| {
+        InteropError::SafetensorsDataRangeInvalid {
+            tensor: "<data section>".into(),
+            reason: "data section starts beyond file buffer",
+        }
+    })? as u64;
+    let mut ranges = Vec::with_capacity(manifest.tensors.len());
+    for entry in &manifest.tensors {
+        let (start, end) = entry.data_offsets;
+        if start > end || end > data_length || end > manifest.declared_data_len() {
+            return Err(InteropError::SafetensorsDataRangeInvalid {
+                tensor: entry.name.clone(),
+                reason: "offsets exceed the supplied data section",
+            });
+        }
+        ranges.push((start, end, entry.name.as_str()));
+    }
+    ranges.sort_unstable_by_key(|(start, _, _)| *start);
+    for pair in ranges.windows(2) {
+        let (_, first_end, first_name) = pair[0];
+        let (second_start, _, second_name) = pair[1];
+        if first_end > second_start {
+            return Err(InteropError::SafetensorsDataRangesOverlap {
+                first: first_name.into(),
+                second: second_name.into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn safetensors_source<'manifest>(
+    manifest: &'manifest Manifest,
+    binding: &BindingProfile,
+    leaf: &str,
+) -> Result<&'manifest proxima_safetensors::TensorEntry, InteropError> {
+    if let Some(entry) = manifest.tensor(leaf) {
+        return Ok(entry);
+    }
+    for (alias, prefix) in binding.aliases_for(leaf) {
+        match alias {
+            TensorAlias::Rename { from, .. } => {
+                let source = format!("{prefix}{from}");
+                if let Some(entry) = manifest.tensor(&source) {
+                    return Ok(entry);
+                }
+            }
+            TensorAlias::Part { .. } => {
+                return Err(InteropError::SafetensorsBindingUnsupported {
+                    leaf: leaf.into(),
+                    feature: "part alias".into(),
+                });
+            }
+            TensorAlias::Join { .. } => {
+                return Err(InteropError::SafetensorsBindingUnsupported {
+                    leaf: leaf.into(),
+                    feature: "join alias".into(),
+                });
+            }
+        }
+    }
+    Err(InteropError::UnknownTensor { name: leaf.into() })
+}
+
+fn bind_safetensors_leaf<'file>(
+    manifest: &Manifest,
+    file_bytes: &'file [u8],
+    data_start: u64,
+    binding: &BindingProfile,
+    leaf: &str,
+    shape: &[Extent],
+    role: Role,
+    entry: &proxima_safetensors::TensorEntry,
+    weights: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    let mut program_axes = Vec::with_capacity(shape.len());
+    for extent in shape {
+        let Extent::Static(axis) = extent else {
+            return Err(InteropError::SafetensorsBindingUnsupported {
+                leaf: leaf.into(),
+                feature: "symbolic weight extent".into(),
+            });
+        };
+        program_axes.push(u64::from(*axis));
+    }
+    let axes_match = match role {
+        Role::Native => entry.shape == program_axes,
+        Role::InOut => {
+            entry.shape.len() == 2
+                && program_axes.len() == 2
+                && entry.shape[0] == program_axes[1]
+                && entry.shape[1] == program_axes[0]
+        }
+        Role::Gathered => false,
+    };
+    if !axes_match {
+        return Err(InteropError::SafetensorsAxesMismatch {
+            leaf: leaf.into(),
+            tensor: entry.name.clone(),
+            leaf_axes: program_axes,
+            tensor_axes: entry.shape.clone(),
+        });
+    }
+
+    let elements = entry
+        .shape
+        .iter()
+        .try_fold(1u64, |product, axis| product.checked_mul(*axis));
+    let expected = elements
+        .and_then(|count| count.checked_mul(entry.dtype.size_bytes() as u64))
+        .ok_or_else(|| InteropError::SafetensorsBindingUnsupported {
+            leaf: leaf.into(),
+            feature: "overflowing shape or byte size".into(),
+        })?;
+    let actual = entry
+        .data_offsets
+        .1
+        .checked_sub(entry.data_offsets.0)
+        .ok_or_else(|| InteropError::SafetensorsByteLengthMismatch {
+            tensor: entry.name.clone(),
+            expected,
+            actual: 0,
+        })?;
+    if actual != expected {
+        return Err(InteropError::SafetensorsByteLengthMismatch {
+            tensor: entry.name.clone(),
+            expected,
+            actual,
+        });
+    }
+    let bytes = tensor_bytes(file_bytes, data_start, entry)?;
+    if binding.decodes_to_f32(leaf) {
+        let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &entry.name)?;
+        let output = if role == Role::InOut {
+            transpose_out_in_to_in_out(
+                &decoded,
+                leaf,
+                program_axes[1] as usize,
+                program_axes[0] as usize,
+            )?
+        } else {
+            decoded
+        };
+        weights.resident_bytes += output.len() * core::mem::size_of::<f32>();
+        weights.owned.push((leaf.into(), output));
+    } else if role == Role::InOut && entry.dtype == DType::Float32 {
+        let decoded = reinterpret_f32(bytes);
+        let output = transpose_out_in_to_in_out(
+            &decoded,
+            leaf,
+            program_axes[1] as usize,
+            program_axes[0] as usize,
+        )?;
+        weights.resident_bytes += output.len() * core::mem::size_of::<f32>();
+        weights.owned.push((leaf.into(), output));
+    } else if role == Role::InOut {
+        let packed =
+            safetensors_tensor_as_packed_block(manifest, file_bytes, data_start, &entry.name)?;
+        if matches!(packed, QuantizedBlock::Float32(_)) {
+            return Err(InteropError::SafetensorsBindingUnsupported {
+                leaf: leaf.into(),
+                feature: "unexpected f32 packed matmul".into(),
+            });
+        }
+        weights.packed.push((leaf.into(), packed));
+    } else if entry.dtype == DType::Float32 {
+        if let Some(view) = aligned_f32_view(bytes) {
+            weights.resident_bytes += core::mem::size_of_val(view);
+            weights
+                .packed
+                .push((leaf.into(), QuantizedBlock::Float32(view)));
+        } else {
+            let decoded = reinterpret_f32(bytes);
+            weights.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
+            weights.owned.push((leaf.into(), decoded));
+        }
+    } else {
+        let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &entry.name)?;
+        weights.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
+        weights.owned.push((leaf.into(), decoded));
+    }
+    Ok(())
+}
+
 /// Zero-copy counterpart to [`safetensors_tensor_as_f32`], mirroring
 /// [`crate::bind::gguf_tensor_as_packed_block`]: borrows `name`'s raw bytes
 /// straight out of `file_bytes` for [`DType::Float32`] (alignment-checked,
@@ -121,8 +412,14 @@ pub(crate) fn safetensors_tensor_as_packed_block<'file>(
             .ok_or_else(|| InteropError::MisalignedFloat32Tensor {
                 tensor: entry.name.clone(),
             }),
-        DType::Float16 => Ok(QuantizedBlock::Packed { codec: Codec::Float16, bytes }),
-        DType::BFloat16 => Ok(QuantizedBlock::Packed { codec: Codec::BFloat16, bytes }),
+        DType::Float16 => Ok(QuantizedBlock::Packed {
+            codec: Codec::Float16,
+            bytes,
+        }),
+        DType::BFloat16 => Ok(QuantizedBlock::Packed {
+            codec: Codec::BFloat16,
+            bytes,
+        }),
         other => Err(InteropError::UndecodableSafetensorsDType {
             tensor: entry.name.clone(),
             dtype: other,
