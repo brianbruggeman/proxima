@@ -61,6 +61,35 @@ pub enum CacheType {
     Iq4Nl,
 }
 
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-attn-variants",
+    target_os = "macos"
+))]
+/// Cached-attention row count assigned to a threadgroup by serving configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttentionTileHeightSetting {
+    Legacy,
+    Rows8,
+    Rows16,
+}
+
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-attn-variants",
+    target_os = "macos"
+))]
+impl AttentionTileHeightSetting {
+    const fn as_tile_height(self) -> AttentionTileHeight {
+        match self {
+            Self::Legacy => AttentionTileHeight::Legacy,
+            Self::Rows8 => AttentionTileHeight::Rows8,
+            Self::Rows16 => AttentionTileHeight::Rows16,
+        }
+    }
+}
+
 impl CacheType {
     pub const fn as_ggml(self) -> GgmlType {
         match self {
