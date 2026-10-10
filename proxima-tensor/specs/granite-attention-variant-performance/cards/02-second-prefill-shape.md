@@ -12,18 +12,18 @@ Extend the Card 00 measurement to a second, shorter prefix of the same Sherlock 
 ## Read
 
 - `../SPEC.md` for the two-shape report contract and exact acceptance counts.
-- Card 00's reusable shape measurement function and Card 01's `--expected-shapes` checker.
-- `proxima-model-interop/tests/granite_attention_variant_prefill.rs:113-135` for the tokenizer-driven Sherlock prompt builder.
+- Card 00's inline shape measurement path and Card 01's `--expected-shapes` checker; Card 02 first extracts that path into a reusable helper.
+- `proxima-model-interop/tests/granite_attention_variant_prefill.rs:209-241,1209-1304` for the legacy-compatible and word-bounded tokenizer-driven prompt builders and captured shape measurement path.
 
 ## Edit
 
-- `proxima-model-interop/tests/granite_attention_variant_prefill.rs`: parameterize the prompt builder by target token count without changing existing callers; add one test that calls the existing shape measurement function for nominal 256 and 971 token targets and writes both to one report.
+- `proxima-model-interop/tests/granite_attention_variant_prefill.rs`: extract Card 00's capture, correctness gate, replay sampling, summary, and resource capture into a reusable shape measurement function; keep the Card 00 test calling it for nominal 971. Parameterize the prompt builder by target token count and add a Card 02 test that calls the helper for nominal 256 and 971 token targets, writing both results to one report.
 - `proxima-tensor/specs/granite-attention-variant-performance/TASKS.md`: tick after the measurement and checker counts are inspected.
 
 ## Steps
 
 1. Build both prompts from the same repeated Sherlock passage and checkpoint tokenizer. Require actual counts at least 256 and 971, short count less than long count, and short prompt text and encoded IDs a prefix of the long. Record actual counts and prompt-ID digests, not only nominal targets.
-2. On one loaded model, run the Card 00 capture, exact output/ID gate, 20 alternating replay samples per arm, and `Cell` resource observation for the short shape, then the long shape. Keep each shape's owning legacy/selected `CapturedDispatch` handles alive until its 20 rounds and resource cells finish. Drain captures between arms/shapes. Both shapes use Card 00's exact `round=0..19`, `arm_order`, and per-arm `position` schema. Preserve both shape records in the same `version=1` JSON report; fail on any nonreplayable, fault-bound, or mismatched dispatch.
+2. Extract Card 00's shape measurement path into a helper and keep Card 00 calling it for nominal 971. On one loaded model, call that helper for the short shape, then the long shape. Keep each shape's owning legacy/selected `CapturedDispatch` handles alive until its 20 rounds and resource cells finish. Drain captures between arms/shapes. Both shapes use Card 00's exact `round=0..19`, `arm_order`, and per-arm `position` schema. Preserve both shape records in the same `version=1` JSON report; fail on any nonreplayable, fault-bound, or mismatched dispatch.
 3. Run Card 01's checker with `--expected-shapes 2`. Read every raw arm row and round difference; report gains and losses as observations without a speed verdict.
 
 ## Acceptance criteria
