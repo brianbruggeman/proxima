@@ -581,6 +581,130 @@ pub fn append_short_conv_mixer(
     )
 }
 
+/// Builds one LFM short-convolution decode transition over a one-token input.
+/// The prompt path uses [`append_short_conv_mixer`]; this path consumes the
+/// caller-owned convolution history and returns its updated state alongside
+/// the residual activation. `cache_position` is the absolute token position
+/// used by LFM's cache update (clamped to the final tap), and `roll_indices`
+/// is `(1..l_cache, 0)`. Call this transition only after the prompt path has
+/// initialized history; the pinned upstream uses full-sequence convolution
+/// when `cache_position` is zero.
+pub fn append_short_conv_cached_mixer_step(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    norm_weight: NodeId,
+    b_proj: NodeId,
+    c_proj: NodeId,
+    x_proj: NodeId,
+    conv_weight: NodeId,
+    out_proj: NodeId,
+    state_in: NodeId,
+    cache_position: NodeId,
+    roll_indices: NodeId,
+    l_cache: u32,
+) -> Result<(NodeId, NodeId), TensorError> {
+    let normed = rmsnorm(program, x, norm_weight, inv_dim, eps)?;
+    let branch_b = project_short_conv_branch(program, normed, b_proj)?;
+    let branch_c = project_short_conv_branch(program, normed, c_proj)?;
+    let branch_x = project_short_conv_branch(program, normed, x_proj)?;
+    let branch_b = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        branch_b,
+        "sg->sg",
+        "g->sg",
+    )?;
+    let branch_c = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        branch_c,
+        "sg->sg",
+        "g->sg",
+    )?;
+    let branch_x = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        branch_x,
+        "sg->sg",
+        "g->sg",
+    )?;
+    let gated_input = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(branch_b, "g->g"), (branch_x, "g->g")],
+    )?;
+    let (convolved, state_out) = causal_conv1d_step(
+        program,
+        state_in,
+        gated_input,
+        conv_weight,
+        cache_position,
+        roll_indices,
+        l_cache,
+        None,
+    )?;
+    let gated_output = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(convolved, "g->g"), (branch_c, "g->g")],
+    )?;
+    let out_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(gated_output, "g->gd"), (out_proj, "gd->gd")],
+    )?;
+    let mixer_out = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        out_product,
+        "gd->gd",
+        "d->gd",
+    )?;
+    let post_mixer = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(mixer_out, "d->sd"), (x, "sd->sd")],
+    )?;
+
+    Ok((post_mixer, state_out))
+}
+
+fn project_short_conv_branch(
+    program: &mut Vec<Op>,
+    normed: NodeId,
+    projection: NodeId,
+) -> Result<NodeId, TensorError> {
+    let product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "sd->sdg"), (projection, "dg->sdg")],
+    )?;
+    reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        "sdg->sdg",
+        "sg->sdg",
+    )
+}
+
 /// One token's worth of the gated-DeltaNet recurrence Qwen3.5's linear
 /// attention (SSM) layers run -- llama.cpp's own reference,
 /// `llm_build_delta_net_base::build_delta_net_autoregressive`

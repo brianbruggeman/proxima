@@ -6426,6 +6426,127 @@ async fn architecture_matrix_lfm_conv_step() {
     std::println!("steps=2 reference_pairs=2 wrong_kernel_rejected=1");
 }
 
+#[proxima::test]
+async fn architecture_matrix_lfm_cached_mixer_step() {
+    const L_CACHE: u32 = 3;
+    let mut program = Vec::new();
+    let x = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(1)],
+        "x",
+    );
+    let norm_weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1)],
+        "norm_weight",
+    );
+    let b_proj = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(1)],
+        "b_proj",
+    );
+    let c_proj = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(1)],
+        "c_proj",
+    );
+    let x_proj = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(1)],
+        "x_proj",
+    );
+    let conv_weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(L_CACHE)],
+        "conv_weight",
+    );
+    let out_proj = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(1)],
+        "out_proj",
+    );
+    let state_in = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(L_CACHE)],
+        "state_in",
+    );
+    let cache_position = input_leaf(&mut program, DType::Float32, Vec::new(), "cache_position");
+    let roll_indices = input_leaf(
+        &mut program,
+        DType::Int32,
+        alloc::vec![Extent::Static(L_CACHE)],
+        "roll_indices",
+    );
+    let inv_dim = scalar_constant(&mut program, 1.0);
+    let eps = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1)],
+        "eps",
+    );
+
+    let (post_mixer, state_out) = append_short_conv_cached_mixer_step(
+        &mut program,
+        x,
+        inv_dim,
+        eps,
+        norm_weight,
+        b_proj,
+        c_proj,
+        x_proj,
+        conv_weight,
+        out_proj,
+        state_in,
+        cache_position,
+        roll_indices,
+        L_CACHE,
+    )
+    .expect("cached short-convolution mixer builds");
+
+    let evaluated = crate::cpu::evaluate_quantized(
+        &program,
+        &[1],
+        &[
+            crate::cpu::QuantizedBlock::Float32(&[2.0]),
+            crate::cpu::QuantizedBlock::Float32(&[1.0]),
+            crate::cpu::QuantizedBlock::Float32(&[2.0]),
+            crate::cpu::QuantizedBlock::Float32(&[3.0]),
+            crate::cpu::QuantizedBlock::Float32(&[4.0]),
+            crate::cpu::QuantizedBlock::Float32(&[1.0, 10.0, 100.0]),
+            crate::cpu::QuantizedBlock::Float32(&[2.0]),
+            crate::cpu::QuantizedBlock::Float32(&[1.0, 2.0, 3.0]),
+            crate::cpu::QuantizedBlock::Float32(&[3.0]),
+            crate::cpu::QuantizedBlock::Int32(&[1, 2, 0]),
+            crate::cpu::QuantizedBlock::Float32(&[1.0e-6]),
+        ],
+        &[post_mixer, state_out],
+    )
+    .expect("cached short-convolution mixer evaluates");
+    let (output, output_shape) = evaluated.get(post_mixer).expect("post-mixer root exists");
+    let (state, state_shape) = evaluated.get(state_out).expect("state root exists");
+    assert_eq!(output_shape, [1, 1]);
+    assert_eq!(state_shape, [1, 3]);
+
+    let norm = 2.0f32 / (4.0f32 + 1.0e-6).sqrt();
+    let gated_input = 8.0 * norm * norm;
+    let expected_state = [2.0, 3.0, gated_input];
+    let convolved = 2.0 + 30.0 + 100.0 * gated_input;
+    let expected_output = 2.0 + 2.0 * convolved * 3.0 * norm;
+    assert!((output[0] - expected_output).abs() < 1.0e-3);
+    for (found, expected) in state.iter().zip(expected_state) {
+        assert!((found - expected).abs() < 1.0e-6);
+    }
+    std::println!("decode_tokens=1 reference_pairs=1 state_values=3");
+}
+
 fn evaluate_lfm_prefill_for_test(
     gated_values: &[f32],
     prefill_len: core::num::NonZeroU32,
