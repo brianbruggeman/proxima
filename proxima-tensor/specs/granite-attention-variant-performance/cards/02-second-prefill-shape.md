@@ -13,7 +13,7 @@ Extend the Card 00 measurement to a second, shorter prefix of the same Sherlock 
 
 - `../SPEC.md` for the two-shape report contract and exact acceptance counts.
 - Card 00's inline shape measurement path and Card 01's `--expected-shapes` checker; Card 02 first extracts that path into a reusable helper.
-- `proxima-model-interop/tests/granite_attention_variant_prefill.rs:209-241,1209-1304` for the legacy-compatible and word-bounded tokenizer-driven prompt builders and captured shape measurement path.
+- `proxima-model-interop/tests/granite_attention_variant_prefill.rs:210-242,1190-1308` for the legacy-compatible and word-bounded tokenizer-driven prompt builders and captured shape measurement path.
 
 ## Edit
 
