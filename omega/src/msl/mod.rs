@@ -65,8 +65,8 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-pub use proxima_primitives::Codec;
 use proxima_gguf::GgmlType;
+pub use proxima_primitives::Codec;
 use proxima_tensor::{
     BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, NumericPolicy,
     NumericRewrite, ReduceInit, ScalarOp, StepArg, admit,
@@ -93,8 +93,8 @@ use proxima_tensor::QuantizedBlock;
 use crate::error::EmitError;
 use crate::grid::checked_product;
 use crate::identity::{
-    body_token, init_token, keep_token, op_token, operand_codecs, reduce_epilogue_is_identity,
-    signed_name_part, MetalOnlyExtras,
+    MetalOnlyExtras, body_token, init_token, keep_token, op_token, operand_codecs,
+    reduce_epilogue_is_identity, signed_name_part,
 };
 #[cfg(all(
     any(feature = "metal-packed-row-nsg2", feature = "metal-q4k-ggml-port"),
@@ -102,7 +102,6 @@ use crate::identity::{
 ))]
 use crate::sized::PACKED_ROW_NSG;
 use crate::sized::SIMD_WIDTH;
-
 
 #[macro_use]
 mod kernel_types_identity;
@@ -126,19 +125,20 @@ mod packed_row_blocked_ggml;
 mod tiled_gemm_cooperative_scan;
 mod expert_grouped_gemm;
 mod wide_grid;
-pub use kernel_types_identity::*;
-pub use emit_and_classify::*;
 pub(crate) use emit_and_classify::emit_inner_with_mma_selection;
 #[cfg(feature = "metal-attn-variants")]
 pub(crate) use emit_and_classify::validate_attention_variant_storage;
-pub(crate) use signature_tokens_prelude::*;
+pub use emit_and_classify::*;
+pub use kernel_types_identity::*;
 pub use signature_tokens_prelude::CachedAttentionForm;
+pub use signature_tokens_prelude::context_chunks_for;
+pub(crate) use signature_tokens_prelude::*;
 #[cfg(feature = "metal-attn-variants")]
 pub use signature_tokens_prelude::{
     AttentionKvReuse, AttentionKvStorage, AttentionMmaPrecision, AttentionPrefetch,
-    AttentionQueryParallelism, AttentionSimdTopology, AttentionTileHeight, AttentionVariant,
+    AttentionQueryParallelism, AttentionSimdTopology, AttentionSimdgroupCount, AttentionTileHeight,
+    AttentionVariant,
 };
-pub use signature_tokens_prelude::context_chunks_for;
 // plain (non-pub) reexports: `render_cached_attention`/
 // `render_cached_attention_merge` only need to reach `msl`'s own child
 // modules (`emit_and_classify`'s and `tests`'s `use super::*`), which
@@ -157,35 +157,43 @@ pub use signature_tokens_prelude::context_chunks_for;
 // since nothing else ever names it through `msl`'s namespace.
 #[cfg(feature = "metal-attn-split-decode")]
 use cached_attention_decode_split::render_cached_attention_decode_split;
-#[cfg(feature = "metal-attn-split-rows")]
-use cached_attention_row_tiled::render_cached_attention_row_tiled;
+#[cfg(test)]
+use cached_attention_render::render_cached_attention;
 use cached_attention_render::{
     cached_attention_kv_codec, render_cached_attention_with_mma_selection,
 };
-#[cfg(test)]
-use cached_attention_render::render_cached_attention;
+#[cfg(feature = "metal-attn-split-rows")]
+use cached_attention_row_tiled::render_cached_attention_row_tiled;
 // Same "plain reexport for descendant modules" shape as
 // `render_cached_attention` immediately above -- `render_cached_softmax_
 // weights` is `pub(super)` on its own definition (`cached_softmax_weights_
 // render.rs`), and its only caller is `emit_and_classify::emit_inner`'s
 // `use super::*`.
-use cached_softmax_weights_render::render_cached_softmax_weights;
-use selection_render::render_top_fraction_select;
+#[cfg(test)]
+pub(crate) use cached_attention_render::emit_cached_attention_merge;
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+pub(crate) use cached_attention_render::emit_cached_attention_merge_with_schedule;
 #[cfg(test)]
 use cached_attention_render::render_cached_attention_merge;
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
-pub(crate) use cached_attention_render::emit_cached_attention_merge;
-#[cfg(any(all(test, feature = "metal-grouped-gemm"), all(feature = "metal", target_os = "macos")))]
-pub(crate) use expert_grouped_gemm::{route_compaction_key, route_prepass, route_prepass_active};
-#[cfg(any(feature = "metal-grouped-gemm", all(feature = "metal", target_os = "macos")))]
-pub(crate) use expert_grouped_gemm::ROUTE_COMPACTION_MISMATCH_FAULT;
+use cached_softmax_weights_render::render_cached_softmax_weights;
 pub(crate) use elementwise_reduce_core::*;
-use packed_row_blocked_ggml::*;
-use tiled_gemm_cooperative_scan::*;
+#[cfg(any(
+    feature = "metal-grouped-gemm",
+    all(feature = "metal", target_os = "macos")
+))]
+pub(crate) use expert_grouped_gemm::ROUTE_COMPACTION_MISMATCH_FAULT;
 use expert_grouped_gemm::*;
-use wide_grid::*;
+#[cfg(any(
+    all(test, feature = "metal-grouped-gemm"),
+    all(feature = "metal", target_os = "macos")
+))]
+pub(crate) use expert_grouped_gemm::{route_compaction_key, route_prepass, route_prepass_active};
+use packed_row_blocked_ggml::*;
+use selection_render::render_top_fraction_select;
+use tiled_gemm_cooperative_scan::*;
 #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 pub(crate) use wide_grid::fit_flat_width;
+use wide_grid::*;
 // `crate::metal::prepare_uniforms_pack` (a sibling of `msl`, not a
 // descendant, so `pub(super)` there would not reach it) needs this to pack
 // `CachedSoftmaxWeights::Uniforms::total_elements` as `attention_rows *

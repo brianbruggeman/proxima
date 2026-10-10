@@ -13,11 +13,7 @@ fn effective_attention_row_schedule(
     }
     #[cfg(feature = "metal-attn-split-rows")]
     if matches!(
-        cached_attention_form_with_tile_height(
-            &resolved.kind,
-            numeric_policy,
-            row_schedule.tile_height(),
-        ),
+        cached_attention_form_with_schedule(&resolved.kind, numeric_policy, row_schedule),
         Some(CachedAttentionForm::TwoRangeRowTiled { .. })
     ) {
         return row_schedule;
@@ -73,13 +69,15 @@ pub fn emit_with_attention_variant(
         })?;
     let row_schedule = effective_attention_row_schedule(resolved, numeric_policy, row_schedule);
     #[cfg(feature = "metal-attn-split-rows")]
-    validate_tile_height_selection(resolved, numeric_policy, row_schedule.tile_height())?;
+    validate_tile_height_selection(resolved, numeric_policy, row_schedule)?;
     #[cfg(feature = "metal-attn-split-rows")]
     validate_query_parallelism_selection(resolved, numeric_policy, row_schedule)?;
     #[cfg(feature = "metal-attn-split-rows")]
     validate_prefetch_selection(resolved, numeric_policy, row_schedule)?;
     #[cfg(feature = "metal-attn-split-rows")]
     validate_simd_topology_selection(resolved, numeric_policy, row_schedule)?;
+    #[cfg(feature = "metal-attn-split-rows")]
+    validate_simdgroup_count_selection(resolved, numeric_policy, row_schedule)?;
     emit_inner_with_mma_selection(
         resolved,
         packed_operands,
@@ -100,17 +98,17 @@ pub fn inspect_attention_variant(
     let kernel = emit_with_attention_variant(resolved, packed_operands, numeric_policy, variant)?;
     let quantized = operand_codecs(resolved, packed_operands);
     let cache_codec = cached_attention_kv_codec(resolved.node, &quantized)?;
-    let form = cached_attention_form(&resolved.kind, numeric_policy).ok_or(
-        EmitError::CachedAttentionVariantAxisNotSupported {
-            axis: "operation",
-            value: "dispatch manifests require a supported cached-attention form",
-        },
-    )?;
-    let (mma_selection, selected_schedule) = AttentionMmaSelection::from_variant(variant).map_err(
-        |(axis, value)| EmitError::CachedAttentionVariantAxisNotSupported { axis, value },
-    )?;
+    let (mma_selection, selected_schedule) =
+        AttentionMmaSelection::from_variant(variant).map_err(|(axis, value)| {
+            EmitError::CachedAttentionVariantAxisNotSupported { axis, value }
+        })?;
     let row_schedule =
         effective_attention_row_schedule(resolved, numeric_policy, selected_schedule);
+    let form = cached_attention_form_with_schedule(&resolved.kind, numeric_policy, row_schedule)
+        .ok_or(EmitError::CachedAttentionVariantAxisNotSupported {
+            axis: "operation",
+            value: "dispatch manifests require a supported cached-attention form",
+        })?;
     let mut effective_variant = variant;
     if selected_schedule.has_shared_k() && !row_schedule.has_shared_k() {
         effective_variant.kv_reuse = AttentionKvReuse::Legacy;
@@ -208,8 +206,7 @@ pub(crate) fn emit_inner_with_mma_selection(
     validate(resolved)?;
     #[cfg(feature = "metal-attn-variants")]
     let row_schedule = effective_attention_row_schedule(resolved, numeric_policy, row_schedule);
-    let tile_height_selection = row_schedule.tile_height();
-    let mut entry = entry_name_with_tile_height(resolved, numeric_policy, tile_height_selection);
+    let mut entry = entry_name_with_schedule(resolved, numeric_policy, row_schedule);
     if matches!(resolved.kind, BoundOpKind::CachedAttention { .. }) {
         entry.push_str(mma_selection.cache_token());
         entry.push_str(&row_schedule.cache_token());
@@ -303,7 +300,11 @@ pub(crate) fn emit_inner_with_mma_selection(
     // caller that lacks the merge dispatch this binding shape requires --
     // `crate::metal::encode_op`'s own doc names that gap and the guard it
     // takes on its `resolved: None` (no plan-resolved merge sibling) path.
-    let is_split_cached_attention = cached_attention_merge_needed(&resolved.kind, numeric_policy);
+    let is_split_cached_attention = cached_attention_merge_needed_with_schedule(
+        &resolved.kind,
+        numeric_policy,
+        row_schedule,
+    );
     let source = widen_for_grid(resolved.node, source, grid.grid2d)?;
     let kernel = Kernel {
         source,
@@ -1862,12 +1863,9 @@ pub(crate) fn kernel_dispatch_shape_with_schedule(
 ) -> Result<(Vec<Binding>, GridSpec), EmitError> {
     validate(resolved)?;
     let quantized = operand_codecs(resolved, packed_operands);
-    let is_split_cached_attention = cached_attention_form_with_tile_height(
-        &resolved.kind,
-        numeric_policy,
-        schedule.tile_height(),
-    )
-    .is_some_and(CachedAttentionForm::needs_merge);
+    let is_split_cached_attention =
+        cached_attention_form_with_schedule(&resolved.kind, numeric_policy, schedule)
+            .is_some_and(CachedAttentionForm::needs_merge);
     // `kernel_dispatch_shape` has no expert-source caller (it never took
     // `expert_source_mode` before this parameter existed either) -- `false`
     // reproduces that pre-existing scope exactly.
@@ -1920,20 +1918,25 @@ pub(crate) fn grid_spec_with_tile_height(
     expert_source_mode: bool,
     schedule: AttentionRowSchedule,
 ) -> Result<GridSpec, EmitError> {
-    let threads = if schedule.tile_height() == AttentionTileHeightSelection::Legacy {
+    let threads = if schedule == AttentionRowSchedule::legacy() {
         grid_threads(resolved, quantized, numeric_policy, expert_source_mode)?
     } else {
-        grid_threads_with_tile_height(
+        grid_threads_with_schedule(
             resolved,
             quantized,
             numeric_policy,
             expert_source_mode,
-            schedule.tile_height(),
+            schedule,
         )?
+    };
+    let threadgroup_width = if schedule == AttentionRowSchedule::legacy() {
+        tiled_gemm_threadgroup_width(resolved, quantized, numeric_policy)
+    } else {
+        tiled_gemm_threadgroup_width_with_schedule(resolved, quantized, numeric_policy, schedule)
     };
     Ok(GridSpec {
         threads,
-        threadgroup_width: tiled_gemm_threadgroup_width(resolved, quantized, numeric_policy),
+        threadgroup_width,
         depth: grid_depth_for(resolved, quantized),
         grid2d: grid2d_for(
             resolved,
@@ -1941,6 +1944,7 @@ pub(crate) fn grid_spec_with_tile_height(
             numeric_policy,
             expert_source_mode,
             threads,
+            schedule,
         )?,
     })
 }
@@ -3945,6 +3949,7 @@ pub(super) fn grid2d_for(
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
     threads: u64,
+    schedule: AttentionRowSchedule,
 ) -> Result<Option<Grid2DSpec>, EmitError> {
     if let BoundOpKind::Reduce {
         reduce_op,
@@ -3973,7 +3978,11 @@ pub(super) fn grid2d_for(
             reason: "its reduction is coherent only inside the one threadgroup it runs as",
         });
     }
-    let threadgroup_width = tiled_gemm_threadgroup_width(resolved, quantized, numeric_policy);
+    let threadgroup_width = if schedule == AttentionRowSchedule::legacy() {
+        tiled_gemm_threadgroup_width(resolved, quantized, numeric_policy)
+    } else {
+        tiled_gemm_threadgroup_width_with_schedule(resolved, quantized, numeric_policy, schedule)
+    };
     let width_is_neutral =
         pinned_width_is_shape_neutral(resolved, quantized, numeric_policy, expert_source_mode);
     flat_grid2d(resolved.node, threads, threadgroup_width, width_is_neutral).map(Some)

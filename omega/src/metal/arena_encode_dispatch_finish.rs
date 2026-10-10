@@ -123,7 +123,9 @@ fn extra_output_nodes(bound: &BoundOp) -> impl Iterator<Item = (NodeId, usize)> 
         _ => None,
     };
     let twin = match &bound.kind {
-        BoundOpKind::ElementwiseTwin { twin_node, .. } => Some((*twin_node, bound_output_len(bound))),
+        BoundOpKind::ElementwiseTwin { twin_node, .. } => {
+            Some((*twin_node, bound_output_len(bound)))
+        }
         _ => None,
     };
     bound
@@ -229,7 +231,9 @@ fn arena_allocations(
             });
         }
         let extras_start = found.extras.len();
-        for (extra_node, element_count) in extra_output_nodes(bound).filter(|(node, _)| !is_placed(*node)) {
+        for (extra_node, element_count) in
+            extra_output_nodes(bound).filter(|(node, _)| !is_placed(*node))
+        {
             live_index.insert(extra_node, found.allocations.len());
             found.extras.push((extra_node, found.allocations.len()));
             found.allocations.push(Allocation {
@@ -323,13 +327,23 @@ pub(super) fn build_buffer_arena(
 
     let packed = (plan.dispatch_type == DispatchType::Serial)
         .then(|| lay_out_packed(&found.allocations, &found.releases))
-        .filter(|layout| layout.slot_bytes.iter().all(|bytes| *bytes <= device.maxBufferLength()));
+        .filter(|layout| {
+            layout
+                .slot_bytes
+                .iter()
+                .all(|bytes| *bytes <= device.maxBufferLength())
+        });
     let was_packed = packed.is_some();
-    let layout = packed
-        .unwrap_or_else(|| lay_out_whole_slots(&found.allocations, &found.releases));
+    let layout = packed.unwrap_or_else(|| lay_out_whole_slots(&found.allocations, &found.releases));
     let mut slots: Vec<MetalBuffer> = Vec::with_capacity(layout.slot_bytes.len());
     for bytes in &layout.slot_bytes {
-        slots.push(allocate_buffer_for("arena_slot", "plan", device, bytes.div_ceil(4), DType::Float32)?);
+        slots.push(allocate_buffer_for(
+            "arena_slot",
+            "plan",
+            device,
+            bytes.div_ceil(4),
+            DType::Float32,
+        )?);
     }
     debug!(
         packed = was_packed,
@@ -344,8 +358,16 @@ pub(super) fn build_buffer_arena(
 
     Ok(BufferArena {
         slots,
-        position_slot: found.primary.iter().map(|index| index.map(|each| layout.places[each].0)).collect(),
-        position_offset: found.primary.iter().map(|index| index.map_or(0, |each| layout.places[each].1)).collect(),
+        position_slot: found
+            .primary
+            .iter()
+            .map(|index| index.map(|each| layout.places[each].0))
+            .collect(),
+        position_offset: found
+            .primary
+            .iter()
+            .map(|index| index.map_or(0, |each| layout.places[each].1))
+            .collect(),
         extra_slots: found
             .extras
             .iter()
@@ -383,7 +405,11 @@ fn emit_arena_census(resolved: &[BoundOp], found: &ArenaAllocations) {
             .get(cursor)
             .filter(|each| each.first == position)
         {
-            *writers.entry(allocation.bytes).or_default().entry(label.clone()).or_default() += 1;
+            *writers
+                .entry(allocation.bytes)
+                .or_default()
+                .entry(label.clone())
+                .or_default() += 1;
             let count = live.entry(allocation.bytes).or_default();
             *count += 1;
             let high = peak_live.entry(allocation.bytes).or_default();
@@ -442,13 +468,14 @@ pub(super) fn build_plan_uniforms(
     device: &ProtocolObject<dyn MTLDevice>,
     resolved: &[BoundOp],
     numeric_policy: NumericPolicy,
+    attention_row_schedule: crate::msl::AttentionRowSchedule,
 ) -> Result<PlanUniforms, MetalError> {
     let mut buffers = Vec::with_capacity(resolved.len());
     for (position, bound) in resolved.iter().enumerate() {
         // read unconditionally so a non-`instrument` build (where the only
         // consumer below is compiled out) does not trip `unused_variables`.
         let _ = position;
-        let bytes = pack_uniforms(bound, numeric_policy)?;
+        let bytes = pack_uniforms_with_schedule(bound, numeric_policy, attention_row_schedule)?;
         let buffer = device
             .newBufferWithLength_options(bytes.len().max(1), MTLResourceOptions::StorageModeShared)
             .ok_or_else(|| MetalError::CompileFailed {
@@ -490,7 +517,10 @@ pub(super) fn write_plan_uniform_bytes(buffer: &ProtocolObject<dyn MTLBuffer>, b
 /// [`write_plan_uniform_bytes`]'s read-back counterpart -- test surface only,
 /// proving a write actually landed rather than trusting the copy above.
 #[cfg(all(test, feature = "metal-plan-stable-buffers"))]
-pub(super) fn read_back_uniform_bytes(buffer: &ProtocolObject<dyn MTLBuffer>, byte_len: usize) -> Vec<u8> {
+pub(super) fn read_back_uniform_bytes(
+    buffer: &ProtocolObject<dyn MTLBuffer>,
+    byte_len: usize,
+) -> Vec<u8> {
     let pointer = buffer.contents();
     // SAFETY: same CPU-visible, `storageModeShared` argument as
     // `write_plan_uniform_bytes` above, read rather than written.
@@ -528,7 +558,10 @@ pub(super) fn arena_placement(
         // `plan` is `&Plan`, never shared across a concurrent write.
         let _ = plan.arena.set(arena);
     }
-    Ok(plan.arena.get().and_then(|arena| arena.placement_for(position)))
+    Ok(plan
+        .arena
+        .get()
+        .and_then(|arena| arena.placement_for(position)))
 }
 /// Registers a position's extra output buffers in `device_buffers` before
 /// `encode_op` runs, so a multi-output op binds plan-owned storage instead
@@ -569,12 +602,20 @@ pub(super) fn arena_placement(
 /// own doc for why this is a free function rather than an inline `#[cfg]`,
 /// and for why it builds `plan.uniforms` lazily on the same schedule.
 #[cfg(feature = "metal-plan-stable-buffers")]
-pub(super) fn plan_uniform_buffer(plan: &Plan, position: usize) -> Result<Option<&MetalBuffer>, MetalError> {
+pub(super) fn plan_uniform_buffer(
+    plan: &Plan,
+    position: usize,
+) -> Result<Option<&MetalBuffer>, MetalError> {
     if plan.uniforms.get().is_none() {
         let (device, _queue) = device_and_queue()?;
         #[cfg(feature = "instrument")]
         let build_started = read_ticks();
-        let uniforms = build_plan_uniforms(&device, &plan.prepared.resolved, plan.numeric_policy)?;
+        let uniforms = build_plan_uniforms(
+            &device,
+            &plan.prepared.resolved,
+            plan.numeric_policy,
+            plan.attention_row_schedule,
+        )?;
         #[cfg(feature = "instrument")]
         counter!(BUILD_PLAN_UNIFORMS_TICKS, elapsed_ticks(build_started));
         let _ = plan.uniforms.set(uniforms);
@@ -585,7 +626,10 @@ pub(super) fn plan_uniform_buffer(plan: &Plan, position: usize) -> Result<Option
         .map(|uniforms| &uniforms.buffers[position]))
 }
 #[cfg(not(feature = "metal-plan-stable-buffers"))]
-pub(super) fn plan_uniform_buffer(_plan: &Plan, _position: usize) -> Result<Option<&MetalBuffer>, MetalError> {
+pub(super) fn plan_uniform_buffer(
+    _plan: &Plan,
+    _position: usize,
+) -> Result<Option<&MetalBuffer>, MetalError> {
     Ok(None)
 }
 
@@ -625,7 +669,23 @@ pub(super) fn plan_uniform_buffer(_plan: &Plan, _position: usize) -> Result<Opti
 /// against their own bind-time `splits`, the count their partial and merge
 /// kernels stride the scratch by, which [`crate::msl::splits_for`] does not
 /// reproduce.
-pub(super) fn cached_attention_scratch_len(bound: &BoundOp, numeric_policy: NumericPolicy) -> Option<u64> {
+#[cfg(test)]
+pub(super) fn cached_attention_scratch_len(
+    bound: &BoundOp,
+    numeric_policy: NumericPolicy,
+) -> Option<u64> {
+    cached_attention_scratch_len_with_schedule(
+        bound,
+        numeric_policy,
+        crate::msl::AttentionRowSchedule::legacy(),
+    )
+}
+
+pub(super) fn cached_attention_scratch_len_with_schedule(
+    bound: &BoundOp,
+    numeric_policy: NumericPolicy,
+    schedule: crate::msl::AttentionRowSchedule,
+) -> Option<u64> {
     let BoundOpKind::CachedAttention {
         head_dim,
         query_rows,
@@ -642,7 +702,11 @@ pub(super) fn cached_attention_scratch_len(bound: &BoundOp, numeric_policy: Nume
         .product::<u64>()
         .checked_div(*head_dim)?;
     #[cfg(feature = "metal-attn-split-rows")]
-    let form_splits = match crate::msl::cached_attention_form(&bound.kind, numeric_policy) {
+    let form_splits = match crate::msl::cached_attention_form_with_schedule(
+        &bound.kind,
+        numeric_policy,
+        schedule,
+    ) {
         Some(
             crate::msl::CachedAttentionForm::TwoRangeRowTiled { splits, .. }
             | crate::msl::CachedAttentionForm::TwoRangeDecodeSplit { splits, .. },
@@ -664,9 +728,22 @@ pub(super) fn cached_attention_scratch_len(bound: &BoundOp, numeric_policy: Nume
 /// Whether `bound`'s form shares one plan-level scratch buffer with the
 /// plan's other ops of that form (`CachedAttentionForm::shares_scratch`).
 #[cfg(any(test, feature = "metal-plan-stable-buffers"))]
-fn scratch_is_shared(bound: &BoundOp, numeric_policy: NumericPolicy) -> bool {
-    crate::msl::cached_attention_form(&bound.kind, numeric_policy)
+fn scratch_is_shared_with_schedule(
+    bound: &BoundOp,
+    numeric_policy: NumericPolicy,
+    schedule: crate::msl::AttentionRowSchedule,
+) -> bool {
+    crate::msl::cached_attention_form_with_schedule(&bound.kind, numeric_policy, schedule)
         .is_some_and(crate::msl::CachedAttentionForm::shares_scratch)
+}
+
+#[cfg(test)]
+fn scratch_is_shared(bound: &BoundOp, numeric_policy: NumericPolicy) -> bool {
+    scratch_is_shared_with_schedule(
+        bound,
+        numeric_policy,
+        crate::msl::AttentionRowSchedule::legacy(),
+    )
 }
 
 /// The one scratch buffer every position that shares it reads and writes,
@@ -679,21 +756,48 @@ fn shared_attention_scratch(
     device: &ProtocolObject<dyn MTLDevice>,
     plan: &Plan,
 ) -> Result<Option<MetalBuffer>, MetalError> {
-    shared_scratch_elements(&plan.prepared.resolved, plan.numeric_policy)
-        .map(|elements| allocate_buffer_for("attention_scratch", "plan", device, elements as usize, DType::Float32))
-        .transpose()
+    shared_scratch_elements_with_schedule(
+        &plan.prepared.resolved,
+        plan.numeric_policy,
+        plan.attention_row_schedule,
+    )
+    .map(|elements| {
+        allocate_buffer_for(
+            "attention_scratch",
+            "plan",
+            device,
+            elements as usize,
+            DType::Float32,
+        )
+    })
+    .transpose()
 }
 
 /// [`shared_attention_scratch`]'s sizing: the widest scratch length among the
 /// positions that share, `None` when none does. Separate from the allocation
 /// so a plan's sharing is checkable without a device.
 #[cfg(any(test, feature = "metal-plan-stable-buffers"))]
-fn shared_scratch_elements(resolved: &[BoundOp], numeric_policy: NumericPolicy) -> Option<u64> {
+fn shared_scratch_elements_with_schedule(
+    resolved: &[BoundOp],
+    numeric_policy: NumericPolicy,
+    schedule: crate::msl::AttentionRowSchedule,
+) -> Option<u64> {
     resolved
         .iter()
-        .filter(|bound| scratch_is_shared(bound, numeric_policy))
-        .filter_map(|bound| cached_attention_scratch_len(bound, numeric_policy))
+        .filter(|bound| scratch_is_shared_with_schedule(bound, numeric_policy, schedule))
+        .filter_map(|bound| {
+            cached_attention_scratch_len_with_schedule(bound, numeric_policy, schedule)
+        })
         .max()
+}
+
+#[cfg(test)]
+fn shared_scratch_elements(resolved: &[BoundOp], numeric_policy: NumericPolicy) -> Option<u64> {
+    shared_scratch_elements_with_schedule(
+        resolved,
+        numeric_policy,
+        crate::msl::AttentionRowSchedule::legacy(),
+    )
 }
 
 /// [`Plan::attention_scratch`]'s lazy builder, built alongside [`PlanUniforms`]
@@ -709,11 +813,27 @@ pub(super) fn attention_scratch_buffer(
         let mut buffers = Vec::with_capacity(plan.prepared.resolved.len());
         let shared = shared_attention_scratch(&device, plan)?;
         for bound in &plan.prepared.resolved {
-            let buffer = match cached_attention_scratch_len(bound, plan.numeric_policy) {
-                Some(_) if scratch_is_shared(bound, plan.numeric_policy) => shared.clone(),
-                Some(elements) => {
-                    Some(allocate_buffer_for("attention_scratch", "plan", &device, elements as usize, DType::Float32)?)
+            let buffer = match cached_attention_scratch_len_with_schedule(
+                bound,
+                plan.numeric_policy,
+                plan.attention_row_schedule,
+            ) {
+                Some(_)
+                    if scratch_is_shared_with_schedule(
+                        bound,
+                        plan.numeric_policy,
+                        plan.attention_row_schedule,
+                    ) =>
+                {
+                    shared.clone()
                 }
+                Some(elements) => Some(allocate_buffer_for(
+                    "attention_scratch",
+                    "plan",
+                    &device,
+                    elements as usize,
+                    DType::Float32,
+                )?),
                 None => None,
             };
             buffers.push(buffer);
@@ -744,11 +864,18 @@ fn resolve_route_prepass(
     cache_key: &str,
     math_mode: MathMode,
 ) -> Result<Option<ResolvedPrepass>, MetalError> {
-    let Some(([count, place], words)) = crate::msl::route_prepass(bound, packed_operands, numeric_policy)? else {
+    let Some(([count, place], words)) =
+        crate::msl::route_prepass(bound, packed_operands, numeric_policy)?
+    else {
         return Ok(None);
     };
     let pipeline = pipeline_for_kernel(device, &count, &format!("{cache_key}_prepass"), math_mode)?;
-    let place_pipeline = pipeline_for_kernel(device, &place, &format!("{cache_key}_prepass_place"), math_mode)?;
+    let place_pipeline = pipeline_for_kernel(
+        device,
+        &place,
+        &format!("{cache_key}_prepass_place"),
+        math_mode,
+    )?;
     Ok(Some(ResolvedPrepass {
         pipeline,
         place: place_pipeline,
@@ -777,8 +904,7 @@ pub(super) fn resolve_step(
         numeric_policy,
         attention_row_schedule,
     )?;
-    let mut cache_key =
-        kernel_cache_key_for_grid(bound, packed_operands, numeric_policy, &grid)?;
+    let mut cache_key = kernel_cache_key_for_grid(bound, packed_operands, numeric_policy, &grid)?;
     cache_key.push(math_mode.cache_token());
     cache_key.push_str(attention_mma_selection.cache_token_for(bound));
     cache_key.push_str(&attention_row_schedule.cache_token_for(bound));
@@ -820,7 +946,11 @@ pub(super) fn resolve_step(
     // merge dispatch, keyed on the split's own cache key plus `_merge`
     // so the two never collide in `PIPELINE_CACHE` even though they
     // share every other structural token.
-    let merge = match crate::msl::emit_cached_attention_merge(bound, numeric_policy)? {
+    let merge = match crate::msl::emit_cached_attention_merge_with_schedule(
+        bound,
+        numeric_policy,
+        attention_row_schedule,
+    )? {
         Some(merge_kernel) => {
             let merge_cache_key = merge_pipeline_key(&cache_key, &merge_kernel);
             let merge_pipeline =
@@ -833,7 +963,14 @@ pub(super) fn resolve_step(
         }
         None => None,
     };
-    let prepass = resolve_route_prepass(device, bound, packed_operands, numeric_policy, &cache_key, math_mode)?;
+    let prepass = resolve_route_prepass(
+        device,
+        bound,
+        packed_operands,
+        numeric_policy,
+        &cache_key,
+        math_mode,
+    )?;
     #[cfg(feature = "metal-moe-mul-mat-id")]
     let round_group = match &bound.kind {
         BoundOpKind::RoundBatchedReduce { .. } => Some(ensure_round_group_resolved(device, bound)?),
@@ -911,14 +1048,11 @@ fn refit_steps(
     patches: &[(usize, BoundOp)],
 ) -> Result<Option<Vec<(usize, ResolvedStep)>>, MetalError> {
     let current = plan.resolved_steps.borrow();
-    if !current
-        .as_ref()
-        .is_some_and(|resolved| {
-            resolved.math_mode == plan.math_mode
-                && resolved.attention_mma_selection == plan.attention_mma_selection
-                && resolved.attention_row_schedule == plan.attention_row_schedule
-        })
-    {
+    if !current.as_ref().is_some_and(|resolved| {
+        resolved.math_mode == plan.math_mode
+            && resolved.attention_mma_selection == plan.attention_mma_selection
+            && resolved.attention_row_schedule == plan.attention_row_schedule
+    }) {
         return Ok(None);
     }
     patches
@@ -951,9 +1085,16 @@ fn refit_uniform_buffers(
     patches
         .iter()
         .map(|(position, bound)| {
-            let bytes = pack_uniforms(bound, plan.numeric_policy)?;
+            let bytes = pack_uniforms_with_schedule(
+                bound,
+                plan.numeric_policy,
+                plan.attention_row_schedule,
+            )?;
             let buffer = device
-                .newBufferWithLength_options(bytes.len().max(1), MTLResourceOptions::StorageModeShared)
+                .newBufferWithLength_options(
+                    bytes.len().max(1),
+                    MTLResourceOptions::StorageModeShared,
+                )
                 .ok_or_else(|| MetalError::CompileFailed {
                     log: "device refused to allocate a plan uniform buffer".to_string(),
                 })?;
@@ -976,7 +1117,10 @@ fn refit_uniform_buffers(
 /// per-position loop, so a plan-cache HIT never pays [`kernel_cache_key`] or
 /// [`kernel_dispatch_shape`] again: the loop below indexes
 /// `plan.resolved_steps` by position instead.
-pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan) -> Result<(), MetalError> {
+pub(super) fn resolve_steps(
+    device: &ProtocolObject<dyn MTLDevice>,
+    plan: &Plan,
+) -> Result<(), MetalError> {
     let stale = plan
         .resolved_steps
         .borrow()
@@ -1015,7 +1159,12 @@ pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan)
             .iter()
             .map(|step| Retained::as_ptr(&step.pipeline))
             .collect();
-        let writes: Vec<NodeId> = plan.prepared.resolved.iter().map(|bound| bound.node).collect();
+        let writes: Vec<NodeId> = plan
+            .prepared
+            .resolved
+            .iter()
+            .map(|bound| bound.node)
+            .collect();
         let reads: Vec<Vec<NodeId>> = plan
             .prepared
             .resolved
@@ -1023,7 +1172,11 @@ pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan)
             .map(|bound| bound.operands().iter().map(|(node, ..)| *node).collect())
             .collect();
         let mut groups = group_mergeable_positions(&identities, &reads, &writes);
-        groups.retain(|group| group.iter().all(|position| steps[*position].prepass.is_none()));
+        groups.retain(|group| {
+            group
+                .iter()
+                .all(|position| steps[*position].prepass.is_none())
+        });
         debug!(
             plan_positions = steps.len(),
             merge_groups = groups.len(),
@@ -1203,7 +1356,11 @@ fn capture_dispatch(
             record.entry.clone(),
             record.msl_sha256.clone(),
         ),
-        None => ("<unrecorded>".to_string(), "<unrecorded>".to_string(), "<unrecorded>".to_string()),
+        None => (
+            "<unrecorded>".to_string(),
+            "<unrecorded>".to_string(),
+            "<unrecorded>".to_string(),
+        ),
     };
     let max_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
     let threadgroup_width = match grid.threadgroup_width {
@@ -1218,19 +1375,29 @@ fn capture_dispatch(
         .map(|spec| crate::msl::fit_flat_width(spec, max_threadgroup as u64));
     let (recorded_grid, recorded_threadgroup, recorded_dispatch) = match launch2d {
         Some(spec) => (
-            (spec.threadgroups_x as usize, spec.threadgroups_y as usize, grid.depth as usize),
-            (spec.threads_per_threadgroup_x as usize, spec.threads_per_threadgroup_y as usize, 1),
+            (
+                spec.threadgroups_x as usize,
+                spec.threadgroups_y as usize,
+                grid.depth as usize,
+            ),
+            (
+                spec.threads_per_threadgroup_x as usize,
+                spec.threads_per_threadgroup_y as usize,
+                1,
+            ),
             "threadgroups",
         ),
-        None => ((grid.threads as usize, 1, grid.depth as usize), (threadgroup_width, 1, 1), "threads"),
+        None => (
+            (grid.threads as usize, 1, grid.depth as usize),
+            (threadgroup_width, 1, 1),
+            "threads",
+        ),
     };
     let mut buffers = Vec::new();
     let mut dump_buffers = Vec::new();
     for (index, binding) in bindings.iter().enumerate() {
         let resolved: Option<(MetalBuffer, usize)> = match binding {
-            Binding::Input(node) | Binding::Indices(node) => {
-                device_buffers.get(node).cloned()
-            }
+            Binding::Input(node) | Binding::Indices(node) => device_buffers.get(node).cloned(),
             Binding::Output(_) => Some((output.0.clone(), output.1)),
             _ => None,
         };
@@ -1297,12 +1464,18 @@ fn capture_dispatch(
             };
             match resolved {
                 Some((buffer, offset)) => live_buffers.push((index, buffer, offset)),
-                None => unreplayable = Some(format!("binding {index} ({binding:?}) not resolvable")),
+                None => {
+                    unreplayable = Some(format!("binding {index} ({binding:?}) not resolvable"))
+                }
             }
         }
-        let prepass_owner = prepass.and_then(|(_, _, shared_from)| shared_from).map(|owner| owner.0);
+        let prepass_owner = prepass
+            .and_then(|(_, _, shared_from)| shared_from)
+            .map(|owner| owner.0);
         let route_prepass_dispatches = ROUTE_PREPASS_DISPATCHES
-            * u64::from(crate::msl::route_prepass_active(bound, packed_operands) && prepass_owner.is_none());
+            * u64::from(
+                crate::msl::route_prepass_active(bound, packed_operands) && prepass_owner.is_none(),
+            );
         let captured_prepass = prepass.and_then(|(resolved_prepass, compaction, _)| {
             live_buffers.push((bindings.len(), compaction.clone(), 0));
             prepass_owner.is_none().then(|| CapturedPrepass {
@@ -1314,11 +1487,15 @@ fn capture_dispatch(
         let missing_prepass = (crate::msl::route_prepass_active(bound, packed_operands) && prepass.is_none()).then(|| {
             "a compacted grouped gemm needs its route prepass, which this capture call did not receive".to_string()
         });
-        let extras_reason = live_extra_buffers(bound, bindings.len(), device_buffers, &mut live_buffers)
-            .or(missing_prepass);
+        let extras_reason =
+            live_extra_buffers(bound, bindings.len(), device_buffers, &mut live_buffers)
+                .or(missing_prepass);
         // SAFETY: `uniforms` is a live shared buffer of `length()` bytes.
         let uniform_bytes = unsafe {
-            core::slice::from_raw_parts(uniforms.contents().as_ptr().cast::<u8>(), uniforms.length())
+            core::slice::from_raw_parts(
+                uniforms.contents().as_ptr().cast::<u8>(),
+                uniforms.length(),
+            )
         }
         .to_vec();
         let live_operands = bound
@@ -1346,9 +1523,9 @@ fn capture_dispatch(
                 unreplayable: unreplayable.or(extras_reason),
                 route_prepass_dispatches,
                 route_prepass_grid: captured_prepass.as_ref().map(|prepass| prepass.grid),
-                route_prepass_max_threads: captured_prepass.as_ref().map(|prepass| {
-                    prepass.pipeline.maxTotalThreadsPerThreadgroup() as usize
-                }),
+                route_prepass_max_threads: captured_prepass
+                    .as_ref()
+                    .map(|prepass| prepass.pipeline.maxTotalThreadsPerThreadgroup() as usize),
                 uniform_bytes,
                 pipeline: pipeline.clone(),
                 buffers: live_buffers,
@@ -1465,7 +1642,9 @@ pub(super) fn flush_pending_capture_dumps() {
             let bytes = unsafe { core::slice::from_raw_parts(pointer.add(*offset), length) };
             // step in the name: without it, a later step silently overwrites
             // an earlier step's dump of the same node.
-            let path = dir.join(format!("node{node}_step{step}_buf{index}_off{offset}_len{length}.bin"));
+            let path = dir.join(format!(
+                "node{node}_step{step}_buf{index}_off{offset}_len{length}.bin"
+            ));
             if let Err(err) = std::fs::write(&path, bytes) {
                 debug!(?err, path = ?path, "capture dump: failed to write buffer bytes");
             }
@@ -1477,8 +1656,10 @@ pub(super) fn flush_pending_capture_dumps() {
             }
         }
         if let (true, Some((length, sha256))) = (entry.manifest, manifest_row) {
-            let manifest_line =
-                format!("node={node}\textents={}\toutput_len={length}\tsha256={sha256}\n", entry.extents);
+            let manifest_line = format!(
+                "node={node}\textents={}\toutput_len={length}\tsha256={sha256}\n",
+                entry.extents
+            );
             let manifest_path = dir.join("manifest.txt");
             let append_result = std::fs::OpenOptions::new()
                 .create(true)
@@ -1497,7 +1678,9 @@ pub(super) fn flush_pending_capture_dumps() {
         if *uniforms_len > 0 {
             let pointer = uniforms_buffer.contents().as_ptr().cast::<u8>();
             let bytes = unsafe { core::slice::from_raw_parts(pointer, *uniforms_len) };
-            let path = dir.join(format!("node{node}_step{step}_uniforms_len{uniforms_len}.bin"));
+            let path = dir.join(format!(
+                "node{node}_step{step}_uniforms_len{uniforms_len}.bin"
+            ));
             if let Err(err) = std::fs::write(&path, bytes) {
                 debug!(?err, path = ?path, "capture dump: failed to write uniforms bytes");
             }
@@ -1655,7 +1838,10 @@ struct DispatchShape {
 
 /// The launch shape [`dispatch`] picks, without launching; `None` for an empty grid.
 #[cfg(feature = "instrument")]
-fn dispatch_shape(pipeline: &ProtocolObject<dyn MTLComputePipelineState>, grid: GridSpec) -> Option<DispatchShape> {
+fn dispatch_shape(
+    pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
+    grid: GridSpec,
+) -> Option<DispatchShape> {
     if grid.threads == 0 {
         return None;
     }
@@ -1683,8 +1869,16 @@ fn dispatch_shape(pipeline: &ProtocolObject<dyn MTLComputePipelineState>, grid: 
     };
     Some(DispatchShape {
         by_threadgroups: false,
-        extent: MTLSize { width: grid.threads as usize, height: 1, depth: grid.depth as usize },
-        threads: MTLSize { width, height: 1, depth: 1 },
+        extent: MTLSize {
+            width: grid.threads as usize,
+            height: 1,
+            depth: grid.depth as usize,
+        },
+        threads: MTLSize {
+            width,
+            height: 1,
+            depth: 1,
+        },
         dynamic_bytes: 0,
     })
 }
@@ -1705,7 +1899,15 @@ fn dispatch_floor(
         return;
     };
     if shape.by_threadgroups {
-        let groups = if one_threadgroup { MTLSize { width: 1, height: 1, depth: 1 } } else { shape.extent };
+        let groups = if one_threadgroup {
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            }
+        } else {
+            shape.extent
+        };
         if dynamic_memory && shape.dynamic_bytes > 0 {
             // SAFETY: index 0 is the `[[threadgroup(0)]]` argument the empty kernel declares when this length is set.
             unsafe { encoder.setThreadgroupMemoryLength_atIndex(shape.dynamic_bytes, 0) };
@@ -1713,7 +1915,11 @@ fn dispatch_floor(
         encoder.dispatchThreadgroups_threadsPerThreadgroup(groups, shape.threads);
     } else {
         let extent = if one_threadgroup {
-            MTLSize { width: shape.threads.width, height: 1, depth: 1 }
+            MTLSize {
+                width: shape.threads.width,
+                height: 1,
+                depth: 1,
+            }
         } else {
             shape.extent
         };
@@ -1756,25 +1962,49 @@ fn floor_pipeline_for(
     };
     indices.sort_unstable();
     indices.dedup();
-    let static_bytes = if minimal_bindings { 0 } else { record.pipeline.staticThreadgroupMemoryLength() };
+    let static_bytes = if minimal_bindings {
+        0
+    } else {
+        record.pipeline.staticThreadgroupMemoryLength()
+    };
     let dynamic = !minimal_bindings
-        && dispatch_shape(&record.pipeline, record.grid).is_some_and(|shape| shape.dynamic_bytes > 0);
+        && dispatch_shape(&record.pipeline, record.grid)
+            .is_some_and(|shape| shape.dynamic_bytes > 0);
     let parameters: String = indices
         .iter()
         .map(|index| format!("device uchar* b{index} [[buffer({index})]], "))
         .collect();
-    let touches: String = indices.iter().map(|index| format!("b{index}[0] = 0; ")).collect();
-    let dynamic_parameter = if dynamic { "threadgroup uchar* dynamic_memory [[threadgroup(0)]], " } else { "" };
+    let touches: String = indices
+        .iter()
+        .map(|index| format!("b{index}[0] = 0; "))
+        .collect();
+    let dynamic_parameter = if dynamic {
+        "threadgroup uchar* dynamic_memory [[threadgroup(0)]], "
+    } else {
+        ""
+    };
     let static_declaration = if static_bytes > 0 {
         format!("threadgroup uchar static_memory[{static_bytes}]; ")
     } else {
         String::new()
     };
-    let static_touch = if static_bytes > 0 { format!("static_memory[tid % {static_bytes}u] = 1; ") } else { String::new() };
-    let dynamic_touch = if dynamic { "dynamic_memory[0] = 1; " } else { "" };
+    let static_touch = if static_bytes > 0 {
+        format!("static_memory[tid % {static_bytes}u] = 1; ")
+    } else {
+        String::new()
+    };
+    let dynamic_touch = if dynamic {
+        "dynamic_memory[0] = 1; "
+    } else {
+        ""
+    };
     let readback = match (static_bytes > 0, dynamic, indices.first()) {
-        (true, true, Some(first)) => format!("b{first}[1] = static_memory[(tid + 1u) % {static_bytes}u] + dynamic_memory[0]; "),
-        (true, false, Some(first)) => format!("b{first}[1] = static_memory[(tid + 1u) % {static_bytes}u]; "),
+        (true, true, Some(first)) => format!(
+            "b{first}[1] = static_memory[(tid + 1u) % {static_bytes}u] + dynamic_memory[0]; "
+        ),
+        (true, false, Some(first)) => {
+            format!("b{first}[1] = static_memory[(tid + 1u) % {static_bytes}u]; ")
+        }
         (false, true, Some(first)) => format!("b{first}[1] = dynamic_memory[0]; "),
         _ => String::new(),
     };
@@ -1788,10 +2018,14 @@ fn floor_pipeline_for(
     let options = MTLCompileOptions::new();
     let library = device
         .newLibraryWithSource_options_error(&NSString::from_str(&source), Some(&options))
-        .map_err(|error| MetalError::CompileFailed { log: nserror_description(&error) })?;
+        .map_err(|error| MetalError::CompileFailed {
+            log: nserror_description(&error),
+        })?;
     let function = library
         .newFunctionWithName(&NSString::from_str("floor_noop"))
-        .ok_or_else(|| MetalError::CompileFailed { log: "empty kernel entry missing".to_string() })?;
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "empty kernel entry missing".to_string(),
+        })?;
     let pipeline = pipeline_from_function(device, &function)?;
     FLOOR_PIPELINES.with(|cache| cache.borrow_mut().insert(source, pipeline.clone()));
     Ok(FloorPipeline { pipeline })
@@ -1844,7 +2078,9 @@ fn gpu_span_ns(command_buffer: &ProtocolObject<dyn MTLCommandBuffer>) -> Result<
     if command_buffer.status() == MTLCommandBufferStatus::Error {
         let reason = command_buffer
             .error()
-            .map_or("no NSError".to_string(), |error| error.localizedDescription().to_string());
+            .map_or("no NSError".to_string(), |error| {
+                error.localizedDescription().to_string()
+            });
         return Err(MetalError::CompileFailed {
             log: format!("replay command buffer failed: {reason}"),
         });
@@ -1887,10 +2123,12 @@ fn stamp_sample_buffer(
         "counter_sampling_support"
     );
     if !device.supportsCounterSampling(objc2_metal::MTLCounterSamplingPoint::AtStageBoundary) {
-        return Err(refuse("device does not sample counters at the stage boundary".to_string()));
+        return Err(refuse(
+            "device does not sample counters at the stage boundary".to_string(),
+        ));
     }
-    let counter_set =
-        timestamp_counter_set(device).ok_or_else(|| refuse("device exposes no timestamp counter set".to_string()))?;
+    let counter_set = timestamp_counter_set(device)
+        .ok_or_else(|| refuse("device exposes no timestamp counter set".to_string()))?;
     if 2 * dispatch_count > MAX_TIMESTAMP_SAMPLES {
         return Err(refuse(format!(
             "{dispatch_count} dispatches need {} samples, one timestamp buffer holds {MAX_TIMESTAMP_SAMPLES}",
@@ -1903,7 +2141,11 @@ fn stamp_sample_buffer(
     unsafe { descriptor.setSampleCount((2 * dispatch_count) as NSUInteger) };
     device
         .newCounterSampleBufferWithDescriptor_error(&descriptor)
-        .map_err(|error| refuse(format!("failed to allocate a counter sample buffer: {error}")))
+        .map_err(|error| {
+            refuse(format!(
+                "failed to allocate a counter sample buffer: {error}"
+            ))
+        })
 }
 
 /// One serial compute encoder for dispatch `position`, sampling its start and
@@ -1914,20 +2156,28 @@ fn split_encoder(
     sample_buffer: Option<&ProtocolObject<dyn MTLCounterSampleBuffer>>,
     position: usize,
 ) -> Result<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>, MetalError> {
-    let refused = || MetalError::CompileFailed { log: "command buffer refused a split replay encoder".to_string() };
+    let refused = || MetalError::CompileFailed {
+        log: "command buffer refused a split replay encoder".to_string(),
+    };
     let Some(sample_buffer) = sample_buffer else {
         return command_buffer.computeCommandEncoder().ok_or_else(refused);
     };
     let descriptor = objc2_metal::MTLComputePassDescriptor::computePassDescriptor();
     // SAFETY: attachment 0 is the one stage-boundary slot a compute pass descriptor always has.
-    let attachment = unsafe { descriptor.sampleBufferAttachments().objectAtIndexedSubscript(0) };
+    let attachment = unsafe {
+        descriptor
+            .sampleBufferAttachments()
+            .objectAtIndexedSubscript(0)
+    };
     attachment.setSampleBuffer(Some(sample_buffer));
     // SAFETY: both indices are inside the `2 * dispatch_count` slots `stamp_sample_buffer` allocated.
     unsafe {
         attachment.setStartOfEncoderSampleIndex((2 * position) as NSUInteger);
         attachment.setEndOfEncoderSampleIndex((2 * position + 1) as NSUInteger);
     }
-    command_buffer.computeCommandEncoderWithDescriptor(&descriptor).ok_or_else(refused)
+    command_buffer
+        .computeCommandEncoderWithDescriptor(&descriptor)
+        .ok_or_else(refused)
 }
 
 /// `[start, end]` per dispatch in ns since the first dispatch's start. A slot the
@@ -1940,12 +2190,17 @@ fn resolve_stamps(
     nanos_per_tick: f64,
 ) -> Result<Vec<[u64; 2]>, MetalError> {
     let fail = |log: String| MetalError::CompileFailed { log };
-    let range = objc2_foundation::NSRange { location: 0, length: 2 * dispatches.len() };
+    let range = objc2_foundation::NSRange {
+        location: 0,
+        length: 2 * dispatches.len(),
+    };
     // SAFETY: the range is exactly the slots the replay wrote.
     let resolved = unsafe { sample_buffer.resolveCounterRange(range) }
         .ok_or_else(|| fail("counter sample buffer resolved no data".to_string()))?;
     let raw = resolved.to_vec();
-    let ticks: Vec<u64> = (0..2 * dispatches.len()).map(|slot| read_timestamp(&raw, slot)).collect();
+    let ticks: Vec<u64> = (0..2 * dispatches.len())
+        .map(|slot| read_timestamp(&raw, slot))
+        .collect();
     if let Some(slot) = ticks.iter().position(|tick| *tick == u64::MAX) {
         return Err(fail(format!("timestamp slot {slot} was not written")));
     }
@@ -2097,7 +2352,12 @@ impl CapturedDispatch {
             // SAFETY: shared-storage buffer idle between replays; `offset + count * 4 <= length`.
             let floats = unsafe {
                 core::slice::from_raw_parts(
-                    source.contents().as_ptr().cast::<u8>().add(offset).cast::<f32>(),
+                    source
+                        .contents()
+                        .as_ptr()
+                        .cast::<u8>()
+                        .add(offset)
+                        .cast::<f32>(),
                     count,
                 )
             };
@@ -2139,7 +2399,10 @@ impl CapturedDispatch {
     /// buffer other than the op's output (a route compaction).
     #[must_use]
     pub fn bound_buffer_bytes_at(&self, binding: usize) -> Option<Vec<u8>> {
-        let (_, buffer, offset) = self.buffers.iter().find(|(index, _, _)| *index == binding)?;
+        let (_, buffer, offset) = self
+            .buffers
+            .iter()
+            .find(|(index, _, _)| *index == binding)?;
         if buffer.length() > RESIDENT_WEIGHT_BUFFER_BYTES {
             return None;
         }
@@ -2157,7 +2420,8 @@ impl CapturedDispatch {
     /// a variant that fails to write it cannot pass for one that did. Returns
     /// whether a buffer was bound there.
     pub fn poison_bound_buffer(&self, binding: usize) -> bool {
-        let Some((_, buffer, offset)) = self.buffers.iter().find(|(index, _, _)| *index == binding) else {
+        let Some((_, buffer, offset)) = self.buffers.iter().find(|(index, _, _)| *index == binding)
+        else {
             return false;
         };
         if buffer.length() > RESIDENT_WEIGHT_BUFFER_BYTES {
@@ -2355,17 +2619,24 @@ impl CapturedDispatch {
     /// command buffer ends in an error status.
     pub fn time_gpu_ns(&self, batch: usize) -> Result<f64, MetalError> {
         if let Some(reason) = &self.unreplayable {
-            return Err(MetalError::CompileFailed { log: reason.clone() });
+            return Err(MetalError::CompileFailed {
+                log: reason.clone(),
+            });
         }
         let (device, queue) = device_and_queue()?;
         let uniforms = shared_buffer_from(&device, &self.uniform_bytes)?;
         let fault = shared_buffer_from(&device, &[0u8; FAULT_REPLAY_BYTES])?;
-        let command_buffer = queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
-            log: "queue refused a replay command buffer".to_string(),
-        })?;
-        let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| MetalError::CompileFailed {
-            log: "command buffer refused a replay encoder".to_string(),
-        })?;
+        let command_buffer = queue
+            .commandBuffer()
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "queue refused a replay command buffer".to_string(),
+            })?;
+        let encoder =
+            command_buffer
+                .computeCommandEncoder()
+                .ok_or_else(|| MetalError::CompileFailed {
+                    log: "command buffer refused a replay encoder".to_string(),
+                })?;
         for _ in 0..batch {
             encoder.setComputePipelineState(&self.pipeline);
             for (index, buffer, offset) in &self.buffers {
@@ -2431,11 +2702,20 @@ impl CapturedDispatch {
         if dispatches.is_empty() {
             return Ok((0.0, Vec::new()));
         }
-        if let Some(reason) = dispatches.iter().find_map(|dispatch| dispatch.unreplayable.as_ref()) {
-            return Err(MetalError::CompileFailed { log: reason.clone() });
+        if let Some(reason) = dispatches
+            .iter()
+            .find_map(|dispatch| dispatch.unreplayable.as_ref())
+        {
+            return Err(MetalError::CompileFailed {
+                log: reason.clone(),
+            });
         }
         let (device, queue) = device_and_queue()?;
-        let sample_buffer = if sample { Some(stamp_sample_buffer(&device, dispatches.len())?) } else { None };
+        let sample_buffer = if sample {
+            Some(stamp_sample_buffer(&device, dispatches.len())?)
+        } else {
+            None
+        };
         let uniforms: Vec<MetalBuffer> = dispatches
             .iter()
             .map(|dispatch| shared_buffer_from(&device, &dispatch.uniform_bytes))
@@ -2449,18 +2729,26 @@ impl CapturedDispatch {
         } else {
             Vec::new()
         };
-        let command_buffer = queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
-            log: "queue refused a split replay command buffer".to_string(),
-        })?;
+        let command_buffer = queue
+            .commandBuffer()
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "queue refused a split replay command buffer".to_string(),
+            })?;
         for (position, (record, uniforms_buffer)) in dispatches.iter().zip(&uniforms).enumerate() {
             let encoder = split_encoder(&command_buffer, sample_buffer.as_deref(), position)?;
-            let pipeline = empties.get(position).map_or(&record.pipeline, |empty| &empty.pipeline);
+            let pipeline = empties
+                .get(position)
+                .map_or(&record.pipeline, |empty| &empty.pipeline);
             encoder.setComputePipelineState(pipeline);
             for (index, buffer, offset) in &record.buffers {
                 // SAFETY: each captured buffer and offset is the pair `encode_op` bound.
                 unsafe { encoder.setBuffer_offset_atIndex(Some(buffer), *offset, *index) };
             }
-            let uniforms_bound = if empty_kernels { &fault } else { uniforms_buffer };
+            let uniforms_bound = if empty_kernels {
+                &fault
+            } else {
+                uniforms_buffer
+            };
             if let Some(index) = record.uniforms_index {
                 unsafe { encoder.setBuffer_offset_atIndex(Some(uniforms_bound), 0, index) };
             }
@@ -2492,7 +2780,13 @@ impl CapturedDispatch {
         let gpu_delta = clock_after.1.saturating_sub(clock_before.1).max(1);
         let nanos_per_tick = cpu_delta as f64 / gpu_delta as f64;
         let stamps = resolve_stamps(&sample_buffer, &dispatches, nanos_per_tick)?;
-        debug!(cpu_delta, gpu_delta, nanos_per_tick, dispatches = dispatches.len() as u64, "dispatch_stamp_calibration");
+        debug!(
+            cpu_delta,
+            gpu_delta,
+            nanos_per_tick,
+            dispatches = dispatches.len() as u64,
+            "dispatch_stamp_calibration"
+        );
         emit_dispatch_stamps(&dispatches, &stamps);
         Ok((span_ns, stamps))
     }
@@ -2529,7 +2823,10 @@ impl CapturedDispatch {
     /// The barrier flags the live concurrent encoder fired, one per dispatch.
     #[must_use]
     pub fn recorded_barriers<Item: Borrow<Self>>(items: &[Item]) -> Vec<bool> {
-        items.iter().map(|item| item.borrow().barrier_before).collect()
+        items
+            .iter()
+            .map(|item| item.borrow().barrier_before)
+            .collect()
     }
 
     /// One flag per dispatch, `true` where it reads a node an earlier dispatch
@@ -2544,8 +2841,14 @@ impl CapturedDispatch {
             .iter()
             .map(|item| {
                 let record = item.borrow();
-                let has_scratch = record.bindings.iter().any(|binding| matches!(binding, Binding::Scratch));
-                let has_output = record.bindings.iter().any(|binding| matches!(binding, Binding::Output(_)));
+                let has_scratch = record
+                    .bindings
+                    .iter()
+                    .any(|binding| matches!(binding, Binding::Scratch));
+                let has_output = record
+                    .bindings
+                    .iter()
+                    .any(|binding| matches!(binding, Binding::Output(_)));
                 let reads_scratch = has_scratch && has_output;
                 let writes_scratch = has_scratch && !has_output;
                 let hazard = crate::msl::hazard_read_nodes(&record.bindings)
@@ -2572,14 +2875,21 @@ impl CapturedDispatch {
     #[must_use]
     pub fn node_and_slot_keyed_barriers<Item: Borrow<Self>>(items: &[Item]) -> Vec<bool> {
         let mut written: std::collections::HashSet<(u32, bool)> = std::collections::HashSet::new();
-        let mut written_buffers: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut written_buffers: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
         let mut read_buffers: std::collections::HashSet<usize> = std::collections::HashSet::new();
         items
             .iter()
             .map(|item| {
                 let record = item.borrow();
-                let has_scratch = record.bindings.iter().any(|binding| matches!(binding, Binding::Scratch));
-                let has_output = record.bindings.iter().any(|binding| matches!(binding, Binding::Output(_)));
+                let has_scratch = record
+                    .bindings
+                    .iter()
+                    .any(|binding| matches!(binding, Binding::Scratch));
+                let has_output = record
+                    .bindings
+                    .iter()
+                    .any(|binding| matches!(binding, Binding::Output(_)));
                 let reads_scratch = has_scratch && has_output;
                 let writes_scratch = has_scratch && !has_output;
                 let buffer_at = |index: usize| {
@@ -2593,7 +2903,9 @@ impl CapturedDispatch {
                 let mut write_pointer = None;
                 for (index, binding) in record.bindings.iter().enumerate() {
                     match binding {
-                        Binding::Input(_) | Binding::Indices(_) => read_pointers.extend(buffer_at(index)),
+                        Binding::Input(_) | Binding::Indices(_) => {
+                            read_pointers.extend(buffer_at(index))
+                        }
                         Binding::Output(_) => write_pointer = buffer_at(index),
                         Binding::Scratch if writes_scratch => write_pointer = buffer_at(index),
                         Binding::Scratch => read_pointers.extend(buffer_at(index)),
@@ -2603,8 +2915,9 @@ impl CapturedDispatch {
                 let read_after_write = crate::msl::hazard_read_nodes(&record.bindings)
                     .any(|node| written.contains(&(node.0, false)))
                     || (reads_scratch && written.contains(&(record.node, true)));
-                let slot_reuse = write_pointer
-                    .is_some_and(|pointer| written_buffers.contains(&pointer) || read_buffers.contains(&pointer));
+                let slot_reuse = write_pointer.is_some_and(|pointer| {
+                    written_buffers.contains(&pointer) || read_buffers.contains(&pointer)
+                });
                 let hazard = read_after_write || slot_reuse;
                 if hazard {
                     written.clear();
@@ -2709,14 +3022,17 @@ impl CapturedDispatch {
             .map(|dispatch| floor_pipeline_for(&device, dispatch, minimal_bindings))
             .collect::<Result<_, _>>()?;
         let small = shared_buffer_from(&device, &[0u8; FAULT_REPLAY_BYTES])?;
-        let command_buffer = queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
-            log: "queue refused a floor replay command buffer".to_string(),
-        })?;
-        let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| {
-            MetalError::CompileFailed {
-                log: "command buffer refused a floor replay encoder".to_string(),
-            }
-        })?;
+        let command_buffer = queue
+            .commandBuffer()
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "queue refused a floor replay command buffer".to_string(),
+            })?;
+        let encoder =
+            command_buffer
+                .computeCommandEncoder()
+                .ok_or_else(|| MetalError::CompileFailed {
+                    log: "command buffer refused a floor replay encoder".to_string(),
+                })?;
         for (record, floor) in dispatches.iter().zip(&pipelines) {
             encoder.setComputePipelineState(&floor.pipeline);
             if minimal_bindings {
@@ -2727,18 +3043,39 @@ impl CapturedDispatch {
                     // SAFETY: each captured buffer and offset is the pair `encode_op` bound.
                     unsafe { encoder.setBuffer_offset_atIndex(Some(buffer), *offset, *index) };
                 }
-                for index in [record.uniforms_index, record.fault_index].into_iter().flatten() {
+                for index in [record.uniforms_index, record.fault_index]
+                    .into_iter()
+                    .flatten()
+                {
                     // SAFETY: the shared small buffer outlives the command buffer.
                     unsafe { encoder.setBuffer_offset_atIndex(Some(&small), 0, index) };
                 }
             }
             if let Some(prepass) = &record.prepass {
-                dispatch_floor(&encoder, &prepass.pipeline, prepass.grid, !minimal_bindings, one_threadgroup);
+                dispatch_floor(
+                    &encoder,
+                    &prepass.pipeline,
+                    prepass.grid,
+                    !minimal_bindings,
+                    one_threadgroup,
+                );
                 if prepass.place.is_some() {
-                    dispatch_floor(&encoder, &prepass.pipeline, prepass.grid, !minimal_bindings, one_threadgroup);
+                    dispatch_floor(
+                        &encoder,
+                        &prepass.pipeline,
+                        prepass.grid,
+                        !minimal_bindings,
+                        one_threadgroup,
+                    );
                 }
             }
-            dispatch_floor(&encoder, &record.pipeline, record.grid, !minimal_bindings, one_threadgroup);
+            dispatch_floor(
+                &encoder,
+                &record.pipeline,
+                record.grid,
+                !minimal_bindings,
+                one_threadgroup,
+            );
         }
         encoder.endEncoding();
         command_buffer.commit();
@@ -2753,14 +3090,20 @@ impl CapturedDispatch {
     /// # Errors
     ///
     /// The compile error of an empty kernel.
-    pub fn floor_pipeline_resources<Item: Borrow<Self>>(items: &[Item]) -> Result<(usize, usize, usize), MetalError> {
+    pub fn floor_pipeline_resources<Item: Borrow<Self>>(
+        items: &[Item],
+    ) -> Result<(usize, usize, usize), MetalError> {
         let (device, _queue) = device_and_queue()?;
-        let mut seen: std::collections::BTreeMap<usize, (usize, usize)> = std::collections::BTreeMap::new();
+        let mut seen: std::collections::BTreeMap<usize, (usize, usize)> =
+            std::collections::BTreeMap::new();
         for item in items {
             let record = item.borrow();
             let original = record.pipeline.staticThreadgroupMemoryLength();
-            let floor = floor_pipeline_for(&device, record, false)?.pipeline.staticThreadgroupMemoryLength();
-            seen.entry(record.pipeline_identity()).or_insert((original, floor));
+            let floor = floor_pipeline_for(&device, record, false)?
+                .pipeline
+                .staticThreadgroupMemoryLength();
+            seen.entry(record.pipeline_identity())
+                .or_insert((original, floor));
         }
         Ok((
             seen.len(),
@@ -2781,7 +3124,9 @@ impl CapturedDispatch {
             .iter()
             .find_map(|dispatch| dispatch.unreplayable.as_ref())
         {
-            return Err(MetalError::CompileFailed { log: reason.clone() });
+            return Err(MetalError::CompileFailed {
+                log: reason.clone(),
+            });
         }
         let (device, queue) = device_and_queue()?;
         let uniforms: Vec<MetalBuffer> = dispatches
@@ -2789,9 +3134,11 @@ impl CapturedDispatch {
             .map(|dispatch| shared_buffer_from(&device, &dispatch.uniform_bytes))
             .collect::<Result<_, _>>()?;
         let fault = shared_buffer_from(&device, &[0u8; FAULT_REPLAY_BYTES])?;
-        let command_buffer = queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
-            log: "queue refused a sequence replay command buffer".to_string(),
-        })?;
+        let command_buffer = queue
+            .commandBuffer()
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "queue refused a sequence replay command buffer".to_string(),
+            })?;
         let encoder = if barriers.is_some() {
             command_buffer.computeCommandEncoderWithDispatchType(MTLDispatchType::Concurrent)
         } else {
@@ -2843,14 +3190,10 @@ impl CapturedDispatch {
         while chunk_start < dispatches.len() {
             let chunk_index = dispatches[chunk_start].chunk_index;
             let mut chunk_end = chunk_start + 1;
-            while chunk_end < dispatches.len()
-                && dispatches[chunk_end].chunk_index == chunk_index
-            {
+            while chunk_end < dispatches.len() && dispatches[chunk_end].chunk_index == chunk_index {
                 chunk_end += 1;
             }
-            if chunk_end < dispatches.len()
-                && dispatches[chunk_end].chunk_index < chunk_index
-            {
+            if chunk_end < dispatches.len() && dispatches[chunk_end].chunk_index < chunk_index {
                 return Err(MetalError::CompileFailed {
                     log: "captured chunk indices are not ordered".to_string(),
                 });
@@ -2872,26 +3215,48 @@ pub fn time_empty_command_buffer_gpu_ns() -> Result<f64, MetalError> {
     let (device, queue) = device_and_queue()?;
     let source = "#include <metal_stdlib>\nusing namespace metal;\nkernel void m0_empty(device float* sink [[buffer(0)]], uint gid [[thread_position_in_grid]]) { }\n";
     let library = device
-        .newLibraryWithSource_options_error(&NSString::from_str(source), Some(&MTLCompileOptions::new()))
-        .map_err(|error| MetalError::CompileFailed { log: error.localizedDescription().to_string() })?;
-    let function = library.newFunctionWithName(&NSString::from_str("m0_empty")).ok_or_else(|| {
-        MetalError::CompileFailed { log: "m0_empty entry missing".to_string() }
-    })?;
+        .newLibraryWithSource_options_error(
+            &NSString::from_str(source),
+            Some(&MTLCompileOptions::new()),
+        )
+        .map_err(|error| MetalError::CompileFailed {
+            log: error.localizedDescription().to_string(),
+        })?;
+    let function = library
+        .newFunctionWithName(&NSString::from_str("m0_empty"))
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "m0_empty entry missing".to_string(),
+        })?;
     let pipeline = device
         .newComputePipelineStateWithFunction_error(&function)
-        .map_err(|error| MetalError::CompileFailed { log: error.localizedDescription().to_string() })?;
+        .map_err(|error| MetalError::CompileFailed {
+            log: error.localizedDescription().to_string(),
+        })?;
     let sink = shared_buffer_from(&device, &[0u8; 16])?;
-    let command_buffer = queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
-        log: "queue refused a floor command buffer".to_string(),
-    })?;
-    let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| MetalError::CompileFailed {
-        log: "command buffer refused a floor encoder".to_string(),
-    })?;
+    let command_buffer = queue
+        .commandBuffer()
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "queue refused a floor command buffer".to_string(),
+        })?;
+    let encoder =
+        command_buffer
+            .computeCommandEncoder()
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "command buffer refused a floor encoder".to_string(),
+            })?;
     encoder.setComputePipelineState(&pipeline);
     unsafe { encoder.setBuffer_offset_atIndex(Some(&sink), 0, 0) };
     encoder.dispatchThreads_threadsPerThreadgroup(
-        MTLSize { width: 1, height: 1, depth: 1 },
-        MTLSize { width: 1, height: 1, depth: 1 },
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
     );
     encoder.endEncoding();
     command_buffer.commit();
@@ -2918,15 +3283,22 @@ pub fn flush_gpu_caches(bytes: usize) -> Result<(), MetalError> {
         *slot = Some(buffer.clone());
         Ok(buffer)
     })?;
-    let command_buffer = queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
-        log: "queue refused a flush command buffer".to_string(),
-    })?;
-    let encoder = command_buffer.blitCommandEncoder().ok_or_else(|| MetalError::CompileFailed {
-        log: "command buffer refused a flush blit encoder".to_string(),
-    })?;
+    let command_buffer = queue
+        .commandBuffer()
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "queue refused a flush command buffer".to_string(),
+        })?;
+    let encoder = command_buffer
+        .blitCommandEncoder()
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "command buffer refused a flush blit encoder".to_string(),
+        })?;
     encoder.fillBuffer_range_value(
         &scratch,
-        objc2_foundation::NSRange { location: 0, length: bytes },
+        objc2_foundation::NSRange {
+            location: 0,
+            length: bytes,
+        },
         0xA5,
     );
     encoder.endEncoding();
@@ -3030,8 +3402,7 @@ pub(super) fn encode_op(
     attention_mma_selection: crate::msl::AttentionMmaSelection,
     attention_row_schedule: crate::msl::AttentionRowSchedule,
     resolved: Option<&ResolvedStep>,
-    #[cfg(feature = "instrument")]
-    capture_chunk_index: usize,
+    #[cfg(feature = "instrument")] capture_chunk_index: usize,
     // Redesign §4c: `Some` when `crate::metal::attention_scratch_buffer`
     // already resolved a PLAN-OWNED scratch buffer for this position
     // (`execute_plan_with_placements`, the one call site with a `Plan` to
@@ -3113,148 +3484,166 @@ pub(super) fn encode_op(
     let owned_bindings: Vec<Binding>;
     let owned_merge: Option<ResolvedMergeStep>;
     let owned_prepass: Option<ResolvedPrepass>;
-    let (pipeline, bindings, grid, merge, prepass) = if let Some(step) =
-        resolved.filter(|_| expert_buffers.is_none())
-    {
-        (
-            step.pipeline.clone(),
-            step.bindings.as_slice(),
-            step.grid,
-            step.merge.as_ref(),
-            step.prepass.as_ref(),
-        )
-    } else if let Some(source_node) = expert_source_node {
-        let (binding_identity, grid) = kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
-        let mut cache_key = kernel_cache_key_for_grid(bound, packed_operands, numeric_policy, &grid)?;
-        cache_key.push(math_mode.cache_token());
-        cache_key.push_str(attention_mma_selection.cache_token_for(bound));
-        cache_key.push_str(&attention_row_schedule.cache_token_for(bound));
-        let uniform_codec = expert_buffers.and_then(|buffers| {
-            let mut codecs = buffers
-                .descriptor_records
-                .iter()
-                .filter(|descriptor| descriptor.byte_length != 0)
-                .map(|descriptor| descriptor.codec);
-            let first = codecs.next()?;
-            (packed_operands.get(&source_node) == Some(&first)
-                && codecs.all(|codec| codec == first))
-            .then_some(first)
-        });
-        if let Some(codec) = uniform_codec {
-            cache_key.push_str("_uniform_expert_");
-            cache_key.push_str(crate::msl::codec_cache_token(codec));
-            if env_flags::debug_expert_emit() {
-                eprintln!("expert lowering mode=uniform codec={codec:?} node={source_node:?}");
-            }
-        } else {
-            cache_key.push_str("_mixed_expert");
-            if env_flags::debug_expert_emit() {
-                eprintln!("expert lowering mode=mixed node={source_node:?}");
-            }
-        }
-        cache_key.push_str(&format!("_{binding_identity:?}"));
-        let kernel = MIXED_KERNEL_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned());
-        let kernel = match kernel {
-            Some(kernel) => kernel,
-            None => {
-                let kernel = if let Some(codec) = uniform_codec {
-                    crate::msl::emit_with_uniform_expert_source(
-                        bound,
-                        packed_operands,
-                        numeric_policy,
-                        source_node,
-                        codec,
-                    )?
-                } else {
-                    crate::msl::emit_with_expert_sources(
-                        bound,
-                        packed_operands,
-                        numeric_policy,
-                        source_node,
-                    )?
-                };
-                MIXED_KERNEL_CACHE.with(|cache| {
-                    cache.borrow_mut().insert(cache_key.clone(), kernel.clone());
-                });
-                kernel
-            }
-        };
-        let pipeline = pipeline_for_kernel(device, &kernel, &cache_key, math_mode)?;
-        owned_bindings = kernel.bindings;
-        if crate::msl::route_prepass_active(bound, packed_operands) {
-            return Err(MetalError::ExpertSourceUnsupported {
-                node: source_node,
-                reason: "a compacted grouped gemm has no expert-source lowering",
+    let (pipeline, bindings, grid, merge, prepass) =
+        if let Some(step) = resolved.filter(|_| expert_buffers.is_none()) {
+            (
+                step.pipeline.clone(),
+                step.bindings.as_slice(),
+                step.grid,
+                step.merge.as_ref(),
+                step.prepass.as_ref(),
+            )
+        } else if let Some(source_node) = expert_source_node {
+            let (binding_identity, grid) =
+                kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
+            let mut cache_key =
+                kernel_cache_key_for_grid(bound, packed_operands, numeric_policy, &grid)?;
+            cache_key.push(math_mode.cache_token());
+            cache_key.push_str(attention_mma_selection.cache_token_for(bound));
+            cache_key.push_str(&attention_row_schedule.cache_token_for(bound));
+            let uniform_codec = expert_buffers.and_then(|buffers| {
+                let mut codecs = buffers
+                    .descriptor_records
+                    .iter()
+                    .filter(|descriptor| descriptor.byte_length != 0)
+                    .map(|descriptor| descriptor.codec);
+                let first = codecs.next()?;
+                (packed_operands.get(&source_node) == Some(&first)
+                    && codecs.all(|codec| codec == first))
+                .then_some(first)
             });
-        }
-        owned_prepass = None;
-        (pipeline, owned_bindings.as_slice(), kernel.grid, None, owned_prepass.as_ref())
-    } else {
-        // `kernel_cache_key`/`kernel_dispatch_shape` are the cheap halves of
-        // `emit`'s work -- structural fingerprint, bindings, grid -- with no
-        // MSL body text rendered. On a pipeline-cache HIT (the steady-decode
-        // case, `plan_hits`/`gpu_exec`'s own row) `emit` itself is never
-        // called; only a genuine miss inside `pipeline_for` pays for the
-        // full render + compile.
-        let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
-        let mut cache_key = kernel_cache_key_for_grid(bound, packed_operands, numeric_policy, &grid)?;
-        cache_key.push(math_mode.cache_token());
-        cache_key.push_str(attention_mma_selection.cache_token_for(bound));
-        cache_key.push_str(&attention_row_schedule.cache_token_for(bound));
-        #[cfg(feature = "instrument")]
-        {
-            counter!(EMIT_CALLS, 1);
-            counter!(EMIT_TICKS, elapsed_ticks(emit_started));
-        }
-        #[cfg(feature = "instrument")]
-        let pipeline_started = read_ticks();
-        let pipeline = pipeline_for(
-            device,
-            bound,
-            packed_operands,
-            &cache_key,
-            math_mode,
-            numeric_policy,
-            attention_mma_selection,
-            attention_row_schedule,
-        )?;
-        #[cfg(feature = "instrument")]
-        {
-            counter!(PIPELINE_LOOKUP_CALLS, 1);
-            counter!(PIPELINE_LOOKUP_TICKS, elapsed_ticks(pipeline_started));
-        }
-        // This cold path (`resolved: None`: `execute_plan`, the
-        // `*_op_timed` diagnostics) has no `Plan` to own a scratch buffer
-        // or a resolved merge pipeline -- it resolves both itself, here,
-        // exactly like `pipeline_for`/`kernel_dispatch_shape` just above,
-        // rather than caching them plan-side. `None` (every non-
-        // `CachedAttention` op, or a `CachedAttention` op under a policy
-        // that withholds `ContextSplitMerge`) costs nothing extra: `emit_
-        // cached_attention_merge` returns `None` before rendering anything.
-        owned_merge = match crate::msl::emit_cached_attention_merge(bound, numeric_policy)? {
-            Some(merge_kernel) => {
-                let merge_cache_key = merge_pipeline_key(&cache_key, &merge_kernel);
-                let merge_pipeline =
-                    pipeline_for_kernel(device, &merge_kernel, &merge_cache_key, math_mode)?;
-                Some(ResolvedMergeStep {
-                    pipeline: merge_pipeline,
-                    bindings: merge_kernel.bindings,
-                    grid: merge_kernel.grid,
-                })
+            if let Some(codec) = uniform_codec {
+                cache_key.push_str("_uniform_expert_");
+                cache_key.push_str(crate::msl::codec_cache_token(codec));
+                if env_flags::debug_expert_emit() {
+                    eprintln!("expert lowering mode=uniform codec={codec:?} node={source_node:?}");
+                }
+            } else {
+                cache_key.push_str("_mixed_expert");
+                if env_flags::debug_expert_emit() {
+                    eprintln!("expert lowering mode=mixed node={source_node:?}");
+                }
             }
-            None => None,
+            cache_key.push_str(&format!("_{binding_identity:?}"));
+            let kernel = MIXED_KERNEL_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned());
+            let kernel = match kernel {
+                Some(kernel) => kernel,
+                None => {
+                    let kernel = if let Some(codec) = uniform_codec {
+                        crate::msl::emit_with_uniform_expert_source(
+                            bound,
+                            packed_operands,
+                            numeric_policy,
+                            source_node,
+                            codec,
+                        )?
+                    } else {
+                        crate::msl::emit_with_expert_sources(
+                            bound,
+                            packed_operands,
+                            numeric_policy,
+                            source_node,
+                        )?
+                    };
+                    MIXED_KERNEL_CACHE.with(|cache| {
+                        cache.borrow_mut().insert(cache_key.clone(), kernel.clone());
+                    });
+                    kernel
+                }
+            };
+            let pipeline = pipeline_for_kernel(device, &kernel, &cache_key, math_mode)?;
+            owned_bindings = kernel.bindings;
+            if crate::msl::route_prepass_active(bound, packed_operands) {
+                return Err(MetalError::ExpertSourceUnsupported {
+                    node: source_node,
+                    reason: "a compacted grouped gemm has no expert-source lowering",
+                });
+            }
+            owned_prepass = None;
+            (
+                pipeline,
+                owned_bindings.as_slice(),
+                kernel.grid,
+                None,
+                owned_prepass.as_ref(),
+            )
+        } else {
+            // `kernel_cache_key`/`kernel_dispatch_shape` are the cheap halves of
+            // `emit`'s work -- structural fingerprint, bindings, grid -- with no
+            // MSL body text rendered. On a pipeline-cache HIT (the steady-decode
+            // case, `plan_hits`/`gpu_exec`'s own row) `emit` itself is never
+            // called; only a genuine miss inside `pipeline_for` pays for the
+            // full render + compile.
+            let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
+            let mut cache_key =
+                kernel_cache_key_for_grid(bound, packed_operands, numeric_policy, &grid)?;
+            cache_key.push(math_mode.cache_token());
+            cache_key.push_str(attention_mma_selection.cache_token_for(bound));
+            cache_key.push_str(&attention_row_schedule.cache_token_for(bound));
+            #[cfg(feature = "instrument")]
+            {
+                counter!(EMIT_CALLS, 1);
+                counter!(EMIT_TICKS, elapsed_ticks(emit_started));
+            }
+            #[cfg(feature = "instrument")]
+            let pipeline_started = read_ticks();
+            let pipeline = pipeline_for(
+                device,
+                bound,
+                packed_operands,
+                &cache_key,
+                math_mode,
+                numeric_policy,
+                attention_mma_selection,
+                attention_row_schedule,
+            )?;
+            #[cfg(feature = "instrument")]
+            {
+                counter!(PIPELINE_LOOKUP_CALLS, 1);
+                counter!(PIPELINE_LOOKUP_TICKS, elapsed_ticks(pipeline_started));
+            }
+            // This cold path (`resolved: None`: `execute_plan`, the
+            // `*_op_timed` diagnostics) has no `Plan` to own a scratch buffer
+            // or a resolved merge pipeline -- it resolves both itself, here,
+            // exactly like `pipeline_for`/`kernel_dispatch_shape` just above,
+            // rather than caching them plan-side. `None` (every non-
+            // `CachedAttention` op, or a `CachedAttention` op under a policy
+            // that withholds `ContextSplitMerge`) costs nothing extra: `emit_
+            // cached_attention_merge` returns `None` before rendering anything.
+            owned_merge = match crate::msl::emit_cached_attention_merge_with_schedule(
+                bound,
+                numeric_policy,
+                attention_row_schedule,
+            )? {
+                Some(merge_kernel) => {
+                    let merge_cache_key = merge_pipeline_key(&cache_key, &merge_kernel);
+                    let merge_pipeline =
+                        pipeline_for_kernel(device, &merge_kernel, &merge_cache_key, math_mode)?;
+                    Some(ResolvedMergeStep {
+                        pipeline: merge_pipeline,
+                        bindings: merge_kernel.bindings,
+                        grid: merge_kernel.grid,
+                    })
+                }
+                None => None,
+            };
+            owned_prepass = resolve_route_prepass(
+                device,
+                bound,
+                packed_operands,
+                numeric_policy,
+                &cache_key,
+                math_mode,
+            )?;
+            owned_bindings = bindings;
+            (
+                pipeline,
+                owned_bindings.as_slice(),
+                grid,
+                owned_merge.as_ref(),
+                owned_prepass.as_ref(),
+            )
         };
-        owned_prepass =
-            resolve_route_prepass(device, bound, packed_operands, numeric_policy, &cache_key, math_mode)?;
-        owned_bindings = bindings;
-        (
-            pipeline,
-            owned_bindings.as_slice(),
-            grid,
-            owned_merge.as_ref(),
-            owned_prepass.as_ref(),
-        )
-    };
     #[cfg(feature = "instrument")]
     let op_setup_started = read_ticks();
     // A `RoundBatchedReduce` dispatch never uses the generic placement/fresh
@@ -3305,7 +3694,12 @@ pub(super) fn encode_op(
             "attention_scratch",
             "call",
             device,
-            cached_attention_scratch_len(bound, numeric_policy).unwrap_or(0) as usize,
+            cached_attention_scratch_len_with_schedule(
+                bound,
+                numeric_policy,
+                attention_row_schedule,
+            )
+            .unwrap_or(0) as usize,
             DType::Float32,
         )?)
     } else {
@@ -3317,7 +3711,10 @@ pub(super) fn encode_op(
     };
     let uniforms = match plan_uniform {
         Some(buffer) => buffer.clone(),
-        None => upload_uniforms(device, &pack_uniforms(bound, numeric_policy)?)?,
+        None => upload_uniforms(
+            device,
+            &pack_uniforms_with_schedule(bound, numeric_policy, attention_row_schedule)?,
+        )?,
     };
     let gathers = gather_count(bound);
     let fault = (gathers > 0)
@@ -3422,9 +3819,8 @@ pub(super) fn encode_op(
             let state_in_offset = state_in_resolved.map(|(_, offset)| *offset).unwrap_or(0);
             let state_in_first4 = state_in_resolved.map(|(buffer, offset)| {
                 let pointer = buffer.contents().as_ptr().cast::<u8>();
-                let floats = unsafe {
-                    core::slice::from_raw_parts(pointer.add(*offset).cast::<f32>(), 4)
-                };
+                let floats =
+                    unsafe { core::slice::from_raw_parts(pointer.add(*offset).cast::<f32>(), 4) };
                 [floats[0], floats[1], floats[2], floats[3]]
             });
             debug!(
@@ -3489,7 +3885,10 @@ pub(super) fn encode_op(
         for (round, round_node) in round_outputs.iter().enumerate().skip(1) {
             device_buffers.insert(
                 *round_node,
-                (group.output_buffer.clone(), round * group.output_member_bytes),
+                (
+                    group.output_buffer.clone(),
+                    round * group.output_member_bytes,
+                ),
             );
         }
     }
@@ -3565,7 +3964,9 @@ pub(super) fn encode_op(
         scratch,
         capture_chunk_index,
         &uniforms,
-        prepass.zip(compaction.as_ref()).map(|(prepass, (buffer, shared_from))| (prepass, buffer, *shared_from)),
+        prepass
+            .zip(compaction.as_ref())
+            .map(|(prepass, (buffer, shared_from))| (prepass, buffer, *shared_from)),
     );
     #[cfg(not(feature = "instrument"))]
     drop(compaction);
@@ -3612,7 +4013,11 @@ pub(super) fn encode_op(
         }
         let merge_uniforms = upload_uniforms(
             device,
-            &pack_cached_attention_merge_uniforms(bound, numeric_policy)?,
+            &pack_cached_attention_merge_uniforms_with_schedule(
+                bound,
+                numeric_policy,
+                attention_row_schedule,
+            )?,
         )?;
         encoder.setComputePipelineState(&merge.pipeline);
         bind_buffers(
@@ -3673,7 +4078,13 @@ fn encode_route_prepass(
     output_pointer: *const ProtocolObject<dyn MTLBuffer>,
     hazard: Option<&mut HazardTracker<*const ProtocolObject<dyn MTLBuffer>>>,
 ) -> Result<MetalBuffer, MetalError> {
-    let compaction = allocate_buffer_for("route_compaction", "call", device, prepass.words, DType::Float32)?;
+    let compaction = allocate_buffer_for(
+        "route_compaction",
+        "call",
+        device,
+        prepass.words,
+        DType::Float32,
+    )?;
     // SAFETY: shared-storage buffer of at least one 4-byte word, idle until the encoded work runs.
     unsafe { compaction.contents().as_ptr().cast::<u32>().write(0) };
     unsafe { encoder.setBuffer_offset_atIndex(Some(&compaction), 0, slot) };
@@ -3794,7 +4205,9 @@ pub(super) fn check_gather_fault(
 
 /// Checks every dispatch's fault buffer after the step's command buffers have
 /// completed, then returns each to [`allocate_fault_buffer`]'s pool.
-pub(super) fn check_pending_faults(pending_faults: Vec<PendingFault<'_>>) -> Result<(), MetalError> {
+pub(super) fn check_pending_faults(
+    pending_faults: Vec<PendingFault<'_>>,
+) -> Result<(), MetalError> {
     for (bound, fault_buffer, gathers) in pending_faults {
         check_gather_fault(bound, &fault_buffer, gathers)?;
         recycle_fault_buffer(fault_buffer, gathers);
@@ -4055,7 +4468,8 @@ pub(super) fn finish(
                 continue;
             };
             let original_shape = shapes.of(*original).to_vec();
-            let original_dtype = gpu_dtype(program, index_nodes, &plan.prepared.resolved, *original);
+            let original_dtype =
+                gpu_dtype(program, index_nodes, &plan.prepared.resolved, *original);
             let Ok(original_bytes) = read_back(
                 original_buffer,
                 *original_offset,
@@ -4080,7 +4494,8 @@ pub(super) fn finish(
                     .map(|(reference, candidate)| (reference - candidate).abs())
                     .fold(0.0_f32, f32::max);
                 let bytes_match = original_bytes.len() == copy_bytes.len() && max_abs_diff == 0.0;
-                let sentinel_survived = !copy_bytes.is_empty() && copy_bytes.iter().all(|value| value.is_nan());
+                let sentinel_survived =
+                    !copy_bytes.is_empty() && copy_bytes.iter().all(|value| value.is_nan());
                 std::eprintln!(
                     "repeat_verify step={step} node={} copy={} bytes_match={bytes_match} sentinel_survived={sentinel_survived} max_abs_diff={max_abs_diff} ptr_orig={ptr_orig} ptr_copy={ptr_copy}",
                     original.0,
@@ -4120,7 +4535,7 @@ pub(super) mod operand_tensor_bytes_tests {
     use proxima_tensor::{AlignedBuffer, DType, Extent, Op, infer};
 
     use super::{
-        BTreeSet, NodeId, Codec, PackedOperands, device_and_queue, element_count,
+        BTreeSet, Codec, NodeId, PackedOperands, device_and_queue, element_count,
         operand_tensor_bytes, page_size, register_checkpoint_mapping, upload_packed_bytes,
     };
     use crate::msl::{Q4K_BLOCK_BYTES, Q5K_BLOCK_BYTES};
@@ -4467,8 +4882,8 @@ pub(super) mod arena_tests {
     };
 
     use super::{
-        DispatchType, arena_placement, device_and_queue, execute_plan, execute_plan_with_placements, plan,
-        plan_uniform_buffer,
+        DispatchType, arena_placement, device_and_queue, execute_plan,
+        execute_plan_with_placements, plan, plan_uniform_buffer,
     };
 
     /// `Input(a, extent) -> Identity -> Identity -> Input(b, extent) ->
@@ -4638,15 +5053,22 @@ pub(super) mod arena_tests {
             .expect("plans the diamonds");
         resolved_plan.set_dispatch_type(DispatchType::Serial);
 
-        let packed = execute_plan_with_placements(&resolved_plan, &blocks, &[], &[], &mut Vec::new())
-            .expect("runs the diamonds against the packed arena");
+        let packed =
+            execute_plan_with_placements(&resolved_plan, &blocks, &[], &[], &mut Vec::new())
+                .expect("runs the diamonds against the packed arena");
 
         for node in outputs.iter().copied() {
             let (expected, _shape) = cpu_oracle.get(node).expect("oracle has this output");
             let (actual, _shape) = packed.get(node).expect("packed run has this output");
-            assert_eq!(actual, expected, "packed arena output for {node:?} must equal the CPU oracle's");
+            assert_eq!(
+                actual, expected,
+                "packed arena output for {node:?} must equal the CPU oracle's"
+            );
         }
-        let arena = resolved_plan.arena.get().expect("the placed run built the arena");
+        let arena = resolved_plan
+            .arena
+            .get()
+            .expect("the placed run built the arena");
         assert_eq!(
             arena.slot_count(),
             1 + outputs.len(),
@@ -4659,8 +5081,15 @@ pub(super) mod arena_tests {
                 .iter()
                 .position(|bound| bound.node == shared)
                 .expect("`shared` is dispatched");
-            assert_eq!(arena.position_slot[position], Some(0), "{shared:?} lives in the shared buffer");
-            assert_eq!(arena.position_offset[position], 0, "no two `shared` nodes are live together");
+            assert_eq!(
+                arena.position_slot[position],
+                Some(0),
+                "{shared:?} lives in the shared buffer"
+            );
+            assert_eq!(
+                arena.position_offset[position], 0,
+                "no two `shared` nodes are live together"
+            );
         }
     }
 
@@ -4674,8 +5103,9 @@ pub(super) mod arena_tests {
         let input: Vec<f32> = (0..24).map(|index| (index as f32).sin()).collect();
         let blocks = [QuantizedBlock::Float32(&input)];
         let run = |dispatch_type: DispatchType| {
-            let mut resolved_plan = plan(&program, &[], &blocks, &outputs, NumericPolicy::default())
-                .expect("plans the diamond");
+            let mut resolved_plan =
+                plan(&program, &[], &blocks, &outputs, NumericPolicy::default())
+                    .expect("plans the diamond");
             resolved_plan.set_dispatch_type(dispatch_type);
             execute_plan_with_placements(&resolved_plan, &blocks, &[], &[], &mut Vec::new())
                 .expect("runs the diamond")
@@ -4687,7 +5117,9 @@ pub(super) mod arena_tests {
         for node in outputs {
             assert_eq!(
                 serial.get(node).expect("serial run has this output"),
-                concurrent.get(node).expect("concurrent run has this output"),
+                concurrent
+                    .get(node)
+                    .expect("concurrent run has this output"),
                 "{node:?} (fed by {shared:?}) differs between layouts"
             );
         }
@@ -4785,7 +5217,8 @@ pub(super) mod arena_tests {
             core::iter::repeat_n(QuantizedBlock::Float32(a.as_slice()), 5).collect();
         let resolved_plan = plan(&program, &[], &blocks, &outputs, NumericPolicy::default())
             .expect("plans the five-diamond program");
-        arena_placement(&resolved_plan, 0, |_| false).expect("builds the arena on first placement lookup");
+        arena_placement(&resolved_plan, 0, |_| false)
+            .expect("builds the arena on first placement lookup");
 
         let arena = resolved_plan
             .arena
@@ -4845,7 +5278,8 @@ pub(super) mod arena_tests {
         let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
         let resolved_plan = plan(&program, &[], &blocks, &outputs, NumericPolicy::default())
             .expect("plans the pinned-output chain");
-        arena_placement(&resolved_plan, 0, |_| false).expect("builds the arena on first placement lookup");
+        arena_placement(&resolved_plan, 0, |_| false)
+            .expect("builds the arena on first placement lookup");
         let arena = resolved_plan
             .arena
             .get()
@@ -4859,8 +5293,10 @@ pub(super) mod arena_tests {
                 .position(|bound| bound.node == node)
                 .expect("node is dispatched")
         };
-        let stage_zero_slot = arena.position_slot[position_of(stage_zero)].expect("no output is placed");
-        let stage_two_slot = arena.position_slot[position_of(stage_two)].expect("no output is placed");
+        let stage_zero_slot =
+            arena.position_slot[position_of(stage_zero)].expect("no output is placed");
+        let stage_two_slot =
+            arena.position_slot[position_of(stage_two)].expect("no output is placed");
         assert_ne!(
             stage_zero_slot, stage_two_slot,
             "a pinned program output's slot must never be handed to a later same-size op"
@@ -4881,7 +5317,8 @@ pub(super) mod arena_tests {
         let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
         let resolved_plan = plan(&program, &[], &blocks, &outputs, NumericPolicy::default())
             .expect("plans the size-mismatched chain");
-        arena_placement(&resolved_plan, 0, |_| false).expect("builds the arena on first placement lookup");
+        arena_placement(&resolved_plan, 0, |_| false)
+            .expect("builds the arena on first placement lookup");
         let arena = resolved_plan
             .arena
             .get()
@@ -4895,8 +5332,10 @@ pub(super) mod arena_tests {
                 .position(|bound| bound.node == node)
                 .expect("node is dispatched")
         };
-        let stage_zero_slot = arena.position_slot[position_of(stage_zero)].expect("no output is placed");
-        let stage_two_slot = arena.position_slot[position_of(stage_two)].expect("no output is placed");
+        let stage_zero_slot =
+            arena.position_slot[position_of(stage_zero)].expect("no output is placed");
+        let stage_two_slot =
+            arena.position_slot[position_of(stage_two)].expect("no output is placed");
         assert_ne!(
             stage_zero_slot, stage_two_slot,
             "a byte-length mismatch must force a genuinely new slot, never a reused one"
@@ -4989,8 +5428,14 @@ pub(super) mod arena_tests {
             .iter()
             .position(|bound| bound.node == stage_one)
             .expect("stage_one is dispatched");
-        let arena = resolved_plan.arena.get().expect("the placed run built the arena");
-        assert_eq!(arena.position_slot[position], None, "the placed node holds no arena range");
+        let arena = resolved_plan
+            .arena
+            .get()
+            .expect("the placed run built the arena");
+        assert_eq!(
+            arena.position_slot[position], None,
+            "the placed node holds no arena range"
+        );
         let (expected_placed, _shape) = cpu_oracle.get(stage_one).expect("oracle has stage_one");
         assert_eq!(
             crate::read_placed_buffer_f32(&cache_rows, 8 * size_of::<f32>(), 4),
@@ -5004,8 +5449,13 @@ pub(super) mod arena_tests {
         );
         for node in [stage_zero, stage_two] {
             let (expected, _shape) = cpu_oracle.get(node).expect("oracle has this output");
-            let (actual, _shape) = evaluated.get(node).expect("the run returns the unplaced output");
-            assert_eq!(actual, expected, "unplaced {node:?} is unchanged by its neighbour's placement");
+            let (actual, _shape) = evaluated
+                .get(node)
+                .expect("the run returns the unplaced output");
+            assert_eq!(
+                actual, expected,
+                "unplaced {node:?} is unchanged by its neighbour's placement"
+            );
         }
     }
 
@@ -5048,7 +5498,8 @@ pub(super) mod arena_tests {
         let blocks = [QuantizedBlock::Float32(&a)];
         let resolved_plan = plan(&program, &[], &blocks, &outputs, NumericPolicy::default())
             .expect("plans the ten-stage chain");
-        arena_placement(&resolved_plan, 0, |_| false).expect("builds the arena on first placement lookup");
+        arena_placement(&resolved_plan, 0, |_| false)
+            .expect("builds the arena on first placement lookup");
 
         let slot_count = resolved_plan
             .arena
@@ -5212,7 +5663,10 @@ pub(super) mod block_node_attribution_tests {
         // `block_node_ids(&program)` is `[activation, weight]`, so this is
         // the opposite order.
         let blocks = [
-            QuantizedBlock::Packed { codec: proxima_primitives::Codec::Q6K, bytes: &packed_weight },
+            QuantizedBlock::Packed {
+                codec: proxima_primitives::Codec::Q6K,
+                bytes: &packed_weight,
+            },
             QuantizedBlock::Float32(&activation_data),
         ];
 
@@ -5259,7 +5713,10 @@ pub(super) mod block_node_attribution_tests {
 
         let blocks = [
             QuantizedBlock::Float32(&activation_data),
-            QuantizedBlock::Packed { codec: proxima_primitives::Codec::Q6K, bytes: &packed_weight },
+            QuantizedBlock::Packed {
+                codec: proxima_primitives::Codec::Q6K,
+                bytes: &packed_weight,
+            },
         ];
 
         plan(&program, &[], &blocks, &[], NumericPolicy::default())
@@ -5281,12 +5738,12 @@ pub(super) mod hazard_tracker_tests {
         infer, projection,
     };
 
+    #[cfg(feature = "instrument")]
+    use super::record_hazard_class;
     use super::{
         Binding, DeviceBuffer, HazardClass, HazardTracker, MetalError, NodeId, PackedOperands,
         hazard_step, kernel_dispatch_shape, resolve_hazard_inputs,
     };
-    #[cfg(feature = "instrument")]
-    use super::record_hazard_class;
     use crate::msl::{hazard_read_nodes, hazard_write_node};
 
     /// `a -> b`, `a -> c` (independent, both only read `a`), then `b, c ->
@@ -5381,7 +5838,11 @@ pub(super) mod hazard_tracker_tests {
         // op1: reads `a` (written by op0 since the last barrier) and writes
         // `b` -> RAW, a genuine dataflow edge, never arena-attributed.
         let class1 = hazards.classify(&["a"], Some("b"));
-        assert_eq!(class1, HazardClass::Raw, "op1 contributed the one RAW barrier");
+        assert_eq!(
+            class1,
+            HazardClass::Raw,
+            "op1 contributed the one RAW barrier"
+        );
         assert!(hazard_step(&mut hazards, &["a"], "b"));
         record_hazard_class(class1, false);
 
@@ -5855,8 +6316,16 @@ pub(super) mod horizontal_merge_grouping_tests {
 
         let groups = group_mergeable_positions(&identities, &reads, &writes);
 
-        assert_eq!(groups.len(), 1, "all 8 independent positions form one group");
-        assert_eq!(groups[0].len(), 8, "the one group must contain every position");
+        assert_eq!(
+            groups.len(),
+            1,
+            "all 8 independent positions form one group"
+        );
+        assert_eq!(
+            groups[0].len(),
+            8,
+            "the one group must contain every position"
+        );
     }
 
     /// Position 5 reads position 2's output -- a genuine dataflow edge
@@ -5879,7 +6348,11 @@ pub(super) mod horizontal_merge_grouping_tests {
 
         let groups = group_mergeable_positions(&identities, &reads, &writes);
 
-        assert_eq!(groups.len(), 1, "the other 7 independent positions still merge into one group");
+        assert_eq!(
+            groups.len(),
+            1,
+            "the other 7 independent positions still merge into one group"
+        );
         assert_eq!(
             groups[0],
             vec![0, 1, 2, 3, 4, 6, 7],
@@ -5920,7 +6393,12 @@ pub(super) mod attention_scratch_len_tests {
 
     use proxima_tensor::{BoundOpKind, DType, Layout, NodeId, NumericPolicy};
 
-    use super::{BoundOp, cached_attention_scratch_len};
+    use crate::msl::AttentionRowSchedule;
+
+    use super::{
+        BoundOp, cached_attention_scratch_len, cached_attention_scratch_len_with_schedule,
+        pack_cached_attention_merge_uniforms_with_schedule, pack_uniforms_with_schedule,
+    };
     #[cfg(feature = "metal-attn-split-rows")]
     use super::{scratch_is_shared, shared_scratch_elements};
 
@@ -5962,6 +6440,34 @@ pub(super) mod attention_scratch_len_tests {
                 new_upper_inclusive: 0,
             },
         }
+    }
+
+    fn row_tiled_capacity_bound(
+        query_rows: u64,
+        cached_key_rows: u64,
+        new_key_rows: u64,
+    ) -> BoundOp {
+        let mut bound = openchat_shaped_bound(query_rows, cached_key_rows, new_key_rows);
+        let BoundOpKind::CachedAttention {
+            operands,
+            query_groups,
+            ..
+        } = &mut bound.kind
+        else {
+            panic!("openchat_shaped_bound returns cached attention");
+        };
+        *query_groups = 2;
+        bound.extents[2] = 2;
+        operands.push((
+            NodeId(8),
+            Layout {
+                base: 0,
+                strides: vec![1].into(),
+            },
+            None,
+        ));
+        bound.node = NodeId(9);
+        bound
     }
 
     /// ROW: a decode dispatch (`query_rows == 1`) still reserves the
@@ -6095,6 +6601,67 @@ pub(super) mod attention_scratch_len_tests {
             elements * 4,
             1_611_904,
             "1.61 MB of scratch for the widest op"
+        );
+    }
+
+    #[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
+    #[test]
+    fn explicit_simdgroup_count_keeps_partial_scratch_and_both_uniforms_aligned() {
+        use crate::msl::{
+            AttentionMmaSelection, AttentionSimdgroupCount, AttentionVariant, CachedAttentionForm,
+        };
+
+        let policy = NumericPolicy::llama_relaxed();
+        let bound = row_tiled_capacity_bound(8, 4096, 8);
+        let (_, selected_schedule) = AttentionMmaSelection::from_variant(AttentionVariant {
+            simdgroup_count: AttentionSimdgroupCount::Groups8,
+            ..AttentionVariant::default()
+        })
+        .expect("the row-tiled simdgroup choice converts into a schedule");
+        let legacy_schedule = AttentionRowSchedule::legacy();
+        let CachedAttentionForm::TwoRangeRowTiled {
+            splits: legacy_splits,
+            ..
+        } = crate::msl::cached_attention_form_with_schedule(&bound.kind, policy, legacy_schedule)
+            .expect("the captured head shape admits the legacy row-tiled form")
+        else {
+            panic!("legacy schedule must select row-tiled attention");
+        };
+        let CachedAttentionForm::TwoRangeRowTiled {
+            splits: selected_splits,
+            ..
+        } = crate::msl::cached_attention_form_with_schedule(&bound.kind, policy, selected_schedule)
+            .expect("the captured head shape admits eight simdgroups")
+        else {
+            panic!("selected schedule must keep row-tiled attention");
+        };
+        assert_ne!(legacy_splits, selected_splits);
+
+        let selected_scratch =
+            cached_attention_scratch_len_with_schedule(&bound, policy, selected_schedule)
+                .expect("selected row-tiled attention requires partial scratch");
+        let expected_scratch = 8 * 8 * 2 * selected_splits * (2 + 128);
+        assert_eq!(selected_scratch, expected_scratch);
+
+        let partial_uniforms = pack_uniforms_with_schedule(&bound, policy, selected_schedule)
+            .expect("selected row-tiled partial uniforms pack");
+        let merge_uniforms =
+            pack_cached_attention_merge_uniforms_with_schedule(&bound, policy, selected_schedule)
+                .expect("selected row-tiled merge uniforms pack");
+        let read_i64 = |bytes: &[u8], offset: usize| {
+            i64::from_ne_bytes(
+                bytes[offset..offset + core::mem::size_of::<i64>()]
+                    .try_into()
+                    .expect("uniform word has eight bytes"),
+            )
+        };
+        assert_eq!(
+            read_i64(&partial_uniforms, core::mem::size_of::<i64>()),
+            selected_splits as i64
+        );
+        assert_eq!(
+            read_i64(&merge_uniforms, core::mem::size_of::<i64>()),
+            selected_splits as i64
         );
     }
 
@@ -6367,7 +6934,7 @@ pub(super) mod plan_query_rows_tests {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(super) mod expert_payload_descriptor_tests {
     use super::{
-        BoundOp, BoundOpKind, ExpertPayloadDescriptor, MetalError, Codec,
+        BoundOp, BoundOpKind, Codec, ExpertPayloadDescriptor, MetalError,
         expert_payload_descriptors, live_block_inputs, ordinary_block_uploads,
         pack_expert_payload_descriptors, reject_non_reducing_expert_staging,
         selected_expert_arena_descriptors, selected_expert_payloads,
@@ -6424,13 +6991,19 @@ pub(super) mod expert_payload_descriptor_tests {
         let high_bytes = [0_u8; 144];
         let entries = [
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &low_bytes },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q2K,
+                    bytes: &low_bytes,
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 11,
             },
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &high_bytes },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes: &high_bytes,
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 12,
@@ -6478,13 +7051,19 @@ pub(super) mod expert_payload_descriptor_tests {
         let high_bytes = [2_u8; 144];
         let entries = [
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &low_bytes },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q2K,
+                    bytes: &low_bytes,
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 1,
             },
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &high_bytes },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes: &high_bytes,
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 2,
@@ -6506,13 +7085,19 @@ pub(super) mod expert_payload_descriptor_tests {
         let high_bytes = [2_u8; 210];
         let entries = [
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &low_bytes },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes: &low_bytes,
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 1,
             },
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q6K, bytes: &high_bytes },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q6K,
+                    bytes: &high_bytes,
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 2,
@@ -6537,13 +7122,19 @@ pub(super) mod expert_payload_descriptor_tests {
         let second = [2_u8; 210];
         let entries = [
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &first },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes: &first,
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 1,
             },
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q6K, bytes: &second },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q6K,
+                    bytes: &second,
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 2,
@@ -6566,13 +7157,19 @@ pub(super) mod expert_payload_descriptor_tests {
         let arena = [0_u8; 256];
         let entries = [
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &arena[7..91] },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q2K,
+                    bytes: &arena[7..91],
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 3,
             },
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &arena[139..223] },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q2K,
+                    bytes: &arena[139..223],
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 4,
@@ -6614,19 +7211,28 @@ pub(super) mod expert_payload_descriptor_tests {
         let third = [3_u8; 144];
         let entries = [
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &first },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes: &first,
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 1,
             },
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &second },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes: &second,
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 2,
             },
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &third },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes: &third,
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 3,
@@ -6649,7 +7255,10 @@ pub(super) mod expert_payload_descriptor_tests {
     fn mixed_hobbit_entries_accept_q3k_runtime_decoder() {
         let q3_bytes = [0_u8; 110];
         let entries = [ExpertEntry {
-            block: QuantizedBlock::Packed { codec: Codec::Q3K, bytes: &q3_bytes },
+            block: QuantizedBlock::Packed {
+                codec: Codec::Q3K,
+                bytes: &q3_bytes,
+            },
             out_dim: 256,
             in_dim: 256,
             epoch: 0,
@@ -6670,7 +7279,10 @@ pub(super) mod expert_payload_descriptor_tests {
         let full_expert_stack = [0_u8; 4_096];
         let activation = [0.0_f32; 16];
         let blocks = [
-            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &full_expert_stack },
+            QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: &full_expert_stack,
+            },
             QuantizedBlock::Float32(&activation),
         ];
         let ordinary = ordinary_block_uploads(
@@ -6695,7 +7307,10 @@ pub(super) mod expert_payload_descriptor_tests {
                 .iter()
                 .map(|(_, block, _)| match block {
                     QuantizedBlock::Float32(values) => core::mem::size_of_val(*values),
-                    QuantizedBlock::Packed { codec: Codec::Q4K, bytes } => bytes.len(),
+                    QuantizedBlock::Packed {
+                        codec: Codec::Q4K,
+                        bytes,
+                    } => bytes.len(),
                     _ => 0,
                 })
                 .sum::<usize>(),
@@ -6711,13 +7326,19 @@ pub(super) mod expert_payload_descriptor_tests {
         let second_expert = [0_u8; 144];
         let entries = [
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &first_expert },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes: &first_expert,
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 1,
             },
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &second_expert },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes: &second_expert,
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 2,
@@ -6727,7 +7348,10 @@ pub(super) mod expert_payload_descriptor_tests {
 
         let error = reject_non_reducing_expert_staging(
             NodeId(51),
-            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &original_bytes },
+            QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: &original_bytes,
+            },
             &source,
         )
         .expect_err("a full-size staging table is not a low-memory substitution");
@@ -6748,13 +7372,19 @@ pub(super) mod expert_payload_descriptor_tests {
         let high_expert = [0_u8; 144];
         let entries = [
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &low_expert },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q2K,
+                    bytes: &low_expert,
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 1,
             },
             ExpertEntry {
-                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &high_expert },
+                block: QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes: &high_expert,
+                },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 2,
@@ -6764,7 +7394,10 @@ pub(super) mod expert_payload_descriptor_tests {
 
         reject_non_reducing_expert_staging(
             NodeId(52),
-            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &original_bytes },
+            QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: &original_bytes,
+            },
             &source,
         )
         .expect("a smaller mixed-codec table reduces the device upload");
@@ -6776,7 +7409,11 @@ pub(super) mod expert_payload_descriptor_tests {
 /// kernel's grid (rows x heads x `SIMD_WIDTH`) is narrower, so the two forms
 /// can differ and must not share a pipeline entry.
 fn merge_pipeline_key(cache_key: &str, merge_kernel: &Kernel) -> String {
-    let form = if merge_kernel.grid.grid2d.is_some() { "_wg" } else { "" };
+    let form = if merge_kernel.grid.grid2d.is_some() {
+        "_wg"
+    } else {
+        ""
+    };
     format!("{cache_key}_merge{form}")
 }
 
@@ -6835,7 +7472,8 @@ mod extra_output_slot_tests {
 
     use proxima_tensor::spec::{RopePairing, fused_rope_pair, input_leaf};
     use proxima_tensor::{
-        BoundOpKind, DType, Extent, Layout, NodeId, NumericPolicy, bind, fuse_twin_elementwise, infer,
+        BoundOpKind, DType, Extent, Layout, NodeId, NumericPolicy, bind, fuse_twin_elementwise,
+        infer,
     };
 
     use super::{BoundOp, extra_output_slots};
@@ -6865,21 +7503,37 @@ mod extra_output_slot_tests {
         )
         .expect("rope pair builds");
         let shapes = infer(&program, &[]).expect("rope program infers");
-        let bound = bind(&program, &shapes, &[first, second], NumericPolicy::default())
-            .expect("rope program binds");
+        let bound = bind(
+            &program,
+            &shapes,
+            &[first, second],
+            NumericPolicy::default(),
+        )
+        .expect("rope program binds");
         let mut fused = fuse_twin_elementwise(bound, &program);
         assert_eq!(fused.len(), 1, "the rope pair fuses to one op");
         fused.remove(0)
     }
 
     fn router_top_k(stacked: bool) -> BoundOp {
-        let nodes = |start: u32, count: u64| (0..count as u32).map(|index| NodeId(start + index)).collect();
+        let nodes = |start: u32, count: u64| {
+            (0..count as u32)
+                .map(|index| NodeId(start + index))
+                .collect()
+        };
         BoundOp {
             node: NodeId(100),
             dtype: DType::Float32,
             extents: vec![1],
             kind: BoundOpKind::MoeTopK {
-                operands: vec![(NodeId(1), Layout { base: 0, strides: vec![1].into() }, None)],
+                operands: vec![(
+                    NodeId(1),
+                    Layout {
+                        base: 0,
+                        strides: vec![1].into(),
+                    },
+                    None,
+                )],
                 expert_count: EXPERT_COUNT,
                 top_k: TOP_K,
                 routes: nodes(100, TOP_K),
@@ -6906,28 +7560,52 @@ mod extra_output_slot_tests {
     #[test]
     fn extra_output_slot_of_a_twin_is_the_buffer_its_kernel_declares() {
         let twin = rope_twin();
-        let kernel = emit(&twin, &PackedOperands::new(), NumericPolicy::default()).expect("a twin renders");
+        let kernel =
+            emit(&twin, &PackedOperands::new(), NumericPolicy::default()).expect("a twin renders");
 
-        let slots: Vec<(usize, NodeId, usize)> = extra_output_slots(&twin, kernel.bindings.len()).collect();
+        let slots: Vec<(usize, NodeId, usize)> =
+            extra_output_slots(&twin, kernel.bindings.len()).collect();
 
         assert_eq!(slots.len(), 1, "a twin binds exactly its second output");
-        assert_eq!(slots[0].0, declared_buffer_index(&kernel.source, "extra_out0"));
+        assert_eq!(
+            slots[0].0,
+            declared_buffer_index(&kernel.source, "extra_out0")
+        );
         assert_eq!(Some(slots[0].1), twin.twin_node());
-        assert_eq!(slots[0].2, 3 * 2 * 4, "the twin holds one value per element of the op extents: sequence, heads, pairs");
+        assert_eq!(
+            slots[0].2,
+            3 * 2 * 4,
+            "the twin holds one value per element of the op extents: sequence, heads, pairs"
+        );
     }
 
     #[test]
     fn extra_output_slot_of_a_top_k_is_the_buffer_its_kernel_declares_for_every_extra() {
         let router = router_top_k(false);
-        let kernel = emit(&router, &PackedOperands::new(), NumericPolicy::default()).expect("a router renders");
+        let kernel = emit(&router, &PackedOperands::new(), NumericPolicy::default())
+            .expect("a router renders");
 
-        let slots: Vec<(usize, NodeId, usize)> = extra_output_slots(&router, kernel.bindings.len()).collect();
+        let slots: Vec<(usize, NodeId, usize)> =
+            extra_output_slots(&router, kernel.bindings.len()).collect();
 
-        assert_eq!(slots.len() as u64, 2 * TOP_K, "top_k - 1 routes, top_k weights, one total");
+        assert_eq!(
+            slots.len() as u64,
+            2 * TOP_K,
+            "top_k - 1 routes, top_k weights, one total"
+        );
         for (index, (slot, _, _)) in slots.iter().enumerate() {
-            assert_eq!(*slot, declared_buffer_index(&kernel.source, &format!("extra{index}")));
+            assert_eq!(
+                *slot,
+                declared_buffer_index(&kernel.source, &format!("extra{index}"))
+            );
         }
-        let BoundOpKind::MoeTopK { routes, weights, weight_total, .. } = &router.kind else {
+        let BoundOpKind::MoeTopK {
+            routes,
+            weights,
+            weight_total,
+            ..
+        } = &router.kind
+        else {
             unreachable!("router_top_k builds a MoeTopK")
         };
         let expected: Vec<NodeId> = routes[1..]
@@ -6937,19 +7615,30 @@ mod extra_output_slot_tests {
             .copied()
             .collect();
         let planned: Vec<NodeId> = slots.iter().map(|(_, node, _)| *node).collect();
-        assert_eq!(planned, expected, "routes[1..], then weights, then the total");
+        assert_eq!(
+            planned, expected,
+            "routes[1..], then weights, then the total"
+        );
     }
 
     #[test]
     fn extra_output_slot_of_a_stacked_top_k_ends_on_the_stack_pair_the_kernel_declares() {
         let router = router_top_k(true);
-        let kernel = emit(&router, &PackedOperands::new(), NumericPolicy::default()).expect("a router renders");
+        let kernel = emit(&router, &PackedOperands::new(), NumericPolicy::default())
+            .expect("a router renders");
 
-        let slots: Vec<(usize, NodeId, usize)> = extra_output_slots(&router, kernel.bindings.len()).collect();
+        let slots: Vec<(usize, NodeId, usize)> =
+            extra_output_slots(&router, kernel.bindings.len()).collect();
 
         let stacked: Vec<&(usize, NodeId, usize)> = slots.iter().rev().take(2).rev().collect();
-        assert_eq!(stacked[0].0, declared_buffer_index(&kernel.source, "stacked_routes"));
-        assert_eq!(stacked[1].0, declared_buffer_index(&kernel.source, "stacked_weights"));
+        assert_eq!(
+            stacked[0].0,
+            declared_buffer_index(&kernel.source, "stacked_routes")
+        );
+        assert_eq!(
+            stacked[1].0,
+            declared_buffer_index(&kernel.source, "stacked_weights")
+        );
         assert_eq!((stacked[0].1, stacked[1].1), (NodeId(400), NodeId(401)));
     }
 
@@ -7003,7 +7692,10 @@ mod route_fault_decode_tests {
             return;
         };
 
-        assert!(matches!(error, MetalError::RouteCompactionMismatch { node } if node == NodeId(7)), "{error:?}");
+        assert!(
+            matches!(error, MetalError::RouteCompactionMismatch { node } if node == NodeId(7)),
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -7012,7 +7704,10 @@ mod route_fault_decode_tests {
             return;
         };
 
-        assert!(matches!(error, MetalError::ExpertSourceMiss { expert: 2, .. }), "{error:?}");
+        assert!(
+            matches!(error, MetalError::ExpertSourceMiss { expert: 2, .. }),
+            "{error:?}"
+        );
     }
 }
 
@@ -7079,7 +7774,11 @@ mod shared_route_compaction_tests {
         let buffers: BTreeSet<u32> = served.iter().map(|(buffer, _)| *buffer).collect();
         assert_eq!(keys.len(), 6);
         assert_eq!(encodes, 2);
-        assert_eq!(buffers.len(), 2, "two route operands must never share a buffer: {served:?}");
+        assert_eq!(
+            buffers.len(),
+            2,
+            "two route operands must never share a buffer: {served:?}"
+        );
         assert_eq!(served.iter().filter(|(_, reused)| *reused).count(), 4);
     }
 
@@ -7111,16 +7810,24 @@ mod shared_route_compaction_tests {
         tracker.record(&[], Some("gate_out"));
 
         let barrier_after_prepass = hazard_write_compaction(&mut tracker, "compaction", "gate_out");
-        let owner_read_needs_barrier = hazard_read_compaction(&mut tracker, "compaction", "gate_out");
+        let owner_read_needs_barrier =
+            hazard_read_compaction(&mut tracker, "compaction", "gate_out");
         tracker.record(&[], Some("up_out"));
         let up_read_needs_barrier = hazard_read_compaction(&mut tracker, "compaction", "up_out");
         tracker.record(&[], Some("down_out"));
-        let down_read_needs_barrier = hazard_read_compaction(&mut tracker, "compaction", "down_out");
+        let down_read_needs_barrier =
+            hazard_read_compaction(&mut tracker, "compaction", "down_out");
 
-        assert!(barrier_after_prepass, "the gemm that follows the prepass must wait for it");
+        assert!(
+            barrier_after_prepass,
+            "the gemm that follows the prepass must wait for it"
+        );
         assert!(!owner_read_needs_barrier && !up_read_needs_barrier && !down_read_needs_barrier);
         assert!(tracker.read.contains("compaction"));
-        assert!(!tracker.written.contains("compaction"), "the barrier published the write");
+        assert!(
+            !tracker.written.contains("compaction"),
+            "the barrier published the write"
+        );
         assert!(tracker.written.contains("up_out") && tracker.written.contains("down_out"));
     }
 

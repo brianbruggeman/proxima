@@ -627,18 +627,20 @@ fn card_11_bf8_row_matches_f32_cache_output_bits_and_masks_the_padded_row() {
     let infinity_named: Vec<(&str, QuantizedBlock<'_>)> = fixture
         .named
         .iter()
-        .map(|(name, values)| match invalid_row_infinity
-            .iter()
-            .find(|(packed_name, _)| packed_name == name)
-        {
-            Some((_, bytes)) => (
-                name.as_str(),
-                QuantizedBlock::Packed {
-                    codec: omega::Codec::BFloat8,
-                    bytes,
-                },
-            ),
-            None => (name.as_str(), QuantizedBlock::Float32(values)),
+        .map(|(name, values)| {
+            match invalid_row_infinity
+                .iter()
+                .find(|(packed_name, _)| packed_name == name)
+            {
+                Some((_, bytes)) => (
+                    name.as_str(),
+                    QuantizedBlock::Packed {
+                        codec: omega::Codec::BFloat8,
+                        bytes,
+                    },
+                ),
+                None => (name.as_str(), QuantizedBlock::Float32(values)),
+            }
         })
         .collect();
     let infinity_output = omega::execute_plan_named(&bf8_plan, &infinity_named)
@@ -682,9 +684,11 @@ fn card_11_bf8_row_selects_the_bf8_source_and_declines_mixed_cache_codecs() {
         assert!(emitted.source.contains("device const uchar* in2"));
         assert!(emitted.source.contains("omega_bf8_load_matrix(even_float"));
         assert!(emitted.source.contains("omega_bf8_to_float"));
-        assert!(emitted
-            .source
-            .contains("omega_zero_padded_value_rows(value_float"));
+        assert!(
+            emitted
+                .source
+                .contains("omega_zero_padded_value_rows(value_float")
+        );
         assert!(emitted.source.contains("simdgroup_float8x8"));
         assert!(!emitted.source.contains("simdgroup_half8x8"));
 
@@ -761,9 +765,9 @@ fn card_13_mma_precision_selects_f32_and_f16_for_each_cache_storage() {
             }
             assert!(emitted.source.contains(fragment));
             assert!(emitted.source.contains(conversion));
-            assert!(emitted
-                .source
-                .contains("simdgroup_float8x8 accumulated[accumulator_dimensions][accumulator_vectors];"));
+            assert!(emitted.source.contains(
+                "simdgroup_float8x8 accumulated[accumulator_dimensions][accumulator_vectors];"
+            ));
             assert!(emitted.source.contains("threadgroup float score_tile"));
             assert!(emitted.source.contains("float local_scores"));
             assert!(emitted.entry.ends_with(match precision {
@@ -856,14 +860,9 @@ fn card_13_mma_precision_f16_exact_fixture_preserves_attention_output_bits() {
         .node;
     let roots = [root];
     let named = as_named_blocks(&fixture.named);
-    let mut f32_plan = omega::plan_named(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &roots,
-        policy,
-    )
-    .expect("the explicit F32 MMA plan builds");
+    let mut f32_plan =
+        omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
+            .expect("the explicit F32 MMA plan builds");
     let plan_storage_mismatch = f32_plan.set_attention_variant(omega::AttentionVariant {
         kv_storage: omega::AttentionKvStorage::Bf8,
         ..omega::AttentionVariant::default()
@@ -875,35 +874,35 @@ fn card_13_mma_precision_f16_exact_fixture_preserves_attention_output_bits() {
             bound: "f32"
         })
     ));
-    f32_plan.set_attention_variant(omega::AttentionVariant {
-        mma_precision: omega::AttentionMmaPrecision::F32,
-        ..omega::AttentionVariant::default()
-    })
-    .expect("F32 MMA is an admitted variant");
-    let mut f16_plan = omega::plan_named(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &roots,
-        policy,
-    )
-    .expect("the explicit F16 MMA plan builds");
-    f16_plan.set_attention_variant(omega::AttentionVariant {
-        mma_precision: omega::AttentionMmaPrecision::F16,
-        ..omega::AttentionVariant::default()
-    })
-    .expect("F16 MMA is an admitted variant");
+    f32_plan
+        .set_attention_variant(omega::AttentionVariant {
+            mma_precision: omega::AttentionMmaPrecision::F32,
+            ..omega::AttentionVariant::default()
+        })
+        .expect("F32 MMA is an admitted variant");
+    let mut f16_plan =
+        omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
+            .expect("the explicit F16 MMA plan builds");
+    f16_plan
+        .set_attention_variant(omega::AttentionVariant {
+            mma_precision: omega::AttentionMmaPrecision::F16,
+            ..omega::AttentionVariant::default()
+        })
+        .expect("F16 MMA is an admitted variant");
     let f32_keys = f32_plan
         .kernel_keys()
         .expect("F32 plan exposes its pipeline identities");
     let f16_keys = f16_plan
         .kernel_keys()
         .expect("F16 plan exposes its pipeline identities");
-    assert_ne!(f16_keys, f32_keys, "MMA precision participates in kernel identity");
-    let f32_output = omega::execute_plan_named(&f32_plan, &named)
-        .expect("the explicit F32 MMA plan executes");
-    let f16_output = omega::execute_plan_named(&f16_plan, &named)
-        .expect("the explicit F16 MMA plan executes");
+    assert_ne!(
+        f16_keys, f32_keys,
+        "MMA precision participates in kernel identity"
+    );
+    let f32_output =
+        omega::execute_plan_named(&f32_plan, &named).expect("the explicit F32 MMA plan executes");
+    let f16_output =
+        omega::execute_plan_named(&f16_plan, &named).expect("the explicit F16 MMA plan executes");
     let f32_bits: Vec<u32> = f32_output
         .root()
         .iter()
@@ -915,7 +914,10 @@ fn card_13_mma_precision_f16_exact_fixture_preserves_attention_output_bits() {
         .map(|value| value.to_bits())
         .collect();
     assert!(f32_output.root().iter().all(|value| *value == 0.5));
-    assert_eq!(f16_bits, f32_bits, "F16-exact operands preserve output bits");
+    assert_eq!(
+        f16_bits, f32_bits,
+        "F16-exact operands preserve output bits"
+    );
 }
 
 #[test]
@@ -943,28 +945,18 @@ fn card_15_v_reuse_device_keeps_query_rows_independent() {
         .node;
     let roots = [root];
     let named = as_named_blocks(&fixture.named);
-    let mut legacy_plan = omega::plan_named(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &roots,
-        policy,
-    )
-    .expect("the legacy row-tiled plan builds");
+    let mut legacy_plan =
+        omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
+            .expect("the legacy row-tiled plan builds");
     legacy_plan
         .set_attention_variant(omega::AttentionVariant {
             mma_precision: omega::AttentionMmaPrecision::F32,
             ..omega::AttentionVariant::default()
         })
         .expect("the explicit F32 legacy plan is admitted");
-    let mut shared_k_plan = omega::plan_named(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &roots,
-        policy,
-    )
-    .expect("the shared K control plan builds");
+    let mut shared_k_plan =
+        omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
+            .expect("the shared K control plan builds");
     shared_k_plan
         .set_attention_variant(omega::AttentionVariant {
             mma_precision: omega::AttentionMmaPrecision::F32,
@@ -972,14 +964,9 @@ fn card_15_v_reuse_device_keeps_query_rows_independent() {
             ..omega::AttentionVariant::default()
         })
         .expect("the shared K control is admitted");
-    let mut shared_kv_plan = omega::plan_named(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &roots,
-        policy,
-    )
-    .expect("the shared K/V plan builds");
+    let mut shared_kv_plan =
+        omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
+            .expect("the shared K/V plan builds");
     shared_kv_plan
         .set_attention_variant(omega::AttentionVariant {
             mma_precision: omega::AttentionMmaPrecision::F32,
@@ -987,14 +974,9 @@ fn card_15_v_reuse_device_keeps_query_rows_independent() {
             ..omega::AttentionVariant::default()
         })
         .expect("the shared K/V plan is admitted");
-    let mut shared_k_f16_plan = omega::plan_named(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &roots,
-        policy,
-    )
-    .expect("the F16 shared K control plan builds");
+    let mut shared_k_f16_plan =
+        omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
+            .expect("the F16 shared K control plan builds");
     shared_k_f16_plan
         .set_attention_variant(omega::AttentionVariant {
             mma_precision: omega::AttentionMmaPrecision::F16,
@@ -1002,14 +984,9 @@ fn card_15_v_reuse_device_keeps_query_rows_independent() {
             ..omega::AttentionVariant::default()
         })
         .expect("the F16 shared K control is admitted");
-    let mut shared_kv_f16_plan = omega::plan_named(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &roots,
-        policy,
-    )
-    .expect("the F16 shared K/V plan builds");
+    let mut shared_kv_f16_plan =
+        omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
+            .expect("the F16 shared K/V plan builds");
     shared_kv_f16_plan
         .set_attention_variant(omega::AttentionVariant {
             mma_precision: omega::AttentionMmaPrecision::F16,
@@ -1030,12 +1007,12 @@ fn card_15_v_reuse_device_keeps_query_rows_independent() {
     assert_ne!(legacy_keys, shared_k_keys);
     assert_ne!(shared_k_keys, shared_kv_keys);
 
-    let legacy = omega::execute_plan_named(&legacy_plan, &named)
-        .expect("the legacy control executes");
-    let shared_k = omega::execute_plan_named(&shared_k_plan, &named)
-        .expect("the shared K control executes");
-    let shared_kv = omega::execute_plan_named(&shared_kv_plan, &named)
-        .expect("the shared K/V plan executes");
+    let legacy =
+        omega::execute_plan_named(&legacy_plan, &named).expect("the legacy control executes");
+    let shared_k =
+        omega::execute_plan_named(&shared_k_plan, &named).expect("the shared K control executes");
+    let shared_kv =
+        omega::execute_plan_named(&shared_kv_plan, &named).expect("the shared K/V plan executes");
     let shared_k_f16 = omega::execute_plan_named(&shared_k_f16_plan, &named)
         .expect("the F16 shared K plan executes");
     let shared_kv_f16 = omega::execute_plan_named(&shared_kv_f16_plan, &named)
@@ -1132,22 +1109,11 @@ fn card_16_tile_height_plan_dispatches_rows16_and_matches_cpu_payload() {
     let expected = run_resolved_on_cpu(&fixture, &resolved);
     let named = as_named_blocks(&fixture.named);
     let roots = [fixture.logits];
-    let legacy_plan = omega::plan_named(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &roots,
-        policy,
-    )
-    .expect("the legacy plan resolves");
-    let mut rows16_plan = omega::plan_named(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &roots,
-        policy,
-    )
-    .expect("the rows16 candidate plan resolves");
+    let legacy_plan = omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
+        .expect("the legacy plan resolves");
+    let mut rows16_plan =
+        omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
+            .expect("the rows16 candidate plan resolves");
     rows16_plan
         .set_attention_variant(omega::AttentionVariant {
             tile_height: omega::AttentionTileHeight::Rows16,
@@ -1163,8 +1129,8 @@ fn card_16_tile_height_plan_dispatches_rows16_and_matches_cpu_payload() {
     assert_ne!(legacy_keys, rows16_keys);
     assert!(rows16_keys.iter().any(|key| key.contains("_tile_rows16")));
 
-    let output = omega::execute_plan_named(&rows16_plan, &named)
-        .expect("the selected rows16 plan executes");
+    let output =
+        omega::execute_plan_named(&rows16_plan, &named).expect("the selected rows16 plan executes");
     assert!(
         relative_difference(&expected, output.root()) <= TOLERANCE,
         "rows16 plan output matches the CPU payload"
@@ -1179,14 +1145,9 @@ fn card_17_query_parallelism_plan_preserves_shared_kv_and_matches_cpu_payload() 
     let expected = run_resolved_on_cpu(&fixture, &resolved);
     let named = as_named_blocks(&fixture.named);
     let roots = [fixture.logits];
-    let mut query_parallel_plan = omega::plan_named(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &roots,
-        policy,
-    )
-    .expect("the Granite-shaped query-parallel plan resolves");
+    let mut query_parallel_plan =
+        omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
+            .expect("the Granite-shaped query-parallel plan resolves");
     query_parallel_plan
         .set_attention_variant(omega::AttentionVariant {
             kv_reuse: omega::AttentionKvReuse::SharedKv,
@@ -1216,14 +1177,9 @@ fn card_18_prefetch_plan_executes_with_a_partial_live_cache_block() {
     let fixture = fixture_with(8, 31, Geometry::TWO_QUERY_GROUPS);
     let named = as_named_blocks(&fixture.named);
     let roots = [fixture.logits];
-    let mut baseline_plan = omega::plan_named(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &roots,
-        policy,
-    )
-    .expect("the F16 baseline plan resolves");
+    let mut baseline_plan =
+        omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
+            .expect("the F16 baseline plan resolves");
     baseline_plan
         .set_attention_variant(omega::AttentionVariant {
             mma_precision: omega::AttentionMmaPrecision::F16,
@@ -1235,14 +1191,9 @@ fn card_18_prefetch_plan_executes_with_a_partial_live_cache_block() {
         .expect("the F16 SharedKv baseline is admitted");
     let baseline = omega::execute_plan_named(&baseline_plan, &named)
         .expect("the F16 SharedKv baseline executes");
-    let mut prefetch_plan = omega::plan_named(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &roots,
-        policy,
-    )
-    .expect("the partial-cache prefetch plan resolves");
+    let mut prefetch_plan =
+        omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
+            .expect("the partial-cache prefetch plan resolves");
     prefetch_plan
         .set_attention_variant(omega::AttentionVariant {
             mma_precision: omega::AttentionMmaPrecision::F16,
@@ -1260,9 +1211,16 @@ fn card_18_prefetch_plan_executes_with_a_partial_live_cache_block() {
 
     let output = omega::execute_plan_named(&prefetch_plan, &named)
         .expect("the partial-cache prefetch plan executes");
-    let baseline_bits: Vec<u32> = baseline.root().iter().map(|value| value.to_bits()).collect();
+    let baseline_bits: Vec<u32> = baseline
+        .root()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
     let prefetch_bits: Vec<u32> = output.root().iter().map(|value| value.to_bits()).collect();
-    assert_eq!(prefetch_bits, baseline_bits, "prefetch preserves the F16 output payload");
+    assert_eq!(
+        prefetch_bits, baseline_bits,
+        "prefetch preserves the F16 output payload"
+    );
 }
 
 #[test]
@@ -1273,37 +1231,29 @@ fn card_19_simd_topology_plans_match_cpu_and_keep_axes_fixed() {
     let expected = run_resolved_on_cpu(&fixture, &resolved);
     let named = as_named_blocks(&fixture.named);
     let roots = [fixture.logits];
-    let mut per_head_plan = omega::plan_named(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &roots,
-        policy,
-    )
-    .expect("the per-head topology plan resolves");
+    let mut per_head_plan =
+        omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
+            .expect("the per-head topology plan resolves");
     per_head_plan
         .set_attention_variant(omega::AttentionVariant {
             mma_precision: omega::AttentionMmaPrecision::F32,
             kv_reuse: omega::AttentionKvReuse::SharedKv,
             tile_height: omega::AttentionTileHeight::Rows16,
             simd_topology: omega::AttentionSimdTopology::PerHead,
+            simdgroup_count: omega::AttentionSimdgroupCount::Legacy,
             ..omega::AttentionVariant::default()
         })
         .expect("the per-head topology is admitted");
-    let mut grouped_plan = omega::plan_named(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &roots,
-        policy,
-    )
-    .expect("the grouped-query topology plan resolves");
+    let mut grouped_plan =
+        omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
+            .expect("the grouped-query topology plan resolves");
     grouped_plan
         .set_attention_variant(omega::AttentionVariant {
             mma_precision: omega::AttentionMmaPrecision::F32,
             kv_reuse: omega::AttentionKvReuse::SharedKv,
             tile_height: omega::AttentionTileHeight::Rows16,
             simd_topology: omega::AttentionSimdTopology::GroupedQueries,
+            simdgroup_count: omega::AttentionSimdgroupCount::Legacy,
             ..omega::AttentionVariant::default()
         })
         .expect("the grouped-query topology is admitted");
@@ -1314,10 +1264,16 @@ fn card_19_simd_topology_plans_match_cpu_and_keep_axes_fixed() {
         .kernel_keys()
         .expect("grouped-query pipeline identities are collected");
     assert_ne!(per_head_keys, grouped_keys);
-    assert!(per_head_keys.iter().any(|key| key.contains("_simd_per_head")));
-    assert!(grouped_keys
-        .iter()
-        .any(|key| key.contains("_simd_grouped_queries")));
+    assert!(
+        per_head_keys
+            .iter()
+            .any(|key| key.contains("_simd_per_head"))
+    );
+    assert!(
+        grouped_keys
+            .iter()
+            .any(|key| key.contains("_simd_grouped_queries"))
+    );
 
     let per_head_output = omega::execute_plan_named(&per_head_plan, &named)
         .expect("the per-head topology plan executes");

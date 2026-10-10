@@ -30,14 +30,25 @@ use super::*;
 /// it assumes `pair_dim * 2 == head_dim` -- to a value address computed
 /// straight from `head_dim`, mirroring `physical.rs`'s own separate
 /// `value_start`/`key_start` addressing.
-pub(super) fn cached_attention_scalar_score_body(pass_present: bool, new_range_windowed: bool) -> String {
+pub(super) fn cached_attention_scalar_score_body(
+    pass_present: bool,
+    new_range_windowed: bool,
+) -> String {
     let lower_guard = if new_range_windowed {
         "if (relative < cached_lower) { continue; }"
     } else {
         "if (cached && relative < cached_lower) { continue; }"
     };
-    let pair_expr = if pass_present { "pair_dim" } else { "head_dim / 2" };
-    let value_addr = if pass_present { "value_base" } else { "kbase * 2" };
+    let pair_expr = if pass_present {
+        "pair_dim"
+    } else {
+        "head_dim / 2"
+    };
+    let value_addr = if pass_present {
+        "value_base"
+    } else {
+        "kbase * 2"
+    };
     let value_base_decl = if pass_present {
         "long value_base = (cached ? key : new_index) * (kv_heads * head_dim) + kv_head * head_dim;\n        "
     } else {
@@ -177,7 +188,9 @@ pub(super) fn render_cached_attention_with_mma_selection(
     // is never legal (`physical.rs`'s own `score_cached_attention_rotary`
     // guard), so that shape alone still rejects.
     if rotary_dim > head_dim {
-        return Err(EmitError::CachedAttentionPartialRotaryNotSupported { node: resolved.node });
+        return Err(EmitError::CachedAttentionPartialRotaryNotSupported {
+            node: resolved.node,
+        });
     }
     let pass_present = rotary_dim < head_dim;
     let pass_dim = head_dim - rotary_dim;
@@ -198,11 +211,9 @@ pub(super) fn render_cached_attention_with_mma_selection(
     // needs no dynamic `new_upper` at all, since its "new" range is never
     // bucketed. `entry_name`'s own "dyn"/"cb" markers are what let one
     // compiled kernel serve every live value on each path.
-    let Some(form) = cached_attention_form_with_tile_height(
-        &resolved.kind,
-        numeric_policy,
-        row_schedule.tile_height(),
-    ) else {
+    let Some(form) =
+        cached_attention_form_with_schedule(&resolved.kind, numeric_policy, row_schedule)
+    else {
         return Err(EmitError::RenderKindMismatch {
             node: resolved.node,
             expected: "cached_attention",
@@ -211,7 +222,10 @@ pub(super) fn render_cached_attention_with_mma_selection(
     };
     #[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
     let has_row_tiled_mma = matches!(form, CachedAttentionForm::TwoRangeRowTiled { .. });
-    #[cfg(all(feature = "metal-attn-variants", not(feature = "metal-attn-split-rows")))]
+    #[cfg(all(
+        feature = "metal-attn-variants",
+        not(feature = "metal-attn-split-rows")
+    ))]
     let has_row_tiled_mma = false;
     #[cfg(feature = "metal-attn-variants")]
     if mma_selection == AttentionMmaSelection::F16 && !has_row_tiled_mma {
@@ -392,7 +406,9 @@ pub(super) fn render_cached_attention_with_mma_selection(
     // bound -- the full-rotary path never emits this text, keeping its
     // kernel source byte-identical to before this plane existed.
     let pass_dim_decl = if pass_present {
-        format!(" constexpr long pair_dim = {rotary_dim} / 2; constexpr long pass_dim = {pass_dim};")
+        format!(
+            " constexpr long pair_dim = {rotary_dim} / 2; constexpr long pass_dim = {pass_dim};"
+        )
     } else {
         String::new()
     };
@@ -425,7 +441,11 @@ pub(super) fn render_cached_attention_with_mma_selection(
     // head_dim` (every full-rotary caller today), so substituting this
     // token in place of the literal keeps full-rotary kernel text
     // byte-identical while partial rotary addresses only its rotated width.
-    let pair_expr = if pass_present { "pair_dim" } else { "head_dim / 2" };
+    let pair_expr = if pass_present {
+        "pair_dim"
+    } else {
+        "head_dim / 2"
+    };
     // Companion to `qbase`, in `pass_dim` units instead of `pair_expr`
     // units -- `physical.rs:444`'s own `pass_query_start` addressing, ported
     // verbatim. Empty for full rotary, so that path's `qbase` line renders
@@ -504,7 +524,8 @@ pub(super) fn render_cached_attention_with_mma_selection(
     // `query_row` past the real row count and reads/writes out of bounds.
     // Computed once here so the decode and `final_store`'s scratch-vs-direct
     // branch below can never disagree on which case this compiled kernel is.
-    let merge_needed = cached_attention_merge_needed(&resolved.kind, numeric_policy);
+    let merge_needed =
+        cached_attention_merge_needed_with_schedule(&resolved.kind, numeric_policy, row_schedule);
     // ROW 385: below the split-at-scale knee, `query_groups` moves out of
     // this threadgroup's own width (`tiled_gemm_threadgroup_width`'s own
     // `CachedAttention` arm) and into a threadgroup-COUNT factor instead, so
@@ -713,7 +734,10 @@ pub(super) fn render_cached_attention_with_mma_selection(
 /// copy-and-normalize, since the single live lane's rescale weight is
 /// always `1.0` (or `0.0` under the all-`-INFINITY`/empty-context corner).
 #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
-pub(super) fn render_cached_attention_merge(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
+pub(super) fn render_cached_attention_merge(
+    resolved: &BoundOp,
+    entry: &str,
+) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention { head_dim, .. } = &resolved.kind else {
         return Err(EmitError::RenderKindMismatch {
             node: resolved.node,
@@ -793,16 +817,32 @@ const INTERLEAVED_SPLIT_SCRATCH: bool = cfg!(feature = "metal-attn-split-decode"
 /// `crate::metal`'s plan-resolution path calls this alongside `emit` for
 /// every position, exactly as it already calls `kernel_dispatch_shape`
 /// alongside `emit`.
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+#[cfg(test)]
 pub(crate) fn emit_cached_attention_merge(
     resolved: &BoundOp,
     numeric_policy: NumericPolicy,
 ) -> Result<Option<Kernel>, EmitError> {
-    if !cached_attention_merge_needed(&resolved.kind, numeric_policy) {
+    emit_cached_attention_merge_with_schedule(
+        resolved,
+        numeric_policy,
+        AttentionRowSchedule::legacy(),
+    )
+}
+
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+pub(crate) fn emit_cached_attention_merge_with_schedule(
+    resolved: &BoundOp,
+    numeric_policy: NumericPolicy,
+    schedule: AttentionRowSchedule,
+) -> Result<Option<Kernel>, EmitError> {
+    if !cached_attention_merge_needed_with_schedule(&resolved.kind, numeric_policy, schedule) {
         return Ok(None);
     }
     validate(resolved)?;
-    let entry = alloc::format!("{}_merge", entry_name(resolved, numeric_policy));
+    let entry = alloc::format!(
+        "{}_merge",
+        entry_name_with_schedule(resolved, numeric_policy, schedule)
+    );
     let source = render_cached_attention_merge(resolved, &entry)?;
     let total_elements = checked_product(resolved.node, resolved.extents.iter().copied())?
         .checked_div(match &resolved.kind {
