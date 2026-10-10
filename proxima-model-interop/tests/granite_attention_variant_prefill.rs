@@ -1111,6 +1111,12 @@ fn f16_rows16_shared_k_variant() -> AttentionVariant {
     variant
 }
 
+fn f32_rows16_shared_k_variant() -> AttentionVariant {
+    let mut variant = f16_rows16_shared_k_variant();
+    variant.mma_precision = omega::AttentionMmaPrecision::F32;
+    variant
+}
+
 fn f16_rows16_shared_k_simdgroup_rows_variant() -> AttentionVariant {
     let mut variant = f16_rows16_shared_k_variant();
     variant.query_parallelism = omega::AttentionQueryParallelism::SimdgroupRows;
@@ -1172,6 +1178,22 @@ fn run_variant_prefill_probe_shapes(
     variant: AttentionVariant,
     prompt_shapes: &[usize],
 ) {
+    run_variant_prefill_probe_shapes_with_grid_requirement(
+        variant_name,
+        baseline_variant,
+        variant,
+        prompt_shapes,
+        false,
+    );
+}
+
+fn run_variant_prefill_probe_shapes_with_grid_requirement(
+    variant_name: &str,
+    baseline_variant: Option<AttentionVariant>,
+    variant: AttentionVariant,
+    prompt_shapes: &[usize],
+    require_equal_grid: bool,
+) {
     let path = granite_checkpoint_path();
     let file = File::open(&path).expect("open the real Granite checkpoint");
     // SAFETY: this probe reads the checkpoint without modifying it.
@@ -1202,6 +1224,12 @@ fn run_variant_prefill_probe_shapes(
             baseline.dispatch.msl_sha256, selected.dispatch.msl_sha256,
             "selected source identity"
         );
+        if require_equal_grid {
+            assert_eq!(
+                baseline.dispatch.grid, selected.dispatch.grid,
+                "MMA precision variants must preserve dispatch grid"
+            );
+        }
         assert!(
             !baseline
                 .dispatch
@@ -1217,6 +1245,22 @@ fn run_variant_prefill_probe_shapes(
                 .any(|binding| matches!(binding, Binding::Fault))
         );
         let output_difference = f32_output_difference(&baseline.output, &selected.output);
+        assert_eq!(
+            output_difference["non_finite_pairs"], 0,
+            "attention output comparison contains only finite values"
+        );
+        assert!(
+            output_difference["max_absolute_difference"]
+                .as_f64()
+                .is_some_and(f64::is_finite),
+            "maximum output difference is finite"
+        );
+        assert!(
+            output_difference["rms_difference"]
+                .as_f64()
+                .is_some_and(f64::is_finite),
+            "RMS output difference is finite"
+        );
         let token_comparison = compare_token_ids(&baseline.token_ids, &selected.token_ids);
         let ids_equal = token_comparison.is_ok();
         token_comparison
@@ -1743,6 +1787,33 @@ async fn perf_granite_rows16_shared_k() {
         Some(f16_variant()),
         f16_rows16_shared_k_variant(),
         &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
+    );
+}
+
+#[proxima::test]
+async fn perf_granite_rows16_shared_k_f16_vs_f32_mma() {
+    let baseline = f16_rows16_shared_k_variant();
+    let selected = f32_rows16_shared_k_variant();
+    for variant in [baseline, selected] {
+        assert_eq!(variant.kv_storage, omega::AttentionKvStorage::F32);
+        assert_eq!(variant.kv_reuse, omega::AttentionKvReuse::SharedK);
+        assert_eq!(variant.tile_height, omega::AttentionTileHeight::Rows16);
+        assert_eq!(
+            variant.query_parallelism,
+            omega::AttentionQueryParallelism::Legacy
+        );
+        assert_eq!(variant.simd_topology, omega::AttentionSimdTopology::Legacy);
+        assert_eq!(variant.prefetch, omega::AttentionPrefetch::Off);
+    }
+    assert_eq!(baseline.mma_precision, omega::AttentionMmaPrecision::F16);
+    assert_eq!(selected.mma_precision, omega::AttentionMmaPrecision::F32);
+
+    run_variant_prefill_probe_shapes_with_grid_requirement(
+        "f16_vs_f32_mma_rows16_shared_k",
+        Some(baseline),
+        selected,
+        &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
+        true,
     );
 }
 
