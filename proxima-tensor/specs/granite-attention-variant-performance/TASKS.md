@@ -15,12 +15,14 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update its c
 
 | 06 | [card](cards/06-rows16-shared-k-probe.md) | 03–05 | R9 | `PROXIMA_TEST_TIMEOUT_MS=900000 PROXIMA_CAPTURE_LIVE=1 PROXIMA_CAPTURE_NODES=all PROXIMA_CAPTURE_STEPS=0 CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo nextest run -p proxima-model-interop --features std,metal,instrument,metal-attn-split-rows,metal-attn-variants --test granite_attention_variant_prefill -E 'test(~perf_granite_rows16_shared_k)' -j 1 --success-output immediate` | selects 1 test, passes 1, skips 22; 2 shapes × 20 paired samples, equal IDs, entry names/grid captured | [x] | Log `evidence/card06-rows16-shared-k-2026-10-10.log`: Granite 3.1 1B A400M Instruct Q8_0, F16 MMA/F32 K/V, local Metal. At 256 tokens baseline/selected p50 180,541.654/244,375.085 ns; at 971 tokens 1,085,374.970/2,004,625.043 ns. Both selected outputs bit-identical; generated IDs `[322]`; selected grid threads half baseline (16,384→8,192; 62,464→31,232). Higher p50 in both one-process replay cells; source stages SharedK, but timing does not attribute the added cost. |
 
+| 07 | [card](cards/07-shared-k-barrier-elision.md) | 06 | R10 | run the card's exact nextest command three times sequentially | each run selects 1, passes 1, skips 22; two shapes × 20 paired samples, output+IDs equal, entry/hash/resource metadata captured | [x] | Logs `evidence/card07-shared-k-barrier-run{1,2,3}-2026-10-10.log`: all three processes passed. Granite 3.1 1B A400M Instruct Q8_0, F16 MMA/F32 K/V, local Metal. At 256 tokens, baseline/selected p50s: R1 181,749.929/243,374.961 ns; R2 182,291.726/244,374.969; R3 180,916.628/240,791.589. At 971: R1 1,079,624.984/1,996,291.569; R2 1,083,041.658/2,006,749.972; R3 1,079,874.928/2,020,125.045. Every within-pair output was bit-identical and IDs `[322]`. Pipeline resources baseline/selected were `(9600,448,32)` / `(13056,384,32)`; removing the barrier did not produce a consistent cross-run timing change at 971 tokens. |
+
 ## resume
 
 Last landed slice: Card 06 Rows16 plus SharedK probe (acceptance 1/1; pushed to `origin/main`)
-Current slice: Card 06 acceptance complete (1/1 passed; 2 shapes recorded)
-Next action: remove one adjacent SharedK barrier under the existing variant toggle and replay the same Granite dispatch
-Open question, if any: what GPU-side cost explains the higher captured SharedK replay time despite identical output and fewer grid threads?
+Current slice: Card 07 adjacent SharedK barrier elision (3/3 processes passed; included in this card commit)
+Next action: test whether a smaller per-simdgroup score matrix can retain query-row reuse with less register pressure
+Open question, if any: how much of the measured gap follows from the `[4][2]`→`[8][4]` score matrix expansion and corresponding pipeline resource change?
 
 ## struck
 
