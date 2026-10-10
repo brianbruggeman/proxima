@@ -134,19 +134,20 @@ def validate_grid(arm: dict, where: str) -> None:
         integer_field(grid2d, "threadgroup_bytes", f"{where}.grid2d")
 
 
-def validate_summary(arm: dict, samples: list[float], where: str) -> None:
+def validate_summary(arm: dict, samples: list[float], where: str, sample_count: int) -> None:
     summary = object_field(arm, "summary", where)
-    require(integer_field(summary, "count", f"{where}.summary") == ROUND_COUNT, f"{where} summary count")
+    require(integer_field(summary, "count", f"{where}.summary") == sample_count, f"{where} summary count")
     sorted_samples = sorted(samples)
-    mean = sum(samples) / ROUND_COUNT
-    variance = sum((sample - mean) ** 2 for sample in samples) / ROUND_COUNT
+    mean = sum(samples) / sample_count
+    variance = sum((sample - mean) ** 2 for sample in samples) / sample_count
+    percentile = lambda value: sorted_samples[math.ceil(value * sample_count) - 1]
     expected = {
         "min_gpu_ns": sorted_samples[0],
         "max_gpu_ns": sorted_samples[-1],
         "mean_gpu_ns": mean,
-        "p50_gpu_ns": sorted_samples[9],
-        "p90_gpu_ns": sorted_samples[17],
-        "p99_gpu_ns": sorted_samples[19],
+        "p50_gpu_ns": percentile(0.50),
+        "p90_gpu_ns": percentile(0.90),
+        "p99_gpu_ns": percentile(0.99),
     }
     for name, value in expected.items():
         near(finite_field(summary, name, f"{where}.summary"), value, 1e-6, f"{where}.summary.{name}")
@@ -158,7 +159,7 @@ def validate_summary(arm: dict, samples: list[float], where: str) -> None:
     )
 
 
-def validate_arm(arm: dict, name: str, selected_name: str, shape_index: int, actual_prompt_tokens: int, rounds: list[dict]) -> list[float]:
+def validate_arm(arm: dict, name: str, selected_name: str, shape_index: int, actual_prompt_tokens: int, rounds: list[dict], sample_count: int) -> list[float]:
     where = f"shapes[{shape_index}].arms[{name}]"
     require(text_field(arm, "arm", where) == name, f"{where} label mismatch")
     integer_field(arm, "node", where)
@@ -198,7 +199,7 @@ def validate_arm(arm: dict, name: str, selected_name: str, shape_index: int, act
     sha256_field(arm, "output_sha256", where)
     generated_ids = array_field(arm, "generated_ids", where)
     require(generated_ids and all(type(value) is int and 0 <= value <= 0xFFFFFFFF for value in generated_ids), f"{where} generated IDs")
-    require(integer_field(arm, "timing_attempts", where) == ROUND_COUNT, f"{where} timing attempts")
+    require(integer_field(arm, "timing_attempts", where) == sample_count, f"{where} timing attempts")
     require(integer_field(arm, "resource_replay_attempts", where) == 5, f"{where} resource attempts")
     require(integer_field(arm, "replay_errors", where) == 0, f"{where} replay errors")
     resource = text_field(arm, "resource", where)
@@ -213,7 +214,7 @@ def validate_arm(arm: dict, name: str, selected_name: str, shape_index: int, act
     require(tuple(required_tokens) == RESOURCE_FIELDS, f"{where} resource fields must occur once in order")
 
     samples = array_field(arm, "samples", where)
-    require(len(samples) == ROUND_COUNT, f"{where} must have {ROUND_COUNT} samples")
+    require(len(samples) == sample_count, f"{where} must have {sample_count} samples")
     values = []
     for round_number, sample in enumerate(samples):
         require(isinstance(sample, dict), f"{where}.samples[{round_number}] must be an object")
@@ -222,11 +223,11 @@ def validate_arm(arm: dict, name: str, selected_name: str, shape_index: int, act
         expected_position = rounds[round_number]["arm_order"].index(name)
         require(integer_field(sample, "position", sample_where) == expected_position, f"{sample_where} position")
         values.append(finite_field(sample, "gpu_ns", sample_where, positive=True))
-    validate_summary(arm, values, where)
+    validate_summary(arm, values, where, sample_count)
     return values
 
 
-def validate_shape(shape: dict, shape_index: int, selected_name: str) -> tuple[int, int, int]:
+def validate_shape(shape: dict, shape_index: int, selected_name: str, sample_count: int) -> tuple[int, int, int]:
     where = f"shapes[{shape_index}]"
     nominal = integer_field(shape, "nominal_prompt_tokens", where, 1)
     actual = integer_field(shape, "actual_prompt_tokens", where, nominal)
@@ -234,7 +235,11 @@ def validate_shape(shape: dict, shape_index: int, selected_name: str) -> tuple[i
     require(shape.get("output_equal") is True, f"{where} output equality is false")
     require(shape.get("ids_equal") is True, f"{where} ID equality is false")
     rounds = array_field(shape, "rounds", where)
-    require(len(rounds) == ROUND_COUNT, f"{where} must have {ROUND_COUNT} rounds")
+    if "measured_rounds" in shape:
+        require(integer_field(shape, "measured_rounds", where) == sample_count, f"{where} measured rounds")
+    else:
+        require(sample_count == ROUND_COUNT, f"{where} measured rounds are missing")
+    require(len(rounds) == sample_count, f"{where} must have {sample_count} rounds")
     for round_number, round_record in enumerate(rounds):
         require(isinstance(round_record, dict), f"{where}.rounds[{round_number}] must be an object")
         round_where = f"{where}.rounds[{round_number}]"
@@ -249,8 +254,8 @@ def validate_shape(shape: dict, shape_index: int, selected_name: str) -> tuple[i
     require(set(by_name) == {"legacy", selected_name}, f"{where} must have one legacy and one {selected_name} arm")
     legacy = by_name["legacy"]
     selected = by_name[selected_name]
-    legacy_values = validate_arm(legacy, "legacy", selected_name, shape_index, actual, rounds)
-    selected_values = validate_arm(selected, selected_name, selected_name, shape_index, actual, rounds)
+    legacy_values = validate_arm(legacy, "legacy", selected_name, shape_index, actual, rounds, sample_count)
+    selected_values = validate_arm(selected, selected_name, selected_name, shape_index, actual, rounds, sample_count)
     require(legacy["node"] == selected["node"] and legacy["extents"] == selected["extents"], f"{where} dispatch identity mismatch")
     require(legacy["entry"] != selected["entry"], f"{where} source entry was not selected")
     require(legacy["source_sha256"] != selected["source_sha256"], f"{where} source SHA was not selected")
@@ -272,7 +277,7 @@ def validate_shape(shape: dict, shape_index: int, selected_name: str) -> tuple[i
     return actual, positive, negative
 
 
-def validate_report(report: dict, expected_shapes: int, selected_name: str = DEFAULT_SELECTED_ARM) -> tuple[int, int]:
+def validate_report(report: dict, expected_shapes: int, selected_name: str = DEFAULT_SELECTED_ARM, sample_count: int = ROUND_COUNT) -> tuple[int, int]:
     require(isinstance(report, dict), "report must be an object")
     validate_provenance(report)
     if selected_name.startswith("simdgroups") or selected_name in ("query_simdgroup_rows", "topology_per_head"):
@@ -282,7 +287,7 @@ def validate_report(report: dict, expected_shapes: int, selected_name: str = DEF
     nominal_targets = {971} if expected_shapes == 1 else {256, 971}
     require(all(isinstance(shape, dict) for shape in shapes), "each shape must be an object")
     require({shape.get("nominal_prompt_tokens") for shape in shapes} == nominal_targets, "nominal prompt targets differ")
-    observed = [validate_shape(shape, index, selected_name) for index, shape in enumerate(shapes)]
+    observed = [validate_shape(shape, index, selected_name, sample_count) for index, shape in enumerate(shapes)]
     require(len({value[0] for value in observed}) == expected_shapes, "actual tokenizer counts are not distinct")
     if expected_shapes == 2:
         by_nominal = {shape["nominal_prompt_tokens"]: shape["actual_prompt_tokens"] for shape in shapes}
@@ -299,7 +304,7 @@ def reorder_resource_fields(record: dict) -> None:
     arm["resource"] = " ".join(tokens)
 
 
-def reject_mutations(report: dict, expected_shapes: int, selected_name: str) -> int:
+def reject_mutations(report: dict, expected_shapes: int, selected_name: str, sample_count: int) -> int:
     mutations = [
         lambda record: record["shapes"][0]["arms"].pop(),
         lambda record: record["shapes"][0]["arms"][0]["samples"].pop(),
@@ -337,12 +342,16 @@ def reject_mutations(report: dict, expected_shapes: int, selected_name: str) -> 
                 entry=record["shapes"][0]["arms"][1]["entry"].removesuffix(suffix)
             )
         )
+    if sample_count != ROUND_COUNT:
+        mutations.append(
+            lambda record: record["shapes"][0].update(measured_rounds=sample_count - 1)
+        )
     rejected = 0
     for mutation in mutations:
         changed = copy.deepcopy(report)
         mutation(changed)
         try:
-            validate_report(changed, expected_shapes, selected_name)
+            validate_report(changed, expected_shapes, selected_name, sample_count)
         except ReportError:
             rejected += 1
     return rejected
@@ -351,6 +360,7 @@ def reject_mutations(report: dict, expected_shapes: int, selected_name: str) -> 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-shapes", type=int, choices=(1, 2), required=True)
+    parser.add_argument("--expected-samples", type=int, choices=(20, 1000), default=ROUND_COUNT)
     parser.add_argument("--negative-controls", action="store_true")
     parser.add_argument(
         "--selected-arm",
@@ -362,10 +372,12 @@ def main() -> int:
     try:
         original = arguments.report.read_bytes()
         report = json.loads(original)
-        positive, negative = validate_report(report, arguments.expected_shapes, arguments.selected_arm)
+        positive, negative = validate_report(report, arguments.expected_shapes, arguments.selected_arm, arguments.expected_samples)
         if arguments.negative_controls:
             expected_controls = 13 if arguments.selected_arm.startswith("simdgroups") or arguments.selected_arm in ("query_simdgroup_rows", "topology_per_head") else 12
-            rejected = reject_mutations(report, arguments.expected_shapes, arguments.selected_arm)
+            if arguments.expected_samples != ROUND_COUNT:
+                expected_controls += 1
+            rejected = reject_mutations(report, arguments.expected_shapes, arguments.selected_arm, arguments.expected_samples)
             require(rejected == expected_controls, f"only {rejected} of {expected_controls} negative controls were rejected")
             require(arguments.report.read_bytes() == original, "negative controls changed the original report")
             print(f"negative_controls={expected_controls} rejected={rejected}")
@@ -373,10 +385,10 @@ def main() -> int:
             arms = arguments.expected_shapes * 2
             print(
                 f"prompt_shapes={arguments.expected_shapes} arms={arms} "
-                f"samples_per_arm={ROUND_COUNT} resource_cells={arms} "
+                f"samples_per_arm={arguments.expected_samples} resource_cells={arms} "
                 f"matching_pairs={arguments.expected_shapes} errors=0"
             )
-            print(f"round_differences_positive={positive} negative={negative} zero={ROUND_COUNT * arguments.expected_shapes - positive - negative}")
+            print(f"round_differences_positive={positive} negative={negative} zero={arguments.expected_samples * arguments.expected_shapes - positive - negative}")
     except (OSError, ValueError, TypeError) as error:
         print(f"report rejected: {error}", file=sys.stderr)
         return 1
