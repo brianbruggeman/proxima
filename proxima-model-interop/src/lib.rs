@@ -23,6 +23,8 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 #[cfg(feature = "std")]
 mod lowering;
@@ -127,7 +129,9 @@ pub use generate::{
 };
 #[cfg(feature = "std")]
 pub use hf_bind::{names as hf_names, node_names as hf_node_names, permute_rope_rows};
-pub use hf_config::{HfConfig, architecture_from_hf_config, parse_hf_config};
+pub use hf_config::{
+    HfConfig, architecture_from_hf_config, lfm_layer_kinds_from_manifest, parse_hf_config,
+};
 #[cfg(feature = "std")]
 pub use short_conv::{
     ShortConvHparams, short_conv_architecture_from_metadata, short_conv_descriptor, short_conv_forward_values,

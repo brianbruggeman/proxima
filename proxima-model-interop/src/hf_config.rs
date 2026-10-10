@@ -30,6 +30,8 @@ use serde::Deserialize;
 
 use crate::bind::ModelHparams;
 use crate::error::InteropError;
+use proxima_safetensors::Manifest;
+use proxima_tensor::spec::LayerKind;
 
 /// A HuggingFace `config.json`, exactly the fields
 /// [`architecture_from_hf_config`] needs -- not a full mirror of every key
@@ -98,6 +100,12 @@ pub struct HfConfig {
     /// matching HF's own schema default.
     #[serde(default)]
     pub tie_word_embeddings: bool,
+    /// Ordered mixer kind for architectures that alternate layer operators.
+    #[serde(default)]
+    pub layer_types: Vec<String>,
+    /// LFM short-convolution cache width, serialized as `conv_L_cache`.
+    #[serde(rename = "conv_L_cache", default)]
+    pub conv_l_cache: Option<u32>,
 }
 
 fn default_rms_norm_eps() -> f32 {
@@ -146,14 +154,20 @@ pub fn parse_hf_config(bytes: &[u8]) -> Result<HfConfig, InteropError> {
 ///   `crate::bind_leaves::bind_program_leaves`'s GGUF path has no such ambiguity:
 ///   llama.cpp's own GGUF writer already folds a MoE checkpoint's per-expert
 ///   width into the one `{architecture}.feed_forward_length` key.
+/// - For `lfm2` with a complete `layer_types` list, convolution layers carry
+///   zero per-layer KV heads, the existing short-convolution architecture
+///   marker; attention layers keep the configured KV-head count.
 ///
 /// `model_type` becomes [`ModelHparams::family`], so the HF path keys the
 /// same family profile the GGUF path keys by `general.architecture`; a family
 /// with no profile is an error at bind time, not a default. `architectures` is
 /// read by [`parse_hf_config`] for diagnostics and not consulted here.
+///
+/// Returns [`InteropError::MalformedHfConfig`] when an LFM2 layer schedule is
+/// incomplete, contains an unsupported mixer, or requires a missing cache width.
 #[must_use]
-pub fn architecture_from_hf_config(config: &HfConfig) -> ModelHparams {
-    let kv_heads = config
+pub fn architecture_from_hf_config(config: &HfConfig) -> Result<ModelHparams, InteropError> {
+    let configured_kv_heads = config
         .num_key_value_heads
         .unwrap_or(config.num_attention_heads);
     let head_dim = config
@@ -172,14 +186,31 @@ pub fn architecture_from_hf_config(config: &HfConfig) -> ModelHparams {
             .moe_intermediate_size
             .unwrap_or(config.intermediate_size)
     };
+    let kv_heads_by_layer = if config.model_type == "lfm2" {
+        lfm_layer_kinds_from_config(config)?
+            .into_iter()
+            .map(|layer_kind| match layer_kind {
+                LayerKind::ShortConv => Ok(0),
+                LayerKind::Attention => Ok(configured_kv_heads),
+                LayerKind::Gdn => Err(malformed_lfm("GDN is not a valid LFM2 layer type")),
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        vec![configured_kv_heads; config.num_hidden_layers as usize]
+    };
+    let kv_heads = kv_heads_by_layer
+        .first()
+        .copied()
+        .filter(|first| kv_heads_by_layer.iter().all(|heads| heads == first))
+        .unwrap_or(0);
 
-    ModelHparams {
+    Ok(ModelHparams {
         vocab: config.vocab_size,
         embedding: config.hidden_size,
         feed_forward,
         query_heads: config.num_attention_heads,
         kv_heads,
-        kv_heads_by_layer: vec![kv_heads; config.num_hidden_layers as usize],
+        kv_heads_by_layer,
         head_dim,
         block_count: config.num_hidden_layers,
         expert_count,
@@ -189,6 +220,160 @@ pub fn architecture_from_hf_config(config: &HfConfig) -> ModelHparams {
         tied_embeddings: config.tie_word_embeddings,
         family: config.model_type.clone(),
         sliding_rope: None,
+    })
+}
+
+/// Resolves LFM's ordered mixer schedule and verifies each layer against the
+/// checkpoint's safetensors directory. A config label alone cannot establish
+/// that the corresponding operator weights exist in this checkpoint.
+pub fn lfm_layer_kinds_from_manifest(
+    config: &HfConfig,
+    manifest: &Manifest,
+) -> Result<Vec<LayerKind>, InteropError> {
+    let layer_kinds = lfm_layer_kinds_from_config(config)?;
+
+    let conv_width = config.conv_l_cache.unwrap_or(0);
+    let head_dim = config
+        .head_dim
+        .unwrap_or_else(|| config.hidden_size / config.num_attention_heads.max(1));
+    let query_width = u64::from(config.num_attention_heads) * u64::from(head_dim);
+    let kv_width = u64::from(
+        config
+            .num_key_value_heads
+            .unwrap_or(config.num_attention_heads),
+    ) * u64::from(head_dim);
+    let hidden_width = u64::from(config.hidden_size);
+
+    for (layer_index, layer_kind) in layer_kinds.iter().enumerate() {
+        let layer = layer_index as u32;
+        let prefix = alloc::format!("model.layers.{layer}.");
+        match layer_kind {
+            LayerKind::ShortConv => {
+                require_lfm_shape(
+                    manifest,
+                    &alloc::format!("{prefix}conv.conv.weight"),
+                    &[hidden_width, 1, u64::from(conv_width)],
+                )?;
+                require_lfm_shape(
+                    manifest,
+                    &alloc::format!("{prefix}conv.in_proj.weight"),
+                    &[hidden_width * 3, hidden_width],
+                )?;
+                require_lfm_shape(
+                    manifest,
+                    &alloc::format!("{prefix}conv.out_proj.weight"),
+                    &[hidden_width, hidden_width],
+                )?;
+                for suffix in [
+                    "self_attn.q_proj.weight",
+                    "self_attn.k_proj.weight",
+                    "self_attn.v_proj.weight",
+                    "self_attn.out_proj.weight",
+                    "self_attn.q_layernorm.weight",
+                    "self_attn.k_layernorm.weight",
+                ] {
+                    reject_lfm_marker(manifest, &alloc::format!("{prefix}{suffix}"))?;
+                }
+            }
+            LayerKind::Attention => {
+                for (suffix, shape) in [
+                    ("self_attn.q_proj.weight", vec![query_width, hidden_width]),
+                    ("self_attn.k_proj.weight", vec![kv_width, hidden_width]),
+                    ("self_attn.v_proj.weight", vec![kv_width, hidden_width]),
+                    (
+                        "self_attn.out_proj.weight",
+                        vec![hidden_width, hidden_width],
+                    ),
+                    ("self_attn.q_layernorm.weight", vec![u64::from(head_dim)]),
+                    ("self_attn.k_layernorm.weight", vec![u64::from(head_dim)]),
+                ] {
+                    require_lfm_shape(manifest, &alloc::format!("{prefix}{suffix}"), &shape)?;
+                }
+                for suffix in [
+                    "conv.conv.weight",
+                    "conv.in_proj.weight",
+                    "conv.out_proj.weight",
+                ] {
+                    reject_lfm_marker(manifest, &alloc::format!("{prefix}{suffix}"))?;
+                }
+            }
+            LayerKind::Gdn => {
+                return Err(malformed_lfm("GDN is not a valid LFM2 layer type"));
+            }
+        }
+    }
+
+    Ok(layer_kinds)
+}
+
+fn lfm_layer_kinds_from_config(config: &HfConfig) -> Result<Vec<LayerKind>, InteropError> {
+    if config.model_type != "lfm2" || config.layer_types.len() != config.num_hidden_layers as usize
+    {
+        return Err(malformed_lfm(
+            "model type or layer_types length is inconsistent",
+        ));
+    }
+
+    let conv_width = config.conv_l_cache.unwrap_or(0);
+    let mut layer_kinds = Vec::with_capacity(config.layer_types.len());
+
+    for layer_type in &config.layer_types {
+        match layer_type.as_str() {
+            "conv" => {
+                if conv_width == 0 {
+                    return Err(malformed_lfm(
+                        "conv_L_cache must be positive for conv layers",
+                    ));
+                }
+                layer_kinds.push(LayerKind::ShortConv);
+            }
+            "full_attention" => {
+                layer_kinds.push(LayerKind::Attention);
+            }
+            _ => return Err(malformed_lfm("layer_types contains an unknown mixer kind")),
+        }
+    }
+
+    Ok(layer_kinds)
+}
+
+fn require_lfm_shape(
+    manifest: &Manifest,
+    name: &str,
+    expected: &[u64],
+) -> Result<(), InteropError> {
+    let Some(tensor) = manifest.tensor(name) else {
+        return Err(InteropError::MalformedHfConfig {
+            reason: alloc::format!(
+                "invalid lfm2 layer schedule: required tensor {name} is missing"
+            ),
+        });
+    };
+    if tensor.shape != expected {
+        return Err(InteropError::MalformedHfConfig {
+            reason: alloc::format!(
+                "invalid lfm2 layer schedule: tensor {name} has shape {:?}, expected {expected:?}",
+                tensor.shape
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn reject_lfm_marker(manifest: &Manifest, name: &str) -> Result<(), InteropError> {
+    if manifest.tensor(name).is_some() {
+        return Err(InteropError::MalformedHfConfig {
+            reason: alloc::format!(
+                "invalid lfm2 layer schedule: conflicting mixer tensor {name} is present"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn malformed_lfm(reason: &str) -> InteropError {
+    InteropError::MalformedHfConfig {
+        reason: alloc::format!("invalid lfm2 layer schedule: {reason}"),
     }
 }
 
