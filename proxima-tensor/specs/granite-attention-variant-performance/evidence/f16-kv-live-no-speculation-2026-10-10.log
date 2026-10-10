@@ -1,0 +1,29 @@
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-model-matrix/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.80s
+────────────
+ Nextest run ID 905c942a-31a7-4125-aecf-30860ff7448c with nextest profile: default
+    Starting 1 test across 1 binary (20 tests skipped)
+        FAIL [  51.164s] (1/1) proxima-model-interop::granite_attention_variant_prefill perf_probe_granite_f16_kv_against_f32_kv
+  stdout ───
+
+    running 1 test
+    test perf_probe_granite_f16_kv_against_f32_kv ... FAILED
+
+    failures:
+
+    failures:
+        perf_probe_granite_f16_kv_against_f32_kv
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 51.14s
+
+  stderr ───
+
+    thread 'perf_probe_granite_f16_kv_against_f32_kv' (87243288) panicked at proxima-test/src/harness.rs:173:31:
+    Granite prefill and one-token forward run: Backend(Attention(CachedAttentionVariantStorageMismatch { selected: "f16", bound: "f32" })) (at proxima-model-interop/tests/granite_attention_variant_prefill.rs:276:10)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure:
+────────────
+     Summary [  51.165s] 1 test run: 0 passed, 1 failed, 20 skipped
+        FAIL [  51.164s] (1/1) proxima-model-interop::granite_attention_variant_prefill perf_probe_granite_f16_kv_against_f32_kv
+error: test run failed

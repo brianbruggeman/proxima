@@ -1,0 +1,15 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
+────────────
+ Nextest run ID 6b6750c3-16b4-41f9-88ae-d5c852d7df55 with nextest profile: default
+    Starting 1 test across 1 binary (19 tests skipped)
+        PASS [   0.010s] (1/1) proxima-model-interop::granite_attention_variant_prefill card_24_wrong_oracle_and_wrong_fact_are_rejected
+  stdout ───
+
+    running 1 test
+    test card_24_wrong_oracle_and_wrong_fact_are_rejected ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+
+────────────
+     Summary [   0.010s] 1 test run: 1 passed, 19 skipped
