@@ -15,7 +15,7 @@ use memmap2::Mmap;
 use omega::metal::MetalError;
 use omega::msl::Binding;
 use omega::{
-    AttentionKvReuse, AttentionSimdgroupCount, AttentionVariant, CapturedDispatch,
+    AttentionKvReuse, AttentionSimdgroupCount, AttentionTileHeight, AttentionVariant, CapturedDispatch,
     set_capture_step, take_captured_dispatches,
 };
 use proxima_gguf::parse_complete;
@@ -1079,6 +1079,19 @@ fn f16_variant() -> AttentionVariant {
     variant
 }
 
+fn f16_rows8_groups4_variant() -> AttentionVariant {
+    let mut variant = f16_variant();
+    variant.tile_height = omega::AttentionTileHeight::Rows8;
+    variant.simdgroup_count = AttentionSimdgroupCount::Groups4;
+    variant
+}
+
+fn f16_rows16_groups4_variant() -> AttentionVariant {
+    let mut variant = f16_rows8_groups4_variant();
+    variant.tile_height = omega::AttentionTileHeight::Rows16;
+    variant
+}
+
 fn f16_shared_kv_simdgroup_rows_variant() -> AttentionVariant {
     let mut variant = f16_variant();
     variant.kv_reuse = omega::AttentionKvReuse::SharedKv;
@@ -1933,6 +1946,36 @@ async fn perf_granite_rows16_only_repeat() {
         true,
     );
 }
+
+#[proxima::test]
+async fn perf_granite_rows8_vs_rows16_groups4() {
+    let baseline = f16_rows8_groups4_variant();
+    let selected = f16_rows16_groups4_variant();
+    for variant in [baseline, selected] {
+        assert_eq!(variant.kv_storage, omega::AttentionKvStorage::F32);
+        assert_eq!(variant.mma_precision, omega::AttentionMmaPrecision::F16);
+        assert_eq!(variant.kv_reuse, AttentionKvReuse::Legacy);
+        assert_eq!(
+            variant.query_parallelism,
+            omega::AttentionQueryParallelism::Legacy
+        );
+        assert_eq!(variant.simd_topology, omega::AttentionSimdTopology::Legacy);
+        assert_eq!(variant.simdgroup_count, AttentionSimdgroupCount::Groups4);
+        assert_eq!(variant.prefetch, omega::AttentionPrefetch::Off);
+    }
+    assert_eq!(baseline.tile_height, omega::AttentionTileHeight::Rows8);
+    assert_eq!(selected.tile_height, omega::AttentionTileHeight::Rows16);
+
+    run_variant_prefill_probe_shapes_with_grid_requirement(
+        "f16_rows8_vs_rows16_groups4",
+        Some(baseline),
+        selected,
+        &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
+        false,
+        true,
+    );
+}
+
 
 #[proxima::test]
 async fn perf_granite_rows16_shared_k_simdgroup_rows() {
