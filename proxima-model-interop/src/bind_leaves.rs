@@ -51,7 +51,7 @@ use crate::serving::WeightPrecisionRule;
 
 /// How the program reads a leaf, decided from the ops that consume it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Role {
+pub(crate) enum Role {
     /// The leaf is read in the order the file stores it.
     Native,
     /// The leaf is a matmul weight the program declares `[in, out]` over a file
@@ -435,7 +435,7 @@ fn expert_stack_parts(leaf: &str) -> Option<(u32, &str)> {
     Some((layer.parse().ok()?, tail.strip_suffix("_exps.weight")?))
 }
 
-fn consumers_of(program: &[Op]) -> Vec<Vec<usize>> {
+pub(crate) fn consumers_of(program: &[Op]) -> Vec<Vec<usize>> {
     let mut consumers = alloc::vec![Vec::new(); program.len()];
     for (index, op) in program.iter().enumerate() {
         for dependency in op.dependencies() {
@@ -448,7 +448,7 @@ fn consumers_of(program: &[Op]) -> Vec<Vec<usize>> {
     consumers
 }
 
-fn role_of(
+pub(crate) fn role_of(
     program: &[Op],
     consumers: &[Vec<usize>],
     leaf_index: usize,
