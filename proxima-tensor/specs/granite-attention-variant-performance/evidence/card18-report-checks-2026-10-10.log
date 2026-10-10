@@ -1,0 +1,18 @@
+prompt_shapes=2 arms=4 samples_per_arm=20 resource_cells=4 matching_pairs=2 errors=0
+round_differences_positive=20 negative=20 zero=0
+negative_controls=13 rejected=13
+prompt_shapes=2 arms=4 samples_per_arm=20 resource_cells=4 matching_pairs=2 errors=0
+round_differences_positive=19 negative=21 zero=0
+negative_controls=13 rejected=13
+prompt_shapes=2 arms=4 samples_per_arm=20 resource_cells=4 matching_pairs=2 errors=0
+round_differences_positive=18 negative=22 zero=0
+negative_controls=13 rejected=13
+prompt_shapes=2 arms=4 samples_per_arm=20 resource_cells=4 matching_pairs=2 errors=0
+round_differences_positive=40 negative=0 zero=0
+negative_controls=13 rejected=13
+prompt_shapes=2 arms=4 samples_per_arm=20 resource_cells=4 matching_pairs=2 errors=0
+round_differences_positive=40 negative=0 zero=0
+negative_controls=13 rejected=13
+prompt_shapes=2 arms=4 samples_per_arm=20 resource_cells=4 matching_pairs=2 errors=0
+round_differences_positive=38 negative=2 zero=0
+negative_controls=13 rejected=13

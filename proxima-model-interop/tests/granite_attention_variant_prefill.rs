@@ -1880,6 +1880,47 @@ async fn perf_granite_simdgroups4_warmup_control_two_shapes_against_f16_legacy()
 
 
 #[proxima::test]
+async fn perf_granite_simdgroup_count_warmup_control_two_shapes_against_f16_legacy() {
+    let baseline = f16_variant();
+    let settings = ServingSettings::from_env().expect("simdgroup count serving setting parses");
+    let configured = settings
+        .as_serving_config(&[])
+        .attention_variant
+        .expect("set PROXIMA_SERVING_ATTENTION_SIMDGROUP_COUNT to groups2 or groups8");
+    assert!(matches!(
+        configured.simdgroup_count,
+        AttentionSimdgroupCount::Groups2 | AttentionSimdgroupCount::Groups8
+    ));
+    let selected = AttentionVariant {
+        simdgroup_count: configured.simdgroup_count,
+        ..baseline
+    };
+    assert_eq!(
+        AttentionVariant {
+            simdgroup_count: AttentionSimdgroupCount::Legacy,
+            ..selected
+        },
+        baseline,
+        "the selected replay must change only simdgroup_count"
+    );
+    let selected_label = match selected.simdgroup_count {
+        AttentionSimdgroupCount::Groups2 => "simdgroups2",
+        AttentionSimdgroupCount::Groups8 => "simdgroups8",
+        AttentionSimdgroupCount::Legacy | AttentionSimdgroupCount::Groups4 => {
+            panic!("this replay cell accepts only Groups2 or Groups8")
+        }
+    };
+    run_granite_attention_measurement_with_warmup(
+        &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
+        Some(baseline),
+        selected,
+        selected_label,
+        2,
+    );
+}
+
+
+#[proxima::test]
 async fn perf_granite_simdgroup_count_against_f16_legacy() {
     let baseline = f16_variant();
     let settings = ServingSettings::from_env().expect("simdgroup count serving setting parses");
