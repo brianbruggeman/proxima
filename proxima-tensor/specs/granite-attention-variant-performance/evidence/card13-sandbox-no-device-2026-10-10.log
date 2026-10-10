@@ -1,0 +1,19 @@
+The first launch used the copied integration binary inside the sandbox:
+
+```text
+running 1 test
+test perf_granite_rows8_vs_rows16_groups4 ... FAILED
+
+failures:
+    perf_granite_rows8_vs_rows16_groups4
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 1.10s
+
+thread 'perf_granite_rows8_vs_rows16_groups4' panicked at proxima-test/src/harness.rs:173:31:
+Granite prefill and one-token forward run: Metal(NoDevice) (at proxima-model-interop/tests/granite_attention_variant_prefill.rs:269:10)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+exit_code=101
+```
+
+Device probes in the same sandbox returned `MTLCreateSystemDefaultDevice() == nil` and `MTLCopyAllDevices() == []`. `/usr/sbin/system_profiler SPDisplaysDataType` reported `Apple M1 Max`, `Type: GPU`, and `Metal: Supported`. The same copied test binary completed three serial replays when launched outside the sandbox.
