@@ -1,0 +1,76 @@
+{
+  "valid": {
+    "version": 1,
+    "case": "fixture_text_model",
+    "checkpoint": {
+      "repo": "fixture/model",
+      "revision": "0123456789abcdef0123456789abcdef01234567",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "tokenizer_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "request": {
+      "name": "ant",
+      "prompt_tokens": 256,
+      "token_ids_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "single_request": {
+      "client": "small_model_trial",
+      "latency_ns": 975000000,
+      "pipelined": false
+    },
+    "samples": [
+      {
+        "elapsed_ns": 1000000000,
+        "prefill_tokens": 256,
+        "cpu_percent": 25.0,
+        "steady_rss_bytes": 1000,
+        "peak_rss_bytes": 1200,
+        "error_count": 0
+      },
+      {
+        "elapsed_ns": 1100000000,
+        "prefill_tokens": 256,
+        "cpu_percent": 40.0,
+        "steady_rss_bytes": 1100,
+        "peak_rss_bytes": 1300,
+        "error_count": 0
+      },
+      {
+        "elapsed_ns": 900000000,
+        "prefill_tokens": 256,
+        "cpu_percent": 35.0,
+        "steady_rss_bytes": 1050,
+        "peak_rss_bytes": 1400,
+        "error_count": 0
+      }
+    ],
+    "metrics": {
+      "throughput_tokens_per_second": 256.0,
+      "p50_ns": 1000000000,
+      "p90_ns": 1100000000,
+      "p99_ns": 1100000000,
+      "p999_ns": 1100000000,
+      "single_request_latency_ns": 975000000,
+      "cpu_percent_mean": 33.333333333333336,
+      "steady_rss_bytes_max": 1100,
+      "peak_rss_bytes_max": 1400,
+      "error_count": 0,
+      "cov_percent": 8.16496580927726
+    },
+    "host": {
+      "os": "macos",
+      "arch": "aarch64",
+      "cpu": "fixture cpu",
+      "device": "fixture device",
+      "loadout": "idle fixture"
+    },
+    "output": {
+      "status": "completed",
+      "generated_ids": [
+        1
+      ],
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "correctness_status": "matched"
+    }
+  }
+}

@@ -60,6 +60,7 @@ EXPECTED_GEMMA_INVENTORY = {
     "release_url": "https://ai.google.dev/gemma/docs/releases?hl=en",
 }
 
+PREFILL_FIXTURE_PATH = SPEC_DIRECTORY / "fixtures" / "prefill-records.json"
 BASELINE_CONTROL_PATH = SPEC_DIRECTORY / "fixtures" / "baseline-controls.json"
 BASELINE_CONTROL_CASES = {
     "paris",
@@ -91,6 +92,28 @@ BASELINE_OUTPUT_TEXT_SHA256 = {
 
 REQUEST_FIXTURE_PATH = SPEC_DIRECTORY / "fixtures" / "request-records.json"
 
+PREFILL_SAMPLE_FIELDS = {
+    "elapsed_ns",
+    "prefill_tokens",
+    "cpu_percent",
+    "steady_rss_bytes",
+    "peak_rss_bytes",
+    "error_count",
+}
+
+PREFILL_METRIC_FIELDS = {
+    "throughput_tokens_per_second",
+    "p50_ns",
+    "p90_ns",
+    "p99_ns",
+    "p999_ns",
+    "single_request_latency_ns",
+    "cpu_percent_mean",
+    "steady_rss_bytes_max",
+    "peak_rss_bytes_max",
+    "error_count",
+    "cov_percent",
+}
 REQUEST_FIELDS = {
     "version",
     "case",
@@ -106,12 +129,14 @@ PROXIMA_STATUSES = {"completed", "failed", "not_attempted"}
 
 FAILURE_STAGES = {"access", "load", "bind", "invocation"}
 
+
 def _is_sha256(value: object) -> bool:
     return (
         isinstance(value, str)
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
 
 def _is_revision(value: object) -> bool:
     return (
@@ -120,8 +145,10 @@ def _is_revision(value: object) -> bool:
         and all(character in "0123456789abcdef" for character in value)
     )
 
+
 def _has_text_fields(record: dict[str, object], fields: set[str]) -> bool:
     return all(isinstance(record.get(field_name), str) and record[field_name] for field_name in fields)
+
 
 def _payload_bytes(root: Path, relative_path: object, expected_sha256: object) -> bytes | None:
     if not isinstance(relative_path, str) or not relative_path:
@@ -139,11 +166,13 @@ def _payload_bytes(root: Path, relative_path: object, expected_sha256: object) -
         return None
     return payload
 
+
 def _shape_size(shape: list[int]) -> int:
     element_count = 1
     for dimension in shape:
         element_count *= dimension
     return element_count
+
 
 def validate_request_record(record: object, artifact_root: Path = SPEC_DIRECTORY) -> str | None:
     if not isinstance(record, dict):
@@ -402,6 +431,7 @@ def validate_request_record(record: object, artifact_root: Path = SPEC_DIRECTORY
         return "access_record_inconsistent"
     return None
 
+
 def _request_fixture_parts(fixture: object) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     if (
         not isinstance(fixture, dict)
@@ -431,6 +461,7 @@ def _request_fixture_parts(fixture: object) -> tuple[list[dict[str, object]], li
             raise ValueError("request fixture control has an invalid shape or base")
         control_names.add(control["name"])
     return positive_records, controls
+
 
 def validate_request_fixtures() -> int:
     fixture = json.loads(REQUEST_FIXTURE_PATH.read_text())
@@ -512,6 +543,7 @@ def validate_request_fixtures() -> int:
         or any(result != expected_controls[name] for name, result in control_results.items())
     )
 
+
 def read_inventory() -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for line_number, line in enumerate(INVENTORY_PATH.read_text().splitlines(), start=1):
@@ -523,6 +555,7 @@ def read_inventory() -> list[dict[str, object]]:
             raise ValueError(f"inventory line {line_number} is not an object")
         records.append(record)
     return records
+
 
 def validate_inventory() -> int:
     records = read_inventory()
@@ -558,6 +591,7 @@ def validate_inventory() -> int:
         or revision_mismatches != 0
         or case_errors != 0
     )
+
 
 def _is_finite_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
@@ -729,23 +763,228 @@ def validate_baseline_controls() -> int:
     )
 
 
+def validate_prefill_record(record: object) -> str | None:
+    if not isinstance(record, dict):
+        return "record_not_object"
+    required = {
+        "version",
+        "case",
+        "checkpoint",
+        "tokenizer_sha256",
+        "request",
+        "single_request",
+        "samples",
+        "metrics",
+        "host",
+        "output",
+    }
+    if not required.issubset(record):
+        return "missing_axis"
+    if type(record["version"]) is not int or record["version"] != 1:
+        return "wrong_version"
+
+    checkpoint = record["checkpoint"]
+    request = record["request"]
+    single_request = record["single_request"]
+    host = record["host"]
+    output = record["output"]
+    samples = record["samples"]
+    metrics = record["metrics"]
+    if not all(
+        isinstance(value, dict)
+        for value in (checkpoint, request, single_request, host, output, metrics)
+    ):
+        return "missing_axis"
+    if not isinstance(record["case"], str) or not record["case"]:
+        return "missing_axis"
+    if not {"repo", "revision", "sha256"}.issubset(checkpoint):
+        return "missing_axis"
+    if not {"name", "prompt_tokens", "token_ids_sha256"}.issubset(request):
+        return "missing_axis"
+    if not {"os", "arch", "cpu", "device", "loadout"}.issubset(host):
+        return "missing_axis"
+    if not {"status", "generated_ids", "sha256", "correctness_status"}.issubset(output):
+        return "missing_axis"
+    if not {"client", "latency_ns", "pipelined"}.issubset(single_request):
+        return "missing_axis"
+    if (
+        not isinstance(checkpoint["repo"], str)
+        or not checkpoint["repo"]
+        or not _is_revision(checkpoint["revision"])
+        or not _is_sha256(checkpoint["sha256"])
+        or not _is_sha256(record["tokenizer_sha256"])
+        or not isinstance(request["name"], str)
+        or not request["name"]
+        or not _is_sha256(request["token_ids_sha256"])
+    ):
+        return "missing_axis"
+    if (
+        not isinstance(single_request["client"], str)
+        or not single_request["client"]
+        or not isinstance(single_request["latency_ns"], int)
+        or isinstance(single_request["latency_ns"], bool)
+        or single_request["latency_ns"] <= 0
+        or single_request["pipelined"] is not False
+    ):
+        return "single_request_invalid"
+    if not _is_sha256(output["sha256"]):
+        return "wrong_output"
+    if output["status"] != "completed" or output["correctness_status"] != "matched":
+        return "wrong_output"
+    if (
+        not isinstance(output["generated_ids"], list)
+        or not output["generated_ids"]
+        or any(
+            not isinstance(token_id, int) or isinstance(token_id, bool) or token_id < 0
+            for token_id in output["generated_ids"]
+        )
+    ):
+        return "wrong_output"
+    if not isinstance(samples, list) or len(samples) < 3:
+        return "missing_axis"
+    if not PREFILL_METRIC_FIELDS.issubset(metrics):
+        return "missing_axis"
+
+    prompt_tokens = request["prompt_tokens"]
+    if not isinstance(prompt_tokens, int) or isinstance(prompt_tokens, bool) or prompt_tokens <= 0:
+        return "missing_axis"
+    for sample in samples:
+        if not isinstance(sample, dict) or not PREFILL_SAMPLE_FIELDS.issubset(sample):
+            return "missing_axis"
+        if (
+            not isinstance(sample["prefill_tokens"], int)
+            or isinstance(sample["prefill_tokens"], bool)
+            or sample["prefill_tokens"] != prompt_tokens
+        ):
+            return "mismatched_tokens"
+        if (
+            not isinstance(sample["elapsed_ns"], int)
+            or isinstance(sample["elapsed_ns"], bool)
+            or sample["elapsed_ns"] <= 0
+        ):
+            return "missing_axis"
+        if (
+            not isinstance(sample["error_count"], int)
+            or isinstance(sample["error_count"], bool)
+            or sample["error_count"] < 0
+            or sample["error_count"] != 0
+        ):
+            return "wrong_output"
+        for field_name in ("cpu_percent",):
+            if not _is_finite_number(sample[field_name]) or sample[field_name] < 0:
+                return "missing_axis"
+        for field_name in ("steady_rss_bytes", "peak_rss_bytes"):
+            if (
+                not isinstance(sample[field_name], int)
+                or isinstance(sample[field_name], bool)
+                or sample[field_name] < 0
+            ):
+                return "missing_axis"
+        if sample["peak_rss_bytes"] < sample["steady_rss_bytes"]:
+            return "missing_axis"
+
+    elapsed = sorted(sample["elapsed_ns"] for sample in samples)
+    quantile = lambda fraction: elapsed[max(0, math.ceil(fraction * len(elapsed)) - 1)]
+    mean_elapsed = sum(elapsed) / len(elapsed)
+    cov_percent = 100 * math.sqrt(
+        sum((value - mean_elapsed) ** 2 for value in elapsed) / len(elapsed)
+    ) / mean_elapsed
+    expected = {
+        "throughput_tokens_per_second": sum(prompt_tokens for _ in samples)
+        / (sum(elapsed) / 1_000_000_000),
+        "p50_ns": quantile(0.50),
+        "p90_ns": quantile(0.90),
+        "p99_ns": quantile(0.99),
+        "p999_ns": quantile(0.999),
+        "single_request_latency_ns": single_request["latency_ns"],
+        "cpu_percent_mean": sum(sample["cpu_percent"] for sample in samples) / len(samples),
+        "steady_rss_bytes_max": max(sample["steady_rss_bytes"] for sample in samples),
+        "peak_rss_bytes_max": max(sample["peak_rss_bytes"] for sample in samples),
+        "error_count": sum(sample["error_count"] for sample in samples),
+        "cov_percent": cov_percent,
+    }
+    for field_name, calculated in expected.items():
+        if not _is_finite_number(metrics[field_name]):
+            return "missing_axis"
+        if not math.isclose(metrics[field_name], calculated, rel_tol=1e-9, abs_tol=1e-6):
+            return "metric_mismatch"
+    if any(
+        not isinstance(host[field_name], str) or not host[field_name]
+        for field_name in ("os", "arch", "cpu", "device", "loadout")
+    ):
+        return "missing_axis"
+    return None
+
+
+def validate_prefill_fixtures() -> int:
+    fixture = json.loads(PREFILL_FIXTURE_PATH.read_text())
+    valid_record = fixture["valid"]
+    missing_axis_record = copy.deepcopy(valid_record)
+    del missing_axis_record["single_request"]["client"]
+    mismatched_tokens_record = copy.deepcopy(valid_record)
+    mismatched_tokens_record["samples"][0]["prefill_tokens"] -= 1
+    wrong_output_record = copy.deepcopy(valid_record)
+    wrong_output_record["output"]["correctness_status"] = "mismatched"
+    wrong_metrics_record = copy.deepcopy(valid_record)
+    wrong_metrics_record["metrics"]["p50_ns"] += 1000
+    wrong_version_record = copy.deepcopy(valid_record)
+    wrong_version_record["version"] = True
+    pipelined_client_record = copy.deepcopy(valid_record)
+    pipelined_client_record["single_request"]["pipelined"] = True
+    accepted = validate_prefill_record(valid_record)
+    missing_axis = validate_prefill_record(missing_axis_record)
+    mismatched_tokens = validate_prefill_record(mismatched_tokens_record)
+    wrong_output = validate_prefill_record(wrong_output_record)
+    wrong_metrics = validate_prefill_record(wrong_metrics_record)
+    wrong_version = validate_prefill_record(wrong_version_record)
+    pipelined_client = validate_prefill_record(pipelined_client_record)
+    print(
+        "accepted=1 "
+        f"missing_axis_rejected={int(missing_axis == 'missing_axis')} "
+        f"mismatched_tokens_rejected={int(mismatched_tokens == 'mismatched_tokens')} "
+        f"wrong_output_rejected={int(wrong_output == 'wrong_output')} "
+        f"metric_mismatch_rejected={int(wrong_metrics == 'metric_mismatch')} "
+        f"wrong_version_rejected={int(wrong_version == 'wrong_version')} "
+        f"pipelined_client_rejected={int(pipelined_client == 'single_request_invalid')}"
+    )
+    return int(
+        accepted is not None
+        or missing_axis != "missing_axis"
+        or mismatched_tokens != "mismatched_tokens"
+        or wrong_output != "wrong_output"
+        or wrong_metrics != "metric_mismatch"
+        or wrong_version != "wrong_version"
+        or pipelined_client != "single_request_invalid"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--inventory", action="store_true")
     parser.add_argument("--schema-fixtures", action="store_true")
+    parser.add_argument("--prefill-fixtures", action="store_true")
     parser.add_argument("--baseline-controls", action="store_true")
     arguments = parser.parse_args()
-    if sum((arguments.inventory, arguments.schema_fixtures, arguments.baseline_controls)) != 1:
-        parser.error("select one implemented validation mode")
+    selected_modes = sum((
+        arguments.inventory,
+        arguments.schema_fixtures,
+        arguments.prefill_fixtures,
+        arguments.baseline_controls,
+    ))
+    if selected_modes != 1:
+        parser.error("select an implemented validation mode")
     try:
         if arguments.schema_fixtures:
             return validate_request_fixtures()
+        if arguments.prefill_fixtures:
+            return validate_prefill_fixtures()
         if arguments.baseline_controls:
             return validate_baseline_controls()
         return validate_inventory()
     except (OSError, ValueError) as error:
         print(str(error), file=sys.stderr)
         return 1
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
