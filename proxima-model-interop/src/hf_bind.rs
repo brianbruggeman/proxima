@@ -34,7 +34,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_safetensors::Manifest;
+use proxima_safetensors::{Manifest, TensorEntry};
 use proxima_tensor::DType;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{Extent, Op};
@@ -97,25 +97,37 @@ fn tensor_bytes<'file>(
     }
 }
 
-/// Binds safetensors by walking the same lowered program leaves as the GGUF
-/// binder, while using the existing HF scalar decode and layout routines.
-/// Family differences belong in `binding`; the program determines each
-/// tensor's storage role.
-/// `manifest`, `file_bytes`, and `data_start` must come from the same parsed
-/// safetensors file so offsets cannot select unrelated bytes.
-pub fn bind_safetensors_program_leaves<'file>(
-    manifest: &Manifest,
+/// A named program leaf's validated source bytes before evaluator conversion.
+#[derive(Debug)]
+pub struct SafetensorsTensorView<'manifest, 'file> {
+    /// Name used by the lowered program.
+    pub leaf: String,
+    /// Exact name in the checkpoint tensor directory.
+    pub name: &'manifest str,
+    /// Checkpoint scalar format.
+    pub dtype: DType,
+    /// Checkpoint row-major axes.
+    pub shape: &'manifest [u64],
+    /// Bytes borrowed from the caller's file buffer.
+    pub bytes: &'file [u8],
+    role: Role,
+    program_axes: Vec<u64>,
+}
+
+/// Resolve program leaves through `binding`, validate their source layout and
+/// byte ranges, and return borrowed checkpoint views. Runtime inputs are skipped.
+pub fn bind_safetensors_program_views<'manifest, 'file>(
+    manifest: &'manifest Manifest,
     file_bytes: &'file [u8],
     data_start: u64,
     program: &[Op],
     binding: &BindingProfile,
     runtime_inputs: &[String],
-) -> Result<BoundWeights<'file>, InteropError> {
-    let mut weights = BoundWeights::new(&[]);
-    weights.resident_bytes = file_bytes.len();
+) -> Result<Vec<SafetensorsTensorView<'manifest, 'file>>, InteropError> {
     let consumers = consumers_of(program);
     let runtime_inputs: BTreeSet<&str> = runtime_inputs.iter().map(String::as_str).collect();
     let mut bound = BTreeSet::new();
+    let mut views = Vec::new();
     let mut ranges_validated = false;
 
     for (index, operation) in program.iter().enumerate() {
@@ -142,17 +154,9 @@ pub fn bind_safetensors_program_leaves<'file>(
             ranges_validated = true;
         }
         let entry = safetensors_source(manifest, binding, leaf)?;
-        bind_safetensors_leaf(
-            manifest,
-            file_bytes,
-            data_start,
-            binding,
-            leaf,
-            shape,
-            role,
-            entry,
-            &mut weights,
-        )?;
+        views.push(validated_view(
+            file_bytes, data_start, leaf, shape, role, entry,
+        )?);
     }
 
     for name in &binding.extra {
@@ -174,18 +178,52 @@ pub fn bind_safetensors_program_leaves<'file>(
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            bind_safetensors_leaf(
-                manifest,
+            views.push(validated_view(
                 file_bytes,
                 data_start,
-                binding,
                 name,
                 &shape,
                 Role::Native,
                 entry,
-                &mut weights,
-            )?;
+            )?);
         }
+    }
+    Ok(views)
+}
+
+/// Binds safetensors by walking the same lowered program leaves as the GGUF
+/// binder, while using the existing HF scalar decode and layout routines.
+/// Family differences belong in `binding`; the program determines each
+/// tensor's storage role.
+/// `manifest`, `file_bytes`, and `data_start` must come from the same parsed
+/// safetensors file so offsets cannot select unrelated bytes.
+pub fn bind_safetensors_program_leaves<'file>(
+    manifest: &Manifest,
+    file_bytes: &'file [u8],
+    data_start: u64,
+    program: &[Op],
+    binding: &BindingProfile,
+    runtime_inputs: &[String],
+) -> Result<BoundWeights<'file>, InteropError> {
+    let mut weights = BoundWeights::new(&[]);
+    weights.resident_bytes = file_bytes.len();
+    let views = bind_safetensors_program_views(
+        manifest,
+        file_bytes,
+        data_start,
+        program,
+        binding,
+        runtime_inputs,
+    )?;
+    for view in &views {
+        bind_safetensors_leaf(
+            manifest,
+            file_bytes,
+            data_start,
+            binding,
+            view,
+            &mut weights,
+        )?;
     }
     Ok(weights)
 }
@@ -264,17 +302,14 @@ fn safetensors_source<'manifest>(
     Err(InteropError::UnknownTensor { name: leaf.into() })
 }
 
-fn bind_safetensors_leaf<'file>(
-    manifest: &Manifest,
+fn validated_view<'manifest, 'file>(
     file_bytes: &'file [u8],
     data_start: u64,
-    binding: &BindingProfile,
     leaf: &str,
     shape: &[Extent],
     role: Role,
-    entry: &proxima_safetensors::TensorEntry,
-    weights: &mut BoundWeights<'file>,
-) -> Result<(), InteropError> {
+    entry: &'manifest TensorEntry,
+) -> Result<SafetensorsTensorView<'manifest, 'file>, InteropError> {
     let mut program_axes = Vec::with_capacity(shape.len());
     for extent in shape {
         let Extent::Static(axis) = extent else {
@@ -331,8 +366,32 @@ fn bind_safetensors_leaf<'file>(
         });
     }
     let bytes = tensor_bytes(file_bytes, data_start, entry)?;
+    Ok(SafetensorsTensorView {
+        leaf: leaf.into(),
+        name: entry.name.as_str(),
+        dtype: entry.dtype,
+        shape: entry.shape.as_slice(),
+        bytes,
+        role,
+        program_axes,
+    })
+}
+
+fn bind_safetensors_leaf<'file>(
+    manifest: &Manifest,
+    file_bytes: &'file [u8],
+    data_start: u64,
+    binding: &BindingProfile,
+    view: &SafetensorsTensorView<'_, 'file>,
+    weights: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    let leaf = view.leaf.as_str();
+    let role = view.role;
+    let program_axes = &view.program_axes;
+    let bytes = view.bytes;
+    let dtype = view.dtype;
     if binding.decodes_to_f32(leaf) {
-        let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &entry.name)?;
+        let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, view.name)?;
         let output = if role == Role::InOut {
             transpose_out_in_to_in_out(
                 &decoded,
@@ -345,7 +404,7 @@ fn bind_safetensors_leaf<'file>(
         };
         weights.resident_bytes += output.len() * core::mem::size_of::<f32>();
         weights.owned.push((leaf.into(), output));
-    } else if role == Role::InOut && entry.dtype == DType::Float32 {
+    } else if role == Role::InOut && dtype == DType::Float32 {
         let decoded = reinterpret_f32(bytes);
         let output = transpose_out_in_to_in_out(
             &decoded,
@@ -357,7 +416,7 @@ fn bind_safetensors_leaf<'file>(
         weights.owned.push((leaf.into(), output));
     } else if role == Role::InOut {
         let packed =
-            safetensors_tensor_as_packed_block(manifest, file_bytes, data_start, &entry.name)?;
+            safetensors_tensor_as_packed_block(manifest, file_bytes, data_start, view.name)?;
         if matches!(packed, QuantizedBlock::Float32(_)) {
             return Err(InteropError::SafetensorsBindingUnsupported {
                 leaf: leaf.into(),
@@ -365,7 +424,7 @@ fn bind_safetensors_leaf<'file>(
             });
         }
         weights.packed.push((leaf.into(), packed));
-    } else if entry.dtype == DType::Float32 {
+    } else if dtype == DType::Float32 {
         if let Some(view) = aligned_f32_view(bytes) {
             weights.resident_bytes += core::mem::size_of_val(view);
             weights
@@ -377,7 +436,7 @@ fn bind_safetensors_leaf<'file>(
             weights.owned.push((leaf.into(), decoded));
         }
     } else {
-        let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &entry.name)?;
+        let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, view.name)?;
         weights.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
         weights.owned.push((leaf.into(), decoded));
     }
@@ -1015,6 +1074,9 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
     )?;
     Ok(state)
 }
+
+#[cfg(test)]
+mod matrix_lfm_bind;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
