@@ -207,6 +207,122 @@ pub fn causal_conv1d(
     )
 }
 
+/// Applies the pinned LFM2 cached one-token short-convolution transition.
+/// `roll_indices` is the caller-owned permutation `(1..L, 0)` so the cache
+/// remains explicit input/output state instead of hidden mutable storage.
+pub fn causal_conv1d_step(
+    program: &mut Vec<Op>,
+    state_in: NodeId,
+    gated_input: NodeId,
+    weight: NodeId,
+    cache_position: NodeId,
+    roll_indices: NodeId,
+    l_cache: u32,
+    bias: Option<NodeId>,
+) -> Result<(NodeId, NodeId), TensorError> {
+    if l_cache == 0 {
+        return Err(TensorError::InvalidConvConfig { l_cache });
+    }
+
+    let zero = scalar_constant(program, 0.0);
+    let last_slot = scalar_constant(program, (l_cache - 1) as f32);
+    let lower_clamped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        &[(cache_position, "->"), (zero, "->")],
+    )?;
+    let write_slot = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Minimum,
+        &[(lower_clamped, "->"), (last_slot, "->")],
+    )?;
+
+    let rolled_state = gather_computed(
+        program,
+        state_in,
+        roll_indices,
+        map::projection(2, &[1]),
+        IndexPattern {
+            iter_rank: 2,
+            axes: alloc::vec![
+                AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(0)).collect(),
+                    offset: 0,
+                    len: None,
+                },
+                AxisIndex::default(),
+            ],
+        },
+        1,
+        DType::Float32,
+    );
+
+    let tap_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(l_cache),
+        },
+    );
+    let zero_wide = op::append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Symbolic(0), Extent::Static(l_cache)],
+            value: 0.0,
+        },
+    );
+    let tap_index_wide = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(tap_index, "l->dl"), (zero_wide, "dl->dl")],
+    )?;
+    let is_write_slot = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Equal,
+        &[(tap_index_wide, "dl->dl"), (write_slot, "->dl")],
+    )?;
+    let state_out = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[
+            (is_write_slot, "dl->dl"),
+            (gated_input, "d->dl"),
+            (rolled_state, "dl->dl"),
+        ],
+    )?;
+    let tap_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(state_out, "dl->dl"), (weight, "dl->dl")],
+    )?;
+    let mut conv_out = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        tap_product,
+        "dl->dl",
+        "d->dl",
+    )?;
+    if let Some(bias_node) = bias {
+        conv_out = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            &[(conv_out, "d->d"), (bias_node, "d->d")],
+        )?;
+    }
+
+    Ok((conv_out, state_out))
+}
+
 /// the short-conv family's gated short-convolution mixer, [`append_gqa_layer`]'s
 /// attention-block counterpart for a `LayerKind::ShortConv` block: three
 /// separate `embedding x embedding` projections (`b_proj`/`c_proj`/`x_proj`)

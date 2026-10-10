@@ -6339,6 +6339,93 @@ async fn causal_conv1d_matches_a_hand_computed_causal_window() {
     assert_eq!(result, [100.0, 210.0, 321.0, 432.0]);
 }
 
+#[proxima::test]
+async fn architecture_matrix_lfm_conv_step() {
+    const L_CACHE: u32 = 3;
+    let mut program = Vec::new();
+    let state_in = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(L_CACHE)],
+        "state_in",
+    );
+    let gated_input = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1)],
+        "gated_input",
+    );
+    let weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(L_CACHE)],
+        "weight",
+    );
+    let cache_position = input_leaf(&mut program, DType::Float32, Vec::new(), "cache_position");
+    let roll_indices = input_leaf(
+        &mut program,
+        DType::Int32,
+        alloc::vec![Extent::Static(L_CACHE)],
+        "roll_indices",
+    );
+    let (conv_out, state_out) = causal_conv1d_step(
+        &mut program,
+        state_in,
+        gated_input,
+        weight,
+        cache_position,
+        roll_indices,
+        L_CACHE,
+        None,
+    )
+    .expect("cached conv step builds");
+
+    let state_values = [1.0f32, 2.0, 3.0];
+    let gated_values = [4.0f32];
+    let weight_values = [1.0f32, 10.0, 100.0];
+    let roll_values = [1i32, 2, 0];
+    let cases = [
+        (1.0f32, [2.0f32, 4.0, 1.0], 142.0f32),
+        (3.0f32, [2.0f32, 3.0, 4.0], 432.0f32),
+    ];
+
+    for (cache_position_value, expected_state, expected_output) in cases {
+        let position_values = [cache_position_value];
+        let evaluated = crate::cpu::evaluate_quantized(
+            &program,
+            &[1],
+            &[
+                crate::cpu::QuantizedBlock::Float32(&state_values),
+                crate::cpu::QuantizedBlock::Float32(&gated_values),
+                crate::cpu::QuantizedBlock::Float32(&weight_values),
+                crate::cpu::QuantizedBlock::Float32(&position_values),
+                crate::cpu::QuantizedBlock::Int32(&roll_values),
+            ],
+            &[conv_out, state_out],
+        )
+        .expect("cached conv step evaluates");
+        let (actual_output, output_shape) = evaluated.get(conv_out).expect("conv output exists");
+        let (actual_state, state_shape) = evaluated.get(state_out).expect("updated state exists");
+        assert_eq!(output_shape, [1]);
+        assert_eq!(state_shape, [1, 3]);
+        assert_eq!(actual_output, [expected_output]);
+        assert_eq!(actual_state, expected_state);
+
+        if cache_position_value == 1.0 {
+            let append_control_state = [2.0f32, 3.0, 4.0];
+            let append_control_output = append_control_state
+                .iter()
+                .zip(weight_values)
+                .map(|(state_value, weight_value)| state_value * weight_value)
+                .sum::<f32>();
+            assert_ne!(append_control_state, expected_state);
+            assert_ne!(append_control_output, expected_output);
+        }
+    }
+
+    std::println!("steps=2 reference_pairs=2 wrong_kernel_rejected=1");
+}
+
 /// proxima-debugger unit oracle (qwen35moe GDN prefill-scan-vs-sequential
 /// divergence), narrowed to the one row this comparison is actually
 /// valid for: [`causal_conv1d`] evaluated on a `[13, 4]` batch's row 0
