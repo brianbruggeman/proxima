@@ -1857,6 +1857,29 @@ async fn perf_granite_simdgroups4_warmup_control_against_f16_legacy() {
 
 
 #[proxima::test]
+async fn perf_granite_simdgroups4_warmup_control_two_shapes_against_f16_legacy() {
+    let baseline = f16_variant();
+    let settings = ServingSettings::from_env().expect("simdgroup count serving setting parses");
+    let configured = settings
+        .as_serving_config(&[])
+        .attention_variant
+        .expect("set PROXIMA_SERVING_ATTENTION_SIMDGROUP_COUNT=groups4");
+    assert_eq!(configured.simdgroup_count, AttentionSimdgroupCount::Groups4);
+    let selected = AttentionVariant {
+        simdgroup_count: configured.simdgroup_count,
+        ..baseline
+    };
+    run_granite_attention_measurement_with_warmup(
+        &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
+        Some(baseline),
+        selected,
+        "simdgroups4",
+        2,
+    );
+}
+
+
+#[proxima::test]
 async fn perf_granite_simdgroup_count_against_f16_legacy() {
     let baseline = f16_variant();
     let settings = ServingSettings::from_env().expect("simdgroup count serving setting parses");
