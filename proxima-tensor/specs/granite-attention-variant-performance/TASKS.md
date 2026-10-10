@@ -37,12 +37,14 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update its c
 
 | 24 | [card](cards/24-groups4-tail-revalidation.md) | 17,21 | revalidate the repeated Groups4 p50 direction with all p90/p99 and signed-pair records on fresh serial processes | use focused copied binary with configured Groups4; run three serial processes; check reports and 13 controls | Each run selects 1, passes 1; two shapes × 2 warmup pairs × 20 measured pairs; output/ID equality | [x] | Three new serial processes passed; all reports passed the positive checker and rejected 13/13 controls. Output hashes/IDs `[322]` matched in all six cells. Groups4 p50 and p99 were lower in all six new cells; all 60 short-prompt signs were negative, while long-prompt signs were mixed 4/16, 3/17, and 5/15 positive/negative. Long run3 CoV was 9.79% Legacy and 5.30% Groups4. Older Card17 run1 had a long-prompt selected p99 crossing. The timing mechanism and cross-run tail bound remain unexplained. Full samples/source/resources are in Card24 and its report files. |
 
+| 25 | [card](cards/25-groups4-thousand-pair-tail-replay.md) | 24 | resolve the Groups4 long-prompt p99 crossing with a thousand paired rounds | focused single-job build; three serial configured Groups4 processes; positive checker and 14 mutation controls at 1,000 samples | Each report selects 1 test, passes 1; two shapes × 2 warmup pairs × 1,000 measured pairs per arm; exact output/ID equality | [x] | Three serial processes passed. Each report passed the 1,000-sample checker and rejected 14/14 mutations, including the measured-round count. Output hashes/IDs `[322]` matched in all six cells. Groups4 p50/p90/p99 were below Legacy in all six; short-prompt signs were all negative, long-prompt positive/negative counts were 253/747, 132/868, and 142/858. Splitting long-prompt signs by arm order gave similar counts and median paired deltas, while the cause of the positive rounds remains unexplained. Full raw samples, hashes, source, grid/resources, process context, and checker records are in Card25/evidence. Groups4 stays explicitly selected through the existing setting; no default changed. |
+
 ## resume
 
-Last completed slice: Card 24 fresh Groups4 tail revalidation on the main-based checkout.
-Current slice: the repeated Groups4 p50/p99 direction is being followed with a larger paired sample count; the setting remains explicit and Legacy remains default.
-Next action: run a thousand-pair Groups4 replay at both Granite prompt lengths and inspect full p99 inputs, paired signs, output identity, and source records.
-Open question: whether Groups4 p99 stays below Legacy at a higher sample count and why this count partition changes timestamps.
+Last completed slice: Card 25 thousand-pair Groups4 tail replay on the main-based checkout.
+Current slice: Groups4 had lower p50/p90/p99 in the six 1,000-pair cells with matched outputs/IDs. Long-prompt pairs still include selected-slower rounds; splitting by alternating order does not explain those rounds. Groups4 remains explicit-only through the existing setting.
+Next action: review the complete Cards 17, 21, 24, and 25 samples and source records to determine whether a further one-variable instrumented experiment can identify the long-prompt slow-pair mechanism. Do not change the default based on a timing result without that mechanism and the serving-level scope evidence.
+Open question: why selected-slower rounds remain in the long prompt even as its measured percentiles are lower; available Metal profiling exposes no shader counters or labeled intervals.
 
 ## struck
 

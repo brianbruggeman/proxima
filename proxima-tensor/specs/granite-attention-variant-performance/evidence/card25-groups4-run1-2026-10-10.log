@@ -1,0 +1,11 @@
+
+running 1 test
+granite ab arm nominal=256 actual=256 arm=legacy samples=1000 resource=cell label=legacy wall_ms=2.353 cpu_ms=0.624 cpu_pct=26.5 rss_peak_mb=1523.4 footprint_mb=113.3 gpu_alloc_mb=1418.9 load_before=4.30 load_after=4.30
+granite ab arm nominal=256 actual=256 arm=simdgroups4 samples=1000 resource=cell label=simdgroups4 wall_ms=2.153 cpu_ms=0.599 cpu_pct=27.8 rss_peak_mb=1523.4 footprint_mb=113.3 gpu_alloc_mb=1418.9 load_before=4.30 load_after=4.30
+granite ab arm nominal=971 actual=972 arm=legacy samples=1000 resource=cell label=legacy wall_ms=6.939 cpu_ms=0.662 cpu_pct=9.5 rss_peak_mb=1767.5 footprint_mb=265.3 gpu_alloc_mb=1563.9 load_before=4.12 load_after=4.12
+granite ab arm nominal=971 actual=972 arm=simdgroups4 samples=1000 resource=cell label=simdgroups4 wall_ms=6.717 cpu_ms=0.615 cpu_pct=9.2 rss_peak_mb=1767.5 footprint_mb=265.3 gpu_alloc_mb=1563.9 load_before=4.12 load_after=4.12
+granite ab report=/private/tmp/proxima-granite-main/proxima-tensor/specs/granite-attention-variant-performance/evidence/card25-groups4-run1-report.json
+test perf_granite_simdgroups4_tail_revalidation_1000_pairs_two_shapes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 35 filtered out; finished in 17.78s
+

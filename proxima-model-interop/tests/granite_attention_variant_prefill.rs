@@ -499,6 +499,7 @@ fn measured_arm_report(
     resource: String,
 ) -> Value {
     let (tg_static_bytes, max_threads, exec_width) = replay.dispatch.pipeline_resources();
+    let timing_attempts = samples.len();
     let grid2d = replay.dispatch.grid.grid2d.map(|grid| {
         json!({
             "form": match grid.form {
@@ -541,7 +542,7 @@ fn measured_arm_report(
         "generated_ids": replay.token_ids,
         "samples": samples,
         "summary": summary,
-        "timing_attempts": 20,
+        "timing_attempts": timing_attempts,
         "resource_replay_attempts": 5,
         "replay_errors": 0,
         "resource": resource,
@@ -1507,6 +1508,7 @@ fn measure_granite_attention_shape(
     selected_variant: AttentionVariant,
     selected_label: &str,
     warmup_rounds: usize,
+    measured_rounds: usize,
 ) -> Value {
     let legacy = capture_attention_replay(model, prompt, baseline_variant, None);
     let legacy_evidence = replay_evidence(&legacy);
@@ -1563,10 +1565,10 @@ fn measure_granite_attention_shape(
         warmups.push(json!({ "round": round, "arm_order": arm_order, "samples": samples }));
     }
 
-    let mut legacy_samples = Vec::with_capacity(20);
-    let mut selected_samples = Vec::with_capacity(20);
-    let mut rounds = Vec::with_capacity(20);
-    for round in 0..20 {
+    let mut legacy_samples = Vec::with_capacity(measured_rounds);
+    let mut selected_samples = Vec::with_capacity(measured_rounds);
+    let mut rounds = Vec::with_capacity(measured_rounds);
+    for round in 0..measured_rounds {
         let arm_order = if round % 2 == 0 {
             ["legacy", selected_label]
         } else {
@@ -1622,6 +1624,7 @@ fn measure_granite_attention_shape(
         "output_equal": true,
         "ids_equal": true,
         "warmup_rounds": warmups,
+        "measured_rounds": measured_rounds,
         "rounds": rounds,
         "arms": [
             measured_arm_report("legacy", &legacy, legacy_samples, legacy_resource),
@@ -1653,6 +1656,25 @@ fn run_granite_attention_measurement_with_warmup(
     selected_label: &str,
     warmup_rounds: usize,
 ) {
+    run_granite_attention_measurement_with_samples(
+        nominal_targets,
+        baseline_variant,
+        selected_variant,
+        selected_label,
+        warmup_rounds,
+        20,
+    );
+}
+
+fn run_granite_attention_measurement_with_samples(
+    nominal_targets: &[usize],
+    baseline_variant: Option<AttentionVariant>,
+    selected_variant: AttentionVariant,
+    selected_label: &str,
+    warmup_rounds: usize,
+    measured_rounds: usize,
+) {
+    assert!(measured_rounds >= 20, "measured rounds must retain at least 20 pairs");
     assert!(
         env::var_os("PROXIMA_CAPTURE_LIVE").is_some(),
         "run with PROXIMA_CAPTURE_LIVE=1"
@@ -1769,6 +1791,7 @@ fn run_granite_attention_measurement_with_warmup(
                 selected_variant,
                 selected_label,
                 warmup_rounds,
+                measured_rounds,
             )
         })
         .collect::<Vec<_>>();
@@ -1875,6 +1898,29 @@ async fn perf_granite_simdgroups4_warmup_control_two_shapes_against_f16_legacy()
         selected,
         "simdgroups4",
         2,
+    );
+}
+
+#[proxima::test]
+async fn perf_granite_simdgroups4_tail_revalidation_1000_pairs_two_shapes() {
+    let baseline = f16_variant();
+    let settings = ServingSettings::from_env().expect("simdgroup count serving setting parses");
+    let configured = settings
+        .as_serving_config(&[])
+        .attention_variant
+        .expect("set PROXIMA_SERVING_ATTENTION_SIMDGROUP_COUNT=groups4");
+    assert_eq!(configured.simdgroup_count, AttentionSimdgroupCount::Groups4);
+    let selected = AttentionVariant {
+        simdgroup_count: configured.simdgroup_count,
+        ..baseline
+    };
+    run_granite_attention_measurement_with_samples(
+        &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
+        Some(baseline),
+        selected,
+        "simdgroups4",
+        2,
+        1000,
     );
 }
 
