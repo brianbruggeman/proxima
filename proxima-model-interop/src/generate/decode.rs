@@ -4072,6 +4072,9 @@ only the single-row decode kernel reads the half-width device cache",
                                     + cache.k_pass.len()
                                     + cache.v.len()) as u64
                             }
+                            LayerCacheState::ShortConv(cache) => {
+                                (cache.history.len() + cache.roll_indices.len()) as u64
+                            }
                             LayerCacheState::Ssm(cache) => {
                                 (cache.conv_history.len() + cache.state.len()) as u64
                             }

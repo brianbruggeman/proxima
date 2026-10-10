@@ -1,0 +1,114 @@
+Analysis of sampling proxima_model_interop-d839340ed319654f (pid 42394) every 1 millisecond
+Process:         proxima_model_interop-d839340ed319654f [42394]
+Path:            /private/tmp/*/proxima_model_interop-d839340ed319654f
+Load Address:    0x1006a4000
+Identifier:      proxima_model_interop-d839340ed319654f
+Version:         ???
+Code Type:       ARM64
+Parent Process:  cargo-nextest [42239]
+Target Type:     live task
+
+Date/Time:       2026-10-10 15:39:39.549 -0500
+Launch Time:     2026-10-10 15:39:08.960 -0500
+OS Version:      macOS 15.8 (24H20)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+----
+
+Call graph:
+    780 Thread_88530161: Main Thread
+    + 742 _dyld_start  (in dyld) + 0  [0x103af07c0]
+    + 24 start  (in dyld) + 6000  [0x18746ab4c]
+    + ! 24 dyld4::start(dyld4::KernelArgs*, void*, void*)::$_0::operator()() const  (in dyld) + 236  [0x18746b1d8]
+    + !   23 dyld4::prepare(dyld4::APIs&, mach_o::Header const*)  (in dyld) + 2976  [0x18746bd8c]
+    + !   : 23 dyld4::RuntimeState::notifyDebuggerLoad(std::span<dyld4::Loader const*, 18446744073709551615ul> const&)  (in dyld) + 432  [0x187479fd0]
+    + !   :   23 dyld4::ExternallyViewableState::addImages(lsl::Allocator&, lsl::Allocator&, std::span<dyld4::ExternallyViewableState::ImageInfo, 18446744073709551615ul> const&)  (in dyld) + 544  [0x1874b09c0]
+    + !   :     23 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 264  [0x1874b05b0]
+    + !   :       23 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x18749a9a8]
+    + !   :         23 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 220  [0x18749a61c]
+    + !   :           23 mach_msg_overwrite  (in dyld) + 244  [0x1874e853c]
+    + !   :             23 mach_msg2_internal  (in dyld) + 76  [0x1874e8390]
+    + !   :               23 mach_msg2_trap  (in dyld) + 8  [0x18746572c]
+    + !   1 dyld4::prepare(dyld4::APIs&, mach_o::Header const*)  (in dyld) + 1644  [0x18746b858]
+    + !     1 dyld4::JustInTimeLoader::applyFixups(Diagnostics&, dyld4::RuntimeState&, dyld4::DyldCacheDataConstLazyScopedWriter&, bool, lsl::Vector<std::pair<dyld4::Loader const*, char const*>>*) const  (in dyld) + 616  [0x18748df40]
+    + !       1 dyld4::Loader::forEachBindTarget(Diagnostics&, dyld4::RuntimeState&, void (unsigned int, unsigned int, dyld4::Loader::ResolvedSymbol const&) block_pointer, bool, void (dyld4::Loader::ResolvedSymbol const&, bool&) block_pointer, void (dyld4::Loader::ResolvedSymbol const&, bool&) block_pointer) const  (in dyld) + 108  [0x18748783c]
+    + !         1 dyld3::MachOAnalyzer::withVMLayout(Diagnostics&, void (mach_o::Layout const&) block_pointer) const  (in dyld) + 672  [0x1874bff00]
+    + !           1 invocation function for block in dyld4::Loader::forEachBindTarget(Diagnostics&, dyld4::RuntimeState&, void (unsigned int, unsigned int, dyld4::Loader::ResolvedSymbol const&) block_pointer, bool, void (dyld4::Loader::ResolvedSymbol const&, bool&) block_pointer, void (dyld4::Loader::ResolvedSymbol const&, bool&) block_pointer) const  (in dyld) + 264  [0x187487950]
+    + !             1 mach_o::Fixups::forEachBindTarget_Opcodes(Diagnostics&, bool, void (mach_o::Fixups::BindTargetInfo const&, bool&) block_pointer, void (mach_o::Fixups::BindTargetInfo const&, bool&) block_pointer) const  (in dyld) + 208  [0x1874bc848]
+    + !               1 mach_o::Fixups::forEachBindUnified_Opcodes(Diagnostics&, bool, void (unsigned long long, unsigned int, mach_o::Fixups::BindTargetInfo const&, bool&) block_pointer, void (unsigned long long, unsigned int, mach_o::Fixups::BindTargetInfo const&, bool&) block_pointer) const  (in dyld) + 244  [0x1874bcecc]
+    + !                 1 mach_o::Fixups::forEachBind_OpcodesLazy(Diagnostics&, void (char const*, bool, bool, unsigned int, int, unsigned int, unsigned int, unsigned long long, unsigned char, char const*, bool, bool, unsigned long long, bool, bool&) block_pointer) const  (in dyld) + 444  [0x1874bd784]
+    + !                   1 invocation function for block in mach_o::Fixups::forEachBindTarget_Opcodes(Diagnostics&, bool, void (mach_o::Fixups::BindTargetInfo const&, bool&) block_pointer, void (mach_o::Fixups::BindTargetInfo const&, bool&) block_pointer) const  (in dyld) + 72  [0x1874bdec4]
+    + !                     1 invocation function for block in dyld4::Loader::forEachBindTarget(Diagnostics&, dyld4::RuntimeState&, void (unsigned int, unsigned int, dyld4::Loader::ResolvedSymbol const&) block_pointer, bool, void (dyld4::Loader::ResolvedSymbol const&, bool&) block_pointer, void (dyld4::Loader::ResolvedSymbol const&, bool&) block_pointer) const  (in dyld) + 100  [0x1874879e0]
+    + !                       1 dyld4::Loader::resolveSymbol(Diagnostics&, dyld4::RuntimeState&, int, char const*, bool, bool, void (unsigned int, unsigned int, dyld4::Loader::ResolvedSymbol const&) block_pointer, bool) const  (in dyld) + 544  [0x187487c68]
+    + !                         1 dyld4::Loader::hasExportedSymbol(Diagnostics&, dyld4::RuntimeState&, char const*, dyld4::Loader::ExportedSymbolMode, dyld4::Loader::ResolverMode, dyld4::Loader::ResolvedSymbol*, dyld3::Array<dyld4::Loader const*>*) const  (in dyld) + 1336  [0x187488ee8]
+    + !                           1 dyld4::Loader::hasExportedSymbol(Diagnostics&, dyld4::RuntimeState&, char const*, dyld4::Loader::ExportedSymbolMode, dyld4::Loader::ResolverMode, dyld4::Loader::ResolvedSymbol*, dyld3::Array<dyld4::Loader const*>*) const  (in dyld) + 384  [0x187488b30]
+    + !                             1 dyld3::MachOFile::trieWalk(Diagnostics&, unsigned char const*, unsigned char const*, char const*)  (in dyld) + 116  [0x1874b8698]
+    + 11 start  (in dyld) + 5108  [0x103af27d0]
+    + ! 11 dyld4::ExternallyViewableState::createMinimalInfo(lsl::Allocator&, unsigned long long, char const*, unsigned long long, char const*, DyldSharedCache const*)  (in dyld) + 1672  [0x103b37ddc]
+    + !   11 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 264  [0x103b385b0]
+    + !     11 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x103b229a8]
+    + !       11 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 220  [0x103b2261c]
+    + !         11 mach_msg_overwrite  (in dyld) + 244  [0x103b7053c]
+    + !           11 mach_msg2_internal  (in dyld) + 76  [0x103b70390]
+    + !             11 mach_msg2_trap  (in dyld) + 8  [0x103aed72c]
+    + 2 start  (in dyld) + 3320  [0x18746a0d4]
+    + ! 2 dyld4::ExternallyViewableState::createMinimalInfo(lsl::Allocator&, unsigned long long, char const*, unsigned long long, char const*, DyldSharedCache const*)  (in dyld) + 1672  [0x1874afddc]
+    + !   2 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 264  [0x1874b05b0]
+    + !     2 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x18749a9a8]
+    + !       2 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 220  [0x18749a61c]
+    + !         2 mach_msg_overwrite  (in dyld) + 244  [0x1874e853c]
+    + !           2 mach_msg2_internal  (in dyld) + 76  [0x1874e8390]
+    + !             2 mach_msg2_trap  (in dyld) + 8  [0x18746572c]
+    + 1 start  (in dyld) + 1716  [0x103af1a90]
+    +   1 dyld4::SyscallDelegate::hasExistingDyldCache(unsigned long long&, FileIdTuple&) const  (in dyld) + 64  [0x103b1c180]
+    2 Thread_88530161   DispatchQueue_1: com.apple.main-thread  (serial)
+      1 start  (in dyld) + 6000  [0x18746ab4c]
+      ! 1 dyld4::start(dyld4::KernelArgs*, void*, void*)::$_0::operator()() const  (in dyld) + 236  [0x18746b1d8]
+      !   1 dyld4::prepare(dyld4::APIs&, mach_o::Header const*)  (in dyld) + 3092  [0x18746be00]
+      !     1 dyld4::APIs::runAllInitializersForMain()  (in dyld) + 392  [0x1874a8a20]
+      !       1 dyld4::Loader::runInitializersBottomUpPlusUpwardLinks(dyld4::RuntimeState&) const  (in dyld) + 716  [0x18748777c]
+      !         1 dyld4::Loader::runInitializersBottomUpPlusUpwardLinks(dyld4::RuntimeState&) const::$_0::operator()() const  (in dyld) + 180  [0x18748bbf0]
+      !           1 dyld4::Loader::runInitializersBottomUp(dyld4::RuntimeState&, dyld3::Array<dyld4::Loader const*>&, dyld3::Array<dyld4::Loader const*>&) const  (in dyld) + 212  [0x187487400]
+      !             1 dyld4::Loader::runInitializersBottomUp(dyld4::RuntimeState&, dyld3::Array<dyld4::Loader const*>&, dyld3::Array<dyld4::Loader const*>&) const  (in dyld) + 212  [0x187487400]
+      !               1 dyld4::Loader::runInitializersBottomUp(dyld4::RuntimeState&, dyld3::Array<dyld4::Loader const*>&, dyld3::Array<dyld4::Loader const*>&) const  (in dyld) + 212  [0x187487400]
+      !                 1 dyld4::Loader::runInitializersBottomUp(dyld4::RuntimeState&, dyld3::Array<dyld4::Loader const*>&, dyld3::Array<dyld4::Loader const*>&) const  (in dyld) + 212  [0x187487400]
+      !                   1 dyld4::Loader::runInitializersBottomUp(dyld4::RuntimeState&, dyld3::Array<dyld4::Loader const*>&, dyld3::Array<dyld4::Loader const*>&) const  (in dyld) + 212  [0x187487400]
+      !                     1 dyld4::Loader::runInitializersBottomUp(dyld4::RuntimeState&, dyld3::Array<dyld4::Loader const*>&, dyld3::Array<dyld4::Loader const*>&) const  (in dyld) + 212  [0x187487400]
+      !                       1 dyld4::Loader::runInitializersBottomUp(dyld4::RuntimeState&, dyld3::Array<dyld4::Loader const*>&, dyld3::Array<dyld4::Loader const*>&) const  (in dyld) + 212  [0x187487400]
+      !                         1 dyld4::Loader::runInitializersBottomUp(dyld4::RuntimeState&, dyld3::Array<dyld4::Loader const*>&, dyld3::Array<dyld4::Loader const*>&) const  (in dyld) + 296  [0x187487454]
+      !                           1 dyld4::RuntimeState::notifyObjCInit(dyld4::Loader const*)  (in dyld) + 456  [0x18747c3ec]
+      !                             1 load_images  (in libobjc.A.dylib) + 980  [0x18741ba08]
+      !                               1 _NSInitializePlatform  (in Foundation) + 40  [0x188e6e58c]
+      !                                 1 __CFInitialize  (in CoreFoundation) + 200  [0x18787c54c]
+      !                                   1 _CFStringGetUserDefaultEncoding  (in CoreFoundation) + 60  [0x18787caa0]
+      !                                     1 _CFGetEUID  (in CoreFoundation) + 48  [0x18787cd30]
+      !                                       1 __CFGetUGIDs  (in CoreFoundation) + 260  [0x18798790c]
+      !                                         1 _dispatch_once_callout  (in libdispatch.dylib) + 32  [0x187656a28]
+      !                                           1 _dispatch_client_callout  (in libdispatch.dylib) + 16  [0x18766d85c]
+      !                                             1 ___CFCanChangeEUIDs_block_invoke  (in CoreFoundation) + 204  [0x18787ce2c]
+      !                                               1 sysctl  (in libsystem_c.dylib) + 120  [0x1876a1788]
+      !                                                 1 __sysctl  (in libsystem_kernel.dylib) + 8  [0x1877cb320]
+      1 start  (in dyld) + 6076  [0x18746ab98]
+        1 main  (in proxima_model_interop-d839340ed319654f) + 36  [0x100997af8]
+          1 _RINvNtCs1SSuMAdGM58_3std2rt10lang_startuECsfvHQEsQFhe8_21proxima_model_interop  (in proxima_model_interop-d839340ed319654f) + 84  [0x1007e7ee8]  rt.rs:205
+            1 _RNvNtCs1SSuMAdGM58_3std2rt19lang_start_internal  (in proxima_model_interop-d839340ed319654f) + 936  [0x101781c70]
+              1 _RNCINvNtCs1SSuMAdGM58_3std2rt10lang_startuE0CsfvHQEsQFhe8_21proxima_model_interop  (in proxima_model_interop-d839340ed319654f) + 28  [0x100808f58]  rt.rs:206
+                1 _RINvNtNtCs1SSuMAdGM58_3std3sys9backtrace28___rust_begin_short_backtraceFEuuECsfvHQEsQFhe8_21proxima_model_interop  (in proxima_model_interop-d839340ed319654f) + 24  [0x100d83da8]  backtrace.rs:166
+                  1 _RNvYFEuINtNtNtCsjIpoRzUjyHQ_4core3ops8function6FnOnceuE9call_onceCsfvHQEsQFhe8_21proxima_model_interop  (in proxima_model_interop-d839340ed319654f) + 20  [0x100b69114]  function.rs:250
+                    1 _RNvCsfvHQEsQFhe8_21proxima_model_interop4main  (in proxima_model_interop-d839340ed319654f) + 28  [0x100955fe8]  lib.rs:1
+                      1 _RNvCslPnnYyqfaRn_4test16test_main_static  (in proxima_model_interop-d839340ed319654f) + 208  [0x100ec1f9c]
+                        1 _RNvNtCslPnnYyqfaRn_4test7console18list_tests_console  (in proxima_model_interop-d839340ed319654f) + 1196  [0x100ed3738]
+                          1 _RNvXs_NtNtCslPnnYyqfaRn_4test10formatters5terseINtB4_14TerseFormatterNtNtNtCs1SSuMAdGM58_3std2io5stdio10StdoutLockENtB6_15OutputFormatter21write_test_discoveredB8_  (in proxima_model_interop-d839340ed319654f) + 92  [0x100edf2a8]
+                            1 _RNvYINtNtCslPnnYyqfaRn_4test7console14OutputLocationNtNtNtCs1SSuMAdGM58_3std2io5stdio10StdoutLockENtNtNtCsjIpoRzUjyHQ_4core2io5write5Write9write_allB7_  (in proxima_model_interop-d839340ed319654f) + 120  [0x100ee3c78]
+                              1 _RNvXsd_NtNtCs1SSuMAdGM58_3std2io5stdioNtB5_6StdoutNtNtNtCsjIpoRzUjyHQ_4core2io5write5Write5write  (in proxima_model_interop-d839340ed319654f) + 56  [0x10178d8e8]
+                                1 _RNvXsh_NtNtCs1SSuMAdGM58_3std2io5stdioNtB5_10StdoutLockNtNtNtCsjIpoRzUjyHQ_4core2io5write5Write5write  (in proxima_model_interop-d839340ed319654f) + 112  [0x10178dcb8]
+                                  1 write  (in libsystem_kernel.dylib) + 8  [0x1877cd6f4]
+
+Total number in stack (recursive counted multiple, when >=5):
+        7       dyld4::Loader::runInitializersBottomUp(dyld4::RuntimeState&, dyld3::Array<dyld4::Loader const*>&, dyld3::Array<dyld4::Loader const*>&) const  (in dyld) + 212  [0x187487400]
+
+Sort by top of stack, same collapsed (when >= 5):
+        _dyld_start  (in dyld)        742
+        mach_msg2_trap  (in dyld)        36
+
+Binary images description not available
