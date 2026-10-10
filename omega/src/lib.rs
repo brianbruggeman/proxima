@@ -76,6 +76,12 @@ pub use cuda_driver::CudaPlan;
 #[cfg(feature = "cuda-driver")]
 pub use cuda_driver::{CudaDriver, CudaDriverError};
 pub use error::EmitError;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
+pub use metal::{
+    CapturedDispatch, execute_plan_timed, flush_gpu_caches, pipeline_cache_keys,
+    pipeline_key_audit_counts, set_capture_step, take_captured_dispatches,
+    time_empty_command_buffer_gpu_ns,
+};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use metal::{
     DispatchType, MathMode, MetalError, Plan, checkpoint_mmap_resident_pages,
@@ -85,15 +91,13 @@ pub use metal::{
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 pub use metal::{
     PlacedBuffer, allocate_placed_buffer, allocate_placed_buffer_over,
-    execute_plan_named_with_placements,
-    execute_plan_named_with_placements_and_expert_sources,
+    execute_plan_named_with_placements, execute_plan_named_with_placements_and_expert_sources,
     execute_plan_named_with_placements_overlapping, execute_plan_with_placements,
     move_placed_buffer_bytes, narrow_placed_buffer_f32_to_bf8, narrow_placed_buffer_f32_to_bf16,
-    narrow_placed_buffer_f32_to_f16, plan_named_with_placed_inputs,
-    read_placed_buffer_bf16_as_f32, read_placed_buffer_bf8_as_f32, read_placed_buffer_f16_as_f32,
-    read_placed_buffer_f32, write_placed_buffer_f32, write_placed_buffer_f32_as_bf8,
-    write_placed_buffer_f32_as_bf16, write_placed_buffer_f32_as_f16,
-    zero_placed_buffer, zero_placed_buffer_range,
+    narrow_placed_buffer_f32_to_f16, plan_named_with_placed_inputs, read_placed_buffer_bf8_as_f32,
+    read_placed_buffer_bf16_as_f32, read_placed_buffer_f16_as_f32, read_placed_buffer_f32,
+    write_placed_buffer_f32, write_placed_buffer_f32_as_bf8, write_placed_buffer_f32_as_bf16,
+    write_placed_buffer_f32_as_f16, zero_placed_buffer, zero_placed_buffer_range,
 };
 #[cfg(all(
     feature = "metal-output-placement",
@@ -105,30 +109,22 @@ pub use metal::{
     execute_plan_with_placements_dispatch_timed, execute_plan_with_placements_op_timed,
     placed_buffer_identity,
 };
-#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
-pub use metal::{
-    CapturedDispatch, execute_plan_timed, flush_gpu_caches, pipeline_cache_keys,
-    pipeline_key_audit_counts, set_capture_step, take_captured_dispatches,
-    time_empty_command_buffer_gpu_ns,
-};
-#[cfg(feature = "alloc")]
-pub use msl::{
-    BF16_UNPACK_MSL, BFLOAT16_BLOCK_BYTES, BFLOAT16_BLOCK_ELEMENTS, Binding, FLOAT16_BLOCK_BYTES,
-    FLOAT16_BLOCK_ELEMENTS, GridSpec, Kernel, Codec, PackedOperands, Q2K_BLOCK_BYTES,
-    Q2K_BLOCK_ELEMENTS, Q2K_UNPACK_MSL, Q3K_BLOCK_BYTES, Q3K_PAIR_DOT_MSL, Q3K_UNPACK_MSL,
-    Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS, Q4_0_UNPACK_MSL, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS,
-    Q4K_UNPACK_MSL, Q5K_BLOCK_BYTES, Q5K_UNPACK_MSL, Q5_0_BLOCK_BYTES, Q5_0_BLOCK_ELEMENTS,
-    Q5_0_UNPACK_MSL, Q5_1_BLOCK_BYTES, Q5_1_BLOCK_ELEMENTS,
-    Q5_1_UNPACK_MSL, Q6K_BLOCK_BYTES, Q6K_UNPACK_MSL,
-    Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS, Q8_0_UNPACK_MSL, CachedAttentionForm, emit,
-    context_chunks_for,
-};
 #[cfg(all(feature = "alloc", feature = "metal-attn-variants"))]
 pub use msl::{
     AttentionDispatchManifest, AttentionKvReuse, AttentionKvStorage, AttentionMmaPrecision,
-    AttentionPrefetch,
-    AttentionQueryParallelism, AttentionSimdTopology, AttentionTileHeight, AttentionVariant,
-    emit_with_attention_variant, inspect_attention_variant,
+    AttentionPrefetch, AttentionQueryParallelism, AttentionSimdTopology, AttentionSimdgroupCount,
+    AttentionTileHeight, AttentionVariant, emit_with_attention_variant, inspect_attention_variant,
+};
+#[cfg(feature = "alloc")]
+pub use msl::{
+    BF16_UNPACK_MSL, BFLOAT16_BLOCK_BYTES, BFLOAT16_BLOCK_ELEMENTS, Binding, CachedAttentionForm,
+    Codec, FLOAT16_BLOCK_BYTES, FLOAT16_BLOCK_ELEMENTS, GridSpec, Kernel, PackedOperands,
+    Q2K_BLOCK_BYTES, Q2K_BLOCK_ELEMENTS, Q2K_UNPACK_MSL, Q3K_BLOCK_BYTES, Q3K_PAIR_DOT_MSL,
+    Q3K_UNPACK_MSL, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS, Q4_0_UNPACK_MSL, Q4K_BLOCK_BYTES,
+    Q4K_BLOCK_ELEMENTS, Q4K_UNPACK_MSL, Q5_0_BLOCK_BYTES, Q5_0_BLOCK_ELEMENTS, Q5_0_UNPACK_MSL,
+    Q5_1_BLOCK_BYTES, Q5_1_BLOCK_ELEMENTS, Q5_1_UNPACK_MSL, Q5K_BLOCK_BYTES, Q5K_UNPACK_MSL,
+    Q6K_BLOCK_BYTES, Q6K_UNPACK_MSL, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS, Q8_0_UNPACK_MSL,
+    context_chunks_for, emit,
 };
 #[cfg(feature = "wgpu-backend")]
 pub use wgpu_driver::{

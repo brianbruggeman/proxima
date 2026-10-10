@@ -267,7 +267,11 @@ impl core::fmt::Display for CommandBufferFailureContext {
             self.encoder_status_requested,
         )?;
         for info in &self.encoder_infos {
-            write!(formatter, " encoder[{}]=error_state={}", info.label, info.error_state)?;
+            write!(
+                formatter,
+                " encoder[{}]=error_state={}",
+                info.label, info.error_state
+            )?;
         }
         Ok(())
     }
@@ -292,7 +296,9 @@ pub enum MetalError {
     ExpertSourceUnsupported { node: NodeId, reason: &'static str },
     #[error("metal expert source for node {node} is not resident for routed expert {expert}")]
     ExpertSourceMiss { node: NodeId, expert: u32 },
-    #[error("metal expert-grouped op {node} located tiles from a route compaction whose header does not match the route length (the prepass did not run or ran on another route)")]
+    #[error(
+        "metal expert-grouped op {node} located tiles from a route compaction whose header does not match the route length (the prepass did not run or ran on another route)"
+    )]
     RouteCompactionMismatch { node: NodeId },
     #[error("checkpoint mmap page discard failed with errno {errno}")]
     CheckpointMmapDiscardFailed { errno: i32 },
@@ -618,7 +624,8 @@ pub fn pipeline_key_audit_counts() -> (u64, u64) {
 /// counter here silently reads 0 forever on any thread but the one that
 /// calls [`set_capture_step`].
 #[cfg(feature = "instrument")]
-pub(super) static CAPTURE_STEP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub(super) static CAPTURE_STEP: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 
 /// Mirrors the decode loop's own per-step counter into [`CAPTURE_STEP`] --
 /// see that static's own doc. A no-op call on a non-`instrument` build costs
@@ -1080,7 +1087,10 @@ pub(super) fn split_by_shared_buffers(
         let key = (Retained::as_ptr(weight_buffer) as usize, activation_node);
         buckets.entry(key).or_default().push(position);
     }
-    buckets.into_values().filter(|bucket| bucket.len() > 1).collect()
+    buckets
+        .into_values()
+        .filter(|bucket| bucket.len() > 1)
+        .collect()
 }
 
 /// Resolved once per [`Plan`], the first call whose `device_buffers` and
@@ -1109,7 +1119,8 @@ pub(super) fn ensure_merged_dispatches(
     let mut groups: Vec<MergedDispatch> = Vec::new();
     let mut position_merge: Vec<Option<(usize, u32)>> = vec![None; plan.prepared.resolved.len()];
     for candidate in &candidates {
-        for subgroup in split_by_shared_buffers(candidate, &plan.prepared.resolved, device_buffers) {
+        for subgroup in split_by_shared_buffers(candidate, &plan.prepared.resolved, device_buffers)
+        {
             let subgroup_len = subgroup.len();
             match build_merged_dispatch(device, plan, &subgroup)? {
                 Some(dispatch) => {
@@ -1205,14 +1216,18 @@ pub(super) fn build_merged_dispatch(
     if kernel.grid.grid2d.is_some() {
         return Ok(None);
     }
-    let Some(weight_index) = kernel.bindings.iter().position(
-        |binding| matches!(binding, Binding::Input(node) if *node == weight_node),
-    ) else {
+    let Some(weight_index) = kernel
+        .bindings
+        .iter()
+        .position(|binding| matches!(binding, Binding::Input(node) if *node == weight_node))
+    else {
         return Ok(None);
     };
-    let Some(other_index) = kernel.bindings.iter().position(
-        |binding| matches!(binding, Binding::Input(node) if *node == activation_node),
-    ) else {
+    let Some(other_index) = kernel
+        .bindings
+        .iter()
+        .position(|binding| matches!(binding, Binding::Input(node) if *node == activation_node))
+    else {
         return Ok(None);
     };
     crate::msl::splice_horizontal_merge_base_table(
@@ -1224,7 +1239,12 @@ pub(super) fn build_merged_dispatch(
         "float",
         "float",
     )?;
-    let mut cache_key = kernel_cache_key_for_grid(leader, &plan.packed_operands, plan.numeric_policy, &kernel.grid)?;
+    let mut cache_key = kernel_cache_key_for_grid(
+        leader,
+        &plan.packed_operands,
+        plan.numeric_policy,
+        &kernel.grid,
+    )?;
     cache_key.push(plan.math_mode.cache_token());
     cache_key.push_str(&format!("_z{}", group.len()));
     let pipeline = pipeline_for_kernel(device, &kernel, &cache_key, plan.math_mode)?;
@@ -1302,15 +1322,20 @@ pub(super) fn ensure_merged_group_resolved(
     // real recurrent-routed decode graph's own second-and-later decode step).
     let already_resolved = {
         let merged_guard = plan.merged.borrow();
-        let dispatch = &merged_guard.as_ref().ok_or(MetalError::CompileFailed {
-            log: "horizontal-merge position_merge named a group but Plan::merged is empty".to_string(),
-        })?.groups[merge_index];
+        let dispatch = &merged_guard
+            .as_ref()
+            .ok_or(MetalError::CompileFailed {
+                log: "horizontal-merge position_merge named a group but Plan::merged is empty"
+                    .to_string(),
+            })?
+            .groups[merge_index];
         dispatch.resolved.borrow().is_some()
     };
     if already_resolved {
         let merged_guard = plan.merged.borrow();
         let merged_state = merged_guard.as_ref().ok_or(MetalError::CompileFailed {
-            log: "horizontal-merge position_merge named a group but Plan::merged is empty".to_string(),
+            log: "horizontal-merge position_merge named a group but Plan::merged is empty"
+                .to_string(),
         })?;
         let dispatch = &merged_state.groups[merge_index];
         let resolved_guard = dispatch.resolved.borrow();
@@ -1344,7 +1369,8 @@ pub(super) fn ensure_merged_group_resolved(
     let leader = &plan.prepared.resolved[leader_position];
     let leader_operands = leader.operands();
     let (_, leader_weight_offset) = buffer_for(device_buffers, leader_operands[0].0)?;
-    let (leader_activation_buffer, leader_activation_offset) = buffer_for(device_buffers, leader_operands[1].0)?;
+    let (leader_activation_buffer, leader_activation_offset) =
+        buffer_for(device_buffers, leader_operands[1].0)?;
 
     // A caller that explicitly placed every member's own output (this
     // crate's own synthetic fixtures; ROW 568's own proof this shape is
@@ -1385,7 +1411,8 @@ pub(super) fn ensure_merged_group_resolved(
                 .get(&leader.node)
                 .copied()
                 .ok_or(MetalError::CompileFailed {
-                    log: "row 572: all_caller_placed already confirmed the leader is placed".to_string(),
+                    log: "row 572: all_caller_placed already confirmed the leader is placed"
+                        .to_string(),
                 })?
                 .1
         }
@@ -1396,7 +1423,8 @@ pub(super) fn ensure_merged_group_resolved(
         let bound = &plan.prepared.resolved[position];
         let bound_operands = bound.operands();
         let (_, weight_offset) = buffer_for(device_buffers, bound_operands[0].0)?;
-        let (activation_buffer, activation_offset) = buffer_for(device_buffers, bound_operands[1].0)?;
+        let (activation_buffer, activation_offset) =
+            buffer_for(device_buffers, bound_operands[1].0)?;
         // The promised buffer-identity check, demoted from an admission
         // gate (`split_by_shared_buffers` admits by NODE identity now) to a
         // cheap sanity assertion at the one point the buffer actually needs
@@ -1416,12 +1444,16 @@ pub(super) fn ensure_merged_group_resolved(
                 .copied()
                 .map(|(buffer, offset)| (buffer.clone(), offset))
                 .ok_or(MetalError::CompileFailed {
-                    log: "row 572: all_caller_placed already confirmed every member is placed".to_string(),
+                    log: "row 572: all_caller_placed already confirmed every member is placed"
+                        .to_string(),
                 })?,
         };
         device_buffers.insert(bound.node, (output_buffer, output_offset));
         offsets.push(relative_byte_offset(weight_offset, leader_weight_offset));
-        offsets.push(relative_byte_offset(activation_offset, leader_activation_offset));
+        offsets.push(relative_byte_offset(
+            activation_offset,
+            leader_activation_offset,
+        ));
         offsets.push(relative_byte_offset(output_offset, leader_output_offset));
     }
     let base_table = upload_base_table(device, &offsets)?;
@@ -1453,17 +1485,26 @@ pub(super) fn upload_base_table(
     offsets: &[u64],
 ) -> Result<MetalBuffer, MetalError> {
     let bytes: &[u8] = unsafe {
-        core::slice::from_raw_parts(offsets.as_ptr().cast::<u8>(), core::mem::size_of_val(offsets))
+        core::slice::from_raw_parts(
+            offsets.as_ptr().cast::<u8>(),
+            core::mem::size_of_val(offsets),
+        )
     };
     // SAFETY: `bytes` borrows `offsets`, which outlives this call, and its
     // length matches `offsets`'s own byte length exactly -- the same
     // single-copy contract `upload_uniforms` relies on for its own
     // `newBufferWithBytes_length_options` call just above it in this file.
     let pointer = unsafe { NonNull::new_unchecked(bytes.as_ptr() as *mut c_void) };
-    let buffer = unsafe { device.newBufferWithBytes_length_options(pointer, bytes.len(), MTLResourceOptions::StorageModeShared) }
-        .ok_or_else(|| MetalError::CompileFailed {
-            log: "device refused to allocate the horizontal-merge base table".to_string(),
-        })?;
+    let buffer = unsafe {
+        device.newBufferWithBytes_length_options(
+            pointer,
+            bytes.len(),
+            MTLResourceOptions::StorageModeShared,
+        )
+    }
+    .ok_or_else(|| MetalError::CompileFailed {
+        log: "device refused to allocate the horizontal-merge base table".to_string(),
+    })?;
     #[cfg(feature = "instrument")]
     record_device_buffer("merge_base_table", "plan", "", bytes.len(), false);
     Ok(buffer)
@@ -1589,21 +1630,38 @@ pub(super) fn handle_merged_position(
     // above (or, from step 2 onward, on a prior call).
     if dispatch_type == DispatchType::Concurrent {
         let operand_nodes: Vec<NodeId> = bound.operands().iter().map(|(node, ..)| *node).collect();
-        resolve_hazard_inputs_into(operand_nodes.iter().copied(), device_buffers, &mut hazard_state.inputs)?;
+        resolve_hazard_inputs_into(
+            operand_nodes.iter().copied(),
+            device_buffers,
+            &mut hazard_state.inputs,
+        )?;
         let output_pointer = device_buffers
             .get(&bound.node)
             .map(|(buffer, _)| Retained::as_ptr(buffer))
             .ok_or(MetalError::UnresolvedHazardOperand { node: bound.node })?;
         #[cfg(feature = "instrument")]
-        let merged_class = hazard_state.tracker.classify(&hazard_state.inputs, Some(output_pointer));
+        let merged_class = hazard_state
+            .tracker
+            .classify(&hazard_state.inputs, Some(output_pointer));
         #[cfg(feature = "instrument")]
         let merged_edges = hazard_state.raw_edges(&operand_nodes);
-        let merged_fired = hazard_step(&mut hazard_state.tracker, &hazard_state.inputs, output_pointer);
+        let merged_fired = hazard_step(
+            &mut hazard_state.tracker,
+            &hazard_state.inputs,
+            output_pointer,
+        );
         #[cfg(feature = "instrument")]
         {
             let run_before = hazard_state.dispatches_since_barrier;
             hazard_state.note_dispatch(output_pointer, bound.node, merged_fired);
-            record_hazard_op(position, bound.node, merged_class, false, merged_edges, run_before);
+            record_hazard_op(
+                position,
+                bound.node,
+                merged_class,
+                false,
+                merged_edges,
+                run_before,
+            );
         }
         if merged_fired {
             encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
@@ -1635,7 +1693,14 @@ pub(super) fn handle_merged_position(
     let uniforms: &MetalBuffer = match uniform_buffer {
         Some(buffer) => buffer,
         None => {
-            owned_uniforms = upload_uniforms(device, &pack_uniforms(bound, plan.numeric_policy)?)?;
+            owned_uniforms = upload_uniforms(
+                device,
+                &pack_uniforms_with_schedule(
+                    bound,
+                    plan.numeric_policy,
+                    plan.attention_row_schedule,
+                )?,
+            )?;
             &owned_uniforms
         }
     };
@@ -1775,24 +1840,20 @@ impl Plan {
             )?;
         }
         let (mma_selection, row_schedule) =
-            crate::msl::AttentionMmaSelection::from_variant(variant)
-            .map_err(|(axis, value)| {
+            crate::msl::AttentionMmaSelection::from_variant(variant).map_err(|(axis, value)| {
                 EmitError::CachedAttentionVariantAxisNotSupported { axis, value }
             })?;
         #[cfg(feature = "metal-attn-split-rows")]
         for bound in &self.prepared.resolved {
-            crate::msl::validate_tile_height_selection(
-                bound,
-                self.numeric_policy,
-                row_schedule.tile_height(),
-            )?;
+            crate::msl::validate_tile_height_selection(bound, self.numeric_policy, row_schedule)?;
             crate::msl::validate_query_parallelism_selection(
                 bound,
                 self.numeric_policy,
                 row_schedule,
             )?;
             crate::msl::validate_prefetch_selection(bound, self.numeric_policy, row_schedule)?;
-            crate::msl::validate_simd_topology_selection(
+            crate::msl::validate_simd_topology_selection(bound, self.numeric_policy, row_schedule)?;
+            crate::msl::validate_simdgroup_count_selection(
                 bound,
                 self.numeric_policy,
                 row_schedule,
@@ -1982,7 +2043,11 @@ pub(super) mod block_buffer_reusable_tests {
 // file-split artifact: see `block_buffer_reusable_tests`'s own doc for why
 // a test module sits here, mid-file, ahead of unrelated production code.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::items_after_test_module)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::items_after_test_module
+)]
 pub(super) mod command_buffer_failed_context_tests {
     //! [`MetalError::CommandBufferFailed`]'s root-cause fields, proved
     //! without a GPU: this is the shape a production log line (or the
@@ -1997,7 +2062,9 @@ pub(super) mod command_buffer_failed_context_tests {
 
     use alloc::string::ToString;
 
-    use super::{BufferDiagnostics, CommandBufferEncoderFailureInfo, CommandBufferFailureContext, MetalError};
+    use super::{
+        BufferDiagnostics, CommandBufferEncoderFailureInfo, CommandBufferFailureContext, MetalError,
+    };
 
     fn sample_error() -> MetalError {
         MetalError::CommandBufferFailed {
@@ -2359,7 +2426,12 @@ impl Plan {
     #[must_use]
     pub fn shape_footprint(
         &self,
-    ) -> alloc::vec::Vec<(u32, &'static str, alloc::vec::Vec<u64>, alloc::vec::Vec<i64>)> {
+    ) -> alloc::vec::Vec<(
+        u32,
+        &'static str,
+        alloc::vec::Vec<u64>,
+        alloc::vec::Vec<i64>,
+    )> {
         self.prepared
             .resolved
             .iter()
@@ -2369,7 +2441,12 @@ impl Plan {
                     .first()
                     .map(|(_, layout, _)| layout.strides.iter().copied().collect())
                     .unwrap_or_default();
-                (bound.node.0, bound.kind.name(), bound.extents.clone(), strides)
+                (
+                    bound.node.0,
+                    bound.kind.name(),
+                    bound.extents.clone(),
+                    strides,
+                )
             })
             .collect()
     }
@@ -2385,7 +2462,10 @@ impl Plan {
 /// would route it through `Float32`'s plain-array path and bind it as the
 /// kernel's own accumulator type, which is wrong the moment a `Float16`
 /// weight multiplies an `f32` activation.
-pub(super) fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> PackedOperands {
+pub(super) fn packed_operands_of(
+    block_nodes: &[NodeId],
+    blocks: &[QuantizedBlock<'_>],
+) -> PackedOperands {
     block_nodes
         .iter()
         .zip(blocks.iter())
@@ -2394,7 +2474,9 @@ pub(super) fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBloc
         // from_quantized_block` as `None`, exactly like before, and hit
         // `reject_unsupported_gpu_dtype`'s ordinary rejection rather than a
         // silent, wrong-shape upload.
-        .filter_map(|(node, block)| crate::msl::codec_from_quantized_block(block).map(|codec| (*node, codec)))
+        .filter_map(|(node, block)| {
+            crate::msl::codec_from_quantized_block(block).map(|codec| (*node, codec))
+        })
         .collect()
 }
 
@@ -2495,8 +2577,7 @@ pub fn selected_expert_payloads(
                 node,
                 reason: "expert entries must use packed bytes",
             })?;
-        let selected =
-            selected_ids.is_none_or(|ids| ids.contains(&(expert_index as u32)));
+        let selected = selected_ids.is_none_or(|ids| ids.contains(&(expert_index as u32)));
         let (byte_offset, byte_length) = if selected {
             let byte_offset = payload_bytes.len();
             payload_bytes.extend_from_slice(bytes);

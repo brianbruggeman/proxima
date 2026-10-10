@@ -15,6 +15,7 @@ fn card_12_variant_config_defaults_preserve_the_legacy_axes() {
             tile_height: AttentionTileHeight::Legacy,
             query_parallelism: AttentionQueryParallelism::Legacy,
             simd_topology: AttentionSimdTopology::Legacy,
+            simdgroup_count: AttentionSimdgroupCount::Legacy,
             prefetch: AttentionPrefetch::Off,
         }
     );
@@ -30,6 +31,7 @@ fn card_12_variant_config_stores_each_axis_independently() {
         tile_height: AttentionTileHeight::Rows8,
         query_parallelism: AttentionQueryParallelism::SimdgroupRows,
         simd_topology: AttentionSimdTopology::PerHead,
+        simdgroup_count: AttentionSimdgroupCount::Legacy,
         prefetch: AttentionPrefetch::NextBlock,
     };
     let root_export: crate::AttentionVariant = selected;
@@ -236,7 +238,8 @@ fn rows_per_threadgroup_follows_the_reuse_registers_memory_and_occupancy_budgets
         let units = rows / unit_rows;
         assert!(units >= 1 && rows % unit_rows == 0, "{cell}: whole units");
         assert!(
-            units * unit_blocks <= crate::sized::ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE.max(unit_blocks),
+            units * unit_blocks
+                <= crate::sized::ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE.max(unit_blocks),
             "{cell}: the tile shares more vector blocks than the reuse budget"
         );
         assert!(
@@ -258,7 +261,15 @@ fn rows_per_threadgroup_follows_the_reuse_registers_memory_and_occupancy_budgets
 #[test]
 fn the_declared_arrays_stay_inside_the_budget_at_every_admitted_shape() {
     let mut shapes = 0_u32;
-    for (groups, head_dim) in [(8_u64, 512_u64), (8, 256), (8, 128), (8, 64), (16, 256), (2, 64), (2, 128)] {
+    for (groups, head_dim) in [
+        (8_u64, 512_u64),
+        (8, 256),
+        (8, 128),
+        (8, 64),
+        (16, 256),
+        (2, 64),
+        (2, 128),
+    ] {
         let op = attention_rows_op(9, groups, head_dim, 512, 971, SLIDING_LOWER);
         let Some(CachedAttentionForm::TwoRangeRowTiled {
             rows_per_threadgroup: rows,
@@ -286,7 +297,10 @@ fn the_declared_arrays_stay_inside_the_budget_at_every_admitted_shape() {
             format!("constexpr long tile_rows = {rows};"),
             format!("constexpr long block = {block};"),
             format!("constexpr long simdgroups = {simdgroups};"),
-            format!("constexpr long split_keys = {};", crate::sized::ATTENTION_ROWS_KEYS_PER_SPLIT),
+            format!(
+                "constexpr long split_keys = {};",
+                crate::sized::ATTENTION_ROWS_KEYS_PER_SPLIT
+            ),
             "threadgroup float score_tile[tile_vectors * block];".to_string(),
             "threadgroup int vector_row[tile_vectors];".to_string(),
         ] {
@@ -351,8 +365,7 @@ fn row_tiled_splits_matches_the_grid_table() {
         ("sliding", 256, &SLIDING_GRID, sliding_op),
     ] {
         for (rows, per_capacity) in grid {
-            for (capacity, (rows_tile, splits, threadgroups)) in
-                CAPACITIES.iter().zip(per_capacity)
+            for (capacity, (rows_tile, splits, threadgroups)) in CAPACITIES.iter().zip(per_capacity)
             {
                 let op = build(*capacity, *rows);
                 let tiles = rows.div_ceil(*rows_tile);
@@ -385,7 +398,8 @@ fn row_tiled_splits_matches_the_grid_table() {
 /// `(query rows, rows per threadgroup, splits)` of eight kv heads at
 /// a thousand cached keys: two simdgroups per threadgroup, so the target is 128
 /// threadgroups and every chunk width lands on it exactly.
-const EIGHT_KV_HEAD_CHUNKS: [(u64, u64, u64); 5] = [(8, 8, 16), (16, 8, 8), (32, 8, 4), (64, 8, 2), (128, 8, 1)];
+const EIGHT_KV_HEAD_CHUNKS: [(u64, u64, u64); 5] =
+    [(8, 8, 16), (16, 8, 8), (32, 8, 4), (64, 8, 2), (128, 8, 1)];
 
 #[test]
 fn eight_kv_head_chunks_split_the_keys_until_the_target_threadgroups_are_filled() {
@@ -510,7 +524,11 @@ fn the_kernel_source_carries_the_tile_decode_the_band_and_the_interleaved_store(
         4,
         "a layer shape compiles one kernel per tile height (one and two rows) and serves every bucket"
     );
-    assert_eq!(entries.len(), sources.len(), "one entry name per kernel text");
+    assert_eq!(
+        entries.len(),
+        sources.len(),
+        "one entry name per kernel text"
+    );
 }
 
 #[test]
@@ -700,7 +718,14 @@ fn every_cached_and_new_key_is_scored_by_exactly_one_split() {
 /// The kernel's new-range schedule, transcribed: the fragment blocks from the
 /// aligned first visible key to the last whole fragment, then the scalar tail.
 /// Returns the keys visited as `(fragment keys, tail keys)`.
-fn new_range_keys(rows: i64, row0: i64, rows_here: i64, lower: i64, upper: i64, block: i64) -> Vec<i64> {
+fn new_range_keys(
+    rows: i64,
+    row0: i64,
+    rows_here: i64,
+    lower: i64,
+    upper: i64,
+    block: i64,
+) -> Vec<i64> {
     let total_aligned = rows & !7;
     let last_row = row0 + rows_here - 1;
     let new_first = (row0 + lower).max(0);
@@ -740,7 +765,11 @@ fn the_new_range_visits_every_key_a_row_of_the_tile_can_see_exactly_once() {
                     let mut sorted = keys.clone();
                     sorted.sort_unstable();
                     sorted.dedup();
-                    assert_eq!(sorted.len(), keys.len(), "rows {rows} row0 {row0}: a key is visited twice");
+                    assert_eq!(
+                        sorted.len(),
+                        keys.len(),
+                        "rows {rows} row0 {row0}: a key is visited twice"
+                    );
                     for key in 0..rows {
                         let visible = (row0..row0 + rows_here)
                             .any(|row| key - row >= lower && key - row <= upper);
@@ -751,13 +780,19 @@ fn the_new_range_visits_every_key_a_row_of_the_tile_can_see_exactly_once() {
                             );
                         }
                     }
-                    assert!(keys.iter().all(|key| (0..rows).contains(key)), "a key outside the new range");
+                    assert!(
+                        keys.iter().all(|key| (0..rows).contains(key)),
+                        "a key outside the new range"
+                    );
                     cases += 1;
                 }
             }
         }
     }
-    assert!(cases > 20_000, "the property must have run over the whole domain: {cases}");
+    assert!(
+        cases > 20_000,
+        "the property must have run over the whole domain: {cases}"
+    );
 }
 
 /// The K-row `CachedSoftmaxWeights` the recognizer binds for a sliding and global layer schedule at
@@ -955,7 +990,9 @@ fn a_partly_packed_or_misplaced_codec_is_declined_on_the_decode_split() {
 }
 
 fn row_tiled_source(op: &BoundOp) -> String {
-    let relaxed = NumericPolicy::bit_exact().with_contraction(true).with_reassociation(true);
+    let relaxed = NumericPolicy::bit_exact()
+        .with_contraction(true)
+        .with_reassociation(true);
     emit(op, &PackedOperands::new(), relaxed)
         .expect("the row-tiled kernel emits")
         .source
@@ -970,10 +1007,20 @@ fn the_row_tiled_softmax_is_one_online_pass_per_vector_with_one_max_and_one_sum_
     assert_default_sizing();
     let source = prompt_1000_kernel();
 
-    assert_eq!(source.matches("simd_max(").count(), 1, "one block max reduction");
-    assert_eq!(source.matches("simd_sum(").count(), 1, "one block sum reduction");
     assert_eq!(
-        source.matches("exp(local_scores[item] - next_maximum)").count(),
+        source.matches("simd_max(").count(),
+        1,
+        "one block max reduction"
+    );
+    assert_eq!(
+        source.matches("simd_sum(").count(),
+        1,
+        "one block sum reduction"
+    );
+    assert_eq!(
+        source
+            .matches("exp(local_scores[item] - next_maximum)")
+            .count(),
         1,
         "the weights are written once, in f32, against the final block maximum"
     );
@@ -1055,7 +1102,10 @@ fn the_query_tile_is_staged_only_while_it_fits_the_threadgroup_budget_and_the_st
             THREADGROUP_BUDGET,
             crate::sized::ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES,
         );
-        assert_eq!(decided, staged, "groups {groups} head_dim {head_dim} tile {tile_rows}");
+        assert_eq!(
+            decided, staged,
+            "groups {groups} head_dim {head_dim} tile {tile_rows}"
+        );
         if staged_bytes != 0 {
             assert_eq!(query_stage_bytes(tile_rows, groups, head_dim), staged_bytes);
         }
@@ -1094,9 +1144,19 @@ fn the_staged_byte_cap_at_the_threadgroup_budget_reproduces_the_fit_only_rule() 
             THREADGROUP_BUDGET,
             THREADGROUP_BUDGET,
         );
-        assert_eq!(uncapped, fits, "groups {groups} head_dim {head_dim} tile {tile_rows}");
+        assert_eq!(
+            uncapped, fits,
+            "groups {groups} head_dim {head_dim} tile {tile_rows}"
+        );
     }
-    assert!(!query_tile_staged(8, 2, 64, row_tiled_block(64), THREADGROUP_BUDGET, 0));
+    assert!(!query_tile_staged(
+        8,
+        2,
+        64,
+        row_tiled_block(64),
+        THREADGROUP_BUDGET,
+        0
+    ));
 }
 
 #[test]
@@ -1172,30 +1232,70 @@ fn card_14_k_reuse_stages_each_k_fragment_and_preserves_row_masks() {
 
     assert_ne!(legacy.entry, shared_k.entry);
     assert_ne!(legacy.source, shared_k.source);
-    assert!(shared_k.source.contains("threadgroup float shared_key_even"));
+    assert!(
+        shared_k
+            .source
+            .contains("threadgroup float shared_key_even")
+    );
     assert!(shared_k.source.contains("simdgroup_store(key_even_tile"));
-    assert!(shared_k.source.contains("threadgroup_barrier(mem_flags::mem_threadgroup)"));
+    assert!(
+        shared_k
+            .source
+            .contains("threadgroup_barrier(mem_flags::mem_threadgroup)")
+    );
     assert!(shared_k.source.contains("omega_load_shared_float"));
-    assert_eq!(shared_k.source.matches("simdgroup_store(key_even_tile").count(), 1);
-    assert_eq!(shared_k.source.matches("simdgroup_store(key_odd_tile").count(), 1);
-    assert!(shared_k.source.contains(
-        "int key_tile = (int)simdgroup_slot + group * (int)simdgroups;"
-    ));
-    assert!(shared_k.source.contains(
-        "for (int key_tile = 0; key_tile < fragments; key_tile++)"
-    ));
+    assert_eq!(
+        shared_k
+            .source
+            .matches("simdgroup_store(key_even_tile")
+            .count(),
+        1
+    );
+    assert_eq!(
+        shared_k
+            .source
+            .matches("simdgroup_store(key_odd_tile")
+            .count(),
+        1
+    );
+    assert!(
+        shared_k
+            .source
+            .contains("int key_tile = (int)simdgroup_slot + group * (int)simdgroups;")
+    );
+    assert!(
+        shared_k
+            .source
+            .contains("for (int key_tile = 0; key_tile < fragments; key_tile++)")
+    );
     assert!(shared_k.source.contains(
         "for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups)"
     ));
-    assert!(shared_k.source.contains("int vector_slot = vector_block / (int)simdgroups;"));
+    assert!(
+        shared_k
+            .source
+            .contains("int vector_slot = vector_block / (int)simdgroups;")
+    );
     assert!(shared_k.source.contains(
         "simdgroup_store(scores[key_tile][vector_slot], score_tile + vector_block * 8 * (int)block + key_tile * 8"
     ));
-    assert!(shared_k.source.contains("relative <= new_upper && relative >= cached_lower"));
-    assert!(legacy.source.contains("relative <= new_upper && relative >= cached_lower"));
+    assert!(
+        shared_k
+            .source
+            .contains("relative <= new_upper && relative >= cached_lower")
+    );
+    assert!(
+        legacy
+            .source
+            .contains("relative <= new_upper && relative >= cached_lower")
+    );
     assert!(legacy.source.contains("if (false) {"));
     assert!(shared_k.source.contains("if (true) {"));
-    assert!(shared_k_f16.source.contains("threadgroup half shared_key_even"));
+    assert!(
+        shared_k_f16
+            .source
+            .contains("threadgroup half shared_key_even")
+    );
     assert!(shared_k_f16.source.contains("omega_load_shared_half"));
     assert!(shared_k_f16.entry.ends_with("_mma_f16_kv_shared_k"));
 }
@@ -1317,14 +1417,34 @@ fn card_15_v_reuse_stages_v_for_distinct_query_owners() {
     assert_ne!(shared_k.entry, shared_kv.entry);
     assert_ne!(shared_k.source, shared_kv.source);
     assert!(shared_kv.entry.ends_with("_mma_f32_kv_shared_kv"));
-    assert!(shared_kv.source.contains("threadgroup float shared_value[512]"));
-    assert!(shared_kv.source.contains("simdgroup_store(value_operand, shared_value"));
-    assert!(shared_kv.source.contains("dimension_block % (int)simdgroups == (int)simdgroup_slot"));
+    assert!(
+        shared_kv
+            .source
+            .contains("threadgroup float shared_value[512]")
+    );
+    assert!(
+        shared_kv
+            .source
+            .contains("simdgroup_store(value_operand, shared_value")
+    );
+    assert!(
+        shared_kv
+            .source
+            .contains("dimension_block % (int)simdgroups == (int)simdgroup_slot")
+    );
     assert!(shared_kv.source.contains("omega_load_shared_float"));
     assert!(shared_kv.source.contains("weights[vector_slot]"));
-    assert!(shared_kv.source.contains("accumulated[dimension_block][vector_slot]"));
+    assert!(
+        shared_kv
+            .source
+            .contains("accumulated[dimension_block][vector_slot]")
+    );
     assert!(shared_kv.source.contains("row_sum[vector]"));
-    assert!(shared_kv_f16.source.contains("threadgroup half shared_value[512]"));
+    assert!(
+        shared_kv_f16
+            .source
+            .contains("threadgroup half shared_value[512]")
+    );
     assert!(shared_kv_f16.source.contains("omega_load_shared_half"));
 
     let bf16 = cached_attention_row_tiled::render_cached_attention_row_tiled_with(
@@ -1421,7 +1541,10 @@ fn the_half_setting_narrows_the_operands_and_keeps_scores_accumulators_and_softm
                 "head_dim {head_dim}: the half setting does not carry `{declaration}`"
             );
         }
-        assert!(source.contains("simdgroup_multiply_accumulate(scores[group][vector_block], query_even"));
+        assert!(
+            source
+                .contains("simdgroup_multiply_accumulate(scores[group][vector_block], query_even")
+        );
         assert!(source.contains("simdgroup_multiply_accumulate(accumulated[slot][vector_block], weights[vector_block], value"));
     }
 }
@@ -1436,15 +1559,30 @@ fn the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads(
         assert!(half_source.contains(cached_attention_row_tiled::HALF_OPERAND_HELPERS));
         let restored = half_source
             .replace(cached_attention_row_tiled::HALF_OPERAND_HELPERS, "")
-            .replace("threadgroup half shared_key_even", "threadgroup float shared_key_even")
-            .replace("threadgroup half shared_key_odd", "threadgroup float shared_key_odd")
-            .replace("threadgroup half shared_value", "threadgroup float shared_value")
+            .replace(
+                "threadgroup half shared_key_even",
+                "threadgroup float shared_key_even",
+            )
+            .replace(
+                "threadgroup half shared_key_odd",
+                "threadgroup float shared_key_odd",
+            )
+            .replace(
+                "threadgroup half shared_value",
+                "threadgroup float shared_value",
+            )
             .replace("omega_load_shared_half", "omega_load_shared_float")
             .replace("simdgroup_half8x8", "simdgroup_float8x8")
             .replace("narrow_fragment(value_float)", "value_float")
             .replace("simdgroup_half8x8 key_", "simdgroup_float8x8 key_")
-            .replace("simdgroup_half8x8 shared_even", "simdgroup_float8x8 shared_even")
-            .replace("simdgroup_half8x8 shared_odd", "simdgroup_float8x8 shared_odd")
+            .replace(
+                "simdgroup_half8x8 shared_even",
+                "simdgroup_float8x8 shared_even",
+            )
+            .replace(
+                "simdgroup_half8x8 shared_odd",
+                "simdgroup_float8x8 shared_odd",
+            )
             .replace("simdgroup_half8x8 query_", "simdgroup_float8x8 query_")
             .replace("simdgroup_half8x8 weights", "simdgroup_float8x8 weights")
             .replace("narrow_fragment(even_float)", "even_float")
@@ -1473,17 +1611,25 @@ fn the_default_sizing_renders_the_float_setting() {
     let op = attention_rows_op(9, 2, 64, 512, 1000, GLOBAL_LOWER);
     let kernel = emit(&op, &PackedOperands::new(), NumericPolicy::llama_relaxed())
         .expect("the row-tiled kernel emits");
-    assert!(kernel.source.contains("simdgroup_float8x8 weights[tile_blocks];"));
+    assert!(
+        kernel
+            .source
+            .contains("simdgroup_float8x8 weights[tile_blocks];")
+    );
     assert!(!kernel.source.contains("simdgroup_half8x8"));
 }
 
 #[cfg(feature = "metal-attn-variants")]
 #[test]
 fn card_16_tile_height_selects_rows16_and_declines_nonintegral_rows4() {
-    let capture = include_str!("../../../proxima-tensor/specs/decode-prefill-parity/evidence/attn5/raw/probe/granite.out");
-    assert!(capture.lines().any(|line| {
-        line.contains("extents=[1000, 8, 2, 64]")
-    }));
+    let capture = include_str!(
+        "../../../proxima-tensor/specs/decode-prefill-parity/evidence/attn5/raw/probe/granite.out"
+    );
+    assert!(
+        capture
+            .lines()
+            .any(|line| { line.contains("extents=[1000, 8, 2, 64]") })
+    );
 
     let captured_shape = attention_rows_op(9, 2, 64, 512, 1000, SLIDING_LOWER);
     let packed = PackedOperands::new();
@@ -1529,7 +1675,10 @@ fn card_16_tile_height_declines_the_exact_threadgroup_memory_overflow() {
     let shape = attention_rows_op(9, 8, 64, 512, 16, SLIDING_LOWER);
     let required = row_tile_bytes(16, 8, row_tiled_block(64));
     assert_eq!(required, 35_840);
-    assert_eq!(crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES, 32_768);
+    assert_eq!(
+        crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES,
+        32_768
+    );
     let error = emit_with_attention_variant(
         &shape,
         &PackedOperands::new(),
@@ -1564,10 +1713,14 @@ fn card_17_granite_attention(rows: u64) -> BoundOp {
 #[cfg(feature = "metal-attn-variants")]
 #[test]
 fn card_17_query_parallelism_assigns_each_granite_query_block_once() {
-    let capture = include_str!("../../../proxima-tensor/specs/decode-prefill-parity/evidence/attn5/raw/probe/granite.out");
-    assert!(capture.lines().any(|line| {
-        line.contains("extents=[1000, 8, 2, 64]")
-    }));
+    let capture = include_str!(
+        "../../../proxima-tensor/specs/decode-prefill-parity/evidence/attn5/raw/probe/granite.out"
+    );
+    assert!(
+        capture
+            .lines()
+            .any(|line| { line.contains("extents=[1000, 8, 2, 64]") })
+    );
     let op = card_17_granite_attention(1000);
     let packed = PackedOperands::new();
     let policy = NumericPolicy::llama_relaxed();
@@ -1604,8 +1757,7 @@ fn card_17_query_parallelism_assigns_each_granite_query_block_once() {
                     let query_group = vector_block % 2;
                     for row_within_block in 0..8_u64 {
                         let query_row = tile_start + vector_block / 2 * 8 + row_within_block;
-                        let query_index =
-                            ((kv_head * 1000 + query_row) * 2 + query_group) as usize;
+                        let query_index = ((kv_head * 1000 + query_row) * 2 + query_group) as usize;
                         coverage[query_index] += 1;
                     }
                 }
@@ -1614,8 +1766,16 @@ fn card_17_query_parallelism_assigns_each_granite_query_block_once() {
     }
     assert!(coverage.iter().all(|count| *count == 1));
     assert_eq!(tile_blocks, simdgroups);
-    assert!(parallel.source.contains("constexpr bool query_parallel_rows = true"));
-    assert!(parallel.source.contains("constexpr bool query_owner_rows = true"));
+    assert!(
+        parallel
+            .source
+            .contains("constexpr bool query_parallel_rows = true")
+    );
+    assert!(
+        parallel
+            .source
+            .contains("constexpr bool query_owner_rows = true")
+    );
     let staged_declarations = |source: &str| -> Vec<String> {
         source
             .lines()
@@ -1638,7 +1798,11 @@ fn card_17_query_parallelism_declines_one_row_and_legacy_keeps_decode_split() {
     let packed = PackedOperands::new();
     let policy = NumericPolicy::llama_relaxed();
     let legacy = emit(&op, &packed, policy).expect("one-row legacy decode emits");
-    assert!(legacy.entry.ends_with("_ds"), "legacy decode entry: {}", legacy.entry);
+    assert!(
+        legacy.entry.ends_with("_ds"),
+        "legacy decode entry: {}",
+        legacy.entry
+    );
     let error = emit_with_attention_variant(
         &op,
         &packed,
@@ -1657,6 +1821,98 @@ fn card_17_query_parallelism_declines_one_row_and_legacy_keeps_decode_split() {
             ..
         }
     ));
+}
+
+#[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
+#[test]
+fn explicit_simdgroup_count_rejects_a_non_row_tiled_shape() {
+    let error = emit_with_attention_variant(
+        &card_17_granite_attention(1),
+        &PackedOperands::new(),
+        NumericPolicy::llama_relaxed(),
+        AttentionVariant {
+            simdgroup_count: AttentionSimdgroupCount::Groups4,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect_err("explicit simdgroup count requires row-tiled attention");
+    assert!(matches!(
+        error,
+        EmitError::CachedAttentionVariantAxisNotSupported {
+            axis: "simdgroup_count",
+            value: "explicit simdgroup count requires a legal row-tiled attention form",
+        }
+    ));
+}
+
+#[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
+#[test]
+fn explicit_simdgroup_count_updates_merge_admission_at_one_split() {
+    let mut operation = attention_rows_op(9, 2, 64, 248, 8, SLIDING_LOWER);
+    operation.extents = vec![8, 64, 2, 64];
+    let BoundOpKind::CachedAttention {
+        kv_heads,
+        query_rows,
+        cached_key_rows,
+        new_key_rows,
+        ..
+    } = &mut operation.kind
+    else {
+        panic!("attention_rows_op returns cached attention");
+    };
+    *kv_heads = 64;
+    *query_rows = 8;
+    *cached_key_rows = 248;
+    *new_key_rows = 8;
+
+    let policy = NumericPolicy::llama_relaxed();
+    let selected = AttentionVariant {
+        simdgroup_count: AttentionSimdgroupCount::Groups8,
+        ..AttentionVariant::default()
+    };
+    let legacy_schedule = AttentionRowSchedule::legacy();
+    let (_, selected_schedule) = AttentionMmaSelection::from_variant(selected)
+        .expect("eight simdgroups form a typed row schedule");
+    assert_eq!(
+        cached_attention_live_splits_with_schedule(&operation.kind, policy, legacy_schedule,),
+        2
+    );
+    assert_eq!(
+        cached_attention_live_splits_with_schedule(&operation.kind, policy, selected_schedule,),
+        1
+    );
+    assert!(cached_attention_merge_needed_with_schedule(
+        &operation.kind,
+        policy,
+        legacy_schedule,
+    ));
+    assert!(!cached_attention_merge_needed_with_schedule(
+        &operation.kind,
+        policy,
+        selected_schedule,
+    ));
+
+    let legacy_kernel =
+        emit(&operation, &PackedOperands::new(), policy).expect("legacy two-split partial emits");
+    let selected_kernel =
+        emit_with_attention_variant(&operation, &PackedOperands::new(), policy, selected)
+            .expect("selected one-split row-tiled dispatch emits");
+    assert!(legacy_kernel.bindings.contains(&Binding::Scratch));
+    assert!(
+        selected_kernel
+            .bindings
+            .contains(&Binding::Output(operation.node))
+    );
+    assert!(
+        emit_cached_attention_merge_with_schedule(&operation, policy, legacy_schedule)
+            .expect("legacy merge selection resolves")
+            .is_some()
+    );
+    assert!(
+        emit_cached_attention_merge_with_schedule(&operation, policy, selected_schedule)
+            .expect("selected merge selection resolves")
+            .is_none()
+    );
 }
 
 #[cfg(feature = "metal-attn-variants")]
@@ -1678,11 +1934,31 @@ fn card_18_prefetch_stages_the_next_kv_block_in_f16_operands() {
     )
     .expect("the F16 Granite-shaped K/V prefetch fits the threadgroup budget");
     assert!(parallel.entry.contains("_prefetch_next_block"));
-    assert!(parallel.source.contains("constexpr bool prefetch_next_block = true"));
-    assert!(parallel.source.contains("threadgroup half prefetched_key_even[2048]"));
-    assert!(parallel.source.contains("threadgroup half prefetched_key_odd[2048]"));
-    assert!(parallel.source.contains("threadgroup half prefetched_value[4096]"));
-    assert!(parallel.source.contains("simdgroup_store(value_operand, prefetched_value"));
+    assert!(
+        parallel
+            .source
+            .contains("constexpr bool prefetch_next_block = true")
+    );
+    assert!(
+        parallel
+            .source
+            .contains("threadgroup half prefetched_key_even[2048]")
+    );
+    assert!(
+        parallel
+            .source
+            .contains("threadgroup half prefetched_key_odd[2048]")
+    );
+    assert!(
+        parallel
+            .source
+            .contains("threadgroup half prefetched_value[4096]")
+    );
+    assert!(
+        parallel
+            .source
+            .contains("simdgroup_store(value_operand, prefetched_value")
+    );
     assert!(!parallel.source.contains('@'));
 
     let f32_error = emit_with_attention_variant(
@@ -1725,19 +2001,35 @@ fn card_18_prefetch_guards_a_partial_final_cached_block() {
     )
     .expect("a partial final cached block remains admissible");
     assert!(kernel.source.contains("step + 1L < cached_blocks"));
-    assert!(kernel.source.contains("long next_columns = min(block, slice_end - next_key0)"));
-    assert!(kernel.source.contains("int next_fragments = (int)((next_columns + 7L) / 8L)"));
-    assert!(kernel.source.contains("fragment_index < next_fragments * depth_fragments"));
+    assert!(
+        kernel
+            .source
+            .contains("long next_columns = min(block, slice_end - next_key0)")
+    );
+    assert!(
+        kernel
+            .source
+            .contains("int next_fragments = (int)((next_columns + 7L) / 8L)")
+    );
+    assert!(
+        kernel
+            .source
+            .contains("fragment_index < next_fragments * depth_fragments")
+    );
     assert!(kernel.source.contains("next_key0 + (long)key_tile * 8L"));
 }
 
 #[cfg(feature = "metal-attn-variants")]
 #[test]
 fn card_19_simd_topology_assigns_each_granite_query_head_once() {
-    let capture = include_str!("../../../proxima-tensor/specs/decode-prefill-parity/evidence/attn5/raw/probe/granite.out");
-    assert!(capture.lines().any(|line| {
-        line.contains("extents=[1000, 8, 2, 64]")
-    }));
+    let capture = include_str!(
+        "../../../proxima-tensor/specs/decode-prefill-parity/evidence/attn5/raw/probe/granite.out"
+    );
+    assert!(
+        capture
+            .lines()
+            .any(|line| { line.contains("extents=[1000, 8, 2, 64]") })
+    );
     let op = card_17_granite_attention(1000);
     let packed = PackedOperands::new();
     let policy = NumericPolicy::llama_relaxed();
@@ -1749,6 +2041,7 @@ fn card_19_simd_topology_assigns_each_granite_query_head_once() {
             kv_reuse: AttentionKvReuse::SharedKv,
             tile_height: AttentionTileHeight::Rows16,
             simd_topology: AttentionSimdTopology::PerHead,
+            simdgroup_count: AttentionSimdgroupCount::Legacy,
             ..AttentionVariant::default()
         },
     )
@@ -1761,14 +2054,31 @@ fn card_19_simd_topology_assigns_each_granite_query_head_once() {
             kv_reuse: AttentionKvReuse::SharedKv,
             tile_height: AttentionTileHeight::Rows16,
             simd_topology: AttentionSimdTopology::GroupedQueries,
+            simdgroup_count: AttentionSimdgroupCount::Legacy,
             ..AttentionVariant::default()
         },
     )
     .expect("grouped-query topology emits for Granite GQA");
-    assert!(per_head.source.contains("constexpr bool simd_per_head = true"));
-    assert!(grouped.source.contains("constexpr bool simd_per_head = false"));
-    assert!(per_head.source.contains("constexpr bool query_parallel_rows = false"));
-    assert!(grouped.source.contains("constexpr bool query_parallel_rows = false"));
+    assert!(
+        per_head
+            .source
+            .contains("constexpr bool simd_per_head = true")
+    );
+    assert!(
+        grouped
+            .source
+            .contains("constexpr bool simd_per_head = false")
+    );
+    assert!(
+        per_head
+            .source
+            .contains("constexpr bool query_parallel_rows = false")
+    );
+    assert!(
+        grouped
+            .source
+            .contains("constexpr bool query_parallel_rows = false")
+    );
     assert!(per_head.source.contains("constexpr long tile_rows = 16;"));
     assert!(grouped.source.contains("constexpr long tile_rows = 16;"));
     assert!(per_head.source.contains("block_index % (tile_rows / 8L)"));
@@ -1798,7 +2108,8 @@ fn card_19_simd_topology_assigns_each_granite_query_head_once() {
                         for row_within_block in 0..8_u64 {
                             let query_row = mapped_start + row_within_block;
                             if query_row >= owned_from && query_row < 1000 {
-                                let index = ((kv_head * 1000 + query_row) * 2 + query_group) as usize;
+                                let index =
+                                    ((kv_head * 1000 + query_row) * 2 + query_group) as usize;
                                 coverage[index] += 1;
                             }
                         }
@@ -1822,6 +2133,7 @@ fn card_19_simd_topology_declines_an_insufficient_head_width() {
         AttentionVariant {
             tile_height: AttentionTileHeight::Rows8,
             simd_topology: AttentionSimdTopology::PerHead,
+            simdgroup_count: AttentionSimdgroupCount::Legacy,
             ..AttentionVariant::default()
         },
     )
@@ -1837,11 +2149,15 @@ fn card_19_simd_topology_declines_an_insufficient_head_width() {
 
 #[cfg(feature = "metal-attn-variants")]
 #[test]
-fn card_20_dispatch_matrix_exposes_legacy_and_seven_one_factor_flips() {
-    let capture = include_str!("../../../proxima-tensor/specs/decode-prefill-parity/evidence/attn5/raw/probe/granite.out");
-    assert!(capture
-        .lines()
-        .any(|line| line.contains("extents=[1000, 8, 2, 64]")));
+fn card_20_dispatch_matrix_exposes_legacy_and_eight_one_factor_flips() {
+    let capture = include_str!(
+        "../../../proxima-tensor/specs/decode-prefill-parity/evidence/attn5/raw/probe/granite.out"
+    );
+    assert!(
+        capture
+            .lines()
+            .any(|line| line.contains("extents=[1000, 8, 2, 64]"))
+    );
     let operation = card_17_granite_attention(1000);
     let policy = NumericPolicy::llama_relaxed();
     let legacy = inspect_attention_variant(
@@ -1856,7 +2172,10 @@ fn card_20_dispatch_matrix_exposes_legacy_and_seven_one_factor_flips() {
     assert_eq!(legacy.kernel.source, pre_variant.source);
     assert_eq!(legacy.kernel.entry, pre_variant.entry);
     assert_eq!(legacy.kernel.grid, pre_variant.grid);
-    assert_eq!(legacy.form, cached_attention_form(&operation.kind, policy).expect("form classified"));
+    assert_eq!(
+        legacy.form,
+        cached_attention_form(&operation.kind, policy).expect("form classified")
+    );
     assert_eq!(legacy.cache_codec, None);
     assert_eq!(legacy.accumulator, DType::Float32);
     assert!(legacy.matches_selector(AttentionVariant::default()));
@@ -1905,6 +2224,10 @@ fn card_20_dispatch_matrix_exposes_legacy_and_seven_one_factor_flips() {
             ..matrix_base_variant
         },
         AttentionVariant {
+            simdgroup_count: AttentionSimdgroupCount::Groups4,
+            ..matrix_base_variant
+        },
+        AttentionVariant {
             prefetch: AttentionPrefetch::NextBlock,
             ..matrix_base_variant
         },
@@ -1929,6 +2252,7 @@ fn card_20_dispatch_matrix_exposes_legacy_and_seven_one_factor_flips() {
             + usize::from(selected.tile_height != matrix_base.variant.tile_height)
             + usize::from(selected.query_parallelism != matrix_base.variant.query_parallelism)
             + usize::from(selected.simd_topology != matrix_base.variant.simd_topology)
+            + usize::from(selected.simdgroup_count != matrix_base.variant.simdgroup_count)
             + usize::from(selected.prefetch != matrix_base.variant.prefetch);
         assert_eq!(changed_axes, 1, "selector must flip exactly one typed axis");
         assert_eq!(manifest.variant, selected);
@@ -1978,6 +2302,7 @@ fn card_21_cross_axis_admits_the_selected_granite_composition() {
         tile_height: AttentionTileHeight::Rows8,
         query_parallelism: AttentionQueryParallelism::SimdgroupRows,
         simd_topology: AttentionSimdTopology::PerHead,
+        simdgroup_count: AttentionSimdgroupCount::Legacy,
         prefetch: AttentionPrefetch::Off,
     };
     let manifest = inspect_attention_variant(
@@ -1986,7 +2311,7 @@ fn card_21_cross_axis_admits_the_selected_granite_composition() {
         NumericPolicy::llama_relaxed(),
         selected,
     )
-    .expect("the selected seven-axis composition fits");
+    .expect("the selected attention composition fits");
 
     assert_eq!(manifest.variant, selected);
     assert_eq!(manifest.cache_codec, Some(Codec::BFloat16));
@@ -1995,9 +2320,18 @@ fn card_21_cross_axis_admits_the_selected_granite_composition() {
     assert_eq!(manifest.kernel.grid.threadgroup_width, Some(64));
     assert_eq!(manifest.kernel.grid.depth, 1);
     assert!(manifest.kernel.source.contains("simd_per_head = true"));
-    assert!(manifest.kernel.source.contains("query_parallel_rows = true"));
+    assert!(
+        manifest
+            .kernel
+            .source
+            .contains("query_parallel_rows = true")
+    );
     assert!(manifest.kernel.source.contains("shared_key_even"));
-    assert!(manifest.dispatch_identity.contains("simd_topology: PerHead"));
+    assert!(
+        manifest
+            .dispatch_identity
+            .contains("simd_topology: PerHead")
+    );
 }
 
 #[cfg(feature = "metal-attn-variants")]
@@ -2019,6 +2353,7 @@ fn card_21_cross_axis_reports_exact_prefetch_budget_decline() {
             tile_height: AttentionTileHeight::Rows8,
             query_parallelism: AttentionQueryParallelism::SimdgroupRows,
             simd_topology: AttentionSimdTopology::PerHead,
+            simdgroup_count: AttentionSimdgroupCount::Legacy,
             prefetch: AttentionPrefetch::NextBlock,
         },
     )
@@ -2033,4 +2368,116 @@ fn card_21_cross_axis_reports_exact_prefetch_budget_decline() {
             ..
         }
     ));
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn explicit_four_simdgroup_dispatch_preserves_row_and_key_tiles() {
+    let operation = card_17_granite_attention(1000);
+    let policy = NumericPolicy::llama_relaxed();
+    let baseline = inspect_attention_variant(
+        &operation,
+        &PackedOperands::new(),
+        policy,
+        AttentionVariant::default(),
+    )
+    .expect("legacy row-tiled dispatch is available");
+    let selected = inspect_attention_variant(
+        &operation,
+        &PackedOperands::new(),
+        policy,
+        AttentionVariant {
+            simdgroup_count: AttentionSimdgroupCount::Groups4,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("four simdgroups divide this head and key block");
+
+    let CachedAttentionForm::TwoRangeRowTiled {
+        rows_per_threadgroup: baseline_rows,
+        simdgroups: baseline_simdgroups,
+        ..
+    } = baseline.form
+    else {
+        panic!("legacy shape selects row-tiled attention");
+    };
+    let CachedAttentionForm::TwoRangeRowTiled {
+        rows_per_threadgroup: selected_rows,
+        simdgroups: selected_simdgroups,
+        ..
+    } = selected.form
+    else {
+        panic!("selected shape keeps row-tiled attention");
+    };
+
+    assert_eq!(baseline_rows, selected_rows);
+    assert_eq!(baseline_simdgroups, 2);
+    assert_eq!(selected_simdgroups, 4);
+    assert_eq!(baseline.kernel.grid.threadgroup_width, Some(64));
+    assert_eq!(selected.kernel.grid.threadgroup_width, Some(128));
+    assert!(
+        selected
+            .kernel
+            .source
+            .contains("constexpr long simdgroups = 4")
+    );
+    assert!(baseline.kernel.source.contains("constexpr long block = 64"));
+    assert!(selected.kernel.source.contains("constexpr long block = 64"));
+    assert!(
+        baseline
+            .kernel
+            .source
+            .contains("constexpr long key_tiles_per_group = (block / 8) / simdgroups;")
+    );
+    assert!(
+        selected
+            .kernel
+            .source
+            .contains("constexpr long key_tiles_per_group = (block / 8) / simdgroups;")
+    );
+    assert!(
+        selected
+            .dispatch_identity
+            .contains("simdgroup_count: Groups4")
+    );
+    assert_ne!(baseline.dispatch_identity, selected.dispatch_identity);
+
+    let composed = inspect_attention_variant(
+        &operation,
+        &PackedOperands::new(),
+        policy,
+        AttentionVariant {
+            mma_precision: AttentionMmaPrecision::F16,
+            kv_reuse: AttentionKvReuse::SharedKv,
+            tile_height: AttentionTileHeight::Rows16,
+            query_parallelism: AttentionQueryParallelism::SimdgroupRows,
+            simdgroup_count: AttentionSimdgroupCount::Groups4,
+            ..AttentionVariant::default()
+        },
+    )
+    .expect("F16 shared K/V can compose with sixteen query rows and four simdgroups");
+    let CachedAttentionForm::TwoRangeRowTiled {
+        rows_per_threadgroup: composed_rows,
+        simdgroups: composed_simdgroups,
+        ..
+    } = composed.form
+    else {
+        panic!("composed Granite shape remains row-tiled");
+    };
+    assert_eq!(composed_rows, 16);
+    assert_eq!(composed_simdgroups, 4);
+    assert!(composed.kernel.source.contains("constexpr bool shared_k = true"));
+    assert!(composed.kernel.source.contains("constexpr bool shared_v = true"));
+    assert!(
+        composed
+            .kernel
+            .source
+            .contains("constexpr bool query_parallel_rows = true")
+    );
+    assert!(
+        composed
+            .kernel
+            .source
+            .contains("constexpr long simdgroups = 4")
+    );
 }
