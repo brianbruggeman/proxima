@@ -355,6 +355,7 @@ serde = { workspace = true, features = ["derive", "alloc"] }
 # already pins the version/features this line inherits, same as
 # `proxima-safetensors`'s identical `serde_json.workspace = true`.
 serde_json.workspace = true
+sha2 = { version = "0.10.9", default-features = false }
 thiserror.workspace = true
 toml = { workspace = true, optional = true }
 xxhash-rust = { workspace = true, features = ["xxh3"], optional = true }

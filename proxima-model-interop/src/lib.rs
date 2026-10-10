@@ -47,6 +47,7 @@ mod generate;
 #[cfg(feature = "std")]
 mod hf_bind;
 mod hf_config;
+pub mod pinned_source;
 #[cfg(feature = "std")]
 mod short_conv;
 #[cfg(feature = "std")]
