@@ -1236,13 +1236,17 @@ fn run_variant_prefill_probe_shapes(
             selected_samples.push(selected_ns);
             signed_deltas.push(selected_ns - baseline_ns);
         }
+        let baseline_pipeline_resources = baseline.dispatch.pipeline_resources();
+        let selected_pipeline_resources = selected.dispatch.pipeline_resources();
         println!(
-            "granite_variant_probe name={variant_name} config={variant:?} nominal_tokens={nominal_tokens} actual_tokens={} node={} extents={:?} baseline_entry={} selected_entry={} baseline_grid={:?} selected_grid={:?} output_diff={output_difference} ids_equal={ids_equal} baseline_ids={:?} selected_ids={:?} baseline_samples_ns={baseline_samples:?} selected_samples_ns={selected_samples:?} selected_minus_baseline_ns={signed_deltas:?} baseline_summary={:?} selected_summary={:?}",
+            "granite_variant_probe name={variant_name} config={variant:?} nominal_tokens={nominal_tokens} actual_tokens={} node={} extents={:?} baseline_entry={} selected_entry={} baseline_msl_sha256={} selected_msl_sha256={} baseline_grid={:?} selected_grid={:?} baseline_pipeline_resources={baseline_pipeline_resources:?} selected_pipeline_resources={selected_pipeline_resources:?} output_diff={output_difference} ids_equal={ids_equal} baseline_ids={:?} selected_ids={:?} baseline_samples_ns={baseline_samples:?} selected_samples_ns={selected_samples:?} selected_minus_baseline_ns={signed_deltas:?} baseline_summary={:?} selected_summary={:?}",
             actual_tokens,
             baseline.dispatch.node,
             baseline.dispatch.extents,
             baseline.dispatch.entry,
             selected.dispatch.entry,
+            baseline.dispatch.msl_sha256,
+            selected.dispatch.msl_sha256,
             baseline.dispatch.grid,
             selected.dispatch.grid,
             baseline.token_ids,
