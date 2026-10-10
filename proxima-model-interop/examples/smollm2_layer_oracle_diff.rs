@@ -137,7 +137,8 @@ fn main() {
     let config_bytes =
         fs::read(PathBuf::from(&model_dir).join("config.json")).expect("read config.json");
     let hf_config = parse_hf_config(&config_bytes).expect("parse config.json");
-    let architecture = architecture_from_hf_config(&hf_config);
+    let architecture =
+        architecture_from_hf_config(&hf_config).expect("derive architecture from model config");
 
     let tokenizer_bytes =
         fs::read(PathBuf::from(&model_dir).join("tokenizer.json")).expect("read tokenizer.json");
