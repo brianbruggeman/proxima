@@ -6396,6 +6396,94 @@ fn architecture_matrix_shortconv_fused_projection_row_views() {
     std::println!("branches=3 shapes=3 values=12 offsets=0,2,4");
 }
 
+#[test]
+fn architecture_matrix_mixed_cached_conv_roots() {
+    const EMBEDDING: u32 = 2;
+    const L_CACHE: u32 = 3;
+    let attention = LayerAttentionConfig {
+        head_dim: 2,
+        kv_heads: 1,
+        mask_window: None,
+        value_source_kind: ValueSourceKind::ProjectedV,
+        key_source_kind: KeySourceKind::ProjectedK,
+        rope_table: RopeTableSel {
+            cos_name: String::from("rope_cos"),
+            sin_name: String::from("rope_sin"),
+        },
+        rope_pairing: RopePairing::SplitHalf { pairs: 1 },
+        score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(2),
+        value_norm: false,
+    };
+    let schedule = alloc::vec![
+        LayerSchedule {
+            kind: LayerKind::Attention,
+            attention: attention.clone(),
+            ffn: LayerFfnConfig::exclusive(),
+        },
+        LayerSchedule {
+            kind: LayerKind::ShortConv,
+            attention,
+            ffn: LayerFfnConfig::exclusive(),
+        },
+    ];
+
+    let (program, _logits, roots, _moe_sites, _head_repeats) =
+        scheduled_two_range_cached_forward_program_with_layer_roots(
+            4,
+            EMBEDDING,
+            2,
+            2,
+            1,
+            2,
+            0,
+            0,
+            2,
+            &schedule,
+            None,
+            None,
+            true,
+            None,
+            false,
+            L_CACHE,
+            1,
+        )
+        .expect("mixed attention and short-convolution schedule lowers");
+
+    let attention_roots = roots
+        .iter()
+        .filter(|root| matches!(root, LayerCacheRoots::Attention(_)))
+        .count();
+    let conv_roots = roots
+        .iter()
+        .filter(|root| matches!(root, LayerCacheRoots::ShortConv { .. }))
+        .count();
+    assert_eq!(attention_roots, 1);
+    assert_eq!(conv_roots, 1);
+    assert!(matches!(roots[0], LayerCacheRoots::Attention(_)));
+    let LayerCacheRoots::ShortConv { state_out } = roots[1] else {
+        panic!("second layer must return its short-convolution state");
+    };
+    let shapes = crate::shape::infer(&program, &[1, 1]).expect("mixed cached graph shapes infer");
+    assert_eq!(
+        shapes.of(state_out),
+        &[u64::from(EMBEDDING), u64::from(L_CACHE)]
+    );
+
+    let input_names: Vec<&str> = program
+        .iter()
+        .filter_map(|operation| match operation {
+            Op::Input {
+                name: Some(name), ..
+            } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(input_names.contains(&"kv_cache.0.k_even"));
+    assert!(input_names.contains(&"shortconv_cache.1.history"));
+    assert!(input_names.contains(&"shortconv_cache.1.roll_indices"));
+    std::println!("attention_layers=1 shortconv_layers=1 kv_roots=1 conv_roots=1");
+}
+
 #[proxima::test]
 async fn architecture_matrix_lfm_conv_step() {
     const L_CACHE: u32 = 3;

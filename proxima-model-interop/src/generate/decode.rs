@@ -1513,6 +1513,10 @@ impl<'file> LoadedModel<'file> {
                     k_pass: alloc::format!("kv_cache.{layer}.k_pass"),
                     v: alloc::format!("kv_cache.{layer}.v"),
                 },
+                DeclaredCacheKind::ShortConv => LayerCacheNames::ShortConv {
+                    history: alloc::format!("shortconv_cache.{layer}.history"),
+                    roll_indices: alloc::format!("shortconv_cache.{layer}.roll_indices"),
+                },
                 DeclaredCacheKind::Ssm => LayerCacheNames::Ssm {
                     conv_history: alloc::format!("ssm_cache.{layer}.conv_history"),
                     state: alloc::format!("ssm_cache.{layer}.state"),
@@ -1576,6 +1580,27 @@ impl<'file> LoadedModel<'file> {
                 }
                 (LayerCacheNames::DenseAttention { .. }, _) => {
                     Ok(LayerCacheState::DenseAttention(DenseAttentionCache::new()))
+                }
+                (
+                    LayerCacheNames::ShortConv { history, .. },
+                    LayerPadRowWidths::ShortConv {
+                        history_len,
+                        roll_indices_len,
+                    },
+                ) => {
+                    #[cfg(feature = "instrument")]
+                    debug!(
+                        history_name = %history,
+                        history_len = *history_len,
+                        roll_indices_len = *roll_indices_len,
+                        "shortconv cache seeded at its program-declared shape"
+                    );
+                    #[cfg(not(feature = "instrument"))]
+                    let _ = history;
+                    Ok(LayerCacheState::ShortConv(ShortConvLayerCache::new(
+                        *history_len,
+                        *roll_indices_len,
+                    )))
                 }
                 (
                     LayerCacheNames::Ssm {
@@ -4339,6 +4364,7 @@ did not hold every cached position)",
                                     roots.push(*value);
                                 }
                             }
+                            LayerCacheRoots::ShortConv { state_out } => roots.push(*state_out),
                             LayerCacheRoots::Ssm {
                                 qkv_mixed,
                                 state_out,
@@ -5804,6 +5830,19 @@ did not hold every cached position)",
                                 } else {
                                     cache.advance_conv_history(qkv_mixed_data, conv_history_len);
                                 }
+                            }
+                            (
+                                LayerCacheRoots::ShortConv { state_out },
+                                LayerCacheState::ShortConv(cache),
+                            ) => {
+                                let (history, _) = evaluated
+                                    .get(*state_out)
+                                    .ok_or(InteropError::MissingEvaluatedNode { node: *state_out })?;
+                                #[cfg(feature = "instrument")]
+                                {
+                                    layer_cache_append_elements += history.len() as u64;
+                                }
+                                cache.replace_history(history, layer)?;
                             }
                             // the E2B checkpoint's cross-layer shared-KV layer: no
                             // state of its own to append to -- its `K`/`V`

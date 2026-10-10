@@ -1,0 +1,40 @@
+Card 13b2b acceptance evidence
+Host: Darwin Thor-43.local 24.6.0 arm64
+Compiler: rustc 1.99.0 (b940084d7 2026-09-28)
+
+Command:
+nice -n 20 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-tensor --lib architecture_matrix_mixed_cached_conv_roots -- --nocapture
+
+Output:
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running unittests src/lib.rs (/tmp/cargo_target/debug/deps/proxima_tensor-7f7e73581b90a90b)
+
+running 1 test
+attention_layers=1 shortconv_layers=1 kv_roots=1 conv_roots=1
+test spec::tests::architecture_matrix_mixed_cached_conv_roots ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.00s
+
+Exit status: 0
+
+Command:
+taskpolicy -b nice -n 20 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo check -p proxima-model-interop --features std --lib
+
+Output:
+    Checking proxima-model-interop v0.1.0 (/private/tmp/proxima-model-matrix/proxima-model-interop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.99s
+
+Exit status: 0
+
+Command:
+git diff --check
+
+Output: (no diagnostics)
+Exit status: 0
+
+The initial test attempt using `taskpolicy -b` built the binary but the OS
+reported it as launched-suspended before the named test started. That run was
+interrupted. The recorded focused test above ran to completion without that
+background policy. These checks establish the mixed graph roots and std-gated
+interop compilation only; no full LFM checkpoint invocation or numeric parity
+is claimed.

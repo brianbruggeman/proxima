@@ -399,6 +399,10 @@ impl PrefixState {
                 LayerCacheState::DenseAttention(cache) => {
                     float_bytes(&[&cache.k_first, &cache.k_second, &cache.k_pass, &cache.v])
                 }
+                LayerCacheState::ShortConv(cache) => {
+                    float_bytes(&[&cache.history])
+                        + cache.roll_indices.capacity() * size_of::<i32>()
+                }
                 LayerCacheState::Ssm(cache) => float_bytes(&[&cache.conv_history, &cache.state]),
                 LayerCacheState::SharedFromLayer => 0,
             })

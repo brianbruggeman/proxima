@@ -72,7 +72,9 @@ impl RingCheckpoint {
                         layers.push(rows);
                     }
                 }
-                LayerCacheState::DenseAttention(_) | LayerCacheState::Ssm(_) => return None,
+                LayerCacheState::DenseAttention(_)
+                | LayerCacheState::ShortConv(_)
+                | LayerCacheState::Ssm(_) => return None,
             }
         }
         (position > 0 && !layers.is_empty()).then_some(Self { position, layers })

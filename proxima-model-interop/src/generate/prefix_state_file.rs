@@ -68,7 +68,9 @@ fn layer_record(entry: &LayerCacheState, cached_len: usize) -> Result<BlockFileL
     match entry {
         LayerCacheState::SharedFromLayer => Ok(BlockFileLayer::default()),
         LayerCacheState::Attention(cache) => attention_layer(cache, cached_len),
-        LayerCacheState::DenseAttention(_) | LayerCacheState::Ssm(_) => {
+        LayerCacheState::DenseAttention(_)
+        | LayerCacheState::ShortConv(_)
+        | LayerCacheState::Ssm(_) => {
             Err(malformed("layer kind has no row planes"))
         }
     }

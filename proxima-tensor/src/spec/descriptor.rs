@@ -689,7 +689,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                 "a residual scale",
             )?;
             let (program, logits, cache_roots, moe_sites, duplicate_head_roots) =
-                scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
+                scheduled_two_range_cached_forward_program_with_layer_roots(
                     descriptor.vocab,
                     descriptor.embedding,
                     descriptor.feed_forward,
@@ -705,12 +705,13 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                     descriptor.last_row_only,
                     descriptor.ple_dim,
                     descriptor.sliding_kv_ring,
+                    descriptor.l_cache,
                     descriptor.head_repeats,
                 )?;
             Ok(ForwardProgram {
                 program,
                 logits,
-                layer_roots: layer_roots_from_cache(&descriptor.layers, cache_roots)?,
+                layer_roots: cache_roots,
                 moe_sites,
                 layer_residuals: Vec::new(),
                 hidden: None,
