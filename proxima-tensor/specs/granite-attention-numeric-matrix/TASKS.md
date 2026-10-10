@@ -35,8 +35,9 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update the r
 ## resume
 
 Last landed slice: Card 26 capture/output gate; AC26 selected 2 tests and passed 2, pushed to origin/main after commit
-Next action: implement performance Card 00's one-shape raw replay cell
-Open question, if any: whether the timed baseline and SharedK replay samples differ at either prompt length; Cards 00–02 retain the samples and checker evidence
+Performance follow-on: Cards 00–02 in `granite-attention-variant-performance` now retain one- and two-shape replay cells and checked report evidence
+Next action: none in the numeric-matrix or two-shape replay card sequences
+Open question, if any: whole-layer/request performance mechanism; the isolated replay report does not resolve it
 
 ## struck
 
