@@ -41,10 +41,10 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update its c
 
 ## resume
 
-Last completed slice: Card 25 thousand-pair Groups4 tail replay on the main-based checkout.
-Current slice: Groups4 had lower p50/p90/p99 in the six 1,000-pair cells with matched outputs/IDs. Long-prompt pairs still include selected-slower rounds; splitting by alternating order does not explain those rounds. Groups4 remains explicit-only through the existing setting.
-Next action: review the complete Cards 17, 21, 24, and 25 samples and source records to determine whether a further one-variable instrumented experiment can identify the long-prompt slow-pair mechanism. Do not change the default based on a timing result without that mechanism and the serving-level scope evidence.
-Open question: why selected-slower rounds remain in the long prompt even as its measured percentiles are lower; available Metal profiling exposes no shader counters or labeled intervals.
+Last completed slice: Card 25 thousand-pair Groups4 tail replay and source/raw-record review on the main-based checkout.
+Current slice: the Groups4 replay experiment is captured end to end. Groups4 remains an explicit serving choice; Legacy remains the default. The lower timestamp percentiles, complete output/ID matches, source partition, paired slow-round records, and order split are all retained.
+Next action: none for this replay slice. Keep the long-prompt selected-slower rounds as an unexplained residual; further attribution requires per-shader instrumentation unavailable in this Mac's current Metal counter/trace setup.
+Open question: what device-level behavior produces the long-prompt selected-slower paired rounds despite lower selected percentiles; current artifacts do not identify that mechanism.
 
 ## struck
 
