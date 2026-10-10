@@ -1,3 +1,5 @@
+use core::num::NonZeroU32;
+
 use super::*;
 
 /// A fixed-width causal depthwise convolution (`l_cache` taps, one weight per
@@ -321,6 +323,116 @@ pub fn causal_conv1d_step(
     }
 
     Ok((conv_out, state_out))
+}
+
+/// Extracts the final `l_cache` gated-input rows for a caller-owned LFM2
+/// cache, left-padding with zeros when the prefill is shorter than the cache.
+/// `prefill_len` is the graph's static sequence width and `gated_input` has
+/// shape `[prefill_len, channels]`.
+pub fn causal_conv1d_prefill_state(
+    program: &mut Vec<Op>,
+    gated_input: NodeId,
+    prefill_len: NonZeroU32,
+    l_cache: u32,
+) -> Result<NodeId, TensorError> {
+    if l_cache == 0 {
+        return Err(TensorError::InvalidConvConfig { l_cache });
+    }
+
+    let sequence_position = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(l_cache),
+        },
+    );
+    let start_position = scalar_constant(program, prefill_len.get() as f32 - l_cache as f32);
+    let raw_position = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(sequence_position, "l->l"), (start_position, "->l")],
+    )?;
+
+    let candidate_position = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(2),
+        },
+    );
+    let zero = scalar_constant(program, 0.0);
+    let zero_candidates = op::append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(l_cache), Extent::Static(2)],
+            value: 0.0,
+        },
+    );
+    let is_raw_candidate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Equal,
+        &[(candidate_position, "c->lc"), (zero_candidates, "lc->lc")],
+    )?;
+    let candidate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[
+            (is_raw_candidate, "lc->lc"),
+            (raw_position, "l->lc"),
+            (zero, "->lc"),
+        ],
+    )?;
+    let gather_position = reduce(
+        program,
+        DType::Int32,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        candidate,
+        "lc->lc",
+        "l->lc",
+    )?;
+
+    let negative_one = scalar_constant(program, -1.0);
+    let has_prefill_value = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Greater,
+        &[(raw_position, "l->l"), (negative_one, "->l")],
+    )?;
+    let gathered_state = gather_computed(
+        program,
+        gated_input,
+        gather_position,
+        map::projection(2, &[1]),
+        IndexPattern {
+            iter_rank: 2,
+            axes: alloc::vec![
+                AxisIndex::default(),
+                AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(0)).collect(),
+                    offset: 0,
+                    len: None,
+                },
+            ],
+        },
+        0,
+        DType::Float32,
+    );
+
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[
+            (has_prefill_value, "l->dl"),
+            (gathered_state, "dl->dl"),
+            (zero, "->dl"),
+        ],
+    )
 }
 
 /// the short-conv family's gated short-convolution mixer, [`append_gqa_layer`]'s
