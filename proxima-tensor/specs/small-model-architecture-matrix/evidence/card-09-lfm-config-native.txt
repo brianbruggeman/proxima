@@ -1,0 +1,17 @@
+Command: `taskpolicy -b nice -n 20 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-model-interop --lib architecture_matrix_lfm_schedule -- --nocapture`
+Host: Darwin Thor-43.local 24.6.0 arm64
+Compiler: rustc 1.99.0 (b940084d7 2026-09-28)
+Exit status: 0
+`git diff --check`: exit status 0; no output
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.00s
+     Running unittests src/lib.rs (/tmp/cargo_target/debug/deps/proxima_model_interop-55d5d9ad7d440948)
+
+running 1 test
+layers=16 schedule_matches=16 wrong_marker_rejected=1 missing_marker_rejected=1 wrong_shape_rejected=1 incomplete_config_rejected=1 unknown_layer_rejected=1
+test hf_config::tests::architecture_matrix_lfm_schedule ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 89 filtered out; finished in 0.01s
+
+Library check command: `taskpolicy -b nice -n 20 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo check -p proxima-model-interop --lib`
+Library check output: `Finished dev profile target(s) in 0.98s`; exit status 0.
