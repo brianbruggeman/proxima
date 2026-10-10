@@ -1,0 +1,31 @@
+Analysis of sampling proxima-model-interop-tests (pid 28755) every 1 millisecond
+Process:         proxima-model-interop-tests [28755]
+Path:            /private/tmp/*/proxima-model-interop-tests
+Load Address:    0x104670000
+Identifier:      proxima-model-interop-tests
+Version:         ???
+Code Type:       ARM64
+Parent Process:  codex [3968]
+Target Type:     live task
+
+Date/Time:       2026-10-10 13:39:04.581 -0500
+Launch Time:     2026-10-10 13:38:41.554 -0500
+OS Version:      macOS 15.8 (24H20)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         96K
+Physical footprint (peak):  96K
+Idle exit:                  untracked
+----
+
+Call graph:
+    3564 Thread_88163612: Main Thread   DispatchQueue_<multiple>
+      3564 _dyld_start  (in dyld) + 0  [0x107c587c0]
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        _dyld_start  (in dyld)        3564
+
+Binary images description not available
