@@ -2019,6 +2019,50 @@ async fn perf_granite_serving_tile_height_rows8_vs_rows16_groups4() {
 
 
 #[proxima::test]
+async fn perf_granite_serving_legacy_tile_vs_rows8_groups4() {
+    let legacy_settings = ServingSettings::builder()
+        .attention_simdgroup_count(AttentionSimdgroupCount::Groups4)
+        .attention_tile_height(AttentionTileHeightSetting::Legacy)
+        .build();
+    let rows8_settings = ServingSettings::builder()
+        .attention_simdgroup_count(AttentionSimdgroupCount::Groups4)
+        .attention_tile_height(AttentionTileHeightSetting::Rows8)
+        .build();
+    let legacy_config = legacy_settings.as_serving_config(&[]);
+    let rows8_config = rows8_settings.as_serving_config(&[]);
+    let legacy_tile = legacy_config
+        .attention_variant
+        .expect("Groups4 with legacy tile height lowers to an attention variant");
+    let rows8 = rows8_config
+        .attention_variant
+        .expect("Rows8 serving setting lowers to an attention variant");
+
+    assert_eq!(legacy_tile.tile_height, AttentionTileHeight::Legacy);
+    assert_eq!(rows8.tile_height, AttentionTileHeight::Rows8);
+    assert_eq!(
+        legacy_tile.simdgroup_count,
+        AttentionSimdgroupCount::Groups4
+    );
+    assert_eq!(rows8.simdgroup_count, AttentionSimdgroupCount::Groups4);
+    assert_eq!(legacy_tile.kv_storage, rows8.kv_storage);
+    assert_eq!(legacy_tile.mma_precision, rows8.mma_precision);
+    assert_eq!(legacy_tile.kv_reuse, rows8.kv_reuse);
+    assert_eq!(legacy_tile.query_parallelism, rows8.query_parallelism);
+    assert_eq!(legacy_tile.simd_topology, rows8.simd_topology);
+    assert_eq!(legacy_tile.prefetch, rows8.prefetch);
+
+    run_variant_prefill_probe_shapes_with_grid_requirement(
+        "serving_legacy_tile_vs_rows8_groups4",
+        Some(legacy_tile),
+        rows8,
+        &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
+        false,
+        true,
+    );
+}
+
+
+#[proxima::test]
 async fn perf_granite_rows16_shared_k_simdgroup_rows() {
     run_variant_prefill_probe_shapes(
         "f16_rows16_shared_k_simdgroup_rows",
