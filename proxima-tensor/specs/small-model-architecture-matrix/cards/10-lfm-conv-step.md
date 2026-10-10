@@ -1,45 +1,50 @@
-# Card 10: LFM short-convolution token step
+# Card 10: LFM causal short-convolution token step
 
-## Worked example (paper, before implementation)
+## Contract
 
-Pinned inputs: `fixtures/semantic-pair-configs/lfm_text.json` declares `conv_L_cache = 3` and `conv_bias = false`. The configuration declares `transformers_version = 4.57.2`. The retained upstream source fixture at `fixtures/upstream-source/f399fa2a111dac8c7fc07b2717abb10ee3e82468851321f45553ebb10fbd28b1.py.gz:491-499` rolls the cached state left, clamps `cache_position` to `[0, L-1]`, writes the current `Bx = B * x` at that slot, and sums the updated taps against `conv.weight[:, 0, :]`. The write is not always at the newest slot.
+Advance explicit convolution history by one gated `B*x` input. `state_in` and
+`state_out` have `[channels, l_cache]` shape; `roll_indices` is the caller's
+`(1..l_cache, 0)` permutation. The transition rolls the history left, clamps
+the absolute cache position to `[0, l_cache - 1]`, overwrites that slot,
+computes the weighted tap sum, and returns both output and state. Cache width
+zero is rejected before graph mutation.
 
-Concrete one-channel decode case:
+The pinned Transformers fixture at
+`fixtures/upstream-source/f399fa2a111dac8c7fc07b2717abb10ee3e82468851321f45553ebb10fbd28b1.py.gz`
+contains two implementations. `cuda_kernels_forward` calls
+`causal_conv1d_update` with its default `cache_seqlens=None` (:455-463), whose
+reference implementation appends new samples to the state before computing
+the causal window ([causal-conv1d reference at `cd81f041`](https://github.com/Dao-AILab/causal-conv1d/blob/cd81f0413cad2fc1e6f17e785ac39f59aae690cd/causal_conv1d/causal_conv1d_interface.py#L1140-L1175)).
+The same Transformers fixture selects `slow_forward` unless running the CUDA
+fast path (:522-524); that fallback writes at the clamped absolute cache
+position after rolling (:491-499). For a one-token prefill with history
+`[0,0,g1]`, the next token at position 1 produces `[0,g2,0]`; this overwrites
+the preceding sample. A causal FIFO update would produce `[0,g1,g2]` instead.
+The graph test reproduces the pinned non-CUDA `slow_forward` formula; no
+Transformers model, runtime, or device execution is included. The full-sequence
+causal path remains a distinct reference.
 
-- old state, oldest to newest: `[1, 2, 3]`
-- current gated input `Bx`: `[4]`
-- cache width: `3`
-- depthwise weights, oldest to newest: `[1, 10, 100]`
-- convolution bias: absent, matching the pinned config
-- decode cache position cases: `1` and `3`; clamped write slots are `1` and `2`
+## Worked vector
 
-At cache position `3`:
+Use one channel, cache width 3, old history `[1, 2, 3]`, current gated input
+`[4]`, weights `[1, 10, 100]`, and absolute cache position 2:
 
-1. Roll left: `[1, 2, 3] -> [2, 3, 1]`.
-2. Write current `Bx=4` at slot `2`: `state_out = [2, 3, 4]`.
-3. Dot updated state with taps: `conv_out = 2*1 + 3*10 + 4*100 = 432`.
+1. Roll: `[1, 2, 3] -> [2, 3, 1]`.
+2. Clamp position 2 and overwrite that slot: `state_out = [2, 3, 4]`.
+3. Dot the taps: `conv_out = 2*1 + 3*10 + 4*100 = 432`.
 
-At cache position `1`, the same roll produces `[2, 3, 1]`, then the write produces `state_out = [2, 4, 1]` and `conv_out = 2*1 + 4*10 + 1*100 = 142`. This case falsifies an unconditional newest-slot append: that incorrect update would return `[2, 3, 4]` and `432`. The position-3 case also agrees with the final position of the existing batch causal-convolution example (`proxima-tensor/src/spec/tests.rs::causal_conv1d_matches_a_hand_computed_causal_window`).
-
-## Algorithm (pseudocode)
-
-```text
-step(state[d, l], gated_input[d], weight[d, l], cache_position):
-  write_slot = clamp(cache_position, 0, L - 1)
-  rolled[d, l] = state[d, (l + 1) mod L]
-  next_state[d, l] = gated_input[d] if l == write_slot else rolled[d, l]
-  conv_out[d] = sum_l(next_state[d, l] * weight[d, l])
-  return conv_out[d], next_state[d, l]
-```
-
-The step precondition is `cache_position > 0`, matching the pinned cached decode branch; initial/prefill cache construction is outside this card.
-
-The state stores prior `B*x` values, not raw hidden states or convolution outputs. The returned `conv_out` is pre-`C` gating and pre-`out_proj`, matching the local batch `causal_conv1d` boundary. The subsequent mixer stages remain the caller's responsibility.
+The named test checks final-tap and shorter absolute positions against the
+pinned overwrite behavior.
 
 ## Design pressure
 
-Use the existing Proxima `Input`, `Elementwise`, `Reduce`, and `Output` graph contract to express caller-owned state-in/state-out. Do not add a stateful `Op` variant: the LFM state is an ordinary fixed-width tensor, and the public `build_forward` graph already represents cache values as input/output leaves. A ring buffer and a persistent hidden allocation are ruled out; this reference step always exposes the exact oldest-to-newest state and writes no state implicitly.
+History remains an ordinary caller-owned tensor. The transition uses existing
+`Input`, `Elementwise`, `Reduce`, and gather operations; it adds no stateful op
+or hidden allocation. The absolute-position overwrite is required to match the
+pinned non-CUDA path for short prefills.
 
-## Implementation mapping
+## Validation
 
-For the pinned `L=3` graph, caller-owned `state_in [D,3]`, `gated_input [D]`, and `weight [D,3]` are inputs. A fixed roll-index leaf `[1,2,0]` feeds the existing computed gather along the tap axis. `Iota` plus equality against the clamped write slot selects current input at one tap and rolled state at the others. Elementwise multiply and tap-axis reduce produce `conv_out`; optional bias is added only when configured. The returned state is an explicit graph root, so the caller owns cache persistence. The named test runs positions 1 and 3, checks both state/output pairs, and asserts the unconditional-append control differs at position 1.
+Run `taskpolicy -b nice -n 20 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-tensor --lib architecture_matrix_lfm_conv_step -- --nocapture`. The expected count is one named test, printing
+`steps=2 reference_pairs=2 state_values=6`. Run `git diff --check` as part of
+the card evidence.
