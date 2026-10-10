@@ -17,9 +17,9 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update its c
 
 ## resume
 
-Last landed slice: Card 06 Rows16 plus SharedK probe (`3429ee03`)
+Last landed slice: Card 06 Rows16 plus SharedK probe (acceptance 1/1; pushed to `origin/main`)
 Current slice: Card 06 acceptance complete (1/1 passed; 2 shapes recorded)
-Next action: fast-forward push Card 06 to `origin/main`
+Next action: remove one adjacent SharedK barrier under the existing variant toggle and replay the same Granite dispatch
 Open question, if any: what GPU-side cost explains the higher captured SharedK replay time despite identical output and fewer grid threads?
 
 ## struck
