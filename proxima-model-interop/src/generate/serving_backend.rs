@@ -151,6 +151,11 @@ mod tests {
                     LayerCacheState::Ssm(layer_cache) => {
                         layer_cache.advance(&synthetic, &synthetic, synthetic.len());
                     }
+                    LayerCacheState::ShortConv(layer_cache) => {
+                        for (index, value) in layer_cache.history.iter_mut().enumerate() {
+                            *value = synthetic[index % synthetic.len()];
+                        }
+                    }
                     LayerCacheState::SharedFromLayer => {}
                 }
             }
@@ -163,6 +168,7 @@ mod tests {
     fn fresh_cache() -> ServingCache {
         alloc::vec![
             LayerCacheState::Attention(LayerCache::new()),
+            LayerCacheState::ShortConv(ShortConvLayerCache::new(4, 2)),
             LayerCacheState::Ssm(SsmLayerCache::new(4, 2)),
         ]
     }
@@ -201,8 +207,12 @@ mod tests {
             prompt_rows,
             "prefill placed every prompt row into layer 0's cache"
         );
-        let LayerCacheState::Ssm(ssm) = &cache[1] else {
-            panic!("layer 1 is Ssm");
+        let LayerCacheState::ShortConv(shortconv) = &cache[1] else {
+            panic!("layer 1 is ShortConv");
+        };
+        assert_eq!(shortconv.history, [4.0, 6.0, 8.0, 4.0]);
+        let LayerCacheState::Ssm(ssm) = &cache[2] else {
+            panic!("layer 2 is Ssm");
         };
         assert_eq!(
             ssm.state.len(),
@@ -222,6 +232,10 @@ mod tests {
             .evaluate(&[last], cache)
             .expect("fake backend never errors");
         assert_eq!(next_token, 9, "(8 + 1) % 11 == 9");
+        let LayerCacheState::ShortConv(shortconv) = &cache[1] else {
+            panic!("layer 1 is ShortConv");
+        };
+        assert_eq!(shortconv.history, [9.0; 4]);
         let LayerCacheState::Attention(attention) = &cache[0] else {
             panic!("layer 0 is Attention");
         };
