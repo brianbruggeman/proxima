@@ -1184,6 +1184,7 @@ fn run_variant_prefill_probe_shapes(
         variant,
         prompt_shapes,
         false,
+        false,
     );
 }
 
@@ -1193,6 +1194,7 @@ fn run_variant_prefill_probe_shapes_with_grid_requirement(
     variant: AttentionVariant,
     prompt_shapes: &[usize],
     require_equal_grid: bool,
+    require_equal_output: bool,
 ) {
     let path = granite_checkpoint_path();
     let file = File::open(&path).expect("open the real Granite checkpoint");
@@ -1261,6 +1263,12 @@ fn run_variant_prefill_probe_shapes_with_grid_requirement(
                 .is_some_and(f64::is_finite),
             "RMS output difference is finite"
         );
+        if require_equal_output {
+            assert_eq!(
+                output_difference["changed_bits"], 0,
+                "Rows16 must preserve every captured output bit"
+            );
+        }
         let token_comparison = compare_token_ids(&baseline.token_ids, &selected.token_ids);
         let ids_equal = token_comparison.is_ok();
         token_comparison
@@ -1282,6 +1290,14 @@ fn run_variant_prefill_probe_shapes_with_grid_requirement(
             } else {
                 (second_ns, first_ns)
             };
+            assert!(
+                baseline_ns.is_finite() && baseline_ns > 0.0,
+                "baseline GPU replay time must be finite and positive"
+            );
+            assert!(
+                selected_ns.is_finite() && selected_ns > 0.0,
+                "selected GPU replay time must be finite and positive"
+            );
             baseline_samples.push(baseline_ns);
             selected_samples.push(selected_ns);
             signed_deltas.push(selected_ns - baseline_ns);
@@ -1813,6 +1829,35 @@ async fn perf_granite_rows16_shared_k_f16_vs_f32_mma() {
         Some(baseline),
         selected,
         &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
+        true,
+        false,
+    );
+}
+
+#[proxima::test]
+async fn perf_granite_rows16_only_repeat() {
+    let baseline = f16_variant();
+    let selected = f16_rows16_variant();
+    for variant in [baseline, selected] {
+        assert_eq!(variant.kv_storage, omega::AttentionKvStorage::F32);
+        assert_eq!(variant.mma_precision, omega::AttentionMmaPrecision::F16);
+        assert_eq!(variant.kv_reuse, omega::AttentionKvReuse::Legacy);
+        assert_eq!(
+            variant.query_parallelism,
+            omega::AttentionQueryParallelism::Legacy
+        );
+        assert_eq!(variant.simd_topology, omega::AttentionSimdTopology::Legacy);
+        assert_eq!(variant.prefetch, omega::AttentionPrefetch::Off);
+    }
+    assert_eq!(baseline.tile_height, omega::AttentionTileHeight::Legacy);
+    assert_eq!(selected.tile_height, omega::AttentionTileHeight::Rows16);
+
+    run_variant_prefill_probe_shapes_with_grid_requirement(
+        "f16_rows16_only_repeat",
+        Some(baseline),
+        selected,
+        &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
+        false,
         true,
     );
 }
