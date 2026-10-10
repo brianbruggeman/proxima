@@ -1847,6 +1847,23 @@ fn explicit_simdgroup_count_rejects_a_non_row_tiled_shape() {
 
 #[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
 #[test]
+fn explicit_simdgroup_count_ignores_non_cached_attention_operations() {
+    let (_, schedule) = AttentionMmaSelection::from_variant(AttentionVariant {
+        simdgroup_count: AttentionSimdgroupCount::Groups4,
+        ..AttentionVariant::default()
+    })
+    .expect("the selected simdgroup count has a row schedule");
+
+    validate_simdgroup_count_selection(
+        &softmax_weights_rows_op(8, 8),
+        NumericPolicy::llama_relaxed(),
+        schedule,
+    )
+    .expect("simdgroup count applies only to cached-attention operations");
+}
+
+#[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
+#[test]
 fn explicit_simdgroup_count_updates_merge_admission_at_one_split() {
     let mut operation = attention_rows_op(9, 2, 64, 248, 8, SLIDING_LOWER);
     operation.extents = vec![8, 64, 2, 64];

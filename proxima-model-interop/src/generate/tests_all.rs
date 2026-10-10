@@ -4242,6 +4242,9 @@ pub(super) mod memory_fit_gate_tests {
                         production_outputs.push(*qkv_mixed);
                         production_outputs.push(*state_out);
                     }
+                    proxima_tensor::spec::LayerCacheRoots::ShortConv { state_out } => {
+                        production_outputs.push(*state_out);
+                    }
                     proxima_tensor::spec::LayerCacheRoots::SharedFromLayer(_) => {
                         unreachable!("qwen3.5 has no cross-layer shared-KV layers")
                     }

@@ -10,7 +10,7 @@ import re
 import sys
 
 
-ARM_NAMES = ("legacy", "shared_k")
+DEFAULT_SELECTED_ARM = "shared_k"
 ROUND_COUNT = 20
 CHECKPOINT_SHA256 = "cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80"
 CHECKPOINT_BYTES = 1422239776
@@ -158,7 +158,7 @@ def validate_summary(arm: dict, samples: list[float], where: str) -> None:
     )
 
 
-def validate_arm(arm: dict, name: str, shape_index: int, actual_prompt_tokens: int, rounds: list[dict]) -> list[float]:
+def validate_arm(arm: dict, name: str, selected_name: str, shape_index: int, actual_prompt_tokens: int, rounds: list[dict]) -> list[float]:
     where = f"shapes[{shape_index}].arms[{name}]"
     require(text_field(arm, "arm", where) == name, f"{where} label mismatch")
     integer_field(arm, "node", where)
@@ -166,9 +166,17 @@ def validate_arm(arm: dict, name: str, shape_index: int, actual_prompt_tokens: i
     require(len(extents) == 4 and all(type(value) is int and value > 0 for value in extents), f"{where} extents")
     require(extents[0] > 1 and extents[1:] == [8, 2, 64], f"{where} is not multi-row Granite attention")
     require(extents[0] == actual_prompt_tokens, f"{where} query extent differs from actual prompt tokens")
-    text_field(arm, "entry", where)
+    entry = text_field(arm, "entry", where)
     sha256_field(arm, "source_sha256", where)
     validate_grid(arm, where)
+    if selected_name.startswith("simdgroups"):
+        selected_groups = int(selected_name.removeprefix("simdgroups"))
+        expected_width = selected_groups * 32 if name == selected_name else 64
+        require(arm["grid"].get("threadgroup_width") == expected_width, f"{where} threadgroup width must be {expected_width}")
+        if name == selected_name:
+            require(entry.endswith(f"_{selected_name}"), f"{where} entry lacks _{selected_name} suffix")
+        else:
+            require(not entry.endswith(f"_{selected_name}"), f"{where} legacy entry has _{selected_name} suffix")
     pipeline = object_field(arm, "pipeline_resources", where)
     integer_field(pipeline, "tg_static_bytes", f"{where}.pipeline_resources")
     integer_field(pipeline, "max_threads", f"{where}.pipeline_resources", 1)
@@ -208,7 +216,7 @@ def validate_arm(arm: dict, name: str, shape_index: int, actual_prompt_tokens: i
     return values
 
 
-def validate_shape(shape: dict, shape_index: int) -> tuple[int, int, int]:
+def validate_shape(shape: dict, shape_index: int, selected_name: str) -> tuple[int, int, int]:
     where = f"shapes[{shape_index}]"
     nominal = integer_field(shape, "nominal_prompt_tokens", where, 1)
     actual = integer_field(shape, "actual_prompt_tokens", where, nominal)
@@ -221,17 +229,18 @@ def validate_shape(shape: dict, shape_index: int) -> tuple[int, int, int]:
         require(isinstance(round_record, dict), f"{where}.rounds[{round_number}] must be an object")
         round_where = f"{where}.rounds[{round_number}]"
         require(integer_field(round_record, "round", round_where) == round_number, f"{round_where} number")
-        expected_order = list(ARM_NAMES) if round_number % 2 == 0 else list(reversed(ARM_NAMES))
+        arm_names = ["legacy", selected_name]
+        expected_order = arm_names if round_number % 2 == 0 else list(reversed(arm_names))
         require(round_record.get("arm_order") == expected_order, f"{round_where} arm order")
 
     arms = array_field(shape, "arms", where)
     require(len(arms) == 2 and all(isinstance(arm, dict) for arm in arms), f"{where} must have two arm objects")
     by_name = {arm.get("arm"): arm for arm in arms}
-    require(set(by_name) == set(ARM_NAMES), f"{where} must have one legacy and one shared_k arm")
+    require(set(by_name) == {"legacy", selected_name}, f"{where} must have one legacy and one {selected_name} arm")
     legacy = by_name["legacy"]
-    selected = by_name["shared_k"]
-    legacy_values = validate_arm(legacy, "legacy", shape_index, actual, rounds)
-    selected_values = validate_arm(selected, "shared_k", shape_index, actual, rounds)
+    selected = by_name[selected_name]
+    legacy_values = validate_arm(legacy, "legacy", selected_name, shape_index, actual, rounds)
+    selected_values = validate_arm(selected, selected_name, selected_name, shape_index, actual, rounds)
     require(legacy["node"] == selected["node"] and legacy["extents"] == selected["extents"], f"{where} dispatch identity mismatch")
     require(legacy["entry"] != selected["entry"], f"{where} source entry was not selected")
     require(legacy["source_sha256"] != selected["source_sha256"], f"{where} source SHA was not selected")
@@ -253,15 +262,17 @@ def validate_shape(shape: dict, shape_index: int) -> tuple[int, int, int]:
     return actual, positive, negative
 
 
-def validate_report(report: dict, expected_shapes: int) -> tuple[int, int]:
+def validate_report(report: dict, expected_shapes: int, selected_name: str = DEFAULT_SELECTED_ARM) -> tuple[int, int]:
     require(isinstance(report, dict), "report must be an object")
     validate_provenance(report)
+    if selected_name.startswith("simdgroups"):
+        require(report.get("selected_arm") == selected_name, "selected simdgroup count metadata mismatch")
     shapes = array_field(report, "shapes", "report")
     require(len(shapes) == expected_shapes, f"report must have {expected_shapes} shapes")
     nominal_targets = {971} if expected_shapes == 1 else {256, 971}
     require(all(isinstance(shape, dict) for shape in shapes), "each shape must be an object")
     require({shape.get("nominal_prompt_tokens") for shape in shapes} == nominal_targets, "nominal prompt targets differ")
-    observed = [validate_shape(shape, index) for index, shape in enumerate(shapes)]
+    observed = [validate_shape(shape, index, selected_name) for index, shape in enumerate(shapes)]
     require(len({value[0] for value in observed}) == expected_shapes, "actual tokenizer counts are not distinct")
     if expected_shapes == 2:
         by_nominal = {shape["nominal_prompt_tokens"]: shape["actual_prompt_tokens"] for shape in shapes}
@@ -278,8 +289,8 @@ def reorder_resource_fields(record: dict) -> None:
     arm["resource"] = " ".join(tokens)
 
 
-def reject_mutations(report: dict, expected_shapes: int) -> int:
-    mutations = (
+def reject_mutations(report: dict, expected_shapes: int, selected_name: str) -> int:
+    mutations = [
         lambda record: record["shapes"][0]["arms"].pop(),
         lambda record: record["shapes"][0]["arms"][0]["samples"].pop(),
         lambda record: record["shapes"][0]["arms"][1].update(
@@ -287,7 +298,7 @@ def reject_mutations(report: dict, expected_shapes: int) -> int:
         ),
         lambda record: record["shapes"][0].update(output_equal=False),
         lambda record: record["shapes"][0]["arms"][0].update(replay_errors=1),
-        lambda record: record["shapes"][0]["rounds"][0].update(arm_order=["shared_k", "legacy"]),
+        lambda record: record["shapes"][0]["rounds"][0].update(arm_order=[selected_name, "legacy"]),
         lambda record: record["checkpoint"].update(
             sha256="0" * 64,
             path=record["checkpoint"]["path"].rsplit("sha256-", 1)[0] + "sha256-" + "0" * 64,
@@ -305,7 +316,13 @@ def reject_mutations(report: dict, expected_shapes: int) -> int:
         ),
         lambda record: record.pop("device_description"),
         reorder_resource_fields,
-    )
+    ]
+    if selected_name.startswith("simdgroups"):
+        mutations.append(
+            lambda record: record["shapes"][0]["arms"][1].update(
+                entry=record["shapes"][0]["arms"][1]["entry"].removesuffix(f"_{selected_name}")
+            )
+        )
     rejected = 0
     for mutation in mutations:
         changed = copy.deepcopy(report)
@@ -321,17 +338,23 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-shapes", type=int, choices=(1, 2), required=True)
     parser.add_argument("--negative-controls", action="store_true")
+    parser.add_argument(
+        "--selected-arm",
+        choices=("shared_k", "simdgroups2", "simdgroups4", "simdgroups8"),
+        default=DEFAULT_SELECTED_ARM,
+    )
     parser.add_argument("report", type=pathlib.Path)
     arguments = parser.parse_args()
     try:
         original = arguments.report.read_bytes()
         report = json.loads(original)
-        positive, negative = validate_report(report, arguments.expected_shapes)
+        positive, negative = validate_report(report, arguments.expected_shapes, arguments.selected_arm)
         if arguments.negative_controls:
-            rejected = reject_mutations(report, arguments.expected_shapes)
-            require(rejected == 12, f"only {rejected} of 12 negative controls were rejected")
+            expected_controls = 13 if arguments.selected_arm.startswith("simdgroups") else 12
+            rejected = reject_mutations(report, arguments.expected_shapes, arguments.selected_arm)
+            require(rejected == expected_controls, f"only {rejected} of {expected_controls} negative controls were rejected")
             require(arguments.report.read_bytes() == original, "negative controls changed the original report")
-            print(f"negative_controls=12 rejected={rejected}")
+            print(f"negative_controls={expected_controls} rejected={rejected}")
         else:
             arms = arguments.expected_shapes * 2
             print(
