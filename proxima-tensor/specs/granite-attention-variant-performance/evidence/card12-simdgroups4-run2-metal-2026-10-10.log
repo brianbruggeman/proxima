@@ -1,0 +1,8 @@
+
+running 1 test
+granite ab arm nominal=971 actual=972 arm=legacy samples=20 resource=cell label=legacy wall_ms=7.013 cpu_ms=0.754 cpu_pct=10.8 rss_peak_mb=1668.5 footprint_mb=265.1 gpu_alloc_mb=1563.9 load_before=6.29 load_after=6.29
+granite ab arm nominal=971 actual=972 arm=simdgroups4 samples=20 resource=cell label=simdgroups4 wall_ms=6.812 cpu_ms=0.685 cpu_pct=10.1 rss_peak_mb=1668.5 footprint_mb=265.1 gpu_alloc_mb=1563.9 load_before=6.29 load_after=6.29
+granite ab report=/private/tmp/granite-attention-simdgroups4-run2.json
+test perf_granite_simdgroup_count_against_f16_legacy ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 13.39s

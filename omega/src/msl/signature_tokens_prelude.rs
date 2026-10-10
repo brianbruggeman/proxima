@@ -1824,6 +1824,8 @@ pub enum AttentionSimdTopology {
 
 #[cfg(feature = "metal-attn-variants")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "std", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "std", serde(rename_all = "snake_case"))]
 pub enum AttentionSimdgroupCount {
     Legacy,
     Groups2,
@@ -2636,6 +2638,9 @@ pub(crate) fn validate_simdgroup_count_selection(
         schedule.simdgroup_count(),
         AttentionSimdgroupCountSelection::Legacy
     ) {
+        return Ok(());
+    }
+    if !matches!(resolved.kind, BoundOpKind::CachedAttention { .. }) {
         return Ok(());
     }
     if matches!(

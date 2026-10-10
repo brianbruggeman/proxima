@@ -10,18 +10,20 @@ use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use conflaguration::Settings;
 use memmap2::Mmap;
 use omega::metal::MetalError;
 use omega::msl::Binding;
 use omega::{
-    AttentionKvReuse, AttentionVariant, CapturedDispatch, set_capture_step,
-    take_captured_dispatches,
+    AttentionKvReuse, AttentionSimdgroupCount, AttentionVariant, CapturedDispatch,
+    set_capture_step, take_captured_dispatches,
 };
 use proxima_gguf::parse_complete;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{
-    GPU_LAYERS_ALL, InteropError, LoadedModel, PromptCacheConfig, ServingConfig, SpeculativeConfig,
+    GPU_LAYERS_ALL, InteropError, LoadedModel, PromptCacheConfig, ServingConfig, ServingSettings,
+    SpeculativeConfig,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1487,13 +1489,16 @@ fn measure_granite_attention_shape(
     nominal_prompt_tokens: usize,
     prompt: &str,
     prompt_ids: &[u32],
+    baseline_variant: Option<AttentionVariant>,
+    selected_variant: AttentionVariant,
+    selected_label: &str,
 ) -> Value {
-    let legacy = capture_attention_replay(model, prompt, None, None);
+    let legacy = capture_attention_replay(model, prompt, baseline_variant, None);
     let legacy_evidence = replay_evidence(&legacy);
     let selected = capture_attention_replay(
         model,
         prompt,
-        Some(shared_k_variant()),
+        Some(selected_variant),
         Some(&legacy.dispatch),
     );
     assert_active_grid_dimensions(&legacy.dispatch);
@@ -1518,16 +1523,16 @@ fn measure_granite_attention_shape(
     let mut rounds = Vec::with_capacity(20);
     for round in 0..20 {
         let arm_order = if round % 2 == 0 {
-            ["legacy", "shared_k"]
+            ["legacy", selected_label]
         } else {
-            ["shared_k", "legacy"]
+            [selected_label, "legacy"]
         };
         let mut legacy_time = None;
         let mut selected_time = None;
         for (position, arm_name) in arm_order.iter().enumerate() {
             let dispatch = match *arm_name {
                 "legacy" => &legacy.dispatch,
-                "shared_k" => &selected.dispatch,
+                label if label == selected_label => &selected.dispatch,
                 _ => unreachable!("arm order contains only admitted arms"),
             };
             let gpu_ns = dispatch
@@ -1547,7 +1552,7 @@ fn measure_granite_attention_shape(
                     legacy_samples.push(sample);
                     legacy_time = Some(gpu_ns);
                 }
-                "shared_k" => {
+                label if label == selected_label => {
                     selected_samples.push(sample);
                     selected_time = Some(gpu_ns);
                 }
@@ -1564,7 +1569,7 @@ fn measure_granite_attention_shape(
     }
 
     let legacy_resource = resource_replays(&legacy.dispatch, "legacy");
-    let selected_resource = resource_replays(&selected.dispatch, "shared_k");
+    let selected_resource = resource_replays(&selected.dispatch, selected_label);
     json!({
         "nominal_prompt_tokens": nominal_prompt_tokens,
         "actual_prompt_tokens": prompt_ids.len(),
@@ -1574,12 +1579,17 @@ fn measure_granite_attention_shape(
         "rounds": rounds,
         "arms": [
             measured_arm_report("legacy", &legacy, legacy_samples, legacy_resource),
-            measured_arm_report("shared_k", &selected, selected_samples, selected_resource),
+            measured_arm_report(selected_label, &selected, selected_samples, selected_resource),
         ],
     })
 }
 
-fn run_granite_attention_measurement(nominal_targets: &[usize]) {
+fn run_granite_attention_measurement(
+    nominal_targets: &[usize],
+    baseline_variant: Option<AttentionVariant>,
+    selected_variant: AttentionVariant,
+    selected_label: &str,
+) {
     assert!(
         env::var_os("PROXIMA_CAPTURE_LIVE").is_some(),
         "run with PROXIMA_CAPTURE_LIVE=1"
@@ -1687,12 +1697,21 @@ fn run_granite_attention_measurement(nominal_targets: &[usize]) {
     let shapes = prompt_shapes
         .iter()
         .map(|(nominal, prompt, prompt_ids)| {
-            measure_granite_attention_shape(&model, *nominal, prompt, prompt_ids)
+            measure_granite_attention_shape(
+                &model,
+                *nominal,
+                prompt,
+                prompt_ids,
+                baseline_variant,
+                selected_variant,
+                selected_label,
+            )
         })
         .collect::<Vec<_>>();
     let report = json!({
         "version": 1,
         "model": "Granite 3.1 1B A400M Instruct",
+        "selected_arm": selected_label,
         "checkpoint": {
             "path": checkpoint_path,
             "bytes": checkpoint_bytes,
@@ -1742,12 +1761,65 @@ fn run_granite_attention_measurement(nominal_targets: &[usize]) {
 
 #[proxima::test]
 async fn perf_card_00_granite_attention_replay_cell() {
-    run_granite_attention_measurement(&[PROMPT_TOKENS]);
+    run_granite_attention_measurement(&[PROMPT_TOKENS], None, shared_k_variant(), "shared_k");
 }
 
 #[proxima::test]
 async fn perf_card_02_granite_two_prefill_shapes() {
-    run_granite_attention_measurement(&[SHORT_PROMPT_TOKENS, PROMPT_TOKENS]);
+    run_granite_attention_measurement(
+        &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
+        None,
+        shared_k_variant(),
+        "shared_k",
+    );
+}
+
+#[proxima::test]
+async fn perf_granite_simdgroup_count_against_f16_legacy() {
+    let baseline = f16_variant();
+    let settings = ServingSettings::from_env().expect("simdgroup count serving setting parses");
+    let configured = settings
+        .as_serving_config(&[])
+        .attention_variant
+        .expect("set PROXIMA_SERVING_ATTENTION_SIMDGROUP_COUNT to groups2, groups4, or groups8");
+    let selected = AttentionVariant {
+        simdgroup_count: configured.simdgroup_count,
+        ..baseline
+    };
+    assert_eq!(baseline.kv_storage, omega::AttentionKvStorage::F32);
+    assert_eq!(selected.kv_storage, omega::AttentionKvStorage::F32);
+    assert_eq!(baseline.mma_precision, omega::AttentionMmaPrecision::F16);
+    assert_eq!(selected.mma_precision, omega::AttentionMmaPrecision::F16);
+    assert_eq!(baseline.kv_reuse, omega::AttentionKvReuse::Legacy);
+    assert_eq!(selected.kv_reuse, omega::AttentionKvReuse::Legacy);
+    assert_eq!(baseline.tile_height, omega::AttentionTileHeight::Legacy);
+    assert_eq!(selected.tile_height, omega::AttentionTileHeight::Legacy);
+    assert_eq!(
+        baseline.query_parallelism,
+        omega::AttentionQueryParallelism::Legacy
+    );
+    assert_eq!(
+        selected.query_parallelism,
+        omega::AttentionQueryParallelism::Legacy
+    );
+    assert_eq!(baseline.simd_topology, omega::AttentionSimdTopology::Legacy);
+    assert_eq!(selected.simd_topology, omega::AttentionSimdTopology::Legacy);
+    assert_eq!(baseline.prefetch, omega::AttentionPrefetch::Off);
+    assert_eq!(selected.prefetch, omega::AttentionPrefetch::Off);
+    assert_eq!(
+        baseline.simdgroup_count,
+        omega::AttentionSimdgroupCount::Legacy
+    );
+    let selected_label = match selected.simdgroup_count {
+        AttentionSimdgroupCount::Groups2 => "simdgroups2",
+        AttentionSimdgroupCount::Groups4 => "simdgroups4",
+        AttentionSimdgroupCount::Groups8 => "simdgroups8",
+        AttentionSimdgroupCount::Legacy => {
+            panic!("set PROXIMA_SERVING_ATTENTION_SIMDGROUP_COUNT to groups2, groups4, or groups8")
+        }
+    };
+
+    run_granite_attention_measurement(&[PROMPT_TOKENS], Some(baseline), selected, selected_label);
 }
 
 #[proxima::test]

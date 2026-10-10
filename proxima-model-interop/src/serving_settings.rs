@@ -1,5 +1,11 @@
 use bon::Builder;
 use conflaguration::Settings;
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-attn-variants",
+    target_os = "macos"
+))]
+use omega::{AttentionSimdgroupCount, AttentionVariant};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::{DispatchType, MathMode};
 use proxima_gguf::types::GgmlType;
@@ -8,12 +14,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::RopeScaling;
 use crate::prompt_cache_settings::PromptCacheSettings;
-use crate::speculative_settings::SpeculativeSettings;
 use crate::serving::{
     ContextLength, DEFAULT_BATCH_SIZE, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH,
     DEFAULT_RESIDENT_PREFILL_PLAN_BYTES, DEFAULT_UBATCH_SIZE, GdnPrefillBackend, NamePattern,
     ServingConfig, WeightPrecisionRule,
 };
+use crate::speculative_settings::SpeculativeSettings;
 
 mod levels;
 
@@ -257,6 +263,15 @@ pub struct ServingSettings {
     #[setting(resolve_with = "from_name", default_str = "serial")]
     #[builder(default = DispatchTypeName::Serial)]
     pub dispatch_type: DispatchTypeName,
+    /// the simdgroup count for cached attention; `legacy` keeps the sized count.
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-attn-variants",
+        target_os = "macos"
+    ))]
+    #[setting(resolve_with = "from_name", default_str = "legacy")]
+    #[builder(default = AttentionSimdgroupCount::Legacy)]
+    pub attention_simdgroup_count: AttentionSimdgroupCount,
     /// `ServingConfig::weight_precision`: ordered per-tensor recode rules, first match wins.
     #[setting(resolve_with = "from_json", default_str = "[]")]
     #[builder(default)]
@@ -399,6 +414,18 @@ impl ServingSettings {
             math_mode: self.math_mode.as_math_mode(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: self.dispatch_type.as_dispatch_type(),
+            #[cfg(all(
+                feature = "metal",
+                feature = "metal-attn-variants",
+                target_os = "macos"
+            ))]
+            attention_variant: match self.attention_simdgroup_count {
+                AttentionSimdgroupCount::Legacy => None,
+                simdgroup_count => Some(AttentionVariant {
+                    simdgroup_count,
+                    ..AttentionVariant::default()
+                }),
+            },
             weight_precision,
             gdn_prefill_backend: self.gdn_prefill_backend,
             gpu_correctness_fallback: self.gpu_correctness_fallback,
@@ -781,6 +808,50 @@ epilogue_sources = true
         );
         let refused = conflaguration::from_toml_str::<ServingSettings>("dispatch_type = \"parallel\"");
         assert!(refused.is_err(), "an unknown dispatch type is refused");
+    }
+
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-attn-variants",
+        target_os = "macos"
+    ))]
+    #[test]
+    fn simdgroup_count_setting_round_trips_and_reaches_serving_config() {
+        let selections = [
+            ("groups2", AttentionSimdgroupCount::Groups2),
+            ("groups4", AttentionSimdgroupCount::Groups4),
+            ("groups8", AttentionSimdgroupCount::Groups8),
+        ];
+
+        for (name, simdgroup_count) in selections {
+            let setting = format!("attention_simdgroup_count = \"{name}\"");
+            let built = ServingSettings::builder()
+                .attention_simdgroup_count(simdgroup_count)
+                .build();
+            round_trip::assert_three_ways(
+                &setting,
+                &[("PROXIMA_SERVING_ATTENTION_SIMDGROUP_COUNT", name)],
+                &built,
+            );
+
+            let lowered = built
+                .as_serving_config(&[])
+                .attention_variant
+                .expect("an explicit simdgroup count lowers to an attention variant");
+            assert_eq!(lowered.simdgroup_count, simdgroup_count);
+            assert_eq!(lowered.mma_precision, omega::AttentionMmaPrecision::Legacy);
+        }
+
+        let default = ServingSettings::default();
+        assert_eq!(default.attention_simdgroup_count, AttentionSimdgroupCount::Legacy);
+        assert!(
+            default.as_serving_config(&[]).attention_variant.is_none(),
+            "legacy count leaves the sized attention selection in place"
+        );
+
+        let invalid: Result<ServingSettings, _> =
+            conflaguration::from_toml_str("attention_simdgroup_count = \"groups16\"");
+        assert!(invalid.is_err(), "unsupported simdgroup counts are rejected");
     }
 
     #[test]
