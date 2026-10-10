@@ -1,0 +1,425 @@
+{
+  "valid": [
+    {
+      "version": 1,
+      "case": "fixture_text",
+      "checkpoint": {
+        "repo": "fixture/model",
+        "revision": "0123456789abcdef0123456789abcdef01234567",
+        "config_sha256": "c50c6419b1a7e49c05654c5ea360aaa864501fde71d535cf1697cd09517f64fe",
+        "weights_sha256": "a4c20188d052cfba3eeddc1e86b94f96b10d8ed3162c5e94752c213ea4b99960"
+      },
+      "input": {
+        "kind": "text",
+        "prompt_utf8_sha256": "5a74e1be0dbb3010cf253dab28e4ea9ecc603193ad65d7e7bfd60d2a998f8f7b",
+        "token_ids": [
+          1,
+          314,
+          2
+        ],
+        "token_ids_sha256": "b0e8b80d9e0769cb1a7c91ae1c31e8e75344634e24b371824b2b0df5246ebcee"
+      },
+      "proxima": {
+        "load_status": "completed",
+        "bind_status": "completed",
+        "invocation_status": "completed",
+        "invocation": {
+          "call_id": "fixture-call-text-1",
+          "request_sha256": "4e48b4ef1de00315f09dc162e10a27acea4ce5e0ec5c4968a3ee92d982a6f8e3",
+          "output_sha256": "8bdfac8bafc4981cdea49bf2202cf6d0cfa1b2d244357df3925103849d666330"
+        }
+      },
+      "result": {
+        "status": "completed",
+        "generated_ids": [
+          777
+        ],
+        "output_utf8_sha256": "8bdfac8bafc4981cdea49bf2202cf6d0cfa1b2d244357df3925103849d666330"
+      },
+      "semantic": {
+        "status": "coherent",
+        "rubric": "fixture-ant-v1",
+        "evidence_sha256": "c31c42b5afc51c32be514a212cfc3e4440ef28ad08682ecbc5baa87f4e1f1b37"
+      },
+      "numeric": {
+        "status": "matched",
+        "boundary": "final-token-ids",
+        "reference_runtime": "fixture-reference",
+        "reference_revision": "0123456789abcdef",
+        "comparator": "sha256_exact_v1",
+        "atol": 0.0,
+        "rtol": 0.0,
+        "reference_payload_path": "fixtures/payloads/exact-reference.bin",
+        "reference_payload_sha256": "980e3348c35c2438a79417f0cd74d40afdae1ba4b1347f070c24a0d0576a00c2",
+        "output_payload_path": "fixtures/payloads/exact-output.bin",
+        "output_payload_sha256": "980e3348c35c2438a79417f0cd74d40afdae1ba4b1347f070c24a0d0576a00c2"
+      }
+    },
+    {
+      "version": 1,
+      "case": "fixture_modal_load_failure",
+      "checkpoint": {
+        "repo": "fixture/vision-model",
+        "revision": "abcdef0123456789abcdef0123456789abcdef01",
+        "config_sha256": "c50c6419b1a7e49c05654c5ea360aaa864501fde71d535cf1697cd09517f64fe",
+        "weights_sha256": "a4c20188d052cfba3eeddc1e86b94f96b10d8ed3162c5e94752c213ea4b99960"
+      },
+      "input": {
+        "kind": "image",
+        "payload_sha256": "4eb5a0eddb65c460116b21adf25a9c7aac0cd38ce99a812f2b8e6b04e56c6bb7",
+        "format": "png",
+        "decoded_input_descriptor": "2x2 RGB fixture image",
+        "decoded_input_sha256": "af390434cc0d6dadb45cdc7f8154f383f0cceebf49fddd0e09a8284002d13d9e"
+      },
+      "proxima": {
+        "load_status": "failed",
+        "bind_status": "not_attempted",
+        "invocation_status": "not_attempted",
+        "invocation": null
+      },
+      "result": {
+        "status": "failed",
+        "stage": "load",
+        "code": "fixture_load_error",
+        "message": "fixture model load failed before bind or invocation"
+      },
+      "semantic": {
+        "status": "unavailable",
+        "rubric": "fixture-image-v1",
+        "reason": "no model output exists"
+      },
+      "numeric": {
+        "status": "unavailable",
+        "boundary": "vision-encoder-output",
+        "reason": "no model output exists"
+      }
+    },
+    {
+      "version": 1,
+      "case": "fixture_f32",
+      "checkpoint": {
+        "repo": "fixture/model",
+        "revision": "0123456789abcdef0123456789abcdef01234567",
+        "config_sha256": "c50c6419b1a7e49c05654c5ea360aaa864501fde71d535cf1697cd09517f64fe",
+        "weights_sha256": "a4c20188d052cfba3eeddc1e86b94f96b10d8ed3162c5e94752c213ea4b99960"
+      },
+      "input": {
+        "kind": "text",
+        "prompt_utf8_sha256": "5a74e1be0dbb3010cf253dab28e4ea9ecc603193ad65d7e7bfd60d2a998f8f7b",
+        "token_ids": [
+          1,
+          314,
+          2
+        ],
+        "token_ids_sha256": "b0e8b80d9e0769cb1a7c91ae1c31e8e75344634e24b371824b2b0df5246ebcee"
+      },
+      "proxima": {
+        "load_status": "completed",
+        "bind_status": "completed",
+        "invocation_status": "completed",
+        "invocation": {
+          "call_id": "fixture-call-text-1",
+          "request_sha256": "4e48b4ef1de00315f09dc162e10a27acea4ce5e0ec5c4968a3ee92d982a6f8e3",
+          "output_sha256": "8bdfac8bafc4981cdea49bf2202cf6d0cfa1b2d244357df3925103849d666330"
+        }
+      },
+      "result": {
+        "status": "completed",
+        "generated_ids": [
+          777
+        ],
+        "output_utf8_sha256": "8bdfac8bafc4981cdea49bf2202cf6d0cfa1b2d244357df3925103849d666330"
+      },
+      "semantic": {
+        "status": "coherent",
+        "rubric": "fixture-ant-v1",
+        "evidence_sha256": "c31c42b5afc51c32be514a212cfc3e4440ef28ad08682ecbc5baa87f4e1f1b37"
+      },
+      "numeric": {
+        "status": "matched",
+        "boundary": "final-token-ids",
+        "reference_runtime": "fixture-reference",
+        "reference_revision": "0123456789abcdef",
+        "comparator": "f32_le_allclose_v1",
+        "atol": 0.0,
+        "rtol": 0.0,
+        "reference_payload_path": "fixtures/payloads/f32-reference.bin",
+        "reference_payload_sha256": "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c",
+        "output_payload_path": "fixtures/payloads/f32-output.bin",
+        "output_payload_sha256": "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c",
+        "reference_shape": [
+          1
+        ],
+        "output_shape": [
+          1
+        ]
+      }
+    },
+    {
+      "version": 1,
+      "case": "fixture_video",
+      "checkpoint": {
+        "repo": "fixture/vision-model",
+        "revision": "abcdef0123456789abcdef0123456789abcdef01",
+        "config_sha256": "c50c6419b1a7e49c05654c5ea360aaa864501fde71d535cf1697cd09517f64fe",
+        "weights_sha256": "a4c20188d052cfba3eeddc1e86b94f96b10d8ed3162c5e94752c213ea4b99960"
+      },
+      "input": {
+        "kind": "video",
+        "payload_sha256": "4eb5a0eddb65c460116b21adf25a9c7aac0cd38ce99a812f2b8e6b04e56c6bb7",
+        "format": "png",
+        "decoded_input_descriptor": "2x2 RGB fixture image",
+        "decoded_input_sha256": "af390434cc0d6dadb45cdc7f8154f383f0cceebf49fddd0e09a8284002d13d9e"
+      },
+      "proxima": {
+        "load_status": "failed",
+        "bind_status": "not_attempted",
+        "invocation_status": "not_attempted",
+        "invocation": null
+      },
+      "result": {
+        "status": "failed",
+        "stage": "load",
+        "code": "fixture_load_error",
+        "message": "fixture model load failed before bind or invocation"
+      },
+      "semantic": {
+        "status": "unavailable",
+        "rubric": "fixture-image-v1",
+        "reason": "no model output exists"
+      },
+      "numeric": {
+        "status": "unavailable",
+        "boundary": "vision-encoder-output",
+        "reason": "no model output exists"
+      }
+    }
+  ],
+  "controls": [
+    {
+      "name": "invocation_evidence_missing",
+      "base": "fixture_text",
+      "mutations": [
+        {
+          "path": [
+            "proxima",
+            "invocation"
+          ],
+          "value": null
+        }
+      ]
+    },
+    {
+      "name": "result_missing",
+      "base": "fixture_text",
+      "mutations": [
+        {
+          "path": [
+            "result"
+          ],
+          "remove": true
+        }
+      ]
+    },
+    {
+      "name": "reference_missing",
+      "base": "fixture_text",
+      "mutations": [
+        {
+          "path": [
+            "numeric",
+            "reference_payload_path"
+          ],
+          "remove": true
+        }
+      ]
+    },
+    {
+      "name": "invocation_key_missing",
+      "base": "fixture_modal_load_failure",
+      "mutations": [
+        {
+          "path": [
+            "proxima",
+            "invocation"
+          ],
+          "remove": true
+        }
+      ]
+    },
+    {
+      "name": "weight_hash_key_missing",
+      "base": "fixture_modal_load_failure",
+      "mutations": [
+        {
+          "path": [
+            "checkpoint",
+            "weights_sha256"
+          ],
+          "remove": true
+        },
+        {
+          "path": [
+            "proxima",
+            "load_status"
+          ],
+          "value": "not_attempted"
+        },
+        {
+          "path": [
+            "result",
+            "stage"
+          ],
+          "value": "access"
+        },
+        {
+          "path": [
+            "result",
+            "code"
+          ],
+          "value": "fixture_access_failure"
+        },
+        {
+          "path": [
+            "result",
+            "message"
+          ],
+          "value": "fixture weights were inaccessible"
+        }
+      ]
+    },
+    {
+      "name": "failed_output_hash_key_missing",
+      "base": "fixture_text",
+      "mutations": [
+        {
+          "path": [
+            "proxima",
+            "invocation_status"
+          ],
+          "value": "failed"
+        },
+        {
+          "path": [
+            "proxima",
+            "invocation",
+            "output_sha256"
+          ],
+          "remove": true
+        }
+      ]
+    },
+    {
+      "name": "completed_result_has_failure_fields",
+      "base": "fixture_text",
+      "mutations": [
+        {
+          "path": [
+            "result",
+            "stage"
+          ],
+          "value": "invocation"
+        }
+      ]
+    },
+    {
+      "name": "float_version",
+      "base": "fixture_text",
+      "mutations": [
+        {
+          "path": [
+            "version"
+          ],
+          "value": 1.0
+        }
+      ]
+    },
+    {
+      "name": "invalid_stage_order",
+      "base": "fixture_modal_load_failure",
+      "mutations": [
+        {
+          "path": [
+            "proxima",
+            "bind_status"
+          ],
+          "value": "completed"
+        }
+      ]
+    },
+    {
+      "name": "exact_hash_status_conflict",
+      "base": "fixture_text",
+      "mutations": [
+        {
+          "path": [
+            "numeric",
+            "status"
+          ],
+          "value": "mismatched"
+        }
+      ]
+    },
+    {
+      "name": "f32_value_status_conflict",
+      "base": "fixture_f32",
+      "mutations": [
+        {
+          "path": [
+            "numeric",
+            "output_payload_path"
+          ],
+          "value": "fixtures/payloads/f32-different.bin"
+        },
+        {
+          "path": [
+            "numeric",
+            "output_payload_sha256"
+          ],
+          "value": "d88c86f15bbea365d658ad95a81d45367c465f7af6f7264fb077f01747ddc77d"
+        }
+      ]
+    },
+    {
+      "name": "f32_payload_length_conflict",
+      "base": "fixture_f32",
+      "mutations": [
+        {
+          "path": [
+            "numeric",
+            "output_shape"
+          ],
+          "value": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "name": "numeric_artifact_missing",
+      "base": "fixture_text",
+      "mutations": [
+        {
+          "path": [
+            "numeric",
+            "output_payload_path"
+          ],
+          "value": "fixtures/payloads/missing.bin"
+        }
+      ]
+    },
+    {
+      "name": "unsupported_modality",
+      "base": "fixture_video",
+      "mutations": [
+        {
+          "path": [
+            "input",
+            "kind"
+          ],
+          "value": "video_audio"
+        }
+      ]
+    }
+  ]
+}
