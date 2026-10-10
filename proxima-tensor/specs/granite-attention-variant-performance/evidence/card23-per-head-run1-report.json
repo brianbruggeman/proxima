@@ -1,0 +1,1038 @@
+{
+  "checkpoint": {
+    "architecture": "granitemoe",
+    "bytes": 1422239776,
+    "gguf_file_type": 7,
+    "model_name": "Granite 3.1 1b A400M Instruct",
+    "path": "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80",
+    "sha256": "cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80",
+    "weight_quant": "Q8_0"
+  },
+  "device_description": null,
+  "host": {
+    "arch": "aarch64",
+    "hostname": null,
+    "os": "macos"
+  },
+  "model": "Granite 3.1 1B A400M Instruct",
+  "selected_arm": "topology_per_head",
+  "serving": {
+    "flash_attention": false,
+    "generated_tokens": 1,
+    "gpu_layers": -1,
+    "kv_cache_key": "F32",
+    "kv_cache_value": "F32",
+    "prompt_cache": "off",
+    "reasoning_budget": 0,
+    "ubatch_size": 0
+  },
+  "shapes": [
+    {
+      "actual_prompt_tokens": 256,
+      "arms": [
+        {
+          "arm": "legacy",
+          "bound_bytes": 35733252,
+          "entry": "omega_cached_attention_h8_g2_d64_s3c800000_ln9223372036854775808_up0_r8_n2_b64_rt_mma_f16",
+          "extents": [
+            256,
+            8,
+            2,
+            64
+          ],
+          "fault_binding_present": false,
+          "generated_ids": [
+            322
+          ],
+          "grid": {
+            "depth": 1,
+            "grid2d": null,
+            "threadgroup_width": 64,
+            "threads": 16384
+          },
+          "node": 89,
+          "output_bytes": 1048576,
+          "output_sha256": "454ca3f4483db67f72f42baa6f7625c46853a9be768e4bbcdd35116789f72ba6",
+          "pipeline_resources": {
+            "exec_width": 32,
+            "max_threads": 448,
+            "tg_static_bytes": 9600
+          },
+          "replay_errors": 0,
+          "resource": "cell label=legacy wall_ms=2.329 cpu_ms=0.616 cpu_pct=26.4 rss_peak_mb=1510.3 footprint_mb=116.2 gpu_alloc_mb=1418.9 load_before=3.46 load_after=3.46",
+          "resource_replay_attempts": 5,
+          "samples": [
+            {
+              "gpu_ns": 182875.0828281045,
+              "position": 0,
+              "round": 0
+            },
+            {
+              "gpu_ns": 182041.66553914547,
+              "position": 1,
+              "round": 1
+            },
+            {
+              "gpu_ns": 181750.045157969,
+              "position": 0,
+              "round": 2
+            },
+            {
+              "gpu_ns": 187000.02692639828,
+              "position": 1,
+              "round": 3
+            },
+            {
+              "gpu_ns": 182625.02271682024,
+              "position": 0,
+              "round": 4
+            },
+            {
+              "gpu_ns": 182791.7294576764,
+              "position": 1,
+              "round": 5
+            },
+            {
+              "gpu_ns": 183208.379894495,
+              "position": 0,
+              "round": 6
+            },
+            {
+              "gpu_ns": 182249.93254989386,
+              "position": 1,
+              "round": 7
+            },
+            {
+              "gpu_ns": 182208.37228000164,
+              "position": 0,
+              "round": 8
+            },
+            {
+              "gpu_ns": 182125.01890957355,
+              "position": 1,
+              "round": 9
+            },
+            {
+              "gpu_ns": 182374.96260553598,
+              "position": 0,
+              "round": 10
+            },
+            {
+              "gpu_ns": 182750.05277246237,
+              "position": 1,
+              "round": 11
+            },
+            {
+              "gpu_ns": 182666.69940203428,
+              "position": 0,
+              "round": 12
+            },
+            {
+              "gpu_ns": 182750.05277246237,
+              "position": 1,
+              "round": 13
+            },
+            {
+              "gpu_ns": 182000.10526925325,
+              "position": 0,
+              "round": 14
+            },
+            {
+              "gpu_ns": 182666.69940203428,
+              "position": 1,
+              "round": 15
+            },
+            {
+              "gpu_ns": 182625.02271682024,
+              "position": 0,
+              "round": 16
+            },
+            {
+              "gpu_ns": 181375.07140636444,
+              "position": 1,
+              "round": 17
+            },
+            {
+              "gpu_ns": 182874.96641278267,
+              "position": 0,
+              "round": 18
+            },
+            {
+              "gpu_ns": 182499.9926611781,
+              "position": 1,
+              "round": 19
+            }
+          ],
+          "source_sha256": "b85db41a81b3503641fbdb453cff0b7dd32e442085614eef5ab20fe1b1e0ba5d",
+          "summary": {
+            "count": 20,
+            "cov_percent": 0.591167537997938,
+            "max_gpu_ns": 187000.02692639828,
+            "mean_gpu_ns": 182672.9450840503,
+            "min_gpu_ns": 181375.07140636444,
+            "p50_gpu_ns": 182625.02271682024,
+            "p90_gpu_ns": 182875.0828281045,
+            "p99_gpu_ns": 187000.02692639828
+          },
+          "timing_attempts": 20
+        },
+        {
+          "arm": "topology_per_head",
+          "bound_bytes": 35733252,
+          "entry": "omega_cached_attention_h8_g2_d64_s3c800000_ln9223372036854775808_up0_r8_n2_b64_rt_mma_f16_simd_per_head",
+          "extents": [
+            256,
+            8,
+            2,
+            64
+          ],
+          "fault_binding_present": false,
+          "generated_ids": [
+            322
+          ],
+          "grid": {
+            "depth": 1,
+            "grid2d": null,
+            "threadgroup_width": 64,
+            "threads": 16384
+          },
+          "node": 89,
+          "output_bytes": 1048576,
+          "output_sha256": "454ca3f4483db67f72f42baa6f7625c46853a9be768e4bbcdd35116789f72ba6",
+          "pipeline_resources": {
+            "exec_width": 32,
+            "max_threads": 448,
+            "tg_static_bytes": 9600
+          },
+          "replay_errors": 0,
+          "resource": "cell label=topology_per_head wall_ms=2.288 cpu_ms=0.631 cpu_pct=27.6 rss_peak_mb=1510.3 footprint_mb=116.2 gpu_alloc_mb=1418.9 load_before=3.46 load_after=3.46",
+          "resource_replay_attempts": 5,
+          "samples": [
+            {
+              "gpu_ns": 182624.9063014984,
+              "position": 1,
+              "round": 0
+            },
+            {
+              "gpu_ns": 182375.0790208578,
+              "position": 0,
+              "round": 1
+            },
+            {
+              "gpu_ns": 182999.9964684248,
+              "position": 1,
+              "round": 2
+            },
+            {
+              "gpu_ns": 182375.0790208578,
+              "position": 0,
+              "round": 3
+            },
+            {
+              "gpu_ns": 182291.72565042973,
+              "position": 1,
+              "round": 4
+            },
+            {
+              "gpu_ns": 181499.98504668474,
+              "position": 0,
+              "round": 5
+            },
+            {
+              "gpu_ns": 182874.96641278267,
+              "position": 1,
+              "round": 6
+            },
+            {
+              "gpu_ns": 181291.71803593636,
+              "position": 0,
+              "round": 7
+            },
+            {
+              "gpu_ns": 182208.37228000164,
+              "position": 1,
+              "round": 8
+            },
+            {
+              "gpu_ns": 182875.0828281045,
+              "position": 0,
+              "round": 9
+            },
+            {
+              "gpu_ns": 181916.75189882517,
+              "position": 1,
+              "round": 10
+            },
+            {
+              "gpu_ns": 182333.40233564377,
+              "position": 0,
+              "round": 11
+            },
+            {
+              "gpu_ns": 182249.93254989386,
+              "position": 1,
+              "round": 12
+            },
+            {
+              "gpu_ns": 181666.6917875409,
+              "position": 0,
+              "round": 13
+            },
+            {
+              "gpu_ns": 182999.9964684248,
+              "position": 1,
+              "round": 14
+            },
+            {
+              "gpu_ns": 180250.03373622894,
+              "position": 0,
+              "round": 15
+            },
+            {
+              "gpu_ns": 181208.36466550827,
+              "position": 1,
+              "round": 16
+            },
+            {
+              "gpu_ns": 182250.04896521568,
+              "position": 0,
+              "round": 17
+            },
+            {
+              "gpu_ns": 182791.61304235458,
+              "position": 1,
+              "round": 18
+            },
+            {
+              "gpu_ns": 181999.98885393143,
+              "position": 0,
+              "round": 19
+            }
+          ],
+          "source_sha256": "2e7a0539cdc125d698c00f01dbfdb5bb6d533ffc732c03ea44f97bc46d3313e8",
+          "summary": {
+            "count": 20,
+            "cov_percent": 0.3739115056473226,
+            "max_gpu_ns": 182999.9964684248,
+            "mean_gpu_ns": 182154.1867684573,
+            "min_gpu_ns": 180250.03373622894,
+            "p50_gpu_ns": 182250.04896521568,
+            "p90_gpu_ns": 182875.0828281045,
+            "p99_gpu_ns": 182999.9964684248
+          },
+          "timing_attempts": 20
+        }
+      ],
+      "ids_equal": true,
+      "nominal_prompt_tokens": 256,
+      "output_equal": true,
+      "prompt_ids_sha256": "90dce7b0e9e0f99963bbf47cdacdc97da20bc0800764859c95113ad13c3e68a7",
+      "rounds": [
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 0,
+          "selected_minus_legacy_ns": -250.17652660608292
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 1,
+          "selected_minus_legacy_ns": 333.4134817123413
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 2,
+          "selected_minus_legacy_ns": 1249.951310455799
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 3,
+          "selected_minus_legacy_ns": -4624.947905540466
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 4,
+          "selected_minus_legacy_ns": -333.2970663905144
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 5,
+          "selected_minus_legacy_ns": -1291.7444109916687
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 6,
+          "selected_minus_legacy_ns": -333.4134817123413
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 7,
+          "selected_minus_legacy_ns": -958.2145139575005
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 8,
+          "selected_minus_legacy_ns": 0.0
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 9,
+          "selected_minus_legacy_ns": 750.063918530941
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 10,
+          "selected_minus_legacy_ns": -458.21070671081543
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 11,
+          "selected_minus_legacy_ns": -416.6504368185997
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 12,
+          "selected_minus_legacy_ns": -416.76685214042664
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 13,
+          "selected_minus_legacy_ns": -1083.3609849214554
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 14,
+          "selected_minus_legacy_ns": 999.8911991715431
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 15,
+          "selected_minus_legacy_ns": -2416.66566580534
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 16,
+          "selected_minus_legacy_ns": -1416.6580513119698
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 17,
+          "selected_minus_legacy_ns": 874.9775588512421
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 18,
+          "selected_minus_legacy_ns": -83.35337042808533
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 19,
+          "selected_minus_legacy_ns": -500.003807246685
+        }
+      ],
+      "warmup_rounds": [
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 0,
+          "samples": [
+            {
+              "arm": "legacy",
+              "gpu_ns": 203124.94598329067,
+              "position": 0
+            },
+            {
+              "arm": "topology_per_head",
+              "gpu_ns": 183583.35364609957,
+              "position": 1
+            }
+          ]
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 1,
+          "samples": [
+            {
+              "arm": "topology_per_head",
+              "gpu_ns": 182749.93635714054,
+              "position": 0
+            },
+            {
+              "arm": "legacy",
+              "gpu_ns": 185291.632078588,
+              "position": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "actual_prompt_tokens": 972,
+      "arms": [
+        {
+          "arm": "legacy",
+          "bound_bytes": 134093572,
+          "entry": "omega_cached_attention_h8_g2_d64_s3c800000_ln9223372036854775808_up0_r8_n2_b64_rt_mma_f16",
+          "extents": [
+            972,
+            8,
+            2,
+            64
+          ],
+          "fault_binding_present": false,
+          "generated_ids": [
+            322
+          ],
+          "grid": {
+            "depth": 1,
+            "grid2d": null,
+            "threadgroup_width": 64,
+            "threads": 62464
+          },
+          "node": 89,
+          "output_bytes": 3981312,
+          "output_sha256": "970fa9d575423441d23b639a5831938d9e9c46aa8c3c6e84fb2d4f7fe0dfbcae",
+          "pipeline_resources": {
+            "exec_width": 32,
+            "max_threads": 448,
+            "tg_static_bytes": 9600
+          },
+          "replay_errors": 0,
+          "resource": "cell label=legacy wall_ms=7.034 cpu_ms=0.614 cpu_pct=8.7 rss_peak_mb=1691.9 footprint_mb=265.3 gpu_alloc_mb=1563.9 load_before=3.46 load_after=3.46",
+          "resource_replay_attempts": 5,
+          "samples": [
+            {
+              "gpu_ns": 1056958.339177072,
+              "position": 0,
+              "round": 0
+            },
+            {
+              "gpu_ns": 1123166.7594984174,
+              "position": 1,
+              "round": 1
+            },
+            {
+              "gpu_ns": 1115125.0218972564,
+              "position": 0,
+              "round": 2
+            },
+            {
+              "gpu_ns": 1106249.9834224582,
+              "position": 1,
+              "round": 3
+            },
+            {
+              "gpu_ns": 1111875.0553578138,
+              "position": 0,
+              "round": 4
+            },
+            {
+              "gpu_ns": 1080708.3453983068,
+              "position": 1,
+              "round": 5
+            },
+            {
+              "gpu_ns": 1124000.0603720546,
+              "position": 0,
+              "round": 6
+            },
+            {
+              "gpu_ns": 1115124.9054819345,
+              "position": 1,
+              "round": 7
+            },
+            {
+              "gpu_ns": 1027625.0541210175,
+              "position": 0,
+              "round": 8
+            },
+            {
+              "gpu_ns": 1082999.98100847,
+              "position": 1,
+              "round": 9
+            },
+            {
+              "gpu_ns": 1079083.4203362465,
+              "position": 0,
+              "round": 10
+            },
+            {
+              "gpu_ns": 1094875.0423267484,
+              "position": 1,
+              "round": 11
+            },
+            {
+              "gpu_ns": 1080499.9619722366,
+              "position": 0,
+              "round": 12
+            },
+            {
+              "gpu_ns": 1102458.336390555,
+              "position": 1,
+              "round": 13
+            },
+            {
+              "gpu_ns": 1075083.389878273,
+              "position": 0,
+              "round": 14
+            },
+            {
+              "gpu_ns": 1111291.698180139,
+              "position": 1,
+              "round": 15
+            },
+            {
+              "gpu_ns": 1115541.672334075,
+              "position": 0,
+              "round": 16
+            },
+            {
+              "gpu_ns": 1098541.6593030095,
+              "position": 1,
+              "round": 17
+            },
+            {
+              "gpu_ns": 1099083.3397954702,
+              "position": 0,
+              "round": 18
+            },
+            {
+              "gpu_ns": 1116625.0333189964,
+              "position": 1,
+              "round": 19
+            }
+          ],
+          "source_sha256": "b85db41a81b3503641fbdb453cff0b7dd32e442085614eef5ab20fe1b1e0ba5d",
+          "summary": {
+            "count": 20,
+            "cov_percent": 2.1668061174011437,
+            "max_gpu_ns": 1124000.0603720546,
+            "mean_gpu_ns": 1095845.8529785275,
+            "min_gpu_ns": 1027625.0541210175,
+            "p50_gpu_ns": 1099083.3397954702,
+            "p90_gpu_ns": 1116625.0333189964,
+            "p99_gpu_ns": 1124000.0603720546
+          },
+          "timing_attempts": 20
+        },
+        {
+          "arm": "topology_per_head",
+          "bound_bytes": 134093572,
+          "entry": "omega_cached_attention_h8_g2_d64_s3c800000_ln9223372036854775808_up0_r8_n2_b64_rt_mma_f16_simd_per_head",
+          "extents": [
+            972,
+            8,
+            2,
+            64
+          ],
+          "fault_binding_present": false,
+          "generated_ids": [
+            322
+          ],
+          "grid": {
+            "depth": 1,
+            "grid2d": null,
+            "threadgroup_width": 64,
+            "threads": 62464
+          },
+          "node": 89,
+          "output_bytes": 3981312,
+          "output_sha256": "970fa9d575423441d23b639a5831938d9e9c46aa8c3c6e84fb2d4f7fe0dfbcae",
+          "pipeline_resources": {
+            "exec_width": 32,
+            "max_threads": 448,
+            "tg_static_bytes": 9600
+          },
+          "replay_errors": 0,
+          "resource": "cell label=topology_per_head wall_ms=6.994 cpu_ms=0.606 cpu_pct=8.7 rss_peak_mb=1691.9 footprint_mb=265.3 gpu_alloc_mb=1563.9 load_before=3.46 load_after=3.46",
+          "resource_replay_attempts": 5,
+          "samples": [
+            {
+              "gpu_ns": 1064375.0429153442,
+              "position": 1,
+              "round": 0
+            },
+            {
+              "gpu_ns": 1130000.1060590148,
+              "position": 0,
+              "round": 1
+            },
+            {
+              "gpu_ns": 1075583.2772701979,
+              "position": 1,
+              "round": 2
+            },
+            {
+              "gpu_ns": 1081958.4131240845,
+              "position": 0,
+              "round": 3
+            },
+            {
+              "gpu_ns": 1064749.900251627,
+              "position": 1,
+              "round": 4
+            },
+            {
+              "gpu_ns": 1099374.9601766467,
+              "position": 0,
+              "round": 5
+            },
+            {
+              "gpu_ns": 1072750.0775828958,
+              "position": 1,
+              "round": 6
+            },
+            {
+              "gpu_ns": 1092291.6699200869,
+              "position": 0,
+              "round": 7
+            },
+            {
+              "gpu_ns": 1071416.65648669,
+              "position": 1,
+              "round": 8
+            },
+            {
+              "gpu_ns": 1100374.96779114,
+              "position": 0,
+              "round": 9
+            },
+            {
+              "gpu_ns": 1113000.0930279493,
+              "position": 1,
+              "round": 10
+            },
+            {
+              "gpu_ns": 1110500.073991716,
+              "position": 0,
+              "round": 11
+            },
+            {
+              "gpu_ns": 1050875.0565350056,
+              "position": 1,
+              "round": 12
+            },
+            {
+              "gpu_ns": 1111375.0515505672,
+              "position": 0,
+              "round": 13
+            },
+            {
+              "gpu_ns": 1099333.2834914327,
+              "position": 1,
+              "round": 14
+            },
+            {
+              "gpu_ns": 1093083.29410851,
+              "position": 0,
+              "round": 15
+            },
+            {
+              "gpu_ns": 1093208.3241641521,
+              "position": 1,
+              "round": 16
+            },
+            {
+              "gpu_ns": 1103500.0206902623,
+              "position": 0,
+              "round": 17
+            },
+            {
+              "gpu_ns": 1073916.6755229235,
+              "position": 1,
+              "round": 18
+            },
+            {
+              "gpu_ns": 1082874.950952828,
+              "position": 0,
+              "round": 19
+            }
+          ],
+          "source_sha256": "2e7a0539cdc125d698c00f01dbfdb5bb6d533ffc732c03ea44f97bc46d3313e8",
+          "summary": {
+            "count": 20,
+            "cov_percent": 1.7818801897491774,
+            "max_gpu_ns": 1130000.1060590148,
+            "mean_gpu_ns": 1089227.0947806537,
+            "min_gpu_ns": 1050875.0565350056,
+            "p50_gpu_ns": 1092291.6699200869,
+            "p90_gpu_ns": 1111375.0515505672,
+            "p99_gpu_ns": 1130000.1060590148
+          },
+          "timing_attempts": 20
+        }
+      ],
+      "ids_equal": true,
+      "nominal_prompt_tokens": 971,
+      "output_equal": true,
+      "prompt_ids_sha256": "45a0b08b8b6c87d1f164ab6c494887bee5be86ca6ca05364d1864ee51e0300e1",
+      "rounds": [
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 0,
+          "selected_minus_legacy_ns": 7416.70373827219
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 1,
+          "selected_minus_legacy_ns": 6833.34656059742
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 2,
+          "selected_minus_legacy_ns": -39541.744627058506
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 3,
+          "selected_minus_legacy_ns": -24291.5702983737
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 4,
+          "selected_minus_legacy_ns": -47125.15510618687
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 5,
+          "selected_minus_legacy_ns": 18666.614778339863
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 6,
+          "selected_minus_legacy_ns": -51249.98278915882
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 7,
+          "selected_minus_legacy_ns": -22833.235561847687
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 8,
+          "selected_minus_legacy_ns": 43791.60236567259
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 9,
+          "selected_minus_legacy_ns": 17374.98678267002
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 10,
+          "selected_minus_legacy_ns": 33916.67269170284
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 11,
+          "selected_minus_legacy_ns": 15625.031664967537
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 12,
+          "selected_minus_legacy_ns": -29624.905437231064
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 13,
+          "selected_minus_legacy_ns": 8916.715160012245
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 14,
+          "selected_minus_legacy_ns": 24249.893613159657
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 15,
+          "selected_minus_legacy_ns": -18208.404071629047
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 16,
+          "selected_minus_legacy_ns": -22333.34816992283
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 17,
+          "selected_minus_legacy_ns": 4958.361387252808
+        },
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 18,
+          "selected_minus_legacy_ns": -25166.66427254677
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 19,
+          "selected_minus_legacy_ns": -33750.0823661685
+        }
+      ],
+      "warmup_rounds": [
+        {
+          "arm_order": [
+            "legacy",
+            "topology_per_head"
+          ],
+          "round": 0,
+          "samples": [
+            {
+              "arm": "legacy",
+              "gpu_ns": 1131541.677750647,
+              "position": 0
+            },
+            {
+              "arm": "topology_per_head",
+              "gpu_ns": 1109124.9762102962,
+              "position": 1
+            }
+          ]
+        },
+        {
+          "arm_order": [
+            "topology_per_head",
+            "legacy"
+          ],
+          "round": 1,
+          "samples": [
+            {
+              "arm": "topology_per_head",
+              "gpu_ns": 1073083.3746492863,
+              "position": 0
+            },
+            {
+              "arm": "legacy",
+              "gpu_ns": 1064000.0691637397,
+              "position": 1
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "version": 1
+}

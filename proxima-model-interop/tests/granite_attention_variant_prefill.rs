@@ -1943,6 +1943,30 @@ async fn perf_granite_query_rows_warmup_control_two_shapes_against_f16_legacy() 
     );
 }
 
+#[proxima::test]
+async fn perf_granite_per_head_topology_warmup_control_two_shapes_against_f16_legacy() {
+    let baseline = f16_variant();
+    let selected = AttentionVariant {
+        simd_topology: omega::AttentionSimdTopology::PerHead,
+        ..baseline
+    };
+    assert_eq!(
+        AttentionVariant {
+            simd_topology: omega::AttentionSimdTopology::Legacy,
+            ..selected
+        },
+        baseline,
+        "the selected replay must change only simd_topology"
+    );
+    run_granite_attention_measurement_with_warmup(
+        &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
+        Some(baseline),
+        selected,
+        "topology_per_head",
+        2,
+    );
+}
+
 
 #[proxima::test]
 async fn perf_granite_simdgroup_count_against_f16_legacy() {
