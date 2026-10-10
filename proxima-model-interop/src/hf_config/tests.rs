@@ -336,6 +336,13 @@ fn architecture_matrix_lfm_schedule() {
         .expect("pinned LFM config derives its mixed layer schedule");
     assert_eq!(architecture.feed_forward, 8192);
     assert!(architecture.tied_embeddings);
+
+    let mut fractional_multiplier_config = config.clone();
+    fractional_multiplier_config.block_ffn_dim_multiplier = Some(1.03125);
+    let fractional_architecture = architecture_from_hf_config(&fractional_multiplier_config)
+        .expect("fractional LFM FFN multiplier derives");
+    assert_eq!(fractional_architecture.feed_forward, 8448);
+
     let expected_kv_heads: Vec<u32> = expected
         .iter()
         .map(|layer_kind| match layer_kind {

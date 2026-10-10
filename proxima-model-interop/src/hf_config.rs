@@ -247,8 +247,8 @@ fn lfm_feed_forward_width(config: &HfConfig) -> Result<u32, InteropError> {
             "block_ffn_dim_multiplier must be finite and nonnegative",
         ));
     }
-    let width = (adjusted as f64 * multiplier).trunc();
-    if width > u64::MAX as f64 {
+    let width = adjusted as f64 * multiplier;
+    if width >= u64::MAX as f64 {
         return Err(malformed_lfm(
             "block_ffn_dim_multiplier overflows the LFM2 FFN width",
         ));
