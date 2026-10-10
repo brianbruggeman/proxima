@@ -13,12 +13,14 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update its c
 
 | 05 | [card](cards/05-rows16-simdgroup-rows-probe.md) | 03,04 | R8 | `PROXIMA_TEST_TIMEOUT_MS=900000 PROXIMA_CAPTURE_LIVE=1 PROXIMA_CAPTURE_NODES=all PROXIMA_CAPTURE_STEPS=0 CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo nextest run -p proxima-model-interop --features std,metal,instrument,metal-attn-split-rows,metal-attn-variants --test granite_attention_variant_prefill -E 'test(~perf_granite_rows16_simdgroup_rows)' -j 1 --success-output immediate` | selects 1 test, passes 1, skips 21; 2 shapes × 20 paired samples, equal IDs, captured source/grid | [x] | `evidence/card05-row16-simdgroup-2026-10-10.log`: F16 MMA/F32 K/V on Granite 3.1 1B A400M Instruct Q8_0, local Metal. Actual 256-token p50 baseline/selected 179,625/489,292 ns; actual 971-token p50 1,109,125/6,411,500 ns. Outputs were bit-identical and IDs `[322]`; selected grid threads were half baseline at both shapes (16,384→8,192; 62,464→31,232). These are single-process isolated replay observations. The selected source and grid are recorded in the raw log. |
 
+| 06 | [card](cards/06-rows16-shared-k-probe.md) | 03–05 | R9 | `PROXIMA_TEST_TIMEOUT_MS=900000 PROXIMA_CAPTURE_LIVE=1 PROXIMA_CAPTURE_NODES=all PROXIMA_CAPTURE_STEPS=0 CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo nextest run -p proxima-model-interop --features std,metal,instrument,metal-attn-split-rows,metal-attn-variants --test granite_attention_variant_prefill -E 'test(~perf_granite_rows16_shared_k)' -j 1 --success-output immediate` | selects 1 test, passes 1, skips 22; 2 shapes × 20 paired samples, equal IDs, entry names/grid captured | [x] | Log `evidence/card06-rows16-shared-k-2026-10-10.log`: Granite 3.1 1B A400M Instruct Q8_0, F16 MMA/F32 K/V, local Metal. At 256 tokens baseline/selected p50 180,541.654/244,375.085 ns; at 971 tokens 1,085,374.970/2,004,625.043 ns. Both selected outputs bit-identical; generated IDs `[322]`; selected grid threads half baseline (16,384→8,192; 62,464→31,232). Higher p50 in both one-process replay cells; source stages SharedK, but timing does not attribute the added cost. |
+
 ## resume
 
-Last landed slice: Card 05 Rows16 plus simdgroup-row probe (1/1 passed; commit pending)
-Current slice: Card 05 Rows16 plus simdgroup-row interaction probe, acceptance complete (1/1)
-Next action: land Card 05, then trace the initial-prefill F16 K/V producer path from ServingConfig through allocation, cache write, and attention bind
-Open question, if any: why the Rows16 + SimdgroupRows path is much slower despite exact output bits; the source and grid change are known, hardware cost attribution is not
+Last landed slice: Card 06 Rows16 plus SharedK probe (`3429ee03`)
+Current slice: Card 06 acceptance complete (1/1 passed; 2 shapes recorded)
+Next action: fast-forward push Card 06 to `origin/main`
+Open question, if any: what GPU-side cost explains the higher captured SharedK replay time despite identical output and fewer grid threads?
 
 ## struck
 
