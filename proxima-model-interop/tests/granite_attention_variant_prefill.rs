@@ -21,7 +21,7 @@ use proxima_gguf::parse_complete;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{
-    GPU_LAYERS_ALL, InteropError, LoadedModel, PromptCacheConfig, ServingConfig,
+    GPU_LAYERS_ALL, InteropError, LoadedModel, PromptCacheConfig, ServingConfig, SpeculativeConfig,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -130,6 +130,7 @@ fn serving_config(attention_variant: Option<AttentionVariant>) -> ServingConfig<
         flash_attention: false,
         reasoning_budget: 0,
         prompt_cache: PromptCacheConfig::off(),
+        speculative: SpeculativeConfig::none(),
         ubatch_size: 0,
         ..ServingConfig::default()
     }
@@ -1047,6 +1048,192 @@ fn shared_k_variant() -> AttentionVariant {
     variant
 }
 
+fn f32_shared_prefetch_variant() -> AttentionVariant {
+    let mut variant = AttentionVariant::default();
+    variant.mma_precision = omega::AttentionMmaPrecision::F16;
+    variant.kv_reuse = omega::AttentionKvReuse::SharedKv;
+    variant.tile_height = omega::AttentionTileHeight::Rows8;
+    variant.query_parallelism = omega::AttentionQueryParallelism::SimdgroupRows;
+    variant.simd_topology = omega::AttentionSimdTopology::PerHead;
+    variant.prefetch = omega::AttentionPrefetch::NextBlock;
+    variant
+}
+
+fn f32_shared_variant() -> AttentionVariant {
+    let mut variant = f32_shared_prefetch_variant();
+    variant.prefetch = omega::AttentionPrefetch::Off;
+    variant
+}
+
+fn f32_shared_k_variant() -> AttentionVariant {
+    let mut variant = f32_shared_variant();
+    variant.kv_reuse = AttentionKvReuse::SharedK;
+    variant
+}
+
+fn f16_variant() -> AttentionVariant {
+    let mut variant = AttentionVariant::default();
+    variant.mma_precision = omega::AttentionMmaPrecision::F16;
+    variant
+}
+
+fn f16_simdgroup_rows_variant() -> AttentionVariant {
+    let mut variant = AttentionVariant::default();
+    variant.mma_precision = omega::AttentionMmaPrecision::F16;
+    variant.query_parallelism = omega::AttentionQueryParallelism::SimdgroupRows;
+    variant
+}
+
+fn f16_shared_k_variant() -> AttentionVariant {
+    let mut variant = AttentionVariant::default();
+    variant.mma_precision = omega::AttentionMmaPrecision::F16;
+    variant.kv_reuse = AttentionKvReuse::SharedK;
+    variant
+}
+
+fn f16_rows16_variant() -> AttentionVariant {
+    let mut variant = AttentionVariant::default();
+    variant.mma_precision = omega::AttentionMmaPrecision::F16;
+    variant.tile_height = omega::AttentionTileHeight::Rows16;
+    variant
+}
+
+fn f32_output_difference(left: &[u8], right: &[u8]) -> Value {
+    assert_eq!(left.len(), right.len(), "attention output byte lengths");
+    assert_eq!(left.len() % 4, 0, "attention output is packed f32");
+    let mut changed_bits = 0usize;
+    let mut max_absolute_difference = 0.0f32;
+    let mut squared_difference_sum = 0.0f64;
+    let mut non_finite_pairs = 0usize;
+    for (left_value, right_value) in left.chunks_exact(4).zip(right.chunks_exact(4)) {
+        let left_value =
+            f32::from_ne_bytes([left_value[0], left_value[1], left_value[2], left_value[3]]);
+        let right_value = f32::from_ne_bytes([
+            right_value[0],
+            right_value[1],
+            right_value[2],
+            right_value[3],
+        ]);
+        changed_bits += usize::from(left_value.to_bits() != right_value.to_bits());
+        if left_value.is_finite() && right_value.is_finite() {
+            let difference = (left_value - right_value).abs();
+            max_absolute_difference = max_absolute_difference.max(difference);
+            squared_difference_sum += f64::from(difference) * f64::from(difference);
+        } else {
+            non_finite_pairs += 1;
+        }
+    }
+    json!({
+        "elements": left.len() / 4,
+        "changed_bits": changed_bits,
+        "max_absolute_difference": max_absolute_difference,
+        "rms_difference": (squared_difference_sum / (left.len() / 4) as f64).sqrt(),
+        "non_finite_pairs": non_finite_pairs,
+    })
+}
+
+fn run_variant_prefill_probe(variant_name: &str, variant: AttentionVariant) {
+    run_variant_prefill_probe_shapes(
+        variant_name,
+        None,
+        variant,
+        &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
+    );
+}
+
+fn run_variant_prefill_probe_shapes(
+    variant_name: &str,
+    baseline_variant: Option<AttentionVariant>,
+    variant: AttentionVariant,
+    prompt_shapes: &[usize],
+) {
+    let path = granite_checkpoint_path();
+    let file = File::open(&path).expect("open the real Granite checkpoint");
+    // SAFETY: this probe reads the checkpoint without modifying it.
+    let mapping = unsafe { Mmap::map(&file) }.expect("mmap the Granite checkpoint");
+    let parsed = parse_complete(&mapping).expect("parse the Granite checkpoint");
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .expect("build the Granite checkpoint vocab");
+    let model = LoadedModel::load(&parsed, &mapping).expect("bind the Granite checkpoint");
+
+    for &nominal_tokens in prompt_shapes {
+        let (prompt, actual_tokens) = prompt_prefix_of_tokens(&vocab, nominal_tokens);
+        let baseline = capture_attention_replay(&model, &prompt, baseline_variant, None);
+        let selected =
+            capture_attention_replay(&model, &prompt, Some(variant), Some(&baseline.dispatch));
+        assert_eq!(
+            baseline.dispatch.node, selected.dispatch.node,
+            "attention node"
+        );
+        assert_eq!(
+            baseline.dispatch.extents, selected.dispatch.extents,
+            "attention extents"
+        );
+        assert_ne!(
+            baseline.dispatch.entry, selected.dispatch.entry,
+            "selected entry"
+        );
+        assert_ne!(
+            baseline.dispatch.msl_sha256, selected.dispatch.msl_sha256,
+            "selected source identity"
+        );
+        assert!(
+            !baseline
+                .dispatch
+                .bindings
+                .iter()
+                .any(|binding| matches!(binding, Binding::Fault))
+        );
+        assert!(
+            !selected
+                .dispatch
+                .bindings
+                .iter()
+                .any(|binding| matches!(binding, Binding::Fault))
+        );
+        let output_difference = f32_output_difference(&baseline.output, &selected.output);
+        let token_comparison = compare_token_ids(&baseline.token_ids, &selected.token_ids);
+        let ids_equal = token_comparison.is_ok();
+        token_comparison
+            .unwrap_or_else(|error| panic!("{variant_name} Granite generated IDs differ: {error}"));
+
+        let mut baseline_samples = Vec::with_capacity(20);
+        let mut selected_samples = Vec::with_capacity(20);
+        let mut signed_deltas = Vec::with_capacity(20);
+        for round in 0..20 {
+            let (first, second) = if round % 2 == 0 {
+                (&baseline.dispatch, &selected.dispatch)
+            } else {
+                (&selected.dispatch, &baseline.dispatch)
+            };
+            let first_ns = first.time_gpu_ns(1).expect("first replay completes");
+            let second_ns = second.time_gpu_ns(1).expect("second replay completes");
+            let (baseline_ns, selected_ns) = if round % 2 == 0 {
+                (first_ns, second_ns)
+            } else {
+                (second_ns, first_ns)
+            };
+            baseline_samples.push(baseline_ns);
+            selected_samples.push(selected_ns);
+            signed_deltas.push(selected_ns - baseline_ns);
+        }
+        println!(
+            "granite_variant_probe name={variant_name} config={variant:?} nominal_tokens={nominal_tokens} actual_tokens={} node={} extents={:?} baseline_entry={} selected_entry={} baseline_grid={:?} selected_grid={:?} output_diff={output_difference} ids_equal={ids_equal} baseline_ids={:?} selected_ids={:?} baseline_samples_ns={baseline_samples:?} selected_samples_ns={selected_samples:?} selected_minus_baseline_ns={signed_deltas:?} baseline_summary={:?} selected_summary={:?}",
+            actual_tokens,
+            baseline.dispatch.node,
+            baseline.dispatch.extents,
+            baseline.dispatch.entry,
+            selected.dispatch.entry,
+            baseline.dispatch.grid,
+            selected.dispatch.grid,
+            baseline.token_ids,
+            selected.token_ids,
+            summarize_samples(&baseline_samples),
+            summarize_samples(&selected_samples),
+        );
+    }
+}
+
 #[proxima::test]
 async fn card_24_wrong_oracle_and_wrong_fact_are_rejected() {
     let expected_ids = [203, 433, 19482, 1236, 47615, 8558, 12011, 2783];
@@ -1472,4 +1659,60 @@ async fn perf_card_00_granite_attention_replay_cell() {
 #[proxima::test]
 async fn perf_card_02_granite_two_prefill_shapes() {
     run_granite_attention_measurement(&[SHORT_PROMPT_TOKENS, PROMPT_TOKENS]);
+}
+
+#[proxima::test]
+async fn perf_probe_granite_f16_mma_against_legacy() {
+    run_variant_prefill_probe("f16_mma", f16_variant());
+}
+
+#[proxima::test]
+async fn perf_probe_granite_f32_shared_prefetch_against_legacy() {
+    run_variant_prefill_probe(
+        "f32_f16_shared_kv_rows8_prefetch",
+        f32_shared_prefetch_variant(),
+    );
+}
+
+#[proxima::test]
+async fn perf_probe_granite_f32_shared_prefetch_off_against_legacy() {
+    run_variant_prefill_probe("f32_f16_shared_kv_rows8_prefetch_off", f32_shared_variant());
+}
+
+#[proxima::test]
+async fn perf_probe_granite_f32_shared_k_parallel_against_legacy() {
+    run_variant_prefill_probe(
+        "f32_f16_shared_k_rows8_simdgroup_per_head",
+        f32_shared_k_variant(),
+    );
+}
+
+#[proxima::test]
+async fn perf_card_04_simdgroup_rows_only_against_f16() {
+    run_variant_prefill_probe_shapes(
+        "f16_simdgroup_rows_only",
+        Some(f16_variant()),
+        f16_simdgroup_rows_variant(),
+        &[PROMPT_TOKENS],
+    );
+}
+
+#[proxima::test]
+async fn perf_card_04_shared_k_only_against_f16() {
+    run_variant_prefill_probe_shapes(
+        "f16_shared_k_only",
+        Some(f16_variant()),
+        f16_shared_k_variant(),
+        &[PROMPT_TOKENS],
+    );
+}
+
+#[proxima::test]
+async fn perf_card_04_rows16_against_f16() {
+    run_variant_prefill_probe_shapes(
+        "f16_rows16_only",
+        Some(f16_variant()),
+        f16_rows16_variant(),
+        &[PROMPT_TOKENS],
+    );
 }
