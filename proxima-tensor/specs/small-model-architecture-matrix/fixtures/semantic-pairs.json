@@ -1,0 +1,710 @@
+{
+  "pairs": [
+    {
+      "control": {
+        "expected": "state_kind_mismatch",
+        "kind": "wrong_state",
+        "replace_kind": "kv"
+      },
+      "id": "lfm_text_vl_conv",
+      "status": "candidate",
+      "left": {
+        "input": {
+          "b": 2,
+          "c": 0.5,
+          "out_proj": 2,
+          "taps": [
+            1,
+            2,
+            3
+          ],
+          "x": 3
+        },
+        "op": "short_conv",
+        "output": [
+          23
+        ],
+        "state_in": {
+          "kind": "conv_taps",
+          "values": [
+            0,
+            1,
+            2
+          ]
+        },
+        "state_out": {
+          "kind": "conv_taps",
+          "values": [
+            1,
+            2,
+            6
+          ]
+        }
+      },
+      "left_source": "lfm_text_conv",
+      "relationship": "reuse",
+      "right": {
+        "input": {
+          "b": 2,
+          "c": 0.5,
+          "out_proj": 2,
+          "taps": [
+            1,
+            2,
+            3
+          ],
+          "x": 3
+        },
+        "op": "short_conv",
+        "output": [
+          23
+        ],
+        "state_in": {
+          "kind": "conv_taps",
+          "values": [
+            0,
+            1,
+            2
+          ]
+        },
+        "state_out": {
+          "kind": "conv_taps",
+          "values": [
+            1,
+            2,
+            6
+          ]
+        }
+      },
+      "right_source": "lfm_vision_conv",
+      "shared_contract": "gated causal convolution: B*x enters L_cache-tap state; C gates convolution; out_proj maps back to hidden width"
+    },
+    {
+      "control": {
+        "expected": "output_mismatch",
+        "kind": "omit_scale_and_head_dim"
+      },
+      "id": "minicpm_granite_gqa",
+      "status": "candidate",
+      "left": {
+        "input": {
+          "head_dim": 128,
+          "qk_dot": [
+            0,
+            11.313708498984761
+          ],
+          "scale": 0.08838834764831845,
+          "values": [
+            0,
+            10
+          ]
+        },
+        "op": "gqa_softmax_core",
+        "output": [
+          7.310585786300049
+        ],
+        "state_in": {
+          "key_rows": 2,
+          "kind": "kv"
+        },
+        "state_out": {
+          "key_rows": 2,
+          "kind": "kv"
+        }
+      },
+      "left_source": "minicpm_gqa",
+      "relationship": "reuse",
+      "right": {
+        "input": {
+          "head_dim": 64,
+          "qk_dot": [
+            0,
+            64
+          ],
+          "scale": 0.015625,
+          "values": [
+            0,
+            10
+          ]
+        },
+        "op": "gqa_softmax_core",
+        "output": [
+          7.310585786300049
+        ],
+        "state_in": {
+          "key_rows": 2,
+          "kind": "kv"
+        },
+        "state_out": {
+          "key_rows": 2,
+          "kind": "kv"
+        }
+      },
+      "right_source": "granite_micro_gqa",
+      "shared_contract": "scaled QK, causal softmax over K rows, weighted V; caller supplies explicit head width and score scale"
+    },
+    {
+      "control": {
+        "expected": "state_kind_mismatch",
+        "kind": "feed_left_state_to_right"
+      },
+      "id": "lfm_conv_granite_mamba",
+      "status": "candidate",
+      "left": {
+        "input": {
+          "b": 2,
+          "c": 0.5,
+          "out_proj": 2,
+          "taps": [
+            1,
+            2,
+            3
+          ],
+          "x": 3
+        },
+        "op": "short_conv",
+        "output": [
+          23
+        ],
+        "state_in": {
+          "kind": "conv_taps",
+          "values": [
+            0,
+            1,
+            2
+          ]
+        },
+        "state_out": {
+          "kind": "conv_taps",
+          "values": [
+            1,
+            2,
+            6
+          ]
+        }
+      },
+      "left_source": "lfm_text_conv",
+      "relationship": "distinct",
+      "right": {
+        "input": {
+          "B": 3,
+          "C": 2,
+          "D": 0,
+          "dA": 0.5,
+          "dt": 0.5,
+          "x": 4
+        },
+        "op": "mamba2_step",
+        "output": [
+          14
+        ],
+        "state_in": {
+          "kind": "selective_ssm",
+          "values": [
+            2
+          ]
+        },
+        "state_out": {
+          "kind": "selective_ssm",
+          "values": [
+            7
+          ]
+        }
+      },
+      "right_source": "granite_h_mamba",
+      "separate_contract": "short finite FIR tap history versus selective SSM state with dA and dBx update"
+    },
+    {
+      "control": {
+        "expected": "state_kind_mismatch",
+        "kind": "exchange_recurrent_states"
+      },
+      "id": "sala_lightning_nemotron_mamba",
+      "status": "candidate",
+      "left": {
+        "input": {
+          "decay_factor": 0.5,
+          "g_gamma": -0.6931471805599453,
+          "k": 3,
+          "q": 2,
+          "scale": 1,
+          "v": 4
+        },
+        "op": "simple_gla_step",
+        "output": [
+          26
+        ],
+        "state_in": {
+          "kind": "gla_matrix",
+          "values": [
+            2
+          ]
+        },
+        "state_out": {
+          "kind": "gla_matrix",
+          "values": [
+            13
+          ]
+        }
+      },
+      "left_source": "sala_lightning",
+      "relationship": "distinct",
+      "right": {
+        "input": {
+          "B": 3,
+          "C": 2,
+          "D": 0,
+          "dA": 0.5,
+          "dt": 0.5,
+          "x": 4
+        },
+        "op": "mamba2_step",
+        "output": [
+          14
+        ],
+        "state_in": {
+          "kind": "selective_ssm",
+          "values": [
+            2
+          ]
+        },
+        "state_out": {
+          "kind": "selective_ssm",
+          "values": [
+            7
+          ]
+        }
+      },
+      "right_source": "nemotron_mamba",
+      "separate_contract": "GLA matrix state decays then adds K outer V and reads with Q; Mamba2 state uses token-dependent dA/dBx and C readout plus D skip"
+    },
+    {
+      "control": {
+        "expected": "output_mismatch",
+        "kind": "drop_block_selection"
+      },
+      "id": "sala_sparse_minicpm_dense",
+      "status": "candidate",
+      "left": {
+        "input": {
+          "context_tokens": 8193,
+          "qk_dot": [
+            0,
+            0,
+            0
+          ],
+          "scale": 1,
+          "selected_indices": [
+            0,
+            2
+          ],
+          "values": [
+            1,
+            10,
+            2
+          ]
+        },
+        "op": "selected_softmax",
+        "output": [
+          1.5
+        ],
+        "state_in": {
+          "key_rows": 3,
+          "kind": "kv_selected"
+        },
+        "state_out": {
+          "key_rows": 3,
+          "kind": "kv_selected"
+        }
+      },
+      "left_source": "sala_sparse",
+      "relationship": "distinct",
+      "right": {
+        "input": {
+          "context_tokens": 8193,
+          "qk_dot": [
+            0,
+            0,
+            0
+          ],
+          "scale": 1,
+          "values": [
+            1,
+            10,
+            2
+          ]
+        },
+        "op": "dense_softmax",
+        "output": [
+          4.333333333333333
+        ],
+        "state_in": {
+          "key_rows": 3,
+          "kind": "kv"
+        },
+        "state_out": {
+          "key_rows": 3,
+          "kind": "kv"
+        }
+      },
+      "right_source": "minicpm_gqa",
+      "separate_contract": "InfLLM-v2 compressed/local block indices select K/V before softmax; dense attention includes every unmasked K/V row"
+    },
+    {
+      "control": {
+        "expected": "cache_identity_mismatch",
+        "kind": "single_pass_with_two_loop_cache"
+      },
+      "id": "nanbeige_loop_llama_single",
+      "status": "candidate",
+      "left": {
+        "input": {
+          "layer_bias": 1,
+          "layer_multiplier": 2,
+          "loops": 2,
+          "norm": "identity",
+          "x": 1
+        },
+        "op": "loop_stack",
+        "output": [
+          7
+        ],
+        "state_in": {
+          "kind": "loop_cache",
+          "slots": []
+        },
+        "state_out": {
+          "kind": "loop_cache",
+          "slots": [
+            "0:0",
+            "1:0"
+          ]
+        }
+      },
+      "left_source": "nanbeige_loop",
+      "relationship": "distinct",
+      "right": {
+        "input": {
+          "layer_bias": 1,
+          "layer_multiplier": 2,
+          "loops": 1,
+          "norm": "identity",
+          "x": 1
+        },
+        "op": "loop_stack",
+        "output": [
+          3
+        ],
+        "state_in": {
+          "kind": "single_cache",
+          "slots": []
+        },
+        "state_out": {
+          "kind": "single_cache",
+          "slots": [
+            "0:0"
+          ]
+        }
+      },
+      "right_source": "llama_single",
+      "separate_contract": "same layer stack re-entered for two loops with loop-aware cache identity and per-loop final norm versus one pass over each layer"
+    }
+  ],
+  "scope": "hand-worked operator/state controls; not full checkpoint execution or model parity",
+  "sources": {
+    "granite_h_mamba": {
+      "case": "granite4_h_tiny_text",
+      "config_checks": {
+        "layer_types.0": "mamba",
+        "mamba_d_conv": 4,
+        "mamba_d_state": 128,
+        "model_type": "granitemoehybrid"
+      },
+      "config_file": "granite_h.json",
+      "config_revision": "f95c8e83b06c12f877486f18d2e2d109ab252bd0",
+      "config_sha256": "bda8fd574ace7d968d82397f59ea6b9a702a077bbeab279a65b9dad7386a82c6",
+      "config_url": "https://huggingface.co/ibm-granite/granite-4.0-h-tiny-base/blob/f95c8e83b06c12f877486f18d2e2d109ab252bd0/config.json",
+      "local": {
+        "line": 291,
+        "needle": "DeltaNet",
+        "path": "proxima-model-interop/src/recurrent_interval.rs",
+        "role": "rejected_substitute"
+      },
+      "operator": {
+        "line": 734,
+        "line_text": "cache_params.ssm_states[self.layer_idx].copy_(",
+        "sha256": "59db4d7a796320b8438ffa3349a06579b250b2a06e106303d145893616c03e17",
+        "supporting_lines": [
+          717,
+          749,
+          755
+        ],
+        "url": "https://github.com/huggingface/transformers/blob/v4.56.0/src/transformers/models/granitemoehybrid/modeling_granitemoehybrid.py#L734"
+      }
+    },
+    "granite_micro_gqa": {
+      "case": "granite4_micro_text",
+      "config_checks": {
+        "attention_multiplier": 0.015625,
+        "hidden_size": 2560,
+        "model_type": "granitemoehybrid",
+        "num_attention_heads": 40,
+        "num_key_value_heads": 8
+      },
+      "config_file": "granite_micro.json",
+      "config_revision": "98e1d641451818f6c8e6b17c1c359b5b4ac495d0",
+      "config_sha256": "e11a24434769f1926c2b73ea4b6bf7115533e3644d553d5a347797082e65c0f2",
+      "config_url": "https://huggingface.co/ibm-granite/granite-4.0-micro-base/blob/98e1d641451818f6c8e6b17c1c359b5b4ac495d0/config.json",
+      "local": {
+        "line": 817,
+        "needle": "inv_sqrt_head_dim",
+        "path": "proxima-tensor/src/spec/attention_forward.rs",
+        "role": "matching_core"
+      },
+      "operator": {
+        "line": 162,
+        "line_text": "self.scaling = config.attention_multiplier",
+        "sha256": "59db4d7a796320b8438ffa3349a06579b250b2a06e106303d145893616c03e17",
+        "supporting_lines": [
+          124,
+          130
+        ],
+        "url": "https://github.com/huggingface/transformers/blob/v4.56.0/src/transformers/models/granitemoehybrid/modeling_granitemoehybrid.py#L162"
+      }
+    },
+    "lfm_text_conv": {
+      "case": "lfm_text",
+      "config_checks": {
+        "conv_L_cache": 3,
+        "layer_types.0": "conv",
+        "model_type": "lfm2"
+      },
+      "config_file": "lfm_text.json",
+      "config_revision": "7453bca97ca1e67754c4035a4b4c584e1c9dd725",
+      "config_sha256": "15d6157fb6df3f8272e2fe90e18f57727ccf02a125c94469198b0f3281510185",
+      "config_url": "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Base/blob/7453bca97ca1e67754c4035a4b4c584e1c9dd725/config.json",
+      "local": {
+        "line": 233,
+        "needle": "b_proj",
+        "path": "proxima-tensor/src/spec/short_conv_delta_net.rs",
+        "role": "matching_core"
+      },
+      "operator": {
+        "line": 489,
+        "line_text": "Bx = B * x",
+        "sha256": "f399fa2a111dac8c7fc07b2717abb10ee3e82468851321f45553ebb10fbd28b1",
+        "supporting_lines": [
+          492,
+          497,
+          509
+        ],
+        "url": "https://github.com/huggingface/transformers/blob/v4.57.2/src/transformers/models/lfm2/modeling_lfm2.py#L489"
+      }
+    },
+    "lfm_vision_conv": {
+      "case": "lfm_vision",
+      "config_checks": {
+        "model_type": "lfm2_vl",
+        "text_config.conv_L_cache": 3,
+        "text_config.layer_types.0": "conv",
+        "text_config.model_type": "lfm2"
+      },
+      "config_file": "lfm_vision.json",
+      "config_revision": "35a118d938ce6d123ac2d371649f24a8efb69058",
+      "config_sha256": "68ed2ea181e1fe305a43b8d5b68e9b912f1f6fd9fcb2a3c45006077ff171cb7f",
+      "config_url": "https://huggingface.co/LiquidAI/LFM2.5-VL-3B/blob/35a118d938ce6d123ac2d371649f24a8efb69058/config.json",
+      "local": {
+        "line": 324,
+        "needle": "causal_conv1d",
+        "path": "proxima-tensor/src/spec/short_conv_delta_net.rs",
+        "role": "matching_core"
+      },
+      "operator": {
+        "line": 368,
+        "line_text": "Bx = B * x",
+        "sha256": "06d45e14f77da557d54085799c908c9dd5b9dd7db8998b91d78296383bcb609f",
+        "supporting_lines": [
+          370,
+          372,
+          384
+        ],
+        "url": "https://github.com/huggingface/transformers/blob/v5.8.1/src/transformers/models/lfm2/modeling_lfm2.py#L368"
+      }
+    },
+    "llama_single": {
+      "case": "minicpm_text",
+      "config_checks": {
+        "model_type": "llama",
+        "num_hidden_layers": 24
+      },
+      "config_file": "minicpm.json",
+      "config_revision": "156170697656c48f69915b33a2fb44110242187c",
+      "config_sha256": "f6a54013efd621f26dbe94f7258445bfbf587cd323b5f6f2411d22dcecc4ef7d",
+      "config_url": "https://huggingface.co/openbmb/MiniCPM5-1B-Base/blob/156170697656c48f69915b33a2fb44110242187c/config.json",
+      "local": {
+        "line": 1029,
+        "needle": "descriptor.layers",
+        "path": "proxima-tensor/src/spec/hybrid_forward.rs",
+        "role": "rejected_substitute"
+      },
+      "operator": {
+        "line": 410,
+        "line_text": "for decoder_layer in self.layers[: self.config.num_hidden_layers]:",
+        "sha256": "46d313ec0f1116bcc1bb7f2379467ab249c140415c64fb758e2d5915cd8b89a5",
+        "supporting_lines": [
+          363
+        ],
+        "url": "https://github.com/huggingface/transformers/blob/v5.6.2/src/transformers/models/llama/modeling_llama.py#L410"
+      }
+    },
+    "minicpm_gqa": {
+      "case": "minicpm_text",
+      "config_checks": {
+        "head_dim": 128,
+        "model_type": "llama",
+        "num_attention_heads": 16,
+        "num_key_value_heads": 2
+      },
+      "config_file": "minicpm.json",
+      "config_revision": "156170697656c48f69915b33a2fb44110242187c",
+      "config_sha256": "f6a54013efd621f26dbe94f7258445bfbf587cd323b5f6f2411d22dcecc4ef7d",
+      "config_url": "https://huggingface.co/openbmb/MiniCPM5-1B-Base/blob/156170697656c48f69915b33a2fb44110242187c/config.json",
+      "local": {
+        "line": 813,
+        "needle": "scores_scaled",
+        "path": "proxima-tensor/src/spec/attention_forward.rs",
+        "role": "matching_core"
+      },
+      "operator": {
+        "line": 232,
+        "line_text": "self.head_dim = getattr(config, \"head_dim\", config.hidden_size // config.num_attention_heads)",
+        "sha256": "46d313ec0f1116bcc1bb7f2379467ab249c140415c64fb758e2d5915cd8b89a5",
+        "supporting_lines": [
+          212,
+          216
+        ],
+        "url": "https://github.com/huggingface/transformers/blob/v5.6.2/src/transformers/models/llama/modeling_llama.py#L232"
+      }
+    },
+    "nanbeige_loop": {
+      "case": "nanbeige_text",
+      "config_checks": {
+        "model_type": "nanbeige",
+        "num_hidden_layers": 22,
+        "num_loops": 2
+      },
+      "config_file": "nanbeige.json",
+      "config_revision": "4a38e817c14b9f2c4b69b1e05cbda90395872f6b",
+      "config_sha256": "844ff06b34b349eae66e7c714542dab2092170f60c0e54d0bf16b0d1e792665a",
+      "config_url": "https://huggingface.co/Nanbeige/Nanbeige4.2-3B-Base/blob/4a38e817c14b9f2c4b69b1e05cbda90395872f6b/config.json",
+      "local": {
+        "line": 1029,
+        "needle": "descriptor.layers",
+        "path": "proxima-tensor/src/spec/hybrid_forward.rs",
+        "role": "rejected_substitute"
+      },
+      "operator": {
+        "line": 2217,
+        "line_text": "for loop_idx in range(num_loops):",
+        "sha256": "547737f989f5cb741c1a568acaf85f83521fa67a8f7268e19f9a37e60127c0d5",
+        "supporting_lines": [
+          2288,
+          2305
+        ],
+        "url": "https://huggingface.co/Nanbeige/Nanbeige4.2-3B-Base/blob/4a38e817c14b9f2c4b69b1e05cbda90395872f6b/modeling_nanbeige.py#L2217"
+      }
+    },
+    "nemotron_mamba": {
+      "case": "nemotron_text",
+      "config_checks": {
+        "conv_kernel": 4,
+        "model_type": "nemotron_h",
+        "ssm_state_size": 128
+      },
+      "config_file": "nemotron.json",
+      "config_revision": "dfaf35de3e30f1867dd8dbc38a7fc9fb52d3914f",
+      "config_sha256": "fde9241f66cd414458df444a80eb535f53aef2b4b240a91f092e651fa6f27219",
+      "config_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16/blob/dfaf35de3e30f1867dd8dbc38a7fc9fb52d3914f/config.json",
+      "local": {
+        "line": 291,
+        "needle": "DeltaNet",
+        "path": "proxima-model-interop/src/recurrent_interval.rs",
+        "role": "rejected_substitute"
+      },
+      "operator": {
+        "line": 592,
+        "line_text": "cache_params.update_ssm_state(",
+        "sha256": "ea982af0b805f181573f919ecb001d5bbc0153459923cf4b2f1ccae194e415a4",
+        "supporting_lines": [
+          575,
+          608
+        ],
+        "url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16/blob/dfaf35de3e30f1867dd8dbc38a7fc9fb52d3914f/modeling_nemotron_h.py#L592"
+      }
+    },
+    "sala_lightning": {
+      "case": "openbmb_sala_text",
+      "config_checks": {
+        "lightning_scale": "1/sqrt(d)",
+        "mixer_types.1": "lightning-attn",
+        "model_type": "minicpm_sala"
+      },
+      "config_file": "sala.json",
+      "config_revision": "9180fe1db74f71fb81bc7105efe88f6b19c959b0",
+      "config_sha256": "cd6d042c4d8d5e32f7809c366d209bb183704bc2917bec5f162f36fb7439955c",
+      "config_url": "https://huggingface.co/openbmb/MiniCPM-SALA/blob/9180fe1db74f71fb81bc7105efe88f6b19c959b0/config.json",
+      "dependency_operator": {
+        "note": "equation witness only; model revision does not pin installed FLA version",
+        "sha256": "f5906e9ea08c52e46b887f7bff4cec151c67d3bc6f478f3bfa7aa56543030618",
+        "url": "https://github.com/fla-org/flash-linear-attention/blob/7b5138a92133132cfc5f80455c9c0920d4fe0278/fla/ops/common/fused_recurrent.py#L104-L129"
+      },
+      "local": {
+        "line": 369,
+        "needle": "state",
+        "path": "proxima-tensor/src/spec/short_conv_delta_net.rs",
+        "role": "rejected_substitute"
+      },
+      "operator": {
+        "line": 2240,
+        "line_text": "o, final_state = fused_recurrent_simple_gla(",
+        "sha256": "b6060c08cfd45868f0e90726e48292689b15f01bf9828cf07f6257530477719c",
+        "supporting_lines": [
+          2294,
+          2304
+        ],
+        "url": "https://huggingface.co/openbmb/MiniCPM-SALA/blob/9180fe1db74f71fb81bc7105efe88f6b19c959b0/modeling_minicpm_sala.py#L2240"
+      }
+    },
+    "sala_sparse": {
+      "case": "openbmb_sala_text",
+      "config_checks": {
+        "mixer_types.0": "minicpm4",
+        "model_type": "minicpm_sala",
+        "sparse_config.block_size": 64,
+        "sparse_config.dense_len": 8192
+      },
+      "config_file": "sala.json",
+      "config_revision": "9180fe1db74f71fb81bc7105efe88f6b19c959b0",
+      "config_sha256": "cd6d042c4d8d5e32f7809c366d209bb183704bc2917bec5f162f36fb7439955c",
+      "config_url": "https://huggingface.co/openbmb/MiniCPM-SALA/blob/9180fe1db74f71fb81bc7105efe88f6b19c959b0/config.json",
+      "local": {
+        "line": 813,
+        "needle": "scores_scaled",
+        "path": "proxima-tensor/src/spec/attention_forward.rs",
+        "role": "rejected_substitute"
+      },
+      "operator": {
+        "line": 1793,
+        "line_text": "topk_idx = compressed_attention(",
+        "sha256": "b6060c08cfd45868f0e90726e48292689b15f01bf9828cf07f6257530477719c",
+        "supporting_lines": [
+          1468,
+          1815,
+          1828
+        ],
+        "url": "https://huggingface.co/openbmb/MiniCPM-SALA/blob/9180fe1db74f71fb81bc7105efe88f6b19c959b0/modeling_minicpm_sala.py#L1793"
+      }
+    }
+  },
+  "version": 1
+}
