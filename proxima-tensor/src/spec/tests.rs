@@ -6384,13 +6384,11 @@ async fn architecture_matrix_lfm_conv_step() {
     let gated_values = [4.0f32];
     let weight_values = [1.0f32, 10.0, 100.0];
     let roll_values = [1i32, 2, 0];
-    let cases = [
+    for (position, expected_state, expected_output) in [
         (1.0f32, [2.0f32, 4.0, 1.0], 142.0f32),
         (3.0f32, [2.0f32, 3.0, 4.0], 432.0f32),
-    ];
-
-    for (cache_position_value, expected_state, expected_output) in cases {
-        let position_values = [cache_position_value];
+    ] {
+        let position_values = [position];
         let evaluated = crate::cpu::evaluate_quantized(
             &program,
             &[1],
@@ -6410,20 +6408,9 @@ async fn architecture_matrix_lfm_conv_step() {
         assert_eq!(state_shape, [1, 3]);
         assert_eq!(actual_output, [expected_output]);
         assert_eq!(actual_state, expected_state);
-
-        if cache_position_value == 1.0 {
-            let append_control_state = [2.0f32, 3.0, 4.0];
-            let append_control_output = append_control_state
-                .iter()
-                .zip(weight_values)
-                .map(|(state_value, weight_value)| state_value * weight_value)
-                .sum::<f32>();
-            assert_ne!(append_control_state, expected_state);
-            assert_ne!(append_control_output, expected_output);
-        }
     }
 
-    std::println!("steps=2 reference_pairs=2 wrong_kernel_rejected=1");
+    std::println!("steps=2 reference_pairs=2 state_values=6");
 }
 
 #[proxima::test]
@@ -6545,6 +6532,458 @@ async fn architecture_matrix_lfm_cached_mixer_step() {
         assert!((found - expected).abs() < 1.0e-6);
     }
     std::println!("decode_tokens=1 reference_pairs=1 state_values=3");
+}
+
+#[proxima::test]
+async fn architecture_matrix_lfm_prefill_mixer_state() {
+    const L_CACHE: u32 = 3;
+    let mut program = Vec::new();
+    let prefill_input = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Symbolic(0), Extent::Static(1)],
+        "prefill_input",
+    );
+    let decode_input = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(1)],
+        "decode_input",
+    );
+    let norm_weight = op::append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(1)],
+            value: 1.0,
+        },
+    );
+    let b_proj = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(1)],
+        "b_proj",
+    );
+    let c_proj = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(1)],
+        "c_proj",
+    );
+    let x_proj = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(1)],
+        "x_proj",
+    );
+    let conv_weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(L_CACHE)],
+        "conv_weight",
+    );
+    let out_proj = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(1)],
+        "out_proj",
+    );
+    let roll_indices = input_leaf(
+        &mut program,
+        DType::Int32,
+        alloc::vec![Extent::Static(L_CACHE)],
+        "roll_indices",
+    );
+    let cache_position = input_leaf(&mut program, DType::Float32, Vec::new(), "cache_position");
+    let inv_dim = scalar_constant(&mut program, 1.0);
+    let eps = scalar_constant(&mut program, 1.0e-6);
+    let prefill_len = core::num::NonZeroU32::new(1).expect("prefill length is nonzero");
+    let mut reference_program = program.clone();
+    let (prefill_output, prefill_state) = append_short_conv_prefill_mixer(
+        &mut program,
+        prefill_input,
+        inv_dim,
+        eps,
+        norm_weight,
+        b_proj,
+        c_proj,
+        x_proj,
+        conv_weight,
+        out_proj,
+        prefill_len,
+        L_CACHE,
+    )
+    .expect("prefill mixer returns residual and initialized history");
+    let prefill_shapes = crate::shape::infer(&program, &[1]).expect("prefill graph shapes");
+    assert_eq!(prefill_shapes.of(prefill_state), [1, L_CACHE as u64]);
+    let (decode_output, decode_state) = append_short_conv_cached_mixer_step(
+        &mut program,
+        decode_input,
+        inv_dim,
+        eps,
+        norm_weight,
+        b_proj,
+        c_proj,
+        x_proj,
+        conv_weight,
+        out_proj,
+        prefill_state,
+        cache_position,
+        roll_indices,
+        L_CACHE,
+    )
+    .expect("decode mixer consumes the returned prefill history");
+    let reference_output = append_short_conv_mixer(
+        &mut reference_program,
+        prefill_input,
+        inv_dim,
+        eps,
+        norm_weight,
+        b_proj,
+        c_proj,
+        x_proj,
+        conv_weight,
+        out_proj,
+        L_CACHE,
+    )
+    .expect("full-sequence reference mixer builds");
+    let wrong_state = op::append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(1), Extent::Static(L_CACHE)],
+            value: 0.0,
+        },
+    );
+    let (wrong_output, _) = append_short_conv_cached_mixer_step(
+        &mut program,
+        decode_input,
+        inv_dim,
+        eps,
+        norm_weight,
+        b_proj,
+        c_proj,
+        x_proj,
+        conv_weight,
+        out_proj,
+        wrong_state,
+        cache_position,
+        roll_indices,
+        L_CACHE,
+    )
+    .expect("zero-history control builds");
+    let evaluated = crate::cpu::evaluate_quantized(
+        &program,
+        &[1],
+        &[
+            crate::cpu::QuantizedBlock::Float32(&[1.0]),
+            crate::cpu::QuantizedBlock::Float32(&[2.0]),
+            crate::cpu::QuantizedBlock::Float32(&[2.0]),
+            crate::cpu::QuantizedBlock::Float32(&[3.0]),
+            crate::cpu::QuantizedBlock::Float32(&[4.0]),
+            crate::cpu::QuantizedBlock::Float32(&[1.0, 10.0, 100.0]),
+            crate::cpu::QuantizedBlock::Float32(&[2.0]),
+            crate::cpu::QuantizedBlock::Int32(&[1, 2, 0]),
+            crate::cpu::QuantizedBlock::Float32(&[1.0]),
+        ],
+        &[
+            prefill_output,
+            prefill_state,
+            decode_output,
+            decode_state,
+            wrong_output,
+        ],
+    )
+    .expect("prefill, carried decode, and control evaluate");
+    let reference_evaluated = crate::cpu::evaluate_quantized(
+        &reference_program,
+        &[2],
+        &[
+            crate::cpu::QuantizedBlock::Float32(&[1.0, 2.0]),
+            crate::cpu::QuantizedBlock::Float32(&[2.0]),
+            crate::cpu::QuantizedBlock::Float32(&[2.0]),
+            crate::cpu::QuantizedBlock::Float32(&[3.0]),
+            crate::cpu::QuantizedBlock::Float32(&[4.0]),
+            crate::cpu::QuantizedBlock::Float32(&[1.0, 10.0, 100.0]),
+            crate::cpu::QuantizedBlock::Float32(&[2.0]),
+            crate::cpu::QuantizedBlock::Int32(&[1, 2, 0]),
+            crate::cpu::QuantizedBlock::Float32(&[1.0]),
+        ],
+        &[reference_output],
+    )
+    .expect("separate full-sequence reference evaluates at its own sequence width");
+    let (prefill_values, prefill_shape) = evaluated
+        .get(prefill_output)
+        .expect("prefill output exists");
+    let (prefill_history, history_shape) = evaluated
+        .get(prefill_state)
+        .expect("prefill history exists");
+    let (decode_values, decode_shape) = evaluated.get(decode_output).expect("decode output exists");
+    let (decode_history, decode_history_shape) =
+        evaluated.get(decode_state).expect("decode history exists");
+    let (reference_values, reference_shape) = reference_evaluated
+        .get(reference_output)
+        .expect("reference output exists");
+    let (zero_history_values, zero_history_shape) = evaluated
+        .get(wrong_output)
+        .expect("zero-history output exists");
+    assert_eq!(prefill_shape, [1, 1]);
+    assert_eq!(history_shape, [1, 3]);
+    assert_eq!(decode_shape, [1, 1]);
+    assert_eq!(decode_history_shape, [1, 3]);
+    assert_eq!(reference_shape, [2, 1]);
+    assert_eq!(zero_history_shape, [1, 1]);
+
+    let normalized = [1.0f32, 2.0].map(|value| value / (value * value + 1.0e-6).sqrt());
+    let gated = normalized.map(|value| 8.0 * value * value);
+    let expected_prefill = 1.0 + 6.0 * normalized[0] * 100.0 * gated[0];
+    let expected_decode = 2.0 + 6.0 * normalized[1] * 10.0 * gated[1];
+    let fifo_decode = 2.0 + 6.0 * normalized[1] * (10.0 * gated[0] + 100.0 * gated[1]);
+    assert!((prefill_values[0] - expected_prefill).abs() < 1.0e-3);
+    for (found, expected) in prefill_history.iter().zip([0.0, 0.0, gated[0]]) {
+        assert!((found - expected).abs() < 1.0e-6);
+    }
+    for (found, expected) in decode_history.iter().zip([0.0, gated[1], 0.0]) {
+        assert!((found - expected).abs() < 1.0e-6);
+    }
+    assert!((decode_values[0] - expected_decode).abs() < 1.0e-3);
+    assert!((decode_values[0] - fifo_decode).abs() > 1.0);
+    assert!((prefill_values[0] - reference_values[0]).abs() < 1.0e-3);
+    assert!((decode_values[0] - reference_values[1]).abs() > 1.0);
+    assert!((zero_history_values[0] - expected_decode).abs() < 1.0e-3);
+    let graph_len_before_invalid_prefill = program.len();
+    let invalid_cache = append_short_conv_prefill_mixer(
+        &mut program,
+        prefill_input,
+        inv_dim,
+        eps,
+        norm_weight,
+        b_proj,
+        c_proj,
+        x_proj,
+        conv_weight,
+        out_proj,
+        prefill_len,
+        0,
+    );
+    assert!(matches!(
+        invalid_cache,
+        Err(TensorError::InvalidConvConfig { l_cache: 0 })
+    ));
+    assert_eq!(program.len(), graph_len_before_invalid_prefill);
+    let graph_len_before_invalid_decode = program.len();
+    let invalid_decode_cache = append_short_conv_cached_mixer_step(
+        &mut program,
+        decode_input,
+        inv_dim,
+        eps,
+        norm_weight,
+        b_proj,
+        c_proj,
+        x_proj,
+        conv_weight,
+        out_proj,
+        prefill_state,
+        cache_position,
+        roll_indices,
+        0,
+    );
+    assert!(matches!(
+        invalid_decode_cache,
+        Err(TensorError::InvalidConvConfig { l_cache: 0 })
+    ));
+    assert_eq!(program.len(), graph_len_before_invalid_decode);
+    std::println!(
+        "prefill_output={prefill_values:?} prefill_state={prefill_history:?} decode_output={decode_values:?} decode_state={decode_history:?} reference_output={reference_values:?} zero_history_output={zero_history_values:?} fifo_output={fifo_decode}"
+    );
+    std::println!(
+        "prefill_tokens=1 prefill_pairs=1 decode_pairs=1 state_values=3 zero_history_control=1 fifo_divergence=1 invalid_cache_rejected=1 partial_graph_rejected=1"
+    );
+    assert_lfm_two_token_prefill_history_is_consumed();
+}
+
+fn assert_lfm_two_token_prefill_history_is_consumed() {
+    const L_CACHE: u32 = 3;
+    let mut program = Vec::new();
+    let prefill_input = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Symbolic(0), Extent::Static(1)],
+        "prefill_input",
+    );
+    let decode_input = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(1)],
+        "decode_input",
+    );
+    let b_proj = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(1)],
+        "b_proj",
+    );
+    let c_proj = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(1)],
+        "c_proj",
+    );
+    let x_proj = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(1)],
+        "x_proj",
+    );
+    let conv_weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(L_CACHE)],
+        "conv_weight",
+    );
+    let out_proj = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(1)],
+        "out_proj",
+    );
+    let roll_indices = input_leaf(
+        &mut program,
+        DType::Int32,
+        alloc::vec![Extent::Static(L_CACHE)],
+        "roll_indices",
+    );
+    let cache_position = input_leaf(&mut program, DType::Float32, Vec::new(), "cache_position");
+    let norm_weight = op::append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(1)],
+            value: 1.0,
+        },
+    );
+    let inv_dim = scalar_constant(&mut program, 1.0);
+    let eps = scalar_constant(&mut program, 1.0e-6);
+    let prefill_len = core::num::NonZeroU32::new(2).expect("two-token prefill is nonzero");
+    let (prefill_output, prefill_state) = append_short_conv_prefill_mixer(
+        &mut program,
+        prefill_input,
+        inv_dim,
+        eps,
+        norm_weight,
+        b_proj,
+        c_proj,
+        x_proj,
+        conv_weight,
+        out_proj,
+        prefill_len,
+        L_CACHE,
+    )
+    .expect("two-token prefill returns initialized history");
+    let (decode_output, decode_state) = append_short_conv_cached_mixer_step(
+        &mut program,
+        decode_input,
+        inv_dim,
+        eps,
+        norm_weight,
+        b_proj,
+        c_proj,
+        x_proj,
+        conv_weight,
+        out_proj,
+        prefill_state,
+        cache_position,
+        roll_indices,
+        L_CACHE,
+    )
+    .expect("position-two decode consumes two-token history");
+    let zero_history = op::append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(1), Extent::Static(L_CACHE)],
+            value: 0.0,
+        },
+    );
+    let (zero_history_output, _) = append_short_conv_cached_mixer_step(
+        &mut program,
+        decode_input,
+        inv_dim,
+        eps,
+        norm_weight,
+        b_proj,
+        c_proj,
+        x_proj,
+        conv_weight,
+        out_proj,
+        zero_history,
+        cache_position,
+        roll_indices,
+        L_CACHE,
+    )
+    .expect("zero-history control builds");
+    let evaluated = crate::cpu::evaluate_quantized(
+        &program,
+        &[2],
+        &[
+            crate::cpu::QuantizedBlock::Float32(&[1.0, 2.0]),
+            crate::cpu::QuantizedBlock::Float32(&[3.0]),
+            crate::cpu::QuantizedBlock::Float32(&[2.0]),
+            crate::cpu::QuantizedBlock::Float32(&[3.0]),
+            crate::cpu::QuantizedBlock::Float32(&[4.0]),
+            crate::cpu::QuantizedBlock::Float32(&[1.0, 10.0, 100.0]),
+            crate::cpu::QuantizedBlock::Float32(&[2.0]),
+            crate::cpu::QuantizedBlock::Int32(&[1, 2, 0]),
+            crate::cpu::QuantizedBlock::Float32(&[2.0]),
+        ],
+        &[prefill_output, prefill_state, decode_output, decode_state, zero_history_output],
+    )
+    .expect("two-token prefill/decode and zero-history control evaluate");
+    let (prefill_values, prefill_shape) = evaluated.get(prefill_output).expect("prefill output exists");
+    let (prefill_history, prefill_history_shape) = evaluated.get(prefill_state).expect("prefill history exists");
+    let (decode_values, decode_shape) = evaluated.get(decode_output).expect("decode output exists");
+    let (decode_history, decode_history_shape) = evaluated.get(decode_state).expect("decode history exists");
+    let (zero_history_values, zero_history_shape) = evaluated
+        .get(zero_history_output)
+        .expect("zero-history output exists");
+
+    assert_eq!(prefill_shape, [2, 1]);
+    assert_eq!(prefill_values.len(), 2);
+    assert_eq!(prefill_history_shape, [1, L_CACHE as u64]);
+    assert_eq!(prefill_history.len(), L_CACHE as usize);
+    assert_eq!(decode_shape, [1, 1]);
+    assert_eq!(decode_values.len(), 1);
+    assert_eq!(decode_history_shape, [1, L_CACHE as u64]);
+    assert_eq!(decode_history.len(), L_CACHE as usize);
+    assert_eq!(zero_history_shape, [1, 1]);
+    assert_eq!(zero_history_values.len(), 1);
+
+    let normalized = [1.0f32, 2.0, 3.0]
+        .map(|value| value / (value * value + 1.0e-6).sqrt());
+    let gated = normalized.map(|value| 8.0 * value * value);
+    let expected_prefill = [
+        1.0 + 6.0 * normalized[0] * 100.0 * gated[0],
+        2.0 + 6.0 * normalized[1] * (10.0 * gated[0] + 100.0 * gated[1]),
+    ];
+    let expected_decode = 3.0
+        + 6.0 * normalized[2] * (gated[0] + 10.0 * gated[1] + 100.0 * gated[2]);
+    let zero_history_decode = 3.0 + 6.0 * normalized[2] * 100.0 * gated[2];
+    for (found, expected) in prefill_values.iter().zip(expected_prefill) {
+        assert!((found - expected).abs() < 1.0e-3);
+    }
+    for (found, expected) in prefill_history.iter().zip([0.0, gated[0], gated[1]]) {
+        assert!((found - expected).abs() < 1.0e-6);
+    }
+    assert!((decode_values[0] - expected_decode).abs() < 1.0e-3);
+    assert!((decode_values[0] - zero_history_decode).abs() > 1.0);
+    assert!((zero_history_values[0] - zero_history_decode).abs() < 1.0e-3);
+    for (found, expected) in decode_history.iter().zip([gated[0], gated[1], gated[2]]) {
+        assert!((found - expected).abs() < 1.0e-6);
+    }
+    std::println!(
+        "two_token_prefill={prefill_values:?} history={prefill_history:?} decode={decode_values:?} state={decode_history:?} zero_history={zero_history_values:?}"
+    );
+    std::println!("two_token_prefill=2 carried_pairs=1 state_values=3 zero_history_rejected=1");
 }
 
 fn evaluate_lfm_prefill_for_test(

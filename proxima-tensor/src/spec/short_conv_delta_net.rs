@@ -31,6 +31,7 @@ use super::*;
 /// Taps whose *unclamped* position is negative (real left-padding) are zeroed
 /// post-gather via `Select`, mirroring how [`causal_mask`] masks attention
 /// scores rather than ever reading an invalid position.
+#[must_use]
 pub fn causal_conv1d(
     program: &mut Vec<Op>,
     x: NodeId,
@@ -209,9 +210,14 @@ pub fn causal_conv1d(
     )
 }
 
-/// Applies the pinned LFM2 cached one-token short-convolution transition.
+/// Applies one position-indexed short-convolution transition.
+/// `cache_position` is clamped to the inclusive range `[0, l_cache - 1]` after
+/// rolling the state, as in the pinned LFM2 non-CUDA fallback. Call this
+/// cached transition only when
+/// `cache_position > 0`; position zero selects the upstream prefill branch.
 /// `roll_indices` is the caller-owned permutation `(1..L, 0)` so the cache
-/// remains explicit input/output state instead of hidden mutable storage.
+/// remains explicit input/output state.
+#[must_use]
 pub fn causal_conv1d_step(
     program: &mut Vec<Op>,
     state_in: NodeId,
@@ -268,14 +274,18 @@ pub fn causal_conv1d_step(
             extent: Extent::Static(l_cache),
         },
     );
-    let zero_wide = op::append(
+    let true_mask = elementwise(
         program,
-        Op::Constant {
-            dtype: DType::Float32,
-            shape: alloc::vec![Extent::Symbolic(0), Extent::Static(l_cache)],
-            value: 0.0,
-        },
-    );
+        DType::Float32,
+        ScalarOp::Equal,
+        &[(zero, "->"), (zero, "->")],
+    )?;
+    let zero_wide = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[(true_mask, "->dl"), (zero, "->dl"), (state_in, "dl->dl")],
+    )?;
     let tap_index_wide = elementwise(
         program,
         DType::Float32,
@@ -325,10 +335,11 @@ pub fn causal_conv1d_step(
     Ok((conv_out, state_out))
 }
 
-/// Extracts the final `l_cache` gated-input rows for a caller-owned LFM2
-/// cache, left-padding with zeros when the prefill is shorter than the cache.
+/// Extracts the final `l_cache` gated-input rows for a caller-owned
+/// short-convolution cache, left-padding with zeros when prefill is shorter.
 /// `prefill_len` is the graph's static sequence width and `gated_input` has
 /// shape `[prefill_len, channels]`.
+#[must_use]
 pub fn causal_conv1d_prefill_state(
     program: &mut Vec<Op>,
     gated_input: NodeId,
@@ -464,10 +475,9 @@ pub fn causal_conv1d_prefill_state(
 /// LiquidAI's published short-convolution block, `y = out_proj(C ⊙
 /// conv(B ⊙ x))`, no activation function inside the block itself, unlike the
 /// SwiGLU FFN every layer still runs after it. This branch assignment and
-/// tap direction are read directly off HuggingFace's own reference
-/// implementation (`transformers/models/lfm2_moe/modeling_lfm2_moe.py`,
-/// `Lfm2MoeShortConv.slow_forward`, lines 434-465 of the checked-out
-/// package): `BCx = in_proj(x).transpose(-1,-2)` then `B, C, x =
+/// tap direction are read from the retained pinned LFM2 source
+/// (`proxima-tensor/specs/small-model-architecture-matrix/fixtures/upstream-source/f399fa2a111dac8c7fc07b2717abb10ee3e82468851321f45553ebb10fbd28b1.py.gz`,
+/// lines 486-512): `BCx = in_proj(x).transpose(-1,-2)` then `B, C, x =
 /// BCx.chunk(3, dim=-2)` -- `B` first, `C` second, ungated `x` third along
 /// the packed axis, exactly `b_proj`/`c_proj`/`x_proj`'s declared order
 /// below -- `Bx = B * x`, `conv_out = self.conv(Bx)` (an `nn.Conv1d` with
@@ -480,6 +490,7 @@ pub fn causal_conv1d_prefill_state(
 /// `input[t - (K-1)]`, the same pairing this function's own weight map
 /// (`ld->sld`) uses.
 #[allow(clippy::too_many_arguments)]
+#[must_use]
 pub fn append_short_conv_mixer(
     program: &mut Vec<Op>,
     x: NodeId,
@@ -493,6 +504,76 @@ pub fn append_short_conv_mixer(
     out_proj: NodeId,
     l_cache: u32,
 ) -> Result<NodeId, TensorError> {
+    if l_cache == 0 {
+        return Err(TensorError::InvalidConvConfig { l_cache });
+    }
+
+    append_short_conv_mixer_with_gated_input(
+        program,
+        x,
+        inv_dim,
+        eps,
+        norm_weight,
+        b_proj,
+        c_proj,
+        x_proj,
+        conv_weight,
+        out_proj,
+        l_cache,
+    )
+    .map(|(residual, _)| residual)
+}
+
+/// returns the prefill residual and caller-owned convolution history.
+#[must_use]
+pub fn append_short_conv_prefill_mixer(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    norm_weight: NodeId,
+    b_proj: NodeId,
+    c_proj: NodeId,
+    x_proj: NodeId,
+    conv_weight: NodeId,
+    out_proj: NodeId,
+    prefill_len: NonZeroU32,
+    l_cache: u32,
+) -> Result<(NodeId, NodeId), TensorError> {
+    if l_cache == 0 {
+        return Err(TensorError::InvalidConvConfig { l_cache });
+    }
+
+    let (residual, gated_input) = append_short_conv_mixer_with_gated_input(
+        program,
+        x,
+        inv_dim,
+        eps,
+        norm_weight,
+        b_proj,
+        c_proj,
+        x_proj,
+        conv_weight,
+        out_proj,
+        l_cache,
+    )?;
+    let state_out = causal_conv1d_prefill_state(program, gated_input, prefill_len, l_cache)?;
+    Ok((residual, state_out))
+}
+
+fn append_short_conv_mixer_with_gated_input(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    norm_weight: NodeId,
+    b_proj: NodeId,
+    c_proj: NodeId,
+    x_proj: NodeId,
+    conv_weight: NodeId,
+    out_proj: NodeId,
+    l_cache: u32,
+) -> Result<(NodeId, NodeId), TensorError> {
     let normed = rmsnorm(program, x, norm_weight, inv_dim, eps)?;
 
     let branch_b_product = elementwise(
@@ -573,22 +654,23 @@ pub fn append_short_conv_mixer(
         "so->sdo",
     )?;
 
-    elementwise(
+    let residual = elementwise(
         program,
         DType::Float32,
         ScalarOp::Add,
         &[(mixer_out, "sd->sd"), (x, "sd->sd")],
-    )
+    )?;
+    Ok((residual, gated_input))
 }
 
-/// Builds one LFM short-convolution decode transition over a one-token input.
-/// The prompt path uses [`append_short_conv_mixer`]; this path consumes the
-/// caller-owned convolution history and returns its updated state alongside
-/// the residual activation. `cache_position` is the absolute token position
-/// used by LFM's cache update (clamped to the final tap), and `roll_indices`
-/// is `(1..l_cache, 0)`. Call this transition only after the prompt path has
-/// initialized history; the pinned upstream uses full-sequence convolution
-/// when `cache_position` is zero.
+/// Builds one short-convolution decode transition over a one-token input.
+/// The prompt path uses [`append_short_conv_prefill_mixer`] when history must
+/// be carried into decode; this path consumes caller-owned history and returns
+/// updated state alongside the residual activation. `cache_position` is the
+/// absolute token position and is clamped to `[0, l_cache - 1]`; call this
+/// cached path only for `cache_position > 0`, because position zero selects the
+/// upstream prefill branch. `roll_indices` is `(1..l_cache, 0)`.
+#[must_use]
 pub fn append_short_conv_cached_mixer_step(
     program: &mut Vec<Op>,
     x: NodeId,
@@ -605,6 +687,10 @@ pub fn append_short_conv_cached_mixer_step(
     roll_indices: NodeId,
     l_cache: u32,
 ) -> Result<(NodeId, NodeId), TensorError> {
+    if l_cache == 0 {
+        return Err(TensorError::InvalidConvConfig { l_cache });
+    }
+
     let normed = rmsnorm(program, x, norm_weight, inv_dim, eps)?;
     let branch_b = project_short_conv_branch(program, normed, b_proj)?;
     let branch_c = project_short_conv_branch(program, normed, c_proj)?;
