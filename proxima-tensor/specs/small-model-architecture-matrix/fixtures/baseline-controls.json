@@ -1,0 +1,168 @@
+{
+  "version": 1,
+  "records": [
+    {
+      "case": "paris",
+      "source_path": "proxima-model-interop/tests/fixtures/gemma4_e2b_llama_greedy_ids.json",
+      "oracle_record_id": "proxima-model-interop/tests/fixtures/gemma4_e2b_llama_greedy_ids.json#paris",
+      "prompt": "The capital of France is",
+      "prompt_utf8_sha256": "bbaff4d2ecd5892d4a442b0f53131641bf6e6f284761dd20fc0664bc97145762",
+      "prompt_ids": [2, 818, 5279, 529, 7001, 563],
+      "prompt_ids_sha256": "912516980a1c9381350daccf4679ba6a62b8fac3c87a68c63332c9f3456f07a4",
+      "output_ids": [9079, 236761, 106],
+      "output_ids_sha256": "7f1b479b70eff53e313fc731e694d3a26bfad3f08ac17320eb2a3d1e869cb3bf",
+      "output_text": " Paris.",
+      "output_text_utf8_sha256": "9d0fe580f9faf59828d942e7da77ab321c428a28c89e25c6eee38aac53a3af34",
+      "oracle": {
+        "runtime": "llama.cpp",
+        "runtime_revision": "5d806aa2575e01e126651fd69ab1ab6cefff861d",
+        "weights_sha256": "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd",
+        "checkpoint": "gemma4:e2b-it-qat",
+        "training_status": "instruction_tuned_quantized",
+        "candidate": false
+      },
+      "semantic": {
+        "rubric": "The continuation names Paris as the capital.",
+        "assertion": "Paris occurs in the decoded reference output.",
+        "status": "pass",
+        "expected_substring": "Paris."
+      }
+    },
+    {
+      "case": "soliloquy",
+      "source_path": "proxima-model-interop/tests/fixtures/gemma4_e2b_llama_greedy_ids.json",
+      "oracle_record_id": "proxima-model-interop/tests/fixtures/gemma4_e2b_llama_greedy_ids.json#soliloquy",
+      "prompt": "In drama, a speech in which a character, alone on stage, speaks their inner thoughts aloud is called a",
+      "prompt_utf8_sha256": "067e3efc0b14da3df11398baa4a81a4826a29b9622fc4fa169fe2bd3209b3c82",
+      "prompt_ids": [
+        2, 902, 18155, 236764, 496, 10808, 528, 837,
+        496, 2872, 236764, 7057, 580, 5552, 236764, 26266,
+        910, 9628, 12018, 79567, 563, 2760, 496
+      ],
+      "prompt_ids_sha256": "8ae4431b3020004c6af737bed4369756a1d4a936a63719e0a2abd75355a2ceb8",
+      "output_ids": [5213, 6169, 11148, 196544, 84750, 106],
+      "output_ids_sha256": "f9149665a5faf2307091aca7775fe4acd0175725ab52e6253feb830ad68ef1bc",
+      "output_text": " **soliloquy**.",
+      "output_text_utf8_sha256": "076870181ae62abd1f8c50d92e00a6d3e6d0b019ab8f76b14ec371ad3c8d0fd6",
+      "oracle": {
+        "runtime": "llama.cpp",
+        "runtime_revision": "5d806aa2575e01e126651fd69ab1ab6cefff861d",
+        "weights_sha256": "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd",
+        "checkpoint": "gemma4:e2b-it-qat",
+        "training_status": "instruction_tuned_quantized",
+        "candidate": false
+      },
+      "semantic": {
+        "rubric": "The completion names the speech form asked for.",
+        "assertion": "The word soliloquy occurs in the decoded reference output.",
+        "status": "pass",
+        "expected_substring": "soliloquy"
+      }
+    },
+    {
+      "case": "ant_vs_briefcase",
+      "source_path": "proxima-model-interop/tests/fixtures/gemma4_e2b_llama_greedy_ids.json",
+      "oracle_record_id": "proxima-model-interop/tests/fixtures/gemma4_e2b_llama_greedy_ids.json#ant_vs_briefcase",
+      "prompt": "<|turn>user\nWhich is bigger, an ant or a briefcase?<turn|>\n<|turn>model",
+      "prompt_utf8_sha256": "6cdd3b85dd806403b0b9a2f712ac1890cb9d770caf6ceb3d75b6f4d338eb559e",
+      "prompt_ids": [
+        2, 105, 2364, 107, 24249, 563, 12869, 236764,
+        614, 2314, 653, 496, 151678, 236881, 106, 107,
+        105, 4368
+      ],
+      "prompt_ids_sha256": "5557224ab57b8b16640af00f679d739196d2c2637494f08eb8ed78ec992f6475",
+      "output_ids": [
+        496, 5213, 37767, 4925, 1018, 563, 12869, 1082,
+        614, 2314, 236761, 106
+      ],
+      "output_ids_sha256": "48ef869c6f9ba86ea46e4e239ddacae41e649aa9e26fdf0cac45eab3fc367ad6",
+      "output_text": " a **briefcase** is bigger than an ant.",
+      "output_text_utf8_sha256": "597bcd239afa6f61dab3847356bbb7c934ef8f1a8e064dfc12f3133f53fc0276",
+      "oracle": {
+        "runtime": "llama.cpp",
+        "runtime_revision": "5d806aa2575e01e126651fd69ab1ab6cefff861d",
+        "weights_sha256": "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd",
+        "checkpoint": "gemma4:e2b-it-qat",
+        "training_status": "instruction_tuned_quantized",
+        "candidate": false
+      },
+      "semantic": {
+        "rubric": "The answer identifies the larger object.",
+        "assertion": "The decoded answer says the briefcase is bigger than the ant.",
+        "status": "pass",
+        "expected_substring": "briefcase** is bigger than an ant"
+      }
+    },
+    {
+      "case": "hippo_vs_building",
+      "source_path": "proxima-model-interop/tests/fixtures/gemma4_e2b_llama_greedy_ids.json",
+      "oracle_record_id": "proxima-model-interop/tests/fixtures/gemma4_e2b_llama_greedy_ids.json#hippo_vs_building",
+      "prompt": "<|turn>user\nWhich of these is smaller in size: a hippopotamus or a large office building?<turn|>\n<|turn>model",
+      "prompt_utf8_sha256": "39725784a80658e8ef184f4aa8361fb167d39c9054e2a1e1ce3870f890243073",
+      "prompt_ids": [
+        2, 105, 2364, 107, 24249, 529, 1239, 563,
+        7100, 528, 2425, 236787, 496, 50205, 64981, 55569,
+        653, 496, 2455, 4408, 3788, 236881, 106, 107,
+        105, 4368
+      ],
+      "prompt_ids_sha256": "2a35f190490fead2a40d64be3b6075f93975d6377d2790296e34ffb7f7cfdee5",
+      "output_ids": [
+        496, 5213, 20619, 4408, 3788, 1018, 563, 7100,
+        528, 2425, 1082, 496, 50205, 64981, 55569, 236761,
+        108, 8291, 236789, 236751, 3217, 236787, 108, 236829,
+        5213, 206621, 64981, 55569, 53121, 5978, 2455, 236764,
+        496, 50205, 64981, 55569, 563, 496, 1401, 2455,
+        808, 36502, 22429, 9567, 2425, 563, 8434, 528
+      ],
+      "output_ids_sha256": "448b3c31ce71eebcfc71edd3ebc32b596c7b811c0541a14c1c2461a84fbf23c3",
+      "output_text": " a **large office building** is smaller in size than a hippopotamus.\n\nHere's why:\n\n* **Hippopotamus:** While large, a hippopotamus is a very large *animal*. Its size is measured in",
+      "output_text_utf8_sha256": "777570b1c0d725b458c9f5e8efc617160e15b2bf086b203a3cf444c736609ca6",
+      "oracle": {
+        "runtime": "llama.cpp",
+        "runtime_revision": "5d806aa2575e01e126651fd69ab1ab6cefff861d",
+        "weights_sha256": "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd",
+        "checkpoint": "gemma4:e2b-it-qat",
+        "training_status": "instruction_tuned_quantized",
+        "candidate": false
+      },
+      "semantic": {
+        "rubric": "The answer identifies the smaller subject.",
+        "assertion": "The decoded answer says the office building is smaller than the hippopotamus, which reverses the requested comparison.",
+        "status": "fail",
+        "expected_substring": "large office building** is smaller in size than a hippopotamus"
+      }
+    },
+    {
+      "case": "fibonacci",
+      "source_path": "proxima-model-interop/tests/fixtures/llama-parity/gemma4_e2b/llama_ids.json",
+      "oracle_record_id": "proxima-model-interop/tests/fixtures/llama-parity/gemma4_e2b/llama_ids.json#fibonacci",
+      "prompt": "def fibonacci(n):\n",
+      "prompt_utf8_sha256": "371c1ee14c379107f9903fba2b671b9a138b03c53c332134b28980eee1934f59",
+      "prompt_ids": [2, 2063, 10779, 78113, 236769, 236749, 1473, 107],
+      "prompt_ids_sha256": "075183edd4e3b90602d739a5afb02ea8651dd68a849d34e47d708ac3c6104ac6",
+      "output_ids": [
+        140, 584, 538, 6605, 236743, 236770, 236787, 107,
+        144, 2060, 538, 107, 140, 4454, 236787, 107,
+        144, 2060, 10779, 78113, 236769, 236749, 236772, 236770,
+        236768, 900, 10779, 78113, 236769, 236749, 236772, 236778
+      ],
+      "output_ids_sha256": "c9c5d2d8b09ee3ba3a7ec544b8ddfe9a4118b5758e9dd6319487332b84614077",
+      "output_text": "    if n <= 1:\n        return n\n    else:\n        return fibonacci(n-1) + fibonacci(n-2",
+      "output_text_utf8_sha256": "ad8b91ae91a2cea72508c7aab66176327223c9471fc26f7174ee040ea11993e3",
+      "oracle": {
+        "runtime": "llama.cpp",
+        "runtime_revision": "f1ea206218210afb913ae2f5d2c51faed35915da",
+        "weights_sha256": "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd",
+        "checkpoint": "gemma4:e2b-it-qat",
+        "training_status": "instruction_tuned_quantized",
+        "candidate": false
+      },
+      "semantic": {
+        "rubric": "The completion must parse as a complete Python Fibonacci function and return 0, 1, 1, and 13 for inputs 0, 1, 2, and 7.",
+        "assertion": "The retained 32-token completion contains the base case and recursive-expression prefix but fails Python parsing because the final call is truncated.",
+        "status": "incomplete",
+        "required_fragments": ["if n <= 1:", "return n", "return fibonacci(n-1) + fibonacci(n-2"]
+      }
+    }
+  ]
+}

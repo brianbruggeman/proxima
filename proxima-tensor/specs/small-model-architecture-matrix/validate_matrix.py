@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import hashlib
 import json
@@ -57,6 +58,35 @@ EXPECTED_GEMMA_INVENTORY = {
     "license": "apache-2.0",
     "release_date": "2026-03-31",
     "release_url": "https://ai.google.dev/gemma/docs/releases?hl=en",
+}
+
+BASELINE_CONTROL_PATH = SPEC_DIRECTORY / "fixtures" / "baseline-controls.json"
+BASELINE_CONTROL_CASES = {
+    "paris",
+    "soliloquy",
+    "ant_vs_briefcase",
+    "hippo_vs_building",
+    "fibonacci",
+}
+BASELINE_EXPECTED_STATUS = {
+    "paris": "pass",
+    "soliloquy": "pass",
+    "ant_vs_briefcase": "pass",
+    "hippo_vs_building": "fail",
+    "fibonacci": "incomplete",
+}
+REPOSITORY_ROOT = SPEC_DIRECTORY.parents[2]
+BASELINE_FACT_SOURCE = REPOSITORY_ROOT / "proxima-model-interop" / "tests" / "fixtures" / "gemma4_e2b_llama_greedy_ids.json"
+BASELINE_CODING_SOURCE = REPOSITORY_ROOT / "proxima-model-interop" / "tests" / "fixtures" / "llama-parity" / "gemma4_e2b" / "llama_ids.json"
+BASELINE_WEIGHTS_SHA256 = "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd"
+BASELINE_FACT_RUNTIME_REVISION = "5d806aa2575e01e126651fd69ab1ab6cefff861d"
+BASELINE_CODING_RUNTIME_REVISION = "f1ea206218210afb913ae2f5d2c51faed35915da"
+BASELINE_OUTPUT_TEXT_SHA256 = {
+    "paris": "9d0fe580f9faf59828d942e7da77ab321c428a28c89e25c6eee38aac53a3af34",
+    "soliloquy": "076870181ae62abd1f8c50d92e00a6d3e6d0b019ab8f76b14ec371ad3c8d0fd6",
+    "ant_vs_briefcase": "597bcd239afa6f61dab3847356bbb7c934ef8f1a8e064dfc12f3133f53fc0276",
+    "hippo_vs_building": "777570b1c0d725b458c9f5e8efc617160e15b2bf086b203a3cf444c736609ca6",
+    "fibonacci": "ad8b91ae91a2cea72508c7aab66176327223c9471fc26f7174ee040ea11993e3",
 }
 
 REQUEST_FIXTURE_PATH = SPEC_DIRECTORY / "fixtures" / "request-records.json"
@@ -532,16 +562,186 @@ def validate_inventory() -> int:
 def _is_finite_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
+
+def validate_baseline_controls() -> int:
+    fixture = json.loads(BASELINE_CONTROL_PATH.read_text())
+    if (
+        not isinstance(fixture, dict)
+        or set(fixture) != {"version", "records"}
+        or type(fixture.get("version")) is not int
+        or fixture["version"] != 1
+        or not isinstance(fixture.get("records"), list)
+        or any(not isinstance(record, dict) for record in fixture["records"])
+        or any(
+            not isinstance(record.get("case"), str)
+            or not isinstance(record.get("oracle_record_id"), str)
+            for record in fixture["records"]
+        )
+    ):
+        raise ValueError("baseline fixture must contain version 1 and a records array")
+
+    fact_source = json.loads(BASELINE_FACT_SOURCE.read_text())
+    coding_source = json.loads(BASELINE_CODING_SOURCE.read_text())
+    if not isinstance(fact_source, list) or not isinstance(coding_source, list):
+        raise ValueError("baseline source files must contain record arrays")
+    fact_sources = {record.get("name"): record for record in fact_source if isinstance(record, dict)}
+    coding_records = [record for record in coding_source if isinstance(record, dict)]
+    coding_record = next(
+        (
+            record
+            for record in coding_records
+            if record.get("prompt") == "def fibonacci(n):\n"
+        ),
+        None,
+    )
+    if coding_record is None:
+        raise ValueError("baseline coding source is missing the Fibonacci reference")
+
+    records = fixture["records"]
+    record_names = [record.get("case") for record in records]
+    oracle_record_ids = [record.get("oracle_record_id") for record in records]
+    classified = 0
+    missing = 0
+    statuses = {status: 0 for status in set(BASELINE_EXPECTED_STATUS.values())}
+    for record in records:
+        case_name = record["case"]
+        source_record = coding_record if case_name == "fibonacci" else fact_sources.get(case_name)
+        source_path = (
+            BASELINE_CODING_SOURCE.relative_to(REPOSITORY_ROOT).as_posix()
+            if case_name == "fibonacci"
+            else BASELINE_FACT_SOURCE.relative_to(REPOSITORY_ROOT).as_posix()
+        )
+        source_ids = None
+        source_prompt = None
+        source_prompt_ids = None
+        if isinstance(source_record, dict):
+            source_prompt = source_record.get("prompt")
+            source_prompt_ids = source_record.get("prompt_ids")
+            source_ids = source_record.get("generated_ids", source_record.get("oracle_ids"))
+        prompt = record.get("prompt")
+        prompt_ids = record.get("prompt_ids")
+        output_ids = record.get("output_ids")
+        output_text = record.get("output_text")
+        oracle = record.get("oracle")
+        semantic = record.get("semantic")
+        if not all(isinstance(value, dict) for value in (oracle, semantic)):
+            missing += 1
+            continue
+        required_fields = {
+            "case",
+            "prompt",
+            "prompt_utf8_sha256",
+            "prompt_ids",
+            "prompt_ids_sha256",
+            "output_ids",
+            "output_ids_sha256",
+            "output_text",
+            "output_text_utf8_sha256",
+            "oracle_record_id",
+        }
+        if not required_fields.issubset(record):
+            missing += 1
+            continue
+        if (
+            not isinstance(prompt, str)
+            or not prompt
+            or hashlib.sha256(prompt.encode()).hexdigest() != record["prompt_utf8_sha256"]
+            or not isinstance(prompt_ids, list)
+            or not prompt_ids
+            or any(type(token_id) is not int or token_id < 0 for token_id in prompt_ids)
+            or hashlib.sha256(json.dumps(prompt_ids, separators=(",", ":")).encode()).hexdigest()
+            != record["prompt_ids_sha256"]
+            or not isinstance(output_ids, list)
+            or not output_ids
+            or any(type(token_id) is not int or token_id < 0 for token_id in output_ids)
+            or hashlib.sha256(json.dumps(output_ids, separators=(",", ":")).encode()).hexdigest()
+            != record["output_ids_sha256"]
+            or not isinstance(output_text, str)
+            or hashlib.sha256(output_text.encode()).hexdigest() != record["output_text_utf8_sha256"]
+            or record["output_text_utf8_sha256"] != BASELINE_OUTPUT_TEXT_SHA256.get(case_name)
+            or prompt != source_prompt
+            or prompt_ids != source_prompt_ids
+            or output_ids != source_ids
+            or record.get("source_path") != source_path
+            or record.get("oracle_record_id") != f"{source_path}#{case_name}"
+            or oracle.get("runtime") != "llama.cpp"
+            or oracle.get("runtime_revision")
+            != (BASELINE_CODING_RUNTIME_REVISION if case_name == "fibonacci" else BASELINE_FACT_RUNTIME_REVISION)
+            or oracle.get("weights_sha256") != BASELINE_WEIGHTS_SHA256
+            or oracle.get("checkpoint") != "gemma4:e2b-it-qat"
+            or oracle.get("training_status") != "instruction_tuned_quantized"
+            or oracle.get("candidate") is not False
+            or not isinstance(semantic.get("rubric"), str)
+            or not semantic["rubric"]
+            or semantic.get("status") != BASELINE_EXPECTED_STATUS.get(case_name)
+        ):
+            missing += 1
+            continue
+
+        expected_substring = semantic.get("expected_substring")
+        required_fragments = semantic.get("required_fragments")
+        assertion = semantic.get("assertion")
+        if case_name == "fibonacci":
+            try:
+                ast.parse(prompt + output_text)
+                actual_status = "pass"
+            except SyntaxError:
+                complete_prefix = (
+                    isinstance(required_fragments, list)
+                    and all(isinstance(fragment, str) and fragment in output_text for fragment in required_fragments)
+                )
+                actual_status = "incomplete" if complete_prefix else "fail"
+        elif case_name == "hippo_vs_building":
+            actual_status = "fail" if isinstance(expected_substring, str) and expected_substring in output_text else "incomplete"
+        elif isinstance(expected_substring, str) and expected_substring:
+            actual_status = "pass" if expected_substring.casefold() in output_text.casefold() else "fail"
+        else:
+            actual_status = "incomplete"
+        if (
+            not isinstance(assertion, str)
+            or not assertion
+            or actual_status != semantic.get("status")
+            or (isinstance(required_fragments, list) and not all(fragment in output_text for fragment in required_fragments))
+        ):
+            missing += 1
+            continue
+        statuses[actual_status] += 1
+        classified += 1
+
+    exact_cases = set(record_names) == BASELINE_CONTROL_CASES
+    unique_oracle_records = len(set(oracle_record_ids)) == len(oracle_record_ids)
+    request_count = len(records)
+    oracle_records = sum(isinstance(value, str) and bool(value) for value in oracle_record_ids)
+    print(
+        f"requests={request_count} oracle_records={oracle_records} "
+        f"classified={classified} missing={missing} "
+        f"pass={statuses['pass']} fail={statuses['fail']} incomplete={statuses['incomplete']}"
+    )
+    return int(
+        not exact_cases
+        or len(record_names) != len(set(record_names))
+        or not unique_oracle_records
+        or request_count != 5
+        or oracle_records != 5
+        or classified != 5
+        or statuses != {"pass": 3, "fail": 1, "incomplete": 1}
+        or missing != 0
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--inventory", action="store_true")
     parser.add_argument("--schema-fixtures", action="store_true")
+    parser.add_argument("--baseline-controls", action="store_true")
     arguments = parser.parse_args()
-    if sum((arguments.inventory, arguments.schema_fixtures)) != 1:
+    if sum((arguments.inventory, arguments.schema_fixtures, arguments.baseline_controls)) != 1:
         parser.error("select one implemented validation mode")
     try:
         if arguments.schema_fixtures:
             return validate_request_fixtures()
+        if arguments.baseline_controls:
+            return validate_baseline_controls()
         return validate_inventory()
     except (OSError, ValueError) as error:
         print(str(error), file=sys.stderr)
