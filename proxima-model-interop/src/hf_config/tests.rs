@@ -334,6 +334,8 @@ fn architecture_matrix_lfm_schedule() {
 
     let architecture = architecture_from_hf_config(&config)
         .expect("pinned LFM config derives its mixed layer schedule");
+    assert_eq!(architecture.feed_forward, 8192);
+    assert!(architecture.tied_embeddings);
     let expected_kv_heads: Vec<u32> = expected
         .iter()
         .map(|layer_kind| match layer_kind {

@@ -98,7 +98,7 @@ pub struct HfConfig {
     /// `model.safetensors` manifest carries no `lm_head.weight` entry at
     /// all). Defaults to `false` for a `config.json` that omits the key,
     /// matching HF's own schema default.
-    #[serde(default)]
+    #[serde(alias = "tie_embedding", default)]
     pub tie_word_embeddings: bool,
     /// Ordered mixer kind for architectures that alternate layer operators.
     #[serde(default)]
@@ -106,6 +106,15 @@ pub struct HfConfig {
     /// LFM short-convolution cache width, serialized as `conv_L_cache`.
     #[serde(rename = "conv_L_cache", default)]
     pub conv_l_cache: Option<u32>,
+    /// lfm2 scales its SwiGLU width by two thirds before optional alignment.
+    #[serde(default)]
+    pub block_auto_adjust_ff_dim: bool,
+    /// optional multiplier applied after lfm2's two-thirds adjustment.
+    #[serde(default)]
+    pub block_ffn_dim_multiplier: Option<f64>,
+    /// lfm2 rounds an adjusted FFN width up to this multiple.
+    #[serde(default)]
+    pub block_multiple_of: Option<u32>,
 }
 
 fn default_rms_norm_eps() -> f32 {
@@ -179,7 +188,9 @@ pub fn architecture_from_hf_config(config: &HfConfig) -> Result<ModelHparams, In
     } else {
         config.num_experts_per_tok.unwrap_or(0)
     };
-    let feed_forward = if expert_count == 0 {
+    let feed_forward = if config.model_type == "lfm2" && config.block_auto_adjust_ff_dim {
+        lfm_feed_forward_width(config)?
+    } else if expert_count == 0 {
         config.intermediate_size
     } else {
         config
@@ -221,6 +232,37 @@ pub fn architecture_from_hf_config(config: &HfConfig) -> Result<ModelHparams, In
         family: config.model_type.clone(),
         sliding_rope: None,
     })
+}
+
+fn lfm_feed_forward_width(config: &HfConfig) -> Result<u32, InteropError> {
+    let adjusted = u64::from(config.intermediate_size)
+        .checked_mul(2)
+        .map(|width| width / 3)
+        .ok_or_else(|| malformed_lfm("intermediate_size overflows the LFM2 FFN calculation"))?;
+    let Some(multiplier) = config.block_ffn_dim_multiplier else {
+        return u32::try_from(adjusted).map_err(|_| malformed_lfm("LFM2 FFN width exceeds u32"));
+    };
+    if !multiplier.is_finite() || multiplier < 0.0 {
+        return Err(malformed_lfm(
+            "block_ffn_dim_multiplier must be finite and nonnegative",
+        ));
+    }
+    let width = (adjusted as f64 * multiplier).trunc();
+    if width > u64::MAX as f64 {
+        return Err(malformed_lfm(
+            "block_ffn_dim_multiplier overflows the LFM2 FFN width",
+        ));
+    }
+    let adjusted = width as u64;
+    let multiple = u64::from(config.block_multiple_of.unwrap_or(1));
+    if multiple == 0 {
+        return Err(malformed_lfm("block_multiple_of must be positive"));
+    }
+    let rounded = adjusted
+        .checked_add(multiple - 1)
+        .map(|width| width / multiple * multiple)
+        .ok_or_else(|| malformed_lfm("aligned LFM2 FFN width overflows"))?;
+    u32::try_from(rounded).map_err(|_| malformed_lfm("LFM2 FFN width exceeds u32"))
 }
 
 /// Resolves LFM's ordered mixer schedule and verifies each layer against the
