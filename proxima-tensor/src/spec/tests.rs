@@ -6426,6 +6426,183 @@ async fn architecture_matrix_lfm_conv_step() {
     std::println!("steps=2 reference_pairs=2 wrong_kernel_rejected=1");
 }
 
+fn evaluate_lfm_prefill_for_test(
+    gated_values: &[f32],
+    prefill_len: core::num::NonZeroU32,
+) -> (Vec<f32>, Vec<f32>) {
+    const L_CACHE: u32 = 3;
+    let mut program = Vec::new();
+    let gated_input = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(prefill_len.get()), Extent::Static(1)],
+        "gated_input",
+    );
+    let weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(L_CACHE)],
+        "weight",
+    );
+    let weight_values = [1.0f32, 10.0, 100.0];
+    let prefill_output = causal_conv1d(&mut program, gated_input, weight, L_CACHE)
+        .expect("prefill causal convolution builds");
+    let prefill_state =
+        causal_conv1d_prefill_state(&mut program, gated_input, prefill_len, L_CACHE)
+            .expect("prefill cache state builds");
+    let evaluated = crate::cpu::evaluate_named(
+        &program,
+        &[u64::from(prefill_len.get())],
+        &[
+            ("gated_input", gated_values),
+            ("weight", &weight_values),
+        ],
+        &[prefill_output, prefill_state],
+    )
+    .expect("prefill graph evaluates");
+    (
+        evaluated
+            .get(prefill_output)
+            .expect("prefill output exists")
+            .0
+            .to_vec(),
+        evaluated
+            .get(prefill_state)
+            .expect("prefill state exists")
+            .0
+            .to_vec(),
+    )
+}
+
+#[proxima::test]
+async fn architecture_matrix_lfm_conv_cache() {
+    const L_CACHE: u32 = 3;
+    let prefill_length = core::num::NonZeroU32::new(2).expect("prefill length is nonzero");
+    let (prefill_outputs, prefill_state) =
+        evaluate_lfm_prefill_for_test(&[1.0, 2.0], prefill_length);
+    assert_eq!(prefill_outputs, [100.0, 210.0]);
+    assert_eq!(prefill_state, [0.0, 1.0, 2.0]);
+    let prefill_state_bytes = prefill_state
+        .iter()
+        .map(|value| value.to_bits())
+        .collect::<Vec<_>>();
+
+    let mut decode_program = Vec::new();
+    let state_in = input_leaf(
+        &mut decode_program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(L_CACHE)],
+        "state_in",
+    );
+    let gated_input = input_leaf(
+        &mut decode_program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1)],
+        "gated_input",
+    );
+    let weight = input_leaf(
+        &mut decode_program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(L_CACHE)],
+        "weight",
+    );
+    let cache_position = input_leaf(
+        &mut decode_program,
+        DType::Float32,
+        Vec::new(),
+        "cache_position",
+    );
+    let roll_indices = input_leaf(
+        &mut decode_program,
+        DType::Int32,
+        alloc::vec![Extent::Static(L_CACHE)],
+        "roll_indices",
+    );
+    let weight_values = [1.0f32, 10.0, 100.0];
+    let roll_values = [1i32, 2, 0];
+    let (conv_out, state_out) = causal_conv1d_step(
+        &mut decode_program,
+        state_in,
+        gated_input,
+        weight,
+        cache_position,
+        roll_indices,
+        L_CACHE,
+        None,
+    )
+    .expect("decode transition builds");
+    let decode = |state_values: &[f32], gated_value: f32, position: f32| {
+        let gated_values = [gated_value];
+        let position_values = [position];
+        let evaluated = crate::cpu::evaluate_quantized(
+            &decode_program,
+            &[1],
+            &[
+                crate::cpu::QuantizedBlock::Float32(state_values),
+                crate::cpu::QuantizedBlock::Float32(&gated_values),
+                crate::cpu::QuantizedBlock::Float32(&weight_values),
+                crate::cpu::QuantizedBlock::Float32(&position_values),
+                crate::cpu::QuantizedBlock::Int32(&roll_values),
+            ],
+            &[conv_out, state_out],
+        )
+        .expect("decode transition evaluates");
+        (
+            evaluated
+                .get(conv_out)
+                .expect("decode output exists")
+                .0
+                .to_vec(),
+            evaluated
+                .get(state_out)
+                .expect("decode state exists")
+                .0
+                .to_vec(),
+        )
+    };
+
+    let (first_decode_output, first_decode_state) = decode(&prefill_state, 3.0, 2.0);
+    assert_eq!(first_decode_output, [321.0]);
+    assert_eq!(first_decode_state, [1.0, 2.0, 3.0]);
+    assert_eq!(
+        prefill_state
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        prefill_state_bytes
+    );
+
+    let (second_decode_output, second_decode_state) = decode(&first_decode_state, 4.0, 3.0);
+    assert_eq!(second_decode_output, [432.0]);
+    assert_eq!(second_decode_state, [2.0, 3.0, 4.0]);
+    assert_eq!(first_decode_state, [1.0, 2.0, 3.0]);
+
+    let (wrong_state_output, wrong_state) = decode(&prefill_state, 4.0, 3.0);
+    assert_eq!(wrong_state_output, [421.0]);
+    assert_eq!(wrong_state, [1.0, 2.0, 4.0]);
+    assert_ne!(wrong_state_output, second_decode_output);
+    assert_ne!(wrong_state, second_decode_state);
+
+    let (_, exact_width_state) = evaluate_lfm_prefill_for_test(
+        &[1.0, 2.0, 3.0],
+        core::num::NonZeroU32::new(3).expect("prefill length is nonzero"),
+    );
+    assert_eq!(exact_width_state, [1.0, 2.0, 3.0]);
+    let (long_prefill_outputs, long_prefill_state) = evaluate_lfm_prefill_for_test(
+        &[1.0, 2.0, 3.0, 4.0],
+        core::num::NonZeroU32::new(4).expect("prefill length is nonzero"),
+    );
+    assert_eq!(long_prefill_outputs, [100.0, 210.0, 321.0, 432.0]);
+    assert_eq!(long_prefill_state, [2.0, 3.0, 4.0]);
+    let (long_decode_output, long_decode_state) = decode(&long_prefill_state, 5.0, 4.0);
+    assert_eq!(long_decode_output, [543.0]);
+    assert_eq!(long_decode_state, [3.0, 4.0, 5.0]);
+
+    std::println!(
+        "prefills=1 decodes=2 state_updates=3 wrong_state_rejected=1 tail_controls=2 long_prefill_decode_controls=1"
+    );
+}
+
 /// proxima-debugger unit oracle (qwen35moe GDN prefill-scan-vs-sequential
 /// divergence), narrowed to the one row this comparison is actually
 /// valid for: [`causal_conv1d`] evaluated on a `[13, 4]` batch's row 0
