@@ -1,0 +1,3 @@
+# Card 08 run disposition
+
+The three raw logs `card08-wrong-baseline-run1-2026-10-10.log`, `card08-wrong-baseline-run2-2026-10-10.log`, and `card08-wrong-baseline-run3-2026-10-10.log` each show a passing selected test, but all three are **wrong-baseline runs** for Card 08. The captured `baseline_entry` is the r8 legacy entry (`..._r8_n2_b64_rt_mma_f16`), while Card 08 requires the baseline arm to be `f16_rows16_shared_k_variant()` (Rows16 + SharedK). The selected arm uses Rows16 + SharedK + SimdgroupRows. Therefore these logs are preserved as raw execution evidence but do not satisfy Card 08's comparison acceptance. The test baseline is now corrected; collect three new sequential runs for acceptance.

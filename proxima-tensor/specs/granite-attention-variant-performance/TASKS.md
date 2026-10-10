@@ -17,12 +17,14 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update its c
 
 | 07 | [card](cards/07-shared-k-barrier-elision.md) | 06 | R10 | run the card's exact nextest command three times sequentially | each run selects 1, passes 1, skips 22; two shapes × 20 paired samples, output+IDs equal, entry/hash/resource metadata captured | [x] | Logs `evidence/card07-shared-k-barrier-run{1,2,3}-2026-10-10.log`: all three processes passed. Granite 3.1 1B A400M Instruct Q8_0, F16 MMA/F32 K/V, local Metal. At 256 tokens, baseline/selected p50s: R1 181,749.929/243,374.961 ns; R2 182,291.726/244,374.969; R3 180,916.628/240,791.589. At 971: R1 1,079,624.984/1,996,291.569; R2 1,083,041.658/2,006,749.972; R3 1,079,874.928/2,020,125.045. Every within-pair output was bit-identical and IDs `[322]`. Pipeline resources baseline/selected were `(9600,448,32)` / `(13056,384,32)`; removing the barrier did not produce a consistent cross-run timing change at 971 tokens. |
 
+| 08 | [card](cards/08-parallel-rows-with-shared-k.md) | 06,07 | R11 | run the card's exact nextest command three times sequentially | each run selects 1, passes 1, skips 23; two shapes × 20 paired samples, equal output/IDs, entry/hash/resource metadata captured | [x] | Corrected logs `evidence/card08-parallel-shared-k-run{1,2,3}-2026-10-10.log`; initial wrong-baseline captures are `evidence/card08-wrong-baseline-run{1,2,3}-2026-10-10.log`, with disposition note. The three accepted runs used Rows16+SharedK as baseline and added only SimdgroupRows. Every pair had `changed_bits=0`, IDs `[322]`, width 64, and resources `(13056,384,32)` / `(13056,512,32)`. At actual 256 tokens baseline/selected p50s were 239,333.371/481,249.997; 239,750.021/481,125.084; 239,624.991/481,541.734 ns. At actual 971 tokens they were 1,988,958.335/4,397,958.284; 2,024,499.932/4,439,875.018; 1,996,999.956/4,477,791.605 ns. Signed selected-minus-baseline deltas were positive in all six cells; source-level row ownership and dtype comparison are in Card 08. |
+
 ## resume
 
-Last landed slice: Card 06 Rows16 plus SharedK probe (acceptance 1/1; pushed to `origin/main`)
-Current slice: Card 07 adjacent SharedK barrier elision (3/3 processes passed; included in this card commit)
-Next action: test whether a smaller per-simdgroup score matrix can retain query-row reuse with less register pressure
-Open question, if any: how much of the measured gap follows from the `[4][2]`→`[8][4]` score matrix expansion and corresponding pipeline resource change?
+Last landed slice: Card 07 adjacent SharedK barrier elision (3/3 processes passed; pushed to `origin/main`)
+Current slice: Card 08 SimdgroupRows+Rows16+SharedK probe, acceptance complete
+Next action: compare Proxima's explicit F32 MMA path with the captured F32 K/V Granite workload, because llama's selected `fa_f32` template keeps K/V and QK accumulation in float while the F16 variant narrows operands
+Open question, if any: does the same captured Granite prefill dispatch support a Proxima F32 variant with output/fault/ID acceptance, and what replay/resource record does that exact entry produce?
 
 ## struck
 
