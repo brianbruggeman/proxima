@@ -49,6 +49,8 @@ mod generate;
 #[cfg(feature = "std")]
 mod hf_bind;
 mod hf_config;
+#[cfg(feature = "std")]
+mod lfm_bind;
 pub mod pinned_source;
 #[cfg(feature = "std")]
 mod short_conv;
@@ -131,6 +133,10 @@ pub use generate::{
 pub use hf_bind::{names as hf_names, node_names as hf_node_names, permute_rope_rows};
 pub use hf_config::{
     HfConfig, architecture_from_hf_config, lfm_layer_kinds_from_manifest, parse_hf_config,
+};
+#[cfg(feature = "std")]
+pub use lfm_bind::{
+    LfmCommonLayerWeights, LfmLayerWeights, LfmMixerWeights, LfmTensorView, bind_lfm_layer,
 };
 #[cfg(feature = "std")]
 pub use short_conv::{
