@@ -4,8 +4,11 @@
     target_os = "macos"
 ))]
 
-use std::fs::File;
-use std::path::Path;
+use std::env;
+use std::fs::{self, File};
+use std::io::ErrorKind;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
 use omega::metal::MetalError;
@@ -15,13 +18,21 @@ use omega::{
     take_captured_dispatches,
 };
 use proxima_gguf::parse_complete;
+use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{
     GPU_LAYERS_ALL, InteropError, LoadedModel, PromptCacheConfig, ServingConfig,
 };
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+#[path = "../examples/cell_resources/cell.rs"]
+mod cell_resources;
 
 const GRANITE_MOE_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
 const GRANITE_MOE_ENV: &str = "PROXIMA_ARCH_GRANITE_MOE_GGUF";
+const GRANITE_EXPECTED_SHA256: &str =
+    "cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
 const PROMPT_TOKENS: usize = 971;
 const PASSAGE: &str = "To Sherlock Holmes she is always THE woman. I have seldom heard him mention her under any other name. In his eyes she eclipses and predominates the whole of her sex. It was not that he felt any emotion akin to love for Irene Adler. All emotions, and that one particularly, were abhorrent to his cold, precise but admirably balanced mind. He was, I take it, the most perfect reasoning and observing machine that the world has seen, but as a lover he would have placed himself in a false position. He never spoke of the softer passions, save with a gibe and a sneer. They were admirable things for the observer—excellent for drawing the veil from men's motives and actions. But for the trained reasoner to admit such intrusions into his own delicate and finely adjusted temperament was to introduce a distracting factor which might throw a doubt upon all his mental results.\n";
 
@@ -130,6 +141,68 @@ fn granite_checkpoint_path() -> String {
         "Granite checkpoint is missing at {path}"
     );
     path
+}
+
+fn verify_granite_checkpoint(parsed: &ParsedGguf, mapping: &[u8]) -> (String, String) {
+    let architecture = parsed
+        .metadata_value("general.architecture")
+        .and_then(|value| value.as_str())
+        .expect("Granite checkpoint declares general.architecture");
+    assert_eq!(architecture, "granitemoe", "checkpoint architecture");
+    let model_name = parsed
+        .metadata_value("general.name")
+        .and_then(|value| value.as_str())
+        .expect("Granite checkpoint declares general.name");
+    assert_eq!(
+        model_name, "Granite 3.1 1b A400M Instruct",
+        "checkpoint model name"
+    );
+    let file_type = parsed
+        .metadata_value("general.file_type")
+        .and_then(|value| value.as_u32())
+        .expect("Granite checkpoint declares general.file_type");
+    assert_eq!(file_type, 7, "GGUF MOSTLY_Q8_0 file type");
+    let checkpoint_sha256 = output_sha256(mapping);
+    assert_eq!(
+        checkpoint_sha256, GRANITE_EXPECTED_SHA256,
+        "checkpoint content SHA256"
+    );
+    (model_name.to_string(), checkpoint_sha256)
+}
+
+fn clear_previous_report(path: &Path, checkpoint_path: &Path) {
+    let report_path = if path.exists() {
+        fs::canonicalize(path).expect("resolve previous Granite report path")
+    } else {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::canonicalize(parent)
+            .expect("resolve Granite report directory")
+            .join(path.file_name().expect("report path has a filename"))
+    };
+    let checkpoint_path =
+        fs::canonicalize(checkpoint_path).expect("resolve Granite checkpoint path");
+    assert_ne!(
+        report_path, checkpoint_path,
+        "report destination must not name the Granite checkpoint"
+    );
+    if path.exists() {
+        let report_metadata = fs::metadata(path).expect("read previous Granite report metadata");
+        let checkpoint_metadata =
+            fs::metadata(&checkpoint_path).expect("read Granite checkpoint metadata");
+        assert!(
+            report_metadata.dev() != checkpoint_metadata.dev()
+                || report_metadata.ino() != checkpoint_metadata.ino(),
+            "report destination must not alias the Granite checkpoint"
+        );
+    }
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => panic!("cannot retire previous report {}: {error}", path.display()),
+    }
 }
 
 fn prompt_of_971_tokens(vocab: &proxima_tokenizer::Vocab) -> (String, usize) {
@@ -313,6 +386,148 @@ fn compare_token_ids(expected: &[u32], actual: &[u32]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[must_use]
+fn nearest_rank(sorted_samples: &[f64], percentile: f64) -> f64 {
+    let rank = (percentile * sorted_samples.len() as f64).ceil() as usize;
+    sorted_samples[rank - 1]
+}
+
+#[must_use]
+fn summarize_samples(samples: &[f64]) -> Value {
+    let mut sorted_samples = samples.to_vec();
+    sorted_samples.sort_by(f64::total_cmp);
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    let population_variance = samples
+        .iter()
+        .map(|sample| (sample - mean).powi(2))
+        .sum::<f64>()
+        / samples.len() as f64;
+    let cov_percent = 100.0 * population_variance.sqrt() / mean;
+    json!({
+        "count": samples.len(),
+        "min_gpu_ns": sorted_samples[0],
+        "p50_gpu_ns": nearest_rank(&sorted_samples, 0.50),
+        "p90_gpu_ns": nearest_rank(&sorted_samples, 0.90),
+        "p99_gpu_ns": nearest_rank(&sorted_samples, 0.99),
+        "max_gpu_ns": sorted_samples[sorted_samples.len() - 1],
+        "mean_gpu_ns": mean,
+        "cov_percent": cov_percent,
+    })
+}
+
+fn resource_replays(dispatch: &CapturedDispatch, label: &str) -> String {
+    let cell = cell_resources::Cell::begin();
+    for _ in 0..5 {
+        dispatch
+            .time_gpu_ns(1)
+            .expect("resource-context replay completes");
+    }
+    cell.end(label)
+}
+
+fn assert_active_grid_dimensions(dispatch: &CapturedDispatch) {
+    assert!(
+        dispatch.grid.threads > 0,
+        "captured attention grid is empty"
+    );
+    assert!(
+        dispatch.grid.depth > 0,
+        "captured attention grid depth is zero"
+    );
+    assert!(
+        dispatch
+            .grid
+            .threadgroup_width
+            .is_none_or(|width| width > 0),
+        "captured attention threadgroup width is zero"
+    );
+    assert!(
+        dispatch.grid.grid2d.is_none_or(|grid| {
+            grid.threadgroups_x > 0
+                && grid.threadgroups_y > 0
+                && grid.threads_per_threadgroup_x > 0
+                && grid.threads_per_threadgroup_y > 0
+        }),
+        "captured attention 2D grid contains a zero dimension"
+    );
+}
+
+#[must_use]
+fn prompt_ids_sha256(token_ids: &[u32]) -> String {
+    let mut digest = Sha256::new();
+    for token_id in token_ids {
+        digest.update(token_id.to_le_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
+#[must_use]
+fn output_sha256(output: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(output))
+}
+
+fn measured_arm_report(
+    arm_name: &str,
+    replay: &CapturedReplay,
+    samples: Vec<Value>,
+    resource: String,
+) -> Value {
+    let (tg_static_bytes, max_threads, exec_width) = replay.dispatch.pipeline_resources();
+    let grid2d = replay.dispatch.grid.grid2d.map(|grid| {
+        json!({
+            "form": match grid.form {
+                omega::msl::Grid2DForm::TileCoordinates => "tile_coordinates",
+                omega::msl::Grid2DForm::FlatThreadgroupIndex => "flat_threadgroup_index",
+            },
+            "threadgroups_x": grid.threadgroups_x,
+            "threadgroups_y": grid.threadgroups_y,
+            "threads_per_threadgroup_x": grid.threads_per_threadgroup_x,
+            "threads_per_threadgroup_y": grid.threads_per_threadgroup_y,
+            "threadgroup_bytes": grid.threadgroup_bytes,
+        })
+    });
+    let numeric_samples = samples
+        .iter()
+        .map(|sample| sample["gpu_ns"].as_f64().expect("sample time is numeric"))
+        .collect::<Vec<_>>();
+    let summary = summarize_samples(&numeric_samples);
+    json!({
+        "arm": arm_name,
+        "node": replay.dispatch.node,
+        "extents": replay.dispatch.extents,
+        "entry": replay.dispatch.entry,
+        "source_sha256": replay.dispatch.msl_sha256,
+        "grid": {
+            "threads": replay.dispatch.grid.threads,
+            "threadgroup_width": replay.dispatch.grid.threadgroup_width,
+            "depth": replay.dispatch.grid.depth,
+            "grid2d": grid2d,
+        },
+        "pipeline_resources": {
+            "tg_static_bytes": tg_static_bytes,
+            "max_threads": max_threads,
+            "exec_width": exec_width,
+        },
+        "bound_bytes": replay.dispatch.bound_buffer_bytes(),
+        "fault_binding_present": replay.dispatch.bindings.iter().any(|binding| matches!(binding, Binding::Fault)),
+        "output_bytes": replay.output.len(),
+        "output_sha256": output_sha256(&replay.output),
+        "generated_ids": replay.token_ids,
+        "samples": samples,
+        "summary": summary,
+        "timing_attempts": 20,
+        "resource_replay_attempts": 5,
+        "replay_errors": 0,
+        "resource": resource,
+    })
+}
+
+fn write_report(path: &Path, report: &Value) {
+    let serialized =
+        serde_json::to_vec_pretty(report).expect("serialize Granite attention replay report");
+    fs::write(path, serialized).expect("write Granite attention replay report");
 }
 
 fn route_mismatch_node(error: &InteropError) -> u32 {
@@ -969,4 +1184,162 @@ async fn card_26_replay_comparator_rejects_three_false_pairs() {
         .expect_err("a fault-bound selected record must be rejected");
     assert!(fault_error.contains("selected dispatch contains a fault binding"));
     println!("card_26 comparator_controls=3 rejected=3");
+}
+
+#[proxima::test]
+async fn perf_card_00_granite_attention_replay_cell() {
+    assert!(
+        env::var_os("PROXIMA_CAPTURE_LIVE").is_some(),
+        "run with PROXIMA_CAPTURE_LIVE=1"
+    );
+    let report_path = env::var_os("PROXIMA_GRANITE_AB_REPORT")
+        .map(PathBuf::from)
+        .expect("set PROXIMA_GRANITE_AB_REPORT to the report destination");
+    let checkpoint_path = granite_checkpoint_path();
+    clear_previous_report(&report_path, Path::new(&checkpoint_path));
+    assert!(
+        !report_path.exists(),
+        "previous Granite attention report remains at {}",
+        report_path.display()
+    );
+    let file = File::open(&checkpoint_path).expect("open the real Granite checkpoint");
+    // SAFETY: this test only reads the checkpoint and does not mutate it.
+    let mapping = unsafe { Mmap::map(&file) }.expect("mmap the Granite checkpoint");
+    let checkpoint_bytes = mapping.len() as u64;
+    let parsed = parse_complete(&mapping).expect("parse the Granite checkpoint");
+    let (model_name, checkpoint_sha256) = verify_granite_checkpoint(&parsed, mapping.as_ref());
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .expect("build the Granite checkpoint vocab");
+    let (prompt, prompt_tokens) = prompt_of_971_tokens(&vocab);
+    let prompt_ids =
+        proxima_tokenizer::encode(&prompt, &vocab).expect("encode the measured Granite prompt");
+    assert_eq!(prompt_ids.len(), prompt_tokens, "prompt tokenizer count");
+    let model = LoadedModel::load(&parsed, &mapping).expect("bind the Granite checkpoint");
+
+    let legacy = capture_attention_replay(&model, &prompt, None, None);
+    let legacy_evidence = replay_evidence(&legacy);
+    let selected = capture_attention_replay(
+        &model,
+        &prompt,
+        Some(shared_k_variant()),
+        Some(&legacy.dispatch),
+    );
+    assert_active_grid_dimensions(&legacy.dispatch);
+    assert_active_grid_dimensions(&selected.dispatch);
+    let selected_evidence = replay_evidence(&selected);
+    compare_replay_pair(Some(&legacy_evidence), Some(&selected_evidence))
+        .unwrap_or_else(|error| panic!("captured Granite attention outputs differ: {error}"));
+    assert!(
+        !legacy.token_ids.is_empty(),
+        "legacy request returned no IDs"
+    );
+    compare_token_ids(&legacy.token_ids, &selected.token_ids)
+        .unwrap_or_else(|error| panic!("captured Granite request IDs differ: {error}"));
+
+    let mut legacy_samples = Vec::with_capacity(20);
+    let mut selected_samples = Vec::with_capacity(20);
+    let mut rounds = Vec::with_capacity(20);
+    for round in 0..20 {
+        let arm_order = if round % 2 == 0 {
+            ["legacy", "shared_k"]
+        } else {
+            ["shared_k", "legacy"]
+        };
+        let mut legacy_time = None;
+        let mut selected_time = None;
+        for (position, arm_name) in arm_order.iter().enumerate() {
+            let dispatch = match *arm_name {
+                "legacy" => &legacy.dispatch,
+                "shared_k" => &selected.dispatch,
+                _ => unreachable!("arm order contains only admitted arms"),
+            };
+            let gpu_ns = dispatch
+                .time_gpu_ns(1)
+                .expect("single-dispatch GPU replay completes");
+            assert!(
+                gpu_ns.is_finite() && gpu_ns > 0.0,
+                "GPU replay time must be finite and positive: {gpu_ns}"
+            );
+            let sample = json!({
+                "round": round,
+                "position": position,
+                "gpu_ns": gpu_ns,
+            });
+            match *arm_name {
+                "legacy" => {
+                    legacy_samples.push(sample);
+                    legacy_time = Some(gpu_ns);
+                }
+                "shared_k" => {
+                    selected_samples.push(sample);
+                    selected_time = Some(gpu_ns);
+                }
+                _ => unreachable!("arm order contains only admitted arms"),
+            }
+        }
+        let legacy_gpu_ns = legacy_time.expect("legacy arm ran once per round");
+        let selected_gpu_ns = selected_time.expect("selected arm ran once per round");
+        rounds.push(json!({
+            "round": round,
+            "arm_order": arm_order,
+            "selected_minus_legacy_ns": selected_gpu_ns - legacy_gpu_ns,
+        }));
+    }
+
+    let legacy_resource = resource_replays(&legacy.dispatch, "legacy");
+    let selected_resource = resource_replays(&selected.dispatch, "shared_k");
+    let report = json!({
+        "version": 1,
+        "model": "Granite 3.1 1B A400M Instruct",
+        "checkpoint": {
+            "path": checkpoint_path,
+            "bytes": checkpoint_bytes,
+            "sha256": checkpoint_sha256,
+            "architecture": "granitemoe",
+            "model_name": model_name,
+            "gguf_file_type": 7,
+            "weight_quant": "Q8_0",
+        },
+        "host": {
+            "hostname": env::var("HOSTNAME").ok(),
+            "arch": env::consts::ARCH,
+            "os": env::consts::OS,
+        },
+        "device_description": Value::Null,
+        "serving": {
+            "gpu_layers": GPU_LAYERS_ALL,
+            "kv_cache_key": "F32",
+            "kv_cache_value": "F32",
+            "flash_attention": false,
+            "reasoning_budget": 0,
+            "prompt_cache": "off",
+            "ubatch_size": 0,
+            "generated_tokens": 1,
+        },
+        "shapes": [{
+            "nominal_prompt_tokens": PROMPT_TOKENS,
+            "actual_prompt_tokens": prompt_tokens,
+            "prompt_ids_sha256": prompt_ids_sha256(&prompt_ids),
+            "output_equal": true,
+            "ids_equal": true,
+            "rounds": rounds,
+            "arms": [
+                measured_arm_report("legacy", &legacy, legacy_samples, legacy_resource),
+                measured_arm_report("shared_k", &selected, selected_samples, selected_resource),
+            ],
+        }],
+    });
+    write_report(&report_path, &report);
+    for arm in report["shapes"][0]["arms"]
+        .as_array()
+        .expect("two arm records")
+    {
+        println!(
+            "granite ab arm arm={} samples={} resource={}",
+            arm["arm"].as_str().expect("arm label"),
+            arm["samples"].as_array().expect("raw samples").len(),
+            arm["resource"].as_str().expect("resource observation")
+        );
+    }
+    println!("granite ab report={}", report_path.display());
 }
