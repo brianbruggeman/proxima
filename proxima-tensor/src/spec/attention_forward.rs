@@ -2095,32 +2095,34 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                 mixer_output.residual
             }
             LayerKind::ShortConv => {
-                // `b_proj`/`c_proj`/`x_proj` are the real checkpoint's single
-                // fused `blk.{layer}.shortconv.in_proj.weight`
-                // (`[embedding, 3*embedding]`) split three ways -- see
-                // `append_short_conv_mixer`'s own doc for why this graph
-                // cannot instead slice one fused `Input` by offset. Binding
-                // these three names from that one on-disk tensor is a
-                // binder-side split this session does not implement; the
-                // names here are this program's contract for whoever does.
-                let b_proj = input_leaf(
+                let in_proj = input_leaf(
                     &mut program,
                     DType::Float32,
-                    alloc::vec![Extent::Static(embedding), Extent::Static(embedding)],
-                    &alloc::format!("blk.{layer}.shortconv.in_proj.weight.b"),
+                    alloc::vec![Extent::Static(embedding * 3), Extent::Static(embedding)],
+                    &alloc::format!("blk.{layer}.shortconv.in_proj.weight"),
                 );
-                let c_proj = input_leaf(
+                let b_proj_map = alloc::format!("d+0@{embedding},i->di");
+                let b_proj = elementwise(
                     &mut program,
                     DType::Float32,
-                    alloc::vec![Extent::Static(embedding), Extent::Static(embedding)],
-                    &alloc::format!("blk.{layer}.shortconv.in_proj.weight.c"),
-                );
-                let x_proj = input_leaf(
+                    ScalarOp::Identity,
+                    &[(in_proj, b_proj_map.as_str())],
+                )?;
+                let c_proj_map = alloc::format!("d+{embedding}@{embedding},i->di");
+                let c_proj = elementwise(
                     &mut program,
                     DType::Float32,
-                    alloc::vec![Extent::Static(embedding), Extent::Static(embedding)],
-                    &alloc::format!("blk.{layer}.shortconv.in_proj.weight.x"),
-                );
+                    ScalarOp::Identity,
+                    &[(in_proj, c_proj_map.as_str())],
+                )?;
+                let x_offset = embedding * 2;
+                let x_proj_map = alloc::format!("d+{x_offset}@{embedding},i->di");
+                let x_proj = elementwise(
+                    &mut program,
+                    DType::Float32,
+                    ScalarOp::Identity,
+                    &[(in_proj, x_proj_map.as_str())],
+                )?;
                 // `[embedding, l_cache]`, NOT `[l_cache, embedding]` --
                 // `causal_conv1d`'s own doc on its `dl->sld` map explains why:
                 // the real on-disk tensor has `l_cache` as its fastest axis,

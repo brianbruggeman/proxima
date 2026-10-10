@@ -1,0 +1,15 @@
+Command: `taskpolicy -b nice -n 20 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-tensor --lib architecture_matrix_shortconv_fused_projection_row_views -- --nocapture`
+Host: Darwin Thor-43.local 24.6.0 arm64
+Compiler: rustc 1.99.0 (b940084d7 2026-09-28)
+Exit status: 0
+`git diff --check`: exit status 0; no output
+
+   Compiling proxima-tensor v0.1.0 (/private/tmp/proxima-model-matrix/proxima-tensor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10m 23s
+     Running unittests src/lib.rs (/tmp/cargo_target/debug/deps/proxima_tensor-7f7e73581b90a90b)
+
+running 1 test
+branches=3 shapes=3 values=12 offsets=0,2,4
+test spec::tests::architecture_matrix_shortconv_fused_projection_row_views ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 792 filtered out; finished in 0.01s
