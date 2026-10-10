@@ -27,12 +27,14 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update its c
 
 | 14 | [card](cards/14-serving-tile-height-setting.md) | 13 | conflaguration-controlled Rows8/Rows16 serving dispatch at fixed Groups4 | focused setting test, focused integration build, then copied Granite replay three times serially | TOML/builder/environment parity; default Legacy; invalid value rejected; each replay selects 1, passes 1, skips 28 and retains 2 shapes × 20 paired samples with exact output/ID equality | [x] | Focused setting test: 1 passed, 735 filtered; TOML/builder/environment agree for Rows8/Rows16 with Groups4; default Legacy and invalid `rows32` behavior recorded in Card 14. Three serial logs each select 1, pass 1, filter 28, and capture 256/971 tokens × 20 paired samples with exact output equality and IDs `[322]`. Independently recomputed p50 ns Rows8/Rows16, run 1/2/3: 256: 137,958.326/180,937.583; 138,354.197/182,833.348; 138,208.328/182,937.481. 971: 1,038,187.474/1,144,791.604; 1,038,895.804/1,137,229.207; 1,012,145.774/1,120,437.519. All six cells had 20/0/0 positive/negative/zero Rows16-minus-Rows8 deltas. Timing cause unexplained; no default changed. Raw arrays, entries, hashes, grids, and resources are in `evidence/card14-serving-tile-height-run{1,2,3}-2026-10-10.log` and Card 14. |
 
+| 15 | [card](cards/15-serving-legacy-tile-vs-rows8.md) | 14 | Rows8 vs Legacy tile-height serving dispatch at fixed Groups4 | compile focused Granite integration target; run copied test binary three times serially | Each run selects 1 test, passes 1, filters 29; both actual shapes × 20 paired samples with full output/ID equality, raw samples, dispatch identity, and resources | [x] | Three serial runs each selected 1, passed 1, filtered 29; all six pairs had `changed_bits=0`, no non-finite pairs, and IDs `[322]`. Independent parsing checked 240 samples and 120 signed deltas. Rows8/Legacy tile p50s, run 1/2/3: at 256 tokens 139,937.503/139,750.075; 140,562.479/140,625.052; 140,833.319/139,874.988 ns; at 971 tokens 1,025,937.498/1,026,874.990; 1,004,083.315/1,006,145.787; 1,014,479.145/1,006,249.979 ns. Both captured kernels have `tile_rows=8`, equal grids and `(9600,512,32)` resources. Pipeline-captured MSL files differ only in the kernel entry symbol. Raw timing logs and source capture are in Card 15/evidence. |
+
 ## resume
 
-Last completed slice: Card 14 serving-configured Rows8 versus Rows16 at fixed Groups4, with three serial two-shape replays.
-Current slice: Card 15 compares configured Legacy tile height with Rows8 while Groups4 stays fixed.
-Next action: capture three serial paired replays through ServingSettings and inspect whether the two tile-height choices emit different MSL and dispatch grids.
-Open question, if any: Rows16 p50 is higher than Rows8 in all six Card14 cells, but the cause remains unexplained and the default remains Legacy.
+Last completed slice: Card 15 configured Legacy tile height versus Rows8 at fixed Groups4, replayed three times at both Granite prompt lengths.
+Current slice: Card 16 repeats Groups4 with two alternating warmup pairs before the 20 measured pairs.
+Next action: add warmup samples to the existing measurement helper and capture three serial two-shape Groups4 runs against F16-MMA Legacy.
+Open question, if any: Card15's Legacy and Rows8 captures emit the same tile-8 kernel body, entry excepted; the timing cause remains unexplained.
 
 ## struck
 
