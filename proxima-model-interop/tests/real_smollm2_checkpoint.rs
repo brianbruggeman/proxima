@@ -125,7 +125,8 @@ fn load_real_model(file_bytes: &[u8]) -> LoadedModel<'_> {
     let config_bytes =
         std::fs::read(alloc_format(MODEL_DIR, "config.json")).expect("read config.json");
     let hf_config = parse_hf_config(&config_bytes).expect("parse real smollm2 config.json");
-    let architecture = architecture_from_hf_config(&hf_config);
+    let architecture = architecture_from_hf_config(&hf_config)
+        .expect("derive architecture from real smollm2 config.json");
     assert!(
         architecture.tied_embeddings,
         "real smollm2 config.json declares tie_word_embeddings: true"

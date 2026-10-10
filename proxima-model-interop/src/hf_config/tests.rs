@@ -1,4 +1,7 @@
 use super::*;
+use proxima_primitives::pipe::sans_io::Outcome;
+use proxima_safetensors::SafetensorsParser;
+use sha2::{Digest, Sha256};
 
 /// The real, on-disk `config.json` this task's own evidence points at --
 /// `~/.lmstudio/models/lmstudio-community/Qwen3-30B-A3B-MLX-4bit/config.json`,
@@ -74,7 +77,7 @@ fn real_qwen3_moe_config_json_derives_the_real_moe_architecture() {
     let config = parse_hf_config(REAL_QWEN3_MOE_CONFIG_JSON.as_bytes())
         .expect("real qwen3 moe config.json parses");
 
-    let architecture = architecture_from_hf_config(&config);
+    let architecture = architecture_from_hf_config(&config).expect("qwen3 config derives");
 
     assert_eq!(
         architecture,
@@ -115,7 +118,7 @@ fn dense_config_with_every_optional_field_absent_derives_via_fallbacks() {
         "vocab_size": 100
     }"#;
     let config = parse_hf_config(json.as_bytes()).expect("minimal dense config.json parses");
-    let architecture = architecture_from_hf_config(&config);
+    let architecture = architecture_from_hf_config(&config).expect("dense config derives");
 
     assert_eq!(
         architecture,
@@ -165,7 +168,12 @@ fn mixtral_style_num_local_experts_alias_reads_the_same_field_as_qwens_num_exper
         Some(8),
         "num_local_experts must alias into num_experts"
     );
-    assert_eq!(architecture_from_hf_config(&config).expert_count, 8);
+    assert_eq!(
+        architecture_from_hf_config(&config)
+            .expect("moe config derives")
+            .expert_count,
+        8
+    );
 }
 
 /// The real, on-disk `config.json` this session downloaded --
@@ -204,7 +212,7 @@ fn real_smollm2_config_json_derives_a_tied_dense_architecture() {
         "smollm2 ships tie_word_embeddings: true"
     );
 
-    let architecture = architecture_from_hf_config(&config);
+    let architecture = architecture_from_hf_config(&config).expect("sliding config derives");
     assert_eq!(
         architecture,
         ModelHparams {
@@ -250,10 +258,10 @@ fn hf_qwen2_config_reads_the_split_half_profile_the_gguf_path_reads() {
         "tie_word_embeddings": false
     }"#;
     let config = parse_hf_config(json.as_bytes()).expect("qwen2-7b config.json parses");
-    let architecture = architecture_from_hf_config(&config);
+    let architecture = architecture_from_hf_config(&config).expect("dense config derives");
 
-    let profile = crate::profiles::family_profile(&architecture.family)
-        .expect("qwen2 profile embedded");
+    let profile =
+        crate::profiles::family_profile(&architecture.family).expect("qwen2 profile embedded");
 
     assert_eq!(architecture.family, "qwen2");
     assert_eq!(
@@ -278,5 +286,97 @@ fn malformed_json_is_a_typed_error_not_a_panic() {
     assert!(
         matches!(outcome, Err(InteropError::MalformedHfConfig { .. })),
         "malformed json must surface as a typed error, got {outcome:?}"
+    );
+}
+
+#[test]
+fn architecture_matrix_lfm_schedule() {
+    let config_bytes = include_bytes!(
+        "../../../proxima-tensor/specs/small-model-architecture-matrix/fixtures/semantic-pair-configs/lfm_text.json"
+    );
+    let header_bytes = include_bytes!(
+        "../../../proxima-tensor/specs/small-model-architecture-matrix/fixtures/lfm_text.safetensors.header"
+    );
+    let config = parse_hf_config(config_bytes).expect("pinned LFM config parses");
+    assert_eq!(
+        std::format!("{:x}", Sha256::digest(header_bytes)),
+        "31a589aa36efce50a5450571144834995319bc35d59ddca12c369485daaf658a"
+    );
+    let mut parser = SafetensorsParser::new();
+    parser.feed(header_bytes);
+    let manifest = match parser.poll().expect("pinned safetensors header parses") {
+        Outcome::Event(manifest) => manifest.clone(),
+        Outcome::NeedMore => panic!("complete header fixture must produce a manifest"),
+    };
+
+    assert_eq!(manifest.tensors.len(), 148);
+    let layer_kinds = lfm_layer_kinds_from_manifest(&config, &manifest)
+        .expect("config schedule matches pinned tensor names and shapes");
+    let expected = vec![
+        LayerKind::ShortConv,
+        LayerKind::ShortConv,
+        LayerKind::Attention,
+        LayerKind::ShortConv,
+        LayerKind::ShortConv,
+        LayerKind::Attention,
+        LayerKind::ShortConv,
+        LayerKind::ShortConv,
+        LayerKind::Attention,
+        LayerKind::ShortConv,
+        LayerKind::Attention,
+        LayerKind::ShortConv,
+        LayerKind::Attention,
+        LayerKind::ShortConv,
+        LayerKind::Attention,
+        LayerKind::ShortConv,
+    ];
+    assert_eq!(layer_kinds, expected);
+
+    let architecture = architecture_from_hf_config(&config)
+        .expect("pinned LFM config derives its mixed layer schedule");
+    let expected_kv_heads: Vec<u32> = expected
+        .iter()
+        .map(|layer_kind| match layer_kind {
+            LayerKind::ShortConv => 0_u32,
+            LayerKind::Attention => 8_u32,
+            LayerKind::Gdn => panic!("pinned LFM schedule has no GDN layers"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(architecture.kv_heads_by_layer, expected_kv_heads);
+    assert_eq!(architecture.kv_heads, 0);
+
+    let mut incomplete_config = config.clone();
+    incomplete_config.layer_types.pop();
+    assert!(architecture_from_hf_config(&incomplete_config).is_err());
+
+    let mut unknown_layer_config = config.clone();
+    unknown_layer_config.layer_types[0] = String::from("unknown");
+    assert!(architecture_from_hf_config(&unknown_layer_config).is_err());
+
+    let mut missing_marker = manifest.clone();
+    missing_marker
+        .tensors
+        .retain(|tensor| tensor.name != "model.layers.2.self_attn.q_proj.weight");
+    assert!(lfm_layer_kinds_from_manifest(&config, &missing_marker).is_err());
+
+    let mut conflicting_marker = manifest.clone();
+    let mut attention_tensor = conflicting_marker
+        .tensor("model.layers.2.self_attn.q_proj.weight")
+        .expect("pinned attention marker exists")
+        .clone();
+    attention_tensor.name = String::from("model.layers.0.self_attn.q_proj.weight");
+    conflicting_marker.tensors.push(attention_tensor);
+    assert!(lfm_layer_kinds_from_manifest(&config, &conflicting_marker).is_err());
+
+    let mut wrong_shape = manifest.clone();
+    wrong_shape
+        .tensors
+        .iter_mut()
+        .find(|tensor| tensor.name == "model.layers.0.conv.conv.weight")
+        .expect("pinned conv marker exists")
+        .shape[2] = 2;
+    assert!(lfm_layer_kinds_from_manifest(&config, &wrong_shape).is_err());
+    std::println!(
+        "layers=16 schedule_matches=16 wrong_marker_rejected=1 missing_marker_rejected=1 wrong_shape_rejected=1 incomplete_config_rejected=1 unknown_layer_rejected=1"
     );
 }

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "model_repo": "LiquidAI/LFM2.5-1.2B-Base",
+  "revision": "7453bca97ca1e67754c4035a4b4c584e1c9dd725",
+  "file_path": "model.safetensors",
+  "source_url": "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Base/resolve/7453bca97ca1e67754c4035a4b4c584e1c9dd725/model.safetensors",
+  "reported_file_size_bytes": 2340697936,
+  "reported_lfs_sha256": "7678ab9546a0c51c1fca161876b1efc4f0906277f170b5822045f40fdaf9eeff",
+  "range_request": "bytes=0-16719",
+  "http_status": 206,
+  "content_range": "bytes 0-16719/2340697936",
+  "header_length_prefix_bytes": 8,
+  "header_json_bytes": 16712,
+  "retained_header_bytes": 16720,
+  "tensor_count": 148,
+  "retained_header_sha256": "31a589aa36efce50a5450571144834995319bc35d59ddca12c369485daaf658a",
+  "lfs_sha256_scope": "hub-reported whole-file digest; the complete weight file was not downloaded or independently hashed"
+}
