@@ -31,12 +31,14 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update its c
 
 | 16 | [card](cards/16-groups4-warmup-control.md) | 12 | determine whether the noisy Groups4 count sweep changes after explicit pre-timing warmup | focused integration build; run copied binary three times serially; check each report positively and with all 13 mutations | Each run selects 1 test, passes 1, filters 30; 2 warmup pairs plus 20 measured pairs; equal complete attention output and IDs | [x] | Card 16 reports all 3 serial runs, warmup and measured raw samples, hashes, grids, resource tuples, and logs. Each run produced equal output SHA/IDs `[322]`; all 3 positive checks and all 39 negative controls passed their stated counts (`evidence/card16-report-checks-2026-10-10.log`). Groups4 p50 was lower in each process; run 1/2 signs 2/18/0 and run 3 signs 6/14/0, with p99 crossing above Legacy in runs 1 and 2. The timing cause remains unexplained; Groups4 remains explicit opt-in and Legacy remains the default. |
 
+| 17 | [card](cards/17-groups4-warmup-two-shape-replay.md) | 16 | check the warmup-controlled Groups4 count cell at both Granite prompt lengths through the serving setting | compile the focused integration binary; run copied test three times serially with `PROXIMA_SERVING_ATTENTION_SIMDGROUP_COUNT=groups4`; check 2-shape reports and 13 controls | Each run selects 1 test, passes 1, filters 31; 2 shapes × 2 warmup pairs × 2 arms and 20 measured pairs × 2 arms; complete output and ID equality per shape | [x] | Three serial Metal runs passed and each report passed its positive checker and rejected all 13 negative controls. Actual 256/972-token output hashes and IDs matched between F16-MMA/F32-KV Legacy and configured Groups4 in all six pairs. Groups4 p50 was lower in all six cells; the 972-token run1 p99 and mixed paired signs remain counter-evidence; timing mechanism unexplained. Reports, logs, full sample arrays, hashes, entry/source identities, grids and resources: Card 17. |
+
 ## resume
 
-Last completed slice: Card 16 repeated Groups4 at actual 972 tokens with two alternating warmup pairs before 20 measured pairs, across three processes.
-Current slice: Card 17 extends the same warmup-controlled Groups4 comparison to both actual 256- and 972-token prompt shapes through the serving setting.
-Next action: run three serial two-shape Groups4 processes against sized F16-MMA Legacy, retaining warmups separately from measured samples.
-Open question, if any: Groups4 p50 was lower in each Card16 process, but paired signs and p99 include reversals; the timing mechanism remains unexplained.
+Last completed slice: Card 17 warmup-controlled configured Groups4 versus F16-MMA/F32-KV sized Legacy at actual 256 and 972 tokens, across three serial processes.
+Current slice: Card 18 applies the same warmup and two-shape protocol to Groups2 and Groups8.
+Next action: run three Groups2 and three Groups8 processes serially, check all reports and negative controls, and compare their source and raw timing payloads with Card17.
+Open question, if any: Groups4 has lower p50 in all six cells, while the 972-token p99 and paired-sign records include reversals; no timing cause is established.
 
 ## struck
 
