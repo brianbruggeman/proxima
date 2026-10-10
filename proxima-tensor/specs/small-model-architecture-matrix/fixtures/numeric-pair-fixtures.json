@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "pairs": [
+    {
+      "case": "gemma4_qat_paris_ids_control",
+      "boundary": "generated-token-ids",
+      "comparator": "u32_le_exact_v1",
+      "reference_runtime": "llama.cpp",
+      "reference_revision": "5d806aa2575e01e126651fd69ab1ab6cefff861d",
+      "reference_source": "proxima-model-interop/tests/fixtures/gemma4_e2b_llama_greedy_ids.json#paris.oracle_ids",
+      "reference_ids": [
+        9079,
+        236761,
+        106
+      ],
+      "reference_payload_path": "fixtures/payloads/upstream-ids-reference.bin",
+      "reference_payload_sha256": "b6f943b160fd05c7dc7e56f1c9a8242897decbe1a8acf2a1ce67c93c19bb93d6",
+      "output_payload_path": "fixtures/payloads/upstream-ids-match-control.bin",
+      "output_payload_sha256": "b6f943b160fd05c7dc7e56f1c9a8242897decbe1a8acf2a1ce67c93c19bb93d6",
+      "output_origin": "matching fixture control copied from reference bytes",
+      "status": "matched"
+    },
+    {
+      "case": "gemma4_qat_paris_top_logprobs_control",
+      "boundary": "token-logprob-top2-step0",
+      "comparator": "f32_le_allclose_v1",
+      "reference_runtime": "llama.cpp",
+      "reference_revision": "f1ea206218210afb913ae2f5d2c51faed35915da",
+      "reference_source": "proxima-model-interop/tests/fixtures/llama-parity/gemma4_e2b/n_probs.json#paris.steps[0].top[0:2].logprob",
+      "reference_shape": [
+        2
+      ],
+      "reference_values": [
+        -0.16142404079437256,
+        -1.9737296104431152
+      ],
+      "reference_payload_path": "fixtures/payloads/upstream-f32-reference.bin",
+      "reference_payload_sha256": "ec36d08c78a05aa0489c5b39cdb6851bc340bc350d46d62a68dc32d7232d7604",
+      "output_payload_path": "fixtures/payloads/upstream-f32-match-control.bin",
+      "output_payload_sha256": "ec36d08c78a05aa0489c5b39cdb6851bc340bc350d46d62a68dc32d7232d7604",
+      "output_origin": "matching fixture control copied from reference bytes",
+      "atol": 1e-05,
+      "rtol": 1e-05,
+      "status": "matched",
+      "output_shape": [
+        2
+      ]
+    }
+  ],
+  "wrong_output_control": {
+    "case": "gemma4_qat_paris_top_logprobs_wrong_control",
+    "boundary": "token-logprob-top2-step0",
+    "comparator": "f32_le_allclose_v1",
+    "reference_runtime": "llama.cpp",
+    "reference_revision": "f1ea206218210afb913ae2f5d2c51faed35915da",
+    "reference_source": "proxima-model-interop/tests/fixtures/llama-parity/gemma4_e2b/n_probs.json#paris.steps[0].top[0:2].logprob",
+    "reference_shape": [
+      2
+    ],
+    "reference_values": [
+      -0.16142404079437256,
+      -1.9737296104431152
+    ],
+    "reference_payload_path": "fixtures/payloads/upstream-f32-reference.bin",
+    "reference_payload_sha256": "ec36d08c78a05aa0489c5b39cdb6851bc340bc350d46d62a68dc32d7232d7604",
+    "output_payload_path": "fixtures/payloads/upstream-f32-wrong-control.bin",
+    "output_payload_sha256": "ae40e7c665b653b7f312cba8937eb667d09e5bafa3e68ba6ff8bf5e7c699d636",
+    "output_origin": "deliberately perturbed fixture control",
+    "atol": 1e-05,
+    "rtol": 1e-05,
+    "status": "matched",
+    "output_shape": [
+      2
+    ]
+  }
+}
