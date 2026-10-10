@@ -29,12 +29,14 @@ Each card is one coherent commit, at most 30 minutes front-to-back. Update its c
 
 | 15 | [card](cards/15-serving-legacy-tile-vs-rows8.md) | 14 | Rows8 vs Legacy tile-height serving dispatch at fixed Groups4 | compile focused Granite integration target; run copied test binary three times serially | Each run selects 1 test, passes 1, filters 29; both actual shapes × 20 paired samples with full output/ID equality, raw samples, dispatch identity, and resources | [x] | Three serial runs each selected 1, passed 1, filtered 29; all six pairs had `changed_bits=0`, no non-finite pairs, and IDs `[322]`. Independent parsing checked 240 samples and 120 signed deltas. Rows8/Legacy tile p50s, run 1/2/3: at 256 tokens 139,937.503/139,750.075; 140,562.479/140,625.052; 140,833.319/139,874.988 ns; at 971 tokens 1,025,937.498/1,026,874.990; 1,004,083.315/1,006,145.787; 1,014,479.145/1,006,249.979 ns. Both captured kernels have `tile_rows=8`, equal grids and `(9600,512,32)` resources. Pipeline-captured MSL files differ only in the kernel entry symbol. Raw timing logs and source capture are in Card 15/evidence. |
 
+| 16 | [card](cards/16-groups4-warmup-control.md) | 12 | determine whether the noisy Groups4 count sweep changes after explicit pre-timing warmup | focused integration build; run copied binary three times serially; check each report positively and with all 13 mutations | Each run selects 1 test, passes 1, filters 30; 2 warmup pairs plus 20 measured pairs; equal complete attention output and IDs | [x] | Card 16 reports all 3 serial runs, warmup and measured raw samples, hashes, grids, resource tuples, and logs. Each run produced equal output SHA/IDs `[322]`; all 3 positive checks and all 39 negative controls passed their stated counts (`evidence/card16-report-checks-2026-10-10.log`). Groups4 p50 was lower in each process; run 1/2 signs 2/18/0 and run 3 signs 6/14/0, with p99 crossing above Legacy in runs 1 and 2. The timing cause remains unexplained; Groups4 remains explicit opt-in and Legacy remains the default. |
+
 ## resume
 
-Last completed slice: Card 15 configured Legacy tile height versus Rows8 at fixed Groups4, replayed three times at both Granite prompt lengths.
-Current slice: Card 16 repeats Groups4 with two alternating warmup pairs before the 20 measured pairs.
-Next action: add warmup samples to the existing measurement helper and capture three serial two-shape Groups4 runs against F16-MMA Legacy.
-Open question, if any: Card15's Legacy and Rows8 captures emit the same tile-8 kernel body, entry excepted; the timing cause remains unexplained.
+Last completed slice: Card 16 repeated Groups4 at actual 972 tokens with two alternating warmup pairs before 20 measured pairs, across three processes.
+Current slice: Card 17 extends the same warmup-controlled Groups4 comparison to both actual 256- and 972-token prompt shapes through the serving setting.
+Next action: run three serial two-shape Groups4 processes against sized F16-MMA Legacy, retaining warmups separately from measured samples.
+Open question, if any: Groups4 p50 was lower in each Card16 process, but paired signs and p99 include reversals; the timing mechanism remains unexplained.
 
 ## struck
 
