@@ -1077,6 +1077,13 @@ fn f16_variant() -> AttentionVariant {
     variant
 }
 
+fn f16_shared_kv_simdgroup_rows_variant() -> AttentionVariant {
+    let mut variant = f16_variant();
+    variant.kv_reuse = omega::AttentionKvReuse::SharedKv;
+    variant.query_parallelism = omega::AttentionQueryParallelism::SimdgroupRows;
+    variant
+}
+
 fn f16_simdgroup_rows_variant() -> AttentionVariant {
     let mut variant = AttentionVariant::default();
     variant.mma_precision = omega::AttentionMmaPrecision::F16;
@@ -1684,6 +1691,16 @@ async fn perf_probe_granite_f32_shared_k_parallel_against_legacy() {
     run_variant_prefill_probe(
         "f32_f16_shared_k_rows8_simdgroup_per_head",
         f32_shared_k_variant(),
+    );
+}
+
+#[proxima::test]
+async fn perf_granite_shared_kv_simdgroup_rows() {
+    run_variant_prefill_probe_shapes(
+        "f16_shared_kv_simdgroup_rows",
+        Some(f16_variant()),
+        f16_shared_kv_simdgroup_rows_variant(),
+        &[SHORT_PROMPT_TOKENS, PROMPT_TOKENS],
     );
 }
 
