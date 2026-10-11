@@ -12,3 +12,7 @@ disallowed-methods = [
     # forbidden calls whenever `tokio` is enabled.
     { path = "proxima::runtime::run_tokio", reason = "forces the tokio backend — use #[proxima::main], `run`, or `block_on`", allow-invalid = true },
 ]
+
+# test code may unwrap/expect with a message; production code stays denied by workspace lints
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
