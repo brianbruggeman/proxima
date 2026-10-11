@@ -14,7 +14,7 @@ pub(super) fn render_elementwise(
     let coordinate_dims = elementwise_coordinate_dims(resolved, gather_count);
 
     let mut source = String::new();
-    preamble(&mut source, None);
+    preamble(&mut source);
     push_scaled_float_decoders(&mut source, quantized);
 
     source.push_str("struct Uniforms {\n");
@@ -389,17 +389,12 @@ pub(super) fn render_reduce(
     // nothing left to reject here.
 
     let mut source = String::new();
-    preamble(
-        &mut source,
-        tiled_decode_codec_of(
-            resolved,
-            quantized,
-            *reduce_op,
-            *init,
-            output_axes,
-        ),
-    );
+    preamble(&mut source);
     push_scaled_float_decoders(&mut source, quantized);
+    push_tiled_decode(
+        &mut source,
+        tiled_decode_codec_of(resolved, quantized, *reduce_op, *init, output_axes),
+    );
 
     source.push_str("struct Uniforms {\n");
     source.push_str("    long output_total;\n");

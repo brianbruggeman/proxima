@@ -93,7 +93,7 @@ pub(super) fn render_cached_attention_decode_split(
         ),
     ];
     let mut source = String::new();
-    preamble(&mut source, None);
+    preamble(&mut source);
     if cached_kv_codec == Some(Codec::BFloat16) {
         source.push_str(BF16_VECTOR_HELPER);
     }

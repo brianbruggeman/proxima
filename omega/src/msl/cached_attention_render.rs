@@ -403,7 +403,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
         .replace("{cached_key_rows}", &cached_key_rows.to_string())
         .replace("{new_key_rows}", &new_key_rows.to_string());
     let mut source = String::new();
-    preamble(&mut source, None);
+    preamble(&mut source);
     source.push_str(uniforms_struct);
     source.push_str(&format!(
         "kernel void {entry}(device const {element_type}* in0 [[buffer(0)]], device const {element_type}* in1 [[buffer(1)]], device const {element_type}* in2 [[buffer(2)]], device const {element_type}* in3 [[buffer(3)]], device const {element_type}* in4 [[buffer(4)]], device const {element_type}* in5 [[buffer(5)]], device const {element_type}* in6 [[buffer(6)]], device const {element_type}* in7 [[buffer(7)]]{cached_len_param}{pass_param}, device {element_type}* out [[buffer({out_buffer_index})]], constant Uniforms& u [[buffer({uniforms_buffer_index})]], uint gid [[thread_position_in_grid]]{tgid_param}) {{\n"
@@ -755,7 +755,7 @@ pub(super) fn render_cached_attention_merge(
     validate_attention_split_limit(resolved.node, crate::sized::ATTENTION_SPLIT_MAX)?;
     let element_type = type_token(resolved.node, resolved.dtype)?;
     let mut source = String::new();
-    preamble(&mut source, None);
+    preamble(&mut source);
     source.push_str("struct Uniforms { long total_elements; long splits; };\n\n");
     if INTERLEAVED_SPLIT_SCRATCH {
         if !head_dim.is_multiple_of(8) {

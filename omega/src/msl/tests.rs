@@ -2146,7 +2146,7 @@ fn q4k_row_blocked_non_add_reduce_keeps_the_per_element_path_single_fetch() {
 /// The smallest activation-row count the tiled path admits: every fixture that asserts the tiled
 /// path rather than the row-blocked one reads the build's own threshold instead of a literal.
 #[cfg(feature = "metal-tiled-gemm")]
-const TILED_ADMITTED_TOKENS: u32 = crate::sized::TILED_GEMM_MIN_TOKENS as u32;
+pub(super) const TILED_ADMITTED_TOKENS: u32 = crate::sized::TILED_GEMM_MIN_TOKENS as u32;
 
 /// Same shape as [`matmul_op`] (`lhs=[features,k]` weight,
 /// `rhs=[k,tokens]` activation), but with the out_map listing the TOKEN
@@ -2160,7 +2160,7 @@ const TILED_ADMITTED_TOKENS: u32 = crate::sized::TILED_GEMM_MIN_TOKENS as u32;
 /// path needs its own fixture rather than reusing `matmul_op` (which
 /// several PRE-EXISTING structural tests already pin to its current
 /// order).
-fn tiled_gemm_op(tokens: u32, k: u32, features: u32) -> BoundOp {
+pub(super) fn tiled_gemm_op(tokens: u32, k: u32, features: u32) -> BoundOp {
     let mut program = Vec::new();
     let lhs = append(
         &mut program,
