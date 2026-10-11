@@ -472,8 +472,16 @@ impl LocalExecutor {
     }
 
     /// poll all currently-ready tasks once. returns the number of tasks
-    /// polled.
+    /// polled. a task that wakes itself keeps this running; a worker that must
+    /// also service timers and the reactor uses [`Self::tick_budget`].
     pub fn tick(&self) -> usize {
+        self.tick_budget(usize::MAX)
+    }
+
+    /// like [`Self::tick`] but returns once `budget` polls have run. tasks still
+    /// ready stay queued for the next call, so a self-waking task cannot hold
+    /// the worker away from its timer wheel and reactor.
+    pub fn tick_budget(&self, budget: usize) -> usize {
         #[cfg(feature = "std")]
         {
             // drain any cross-thread wakes into the local queue first.
@@ -492,6 +500,9 @@ impl LocalExecutor {
                     break;
                 }
                 for _ in 0..batch_len {
+                    if polled >= budget {
+                        return polled;
+                    }
                     // SAFETY: same-thread. pop_front equivalent via swap_remove(0)
                     // would change order; we use pop() which is LIFO. for our
                     // workload order doesn't matter — the task body decides.
@@ -542,7 +553,9 @@ impl LocalExecutor {
         #[cfg(not(feature = "std"))]
         {
             let mut polled = 0;
-            while let Some(index) = self.remote_ready.pop() {
+            while polled < budget
+                && let Some(index) = self.remote_ready.pop()
+            {
                 polled += 1;
                 let Some((task_ptr, waker_ptr)) = self.poll_targets(index) else {
                     continue;
