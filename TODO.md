@@ -247,6 +247,17 @@ Recorded so the position is in the tree, not only in session memory. Status: no 
 - Non-goals until a measurement says otherwise: no MLIR (LLVM) dependency in the core crates; textual emission and parsing only; no dialect registration.
 - Unsourced: whether hexagon-mlir or MLIR-AIE accept Linalg text at the level omega would emit (their user guides were read for the lane census, not for this question).
 
+## Echo and trace (owner idea, 2026-10-11)
+
+Idea card. Status: not started, no spec, no slice. Owner's words (2026-10-11): "we send in a set of tokens into the neural network, and it becomes a ripple or echo through. but at the end, we have a singular 'tree' or 'network' for lack of a word that can be traced through that was actually used to formulate the response."
+
+- The echo: the forward pass with its sparse decisions recorded as data. Four record kinds: (a) the per-token expert route, already a compacted prepass in omega's grouped gemm; (b) the attention edges carrying mass per head, kept as top-k or a cumulative-mass threshold; (c) the activation support after the gated nonlinearity; (d) per-layer residual contributions. Emitted as structured events through an observe pipe over the plan to a file sink, never a hot-path side effect.
+- The trace: a backward attribution from the chosen logit through the recorded adjoint (gradient x activation, or integrated gradients along the recorded path). The generic affine-map adjoint landed at 0f16dcf6, which makes this computable on granite's whole graph. The attribution is pruned by a pre-registered mass bound to a CSR subgraph over (layer, unit) nodes, with weighted edges from the input tokens to the output token, hoppable like a retrieval graph.
+- What exists: the IR as data, route compaction, the adjoint.
+- What is missing: recording of attention edges and activation support, the pruning rule and its bound, the validation oracle.
+- The oracle: no ground truth exists, so ablation controls. Zeroing the traced subgraph must move the output logit by more than the bound; zeroing a random subgraph of equal size must not. Pre-registered as a discovery-loop (hypothesis and kill criterion written before any measurement).
+- Ordering: a spec after the `proxima-tensor/specs/float-layout-dtype` and one-evaluate-pipe slices land, because the recorder sits on the one plan, not on four loops. Depends on omega-compiler-teaching's stage records for the recorder's shape.
+
 ## Interop doors: any format in, any hardware out (owner frame, 2026-10-11)
 
 Owner: "from a gguf or from a onnx or any other format - the point here is interop and also GENERIC and proxima pipes with fsm." One generic IR (proxima-tensor's algebra, lowered by omega) with many doors; every door is a proxima pipe over that IR with an FSM for its stages, measured by the same oracles (recorded llama ids for tokens, vendored reference bytes for formats); no format- or vendor-specific code outside its pipe. State at `f82e9ab2`:
