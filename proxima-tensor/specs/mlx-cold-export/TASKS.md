@@ -26,12 +26,12 @@ Dependencies: 1 none; 2 none (creates `mlx_names.rs`, vendors `plain/`); 3 on 2;
 | 11 | vendor the `affine4/` reference files; header, name and config-key agreement for the plain and affine exports | AC11 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mlx_reference_header/)'` | `16 passed` | [ ] | README records the 4-bit repo and sha |
 | 12 | packing agreement against the affine4 reference | AC12 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mlx_reference_pack/)'` | `8 passed` | [ ] | input is the vendored plain bf16 tensor read as exact f32 |
 | 13 | CLI `model export-mlx` and `tests/mlx_cli_export.rs` | AC13 | `cargo nextest run -p proxima-model-interop --features std,metal --test mlx_cli_export` | `10 passed` | [ ] | GPU; behind gpu.lock |
-| 14 | `InteropError::MlxQuantizedNotLoadable` refusal on load | AC14 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mlx_quantized_load_refused/)'` | `1 passed` | [ ] |  |
+| 14 | `InteropError::MlxQuantizedNotLoadable` refusal on load | AC14 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mlx_quantized_load_refused/)'` | `1 passed` | [x] | refused in hf_bind::mlx_refusal, called first by both safetensors binders; tests/support/trial.rs moved to a per-target mod (dead-code deny) |
 
 ## resume
 
-Last landed slice: 1, 2 and 8
-Next action: slice 6 or slice 14 (independent), then slice 7
+Last landed slice: 1, 2, 8 and 14
+Next action: slice 6, then slice 7
 Open question, if any: whether the stacked-expert leaves as `expert_slab` binds them have one HF counterpart each (slice 3 answers it; a leaf with no counterpart is reported)
 
 ## struck

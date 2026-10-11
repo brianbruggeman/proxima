@@ -124,6 +124,7 @@ pub fn bind_safetensors_program_views<'manifest, 'file>(
     binding: &BindingProfile,
     runtime_inputs: &[String],
 ) -> Result<Vec<SafetensorsTensorView<'manifest, 'file>>, InteropError> {
+    refuse_mlx_quantized_header(manifest)?;
     let consumers = consumers_of(program);
     let runtime_inputs: BTreeSet<&str> = runtime_inputs.iter().map(String::as_str).collect();
     let mut bound = BTreeSet::new();
@@ -917,6 +918,7 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
     data_start: u64,
     architecture: &ModelHparams,
 ) -> Result<BoundWeights<'file>, InteropError> {
+    refuse_mlx_quantized_header(manifest)?;
     if architecture.expert_count != 0 {
         return Err(InteropError::HfMoeWeightsUnsupported {
             expert_count: architecture.expert_count,
@@ -1074,6 +1076,10 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
     )?;
     Ok(state)
 }
+
+mod mlx_refusal;
+
+pub use mlx_refusal::{refuse_mlx_quantized, refuse_mlx_quantized_header};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

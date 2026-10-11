@@ -130,6 +130,7 @@ pub use generate::{
 #[cfg(feature = "std")]
 pub use hf_bind::{
     SafetensorsTensorView, bind_safetensors_program_leaves, bind_safetensors_program_views,
+    refuse_mlx_quantized, refuse_mlx_quantized_header,
     names as hf_names, node_names as hf_node_names, permute_rope_rows,
 };
 pub use hf_config::{

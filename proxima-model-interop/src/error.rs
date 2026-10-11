@@ -485,6 +485,15 @@ pub enum InteropError {
     )]
     HfMoeWeightsUnsupported { expert_count: u32 },
 
+    /// A safetensors directory in mlx-lm's quantized layout (`<name>.weight`
+    /// U32 with `.scales`/`.biases` siblings, or a `quantization` object in
+    /// `config.json`) was handed to the loader; native affine import is not
+    /// implemented, so it is refused naming the first offending tensor.
+    #[error(
+        "tensor {tensor:?} is mlx-lm quantized (packed u32 weight with scales and biases); loading mlx quantized checkpoints is not supported"
+    )]
+    MlxQuantizedNotLoadable { tensor: String },
+
     /// `crate::short_conv::short_conv_architecture_from_metadata`'s (`std`-gated) `key` (e.g.
     /// `lfm2moe.attention.head_count_kv`) is a per-layer array whose
     /// nonzero entries (the real attention layers' own kv head count)
