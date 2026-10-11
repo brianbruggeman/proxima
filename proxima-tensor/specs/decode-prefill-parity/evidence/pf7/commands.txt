@@ -16,4 +16,4 @@ cell B process: env -i PROXIMA_GEMMA4_E2B_GGUF=<granite blob> PROXIMA_PROMPT_FIL
                 ab_summary group single_us p1.out p2.out p3.out
 bytes:          tg_bytes 64 ; tg_bytes 32
 gates:          cargo nextest run -p omega --features metal,instrument --cargo-profile gate --no-fail-fast ; cargo clippy -p omega --features metal,instrument --no-deps --all-targets -- -D warnings ; cargo clippy -p proxima-model-interop --features std,metal,instrument --no-deps -- -D warnings
-CI: none of these cells runs in CI (Metal A/B and timing); each row re-proves on this box only. Raw telemetry logs (1.9 MB each) and ab outputs stay in .long_ctx_backups/pf7/raw.
+CI: none of these cells runs in CI (Metal A/B and timing); each row re-proves on this box only. The cell A raw telemetry logs (1.9 MB each, 245 MB in all) were deleted after summarizing; the cell B ab outputs stay in .long_ctx_backups/pf7/raw/cellB.
