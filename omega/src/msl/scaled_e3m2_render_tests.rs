@@ -2,7 +2,7 @@ use alloc::collections::BTreeMap;
 
 use proxima_primitives::float_layout::FloatLayout;
 
-use super::tests::matmul_op;
+use super::tests::{TILED_ADMITTED_TOKENS, gathered_matmul_op, matmul_op, tiled_gemm_op};
 use super::*;
 
 const ROW_BLOCKED_1024X512: &str =
@@ -11,15 +11,23 @@ const ROW_BLOCKED_1536X6144: &str =
     include_str!("../../tests/fixtures/scaled_e3m2_row_blocked_1536x6144.msl");
 const DECODER_START: &str = "static inline float scaled_e3m2_field";
 
-fn matvec_source(rows: u32, reduction: u32) -> String {
-    let bound = matmul_op(rows, reduction, 1);
+fn e3m2_kernel_source(bound: &BoundOp) -> String {
     let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Fp6E3M2)]);
-    let kernel = emit(&bound, &packed, NumericPolicy::default()).expect("an e3m2 matvec emits");
-    let start = kernel
+    emit(bound, &packed, NumericPolicy::default())
+        .expect("an e3m2 kernel emits")
         .source
+}
+
+fn full_matvec_source(rows: u32, reduction: u32) -> String {
+    e3m2_kernel_source(&matmul_op(rows, reduction, 1))
+}
+
+fn matvec_source(rows: u32, reduction: u32) -> String {
+    let source = full_matvec_source(rows, reduction);
+    let start = source
         .find(DECODER_START)
         .expect("the e3m2 decoders are spliced in");
-    kernel.source[start..].to_string()
+    source[start..].to_string()
 }
 
 fn assert_carries_the_six_bit_unpack(source: &str) {
@@ -78,4 +86,72 @@ fn scaled_e3m2_render_decode_carries_bias_3_and_field_masks() {
     );
     assert!(rebiased.contains("const int bias = 4;") && !rebiased.contains("const int bias = 3;"));
     assert_ne!(source, rebiased);
+}
+
+const GROUPED_EXPERTS: u32 = 8;
+const GROUPED_ROWS: u32 = 192;
+const GROUPED_REDUCTION: u32 = 512;
+
+fn tiled_source() -> String {
+    e3m2_kernel_source(&tiled_gemm_op(TILED_ADMITTED_TOKENS, 512, 192))
+}
+
+fn grouped_source() -> String {
+    e3m2_kernel_source(&gathered_matmul_op(
+        300,
+        GROUPED_EXPERTS,
+        GROUPED_ROWS,
+        GROUPED_REDUCTION,
+    ))
+}
+
+fn e3m2_decode_description() -> TiledDecode {
+    tiled_decode(Codec::Fp6E3M2).expect("the e3m2 codec has a tiled decode description")
+}
+
+#[test]
+fn scaled_e3m2_render_tiled_decode_elements_32_bytes_26() {
+    let decode = e3m2_decode_description();
+    let source = tiled_source();
+
+    assert_eq!(decode.block_elements, 32);
+    assert_eq!(decode.block_bytes, 26);
+    assert_eq!(decode.function, "scaled_e3m2_decode");
+    assert!(
+        source.contains(&format!("{}(wws_blk", decode.function)),
+        "the tiled body stages through the description:\n{source}"
+    );
+    assert!(source.contains(decode.msl));
+}
+
+#[test]
+fn scaled_e3m2_render_grouped_gemm_source_uses_the_tiled_decode() {
+    let decode = e3m2_decode_description();
+    let source = grouped_source();
+
+    assert!(source.contains("scaled_e3m2_decode"));
+    assert!(source.contains(decode.msl));
+    assert_eq!(
+        source
+            .matches("static inline float scaled_e3m2_field")
+            .count(),
+        1
+    );
+    assert!(source.contains(&format!("+= 1u * {};", decode.block_bytes)));
+}
+
+#[test]
+fn scaled_e3m2_render_model_name_free() {
+    let sources = [
+        full_matvec_source(1024, 512),
+        tiled_source(),
+        grouped_source(),
+    ];
+
+    assert_eq!(sources.len(), 3);
+    for source in sources.map(|text| text.to_lowercase()) {
+        for name in ["gemma", "granite", "qwen", "llama"] {
+            assert!(!source.contains(name), "{name} in a rendered source");
+        }
+    }
 }

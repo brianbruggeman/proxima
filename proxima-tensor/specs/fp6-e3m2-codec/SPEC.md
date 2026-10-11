@@ -117,6 +117,7 @@ Oracles, stated because e3m2 has no incumbent (ggml's `ggml_type` enum as read h
 | 4 weights per 3 bytes | yes | dense; one byte per weight is 8 bits |
 | proxima-own GGUF type id, rejected at the ggml edge | yes | a fake ggml id would corrupt real consumers (principle 14) |
 | grouped GEMM in scope through the one `TiledDecode` description | yes | a converted checkpoint has no shipped-codec expert weights left, so prefill cannot "stay on the shipped codec"; if staging 3-byte groups fails at AC11 the spec is amended with the reason, not reworded |
+| `const_format` for the tiled decode MSL | yes | `tiled_decode` is a `const fn` returning `&'static str` in a no_std+alloc crate, so rendering the decode from `FloatLayout::E3M2` at compile time has no std route; the alternative, a hand-written literal pinned to the runtime renderer by a test, makes two sources of one string; proc-macro only, no runtime cost, 5 crates in the lock |
 | offline conversion | yes | load-time quantization hides the codec from the format layer |
 | default off | yes | the codec changes outputs; the owner flips the default on the AC16 to AC18 results |
 

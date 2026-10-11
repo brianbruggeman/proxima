@@ -553,6 +553,7 @@ wgpu = { version = "30.0.1", default-features = false, features = [
 proxima-primitives = { version = "0.1.0", path = "../proxima-primitives", default-features = false }
 sha2 = { workspace = true, optional = true }
 proxima-tensor = { version = "0.1.0", path = "../proxima-tensor", default-features = false, features = ["alloc"] }
+const_format = { version = "0.2.36", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # objc2: the message-send runtime (Retained<T>, extern_methods!) every Metal

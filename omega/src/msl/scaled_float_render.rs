@@ -1,3 +1,4 @@
+use const_format::formatcp;
 use proxima_primitives::float_layout::FloatLayout;
 
 use super::*;
@@ -124,3 +125,28 @@ static inline float scaled_e3m2_quad_dot(device const uchar *superblock, uint sl
 "
     )
 }
+
+const ELEMENT_MASK: u32 = (1u32 << FloatLayout::E3M2.width()) - 1;
+const RUN_GROUPS: u32 = DECODE_RUN_ELEMENTS as u32 / FIELDS_PER_GROUP;
+const FIELD_WIDTH: u32 = FloatLayout::E3M2.width() as u32;
+
+/// The e3m2 entry of the tiled decode description (`tiled_decode`): the
+/// `function(block, slot, out)` contract writing one [`DECODE_RUN_ELEMENTS`] run
+/// as `half`. It reads the 3-byte groups through `scaled_e3m2_group` and decodes
+/// through `scaled_e3m2_field`, the same definitions the row-blocked quad dot
+/// calls (spliced once by [`push_scaled_float_decoders`]); every byte read is a
+/// `uchar`, because a 26-byte block puts the payload at +2 and the groups on a
+/// 3-byte stride, so no group is ever 4-byte or 2-byte aligned.
+pub(super) const SCALED_E3M2_DECODE_MSL: &str = formatcp!(
+    "
+static inline void scaled_e3m2_decode(device const uchar *block, uint slot, thread half *out) {{
+{SCALE_DECODE_MSL}    device const uchar *payload = block + {SCALE_BYTES}u + (slot / {FIELDS_PER_GROUP}u) * {BYTES_PER_GROUP}u;
+    for (uint group = 0u; group < {RUN_GROUPS}u; ++group) {{
+        uint word = scaled_e3m2_group(payload + group * {BYTES_PER_GROUP}u);
+        for (uint field = 0u; field < {FIELDS_PER_GROUP}u; ++field) {{
+            out[group * {FIELDS_PER_GROUP}u + field] = (half)(scaled_e3m2_field((word >> (field * {FIELD_WIDTH}u)) & {ELEMENT_MASK:#x}u) * scale);
+        }}
+    }}
+}}
+"
+);
