@@ -151,3 +151,8 @@ fn stringify_metadata_value(value: &MetadataValue) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;
+
+#[cfg(feature = "std")]
+mod mlx_names;
+#[cfg(feature = "std")]
+pub use mlx_names::{Layout, MlxNames, SANDWICH_NORM_LAYOUT, STANDARD_LAYOUT, dense_names};

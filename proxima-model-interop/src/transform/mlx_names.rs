@@ -1,0 +1,402 @@
+//! Dense GGUF leaf to Hugging Face tensor name, for the MLX export.
+//!
+//! A leaf the tensor directory does not store (a tied output projection)
+//! resolves through [`BindingProfile::aliases_for`] to the stored tensor it
+//! reads, the loader's own rule run in reverse: the HF name of the leaf is
+//! the HF name of the tensor that holds its bytes. A leaf nothing stores, or
+//! that the layout table has no row for, is reported in
+//! [`MlxNames::unmapped`] and no name is produced for it.
+//!
+//! The layout rows are the same names `hf_bind::names` reads
+//! checkpoints with; `STANDARD_LAYOUT` is checked against that module in the
+//! tests so the two cannot drift.
+
+use alloc::collections::BTreeSet;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use crate::profiles::{BindingProfile, TensorAlias};
+
+/// Rows of `(gguf name, hf name)`. A `blk.N.` leaf matches on the text after
+/// `blk.N.` and maps under `layers.N.`; any other leaf matches whole.
+pub type Layout = &'static [(&'static str, &'static str)];
+
+/// Llama-style decoder: two norms per layer, `lm_head` tied or absent.
+pub const STANDARD_LAYOUT: Layout = &[
+    ("token_embd.weight", "embed_tokens.weight"),
+    ("output_norm.weight", "norm.weight"),
+    ("attn_norm.weight", "input_layernorm.weight"),
+    ("ffn_norm.weight", "post_attention_layernorm.weight"),
+    ("attn_q.weight", "self_attn.q_proj.weight"),
+    ("attn_k.weight", "self_attn.k_proj.weight"),
+    ("attn_v.weight", "self_attn.v_proj.weight"),
+    ("attn_output.weight", "self_attn.o_proj.weight"),
+    ("ffn_gate.weight", "mlp.gate_proj.weight"),
+    ("ffn_up.weight", "mlp.up_proj.weight"),
+    ("ffn_down.weight", "mlp.down_proj.weight"),
+];
+
+/// Four norms per layer, per-head q/k norms and per-layer input tables.
+pub const SANDWICH_NORM_LAYOUT: Layout = &[
+    ("token_embd.weight", "embed_tokens.weight"),
+    ("output_norm.weight", "norm.weight"),
+    (
+        "per_layer_token_embd.weight",
+        "embed_tokens_per_layer.weight",
+    ),
+    (
+        "per_layer_model_proj.weight",
+        "per_layer_model_projection.weight",
+    ),
+    (
+        "per_layer_proj_norm.weight",
+        "per_layer_projection_norm.weight",
+    ),
+    ("attn_norm.weight", "input_layernorm.weight"),
+    (
+        "post_attention_norm.weight",
+        "post_attention_layernorm.weight",
+    ),
+    ("ffn_norm.weight", "pre_feedforward_layernorm.weight"),
+    ("post_ffw_norm.weight", "post_feedforward_layernorm.weight"),
+    ("attn_q.weight", "self_attn.q_proj.weight"),
+    ("attn_k.weight", "self_attn.k_proj.weight"),
+    ("attn_v.weight", "self_attn.v_proj.weight"),
+    ("attn_output.weight", "self_attn.o_proj.weight"),
+    ("attn_q_norm.weight", "self_attn.q_norm.weight"),
+    ("attn_k_norm.weight", "self_attn.k_norm.weight"),
+    ("ffn_gate.weight", "mlp.gate_proj.weight"),
+    ("ffn_up.weight", "mlp.up_proj.weight"),
+    ("ffn_down.weight", "mlp.down_proj.weight"),
+    ("inp_gate.weight", "per_layer_input_gate.weight"),
+    ("proj.weight", "per_layer_projection.weight"),
+    ("post_norm.weight", "post_per_layer_input_norm.weight"),
+    ("layer_output_scale.weight", "layer_scalar"),
+];
+
+/// The outcome of naming a set of leaves.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MlxNames {
+    /// `(leaf, hf name)` in input order, e.g. `("blk.0.attn_q.weight",
+    /// "language_model.model.layers.0.self_attn.q_proj.weight")`.
+    pub mapped: Vec<(String, String)>,
+    /// Leaves with no stored tensor or no layout row, e.g.
+    /// `blk.3.ffn_gate_exps.weight`; never given an invented name.
+    pub unmapped: Vec<String>,
+}
+
+fn layer_split(leaf: &str) -> Option<(&str, &str)> {
+    let (index, rest) = leaf.strip_prefix("blk.")?.split_once('.')?;
+    index
+        .bytes()
+        .all(|byte| byte.is_ascii_digit())
+        .then_some((index, rest))
+}
+
+fn stored_name(leaf: &str, directory: &BTreeSet<&str>, binding: &BindingProfile) -> Option<String> {
+    if directory.contains(leaf) {
+        return Some(leaf.to_string());
+    }
+    binding
+        .aliases_for(leaf)
+        .find_map(|(alias, prefix)| match alias {
+            TensorAlias::Rename { from, .. } => {
+                Some(format!("{prefix}{from}")).filter(|source| directory.contains(source.as_str()))
+            }
+            TensorAlias::Part { .. } | TensorAlias::Join { .. } => None,
+        })
+}
+
+fn hf_name(stored: &str, layout: Layout, hf_prefix: &str) -> Option<String> {
+    let row_for = |key: &str| {
+        layout
+            .iter()
+            .find(|(gguf, _)| *gguf == key)
+            .map(|(_, hf)| *hf)
+    };
+    match layer_split(stored) {
+        Some((index, rest)) => row_for(rest).map(|hf| format!("{hf_prefix}layers.{index}.{hf}")),
+        None => row_for(stored).map(|hf| format!("{hf_prefix}{hf}")),
+    }
+}
+
+/// Names `leaves` for an HF checkpoint whose tensors sit under `hf_prefix`
+/// (`"model."`, `"language_model.model."`). `directory` is the GGUF tensor
+/// directory the leaves are bound from. Composes
+/// [`BindingProfile::aliases_for`], the loader's alias lookup, in reverse; the
+/// layout rows are the loader's own HF names (`hf_bind::names`).
+#[must_use]
+pub fn dense_names(
+    leaves: &[&str],
+    directory: &[&str],
+    binding: &BindingProfile,
+    layout: Layout,
+    hf_prefix: &str,
+) -> MlxNames {
+    let stored_set: BTreeSet<&str> = directory.iter().copied().collect();
+    leaves.iter().fold(MlxNames::default(), |mut names, leaf| {
+        let named = stored_name(leaf, &stored_set, binding)
+            .and_then(|stored| hf_name(&stored, layout, hf_prefix));
+        match named {
+            Some(hf) => names.mapped.push(((*leaf).to_string(), hf)),
+            None => names.unmapped.push((*leaf).to_string()),
+        }
+        names
+    })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::fs::File;
+    use std::path::Path;
+
+    use proxima_gguf::parse_complete;
+    use serde_json::Value;
+
+    use super::*;
+    use crate::hf_bind::names;
+    use crate::profiles::binding_profile;
+
+    const E2B_GGUF: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
+    const GRANITE_GGUF: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
+    const E2B_PREFIX: &str = "language_model.model.";
+    const GRANITE_PREFIX: &str = "model.";
+
+    fn reference_dir(model: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/mlx-reference")
+            .join(model)
+            .join("plain")
+    }
+
+    fn header_names(model: &str) -> BTreeSet<String> {
+        let mut found = BTreeSet::new();
+        for entry in std::fs::read_dir(reference_dir(model)).expect("reference dir exists") {
+            let path = entry.expect("dir entry").path();
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if file_name.starts_with("header") && file_name.ends_with(".json") {
+                let header: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                found.extend(
+                    header
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .filter(|key| *key != "__metadata__")
+                        .cloned(),
+                );
+            }
+        }
+        found
+    }
+
+    fn gguf_directory(path: &str) -> Vec<String> {
+        assert!(
+            Path::new(path).exists(),
+            "host-local gguf blob missing at {path}"
+        );
+        let file = File::open(path).unwrap();
+        let mapping = unsafe { memmap2::Mmap::map(&file) }.unwrap();
+        parse_complete(&mapping)
+            .unwrap()
+            .tensors
+            .into_iter()
+            .map(|tensor| tensor.name)
+            .collect()
+    }
+
+    fn program_leaves<'a>(directory: &'a [String], binding: &BindingProfile) -> Vec<&'a str> {
+        directory
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !binding.extra.iter().any(|extra| extra == name))
+            .collect()
+    }
+
+    fn name_dense(
+        path: &str,
+        family: &str,
+        layout: Layout,
+        prefix: &str,
+    ) -> (MlxNames, Vec<String>) {
+        let directory = gguf_directory(path);
+        let binding = binding_profile(family).unwrap();
+        let mut leaves = program_leaves(&directory, &binding);
+        leaves.push("output.weight");
+        let stored: Vec<&str> = directory.iter().map(String::as_str).collect();
+        (
+            dense_names(&leaves, &stored, &binding, layout, prefix),
+            directory,
+        )
+    }
+
+    #[test]
+    fn mlx_names_dense_e2b_leaves_match_plain_header_with_zero_unmapped() {
+        let (named, directory) = name_dense(E2B_GGUF, "gemma4", SANDWICH_NORM_LAYOUT, E2B_PREFIX);
+        let header = header_names("gemma4-e2b");
+
+        let missing: Vec<&str> = named
+            .mapped
+            .iter()
+            .map(|(_, hf)| hf.as_str())
+            .filter(|hf| !header.contains(*hf))
+            .collect();
+
+        assert!(named.unmapped.is_empty(), "unmapped: {:?}", named.unmapped);
+        assert!(
+            missing.is_empty(),
+            "names absent from the plain header: {missing:?}"
+        );
+        assert_eq!(
+            named.mapped.len(),
+            directory.len(),
+            "every stored tensor but rope_freqs, plus the tied output leaf"
+        );
+    }
+
+    #[test]
+    fn mlx_names_dense_granite_leaves_match_plain_header_with_zero_unmapped() {
+        let (named, directory) =
+            name_dense(GRANITE_GGUF, "granitemoe", STANDARD_LAYOUT, GRANITE_PREFIX);
+        let header = header_names("granite-3.1-1b-a400m-moe");
+        let routed = |name: &str| name.contains("_exps.") || name.contains("ffn_gate_inp.");
+
+        let missing: Vec<&str> = named
+            .mapped
+            .iter()
+            .map(|(_, hf)| hf.as_str())
+            .filter(|hf| !header.contains(*hf))
+            .collect();
+        let expected_unmapped = directory.iter().filter(|name| routed(name)).count();
+
+        assert!(
+            missing.is_empty(),
+            "names absent from the plain header: {missing:?}"
+        );
+        assert!(
+            named.unmapped.iter().all(|leaf| routed(leaf)),
+            "a dense leaf was left unmapped: {:?}",
+            named.unmapped
+        );
+        assert_eq!(
+            named.unmapped.len(),
+            expected_unmapped,
+            "every routed-expert leaf is reported, none named"
+        );
+        assert!(
+            named
+                .mapped
+                .iter()
+                .any(|(leaf, hf)| leaf == "output.weight" && hf == "model.embed_tokens.weight")
+        );
+    }
+
+    #[test]
+    fn mlx_names_dense_identity_control_reference_names_compare_equal_to_themselves() {
+        let (named, _) = name_dense(GRANITE_GGUF, "granitemoe", STANDARD_LAYOUT, GRANITE_PREFIX);
+        let reference: Vec<String> = named.mapped.iter().map(|(_, hf)| hf.clone()).collect();
+
+        let compared: Vec<(&String, &String)> = reference
+            .iter()
+            .zip(reference.iter())
+            .filter(|(left, right)| left != right)
+            .collect();
+
+        assert!(!reference.is_empty() && compared.is_empty());
+    }
+
+    #[test]
+    fn mlx_names_dense_degenerate_control_one_altered_name_is_detected() {
+        let (named, _) = name_dense(GRANITE_GGUF, "granitemoe", STANDARD_LAYOUT, GRANITE_PREFIX);
+        let header = header_names("granite-3.1-1b-a400m-moe");
+        let mut altered: Vec<String> = named.mapped.iter().map(|(_, hf)| hf.clone()).collect();
+        altered[3] = altered[3].replace("layers", "layer");
+
+        let missing = altered
+            .iter()
+            .filter(|hf| !header.contains(hf.as_str()))
+            .count();
+
+        assert_eq!(
+            missing, 1,
+            "exactly the altered name must fail the header comparison"
+        );
+    }
+
+    #[test]
+    fn mlx_names_dense_leaf_without_a_profile_entry_is_unmapped_and_gets_no_name() {
+        let binding = binding_profile("granitemoe").unwrap();
+        let directory = [
+            "token_embd.weight",
+            "blk.0.attn_q.weight",
+            "blk.0.mystery_gate.weight",
+        ];
+
+        let named = dense_names(
+            &directory,
+            &directory,
+            &binding,
+            STANDARD_LAYOUT,
+            GRANITE_PREFIX,
+        );
+
+        assert_eq!(
+            named.unmapped,
+            vec!["blk.0.mystery_gate.weight".to_string()]
+        );
+        assert_eq!(named.mapped.len(), 2);
+        assert!(
+            named
+                .mapped
+                .iter()
+                .all(|(leaf, _)| leaf != "blk.0.mystery_gate.weight")
+        );
+    }
+
+    #[test]
+    fn standard_layout_agrees_with_the_loader_names() {
+        let layer = 3;
+        let expected = [
+            ("blk.3.attn_norm.weight", names::input_layernorm(layer)),
+            (
+                "blk.3.ffn_norm.weight",
+                names::post_attention_layernorm(layer),
+            ),
+            ("blk.3.attn_q.weight", names::q_proj(layer)),
+            ("blk.3.attn_k.weight", names::k_proj(layer)),
+            ("blk.3.attn_v.weight", names::v_proj(layer)),
+            ("blk.3.attn_output.weight", names::o_proj(layer)),
+            ("blk.3.ffn_gate.weight", names::gate_proj(layer)),
+            ("blk.3.ffn_up.weight", names::up_proj(layer)),
+            ("blk.3.ffn_down.weight", names::down_proj(layer)),
+            ("token_embd.weight", names::embed_tokens()),
+            ("output_norm.weight", names::final_norm()),
+        ];
+        let leaves: Vec<&str> = expected.iter().map(|(leaf, _)| *leaf).collect();
+
+        let named = dense_names(
+            &leaves,
+            &leaves,
+            &BindingProfile::default(),
+            STANDARD_LAYOUT,
+            "model.",
+        );
+
+        let produced: Vec<(&str, &str)> = named
+            .mapped
+            .iter()
+            .map(|(leaf, hf)| (leaf.as_str(), hf.as_str()))
+            .collect();
+        let wanted: Vec<(&str, &str)> = expected
+            .iter()
+            .map(|(leaf, hf)| (*leaf, hf.as_str()))
+            .collect();
+        assert_eq!(produced, wanted);
+    }
+}
