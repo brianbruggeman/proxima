@@ -10,6 +10,8 @@
 //! (migrated onto this type), `omega`'s `PackedCodec`, and
 //! `proxima-tensor`'s `QuantizedBlock` tag (both still to migrate).
 
+use crate::float_layout::FloatLayout;
+
 /// Which packed byte layout a codec-tagged buffer holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Codec {
@@ -45,6 +47,7 @@ pub enum Codec {
     BFloat8,
     Bf8E5M2,
     Bf4E2M1,
+    Fp6E3M2,
 }
 
 impl Codec {
@@ -85,6 +88,7 @@ impl Codec {
             Codec::BFloat8 => 29,
             Codec::Bf8E5M2 => 30,
             Codec::Bf4E2M1 => 31,
+            Codec::Fp6E3M2 => 32,
         }
     }
 
@@ -124,9 +128,18 @@ impl Codec {
             29 => Some(Codec::BFloat8),
             30 => Some(Codec::Bf8E5M2),
             31 => Some(Codec::Bf4E2M1),
+            32 => Some(Codec::Fp6E3M2),
             _ => None,
         }
     }
+
+    /// Weights per [`Codec::Fp6E3M2`] block, one f16 absmax scale each.
+    pub const FP6_E3M2_BLOCK_ELEMENTS: usize = 32;
+
+    /// Bytes per [`Codec::Fp6E3M2`] block: the 6-bit [`FloatLayout::E3M2`] fields
+    /// packed, then the f16 scale.
+    pub const FP6_E3M2_BLOCK_BYTES: usize =
+        Self::FP6_E3M2_BLOCK_ELEMENTS * FloatLayout::E3M2.width() as usize / 8 + 2;
 }
 
 #[cfg(test)]
@@ -168,8 +181,9 @@ mod tests {
             (Codec::BFloat8, 29),
             (Codec::Bf8E5M2, 30),
             (Codec::Bf4E2M1, 31),
+            (Codec::Fp6E3M2, 32),
         ];
-        assert_eq!(variants.len(), 32);
+        assert_eq!(variants.len(), 33);
         for (codec, stable_tag) in variants {
             assert_eq!(codec.tag(), stable_tag);
             assert_eq!(Codec::from_tag(stable_tag), Some(codec));
@@ -177,8 +191,25 @@ mod tests {
     }
 
     #[test]
+    fn fp6_e3m2_codec_tag_32_round_trip() {
+        assert_eq!(Codec::Fp6E3M2.tag(), 32);
+        assert_eq!(Codec::from_tag(32), Some(Codec::Fp6E3M2));
+    }
+
+    #[test]
+    fn fp6_e3m2_codec_tag_33_rejected() {
+        assert_eq!(Codec::from_tag(33), None);
+    }
+
+    #[test]
+    fn fp6_e3m2_codec_block_geometry_26_bytes_32_elements() {
+        assert_eq!(Codec::FP6_E3M2_BLOCK_BYTES, 26);
+        assert_eq!(Codec::FP6_E3M2_BLOCK_ELEMENTS, 32);
+    }
+
+    #[test]
     fn card_02_bf8_codec_rejects_unassigned_tag() {
-        assert_eq!(Codec::from_tag(32), None);
+        assert_eq!(Codec::from_tag(33), None);
         assert_eq!(Codec::from_tag(255), None);
     }
 }

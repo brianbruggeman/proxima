@@ -9,7 +9,7 @@ Each slice: one commit, one behaviour change, one validation command, one expect
 | 3 | the BF32, BF16 and E5M2 oracle tests with their controls | AC3 | `cargo nextest run -p proxima-gguf -E 'test(/float_layout_bf32/) + test(/float_layout_bf16/) + test(/float_layout_e5m2/)'` | `9 passed` | [x] | 9 passed; the csv contradicted the saturating E5M2 (rows overflow and +-infinity expect 0x7c, contract test expects 0x7b): E5M2 and BF8 are now InfinityOnOverflow, the new E5M2_SATURATING is the gguf bf8 policy; AC1 11 and AC2 10 still pass |
 | 4 | `bf8_e5m2` and `bf4_e2m1` bodies become calls into the generic functions; wrapper equality tests; the contract test file untouched | AC4 | `cargo nextest run -p proxima-gguf -E 'test(/bf8_e5m2_bf4_e2m1_encoding_contract/) + test(/float_layout_wrapper/)'` | `3 passed` | [x] | 3 passed; wrappers are one-line calls into the generic codec, nan 0x7e unchanged, contract test untouched; whole-crate nextest 224 passed |
 | 5 | vendor the OCP text as `proxima-gguf/src/quant/fixtures/ocp_mx_v1_0.txt` (copy of `.long_ctx_backups/mlx_fp6/ocp/ocp-mx-v1.0.txt`); E3M2 golden table tests and control | AC5 | `cargo nextest run -p proxima-gguf -E 'test(/float_layout_e3m2_golden/)'` | `4 passed` | [x] | 4 passed; 592 newline bytes asserted |
-| 6 | `Codec::Fp6E3M2` tag 32, block 26 bytes, 32 elements | AC6 | `cargo nextest run -p proxima-primitives -E 'test(/fp6_e3m2_codec/)'` | `3 passed` | [ ] | interop capability names in the same commit |
+| 6 | `Codec::Fp6E3M2` tag 32, block 26 bytes, 32 elements | AC6 | `cargo nextest run -p proxima-primitives -E 'test(/fp6_e3m2_codec/)'` | `3 passed` | [x] | 3 passed; tag 32, `Codec::FP6_E3M2_BLOCK_BYTES` 26 and `FP6_E3M2_BLOCK_ELEMENTS` 32 derived from `FloatLayout::E3M2`; capability name FP6_E3M2, bind.rs and expert_slab.rs rejects, epilogue.rs None arms, omega None or reject arms; admitted nowhere |
 | 7 | `scaled_float.rs` block quantize and dequantize generic over the layout | AC7 | `cargo nextest run -p proxima-gguf -E 'test(/scaled_e3m2_block/)'` | `3 passed` | [ ] | rows from the Q8_0 1024x512 tensors; subnormal bound 0.03125 x scale |
 | 8 | CPU `dequantize_fp6_e3m2` and `matmul_fp6_e3m2_f32` with the f64 loop oracle and control | AC8 | `cargo nextest run -p proxima-tensor -E 'test(/scaled_e3m2_cpu_/)'` | `3 passed` | [ ] | matmul tolerance 4e-5 x sum(abs(a x b)) at K = 512 |
 | 9 | proxima-own GGUF tensor type id, `DType::Fp6E3M2`, `dtype_to_ggml` returns `None`, transform round trip and export rejection | AC9 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/fp6_e3m2_gguf_/)'` | `3 passed` | [ ] | the compiler lists the other `DType` match sites |
@@ -27,8 +27,8 @@ In the table above `\|` stands for a literal pipe character; the SPEC's `### com
 
 ## resume
 
-Last landed slice: 5
-Next action: slice 6 (Codec::Fp6E3M2 tag 32), then slice 7 (scaled_float.rs block codec) which needs 3 and 5
+Last landed slice: 6
+Next action: slice 7 (scaled_float.rs block codec, needs 3 and 5); slice 10 (omega row-blocked arm, needs 1 and 6) may run in parallel; slice 9 (GGUF edge) needs 6 and 7
 Open question, if any: none for the E3M2 definition (the OCP text, SPEC section "Definition of E3M2", gives bias 3 and no override); slice 11 answers whether the grouped GEMM can stage 3-byte groups
 
 ## struck

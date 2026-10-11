@@ -312,6 +312,7 @@ pub mod quant_format {
             Codec::BFloat8 => "BF8",
             Codec::Bf8E5M2 => "BF8_E5M2",
             Codec::Bf4E2M1 => "BF4_E2M1",
+            Codec::Fp6E3M2 => "FP6_E3M2",
             Codec::Q4_1 => "Q4_1",
             Codec::Q8_1 => "Q8_1",
             Codec::Q8K => "Q8_K",
@@ -395,6 +396,7 @@ pub mod quant_format {
         Codec::BFloat8,
         Codec::Bf8E5M2,
         Codec::Bf4E2M1,
+        Codec::Fp6E3M2,
     ];
 
     #[must_use]

@@ -722,7 +722,7 @@ pub(super) fn push_packed_row_blocked_body(
                         codec: "bfloat8",
                     });
                 }
-                Codec::Bf8E5M2 | Codec::Bf4E2M1 => {
+                Codec::Bf8E5M2 | Codec::Bf4E2M1 | Codec::Fp6E3M2 => {
                     return Err(EmitError::NonKQuantCodec {
                         node: resolved.node,
                         codec: "brain-float scalar",

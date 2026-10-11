@@ -2924,7 +2924,8 @@ const fn row_block_extent_multiple(codec: Codec) -> Option<usize> {
         | Codec::Q2_0
         | Codec::BFloat8
         | Codec::Bf8E5M2
-        | Codec::Bf4E2M1 => None,
+        | Codec::Bf4E2M1
+        | Codec::Fp6E3M2 => None,
     }
 }
 
