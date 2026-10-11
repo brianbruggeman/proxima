@@ -27,3 +27,12 @@ The repository vendors only the first 4096 bytes (`model_header.bin`) and the ha
 - the ids come from `tokenizer.json` of the revision above, `encode(text, true)`
 
 The builder is `examples/corpus_build.rs` of the indexer repo (it owns the tokenizer dependency). It takes the proxima checkout root, the revision's `tokenizer.json` and the output path.
+
+## the tract record
+
+`tract_b1.jsonl` and `tract_b32.jsonl` are the incumbent's output, recorded once by `examples/tract_record.rs` of the indexer repo (tract-onnx 0.22.4, `model_for_read`, `into_optimized`, `into_runnable`, as the indexer's `cpu.rs` loads it). The recorder reads `corpus.jsonl` for the ids, so both arms see the identical padded tensors.
+
+- every file opens with a `header` line naming `tract_onnx` and `model_sha256`
+- padding: each batch is padded to the next multiple of 16 tokens (minimum 16), attention mask 0 on pad, token types 0; batch 1 pads each sentence alone, batch 32 pads each chunk of 32 corpus rows to its longest row
+- `tract_b1.jsonl`: 64 `batch` lines of one row; `tract_b32.jsonl`: 2 `batch` lines of 32 rows; each line carries `input_ids`, `attention_mask`, `token_type_ids` and `cls`, the raw first-token hidden state (384 f32, not normalized)
+- the recording is not re-run in a gate; the proxima tests only validate the files
