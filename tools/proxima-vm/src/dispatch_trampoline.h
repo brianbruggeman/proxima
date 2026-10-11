@@ -333,6 +333,12 @@ int32_t proxima_vm_dispatch_sysreg_icc(
  * the guest's IRQ line is asserted. */
 void proxima_vm_icc_set_vtimer_pending(void *icc_transport, uint32_t intid);
 
+/* Nonzero while `icc_transport`'s interrupt is signalling an IRQ
+ * (`IccCpuInterface::irq_asserted`, `gic.rs`). HVF clears the asserted IRQ
+ * line each time `hv_vcpu_run` returns, so the exit loop re-asserts it before
+ * every run for as long as this is nonzero. */
+uint8_t proxima_vm_icc_irq_asserted(const void *icc_transport);
+
 /* PL011 register-access trampoline (`src/mmio_trampoline.rs`), monomorphized
  * to `crate::pl011::Pl011Uart` for the same `extern "C"`-cannot-be-generic
  * reason every other device trampoline above is monomorphized to its own

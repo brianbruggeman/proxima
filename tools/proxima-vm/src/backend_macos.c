@@ -5,6 +5,7 @@
 #include <sys/mman.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <mach/mach_time.h>
 #include <os/object.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -1788,6 +1789,48 @@ static icc_sysreg_iss_t decode_icc_sysreg_iss(uint64_t syndrome) {
     return decoded;
 }
 
+/* Parks the host thread, on a trapped `WFI`, until the guest's own virtual
+ * timer deadline -- the only wake source this VM models besides an
+ * already-asserted ICC interrupt (the caller checks that first). The deadline
+ * is `CNTV_CVAL_EL0 + vtimer offset` in host `mach_absolute_time` ticks:
+ * HVF defines `CNTVCT = mach_absolute_time - offset`, and the measured
+ * `HV_EXIT_REASON_VTIMER_ACTIVATED` exit landed 32-39 ticks after
+ * `CNTV_CVAL`. A timer that is disabled (`CNTV_CTL.ENABLE == 0`), imask'd
+ * (`IMASK == 1`) or HVF-masked after its own exit (`hv_vcpu_set_vtimer_mask`:
+ * it cannot fire until the guest's EOI) is no wake source, so the guest is
+ * resumed immediately and its next `WFI` re-checks -- a guest with no wake
+ * source at all stays bounded by `MAX_TOTAL_EXITS` rather than hanging. A
+ * deadline already past returns at once: the vtimer exit is then delivered by
+ * the next `hv_vcpu_run`. */
+static hv_return_t wfi_wait_for_vtimer_deadline(hv_vcpu_t vcpu) {
+    const uint64_t cntv_ctl_enable = 0x1u;
+    const uint64_t cntv_ctl_imask = 0x2u;
+    uint64_t cntv_ctl = 0;
+    hv_return_t status = hv_vcpu_get_sys_reg(vcpu, HV_SYS_REG_CNTV_CTL_EL0, &cntv_ctl);
+    if (status != HV_SUCCESS || (cntv_ctl & (cntv_ctl_enable | cntv_ctl_imask)) != cntv_ctl_enable) {
+        return status;
+    }
+    bool vtimer_masked = false;
+    status = hv_vcpu_get_vtimer_mask(vcpu, &vtimer_masked);
+    if (status != HV_SUCCESS || vtimer_masked) {
+        return status;
+    }
+    uint64_t cntv_cval = 0;
+    uint64_t vtimer_offset = 0;
+    status = hv_vcpu_get_sys_reg(vcpu, HV_SYS_REG_CNTV_CVAL_EL0, &cntv_cval);
+    if (status == HV_SUCCESS) {
+        status = hv_vcpu_get_vtimer_offset(vcpu, &vtimer_offset);
+    }
+    if (status != HV_SUCCESS) {
+        return status;
+    }
+    const uint64_t deadline = cntv_cval + vtimer_offset;
+    if (deadline > mach_absolute_time()) {
+        mach_wait_until(deadline);
+    }
+    return HV_SUCCESS;
+}
+
 /* Handles one EC 0x18 (trapped `MSR`/`MRS`) exit whose decoded
  * `(op0, op1, crn, crm, op2)` names a GICv3 CPU-interface system register:
  * decodes the ISS, reads `Rt` for a write (`Rt == 31` is `xzr`, this
@@ -2453,6 +2496,17 @@ int proxima_vm_run_device_dispatch_loop(
     }
 
     for (;;) {
+        /* `hv_vcpu_set_pending_interrupt`'s SDK doc: the asserted line is
+         * cleared whenever `hv_vcpu_run` returns, so a level that is still
+         * asserted in the ICC model (pending, not yet acknowledged through
+         * `ICC_IAR1_EL1`) has to be re-asserted before every run, not once. */
+        if (proxima_vm_icc_irq_asserted(icc_transport) != 0) {
+            status = hv_vcpu_set_pending_interrupt(vcpu, HV_INTERRUPT_TYPE_IRQ, true);
+            if (status != HV_SUCCESS) {
+                set_hv_error(error_buffer, error_capacity, "assert irq before run", status);
+                goto cleanup;
+            }
+        }
         status = hv_vcpu_run(vcpu);
         if (status != HV_SUCCESS) {
             set_hv_error(error_buffer, error_capacity, "hv_vcpu_run", status);
@@ -2474,12 +2528,13 @@ int proxima_vm_run_device_dispatch_loop(
          * `PROXIMA_VM_VTIMER_INTID`). The explicit
          * `hv_vcpu_set_vtimer_mask(vcpu, true)` below is redundant with
          * HVF's own auto-mask -- kept for readability of the contract, not
-         * because it changes behavior. The injection this comment used to
-         * say never happens now does: record INTID 27 pending in the ICC
+         * because it changes behavior. Record INTID 27 pending in the ICC
          * model's one-deep slot (`proxima_vm_icc_set_vtimer_pending`,
-         * `gic.rs`'s `IccCpuInterface::set_pending`) and tell HVF the
-         * guest's IRQ line is asserted (`hv_vcpu_set_pending_interrupt`), so
-         * the guest takes the IRQ exception once its `PSTATE.I` unmasks --
+         * `gic.rs`'s `IccCpuInterface::set_pending`); the top of this loop
+         * asserts the guest's IRQ line (`hv_vcpu_set_pending_interrupt`)
+         * before every `hv_vcpu_run` while the slot stays pending, since HVF
+         * drops the line each time a run returns, so the guest takes the IRQ
+         * exception once its `PSTATE.I` unmasks --
          * the re-arm half (mask/pending both cleared again) lives in
          * `handle_icc_sysreg_trap`'s own EOIR1 handling below, the
          * documented contract's other end. A guest that never unmasks IRQs
@@ -2497,11 +2552,6 @@ int proxima_vm_run_device_dispatch_loop(
                 goto cleanup;
             }
             proxima_vm_icc_set_vtimer_pending(icc_transport, PROXIMA_VM_VTIMER_INTID);
-            status = hv_vcpu_set_pending_interrupt(vcpu, HV_INTERRUPT_TYPE_IRQ, true);
-            if (status != HV_SUCCESS) {
-                set_hv_error(error_buffer, error_capacity, "hv_vcpu_set_pending_interrupt", status);
-                goto cleanup;
-            }
             continue;
         }
         if (exit_data->reason == HV_EXIT_REASON_CANCELED) {
@@ -2597,20 +2647,23 @@ int proxima_vm_run_device_dispatch_loop(
         }
         if (exception_class == 0x1u) {
             /* `WFI`/`WFE` is a scheduling hint, not a fault (ARM DDI 0487
-             * D13.2.37) -- the correct host action is to treat the trap as
-             * a yield and resume the guest, exactly the "advance past the
-             * faulting instruction" shape `handle_icc_sysreg_trap` and
-             * `handle_mmio_data_abort` already use for their own traps.
-             * HVF offers no "block this vCPU until an interrupt is pending"
-             * primitive for a WFI-class exit the way it does for
-             * `HV_EXIT_REASON_VTIMER_ACTIVATED` above (that path already
-             * injects a real IRQ and lets `hv_vcpu_run` itself block); here
-             * the guest re-issues the same `wfi` the instant it resumes,
-             * which is the expected idle spin, not a bug. `total_exit_count`
-             * above already bounds how many times this loop will do that
-             * before reporting the budget exceeded, so no separate idle cap
-             * is needed. */
+             * D13.2.37) -- advance past it, the same shape
+             * `handle_icc_sysreg_trap` and `handle_mmio_data_abort` use.
+             * HVF never blocks the vCPU on a trapped `WFI` itself, so the
+             * host is the one that sleeps: a `WFI` (ISS bit 0 clear) with no
+             * IRQ already asserted waits for the vtimer deadline
+             * (`wfi_wait_for_vtimer_deadline`); a `WFE`, or a `WFI` with an
+             * IRQ already asserted, resumes at once and the next
+             * `hv_vcpu_run` delivers the interrupt. A guest with no wake
+             * source at all is still bounded by `total_exit_count` above. */
             ++wfi_wfe_trap_count;
+            if ((exit_data->exception.syndrome & 0x1u) == 0 && proxima_vm_icc_irq_asserted(icc_transport) == 0) {
+                status = wfi_wait_for_vtimer_deadline(vcpu);
+                if (status != HV_SUCCESS) {
+                    set_hv_error(error_buffer, error_capacity, "wait for vtimer deadline on wfi", status);
+                    goto cleanup;
+                }
+            }
             uint64_t program_counter = 0;
             status = hv_vcpu_get_reg(vcpu, HV_REG_PC, &program_counter);
             if (status != HV_SUCCESS) {
