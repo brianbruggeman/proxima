@@ -62,7 +62,7 @@ pub use cache::DoorStats;
 use cache::PlanCache;
 pub use error::{DoorError, StageKind};
 pub use reader::{Pins, Reader, ReaderWork};
-pub use settings::{DoorConfigError, DoorSettings};
+pub use settings::{ComputeUnits, DoorConfigError, DoorSettings, Precision};
 pub use stage::DoorStage;
 pub use writer::{NoSink, Writer};
 
@@ -115,12 +115,13 @@ impl<R: Reader, W: Writer> Door<R, W> {
     /// Holds `bytes` for `reader` to read. A door that only writes passes
     /// empty bytes.
     pub fn new(reader: R, writer: W, bytes: impl Into<Vec<u8>>, settings: DoorSettings) -> Self {
+        let cache = RefCell::new(PlanCache::new(settings.max_pin_sets));
         Self {
             reader,
             writer,
             bytes: bytes.into(),
             settings,
-            cache: RefCell::new(PlanCache::new(settings.max_pin_sets)),
+            cache,
         }
     }
 

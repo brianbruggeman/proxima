@@ -153,7 +153,7 @@ fn plan<'bytes, R: Reader, W: Writer>(
 ) -> Result<DoorStage<'bytes, R, W>, DoorError<R, W>> {
     let roots = output_roots(&lowered);
     let named = named_blocks(&lowered, batch);
-    let settings = door.settings;
+    let settings = &door.settings;
     let plan = plan_named(
         settings.engine,
         settings.gpu_driver,

@@ -1,10 +1,12 @@
+use std::path::PathBuf;
+
 use bon::Builder;
 use conflaguration::Settings;
 use proxima_tensor::NumericPolicy;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{Engine, GpuDriver};
-use crate::door::{DoorConfigError, DoorSettings};
+use crate::door::{ComputeUnits, DoorConfigError, DoorSettings, Precision};
 use crate::sized;
 
 /// Where and how the door runs a lowered graph.
@@ -15,6 +17,7 @@ use crate::sized;
 /// the value serialises, and the `resolve_*` methods turn them into the typed
 /// [`Engine`], [`GpuDriver`] and [`NumericPolicy`] the backend takes.
 #[derive(Debug, Clone, PartialEq, Eq, Builder, Deserialize, Serialize, Settings)]
+#[serde(default)]
 #[settings(prefix = "OMEGA_ONNX_DOOR")]
 #[builder(state_mod(vis = "pub"))]
 pub struct DoorConfig {
@@ -37,6 +40,18 @@ pub struct DoorConfig {
     #[setting(default = 0)]
     #[builder(overwritable, default = 0)]
     pub max_pin_sets: usize,
+    /// `cpu_only`, `cpu_and_neural_engine` or `all`: the Core ML devices a lane may place operations on.
+    #[setting(default = "cpu_and_neural_engine")]
+    #[builder(into, overwritable, default = String::from("cpu_and_neural_engine"))]
+    pub compute_units: String,
+    /// `float16` or `float32`: the interior width of a Core ML lane; the neural engine computes `float16` only.
+    #[setting(default = "float16")]
+    #[builder(into, overwritable, default = String::from("float16"))]
+    pub precision: String,
+    /// Directory a lane keeps compiled packages in; empty lets the lane pick its default beneath the user cache.
+    #[setting(default = "")]
+    #[builder(into, overwritable, default = String::new())]
+    pub model_cache_dir: String,
 }
 
 impl Default for DoorConfig {
@@ -54,6 +69,9 @@ impl DoorConfig {
             .gpu_driver(config.gpu_driver.as_str())
             .numeric_policy(config.numeric_policy.as_str())
             .max_pin_sets(config.max_pin_sets)
+            .compute_units(config.compute_units.as_str())
+            .precision(config.precision.as_str())
+            .model_cache_dir(config.model_cache_dir.as_str())
     }
 
     /// Defaults overlaid by `OMEGA_ONNX_DOOR_*` variables.
@@ -118,12 +136,40 @@ impl DoorConfig {
     /// # Errors
     /// The first [`DoorConfigError`] any field raises.
     pub fn settings(&self) -> Result<DoorSettings, DoorConfigError> {
+        let compute_units = self.resolve_compute_units()?;
+        let precision = self.resolve_precision()?;
+        precision.check(compute_units)?;
         Ok(DoorSettings {
             engine: self.resolve_engine()?,
             gpu_driver: self.resolve_gpu_driver()?,
             numeric_policy: self.resolve_numeric_policy()?,
             max_pin_sets: self.resolve_max_pin_sets(),
+            compute_units,
+            precision,
+            model_cache_dir: self.resolve_model_cache_dir(),
         })
+    }
+
+    /// The [`ComputeUnits`] named by `compute_units`.
+    ///
+    /// # Errors
+    /// [`DoorConfigError::UnknownComputeUnits`] for any unlisted name.
+    pub fn resolve_compute_units(&self) -> Result<ComputeUnits, DoorConfigError> {
+        ComputeUnits::parse(&self.compute_units)
+    }
+
+    /// The [`Precision`] named by `precision`.
+    ///
+    /// # Errors
+    /// [`DoorConfigError::UnknownPrecision`] for any unlisted name.
+    pub fn resolve_precision(&self) -> Result<Precision, DoorConfigError> {
+        Precision::parse(&self.precision)
+    }
+
+    /// The package directory: `None` when `model_cache_dir` is empty.
+    #[must_use]
+    pub fn resolve_model_cache_dir(&self) -> Option<PathBuf> {
+        (!self.model_cache_dir.is_empty()).then(|| PathBuf::from(&self.model_cache_dir))
     }
 
     /// The pin-set cap: `max_pin_sets`, or the build-time
