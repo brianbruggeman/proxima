@@ -19,6 +19,248 @@ use proxima_tensor::map::{self, AxisIndex, AxisTerm, IndexMap, IndexPattern};
 use proxima_tensor::op::{self, Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 use proxima_tensor::test_support::Lcg;
 
+#[cfg(feature = "instrument")]
+#[global_allocator]
+static COUNTING_ALLOCATOR: phases::CountingAllocator = phases::CountingAllocator;
+
+#[cfg(feature = "instrument")]
+pub mod phases {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+    use std::error::Error;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use proxima_telemetry::emit::{EnvFilter, global};
+    use proxima_telemetry::export::{Exporter, Formatter};
+    use proxima_telemetry::recorder::Recorder;
+    use proxima_tensor::cpu::arena_cache_totals;
+    use proxima_tensor::instrument::{
+        alloc_totals, current_alloc_site, evaluate_quantized_phase_totals, record_alloc,
+        reset_alloc_sites, reset_evaluate_quantized_phase, ticks_to_nanos,
+    };
+
+    thread_local! {
+        static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+        static ALLOCATED_BYTES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// counts per-thread so the telemetry drain thread never lands in a phase row.
+    pub struct CountingAllocator;
+
+    // SAFETY: every call forwards unchanged to `System`; the thread-local cells only count.
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            ALLOCATIONS.with(|cell| cell.set(cell.get() + 1));
+            ALLOCATED_BYTES.with(|cell| cell.set(cell.get() + layout.size() as u64));
+            record_alloc(current_alloc_site(), layout.size() as u64);
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(pointer, layout) }
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            ALLOCATIONS.with(|cell| cell.set(cell.get() + 1));
+            ALLOCATED_BYTES.with(|cell| cell.set(cell.get() + new_size as u64));
+            record_alloc(current_alloc_site(), new_size as u64);
+            unsafe { System.realloc(pointer, layout, new_size) }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct Mark {
+        instant: Instant,
+        allocations: u64,
+        bytes: u64,
+    }
+
+    impl Mark {
+        fn now() -> Self {
+            Self {
+                instant: Instant::now(),
+                allocations: ALLOCATIONS.with(Cell::get),
+                bytes: ALLOCATED_BYTES.with(Cell::get),
+            }
+        }
+    }
+
+    struct Row {
+        phase: &'static str,
+        count: u64,
+        nanos: u64,
+        allocations: u64,
+        bytes: u64,
+    }
+
+    /// per-step phase accumulator: `lap` closes the sequential phase that ends now,
+    /// `add` credits a nested span measured from an earlier `mark` without moving the lap cursor.
+    pub struct PhaseClock {
+        cursor: Mark,
+        rows: Vec<Row>,
+        arena_seen: (u64, u64),
+        recorder: Option<Arc<Recorder>>,
+    }
+
+    impl PhaseClock {
+        /// `phase_log` is the file the structured phase events are exported to.
+        pub fn install(phase_log: Option<&str>) -> Result<Self, Box<dyn Error>> {
+            let recorder = phase_log.map(install_file_recorder).transpose()?;
+            Ok(Self {
+                cursor: Mark::now(),
+                rows: Vec::new(),
+                arena_seen: arena_cache_totals(),
+                recorder,
+            })
+        }
+
+        pub fn mark(&self) -> Mark {
+            Mark::now()
+        }
+
+        pub fn restart(&mut self) {
+            self.cursor = Mark::now();
+        }
+
+        pub fn lap(&mut self, phase: &'static str) {
+            let cursor = self.cursor;
+            self.add(phase, cursor);
+            self.cursor = Mark::now();
+        }
+
+        pub fn add(&mut self, phase: &'static str, since: Mark) {
+            let now = Mark::now();
+            let nanos = now.instant.duration_since(since.instant).as_nanos();
+            self.credit(
+                phase,
+                1,
+                u64::try_from(nanos).unwrap_or(u64::MAX),
+                now.allocations - since.allocations,
+                now.bytes - since.bytes,
+            );
+        }
+
+        fn credit(
+            &mut self,
+            phase: &'static str,
+            count: u64,
+            nanos: u64,
+            allocations: u64,
+            bytes: u64,
+        ) {
+            match self.rows.iter_mut().find(|row| row.phase == phase) {
+                Some(row) => {
+                    row.count += count;
+                    row.nanos += nanos;
+                    row.allocations += allocations;
+                    row.bytes += bytes;
+                }
+                None => self.rows.push(Row {
+                    phase,
+                    count,
+                    nanos,
+                    allocations,
+                    bytes,
+                }),
+            }
+        }
+
+        /// the quantized evaluator's own per-call timers and the plan-cache counters,
+        /// read once per step so they land in the same event stream as the example's laps.
+        pub fn credit_tensor_phases(&mut self) {
+            let (calls, resolve, setup, loop_overhead, finish, _) =
+                evaluate_quantized_phase_totals();
+            reset_evaluate_quantized_phase();
+            self.credit("tensor.resolve", calls, ticks_to_nanos(resolve), 0, 0);
+            self.credit("tensor.setup", calls, ticks_to_nanos(setup), 0, 0);
+            self.credit(
+                "tensor.loop_overhead",
+                calls,
+                ticks_to_nanos(loop_overhead),
+                0,
+                0,
+            );
+            self.credit("tensor.finish", calls, ticks_to_nanos(finish), 0, 0);
+            let sites = alloc_totals();
+            reset_alloc_sites();
+            self.credit(
+                "tensor.setup_allocs",
+                calls,
+                0,
+                sites.prepare_count,
+                sites.prepare_bytes,
+            );
+            let (builds, hits) = arena_cache_totals();
+            self.credit("tensor.arena_builds", builds - self.arena_seen.0, 0, 0, 0);
+            self.credit("tensor.arena_hits", hits - self.arena_seen.1, 0, 0, 0);
+            self.arena_seen = (builds, hits);
+        }
+
+        pub fn emit(&mut self, format: &str, seed: u64, step: u32) {
+            for row in self.rows.drain(..) {
+                proxima_telemetry::debug!(
+                    format = %format,
+                    seed = seed,
+                    step = u64::from(step),
+                    phase = %row.phase,
+                    count = row.count,
+                    nanos = row.nanos,
+                    allocations = row.allocations,
+                    bytes = row.bytes,
+                    "packed pilot phase"
+                );
+            }
+            if let Some(recorder) = &self.recorder {
+                recorder.drain();
+            }
+        }
+    }
+
+    fn install_file_recorder(path: &str) -> Result<Arc<Recorder>, Box<dyn Error>> {
+        global::install(EnvFilter::parse(
+            "error,low_precision_moe_training_pilot=debug",
+        ));
+        let recorder = Recorder::builder()
+            .export(Exporter::file(path).format(Formatter::Json))?
+            .install()?;
+        Ok(recorder)
+    }
+}
+
+#[cfg(not(feature = "instrument"))]
+pub mod phases {
+    use std::error::Error;
+
+    #[derive(Clone, Copy)]
+    pub struct Mark;
+
+    pub struct PhaseClock;
+
+    impl PhaseClock {
+        pub fn install(phase_log: Option<&str>) -> Result<Self, Box<dyn Error>> {
+            match phase_log {
+                Some(_) => Err("--phase-log requires the instrument feature".into()),
+                None => Ok(Self),
+            }
+        }
+
+        pub fn mark(&self) -> Mark {
+            Mark
+        }
+
+        pub fn restart(&mut self) {}
+
+        pub fn lap(&mut self, _phase: &'static str) {}
+
+        pub fn add(&mut self, _phase: &'static str, _since: Mark) {}
+
+        pub fn credit_tensor_phases(&mut self) {}
+
+        pub fn emit(&mut self, _format: &str, _seed: u64, _step: u32) {}
+    }
+}
+
 pub type TokenEvaluation = (Vec<f32>, f32, Vec<f32>);
 pub type OptimizerState = (Vec<f32>, Vec<f32>, Vec<f32>);
 
@@ -255,7 +497,9 @@ pub fn evaluate_token(
     weight_values: &[f32],
     token_id: u32,
     target_id: u32,
+    clock: &mut phases::PhaseClock,
 ) -> Result<TokenEvaluation, Box<dyn Error>> {
+    let call_mark = clock.mark();
     let input_values = one_hot(token_id);
     let target_values = one_hot(target_id);
     let route = [(token_id % 2) as f32];
@@ -270,6 +514,8 @@ pub fn evaluate_token(
         ],
         &[model.logits, model.loss, model.gathered_gradient],
     )?;
+    clock.add("evaluate.call", call_mark);
+    let extract_mark = clock.mark();
     let logits = evaluated
         .get(model.logits)
         .map(|(values, _)| values.to_vec())
@@ -282,6 +528,7 @@ pub fn evaluate_token(
         .get(model.gathered_gradient)
         .map(|(values, _)| values.to_vec())
         .ok_or_else(|| io::Error::other("gathered expert gradient missing"))?;
+    clock.add("evaluate.extract", extract_mark);
     Ok((logits, loss, gradient))
 }
 
@@ -410,7 +657,9 @@ pub fn evaluate_packed_token(
     token_id: u32,
     target_id: u32,
     epoch: u64,
+    clock: &mut phases::PhaseClock,
 ) -> Result<TokenEvaluation, Box<dyn Error>> {
+    let bind_mark = clock.mark();
     let codec = match format {
         WeightFormat::Bf8E5M2 => Codec::Bf8E5M2,
         WeightFormat::Bf4E2M1 => Codec::Bf4E2M1,
@@ -452,6 +701,8 @@ pub fn evaluate_packed_token(
         ("inputs", QuantizedBlock::Float32(&input_values)),
         ("targets", QuantizedBlock::Float32(&target_values)),
     ];
+    clock.add("evaluate.bind", bind_mark);
+    let call_mark = clock.mark();
     let evaluated = evaluate_quantized_named_with_scratch_and_experts(
         &model.differentiated_program,
         &[],
@@ -461,6 +712,8 @@ pub fn evaluate_packed_token(
         &mut None,
         Some(&expert_sources),
     )?;
+    clock.add("evaluate.call", call_mark);
+    let extract_mark = clock.mark();
     let logits = evaluated
         .get(model.logits)
         .map(|(values, _)| values.to_vec())
@@ -473,6 +726,7 @@ pub fn evaluate_packed_token(
         .get(model.gathered_gradient)
         .map(|(values, _)| values.to_vec())
         .ok_or_else(|| io::Error::other("packed gathered expert gradient missing"))?;
+    clock.add("evaluate.extract", extract_mark);
     Ok((logits, loss, gradient))
 }
 
@@ -588,6 +842,7 @@ pub fn run_arm(
     format: WeightFormat,
     format_name: &str,
     seed: u64,
+    clock: &mut phases::PhaseClock,
     output: &mut impl Write,
 ) -> Result<(), Box<dyn Error>> {
     let mut lcg = Lcg(seed);
@@ -599,13 +854,16 @@ pub fn run_arm(
 
     for step in 1..=64 {
         let started = Instant::now();
+        clock.restart();
         let master_input = parameters.clone();
         let first_moment_input = first_moment.clone();
         let second_moment_input = second_moment.clone();
+        clock.lap("snapshot");
         let training_packed_bytes = match format {
             WeightFormat::Fp32 => Vec::new(),
             _ => encode_packed_weights(&master_input, format)?,
         };
+        clock.lap("train_encode");
         let mut losses = 0.0_f32;
         let mut train_logits = Vec::with_capacity(8);
         let mut train_token_losses = Vec::with_capacity(8);
@@ -614,7 +872,9 @@ pub fn run_arm(
         let mut gradient_values = Vec::with_capacity(8 * 16);
         for (token_id, target_id) in TRAIN_INPUTS.into_iter().zip(TRAIN_TARGETS) {
             let (logits, loss, gradient) = match format {
-                WeightFormat::Fp32 => evaluate_token(model, &master_input, token_id, target_id)?,
+                WeightFormat::Fp32 => {
+                    evaluate_token(model, &master_input, token_id, target_id, clock)?
+                }
                 _ => evaluate_packed_token(
                     model,
                     &training_packed_bytes,
@@ -622,6 +882,7 @@ pub fn run_arm(
                     token_id,
                     target_id,
                     step as u64,
+                    clock,
                 )?,
             };
             losses += loss;
@@ -631,6 +892,7 @@ pub fn run_arm(
             gradient_ids.push((token_id % 2) as f32);
             gradient_values.extend_from_slice(&gradient);
         }
+        clock.lap("train_tokens");
         let training_loss = losses / 8.0;
         let (unique_ids, summed_gradients) =
             dedupe_and_sum_rows(&gradient_ids, &gradient_values, 16)?;
@@ -642,6 +904,7 @@ pub fn run_arm(
             .into_iter()
             .map(|gradient| gradient / 8.0)
             .collect();
+        clock.lap("coalesce");
         let (optimizer_program, new_parameters, new_first, new_second) = optimizer;
         (parameters, first_moment, second_moment) = run_optimizer(
             optimizer_program,
@@ -654,17 +917,21 @@ pub fn run_arm(
             &second_moment,
             step as f32,
         )?;
+        clock.lap("optimizer");
 
         let held_out_packed_bytes = match format {
             WeightFormat::Fp32 => Vec::new(),
             _ => encode_packed_weights(&parameters, format)?,
         };
+        clock.lap("heldout_encode");
         let mut held_out_loss = 0.0_f32;
         let mut held_out_logits = Vec::with_capacity(8);
         let mut held_out_token_losses = Vec::with_capacity(8);
         for (token_id, target_id) in HELD_OUT_INPUTS.into_iter().zip(HELD_OUT_TARGETS) {
             let (logits, loss, _) = match format {
-                WeightFormat::Fp32 => evaluate_token(model, &parameters, token_id, target_id)?,
+                WeightFormat::Fp32 => {
+                    evaluate_token(model, &parameters, token_id, target_id, clock)?
+                }
                 _ => evaluate_packed_token(
                     model,
                     &held_out_packed_bytes,
@@ -672,6 +939,7 @@ pub fn run_arm(
                     token_id,
                     target_id,
                     step as u64,
+                    clock,
                 )?,
             };
             held_out_loss += loss;
@@ -683,6 +951,7 @@ pub fn run_arm(
             .iter()
             .map(|token_id| token_id % 2)
             .collect();
+        clock.lap("heldout_tokens");
         let elapsed_ns = started.elapsed().as_nanos().max(1);
         let tokens_per_second = 8_000_000_000.0 / elapsed_ns as f64;
         let non_finite_count = parameters
@@ -692,6 +961,7 @@ pub fn run_arm(
             .chain(std::iter::once(&held_out_loss))
             .filter(|value| !value.is_finite())
             .count();
+        clock.lap("wall_epilogue");
 
         let mut scalar_train_logits = Vec::with_capacity(8);
         let mut scalar_train_losses = Vec::with_capacity(8);
@@ -740,6 +1010,7 @@ pub fn run_arm(
         }
         let scalar_train_loss = scalar_train_losses.iter().sum::<f32>() / 8.0;
         let scalar_held_out_loss = scalar_held_out_losses.iter().sum::<f32>() / 8.0;
+        clock.lap("scalar_reference");
         let train_spans = expert_byte_spans(format, format_name);
         let held_out_spans = expert_byte_spans(format, format_name);
         step_records.push(serde_json::json!({
@@ -786,6 +1057,9 @@ pub fn run_arm(
                 "updated_second_moment_rows": scalar_updated_second.as_chunks::<16>().0.iter().collect::<Vec<_>>()
             }
         }));
+        clock.lap("record_build");
+        clock.credit_tensor_phases();
+        clock.emit(format_name, seed, step);
     }
     let report = serde_json::json!({
         "format": format_name,
@@ -804,7 +1078,7 @@ pub fn run_arm(
 
 pub fn main() -> Result<(), Box<dyn Error>> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    if arguments.len() == 3 && arguments[0] == "--arm-worker" {
+    if (3..=4).contains(&arguments.len()) && arguments[0] == "--arm-worker" {
         let format_name = arguments[1].as_str();
         let format = match format_name {
             "bf8_e5m2" => WeightFormat::Bf8E5M2,
@@ -815,6 +1089,7 @@ pub fn main() -> Result<(), Box<dyn Error>> {
         let seed = arguments[2].parse::<u64>()?;
         let model = build_model()?;
         let optimizer = optimizer_program();
+        let mut clock = phases::PhaseClock::install(arguments.get(3).map(String::as_str))?;
         let mut output = io::BufWriter::new(io::stdout().lock());
         run_arm(
             &model,
@@ -822,6 +1097,7 @@ pub fn main() -> Result<(), Box<dyn Error>> {
             format,
             format_name,
             seed,
+            &mut clock,
             &mut output,
         )?;
         output.flush()?;

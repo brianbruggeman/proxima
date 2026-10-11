@@ -328,6 +328,8 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
     // own doc for why this replaced a per-call `DIAG` eprintln.
     #[cfg(feature = "instrument")]
     let setup_started = instrument::read_ticks();
+    #[cfg(feature = "instrument")]
+    let setup_alloc_guard = instrument::AllocSiteGuard::enter(instrument::AllocSite::Prepare);
     let shapes = shape::infer(program, symbols)?;
     let block_nodes = block_node_ids(program);
     if blocks.len() != block_nodes.len() {
@@ -609,6 +611,8 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
     let mut loop_overhead_ticks: u64 = 0;
     #[cfg(feature = "instrument")]
     let setup_ticks = instrument::elapsed_ticks(setup_started);
+    #[cfg(feature = "instrument")]
+    drop(setup_alloc_guard);
     // Entered ONCE, before the node loop -- not per matmul call -- so the
     // wake this session amortizes is paid once per forward pass, the same
     // amortization `prime/src/os/cohort.rs`'s own module doc measures
