@@ -212,7 +212,11 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
                 | Codec::Mxfp4
                 | Codec::Nvfp4
                 | Codec::Q1_0
-                | Codec::Q2_0,
+                | Codec::Q2_0
+                | Codec::BFloat8
+                | Codec::Bf8E5M2
+                | Codec::Bf4E2M1
+                | Codec::Fp6E3M2,
             )
             | None => None,
         })
@@ -305,6 +309,10 @@ fn block_codec_name(block: &QuantizedBlock<'_>) -> &'static str {
         QuantizedBlock::Packed { codec: Codec::Nvfp4, bytes: _ } => "nvfp4",
         QuantizedBlock::Packed { codec: Codec::Q1_0, bytes: _ } => "q1_0",
         QuantizedBlock::Packed { codec: Codec::Q2_0, bytes: _ } => "q2_0",
+        QuantizedBlock::Packed { codec: Codec::BFloat8, bytes: _ } => "bfloat8",
+        QuantizedBlock::Packed { codec: Codec::Bf8E5M2, bytes: _ } => "bf8_e5m2",
+        QuantizedBlock::Packed { codec: Codec::Bf4E2M1, bytes: _ } => "bf4_e2m1",
+        QuantizedBlock::Packed { codec: Codec::Fp6E3M2, bytes: _ } => "fp6_e3m2",
     }
 }
 

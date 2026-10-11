@@ -1111,7 +1111,11 @@ fn codec_function_name(node: NodeId, codec: Codec) -> Result<&'static str, EmitE
         | Codec::Mxfp4
         | Codec::Nvfp4
         | Codec::Q1_0
-        | Codec::Q2_0 => Err(EmitError::UnsupportedCodec { node }),
+        | Codec::Q2_0
+        | Codec::BFloat8
+        | Codec::Bf8E5M2
+        | Codec::Bf4E2M1
+        | Codec::Fp6E3M2 => Err(EmitError::UnsupportedCodec { node }),
     }
 }
 

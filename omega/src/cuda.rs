@@ -536,7 +536,8 @@ fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
         | DType::UInt64
         | DType::Int128
         | DType::UInt128
-        | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }),
+        | DType::Float64
+        | DType::BFloat8 => Err(EmitError::UnsupportedDType { node, dtype }),
     }
 }
 
@@ -1189,7 +1190,7 @@ fn push_gather_fetch(
 /// `crate::msl::operand_read`, same per-element-only scope (no row-blocked
 /// header amortization; see the module doc).
 fn operand_read(
-    _node: NodeId,
+    node: NodeId,
     index: usize,
     offset: &str,
     codec: Option<Codec>,
@@ -1252,6 +1253,9 @@ fn operand_read(
             | Codec::Q1_0
             | Codec::Q2_0,
         ) => Ok(format!("in{index}[{offset}]")),
+        Some(Codec::BFloat8 | Codec::Bf8E5M2 | Codec::Bf4E2M1 | Codec::Fp6E3M2) => {
+            Err(EmitError::CudaUnsupportedCodec { node })
+        }
     }
 }
 
