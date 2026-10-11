@@ -117,12 +117,9 @@ async fn empty_guest_emits_zero_bytes() {
 
 /// Sad path: without the entitlement the hypervisor refuses, and the failure
 /// must surface as a named error rather than a silent empty success.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[proxima::test]
 async fn unsigned_guest_is_refused_by_the_hypervisor() {
-    if !HYPERVISOR_LANE {
-        return;
-    }
-
     let directory = tempfile::tempdir().expect("create tempdir");
     let path = directory.path().join("unsigned-guest");
     std::fs::copy(Path::new(GUEST_BINARY), &path).expect("copy the built guest binary");

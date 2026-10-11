@@ -36,6 +36,13 @@ const GUEST_MANIFEST_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/guests/la
 const HYPERVISOR_LANE: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 const KVM_LANE: bool = cfg!(all(target_os = "linux", target_arch = "x86_64"));
 
+/// the guest ISA must match the hypervisor lane: x86_64 under KVM, aarch64 under HVF
+const GUEST_TARGET: &str = if KVM_LANE {
+    "x86_64-unknown-none"
+} else {
+    "aarch64-unknown-none"
+};
+
 /// Builds `proxima-vm-guest-lambda` for `aarch64-unknown-none` into a
 /// per-case tempdir's own `CARGO_TARGET_DIR`, so parallel nextest cases
 /// never race on a shared build output — same discipline as
@@ -47,7 +54,7 @@ fn build_guest_elf(target_dir: &Path) -> PathBuf {
             "--manifest-path",
             &format!("{GUEST_MANIFEST_DIR}/Cargo.toml"),
             "--target",
-            "aarch64-unknown-none",
+            GUEST_TARGET,
             "--release",
         ])
         .env("CARGO_TARGET_DIR", target_dir)
@@ -55,7 +62,7 @@ fn build_guest_elf(target_dir: &Path) -> PathBuf {
         .expect("run cargo build for the guest ELF");
     assert!(status.success(), "guest ELF build failed");
     target_dir
-        .join("aarch64-unknown-none")
+        .join(GUEST_TARGET)
         .join("release")
         .join("proxima-vm-guest-lambda")
 }

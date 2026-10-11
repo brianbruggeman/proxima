@@ -163,10 +163,7 @@ unsafe impl Sync for GuestMemoryRegion {}
 unsafe impl Send for RegionView {}
 unsafe impl Sync for RegionView {}
 
-#[cfg(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
-))]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod platform {
     use std::ffi::CStr;
     use std::os::raw::c_char;
@@ -261,10 +258,7 @@ mod platform {
     }
 }
 
-#[cfg(not(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
-)))]
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 mod platform {
     use proxima_core::ProximaError;
 
@@ -272,7 +266,7 @@ mod platform {
 
     pub(super) fn create(_size: usize) -> Result<RawNamedRegion, ProximaError> {
         Err(ProximaError::Upstream(
-            "named guest memory regions are only implemented for the KVM and HVF lanes".into(),
+            "named guest memory regions are only implemented for the HVF lane (backend_linux.c has no named-region leaf)".into(),
         ))
     }
 
@@ -281,7 +275,7 @@ mod platform {
         _want_private_view: bool,
     ) -> Result<super::RegionView, ProximaError> {
         Err(ProximaError::Upstream(
-            "named guest memory regions are only implemented for the KVM and HVF lanes".into(),
+            "named guest memory regions are only implemented for the HVF lane (backend_linux.c has no named-region leaf)".into(),
         ))
     }
 
@@ -294,16 +288,9 @@ mod platform {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    #[cfg(any(
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "macos", target_arch = "aarch64")
-    ))]
     use super::GuestMemoryRegion;
 
-    #[cfg(any(
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "macos", target_arch = "aarch64")
-    ))]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[proxima::test]
     async fn a_second_shared_view_observes_writes_made_through_the_primary_view() {
         let mut region =
@@ -319,10 +306,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "macos", target_arch = "aarch64")
-    ))]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[proxima::test]
     async fn a_write_through_a_second_shared_view_is_visible_through_the_primary_view() {
         let region = GuestMemoryRegion::create(4096).expect("create a named guest memory region");
@@ -338,10 +322,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "macos", target_arch = "aarch64")
-    ))]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[proxima::test]
     async fn a_freshly_created_region_is_zero_filled() {
         let region = GuestMemoryRegion::create(4096).expect("create a named guest memory region");
@@ -352,37 +333,18 @@ mod tests {
         );
     }
 
-    /// KVM lane only (`ROADMAP.md`'s M4 exit criterion verbatim: "a
-    /// `MAP_PRIVATE` child on the KVM lane observes copy-on-write"). This
-    /// host is `macos`/`aarch64`, so `backend_linux.c` never compiles into
-    /// this crate at all (`build.rs`'s `match (target_os, target_arch)`) --
-    /// this test exists, cross-compiles clean under
-    /// `--target x86_64-unknown-linux-gnu` (verified separately), and has
-    /// never executed on real KVM hardware, the same unexecuted status
-    /// `tests/dispatch_hypercall.rs`'s x86_64 lane already carries.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    /// `backend_linux.c` defines no named-region leaf, so the KVM lane
+    /// reports the gap by name instead of failing at link time.
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     #[proxima::test]
-    async fn a_private_child_view_on_the_kvm_lane_does_not_see_its_own_writes_reflected_back() {
-        let mut region =
-            GuestMemoryRegion::create(4096).expect("create a named guest memory region");
-        region.primary_slice_mut()[..4].copy_from_slice(&[1, 2, 3, 4]);
+    async fn a_named_region_request_off_the_hvf_lane_is_a_named_unsupported_error() {
+        let error = GuestMemoryRegion::create(4096)
+            .expect_err("only the HVF lane implements named guest memory regions");
 
-        let mut child = region
-            .map_private_view()
-            .expect("map a private copy-on-write view");
-        assert_eq!(
-            &child.as_slice()[..4],
-            &[1, 2, 3, 4],
-            "a private view must read the parent's contents before its own first write"
-        );
-
-        child.as_slice_mut()[..4].copy_from_slice(&[9, 8, 7, 6]);
-
-        assert_eq!(
-            &region.primary_slice()[..4],
-            &[1, 2, 3, 4],
-            "a write through a MAP_PRIVATE child view must never become visible through the \
-             parent's primary view -- proven by reading the parent's bytes back, not by inference"
+        let message = error.to_string();
+        assert!(
+            message.contains("only implemented for the HVF lane"),
+            "the unsupported-lane rejection must name the gap, not fail silently: {message}"
         );
     }
 

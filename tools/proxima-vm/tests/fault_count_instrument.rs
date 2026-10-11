@@ -12,6 +12,8 @@
 //! (`tests/boot.rs` and `tests/dispatch_hypercall.rs` each already carry
 //! their own copy of this exact shape).
 
+// the m3 instrument and its aarch64 degenerate guest exist only on the hvf lane
+#![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::path::{Path, PathBuf};

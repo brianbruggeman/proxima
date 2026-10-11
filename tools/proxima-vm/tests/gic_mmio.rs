@@ -14,6 +14,8 @@
 //! touches another guest's pinned ELF layout or pinned emitted-byte
 //! contract.
 
+// the leaves these tests drive exist only in backend_macos.c
+#![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::path::{Path, PathBuf};

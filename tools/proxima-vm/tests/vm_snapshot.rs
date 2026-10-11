@@ -11,6 +11,8 @@
 //! (`proxima_vm::snapshot`'s own module doc), connected by a
 //! postcard-encoded [`proxima_vm::snapshot::VmSnapshot`] file on disk.
 
+// the leaves these tests drive exist only in backend_macos.c
+#![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::collections::HashMap;

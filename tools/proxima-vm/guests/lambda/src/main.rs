@@ -16,8 +16,11 @@ use core::arch::naked_asm;
 use core::panic::PanicInfo;
 
 mod hypercall;
+#[cfg(target_arch = "aarch64")]
 mod virtio_blk;
+#[cfg(target_arch = "aarch64")]
 mod virtio_console;
+#[cfg(target_arch = "aarch64")]
 mod virtio_net;
 
 /// Postcard variant discriminant for `proxima_protocols::process::ChildRequest::Read`
@@ -88,18 +91,28 @@ extern "C" fn entry() -> ! {
     // M6 slice 3: drive virtio-console over the mmio transport through real
     // data-abort VM exits — separate from the hvc-based ChildRequest
     // channel above, proving the second, independent exit path.
-    unsafe { virtio_console::bring_up_and_transmit_one_byte() };
+    // the kvm backend has no mmio exit model, so the device bring-up is aarch64-only
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        virtio_console::bring_up_and_transmit_one_byte()
+    };
 
     // M6 slice 5: drive virtio-net over its own mmio window through real
     // data-abort VM exits — a second, independent device sharing the same
     // exit-routing mechanism the console device above already proved.
-    unsafe { virtio_net::bring_up_and_transmit_one_frame() };
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        virtio_net::bring_up_and_transmit_one_frame()
+    };
 
     // M6 slice 6: drive virtio-blk over its own mmio window — the third
     // device sharing the same exit-routing mechanism, and the first one
     // whose request round-trips (an `IN` the device writes back into) rather
     // than only ever being read from by the host.
-    unsafe { virtio_blk::bring_up_and_exercise_one_sector() };
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        virtio_blk::bring_up_and_exercise_one_sector()
+    };
 
     let mut halt = [0_u8; 0];
     unsafe { hypercall::hypercall(HALT_VERB, &mut halt) };

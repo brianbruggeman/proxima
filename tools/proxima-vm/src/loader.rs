@@ -188,6 +188,7 @@ mod platform {
         /// which has an ELF `Segment` to marshal via [`Self::from_segment`].
         /// `data` must outlive the `proxima_vm_run_dispatch_loop` call this
         /// segment is passed into.
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         pub(crate) fn raw(
             guest_address: u64,
             data: &[u8],

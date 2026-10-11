@@ -114,6 +114,105 @@ static int start_vcpu_registers(int vcpu_fd, uint64_t entry, char *error_buffer,
     return 0;
 }
 
+/* ELF guests are x86_64 long-mode code (`lea rsp, [rip + __stack_top]`), so
+ * unlike the scratch guest's 16-bit blob they need paging on and a 64-bit
+ * code segment before the first instruction. The identity map (one PML4 ->
+ * one PDPT -> one PD of 512 2 MiB pages = the first 1 GiB) lives mid-way
+ * through the guest's stack reservation, far from both the ELF segments at
+ * the bottom and the stack top the guest grows down from. */
+#define LONG_MODE_TABLE_BYTES 0x3000u
+#define LONG_MODE_PTE_PRESENT_WRITABLE 0x3ull
+#define LONG_MODE_PDE_HUGE_PRESENT_WRITABLE 0x83ull
+#define LONG_MODE_CR0_PE_PG 0x80000001ull
+#define LONG_MODE_CR4_PAE 0x20ull
+#define LONG_MODE_EFER_LME_LMA 0x500ull
+
+static uint64_t long_mode_table_address(uint64_t guest_memory_size) {
+    return (guest_memory_size / 2) & ~0xfffull;
+}
+
+static void write_identity_page_tables(uint8_t *guest_memory, uint64_t table_address) {
+    uint64_t *pml4 = (uint64_t *)(guest_memory + table_address);
+    uint64_t *pdpt = (uint64_t *)(guest_memory + table_address + 0x1000);
+    uint64_t *pd = (uint64_t *)(guest_memory + table_address + 0x2000);
+
+    memset(pml4, 0, LONG_MODE_TABLE_BYTES);
+    pml4[0] = (table_address + 0x1000) | LONG_MODE_PTE_PRESENT_WRITABLE;
+    pdpt[0] = (table_address + 0x2000) | LONG_MODE_PTE_PRESENT_WRITABLE;
+    for (uint64_t index = 0; index < 512; ++index) {
+        pd[index] = (index << 21) | LONG_MODE_PDE_HUGE_PRESENT_WRITABLE;
+    }
+}
+
+static struct kvm_segment flat_segment(uint16_t selector, uint8_t type, uint8_t code_long) {
+    struct kvm_segment segment = {
+        .base = 0,
+        .limit = 0xffffffffu,
+        .selector = selector,
+        .type = type,
+        .present = 1,
+        .dpl = 0,
+        .db = code_long ? 0 : 1,
+        .s = 1,
+        .l = code_long,
+        .g = 1,
+    };
+    return segment;
+}
+
+/* a vCPU with no CPUID table reports no long-mode support, so KVM rejects
+ * EFER.LME in KVM_SET_SREGS with EINVAL; mirror the host's supported set. */
+#define LONG_MODE_CPUID_ENTRIES 256u
+
+static int copy_supported_cpuid(int kvm_fd, int vcpu_fd, char *error_buffer, size_t error_capacity) {
+    struct {
+        struct kvm_cpuid2 header;
+        struct kvm_cpuid_entry2 entries[LONG_MODE_CPUID_ENTRIES];
+    } cpuid;
+
+    memset(&cpuid, 0, sizeof(cpuid));
+    cpuid.header.nent = LONG_MODE_CPUID_ENTRIES;
+    if (ioctl(kvm_fd, KVM_GET_SUPPORTED_CPUID, &cpuid) < 0) {
+        return set_errno_error(error_buffer, error_capacity, "KVM_GET_SUPPORTED_CPUID");
+    }
+    if (ioctl(vcpu_fd, KVM_SET_CPUID2, &cpuid) < 0) {
+        return set_errno_error(error_buffer, error_capacity, "KVM_SET_CPUID2");
+    }
+    return 0;
+}
+
+static int start_vcpu_long_mode(int kvm_fd, int vcpu_fd, uint64_t entry, uint64_t table_address, char *error_buffer, size_t error_capacity) {
+    if (copy_supported_cpuid(kvm_fd, vcpu_fd, error_buffer, error_capacity) != 0) {
+        return -1;
+    }
+    struct kvm_sregs special_registers;
+    if (ioctl(vcpu_fd, KVM_GET_SREGS, &special_registers) < 0) {
+        return set_errno_error(error_buffer, error_capacity, "KVM_GET_SREGS");
+    }
+    special_registers.cr3 = table_address;
+    special_registers.cr4 |= LONG_MODE_CR4_PAE;
+    special_registers.cr0 |= LONG_MODE_CR0_PE_PG;
+    special_registers.efer = LONG_MODE_EFER_LME_LMA;
+    special_registers.cs = flat_segment(0x08, 11, 1);
+    special_registers.ds = flat_segment(0x10, 3, 0);
+    special_registers.es = special_registers.ds;
+    special_registers.fs = special_registers.ds;
+    special_registers.gs = special_registers.ds;
+    special_registers.ss = special_registers.ds;
+    if (ioctl(vcpu_fd, KVM_SET_SREGS, &special_registers) < 0) {
+        return set_errno_error(error_buffer, error_capacity, "KVM_SET_SREGS");
+    }
+
+    struct kvm_regs registers = {
+        .rip = entry,
+        .rflags = 2,
+    };
+    if (ioctl(vcpu_fd, KVM_SET_REGS, &registers) < 0) {
+        return set_errno_error(error_buffer, error_capacity, "KVM_SET_REGS");
+    }
+    return 0;
+}
+
 /* Shared teardown halves, split so `proxima_vm_run_dispatch_loop`'s cleanup
  * order (vcpu resources, then the flat guest-memory unmap, then the vm
  * resources) matches `proxima_vm_scratch_run`'s without forcing an unrelated
@@ -472,6 +571,9 @@ int proxima_vm_run_dispatch_loop(
         }
     }
 
+    if (guest_memory_size < 4u * 1024u * 1024u) {
+        return set_error(error_buffer, error_capacity, "guest memory reservation too small for the long-mode page tables");
+    }
     if (create_vm(&kvm_fd, &vm_fd, error_buffer, error_capacity) != 0) {
         goto cleanup;
     }
@@ -523,7 +625,8 @@ int proxima_vm_run_dispatch_loop(
         goto cleanup;
     }
 
-    if (start_vcpu_registers(vcpu_fd, entry, error_buffer, error_capacity) != 0) {
+    write_identity_page_tables((uint8_t *)guest_memory, long_mode_table_address(guest_memory_size));
+    if (start_vcpu_long_mode(kvm_fd, vcpu_fd, entry, long_mode_table_address(guest_memory_size), error_buffer, error_capacity) != 0) {
         goto cleanup;
     }
 
