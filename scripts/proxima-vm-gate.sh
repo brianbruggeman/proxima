@@ -28,8 +28,13 @@ printf '\n[2/6] default (std, `hello` bin) feature set compiles\n'
 cargo build -p "${crate}" --all-targets
 
 printf '\n[3/6] default tests green, count asserted\n'
-nextest_output="$(cargo nextest run -p "${crate}" --no-fail-fast 2>&1)"
+nextest_status=0
+nextest_output="$(cargo nextest run -p "${crate}" --no-fail-fast 2>&1)" || nextest_status=$?
 printf '%s\n' "${nextest_output}"
+if [ "${nextest_status}" -ne 0 ]; then
+    printf 'ERROR: %s nextest exited %s (failures listed above)\n' "${crate}" "${nextest_status}" >&2
+    exit "${nextest_status}"
+fi
 ran_count="$(printf '%s\n' "${nextest_output}" | grep -oE '[0-9]+ tests run:' | grep -oE '[0-9]+' | tail -1)"
 if [ -z "${ran_count}" ] || [ "${ran_count}" -eq 0 ]; then
     printf 'ERROR: %s nextest reported zero tests run -- an empty run is not a pass\n' "${crate}" >&2
@@ -52,8 +57,13 @@ cargo doc -p "${crate}" --no-deps
 # scripts/proxima-clock-gate.sh's last step) or it will silently stop
 # proving the new doctest runs.
 printf '\n[6/6] doctests: 0 fences in src/ -- asserting 0 expected, 0 found\n'
-doctest_output="$(cargo test --doc -p "${crate}" 2>&1)"
+doctest_status=0
+doctest_output="$(cargo test --doc -p "${crate}" 2>&1)" || doctest_status=$?
 printf '%s\n' "${doctest_output}"
+if [ "${doctest_status}" -ne 0 ]; then
+    printf 'ERROR: %s doctest run exited %s (output above)\n' "${crate}" "${doctest_status}" >&2
+    exit "${doctest_status}"
+fi
 if ! printf '%s\n' "${doctest_output}" | grep -qE '^test result: ok\. 0 passed'; then
     printf 'ERROR: %s doctest run no longer matches the expected 0-fence baseline -- update this gate\n' "${crate}" >&2
     exit 1
