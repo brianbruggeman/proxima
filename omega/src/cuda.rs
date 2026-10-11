@@ -1224,13 +1224,7 @@ fn operand_read(
         Some(Codec::BFloat16) => Ok(format!(
             "bf16_element(in{index} + ({offset} / {BFLOAT16_BLOCK_ELEMENTS}) * {BFLOAT16_BLOCK_BYTES}, (unsigned int)({offset} % {BFLOAT16_BLOCK_ELEMENTS}))"
         )),
-        // No CUDA unpack kernel exists for any of these 20 -- `PackedOperands`
-        // is only ever populated via `codec_from_quantized_block`, which maps
-        // just the 9 codecs above for this backend, so this arm is
-        // unreachable by construction; kept exhaustive (mirroring
-        // `crate::msl::signature_tokens_prelude::operand_read`'s own trailing
-        // arm) so a future codec forces a decision here rather than slipping
-        // through.
+        // a future codec must choose here; no silent raw read of packed bytes
         Some(
             Codec::Q5_1
             | Codec::Q5_0
@@ -1251,11 +1245,12 @@ fn operand_read(
             | Codec::Mxfp4
             | Codec::Nvfp4
             | Codec::Q1_0
-            | Codec::Q2_0,
-        ) => Ok(format!("in{index}[{offset}]")),
-        Some(Codec::BFloat8 | Codec::Bf8E5M2 | Codec::Bf4E2M1 | Codec::Fp6E3M2) => {
-            Err(EmitError::CudaUnsupportedCodec { node })
-        }
+            | Codec::Q2_0
+            | Codec::BFloat8
+            | Codec::Bf8E5M2
+            | Codec::Bf4E2M1
+            | Codec::Fp6E3M2,
+        ) => Err(EmitError::CudaUnsupportedCodec { node }),
     }
 }
 
