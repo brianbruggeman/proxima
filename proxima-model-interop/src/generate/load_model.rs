@@ -1023,9 +1023,9 @@ pub struct LoadedModel<'file> {
     /// orphans them.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) plan_life: Arc<()>,
-    /// Where the device-resident kv buffers of a decode come from; `allocate_placed_buffer` unless a caller replaced it. Placement only, so no cache key changes: the same values land in other memory.
+    /// Where the device-resident kv buffers of a decode come from: `None` is `allocate_placed_buffer` through the resident store (`ServingConfig::resident_kv_bytes`), which a finished generation hands its buffers back to; `Some` is a caller's replacement, asked per buffer every generation and never pooled because the memory behind its buffers is the caller's. Placement only, so no cache key changes: the same values land in other memory.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-    pub(super) kv_buffer_source: KvBufferSource,
+    pub(super) kv_buffer_source: Option<KvBufferSource>,
     /// Who may use the device, a request or an anticipatory prefill
     /// ([`super::prewarm_gate`]'s module doc).
     pub(super) prewarm_gate: super::PrewarmGate,

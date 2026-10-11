@@ -68,6 +68,8 @@ pub(super) struct KvPlacements<'buffers> {
 }
 
 struct DeviceKvLayer {
+    #[cfg(feature = "instrument")]
+    layer: usize,
     k_even: PlacedBuffer,
     k_odd: PlacedBuffer,
     v: PlacedBuffer,
@@ -98,14 +100,43 @@ pub(super) struct DeviceKv {
     element: KvElement,
 }
 
+#[cfg(feature = "instrument")]
+fn acquire(
+    source: &mut impl FnMut(usize) -> Result<PlacedBuffer, omega::MetalError>,
+    layer: usize,
+    buffer: &'static str,
+    bytes: usize,
+) -> Result<PlacedBuffer, InteropError> {
+    let started = read_ticks();
+    let placed = source(bytes)?;
+    debug!(
+        layer = layer as u64,
+        buffer,
+        bytes = bytes as u64,
+        acquire_ns = ticks_to_nanos(elapsed_ticks(started)),
+        "kv_adopt_buffer"
+    );
+    Ok(placed)
+}
+
+#[cfg(not(feature = "instrument"))]
+fn acquire(
+    source: &mut impl FnMut(usize) -> Result<PlacedBuffer, omega::MetalError>,
+    _layer: usize,
+    _buffer: &'static str,
+    bytes: usize,
+) -> Result<PlacedBuffer, InteropError> {
+    Ok(source(bytes)?)
+}
+
 impl DeviceKvLayer {
     fn allocate(
+        layer: usize,
         cache: &LayerCache,
-        even_odd_row: usize,
-        v_row: usize,
+        (even_odd_row, v_row): (usize, usize),
         full_capacity_rows: usize,
         max_step_rows: usize,
-        source: KvBufferSource,
+        source: &mut impl FnMut(usize) -> Result<PlacedBuffer, omega::MetalError>,
         element: KvElement,
     ) -> Result<Self, InteropError> {
         let element_bytes = element_bytes(element)?;
@@ -118,9 +149,9 @@ impl DeviceKvLayer {
         };
         let even_odd_row_bytes = even_odd_row * element_bytes;
         let v_row_bytes = v_row * element_bytes;
-        let k_even = source(capacity_rows * even_odd_row_bytes)?;
-        let k_odd = source(capacity_rows * even_odd_row_bytes)?;
-        let v = source(capacity_rows * v_row_bytes)?;
+        let k_even = acquire(source, layer, "k_even", capacity_rows * even_odd_row_bytes)?;
+        let k_odd = acquire(source, layer, "k_odd", capacity_rows * even_odd_row_bytes)?;
+        let v = acquire(source, layer, "v", capacity_rows * v_row_bytes)?;
         let staging = if element == KvElement::F32 {
             None
         } else {
@@ -132,6 +163,8 @@ impl DeviceKvLayer {
             ])
         };
         Ok(Self {
+            #[cfg(feature = "instrument")]
+            layer,
             k_even,
             k_odd,
             v,
@@ -164,6 +197,28 @@ impl DeviceKvLayer {
     /// head is overwritten here, so zeroing it first is a second pass over
     /// every byte of a long context.
     fn seed(&mut self, cache: &LayerCache, cached_len: usize) {
+        #[cfg(feature = "instrument")]
+        let write_started = read_ticks();
+        let kept = self.write_kept(cache, cached_len);
+        #[cfg(feature = "instrument")]
+        let write_ns = ticks_to_nanos(elapsed_ticks(write_started));
+        #[cfg(feature = "instrument")]
+        let zero_started = read_ticks();
+        self.zero_tail(kept);
+        #[cfg(feature = "instrument")]
+        let zero_ns = ticks_to_nanos(elapsed_ticks(zero_started));
+        #[cfg(feature = "instrument")]
+        debug!(
+            layer = self.layer as u64,
+            kept_rows = kept as u64,
+            zero_bytes = ((self.capacity_rows - kept) * (2 * self.even_odd_row_bytes + self.v_row_bytes)) as u64,
+            write_ns,
+            zero_ns,
+            "kv_adopt_seed"
+        );
+    }
+
+    fn write_kept(&mut self, cache: &LayerCache, cached_len: usize) -> usize {
         let even_odd_row = self.even_odd_row;
         let v_row = self.v_row;
         let first = self.first_kept(cached_len);
@@ -175,6 +230,10 @@ impl DeviceKvLayer {
         {
             self.write_rows(cache, slot_start, rows, target_row, even_odd_row, v_row);
         }
+        kept
+    }
+
+    fn zero_tail(&self, kept: usize) {
         for (buffer, row_bytes) in [
             (&self.k_even, self.even_odd_row_bytes),
             (&self.k_odd, self.even_odd_row_bytes),
@@ -343,13 +402,13 @@ impl DeviceKv {
         capacity_positions: usize,
         bucket_tokens: usize,
         max_step_rows: usize,
-        source: KvBufferSource,
+        mut source: impl FnMut(usize) -> Result<PlacedBuffer, omega::MetalError>,
         element: KvElement,
     ) -> Result<Option<Self>, InteropError> {
         let full_capacity_rows =
             kv_extent(capacity_positions, usize::MAX, bucket_tokens) + bucket_tokens;
         let mut layers: Vec<Option<DeviceKvLayer>> = Vec::with_capacity(layer_caches.len());
-        for (state, widths) in layer_caches.iter().zip(layer_row_widths) {
+        for (index, (state, widths)) in layer_caches.iter().zip(layer_row_widths).enumerate() {
             match (state, widths) {
                 (
                     LayerCacheState::Attention(cache),
@@ -365,12 +424,12 @@ impl DeviceKv {
                         return Ok(None);
                     }
                     let mut device_layer = DeviceKvLayer::allocate(
+                        index,
                         cache,
-                        *even_odd_row,
-                        *v_row,
+                        (*even_odd_row, *v_row),
                         full_capacity_rows,
                         max_step_rows,
-                        source,
+                        &mut source,
                         element,
                     )?;
                     device_layer.seed(cache, cached_len);
@@ -394,6 +453,16 @@ impl DeviceKv {
             max_step_rows,
             element,
         }))
+    }
+
+    /// Gives up the cache buffers of every resident layer so the next [`Self::adopt`] can bind them
+    /// instead of allocating; the f32 staging buffers of a half-width layer are freed here.
+    pub(super) fn into_buffers(self) -> Vec<PlacedBuffer> {
+        self.layers
+            .into_iter()
+            .flatten()
+            .flat_map(|layer| [layer.k_even, layer.k_odd, layer.v])
+            .collect()
     }
 
     pub(super) fn max_step_rows(&self) -> usize {
@@ -756,12 +825,12 @@ mod tests {
         let capacity_rows = 48;
         let cache = host_cache(None, positions);
         let mut layer = DeviceKvLayer::allocate(
+            0,
             &cache,
-            EVEN_ODD_ROW,
-            V_ROW,
+            (EVEN_ODD_ROW, V_ROW),
             capacity_rows,
             3,
-            allocate_placed_buffer,
+            &mut allocate_placed_buffer,
             GgmlType::F32.into(),
         )
             .expect("device kv allocates on the real Metal device");
@@ -949,6 +1018,68 @@ mod tests {
                 "v holds the same rows at its own width"
             );
         }
+    }
+
+    #[test]
+    fn buffers_one_generation_gives_back_serve_the_next_and_are_zeroed_past_its_rows() {
+        let widths = [LayerPadRowWidths::Attention {
+            even_odd_row: EVEN_ODD_ROW,
+            v_row: V_ROW,
+        }];
+        let mut first_caches = alloc::vec![LayerCacheState::Attention(host_cache(None, 37))];
+        let first = DeviceKv::adopt(
+            &mut first_caches,
+            &widths,
+            37,
+            80,
+            4,
+            3,
+            allocate_placed_buffer,
+            GgmlType::F32.into(),
+        )
+            .expect("device kv allocates on the real Metal device")
+            .expect("a plain attention layer is adoptable");
+        let mut kept = first.into_buffers();
+        assert_eq!(kept.len(), 3, "k_even, k_odd and v of the one layer come back");
+        for buffer in &kept {
+            let floats = resident_plans::kv_bytes(core::slice::from_ref(buffer)) / size_of::<f32>();
+            omega::write_placed_buffer_f32(buffer, 0, &alloc::vec![f32::NAN; floats]);
+        }
+
+        let mut allocations = 0;
+        let mut second_caches = alloc::vec![LayerCacheState::Attention(host_cache(None, 37))];
+        let second = DeviceKv::adopt(
+            &mut second_caches,
+            &widths,
+            37,
+            80,
+            4,
+            3,
+            |bytes| {
+                resident_plans::take_kv_buffer(&mut kept, bytes).map_or_else(
+                    || {
+                        allocations += 1;
+                        allocate_placed_buffer(bytes)
+                    },
+                    Ok,
+                )
+            },
+            GgmlType::F32.into(),
+        )
+            .expect("device kv binds the kept buffers")
+            .expect("a plain attention layer is adoptable");
+
+        assert_eq!(allocations, 0, "every buffer of the second generation was bound, none allocated");
+        assert!(kept.is_empty(), "the second generation took all three kept buffers");
+        let layer = second.layers[0].as_ref().expect("layer 0 is resident");
+        let tail_rows = layer.capacity_rows - 37;
+        let tail = omega::read_placed_buffer_f32(&layer.k_even, 37 * layer.even_odd_row_bytes, tail_rows * EVEN_ODD_ROW);
+        assert!(
+            tail.iter().all(|value| *value == 0.0),
+            "stale NaN rows from the first generation are zeroed past the seeded rows"
+        );
+        let head = omega::read_placed_buffer_f32(&layer.v, 0, 37 * V_ROW);
+        assert_eq!(head, rows(0, 37, V_ROW, 2), "the seeded rows are the second generation's own");
     }
 
     #[test]

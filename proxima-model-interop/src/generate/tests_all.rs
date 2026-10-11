@@ -2581,13 +2581,18 @@ pub(super) mod memory_fit_gate_tests {
     fn with_kv_buffer_source_replaces_the_default_source() {
         use core::sync::atomic::Ordering;
 
-        let default_buffer = (model_with(1_000_000).kv_buffer_source)(4096);
-        assert!(default_buffer.is_ok(), "the default source must place 4096 bytes");
+        assert!(
+            model_with(1_000_000).kv_buffer_source.is_none(),
+            "the default source is the resident store, not a caller function"
+        );
         assert_eq!(REQUESTS.load(Ordering::SeqCst), 0, "the default source must not touch the counter");
 
         let model = model_with(1_000_000).with_kv_buffer_source(counting_source);
-        let counted_buffer = (model.kv_buffer_source)(4096);
-        assert!(counted_buffer.is_ok(), "the replacement source must place 4096 bytes");
+        let counted_buffer = model.kv_buffer_source.map(|source| source(4096));
+        assert!(
+            counted_buffer.is_some_and(|placed| placed.is_ok()),
+            "the replacement source must place 4096 bytes"
+        );
         assert_eq!(REQUESTS.load(Ordering::SeqCst), 1, "the replacement source must be the one asked");
     }
 
@@ -2641,7 +2646,7 @@ pub(super) mod memory_fit_gate_tests {
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: crate::generate::Arc::new(()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-            kv_buffer_source: allocate_placed_buffer,
+            kv_buffer_source: None,
             prewarm_gate: crate::generate::PrewarmGate::new(),
             prewarm_queue: crate::generate::PrewarmQueue::new(),
         }

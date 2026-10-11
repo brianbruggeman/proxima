@@ -161,6 +161,9 @@ pub const DEFAULT_GPU_LAYERS: i32 = if cfg!(feature = "metal") {
 /// one prefill plan of a 970-token prompt on a 35-layer decoder (402 MB of output slots).
 pub const DEFAULT_RESIDENT_PREFILL_PLAN_BYTES: usize = 512 * 1024 * 1024;
 
+/// [`ServingConfig::default`]'s `resident_kv_bytes`: 512 MiB keeps the 107 MB of device KV buffers a 1000-token granite moe generation adopts, with room for a longer context.
+pub const DEFAULT_RESIDENT_KV_BYTES: usize = 512 * 1024 * 1024;
+
 /// [`ServingConfig::default`]'s `batch_size`: llama.cpp's own `-b` default
 /// (`common/common.h` `n_batch`), the logical batch an `-ub` micro-batch is
 /// clamped to.
@@ -1124,6 +1127,16 @@ pub struct ServingConfig<'model> {
     /// behaviour before this field existed. Decode-width (`new_count == 1`)
     /// plans are not counted here; they are always resident.
     pub resident_prefill_plan_bytes: usize,
+    /// Not an upstream llama-server flag -- the most bytes of device KV buffers
+    /// (`generate::device_kv::DeviceKv`) kept bound between generations of one
+    /// loaded model. A generation's `DeviceKv::adopt` binds a kept buffer that is
+    /// large enough instead of asking the device for a new one, and hands every
+    /// buffer back when the generation ends, so a request that repeats a shape
+    /// skips the 72 allocations a 24-layer granite moe adopt makes. Buffers past
+    /// the budget are freed when the generation ends. `0` allocates per generation,
+    /// which is the behaviour before this field existed. Bytes held show up in the
+    /// device allocation between generations, not only during one.
+    pub resident_kv_bytes: usize,
     /// I3 (ROW 501 HeteGen/FlexGen): issue the next layer's expert-source
     /// uploads while the current layer's dispatches still run, instead of
     /// waiting for the dispatches to finish first. Gated on a lifetime
@@ -1288,6 +1301,7 @@ impl Default for ServingConfig<'static> {
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
+            resident_kv_bytes: DEFAULT_RESIDENT_KV_BYTES,
             overlap_transfer_compute: false,
             warm_model_buffers_at_load: true,
             admission_schedule: AdmissionSchedule {
@@ -1771,6 +1785,7 @@ mod tests {
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
+            resident_kv_bytes: DEFAULT_RESIDENT_KV_BYTES,
             overlap_transfer_compute: false,
             warm_model_buffers_at_load: true,
             admission_schedule: AdmissionSchedule {
@@ -1955,6 +1970,7 @@ mod tests {
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
+            resident_kv_bytes: DEFAULT_RESIDENT_KV_BYTES,
             overlap_transfer_compute: false,
             warm_model_buffers_at_load: true,
             admission_schedule: AdmissionSchedule {
@@ -2084,6 +2100,7 @@ mod tests {
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
+            resident_kv_bytes: DEFAULT_RESIDENT_KV_BYTES,
             overlap_transfer_compute: false,
             warm_model_buffers_at_load: true,
             admission_schedule: AdmissionSchedule {
@@ -2186,6 +2203,7 @@ mod tests {
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
+            resident_kv_bytes: DEFAULT_RESIDENT_KV_BYTES,
             overlap_transfer_compute: false,
             warm_model_buffers_at_load: true,
             admission_schedule: AdmissionSchedule {
@@ -2278,6 +2296,7 @@ mod tests {
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
+            resident_kv_bytes: DEFAULT_RESIDENT_KV_BYTES,
             overlap_transfer_compute: false,
             warm_model_buffers_at_load: true,
             admission_schedule: AdmissionSchedule {

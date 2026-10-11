@@ -16,7 +16,7 @@ use crate::RopeScaling;
 use crate::codec_policy_settings::CodecPolicySettings;
 use crate::prompt_cache_settings::PromptCacheSettings;
 use crate::serving::{
-    ContextLength, DEFAULT_BATCH_SIZE, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH,
+    ContextLength, DEFAULT_BATCH_SIZE, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH, DEFAULT_RESIDENT_KV_BYTES,
     DEFAULT_RESIDENT_PREFILL_PLAN_BYTES, DEFAULT_UBATCH_SIZE, GdnPrefillBackend, NamePattern,
     ServingConfig, WeightPrecisionRule,
 };
@@ -363,6 +363,10 @@ pub struct ServingSettings {
     #[setting(default = 536870912)]
     #[builder(default = DEFAULT_RESIDENT_PREFILL_PLAN_BYTES)]
     pub resident_prefill_plan_bytes: usize,
+    /// `ServingConfig::resident_kv_bytes`: bytes of device KV buffers kept bound between generations of one loaded model; `0` allocates them per generation.
+    #[setting(default = 536870912)]
+    #[builder(default = DEFAULT_RESIDENT_KV_BYTES)]
+    pub resident_kv_bytes: usize,
     /// `ServingConfig::overlap_transfer_compute`: overlap weight transfer with compute.
     #[setting(default = false)]
     #[builder(default = false)]
@@ -486,6 +490,7 @@ impl ServingSettings {
             command_buffer_chunks: self.command_buffer_chunks,
             max_command_buffers_per_token: self.max_command_buffers_per_token,
             resident_prefill_plan_bytes: self.resident_prefill_plan_bytes,
+            resident_kv_bytes: self.resident_kv_bytes,
             overlap_transfer_compute: self.overlap_transfer_compute,
             warm_model_buffers_at_load: self.warm_model_buffers_at_load,
             admission_schedule: self.admission_schedule.as_admission_schedule(),
@@ -1038,6 +1043,7 @@ plan_refit = false
 command_buffer_chunks = 8
 max_command_buffers_per_token = 12
 resident_prefill_plan_bytes = 805306368
+resident_kv_bytes = 268435456
 overlap_transfer_compute = true
 warm_model_buffers_at_load = false
 "#;
@@ -1055,6 +1061,7 @@ warm_model_buffers_at_load = false
             .command_buffer_chunks(8)
             .max_command_buffers_per_token(12)
             .resident_prefill_plan_bytes(805_306_368)
+            .resident_kv_bytes(268_435_456)
             .overlap_transfer_compute(true)
             .warm_model_buffers_at_load(false)
             .build();
@@ -1070,6 +1077,7 @@ warm_model_buffers_at_load = false
                 ("PROXIMA_SERVING_COMMAND_BUFFER_CHUNKS", Some("8")),
                 ("PROXIMA_SERVING_MAX_COMMAND_BUFFERS_PER_TOKEN", Some("12")),
                 ("PROXIMA_SERVING_RESIDENT_PREFILL_PLAN_BYTES", Some("805306368")),
+                ("PROXIMA_SERVING_RESIDENT_KV_BYTES", Some("268435456")),
                 ("PROXIMA_SERVING_OVERLAP_TRANSFER_COMPUTE", Some("true")),
                 ("PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD", Some("false")),
             ],
@@ -1090,6 +1098,7 @@ warm_model_buffers_at_load = false
         assert_eq!(config.command_buffer_chunks, 8);
         assert_eq!(config.max_command_buffers_per_token, 12);
         assert_eq!(config.resident_prefill_plan_bytes, 805_306_368);
+        assert_eq!(config.resident_kv_bytes, 268_435_456);
         assert!(config.overlap_transfer_compute);
         assert!(!config.warm_model_buffers_at_load);
 
@@ -1106,6 +1115,7 @@ warm_model_buffers_at_load = false
         assert_eq!(lowered.command_buffer_chunks, today.command_buffer_chunks);
         assert_eq!(lowered.max_command_buffers_per_token, today.max_command_buffers_per_token);
         assert_eq!(lowered.resident_prefill_plan_bytes, today.resident_prefill_plan_bytes);
+        assert_eq!(lowered.resident_kv_bytes, today.resident_kv_bytes);
         assert_eq!(lowered.overlap_transfer_compute, today.overlap_transfer_compute);
         assert_eq!(lowered.warm_model_buffers_at_load, today.warm_model_buffers_at_load);
         assert!(today.warm_model_buffers_at_load, "the warm-up is on by default");

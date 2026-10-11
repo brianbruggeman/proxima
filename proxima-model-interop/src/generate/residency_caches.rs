@@ -2314,6 +2314,15 @@ pub(crate) struct BackendRuntime {
     /// constant dispatch.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) decode_plans: resident_plans::DecodePlans,
+    /// Device KV buffers [`DeviceKv`] handed back when the last generation ended
+    /// and the next [`DeviceKv::adopt`] binds before it asks the device for
+    /// more; they come from and go back to [`resident_plans`] with the plans.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) kv_buffers: Vec<PlacedBuffer>,
+    /// `ServingConfig::resident_kv_bytes`, read once at construction: the bytes
+    /// of [`Self::kv_buffers`] that outlive a generation.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) resident_kv_bytes: usize,
     /// The model token and numeric identity [`Self::decode_plans`] return to
     /// on drop; `None` for a runtime built by [`Self::new`] directly.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -2371,6 +2380,7 @@ impl Drop for BackendRuntime {
                 decode: core::mem::take(&mut self.decode_plans),
                 wide,
                 wide_order,
+                kv_buffers: core::mem::take(&mut self.kv_buffers),
             };
             resident_plans::put(&owner, identity, plans);
         }
@@ -2407,6 +2417,10 @@ impl BackendRuntime {
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             decode_plans: resident_plans::DecodePlans::new(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            kv_buffers: Vec::new(),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            resident_kv_bytes: config.resident_kv_bytes,
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             resident_home: None,
             plan_hits: 0,
             plan_misses: 0,
@@ -2436,9 +2450,23 @@ impl BackendRuntime {
             runtime.decode_plans = resident.decode;
             runtime.placed_plans = resident.wide;
             runtime.placed_order = resident.wide_order;
+            runtime.kv_buffers = resident.kv_buffers;
             runtime.resident_home = Some((Arc::clone(owner), identity));
         }
         runtime
+    }
+
+    /// The smallest kept device KV buffer that holds `bytes`, or `None`.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn take_kv_buffer(&mut self, bytes: usize) -> Option<PlacedBuffer> {
+        resident_plans::take_kv_buffer(&mut self.kv_buffers, bytes)
+    }
+
+    /// Keeps the buffers a finished generation's [`DeviceKv`] held, up to
+    /// `ServingConfig::resident_kv_bytes`; the rest are freed here.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn keep_kv_buffers(&mut self, returned: Vec<PlacedBuffer>) {
+        resident_plans::keep_kv_buffers(&mut self.kv_buffers, returned, self.resident_kv_bytes);
     }
 
     /// Drops every decode-shaped plan. The host-cache steps before a device-KV
