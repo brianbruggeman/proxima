@@ -506,6 +506,7 @@ pub(super) fn render_reduce(
             element_type,
             epilogue_body,
             epilogue_operands,
+            metal,
         );
     }
     source.push_str("}\n");
@@ -696,8 +697,9 @@ pub(super) fn push_serial_reduce_body(
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    metal: &MetalOnlyExtras,
 ) {
-    let narrow = serial_reduce_index32_fits(resolved, output_axes) && coord_index32_override();
+    let narrow = metal.coord_index32;
     source.push_str("    if ((long)gid >= u.output_total) { return; }\n");
 
     source.push_str(&format!("    long full_coord[{rank_len}];\n"));

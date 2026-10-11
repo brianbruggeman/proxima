@@ -811,7 +811,7 @@ async fn a_route_that_moves_along_a_reduced_axis_renders_the_serial_body_fetchin
     assert!(!kernel.source.contains("simd_sum"), "{}", kernel.source);
 }
 
-fn gathered_matmul_op(tokens: u32, experts: u32, rows: u32, k: u32) -> BoundOp {
+pub(super) fn gathered_matmul_op(tokens: u32, experts: u32, rows: u32, k: u32) -> BoundOp {
     let mut program = Vec::new();
     let weight = append(
         &mut program,
@@ -4492,7 +4492,7 @@ fn cumsum_op(extent: u32) -> BoundOp {
 
 /// `table[ids[s], d]` over iteration space `(s, d)`: the same worked
 /// example `map.rs`'s docs use, as a standalone elementwise gather.
-fn embedding_lookup_op(vocab: u32, dim: u32, seq: u32) -> BoundOp {
+pub(super) fn embedding_lookup_op(vocab: u32, dim: u32, seq: u32) -> BoundOp {
     let mut program = Vec::new();
     let table = append(
         &mut program,
@@ -4749,7 +4749,7 @@ fn a_gather_kernel_binds_and_declares_the_fault_buffer() {
     assert!(
         kernel
             .source
-            .contains("fetched0 < 0 || fetched0 >= u.gather_extent[0]"),
+            .contains("fetched0 < 0 || fetched0 >= ((int)u.gather_extent[0])"),
         "the fault check must run before the clamp, on the unclamped fetched value"
     );
 }
