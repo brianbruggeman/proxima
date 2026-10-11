@@ -424,6 +424,9 @@ fn run_sequential() -> ParitySample {
                 LayerCacheRoots::SharedFromLayer(_) => {
                     unreachable!("qwen3.5 has no cross-layer shared-KV layers")
                 }
+                LayerCacheRoots::ShortConv { .. } => {
+                    unreachable!("qwen3.5 has no short-convolution layers")
+                }
             }
             let _ = layer;
         }
