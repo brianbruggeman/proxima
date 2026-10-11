@@ -2101,28 +2101,8 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                     alloc::vec![Extent::Static(embedding * 3), Extent::Static(embedding)],
                     &alloc::format!("blk.{layer}.shortconv.in_proj.weight"),
                 );
-                let b_proj_map = alloc::format!("d+0@{embedding},i->di");
-                let b_proj = elementwise(
-                    &mut program,
-                    DType::Float32,
-                    ScalarOp::Identity,
-                    &[(in_proj, b_proj_map.as_str())],
-                )?;
-                let c_proj_map = alloc::format!("d+{embedding}@{embedding},i->di");
-                let c_proj = elementwise(
-                    &mut program,
-                    DType::Float32,
-                    ScalarOp::Identity,
-                    &[(in_proj, c_proj_map.as_str())],
-                )?;
-                let x_offset = embedding * 2;
-                let x_proj_map = alloc::format!("d+{x_offset}@{embedding},i->di");
-                let x_proj = elementwise(
-                    &mut program,
-                    DType::Float32,
-                    ScalarOp::Identity,
-                    &[(in_proj, x_proj_map.as_str())],
-                )?;
+                let (b_proj, c_proj, x_proj) =
+                    fused_short_conv_projections(&mut program, in_proj, embedding)?;
                 // `[embedding, l_cache]`, NOT `[l_cache, embedding]` --
                 // `causal_conv1d`'s own doc on its `dl->sld` map explains why:
                 // the real on-disk tensor has `l_cache` as its fastest axis,

@@ -1298,28 +1298,8 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                 alloc::vec![Extent::Static(embedding * 3), Extent::Static(embedding)],
                 &alloc::format!("blk.{layer}.shortconv.in_proj.weight"),
             );
-            let b_proj_map = alloc::format!("d+0@{embedding},i->di");
-            let b_proj = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Identity,
-                &[(in_proj, b_proj_map.as_str())],
-            )?;
-            let c_proj_map = alloc::format!("d+{embedding}@{embedding},i->di");
-            let c_proj = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Identity,
-                &[(in_proj, c_proj_map.as_str())],
-            )?;
-            let x_offset = embedding * 2;
-            let x_proj_map = alloc::format!("d+{x_offset}@{embedding},i->di");
-            let x_proj = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Identity,
-                &[(in_proj, x_proj_map.as_str())],
-            )?;
+            let (b_proj, c_proj, x_proj) =
+                fused_short_conv_projections(&mut program, in_proj, embedding)?;
             let conv_weight = input_leaf(
                 &mut program,
                 DType::Float32,

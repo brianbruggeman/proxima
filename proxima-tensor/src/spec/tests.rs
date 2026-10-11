@@ -6340,8 +6340,10 @@ async fn causal_conv1d_matches_a_hand_computed_causal_window() {
 }
 
 #[test]
-fn architecture_matrix_shortconv_fused_projection_row_views() {
-    const EMBEDDING: u32 = 2;
+fn architecture_matrix_shortconv_fused_projection_contracts_the_input_axis() {
+    const EMBEDDING: u32 = 3;
+    let rows = (EMBEDDING * 3) as usize;
+    let columns = EMBEDDING as usize;
     let mut program = Vec::new();
     let in_proj = input_leaf(
         &mut program,
@@ -6349,51 +6351,63 @@ fn architecture_matrix_shortconv_fused_projection_row_views() {
         alloc::vec![Extent::Static(EMBEDDING * 3), Extent::Static(EMBEDDING)],
         "in_proj",
     );
-    let b_map = alloc::format!("d+0@{EMBEDDING},i->di");
-    let b_proj = elementwise(
+    let activation = input_leaf(
         &mut program,
         DType::Float32,
-        ScalarOp::Identity,
-        &[(in_proj, b_map.as_str())],
-    )
-    .expect("B rows slice from the fused projection");
-    let c_map = alloc::format!("d+{EMBEDDING}@{EMBEDDING},i->di");
-    let c_proj = elementwise(
-        &mut program,
-        DType::Float32,
-        ScalarOp::Identity,
-        &[(in_proj, c_map.as_str())],
-    )
-    .expect("C rows slice from the fused projection");
-    let x_offset = EMBEDDING * 2;
-    let x_map = alloc::format!("d+{x_offset}@{EMBEDDING},i->di");
-    let x_proj = elementwise(
-        &mut program,
-        DType::Float32,
-        ScalarOp::Identity,
-        &[(in_proj, x_map.as_str())],
-    )
-    .expect("X rows slice from the fused projection");
+        alloc::vec![Extent::Static(1), Extent::Static(EMBEDDING)],
+        "activation",
+    );
+    let (b_proj, c_proj, x_proj) = fused_short_conv_projections(&mut program, in_proj, EMBEDDING)
+        .expect("B, C and x views slice from the fused projection");
+    let mut contract = |projection: NodeId| {
+        let product = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(activation, "sd->sdg"), (projection, "dg->sdg")],
+        )
+        .expect("activation multiplies the projection view");
+        reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            product,
+            "sdg->sdg",
+            "sg->sdg",
+        )
+        .expect("the input axis reduces")
+    };
+    let outputs = [contract(b_proj), contract(c_proj), contract(x_proj)];
 
-    let in_proj_values = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+    let in_proj_values: Vec<f32> = (0..rows * columns)
+        .map(|index| ((index / columns * 7 + index % columns * 3) % 11) as f32 - 5.0)
+        .collect();
+    let activation_values = [2.0f32, -1.0, 0.5];
     let evaluated = crate::cpu::evaluate_quantized(
         &program,
         &[],
-        &[crate::cpu::QuantizedBlock::Float32(&in_proj_values)],
-        &[b_proj, c_proj, x_proj],
+        &[
+            crate::cpu::QuantizedBlock::Float32(&in_proj_values),
+            crate::cpu::QuantizedBlock::Float32(&activation_values),
+        ],
+        &outputs,
     )
-    .expect("fused projection row views evaluate");
-    let (b_values, b_shape) = evaluated.get(b_proj).expect("B projection exists");
-    let (c_values, c_shape) = evaluated.get(c_proj).expect("C projection exists");
-    let (x_values, x_shape) = evaluated.get(x_proj).expect("X projection exists");
+    .expect("fused projection views evaluate");
 
-    assert_eq!(b_shape, [2, 2]);
-    assert_eq!(c_shape, [2, 2]);
-    assert_eq!(x_shape, [2, 2]);
-    assert_eq!(b_values, [1.0, 2.0, 3.0, 4.0]);
-    assert_eq!(c_values, [5.0, 6.0, 7.0, 8.0]);
-    assert_eq!(x_values, [9.0, 10.0, 11.0, 12.0]);
-    std::println!("branches=3 shapes=3 values=12 offsets=0,2,4");
+    for (band, output) in outputs.iter().enumerate() {
+        let (values, shape) = evaluated.get(*output).expect("branch output exists");
+        let expected: Vec<f32> = (0..columns)
+            .map(|channel| {
+                let row = band * columns + channel;
+                (0..columns)
+                    .map(|input| in_proj_values[row * columns + input] * activation_values[input])
+                    .sum()
+            })
+            .collect();
+        assert_eq!(shape, [1, u64::from(EMBEDDING)], "band {band}");
+        assert_eq!(values, expected.as_slice(), "band {band}: row of the fused weight times the activation");
+    }
 }
 
 #[test]
