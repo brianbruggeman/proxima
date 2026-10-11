@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use moe_test_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -169,4 +169,45 @@ pub fn all_within(actual: &[f64], expected: &[f64], tolerance: f64) -> bool {
             .iter()
             .zip(expected)
             .all(|(actual, expected)| (actual - expected).abs() <= tolerance)
+}
+
+pub const EMBEDDING_DIMENSION: usize = 384;
+
+pub fn cls_rows(values: &[f32], rows: usize) -> Result<Vec<Vec<f32>>> {
+    ensure!(
+        rows > 0 && values.len().is_multiple_of(rows),
+        "{} values do not split into {rows} rows",
+        values.len()
+    );
+    let stride = values.len() / rows;
+    ensure!(
+        stride >= EMBEDDING_DIMENSION,
+        "row stride {stride} is below {EMBEDDING_DIMENSION}"
+    );
+    Ok(values
+        .chunks_exact(stride)
+        .map(|row| row[..EMBEDDING_DIMENSION].to_vec())
+        .collect())
+}
+
+pub fn flatten_as_float(rows: &[Vec<i64>]) -> Vec<f32> {
+    rows.iter().flatten().map(|&value| value as f32).collect()
+}
+
+pub fn sentence_differences(actual: &[Vec<f32>], expected: &[Vec<f32>]) -> Result<Vec<f32>> {
+    ensure!(
+        actual.len() == expected.len(),
+        "{} actual rows against {} expected rows",
+        actual.len(),
+        expected.len()
+    );
+    Ok(actual
+        .iter()
+        .zip(expected)
+        .map(|(actual, expected)| max_abs_difference(actual, expected))
+        .collect())
+}
+
+pub fn norm(row: &[f32]) -> f32 {
+    row.iter().map(|value| value * value).sum::<f32>().sqrt()
 }

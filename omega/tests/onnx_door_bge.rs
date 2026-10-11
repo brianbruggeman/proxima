@@ -6,7 +6,11 @@
 #[path = "support/bge.rs"]
 mod bge;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
+use omega::onnx_door::{DoorBatch, DoorConfig, OnnxDoor};
+use proxima_primitives::pipe::Pipe;
+
+use bge::RecordBatch;
 
 const MODEL_BYTES: usize = 133_093_490;
 const MODEL_SHA256: &str = "828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35";
@@ -152,7 +156,7 @@ fn bge_fixture_first_three_corpus_rows_equal_the_hard_coded_id_arrays_of_bge_eva
     Ok(())
 }
 
-const EMBEDDING_DIMENSION: usize = 384;
+const EMBEDDING_DIMENSION: usize = bge::EMBEDDING_DIMENSION;
 const ONNXRUNTIME_COSINES: [f64; 3] = [0.936_311, 0.378_777, 0.334_176];
 const COSINE_TOLERANCE: f64 = 1e-4;
 const PADDING_TOLERANCE: f32 = 1e-5;
@@ -300,5 +304,195 @@ fn tract_record_degenerate_control_cosine_a_b_altered_by_1e_3_fails() -> Result<
         !bge::all_within(&cosines, &altered, COSINE_TOLERANCE),
         "an alteration of 1e-3 stayed within {COSINE_TOLERANCE}"
     );
+    Ok(())
+}
+
+const CPU_TOLERANCE: f32 = 1e-5;
+const OUTPUT_NAME: &str = "last_hidden_state";
+const UNIT_NORM_TOLERANCE: f32 = 1e-6;
+
+#[derive(Clone, Copy)]
+enum MaskPolicy {
+    Recorded,
+    PadPositionsUnmasked,
+}
+
+fn cpu_door() -> Result<OnnxDoor> {
+    OnnxDoor::from_bytes(bge::read_model()?, &DoorConfig::default())
+        .map_err(|error| anyhow!("cpu door config: {error}"))
+}
+
+fn door_batch(batch: &RecordBatch, policy: MaskPolicy) -> DoorBatch {
+    let mask = match policy {
+        MaskPolicy::Recorded => bge::flatten_as_float(&batch.attention_mask),
+        MaskPolicy::PadPositionsUnmasked => vec![1.0; batch.input_ids.len() * batch.seq],
+    };
+    DoorBatch {
+        pins: [
+            ("batch_size".to_owned(), batch.input_ids.len() as u64),
+            ("sequence_length".to_owned(), batch.seq as u64),
+        ]
+        .into(),
+        inputs: vec![
+            (
+                "input_ids".to_owned(),
+                bge::flatten_as_float(&batch.input_ids),
+            ),
+            ("attention_mask".to_owned(), mask),
+            (
+                "token_type_ids".to_owned(),
+                bge::flatten_as_float(&batch.token_type_ids),
+            ),
+        ],
+    }
+}
+
+async fn door_cls_rows(
+    door: &OnnxDoor,
+    batch: &RecordBatch,
+    policy: MaskPolicy,
+) -> Result<Vec<Vec<f32>>> {
+    let rows = batch.input_ids.len();
+    let output = door
+        .call(door_batch(batch, policy))
+        .await
+        .map_err(|error| anyhow!("door call at batch {rows} seq {}: {error}", batch.seq))?;
+    let (values, shape) = output
+        .get(OUTPUT_NAME)
+        .with_context(|| format!("door output has no {OUTPUT_NAME}"))?;
+    ensure!(
+        shape == [rows as u64, batch.seq as u64, EMBEDDING_DIMENSION as u64],
+        "{OUTPUT_NAME} has shape {shape:?}"
+    );
+    bge::cls_rows(values, rows)
+}
+
+async fn door_cls_for_cell(cell: &str, policy: MaskPolicy) -> Result<Vec<Vec<f32>>> {
+    let door = cpu_door()?;
+    let mut rows = Vec::new();
+    for batch in &bge::read_record(cell)?.batches {
+        rows.extend(door_cls_rows(&door, batch, policy).await?);
+    }
+    Ok(rows)
+}
+
+fn normalized(rows: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    rows.iter().map(|row| bge::l2_normalize(row)).collect()
+}
+
+fn recorded_embeddings(cell: &str) -> Result<Vec<Vec<f32>>> {
+    Ok(normalized(&record_rows(cell)?))
+}
+
+fn report_differences(cell: &str, differences: &[f32]) {
+    for (sentence, difference) in differences.iter().enumerate() {
+        println!("bge_cpu_parity cell={cell} sentence={sentence} max_abs={difference:e}");
+    }
+}
+
+fn ensure_within(cell: &str, differences: &[f32], tolerance: f32) -> Result<()> {
+    let exceeding: Vec<String> = differences
+        .iter()
+        .enumerate()
+        .filter(|(_, difference)| difference.is_nan() || **difference > tolerance)
+        .map(|(sentence, difference)| format!("{sentence}:{difference:e}"))
+        .collect();
+    ensure!(
+        exceeding.is_empty(),
+        "cell {cell}: {} of {} sentences exceed {tolerance:e}: {exceeding:?}",
+        exceeding.len(),
+        differences.len()
+    );
+    Ok(())
+}
+
+async fn parity_against_tract(cell: &str) -> Result<()> {
+    let actual = normalized(&door_cls_for_cell(cell, MaskPolicy::Recorded).await?);
+    let differences = bge::sentence_differences(&actual, &recorded_embeddings(cell)?)?;
+    ensure!(
+        differences.len() == CORPUS_ROWS,
+        "{} sentences compared",
+        differences.len()
+    );
+    report_differences(cell, &differences);
+    ensure_within(cell, &differences, CPU_TOLERANCE)
+}
+
+#[proxima::test]
+async fn bge_cpu_parity_b1_all_64_sentences_within_1e_5_of_tract() -> Result<()> {
+    parity_against_tract("b1").await
+}
+
+#[proxima::test]
+async fn bge_cpu_parity_b32_all_64_sentences_within_1e_5_of_tract() -> Result<()> {
+    parity_against_tract("b32").await
+}
+
+#[test]
+fn bge_cpu_parity_identity_control_tract_record_compared_with_itself_passes() -> Result<()> {
+    for cell in ["b1", "b32"] {
+        let record = recorded_embeddings(cell)?;
+
+        let differences = bge::sentence_differences(&record, &record)?;
+
+        ensure!(
+            differences.len() == CORPUS_ROWS,
+            "{cell} compared {} rows",
+            differences.len()
+        );
+        ensure_within(cell, &differences, CPU_TOLERANCE)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn bge_cpu_parity_degenerate_control_one_element_altered_by_1e_3_fails() -> Result<()> {
+    let record = recorded_embeddings("b1")?;
+    let mut altered = record.clone();
+    altered[17][200] += 1e-3;
+
+    let differences = bge::sentence_differences(&altered, &record)?;
+
+    ensure!(
+        ensure_within("b1", &differences, CPU_TOLERANCE).is_err(),
+        "an element altered by 1e-3 stayed within {CPU_TOLERANCE:e}"
+    );
+    Ok(())
+}
+
+#[proxima::test]
+async fn bge_cpu_parity_mask_leak_control_pad_positions_unmasked_exceed_the_tolerance() -> Result<()>
+{
+    let leaked = normalized(&door_cls_for_cell("b32", MaskPolicy::PadPositionsUnmasked).await?);
+
+    let differences = bge::sentence_differences(&leaked, &recorded_embeddings("b32")?)?;
+
+    let exceeding = differences
+        .iter()
+        .filter(|difference| **difference > CPU_TOLERANCE)
+        .count();
+    println!("bge_cpu_parity mask_leak sentences_exceeding={exceeding}");
+    ensure!(
+        exceeding >= 1,
+        "unmasked pad positions left every sentence within {CPU_TOLERANCE:e}"
+    );
+    Ok(())
+}
+
+#[proxima::test]
+async fn bge_cpu_parity_outputs_are_finite_and_unit_norm() -> Result<()> {
+    let raw = door_cls_for_cell("b32", MaskPolicy::Recorded).await?;
+
+    ensure!(
+        raw.iter().flatten().all(|value| value.is_finite()),
+        "a door output value is not finite"
+    );
+    for (sentence, row) in normalized(&raw).iter().enumerate() {
+        let deviation = (bge::norm(row) - 1.0).abs();
+        ensure!(
+            deviation <= UNIT_NORM_TOLERANCE,
+            "sentence {sentence} norm deviates from 1 by {deviation:e}"
+        );
+    }
     Ok(())
 }
