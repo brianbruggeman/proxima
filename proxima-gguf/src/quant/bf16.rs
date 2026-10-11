@@ -2,17 +2,18 @@
 //! ([`crate::types::GgmlType::Bf16`]'s own
 //! [`crate::types::GgmlType::block_layout`] already reports
 //! `block_elements: 1, block_bytes: 2`). Same non-block, no-scale shape as
-//! [`crate::quant::f16`] — see that module's doc for why this is a
-//! composed conversion (the existing [`half::bf16`] dependency), not a
-//! hand-rolled codec.
+//! [`crate::quant::f16`].
 //!
-//! `bf16` shares `f32`'s 8-bit exponent and truncates the 23-bit mantissa
-//! to 7 bits, so widening `bf16 -> f32` is exact (a zero-extend of the
-//! bit pattern, `half::bf16::to_f32` performs it losslessly) — it is the
-//! narrowing direction, [`quantize`], that discards the low 16 mantissa
-//! bits and is where precision is actually lost.
+//! Teaching pointer: this module is the `BF16` instance of the one float
+//! codec, [`crate::quant::float_layout`], over
+//! [`proxima_primitives::float_layout::FloatLayout::BF16`]; it holds no float
+//! arithmetic of its own. Widening `bf16 -> f32` is exact; the narrowing
+//! direction, [`quantize`], rounds to nearest with ties to the even code.
+
+use proxima_primitives::float_layout::FloatLayout;
 
 use crate::quant::QuantError;
+use crate::quant::float_layout;
 
 /// This codec's name as it appears in a rendered [`QuantError`] message.
 const CODEC: &str = "bf16";
@@ -46,7 +47,7 @@ pub const fn bytes_for_blocks(element_count: usize) -> usize {
 pub fn dequantize_block(block: &[u8], output: &mut [f32]) {
     let mut bytes = [0u8; BLOCK_BYTES];
     bytes.copy_from_slice(block);
-    output[0] = half::bf16::from_le_bytes(bytes).to_f32();
+    output[0] = float_layout::decode(u32::from(u16::from_le_bytes(bytes)), FloatLayout::BF16);
 }
 
 /// Dequantizes a run of `Bf16` elements. `data` is borrowed, `output` is
@@ -99,7 +100,8 @@ pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
         .iter_mut()
         .zip(input.iter())
     {
-        chunk.copy_from_slice(&half::bf16::from_f32(value).to_le_bytes());
+        let code = float_layout::encode(value, FloatLayout::BF16);
+        chunk.copy_from_slice(&(code as u16).to_le_bytes());
     }
     Ok(())
 }
