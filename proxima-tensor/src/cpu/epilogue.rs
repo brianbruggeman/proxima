@@ -1,4 +1,6 @@
 use super::*;
+use proxima_gguf::quant::{QuantError, scaled_float};
+use proxima_primitives::float_layout::FloatLayout;
 
 fn dequantize_bf8_e5m2(
     bytes: &[u8],
@@ -14,6 +16,28 @@ fn dequantize_bf8_e5m2(
         *value = proxima_gguf::quant::bf8_e5m2::decode(encoded);
     }
     Ok(())
+}
+
+fn dequantize_fp6_e3m2(bytes: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
+    let (blocks, remainder) = bytes.as_chunks::<{ scaled_float::BLOCK_BYTES }>();
+    if !remainder.is_empty() {
+        return Err(QuantError::InputNotBlockMultiple {
+            codec: "fp6_e3m2",
+            found: bytes.len(),
+            block_bytes: scaled_float::BLOCK_BYTES,
+        });
+    }
+    let expected = blocks.len() * scaled_float::BLOCK_ELEMENTS;
+    if output.len() != expected {
+        return Err(QuantError::OutputSizeMismatch {
+            found: output.len(),
+            expected,
+        });
+    }
+    blocks
+        .iter()
+        .zip(output.as_chunks_mut::<{ scaled_float::BLOCK_ELEMENTS }>().0)
+        .try_for_each(|(block, out)| scaled_float::dequantize_block(block, FloatLayout::E3M2, out))
 }
 
 fn dequantize_bf4_e2m1(
@@ -1415,7 +1439,7 @@ pub(super) const fn codec_matmul_f32_kernel(
         Codec::BFloat16 => Some(matmul_bf16_f32),
         Codec::Bf8E5M2 => Some(matmul_bf8_e5m2_f32),
         Codec::Bf4E2M1 => Some(matmul_bf4_e2m1_f32),
-        Codec::Fp6E3M2 => None,
+        Codec::Fp6E3M2 => Some(matmul_fp6_e3m2_f32),
         Codec::BFloat8 => None,
         Codec::Q4K
         | Codec::Q5K
@@ -1468,7 +1492,7 @@ pub(super) const fn codec_dequantize_fn(
         Codec::BFloat16 => Some(gguf_bf16::dequantize),
         Codec::Bf8E5M2 => Some(dequantize_bf8_e5m2),
         Codec::Bf4E2M1 => Some(dequantize_bf4_e2m1),
-        Codec::Fp6E3M2 => None,
+        Codec::Fp6E3M2 => Some(dequantize_fp6_e3m2),
         Codec::Q4_0
         | Codec::Q5_0
         | Codec::BFloat8
@@ -1836,6 +1860,9 @@ impl<'a> QuantizedBlock<'a> {
         match codec {
             Codec::Bf8E5M2 => return Some((1, 1)),
             Codec::Bf4E2M1 => return Some((1, 2)),
+            Codec::Fp6E3M2 => {
+                return Some((Codec::FP6_E3M2_BLOCK_BYTES, Codec::FP6_E3M2_BLOCK_ELEMENTS));
+            }
             _ => {}
         }
         let Some(ggml_type) = codec_to_decodable_ggml_type(*codec) else {
@@ -2011,6 +2038,17 @@ impl<'a> QuantizedBlock<'a> {
                     bytes.len(),
                     gguf_bf16::BLOCK_BYTES,
                     gguf_bf16::blocks_for_bytes(bytes.len()),
+                ),
+                Codec::Fp6E3M2 => (
+                    "fp6_e3m2",
+                    bytes.len(),
+                    scaled_float::BLOCK_BYTES,
+                    bytes
+                        .len()
+                        .is_multiple_of(scaled_float::BLOCK_BYTES)
+                        .then(|| {
+                            bytes.len() / scaled_float::BLOCK_BYTES * scaled_float::BLOCK_ELEMENTS
+                        }),
                 ),
                 Codec::BFloat8 => ("bfloat8", bytes.len(), 1, Some(bytes.len())),
                 Codec::Bf8E5M2 => ("bf8_e5m2", bytes.len(), 1, Some(bytes.len())),
