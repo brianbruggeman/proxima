@@ -474,11 +474,10 @@ mod tests {
         top.chain(nested).collect()
     }
 
-    fn hparams_of(case: &Case) -> ModelHparams {
-        let (_, parsed) = open(case.gguf);
+    fn hparams_of(case: &Case, parsed: &ParsedGguf) -> ModelHparams {
         match case.family {
-            "gemma4" => sliding_pattern_hparams(&sliding_from_metadata(&parsed).unwrap()),
-            _ => architecture_from_metadata(&parsed).unwrap(),
+            "gemma4" => sliding_pattern_hparams(&sliding_from_metadata(parsed).unwrap()),
+            _ => architecture_from_metadata(parsed).unwrap(),
         }
     }
 
@@ -487,7 +486,8 @@ mod tests {
         flavor: &str,
         quantization: Option<(u8, u32)>,
     ) -> (Vec<String>, Vec<String>) {
-        let bytes = hf_config_bytes(&hparams_of(case), quantization).unwrap();
+        let (_, parsed) = open(case.gguf);
+        let bytes = hf_config_bytes(&hparams_of(case, &parsed), &parsed, quantization).unwrap();
         let written = key_paths(&serde_json::from_slice(&bytes).unwrap());
         let vendored = key_paths(&reference_config(case.model, flavor));
         let missing = vendored.difference(&written).cloned().collect();
@@ -568,20 +568,10 @@ mod tests {
         assert_eq!(extra, vec!["proxima_format_version"]);
     }
 
-    const GRANITE_UNWRITTEN: [&str; 18] = [
-        "attention_bias",
+    const GRANITE_UNDERIVABLE: [&str; 8] = [
         "attention_dropout",
-        "attention_multiplier",
-        "bos_token_id",
-        "embedding_multiplier",
-        "eos_token_id",
-        "hidden_act",
         "initializer_range",
-        "logits_scaling",
-        "max_position_embeddings",
         "output_router_logits",
-        "pad_token_id",
-        "residual_multiplier",
         "rope_scaling",
         "router_aux_loss_coef",
         "torch_dtype",
@@ -589,7 +579,7 @@ mod tests {
         "use_cache",
     ];
 
-    const E2B_UNWRITTEN: [&str; 41] = [
+    const E2B_UNDERIVABLE: [&str; 25] = [
         "audio_config",
         "audio_token_id",
         "boa_token_id",
@@ -601,49 +591,20 @@ mod tests {
         "eos_token_id",
         "image_token_id",
         "initializer_range",
-        "text_config.attention_bias",
         "text_config.attention_dropout",
         "text_config.attention_k_eq_v",
-        "text_config.bos_token_id",
         "text_config.dtype",
-        "text_config.enable_moe_block",
-        "text_config.eos_token_id",
-        "text_config.final_logit_softcapping",
-        "text_config.global_head_dim",
-        "text_config.hidden_activation",
-        "text_config.hidden_size_per_layer_input",
         "text_config.initializer_range",
-        "text_config.layer_types",
-        "text_config.max_position_embeddings",
         "text_config.moe_intermediate_size",
         "text_config.num_experts",
         "text_config.num_global_key_value_heads",
-        "text_config.num_kv_shared_layers",
-        "text_config.pad_token_id",
-        "text_config.rope_parameters",
-        "text_config.sliding_window",
         "text_config.top_k_experts",
         "text_config.use_bidirectional_attention",
         "text_config.use_cache",
-        "text_config.use_double_wide_mlp",
-        "text_config.vocab_size_per_layer_input",
         "transformers_version",
         "video_token_id",
         "vision_config",
         "vision_soft_tokens_per_image",
-    ];
-
-    const E2B_TOP_LEVEL_TEXT_KEYS: [&str; 10] = [
-        "head_dim",
-        "hidden_size",
-        "intermediate_size",
-        "num_attention_heads",
-        "num_hidden_layers",
-        "num_key_value_heads",
-        "rms_norm_eps",
-        "rope_theta",
-        "text_config.rope_theta",
-        "vocab_size",
     ];
 
     fn e2b_reference_only() -> BTreeMap<String, usize> {
@@ -706,32 +667,33 @@ mod tests {
     }
 
     #[test]
-    fn mlx_reference_header_granite_plain_config_lacks_the_recorded_keys_and_invents_head_dim() {
+    fn mlx_reference_header_granite_plain_config_lacks_only_the_underivable_keys() {
         let (missing, invented) = config_key_gap(&GRANITE, "plain", None);
-        assert_eq!(missing, strings(&GRANITE_UNWRITTEN));
-        assert_eq!(invented, strings(&["head_dim"]));
+        assert_eq!(missing, strings(&GRANITE_UNDERIVABLE));
+        assert_eq!(invented, Vec::<String>::new());
     }
 
     #[test]
-    fn mlx_reference_header_granite_affine_config_lacks_the_recorded_keys_and_invents_head_dim() {
+    fn mlx_reference_header_granite_affine_config_lacks_only_the_underivable_keys() {
         let (missing, invented) = config_key_gap(&GRANITE, "affine4", Some((4, 64)));
-        assert_eq!(missing, strings(&GRANITE_UNWRITTEN));
-        assert_eq!(invented, strings(&["head_dim"]));
+        assert_eq!(missing, strings(&GRANITE_UNDERIVABLE));
+        assert_eq!(invented, Vec::<String>::new());
     }
 
     #[test]
-    fn mlx_reference_header_e2b_plain_config_lacks_the_recorded_keys_and_writes_text_keys_at_top() {
+    fn mlx_reference_header_e2b_plain_config_nests_the_text_keys_and_lacks_only_the_underivable_keys()
+     {
         let (missing, invented) = config_key_gap(&E2B, "plain", None);
-        assert_eq!(missing, strings(&E2B_UNWRITTEN));
-        assert_eq!(invented, strings(&E2B_TOP_LEVEL_TEXT_KEYS));
+        assert_eq!(missing, strings(&E2B_UNDERIVABLE));
+        assert_eq!(invented, Vec::<String>::new());
     }
 
     #[test]
-    fn mlx_reference_header_e2b_affine_config_lacks_the_recorded_keys_and_writes_text_keys_at_top()
-    {
+    fn mlx_reference_header_e2b_affine_config_nests_the_text_keys_and_lacks_only_the_underivable_keys()
+     {
         let (missing, invented) = config_key_gap(&E2B, "affine4", Some((4, 64)));
-        assert_eq!(missing, strings(&E2B_UNWRITTEN));
-        assert_eq!(invented, strings(&E2B_TOP_LEVEL_TEXT_KEYS));
+        assert_eq!(missing, strings(&E2B_UNDERIVABLE));
+        assert_eq!(invented, Vec::<String>::new());
     }
 
     #[test]

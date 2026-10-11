@@ -27,6 +27,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::bind::ModelHparams;
 use crate::error::InteropError;
@@ -117,12 +118,15 @@ pub struct HfConfig {
     pub block_multiple_of: Option<u32>,
 }
 
-/// Every top-level key [`HfConfig`] consults, in one list the MLX writer
+/// Every key [`HfConfig`] consults, in one list the MLX writer
 /// (`crate::transform`) draws its emitted keys from, so reader and writer
 /// cannot name a field differently. `num_local_experts` is the alias of
-/// `num_experts` the reader also accepts.
+/// `num_experts` the reader also accepts; `text_config` and
+/// `rope_parameters` are the nesting [`parse_hf_config`] looks through.
 #[cfg(feature = "std")]
-pub(crate) const HF_CONFIG_KEYS: [&str; 16] = [
+pub(crate) const HF_CONFIG_KEYS: [&str; 19] = [
+    "text_config",
+    "rope_parameters",
     "model_type",
     "architectures",
     "hidden_size",
@@ -139,6 +143,34 @@ pub(crate) const HF_CONFIG_KEYS: [&str; 16] = [
     "num_local_experts",
     "num_experts_per_tok",
     "tie_word_embeddings",
+    "layer_types",
+];
+
+/// Keys the MLX writer emits from GGUF values or family constants that
+/// [`HfConfig`] does not read: they land in no [`ModelHparams`] field, but an
+/// mlx-lm load of the exported directory takes them from `config.json`.
+#[cfg(feature = "std")]
+pub(crate) const HF_CONFIG_PASSTHROUGH_KEYS: [&str; 20] = [
+    "attention_bias",
+    "attention_multiplier",
+    "bos_token_id",
+    "embedding_multiplier",
+    "eos_token_id",
+    "pad_token_id",
+    "hidden_act",
+    "hidden_activation",
+    "logits_scaling",
+    "max_position_embeddings",
+    "residual_multiplier",
+    "rope_scaling",
+    "enable_moe_block",
+    "final_logit_softcapping",
+    "global_head_dim",
+    "hidden_size_per_layer_input",
+    "num_kv_shared_layers",
+    "sliding_window",
+    "use_double_wide_mlp",
+    "vocab_size_per_layer_input",
 ];
 
 fn default_rms_norm_eps() -> f32 {
@@ -158,9 +190,41 @@ fn default_rope_theta() -> f32 {
 /// [`InteropError::MalformedHfConfig`] if `bytes` is not valid JSON, or is
 /// missing/mis-typing one of [`HfConfig`]'s required fields.
 pub fn parse_hf_config(bytes: &[u8]) -> Result<HfConfig, InteropError> {
-    serde_json::from_slice(bytes).map_err(|error| InteropError::MalformedHfConfig {
+    let root: Value = serde_json::from_slice(bytes).map_err(malformed_config)?;
+    serde_json::from_value(text_view(root)).map_err(malformed_config)
+}
+
+fn malformed_config(error: serde_json::Error) -> InteropError {
+    InteropError::MalformedHfConfig {
         reason: alloc::string::ToString::to_string(&error),
-    })
+    }
+}
+
+/// The object [`HfConfig`] is read from. A multimodal checkpoint (Gemma 4)
+/// nests the language model under `text_config`; its fields are read from
+/// there, with `model_type` and `architectures` kept from the root (the
+/// family key is the root's `gemma4`, not the nested `gemma4_text`) and
+/// `rope_theta` taken from `rope_parameters.full_attention` when the text
+/// object carries no flat one. A config without `text_config` is returned
+/// unchanged.
+fn text_view(root: Value) -> Value {
+    let Some(Value::Object(mut text)) = root.get("text_config").cloned() else {
+        return root;
+    };
+    for key in ["model_type", "architectures"] {
+        if let Some(value) = root.get(key) {
+            text.insert(key.into(), value.clone());
+        }
+    }
+    let full_theta = text
+        .get("rope_parameters")
+        .and_then(|parameters| parameters.get("full_attention"))
+        .and_then(|full| full.get("rope_theta"))
+        .cloned();
+    if let (false, Some(theta)) = (text.contains_key("rope_theta"), full_theta) {
+        text.insert("rope_theta".into(), theta);
+    }
+    Value::Object(text)
 }
 
 /// Reads [`ModelHparams`] out of `config` -- the HF counterpart to

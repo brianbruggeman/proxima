@@ -2,32 +2,45 @@
 //! [`crate::hf_config::parse_hf_config`] and [`crate::hf_config::architecture_from_hf_config`].
 //!
 //! Sans-IO: [`hf_config_bytes`] takes the [`ModelHparams`] that
-//! [`crate::bind::architecture_from_metadata`] read from the GGUF and returns the
-//! file's bytes; the edge writes them. [`copy_config`] is the HF-directory
-//! counterpart, which carries the source file through untouched. Every key
-//! written is drawn from [`HF_CONFIG_KEYS`], the list the reader consults, so a
-//! field renamed on one side is a compile or test failure on the other.
+//! [`crate::bind::architecture_from_metadata`] read from the GGUF plus the
+//! [`ParsedGguf`] itself, and returns the file's bytes; the edge writes them.
+//! [`copy_config`] is the HF-directory counterpart, which carries the source
+//! file through untouched. Every key written is drawn from [`HF_CONFIG_KEYS`]
+//! (the list the reader consults) or [`HF_CONFIG_PASSTHROUGH_KEYS`] (what the
+//! reader ignores but mlx-lm reads), so a field renamed on one side is a
+//! compile or test failure on the other. A key with no GGUF source and no
+//! family constant is not written; `mlx_config_fields` lists them.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use proxima_gguf::pipe::ParsedGguf;
 use serde_json::{Map, Number, Value, json};
 
+use super::mlx_config_fields::{
+    FamilyFields, GEMMA_FLOATS, GEMMA_INTS, GRANITE_FLOATS, GRANITE_INTS, KeyTable, gemma_fields,
+    granite_fields, table_fields, tied_embeddings,
+};
 use crate::bind::ModelHparams;
 use crate::error::InteropError;
-use crate::hf_config::HF_CONFIG_KEYS;
+use crate::hf_config::{HF_CONFIG_KEYS, HF_CONFIG_PASSTHROUGH_KEYS};
 use crate::sliding_pattern::hparams::SlidingPatternHparams;
 
 /// How one GGUF `general.architecture` spells itself in an HF `config.json`.
 /// `nested` names the sub-object (and its `model_type`) a multimodal
-/// checkpoint keeps its text fields under; the fields are also written at the
-/// top level because `parse_hf_config` reads only the top level.
+/// checkpoint keeps its text fields under; only `model_type`, `architectures`
+/// and `tie_word_embeddings` stay at the root, as the reference does, and
+/// `parse_hf_config` reads through the nesting. `floats` and `ints` map HF keys
+/// to `{architecture}.` GGUF suffixes; `computed` derives the rest.
 struct FamilyLayout {
     gguf_architecture: &'static str,
     model_type: &'static str,
     architecture_class: &'static str,
     expert_count_key: &'static str,
     nested: Option<(&'static str, &'static str)>,
+    floats: KeyTable,
+    ints: KeyTable,
+    computed: FamilyFields,
 }
 
 const FAMILIES: [FamilyLayout; 2] = [
@@ -37,6 +50,9 @@ const FAMILIES: [FamilyLayout; 2] = [
         architecture_class: "GraniteMoeForCausalLM",
         expert_count_key: "num_local_experts",
         nested: None,
+        floats: GRANITE_FLOATS,
+        ints: GRANITE_INTS,
+        computed: granite_fields,
     },
     FamilyLayout {
         gguf_architecture: "gemma4",
@@ -44,10 +60,14 @@ const FAMILIES: [FamilyLayout; 2] = [
         architecture_class: "Gemma4ForConditionalGeneration",
         expert_count_key: "num_experts",
         nested: Some(("text_config", "gemma4_text")),
+        floats: GEMMA_FLOATS,
+        ints: GEMMA_INTS,
+        computed: gemma_fields,
     },
 ];
 
-/// Writes the `config.json` bytes for an MLX export of `hparams`.
+/// Writes the `config.json` bytes for an MLX export of `hparams`, with every
+/// extra key the GGUF `metadata` (or its tensor directory) can supply.
 ///
 /// `quantization` is `Some((bits, group_size))` on an affine-quantized export,
 /// which adds `quantization` and its `quantization_config` mirror with
@@ -61,20 +81,16 @@ const FAMILIES: [FamilyLayout; 2] = [
 #[must_use = "the config bytes are the export's config.json"]
 pub fn hf_config_bytes(
     hparams: &ModelHparams,
+    metadata: &ParsedGguf,
     quantization: Option<(u8, u32)>,
 ) -> Result<Vec<u8>, InteropError> {
     let layout = family_layout(&hparams.family)?;
-    let mut fields = text_fields(hparams, layout)?;
-    let mut root = fields.clone();
-    insert_field(&mut root, "model_type", json!(layout.model_type))?;
-    insert_field(
-        &mut root,
-        "architectures",
-        json!([layout.architecture_class]),
-    )?;
+    let fields = text_fields(hparams, metadata, layout)?;
+    let mut root = root_fields(&fields, layout)?;
     if let Some((name, nested_type)) = layout.nested {
-        insert_field(&mut fields, "model_type", json!(nested_type))?;
-        root.insert(name.into(), Value::Object(fields));
+        let mut nested = fields;
+        insert_field(&mut nested, "model_type", json!(nested_type))?;
+        root.insert(name.into(), Value::Object(nested));
     }
     if let Some((bits, group_size)) = quantization {
         let block = json!({"group_size": group_size, "bits": bits, "mode": "affine"});
@@ -82,6 +98,26 @@ pub fn hf_config_bytes(
         root.insert("quantization_config".into(), block);
     }
     serde_json::to_vec_pretty(&Value::Object(root)).map_err(|error| malformed(&error.to_string()))
+}
+
+fn root_fields(
+    fields: &Map<String, Value>,
+    layout: &FamilyLayout,
+) -> Result<Map<String, Value>, InteropError> {
+    let mut root = match layout.nested {
+        None => fields.clone(),
+        Some(_) => fields
+            .get("tie_word_embeddings")
+            .map(|tied| Map::from_iter([("tie_word_embeddings".to_string(), tied.clone())]))
+            .unwrap_or_default(),
+    };
+    insert_field(&mut root, "model_type", json!(layout.model_type))?;
+    insert_field(
+        &mut root,
+        "architectures",
+        json!([layout.architecture_class]),
+    )?;
+    Ok(root)
 }
 
 /// Carries an HF-directory source's `config.json` into the export unchanged.
@@ -112,24 +148,17 @@ fn family_layout(family: &str) -> Result<&'static FamilyLayout, InteropError> {
 
 fn text_fields(
     hparams: &ModelHparams,
+    metadata: &ParsedGguf,
     layout: &FamilyLayout,
 ) -> Result<Map<String, Value>, InteropError> {
-    let mut pairs = alloc::vec![
-        ("hidden_size", json!(hparams.embedding)),
-        ("num_hidden_layers", json!(hparams.block_count)),
-        ("num_attention_heads", json!(hparams.query_heads)),
-        ("num_key_value_heads", json!(uniform_kv_heads(hparams)?)),
-        ("intermediate_size", json!(hparams.feed_forward)),
-        ("vocab_size", json!(hparams.vocab)),
-        ("head_dim", json!(hparams.head_dim)),
-        ("rms_norm_eps", float_value(hparams.rms_epsilon)?),
-        ("rope_theta", float_value(hparams.rope_freq_base)?),
-        ("tie_word_embeddings", json!(hparams.tied_embeddings)),
-    ];
-    if hparams.expert_count > 0 {
-        pairs.push((layout.expert_count_key, json!(hparams.expert_count)));
-        pairs.push(("num_experts_per_tok", json!(hparams.expert_used_count)));
-    }
+    let mut pairs = dimension_pairs(hparams, metadata, layout)?;
+    pairs.extend(table_fields(
+        metadata,
+        layout.gguf_architecture,
+        layout.floats,
+        layout.ints,
+    )?);
+    pairs.extend((layout.computed)(metadata, hparams)?);
     let mut fields = Map::new();
     pairs
         .into_iter()
@@ -137,14 +166,45 @@ fn text_fields(
     Ok(fields)
 }
 
+fn dimension_pairs(
+    hparams: &ModelHparams,
+    metadata: &ParsedGguf,
+    layout: &FamilyLayout,
+) -> Result<Vec<(&'static str, Value)>, InteropError> {
+    let mut pairs = alloc::vec![
+        ("hidden_size", json!(hparams.embedding)),
+        ("num_hidden_layers", json!(hparams.block_count)),
+        ("num_attention_heads", json!(hparams.query_heads)),
+        ("num_key_value_heads", json!(uniform_kv_heads(hparams)?)),
+        ("intermediate_size", json!(hparams.feed_forward)),
+        ("vocab_size", json!(hparams.vocab)),
+        ("rms_norm_eps", float_value(hparams.rms_epsilon)?),
+        (
+            "tie_word_embeddings",
+            json!(tied_embeddings(hparams, metadata))
+        ),
+    ];
+    if layout.nested.is_none() {
+        pairs.push(("rope_theta", float_value(hparams.rope_freq_base)?));
+    }
+    if hparams.head_dim != hparams.embedding / hparams.query_heads.max(1) {
+        pairs.push(("head_dim", json!(hparams.head_dim)));
+    }
+    if hparams.expert_count > 0 {
+        pairs.push((layout.expert_count_key, json!(hparams.expert_count)));
+        pairs.push(("num_experts_per_tok", json!(hparams.expert_used_count)));
+    }
+    Ok(pairs)
+}
+
 fn insert_field(
     fields: &mut Map<String, Value>,
     key: &str,
     value: Value,
 ) -> Result<(), InteropError> {
-    if !HF_CONFIG_KEYS.contains(&key) {
+    if !HF_CONFIG_KEYS.contains(&key) && !HF_CONFIG_PASSTHROUGH_KEYS.contains(&key) {
         return Err(malformed(&alloc::format!(
-            "key {key} is not one the reader consults"
+            "key {key} is not one the reader consults or the writer passes through"
         )));
     }
     fields.insert(key.into(), value);
@@ -165,7 +225,7 @@ fn uniform_kv_heads(hparams: &ModelHparams) -> Result<u32, InteropError> {
     }
 }
 
-fn float_value(value: f32) -> Result<Value, InteropError> {
+pub(super) fn float_value(value: f32) -> Result<Value, InteropError> {
     let shortest = value
         .to_string()
         .parse::<f64>()
@@ -175,7 +235,7 @@ fn float_value(value: f32) -> Result<Value, InteropError> {
         .ok_or_else(|| malformed("float field is not finite"))
 }
 
-fn malformed(reason: &str) -> InteropError {
+pub(super) fn malformed(reason: &str) -> InteropError {
     InteropError::MalformedHfConfig {
         reason: reason.to_string(),
     }
@@ -216,6 +276,7 @@ mod tests {
     use std::path::Path;
 
     use proxima_gguf::parse_complete;
+    use proxima_gguf::pipe::ParsedGguf;
 
     use super::*;
     use crate::bind::architecture_from_metadata;
@@ -236,23 +297,69 @@ mod tests {
         "rms_norm_eps",
         "rope_theta",
     ];
+    const GRANITE_DERIVED_KEYS: [&str; 12] = [
+        "attention_bias",
+        "attention_multiplier",
+        "bos_token_id",
+        "embedding_multiplier",
+        "eos_token_id",
+        "hidden_act",
+        "logits_scaling",
+        "max_position_embeddings",
+        "pad_token_id",
+        "residual_multiplier",
+        "tie_word_embeddings",
+        "vocab_size",
+    ];
+    const E2B_TEXT_DERIVED_KEYS: [&str; 17] = [
+        "bos_token_id",
+        "enable_moe_block",
+        "eos_token_id",
+        "final_logit_softcapping",
+        "global_head_dim",
+        "head_dim",
+        "hidden_activation",
+        "hidden_size_per_layer_input",
+        "layer_types",
+        "max_position_embeddings",
+        "num_kv_shared_layers",
+        "pad_token_id",
+        "rope_parameters",
+        "sliding_window",
+        "use_double_wide_mlp",
+        "vocab_size_per_layer_input",
+        "vocab_size",
+    ];
 
-    fn with_parsed<T>(path: &str, read: impl FnOnce(&proxima_gguf::pipe::ParsedGguf) -> T) -> T {
+    fn open(path: &str) -> ParsedGguf {
         let file = File::open(path).expect("host-local gguf blob present");
         let mapping = unsafe { memmap2::Mmap::map(&file) }.expect("gguf maps");
-        read(&parse_complete(&mapping).expect("gguf parses"))
+        parse_complete(&mapping).expect("gguf parses")
     }
 
-    fn granite_hparams() -> ModelHparams {
-        with_parsed(GRANITE_GGUF, |parsed| {
-            architecture_from_metadata(parsed).expect("granite metadata reads")
-        })
+    fn granite() -> (ModelHparams, ParsedGguf) {
+        let parsed = open(GRANITE_GGUF);
+        (
+            with_directory_tie(
+                architecture_from_metadata(&parsed).expect("granite metadata reads"),
+                &parsed,
+            ),
+            parsed,
+        )
     }
 
-    fn e2b_hparams() -> ModelHparams {
-        with_parsed(E2B_GGUF, |parsed| {
-            sliding_pattern_hparams(&sliding_from_metadata(parsed).expect("e2b metadata reads"))
-        })
+    fn e2b() -> (ModelHparams, ParsedGguf) {
+        let parsed = open(E2B_GGUF);
+        let hparams =
+            sliding_pattern_hparams(&sliding_from_metadata(&parsed).expect("e2b metadata reads"));
+        (with_directory_tie(hparams, &parsed), parsed)
+    }
+
+    fn with_directory_tie(hparams: ModelHparams, parsed: &ParsedGguf) -> ModelHparams {
+        ModelHparams {
+            tied_embeddings: tied_embeddings(&hparams, parsed),
+            ..hparams
+        }
     }
 
     fn vendored(model: &str) -> (Vec<u8>, Value) {
@@ -265,8 +372,9 @@ mod tests {
         (bytes, value)
     }
 
-    fn written(hparams: &ModelHparams, quantization: Option<(u8, u32)>) -> Value {
-        let bytes = hf_config_bytes(hparams, quantization).expect("known family writes");
+    fn written(loaded: &(ModelHparams, ParsedGguf), quantization: Option<(u8, u32)>) -> Value {
+        let bytes =
+            hf_config_bytes(&loaded.0, &loaded.1, quantization).expect("known family writes");
         serde_json::from_slice(&bytes).expect("written config parses")
     }
 
@@ -301,30 +409,48 @@ mod tests {
             || (key == "rope_theta" && text.get("rope_parameters").is_some())
     }
 
+    fn written_has(config: &Value, key: &str) -> bool {
+        let text = config.get("text_config").unwrap_or(config);
+        text.get(key).is_some() || (key == "rope_theta" && text.get("rope_parameters").is_some())
+    }
+
     fn assert_spec_keys_equal_vendored(config: &Value, vendored: &Value, hparams: &ModelHparams) {
+        let text = config.get("text_config").unwrap_or(config);
         for key in SPEC_KEYS {
-            assert!(config.get(key).is_some(), "written config lacks {key}");
+            assert!(
+                written_has(config, key) || config.get(key).is_some(),
+                "written config lacks {key}"
+            );
             assert!(oracle_has(vendored, key), "vendored config lacks {key}");
         }
-        assert_eq!(config["hidden_size"], json!(hparams.embedding));
-        assert_eq!(config["num_hidden_layers"], json!(hparams.block_count));
-        assert_eq!(config["num_attention_heads"], json!(hparams.query_heads));
-        assert_eq!(config["num_key_value_heads"], json!(hparams.kv_heads));
-        assert_eq!(config["intermediate_size"], json!(hparams.feed_forward));
-        assert_eq!(config["vocab_size"], json!(hparams.vocab));
+        assert_eq!(text["hidden_size"], json!(hparams.embedding));
+        assert_eq!(text["num_hidden_layers"], json!(hparams.block_count));
+        assert_eq!(text["num_attention_heads"], json!(hparams.query_heads));
+        assert_eq!(text["num_key_value_heads"], json!(hparams.kv_heads));
+        assert_eq!(text["intermediate_size"], json!(hparams.feed_forward));
+        assert_eq!(text["vocab_size"], json!(hparams.vocab));
         assert_eq!(config["model_type"], vendored["model_type"]);
         assert_eq!(config["architectures"], vendored["architectures"]);
     }
 
+    fn assert_keys_equal(written: &Value, oracle: &Value, keys: &[&str], label: &str) {
+        for key in keys {
+            assert_eq!(
+                written[*key], oracle[*key],
+                "{label} {key} differs from the vendored config"
+            );
+        }
+    }
+
     #[test]
     fn mlx_config_granite_carries_every_key_and_moe_field_with_the_gguf_values() {
-        let hparams = granite_hparams();
+        let loaded = granite();
         let (_, vendored) = vendored("granite-3.1-1b-a400m-moe");
 
-        let config = written(&hparams, None);
+        let config = written(&loaded, None);
 
-        assert_spec_keys_equal_vendored(&config, &vendored, &hparams);
-        for key in [
+        assert_spec_keys_equal_vendored(&config, &vendored, &loaded.0);
+        let keys = [
             "hidden_size",
             "num_hidden_layers",
             "num_attention_heads",
@@ -335,25 +461,57 @@ mod tests {
             "rope_theta",
             "num_local_experts",
             "num_experts_per_tok",
+        ];
+        assert_keys_equal(&config, &vendored, &keys, "granite");
+    }
+
+    #[test]
+    fn mlx_config_granite_carries_the_multipliers_token_ids_and_context_the_gguf_names() {
+        let loaded = granite();
+        let (_, vendored) = vendored("granite-3.1-1b-a400m-moe");
+
+        let config = written(&loaded, None);
+
+        assert_keys_equal(&config, &vendored, &GRANITE_DERIVED_KEYS, "granite");
+        assert_eq!(config["residual_multiplier"], json!(0.22));
+        assert_eq!(config["max_position_embeddings"], json!(131_072));
+    }
+
+    #[test]
+    fn mlx_config_granite_writes_no_head_dim_and_none_of_the_underivable_keys() {
+        let config = written(&granite(), None);
+
+        let keys: Vec<&str> = config
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+
+        for absent in [
+            "head_dim",
+            "torch_dtype",
+            "transformers_version",
+            "initializer_range",
+            "attention_dropout",
+            "use_cache",
+            "output_router_logits",
+            "router_aux_loss_coef",
+            "rope_scaling",
         ] {
-            assert_eq!(
-                config[key], vendored[key],
-                "granite {key} differs from the vendored config"
-            );
+            assert!(!keys.contains(&absent), "granite config carries {absent}");
         }
     }
 
     #[test]
     fn mlx_config_e2b_carries_every_key_with_the_gguf_values_and_no_moe_fields() {
-        let hparams = e2b_hparams();
+        let loaded = e2b();
         let (_, vendored) = vendored("gemma4-e2b");
 
-        let config = written(&hparams, None);
+        let config = written(&loaded, None);
 
-        assert_spec_keys_equal_vendored(&config, &vendored, &hparams);
-        let nested = &config["text_config"];
-        let oracle = &vendored["text_config"];
-        for key in [
+        assert_spec_keys_equal_vendored(&config, &vendored, &loaded.0);
+        let keys = [
             "hidden_size",
             "num_hidden_layers",
             "num_attention_heads",
@@ -362,79 +520,138 @@ mod tests {
             "vocab_size",
             "rms_norm_eps",
             "head_dim",
-        ] {
-            assert_eq!(
-                nested[key], oracle[key],
-                "e2b text_config {key} differs from the vendored config"
-            );
-        }
-        assert_eq!(
-            config["rope_theta"],
-            oracle["rope_parameters"]["full_attention"]["rope_theta"]
+        ];
+        assert_keys_equal(
+            &config["text_config"],
+            &vendored["text_config"],
+            &keys,
+            "e2b",
         );
-        assert!(config.get("num_experts").is_none() && config.get("num_local_experts").is_none());
+        let nested = &config["text_config"];
+        assert_eq!(
+            nested["rope_parameters"]["full_attention"]["rope_theta"],
+            vendored["text_config"]["rope_parameters"]["full_attention"]["rope_theta"]
+        );
+        assert!(nested.get("num_experts").is_none() && nested.get("num_local_experts").is_none());
+    }
+
+    #[test]
+    fn mlx_config_e2b_nests_the_text_keys_and_writes_no_tower_blocks() {
+        let config = written(&e2b(), None);
+
+        let root: Vec<&str> = config
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+
+        assert_eq!(
+            root,
+            vec![
+                "architectures",
+                "model_type",
+                "text_config",
+                "tie_word_embeddings"
+            ]
+        );
+        assert_eq!(config["text_config"]["model_type"], json!("gemma4_text"));
+    }
+
+    #[test]
+    fn mlx_config_e2b_text_config_carries_the_gguf_derived_values_the_reference_names() {
+        let loaded = e2b();
+        let (_, vendored) = vendored("gemma4-e2b");
+
+        let config = written(&loaded, None);
+
+        let derived = &E2B_TEXT_DERIVED_KEYS[..];
+        let comparable: Vec<&str> = derived
+            .iter()
+            .copied()
+            .filter(|key| *key != "rope_parameters" && *key != "vocab_size_per_layer_input")
+            .collect();
+        assert_keys_equal(
+            &config["text_config"],
+            &vendored["text_config"],
+            &comparable,
+            "e2b",
+        );
+        let sliding = &config["text_config"]["rope_parameters"]["sliding_attention"];
+        assert_eq!(
+            sliding["rope_theta"],
+            vendored["text_config"]["rope_parameters"]["sliding_attention"]["rope_theta"]
+        );
+        assert_eq!(
+            config["text_config"]["vocab_size_per_layer_input"],
+            vendored["text_config"]["vocab_size_per_layer_input"]
+        );
     }
 
     #[test]
     fn mlx_config_identity_control_same_hparams_write_the_same_config() {
-        let hparams = granite_hparams();
+        let loaded = granite();
 
-        let differing = differing_keys(&written(&hparams, None), &written(&hparams, None));
+        let differing = differing_keys(&written(&loaded, None), &written(&loaded, None));
 
         assert_eq!(differing, Vec::<String>::new());
     }
 
     #[test]
     fn mlx_config_degenerate_control_one_altered_value_is_the_only_difference() {
-        let hparams = granite_hparams();
+        let (hparams, parsed) = granite();
         let altered = ModelHparams {
             embedding: hparams.embedding + 1,
             ..hparams.clone()
         };
 
-        let differing = differing_keys(&written(&hparams, None), &written(&altered, None));
+        let differing = differing_keys(
+            &written(&(hparams, parsed.clone()), None),
+            &written(&(altered, parsed), None),
+        );
 
         assert_eq!(differing, vec!["hidden_size".to_string()]);
     }
 
     #[test]
     fn mlx_config_granite_read_back_equals_the_gguf_hparams() {
-        let hparams = granite_hparams();
+        let loaded = granite();
 
-        assert_eq!(read_back(&written(&hparams, None)), hparams);
+        assert_eq!(read_back(&written(&loaded, None)), loaded.0);
     }
 
     #[test]
     fn mlx_config_e2b_read_back_equals_the_gguf_hparams() {
-        let hparams = e2b_hparams();
+        let loaded = e2b();
 
-        assert_eq!(read_back(&written(&hparams, None)), hparams);
+        assert_eq!(read_back(&written(&loaded, None)), loaded.0);
     }
 
     #[test]
     fn mlx_config_degenerate_control_altered_hidden_size_reads_back_different() {
-        let hparams = granite_hparams();
-        let mut config = written(&hparams, None);
-        config["hidden_size"] = json!(hparams.embedding + 1);
+        let loaded = granite();
+        let mut config = written(&loaded, None);
+        config["hidden_size"] = json!(loaded.0.embedding + 1);
 
-        assert_ne!(read_back(&config), hparams);
+        assert_ne!(read_back(&config), loaded.0);
     }
 
     #[test]
     fn mlx_config_unknown_family_is_refused_by_name() {
-        let hparams = ModelHparams {
+        let (hparams, parsed) = granite();
+        let unknown = ModelHparams {
             family: "llama".into(),
-            ..granite_hparams()
+            ..hparams
         };
 
-        let error = hf_config_bytes(&hparams, None).expect_err("llama has no layout");
+        let error = hf_config_bytes(&unknown, &parsed, None).expect_err("llama has no layout");
 
         assert!(matches!(error, InteropError::UnknownFamilyConfig { family } if family == "llama"));
     }
 
     #[test]
     fn mlx_config_quantized_export_carries_quantization_and_its_mirror() {
-        let config = written(&granite_hparams(), Some((4, 64)));
+        let config = written(&granite(), Some((4, 64)));
 
         let expected = json!({"group_size": 64, "bits": 4, "mode": "affine"});
         assert_eq!(config["quantization"], expected);
@@ -443,7 +660,7 @@ mod tests {
 
     #[test]
     fn mlx_config_plain_export_carries_neither_quantization_key() {
-        let config = written(&granite_hparams(), None);
+        let config = written(&granite(), None);
 
         assert!(config.get("quantization").is_none());
         assert!(config.get("quantization_config").is_none());
