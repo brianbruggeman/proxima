@@ -102,6 +102,7 @@ fn alloc_outputs(bound_program: &proxima_model_interop::BoundProgram<'_>) -> Vec
             }
             proxima_tensor::spec::LayerCacheRoots::SharedFromLayer(_) => {}
             proxima_tensor::spec::LayerCacheRoots::DenseAttention(_)
+            | proxima_tensor::spec::LayerCacheRoots::ShortConv { .. }
             | proxima_tensor::spec::LayerCacheRoots::Ssm { .. } => {
                 panic!("gemma4 E2B's own layer schedule is Attention/SharedFromLayer only")
             }

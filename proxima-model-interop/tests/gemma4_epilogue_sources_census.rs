@@ -65,7 +65,9 @@ fn production_step_outputs(logits_root: NodeId, layer_roots: &[LayerCacheRoots])
                 outputs.extend([*even, *odd, *value]);
             }
             LayerCacheRoots::SharedFromLayer(_) => {}
-            LayerCacheRoots::DenseAttention(_) | LayerCacheRoots::Ssm { .. } => {
+            LayerCacheRoots::DenseAttention(_)
+            | LayerCacheRoots::ShortConv { .. }
+            | LayerCacheRoots::Ssm { .. } => {
                 panic!("gemma4 E2B's own layer schedule is Attention/SharedFromLayer only")
             }
         }
