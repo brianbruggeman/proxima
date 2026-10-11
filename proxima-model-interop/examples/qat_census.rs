@@ -35,7 +35,8 @@ fn parse_arguments(raw: &[String]) -> Result<Arguments, QatError> {
                     .collect::<Result<_, _>>()?;
             }
             [flag, value] if flag == "--seq" => arguments.sequence = parse_number(value)?,
-            [flag, value] if flag == "--control" && value == "bfloat16_input" => {
+            [flag, value] if flag == "--dtype" && value == "f32" => {}
+            [flag, value] if flag == "--control" && value == "int32_input" => {
                 arguments.control = true;
             }
             other => return Err(QatError::Argument(format!("unrecognized {other:?}"))),

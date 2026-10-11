@@ -164,9 +164,9 @@ pub fn fused_verdicts(graph: &StepGraph) -> Result<Vec<(NodeId, &'static str, Ve
         .collect())
 }
 
-pub fn control_bfloat16_input() -> Result<(usize, usize, usize), QatError> {
+pub fn control_int32_input() -> Result<(usize, usize, usize), QatError> {
     let program = vec![Op::Input {
-        dtype: DType::BFloat16,
+        dtype: DType::Int32,
         shape: vec![Extent::Static(1)],
         name: Some("control_input".to_owned()),
     }];

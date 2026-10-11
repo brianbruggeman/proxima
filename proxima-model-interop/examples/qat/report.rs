@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use super::QatError;
 use super::census::{
-    NodeLine, PlanOutcome, Verdict, classify_nodes, control_bfloat16_input, fused_verdicts,
+    NodeLine, PlanOutcome, Verdict, classify_nodes, control_int32_input, fused_verdicts,
 };
 use super::graph::StepGraph;
 
@@ -114,7 +114,7 @@ pub fn print_cell(layers: u32, graph: &StepGraph) -> Result<(), QatError> {
 }
 
 pub fn print_control() -> Result<(), QatError> {
-    let (nodes, accepted, rejected) = control_bfloat16_input()?;
+    let (nodes, accepted, rejected) = control_int32_input()?;
     println!("control census nodes={nodes} metal_ok={accepted} metal_reject={rejected}");
     Ok(())
 }
