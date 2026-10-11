@@ -127,6 +127,12 @@ pub(crate) fn bind_missing_leaves<'file>(
         .map(|(name, _)| name.clone())
         .chain(state.packed().iter().map(|(name, _)| name.clone()))
         .chain(state.packed_owned().iter().map(|(name, _, _)| name.clone()))
+        .chain(
+            state
+                .expert_ranges()
+                .iter()
+                .map(|(name, _, _)| name.clone()),
+        )
         .collect();
 
     for (index, op) in program.iter().enumerate() {

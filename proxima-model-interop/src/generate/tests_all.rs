@@ -2625,6 +2625,7 @@ pub(super) mod memory_fit_gate_tests {
                 owned: Vec::new(),
                 packed: Vec::new(),
                 packed_owned: Vec::new(),
+                expert_ranges: Vec::new(),
                 precision: &[],
             },
             architecture: tiny_architecture(),

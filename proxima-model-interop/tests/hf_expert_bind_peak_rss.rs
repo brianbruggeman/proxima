@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use memmap2::Mmap;
-use proxima_model_interop::profiles::binding_profile;
+use proxima_model_interop::profiles::{BindingProfile, TensorAlias, binding_profile};
 use proxima_model_interop::{
-    KvLayout, bind_checkpoint, bind_safetensors_program_leaves, header_descriptor,
+    BoundWeights, KvLayout, bind_checkpoint, bind_safetensors_program_leaves, header_descriptor,
 };
 use proxima_primitives::pipe::sans_io::Outcome;
 use proxima_safetensors::{Manifest, SafetensorsParser};
@@ -21,9 +21,9 @@ const DEFAULT_GGUF: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd
 const TEST_NAME: &str =
     "hf_expert_stack_bind_peak_rss_stays_within_the_measured_bound_of_the_gguf_bind";
 const MARKER: &str = "BIND_RSS";
-// measured 125.25 on the granite plain export (hf 3242426368 B, gguf 25886720 B): the gguf bind maps lazily
-// while the fused gate/up cut reads and copies 1.6 GB each; a regression to owned f32 stacks must exceed this
-const HF_OVER_GGUF_PEAK_BOUND: f64 = 140.0;
+const EMBEDDING_LEAF: &str = "token_embd.weight";
+// measured 11.60 to 12.17 over seven runs (hf 323.3 to 323.9 MB, gguf 26.7 to 27.9 MB): token_embd.weight decodes bf16 to 201338880 B of f32 and reads 100669440 B of mapped bf16; with it skipped hf peaks at 21.7 to 22.6 MB; the previous copying bind recorded 3242426368 B, ratio 125.25
+const HF_OVER_GGUF_PEAK_BOUND: f64 = 13.0;
 
 fn peak_rss_bytes() -> u64 {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
@@ -49,11 +49,28 @@ fn map(path: &Path) -> Mmap {
     unsafe { Mmap::map(&file) }.expect("map checkpoint")
 }
 
-fn report(mode: &str, bound: (usize, usize, usize)) {
-    let (owned, packed, packed_owned) = bound;
+fn largest_owned(weights: &BoundWeights<'_>) -> (String, usize) {
+    weights
+        .owned()
+        .iter()
+        .map(|(name, values)| (name.clone(), values.len() * std::mem::size_of::<f32>()))
+        .max_by_key(|(_, bytes)| *bytes)
+        .unwrap_or_default()
+}
+
+fn report(mode: &str, weights: &BoundWeights<'_>) {
+    let (owned, packed) = (weights.owned().len(), weights.packed().len());
+    let (packed_owned, ranges) = (weights.packed_owned().len(), weights.expert_ranges().len());
+    let owned_bytes: usize = weights
+        .owned()
+        .iter()
+        .map(|(_, values)| values.len() * std::mem::size_of::<f32>())
+        .sum();
+    let (largest_name, largest_bytes) = largest_owned(weights);
     println!(
-        "{MARKER} mode={mode} rss_peak_bytes={} owned={owned} packed={packed} packed_owned={packed_owned}",
-        peak_rss_bytes()
+        "{MARKER} mode={mode} rss_peak_bytes={} owned={owned} packed={packed} packed_owned={packed_owned} expert_ranges={ranges} leaves={} owned_bytes={owned_bytes} largest_owned={largest_name}:{largest_bytes}",
+        peak_rss_bytes(),
+        owned + packed + packed_owned + ranges
     );
 }
 
@@ -61,15 +78,7 @@ fn bind_gguf_child() {
     let mapping = map(&gguf_path());
     let parsed = proxima_gguf::parse_complete(&mapping).expect("parse gguf");
     let bound = bind_checkpoint(&parsed, &mapping).expect("gguf bind");
-    let weights = &bound.weights;
-    report(
-        "gguf",
-        (
-            weights.owned().len(),
-            weights.packed().len(),
-            weights.packed_owned().len(),
-        ),
-    );
+    report("gguf", &bound.weights);
 }
 
 fn manifest_of(file: &[u8]) -> (Manifest, u64) {
@@ -83,7 +92,24 @@ fn manifest_of(file: &[u8]) -> (Manifest, u64) {
     (manifest.clone(), data_start)
 }
 
-fn runtime_inputs(program: &[Op]) -> Vec<String> {
+fn is_stored(manifest: &Manifest, binding: &BindingProfile, name: &str) -> bool {
+    manifest.tensor(name).is_some()
+        || binding
+            .aliases_for(name)
+            .any(|(alias, prefix)| match alias {
+                TensorAlias::Rename { from, .. } | TensorAlias::Part { from, .. } => {
+                    manifest.tensor(&format!("{prefix}{from}")).is_some()
+                }
+                TensorAlias::Join { .. } => false,
+            })
+}
+
+fn runtime_inputs(
+    program: &[Op],
+    manifest: &Manifest,
+    binding: &BindingProfile,
+    skipped: &[&str],
+) -> Vec<String> {
     program
         .iter()
         .filter_map(|operation| match operation {
@@ -92,11 +118,11 @@ fn runtime_inputs(program: &[Op]) -> Vec<String> {
             } => Some(name.clone()),
             _ => None,
         })
-        .filter(|name| !name.ends_with("_exps.weight"))
+        .filter(|name| skipped.contains(&name.as_str()) || !is_stored(manifest, binding, name))
         .collect()
 }
 
-fn bind_hf_child(export: &Path) {
+fn bind_hf_child(export: &Path, mode: &str, skipped: &[&str]) {
     let gguf = map(&gguf_path());
     let parsed = proxima_gguf::parse_complete(&gguf).expect("parse gguf header");
     let descriptor = header_descriptor(&parsed, KvLayout::Full).expect("descriptor");
@@ -110,20 +136,21 @@ fn bind_hf_child(export: &Path) {
         data_start,
         &program,
         &binding,
-        &runtime_inputs(&program),
+        &runtime_inputs(&program, &manifest, &binding, skipped),
     )
     .expect("hf bind");
-    report(
-        "hf",
-        (
-            weights.owned().len(),
-            weights.packed().len(),
-            weights.packed_owned().len(),
-        ),
-    );
+    report(mode, &weights);
 }
 
-fn spawn_child(mode: &str, export: &Path) -> (u64, String) {
+fn field(line: &str, key: &str) -> u64 {
+    line.split_whitespace()
+        .find_map(|item| item.strip_prefix(key)?.strip_prefix('='))
+        .unwrap_or_else(|| panic!("no {key} field in {line}"))
+        .parse()
+        .unwrap_or_else(|error| panic!("{key} is not a number in {line}: {error}"))
+}
+
+fn spawn_child(mode: &str, export: &Path) -> String {
     let output = Command::new(std::env::current_exe().expect("test binary path"))
         .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
         .env(CHILD_ENV, mode)
@@ -136,17 +163,11 @@ fn spawn_child(mode: &str, export: &Path) -> (u64, String) {
         "{mode} child failed: {stdout}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let line = stdout
+    stdout
         .lines()
         .find_map(|line| line.find(MARKER).map(|start| &line[start..]))
-        .unwrap_or_else(|| panic!("{mode} child printed no {MARKER} line: {stdout}"));
-    let peak = line
-        .split_whitespace()
-        .find_map(|field| field.strip_prefix("rss_peak_bytes="))
-        .expect("rss field")
-        .parse()
-        .expect("rss number");
-    (peak, line.to_string())
+        .unwrap_or_else(|| panic!("{mode} child printed no {MARKER} line: {stdout}"))
+        .to_string()
 }
 
 fn stack_bytes() -> (u64, u64) {
@@ -171,23 +192,45 @@ fn stack_bytes() -> (u64, u64) {
 fn hf_expert_stack_bind_peak_rss_stays_within_the_measured_bound_of_the_gguf_bind() {
     let Ok(export) = std::env::var(EXPORT_ENV) else {
         eprintln!(
-            "SKIPPED {TEST_NAME}: {EXPORT_ENV} names no granite plain export directory (model.safetensors + config.json); the peak-RSS contract was not checked"
+            "SKIPPED {TEST_NAME}: {EXPORT_ENV} names no granite plain export directory (model.safetensors, written by the mlx_plain_export example); the peak-RSS contract was not checked"
         );
         return;
     };
     let export = PathBuf::from(export);
     match std::env::var(CHILD_ENV).as_deref() {
         Ok("gguf") => return bind_gguf_child(),
-        Ok("hf") => return bind_hf_child(&export),
+        Ok("hf") => return bind_hf_child(&export, "hf", &[]),
+        Ok("hf_without_embedding") => {
+            return bind_hf_child(&export, "hf_without_embedding", &[EMBEDDING_LEAF]);
+        }
         _ => {}
     }
-    let (gguf_peak, gguf_line) = spawn_child("gguf", &export);
-    let (hf_peak, hf_line) = spawn_child("hf", &export);
+    let gguf_line = spawn_child("gguf", &export);
+    let hf_line = spawn_child("hf", &export);
+    let without_embedding_line = spawn_child("hf_without_embedding", &export);
+    let (gguf_peak, hf_peak) = (
+        field(&gguf_line, "rss_peak_bytes"),
+        field(&hf_line, "rss_peak_bytes"),
+    );
     let (stored, bf16) = stack_bytes();
     let ratio = hf_peak as f64 / gguf_peak as f64;
     eprintln!(
-        "{gguf_line}\n{hf_line}\nstack_bytes q8_0={stored} bf16={bf16} stack_ratio={:.4} hf_over_gguf_peak={ratio:.4}",
+        "{gguf_line}\n{hf_line}\n{without_embedding_line}\nstack_bytes q8_0={stored} bf16={bf16} stack_ratio={:.4} hf_over_gguf_peak={ratio:.4}",
         bf16 as f64 / stored as f64
+    );
+    assert!(
+        field(&gguf_line, "leaves") > 0,
+        "the gguf bind bound no leaves"
+    );
+    assert_eq!(
+        field(&hf_line, "leaves"),
+        field(&gguf_line, "leaves"),
+        "the hf bind must bind every leaf the gguf bind binds"
+    );
+    assert_eq!(
+        field(&hf_line, "packed_owned"),
+        0,
+        "no fused expert part may be copied into owned bytes"
     );
     assert!(
         ratio <= HF_OVER_GGUF_PEAK_BOUND,
