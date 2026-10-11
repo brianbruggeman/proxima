@@ -56,7 +56,7 @@ proxima-primitives/src/float_layout.rs
                      pub const fn bias(&self) -> i16; pub const fn width(&self) -> u8;
                      pub fn max_normal(&self) -> f32; pub fn min_normal(&self) -> f32; pub fn min_subnormal(&self) -> f32; }
 proxima-gguf/src/quant/float_layout.rs        pub fn encode(value: f32, layout: FloatLayout) -> u32; pub fn decode(code: u32, layout: FloatLayout) -> f32;
-                                              pub fn encode_counting(value: f32, layout: FloatLayout, nan_count: &mut usize) -> u32
+                                              pub fn encode_counting(value: f32, layout: FloatLayout, nan_count: &mut u64) -> u32
 proxima-gguf/src/quant/bf8_e5m2.rs            encode/decode -> float_layout::{encode,decode}(.., FloatLayout::E5M2) as u8
 proxima-gguf/src/quant/bf4_e2m1.rs            the same with E2M1; encode keeps its Result and maps a non-finite input to QuantError::NonFiniteInput
 proxima-gguf/src/quant/scaled_float.rs        pub fn quantize_block(values: &[f32; 32], layout: FloatLayout, out: &mut [u8]); pub fn dequantize_block(block: &[u8], layout: FloatLayout, out: &mut [f32; 32])
