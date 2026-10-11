@@ -414,7 +414,7 @@ impl PrefixState {
 /// Where the prompt cache hands an entry it is evicting, so the entry stays
 /// reachable at a cost lower than its rows in memory.
 ///
-/// [`PromptCache::store`] calls `demote` for each entry its budget evicts. A
+/// `PromptCache::store` calls `demote` for each entry its budget evicts. A
 /// tier composes `PrefixState::to_block_file` and
 /// `PrefixState::from_block_file` with its own file code to keep the copy.
 /// The slot is a trait and not a pipe because a demote runs inside the

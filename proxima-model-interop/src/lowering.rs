@@ -470,7 +470,7 @@ impl<'file> BoundProgram<'file> {
     /// instead of the descriptor the binder derived: the op graph and every
     /// root into it come from [`proxima_tensor::spec::build_forward`] over the
     /// config, and the weights gain whatever leaves that program names which the
-    /// binder's own program did not ([`crate::bind_leaves::bind_missing_leaves`]). A root the
+    /// binder's own program did not (`crate::bind_leaves::bind_missing_leaves`). A root the
     /// binder chose not to expose (`hidden_root`, `residual_roots`) stays
     /// unexposed, so a decode loop reads the same outputs it always did.
     ///

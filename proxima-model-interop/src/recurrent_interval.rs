@@ -208,15 +208,15 @@ fn metadata_u32_nonzero_uniform(parsed: &ParsedGguf, key: &str) -> Result<u32, I
     }
 }
 
-/// One bind attempt's report for a caller that never sees [`BoundWeights`]
+/// One bind attempt's report for a caller that never sees `BoundWeights`
 /// (`pub(crate)`, `crate::generate::LoadedModel`'s own field type) --
-/// [`crate::short_conv::run_lfm2_prefill`]'s bind-only counterpart, minus the
+/// `crate::short_conv::run_lfm2_prefill`'s bind-only counterpart, minus the
 /// forward-program compile and generation loop this checkpoint has no
 /// state-space kernel for yet.
 ///
 /// # Errors
 ///
-/// Whatever `recurrent_interval_architecture_from_metadata`, [`recurrent_interval_forward_program`]
+/// Whatever `recurrent_interval_architecture_from_metadata`, `recurrent_interval_forward_program`
 /// and [`bind_program_leaves`] can fail with.
 pub fn bind_recurrent_interval_checkpoint(
     parsed: &ParsedGguf,
@@ -239,7 +239,7 @@ pub fn bind_recurrent_interval_checkpoint(
     ))
 }
 
-/// This checkpoint's forward-program seam -- [`crate::short_conv::run_lfm2_prefill`]'s
+/// This checkpoint's forward-program seam -- `crate::short_conv::run_lfm2_prefill`'s
 /// call into [`proxima_tensor::spec::scheduled_forward_program_with_experts`]
 /// counterpart, minus the builder itself: every op-graph primitive that
 /// builder composes (`append_attention_mixer`, `rmsnorm`, `elementwise`,
