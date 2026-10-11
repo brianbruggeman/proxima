@@ -342,3 +342,69 @@ fn float_layout_wrapper_bf4_equals_generic_e2m1() {
         );
     }
 }
+
+const OCP_MX_TEXT: &str = include_str!("../src/quant/fixtures/ocp_mx_v1_0.txt");
+const E3M2_SIGN_BIT: u32 = 0x20;
+const E3M2_POSITIVE_GOLDEN: [f32; 32] = [
+    0.0, 0.0625, 0.125, 0.1875, 0.25, 0.3125, 0.375, 0.4375, 0.5, 0.625, 0.75, 0.875, 1.0, 1.25,
+    1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0, 14.0, 16.0, 20.0, 24.0,
+    28.0,
+];
+
+fn e3m2_golden_table(positive: &[f32; 32]) -> Vec<(u32, f32)> {
+    let positives = positive.iter().zip(0u32..);
+    let negatives = positive.iter().zip(E3M2_SIGN_BIT..);
+    positives
+        .map(|(&value, code)| (code, value))
+        .chain(negatives.map(|(&value, code)| (code, -value)))
+        .collect()
+}
+
+fn e3m2_decode_matches(table: &[(u32, f32)]) -> bool {
+    table
+        .iter()
+        .all(|&(code, value)| decode(code, FloatLayout::E3M2).to_bits() == value.to_bits())
+}
+
+fn e3m2_encode_matches(table: &[(u32, f32)]) -> bool {
+    table
+        .iter()
+        .all(|&(code, value)| encode(value, FloatLayout::E3M2) == code)
+}
+
+#[test]
+fn float_layout_e3m2_golden_decode_all_64_codes() {
+    let table = e3m2_golden_table(&E3M2_POSITIVE_GOLDEN);
+
+    assert_eq!(table.len(), 64);
+    assert!(e3m2_decode_matches(&table));
+    assert!(decode(E3M2_SIGN_BIT, FloatLayout::E3M2).is_sign_negative());
+    assert_eq!(decode(E3M2_SIGN_BIT, FloatLayout::E3M2), 0.0);
+}
+
+#[test]
+fn float_layout_e3m2_golden_encode_each_value() {
+    let table = e3m2_golden_table(&E3M2_POSITIVE_GOLDEN);
+
+    assert_eq!(table.len(), 64);
+    assert!(e3m2_encode_matches(&table));
+}
+
+#[test]
+fn float_layout_e3m2_golden_control_altered_row_fails() {
+    let mut altered = E3M2_POSITIVE_GOLDEN;
+    altered[31] = 24.0;
+    let table = e3m2_golden_table(&altered);
+
+    assert!(!e3m2_decode_matches(&table));
+    assert!(!e3m2_encode_matches(&table));
+}
+
+#[test]
+fn float_layout_e3m2_golden_fixture_carries_table4() {
+    let newline_count = OCP_MX_TEXT.bytes().filter(|&byte| byte == b'\n').count();
+
+    assert_eq!(newline_count, 592);
+    assert!(OCP_MX_TEXT.contains("S 111 112 = ± 24 × 1.75 = ± 28.0"));
+    assert!(OCP_MX_TEXT.contains("S 000 012 = ± 2-2 × 0.25 = ± 0.0625"));
+}

@@ -44,6 +44,7 @@ impl FloatLayout {
     /// E5M2 widths with saturation: the GGUF bf8 storage policy, which keeps infinities out of stored weights.
     pub const E5M2_SATURATING: Self = Self::ieee_like(5, 2, Specials::SaturateOnOverflow);
     pub const E2M1: Self = Self::ieee_like(2, 1, Specials::None);
+    /// OCP MX v1.0 FP6 E3M2: bias 3, no inf or nan, max normal 28.0 (page 12, section 5.3.2, Table 4).
     pub const E3M2: Self = Self::ieee_like(3, 2, Specials::None);
     pub const E2M3: Self = Self::ieee_like(2, 3, Specials::None);
     pub const BF32: Self = Self::ieee_like(8, 23, Specials::InfinityOnOverflow);
