@@ -4342,3 +4342,228 @@ emitter check: OMEGA_ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE=4 OMEGA_ATTENTION_ROW
 ```
 
 Missing for CI: no job runs the Metal A/B, the captures or the box sampler; the saved baseline of this section is `evidence/attn5/raw/` and `summaries/`, and no job diffs a later run against it.
+
+## round five: attention simdgroups and mma precision (measured 2026-10-08 on 70aecbd0; code landed as a2423eef, 42c0d4a0)
+
+Evidence under `evidence/attn6/` (`summaries/` are the `ab_summary` tables and the `decode_arms` bench tables, `box/` the pre-run box samples, `logs/` the gate, build and diff logs, `bench_text_hashes.txt` the per-process text hashes extracted from the bench stderr, `base_export_commit.txt` = `70aecbd05822d90b537f7a25d29fa4d90a89dbc7`); raw per-process outputs stay in `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn6/raw/`. Provenance tags as in the preceding section: MEASURED is a printed value from a run named here, DERIVED is arithmetic on measured values or on the kernel source, HYPOTHESIS is a mechanism no counter confirmed. Later attention work is in other places and is not repeated here: commits `72ee16e9` (select attention tile height), `dbec97ba` (select attention simd topology), `25480fed` (remove adjacent shared-k barrier) and the granite replay campaign under `proxima-tensor/specs/granite-attention-variant-performance/` and `granite-attention-numeric-matrix/`; no section follows this one in this file.
+
+Code that this section documents: `a2423eef` `feat(interop): compare each a/b arm against an f64 attention reference` (`proxima-model-interop/examples/cell_resources/attention_reference.rs`, `logs/diff_commit1.txt`) and `42c0d4a0` `perf(omega): half-precision mma in the row-tiled attention by key` (`omega/build.rs`, `omega/omega-runtime.toml`, `omega/src/msl/cached_attention_row_tiled.rs`, `logs/diff_working.txt`, the working-tree diff read before the commit). Protocol, from the `ab group` lines (`raw/cell2/granite1.out`): `single_us` is the GPU time of one captured dispatch alone in its own command buffer, 21 rounds per process, 3 processes per cell, arms interleaved in one process, threadgroups of 64 threads, layer 0 of the captured prefill (granite 24 ops, E2B d256 28 ops, E2B d512 7 ops). Release builds (`logs/build_ab_prod.log`: `cargo build --release -p proxima-model-interop --features std,metal,instrument`). Every table cell is median of the three process medians, `[CoV% of the three]`, `(min-max)`. Shapes and tile heights are those of the preceding section (granite d64 `[1000, 8, 2, 64]` group `e3603c69`, E2B sliding d256 `[971, 1, 8, 256]` group `28e53828`, E2B global d512 `[971, 1, 8, 512]` group `96585e0b`); the production kernel at the base commit renders granite 8 rows x 2 simdgroups x 64-key block (9,600 B), d256 2 rows x 4 simdgroups x 128-key block (8,576 B), d512 2 rows x 8 simdgroups x 128-key block (8,576 B).
+
+Box before every timed process (MEASURED, `box/*.txt`, 60 files): three `ioreg` device-utilization reads, the first nonzero in every file (90 to 98), the second and third 0, as in the preceding section where the first read is the sampler's own (not separately verified here); load averages 3.22 to 10.84 at launch (the 10.84 is `probe__box_before_e2b5121.txt`, the highest of the probe cells; cells 1, 2, 2emit and the mma-rate cells 3.22 to 5.25; bench_long 5.13 and bench_short 3.35); the only cargo-related process was the idle `sccache`; PID 70140 (`/System/Library/...`) and PID 17029 (`/Users/brianbrug...`, names truncated by `ps`) are the top two consumers in 55 of the 60 files at 25 to 87 % and 20 to 85 % CPU, and a user daemon (`user-daemon` in the saved files) is listed in 27 files at 2.3 to 21.9 %. The `pgrep` line of each file lists no ollama process.
+
+### 0. hypotheses and falsifiers, as set before the cells
+
+- Cell 1. Hypothesis: four simdgroups over a 64-key block (the one arm below production on granite in the preceding section) wins at head dim 64 and must not lose at head dims 256 and 512. Falsifier: the arm loses to production at d256 or d512, or does not win at d64 (no numeric margin is written in any file read). Arms: `base` (production), `msg4` (`min_simdgroups = 4`, block stays at the sizing value), `kpb64` (`keys_per_block = 64`), `both` (both keys). Bits compared against `base` over every output element.
+- Cell 2. Hypothesis: half-precision MMA operands (accumulating in float) cut the Q.K^T and P.V time by a large fraction. Admission bar: llama parity tests and the text hashes of the bench equal. Falsifier: no large cut in the Q.K^T and P.V time, or a parity test or text hash differs (no numeric threshold for "large" is written in any file read; section 2 reports the cut as a fraction of the time the MMA-removed arms bound). Arms: `f32mma` (explicit float operands, the control), `qk_*` / `pv_*` / `both_*` (half on Q.K^T / on P.V / on both), `_f16` (K and V bound as half: the bound buffer is smaller, 127.6 against 131.8 MB at granite) and `_cvt` (f32 buffers, each fragment narrowed to half as it is loaded: bound buffer equal to base), `f16store_f32mma` (half K/V storage, float MMA), `*_off` (that MMA deleted: outputs are wrong by design, cosine 0.30 to 0.91 against base, so these arms bound time, not work). The `_cvt` form is what the emitter renders (`cached_attention_row_tiled.rs`, `simdgroup_load` overloads that narrow as loaded); `emit_half` in cell 2emit is the emitter's own output.
+
+### 1. cell 1: four simdgroups and the 64-key block (`summaries/cell1_{granite,e2b256,e2b512}_single_us.md`, `..._round_cov.md`, `cell1_bits_*.txt`)
+
+Per-process resources, MEASURED, the same for all four arms inside a shape: granite bound 131.8 MB, RSS peak 1622.4 MB, footprint 184.3 MB, Metal 1515.3 MB, load 3.55; d256 385.3, 3425.4, 226.3, 3374.6, load 3.49; d512 355.3, 3425.2, 230.6, 3374.6, load 4.00. CPU per replay is 0.052 to 0.078 ms (1.8 to 4.9 % of wall): the timing is GPU-bound.
+
+| shape | arm | us/op median [CoV%] (min-max) | vs base (DERIVED) | bits vs base | static tg B | cpu ms / % of wall | wall ms per replay |
+|---|---|---|---|---|---|---|---|
+| granite d64 | base | 1131.583 [0.60] (1125.292-1138.792) | | 0 of 1,024,000 | 9,600 | 0.057 / 4.2 | 1.378 |
+| granite d64 | msg4 | 1111.333 [0.29] (1111.250-1116.875) | -20.3 us (-1.8 %) | 533,198 differ, max 80,089 ulp, max_abs 4.77e-6 | 13,696 | 0.059 / 4.4 | 1.340 |
+| granite d64 | kpb64 | 1123.292 [1.18] (1107.750-1134.042) | -8.3 us (-0.7 %) | 0 | 9,600 | 0.056 / 4.3 | 1.302 |
+| granite d64 | **both** | **1036.792 [0.39] (1035.125-1042.875)** | **-94.8 us (-8.4 %)** | **0** | 9,600 | 0.057 / 4.5 | 1.266 |
+| E2B d256 | base | 932.875 [0.10] (931.375-933.000) | | 0 of 1,988,608 | 8,576 | 0.059 / 4.5 | 1.330 |
+| E2B d256 | msg4 | 935.042 [0.16] (933.250-936.250) | +2.2 us (+0.2 %) | 0 | 8,576 | 0.055 / 4.9 | 1.133 |
+| E2B d256 | kpb64 | 929.958 [0.11] (929.000-931.000) | -2.9 us (-0.3 %) | 1,045,269 differ, max 996,093 ulp, max_abs 4.77e-6 | 4,480 | 0.052 / 4.6 | 1.133 |
+| E2B d256 | both | 932.125 [0.17] (930.750-933.833) | -0.8 us (-0.1 %) | 1,045,269 differ, same max | 4,480 | 0.054 / 4.7 | 1.133 |
+| E2B d512 | base | 2620.125 [0.20] (2617.625-2627.583) | | 0 of 3,977,216 | 8,576 | 0.072 / 2.5 | 2.912 |
+| E2B d512 | msg4 | 2643.875 [0.08] (2643.000-2647.167) | +23.8 us (+0.9 %) | 0 | 8,576 | 0.071 / 2.5 | 2.869 |
+| E2B d512 | kpb64 | 3492.500 [0.15] (3488.250-3498.958) | +872.4 us (+33.3 %) | 2,195,339 differ, max 597,454 ulp, max_abs 7.15e-6 | 4,480 | 0.078 / 2.1 | 3.726 |
+| E2B d512 | **both** | **3487.000 [0.10] (3481.250-3487.042)** | **+866.9 us (+33.1 %)** | 2,195,339 differ, same max | 4,480 | 0.068 / 1.8 | 3.719 |
+
+Mechanism rows. Granite `msg4` alone is not bit-identical and `both` is: `msg4` changes the key block (`block = min(keys_per_block, 32 * simdgroups)`, preceding section section 5), which regroups the sums; with the block pinned at 64 every query row's blocks start at 0 and the four-simdgroup arm sums in production's order (DERIVED, preceding section section 5; the 533,198 and 80,089 here equal the preceding section's `t8n4b128s` count and max). On d256 the production already has four simdgroups (so `msg4` is the production kernel: 0 differ, 8,576 B) and on d512 eight (same); `kpb64` regroups the sums on both (1,045,269 differs on d256, equal to the preceding section's `r2b64u`), and cuts static threadgroup bytes from 8,576 to 4,480. Why the 64-key block costs +33 % at d512 (and is flat at d256) is not traced: no counter was read. The wall-ms column of the d256 base (1.330) is 0.197 ms above the other three arms (1.133) while `single_us` is within 0.2 % across the four: not traced.
+
+Reading against the falsifier: the granite arm is below production by 8.4 % with bits identical; the d512 arm is above production by 33.1 % (range 3481.3 to 3487.0 against 2617.6 to 2627.6); the d256 arm is within 0.1 % of production. No default was moved and no per-head-dim table was written (a table fitted to these three points would be a rule for specific instances, as in the preceding section).
+
+### 2. cell 2: half-precision MMA operands (`summaries/cell2_{granite,e2b256,e2b512}_single_us.md`, `cell2_accuracy_*.txt`, `cell2_d256_repeat_single_us.md`, `cell2emit_*_single_us.md`)
+
+Accuracy is `ab agree` (against the `base` arm's output) and `ab ref` (against the CPU f64 reference of `a2423eef`, `cell2_accuracy_*.txt`), over every element (1,024,000 granite; 1,988,608 d256; 3,977,216 d512). Per-process resources, MEASURED: granite bound 131.8 MB (127.6 for `both_f16` and `f16store_f32mma`, 129.7 for `qk_f16` and `pv_f16`), RSS peak 1620.5 MB, footprint 194.3 to 195.1 MB, Metal 1529.1 MB; d256 bound 385.3 (383.3 / 384.3), RSS 3426.8, footprint 234.1 to 234.7, Metal 3381.8; d512 bound 355.3 (351.2 / 353.2), RSS 3423.3, footprint 240.3 to 241.0, Metal 3387.9; CPU per replay 0.052 to 0.083 ms (2.3 to 5.7 % of wall). Static threadgroup bytes are the base's in every arm (granite 9,600, d256 and d512 8,576).
+
+**Granite d64** (base 1132.000):
+
+| arm | us/op median [CoV%] (min-max) | vs base (DERIVED) | differ of 1,024,000 | max_abs vs base | cosine vs base | max_abs vs f64 | cosine vs f64 | rel_l2 vs f64 |
+|---|---|---|---|---|---|---|---|---|
+| base | 1132.000 [0.41] (1126.125-1135.250) | | 0 | 0 | 1.000000000 | 4.333e-5 | 1.000000000 | 4.539e-7 |
+| f32mma | 1138.875 [0.13] (1138.000-1140.875) | +6.9 (+0.6 %) | 0 | 0 | 1.000000000 | 4.333e-5 | 1.000000000 | 4.539e-7 |
+| qk_f16 | 1085.625 [0.48] (1083.250-1093.333) | -46.4 (-4.1 %) | 1,016,688 | 3.778e-2 | 0.999999873 | 3.777e-2 | 0.999999873 | 5.054e-4 |
+| qk_cvt | 1100.375 [0.17] (1098.292-1102.000) | -31.6 (-2.8 %) | 1,016,688 | 3.778e-2 | 0.999999873 | 3.777e-2 | 0.999999873 | 5.054e-4 |
+| pv_f16 | 1126.917 [0.49] (1118.750-1129.125) | -5.1 (-0.4 %) | 1,023,805 | 3.902e-3 | 0.999999987 | 3.902e-3 | 0.999999987 | 1.627e-4 |
+| pv_cvt | 1124.500 [0.64] (1120.292-1134.250) | -7.5 (-0.7 %) | 1,023,805 | 3.902e-3 | 0.999999987 | 3.902e-3 | 0.999999987 | 1.627e-4 |
+| **both_f16** | **1082.250 [0.47] (1074.750-1084.542)** | **-49.8 (-4.4 %)** | 1,023,906 | **3.797e-2** | 0.999999859 | 3.796e-2 | 0.999999859 | **5.317e-4** |
+| both_cvt | 1110.250 [0.17] (1107.417-1110.917) | -21.8 (-1.9 %) | 1,023,906 | 3.797e-2 | 0.999999859 | 3.796e-2 | 0.999999859 | 5.317e-4 |
+| f16store_f32mma | 1136.875 [0.27] (1131.875-1137.583) | +4.9 (+0.4 %) | 1,023,872 | 2.297e-2 | 0.999999899 | 2.297e-2 | 0.999999899 | 4.510e-4 |
+| qk_off | 1003.000 [0.27] (999.542-1004.875) | -129.0 (-11.4 %) | 1,022,975 | 12.34 | 0.572150927 | 12.34 | 0.572150950 | 8.278e-1 |
+| pv_off | 1040.500 [0.66] (1033.875-1047.542) | -91.5 (-8.1 %) | 1,023,076 | 398.4 | 0.304749842 | 398.4 | 0.304749900 | 9.448 |
+| **both_off** | **974.375 [0.49] (971.000-980.500)** | **-157.6 (-13.9 %)** | 1,023,104 | 12.86 | 0.434848184 | 12.86 | 0.434848216 | 9.010e-1 |
+
+**E2B sliding d256** (base 971.333; the second column of us/op is the three-process repeat, `cell2_d256_repeat_single_us.md`, base 968.292):
+
+| arm | us/op median [CoV%] (min-max) | repeat us/op [CoV%] | vs base (DERIVED) | differ of 1,988,608 | max_abs vs base | cosine vs base | max_abs vs f64 | cosine vs f64 | rel_l2 vs f64 |
+|---|---|---|---|---|---|---|---|---|---|
+| base | 971.333 [0.30] (968.375-974.125) | 968.292 [0.27] | | 0 | 0 | 1.000000000 | 8.583e-6 | 1.000000000 | 3.024e-7 |
+| f32mma | 971.500 [0.24] (967.958-972.292) | 974.375 [0.46] | +0.2 (0.0 %) | 0 | 0 | 1.000000000 | 8.583e-6 | 1.000000000 | 3.024e-7 |
+| qk_f16 | 908.958 [0.10] (908.458-910.250) | 911.000 [0.08] | -62.4 (-6.4 %) | 1,985,772 | 2.310e-3 | 0.999999997 | 2.311e-3 | 0.999999997 | 7.896e-5 |
+| qk_cvt | 917.500 [0.16] (916.000-918.875) | 916.750 [0.08] | -53.8 (-5.5 %) | 1,985,774 | 2.310e-3 | 0.999999997 | 2.311e-3 | 0.999999997 | 7.896e-5 |
+| pv_f16 | 981.875 [0.09] (980.875-982.708) | 984.167 [0.55] | +10.5 (+1.1 %) | 1,988,111 | 2.749e-3 | 0.999999996 | 2.749e-3 | 0.999999996 | 1.089e-4 |
+| pv_cvt | 1003.542 [0.25] (1000.417-1005.333) | 1003.542 [0.27] | +32.2 (+3.3 %) | 1,988,112 | 2.749e-3 | 0.999999996 | 2.749e-3 | 0.999999996 | 1.089e-4 |
+| **both_f16** | **889.208 [0.05] (889.000-889.875)** | 891.083 [0.21] | **-82.1 (-8.5 %)** | 1,988,238 | 3.281e-3 | 0.999999992 | 3.281e-3 | 0.999999992 | 1.348e-4 |
+| both_cvt | 910.500 [0.17] (909.458-912.542) | 908.875 [0.11] | -60.8 (-6.3 %) | 1,988,238 | 3.281e-3 | 0.999999992 | 3.281e-3 | 0.999999992 | 1.348e-4 |
+| f16store_f32mma | 954.750 [0.08] (953.750-955.167) | 956.708 [0.29] | -16.6 (-1.7 %) | 1,988,169 | 2.749e-3 | 0.999999995 | 2.749e-3 | 0.999999995 | 1.148e-4 |
+| qk_off | 855.542 [0.31] (853.208-858.458) | 861.500 [0.38] | -115.8 (-11.9 %) | 1,986,560 | 11.98 | 0.891883608 | 11.98 | 0.891883608 | 4.717e-1 |
+| pv_off | 1236.250 [0.19] (1235.375-1239.875) | 1240.583 [0.45] | **+264.9 (+27.3 %)** | 1,988,384 | 25.24 | 0.678938125 | 25.24 | 0.678938123 | 7.474e-1 |
+| **both_off** | **791.250 [0.28] (790.375-794.583)** | 790.083 [0.48] | **-180.1 (-18.5 %)** | 1,988,384 | 39.82 | 0.750231975 | 39.82 | 0.750231974 | 1.446 |
+
+**E2B global d512** (base 2620.750):
+
+| arm | us/op median [CoV%] (min-max) | vs base (DERIVED) | differ of 3,977,216 | max_abs vs base | cosine vs base | max_abs vs f64 | cosine vs f64 | rel_l2 vs f64 |
+|---|---|---|---|---|---|---|---|---|
+| base | 2620.750 [0.14] (2619.750-2626.542) | | 0 | 0 | 1.000000000 | 9.060e-6 | 1.000000000 | 3.249e-7 |
+| f32mma | 2634.917 [0.11] (2634.208-2639.750) | +14.2 (+0.5 %) | 0 | 0 | 1.000000000 | 9.060e-6 | 1.000000000 | 3.249e-7 |
+| qk_f16 | 2670.750 [0.12] (2667.958-2674.125) | +50.0 (+1.9 %) | 3,971,231 | 2.563e-3 | 0.999999999 | 2.566e-3 | 0.999999999 | 4.559e-5 |
+| qk_cvt | 2785.750 [0.05] (2783.833-2786.250) | +165.0 (+6.3 %) | 3,971,229 | 2.563e-3 | 0.999999999 | 2.566e-3 | 0.999999999 | 4.559e-5 |
+| pv_f16 | 2632.875 [0.06] (2630.750-2634.042) | +12.1 (+0.5 %) | 3,975,354 | 7.509e-3 | 0.999999997 | 7.509e-3 | 0.999999997 | 7.508e-5 |
+| pv_cvt | 2624.125 [0.27] (2613.583-2627.208) | +3.4 (+0.1 %) | 3,975,353 | 7.509e-3 | 0.999999997 | 7.509e-3 | 0.999999997 | 7.508e-5 |
+| **both_f16** | **2676.292 [0.56] (2655.667-2684.792)** | **+55.5 (+2.1 %)** | 3,975,987 | 7.719e-3 | 0.999999996 | 7.717e-3 | 0.999999996 | 8.760e-5 |
+| both_cvt | 2770.625 [0.02] (2769.917-2770.708) | +149.9 (+5.7 %) | 3,975,986 | 7.719e-3 | 0.999999996 | 7.717e-3 | 0.999999996 | 8.760e-5 |
+| f16store_f32mma | 2753.458 [0.34] (2741.000-2759.208) | +132.7 (+5.1 %) | 3,975,457 | 7.509e-3 | 0.999999998 | 7.509e-3 | 0.999999998 | 6.769e-5 |
+| qk_off | 2299.833 [0.17] (2295.917-2303.625) | -320.9 (-12.2 %) | 3,973,120 | 15.16 | 0.912072884 | 15.16 | 0.912072884 | 4.277e-1 |
+| pv_off | 2438.708 [0.23] (2438.083-2448.042) | -182.0 (-6.9 %) | 3,976,768 | 24.06 | 0.751549377 | 24.06 | 0.751549377 | 6.653e-1 |
+| **both_off** | **2136.708 [0.02] (2136.542-2137.500)** | **-484.0 (-18.5 %)** | 3,976,768 | 24.82 | 0.788113666 | 24.82 | 0.788113667 | 1.311 |
+
+Emitted-kernel cell (`cell2emit_*_single_us.md`, 4 arms interleaved, 3 processes; base / `both_cvt` / `emit_half` / `qk_cvt`): granite 1132.000 / 1111.500 / 1108.792 [0.16] / 1104.500; d256 931.958 / 913.000 / 912.167 [0.23] / 914.375; d512 2622.375 / 2764.833 / 2774.875 [0.11] / 2769.000. `emit_half` differs from `both_cvt` by -0.2 %, -0.1 %, +0.4 %, and its differing-element counts and max ulp equal `both_cvt`'s (1,023,906 / 1,988,238 / 3,975,986; max ulp 1,998,121,882 / 1,909,662,226 / 1,896,514,884). `emit_half` against its own base (DERIVED): -2.05 %, -2.12 %, +5.82 %; these three are the figures in the comment above `mma_precision` in `omega/omega-runtime.toml:549-557` (-2.1, -2.1, +5.8). The d256 base reads 931.958 in this cell and 971.333 in the 12-arm cell above, while `both_cvt` reads 913.000 and 910.500: the arm that did not change moved 4.2 %, so the percentages against base differ between the two cells (-2.1 % here, -6.3 % there); the cause is not traced (the preceding section recorded an arm-count context effect of up to 2 % on other arms; it was not measured on this one).
+
+Mechanism rows (DERIVED unless marked):
+- MMA share bound: `both_off` removes 157.6 us (13.9 %) at granite, 180.1 us (18.5 %) at d256, 484.0 us (18.5 %) at d512. Q.K^T alone (`qk_off`) 129.0 / 115.8 / 320.9 us; P.V alone (`pv_off`) 91.5 / -264.9 (slower) / 182.0 us. The sum of the two single removals exceeds `both_off` at granite (220.5 against 157.6) and d512 (502.9 against 484.0); at d256 `pv_off` is 27.3 % slower than base and `both_off` 18.5 % faster. The slower d256 `pv_off` is not traced (the arm also removes the data the softmax and the accumulate depend on).
+- Fraction of the `both_off` bound that `both_f16` recovers: 49.75 / 157.6 = 31.6 % (granite), 82.1 / 180.1 = 45.6 % (d256), -55.5 / 484.0 = -11.5 % (d512, slower). `both_cvt`: 13.8 %, 33.8 %, -31.0 %.
+- Where the accuracy comes from: `f16store_f32mma` (half K/V storage, float MMA) holds rel_l2 4.510e-4 of `both_f16`'s 5.317e-4 at granite, 1.148e-4 of 1.348e-4 at d256, 6.769e-5 of 8.760e-5 at d512; the `_cvt` and `_f16` arms agree to 4 digits in every accuracy column (rounding the fragment to half is the same operation whether it happens in the buffer or at the load). The half arms against f64 at granite: max_abs 3.796e-2 against base's 4.333e-5 (876x), rel_l2 5.317e-4 against 4.539e-7 (1,171x). The round four `f16kv` arm read max_abs/largest 2.2e-3; here `f16store_f32mma` granite reads 2.058e-3 over the largest value (`cell2_accuracy_granite.txt`, `ab agree` line).
+- `f32mma` against `base` reads +0.6 %, +0.0 %, +0.5 % with 0 elements differing: spelling the float MMA out is the production arithmetic.
+- d512 `qk_cvt` +6.3 % against `qk_f16` +1.9 % and `pv_cvt` +0.1 % against `pv_f16` +0.5 %: the narrowing-at-load form costs 4.4 points more than half-bound buffers on Q.K^T at d512; not traced.
+
+### 3. the MMA rate in isolation (`summaries/mma_rate_single_us.md`, `mma_rate2_single_us.md`, `mma_rate3_single_us.md`; granite grid, 1000 threadgroups of 2 simdgroups, no memory traffic in the loop)
+
+Kernel sources are `scratch/mma_rate*/e3603c6942491f2f.*.metal` (not copied): independent accumulator chains of `simdgroup_multiply_accumulate` on one fixed left and right fragment, 8,192 MMAs per simdgroup in every arm (`mma_*`: 8 chains x 1024 steps; `c4`: 4 x 2048; `c16`: 16 x 512; `c32`: 32 x 256). `_f32` float operands and float accumulators; `_hf` and `mma_h_f32` half operands, float accumulators; `_hh` and `mma_h_h` half operands and half accumulators. Executed work DERIVED: 1000 x 2 x 8,192 x 1,024 FLOP = 16.78 GFLOP per dispatch (an 8x8x8 MMA is 1,024 FLOP), TFLOP/s = that over the time.
+
+| arm (file) | chains | us/op median [CoV%] (min-max) | exec TFLOP/s (DERIVED) |
+|---|---|---|---|
+| mma_f32 (mma_rate) | 8 | 2777.250 [1.15] (2775.125-2831.875) | 6.04 |
+| mma_h_f32 | 8 | 2592.958 [0.14] (2592.792-2599.000) | 6.47 |
+| mma_h_h | 8 | 2594.375 [2.85] (2536.500-2684.000) | 6.47 |
+| c4_f32 (mma_rate2) | 4 | 2830.375 [5.45] (2729.750-3036.000) | 5.93 |
+| c4_hf | 4 | 2834.292 [5.01] (2668.833-2949.542) | 5.92 |
+| c16_f32 | 16 | 1803.125 [0.06] (1802.125-1804.125) | 9.30 |
+| c16_hf | 16 | 1810.000 [0.07] (1808.542-1811.125) | 9.27 |
+| c32_f32 | 32 | 1692.500 [0.02] (1692.083-1692.875) | 9.91 |
+| c32_hf | 32 | 1693.292 [0.06] (1692.583-1694.500) | 9.91 |
+| c32_f32 (mma_rate3) | 32 | 1693.500 [0.04] (1692.417-1693.625) | 9.91 |
+| c32_hf | 32 | 1694.250 [0.04] (1693.083-1694.333) | 9.90 |
+| c32_hh | 32 | 1786.167 [0.05] (1784.750-1786.250) | 9.39 |
+
+The base attention arm in the same processes reads 1138.125, 1141.542 and 1137.125 us (the three files). Float against half operands at 8 chains: 2777.250 against 2592.958 (6.6 % apart, a ratio of 1.071, not 2); at 16 and 32 chains the two read within 0.4 % of each other; half accumulators (`c32_hh`) read 5.5 % above the float-accumulator arm. The kernel's executed MMA work per layer at granite is 2.0644 GFLOP (preceding section, section 2, DERIVED): at the 32-chain float rate that is 208 us, at the 8-chain float rate 342 us; the `both_off` bound is 157.6 us. Why half operands do not double the rate is not traced (no shader-profiler counter read); the measurement is that on this part, with float accumulators, half operands issue at the same rate as float operands once the chain count hides the latency, and 7 % faster at 8 chains.
+
+### 4. what removing pieces of the kernel did (`summaries/probe_*_single_us.md`, `probe2_*_single_us.md`; same protocol, 9 arms per cell)
+
+Arm macros, read from the variant sources (`scratch/probe*_*/…metal`, not copied): `exp_off` the exp, `reduce_off` the `simd_max`/`simd_sum` reductions, `barrier_off` the threadgroup barriers, `softmax_off` exp and reductions, `mma_off` both MMAs, `softmax_mma_off` exp, reductions and MMAs, `softmax_mma_barrier_off` those plus the barriers; `key_loads_off` / `value_loads_off` / `query_loads_off` replace that operand's fragment loads with constants, `all_loads_off` all three; `alloff` is exp, reductions, MMAs and barriers off with the loads kept; `alloff_all_loads_off` is everything off. `ctrl` is the unmodified source recompiled.
+
+| arm | granite d64 | E2B d256 | E2B d512 |
+|---|---|---|---|
+| base (probe) | 1122.500 [0.70] | 964.458 [0.15] | 2622.125 [0.07] |
+| ctrl | 1122.917 [0.41] | 965.875 [0.38] | 2625.250 [0.02] |
+| exp_off | 1121.167 [0.34] | 994.417 [0.34] | 2622.917 [0.06] |
+| reduce_off | 1105.000 [0.15] | 994.375 [0.41] | 2624.042 [0.07] |
+| softmax_off | 1103.875 [0.37] | 983.000 [0.59] | 2607.083 [0.02] |
+| barrier_off | 1107.625 [0.17] | 950.500 [0.14] | 2472.417 [0.14] |
+| mma_off | 962.875 [0.05] | 783.375 [0.36] | 2103.000 [0.27] |
+| softmax_mma_off | 929.667 [0.35] | 760.583 [0.13] | 2080.292 [0.22] |
+| softmax_mma_barrier_off | 918.792 [0.30] | 757.250 [0.31] | 2073.750 [0.45] |
+| base (probe2) | 1138.958 [0.34] | 934.375 [0.42] | 2636.250 [0.20] |
+| ctrl | 1136.667 [0.93] | 939.708 [0.23] | 2624.125 [0.17] |
+| key_loads_off | 906.042 [0.61] | 711.583 [0.07] | 2127.083 [0.12] |
+| query_loads_off | 1033.583 [0.14] | 831.667 [0.23] | 2393.875 [0.41] |
+| value_loads_off | 1036.625 [1.40] | 906.583 [0.19] | 2489.875 [0.16] |
+| all_loads_off | 705.750 [0.36] | 624.583 [0.06] | 1595.042 [0.23] |
+| alloff | 934.250 [0.28] | 758.708 [0.57] | 2093.250 [0.48] |
+| alloff_key_loads_off | 706.625 [0.14] | 506.042 [0.09] | 1540.917 [0.19] |
+| alloff_all_loads_off | 454.625 [0.30] | 302.875 [0.89] | 697.125 [0.27] |
+
+DERIVED against the same-file base: granite `all_loads_off` -433.2 us (-38.0 %), key loads -232.9, query loads -105.4, value loads -102.3; d256 -309.8 (-33.2 %), -222.8, -102.7, -27.8; d512 -1041.2 (-39.5 %), -509.2, -242.4, -146.4. `alloff` (no softmax arithmetic, no MMA, no barrier) is 934.250 at granite, 758.708 at d256, 2093.250 at d512: 82.0 %, 81.2 %, 79.4 % of the same-file base; removing the loads from it takes 479.6, 455.8 and 1396.1 us. `softmax_off` moves granite -18.6 us, d256 +18.5, d512 -15.0, and `exp_off` and `reduce_off` move d256 by +30.0 and +29.9 (slower than base); `barrier_off` moves d512 by -149.7 us (-5.7 %). The preceding rounds' `nosoftmax` arm (loop deleted, round four section) read -450.5 us at granite: the exp and reduction arithmetic by itself accounts for -18.6 us of that in this cell; what else in the softmax loop (`cached_attention_row_tiled.rs:240-275`: the scale, the running max and sum update, the accumulator rescale, the probability store) accounts for the rest is not traced. The slower d256 readings under `exp_off`, `reduce_off` and `softmax_off` are not traced. The d256 base reads 964.458 here and 934.375 in `probe2` (the same shape, different cell).
+
+### 5. the bench: `decode_arms`, arms base / tip / control / half (`summaries/bench_long.md`, `bench_short.md`, `bench_text_hashes.txt`, `box/bench_*__box_load_before.txt`)
+
+Binaries (`bin/decode_gbps_baseline_*`, sha256 prefixes MEASURED): `base` `6c2e4afa30412514` (built at the base export, `70aecbd0`); `tip` and `control` both `7558d5b19ae927bf` (the same binary run as two arms, so the difference between them is the harness spread of the run); `half` `6cf0a8957f8e08ab`. The tip, control and half binaries were built at the half-key commit (`logs/build_tip_rel.log`, `build_half_rel.log`: 57.6 s and 56.2 s release builds; the logs record neither the commit nor the key value; both are from the run's brief); `half` is the build with `mma_precision = "half"`, `tip` and `control` the default `"float"`. 3 processes x 5 runs (6 `run=done` records per process, `run=0` not in the tables) = 15 per arm, 128 tokens generated, `stopped_by_eos=false` in all 144 records. Prompts: long 970 tokens (E2B) and 1000 (granite), short 26 (E2B) and 36 (granite). Text hash (`bench_text_hashes.txt`, 48 per-process lines, every line 6 records): E2B long `8fec363180a250e0`, granite long `c4625c1fb93f28b7`, E2B short `16f789b7871d97d1`, granite short `fd64fab40cc5300b`, identical across the four arms in each of the four cells. Box before the long run: utilization 98, 0, 0, load 5.13 6.63 6.69; before the short run: 94, 0, 0, load 3.35 4.52 5.68; two processes at 80 to 82 % CPU (long) and 45 to 50 % (short) in the box sample.
+
+Long prompt (`bench_long.md`; median over 15 runs, in the file the parentheses carry CoV all / kept, min-max of the kept runs and n kept; ms and MB):
+
+| model | arm | prefill_ms | ttft_ms | wall_ms | ms_per_token | cpu_pct | peak_rss | peak_footprint | steady_rss | steady_footprint | peak_gpu | steady_gpu |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| gemma4_e2b | base | 586.010 | 586.000 | 2029.472 | 11.356 | 8.800 | 3715.4 | 410.5 | 3668.4 | 359.8 | 3613.5 | 3568.0 |
+| gemma4_e2b | tip | 586.018 | 586.000 | 2025.502 | 11.327 | 8.720 | 3714.5 | 416.2 | 3665.6 | 364.5 | 3613.5 | 3568.0 |
+| gemma4_e2b | control | 586.000 | 586.000 | 2026.364 | 11.338 | 8.670 | 3732.7 | 407.1 | 3662.1 | 351.2 | 3613.5 | 3568.0 |
+| gemma4_e2b | half | 584.999 | 585.000 | 2033.593 | 11.402 | 8.650 | 3715.4 | 410.7 | 3665.6 | 359.8 | 3614.0 | 3568.0 |
+| granite_moe | base | 215.480 | 215.500 | 1079.992 | 6.811 | 15.760 | 2092.9 | 359.3 | 1864.4 | 238.7 | 1722.9 | 1605.2 |
+| granite_moe | tip | 215.949 | 216.000 | 1068.431 | 6.712 | 15.740 | 1983.1 | 358.3 | 1746.9 | 237.5 | 1722.9 | 1605.2 |
+| granite_moe | control | 215.056 | 215.000 | 1069.811 | 6.723 | 15.445 | 1984.8 | 358.7 | 1747.1 | 237.7 | 1722.9 | 1605.2 |
+| granite_moe | half | 215.039 | 215.000 | 1071.598 | 6.749 | 15.710 | 1987.1 | 359.7 | 1856.8 | 238.8 | 1722.9 | 1605.2 |
+
+Short prompt (`bench_short.md`):
+
+| model | arm | prefill_ms | ttft_ms | wall_ms | ms_per_token | cpu_pct | peak_rss | peak_footprint | steady_rss | steady_footprint | peak_gpu | steady_gpu |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| gemma4_e2b | base | 87.986 | 88.000 | 1475.504 | 10.925 | 10.910 | 3607.9 | 194.6 | 3596.8 | 183.9 | 3385.2 | 3377.0 |
+| gemma4_e2b | tip | 88.037 | 88.000 | 1476.715 | 10.935 | 10.930 | 3612.6 | 196.8 | 3604.3 | 185.6 | 3385.2 | 3377.0 |
+| gemma4_e2b | control | 88.008 | 88.000 | 1477.702 | 10.935 | 10.780 | 3605.7 | 192.4 | 3597.6 | 181.2 | 3385.2 | 3377.0 |
+| gemma4_e2b | half | 87.996 | 88.000 | 1477.075 | 10.943 | 10.825 | 3613.9 | 199.4 | 3601.8 | 187.9 | 3385.2 | 3377.0 |
+| granite_moe | base | 38.998 | 39.000 | 755.576 | 5.637 | 17.285 | 1594.8 | 119.0 | 1571.0 | 93.6 | 1476.8 | 1454.5 |
+| granite_moe | tip | 39.034 | 39.000 | 751.992 | 5.614 | 17.500 | 1597.5 | 117.5 | 1571.1 | 92.3 | 1476.8 | 1454.5 |
+| granite_moe | control | 39.052 | 39.000 | 754.045 | 5.627 | 17.090 | 1597.6 | 117.8 | 1567.9 | 93.6 | 1476.8 | 1454.5 |
+| granite_moe | half | 38.991 | 39.000 | 748.743 | 5.588 | 17.185 | 1590.3 | 117.6 | 1562.0 | 93.5 | 1476.8 | 1454.5 |
+
+The bound reading (DERIVED from the medians above; `control` minus `tip` is the same-binary spread, `half` minus `tip` the arm difference). Long: E2B prefill control-tip -0.018 ms, half-tip -1.019 ms; E2B ms_per_token control-tip +0.011, half-tip +0.075; granite prefill control-tip -0.893, half-tip -0.910; granite ms_per_token control-tip +0.011, half-tip +0.037. Short: E2B prefill control-tip -0.029, half-tip -0.041; E2B ms_per_token control-tip 0.000, half-tip +0.008; granite prefill control-tip +0.018, half-tip -0.043; granite ms_per_token control-tip +0.013, half-tip -0.026. The same-binary prefill spread at granite long (0.893 ms) is 0.981 times the `half` minus `tip` difference (0.910 ms); the layer-0 granite `both_cvt` reading of -21.8 us times 24 attention ops is -0.52 ms (DERIVED; the `emit_half` -23.2 us gives -0.56 ms) and the `both_f16` form (not the landed one) -1.19 ms. The CoV, min-max and kept counts of every cell are in the two bench files. The `half` build's text hash equals base's in all four cells (48 of 48 per-process lines carry the cell's single hash).
+
+### 6. landed state
+
+`42c0d4a0` adds `[attention_rows].mma_precision` (`omega/omega-runtime.toml:557`, `"float"` or `"half"`, override `OMEGA_ATTENTION_ROWS_MMA_PRECISION`; `omega/build.rs:661-664` panics at build time on any other value), emitted as `crate::sized::ATTENTION_ROWS_MMA_HALF` into `render_cached_attention_row_tiled`; the default is `float`, which renders the production kernel. `half` narrows each fragment to `simdgroup_half8x8` as it is loaded and accumulates into `simdgroup_float8x8`; the softmax stays float in both. The comment above the key records the cell 2emit figures (-2.1 %, -2.1 %, +5.8 %; 5.3e-4 relative L2 at granite against f64). `a2423eef` prints `ab agree` and `ab ref` (against a CPU f64 reference of the captured attention) for every arm. No key other than `mma_precision` was added; cell 1 moved no default.
+
+### 7. what this rules out (as upper bounds on the layer-0 kernel time, measured here or in the preceding section)
+
+- K/V traffic: pinning K and V reads to one cache-resident block moved the time by at most -5.8 % (preceding section, section 5); here half-stored K/V with float MMA (`f16store_f32mma`, bound bytes lower by 4.2 / 2.0 / 4.1 MB) reads -2.0 us at granite against the `f32mma` arm in the same process (1136.875 against 1138.875), -16.8 us at d256 (954.750 against 971.500) and +118.5 us at d512 (2753.458 against 2634.917).
+- Tile height: the preceding section's 16- and 32-row arms read +17.7 % and +197 % at granite; no new height was run here.
+- Simdgroup count and key block: cell 1 above; the one granite arm below production (-8.4 %) reads +33.1 % at d512.
+- MMA precision: half operands read -4.4 % / -8.5 % / +2.1 % (`both_f16`) and -1.9 % / -6.3 % / +5.7 % (`both_cvt`, the landed form) at granite / d256 / d512 against base in cell 2, and -2.1 % / -2.1 % / +5.8 % in cell 2emit; the standalone MMA rate is 6.6 % apart at 8 chains and equal at 16 and 32.
+- MMA share: removing both MMAs removes 13.9 % / 18.5 % / 18.5 % of the time (granite / d256 / d512).
+
+### 8. still open: the attention gap to llama's 539 us per layer at granite
+
+- The load path of the K and V fragments. Round four's phase removals (preceding rounds, round four section 1, base 1153.9 us): Q.K^T phase 510 us, P.V 265 us, softmax loop 451 us. With the MMA removals of this round subtracted (DERIVED, mixed bases 1153.9 and 1132.0): Q.K^T 510 less about 130 (`qk_off` 129.0) is about 380, P.V 265 less about 90 (`pv_off` 91.5) is about 175. `all_loads_off` removes 433.2 us at granite and `alloff` (no arithmetic) still costs 934.250 against 454.625 with the loads off; key loads 232.9 us, query loads 105.4, value loads 102.3. The cost of the fragment loads themselves (address pattern, device versus threadgroup source, load width) is not traced; no counter was read.
+- The softmax phase, 451 us by ablation in round four: exp and reduction arithmetic account for -18.6 us in this round (`softmax_off`); the rest of the loop, and the +18 to +30 us readings of `exp_off`, `reduce_off` and `softmax_off` at d256, are not traced.
+- The threadgroup-bytes occupancy cliff of the preceding section (1142 us at 9,856 B to 1761 us at 19,200 B at fixed code): resident threadgroups per core were not read; `kpb64` and `both` at d256 and d512 cut static bytes from 8,576 to 4,480 and moved time by -0.3 % and +33.3 %.
+- llama's 539 us (538.7, 12.93 ms over 24 layers, round four section 1) is an own-command-buffer figure: the profiler's floor is inside it, as the 4 us floor is inside every `single_us` here (`time_gpu_ns`); the two floors were not measured against each other.
+- The d256 base moves 4.2 % between cells with the same arm; the d512 `qk_cvt` against `qk_f16` gap (4.4 points) is not traced; why the 64-key block costs +33 % at d512.
+
+### 9. gates (MEASURED, `logs/`; N is the count the log prints and the count of `PASS [` lines in the file)
+
+| gate | log | N run | passed | skipped | note |
+|---|---|---|---|---|---|
+| omega metal suite | `gate_omega_metal.log` | 881 | 881 | 16 | 107 binaries, 54.612 s |
+| omega metal + instrument suite | `gate_omega_metal_instrument.log` | 935 | 935 | 22 | 107 binaries, 64.154 s |
+| omega std lib | `gate_omega_std_lib.log` | 151 | 151 | 1 | 1 binary |
+| attention golden rows | `gate_attn_golden_rows.log` | 30 | 30 | 867 | 107 binaries |
+| attention rows, all | `gate_attn_all.log` | 83 | 83 | 814 | 107 binaries |
+| new rows tests | `test_rows_new.log` | 30 | 30 | 867 | 107 binaries |
+| llama parity with the half build | `parity_half.log` | 5 | 5 | 869 | `generic_verify_llama_parity_gemma4_e2b`, `generic_verify_llama_parity_granite_moe`, `llama_parity_gemma4_e2b`, `llama_parity_granite_moe`, `prefill_width_parity_with_llama_granite_moe` in 35 binaries; the log does not record which `mma_precision` value was set |
+| clippy x 4 | `clippy_omega_metal.log`, `clippy_omega_metal_instrument.log`, `clippy_tensor_interop.log`, `clippy_norm_variant_ab.log` | | | | each ends `Finished` with no warning or error line (2 to 3 lines each); exit codes are not recorded in the logs |
+| control run | `control_half_rows_tests.log` | 11 of 30 started | 8 | 867 | 3 failed (`eight_kv_head_chunks_split_the_keys_until_the_target_threadgroups_are_filled`, `rows_per_threadgroup_follows_the_reuse_registers_memory_and_occupancy_budgets`, `row_tiled_splits_matches_the_grid_table`, each panicking at `attn_rows_tests.rs:21`), 19 not run after the fail-fast stop; the log does not record the setup it used |
+
+The gate logs record the nextest result, not the feature flags; the nextest logs show the `gate` build profile. No CI job runs the Metal A/B or the bench; every row re-proves on this box only. The bench binaries were built at the half-key commit (`42c0d4a0`), so the `tip`, `control` and `half` arms carry that library and `base` carries `70aecbd0`'s.
+
+### 10. unexplained, unmeasured, assumed
+
+- Layer 0 only (first of 24 / 28 / 7 members); no full-step prefill time was measured except the bench's `prefill_ms`, whose same-binary spread at granite long (0.893 ms) is as large as the half-minus-tip difference.
+- No shader-profiler counter, spill count, occupancy or cache counter was read; every mechanism row above is DERIVED from timing differences between arms, and the removal arms change the data the remaining code operates on.
+- The d256 base moving 4.2 % between 4-arm and 12-arm cells; the d512 +33 % at the 64-key block; the d256 `pv_off` and `exp_off` slowdowns; the `qk_cvt` against `qk_f16` gap at d512; the `wall_ms` 1.330 of the d256 cell 1 base.
+- The arm names `_f16`, `_cvt`, `f16store_f32mma` are read from the printed bound-buffer sizes, the accuracy columns and the emitter's source; the variant source of each is in `scratch/` and `raw/half_master*.metal`, not copied.
+- The text hash of the bench is a 128-token greedy continuation per prompt; four prompts, two models.
+- The bench's first utilization read (94 to 98) and the two background processes at 45 to 82 % CPU were present in every box file; their effect on the GPU timings was not measured.

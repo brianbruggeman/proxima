@@ -1,0 +1,192 @@
+diff --git a/omega/build.rs b/omega/build.rs
+index f4bf4b4b..a1e51a98 100644
+--- a/omega/build.rs
++++ b/omega/build.rs
+@@ -660,0 +661,8 @@ fn emit_sizing_consts() {
++    let attention_rows_mma_half = match resolve_str(&root, "attention_rows", "mma_precision").as_str() {
++        "float" => false,
++        "half" => true,
++        other => panic!("attention_rows.mma_precision must be \"float\" or \"half\", got {other:?}"),
++    };
++    out.push_str(&format!(
++        "pub const ATTENTION_ROWS_MMA_HALF: bool = {attention_rows_mma_half};\n"
++    ));
+diff --git a/omega/omega-runtime.toml b/omega/omega-runtime.toml
+index 133f27cc..1625088c 100644
+--- a/omega/omega-runtime.toml
++++ b/omega/omega-runtime.toml
+@@ -548,0 +549,9 @@ max_staged_query_bytes = 8192
++# operand precision of the row-tiled attention's two matrix multiplies (Q.K^T and P.V): "float"
++# multiplies float8x8 fragments; "half" narrows each fragment to half8x8 as it is loaded and
++# still accumulates into float8x8 (the softmax stays float in both). MEASURED on one layer of
++# the captured prefill (4 interleaved arms, 3 processes x 21 rounds, same-process float arm as
++# the base): head dim 64 (1000 rows) -2.1 %, head dim 256 (971 rows, sliding) -2.1 %, head dim
++# 512 (971 rows, global) +5.8 %, with the output moved by 5.3e-4 relative L2 (head dim 64, against
++# an f64 reference); no single value wins every shape, so the default is the exact one.
++# override via OMEGA_ATTENTION_ROWS_MMA_PRECISION.
++mma_precision = "float"
+diff --git a/omega/src/msl/attn_rows_tests.rs b/omega/src/msl/attn_rows_tests.rs
+index 89dd7444..cac67240 100644
+--- a/omega/src/msl/attn_rows_tests.rs
++++ b/omega/src/msl/attn_rows_tests.rs
+@@ -20,0 +21 @@ fn assert_default_sizing() {
++    const { assert!(!crate::sized::ATTENTION_ROWS_MMA_HALF) };
+@@ -1053,0 +1055,95 @@ fn the_runtime_toml_pins_the_staged_query_byte_cap_default() {
++
++fn rendered_with_operands(op: &BoundOp, half_operands: bool) -> String {
++    let Some(CachedAttentionForm::TwoRangeRowTiled {
++        rows_per_threadgroup,
++        simdgroups,
++        ..
++    }) = relaxed_form(op)
++    else {
++        panic!("not the row-tiled form");
++    };
++    cached_attention_row_tiled::render_cached_attention_row_tiled_with(
++        op,
++        "omega_cached_attention_probe",
++        rows_per_threadgroup,
++        simdgroups,
++        half_operands,
++    )
++    .expect("the row-tiled kernel renders")
++}
++
++#[test]
++fn the_float_setting_multiplies_float_fragments_and_names_no_half_type() {
++    for (groups, head_dim) in [(2_u64, 64_u64), (8, 256), (8, 512)] {
++        let op = attention_rows_op(9, groups, head_dim, 512, 971, SLIDING_LOWER);
++        let source = rendered_with_operands(&op, false);
++        for declaration in [
++            "simdgroup_float8x8 key_even_tile[key_tiles_per_group][depth_unroll];",
++            "simdgroup_float8x8 key_odd_tile[key_tiles_per_group][depth_unroll];",
++            "simdgroup_float8x8 query_even[depth_unroll];",
++            "simdgroup_float8x8 weights[tile_blocks];",
++            "simdgroup_float8x8 value;",
++            "simdgroup_float8x8 scores[key_tiles_per_group][tile_blocks];",
++            "simdgroup_float8x8 accumulated[dims_per_group][tile_blocks];",
++        ] {
++            assert!(
++                source.contains(declaration),
++                "head_dim {head_dim}: the float setting does not declare `{declaration}`"
++            );
++        }
++        assert!(!source.contains("simdgroup_half8x8"), "head_dim {head_dim}");
++    }
++}
++
++#[test]
++fn the_half_setting_narrows_the_operands_and_keeps_scores_accumulators_and_softmax_float() {
++    for (groups, head_dim) in [(2_u64, 64_u64), (8, 256), (8, 512)] {
++        let op = attention_rows_op(9, groups, head_dim, 512, 971, SLIDING_LOWER);
++        let source = rendered_with_operands(&op, true);
++        for declaration in [
++            "simdgroup_half8x8 key_even_tile[key_tiles_per_group][depth_unroll];",
++            "simdgroup_half8x8 key_odd_tile[key_tiles_per_group][depth_unroll];",
++            "simdgroup_half8x8 query_even[depth_unroll];",
++            "simdgroup_half8x8 query_odd[depth_unroll];",
++            "simdgroup_half8x8 weights[tile_blocks];",
++            "simdgroup_half8x8 value;",
++            "simdgroup_float8x8 scores[key_tiles_per_group][tile_blocks];",
++            "simdgroup_float8x8 accumulated[dims_per_group][tile_blocks];",
++            "threadgroup float score_tile[tile_vectors * block];",
++            "float local_scores[block / 32];",
++        ] {
++            assert!(
++                source.contains(declaration),
++                "head_dim {head_dim}: the half setting does not carry `{declaration}`"
++            );
++        }
++        assert!(source.contains("simdgroup_multiply_accumulate(scores[group][vector_block], query_even"));
++        assert!(source.contains("simdgroup_multiply_accumulate(accumulated[slot][vector_block], weights[vector_block], value"));
++    }
++}
++
++#[test]
++fn the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads() {
++    for (groups, head_dim) in [(2_u64, 64_u64), (8, 256), (8, 512)] {
++        let op = attention_rows_op(9, groups, head_dim, 512, 971, SLIDING_LOWER);
++        let float_source = rendered_with_operands(&op, false);
++        let half_source = rendered_with_operands(&op, true);
++        assert!(half_source.contains(cached_attention_row_tiled::HALF_OPERAND_HELPERS));
++        let restored = half_source
++            .replace(cached_attention_row_tiled::HALF_OPERAND_HELPERS, "")
++            .replace("simdgroup_half8x8 key_", "simdgroup_float8x8 key_")
++            .replace("simdgroup_half8x8 query_", "simdgroup_float8x8 query_")
++            .replace("simdgroup_half8x8 weights", "simdgroup_float8x8 weights")
++            .replace("simdgroup_half8x8 value", "simdgroup_float8x8 value");
++        assert_eq!(restored, float_source, "head_dim {head_dim}");
++    }
++}
++
++#[test]
++fn the_default_sizing_renders_the_float_setting() {
++    let op = attention_rows_op(9, 2, 64, 512, 1000, GLOBAL_LOWER);
++    let kernel = emit(&op, &PackedOperands::new(), NumericPolicy::llama_relaxed())
++        .expect("the row-tiled kernel emits");
++    assert!(kernel.source.contains("simdgroup_float8x8 weights[tile_blocks];"));
++    assert!(!kernel.source.contains("simdgroup_half8x8"));
++}
+diff --git a/omega/src/msl/cached_attention_row_tiled.rs b/omega/src/msl/cached_attention_row_tiled.rs
+index c67323a7..888da080 100644
+--- a/omega/src/msl/cached_attention_row_tiled.rs
++++ b/omega/src/msl/cached_attention_row_tiled.rs
+@@ -35,0 +36,6 @@ use super::*;
++///
++/// The operand precision of the two matrix multiplies is `[attention_rows].mma_precision`:
++/// `float` multiplies `simdgroup_float8x8` fragments; `half` narrows each fragment to
++/// `simdgroup_half8x8` as it is loaded (the `simdgroup_load` overloads in
++/// [`HALF_OPERAND_HELPERS`]) and still accumulates into `simdgroup_float8x8`, the way
++/// llama.cpp's half flash attention does over a half K/V. The softmax is float in both.
+@@ -40,0 +47,16 @@ pub(super) fn render_cached_attention_row_tiled(
++) -> Result<String, EmitError> {
++    render_cached_attention_row_tiled_with(
++        resolved,
++        entry,
++        rows_per_threadgroup,
++        simdgroups,
++        crate::sized::ATTENTION_ROWS_MMA_HALF,
++    )
++}
++
++pub(super) fn render_cached_attention_row_tiled_with(
++    resolved: &BoundOp,
++    entry: &str,
++    rows_per_threadgroup: u64,
++    simdgroups: u64,
++    half_operands: bool,
+@@ -78,0 +101,2 @@ pub(super) fn render_cached_attention_row_tiled(
++        ("@MMA_HELPERS@", if half_operands { HALF_OPERAND_HELPERS } else { "" }.to_string()),
++        ("@OPERAND@", if half_operands { "simdgroup_half8x8" } else { "simdgroup_float8x8" }.to_string()),
+@@ -106 +130,8 @@ pub(super) fn render_cached_attention_row_tiled(
+-const ROW_TILED_KERNEL: &str = r#"struct Uniforms { long total_elements; long splits; };
++pub(super) const HALF_OPERAND_HELPERS: &str = r#"
++inline simdgroup_half8x8 narrow_fragment(simdgroup_float8x8 wide) { simdgroup_half8x8 narrowed; narrowed.thread_elements()[0] = half(wide.thread_elements()[0]); narrowed.thread_elements()[1] = half(wide.thread_elements()[1]); return narrowed; }
++inline void simdgroup_load(thread simdgroup_half8x8& destination, device const float* source, ulong stride, ulong2 origin, bool transposed) { simdgroup_float8x8 loaded; simdgroup_load(loaded, source, stride, origin, transposed); destination = narrow_fragment(loaded); }
++inline void simdgroup_load(thread simdgroup_half8x8& destination, device const float* source, ulong stride) { simdgroup_float8x8 loaded; simdgroup_load(loaded, source, stride); destination = narrow_fragment(loaded); }
++inline void simdgroup_load(thread simdgroup_half8x8& destination, threadgroup const float* source, ulong stride) { simdgroup_float8x8 loaded; simdgroup_load(loaded, source, stride); destination = narrow_fragment(loaded); }
++"#;
++
++const ROW_TILED_KERNEL: &str = r#"struct Uniforms { long total_elements; long splits; };@MMA_HELPERS@
+@@ -199 +230 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
+-                simdgroup_float8x8 key_even_tile[key_tiles_per_group][depth_unroll]; simdgroup_float8x8 key_odd_tile[key_tiles_per_group][depth_unroll];
++                @OPERAND@ key_even_tile[key_tiles_per_group][depth_unroll]; @OPERAND@ key_odd_tile[key_tiles_per_group][depth_unroll];
+@@ -213 +244 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
+-                    simdgroup_float8x8 query_even[depth_unroll]; simdgroup_float8x8 query_odd[depth_unroll];
++                    @OPERAND@ query_even[depth_unroll]; @OPERAND@ query_odd[depth_unroll];
+@@ -318 +349 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
+-                simdgroup_float8x8 weights[tile_blocks];
++                @OPERAND@ weights[tile_blocks];
+@@ -322 +353 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
+-                    simdgroup_float8x8 value;
++                    @OPERAND@ value;
+diff --git a/omega/src/sized.rs b/omega/src/sized.rs
+index 6ea040f6..6e0dcda8 100644
+--- a/omega/src/sized.rs
++++ b/omega/src/sized.rs
+@@ -83 +83 @@
+-//!   `ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES` (always compiled) -- the row-tiled cached attention form's block width, split
++//!   `ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES`/`ATTENTION_ROWS_MMA_HALF` (always compiled) -- the row-tiled cached attention form's block width, split
+@@ -85 +85 @@
+-//!   budget, split target and staged query-tile byte cap (`crate::msl::rows_per_threadgroup`, `query_tile_staged`, `row_tiled_simdgroups`,
++//!   budget, split target, staged query-tile byte cap and matrix-multiply operand precision (`crate::msl::rows_per_threadgroup`, `query_tile_staged`, `row_tiled_simdgroups`,

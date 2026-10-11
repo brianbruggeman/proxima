@@ -1,0 +1,10 @@
+3 files; value `single_us` from `group` lines; median [CoV%] (min-max) over runs
+| group | extents | arm | n | single_us median [CoV%] (min-max) | bit compare vs base (first file) | cpu ms per replay | cpu % of wall | wall ms per replay | static tg bytes, bound buffer MB, rss peak MB, footprint MB, Metal MB, load |
+|---|---|---|---|---|---|---|---|---|---|
+| e3603c69 | [1000, 8, 2, 64] | base | 3 | 1141.542 [0.19] (1138.250-1142.292) | differing=0/1024000 max_ulp=0 | 0.056 | 4.0 | 1.412 | tg_static=9600 bound_buffer_mb=131.8 rss_peak_mb=1622.3 footprint_mb=182.5 gpu_alloc_mb=1515.3 load=3.76 |
+| e3603c69 | [1000, 8, 2, 64] | c16_f32 | 3 | 1803.125 [0.06] (1802.125-1804.125) | differing=1024000/1024000 max_ulp=2523666303 | 0.072 | 3.5 | 2.049 | tg_static=0 bound_buffer_mb=131.8 rss_peak_mb=1622.3 footprint_mb=182.5 gpu_alloc_mb=1515.3 load=3.76 |
+| e3603c69 | [1000, 8, 2, 64] | c16_hf | 3 | 1810.000 [0.07] (1808.542-1811.125) | differing=1024000/1024000 max_ulp=2523666303 | 0.066 | 3.3 | 2.045 | tg_static=0 bound_buffer_mb=131.8 rss_peak_mb=1622.3 footprint_mb=182.5 gpu_alloc_mb=1515.3 load=3.76 |
+| e3603c69 | [1000, 8, 2, 64] | c32_f32 | 3 | 1692.500 [0.02] (1692.083-1692.875) | differing=1024000/1024000 max_ulp=2523666303 | 0.063 | 3.3 | 1.927 | tg_static=0 bound_buffer_mb=131.8 rss_peak_mb=1622.3 footprint_mb=182.5 gpu_alloc_mb=1515.3 load=3.76 |
+| e3603c69 | [1000, 8, 2, 64] | c32_hf | 3 | 1693.292 [0.06] (1692.583-1694.500) | differing=1024000/1024000 max_ulp=2523666303 | 0.066 | 3.4 | 1.932 | tg_static=0 bound_buffer_mb=131.8 rss_peak_mb=1622.3 footprint_mb=182.5 gpu_alloc_mb=1515.3 load=3.76 |
+| e3603c69 | [1000, 8, 2, 64] | c4_f32 | 3 | 2830.375 [5.45] (2729.750-3036.000) | differing=1024000/1024000 max_ulp=2523666303 | 0.079 | 2.4 | 3.268 | tg_static=0 bound_buffer_mb=131.8 rss_peak_mb=1622.3 footprint_mb=182.5 gpu_alloc_mb=1515.3 load=3.76 |
+| e3603c69 | [1000, 8, 2, 64] | c4_hf | 3 | 2834.292 [5.01] (2668.833-2949.542) | differing=1024000/1024000 max_ulp=2523666303 | 0.069 | 2.1 | 3.202 | tg_static=0 bound_buffer_mb=131.8 rss_peak_mb=1622.3 footprint_mb=182.5 gpu_alloc_mb=1515.3 load=3.76 |
