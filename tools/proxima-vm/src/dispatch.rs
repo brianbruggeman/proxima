@@ -454,6 +454,9 @@ pub fn run_dispatch_loop(
             vtimer_activation_count_out: *mut u64,
             wfi_wfe_trap_count_out: *mut u64,
             entered_el2_out: *mut u64,
+            irq_assert_count_out: *mut u64,
+            wfi_wait_count_out: *mut u64,
+            timer_eoi_count_out: *mut u64,
             error_buffer: *mut c_char,
             error_capacity: usize,
         ) -> i32;
@@ -547,6 +550,9 @@ pub fn run_dispatch_loop(
     // stays a discarded local rather than growing `DispatchLoopOutput`.
     let mut wfi_wfe_trap_count: u64 = 0;
     let mut entered_el2: u64 = 0;
+    let mut irq_assert_count: u64 = 0;
+    let mut wfi_wait_count: u64 = 0;
+    let mut timer_eoi_count: u64 = 0;
     let mut error_buffer = [0_i8; ERROR_CAPACITY];
 
     let status = unsafe {
@@ -601,6 +607,9 @@ pub fn run_dispatch_loop(
             &raw mut vtimer_activation_count,
             &raw mut wfi_wfe_trap_count,
             &raw mut entered_el2,
+            &raw mut irq_assert_count,
+            &raw mut wfi_wait_count,
+            &raw mut timer_eoi_count,
             error_buffer.as_mut_ptr(),
             error_buffer.len(),
         )

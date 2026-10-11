@@ -1852,6 +1852,7 @@ static int handle_icc_sysreg_trap(
     hv_vcpu_t vcpu,
     hv_vcpu_exit_t *exit_data,
     void *icc_transport,
+    uint64_t *timer_eoi_count,
     char *error_buffer,
     size_t error_capacity
 ) {
@@ -1934,6 +1935,7 @@ static int handle_icc_sysreg_trap(
      * the mask so a future timeout can raise `HV_EXIT_REASON_VTIMER_
      * ACTIVATED` again. */
     if (deactivated != 0 && deactivated_intid == PROXIMA_VM_VTIMER_INTID) {
+        ++*timer_eoi_count;
         status = hv_vcpu_set_pending_interrupt(vcpu, HV_INTERRUPT_TYPE_IRQ, false);
         if (status != HV_SUCCESS) {
             return set_hv_error(error_buffer, error_capacity, "clear vtimer pending interrupt", status);
@@ -2301,6 +2303,9 @@ int proxima_vm_run_device_dispatch_loop(
     uint64_t *vtimer_activation_count_out,
     uint64_t *wfi_wfe_trap_count_out,
     uint64_t *entered_el2_out,
+    uint64_t *irq_assert_count_out,
+    uint64_t *wfi_wait_count_out,
+    uint64_t *timer_eoi_count_out,
     char *error_buffer,
     size_t error_capacity
 ) {
@@ -2344,6 +2349,9 @@ int proxima_vm_run_device_dispatch_loop(
     uint64_t pl011_trap_count = 0;
     uint64_t virtio_trap_count = 0;
     uint64_t vtimer_activation_count = 0;
+    uint64_t irq_assert_count = 0;
+    uint64_t wfi_wait_count = 0;
+    uint64_t timer_eoi_count = 0;
     /* EC 0x1 (trapped `WFI`/`WFE`, ARM DDI 0487 D13.2.37): PID1's own idle
      * park loop (`kernel_boot_userspace.rs`'s own wall, "unexpected arm
      * exception class 0x1") issues this once it has nothing left to
@@ -2501,6 +2509,7 @@ int proxima_vm_run_device_dispatch_loop(
          * asserted in the ICC model (pending, not yet acknowledged through
          * `ICC_IAR1_EL1`) has to be re-asserted before every run, not once. */
         if (proxima_vm_icc_irq_asserted(icc_transport) != 0) {
+            ++irq_assert_count;
             status = hv_vcpu_set_pending_interrupt(vcpu, HV_INTERRUPT_TYPE_IRQ, true);
             if (status != HV_SUCCESS) {
                 set_hv_error(error_buffer, error_capacity, "assert irq before run", status);
@@ -2640,7 +2649,7 @@ int proxima_vm_run_device_dispatch_loop(
             continue;
         }
         if (exception_class == 0x18u) {
-            if (handle_icc_sysreg_trap(vcpu, exit_data, icc_transport, error_buffer, error_capacity) != 0) {
+            if (handle_icc_sysreg_trap(vcpu, exit_data, icc_transport, &timer_eoi_count, error_buffer, error_capacity) != 0) {
                 goto cleanup;
             }
             continue;
@@ -2658,6 +2667,7 @@ int proxima_vm_run_device_dispatch_loop(
              * source at all is still bounded by `total_exit_count` above. */
             ++wfi_wfe_trap_count;
             if ((exit_data->exception.syndrome & 0x1u) == 0 && proxima_vm_icc_irq_asserted(icc_transport) == 0) {
+                ++wfi_wait_count;
                 status = wfi_wait_for_vtimer_deadline(vcpu);
                 if (status != HV_SUCCESS) {
                     set_hv_error(error_buffer, error_capacity, "wait for vtimer deadline on wfi", status);
@@ -2870,6 +2880,15 @@ cleanup:
     }
     if (wfi_wfe_trap_count_out != NULL) {
         *wfi_wfe_trap_count_out = wfi_wfe_trap_count;
+    }
+    if (irq_assert_count_out != NULL) {
+        *irq_assert_count_out = irq_assert_count;
+    }
+    if (wfi_wait_count_out != NULL) {
+        *wfi_wait_count_out = wfi_wait_count;
+    }
+    if (timer_eoi_count_out != NULL) {
+        *timer_eoi_count_out = timer_eoi_count;
     }
     if (entered_el2_out != NULL) {
         *entered_el2_out = (uint64_t)entered_el2;

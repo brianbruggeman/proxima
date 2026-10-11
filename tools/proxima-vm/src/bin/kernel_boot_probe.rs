@@ -96,13 +96,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     eprintln!(
         "m5b gicd_trap_count={} gicr_trap_count={} pl011_trap_count={} virtio_trap_count={} \
-         vtimer_activation_count={} wfi_wfe_trap_count={}",
+         vtimer_activation_count={} wfi_wfe_trap_count={} \
+         irq_assert_count={} wfi_wait_count={} timer_eoi_count={}",
         stats.gicd_trap_count,
         stats.gicr_trap_count,
         stats.pl011_trap_count,
         stats.virtio_trap_count,
         stats.vtimer_activation_count,
-        stats.wfi_wfe_trap_count
+        stats.wfi_wfe_trap_count,
+        stats.irq_assert_count,
+        stats.wfi_wait_count,
+        stats.timer_eoi_count
     );
     if let Err(loop_error) = &loop_outcome {
         eprintln!("hypervisor loop did not reach a clean halt: {loop_error}");

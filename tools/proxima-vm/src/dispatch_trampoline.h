@@ -468,6 +468,9 @@ int proxima_vm_run_device_dispatch_loop(
      * fallback rather than a hard error). Always 0 on the KVM/x86_64 lane
      * (`backend_linux.c`'s own doc: no ARM exception-level model there). */
     uint64_t *entered_el2_out,
+    uint64_t *irq_assert_count_out,
+    uint64_t *wfi_wait_count_out,
+    uint64_t *timer_eoi_count_out,
     char *error_buffer,
     size_t error_capacity
 );
