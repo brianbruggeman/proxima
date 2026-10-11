@@ -245,7 +245,10 @@ fn run_reduce_quantized_rejects_a_composed_body_wider_than_a_bare_weight_activat
     let error = run_reduce_quantized(
         &resolved,
         &buffers,
-        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &weight_bytes },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &weight_bytes,
+        },
         weight_node,
         None,
         None,
@@ -971,18 +974,54 @@ fn commutative_operand_order_preserves_bit_exact_output() {
 
 fn packed_block<'a>(codec: &str, bytes: &'a [u8]) -> QuantizedBlock<'a> {
     match codec {
-        "q4_k" => QuantizedBlock::Packed { codec: Codec::Q4K, bytes },
-        "q5_k" => QuantizedBlock::Packed { codec: Codec::Q5K, bytes },
-        "q6_k" => QuantizedBlock::Packed { codec: Codec::Q6K, bytes },
-        "q8_0" => QuantizedBlock::Packed { codec: Codec::Q8_0, bytes },
-        "q4_0" => QuantizedBlock::Packed { codec: Codec::Q4_0, bytes },
-        "q5_1" => QuantizedBlock::Packed { codec: Codec::Q5_1, bytes },
-        "q5_0" => QuantizedBlock::Packed { codec: Codec::Q5_0, bytes },
-        "iq4_nl" => QuantizedBlock::Packed { codec: Codec::Iq4Nl, bytes },
-        "iq2_xs" => QuantizedBlock::Packed { codec: Codec::Iq2Xs, bytes },
-        "iq3_xxs" => QuantizedBlock::Packed { codec: Codec::Iq3Xxs, bytes },
-        "float16" => QuantizedBlock::Packed { codec: Codec::Float16, bytes },
-        "bfloat16" => QuantizedBlock::Packed { codec: Codec::BFloat16, bytes },
+        "q4_k" => QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes,
+        },
+        "q5_k" => QuantizedBlock::Packed {
+            codec: Codec::Q5K,
+            bytes,
+        },
+        "q6_k" => QuantizedBlock::Packed {
+            codec: Codec::Q6K,
+            bytes,
+        },
+        "q8_0" => QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes,
+        },
+        "q4_0" => QuantizedBlock::Packed {
+            codec: Codec::Q4_0,
+            bytes,
+        },
+        "q5_1" => QuantizedBlock::Packed {
+            codec: Codec::Q5_1,
+            bytes,
+        },
+        "q5_0" => QuantizedBlock::Packed {
+            codec: Codec::Q5_0,
+            bytes,
+        },
+        "iq4_nl" => QuantizedBlock::Packed {
+            codec: Codec::Iq4Nl,
+            bytes,
+        },
+        "iq2_xs" => QuantizedBlock::Packed {
+            codec: Codec::Iq2Xs,
+            bytes,
+        },
+        "iq3_xxs" => QuantizedBlock::Packed {
+            codec: Codec::Iq3Xxs,
+            bytes,
+        },
+        "float16" => QuantizedBlock::Packed {
+            codec: Codec::Float16,
+            bytes,
+        },
+        "bfloat16" => QuantizedBlock::Packed {
+            codec: Codec::BFloat16,
+            bytes,
+        },
         other => panic!("packed_block: unknown test codec {other}"),
     }
 }
@@ -1728,19 +1767,41 @@ fn cached_attention_window_bounds_the_new_range_too() {
     };
 
     let mut windowed = vec![0.0; 6];
-    run_node_into(&attention(-1), &buffers, None, None, None, false, &mut windowed)
-        .expect("a windowed cached attention step runs");
+    run_node_into(
+        &attention(-1),
+        &buffers,
+        None,
+        None,
+        None,
+        false,
+        &mut windowed,
+    )
+    .expect("a windowed cached attention step runs");
     let windowed_expected = [5.5f32, 11.0, 2.0, 3.0, 4.0, 5.0];
     for (got, want) in windowed.iter().zip(windowed_expected) {
-        assert!((got - want).abs() < 1e-5, "windowed {windowed:?} != {windowed_expected:?}");
+        assert!(
+            (got - want).abs() < 1e-5,
+            "windowed {windowed:?} != {windowed_expected:?}"
+        );
     }
 
     let mut unwindowed = vec![0.0; 6];
-    run_node_into(&attention(i64::MIN), &buffers, None, None, None, false, &mut unwindowed)
-        .expect("an unwindowed cached attention step runs");
+    run_node_into(
+        &attention(i64::MIN),
+        &buffers,
+        None,
+        None,
+        None,
+        false,
+        &mut unwindowed,
+    )
+    .expect("an unwindowed cached attention step runs");
     let unwindowed_expected = [5.5f32, 11.0, 14.0 / 3.0, 26.0 / 3.0, 4.75, 8.0];
     for (got, want) in unwindowed.iter().zip(unwindowed_expected) {
-        assert!((got - want).abs() < 1e-5, "unwindowed {unwindowed:?} != {unwindowed_expected:?}");
+        assert!(
+            (got - want).abs() < 1e-5,
+            "unwindowed {unwindowed:?} != {unwindowed_expected:?}"
+        );
     }
 }
 
@@ -1837,10 +1898,7 @@ fn cached_softmax_weights_bound_step_matches_hand_computed_softmax() {
         expected_output[0] + expected_output[2],
         expected_output[1] + expected_output[3],
     ];
-    let expected_new_weight_sum = [
-        (0.5f32 - group_max[0]).exp(),
-        (0.6f32 - group_max[1]).exp(),
-    ];
+    let expected_new_weight_sum = [(0.5f32 - group_max[0]).exp(), (0.6f32 - group_max[1]).exp()];
     let expected_new_attended = [
         expected_new_weight_sum[0] * 4.0,
         expected_new_weight_sum[0] * 5.0,
@@ -2035,7 +2093,10 @@ fn interpreter_places_cached_softmax_weights_extra_outputs_in_the_buffer_table()
             .unwrap_or_else(|| panic!("node {node} must hold its extra output after the fold"));
         assert_eq!(stored.len(), expected.len(), "node {node}");
         for (index, (actual, wanted)) in stored.iter().zip(expected).enumerate() {
-            assert!((actual - wanted).abs() < 1e-6, "node {node}[{index}]: {actual} vs {wanted}");
+            assert!(
+                (actual - wanted).abs() < 1e-6,
+                "node {node}[{index}]: {actual} vs {wanted}"
+            );
         }
     }
 }
@@ -2049,7 +2110,10 @@ fn cached_softmax_weights_extras_rejects_a_sink_of_the_wrong_length() {
     assert!(
         matches!(
             result,
-            Err(TensorError::NotLowerable { node: NodeId(3), .. })
+            Err(TensorError::NotLowerable {
+                node: NodeId(3),
+                ..
+            })
         ),
         "a truncated sink must fail loudly instead of leaving readers with a missing buffer"
     );
@@ -7091,7 +7155,10 @@ fn card_03_bf8_element_widens_reduce_and_rejects_bf8_accumulation() {
         per_step_bf8 = BFloat8::from_f32(per_step_bf8.to_f32() + value);
     }
     assert_eq!(per_step_bf8.to_f32(), 1.0);
-    assert_ne!(widened[0].2, TypedBuffer::Float32(alloc::vec![per_step_bf8.to_f32()]));
+    assert_ne!(
+        widened[0].2,
+        TypedBuffer::Float32(alloc::vec![per_step_bf8.to_f32()])
+    );
 
     let (narrow_program, _) =
         typed_reduce_vector_to_scalar_program(DType::BFloat8, values.len() as u32);
@@ -8901,11 +8968,22 @@ fn quant_dot_fused_and_unfused_agree_for_q4k_within_int8_quantization_tolerance(
     quantize_row_q8k(&activation_f32, &mut activation_q8k)
         .expect("k is a whole number of q8_k super-blocks");
 
-    let fused = block_on(QuantDot::Fused(QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &weight_bytes }).call(&activation_q8k))
-        .expect("fused int8 dot evaluates");
-    let unfused =
-        block_on(QuantDot::Unfused(QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &weight_bytes }).call(&activation_q8k))
-            .expect("unfused dequantize-then-fold evaluates");
+    let fused = block_on(
+        QuantDot::Fused(QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &weight_bytes,
+        })
+        .call(&activation_q8k),
+    )
+    .expect("fused int8 dot evaluates");
+    let unfused = block_on(
+        QuantDot::Unfused(QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &weight_bytes,
+        })
+        .call(&activation_q8k),
+    )
+    .expect("unfused dequantize-then-fold evaluates");
     let kernel_ground_truth = dot_q4k_q8k(&weight_bytes, &activation_q8k)
         .expect("the underlying kernel evaluates directly");
 
@@ -8940,11 +9018,22 @@ fn quant_dot_fused_and_unfused_agree_for_q5k_within_int8_quantization_tolerance(
     quantize_row_q8k(&activation_f32, &mut activation_q8k)
         .expect("k is a whole number of q8_k super-blocks");
 
-    let fused = block_on(QuantDot::Fused(QuantizedBlock::Packed { codec: Codec::Q5K, bytes: &weight_bytes }).call(&activation_q8k))
-        .expect("fused int8 dot evaluates");
-    let unfused =
-        block_on(QuantDot::Unfused(QuantizedBlock::Packed { codec: Codec::Q5K, bytes: &weight_bytes }).call(&activation_q8k))
-            .expect("unfused dequantize-then-fold evaluates");
+    let fused = block_on(
+        QuantDot::Fused(QuantizedBlock::Packed {
+            codec: Codec::Q5K,
+            bytes: &weight_bytes,
+        })
+        .call(&activation_q8k),
+    )
+    .expect("fused int8 dot evaluates");
+    let unfused = block_on(
+        QuantDot::Unfused(QuantizedBlock::Packed {
+            codec: Codec::Q5K,
+            bytes: &weight_bytes,
+        })
+        .call(&activation_q8k),
+    )
+    .expect("unfused dequantize-then-fold evaluates");
     let kernel_ground_truth = dot_q5k_q8k(&weight_bytes, &activation_q8k)
         .expect("the underlying kernel evaluates directly");
 
@@ -8979,11 +9068,22 @@ fn quant_dot_fused_and_unfused_agree_for_q6k_within_int8_quantization_tolerance(
     quantize_row_q8k(&activation_f32, &mut activation_q8k)
         .expect("k is a whole number of q8_k super-blocks");
 
-    let fused = block_on(QuantDot::Fused(QuantizedBlock::Packed { codec: Codec::Q6K, bytes: &weight_bytes }).call(&activation_q8k))
-        .expect("fused int8 dot evaluates");
-    let unfused =
-        block_on(QuantDot::Unfused(QuantizedBlock::Packed { codec: Codec::Q6K, bytes: &weight_bytes }).call(&activation_q8k))
-            .expect("unfused dequantize-then-fold evaluates");
+    let fused = block_on(
+        QuantDot::Fused(QuantizedBlock::Packed {
+            codec: Codec::Q6K,
+            bytes: &weight_bytes,
+        })
+        .call(&activation_q8k),
+    )
+    .expect("fused int8 dot evaluates");
+    let unfused = block_on(
+        QuantDot::Unfused(QuantizedBlock::Packed {
+            codec: Codec::Q6K,
+            bytes: &weight_bytes,
+        })
+        .call(&activation_q8k),
+    )
+    .expect("unfused dequantize-then-fold evaluates");
     let kernel_ground_truth = dot_q6k_q8k(&weight_bytes, &activation_q8k)
         .expect("the underlying kernel evaluates directly");
 
@@ -9008,17 +9108,27 @@ fn quant_dot_rejects_a_malformed_weight_row_on_both_fused_and_unfused() {
     let weight_row = vec![0u8; Q4K_BLOCK_BYTES - 1];
     let activation_q8k = vec![0u8; Q8K_BLOCK_BYTES];
 
-    let fused_error =
-        block_on(QuantDot::Fused(QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &weight_row }).call(&activation_q8k))
-            .unwrap_err();
+    let fused_error = block_on(
+        QuantDot::Fused(QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &weight_row,
+        })
+        .call(&activation_q8k),
+    )
+    .unwrap_err();
     assert!(
         matches!(fused_error, TensorError::QuantizedShapeMismatch { .. }),
         "got {fused_error:?}"
     );
 
-    let unfused_error =
-        block_on(QuantDot::Unfused(QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &weight_row }).call(&activation_q8k))
-            .unwrap_err();
+    let unfused_error = block_on(
+        QuantDot::Unfused(QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &weight_row,
+        })
+        .call(&activation_q8k),
+    )
+    .unwrap_err();
     assert!(
         matches!(unfused_error, TensorError::QuantizedShapeMismatch { .. }),
         "got {unfused_error:?}"
@@ -9035,17 +9145,27 @@ fn quant_dot_rejects_a_codec_with_no_int8_dot_kernel() {
     let weight_row = vec![0u8; Q8_0_BLOCK_BYTES];
     let activation_q8k = vec![0u8; Q8K_BLOCK_BYTES];
 
-    let fused_error =
-        block_on(QuantDot::Fused(QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &weight_row }).call(&activation_q8k))
-            .unwrap_err();
+    let fused_error = block_on(
+        QuantDot::Fused(QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes: &weight_row,
+        })
+        .call(&activation_q8k),
+    )
+    .unwrap_err();
     assert!(
         matches!(fused_error, TensorError::NotLowerable { .. }),
         "got {fused_error:?}"
     );
 
-    let unfused_error =
-        block_on(QuantDot::Unfused(QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &weight_row }).call(&activation_q8k))
-            .unwrap_err();
+    let unfused_error = block_on(
+        QuantDot::Unfused(QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes: &weight_row,
+        })
+        .call(&activation_q8k),
+    )
+    .unwrap_err();
     assert!(
         matches!(unfused_error, TensorError::NotLowerable { .. }),
         "got {unfused_error:?}"
@@ -9274,7 +9394,10 @@ fn evaluate_quantized_matmul_matches_dequantize_then_f32_evaluate() {
 
     let (quantized_program, quantized_sum) = quantized_matmul_program(rows, k);
     let quantized_blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &weight_blocks },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &weight_blocks,
+        },
         QuantizedBlock::Float32(&activation),
     ];
     let quantized_result =
@@ -9430,7 +9553,10 @@ fn evaluate_quantized_threads_a_fused_elementwise_step_ahead_of_the_matmul_multi
     );
 
     let blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &weight_blocks },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &weight_blocks,
+        },
         QuantizedBlock::Float32(&raw_activation),
     ];
 
@@ -9621,7 +9747,10 @@ fn evaluate_quantized_applies_the_full_composed_gate_not_just_its_first_leaf() {
     );
 
     let blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &weight_blocks },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &weight_blocks,
+        },
         QuantizedBlock::Float32(&attended),
         QuantizedBlock::Float32(&gate_raw),
     ];
@@ -9861,7 +9990,10 @@ fn evaluate_quantized_applies_the_composed_gate_over_a_multi_axis_packed_contrac
     );
 
     let blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &weight_blocks },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &weight_blocks,
+        },
         QuantizedBlock::Float32(&attended),
         QuantizedBlock::Float32(&gate_raw),
     ];
@@ -9998,7 +10130,10 @@ fn qwen35_batched_packed_ssm_projection_matches_repeated_rows() {
 
     let (batched_program, batched_sum) = build(POSITIONS);
     let batched_blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: weight_blocks.as_slice() },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: weight_blocks.as_slice(),
+        },
         QuantizedBlock::Float32(activation.as_slice()),
     ];
     let batched = evaluate_quantized_exact(&batched_program, &[], &batched_blocks, &[batched_sum])
@@ -10010,7 +10145,10 @@ fn qwen35_batched_packed_ssm_projection_matches_repeated_rows() {
     let mut repeated = Vec::new();
     for row in activation.as_chunks::<{ CONTRACTION as usize }>().0 {
         let blocks = [
-            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: weight_blocks.as_slice() },
+            QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: weight_blocks.as_slice(),
+            },
             QuantizedBlock::Float32(row),
         ];
         repeated.extend_from_slice(
@@ -10062,7 +10200,10 @@ fn evaluate_quantized_exact_matches_dequantize_then_f32_evaluate_near_exactly() 
 
     let (quantized_program, quantized_sum) = quantized_matmul_program(rows, k);
     let quantized_blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &weight_blocks },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &weight_blocks,
+        },
         QuantizedBlock::Float32(&activation),
     ];
     let exact_result =
@@ -10229,7 +10370,10 @@ fn evaluate_quantized_gathered_moe_weight_matches_the_routed_experts_own_matmul(
 
     let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
     let quantized_blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &stacked_weight },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &stacked_weight,
+        },
         QuantizedBlock::Float32(&route_data),
         QuantizedBlock::Float32(&activation),
     ];
@@ -10307,7 +10451,10 @@ fn resolve_gathered_reduce_for_expert_source_test<'a>(
 /// instead, never a panic.
 #[test]
 fn expert_entries_from_stack_rejects_empty_payload_instead_of_panicking() {
-    let empty_stack = QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &[] };
+    let empty_stack = QuantizedBlock::Packed {
+        codec: Codec::Q4K,
+        bytes: &[],
+    };
     let error = expert_entries_from_stack(empty_stack, 3, 4, 256, 0)
         .expect_err("an empty packed stack must be a typed rejection, not a panic");
     assert_eq!(
@@ -10373,7 +10520,10 @@ fn expert_source_matches_stack_gather() {
         .collect();
 
     let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
-    let weight_block = QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &stacked_weight };
+    let weight_block = QuantizedBlock::Packed {
+        codec: Codec::Q4K,
+        bytes: &stacked_weight,
+    };
     let entries = expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
         .expect("a block-aligned contiguous stack slices evenly");
     let source = ExpertSource::new(&entries);
@@ -10466,11 +10616,17 @@ fn expert_source_resolves_each_entry_through_its_own_codec() {
         .collect();
 
     let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
-    let weight_block = QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &stacked_weight };
+    let weight_block = QuantizedBlock::Packed {
+        codec: Codec::Q4K,
+        bytes: &stacked_weight,
+    };
     let mut entries = expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
         .expect("a block-aligned contiguous stack slices evenly");
     entries[1] = ExpertEntry {
-        block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &expert1_q2k },
+        block: QuantizedBlock::Packed {
+            codec: Codec::Q2K,
+            bytes: &expert1_q2k,
+        },
         out_dim: rows,
         in_dim: k,
         epoch: 1,
@@ -10567,11 +10723,17 @@ fn expert_source_instrumentation_attributes_to_the_dispatched_codec() {
         .collect();
 
     let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
-    let weight_block = QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &stacked_weight };
+    let weight_block = QuantizedBlock::Packed {
+        codec: Codec::Q4K,
+        bytes: &stacked_weight,
+    };
     let mut entries = expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
         .expect("a block-aligned contiguous stack slices evenly");
     entries[1] = ExpertEntry {
-        block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &expert1_q2k },
+        block: QuantizedBlock::Packed {
+            codec: Codec::Q2K,
+            bytes: &expert1_q2k,
+        },
         out_dim: rows,
         in_dim: k,
         epoch: 1,
@@ -10657,7 +10819,10 @@ fn expert_source_swap_between_evaluations_reads_the_new_entry_cleanly() {
         .collect();
 
     let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
-    let weight_block = QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &stacked_weight };
+    let weight_block = QuantizedBlock::Packed {
+        codec: Codec::Q4K,
+        bytes: &stacked_weight,
+    };
     let entries_q4k = expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
         .expect("a block-aligned contiguous stack slices evenly");
 
@@ -10679,7 +10844,10 @@ fn expert_source_swap_between_evaluations_reads_the_new_entry_cleanly() {
 
     let mut entries_swapped = entries_q4k.clone();
     entries_swapped[1] = ExpertEntry {
-        block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &expert1_q2k },
+        block: QuantizedBlock::Packed {
+            codec: Codec::Q2K,
+            bytes: &expert1_q2k,
+        },
         out_dim: rows,
         in_dim: k,
         epoch: 1,
@@ -10718,13 +10886,19 @@ fn all_expert_arena_requires_one_exact_span_per_packed_entry() {
     let arena = [0_u8, 11, 12, 13, 0, 21, 22];
     let entries = [
         ExpertEntry {
-            block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &first },
+            block: QuantizedBlock::Packed {
+                codec: Codec::Q2K,
+                bytes: &first,
+            },
             out_dim: 1,
             in_dim: 1,
             epoch: 0,
         },
         ExpertEntry {
-            block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &second },
+            block: QuantizedBlock::Packed {
+                codec: Codec::Q2K,
+                bytes: &second,
+            },
             out_dim: 1,
             in_dim: 1,
             epoch: 0,
@@ -10761,13 +10935,19 @@ fn all_expert_arena_rejects_a_missing_expert_span() {
     let arena = [11_u8, 12, 13, 21, 22];
     let entries = [
         ExpertEntry {
-            block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &first },
+            block: QuantizedBlock::Packed {
+                codec: Codec::Q2K,
+                bytes: &first,
+            },
             out_dim: 1,
             in_dim: 1,
             epoch: 0,
         },
         ExpertEntry {
-            block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &second },
+            block: QuantizedBlock::Packed {
+                codec: Codec::Q2K,
+                bytes: &second,
+            },
             out_dim: 1,
             in_dim: 1,
             epoch: 0,
@@ -10823,7 +11003,10 @@ fn expert_source_rejects_an_entry_whose_shape_disagrees_with_the_program() {
     let activation: Vec<f32> = random_vec(611, seq as usize * k as usize);
 
     let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
-    let weight_block = QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &stacked_weight };
+    let weight_block = QuantizedBlock::Packed {
+        codec: Codec::Q4K,
+        bytes: &stacked_weight,
+    };
     let mut entries = expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
         .expect("a block-aligned contiguous stack slices evenly");
     // Expert 0's own entry now lies about its row count.
@@ -11066,9 +11249,15 @@ fn evaluate_quantized_two_layers_does_not_underflow_live_now() {
         .collect();
 
     let blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &weight1_blocks },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &weight1_blocks,
+        },
         QuantizedBlock::Float32(&activation1),
-        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &weight2_blocks },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &weight2_blocks,
+        },
         QuantizedBlock::Float32(&activation2),
     ];
 
@@ -11171,8 +11360,13 @@ fn reduce_epilogue_only_quantized_weight_is_materialized_before_evaluation() {
         },
     };
 
-    let quantized_weights: BTreeMap<NodeId, QuantizedBlock> =
-        BTreeMap::from([(gate_node, QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &gate_bytes })]);
+    let quantized_weights: BTreeMap<NodeId, QuantizedBlock> = BTreeMap::from([(
+        gate_node,
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &gate_bytes,
+        },
+    )]);
     let mut buffers: Vec<Option<Cow<'_, [f32]>>> = alloc::vec![None; program.len()];
     buffers[x_node.0 as usize] = Some(Cow::Borrowed(x_data.as_slice()));
 
@@ -11336,7 +11530,10 @@ fn a_reduce_where_activation_and_packed_weight_share_a_kept_output_axis_is_rejec
         random_vec(31, (sequence_len * cached_len * kv_heads) as usize);
 
     let blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &weight_bytes },
+        QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes: &weight_bytes,
+        },
         QuantizedBlock::Float32(&activation_values),
     ];
     let outcome = evaluate_quantized(&program, &[], &blocks, &[sum]);
@@ -11569,11 +11766,17 @@ async fn evaluate_quantized_executes_a_half_precision_weight_end_to_end(
 
     let blocks = match kind {
         HalfPrecisionKind::F16 => alloc::vec![
-            QuantizedBlock::Packed { codec: Codec::Float16, bytes: &weight_bytes },
+            QuantizedBlock::Packed {
+                codec: Codec::Float16,
+                bytes: &weight_bytes
+            },
             QuantizedBlock::Float32(&activation)
         ],
         HalfPrecisionKind::Bf16 => alloc::vec![
-            QuantizedBlock::Packed { codec: Codec::BFloat16, bytes: &weight_bytes },
+            QuantizedBlock::Packed {
+                codec: Codec::BFloat16,
+                bytes: &weight_bytes
+            },
             QuantizedBlock::Float32(&activation)
         ],
     };
@@ -12336,7 +12539,10 @@ fn evaluate_quantized_routes_q5k_block_and_matches_dequantize_then_evaluate() {
 
     let (program, sum) = quantized_matmul_program(rows, k);
     let blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q5K, bytes: &weight_blocks },
+        QuantizedBlock::Packed {
+            codec: Codec::Q5K,
+            bytes: &weight_blocks,
+        },
         QuantizedBlock::Float32(&activation),
     ];
     let quantized_result = evaluate_quantized(&program, &[], &blocks, &[sum])
@@ -12450,7 +12656,10 @@ async fn evaluate_quantized_matmul_matches_dequantized_reference_across_every_co
             }
             let (program, sum) = quantized_matmul_program(rows, k);
             let blocks = [
-                QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &weight_blocks },
+                QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes: &weight_blocks,
+                },
                 QuantizedBlock::Float32(&activation),
             ];
             evaluate_quantized(&program, &[], &blocks, &[sum])
@@ -12471,7 +12680,10 @@ async fn evaluate_quantized_matmul_matches_dequantized_reference_across_every_co
             }
             let (program, sum) = quantized_matmul_program(rows, k);
             let blocks = [
-                QuantizedBlock::Packed { codec: Codec::Q5K, bytes: &weight_blocks },
+                QuantizedBlock::Packed {
+                    codec: Codec::Q5K,
+                    bytes: &weight_blocks,
+                },
                 QuantizedBlock::Float32(&activation),
             ];
             evaluate_quantized(&program, &[], &blocks, &[sum])
@@ -12492,7 +12704,10 @@ async fn evaluate_quantized_matmul_matches_dequantized_reference_across_every_co
             }
             let (program, sum) = quantized_matmul_program(rows, k);
             let blocks = [
-                QuantizedBlock::Packed { codec: Codec::Q3K, bytes: &weight_blocks },
+                QuantizedBlock::Packed {
+                    codec: Codec::Q3K,
+                    bytes: &weight_blocks,
+                },
                 QuantizedBlock::Float32(&activation),
             ];
             evaluate_quantized(&program, &[], &blocks, &[sum])
@@ -12513,7 +12728,10 @@ async fn evaluate_quantized_matmul_matches_dequantized_reference_across_every_co
             }
             let (program, sum) = quantized_matmul_program(rows, k);
             let blocks = [
-                QuantizedBlock::Packed { codec: Codec::Q6K, bytes: &weight_blocks },
+                QuantizedBlock::Packed {
+                    codec: Codec::Q6K,
+                    bytes: &weight_blocks,
+                },
                 QuantizedBlock::Float32(&activation),
             ];
             evaluate_quantized(&program, &[], &blocks, &[sum])
@@ -12534,7 +12752,10 @@ async fn evaluate_quantized_matmul_matches_dequantized_reference_across_every_co
             }
             let (program, sum) = quantized_matmul_program(rows, k);
             let blocks = [
-                QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &weight_blocks },
+                QuantizedBlock::Packed {
+                    codec: Codec::Q8_0,
+                    bytes: &weight_blocks,
+                },
                 QuantizedBlock::Float32(&activation),
             ];
             evaluate_quantized(&program, &[], &blocks, &[sum])
@@ -12555,7 +12776,10 @@ async fn evaluate_quantized_matmul_matches_dequantized_reference_across_every_co
             }
             let (program, sum) = quantized_matmul_program(rows, k);
             let blocks = [
-                QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: &weight_blocks },
+                QuantizedBlock::Packed {
+                    codec: Codec::Q4_0,
+                    bytes: &weight_blocks,
+                },
                 QuantizedBlock::Float32(&activation),
             ];
             evaluate_quantized(&program, &[], &blocks, &[sum])
@@ -13051,18 +13275,14 @@ fn round_batched_reduce_matches_k_sequential_reduces() {
     // keeping this test's own proof (the HAND-collapse below is bit-exact
     // with the k separate folds) independent of whether that admission gate
     // fires, exactly as this test's own doc states.
-    let resolved = temp_env::with_var(
-        "PROXIMA_DISABLE_MOE_ROUND_GROUP_FUSION",
-        Some("1"),
-        || {
-            bind::bind(
-                &program,
-                &shapes,
-                &[round0, round1],
-                NumericPolicy::bit_exact(),
-            )
-        },
-    )
+    let resolved = temp_env::with_var("PROXIMA_DISABLE_MOE_ROUND_GROUP_FUSION", Some("1"), || {
+        bind::bind(
+            &program,
+            &shapes,
+            &[round0, round1],
+            NumericPolicy::bit_exact(),
+        )
+    })
     .expect("bind succeeds");
 
     let table_data: Vec<f32> = (0..n_experts * width)
@@ -13090,11 +13310,27 @@ fn round_batched_reduce_matches_k_sequential_reduces() {
         .expect("round1 resolves to its own BoundOp");
 
     let mut reference0 = [0.0f32; 1];
-    run_node_into(&bound_round0, &buffers, None, None, None, false, &mut reference0)
-        .expect("round0 runs standalone as a plain Reduce");
+    run_node_into(
+        &bound_round0,
+        &buffers,
+        None,
+        None,
+        None,
+        false,
+        &mut reference0,
+    )
+    .expect("round0 runs standalone as a plain Reduce");
     let mut reference1 = [0.0f32; 1];
-    run_node_into(&bound_round1, &buffers, None, None, None, false, &mut reference1)
-        .expect("round1 runs standalone as a plain Reduce");
+    run_node_into(
+        &bound_round1,
+        &buffers,
+        None,
+        None,
+        None,
+        false,
+        &mut reference1,
+    )
+    .expect("round1 runs standalone as a plain Reduce");
 
     let BoundOpKind::Reduce {
         element_body,
@@ -13267,7 +13503,10 @@ fn bind_collapses_structurally_uniform_round_group_into_round_batched_reduce() {
             round0_bound.kind.name()
         );
     };
-    assert_eq!(*round_count, 2, "two round-sibling reduces collapse to round_count 2");
+    assert_eq!(
+        *round_count, 2,
+        "two round-sibling reduces collapse to round_count 2"
+    );
     assert_eq!(round_routes.as_slice(), [route0, route1]);
     assert_eq!(round_outputs.as_slice(), [round0, round1]);
     assert!(
@@ -13407,7 +13646,9 @@ fn e3m2_pack_block(codes: &[u8; 32], scale: f16) -> [u8; E3M2_BLOCK_BYTES] {
         let word = group_codes
             .iter()
             .enumerate()
-            .fold(0u32, |word, (slot, &code)| word | u32::from(code) << (6 * slot));
+            .fold(0u32, |word, (slot, &code)| {
+                word | u32::from(code) << (6 * slot)
+            });
         block[2 + group * 3..5 + group * 3].copy_from_slice(&word.to_le_bytes()[..3]);
     }
     block
@@ -13439,7 +13680,9 @@ fn e3m2_f64_dot(weights: &[u8], row: usize, activation: &[f32]) -> (f64, f64) {
                 scale * e3m2_table4_value(code) * f64::from(activation_block[element])
             })
         })
-        .fold((0.0, 0.0), |(sum, magnitude), term| (sum + term, magnitude + term.abs()))
+        .fold((0.0, 0.0), |(sum, magnitude), term| {
+            (sum + term, magnitude + term.abs())
+        })
 }
 
 fn e3m2_worst_ratio(weights: &[u8], activation: &[f32]) -> f64 {
@@ -13458,8 +13701,13 @@ fn e3m2_worst_ratio(weights: &[u8], activation: &[f32]) -> f64 {
 #[test]
 fn scaled_e3m2_cpu_dequantize_equals_golden_times_scale_1024x512() {
     let weights = e3m2_weight_bytes(e3m2_code);
-    let block = QuantizedBlock::Packed { codec: Codec::Fp6E3M2, bytes: &weights };
-    let dequantize = block.dequantize_fn().expect("fp6_e3m2 has a single-shot decoder");
+    let block = QuantizedBlock::Packed {
+        codec: Codec::Fp6E3M2,
+        bytes: &weights,
+    };
+    let dequantize = block
+        .dequantize_fn()
+        .expect("fp6_e3m2 has a single-shot decoder");
     let mut decoded = vec![0.0f32; E3M2_ROWS * E3M2_K];
 
     dequantize(&weights, &mut decoded).expect("whole blocks decode");
@@ -13482,7 +13730,10 @@ fn scaled_e3m2_cpu_matmul_matches_f64_loop_1024x512() {
 
     let worst = e3m2_worst_ratio(&weights, &activation);
 
-    assert!(worst <= E3M2_MATMUL_BOUND, "worst relative error {worst:e} exceeds {E3M2_MATMUL_BOUND:e}");
+    assert!(
+        worst <= E3M2_MATMUL_BOUND,
+        "worst relative error {worst:e} exceeds {E3M2_MATMUL_BOUND:e}"
+    );
 }
 
 #[test]
@@ -13491,7 +13742,11 @@ fn scaled_e3m2_cpu_matmul_control_perturbed_weight_fails() {
     let activation = random_vec(29, E3M2_K);
     let perturbed_code = |row: usize, block: usize, element: usize| {
         let code = e3m2_code(row, block, element);
-        if (row, block, element) == (0, 0, 1) { code ^ 0x1c } else { code }
+        if (row, block, element) == (0, 0, 1) {
+            code ^ 0x1c
+        } else {
+            code
+        }
     };
     let perturbed = e3m2_weight_bytes(perturbed_code);
     assert_ne!(intact, perturbed, "the control must change a weight code");
@@ -13501,5 +13756,8 @@ fn scaled_e3m2_cpu_matmul_control_perturbed_weight_fails() {
     let (exact, magnitude) = e3m2_f64_dot(&intact, 0, &activation);
 
     let ratio = (f64::from(kernel_result[0]) - exact).abs() / magnitude;
-    assert!(ratio > E3M2_MATMUL_BOUND, "perturbation ratio {ratio:e} stayed within the bound");
+    assert!(
+        ratio > E3M2_MATMUL_BOUND,
+        "perturbation ratio {ratio:e} stayed within the bound"
+    );
 }
