@@ -1,10 +1,12 @@
 #![cfg(feature = "std")]
 
 mod support;
+#[path = "support/trial.rs"]
+mod trial;
 
 use proxima_gguf::GgmlType;
 use serde_json::Value;
-use support::trial::{TrialRequest, run_trial, verify_invocation_evidence};
+use trial::{TrialRequest, run_trial, verify_invocation_evidence};
 
 const FIXTURE_REVISION: &str = "0000000000000000000000000000000000000001";
 const CONFIG_BYTES: &[u8] =
