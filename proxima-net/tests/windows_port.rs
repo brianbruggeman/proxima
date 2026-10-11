@@ -144,7 +144,10 @@ fn windows_port_tcp_upstream_payload() -> Result<(), Failure> {
         .dispatch_send_inline(async move {
             let outcome = async {
                 let upstream = PrimeTcpUpstream::new(address);
-                let mut connection = upstream.connect().await.context("prime upstream connects")?;
+                let mut connection = upstream
+                    .connect()
+                    .await
+                    .context("prime upstream connects")?;
                 connection
                     .write_all(REQUEST)
                     .await
@@ -367,10 +370,7 @@ fn windows_port_packet_listener_factory_payload() -> Result<(), Failure> {
                     .send(local_address)
                     .context("report packet listener address")?;
                 let mut buffer = [0; 128];
-                let received = listener
-                    .recv(&mut buffer)
-                    .await
-                    .context("receive packet")?;
+                let received = listener.recv(&mut buffer).await.context("receive packet")?;
                 assert_eq!(received.data, Bytes::from_static(DATAGRAM));
                 assert_eq!(received.dst, local_address);
                 let response_packet = Packet {
@@ -406,9 +406,10 @@ fn windows_port_packet_listener_factory_payload() -> Result<(), Failure> {
         .context("receive packet reply")?;
     assert_eq!(&response[..count], DATAGRAM);
     assert_eq!(source, address);
-    let (observed_source, observed_destination, observed_data) = result_rx
-        .recv_timeout(GUARD)
-        .context("receive packet result")??;
+    let (observed_source, observed_destination, observed_data) =
+        result_rx
+            .recv_timeout(GUARD)
+            .context("receive packet result")??;
     assert_eq!(observed_source, peer_address);
     assert_eq!(observed_destination, address);
     assert_eq!(observed_data, DATAGRAM);
@@ -453,9 +454,7 @@ fn hostname_upstream_payload() -> Result<(), Failure> {
     let (bytes, peer) = result.recv_timeout(GUARD).context("hostname completed")??;
     assert_eq!(bytes, RESPONSE);
     assert!(matches!(peer, Some(PeerInfo::Tcp(peer)) if peer == address));
-    handle
-        .shutdown_and_join()
-        .context("join hostname worker")?;
+    handle.shutdown_and_join().context("join hostname worker")?;
     Ok(())
 }
 
