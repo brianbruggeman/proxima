@@ -61,6 +61,8 @@ pub mod metal;
 pub mod mlx;
 #[cfg(feature = "alloc")]
 pub mod msl;
+#[cfg(feature = "onnx-door")]
+pub mod onnx_door;
 pub mod sized;
 #[cfg(feature = "wgpu-backend")]
 pub mod wgpu_driver;

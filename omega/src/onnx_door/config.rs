@@ -1,0 +1,119 @@
+use bon::Builder;
+use conflaguration::Settings;
+use proxima_tensor::NumericPolicy;
+use serde::{Deserialize, Serialize};
+
+use crate::backend::{BackendError, Engine, GpuDriver};
+
+/// Why a [`DoorConfig`] string did not name a compiled-in value.
+#[derive(Debug, thiserror::Error)]
+pub enum DoorConfigError {
+    #[error("engine: {0}")]
+    Engine(#[source] BackendError),
+
+    #[error("unknown gpu driver `{name}`; known drivers: auto, metal, wgpu")]
+    UnknownGpuDriver { name: String },
+
+    #[error("unknown numeric policy `{name}`; known policies: bit_exact, llama_relaxed, fast")]
+    UnknownNumericPolicy { name: String },
+}
+
+/// Where and how the door runs a lowered graph.
+///
+/// One value is both the `DoorConfig::builder()` result and the
+/// `OMEGA_ONNX_DOOR_*` / file configuration, the same pairing
+/// [`RuntimeConfig`](crate::config::RuntimeConfig) uses: names are strings so
+/// the value serialises, and the `resolve_*` methods turn them into the typed
+/// [`Engine`], [`GpuDriver`] and [`NumericPolicy`] the backend takes.
+#[derive(Debug, Clone, PartialEq, Eq, Builder, Deserialize, Serialize, Settings)]
+#[settings(prefix = "OMEGA_ONNX_DOOR")]
+#[builder(state_mod(vis = "pub"))]
+pub struct DoorConfig {
+    /// `cpu` or `gpu`.
+    #[setting(default = "cpu")]
+    #[builder(into, overwritable, default = String::from("cpu"))]
+    pub engine: String,
+    /// `auto`, `metal` or `wgpu`; read only when `engine` is `gpu`.
+    #[setting(default = "auto")]
+    #[builder(into, overwritable, default = String::from("auto"))]
+    pub gpu_driver: String,
+    /// `bit_exact`, `llama_relaxed` or `fast`: the rewrites the planner may
+    /// apply, as the `NumericPolicy` preset of the same name.
+    #[setting(default = "bit_exact")]
+    #[builder(into, overwritable, default = String::from("bit_exact"))]
+    pub numeric_policy: String,
+}
+
+impl Default for DoorConfig {
+    fn default() -> Self {
+        Self::builder().build()
+    }
+}
+
+impl DoorConfig {
+    /// A builder seeded from `config`, so a loaded file or environment can be
+    /// tweaked fluently.
+    pub fn builder_from(config: &Self) -> DoorConfigBuilder<impl door_config_builder::IsComplete> {
+        Self::builder()
+            .engine(config.engine.as_str())
+            .gpu_driver(config.gpu_driver.as_str())
+            .numeric_policy(config.numeric_policy.as_str())
+    }
+
+    /// Defaults overlaid by `OMEGA_ONNX_DOOR_*` variables.
+    ///
+    /// # Errors
+    /// Whatever [`conflaguration`] rejects in the environment.
+    pub fn from_env() -> Result<Self, conflaguration::Error> {
+        <Self as Settings>::from_env()
+    }
+
+    /// Loads a TOML, JSON or YAML file.
+    ///
+    /// # Errors
+    /// Whatever [`conflaguration`] rejects in the file.
+    pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, conflaguration::Error> {
+        conflaguration::from_file(path.as_ref())
+    }
+
+    /// The [`Engine`] named by `engine`.
+    ///
+    /// # Errors
+    /// [`DoorConfigError::Engine`] when the name is neither `cpu` nor `gpu`.
+    pub fn resolve_engine(&self) -> Result<Engine, DoorConfigError> {
+        self.engine
+            .parse::<Engine>()
+            .map_err(DoorConfigError::Engine)
+    }
+
+    /// The driver named by `gpu_driver`; `auto` is `None`, which lets the
+    /// backend pick the driver compiled for this target.
+    ///
+    /// # Errors
+    /// [`DoorConfigError::UnknownGpuDriver`] for any other name.
+    pub fn resolve_gpu_driver(&self) -> Result<Option<GpuDriver>, DoorConfigError> {
+        match self.gpu_driver.as_str() {
+            "auto" => Ok(None),
+            "metal" => Ok(Some(GpuDriver::Metal)),
+            "wgpu" => Ok(Some(GpuDriver::Wgpu)),
+            other => Err(DoorConfigError::UnknownGpuDriver {
+                name: other.to_owned(),
+            }),
+        }
+    }
+
+    /// The [`NumericPolicy`] preset named by `numeric_policy`.
+    ///
+    /// # Errors
+    /// [`DoorConfigError::UnknownNumericPolicy`] for any other name.
+    pub fn resolve_numeric_policy(&self) -> Result<NumericPolicy, DoorConfigError> {
+        match self.numeric_policy.as_str() {
+            "bit_exact" => Ok(NumericPolicy::bit_exact()),
+            "llama_relaxed" => Ok(NumericPolicy::llama_relaxed()),
+            "fast" => Ok(NumericPolicy::fast()),
+            other => Err(DoorConfigError::UnknownNumericPolicy {
+                name: other.to_owned(),
+            }),
+        }
+    }
+}
