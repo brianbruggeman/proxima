@@ -4063,6 +4063,7 @@ dependencies = [
  "json5",
  "kafka-protocol",
  "libc",
+ "libtest-mimic",
  "log",
  "loom",
  "memmap2",
@@ -5235,7 +5236,6 @@ dependencies = [
  "fdt",
  "futures",
  "goblin",
- "libtest-mimic",
  "object",
  "postcard",
  "proptest",
@@ -5249,7 +5249,6 @@ dependencies = [
  "proxima-tensor",
  "serde",
  "tempfile",
- "tokio",
  "vm-fdt",
 ]
 
