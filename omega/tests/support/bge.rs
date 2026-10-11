@@ -74,3 +74,99 @@ fn parse_row(line: &str) -> Result<CorpusRow> {
         .collect::<Result<_>>()?;
     Ok(CorpusRow { text, ids })
 }
+
+pub struct RecordBatch {
+    pub seq: usize,
+    pub input_ids: Vec<Vec<i64>>,
+    pub attention_mask: Vec<Vec<i64>>,
+    pub token_type_ids: Vec<Vec<i64>>,
+    pub cls: Vec<Vec<f32>>,
+}
+
+pub struct Record {
+    pub header: Value,
+    pub batches: Vec<RecordBatch>,
+}
+
+pub fn read_record(cell: &str) -> Result<Record> {
+    let text = String::from_utf8(read_fixture(&format!("tract_{cell}.jsonl"))?)?;
+    let mut lines = text.lines();
+    let header = moe_test_json::from_str(lines.next().context("record is empty")?)?;
+    let batches = lines.map(parse_batch).collect::<Result<_>>()?;
+    Ok(Record { header, batches })
+}
+
+fn parse_batch(line: &str) -> Result<RecordBatch> {
+    let value: Value = moe_test_json::from_str(line)?;
+    Ok(RecordBatch {
+        seq: usize::try_from(value["seq"].as_u64().context("batch has no seq")?)?,
+        input_ids: integer_rows(&value, "input_ids")?,
+        attention_mask: integer_rows(&value, "attention_mask")?,
+        token_type_ids: integer_rows(&value, "token_type_ids")?,
+        cls: float_rows(&value, "cls")?,
+    })
+}
+
+fn rows_of<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>> {
+    value[key]
+        .as_array()
+        .with_context(|| format!("batch has no {key}"))
+}
+
+fn integer_rows(value: &Value, key: &str) -> Result<Vec<Vec<i64>>> {
+    rows_of(value, key)?
+        .iter()
+        .map(|row| {
+            row.as_array()
+                .context("row is not an array")?
+                .iter()
+                .map(|item| item.as_i64().context("item is not an integer"))
+                .collect()
+        })
+        .collect()
+}
+
+fn float_rows(value: &Value, key: &str) -> Result<Vec<Vec<f32>>> {
+    rows_of(value, key)?
+        .iter()
+        .map(|row| {
+            row.as_array()
+                .context("row is not an array")?
+                .iter()
+                .map(|item| {
+                    item.as_f64()
+                        .map(|float| float as f32)
+                        .context("item is not a float")
+                })
+                .collect()
+        })
+        .collect()
+}
+
+pub fn l2_normalize(row: &[f32]) -> Vec<f32> {
+    let norm = row.iter().map(|value| value * value).sum::<f32>().sqrt();
+    row.iter().map(|value| value / norm).collect()
+}
+
+pub fn max_abs_difference(left: &[f32], right: &[f32]) -> f32 {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| (left - right).abs())
+        .fold(0.0, f32::max)
+}
+
+pub fn cosine(left: &[f32], right: &[f32]) -> f64 {
+    let (left, right) = (l2_normalize(left), l2_normalize(right));
+    left.iter()
+        .zip(&right)
+        .map(|(left, right)| f64::from(left * right))
+        .sum()
+}
+
+pub fn all_within(actual: &[f64], expected: &[f64], tolerance: f64) -> bool {
+    actual.len() == expected.len()
+        && actual
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| (actual - expected).abs() <= tolerance)
+}

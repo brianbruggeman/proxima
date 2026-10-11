@@ -151,3 +151,154 @@ fn bge_fixture_first_three_corpus_rows_equal_the_hard_coded_id_arrays_of_bge_eva
     }
     Ok(())
 }
+
+const EMBEDDING_DIMENSION: usize = 384;
+const ONNXRUNTIME_COSINES: [f64; 3] = [0.936_311, 0.378_777, 0.334_176];
+const COSINE_TOLERANCE: f64 = 1e-4;
+const PADDING_TOLERANCE: f32 = 1e-5;
+
+fn record_rows(cell: &str) -> Result<Vec<Vec<f32>>> {
+    let record = bge::read_record(cell)?;
+    Ok(record
+        .batches
+        .into_iter()
+        .flat_map(|batch| batch.cls)
+        .collect())
+}
+
+fn recorded_cosines() -> Result<[f64; 3]> {
+    let rows = record_rows("b1")?;
+    Ok([
+        bge::cosine(&rows[0], &rows[1]),
+        bge::cosine(&rows[0], &rows[2]),
+        bge::cosine(&rows[1], &rows[2]),
+    ])
+}
+
+#[test]
+fn tract_record_b1_record_has_64_rows_of_384_finite_floats() -> Result<()> {
+    let rows = record_rows("b1")?;
+
+    ensure!(
+        rows.len() == CORPUS_ROWS,
+        "b1 record has {} rows",
+        rows.len()
+    );
+    ensure!(
+        rows.iter().all(|row| row.len() == EMBEDDING_DIMENSION),
+        "a b1 row is not {EMBEDDING_DIMENSION} floats"
+    );
+    ensure!(
+        rows.iter().flatten().all(|value| value.is_finite()),
+        "a b1 value is not finite"
+    );
+    Ok(())
+}
+
+#[test]
+fn tract_record_b32_record_has_2_batches_of_32_rows_of_384() -> Result<()> {
+    let record = bge::read_record("b32")?;
+
+    ensure!(
+        record.batches.len() == 2,
+        "b32 record has {} batches",
+        record.batches.len()
+    );
+    for batch in &record.batches {
+        ensure!(batch.cls.len() == 32, "batch has {} rows", batch.cls.len());
+        ensure!(
+            batch.cls.iter().all(|row| row.len() == EMBEDDING_DIMENSION),
+            "a b32 row is not {EMBEDDING_DIMENSION} floats"
+        );
+        ensure!(
+            batch.input_ids.iter().all(|row| row.len() == batch.seq)
+                && batch
+                    .attention_mask
+                    .iter()
+                    .all(|row| row.len() == batch.seq)
+                && batch
+                    .token_type_ids
+                    .iter()
+                    .all(|row| row.len() == batch.seq),
+            "an input tensor row is not seq {} wide",
+            batch.seq
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn tract_record_header_names_tract_onnx_0_22_4_and_the_model_sha256() -> Result<()> {
+    for header in [
+        bge::read_record("b1")?.header,
+        bge::read_record("b32")?.header,
+    ] {
+        ensure!(
+            header["tract_onnx"] == "0.22.4",
+            "header names tract {}",
+            header["tract_onnx"]
+        );
+        ensure!(
+            header["model_sha256"] == MODEL_SHA256,
+            "header names model {}",
+            header["model_sha256"]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn tract_record_padding_invariance_each_b32_row_equals_its_b1_row_within_1e_5_after_normalization()
+-> Result<()> {
+    let single = record_rows("b1")?;
+    let batched = record_rows("b32")?;
+
+    ensure!(single.len() == batched.len(), "row counts differ");
+    for (index, (single_row, batched_row)) in single.iter().zip(&batched).enumerate() {
+        let difference = bge::max_abs_difference(
+            &bge::l2_normalize(single_row),
+            &bge::l2_normalize(batched_row),
+        );
+        ensure!(
+            difference <= PADDING_TOLERANCE,
+            "row {index} differs by {difference} between b1 and b32"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn tract_record_three_sentence_cosines_equal_the_recorded_onnxruntime_values_0_936311_0_378777_0_334176_within_1e_4()
+-> Result<()> {
+    let cosines = recorded_cosines()?;
+
+    ensure!(
+        bge::all_within(&cosines, &ONNXRUNTIME_COSINES, COSINE_TOLERANCE),
+        "tract cosines {cosines:?} differ from onnxruntime {ONNXRUNTIME_COSINES:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn tract_record_identity_control_the_records_cosines_compared_with_themselves_pass() -> Result<()> {
+    let cosines = recorded_cosines()?;
+
+    ensure!(
+        bge::all_within(&cosines, &cosines, COSINE_TOLERANCE),
+        "the record's cosines differ from themselves"
+    );
+    Ok(())
+}
+
+#[test]
+fn tract_record_degenerate_control_cosine_a_b_altered_by_1e_3_fails() -> Result<()> {
+    let cosines = recorded_cosines()?;
+    let mut altered = ONNXRUNTIME_COSINES;
+    altered[0] += 1e-3;
+
+    ensure!(
+        !bge::all_within(&cosines, &altered, COSINE_TOLERANCE),
+        "an alteration of 1e-3 stayed within {COSINE_TOLERANCE}"
+    );
+    Ok(())
+}
