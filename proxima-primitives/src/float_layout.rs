@@ -9,7 +9,7 @@ pub enum Specials {
     /// to the signed max normal (E3M2, E2M1).
     None,
     /// IEEE inf and nan encodings are reserved; finite overflow and inf input clamp to the max
-    /// normal, nan still encodes as nan (E5M2 as BF8).
+    /// normal, nan still encodes as nan (E5M2_SATURATING, the GGUF bf8 storage policy).
     SaturateOnOverflow,
     /// IEEE inf and nan encodings are reserved; overflow rounds to inf (binary32, BF16).
     InfinityOnOverflow,
@@ -40,7 +40,9 @@ const fn pow2(exponent: i32) -> f32 {
 }
 
 impl FloatLayout {
-    pub const E5M2: Self = Self::ieee_like(5, 2, Specials::SaturateOnOverflow);
+    pub const E5M2: Self = Self::ieee_like(5, 2, Specials::InfinityOnOverflow);
+    /// E5M2 widths with saturation: the GGUF bf8 storage policy, which keeps infinities out of stored weights.
+    pub const E5M2_SATURATING: Self = Self::ieee_like(5, 2, Specials::SaturateOnOverflow);
     pub const E2M1: Self = Self::ieee_like(2, 1, Specials::None);
     pub const E3M2: Self = Self::ieee_like(3, 2, Specials::None);
     pub const E2M3: Self = Self::ieee_like(2, 3, Specials::None);
@@ -200,6 +202,7 @@ mod tests {
         let observed = [
             FloatLayout::E5M2,
             FloatLayout::BF8,
+            FloatLayout::E5M2_SATURATING,
             FloatLayout::BF16,
             FloatLayout::BF32,
             FloatLayout::E3M2,
@@ -212,7 +215,8 @@ mod tests {
         let saturate = Specials::SaturateOnOverflow;
         let infinity = Specials::InfinityOnOverflow;
         let expected = [
-            (saturate, 8),
+            (infinity, 8),
+            (infinity, 8),
             (saturate, 8),
             (infinity, 16),
             (infinity, 32),

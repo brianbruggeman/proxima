@@ -50,9 +50,12 @@ fn float_layout_range_saturates_e3m2() {
 }
 
 #[test]
-fn float_layout_range_saturates_infinity_e5m2() {
-    assert_eq!(encode(f32::INFINITY, FloatLayout::E5M2), 0x7b);
-    assert_eq!(encode(f32::NEG_INFINITY, FloatLayout::E5M2), 0xfb);
+fn float_layout_range_saturates_infinity_e5m2_saturating() {
+    assert_eq!(encode(f32::INFINITY, FloatLayout::E5M2_SATURATING), 0x7b);
+    assert_eq!(
+        encode(f32::NEG_INFINITY, FloatLayout::E5M2_SATURATING),
+        0xfb
+    );
 }
 
 #[test]
@@ -267,5 +270,28 @@ fn float_layout_e5m2_control_altered_row_fails() {
             !row_encodes_to_expected_code(row, row.code ^ 1),
             "altered row must fail"
         );
+    }
+}
+
+#[test]
+fn float_layout_e5m2_matches_bf8_vectors_csv() {
+    for row in bf8_rows() {
+        assert!(
+            row_encodes_to_expected_code(&row, row.code),
+            "{}: encode",
+            row.case
+        );
+        assert_row_decodes(&row);
+    }
+}
+
+fn assert_row_decodes(row: &Bf8Row) {
+    let decoded = decode(row.code, FloatLayout::E5M2);
+    if row.input.is_nan() {
+        assert!(decoded.is_nan(), "{}: expected nan", row.case);
+    } else if row.input.to_bits() & 0x1f_ffff == 0 {
+        assert_same_float(decoded, row.input, row.case);
+    } else {
+        assert_eq!(encode(decoded, FloatLayout::E5M2), row.code, "{}", row.case);
     }
 }
