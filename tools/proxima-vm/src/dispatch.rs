@@ -330,7 +330,7 @@ pub unsafe extern "C" fn proxima_vm_dispatch_hypercall(
 /// declares.
 ///
 /// This ELF-guest path drives the same device-model C exit loop
-/// [`crate::boot`] drives (`proxima_vm_run_device_dispatch_loop`,
+/// `crate::boot` drives (`proxima_vm_run_device_dispatch_loop`,
 /// `backend_macos.c`/`backend_linux.c`), always at guest-physical base 0,
 /// boot register `x0 == 0`, and this loop's own default CPSR (EL1h) — never
 /// `crate::boot`'s `guest_memory_base`/`boot_x0`/`boot_cpsr` triple, which
@@ -369,13 +369,7 @@ pub type DispatchLoopOutput = (
     u64,
 );
 
-#[cfg(all(
-    feature = "std",
-    any(
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "macos", target_arch = "aarch64")
-    )
-))]
+#[cfg(all(feature = "std", target_os = "macos", target_arch = "aarch64"))]
 #[allow(
     clippy::too_many_arguments,
     reason = "each argument is a distinct device's own emitted-byte capacity (console/net/blk/pl011); \
@@ -403,12 +397,7 @@ pub fn run_dispatch_loop(
     use crate::virtio_net::NetTransport;
 
     const ERROR_CAPACITY: usize = 512;
-    if guest_memory_size < GUEST_MEMORY_SIZE {
-        return Err(ProximaError::Upstream(alloc::format!(
-            "guest_memory_size must cover the lambda guest's full stack reservation \
-             ({GUEST_MEMORY_SIZE} bytes); got {guest_memory_size}"
-        )));
-    }
+    let raw_segments = lambda_guest_segments(segments, guest_memory_size)?;
 
     unsafe extern "C" {
         fn proxima_vm_run_device_dispatch_loop(
@@ -460,28 +449,6 @@ pub fn run_dispatch_loop(
             error_buffer: *mut c_char,
             error_capacity: usize,
         ) -> i32;
-    }
-
-    /// Both host mapping APIs this crate drives (`hv_vm_map`,
-    /// `KVM_SET_USER_MEMORY_REGION`) only accept page-aligned ranges — the
-    /// base page size on both `aarch64` and `x86_64` (hugepages aside).
-    /// Starting the stack region on a page boundary keeps it out of
-    /// whichever page the last real ELF segment's tail shares, so the C
-    /// side's window-merge (`build_mapped_windows` in each backend) never
-    /// has to fold the writable stack into the same page as an executable
-    /// segment.
-    const GUEST_PAGE_SIZE: u64 = 4096;
-
-    let extent = segments
-        .iter()
-        .map(|segment| segment.virtual_address() + segment.memory_size())
-        .max()
-        .unwrap_or(0);
-    let stack_start = extent.div_ceil(GUEST_PAGE_SIZE) * GUEST_PAGE_SIZE;
-    let mut raw_segments: Vec<RawSegment> = segments.iter().map(RawSegment::from_segment).collect();
-    let stack_size = guest_memory_size.saturating_sub(stack_start);
-    if stack_size > 0 {
-        raw_segments.push(RawSegment::stack(stack_start, stack_size));
     }
 
     let dispatcher = FfiRecordingDispatcher::new(configured_response);
@@ -635,6 +602,139 @@ pub fn run_dispatch_loop(
         create_to_first_exit_nanos,
         touch_all_pages_nanos,
         mmio_trap_count,
+    ))
+}
+
+/// Both host mapping APIs this crate drives (`hv_vm_map`,
+/// `KVM_SET_USER_MEMORY_REGION`) only accept page-aligned ranges — the
+/// base page size on both `aarch64` and `x86_64` (hugepages aside).
+/// Starting the stack region on a page boundary keeps it out of
+/// whichever page the last real ELF segment's tail shares, so the C
+/// side's window-merge (`build_mapped_windows` in each backend) never
+/// has to fold the writable stack into the same page as an executable
+/// segment.
+#[cfg(all(
+    feature = "std",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    )
+))]
+fn lambda_guest_segments(
+    segments: &[crate::elf::Segment<'_>],
+    guest_memory_size: u64,
+) -> Result<Vec<crate::loader::RawSegment>, ProximaError> {
+    use crate::loader::RawSegment;
+
+    const GUEST_PAGE_SIZE: u64 = 4096;
+    if guest_memory_size < GUEST_MEMORY_SIZE {
+        return Err(ProximaError::Upstream(alloc::format!(
+            "guest_memory_size must cover the lambda guest's full stack reservation \
+             ({GUEST_MEMORY_SIZE} bytes); got {guest_memory_size}"
+        )));
+    }
+    let extent = segments
+        .iter()
+        .map(|segment| segment.virtual_address() + segment.memory_size())
+        .max()
+        .unwrap_or(0);
+    let stack_start = extent.div_ceil(GUEST_PAGE_SIZE) * GUEST_PAGE_SIZE;
+    let mut raw_segments: Vec<RawSegment> = segments.iter().map(RawSegment::from_segment).collect();
+    let stack_size = guest_memory_size.saturating_sub(stack_start);
+    if stack_size > 0 {
+        raw_segments.push(RawSegment::stack(stack_start, stack_size));
+    }
+    Ok(raw_segments)
+}
+
+/// The KVM lane of [`run_dispatch_loop`]: `src/backend_linux.c`'s
+/// `proxima_vm_run_dispatch_loop` drives `out dx, al` hypercalls through
+/// [`proxima_vm_dispatch_hypercall`]. The device-model exit loop
+/// (virtio/GIC/pl011) is aarch64-only, so every device channel and trap
+/// counter in the returned [`DispatchLoopOutput`] is empty or zero here.
+///
+/// # Errors
+///
+/// Returns [`ProximaError::Upstream`] naming the failing KVM call, an
+/// exceeded hypercall budget, or a hypercall dispatch failure.
+#[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "same public signature as the hypervisor.framework lane, whose per-device \
+              emitted-byte capacities have no KVM counterpart but must keep the call site portable"
+)]
+pub fn run_dispatch_loop(
+    entry: u64,
+    segments: &[crate::elf::Segment<'_>],
+    configured_response: ChildResponse,
+    max_hypercalls: usize,
+    emitted_capacity: usize,
+    _mmio_emitted_capacity: usize,
+    _net_emitted_capacity: usize,
+    _blk_emitted_capacity: usize,
+    _pl011_emitted_capacity: usize,
+    guest_memory_size: u64,
+) -> Result<DispatchLoopOutput, ProximaError> {
+    use std::ffi::CStr;
+    use std::os::raw::c_char;
+
+    use crate::loader::RawSegment;
+
+    const ERROR_CAPACITY: usize = 512;
+    let raw_segments = lambda_guest_segments(segments, guest_memory_size)?;
+
+    unsafe extern "C" {
+        fn proxima_vm_run_dispatch_loop(
+            segments: *const RawSegment,
+            segment_count: usize,
+            guest_memory_size: u64,
+            entry: u64,
+            dispatcher: *const c_void,
+            max_hypercalls: usize,
+            emitted_out: *mut u8,
+            emitted_capacity: usize,
+            emitted_length_out: *mut usize,
+            error_buffer: *mut c_char,
+            error_capacity: usize,
+        ) -> i32;
+    }
+
+    let dispatcher = FfiRecordingDispatcher::new(configured_response);
+    let mut emitted = alloc::vec![0_u8; emitted_capacity];
+    let mut emitted_length: usize = 0;
+    let mut error_buffer = [0_i8; ERROR_CAPACITY];
+    let status = unsafe {
+        proxima_vm_run_dispatch_loop(
+            raw_segments.as_ptr(),
+            raw_segments.len(),
+            guest_memory_size,
+            entry,
+            (&raw const dispatcher).cast(),
+            max_hypercalls,
+            emitted.as_mut_ptr(),
+            emitted.len(),
+            &raw mut emitted_length,
+            error_buffer.as_mut_ptr(),
+            error_buffer.len(),
+        )
+    };
+    if status != 0 {
+        let message = unsafe { CStr::from_ptr(error_buffer.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        return Err(ProximaError::Upstream(message));
+    }
+    emitted.truncate(emitted_length);
+    Ok((
+        dispatcher.requests(),
+        emitted,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        0,
+        0,
+        0,
     ))
 }
 

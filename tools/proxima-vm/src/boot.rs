@@ -37,17 +37,11 @@
 //!
 //! # Tier
 //!
-//! `std` (tier 2): this module drives a real hypervisor VM exit loop through
+//! `std` (tier 2), macos/aarch64 only (the device-model exit loop is
+//! `backend_macos.c`'s): this module drives a real hypervisor VM exit loop through
 //! FFI, exactly like [`crate::dispatch::run_dispatch_loop`].
 
-#![cfg(all(
-    feature = "std",
-    any(
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "macos", target_arch = "aarch64")
-    )
-))]
-
+#![cfg(all(feature = "std", target_os = "macos", target_arch = "aarch64"))]
 extern crate alloc;
 
 use alloc::vec::Vec;

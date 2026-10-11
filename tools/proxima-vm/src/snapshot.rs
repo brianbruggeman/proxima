@@ -843,10 +843,7 @@ impl WarmVm {
     }
 }
 
-#[cfg(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
-))]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod platform {
     use std::ffi::CStr;
     use std::os::raw::{c_char, c_void};
@@ -1487,10 +1484,7 @@ mod platform {
     }
 }
 
-#[cfg(not(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
-)))]
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 mod platform {
     use proxima_core::ProximaError;
 
