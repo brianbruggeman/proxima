@@ -32,3 +32,33 @@ shard (`N` is the little-endian u64 in bytes 0..8), saved as the JSON object onl
   201428760..=202477335 (`data_offsets` [201402368, 202450944] plus 8 plus the 26384-byte header)
 
 The gemma4-e2b `plain/tokenizer.json` is stored minified (`jq -c`, same JSON value) to keep it under the repository's largest tracked file; the upstream file is pretty-printed at 32 MB.
+
+## gemma4-e2b/affine4
+
+- upstream: `mlx-community/gemma-4-E2B-it-qat-4bit`
+- revision: `42f62737af7a9fd8c1d55d79666c1a217be4e2e2` (last modified 2026-06-05); one shard, `model.safetensors`
+- files: `config.json` (31198 bytes; carries `quantization` and `quantization_config`, `mode` affine, `group_size` 64, `bits` 4, plus 105 per-module overrides at `bits` 8 for every layer's `mlp.gate_proj`, `mlp.up_proj` and `mlp.down_proj`), `header.json` (header length 320311 bytes, 2511 tensors, `__metadata__` `{"format":"mlx"}`)
+- tensor: `language_model.model.layers.0.self_attn.k_proj`, the same module `plain/` vendors, taken from `model.safetensors` at absolute bytes (`data_offsets` plus 8 plus the 320311-byte header):
+  - `weight`, U32, shape `[256, 192]`, 196608 bytes, file `...k_proj.weight.u32.bin`, bytes 2600571573..=2600768180
+  - `scales`, BF16, shape `[256, 24]`, 12288 bytes, file `...k_proj.scales.bf16.bin`, bytes 2553717787..=2553730074
+  - `biases`, BF16, shape `[256, 24]`, 12288 bytes, file `...k_proj.biases.bf16.bin`, bytes 2605032131..=2605044418
+- the QAT release is mixed precision: this conversion is not uniform (4, 64). The 105 mlp weights are `[rows, in * 8 / 32]` words, and the header tests derive that set from the vendored config instead of assuming it
+
+## granite-3.1-1b-a400m-moe/affine4
+
+mlx-community has no 4-bit conversion of this model, and none for the nearest architecture: the granite 4-bit repos
+found by search (`granite-3.2-8b-instruct-preview-4bit`, `granite-3.3-*-4bit`, `granite-4.0-*-4bit`,
+`granite-4.0-tiny-preview-4bit`, `granite-4.0-h-*-4bit`) are dense, hybrid-mamba or `granitemoehybrid` models, not `granitemoe`.
+Every granite `affine4` row is therefore self-referential and says nothing about mlx-lm's output. What the files are:
+
+- `header.json` (65986 bytes) is derived from the vendored `plain/header.json` by one `jq` program: for each tensor whose name
+  ends in `.weight`, with at least two dimensions and a last dimension divisible by 64, replace it with `weight` (U32, last dim
+  `x 4 / 32`), `scales` and `biases` (BF16, last dim `/ 64`); other tensors are copied; names sorted; offsets assigned
+  contiguously; `__metadata__` `{"format":"mlx"}`. The rule and shapes are transcribed from mlx's `quantize`, not from this crate's output
+- `config.json` is `plain/config.json` plus `quantization` and `quantization_config` `{group_size 64, bits 4, mode affine}`
+- `model.layers.0.self_attn.k_proj.{weight.u32,scales.bf16,biases.bf16}.bin` are the output of this crate's `export_affine` at (4, 64) over
+  `plain/model.layers.0.self_attn.k_proj.weight.bf16.bin` read as exact f32; shapes `[512, 128]`, `[512, 16]`, `[512, 16]`, 262144, 16384 and 16384 bytes.
+  They are the crate agreeing with itself, so a slice 12 comparison on these rows is an identity check and only the gemma rows are external
+- mlx-lm's `granitemoe.py` (main, fetched 2026-10-11) renames the fused expert stacks on load to
+  `block_sparse_moe.switch_mlp.{gate_proj,up_proj,down_proj}` and quantizes `router.layer`, `self_attn.o_proj` and `mlp.down_proj` at 8 bits
+  (`quant_predicate`); this header keeps the IBM names and a uniform 4 bits, as the export does
