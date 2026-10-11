@@ -1921,6 +1921,7 @@ pub(crate) fn kernel_dispatch_shape_with_schedule(
 ///
 /// # Errors
 /// [`grid_threads`]' and [`grid2d_for`]'s: a grid no launch form can cover.
+#[cfg(any(test, feature = "metal-core"))]
 pub(super) fn grid_spec(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],

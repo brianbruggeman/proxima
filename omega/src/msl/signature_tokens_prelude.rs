@@ -2430,6 +2430,12 @@ fn row_tiled_entry_name(
 /// count is one past the base layout (8, or 11 with the partial-rotary pass
 /// plane); `cached_key_rows == 0` then names the single-range form
 /// (`BoundOpKind::CachedAttention`'s own doc).
+#[cfg(any(
+    test,
+    feature = "metal-core",
+    feature = "wgpu-backend",
+    feature = "cuda"
+))]
 #[must_use]
 pub(crate) fn cached_attention_form(
     kind: &BoundOpKind,
@@ -2438,6 +2444,12 @@ pub(crate) fn cached_attention_form(
     cached_attention_form_with_tile_height(kind, policy, AttentionTileHeightSelection::Legacy)
 }
 
+#[cfg(any(
+    test,
+    feature = "metal-core",
+    feature = "wgpu-backend",
+    feature = "cuda"
+))]
 pub(crate) fn cached_attention_form_with_tile_height(
     kind: &BoundOpKind,
     policy: NumericPolicy,
