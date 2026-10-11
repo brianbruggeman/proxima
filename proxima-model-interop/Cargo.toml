@@ -695,3 +695,8 @@ required-features = ["std", "metal"]
 [[example]]
 name = "serving_state_walkthrough"
 required-features = ["std"]
+
+# mmap's checkpoints through `memmap2` and `profiles`, both `std`-gated.
+[[example]]
+name = "mlx_plain_export"
+required-features = ["std"]
