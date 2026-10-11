@@ -1,0 +1,33 @@
+2026-10-11T05:15:51Z
+ 0:15  up 10 days, 10:20, 3 users, load averages: 19.85 13.19 12.93
+pgrep:
+30900 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+30905 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo check --workspace --all-targets
+39678 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+39683 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_tensor --editi
+39872 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+39876 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name omega --edition=2024 o
+40059 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+40061 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_telemetry --ed
+40182 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+40184 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_vm --edition=2
+40237 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+40258 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name matvec_roofline_ladder
+40274 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+40275 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+40276 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name bench_native --edition
+40280 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+40282 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name step_buffer_allocation
+40285 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+40286 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name native_listener_concur
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+top:
+  PID  %CPU COMM
+39683  89.5 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+40061  89.4 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+40184  84.1 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+39876  83.5 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+40258  52.0 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ioreg_sample_1: "Device Utilization %"=78
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

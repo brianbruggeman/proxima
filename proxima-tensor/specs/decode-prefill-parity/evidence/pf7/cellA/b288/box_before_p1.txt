@@ -1,0 +1,26 @@
+2026-10-11T05:21:31Z
+ 0:21  up 10 days, 10:25, 3 users, load averages: 83.84 42.38 24.48
+pgrep:
+41137 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+49057 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+55868 /Users/brianbruggeman/.cargo/bin/cargo-nextest nextest run -p proxima-autograd --cargo-profile gate --no-fail-fast
+68610 /private/tmp/cargo_target_gate6/gate/deps/actor_critic-39d24f9539d64357 --exact policy_converges_to_the_known_opti
+68615 /private/tmp/cargo_target_gate6/gate/deps/actor_critic-39d24f9539d64357 --exact value_net_convergence_depends_on_w
+68706 /private/tmp/cargo_target_gate6/gate/deps/language_model-78fddf1dfbcef5e4 --exact adam_training_overfits_the_real_
+68708 /private/tmp/cargo_target_gate6/gate/deps/language_model-78fddf1dfbcef5e4 --exact whole_model_gradient_check_match
+68712 /private/tmp/cargo_target_gate6/gate/deps/model_search-1b834147a6ddec81 --exact a_wider_convolution_has_more_param
+68717 /private/tmp/cargo_target_gate6/gate/deps/model_search-1b834147a6ddec81 --exact rerunning_the_pipeline_reproduces_
+68729 /private/tmp/cargo_target_gate6/gate/deps/model_search-1b834147a6ddec81 --exact topology_fit_matches_receptive_fie
+68779 /private/tmp/cargo_target_gate6/gate/deps/model_search-1b834147a6ddec81 --exact topology_fit_matches_receptive_fie
+68783 /private/tmp/cargo_target_gate6/gate/deps/model_search-1b834147a6ddec81 --exact topology_fit_matches_receptive_fie
+top:
+  PID  %CPU COMM
+68712  45.8 /private/tmp/cargo_target_gate6/gate/deps/model_search-1b834147a6ddec81
+68610  39.8 /private/tmp/cargo_target_gate6/gate/deps/actor_critic-39d24f9539d64357
+68615  39.8 (actor_critic-39d)
+68706  39.7 /private/tmp/cargo_target_gate6/gate/deps/language_model-78fddf1dfbcef5e4
+68729  39.1 /private/tmp/cargo_target_gate6/gate/deps/model_search-1b834147a6ddec81
+ioreg_sample_1: "Device Utilization %"=92
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

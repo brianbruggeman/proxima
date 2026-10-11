@@ -1,0 +1,40 @@
+2026-10-11T05:32:27Z
+ 0:32  up 10 days, 10:36, 3 users, load averages: 43.25 24.60 21.75
+pgrep:
+181 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null ||
+1183 /Users/brianbruggeman/.cargo/bin/cargo-nextest nextest run -p omega --features metal --cargo-profile gate --no-run
+1629 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+1630 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name norm_variant_ab --editi
+4262 /private/tmp/cargo_target_gate6/gate/deps/metal_output_placement-b2a05a6d3a1628bd --list --format terse
+4263 /private/tmp/cargo_target_gate6/gate/deps/metal_output_placement-b2a05a6d3a1628bd --list --format terse --ignored
+4265 /private/tmp/cargo_target_gate6/gate/deps/metal_parity-aa1a58ed8248a364 --list --format terse
+4266 /private/tmp/cargo_target_gate6/gate/deps/metal_parity-aa1a58ed8248a364 --list --format terse --ignored
+4267 /private/tmp/cargo_target_gate6/gate/deps/metal_real_forward-c8cbd2358c7221a8 --list --format terse
+4268 /private/tmp/cargo_target_gate6/gate/deps/metal_real_forward-c8cbd2358c7221a8 --list --format terse --ignored
+4269 /private/tmp/cargo_target_gate6/gate/deps/mixed_expert_metal_execution-ed81021d3f342a45 --list --format terse
+4270 /private/tmp/cargo_target_gate6/gate/deps/mixed_expert_metal_execution-ed81021d3f342a45 --list --format terse --ign
+4271 /private/tmp/cargo_target_gate6/gate/deps/moe_gather_parity-c991aa4f07f5f7f6 --list --format terse
+4272 /private/tmp/cargo_target_gate6/gate/deps/moe_gather_parity-c991aa4f07f5f7f6 --list --format terse --ignored
+4274 /private/tmp/cargo_target_gate6/gate/deps/moe_round_batched_metal_consistency-2a5ff82737687a2a --list --format ters
+4275 /private/tmp/cargo_target_gate6/gate/deps/moe_round_batched_metal_consistency-2a5ff82737687a2a --list --format ters
+4276 /private/tmp/cargo_target_gate6/gate/deps/moe_topk_bare_dispatch_timing-7b32ce1e472db593 --list --format terse
+4277 /private/tmp/cargo_target_gate6/gate/deps/moe_topk_bare_dispatch_timing-7b32ce1e472db593 --list --format terse --ig
+4278 /private/tmp/cargo_target_gate6/gate/deps/moe_topk_fused_fold_parity-f788c3abb08dbb43 --list --format terse
+4279 /private/tmp/cargo_target_gate6/gate/deps/moe_topk_fused_fold_parity-f788c3abb08dbb43 --list --format terse --ignor
+4280 /private/tmp/cargo_target_gate6/gate/deps/moe_topk_metal_tie_parity-fe2fb306c9fa8a70 --list --format terse
+4281 /private/tmp/cargo_target_gate6/gate/deps/moe_topk_metal_tie_parity-fe2fb306c9fa8a70 --list --format terse --ignore
+4306 /private/tmp/cargo_target_gate6/gate/deps/moe_topk_stacked_metal_parity-68862fb03421037d --list --format terse
+4307 /private/tmp/cargo_target_gate6/gate/deps/moe_topk_stacked_metal_parity-68862fb03421037d --list --format terse --ig
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+98994 sh -c cargo build --release -p proxima-model-interop --features std,metal,instrument,metal-attn-variants --example
+98996 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build --release -p proxima-model-in
+top:
+  PID  %CPU COMM
+ 1265 103.8 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectServi
+  688 101.5 /System/Library/PrivateFrameworks/PhotoAnalysis.framework/Versions/A/Support/photoanalysisd
+ 1630  98.2 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+  542  40.6 /usr/libexec/syspolicyd
+  476  30.5 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+ioreg_sample_1: "Device Utilization %"=93
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

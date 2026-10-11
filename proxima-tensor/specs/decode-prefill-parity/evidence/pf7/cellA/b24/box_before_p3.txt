@@ -1,0 +1,40 @@
+2026-10-11T05:32:33Z
+ 0:32  up 10 days, 10:36, 3 users, load averages: 40.75 24.40 21.69
+pgrep:
+181 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null ||
+1183 /Users/brianbruggeman/.cargo/bin/cargo-nextest nextest run -p omega --features metal --cargo-profile gate --no-run
+1629 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+1630 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name norm_variant_ab --editi
+4460 /private/tmp/cargo_target_gate6/gate/deps/q5k_real_checkpoint_parity-f1d6ecaa7d4d16ed --list --format terse
+4461 /private/tmp/cargo_target_gate6/gate/deps/q5k_real_checkpoint_parity-f1d6ecaa7d4d16ed --list --format terse --ignor
+4462 /private/tmp/cargo_target_gate6/gate/deps/q5k_unpack-5b19ead884af8d99 --list --format terse
+4463 /private/tmp/cargo_target_gate6/gate/deps/q5k_unpack-5b19ead884af8d99 --list --format terse --ignored
+4465 /private/tmp/cargo_target_gate6/gate/deps/q6k_ggml_port_strided_activation-dabe5dc8c24b8965 --list --format terse
+4466 /private/tmp/cargo_target_gate6/gate/deps/q6k_ggml_port_strided_activation-dabe5dc8c24b8965 --list --format terse -
+4467 /private/tmp/cargo_target_gate6/gate/deps/q6k_matmul_strided_activation-5d2aa2167303f3a7 --list --format terse
+4468 /private/tmp/cargo_target_gate6/gate/deps/q6k_matmul_strided_activation-5d2aa2167303f3a7 --list --format terse --ig
+4469 /private/tmp/cargo_target_gate6/gate/deps/q6k_real_checkpoint_parity-8a1a41cb7491ae69 --list --format terse
+4470 /private/tmp/cargo_target_gate6/gate/deps/q6k_real_checkpoint_parity-8a1a41cb7491ae69 --list --format terse --ignor
+4471 /private/tmp/cargo_target_gate6/gate/deps/q6k_unpack-8ff20aacc14e6aae --list --format terse
+4472 /private/tmp/cargo_target_gate6/gate/deps/q6k_unpack-8ff20aacc14e6aae --list --format terse --ignored
+4474 /private/tmp/cargo_target_gate6/gate/deps/q8_0_real_checkpoint_parity-98b3d4a36c42cdb9 --list --format terse
+4475 /private/tmp/cargo_target_gate6/gate/deps/q8_0_real_checkpoint_parity-98b3d4a36c42cdb9 --list --format terse --igno
+4476 /private/tmp/cargo_target_gate6/gate/deps/q8_0_unpack-d41c15b1e5fbc41f --list --format terse
+4477 /private/tmp/cargo_target_gate6/gate/deps/q8_0_unpack-d41c15b1e5fbc41f --list --format terse --ignored
+4478 /private/tmp/cargo_target_gate6/gate/deps/qwen35_mixer_multi_position_metal_parity-e9477f483b5d0221 --list --format
+4479 /private/tmp/cargo_target_gate6/gate/deps/qwen35_mixer_multi_position_metal_parity-e9477f483b5d0221 --list --format
+4498 /private/tmp/cargo_target_gate6/gate/deps/qwen3_gqa_qk_norm_two_range_parity-0be21259f34e9d75 --list --format terse
+4499 /private/tmp/cargo_target_gate6/gate/deps/qwen3_gqa_qk_norm_two_range_parity-0be21259f34e9d75 --list --format terse
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+98994 sh -c cargo build --release -p proxima-model-interop --features std,metal,instrument,metal-attn-variants --example
+98996 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build --release -p proxima-model-in
+top:
+  PID  %CPU COMM
+ 1265 105.3 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectServi
+ 1630  98.9 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+  688  91.3 /System/Library/PrivateFrameworks/PhotoAnalysis.framework/Versions/A/Support/photoanalysisd
+  542  41.3 /usr/libexec/syspolicyd
+17029  40.9 /Users/brianbruggeman/.local/bin/user-daemon
+ioreg_sample_1: "Device Utilization %"=93
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

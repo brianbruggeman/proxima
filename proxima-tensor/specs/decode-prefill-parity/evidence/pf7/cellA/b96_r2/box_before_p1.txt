@@ -1,0 +1,18 @@
+2026-10-11T06:02:51Z
+ 1:02  up 10 days, 11:07, 3 users, load averages: 7.40 10.76 13.09
+pgrep:
+5089 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null |
+7481 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null |
+7641 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null |
+7677 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo nextest run -j2 -p proxima-model-int
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+top:
+  PID  %CPU COMM
+17029  80.6 /Users/brianbruggeman/.local/bin/user-daemon
+  476  33.0 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+54533   7.3 /Applications/iTerm.app/Contents/MacOS/iTerm2
+ 7649   5.2 /usr/bin/ruby
+  888   4.5 /usr/libexec/sysmond
+ioreg_sample_1: "Device Utilization %"=95
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

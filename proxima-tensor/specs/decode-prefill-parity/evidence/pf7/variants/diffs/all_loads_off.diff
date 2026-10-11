@@ -1,0 +1,44 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/pf7/scratch/pipecap/pipeline_209d743dffeea538.metal	2026-10-10 23:53:33
++++ 209d743dffeea538.all_loads_off.metal	2026-10-11 00:51:55
+@@ -1044,8 +1044,8 @@
+                                 key_even_tile[group][step_index] = even_float;
+                                 key_odd_tile[group][step_index] = odd_float;
+                             } else {
+-                                simdgroup_load(key_even_tile[group][step_index], key_even_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+-                                simdgroup_load(key_odd_tile[group][step_index], key_odd_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
++                                key_even_tile[group][step_index] = make_filled_simdgroup_matrix<float, 8, 8>(1.0f);
++                                key_odd_tile[group][step_index] = make_filled_simdgroup_matrix<float, 8, 8>(1.0f);
+                             }
+                         }
+                     }
+@@ -1079,8 +1079,8 @@
+                             FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
+                                 if (stage_query) {
+                                     threadgroup const float* stage_even = query_stage + (long)vector_block * 16L * query_stage_stride + depth + 8 * step_index;
+-                                    simdgroup_load(query_even[step_index], stage_even, (ulong)query_stage_stride);
+-                                    simdgroup_load(query_odd[step_index], stage_even + 8L * query_stage_stride, (ulong)query_stage_stride);
++                                    query_even[step_index] = make_filled_simdgroup_matrix<float, 8, 8>(1.0f);
++                                    query_odd[step_index] = make_filled_simdgroup_matrix<float, 8, 8>(1.0f);
+                                 } else {
+                                     simdgroup_load(query_even[step_index], in0 + query_offset + 8 * step_index, (ulong)query_stride);
+                                     simdgroup_load(query_odd[step_index], in1 + query_offset + 8 * step_index, (ulong)query_stride);
+@@ -1099,8 +1099,8 @@
+                         FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
+                             if (stage_query) {
+                                 threadgroup const float* stage_even = query_stage + (long)vector_block * 16L * query_stage_stride + depth + 8 * step_index;
+-                                simdgroup_load(query_even[step_index], stage_even, (ulong)query_stage_stride);
+-                                simdgroup_load(query_odd[step_index], stage_even + 8L * query_stage_stride, (ulong)query_stage_stride);
++                                query_even[step_index] = make_filled_simdgroup_matrix<float, 8, 8>(1.0f);
++                                query_odd[step_index] = make_filled_simdgroup_matrix<float, 8, 8>(1.0f);
+                             } else {
+                                 simdgroup_load(query_even[step_index], in0 + query_offset + 8 * step_index, (ulong)query_stride);
+                                 simdgroup_load(query_odd[step_index], in1 + query_offset + 8 * step_index, (ulong)query_stride);
+@@ -1319,7 +1319,7 @@
+                             device const uchar* cached_value = (device const uchar*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
+                             omega_bf8_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                         } else {
+-                            simdgroup_load(value_float, value_ptr + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8, (ulong)(kv_heads * head_dim));
++                            value_float = make_filled_simdgroup_matrix<float, 8, 8>(1.0f);
+                         }
+                         omega_zero_padded_value_rows(value_float, key0 + (long)key_tile * 8L, mode == 0L ? slice_end : mma_end, lane);
+                         simdgroup_float8x8 value = value_float;

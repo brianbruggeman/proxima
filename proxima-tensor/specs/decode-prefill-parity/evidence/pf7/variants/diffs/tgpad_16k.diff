@@ -1,0 +1,11 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/pf7/scratch/pipecap/pipeline_209d743dffeea538.metal	2026-10-10 23:53:33
++++ 209d743dffeea538.tgpad_16k.metal	2026-10-11 00:51:55
+@@ -948,6 +948,8 @@
+     constexpr long shared_v_dimension_blocks = 1;
+     constexpr bool stage_query = true; constexpr long query_stage_stride = half_dim + 8L;
+     threadgroup float query_stage[stage_query ? tile_blocks * 2L * 8L * query_stage_stride : 1L];
++    threadgroup float pad_probe[4096];
++    pad_probe[thread_id % 4096] = 0.0f; if (live < 0L) { out[0] = pad_probe[(thread_id * 7L + 1L) % 4096]; }
+     for (long index = thread_id; index < tile_vectors; index += threads) {
+         long block_index = index / 8L; long within = index % 8L;
+         long row; long head; long owned;

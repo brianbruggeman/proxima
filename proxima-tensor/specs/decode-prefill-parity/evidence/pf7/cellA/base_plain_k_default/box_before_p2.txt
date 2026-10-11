@@ -1,0 +1,15 @@
+2026-10-11T05:16:03Z
+ 0:16  up 10 days, 10:20, 3 users, load averages: 17.70 12.95 12.84
+pgrep:
+40683 /Users/brianbruggeman/.wakatime/wakatime-cli --entity ◑ cargo-val Windows completed-read seam --entity-type app --
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+top:
+  PID  %CPU COMM
+17029  75.7 /Users/brianbruggeman/.local/bin/user-daemon
+40683  58.7 (wakatime-cli-dar)
+  476  39.3 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+54533  12.3 /Applications/iTerm.app/Contents/MacOS/iTerm2
+  888   4.5 /usr/libexec/sysmond
+ioreg_sample_1: "Device Utilization %"=94
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

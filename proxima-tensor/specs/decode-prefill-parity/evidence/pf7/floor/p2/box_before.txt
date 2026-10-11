@@ -1,0 +1,25 @@
+2026-10-11T06:07:01Z
+ 1:07  up 10 days, 11:11, 3 users, load averages: 9.06 11.00 12.68
+pgrep:
+19969 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+20404 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+20408 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo-clippy clippy -j2 -p proxima-model-
+20409 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo check -j2 -p proxima-model-interop 
+20739 /Users/brianbruggeman/.cargo/bin/cargo-nextest nextest run -j2 -p proxima-primitives -E test(/float_layout_/)
+20762 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo --color=auto test --no-run --messag
+21200 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+21201 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/clippy-driver /Users/brianbruggeman/.rust
+21266 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+21297 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+21302 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/clippy-driver /Users/brianbruggeman/.rust
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+top:
+  PID  %CPU COMM
+21201 100.0 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/clippy-driver
+17029  80.2 /Users/brianbruggeman/.local/bin/user-daemon
+  542  26.3 /usr/libexec/syspolicyd
+  888  16.5 /usr/libexec/sysmond
+  875  15.3 /System/Library/CoreServices/ReportCrash
+ioreg_sample_1: "Device Utilization %"=98
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

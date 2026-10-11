@@ -1,0 +1,5 @@
+error: this function has too many arguments (8/7)
+   --> omega/src/metal/pipeline_buffers_upload.rs:343:1
+error: casting to the same type is unnecessary (`usize` -> `usize`)
+    --> omega/src/metal/arena_encode_dispatch_finish.rs:1528:36
+error: could not compile `omega` (lib) due to 2 previous errors

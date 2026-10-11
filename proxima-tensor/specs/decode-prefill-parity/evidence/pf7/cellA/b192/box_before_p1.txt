@@ -1,0 +1,25 @@
+2026-10-11T05:33:00Z
+ 0:33  up 10 days, 10:37, 3 users, load averages: 49.90 27.90 23.03
+pgrep:
+181 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null ||
+1629 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+1630 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name norm_variant_ab --editi
+4646 /Users/brianbruggeman/.cargo/bin/cargo-nextest nextest run -p omega --features metal,instrument --cargo-profile gat
+4743 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo --color=auto test --no-run --message
+4972 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+4973 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_tensor --editio
+6279 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+6281 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name omega --edition=2024 om
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+98994 sh -c cargo build --release -p proxima-model-interop --features std,metal,instrument,metal-attn-variants --example
+98996 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build --release -p proxima-model-in
+top:
+  PID  %CPU COMM
+ 6281 360.8 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ 4973 323.7 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+  476  31.3 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+ 1630  30.9 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+  542  26.1 /usr/libexec/syspolicyd
+ioreg_sample_1: "Device Utilization %"=92
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

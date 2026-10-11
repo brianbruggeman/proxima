@@ -4826,3 +4826,213 @@ Why 64-bit integer multiply and divide cost what they cost on this GPU: no ISA o
 ### re-prove
 
 `evidence/idx6/commands.txt` lists every command. Mechanically re-provable in CI without a GPU: the 19 tests of `index_narrowing_tests.rs` (`cargo nextest run -p omega --features metal --cargo-profile gate -E 'test(index_narrowing_tests)'`: 19 tests; the vendored fixtures are real captured kernels); the byte equality of renderer and measured variant needs the captured MSL (9.4 MB, under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/raw/caps`, `tipcaps`) and is re-run with `tools/render_equal.rs`. The timing rows (sections 2, 3, 4, 7) need the GPU and the lock; the saved outputs are in the evidence directories and no CI job runs them: they are unsealed in the sense of the discipline log until a bench job and a saved baseline exist.
+
+## round six: warm prefill timeline and attention loads (measured 2026-10-10 to 2026-10-11 on `8417f133` plus the three tooling commits below; evidence under `evidence/pf7/`, raw logs and binaries under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/pf7/raw/` and `.../bin/`; the preceding section is the 32-bit index class section, which was appended while this one was being measured and is not repeated here: its commits `ed9fa81a` and `39946655` narrow index arithmetic in other kernels (its fixture list names combine, embedding, expert down and norm epilogues, no attention kernel), and cell B below was measured on the `8417f133` kernel text and not re-run at `777510e1`)
+
+Provenance tags as in the preceding sections: MEASURED is a printed value from a run named here, DERIVED is arithmetic on measured values or on source, HYPOTHESIS is a mechanism no counter confirmed. Model: granite moe 1b only (blob `sha256-cd60b3e8...`), the 1000-token prompt `ac1/prompt1k.txt` (md5 `5d7a5713e0497cb1ec12414f5f0cdc85`, passed verbatim with its trailing newline), drafter off (`PROXIMA_SPECULATIVE_TYPES=none`), no Ollama and no llama.cpp process. Nothing in this section is a verdict.
+
+Commits in the export that carry the instruments (all `instrument`-gated, default-off; none changes a default build): `49378b7c` three queue toggles (`PROXIMA_PRECOMMIT_WAIT`, `PROXIMA_PRECOMMIT_PING`, `PROXIMA_COMMAND_BUFFER_ENQUEUE_EARLY`; `omega/src/metal/env_flags.rs`, `placements_execute_named.rs`: `precommit_toggles`), `81591d97` four `named_blocks_phase` events (`weights_loop`, `device_kv_adopt`, `push_step_named_blocks`, `greedy_program`; `proxima-model-interop/src/generate/decode.rs`), `245622f2` the tools (`evidence/pf7/tools/warm_timeline.rs`, `make_prefill_variants.rs`, `tg_bytes.rs`). The toggles and events existed in `tip2` binaries only; `base_instr` is `8417f133` unmodified. No library code that a default build compiles was changed, so no landing was made (section 9).
+
+Binaries (`evidence/pf7/bin_sha256/binaries.txt`, sha256 prefixes MEASURED): `decode_gbps_baseline_base_instr` `642a91ee...` (`--features std,metal,instrument` at `8417f133`), `..._base_plain` `b4109961...` (`std,metal`, release, built from the tree with the instrument-gated edits compiled out), `..._tip2_instr` `95e8b747...` (base plus the two feature commits), `norm_variant_ab_var_instr` `80ad7df7...` and `prefill_queueing_var_instr` `50122f75...` (built with `metal-attn-variants`), `dispatch_floor_tip2_instr` `2aade98f...`. All release builds; no debug binary was timed.
+
+Box protocol (MEASURED, `box_before*.txt` beside every cell): `gpu.lock` taken per cell (`mkdir`), released after; before every process `date`, `uptime`, `pgrep`, the top five processes by CPU and three `ioreg` utilization reads (the first read 94 to 96 in every file and is the sampler's own, the second and third read 0). The user daemon appears as `user-daemon`. Other agents ran cargo, clippy and Metal test suites on this machine throughout; the foreign counts printed at the boundaries of each cell (models, builds) are, by cell: first baseline pair 0 and 0; plain-and-instrument pair 0 and 9 at the start, 1 build at the end; chunk sweep (`k1` to `k16`) 0 and 0 at every process boundary; the queue-toggle cell `k_default_ping`, `k_default_enqueue`, `k4_wait` 0 and 0, then `k4_ping`, `k4_enqueue`, `k4_wait_ping`, `b24`, `b96`, `b192` showed 2 to 22 foreign "models" (this count then included a `cargo-nextest` build wrapper and test binaries; the detector was narrowed to executables and test binaries afterwards) and 3 to 24 builds, and `b288` 0 and 0; the rerun cells (`plan_rebuilt`, `*_r2`) 0 models throughout and 0 to 12 builds; cell B: `b1` 0 and 0, `b2` 0 and 0 except process 3 (1 and 5), `b3`/`b2b`/`b4` 0 models and 3 to 19 builds. The loadgen state is in each `box_before` file. One lock was removed by another agent's trailing `rmdir` during the first baseline cell while I held it; no foreign model process was present at the end of that cell. The first runs of `k4_ping`, `k4_enqueue`, `k4_wait_ping`, `b24`, `b96` and `b192` (foreign models and builds present, wall up to 239.9 ms and GPU busy up to 212 ms against 213.5 and 201.0 in clean cells) were overwritten by their reruns and are not kept; their summary lines are quoted in section 7 only as the contamination that triggered the rerun.
+
+### 0. what the premise did not match (read from source and from the first run)
+
+- Prefill is one command buffer unless told otherwise: `command_buffer_chunk_count` returns 1 with `source=default` for a non-decode-shaped plan (at `8417f133`: `placements_execute_named.rs:256-261`); the `[command_buffer]` keys (`first_chunk_ops = 24`, `growth_permille = 1350`, `omega-runtime.toml:307-341`) only place boundaries once a count above 1 is requested. So "the chunk count halved" has no meaning at the default (1 chunk, 383 ops); the sweep below uses `PROXIMA_COMMAND_BUFFER_CHUNKS=K` (the env value wins for prefill and decode alike, `:257-259`) and `PROXIMA_COMMAND_BUFFER_BOUNDARIES` (`:840-841`, with `PROXIMA_BOUNDARIES_PREFILL=1`; line numbers of this file are those of `8417f133`, the toggle commit shifts later lines by 28). The build-time keys were not rebuilt; every K is a runtime value.
+- The kernel sum is not 178 ms in this export: `dispatch_floor` (step 0, `DF_MODE=floor`) prints `isolated_marginal groups=21 sum_over_dispatches_ms=200.1491` over the captured step (369 records, 417 physical dispatches; `evidence/pf7/floor/p1/stdout.log`), and the recorded whole-step replay reads 200.2 to 201.0 ms (13 rounds in two processes). I could not find where 178 comes from (grep of `SPEC.md` finds no such sum); it is not used below.
+- A warm prefill step has no `prepare` event: the plan is cached across generations (the prompt cache is off, the resident prefill plan is on), so generations 2 to 5 show `prepare` 0, `pipeline_misses` 0, and a `DeviceKv::adopt` per generation instead.
+
+### 1. cell A: where the wall of a prefill step goes
+
+Protocol: `decode_gbps_baseline`, 1000-token prompt, 24 new tokens, `PROXIMA_RUNS=5` (5 generations in one process), 3 processes per cell, telemetry through the file exporter (`PROXIMA_TELEMETRY_FILE`, filter `proxima_model_interop::generate::decode=debug,omega::metal::placements_execute_named=debug`), summarized by `evidence/pf7/tools/warm_timeline.rs` (`rustc -O --edition 2024`; it asserts the count of `step_host_timeline`, `token_breakdown` and `chunk_record` events are equal and prints N per process; 120 executions per process = 5 generations x 24 steps, 0 phase events unassigned in every cell). Every number is the median over the cell's executions inside a process, then the median of the three process medians with `[CoV% of the three]` and `(min-max)`. Timeline segments are on the `mach_absolute_time` base shared with `GPUStartTime`/`GPUEndTime`.
+
+#### 1.1 generation 1 (cold) against generations 2 to 5 (warm), `tip2_instr`, default chunking (`evidence/pf7/cellA/tip2_instr_k_default/summary.md`, `base_instr_k_default/summary.md`)
+
+| quantity, ms | generation 1 (cold), N=1 per process | generations 2 to 5 (warm), N=4 per process |
+|---|---|---|
+| step wall (`step_wall_ms`) | 341.297 [1.0] (339.997-346.774) | **216.107 [0.1] (216.008-216.594)** |
+| evaluate | 331.433 [1.0] | 205.635 [0.2] |
+| before evaluate: position inputs | 0.463 [2.2] | 0.462 [1.7] |
+| before evaluate: `DeviceKv::adopt` | 8.329 [3.5] | **8.687 [0.5] (8.650-8.741)** |
+| before evaluate: greedy-argmax program build | 1.028 [2.2] | 1.229 [35.3] (1.140-2.089) |
+| before evaluate: weights loop + `push_step_named_blocks` | 0.005 | 0.004 |
+| before evaluate, whole (`wall - evaluate`) | 9.986 [2.8] | 10.690 [3.1] (10.419-11.086) |
+| `prepare` | 32.911 [3.0] | 0 (plan cached) |
+| `pre_encode` (of which pipeline compile) | 36.088 [5.8] (26.788, 33 misses) | 0.126 [4.1] (0, 0 misses) |
+| encode (one chunk, 383 ops) | 3.413 [1.7] | 0.819 [5.6] |
+| commit call | 0.012 | 0.012 |
+| commit end to scheduled callback | **48.878 [0.6]** | **2.721 [5.9] (2.706-3.000)** |
+| scheduled callback to GPU start | 0.052 | 0.067 [12.0] |
+| entry (end of `prepare`) to GPU start ("lead idle") | 89.256 [2.3] | 3.723 [5.8] (3.708-4.103) |
+| GPU busy (`GPUEndTime - GPUStartTime`, one chunk) | 210.445 [0.8] | **201.243 [0.1] (201.113-201.516)** |
+| GPU end to `waitUntilCompleted` return ("tail") | 0.171 | 0.162 [4.0] |
+| wait return to evaluate exit | 0.023 | 0.024 |
+| GPU busy / wall | 60.9 % | **93.2 %** |
+
+`base_instr` (unmodified `8417f133`), same protocol: warm wall 216.751 [0.1] (216.497-216.807), busy 201.113 [0.1], commit-to-scheduled 2.683 [2.0], lead idle 3.685 [1.1]; cold wall 342.002 [4.6], busy 211.057 [1.0], commit-to-scheduled 49.215 [0.4]. In the lock hold where `base_instr` and an earlier `tip2` run (before the event filter was corrected, so without the `named_blocks_phase` rows) ran interleaved, warm wall read 216.751 [0.1] for base and 216.221 [0.1] (216.017-216.532) for `tip2`, a 0.53 ms difference that is binary plus cell drift and is not separated here. The non-instrument release binary (`base_plain`) reads warm `ttft_ms` 216 (215-217), 216 (216-217), 217 (216-217) in its three processes, against 216 (215-217), 216 (215-216), 216 (215-216) for `tip2_instr` (`cellA/base_plain_k_default/resources.md`): the instrument build adds nothing visible at this resolution (1 ms).
+
+Warm step partition (DERIVED from the medians above; a median of sums is not a sum of medians, so the parts do not add exactly): 201.243 GPU busy (93.2 %) + 10.690 host before evaluate (4.9 %: 8.687 `DeviceKv::adopt`, 1.229 greedy-program build, 0.462 position inputs) + 3.723 lead idle (0.126 + 0.819 + 0.012 + 2.721 + 0.067 = 3.745 by segment) + 0.162 tail + 0.024 = 215.842 against 216.107 wall, a 0.265 ms remainder. Inter-chunk idle is 0 (one chunk). **The largest single idle gap in the warm step is the one before chunk 1 (ops 0-382): 10.69 ms of host before evaluate plus 3.72 ms of lead idle, 14.4 ms from the step start to the first GPU start, with no chunk before it and the step's only chunk after it.** The tail after the chunk is 0.16 ms.
+
+Resources of the cell (MEASURED, `run=done` records and `/usr/bin/time -l` of the same processes; gens 2-5 medians): `tip2_instr` p1/p2/p3 wall per generation 374.6/368.5/372.5 ms, CPU 21.9/20.5/20.8 %, steady RSS 3234.5/3204.7/3129.2 MB, steady footprint 1612.3/1612.7/1604.7 MB (includes the 1455 MB telemetry ring of the instrument build), Metal 1625.0 MB, `time -l` peak RSS 3421.4/3308.8/3312.5 MB, peak footprint 1717.2/1718.7/1711.8 MB. `base_plain` p1/p2/p3: wall 370.4/368.9/372.5 ms, CPU 18.4/17.9/18.7 %, steady RSS 1748.8/1775.9/1756.6 MB, steady footprint 221.9/219.7/217.6 MB, Metal 1625.0/1625.1/1625.0 MB, peak RSS 1854.4/1881.6/1859.5 MB, peak footprint 325.4/325.0/322.3 MB. Text hash `aff93fd561a93eff` in all 30 generations of the six processes. Foreign state at the start of the cell that produced the `tip2_instr` and `base_plain` rows: 0 models, 9 builds (1 build at the end); the `base_instr` cell: 0 and 0.
+
+#### 1.2 what is inside the 10.69 ms before evaluate (MEASURED events, then DERIVED from source)
+
+`named_blocks_weights_ms` and `named_blocks_kv_ms` are two spans closing at the same point of `decode.rs` (at `8417f133` started at `decode.rs:4016` and `:4095`, both closed at `:4282-4284`), which is why they read within 1 us of each other; the work between is one span. The new events split it: warm generations 2 to 5, `DeviceKv::adopt` 8.687 ms [0.5] (8.650-8.741), greedy-program build (`with_greedy_argmax` and one logits placed buffer) 1.229 ms [35.3], weights loop 0.001 ms, `push_step_named_blocks` 0.003 ms. `DeviceKv::adopt` (`device_kv.rs:339-397`) runs once per generation (it is gated on `!device_kv_attempted`, reset per generation) and calls `DeviceKvLayer::allocate` for every attention layer (`:121-123`: three `source(...)` calls, `allocate_placed_buffer` = `newBufferWithLength_options(StorageModeShared)`, `execute_and_hazards.rs:1044`), so 24 layers x 3 = 72 buffer allocations of 1,114,112 / 1,114,112 / 2,228,224 bytes per layer (lengths printed by `AB_DESCRIBE`, `cellB/describe_granite_step0.out`), 106,954,752 bytes in all (DERIVED), 8.687 ms / 72 = 0.121 ms per allocation (DERIVED). Which part of an allocation (the `newBuffer` call or first-touch page faults from the host copy) takes the 0.121 ms was not separated: untraced. The same adopt reads 8.329 ms in generation 1, so it is not a first-process cost.
+
+#### 1.3 chunk-count sweep (granite, `tip2_instr`, `PROXIMA_COMMAND_BUFFER_CHUNKS=K`; the env value applies to prefill and to the 24 decode steps alike; 3 processes per K; foreign models 0 and builds 0 at the end of each of these five cells)
+
+Prefill step 0, generations 2 to 5:
+
+| K | chunks (ops in chunk 1) | wall | GPU busy sum | inter-chunk idle (sum) | lead idle (entry to GPU start) | chunk 1 commit-to-scheduled | encode (sum) |
+|---|---|---|---|---|---|---|---|
+| default (config) | 1 (383) | 216.107 [0.1] | 201.243 | 0 | 3.723 [5.8] | 2.721 [5.9] | 0.819 |
+| 1 | 1 (383) | 216.201 [0.4] (215.204-216.896) | 201.078 | 0 | 3.631 [3.9] | 2.607 [4.9] | 0.801 |
+| 2 | 2 (191) | 215.222 [0.4] (214.418-216.135) | 201.318 | 0.042 [2.2] | 2.321 [3.4] | 1.663 [3.7] | 0.858 |
+| 4 | 4 (24) | 213.955 [0.1] (213.804-214.227) | 200.986 | 0.126 [0.8] | 0.691 [9.0] | 0.359 [8.2] | 0.978 |
+| 8 | 8 (24) | 213.753 [0.2] (213.559-214.329) | 201.208 | 0.289 [3.7] | 0.721 [5.2] | 0.357 [2.0] | 0.958 |
+| 16 | 16 (24) | 213.671 [0.1] (213.374-213.944) | 201.250 | 0.564 [3.2] | 0.711 [2.1] | 0.367 [8.3] | 1.029 |
+
+DERIVED from that table: wall moves by -2.246 ms (K=4 against K=1, -1.04 %), -2.448 (K=8) and -2.530 (K=16); the GPU busy sum moves by at most 0.33 ms across K; inter-chunk idle is 0.042 / 0.042 / 0.041 / 0.038 ms per boundary (K=2, 4, 8, 16: 0.042/1, 0.126/3, 0.289/7, 0.564/15), so the idle scales with the boundary count and the lead idle shrinks with the first chunk's op count. The step still has 213.7 ms of wall at K=16 with 201.25 of GPU busy: 12.4 ms outside the GPU, of which 10.7 is the host before evaluate (section 1.2), unchanged by K.
+
+Decode steps >= 2 of the same runs (88 per process in generations 2 to 5, a sanity check against the round-four decode timeline): default K=8: wall 5.695 [0.7] ms, GPU busy 4.941, **busy / wall 87.2 % [0.3]**, inter-chunk idle 0.165, lead idle 0.279, chunk 1 (24 ops) commit-to-scheduled 0.078 [1.9]. Across K (busy / wall): K=1 83.0 % (wall 6.191), K=2 85.9 % (5.863), K=4 89.3 % (5.665), K=8 87.5 % (5.811), K=16 84.7 % (5.886). The K=8 row of the sweep (5.811) and the default row (5.695) are the same chunk count through two paths and differ by 2 %, which is the cell-to-cell spread of this box. The `base_instr` cell reads decode wall 5.699 [1.8], GPU busy 5.033 [2.6], busy / wall 88.3 % (DERIVED from the two medians).
+
+Per chunk at K=4, prefill, generations 2 to 5 (`evidence/pf7/cellA/k4/summary.md`, `k4_wait/summary.md`):
+
+| chunk (ops) | commit end to scheduled | scheduled to GPU start | GPU busy | previous GPU end to this GPU start |
+|---|---|---|---|---|
+| 1 (24) | 0.359 [8.2] | 0.095 [32.3] | 9.381 | n/a |
+| 2 (86) | 0.842 [3.7] | 8.815 [0.2] | 49.479 | 0.043 [2.3] |
+| 3 (116) | 1.504 [1.9] | 57.476 [0.1] | 61.061 | 0.044 [3.8] |
+| 4 (157) | 2.128 [0.7] | 117.508 | 81.179 | 0.041 [5.2] |
+
+The `scheduled` callback of chunks 2 to 4 fires while the earlier chunks are still running, 8.8 / 57.5 / 117.5 ms before their GPU start: it marks the end of the driver's processing of the buffer, not the GPU start; the GPU starts 0.041 to 0.044 ms after the previous chunk ends.
+
+#### 1.4 the commit-to-scheduled gap of the first chunk, one level down
+
+(a) It scales with the op count of the chunk that is committed (first-chunk ops against commit-to-scheduled; boundaries from `PROXIMA_COMMAND_BUFFER_BOUNDARIES`, `PROXIMA_BOUNDARIES_PREFILL=1`, cells `b24`, `b96_r2`, `b192_r2`, `b288`; K cells for 191 and 383; all with foreign models 0): 24 ops 0.356 [9.9] (also 0.357 to 0.367 at K=4, 8, 16), 96 ops 1.267 [14.1] (1.021-1.350), 191 ops 1.663 [3.7], 192 ops 1.703 [12.9] (1.602-2.040), 288 ops 2.413 [5.0], 383 ops 2.607 to 2.721. The slope is not constant (about 12.6 us/op from 24 to 96, 4.2 from 96 to 191, 7.7 from 191 to 288, 2 to 3 from 288 to 383: DERIVED). A decode chunk of the same 24 ops reads 0.078 ms (section 1.3), 4.6 times smaller: why a prefill dispatch costs the driver more is not traced (candidates, none measured: threadgroup counts per dispatch, bound-buffer sizes, the 479 physical dispatches of the 383 ops).
+
+(b) Overlap against an idle queue (`K=4`, chunks 2 to 4): committed while the previous chunk runs, commit-to-scheduled is 0.842 / 1.504 / 2.128 ms and the next GPU start follows the previous GPU end by 0.043 ms. Committed to an idle queue (`PROXIMA_PRECOMMIT_WAIT=1`, the previous chunk completed before the commit): 0.802 / 1.191 / 1.357 ms, the GPU starts 0.085 / 0.081 / 0.078 ms after the scheduled callback, and the gap from the previous GPU end to the next GPU start is 1.152 / 1.444 / 1.607 ms (inter-chunk idle sum 4.129 [2.0], wall 217.285 [0.1]). The per-op driver cost is present in both; overlap hides it behind the previous chunk's GPU time, an idle queue exposes it.
+
+(c) Toggles at the first chunk (`tip2_instr`, 3 processes each):
+
+| toggle | cell | chunk 1 commit-to-scheduled | wall | note |
+|---|---|---|---|---|
+| none (K=1 control) | `k1` | 2.607 [4.9] (2.497-2.751) | 216.201 | |
+| empty command buffer committed and waited immediately before the first commit (`PROXIMA_PRECOMMIT_PING`) | `k_default_ping` | 2.615 [3.8] (2.537-2.735) | 216.089 [0.5] | the ping itself shows as 0.062 ms between encode end and commit start |
+| `enqueue()` at command buffer creation (`PROXIMA_COMMAND_BUFFER_ENQUEUE_EARLY`) | `k_default_enqueue` | 2.479 [4.9] (2.474-2.693) | 216.153 [0.4] | -0.13 ms against `k1`, -0.24 against `tip2` default; the two control cells differ by 0.11 ms |
+| none (K=4 control) | `k4` | 0.359 [8.2] | 213.955 | |
+| ping, K=4 | `k4_ping` (rerun) | 0.357 [10.8] (0.340-0.417) | 213.640 [0.2] | ping 0.065 ms |
+| enqueue, K=4 | `k4_enqueue_r2` | 0.364 [10.1] | 213.235 [0.2] | the earlier run under the name `k4_enqueue` read 0.387 [55.8] and wall 214.021 |
+| wait before each commit + ping, K=4 | `k4_wait_ping_r2` | 0.297 [11.1] | 217.260 [0.6] | inter-chunk idle 4.002 [8.0] |
+
+Reading the table: an empty command buffer committed and completed 62 us before the first commit leaves the first chunk's commit-to-scheduled unchanged (2.615 against 2.607), so an idle queue or an idle device being addressed is not what the 2.6 ms waits for; `enqueue()` moves it by an amount inside the spread of two identical control cells; waiting for the previous buffer changes nothing for chunk 1 (there is none) and exposes 1.15 to 1.61 ms per later chunk (b). The device clock state was not read, so a clock ramp that an empty buffer does not trigger is not excluded.
+
+(d) Plan newness changes it. `PROXIMA_RESIDENT_PREFILL_PLAN_BYTES=0` (the plan is rebuilt each generation; same harness, same prompt): commit-to-scheduled **4.881 [2.5] (4.806-5.045)** against 2.721 with the plan cached, `prepare` 34.189 [2.8], `pre_encode` 6.975, wall 265.954 [1.0], GPU busy 204.464 [1.1] (`cellA/plan_rebuilt/summary.md`). And `prefill_queueing` (`PQ_STAGES=prefill` x5, the harness of the preceding rounds, a changed first letter per prompt so the plan is rebuilt): generations after the first read commit-to-scheduled 4.921 / 5.506 (p1), 4.742 / 5.083 (p2), 4.937 / 6.191 (p3), with `prepare` 31.6 to 33.7 ms each (`evidence/pf7/pq/p*/queueing.md`; five stages were requested and the summarizer printed three generations, which I did not trace). That is the lower mode of the 4.5 to 9.8 ms recorded in the round-four section; the 8.4 to 9.8 mode did not appear in these three processes. What a rebuilt plan adds to the driver's processing of the buffer (new arena buffers are the candidate: the arena is 181 MB, `placed_arena_allocated_bytes` in the earlier census) was not isolated.
+
+#### 1.5 the dispatch stream against the kernel sum (`dispatch_floor`, `DF_MODE=floor`, `DF_STEP=0`, 2 processes)
+
+MEASURED (`evidence/pf7/floor/p*/stdout.log`; each process ended in a Metal `Internal Error (0000000e)` raised at `dispatch_floor.rs:263` (whole-step replay) after 7 and 6 completed rounds, `panic.txt`; which arm was running was not traced; the rounds that completed are all that is used; `recorded_unordered` has invalid output by design): whole captured step (369 records, 417 physical dispatches) as one command buffer, `gpu_span_ms`: `recorded` 200.820 200.937 200.930 200.674 200.732 200.953 200.775 (p1) and 200.277 200.800 200.658 200.445 200.710 201.041 (p2); `empty_same_bindings` (every kernel body empty, same bindings, grids and static threadgroup memory) 0.989 1.006 0.986 0.987 0.988 0.988 1.091 (p1), 1.173 0.973 0.997 0.983 1.002 0.987 0.980 (p2); `empty_minimal_bindings` 0.90 to 1.06; `empty_one_threadgroup` 0.575 to 0.670; `recorded_unordered` (no barriers, overlap ceiling, invalid output) 77.1 to 133.0. DERIVED: the dispatch floor of the stream is about 1.0 ms of the 200.8; the recorded span is 0.7 ms above the isolated-marginal sum 200.149; the live chunk's GPU busy (201.243) is within 0.5 ms of the replay. So in this export the 201 ms is kernel time, not kernel launch gaps; the host-side remainder of the 216.1 is section 1.1. Foreign state: 0 models, 5 builds at the start, 6 at each process end.
+
+### 2. cell B: how the attention kernel loads its fragments
+
+Captured dispatch: granite prefill step 0, layer 0 of 24, group sha `209d743d` (`omega_cached_attention_h8_g2_d64_..._b64_rt`; the `e3603c69` recorded in the round-five sections is a different hash; the kernel text changed after `70aecbd0` through the commits that section lists as later, `72ee16e9`, `dbec97ba`, `25480fed`), extents `[1000, 8, 2, 64]`, uniforms `[16000, 1]` (splits 1), 1000 threadgroups of 64 threads, 2 simdgroups, 8 query rows x 2 groups = 2 vector blocks per tile, 64-key block, `live` 0 so every key block is the new range; static threadgroup 9,600 B (score tile 4,096 + query stage 5,120 + 384 of row state). Base emitted source: `evidence/pf7/variants/base_emitted_209d743dffeea538.metal`; every arm is a one-file diff against it (`variants/diffs/`), generated and re-generable by `tools/make_prefill_variants.rs` (every anchor asserted to occur the stated number of times; it printed 36 variants and no assertion failed). Protocol of every row: `norm_variant_ab` release (`--features std,metal,instrument,metal-attn-variants`), `AB_STEP=0 AB_ROUNDS=21 AB_SPAN_FULL=1 AB_ATTENTION_REFERENCE=1`, arms interleaved in one process, 3 processes per cell, `single_us` = GPU time of one dispatch alone in its own command buffer; tables are the median of the three process medians with `[CoV%]` and `(min-max)`; bits are over all 1,024,000 outputs against the `base` arm. Resources (`ab res`, identical for all arms of a cell): bound buffers 131.8 MB, process RSS peak 1622.3 to 1632.2 MB, footprint 185.5 to 190.8 MB, Metal 1516.3 MB, CPU 0.058 to 0.075 ms per replay (2.7 to 6.4 % of the replay wall).
+
+#### 2.1 how K, V and Q fragments are loaded today (read from `omega/src/msl/cached_attention_row_tiled.rs`)
+
+- K, Q.K^T: `simdgroup_load(key_even_tile[group][step_index], key_even_ptr + depth + 8 * step_index, kv_heads * half_dim, ulong2(0, 0), true)` and the same for the odd plane (`:572-573`): a device pointer, row stride `kv_heads * half_dim` = 256 floats (1,024 B), transposed (`true`) so the 8 x 8 fragment is K^T. One fragment = 8 keys x 8 depth floats = 8 rows of 32 B at 1,024 B stride (256 B). The cache layout is `[key][kv_head][half_dim]` per plane, so one key's 32-float row for the head is 128 B contiguous and a fragment touches 8 distinct 128 B lines. A simdgroup owns key tiles `slot + group * 2` (tiles 0, 2, 4, 6 or 1, 3, 5, 7 of the 8 in a 64-key block), loads each of its fragments once per depth step, and uses each against both vector blocks. Per block per simdgroup: 4 key tiles x 4 depth steps (2 depth iterations x `depth_unroll` 2) x 2 planes = 32 fragment loads (DERIVED from the loop bounds); 64 per threadgroup per block.
+- V, P.V: `simdgroup_load(value_float, value_ptr + key_tile * 8 * (kv_heads * head_dim) + dimension_block * 8, kv_heads * head_dim)` (`:847`): device pointer, stride 512 floats (2,048 B), not transposed; a simdgroup owns dimension blocks `slot * 2 + simdgroup` (4 of 8) and loops all 8 key tiles: 32 fragment loads per simdgroup per block, each 8 rows of 32 B at 2,048 B stride, followed by `omega_zero_padded_value_rows`.
+- Q: staged once per threadgroup into threadgroup memory (`query_stage`, 5,120 B, `:517` is the barrier after it) and loaded per block by `simdgroup_load` from that threadgroup array (`:627`), stride 40 floats; 16 loads per simdgroup per block.
+- Consecutive threads reading consecutive addresses: the fragment loads are issued by the hardware as one simdgroup operation; no per-thread scalar gather exists in this path (the only per-thread scalar loop on keys is the tail `mode == 2` step, `:670` onward, which step 0 does not visit because `tail_steps` is 0 when the row count is a multiple of 8). Whether the hardware coalesces the eight 32 B row segments is not observable from the source.
+- Bytes (DERIVED, `tools/tg_bytes.rs`): per op 8,320 threadgroup-block visits at block 64 (8.32 per threadgroup; 16,128 at block 32), 504,000 fragment-rounded keys summed over threadgroups, so the direct fragment loads read 129,024,000 B of K and 129,024,000 B of V per op (129,024 B each per threadgroup on average), the same at both block sizes. A staged copy reads those device bytes once and adds the same bytes as threadgroup stores and as threadgroup fragment loads (K, V each 129.0 MB per op). At the base arm's 1155.125 us that is 223 GB/s of K+V fragment traffic (DERIVED).
+
+#### 2.2 load-path arms (`cellB/b1/summary_single_us.md`; foreign state at the process boundaries: 0 models, 0 builds; the load average printed by the tool inside the process was 34.1 to 36.8, the other cells 16.4 (`b2`), 10.7 (`b2b`), 13.4 (`b3`), 10.0 (`b4`); CPU share of the replay 3 to 6 %, so the single-dispatch timing is GPU-bound)
+
+| arm | what changes | static threadgroup B | us/op median [CoV] (min-max) | vs base | differing of 1,024,000 vs base, max_abs | max_abs vs f64 |
+|---|---|---|---|---|---|---|
+| base | production | 9,600 | 1155.125 [0.22] (1152.542-1157.625) | | 0 | 4.333e-5 |
+| ctrl | the same text recompiled | 9,600 | 1150.125 [0.21] | -5.0 (-0.4 %) | 0 | 4.333e-5 |
+| `k_d16` | K staged per 16-depth chunk, 64 keys, both planes, one coalesced float4 copy (8,192 B), loaded with `simdgroup_load(..., true)` from threadgroup | 17,792 | 1921.500 [0.33] (1919.375-1931.250) | +766.4 (+66.3 %) | 0 | 4.333e-5 |
+| `k_d16_pad4` | the same with a 4-float row pad | 19,840 | 1917.125 [0.43] | +762.0 (+66.0 %) | 0 | 4.333e-5 |
+| `kt_d16_pad4` | K staged pre-transposed (`[depth][key + 4]`), loaded row-major (`false`) | 18,304 | 1897.958 [0.21] (1891.125-1898.042) | +742.8 (+64.3 %) | 0 | 4.333e-5 |
+| `v_t4` | V staged in 32-key halves (8,192 B) | 17,792 | 2127.667 [0.41] (2126.875-2142.250) | +972.5 (+84.2 %) | 0 | 4.333e-5 |
+| `v_t4_pad4` | the same with a 4-float row pad | 18,304 | 2159.125 [0.94] | +1004.0 (+86.9 %) | 0 | 4.333e-5 |
+| `kv_d16_t4` | K and V staged, one shared 8,192 B region | 17,792 | 2301.292 [0.21] (2298.208-2307.792) | +1146.2 (+99.2 %) | 0 | 4.333e-5 |
+| `kvt_d16_t4` | K pre-transposed and V staged, shared region | 18,304 | 2264.500 [0.35] | +1109.4 (+96.0 %) | 0 | 4.333e-5 |
+| `b32` | 32-key block, loads direct (control for the arms below) | 7,552 | 1135.208 [0.53] (1125.583-1136.750) | **-19.9 (-1.7 %)** | 585,118, 3.815e-6 | 4.333e-5 |
+| `b32_k` | 32-key block, K staged whole (32 keys x 32 depth x 2 planes, 8,192 B) | 15,744 | 1733.792 [0.49] (1725.750-1742.792) | +578.7 (+50.1 %) | 585,118, 3.815e-6 | 4.333e-5 |
+| `b32_kt` | the same, K pre-transposed (pad 4) | 16,768 | 2073.833 [0.46] | +918.7 (+79.5 %) | 585,118, 3.815e-6 | 4.333e-5 |
+| `b32_v` | 32-key block, V staged whole (8,192 B) | 15,744 | 1821.250 [1.22] (1785.625-1825.917) | +666.1 (+57.7 %) | 585,118, 3.815e-6 | 4.333e-5 |
+| `b32_kv` | K and V, shared region | 15,744 | 2014.167 [0.88] | +859.0 (+74.4 %) | 585,118, 3.815e-6 | 4.333e-5 |
+| `all_loads_off` (floor) | K, V and Q fragment loads replaced by constants | 4,480 | 714.375 [0.74] (707.500-717.833) | -440.8 (-38.2 %) | invalid output by design | |
+| `b32_all_loads_off` | the same at block 32 | 2,432 | 831.042 [1.01] | -324.1 (-28.1 %) | invalid | |
+
+What a 32-key block changes beyond the staged bytes (it is the alternative the brief allowed for the 19 KB limit): the key block halves, so each query row's online-softmax regroups (585,118 outputs change in the last bits, max_abs 3.8e-6, against an f64 reference max_abs 4.333e-5 for both; `rel_l2` 4.554e-7 against 4.539e-7), the score tile halves (4,096 to 2,048 B), the number of block steps and of the two barriers per block doubles (8,320 to 16,128 visits per op), and the softmax sees 32 columns per vector (one item per lane instead of two). The five `b32` arms share `rel_l2` 4.5541835e-7 to 8 digits against f64, which is the evidence that the staged forms equal `b32` in value; the direct reference run (`AB_REFERENCE=b32`) was not made. The `ab agree` line reads cosine 1.000000000 against `base` for every arm except the two `*_all_loads_off` arms (0.003866).
+
+Derived bytes per threadgroup (average over the 1000 threadgroups): direct arms read 129,024 B of K and 129,024 B of V from device per threadgroup; the staged arms read the same device bytes (once each, by the copy) and add 129,024 B of threadgroup stores and 129,024 B of threadgroup fragment loads per staged operand per threadgroup, plus 2 barriers per staged chunk (`k_d16`: 2 depth chunks x 2 barriers = 4 more per block; `v_t4`: 2 halves x 2 = 4 more per block; against the 2 in the production block loop).
+
+#### 2.3 what the threadgroup bytes alone do (fixed code, `cellB/b3/`, `cellB/b4/`)
+
+An array that is written once and read in a branch the run never takes (`pad_probe`, in `tgpad_*` and `tgtotal_*`) makes the static threadgroup bytes what the row says and changes no executed work (differing 0 of 1,024,000 in every probe):
+
+| static threadgroup B | arm | us/op median [CoV] | vs ctrl of its cell |
+|---|---|---|---|
+| 4,480 | `qstage_off` (query tile not staged, Q read from device; bit-identical) | 1174.542 [0.50] | +38.9 (+3.4 %) |
+| 9,600 | ctrl | 1135.625 [0.51] (cell b4) / 1138.750 [0.51] (b3) | |
+| 10,880 | `tgtotal_10880` | 1279.792 [0.91] | +144.2 (+12.7 %) |
+| 11,008 | `tgtotal_11008` | 1293.875 [0.86] | +158.3 (+13.9 %) |
+| 16,320 | `tgtotal_16320` | 1437.250 [1.05] | +301.6 (+26.6 %) |
+| 16,512 | `tgtotal_16512` | 1704.750 [1.57] | +569.1 (+50.1 %) |
+| 17,792 | `tgpad_8k` | 1706.333 [0.64] (b4) / 1702.750 [0.16] (b3) | +570.7 (+50.3 %) / +564.0 (+49.5 %) |
+| 19,840 | `tgpad_10k` | 1727.750 [0.24] | +589.0 (+51.7 %) |
+| 25,984 | `tgpad_16k` | 2408.458 [0.44] | +1269.7 (+111.5 %) |
+
+The step is between 16,320 and 16,512 B (16,384 = 32,768 / 2). Resident threadgroups per core were not read; the reading that fits both the step and the +12.7 % at 10,880 B is HYPOTHESIS (fewer resident simdgroups hide less latency in a kernel whose block loop is a dependent chain, section 3). DERIVED against the staged arms: `k_d16` (17,792 B) at 1921.5 is 215 to 219 us above the padding-only arm of the same bytes (1706.3 / 1702.8), `v_t4` 421 to 425 us, `kv_d16_t4` 595 to 599 us; `b32_k` at 15,744 B reads 1733.8, 296 us above `tgtotal_16320` (1437.3, which has 576 B more); so the staging code's own cost is a lower bound of those amounts, and about three quarters of the K-staging loss at 17,792 B is the bytes. No staging that adds 8 KB to a 9.6 KB kernel can sit below the 16,384 B step; the smallest staged arm here, `b32_k`, is at 15,744 B and still 50 % above `b32`.
+
+### 3. the softmax phase (451 us in round four)
+
+What the block loop of `cached_attention_row_tiled.rs:699-734` executes (counts DERIVED from the source for granite: 2 simdgroups, 16 vectors, 64-key block, 2 items per lane): per block per simdgroup 8 vector iterations (the loop starts at `simdgroup_slot` and steps by `simdgroups`, trip count not a compile-time constant, not unrolled), each with 1 `simd_max` (`:720`), 1 `simd_sum` (`:732`), 3 `exp` per lane (1 rescale `:723`, 2 weights `:727`), 2 `score_tile` reads and 2 writes per lane, 3 `row_*` threadgroup reads/writes, 3 lane-0 stores; per block per simdgroup 8 `simd_max`, 8 `simd_sum`, 24 `exp`; per op (8,320 visits x 2 simdgroups) 133,120 `simd_max`, 133,120 `simd_sum` and 399,360 `exp` instructions per lane; 2 threadgroup barriers per block (`:698`, `:735`; 16,640 per op) plus 1 per threadgroup after the query stage (`:517`); the accumulator rescale is 4 slots x 2 vector blocks x 2 elements = 16 float multiplies per lane per block. Register traffic was not counted (no disassembly or counter read).
+
+Ablations (outputs invalid by design except where bits say 0; same protocol; `cellB/b2/`, `cellB/b2b/`; ctrl 1151.667 [0.36] in b2 and 1142.167 [0.17] in b2b; base 1138.792 [1.14] and 1148.750 [0.37]):
+
+| arm | us/op [CoV] | vs base of its cell |
+|---|---|---|
+| `softmax_loop_off` (vector loop bound 0) | 672.542 [0.13] (b2) / 668.167 [1.06] (b2b) | -466.3 (-40.9 %) / -480.6 (-41.8 %) |
+| `softmax_body_min` (loop kept; mask, score read, exp, both reductions, weight store and lane-0 stores all removed) | 673.500 [0.26] | -475.3 (-41.4 %) |
+| `exp_off` / `reduce_off` / `exp_reduce_off` | 1142.667 / 1122.375 / 1119.500 (b2); 1113.000 [0.39] (b2b) | +3.9 / -16.4 / -19.3 (b2); -35.8 (b2b) |
+| `scores_read_off` (score read replaced by a lane expression) | 1127.625 [0.32] | -21.1 (-1.8 %) |
+| `mask_off` (the causal/window `if` forced true) | 1072.208 [0.50] | -76.5 (-6.7 %) |
+| `weights_store_off` | 1094.083 [0.22] | -54.7 (-4.8 %) |
+| `stats_store_off` (lane-0 `row_maximum`/`row_sum`/`rescale_tile` stores) | 1071.750 [0.55] | -77.0 (-6.7 %) |
+| `rescale_off` (accumulator rescale multiplier 1.0) | 1146.958 [0.58] | +8.2 (+0.7 %) |
+| `barrier_a_off` (before the softmax) / `barrier_b_off` (after) / `barrier_off` (both) | 1132.000 [0.38] / 1137.833 [0.50] / 1131.250 [0.36] | -6.8 / -1.0 / -7.5 |
+
+The sum of the single-piece removals in b2b (scores read 21.1, mask 76.5, weight store 54.7, stats stores 77.0, exp+reduce 35.8) is 265.1 us; deleting the loop removes 480.6 and the loop with all of those pieces removed (`softmax_body_min`) removes 475.3, so the pieces overlap and the loop shell with nothing in it costs nothing measurable (673.5 against 668.2). The `exp` and `simd` reductions together are 19 to 36 us, the barriers 7.5 us, the accumulator rescale 0 within the spread. The difference between the whole-loop removal (466 to 481 us) and the sum of its identifiable arithmetic is not accounted for by any single piece: untraced. HYPOTHESIS (not tested beyond the consistency with section 2.3): the loop is a serial chain per vector (threadgroup read of a score, mask, cross-lane `simd_max`, threadgroup read of the row maximum, `exp`, a threadgroup store, `simd_sum`, lane-0 stores) repeated 8 times per simdgroup per block with 3 threadgroups x 2 simdgroups resident per core to hide it; removing any one link shortens the chain by little while removing the chain removes the chain. The unrolled form of this loop was tried in round four (`3b2ece28`, +17 % at granite) and was not retried.
+
+### 4. what this rules out, as measured at granite layer 0 prefill (upper bounds, one dispatch alone in its own command buffer)
+
+- Staging K or V (or both) through threadgroup memory: +50 % to +99 % in all 11 staged arms, bit-identical in the seven 64-key arms; the threadgroup bytes account for about 570 us of the 766 us at 17,792 B.
+- Pre-transposing K in the staging copy: 1897.958 (18,304 B) against `k_d16_pad4`'s 1917.125 (19,840 B), a 19 us difference between arms with 0.2 to 0.4 % CoV; both are above the two padding-only probes that bracket them (1706.3 at 17,792 B, 1727.8 at 19,840 B).
+- A 32-key block: -1.7 % direct (inside two same-binary control cells that differ by 0.4 %), not bit-identical.
+- Raising occupancy by dropping the query stage: +3.4 %.
+- The fragment loads' ceiling: removing all of them (`all_loads_off`) removes 440.8 us (38.2 %); that is the bound on any load-path change at this shape, and the staging forms measured here are 50 to 99 % above base, not below it.
+
+### 5. landed state, gates, bench
+
+No library change was landed. The rule asks for an arm that wins outside the bound; the only arm below base is `b32` (-19.9 us, -1.7 %, DERIVED -0.48 ms over 24 layers against a same-binary granite prefill spread of 0.893 ms in the round-five simdgroups and mma precision section), it is not bit-identical, and the 32-key block is the global `keys_per_block` which measured +33.3 % at head dim 512 in the round-five simdgroups and mma precision section (`kpb64`). The text-hash, llama-parity, E2B and `decode_arms` bench steps of the landing rule were therefore not run; the hashes that exist are the 30 generations of `aff93fd561a93eff` above.
+
+Gates for the tooling commits (MEASURED, `evidence/pf7/gates/`): `cargo nextest run -p omega --features metal,instrument --cargo-profile gate --no-fail-fast`: **953 tests run, 946 passed, 7 failed, 22 skipped** (the known 7: six `attn_rows_tests` that pin row-tiled kernel text and `packed_row_blocked_s1_byte_identity`; counts as in the `32f21d65` section: 953 run, 946 passed), 69.349 s. `cargo clippy -p omega --features metal,instrument --no-deps --all-targets -- -D warnings`: 2 errors (`too_many_arguments` in `pipeline_buffers_upload.rs`, `unnecessary_cast` in `arena_encode_dispatch_finish.rs`), none in `env_flags.rs` or `placements_execute_named.rs`. `cargo clippy -p proxima-model-interop --features std,metal,instrument --no-deps -- -D warnings`: 1 error (`hf_config.rs:177-178`, `double_must_use`), none in `decode.rs`. The `std,metal` release build (instrument code compiled out) printed 0 warnings. The omega `metal` (no instrument) nextest, the E2B suite and the llama parity tests were not run (the tooling commits touch only `instrument`-gated code).
+
+### 6. the abandoned designs and what the constraints changed
+
+Abandoned: (1) staging the 64-key K block whole (16,384 B on top of 9,600 gives 25,984 B, 2408 us at that size in the padding probe): replaced by a 16-depth chunk (8,192 B) and a 32-key block; (2) a bespoke env-gated file dump for the named-block cost: replaced by four structured events on the existing file exporter; (3) one summarizer per harness: the step ids repeat across generations in one process, so the existing timeline tool would merge generations; the new tool keys phases to executions by their `entry_raw_s`. The allocation budget of the added instruments: zero in a default build (compiled out), and in an instrument build 4 debug events per prefill step and 3 per decode step through the existing recorder, plus one empty command buffer per step when `PROXIMA_PRECOMMIT_PING=1`; measured only through the warm walls above (no allocation counter was read).
+
+### 7. unexplained, unmeasured, assumed
+
+- Why a prefill command buffer costs 0.36 ms for 24 ops where a decode buffer costs 0.078, and why a rebuilt plan adds 2.2 ms to commit-to-scheduled: no driver counter was read.
+- Which part of the 0.121 ms per `DeviceKv::adopt` allocation is the allocation and which is first touch.
+- The cause of the 4.5 to 9.8 ms band's upper mode (8.4 to 9.8 ms): not reproduced in 3 `prefill_queueing` processes.
+- Resident threadgroups per core, spills, occupancy and cache counters: none read; section 2.3's mechanism and section 3's chain are HYPOTHESIS.
+- The `dispatch_floor` 0000000e abort after 6 to 7 rounds (which arm and why): not traced.
+- Cell-to-cell drift on this box: identical configurations read 213.2 to 214.0 ms (K=4 family) and 5.695 to 5.811 ms (decode K=8). Contamination that triggered reruns: `k4_ping` first run wall 239.935 [6.7], GPU busy 209.607 [2.6]; `k4_enqueue` 238.539, 211.152; `k4_wait_ping` 219.576; `b24` 231.938 [9.1]; `b96` 229.378; `b192` 216.878 (all with foreign models or builds present, not kept). The second runs under the original names are kept and two of them are still contaminated (`k4_wait_ping` wall 227.648 [8.7], `b192` 244.241 [10.1]); `k4_wait_ping_r2`, `b192_r2`, `k4_enqueue_r2`, `b96_r2` are the clean reruns the tables use. `k4_ping`, `b24` (second runs) are clean.
+- Layer 0 only for cell B; E2B was not measured in this round.

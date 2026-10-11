@@ -1,0 +1,40 @@
+2026-10-11T05:58:39Z
+ 0:58  up 10 days, 11:02, 3 users, load averages: 10.65 11.22 13.91
+pgrep:
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+90967 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+92302 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+92308 /Users/brianbruggeman/.cargo/bin/cargo-nextest nextest run -j2 -p proxima-model-interop --features std -E test(/ml
+92331 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo --color=auto test --no-run --messag
+93045 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo doc -j2 -p proxima-model-interop --
+93330 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+93334 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo-clippy clippy -j2 -p proxima-model-
+93335 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo check -j2 -p proxima-model-interop 
+93532 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+93533 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_model_interop 
+93826 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+93828 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name arch_data_baseline --e
+93951 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+93955 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name speculative_decode_par
+94038 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+94039 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name tier_real_state --edit
+94064 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+94065 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name real_gemma4_header_pro
+94070 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+94074 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name task_probe --edition=2
+94100 /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang /Users/brianbruggeman
+94103 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+94114 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name model_config_limits --
+94116 /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld -demangle -lto_library /
+94124 /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang /Users/brianbruggeman
+94130 /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld -demangle -lto_library /
+top:
+  PID  %CPU COMM
+94130 110.7 /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld
+94116  77.4 /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld
+93533  43.6 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+94114  37.4 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+  476  34.9 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+ioreg_sample_1: "Device Utilization %"=96
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

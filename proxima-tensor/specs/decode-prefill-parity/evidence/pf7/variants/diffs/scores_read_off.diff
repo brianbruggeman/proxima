@@ -1,0 +1,15 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/pf7/scratch/pipecap/pipeline_209d743dffeea538.metal	2026-10-10 23:53:33
++++ 209d743dffeea538.scores_read_off.metal	2026-10-11 00:51:55
+@@ -1183,10 +1183,10 @@
+                         if (column < columns) { raw_score = score_tile[vector * block + column]; }
+                     } else if (mode == 1L) {
+                         long relative = key0 + column - query_row;
+-                        if (column < columns && relative <= new_upper && relative >= cached_lower) { raw_score = score_tile[vector * block + column] * scale; }
++                        if (column < columns && relative <= new_upper && relative >= cached_lower) { raw_score = (scale * (float)column); }
+                     } else {
+                         long key = key0 + column;
+-                        if (key < slice_end && (key - live - query_row) >= cached_lower) { raw_score = score_tile[vector * block + column] * scale; }
++                        if (key < slice_end && (key - live - query_row) >= cached_lower) { raw_score = (scale * (float)column); }
+                     }
+                 }
+                 local_scores[item] = raw_score;

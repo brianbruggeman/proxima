@@ -1,0 +1,19 @@
+2026-10-11T05:50:42Z
+ 0:50  up 10 days, 10:54, 3 users, load averages: 11.71 12.74 16.36
+pgrep:
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+65274 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+waitfree() { for i in $(seq 1 30); do [ -d $LOCK ] || return 0; sleep 60; done; echo LOCK_TIMEOUT; return 1; }
+waitfree && cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate -E
+waitfree && cargo nextest run -p proxima-model-interop --features std,metal,conflaguration --cargo-profile gate -E '"'"'
+waitfree && cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate -E '"'"'test(=llama_par
+top:
+  PID  %CPU COMM
+17029  83.2 /Users/brianbruggeman/.local/bin/user-daemon
+  476  38.1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  542  20.9 /usr/libexec/syspolicyd
+  888  20.0 /usr/libexec/sysmond
+54533  14.0 /Applications/iTerm.app/Contents/MacOS/iTerm2
+ioreg_sample_1: "Device Utilization %"=97
+ioreg_sample_2: "Device Utilization %"=4
+ioreg_sample_3: "Device Utilization %"=4

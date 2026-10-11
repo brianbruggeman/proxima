@@ -1,0 +1,29 @@
+2026-10-11T05:32:53Z
+ 0:32  up 10 days, 10:37, 3 users, load averages: 47.89 27.14 22.74
+pgrep:
+181 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null ||
+1629 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+1630 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name norm_variant_ab --editi
+4646 /Users/brianbruggeman/.cargo/bin/cargo-nextest nextest run -p omega --features metal,instrument --cargo-profile gat
+4743 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo --color=auto test --no-run --message
+4972 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+4973 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_tensor --editio
+5582 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+5593 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima --edition=2024 
+6278 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+6279 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+6281 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name omega --edition=2024 om
+6282 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_onnx --edition=
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+98994 sh -c cargo build --release -p proxima-model-interop --features std,metal,instrument,metal-attn-variants --example
+98996 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build --release -p proxima-model-in
+top:
+  PID  %CPU COMM
+ 5593 517.4 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ 6282  56.3 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ 1630  54.0 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ 4973  52.7 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ 6281  50.5 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ioreg_sample_1: "Device Utilization %"=92
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

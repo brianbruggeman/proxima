@@ -1,0 +1,42 @@
+2026-10-11T05:32:46Z
+ 0:32  up 10 days, 10:36, 3 users, load averages: 46.31 26.48 22.48
+pgrep:
+181 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null ||
+1629 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+1630 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name norm_variant_ab --editi
+4646 /Users/brianbruggeman/.cargo/bin/cargo-nextest nextest run -p omega --features metal,instrument --cargo-profile gat
+4743 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo --color=auto test --no-run --message
+4972 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+4973 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_tensor --editio
+5582 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+5593 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima --edition=2024 
+6277 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+6278 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+6279 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+6280 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+6281 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name omega --edition=2024 om
+6282 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_onnx --edition=
+6283 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_autograd --edit
+6284 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_safetensors --e
+6315 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null |
+runcfg() { name=$1; shift; for p in 1 2 3; do d=$X/raw/cellA/$name/p$p; rm -rf $d; mkdir -p $d; cellrun ${name}_p$p $X/b
+runcfg k4_ping PROXIMA_COMMAND_BUFFER_CHUNKS=4 PROXIMA_PRECOMMIT_PING=1
+runcfg k4_enqueue PROXIMA_COMMAND_BUFFER_CHUNKS=4 PROXIMA_COMMAND_BUFFER_ENQUEUE_EARLY=1
+runcfg k4_wait_ping PROXIMA_COMMAND_BUFFER_CHUNKS=4 PROXIMA_PRECOMMIT_WAIT=1 PROXIMA_PRECOMMIT_PING=1
+runcfg b24 PROXIMA_BOUNDARIES_PREFILL=1 PROXIMA_COMMAND_BUFFER_BOUNDARIES=24
+runcfg b96 PROXIMA_BOUNDARIES_PREFILL=1 PROXIMA_COMMAND_BUFFER_BOUNDARIES=96
+runcfg b192 PROXIMA_BOUNDARIES_PREFILL=1 PROXIMA_COMMAND_BUFFER_BOUNDARIES=192
+rmdir $BL/gpu.lock 2>&1 | tail -1' < /dev/null && pwd -P >| /tmp/claude-4505-cwd
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+98994 sh -c cargo build --release -p proxima-model-interop --features std,metal,instrument,metal-attn-variants --example
+98996 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build --release -p proxima-model-in
+top:
+  PID  %CPU COMM
+ 4973 269.5 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ 1630  82.5 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ 5593  75.9 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ 6281  65.8 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ 6283  60.7 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ioreg_sample_1: "Device Utilization %"=93
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

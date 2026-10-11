@@ -1,0 +1,40 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/pf7/scratch/pipecap/pipeline_209d743dffeea538.metal	2026-10-10 23:53:33
++++ 209d743dffeea538.softmax_body_min.metal	2026-10-11 00:51:55
+@@ -1183,29 +1183,29 @@
+                         if (column < columns) { raw_score = score_tile[vector * block + column]; }
+                     } else if (mode == 1L) {
+                         long relative = key0 + column - query_row;
+-                        if (column < columns && relative <= new_upper && relative >= cached_lower) { raw_score = score_tile[vector * block + column] * scale; }
++                        if (true) { raw_score = (scale * (float)column); }
+                     } else {
+                         long key = key0 + column;
+-                        if (key < slice_end && (key - live - query_row) >= cached_lower) { raw_score = score_tile[vector * block + column] * scale; }
++                        if (true) { raw_score = (scale * (float)column); }
+                     }
+                 }
+                 local_scores[item] = raw_score;
+                 block_maximum = max(block_maximum, raw_score);
+             }
+-            block_maximum = simd_max(block_maximum);
++            block_maximum = block_maximum;
+             float previous_maximum = row_maximum[vector];
+             float next_maximum = max(previous_maximum, block_maximum);
+-            float rescale = (previous_maximum == -INFINITY) ? 0.0f : exp(previous_maximum - next_maximum);
++            float rescale = (previous_maximum == -INFINITY) ? 0.0f : (previous_maximum - next_maximum);
+             float block_sum = 0.0f;
+             FOR_UNROLL for (long item = 0L; item < block / 32L; item++) {
+                 if (item * 32L < columns) {
+-                    float weight = (local_scores[item] == -INFINITY) ? 0.0f : exp(local_scores[item] - next_maximum);
+-                    score_tile[vector * block + (long)lane + item * 32L] = weight;
++                    float weight = (local_scores[item] == -INFINITY) ? 0.0f : (local_scores[item] - next_maximum);
++                    (void)weight;
+                     block_sum += weight;
+                 }
+             }
+-            block_sum = simd_sum(block_sum);
+-            if (lane == 0) { row_maximum[vector] = next_maximum; row_sum[vector] = row_sum[vector] * rescale + block_sum; rescale_tile[vector] = rescale; }
++            block_sum = block_sum;
++            if (lane == 99) { }
+         }
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+         if (false) {

@@ -1,0 +1,11 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/pf7/scratch/pipecap/pipeline_209d743dffeea538.metal	2026-10-10 23:53:33
++++ 209d743dffeea538.stats_store_off.metal	2026-10-11 00:51:55
+@@ -1205,7 +1205,7 @@
+                 }
+             }
+             block_sum = simd_sum(block_sum);
+-            if (lane == 0) { row_maximum[vector] = next_maximum; row_sum[vector] = row_sum[vector] * rescale + block_sum; rescale_tile[vector] = rescale; }
++            if (lane == 99) { }
+         }
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+         if (false) {

@@ -1,0 +1,6 @@
+
+thread 'main' (93107673) panicked at proxima-model-interop/examples/dispatch_floor.rs:263:19:
+whole-step replay: CompileFailed { log: "replay command buffer failed: Internal Error (0000000e:Internal Error)" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+time: command terminated abnormally
+        7.62 real         0.22 user         0.56 sys

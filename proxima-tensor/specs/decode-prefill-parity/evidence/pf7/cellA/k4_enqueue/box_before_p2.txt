@@ -1,0 +1,23 @@
+2026-10-11T05:31:45Z
+ 0:31  up 10 days, 10:35, 3 users, load averages: 8.77 17.02 19.09
+pgrep:
+181 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null ||
+183 /Users/brianbruggeman/.cargo/bin/cargo-nextest nextest run -p omega --no-default-features --features std --lib --no-
+231 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo --color=auto test --no-run --message-
+342 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/ru
+343 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_telemetry --edit
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+98994 sh -c cargo build --release -p proxima-model-interop --features std,metal,instrument,metal-attn-variants --example
+98996 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build --release -p proxima-model-in
+99716 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+99752 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_model_interop 
+top:
+  PID  %CPU COMM
+99752  95.1 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+  343  67.8 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+  542  52.9 /usr/libexec/syspolicyd
+17029  48.1 /Users/brianbruggeman/.local/bin/user-daemon
+  476  28.7 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+ioreg_sample_1: "Device Utilization %"=94
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

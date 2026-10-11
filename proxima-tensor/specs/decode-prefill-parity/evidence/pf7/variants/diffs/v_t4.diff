@@ -1,0 +1,37 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/pf7/scratch/pipecap/pipeline_209d743dffeea538.metal	2026-10-10 23:53:33
++++ 209d743dffeea538.v_t4.metal	2026-10-11 00:51:55
+@@ -948,6 +948,8 @@
+     constexpr long shared_v_dimension_blocks = 1;
+     constexpr bool stage_query = true; constexpr long query_stage_stride = half_dim + 8L;
+     threadgroup float query_stage[stage_query ? tile_blocks * 2L * 8L * query_stage_stride : 1L];
++    threadgroup float stage_union[2048];
++    threadgroup float* vstage = stage_union;
+     for (long index = thread_id; index < tile_vectors; index += threads) {
+         long block_index = index / 8L; long within = index % 8L;
+         long row; long head; long owned;
+@@ -1305,6 +1307,16 @@
+             } else {
+                 for (int key_tile = 0; key_tile < fragments; key_tile++) {
+                     simdgroup_float8x8 weights[tile_blocks];
++                    if (key_tile % 4 == 0) {
++                        threadgroup_barrier(mem_flags::mem_threadgroup);
++                        for (int copy = (int)thread_id; copy < 32 * 16; copy += (int)threads) {
++                            int copy_key = copy / 16; int copy_part = copy % 16;
++                            if (key_tile * 8 + copy_key < fragments * 8) {
++                                *(threadgroup float4*)(vstage + copy_key * 64 + copy_part * 4) = *(device const float4*)(value_ptr + (long)(key_tile * 8 + copy_key) * (kv_heads * head_dim) + copy_part * 4);
++                            }
++                        }
++                        threadgroup_barrier(mem_flags::mem_threadgroup);
++                    }
+                     FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { simdgroup_load(weights[vector_block], score_tile + vector_block * 8 * (int)block + key_tile * 8, (ulong)block); }
+                     FOR_UNROLL for (int slot = 0; slot < (int)dims_per_group; slot++) {
+                         int dimension_block = (int)simdgroup_slot + slot * (int)simdgroups;
+@@ -1319,7 +1331,7 @@
+                             device const uchar* cached_value = (device const uchar*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
+                             omega_bf8_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                         } else {
+-                            simdgroup_load(value_float, value_ptr + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8, (ulong)(kv_heads * head_dim));
++                            simdgroup_load(value_float, (threadgroup const float*)(vstage) + ((key_tile % 4) * 8) * 64 + dimension_block * 8, (ulong)64);
+                         }
+                         omega_zero_padded_value_rows(value_float, key0 + (long)key_tile * 8L, mode == 0L ? slice_end : mma_end, lane);
+                         simdgroup_float8x8 value = value_float;

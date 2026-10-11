@@ -1,0 +1,18 @@
+2026-10-11T05:31:39Z
+ 0:31  up 10 days, 10:35, 3 users, load averages: 8.84 17.18 19.15
+pgrep:
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+98994 sh -c cargo build --release -p proxima-model-interop --features std,metal,instrument,metal-attn-variants --example
+98996 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build --release -p proxima-model-in
+99105 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+99137 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name omega --edition=2024 o
+top:
+  PID  %CPU COMM
+99137  99.1 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+17029  76.0 /Users/brianbruggeman/.local/bin/user-daemon
+  476  35.4 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+54647  28.5 claude
+  542  23.6 /usr/libexec/syspolicyd
+ioreg_sample_1: "Device Utilization %"=94
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0
