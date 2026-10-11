@@ -34,7 +34,8 @@ mod reader;
 mod validation;
 
 pub use crate::door::{
-    DoorBatch, DoorConfigError, DoorOutput, DoorSettings, DoorStats, NoSink, StageKind,
+    ComputeUnits, DoorBatch, DoorConfigError, DoorOutput, DoorSettings, DoorStats, NoSink,
+    Precision, StageKind,
 };
 pub use config::{DoorConfig, DoorConfigBuilder, door_config_builder};
 pub use reader::{OnnxReader, ValidatedGraph};
