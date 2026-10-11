@@ -3,6 +3,7 @@
 # Disciplined-component gate for the prime-default serve runtime.
 # Verifies the default flip holds and the tokio opt-out still works,
 # then runs the parity + reactor-absence proofs.
+# stream_listen_prime_parity compiles to zero tests without prime+tcp features, so step 4b exists to run it and assert its count.
 #
 # usage: bash scripts/prime-serve-gate.sh
 #
@@ -13,6 +14,9 @@
 #   4. serve_parity runs: byte-parity prime==tokio + the 2 MiB streaming
 #      vector + the reactor-absence proof (Handle::try_current is Err on
 #      the prime serve path)
+#      stream_listen_prime_parity runs the same way (its cfg needs tcp on top
+#      of the prime cluster, so it compiles to zero tests otherwise) and the
+#      printed count must be exactly 1
 #   5. full umbrella suite is green on the prime default — this runs with
 #      NO features, so anything gated behind a feature off by default
 #      (e.g. http1-native) never compiles here and is invisible to this
@@ -120,6 +124,16 @@ cargo build -p proxima --no-default-features \
 
 printf '\n-- 4. serve_parity: byte-parity + streaming-on-prime + reactor-absence --\n'
 cargo nextest run -p proxima --test serve_parity --features "${prime_feats}"
+
+printf '\n-- 4b. stream_listen_prime_parity: asserted count 1 --\n'
+stream_output="$(cargo nextest run --color never -p proxima --test stream_listen_prime_parity --features "${prime_feats},tcp" 2>&1)"
+printf '%s\n' "${stream_output}"
+stream_count="$(printf '%s\n' "${stream_output}" | grep -oE '[0-9]+ tests? run: [0-9]+ passed' | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | tail -1)"
+if [ "${stream_count:-}" != "1" ]; then
+    printf 'ERROR: stream_listen_prime_parity expected exactly 1 passed, got "%s"\n' "${stream_count:-}" >&2
+    exit 1
+fi
+printf 'stream_listen_prime_parity passed: %s\n' "${stream_count}"
 
 printf '\n-- 5. full umbrella suite on the prime default --\n'
 cargo nextest run -p proxima
