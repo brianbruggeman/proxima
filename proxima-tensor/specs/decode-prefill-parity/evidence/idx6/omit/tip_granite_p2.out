@@ -1,0 +1,30 @@
+ab capture excludes 0 unreplayable dispatches of 398
+ab capture: step=23 dispatches=398 groups=27
+ab omit entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi1_fused_identity_o1__multiply_s0_o0 sha=1376bef63b6d5d07 threads=393248 tg=Some(64) extents=[1, 1024, 49155] count=1 base_ms=6.8985 cost_ms=0.6578 per_dispatch_us=657.75
+ab omit entry=omega_reduce_r3_o2_n4_fused_greater_o0_o1__greater_o2_o3__multiply_s0_s1_add_zero sha=1538b29d937a65fc threads=14464 tg=Some(128) extents=[1, 113, 435] count=1 base_ms=7.1592 cost_ms=0.1515 per_dispatch_us=151.46
+ab omit entry=omega_elementwise_r3_n1_identity sha=1e9e68170e758423 threads=49155 tg=None extents=[1, 113, 435] count=1 base_ms=7.1034 cost_ms=0.1839 per_dispatch_us=183.92
+ab omit entry=omega_reduce_r3_o2_n1_identity_maximum_negative_infinity sha=246d0d2ba418d085 threads=14464 tg=Some(128) extents=[1, 113, 435] count=1 base_ms=7.0528 cost_ms=0.1686 per_dispatch_us=168.58
+ab omit entry=omega_cached_attention_q1_h8_g2_d64_s3c800000_ln9223372036854775808_up0_x4_e1_k1_ds_merge sha=38d6abd7ff828421 threads=16384 tg=Some(1024) extents=[1, 8, 2, 64] count=24 base_ms=7.0960 cost_ms=0.4416 per_dispatch_us=18.40
+ab omit entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi10_fused_identity_o10__add_o8_o9__add_s1_o7__add_s2_o6__add_s3_o5__add_s4_o4__add_s5_o3__add_s6_o2__reciprocal_s7__multiply_s0_s8__multiply_s9_o1__add_s10_o0 sha=3ed58ffac07af855 threads=32768 tg=Some(32) extents=[1, 8, 1024] count=24 base_ms=7.2754 cost_ms=0.2784 per_dispatch_us=11.60
+ab omit entry=omega_reduce_r5_o2_n2_multiply_add_zero_epi2_fused_identity_o2__multiply_s0_o1__add_s1_o0 sha=466321b6ffa7fca1 threads=8192 tg=Some(64) extents=[1, 8, 2, 64, 1024] count=24 base_ms=7.3184 cost_ms=0.4919 per_dispatch_us=20.50
+ab omit entry=omega_reduce_r2_o1_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_s0_o3__add_s1_o2__square_root_s2__reciprocal_s3__multiply_s4_o1__multiply_s5_o0 sha=4c10034083d951c4 threads=256 tg=Some(256) extents=[1, 1024] count=49 base_ms=7.4718 cost_ms=0.7651 per_dispatch_us=15.61
+ab omit entry=omega_elementwise_r2_n1_identity_g1 sha=4fe1eae5c8f25a78 threads=1024 tg=None extents=[1, 1024] count=1 base_ms=7.0655 cost_ms=-0.1483 per_dispatch_us=-148.29
+ab omit entry=omega_moe_topk_e32_k8_stacked sha=772a284c4d2dc024 threads=32 tg=Some(32) extents=[1] count=24 base_ms=7.2290 cost_ms=0.1978 per_dispatch_us=8.24
+ab omit entry=omega_reduce_r2_o1_n1_identity_maximum_negative_infinity sha=90228b0984fee58a threads=32 tg=Some(32) extents=[1, 113] count=1 base_ms=7.2750 cost_ms=-0.0047 per_dispatch_us=-4.71
+ab omit entry=omega_elementwise_r2_n2_fused_identity_o0__multiply_s0_o1_g10 sha=909cee64530e39be threads=1024 tg=None extents=[1, 1024] count=1 base_ms=6.0022 cost_ms=-0.0118 per_dispatch_us=-11.79
+ab omit entry=omega_cached_attention_q1_h8_g2_d64_s3c800000_ln9223372036854775808_up0_x4_e1_k1_ds sha=90a8b14d996692f8 threads=65536 tg=Some(128) extents=[1, 8, 2, 64] count=24 base_ms=4.2341 cost_ms=0.5980 per_dispatch_us=24.92
+ab omit entry=omega_reduce_r3_o2_n2_multiply_add_zero sha=9879cfba36b2d4ca threads=8192 tg=Some(256) extents=[1, 1024, 32] count=24 base_ms=4.2361 cost_ms=0.1537 per_dispatch_us=6.41
+ab omit entry=omega_reduce_r2_o1_n1_identity_add_zero sha=990ca97c1bcd3867 threads=32 tg=Some(32) extents=[1, 113] count=1 base_ms=4.2328 cost_ms=0.0025 per_dispatch_us=2.50
+ab omit entry=omega_reduce_r3_o2_n5_fused_equal_o0_o1__add_o2_o3__select_s0_s1_o4_minimum_positive_infinity sha=a869f1c89e467837 threads=14464 tg=Some(128) extents=[1, 113, 435] count=1 base_ms=6.6474 cost_ms=-0.1570 per_dispatch_us=-156.96
+ab omit entry=omega_elementwise_r1_n2_multiply sha=b0d991f9fd66f7c1 threads=113 tg=None extents=[113] count=1 base_ms=7.1938 cost_ms=0.0842 per_dispatch_us=84.17
+ab omit entry=omega_reduce_r4_o3_n2_multiply_add_zero sha=ba997080e107c354 threads=4096 tg=Some(64) extents=[1, 8, 64, 1024] count=48 base_ms=7.0703 cost_ms=0.6687 per_dispatch_us=13.93
+ab omit entry=omega_reduce_r4_o3_n2_multiply_add_zero sha=ba997080e107c354 threads=8192 tg=Some(64) extents=[1, 16, 64, 1024] count=24 base_ms=7.2853 cost_ms=0.1860 per_dispatch_us=7.75
+ab omit entry=omega_reduce_r4_o3_n2_multiply_add_zero_epi3_fused_identity_o3__negate_o2__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_g10 sha=bec5b66056f1ba8d threads=32768 tg=Some(64) extents=[1, 8, 1024, 512] count=24 base_ms=7.3836 cost_ms=1.2290 per_dispatch_us=51.21
+ab omit entry=omega_reduce_r2_o1_n1_identity_minimum_positive_infinity sha=c60e77ec9be397d4 threads=32 tg=Some(32) extents=[1, 113] count=1 base_ms=7.4662 cost_ms=0.2438 per_dispatch_us=243.83
+ab omit entry=omega_reduce_r4_o3_n2_multiply_add_zero_g10 sha=d4688f2cd27b0d6a threads=32768 tg=Some(64) extents=[1, 8, 1024, 512] count=24 base_ms=6.7797 cost_ms=1.1476 per_dispatch_us=47.82
+ab omit entry=omega_reduce_r4_o3_n2_multiply_add_zero_g10 sha=d4688f2cd27b0d6a threads=65536 tg=Some(64) extents=[1, 8, 512, 1024] count=24 base_ms=6.8359 cost_ms=0.9534 per_dispatch_us=39.72
+ab omit entry=omega_elementwise_twin_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_fused_multiply_o0_o3__multiply_o2_o1__subtract_s0_s1 sha=d7d099102a47d669 threads=256 tg=None extents=[1, 8, 32] count=24 base_ms=6.7358 cost_ms=0.1150 per_dispatch_us=4.79
+ab omit entry=omega_elementwise_twin_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_fused_multiply_o0_o3__multiply_o2_o1__add_s0_s1 sha=e95858e3d93b76d0 threads=512 tg=None extents=[1, 16, 32] count=24 base_ms=6.6253 cost_ms=0.0928 per_dispatch_us=3.87
+ab omit entry=omega_iota_r1 sha=ea1f084ac28a8e06 threads=113 tg=None extents=[113] count=1 base_ms=6.3288 cost_ms=0.2776 per_dispatch_us=277.58
+ab omit entry=omega_iota_r1 sha=ea1f084ac28a8e06 threads=435 tg=None extents=[435] count=1 base_ms=6.5612 cost_ms=0.4030 per_dispatch_us=403.00
+ab cell label=process wall_ms=11284.683 cpu_ms=3034.004 cpu_pct=26.9 rss_peak_mb=1645.1 footprint_mb=145.5 gpu_alloc_mb=1469.1 load_before=19.67 load_after=17.19

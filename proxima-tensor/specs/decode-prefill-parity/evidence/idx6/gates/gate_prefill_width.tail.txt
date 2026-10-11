@@ -1,0 +1,7 @@
+    Finished `gate` profile [optimized] target(s) in 0.22s
+────────────
+ Nextest run ID 71048142-444f-4413-8325-8cc011202a99 with nextest profile: default
+    Starting 1 test across 1 binary (64 tests skipped)
+        PASS [   1.772s] (1/1) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_granite_moe
+────────────
+     Summary [   1.772s] 1 test run: 1 passed, 64 skipped

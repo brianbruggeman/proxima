@@ -1,0 +1,9 @@
+2026-10-11T04:35:17Z
+23:35  up 10 days,  9:39, 3 users, load averages: 11.12 18.64 16.52
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+  PID  %CPU COMM
+ 1418 116.2 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+17029  27.0 /Users/brianbruggeman/.local/bin/user-daemon
+  542  25.0 /usr/libexec/syspolicyd
+  476  24.9 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+"Device Utilization %"=91

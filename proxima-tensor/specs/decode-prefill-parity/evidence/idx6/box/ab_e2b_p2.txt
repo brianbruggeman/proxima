@@ -1,0 +1,12 @@
+2026-10-11T04:35:00Z
+23:35  up 10 days,  9:39, 3 users, load averages: 13.22 19.41 16.75
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+92470 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'cd /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/gate6/tree && perl -0pi -e '"'"'s/\npub\(super\) fn pipeline_for\(/\n#[expect(\n    clippy::too_many_arguments,\n    reason = "the cache key, both numeric settings and both attention selections arrive pre-resolved from each caller, which already holds them as separate values"\n)]\npub(super) fn pipeline_for(/'"'"' omega/src/metal/pipeline_buffers_upload.rs && export CARGO_TARGET_DIR=/private/tmp/cargo_target_gate6 GITHUB_TOKEN=; cargo clippy -p omega --all-targets -- -D warnings > ../logs/g3_omega2.log 2>&1; echo $?' < /dev/null && pwd -P >| /tmp/claude-9662-cwd
+92473 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo-clippy clippy -p omega --all-targets -- -D warnings
+92474 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo check -p omega --all-targets
+  PID  %CPU COMM
+17029  70.6 /Users/brianbruggeman/.local/bin/user-daemon
+92474  54.2 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo
+  779  47.4 /System/Library/CoreServices/SystemUIServer.app/Contents/MacOS/SystemUIServer
+  476  37.5 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+"Device Utilization %"=94

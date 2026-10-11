@@ -1,0 +1,6 @@
+gemma4_e2b.base   18 text_hash=8fec363180a250e0
+gemma4_e2b.tip   18 text_hash=8fec363180a250e0
+gemma4_e2b.control   18 text_hash=8fec363180a250e0
+granite_moe.base   18 text_hash=c4625c1fb93f28b7
+granite_moe.tip   18 text_hash=c4625c1fb93f28b7
+granite_moe.control   18 text_hash=c4625c1fb93f28b7

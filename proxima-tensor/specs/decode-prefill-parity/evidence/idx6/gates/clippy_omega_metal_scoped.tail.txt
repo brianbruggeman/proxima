@@ -1,0 +1,40 @@
+     |
+2477 |     fs::create_dir_all(path.parent().expect("result parent exists"))
+     |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is `None`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+    --> omega/tests/packed_brain_float_moe_training_metal.rs:2479:5
+     |
+2479 |     fs::write(&path, &json).expect("two-step evidence is written");
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+    --> omega/tests/packed_brain_float_moe_training_metal.rs:2481:9
+     |
+2481 |         fs::read_to_string(path).expect("two-step evidence is readable"),
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+    --> omega/tests/packed_brain_float_moe_training_metal.rs:2528:5
+     |
+2528 | /     write!(
+2529 | |         record,
+2530 | |         "{{\"codec\":\"{codec_name}\",\"seed\":17,\"step\":1,\"backend\":\"metal\",\"master_input\":{},\"routes\":{},\"activatio...
+2531 | |         json_f32(&MASTER),
+...    |
+2558 | |     .expect("writing into a String is infallible");
+     | |__________________________________________________^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#expect_used
+
+error: could not compile `omega` (test "packed_brain_float_moe_training_metal") due to 107 previous errors

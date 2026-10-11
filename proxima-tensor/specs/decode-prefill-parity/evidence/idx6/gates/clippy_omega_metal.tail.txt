@@ -1,0 +1,40 @@
+    Checking shell-words v1.1.1
+    Checking constant_time_eq v0.4.2
+    Checking proxima-test v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/tree/proxima-test)
+    Checking criterion-plot v0.8.2
+    Checking cel-interpreter v0.10.0
+    Checking walkdir v2.5.0
+    Checking tempfile v3.27.0
+    Checking http-body-util v0.1.4
+    Checking zstd v0.13.3
+    Checking proxima-tokenizer v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/tree/proxima-tokenizer)
+    Checking clap v4.6.4
+    Checking objc2-metal v0.3.2
+    Checking ciborium v0.2.2
+    Checking tinytemplate v1.2.1
+    Checking page_size v0.6.0
+    Checking anes v0.1.6
+    Checking oorandom v11.1.5
+    Checking temp-env v0.3.6
+    Checking rayon v1.12.0
+    Checking criterion v0.8.2
+    Checking proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/tree/proxima-safetensors)
+    Checking proxima-autograd v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/tree/proxima-autograd)
+error: this function has too many arguments (8/7)
+   --> omega/src/metal/pipeline_buffers_upload.rs:343:1
+    |
+343 | / pub(super) fn pipeline_for(
+344 | |     device: &ProtocolObject<dyn MTLDevice>,
+345 | |     bound: &BoundOp,
+346 | |     packed_operands: &PackedOperands,
+...   |
+351 | |     attention_row_schedule: crate::msl::AttentionRowSchedule,
+352 | | ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
+    | |______________________________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#too_many_arguments
+    = note: `-D clippy::too-many-arguments` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::too_many_arguments)]`
+
+error: could not compile `omega` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

@@ -1,0 +1,20 @@
+2026-10-11T04:41:51Z
+23:41  up 10 days,  9:46, 3 users, load averages: 15.88 18.03 16.75
+25375 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+sleep 2; echo started' < /dev/null && pwd -P >| /tmp/claude-3cdf-cwd
+25376 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build --release -p proxima-model-in
+30256 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+30263 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_tensor --editi
+30502 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+30503 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+30512 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_process --edit
+30513 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_recording --ed
+30556 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+30573 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_listen --editi
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+  PID  %CPU COMM
+30512  99.6 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+30263  98.0 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+30513  97.2 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+30573  67.3 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+"Device Utilization %"=82

@@ -1,0 +1,40 @@
+    Checking rustls-platform-verifier v0.7.1
+    Checking futures-rustls v0.26.0
+    Checking proxima-tls v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/tree/proxima-tls)
+    Checking proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/tree/proxima-safetensors)
+    Checking proxima-autograd v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/tree/proxima-autograd)
+    Checking proxima-net v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/tree/proxima-net)
+    Checking proxima-process v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/tree/proxima-process)
+    Checking proxima-recording v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/tree/proxima-recording)
+    Checking proxima-onnx v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/tree/proxima-onnx)
+    Checking proxima-listen v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/tree/proxima-listen)
+    Checking proxima-quic v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/tree/proxima-quic)
+    Checking proxima-http v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/tree/proxima-http)
+error: this function has too many arguments (8/7)
+   --> omega/src/metal/pipeline_buffers_upload.rs:343:1
+    |
+343 | / pub(super) fn pipeline_for(
+344 | |     device: &ProtocolObject<dyn MTLDevice>,
+345 | |     bound: &BoundOp,
+346 | |     packed_operands: &PackedOperands,
+...   |
+351 | |     attention_row_schedule: crate::msl::AttentionRowSchedule,
+352 | | ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
+    | |______________________________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#too_many_arguments
+    = note: `-D clippy::too-many-arguments` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::too_many_arguments)]`
+
+error: casting to the same type is unnecessary (`usize` -> `usize`)
+    --> omega/src/metal/arena_encode_dispatch_finish.rs:1528:36
+     |
+1528 |                     .map(|prepass| prepass.pipeline.maxTotalThreadsPerThreadgroup() as usize),
+     |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `prepass.pipeline.maxTotalThreadsPerThreadgroup()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_cast
+     = note: `-D clippy::unnecessary-cast` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::unnecessary_cast)]`
+
+error: could not compile `omega` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...

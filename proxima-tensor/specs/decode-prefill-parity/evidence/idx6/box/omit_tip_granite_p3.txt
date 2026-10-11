@@ -1,0 +1,17 @@
+2026-10-11T05:30:27Z
+ 0:30  up 10 days, 10:34, 3 users, load averages: 11.37 19.50 20.07
+78504 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+runcfg() { name=$1; shift; for p in 1 2 3; do d=$X/raw/cellA/$name/p$p; rm -rf $d; mkdir -p $d; cellrun ${name}_p$p $X/b
+runcfg k4_ping PROXIMA_COMMAND_BUFFER_CHUNKS=4 PROXIMA_PRECOMMIT_PING=1
+runcfg k4_enqueue PROXIMA_COMMAND_BUFFER_CHUNKS=4 PROXIMA_COMMAND_BUFFER_ENQUEUE_EARLY=1
+runcfg k4_wait_ping PROXIMA_COMMAND_BUFFER_CHUNKS=4 PROXIMA_PRECOMMIT_WAIT=1 PROXIMA_PRECOMMIT_PING=1
+runcfg b24 PROXIMA_BOUNDARIES_PREFILL=1 PROXIMA_COMMAND_BUFFER_BOUNDARIES=24
+runcfg b96 PROXIMA_BOUNDARIES_PREFILL=1 PROXIMA_COMMAND_BUFFER_BOUNDARIES=96
+runcfg b192 PROXIMA_BOUNDARIES_PREFILL=1 PROXIMA_COMMAND_BUFFER_BOUNDARIES=192
+rmdir $BL/gpu.lock 2>&1 | tail -1' < /dev/null && pwd -P >| /tmp/claude-4505-cwd
+95789 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+95795 /Users/brianbruggeman/.cargo/bin/cargo-nextest nextest run -p proxima-tensor --cargo-profile gate -E test(/pre_cha
+  PID  %CPU COMM
+17029  78.1 /Users/brianbruggeman/.local/bin/user-daemon
+  476  37.9 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  542  23.7 /usr/libexec/syspolicyd

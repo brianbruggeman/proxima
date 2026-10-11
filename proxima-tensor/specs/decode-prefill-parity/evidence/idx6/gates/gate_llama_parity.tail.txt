@@ -1,0 +1,11 @@
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/tree/proxima-model-interop)
+    Finished `gate` profile [optimized] target(s) in 2.91s
+────────────
+ Nextest run ID 377691a3-ccf8-4d08-962c-26609339e3a9 with nextest profile: default
+    Starting 4 tests across 1 binary (61 tests skipped)
+        PASS [   6.382s] (1/4) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_gemma4_e2b
+        PASS [   6.383s] (2/4) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        PASS [   2.981s] (3/4) proxima-model-interop::arch_data_baseline llama_parity_gemma4_e2b
+        PASS [   1.351s] (4/4) proxima-model-interop::arch_data_baseline llama_parity_granite_moe
+────────────
+     Summary [  17.098s] 4 tests run: 4 passed, 61 skipped

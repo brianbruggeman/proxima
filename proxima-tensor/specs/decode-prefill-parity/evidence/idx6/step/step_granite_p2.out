@@ -1,0 +1,18 @@
+ab capture excludes 0 unreplayable dispatches of 398
+ab capture: step=23 dispatches=398 groups=27
+ab stepall set=i32 swapped_dispatches=228 of 398
+ab stepall set=w32 swapped_dispatches=74 of 398
+ab stepall set=gp32 swapped_dispatches=144 of 398
+ab stepall set=gq32 swapped_dispatches=1 of 398
+ab stepall set=st32 swapped_dispatches=169 of 398
+ab stepall set=w32,gp32,gq32 swapped_dispatches=219 of 398
+ab stepall set=w32,gp32,gq32,st32 swapped_dispatches=244 of 398
+ab stepall arm=base step_ms=5.1328 round_min_ms=4.7677 round_max_ms=12.7577 round_cov_pct=30.070 rounds=21
+ab stepall arm=i32 step_ms=4.9463 round_min_ms=4.6926 round_max_ms=6.8168 round_cov_pct=9.655 rounds=21
+ab stepall arm=w32 step_ms=4.9976 round_min_ms=4.6447 round_max_ms=7.1271 round_cov_pct=9.923 rounds=21
+ab stepall arm=gp32 step_ms=4.7435 round_min_ms=4.4119 round_max_ms=6.3998 round_cov_pct=9.093 rounds=21
+ab stepall arm=gq32 step_ms=5.1025 round_min_ms=4.7531 round_max_ms=10.7879 round_cov_pct=23.531 rounds=21
+ab stepall arm=st32 step_ms=5.2919 round_min_ms=4.8909 round_max_ms=6.8436 round_cov_pct=8.136 rounds=21
+ab stepall arm=w32+gp32+gq32 step_ms=4.5457 round_min_ms=4.2751 round_max_ms=5.7850 round_cov_pct=7.763 rounds=21
+ab stepall arm=w32+gp32+gq32+st32 step_ms=4.5469 round_min_ms=4.2781 round_max_ms=5.7718 round_cov_pct=8.513 rounds=21
+ab cell label=process wall_ms=2165.725 cpu_ms=1154.575 cpu_pct=53.3 rss_peak_mb=1643.5 footprint_mb=149.5 gpu_alloc_mb=1469.1 load_before=16.74 load_after=16.74

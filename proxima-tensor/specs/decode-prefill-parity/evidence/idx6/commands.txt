@@ -1,0 +1,31 @@
+export: origin/main 8417f133 archived into idx6/tree (tip) and idx6/base_tree (base); CARGO_TARGET_DIR=/private/tmp/cargo_target_idx6 (tip), /private/tmp/cargo_target_idx6_base (base)
+models: gemma4 E2B = ~/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd ; granite moe 1b = ~/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80 ; prompts: attn7 prompt1k.txt (970 / 1000 tokens), prompt_short_hippo.txt (26 / 36 tokens)
+
+builds (release):
+  cargo build --release -p proxima-model-interop --features std,metal,instrument,metal-attn-variants --example norm_variant_ab        (base: pre-change binary; tool: with AB_STEP_ALL; tip: with the landed rule)
+  OMEGA_ATTENTION_DECODE_INDEX_BITS=64 cargo build --release ... --example norm_variant_ab                                         (the 64-bit attention form, build-time key)
+  cargo build --release -p proxima-model-interop --features std,metal --example decode_gbps_baseline --example decode_arms        (base tree and tip tree)
+
+census (cell 1):
+  env -i PROXIMA_GEMMA4_E2B_GGUF=<blob> PROXIMA_PROMPT_FILE=prompt1k.txt AB_STEP=23 AB_DESCRIBE=1 AB_PACKED=1 AB_VARIANT_DIR=<empty dir> PROXIMA_PIPELINE_CAPTURE=<dir> PROXIMA_SPECULATIVE_TYPES=none norm_variant_ab     (base and tip binaries; describe_*.out, captured MSL not stored here: 9.4 MB)
+  rustc -O --edition 2024 tools/census.rs ; census <model> <describe.out> <captured MSL dir> <attr5 cell dir> <ir dir> > census_*.csv        (xcrun -sdk macosx metal -S -emit-llvm at -O0 and -O2, -ffast-math)
+
+variants and a/b (cell 2):
+  idx_variants <describe.out> <captured MSL dir> <variant dir>        tags i32 (whole body), w32 (whole body, epilogue or gather only), gp32 (expert prologue divides), gq32 (block decode of a gathered packed operand), st32 (step counters)
+  env -i ... AB_STEP=23 AB_ROUNDS=21 AB_PACKED=1 AB_SPAN_FULL=1 AB_VARIANT_DIR=<variant dir> PROXIMA_SPECULATIVE_TYPES=none norm_variant_ab        x3 processes per model  -> ab_variants/ (i32, gp32, st32), ab_landed_set/ (adds w32, gq32)
+  env -i ... AB_STEP=23 AB_ROUNDS=21 AB_PACKED=1 AB_FLUSH_MIB=0 AB_STEP_ALL='i32;w32;gp32;gq32;st32;w32,gp32,gq32;w32,gp32,gq32,st32' norm_variant_ab        x3 -> step/
+  ab_ratio single_us|marginal_us <p1.out> <p2.out> <p3.out>        per-process ratio of an arm to base (the arms are interleaved inside one process)
+  ab_ratio stepall <p1.out> <p2.out> <p3.out>
+  pair_variants <tip describe> <64-bit describe> <64-bit MSL dir> <tip MSL dir> <variant dir> long64        then the a/b above with the tip binary  -> ab_attention64/ (clean), ab_attention64_contaminated/ (foreign Metal test processes resident)
+  render_equal <base describe> <tip describe> <base MSL dir> <tip MSL dir> <variant dir> w32,gp32,gq32        -> render_equal/ : the renderer's own text against the measured variant text, byte for byte
+  AB_OMIT_ALL=1 AB_ROUNDS=21 AB_FLUSH_MIB=0 (base and tip binaries) ; omit_table <base prefix> <tip prefix> 3        -> omit/
+
+gates (each with the GPU lock directory held):
+  cargo nextest run -p omega --features metal --cargo-profile gate --no-fail-fast
+  cargo nextest run -p omega --features metal,instrument --cargo-profile gate --no-fail-fast
+  cargo clippy -p omega --features metal [,instrument] --all-targets --no-deps -- -D warnings          (and the same with -A clippy::too_many_arguments -A clippy::unnecessary_cast)
+  cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --no-fail-fast --test arch_data_baseline --test-threads 1 -E 'test(=generic_verify_llama_parity_gemma4_e2b) + test(=generic_verify_llama_parity_granite_moe) + test(=llama_parity_gemma4_e2b) + test(=llama_parity_granite_moe)'
+  cargo nextest run ... -E 'test(=prefill_width_parity_with_llama_granite_moe)'
+
+bench (drafter off by the driver, PROXIMA_SPECULATIVE_TYPES=none; 128 new tokens; 3 processes x (1 warm-up + 5 runs) per arm; arms base / tip / control interleaved per process; tip and control are one binary):
+  decode_arms --prompt-file <prompt> --log launches.log --processes 3 --runs 5 --case gemma4_e2b=<blob> --case granite_moe=<blob> --arm base=decode_gbps_baseline_base --arm tip=decode_gbps_baseline_tip --arm control=decode_gbps_baseline_control

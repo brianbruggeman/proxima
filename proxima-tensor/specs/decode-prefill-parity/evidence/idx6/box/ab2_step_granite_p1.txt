@@ -1,0 +1,17 @@
+2026-10-11T04:41:37Z
+23:41  up 10 days,  9:45, 3 users, load averages: 18.60 18.63 16.93
+25375 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+sleep 2; echo started' < /dev/null && pwd -P >| /tmp/claude-3cdf-cwd
+25376 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build --release -p proxima-model-in
+29797 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+29822 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_telemetry --ed
+30127 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+30131 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name aws_lc_sys --edition=2
+30132 /private/tmp/cargo_target_pf7/release/build/rustls-63059de321a022c5/build-script-build
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+  PID  %CPU COMM
+29822 100.0 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+17029  63.0 /Users/brianbruggeman/.local/bin/user-daemon
+ 1265  59.7 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectService.xpc/Contents/MacOS/XprotectService
+30131  42.7 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+"Device Utilization %"=83
