@@ -28,6 +28,8 @@ toml.workspace = true
 futures.workspace = true
 tokio-util = { workspace = true, features = ["compat"] }
 proxima-telemetry = { workspace = true, features = ["emit", "std"] }
+proxima-model-interop = { version = "0.1.0", path = "../../proxima-model-interop", features = ["std"] }
+proxima-tensor.workspace = true
 
 [dev-dependencies]
 proxima = { workspace = true, features = ["test-support-tokio"] }

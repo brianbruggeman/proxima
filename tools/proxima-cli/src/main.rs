@@ -1,3 +1,4 @@
+mod model;
 mod pipeline;
 
 use std::net::{SocketAddr, TcpListener};
@@ -6,6 +7,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use model::ModelArgs;
 use pipeline::PipelineArgs;
 use proxima::scenarios::{
     DurationSpec, WorkloadMode, discover_by_name, discover_scenario, run_scenario_with_sink,
@@ -147,6 +149,9 @@ enum Command {
     /// or json spec; the CLI talks to proximad over either a local UDS
     /// or `ssh <host> proximad serve --stdio`.
     Pipeline(PipelineArgs),
+    /// Model-file conversions, e.g. `model export-mlx` writes an mlx-lm
+    /// directory from a GGUF.
+    Model(ModelArgs),
     /// Walk a parsed spec and report policy violations. Zero-arg
     /// invocation at a project root discovers `proxima.toml` /
     /// `spec.toml` / `.proxima/spec.toml` and `proxima.policy.toml` /
@@ -351,6 +356,7 @@ async fn main() -> ExitCode {
             remote,
             record,
         } => run_load(scenario, name, json, rps, duration, remote, record).await,
+        Command::Model(args) => model::run(args),
         other => match run(Cli { command: other }).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -393,8 +399,11 @@ async fn run(cli: Cli) -> Result<(), ProximaError> {
             offset,
         } => run_explain(index, node, offset),
         Command::Pipeline(args) => pipeline::run(args).await,
-        Command::Verify { .. } | Command::Replay { .. } | Command::Load { .. } => {
-            unreachable!("Verify/Replay/Load dispatched in main for custom exit codes")
+        Command::Verify { .. }
+        | Command::Replay { .. }
+        | Command::Load { .. }
+        | Command::Model(_) => {
+            unreachable!("Verify/Replay/Load/Model dispatched in main for custom exit codes")
         }
     }
 }

@@ -6,6 +6,8 @@ mod hello_name;
 mod load_smoke;
 #[path = "integration/mcp_stdio.rs"]
 mod mcp_stdio;
+#[path = "integration/model_export.rs"]
+mod model_export;
 #[path = "integration/pipeline_subcommand.rs"]
 mod pipeline_subcommand;
 #[path = "integration/scenario_isolated.rs"]
