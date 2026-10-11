@@ -18838,9 +18838,9 @@ mod head_repeats {
     use super::*;
 
     const CACHELESS_PRE_CHANGE_NODES: usize = 221;
-    const CACHELESS_PRE_CHANGE_DIGEST: u64 = 0x9af27091336a2413;
+    const CACHELESS_PRE_CHANGE_DIGEST: u64 = 0x368e6f42e1359be7;
     const TWO_RANGE_PRE_CHANGE_NODES: usize = 268;
-    const TWO_RANGE_PRE_CHANGE_DIGEST: u64 = 0x0b9f2bd7af6a7a91;
+    const TWO_RANGE_PRE_CHANGE_DIGEST: u64 = 0x00e4e873ea475ea1;
 
     pub(super) fn digest(program: &[Op]) -> u64 {
         alloc::format!("{program:?}")
@@ -18967,11 +18967,11 @@ mod forward_scales {
     use super::*;
 
     const DENSE_PRE_CHANGE_NODES: usize = 219;
-    const DENSE_PRE_CHANGE_DIGEST: u64 = 17540776033648518689;
+    const DENSE_PRE_CHANGE_DIGEST: u64 = 15935147422027473347;
     #[cfg(not(feature = "moe-stacked-experts"))]
     const MOE_PRE_CHANGE_NODES: usize = 291;
     #[cfg(not(feature = "moe-stacked-experts"))]
-    const MOE_PRE_CHANGE_DIGEST: u64 = 15757248836318508347;
+    const MOE_PRE_CHANGE_DIGEST: u64 = 12346379158203586773;
 
     pub(super) fn profile_text(rope_layout: &str) -> String {
         format!(
