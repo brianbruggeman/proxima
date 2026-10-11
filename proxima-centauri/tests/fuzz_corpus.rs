@@ -18,8 +18,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_centauri::cookie::{CookieSecret, examine};
+#[cfg(any(feature = "aead-chacha20poly1305", feature = "aead-aes-gcm"))]
 use proxima_centauri::esp::OVERHEAD;
-use proxima_centauri::{ChildSa, Entropy32, EspSpi, Handshake, IkeSpi, Role};
+#[cfg(any(feature = "aead-chacha20poly1305", feature = "aead-aes-gcm"))]
+use proxima_centauri::{ChildSa, EspSpi, Role};
+use proxima_centauri::{Entropy32, Handshake, IkeSpi};
 use proxima_clock::ticks::Ticks;
 
 const PSK: [u8; 32] = [0xAB; 32];
@@ -84,6 +87,7 @@ fn an_sa_init() -> [u8; 92] {
     message
 }
 
+#[cfg(any(feature = "aead-chacha20poly1305", feature = "aead-aes-gcm"))]
 fn agreed_pair() -> (ChildSa, ChildSa) {
     let mut initiator = Handshake::initiator(PSK, IkeSpi::new(1));
     let mut responder = Handshake::responder(PSK, IkeSpi::new(2));
@@ -138,6 +142,7 @@ fn the_handshake_parser_survives_the_corpus() {
     }
 }
 
+#[cfg(any(feature = "aead-chacha20poly1305", feature = "aead-aes-gcm"))]
 #[test]
 fn the_aead_opener_survives_the_corpus() {
     let mut corpus = Corpus::new(0x0fed_cba9_8765_4321);
