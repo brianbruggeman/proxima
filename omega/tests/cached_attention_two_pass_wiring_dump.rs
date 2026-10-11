@@ -6,7 +6,11 @@
 //! `two_pass` is never set on a qwen op (Part A's `via_gemma_template`
 //! scoping), so the two dumps must be byte-identical.
 
-#![cfg(all(feature = "metal", feature = "cached-attention-streaming", target_os = "macos"))]
+#![cfg(all(
+    feature = "metal",
+    feature = "cached-attention-streaming",
+    target_os = "macos"
+))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use omega::PackedOperands;
@@ -19,8 +23,10 @@ use support::{production_numeric_policy, qwen35_partial_rotary_forward_fixture};
 fn dump_qwen35_partial_rotary_op_text() {
     let (program, symbols, roots, _owned) = qwen35_partial_rotary_forward_fixture(1, 40, 37);
     let policy = production_numeric_policy();
-    let shapes = proxima_tensor::infer(&program, &symbols).expect("qwen35 partial-rotary fixture infers");
-    let resolved = bind(&program, &shapes, &roots, policy).expect("qwen35 partial-rotary fixture binds");
+    let shapes =
+        proxima_tensor::infer(&program, &symbols).expect("qwen35 partial-rotary fixture infers");
+    let resolved =
+        bind(&program, &shapes, &roots, policy).expect("qwen35 partial-rotary fixture binds");
     let fused = resolved
         .iter()
         .find(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
@@ -51,7 +57,11 @@ fn dump_qwen35_partial_rotary_op_text() {
     };
     std::fs::write(&path, format!("entry={}\n{}", kernel.entry, kernel.source))
         .unwrap_or_else(|error| panic!("write {path}: {error}"));
-    let written = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read back {path}: {error}"));
+    let written =
+        std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read back {path}: {error}"));
     assert!(!written.is_empty(), "wiring dump must not be empty");
-    println!("dump_qwen35_partial_rotary_op_text entry={} path={path}", kernel.entry);
+    println!(
+        "dump_qwen35_partial_rotary_op_text entry={} path={path}",
+        kernel.entry
+    );
 }

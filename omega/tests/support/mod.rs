@@ -21,8 +21,8 @@
 #![allow(dead_code)]
 
 use proxima_tensor::spec::{
-    DuplicateHeadPosition, gqa_cached_forward_program,
-    gqa_single_range_cached_forward_program, qk_norm_cached_forward_program,
+    DuplicateHeadPosition, gqa_cached_forward_program, gqa_single_range_cached_forward_program,
+    qk_norm_cached_forward_program,
 };
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{NodeId, NumericPolicy, Op, QuantizedBlock, block_node_ids, infer};
@@ -354,7 +354,12 @@ pub fn qwen35_partial_rotary_forward_fixture(
         "x",
     );
     let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
-    let eps = input_leaf(&mut program, DType::Float32, vec![Extent::Symbolic(0)], "eps");
+    let eps = input_leaf(
+        &mut program,
+        DType::Float32,
+        vec![Extent::Symbolic(0)],
+        "eps",
+    );
     let ones = scalar_constant(&mut program, 1.0);
     let inv_sqrt_attn_head_dim = scalar_constant(&mut program, 1.0 / (ATTN_HEAD_DIM as f32).sqrt());
     let inv_attn_head_dim = scalar_constant(&mut program, 1.0 / ATTN_HEAD_DIM as f32);
@@ -379,7 +384,12 @@ pub fn qwen35_partial_rotary_forward_fixture(
         "attn_norm_weight",
     );
     let norm_shape = vec![Extent::Static(ATTN_HEAD_DIM)];
-    let q_norm_weight = input_leaf(&mut program, DType::Float32, norm_shape.clone(), "q_norm_weight");
+    let q_norm_weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        norm_shape.clone(),
+        "q_norm_weight",
+    );
     let k_norm_weight = input_leaf(&mut program, DType::Float32, norm_shape, "k_norm_weight");
     let wq_gate = input_leaf(
         &mut program,
@@ -424,9 +434,24 @@ pub fn qwen35_partial_rotary_forward_fixture(
         Extent::Static(KV_HEADS),
         Extent::Static(ATTN_HEAD_DIM),
     ];
-    let k_first_cache = input_leaf(&mut program, DType::Float32, cache_rotary_shape.clone(), "k_first_cache");
-    let k_second_cache = input_leaf(&mut program, DType::Float32, cache_rotary_shape, "k_second_cache");
-    let k_pass_cache = input_leaf(&mut program, DType::Float32, cache_pass_shape, "k_pass_cache");
+    let k_first_cache = input_leaf(
+        &mut program,
+        DType::Float32,
+        cache_rotary_shape.clone(),
+        "k_first_cache",
+    );
+    let k_second_cache = input_leaf(
+        &mut program,
+        DType::Float32,
+        cache_rotary_shape,
+        "k_second_cache",
+    );
+    let k_pass_cache = input_leaf(
+        &mut program,
+        DType::Float32,
+        cache_pass_shape,
+        "k_pass_cache",
+    );
     let v_cache = input_leaf(&mut program, DType::Float32, cache_v_shape, "v_cache");
 
     let (residual1, taps) = append_gated_attention_only_with_taps(
@@ -466,7 +491,11 @@ pub fn qwen35_partial_rotary_forward_fixture(
     for (position, op) in program.iter().enumerate() {
         let Op::Input { name, .. } = op else { continue };
         let node = NodeId(position as u32);
-        let count: usize = shapes.of(node).iter().map(|extent| *extent as usize).product();
+        let count: usize = shapes
+            .of(node)
+            .iter()
+            .map(|extent| *extent as usize)
+            .product();
         let name = name.clone().expect("every input in this fixture is named");
         let data = if name == "eps" {
             vec![1e-5f32; count]

@@ -35,7 +35,8 @@ fn parse_range_line(line: &str) -> Result<(u32, u16), String> {
     let (start, flags) = inner
         .split_once(',')
         .ok_or_else(|| format!("range line without a comma: {line:?}"))?;
-    let flags = u16::try_from(parse_hex(flags)?).map_err(|error| format!("flags {line:?}: {error}"))?;
+    let flags =
+        u16::try_from(parse_hex(flags)?).map_err(|error| format!("flags {line:?}: {error}"))?;
     Ok((parse_hex(start)?, flags))
 }
 
@@ -74,7 +75,9 @@ fn parse(source: &str) -> Result<(Vec<ClassRange>, Vec<u32>), String> {
                         ranges.push((start, bits));
                     }
                 }
-                Section::Whitespace => whitespace.push(parse_hex(line.trim().trim_end_matches(','))?),
+                Section::Whitespace => {
+                    whitespace.push(parse_hex(line.trim().trim_end_matches(','))?)
+                }
                 Section::None => {}
             }
         }
@@ -83,17 +86,34 @@ fn parse(source: &str) -> Result<(Vec<ClassRange>, Vec<u32>), String> {
     Ok((ranges, whitespace))
 }
 
-fn render(commit: &str, ranges: &[(u32, u8)], whitespace: &[u32]) -> Result<String, std::fmt::Error> {
+fn render(
+    commit: &str,
+    ranges: &[(u32, u8)],
+    whitespace: &[u32],
+) -> Result<String, std::fmt::Error> {
     let mut out = String::new();
-    writeln!(out, "//! Generated from llama.cpp {commit} `src/unicode-data.cpp` by")?;
-    writeln!(out, "//! `cargo run -p proxima-tokenizer --example gen_unicode_tables`: the exact")?;
-    writeln!(out, "//! `\\p{{N}}` / `\\p{{L}}` / `\\p{{M}}` / `\\p{{P}}` / `\\s` tables llama.cpp's")?;
+    writeln!(
+        out,
+        "//! Generated from llama.cpp {commit} `src/unicode-data.cpp` by"
+    )?;
+    writeln!(
+        out,
+        "//! `cargo run -p proxima-tokenizer --example gen_unicode_tables`: the exact"
+    )?;
+    writeln!(
+        out,
+        "//! `\\p{{N}}` / `\\p{{L}}` / `\\p{{M}}` / `\\p{{P}}` / `\\s` tables llama.cpp's"
+    )?;
     writeln!(out, "//! pre-tokenizers read.\n")?;
     writeln!(out, "pub(super) const NUMBER: u8 = 1;")?;
     writeln!(out, "pub(super) const LETTER: u8 = 2;")?;
     writeln!(out, "pub(super) const MARK: u8 = 4;")?;
     writeln!(out, "pub(super) const PUNCT: u8 = 8;\n")?;
-    writeln!(out, "pub(super) static CLASS_RANGES: [(u32, u8); {}] = [", ranges.len())?;
+    writeln!(
+        out,
+        "pub(super) static CLASS_RANGES: [(u32, u8); {}] = [",
+        ranges.len()
+    )?;
     for chunk in ranges.chunks(6) {
         let items: Vec<String> = chunk
             .iter()
@@ -102,9 +122,16 @@ fn render(commit: &str, ranges: &[(u32, u8)], whitespace: &[u32]) -> Result<Stri
         writeln!(out, "    {},", items.join(", "))?;
     }
     writeln!(out, "];\n")?;
-    writeln!(out, "pub(super) static WHITESPACE: [u32; {}] = [", whitespace.len())?;
+    writeln!(
+        out,
+        "pub(super) static WHITESPACE: [u32; {}] = [",
+        whitespace.len()
+    )?;
     for chunk in whitespace.chunks(8) {
-        let items: Vec<String> = chunk.iter().map(|codepoint| format!("0x{codepoint:06X}")).collect();
+        let items: Vec<String> = chunk
+            .iter()
+            .map(|codepoint| format!("0x{codepoint:06X}"))
+            .collect();
         writeln!(out, "    {},", items.join(", "))?;
     }
     writeln!(out, "];")?;
@@ -114,9 +141,13 @@ fn render(commit: &str, ranges: &[(u32, u8)], whitespace: &[u32]) -> Result<Stri
 fn main() -> Result<(), String> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let [source_path, commit, output_path] = arguments.as_slice() else {
-        return Err("usage: gen_unicode_tables <unicode-data.cpp> <llama.cpp commit> <output.rs>".to_owned());
+        return Err(
+            "usage: gen_unicode_tables <unicode-data.cpp> <llama.cpp commit> <output.rs>"
+                .to_owned(),
+        );
     };
-    let source = fs::read_to_string(source_path).map_err(|error| format!("read {source_path}: {error}"))?;
+    let source =
+        fs::read_to_string(source_path).map_err(|error| format!("read {source_path}: {error}"))?;
     let (ranges, whitespace) = parse(&source)?;
     if ranges.is_empty() || whitespace.is_empty() {
         return Err(format!(
@@ -127,6 +158,10 @@ fn main() -> Result<(), String> {
     }
     let rendered = render(commit, &ranges, &whitespace).map_err(|error| error.to_string())?;
     fs::write(output_path, rendered).map_err(|error| format!("write {output_path}: {error}"))?;
-    println!("wrote {output_path}: {} ranges, {} whitespace codepoints", ranges.len(), whitespace.len());
+    println!(
+        "wrote {output_path}: {} ranges, {} whitespace codepoints",
+        ranges.len(),
+        whitespace.len()
+    );
     Ok(())
 }

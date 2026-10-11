@@ -497,7 +497,10 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     #[cfg(feature = "q4k-int8-dot")]
     if !exact_activations
         && weight_gather.is_none()
-        && let QuantizedBlock::Packed { codec: Codec::Q4K, bytes: _ } = weight_block
+        && let QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: _,
+        } = weight_block
     {
         #[cfg(feature = "instrument")]
         let diag_call_started = instrument::read_ticks();
@@ -547,7 +550,10 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     #[cfg(feature = "q5k-int8-dot")]
     if !exact_activations
         && weight_gather.is_none()
-        && let QuantizedBlock::Packed { codec: Codec::Q5K, bytes: _ } = weight_block
+        && let QuantizedBlock::Packed {
+            codec: Codec::Q5K,
+            bytes: _,
+        } = weight_block
     {
         #[cfg(feature = "instrument")]
         let diag_call_started = instrument::read_ticks();
@@ -574,7 +580,10 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     #[cfg(feature = "q6k-int8-dot")]
     if !exact_activations
         && weight_gather.is_none()
-        && let QuantizedBlock::Packed { codec: Codec::Q6K, bytes: _ } = weight_block
+        && let QuantizedBlock::Packed {
+            codec: Codec::Q6K,
+            bytes: _,
+        } = weight_block
     {
         #[cfg(feature = "instrument")]
         let diag_call_started = instrument::read_ticks();
@@ -622,7 +631,11 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         let selection = step % selection_total;
         if weight_gather.is_some() {
             unflatten_into(position as u64, &leading_extents, &mut leading_coordinate);
-            unflatten_into(selection as u64, &selection_extents, &mut selection_coordinate);
+            unflatten_into(
+                selection as u64,
+                &selection_extents,
+                &mut selection_coordinate,
+            );
             merge_coordinates_into(
                 &leading_axes,
                 &leading_coordinate,
@@ -723,7 +736,10 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 unreachable!("integer index blocks never enter quantized dispatch")
             }
             QuantizedBlock::Float32(_) => return Err(shape_error()),
-            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: _ } => {
+            QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: _,
+            } => {
                 // reachable when `exact_activations` is set (the wide fold
                 // above declines whenever it is) or a gathered/MoE weight
                 // routes here directly; otherwise unreachable when
@@ -742,7 +758,10 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                     matmul_q4k_f32(weights, rows, activation_row)?
                 }
             }
-            QuantizedBlock::Packed { codec: Codec::Q5K, bytes: _ } => {
+            QuantizedBlock::Packed {
+                codec: Codec::Q5K,
+                bytes: _,
+            } => {
                 // same shape as the `Q4K` arm above.
                 #[cfg(feature = "q5k-int8-dot")]
                 {
@@ -757,7 +776,10 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                     matmul_q5k_f32(weights, rows, activation_row)?
                 }
             }
-            QuantizedBlock::Packed { codec: Codec::Q6K, bytes: _ } => {
+            QuantizedBlock::Packed {
+                codec: Codec::Q6K,
+                bytes: _,
+            } => {
                 // same shape as the `Q4K` arm above.
                 #[cfg(feature = "q6k-int8-dot")]
                 {
@@ -809,7 +831,10 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             // as `Q4_K` whenever the stack's OWN declared codec was `Q4_K`.
             match dispatch_block {
                 QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => {}
-                QuantizedBlock::Packed { codec: Codec::Q4K, bytes: _ } => {
+                QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes: _,
+                } => {
                     counter!(instrument::MATMUL_Q4K_MACS, diag_call_macs);
                     counter!(instrument::MATMUL_Q4K_CALL_TICKS, diag_call_ticks);
                     instrument::record_q4k_shape_call(
@@ -819,24 +844,64 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                         diag_call_ticks,
                     );
                 }
-                QuantizedBlock::Packed { codec: Codec::Q5K, bytes: _ } => {
+                QuantizedBlock::Packed {
+                    codec: Codec::Q5K,
+                    bytes: _,
+                } => {
                     counter!(instrument::MATMUL_Q5K_MACS, diag_call_macs);
                     counter!(instrument::MATMUL_Q5K_CALL_TICKS, diag_call_ticks);
                 }
-                QuantizedBlock::Packed { codec: Codec::Q6K, bytes: _ } => {
+                QuantizedBlock::Packed {
+                    codec: Codec::Q6K,
+                    bytes: _,
+                } => {
                     counter!(instrument::MATMUL_Q6K_MACS, diag_call_macs);
                     counter!(instrument::MATMUL_Q6K_CALL_TICKS, diag_call_ticks);
                 }
-                QuantizedBlock::Packed { codec: Codec::Q3K, bytes: _ } => {}
-                QuantizedBlock::Packed { codec: Codec::Q2K, bytes: _ } => {}
-                QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: _ } => {}
-                QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: _ } => {}
-                QuantizedBlock::Packed { codec: Codec::Q5_1, bytes: _ } => {}
-                QuantizedBlock::Packed { codec: Codec::Q5_0, bytes: _ } => {}
-                QuantizedBlock::Packed { codec: Codec::Iq4Nl, bytes: _ } => {}
-                QuantizedBlock::Packed { codec: Codec::Iq2Xs, bytes: _ } => {}
-                QuantizedBlock::Packed { codec: Codec::Iq3Xxs, bytes: _ } => {}
-                QuantizedBlock::Packed { codec: Codec::Float16, bytes: _ } | QuantizedBlock::Packed { codec: Codec::BFloat16, bytes: _ } => {}
+                QuantizedBlock::Packed {
+                    codec: Codec::Q3K,
+                    bytes: _,
+                } => {}
+                QuantizedBlock::Packed {
+                    codec: Codec::Q2K,
+                    bytes: _,
+                } => {}
+                QuantizedBlock::Packed {
+                    codec: Codec::Q8_0,
+                    bytes: _,
+                } => {}
+                QuantizedBlock::Packed {
+                    codec: Codec::Q4_0,
+                    bytes: _,
+                } => {}
+                QuantizedBlock::Packed {
+                    codec: Codec::Q5_1,
+                    bytes: _,
+                } => {}
+                QuantizedBlock::Packed {
+                    codec: Codec::Q5_0,
+                    bytes: _,
+                } => {}
+                QuantizedBlock::Packed {
+                    codec: Codec::Iq4Nl,
+                    bytes: _,
+                } => {}
+                QuantizedBlock::Packed {
+                    codec: Codec::Iq2Xs,
+                    bytes: _,
+                } => {}
+                QuantizedBlock::Packed {
+                    codec: Codec::Iq3Xxs,
+                    bytes: _,
+                } => {}
+                QuantizedBlock::Packed {
+                    codec: Codec::Float16,
+                    bytes: _,
+                }
+                | QuantizedBlock::Packed {
+                    codec: Codec::BFloat16,
+                    bytes: _,
+                } => {}
                 // codecs with no dedicated counter simply get no instrumentation
                 QuantizedBlock::Packed { .. } => {}
             }

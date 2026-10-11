@@ -47,9 +47,9 @@ pub mod ngram_mod;
 pub mod ngram_simple;
 
 pub use ngram_cache::{
-    DEFAULT_N_DRAFT, LLAMA_NGRAM_MAX, LLAMA_NGRAM_MIN, LLAMA_NGRAM_STATIC,
-    NgramCache, NgramCacheLoadError, NgramCacheState, load_llama_ngram_cache_bytes,
-    ngram_cache_draft, ngram_cache_state_draft, ngram_cache_update,
+    DEFAULT_N_DRAFT, LLAMA_NGRAM_MAX, LLAMA_NGRAM_MIN, LLAMA_NGRAM_STATIC, NgramCache,
+    NgramCacheLoadError, NgramCacheState, load_llama_ngram_cache_bytes, ngram_cache_draft,
+    ngram_cache_state_draft, ngram_cache_update,
 };
 pub use ngram_map::{
     DEFAULT_MIN_HITS, DEFAULT_SIZE_KEY, DEFAULT_SIZE_VALUE, NgramMap, NgramMapConfig,
@@ -219,7 +219,10 @@ pub fn speculative_accept_sampled(
     target_dist: &[f32],
     rng: &mut Rng,
 ) -> Accept {
-    let target_prob = target_dist.get(draft_token as usize).copied().unwrap_or(0.0);
+    let target_prob = target_dist
+        .get(draft_token as usize)
+        .copied()
+        .unwrap_or(0.0);
     let draft_prob = draft_probability(draft, draft_token, draft_token);
 
     if draft_prob > 0.0 {
@@ -261,8 +264,7 @@ fn sample_residual(
     let mut weights: Vec<f32> = Vec::with_capacity(target_dist.len());
     let mut total = 0.0f32;
     for (index, &target_prob) in target_dist.iter().enumerate() {
-        let residual =
-            (target_prob - draft_probability(draft, draft_token, index as u32)).max(0.0);
+        let residual = (target_prob - draft_probability(draft, draft_token, index as u32)).max(0.0);
         weights.push(residual);
         total += residual;
     }
@@ -475,9 +477,7 @@ mod tests {
         for case in 0..2_000u32 {
             let vocab = 4 + (case % 12) as usize;
             let row_count = 1 + (case % 6) as usize;
-            let rows: Vec<Vec<f32>> = (0..row_count)
-                .map(|_| lcg.next_row(vocab))
-                .collect();
+            let rows: Vec<Vec<f32>> = (0..row_count).map(|_| lcg.next_row(vocab)).collect();
 
             let one_at_a_time: Vec<u32> = rows
                 .iter()

@@ -45,7 +45,10 @@ fn input(program: &mut Vec<Op>, dtype: DType, shape: &[usize], name: &str) -> No
         program,
         Op::Input {
             dtype,
-            shape: shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(),
+            shape: shape
+                .iter()
+                .map(|&extent| Extent::Static(extent as u32))
+                .collect(),
             name: Some(name.into()),
         },
     )
@@ -84,7 +87,12 @@ fn program(shape: &Shape, fuse_gate: bool) -> (Vec<Op>, NodeId) {
         "weight",
     );
     let route = input(&mut program, DType::Int32, &[shape.tokens], "route");
-    let activation = input(&mut program, DType::Float32, &[shape.tokens, shape.k], "activation");
+    let activation = input(
+        &mut program,
+        DType::Float32,
+        &[shape.tokens, shape.k],
+        "activation",
+    );
     let product = append(
         &mut program,
         Op::Elementwise {
@@ -113,7 +121,12 @@ fn program(shape: &Shape, fuse_gate: bool) -> (Vec<Op>, NodeId) {
     if !fuse_gate {
         return (program, sum);
     }
-    let gate = input(&mut program, DType::Float32, &[shape.tokens, shape.rows], "gate");
+    let gate = input(
+        &mut program,
+        DType::Float32,
+        &[shape.tokens, shape.rows],
+        "gate",
+    );
     let gated = append(
         &mut program,
         Op::Elementwise {
@@ -181,13 +194,23 @@ struct Outputs {
 }
 
 fn run(case: &Case) -> Outputs {
-    let Case { shape, route, fuse_gate } = case;
+    let Case {
+        shape,
+        route,
+        fuse_gate,
+    } = case;
     let (program, output) = program(shape, *fuse_gate);
     let stack = quantized_expert_stack(shape);
     let activation = unit_values(2000, shape.tokens * shape.k, -1.0, 1.0);
     let gate = unit_values(3000, shape.tokens * shape.rows, 0.5, 1.5);
     let mut named = vec![
-        ("weight", QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &stack }),
+        (
+            "weight",
+            QuantizedBlock::Packed {
+                codec: Codec::Q8_0,
+                bytes: &stack,
+            },
+        ),
         ("route", QuantizedBlock::Float32(route)),
         ("activation", QuantizedBlock::Float32(&activation)),
     ];
@@ -219,7 +242,8 @@ fn run(case: &Case) -> Outputs {
 }
 
 fn grouped_kernel_ran(keys: &[String]) -> bool {
-    keys.iter().any(|key| key.contains("_g10") && key.contains("E_w128"))
+    keys.iter()
+        .any(|key| key.contains("_g10") && key.contains("E_w128"))
 }
 
 fn worst_relative_row_error(oracle: &[f32], metal: &[f32], row_width: usize) -> f32 {
@@ -227,7 +251,11 @@ fn worst_relative_row_error(oracle: &[f32], metal: &[f32], row_width: usize) -> 
         .chunks_exact(row_width)
         .zip(metal.chunks_exact(row_width))
         .map(|(want_row, got_row)| {
-            let norm = want_row.iter().map(|value| value * value).sum::<f32>().sqrt();
+            let norm = want_row
+                .iter()
+                .map(|value| value * value)
+                .sum::<f32>()
+                .sqrt();
             let worst = want_row
                 .iter()
                 .zip(got_row)
@@ -241,8 +269,16 @@ fn worst_relative_row_error(oracle: &[f32], metal: &[f32], row_width: usize) -> 
 fn assert_grouped_matches_oracle(case: &Case) {
     let outputs = run(case);
     let element_count = case.shape.tokens * case.shape.rows;
-    assert_eq!(outputs.oracle.len(), element_count, "degenerate: oracle produced no output");
-    assert_eq!(outputs.metal.len(), element_count, "degenerate: metal produced no output");
+    assert_eq!(
+        outputs.oracle.len(),
+        element_count,
+        "degenerate: oracle produced no output"
+    );
+    assert_eq!(
+        outputs.metal.len(),
+        element_count,
+        "degenerate: metal produced no output"
+    );
     assert!(
         grouped_kernel_ran(&outputs.kernel_keys),
         "the expert-grouped kernel was never selected: {:?}",
@@ -261,44 +297,100 @@ fn assert_grouped_matches_oracle(case: &Case) {
 
 #[test]
 fn heavy_expert_and_empty_experts_match_the_f32_oracle() {
-    let shape = Shape { tokens: 300, rows: 192, k: 512, experts: 8 };
+    let shape = Shape {
+        tokens: 300,
+        rows: 192,
+        k: 512,
+        experts: 8,
+    };
     let route = heavy_expert_route(shape.tokens, shape.experts);
-    assert_grouped_matches_oracle(&Case { shape, route, fuse_gate: false });
+    assert_grouped_matches_oracle(&Case {
+        shape,
+        route,
+        fuse_gate: false,
+    });
 }
 
 #[test]
 fn ragged_rows_and_tokens_match_the_f32_oracle() {
-    let shape = Shape { tokens: 161, rows: 100, k: 256, experts: 6 };
+    let shape = Shape {
+        tokens: 161,
+        rows: 100,
+        k: 256,
+        experts: 6,
+    };
     let route = heavy_expert_route(shape.tokens, shape.experts);
-    assert_grouped_matches_oracle(&Case { shape, route, fuse_gate: false });
+    assert_grouped_matches_oracle(&Case {
+        shape,
+        route,
+        fuse_gate: false,
+    });
 }
 
 #[test]
 fn one_expert_receiving_every_token_spans_every_token_tile() {
-    let shape = Shape { tokens: 200, rows: 128, k: 256, experts: 4 };
+    let shape = Shape {
+        tokens: 200,
+        rows: 128,
+        k: 256,
+        experts: 4,
+    };
     let route = vec![2.0; shape.tokens];
-    assert_grouped_matches_oracle(&Case { shape, route, fuse_gate: false });
+    assert_grouped_matches_oracle(&Case {
+        shape,
+        route,
+        fuse_gate: false,
+    });
 }
 
 #[test]
 fn tokens_cycling_through_every_expert_match_the_f32_oracle() {
-    let shape = Shape { tokens: 256, rows: 128, k: 512, experts: 8 };
-    let route = (0..shape.tokens).map(|token| (token % shape.experts) as f32).collect();
-    assert_grouped_matches_oracle(&Case { shape, route, fuse_gate: false });
+    let shape = Shape {
+        tokens: 256,
+        rows: 128,
+        k: 512,
+        experts: 8,
+    };
+    let route = (0..shape.tokens)
+        .map(|token| (token % shape.experts) as f32)
+        .collect();
+    assert_grouped_matches_oracle(&Case {
+        shape,
+        route,
+        fuse_gate: false,
+    });
 }
 
 #[test]
 fn a_fused_epilogue_reads_its_operands_at_the_scattered_token() {
-    let shape = Shape { tokens: 300, rows: 192, k: 512, experts: 8 };
+    let shape = Shape {
+        tokens: 300,
+        rows: 192,
+        k: 512,
+        experts: 8,
+    };
     let route = heavy_expert_route(shape.tokens, shape.experts);
-    assert_grouped_matches_oracle(&Case { shape, route, fuse_gate: true });
+    assert_grouped_matches_oracle(&Case {
+        shape,
+        route,
+        fuse_gate: true,
+    });
 }
 
 #[test]
 fn below_the_tiled_token_minimum_the_dense_gather_kernel_runs() {
-    let shape = Shape { tokens: MIN_TOKENS_FOR_TILES - 1, rows: 128, k: 256, experts: 8 };
+    let shape = Shape {
+        tokens: MIN_TOKENS_FOR_TILES - 1,
+        rows: 128,
+        k: 256,
+        experts: 8,
+    };
     let route = heavy_expert_route(shape.tokens, shape.experts);
-    let outputs = run(&Case { shape, route, fuse_gate: false });
+    let outputs = run(&Case {
+        shape,
+        route,
+        fuse_gate: false,
+    });
     assert!(
         !grouped_kernel_ran(&outputs.kernel_keys),
         "a prefill shorter than the tiled minimum must not take the grouped kernel: {:?}",
@@ -308,14 +400,25 @@ fn below_the_tiled_token_minimum_the_dense_gather_kernel_runs() {
 
 #[test]
 fn an_expert_index_past_the_slab_raises_the_same_error_as_cpu() {
-    let shape = Shape { tokens: 200, rows: 64, k: 256, experts: 8 };
+    let shape = Shape {
+        tokens: 200,
+        rows: 64,
+        k: 256,
+        experts: 8,
+    };
     let mut route = heavy_expert_route(shape.tokens, shape.experts);
     route[137] = shape.experts as f32 + 5.0;
     let (program, output) = program(&shape, false);
     let stack = quantized_expert_stack(&shape);
     let activation = unit_values(2000, shape.tokens * shape.k, -1.0, 1.0);
     let named = [
-        ("weight", QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &stack }),
+        (
+            "weight",
+            QuantizedBlock::Packed {
+                codec: Codec::Q8_0,
+                bytes: &stack,
+            },
+        ),
         ("route", QuantizedBlock::Float32(&route)),
         ("activation", QuantizedBlock::Float32(&activation)),
     ];
@@ -335,30 +438,53 @@ fn an_expert_index_past_the_slab_raises_the_same_error_as_cpu() {
         .expect("metal plans the gathered q8_0 expert product");
     let metal_error = omega::execute_plan_named(&plan, &named)
         .expect_err("metal rejects the out-of-range expert instead of clamping it away");
-    let TensorError::GatherIndexOutOfRange { node: cpu_node, extent: cpu_extent, .. } = cpu_error
+    let TensorError::GatherIndexOutOfRange {
+        node: cpu_node,
+        extent: cpu_extent,
+        ..
+    } = cpu_error
     else {
         panic!("cpu raised {cpu_error} instead of GatherIndexOutOfRange");
     };
-    let MetalError::Tensor(TensorError::GatherIndexOutOfRange { node, index, extent }) =
-        metal_error
+    let MetalError::Tensor(TensorError::GatherIndexOutOfRange {
+        node,
+        index,
+        extent,
+    }) = metal_error
     else {
         panic!("metal raised {metal_error:?} instead of GatherIndexOutOfRange");
     };
     assert_eq!((node, extent), (cpu_node, cpu_extent));
-    assert_eq!(index, shape.experts as i64 + 5, "the fault carries the raw fetched index");
+    assert_eq!(
+        index,
+        shape.experts as i64 + 5,
+        "the fault carries the raw fetched index"
+    );
 }
 
 #[test]
 fn control_an_oracle_routed_to_other_experts_disagrees_by_a_gross_factor() {
-    let shape = Shape { tokens: 300, rows: 192, k: 512, experts: 8 };
+    let shape = Shape {
+        tokens: 300,
+        rows: 192,
+        k: 512,
+        experts: 8,
+    };
     let route = heavy_expert_route(shape.tokens, shape.experts);
     let matching = run(&Case {
         shape: Shape { ..shape },
         route: route.clone(),
         fuse_gate: false,
     });
-    let rotated: Vec<f32> = route.iter().map(|expert| (expert + 1.0) % shape.experts as f32).collect();
-    let misrouted = run(&Case { shape, route: rotated, fuse_gate: false });
+    let rotated: Vec<f32> = route
+        .iter()
+        .map(|expert| (expert + 1.0) % shape.experts as f32)
+        .collect();
+    let misrouted = run(&Case {
+        shape,
+        route: rotated,
+        fuse_gate: false,
+    });
     let gross = worst_relative_row_error(&misrouted.oracle, &matching.metal, 192);
     assert!(
         gross > RELATIVE_TOLERANCE,

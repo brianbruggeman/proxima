@@ -109,7 +109,11 @@ fn q4_0_weights(in_dim: usize, out_dim: usize, seed: u64) -> Weights {
     }
     let mut dequantized = vec![0.0f32; out_dim * in_dim];
     q4_0::dequantize(&packed, &mut dequantized).unwrap();
-    Weights { codec: omega::Codec::Q4_0, packed, dequantized }
+    Weights {
+        codec: omega::Codec::Q4_0,
+        packed,
+        dequantized,
+    }
 }
 
 fn q6k_weights(in_dim: usize, out_dim: usize, seed: u64) -> Weights {
@@ -120,7 +124,11 @@ fn q6k_weights(in_dim: usize, out_dim: usize, seed: u64) -> Weights {
     }
     let mut dequantized = vec![0.0f32; out_dim * in_dim];
     q6_k::dequantize(&packed, &mut dequantized).unwrap();
-    Weights { codec: omega::Codec::Q6K, packed, dequantized }
+    Weights {
+        codec: omega::Codec::Q6K,
+        packed,
+        dequantized,
+    }
 }
 
 fn assert_fused_epilogue_matches_the_cpu_oracle(
@@ -134,7 +142,10 @@ fn assert_fused_epilogue_matches_the_cpu_oracle(
     let scale = random_vec(seed + 31, out_dim);
     let (program, root) = scaled_matmul_program(tokens as u32, in_dim as u32, out_dim as u32);
     let blocks = [
-        QuantizedBlock::Packed { codec: weights.codec, bytes: &weights.packed },
+        QuantizedBlock::Packed {
+            codec: weights.codec,
+            bytes: &weights.packed,
+        },
         QuantizedBlock::Float32(&activation),
         QuantizedBlock::Float32(&scale),
     ];
@@ -150,7 +161,11 @@ fn assert_fused_epilogue_matches_the_cpu_oracle(
         kernel_keys.iter().any(|key| key.contains("epi")),
         "the scale never fused into the reduce, so no epilogue write-back ran: {kernel_keys:?}"
     );
-    assert_eq!(output.len(), tokens * out_dim, "degenerate gate: wrong element count");
+    assert_eq!(
+        output.len(),
+        tokens * out_dim,
+        "degenerate gate: wrong element count"
+    );
     let expected: Vec<f32> = (0..tokens * out_dim)
         .map(|index| {
             let (token, row) = (index / out_dim, index % out_dim);
@@ -163,7 +178,11 @@ fn assert_fused_epilogue_matches_the_cpu_oracle(
             (sum * f64::from(scale[row])) as f32
         })
         .collect();
-    let max_diff = output.iter().zip(&expected).map(|(left, right)| (left - right).abs()).fold(0.0, f32::max);
+    let max_diff = output
+        .iter()
+        .zip(&expected)
+        .map(|(left, right)| (left - right).abs())
+        .fold(0.0, f32::max);
     let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0, f32::max);
     assert!(
         max_diff / max_magnitude < RELATIVE_TOLERANCE,

@@ -470,7 +470,9 @@ fn main() {
         "tensor count round-trips"
     );
 
-    let parent = output.parent().expect("fixture path has a parent directory");
+    let parent = output
+        .parent()
+        .expect("fixture path has a parent directory");
     std::fs::create_dir_all(parent).expect("create fixture directory");
     std::fs::write(&output, &written).expect("write synthetic gguf fixture");
 }

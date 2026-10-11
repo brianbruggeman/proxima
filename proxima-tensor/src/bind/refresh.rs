@@ -67,7 +67,9 @@ pub enum RefreshRefusal {
     /// never itself a member of `BoundOp::operands()` — not reachable from a
     /// retained `BoundOp` plus `program` alone (SLICE1B.md's own residual).
     /// A NAMED FALLBACK, not attempted this slice.
-    #[error("position {position}, node {node}: {kind} is matcher-recognized, refresh refuses rather than approximate its kernel scalars/operand layouts")]
+    #[error(
+        "position {position}, node {node}: {kind} is matcher-recognized, refresh refuses rather than approximate its kernel scalars/operand layouts"
+    )]
     MatcherFusedKind {
         position: usize,
         node: NodeId,
@@ -83,13 +85,17 @@ pub enum RefreshRefusal {
     /// composition (a second, separate `compose` call this slice's window
     /// recovery does not extend to) — a NAMED FALLBACK, not attempted this
     /// slice.
-    #[error("position {position}, node {node}: reduce-epilogue-fusion replaced this node's identity; epilogue recomposition is not attempted this slice")]
+    #[error(
+        "position {position}, node {node}: reduce-epilogue-fusion replaced this node's identity; epilogue recomposition is not attempted this slice"
+    )]
     EpilogueFusionNotLocal { position: usize, node: NodeId },
 
     /// `program[node]` is not the [`Op`] variant this position's
     /// [`BoundOpKind`] expects — the retained position and the immutable
     /// program have drifted out of correspondence.
-    #[error("position {position}, node {node}: program op does not match this position's BoundOpKind")]
+    #[error(
+        "position {position}, node {node}: program op does not match this position's BoundOpKind"
+    )]
     OpKindMismatch { position: usize, node: NodeId },
 
     /// The window `recover_window` rebuilt from `program` recomposed to a
@@ -101,7 +107,9 @@ pub enum RefreshRefusal {
     /// genuinely different fusion decision was made at the new shapes. In
     /// either case the ONLY safe answer is to refuse rather than bind a
     /// silently different composition.
-    #[error("position {position}, node {node}: recomposed element_body step sequence {recomposed:?} does not match retained {retained:?}")]
+    #[error(
+        "position {position}, node {node}: recomposed element_body step sequence {recomposed:?} does not match retained {retained:?}"
+    )]
     RecomposedBodyMismatch {
         position: usize,
         node: NodeId,
@@ -118,7 +126,9 @@ pub enum RefreshRefusal {
     /// materialized extent was smaller than the reduce's iteration extent at
     /// bind time). Refuses rather than silently bind a different leaf than
     /// the one the real program actually reads.
-    #[error("position {position}, node {node}: recomposed operand set {recomposed:?} does not match retained {retained:?}")]
+    #[error(
+        "position {position}, node {node}: recomposed operand set {recomposed:?} does not match retained {retained:?}"
+    )]
     RecomposedOperandsDiffer {
         position: usize,
         node: NodeId,
@@ -141,7 +151,13 @@ fn is_masked(mask: u64, changed_symbols: u64) -> bool {
     mask & changed_symbols != 0
 }
 
-fn operand_ids(operands: &[(NodeId, super::types_layout_boundop::Layout, Option<super::types_layout_boundop::Lookup>)]) -> Vec<NodeId> {
+fn operand_ids(
+    operands: &[(
+        NodeId,
+        super::types_layout_boundop::Layout,
+        Option<super::types_layout_boundop::Lookup>,
+    )],
+) -> Vec<NodeId> {
     operands.iter().map(|(node, _, _)| *node).collect()
 }
 
@@ -279,7 +295,15 @@ fn refresh_one(
             ..bound_op.clone()
         }),
         BoundOpKind::Elementwise { body, .. } => refresh_elementwise(
-            position, bound_op, body, program, retires, ones, values, numeric_policy, new_shapes,
+            position,
+            bound_op,
+            body,
+            program,
+            retires,
+            ones,
+            values,
+            numeric_policy,
+            new_shapes,
         ),
         BoundOpKind::Reduce {
             element_body,
@@ -456,13 +480,18 @@ fn refresh_reduce(
         });
     }
 
-    build_reduce_op(bound_op.node, reduce, new_shapes, recomposed_body, recomposed_operands).map_err(
-        |source| RefreshRefusal::ShapeError {
-            position,
-            node: bound_op.node,
-            source,
-        },
+    build_reduce_op(
+        bound_op.node,
+        reduce,
+        new_shapes,
+        recomposed_body,
+        recomposed_operands,
     )
+    .map_err(|source| RefreshRefusal::ShapeError {
+        position,
+        node: bound_op.node,
+        source,
+    })
 }
 
 #[cfg(test)]
@@ -477,7 +506,11 @@ mod tests {
 
     fn per_position_masks(program: &[Op], resolved: &[BoundOp]) -> Vec<u64> {
         let node_masks = shape::symbol_dependency_output_masks(program);
-        let aggregate = |node: NodeId| node_masks[node.0 as usize].iter().fold(0, |mask, axis| mask | axis);
+        let aggregate = |node: NodeId| {
+            node_masks[node.0 as usize]
+                .iter()
+                .fold(0, |mask, axis| mask | axis)
+        };
         resolved
             .iter()
             .map(|op| {
@@ -485,7 +518,9 @@ mod tests {
                 for (node, _, _) in op.all_read_sources() {
                     mask |= aggregate(*node);
                 }
-                if let BoundOpKind::Reduce { keep: Keep::Reduce, .. } = &op.kind
+                if let BoundOpKind::Reduce {
+                    keep: Keep::Reduce, ..
+                } = &op.kind
                     && let Some(Op::Reduce(reduce)) = program.get(op.node.0 as usize)
                 {
                     mask |= shape::symbol_dependency_iteration_mask(reduce, &node_masks);
@@ -572,7 +607,12 @@ mod tests {
         )
         .expect("a held-prologue reduce recomposes locally over its fixed window");
 
-        assert_eq!(refreshed.len(), resolved_high.len(), "positions compared: {}", refreshed.len());
+        assert_eq!(
+            refreshed.len(),
+            resolved_high.len(),
+            "positions compared: {}",
+            refreshed.len()
+        );
         assert_eq!(
             refreshed, resolved_high,
             "locally recomposed bound ops must equal a fresh bind_with_fusion"
@@ -598,6 +638,9 @@ mod tests {
         )
         .expect("no position is masked");
 
-        assert_eq!(refreshed, resolved_low, "unmasked positions are carried forward unchanged");
+        assert_eq!(
+            refreshed, resolved_low,
+            "unmasked positions are carried forward unchanged"
+        );
     }
 }

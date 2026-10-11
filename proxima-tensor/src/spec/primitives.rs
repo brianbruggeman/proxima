@@ -619,7 +619,12 @@ pub fn greedy_argmax(
             (unit, "gw->sgw"),
         ],
     )?;
-    let peak = reduce_blocked(program, ScalarOp::Maximum, ReduceInit::NegativeInfinity, grid)?;
+    let peak = reduce_blocked(
+        program,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        grid,
+    )?;
     let at_peak = elementwise(
         program,
         DType::Float32,
@@ -697,16 +702,20 @@ fn reduce_blocked(
         "sgw->sgw",
         "sg->sgw",
     )?;
-    reduce(program, DType::Float32, body, init, partial, "sg->sg", "s->sg")
+    reduce(
+        program,
+        DType::Float32,
+        body,
+        init,
+        partial,
+        "sg->sg",
+        "s->sg",
+    )
 }
 
 /// `block * width + lane` for every `[block, lane]` cell, as an `f32` index
 /// tensor -- the vocabulary position each cell of the blocked row holds.
-fn block_index(
-    program: &mut Vec<Op>,
-    blocks: u32,
-    width: u32,
-) -> Result<NodeId, TensorError> {
+fn block_index(program: &mut Vec<Op>, blocks: u32, width: u32) -> Result<NodeId, TensorError> {
     let block = op::append(
         program,
         Op::Iota {

@@ -216,7 +216,10 @@ pub fn causal_conv1d(
 /// `cache_position > 0`; position zero selects the upstream prefill branch.
 /// `roll_indices` is the caller-owned permutation `(1..L, 0)` so the cache
 /// remains explicit input/output state.
-#[expect(clippy::too_many_arguments, reason = "operand node ids are the builder's positional signature; each call site names every one")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "operand node ids are the builder's positional signature; each call site names every one"
+)]
 pub fn causal_conv1d_step(
     program: &mut Vec<Op>,
     state_in: NodeId,
@@ -487,7 +490,10 @@ pub fn causal_conv1d_prefill_state(
 /// `weight[K-1]` always pairs with `input[t]` and `weight[0]` with
 /// `input[t - (K-1)]`, the same pairing this function's own weight map
 /// (`ld->sld`) uses.
-#[expect(clippy::too_many_arguments, reason = "operand node ids are the builder's positional signature; each call site names every one")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "operand node ids are the builder's positional signature; each call site names every one"
+)]
 pub fn append_short_conv_mixer(
     program: &mut Vec<Op>,
     x: NodeId,
@@ -522,7 +528,10 @@ pub fn append_short_conv_mixer(
 }
 
 /// returns the prefill residual and caller-owned convolution history.
-#[expect(clippy::too_many_arguments, reason = "operand node ids are the builder's positional signature; each call site names every one")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "operand node ids are the builder's positional signature; each call site names every one"
+)]
 pub fn append_short_conv_prefill_mixer(
     program: &mut Vec<Op>,
     x: NodeId,
@@ -558,7 +567,10 @@ pub fn append_short_conv_prefill_mixer(
     Ok((residual, state_out))
 }
 
-#[expect(clippy::too_many_arguments, reason = "operand node ids are the builder's positional signature; each call site names every one")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "operand node ids are the builder's positional signature; each call site names every one"
+)]
 fn append_short_conv_mixer_with_gated_input(
     program: &mut Vec<Op>,
     x: NodeId,
@@ -668,7 +680,10 @@ fn append_short_conv_mixer_with_gated_input(
 /// absolute token position and is clamped to `[0, l_cache - 1]`; call this
 /// cached path only for `cache_position > 0`, because position zero selects the
 /// upstream prefill branch. `roll_indices` is `(1..l_cache, 0)`.
-#[expect(clippy::too_many_arguments, reason = "operand node ids are the builder's positional signature; each call site names every one")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "operand node ids are the builder's positional signature; each call site names every one"
+)]
 pub fn append_short_conv_cached_mixer_step(
     program: &mut Vec<Op>,
     x: NodeId,

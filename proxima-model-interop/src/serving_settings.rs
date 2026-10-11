@@ -16,9 +16,9 @@ use crate::RopeScaling;
 use crate::codec_policy_settings::CodecPolicySettings;
 use crate::prompt_cache_settings::PromptCacheSettings;
 use crate::serving::{
-    ContextLength, DEFAULT_BATCH_SIZE, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH, DEFAULT_RESIDENT_KV_BYTES,
-    DEFAULT_RESIDENT_PREFILL_PLAN_BYTES, DEFAULT_UBATCH_SIZE, GdnPrefillBackend, NamePattern,
-    ServingConfig, WeightPrecisionRule,
+    ContextLength, DEFAULT_BATCH_SIZE, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH,
+    DEFAULT_RESIDENT_KV_BYTES, DEFAULT_RESIDENT_PREFILL_PLAN_BYTES, DEFAULT_UBATCH_SIZE,
+    GdnPrefillBackend, NamePattern, ServingConfig, WeightPrecisionRule,
 };
 use crate::speculative_settings::SpeculativeSettings;
 
@@ -171,7 +171,9 @@ pub enum WeightPrecisionRuleSettings {
 #[serde(default)]
 pub struct ServingSettings {
     /// `ServingConfig::model_path`: `-m`, the model file.
-    #[setting(default = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf")]
+    #[setting(
+        default = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf"
+    )]
     #[builder(default = DEFAULT_MODEL_PATH.to_owned())]
     pub model_path: String,
     /// `ServingConfig::context_length`: `-c`; `0` serves the model's native length.
@@ -495,7 +497,9 @@ impl ServingSettings {
             warm_model_buffers_at_load: self.warm_model_buffers_at_load,
             admission_schedule: self.admission_schedule.as_admission_schedule(),
             phase_schedule: self.phase_schedule.as_phase_schedule(),
-            expert_residency_schedule: self.expert_residency_schedule.as_expert_residency_schedule(),
+            expert_residency_schedule: self
+                .expert_residency_schedule
+                .as_expert_residency_schedule(),
             speculative: self.speculative.as_speculative_config(),
             prompt_cache: self.prompt_cache.as_prompt_cache_config(),
             ..ServingConfig::default()
@@ -527,7 +531,11 @@ mod round_trip {
     fn cleared_section_env() -> Vec<(String, Option<String>)> {
         std::env::vars_os()
             .filter_map(|(key, _)| key.into_string().ok())
-            .filter(|key| SECTION_PREFIXES.iter().any(|prefix| key.starts_with(prefix)))
+            .filter(|key| {
+                SECTION_PREFIXES
+                    .iter()
+                    .any(|prefix| key.starts_with(prefix))
+            })
             .map(|key| (key, None))
             .collect()
     }
@@ -546,12 +554,17 @@ mod round_trip {
                 .map(|(key, value)| ((*key).to_owned(), Some((*value).to_owned()))),
         );
         let parsed_env = temp_env::with_vars(env, || {
-            ServingSettings::from_env()
-                .unwrap_or_else(|err| panic!("the env loader failed: {err}"))
+            ServingSettings::from_env().unwrap_or_else(|err| panic!("the env loader failed: {err}"))
         });
 
-        assert_eq!(&parsed_toml, via_builder, "the toml loader differs from the builder");
-        assert_eq!(&parsed_env, via_builder, "the env loader differs from the builder");
+        assert_eq!(
+            &parsed_toml, via_builder,
+            "the toml loader differs from the builder"
+        );
+        assert_eq!(
+            &parsed_env, via_builder,
+            "the env loader differs from the builder"
+        );
     }
 }
 
@@ -673,7 +686,10 @@ beta_slow = 1.0
             .build();
         let from_env = temp_env::with_vars(
             [
-                ("PROXIMA_SERVING_MODEL_PATH", Some("/models/e2b-it-qat.gguf")),
+                (
+                    "PROXIMA_SERVING_MODEL_PATH",
+                    Some("/models/e2b-it-qat.gguf"),
+                ),
                 ("PROXIMA_SERVING_CONTEXT_LENGTH", Some("32768")),
                 ("PROXIMA_SERVING_CONTEXT_EXTRAPOLATE", Some("true")),
                 ("PROXIMA_SERVING_PARALLEL_SEQUENCES", Some("2")),
@@ -684,7 +700,10 @@ beta_slow = 1.0
                 ("PROXIMA_SERVING_UBATCH_SIZE", Some("128")),
                 ("PROXIMA_SERVING_GPU_LAYERS", Some("99")),
                 ("PROXIMA_SERVING_GPU_MEMORY_FIT", Some("false")),
-                ("PROXIMA_SERVING_GPU_MEMORY_LIMIT_BYTES", Some("17179869184")),
+                (
+                    "PROXIMA_SERVING_GPU_MEMORY_LIMIT_BYTES",
+                    Some("17179869184"),
+                ),
                 ("PROXIMA_SERVING_KV_OFFLOAD", Some("true")),
                 ("PROXIMA_SERVING_MULTIMODAL_PROJECTOR", Some("true")),
                 ("PROXIMA_SERVING_REASONING_BUDGET", Some("1024")),
@@ -824,10 +843,10 @@ epilogue_sources = true
         #[cfg(all(feature = "metal", target_os = "macos"))]
         assert_eq!(lowered.math_mode, MathMode::Fast);
 
-        let defaults = temp_env::with_vars(
-            SAMPLING_ENV_KEYS.map(|key| (key, None::<&str>)),
-            || ServingSettings::from_env().expect("the unset env resolves to defaults"),
-        );
+        let defaults =
+            temp_env::with_vars(SAMPLING_ENV_KEYS.map(|key| (key, None::<&str>)), || {
+                ServingSettings::from_env().expect("the unset env resolves to defaults")
+            });
         assert_eq!(
             defaults.numeric_policy,
             NumericPolicy::llama_relaxed().with_epilogue_sources(true)
@@ -839,8 +858,9 @@ epilogue_sources = true
     #[cfg(all(feature = "metal", target_os = "macos"))]
     #[test]
     fn serving_scalars_dispatch_type_lowers_and_round_trips() {
-        let from_toml: ServingSettings = conflaguration::from_toml_str("dispatch_type = \"concurrent\"")
-            .expect("the dispatch type toml parses");
+        let from_toml: ServingSettings =
+            conflaguration::from_toml_str("dispatch_type = \"concurrent\"")
+                .expect("the dispatch type toml parses");
         let built = ServingSettings::builder()
             .dispatch_type(DispatchTypeName::Concurrent)
             .build();
@@ -856,10 +876,13 @@ epilogue_sources = true
             DispatchType::Concurrent
         );
         assert_eq!(
-            ServingSettings::default().as_serving_config(&[]).dispatch_type,
+            ServingSettings::default()
+                .as_serving_config(&[])
+                .dispatch_type,
             DispatchType::Serial
         );
-        let refused = conflaguration::from_toml_str::<ServingSettings>("dispatch_type = \"parallel\"");
+        let refused =
+            conflaguration::from_toml_str::<ServingSettings>("dispatch_type = \"parallel\"");
         assert!(refused.is_err(), "an unknown dispatch type is refused");
     }
 
@@ -896,7 +919,10 @@ epilogue_sources = true
         }
 
         let default = ServingSettings::default();
-        assert_eq!(default.attention_simdgroup_count, AttentionSimdgroupCount::Legacy);
+        assert_eq!(
+            default.attention_simdgroup_count,
+            AttentionSimdgroupCount::Legacy
+        );
         assert!(
             default.as_serving_config(&[]).attention_variant.is_none(),
             "legacy count leaves the sized attention selection in place"
@@ -904,7 +930,10 @@ epilogue_sources = true
 
         let invalid: Result<ServingSettings, _> =
             conflaguration::from_toml_str("attention_simdgroup_count = \"groups16\"");
-        assert!(invalid.is_err(), "unsupported simdgroup counts are rejected");
+        assert!(
+            invalid.is_err(),
+            "unsupported simdgroup counts are rejected"
+        );
     }
 
     #[cfg(all(
@@ -944,7 +973,10 @@ epilogue_sources = true
         }
 
         let default = ServingSettings::default();
-        assert_eq!(default.attention_tile_height, AttentionTileHeightSetting::Legacy);
+        assert_eq!(
+            default.attention_tile_height,
+            AttentionTileHeightSetting::Legacy
+        );
         assert!(
             default.as_serving_config(&[]).attention_variant.is_none(),
             "legacy tile height and count preserve the default dispatch"
@@ -954,7 +986,6 @@ epilogue_sources = true
             conflaguration::from_toml_str("attention_tile_height = \"rows32\"");
         assert!(invalid.is_err(), "unsupported tile heights are rejected");
     }
-
 
     #[test]
     fn serving_scalars_weight_precision_and_fallbacks_lower_and_round_trip() {
@@ -992,7 +1023,10 @@ target = "q8_0"
             .build();
         let from_env = temp_env::with_vars(
             [
-                ("PROXIMA_SERVING_WEIGHT_PRECISION", Some(WEIGHT_PRECISION_JSON)),
+                (
+                    "PROXIMA_SERVING_WEIGHT_PRECISION",
+                    Some(WEIGHT_PRECISION_JSON),
+                ),
                 ("PROXIMA_SERVING_GDN_PREFILL_BACKEND", Some("mlx")),
                 ("PROXIMA_SERVING_GPU_CORRECTNESS_FALLBACK", Some("true")),
             ],
@@ -1027,7 +1061,10 @@ target = "q8_0"
         let missing_pattern = conflaguration::from_toml_str::<ServingSettings>(
             "[[weight_precision]]\npattern_kind = \"exact\"\ntarget = \"q4_0\"",
         );
-        assert!(missing_pattern.is_err(), "an exact rule without a pattern is refused");
+        assert!(
+            missing_pattern.is_err(),
+            "an exact rule without a pattern is refused"
+        );
     }
 
     #[test]
@@ -1076,7 +1113,10 @@ warm_model_buffers_at_load = false
                 ("PROXIMA_SERVING_PLAN_REFIT", Some("false")),
                 ("PROXIMA_SERVING_COMMAND_BUFFER_CHUNKS", Some("8")),
                 ("PROXIMA_SERVING_MAX_COMMAND_BUFFERS_PER_TOKEN", Some("12")),
-                ("PROXIMA_SERVING_RESIDENT_PREFILL_PLAN_BYTES", Some("805306368")),
+                (
+                    "PROXIMA_SERVING_RESIDENT_PREFILL_PLAN_BYTES",
+                    Some("805306368"),
+                ),
                 ("PROXIMA_SERVING_RESIDENT_KV_BYTES", Some("268435456")),
                 ("PROXIMA_SERVING_OVERLAP_TRANSFER_COMPUTE", Some("true")),
                 ("PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD", Some("false")),
@@ -1106,19 +1146,40 @@ warm_model_buffers_at_load = false
         let lowered = defaults.as_serving_config(&[]);
         let today = ServingConfig::default();
         assert_eq!(lowered.prefill_one_evaluation, today.prefill_one_evaluation);
-        assert_eq!(lowered.prefill_chunk_positions, today.prefill_chunk_positions);
-        assert_eq!(lowered.cached_attention_fusion, today.cached_attention_fusion);
+        assert_eq!(
+            lowered.prefill_chunk_positions,
+            today.prefill_chunk_positions
+        );
+        assert_eq!(
+            lowered.cached_attention_fusion,
+            today.cached_attention_fusion
+        );
         assert_eq!(lowered.gated_delta_net_fusion, today.gated_delta_net_fusion);
         assert_eq!(lowered.moe_topk_fusion, today.moe_topk_fusion);
         assert_eq!(lowered.plan_time_constants, today.plan_time_constants);
         assert_eq!(lowered.plan_refit, today.plan_refit);
         assert_eq!(lowered.command_buffer_chunks, today.command_buffer_chunks);
-        assert_eq!(lowered.max_command_buffers_per_token, today.max_command_buffers_per_token);
-        assert_eq!(lowered.resident_prefill_plan_bytes, today.resident_prefill_plan_bytes);
+        assert_eq!(
+            lowered.max_command_buffers_per_token,
+            today.max_command_buffers_per_token
+        );
+        assert_eq!(
+            lowered.resident_prefill_plan_bytes,
+            today.resident_prefill_plan_bytes
+        );
         assert_eq!(lowered.resident_kv_bytes, today.resident_kv_bytes);
-        assert_eq!(lowered.overlap_transfer_compute, today.overlap_transfer_compute);
-        assert_eq!(lowered.warm_model_buffers_at_load, today.warm_model_buffers_at_load);
-        assert!(today.warm_model_buffers_at_load, "the warm-up is on by default");
+        assert_eq!(
+            lowered.overlap_transfer_compute,
+            today.overlap_transfer_compute
+        );
+        assert_eq!(
+            lowered.warm_model_buffers_at_load,
+            today.warm_model_buffers_at_load
+        );
+        assert!(
+            today.warm_model_buffers_at_load,
+            "the warm-up is on by default"
+        );
     }
 
     #[test]
@@ -1143,9 +1204,17 @@ warm_model_buffers_at_load = false
 
         assert_eq!(from_toml, built, "toml and builder agree");
         assert_eq!(from_env, built, "env and builder agree");
-        assert_eq!(built.as_serving_config(&[]).admission_schedule.max_concurrent_requests, 4);
         assert_eq!(
-            ServingSettings::default().as_serving_config(&[]).admission_schedule,
+            built
+                .as_serving_config(&[])
+                .admission_schedule
+                .max_concurrent_requests,
+            4
+        );
+        assert_eq!(
+            ServingSettings::default()
+                .as_serving_config(&[])
+                .admission_schedule,
             ServingConfig::default().admission_schedule,
         );
 
@@ -1177,9 +1246,16 @@ warm_model_buffers_at_load = false
 
         assert_eq!(from_toml, built, "toml and builder agree");
         assert_eq!(from_env, built, "env and builder agree");
-        assert!(!built.as_serving_config(&[]).phase_schedule.prefill_before_decode);
+        assert!(
+            !built
+                .as_serving_config(&[])
+                .phase_schedule
+                .prefill_before_decode
+        );
         assert_eq!(
-            ServingSettings::default().as_serving_config(&[]).phase_schedule,
+            ServingSettings::default()
+                .as_serving_config(&[])
+                .phase_schedule,
             ServingConfig::default().phase_schedule,
         );
     }
@@ -1306,10 +1382,10 @@ ngram_mod_n_min = 48\n";
         assert_eq!(lowered.prompt_cache.byte_budget, 1_073_741_824);
         assert_eq!(lowered.speculative.ngram_simple.size_n, 16);
 
-        let off_switch = temp_env::with_vars(
-            [("PROXIMA_PROMPT_CACHE_BYTE_BUDGET", Some("0"))],
-            || ServingSettings::from_env().expect("the off switch env parses"),
-        );
+        let off_switch =
+            temp_env::with_vars([("PROXIMA_PROMPT_CACHE_BYTE_BUDGET", Some("0"))], || {
+                ServingSettings::from_env().expect("the off switch env parses")
+            });
         assert!(!off_switch.as_serving_config(&[]).prompt_cache.is_enabled());
 
         let refused = conflaguration::from_toml_str::<ServingSettings>(

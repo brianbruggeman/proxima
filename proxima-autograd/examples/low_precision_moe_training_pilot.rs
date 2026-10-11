@@ -295,7 +295,9 @@ pub fn encode_packed_weights(
             .map(|value| proxima_gguf::quant::bf8_e5m2::encode(*value))
             .collect()),
         WeightFormat::Bf4E2M1 => master_weights
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 proxima_gguf::quant::bf4_e2m1::pack_pair(pair[0], pair[1]).map_err(Into::into)
             })

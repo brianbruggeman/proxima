@@ -21,8 +21,8 @@
 
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
-    AttentionScoreScale, CacheStrategy, EmbeddingScale, LayerAttentionConfig, LayerKind, LayerSchedule,
-    ModelDescriptor, gqa_descriptor_from_shape,
+    AttentionScoreScale, CacheStrategy, EmbeddingScale, LayerAttentionConfig, LayerKind,
+    LayerSchedule, ModelDescriptor, gqa_descriptor_from_shape,
 };
 
 use crate::bind::{
@@ -90,8 +90,15 @@ pub fn descriptor_from_gguf(
     // ROW 418/421 measured the cost of computing every row instead).
     let last_row_only = !matches!(classify_task(parsed).task, ModelTask::Embedding);
     let descriptor = with_conv_layers(descriptor, parsed, architecture)?;
-    let descriptor = with_header_window(with_header_scales(descriptor, parsed, &architecture.family), parsed, &architecture.family);
-    Ok(ModelDescriptor { last_row_only, ..descriptor })
+    let descriptor = with_header_window(
+        with_header_scales(descriptor, parsed, &architecture.family),
+        parsed,
+        &architecture.family,
+    );
+    Ok(ModelDescriptor {
+        last_row_only,
+        ..descriptor
+    })
 }
 
 /// A checkpoint whose header declares zero KV heads on some layers is a hybrid
@@ -115,20 +122,33 @@ fn with_conv_layers(
         .layers
         .iter()
         .zip(kinds)
-        .map(|(layer, kind)| LayerSchedule { kind, ..layer.clone() })
+        .map(|(layer, kind)| LayerSchedule {
+            kind,
+            ..layer.clone()
+        })
         .collect();
     Ok(ModelDescriptor {
         layers,
         feed_forward: metadata_u32_optional(parsed, &format!("{family}.feed_forward_length")),
-        leading_dense_block_count: metadata_u32_optional(parsed, &format!("{family}.leading_dense_block_count")),
+        leading_dense_block_count: metadata_u32_optional(
+            parsed,
+            &format!("{family}.leading_dense_block_count"),
+        ),
         l_cache: metadata_u32_optional(parsed, &format!("{family}.shortconv.l_cache")),
         cache_strategy: CacheStrategy::Cacheless,
         ..descriptor
     })
 }
 
-fn layer_kinds(parsed: &ParsedGguf, architecture: &ModelHparams) -> Result<Vec<LayerKind>, InteropError> {
-    let names: Vec<&str> = parsed.tensors.iter().map(|tensor| tensor.name.as_str()).collect();
+fn layer_kinds(
+    parsed: &ParsedGguf,
+    architecture: &ModelHparams,
+) -> Result<Vec<LayerKind>, InteropError> {
+    let names: Vec<&str> = parsed
+        .tensors
+        .iter()
+        .map(|tensor| tensor.name.as_str())
+        .collect();
     architecture
         .kv_heads_by_layer
         .iter()
@@ -150,7 +170,11 @@ fn layer_kinds(parsed: &ParsedGguf, architecture: &ModelHparams) -> Result<Vec<L
 /// `<family>.attention.sliding_window`, when the header carries it, is the
 /// window of every layer; absent or zero leaves every layer on the full
 /// causal mask, the same reading llama.cpp's `n_swa` gets.
-fn with_header_window(descriptor: ModelDescriptor, parsed: &ParsedGguf, family: &str) -> ModelDescriptor {
+fn with_header_window(
+    descriptor: ModelDescriptor,
+    parsed: &ParsedGguf,
+    family: &str,
+) -> ModelDescriptor {
     let window = metadata_u32_optional(parsed, &format!("{family}.attention.sliding_window"));
     if window == 0 {
         return descriptor;
@@ -166,7 +190,10 @@ fn with_header_window(descriptor: ModelDescriptor, parsed: &ParsedGguf, family: 
             ..layer.clone()
         })
         .collect();
-    ModelDescriptor { layers, ..descriptor }
+    ModelDescriptor {
+        layers,
+        ..descriptor
+    }
 }
 
 fn header_scale(parsed: &ParsedGguf, family: &str, key: &str) -> Option<f32> {
@@ -174,7 +201,11 @@ fn header_scale(parsed: &ParsedGguf, family: &str, key: &str) -> Option<f32> {
     (value != 0.0).then_some(value)
 }
 
-fn with_header_scales(descriptor: ModelDescriptor, parsed: &ParsedGguf, family: &str) -> ModelDescriptor {
+fn with_header_scales(
+    descriptor: ModelDescriptor,
+    parsed: &ParsedGguf,
+    family: &str,
+) -> ModelDescriptor {
     let layers = match header_scale(parsed, family, "attention.scale") {
         Some(scale) => descriptor
             .layers
@@ -203,7 +234,10 @@ fn with_header_scales(descriptor: ModelDescriptor, parsed: &ParsedGguf, family: 
 /// The single-range builder rotates `head_dim` channels. A header whose
 /// `<arch>.rope.dimension_count` says otherwise is partial rotary, which this
 /// program cannot lower; refuse it rather than rotate the wrong width.
-fn require_full_rotary(parsed: &ParsedGguf, architecture: &ModelHparams) -> Result<(), InteropError> {
+fn require_full_rotary(
+    parsed: &ParsedGguf,
+    architecture: &ModelHparams,
+) -> Result<(), InteropError> {
     let key = format!("{}.rope.dimension_count", architecture.family);
     match metadata_u32_optional(parsed, &key) {
         0 => Ok(()),

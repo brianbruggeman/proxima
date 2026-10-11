@@ -26,13 +26,25 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 fn main() {
-    #[cfg(all(feature = "metal", feature = "metal-attn-split-decode", target_os = "macos"))]
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-attn-split-decode",
+        target_os = "macos"
+    ))]
     imp::run();
-    #[cfg(not(all(feature = "metal", feature = "metal-attn-split-decode", target_os = "macos")))]
+    #[cfg(not(all(
+        feature = "metal",
+        feature = "metal-attn-split-decode",
+        target_os = "macos"
+    )))]
     println!("attn_decode_split_probe requires --features metal on macOS");
 }
 
-#[cfg(all(feature = "metal", feature = "metal-attn-split-decode", target_os = "macos"))]
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-attn-split-decode",
+    target_os = "macos"
+))]
 mod imp {
     use core::ffi::c_void;
     use core::ptr::NonNull;
@@ -165,7 +177,10 @@ mod imp {
         device
             .newComputePipelineStateWithFunction_error(&function)
             .unwrap_or_else(|error| {
-                panic!("creates the pipeline for {entry}: {}", error.localizedDescription())
+                panic!(
+                    "creates the pipeline for {entry}: {}",
+                    error.localizedDescription()
+                )
             })
     }
 
@@ -189,7 +204,10 @@ mod imp {
         device: &ProtocolObject<dyn MTLDevice>,
         values: &[f32],
     ) -> Retained<ProtocolObject<dyn MTLBuffer>> {
-        let bytes: Vec<u8> = values.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let bytes: Vec<u8> = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
         shared_buffer(device, &bytes)
     }
 
@@ -266,7 +284,9 @@ mod imp {
         repeats: usize,
     ) -> f64 {
         let command_buffer = queue.commandBuffer().expect("command buffer");
-        let encoder = command_buffer.computeCommandEncoder().expect("compute encoder");
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .expect("compute encoder");
         for repeat in 0..repeats {
             encode(&encoder, launch, &layers[repeat % layers.len()]);
         }
@@ -326,12 +346,7 @@ mod imp {
             .collect()
     }
 
-    fn merged_from_scratch(
-        scratch: &[f32],
-        shape: &Shape,
-        splits: usize,
-        head: usize,
-    ) -> Vec<f32> {
+    fn merged_from_scratch(scratch: &[f32], shape: &Shape, splits: usize, head: usize) -> Vec<f32> {
         let stats_base = HEADS * shape.head_dim * splits;
         let stats = |split: usize| {
             let at = stats_base + (head * splits + split) * 2;
@@ -348,14 +363,17 @@ mod imp {
                 (maximum - global_max).exp()
             }
         };
-        let total: f32 = (0..splits).map(|split| stats(split).1 * weight(split)).sum();
+        let total: f32 = (0..splits)
+            .map(|split| stats(split).1 * weight(split))
+            .sum();
         (0..shape.head_dim)
             .map(|dim| {
                 let quad = dim / 4;
                 let lane = dim % 4;
                 (0..splits)
                     .map(|split| {
-                        let at = (((head * (shape.head_dim / 4) + quad) * splits + split) * 4) + lane;
+                        let at =
+                            (((head * (shape.head_dim / 4) + quad) * splits + split) * 4) + lane;
                         scratch[at] * weight(split)
                     })
                     .sum::<f32>()
@@ -390,24 +408,37 @@ mod imp {
         let op = shape.op();
         let kernel = omega::emit(&op, &PackedOperands::new(), NumericPolicy::llama_relaxed())
             .expect("the decode split kernel emits");
-        assert!(kernel.entry.ends_with("_ds"), "not the decode split form: {}", kernel.entry);
+        assert!(
+            kernel.entry.ends_with("_ds"),
+            "not the decode split form: {}",
+            kernel.entry
+        );
         let default_width = kernel
             .grid
             .threadgroup_width
-            .or(kernel.grid.grid2d.map(|spec| spec.threads_per_threadgroup_x))
+            .or(kernel
+                .grid
+                .grid2d
+                .map(|spec| spec.threads_per_threadgroup_x))
             .unwrap_or(SIMD_WIDTH);
         let default_chunks = (default_width / SIMD_WIDTH) as usize;
         let default_splits = (kernel.grid.threads / (HEADS as u64 * default_width)) as usize;
         let chunks = env_usize("PROBE_CHUNKS", default_chunks);
         let splits = env_usize("PROBE_SPLITS", default_splits);
-        let lanes = std::env::var("PROBE_LANES").ok().map(|value| value.parse().unwrap());
-        let batch = std::env::var("PROBE_BATCH").ok().map(|value| value.parse().unwrap());
+        let lanes = std::env::var("PROBE_LANES")
+            .ok()
+            .map(|value| value.parse().unwrap());
+        let batch = std::env::var("PROBE_BATCH")
+            .ok()
+            .map(|value| value.parse().unwrap());
         let repeats = env_usize("PROBE_REPEATS", 140);
         let passes = env_usize("PROBE_PASSES", 9);
 
         let source = rewrite_constant(&kernel.source, "short lanes_per_key", lanes);
         let source = rewrite_constant(&source, "short batch", batch);
-        let cap = std::env::var("PROBE_CAP").ok().map(|value| value.parse().unwrap());
+        let cap = std::env::var("PROBE_CAP")
+            .ok()
+            .map(|value| value.parse().unwrap());
         let source = rewrite_constant(&source, "long cap", cap);
 
         let device = MTLCreateSystemDefaultDevice().expect("a metal device");
@@ -429,13 +460,18 @@ mod imp {
             lcg.vector(HEADS * plane, 0.5),
         ];
         let scratch_floats = HEADS * shape.head_dim * splits + HEADS * splits * 2;
-        let caches: Vec<CacheSet> = (0..shape.layers).map(|_| cache_set(&mut lcg, &shape)).collect();
+        let caches: Vec<CacheSet> = (0..shape.layers)
+            .map(|_| cache_set(&mut lcg, &shape))
+            .collect();
         let layers: Vec<LayerBuffers> = caches
             .iter()
             .map(|cache| layer_buffers(&device, &query, cache, shape.live_rows, scratch_floats))
             .collect();
         let uniform_words = [HEADS as i64, chunks as i64, splits as i64];
-        let uniform_bytes: Vec<u8> = uniform_words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let uniform_bytes: Vec<u8> = uniform_words
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
         let uniforms = shared_buffer(&device, &uniform_bytes);
         let launch = Launch {
             pipeline: &pipeline,
@@ -445,7 +481,9 @@ mod imp {
         };
 
         let command_buffer = queue.commandBuffer().expect("command buffer");
-        let encoder = command_buffer.computeCommandEncoder().expect("compute encoder");
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .expect("compute encoder");
         encode(&encoder, &launch, &layers[0]);
         encoder.endEncoding();
         command_buffer.commit();

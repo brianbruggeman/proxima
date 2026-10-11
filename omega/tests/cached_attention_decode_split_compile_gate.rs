@@ -101,7 +101,11 @@ fn with_constant(kernel: &Kernel, name: &str, value: u64) -> Kernel {
             .find(';')
             .expect("a constexpr declaration ends in a semicolon");
     let mut rewritten = kernel.clone();
-    rewritten.source = format!("{}{value}{}", &kernel.source[..start], &kernel.source[end..]);
+    rewritten.source = format!(
+        "{}{value}{}",
+        &kernel.source[..start],
+        &kernel.source[end..]
+    );
     rewritten
 }
 
@@ -123,7 +127,11 @@ fn every_lane_layout_and_load_batch_the_sweep_reaches_compiles() {
         let base = omega::emit(&op, &PackedOperands::new(), policy).expect("the partial emits");
         for lanes in [8_u64, 16, 32] {
             for batch in [1_u64, 2, 4] {
-                let kernel = with_constant(&with_constant(&base, "lanes_per_key", lanes), "batch", batch);
+                let kernel = with_constant(
+                    &with_constant(&base, "lanes_per_key", lanes),
+                    "batch",
+                    batch,
+                );
                 compile(
                     &format!("head_dim {head_dim} lanes {lanes} batch {batch}"),
                     &kernel,
@@ -132,5 +140,8 @@ fn every_lane_layout_and_load_batch_the_sweep_reaches_compiles() {
             }
         }
     }
-    assert_eq!(compiled, 27, "3 head dims x 3 lane layouts x 3 load batches");
+    assert_eq!(
+        compiled, 27,
+        "3 head dims x 3 lane layouts x 3 load batches"
+    );
 }

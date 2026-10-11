@@ -56,7 +56,8 @@ mod ladder {
     type Pipeline = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
     type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 
-    const DEFAULT_GGML_DIR: &str = "/Users/brianbruggeman/repos/others/llama.cpp/ggml/src/ggml-metal";
+    const DEFAULT_GGML_DIR: &str =
+        "/Users/brianbruggeman/repos/others/llama.cpp/ggml/src/ggml-metal";
 
     const GGML_VARIANT_SHARED_BYTES: usize = 8192;
 
@@ -74,14 +75,21 @@ mod ladder {
 
     fn env_number(name: &str, default: usize) -> anyhow::Result<usize> {
         match std::env::var(name) {
-            Ok(text) => text.parse().with_context(|| format!("{name} is a whole number, got {text:?}")),
+            Ok(text) => text
+                .parse()
+                .with_context(|| format!("{name} is a whole number, got {text:?}")),
             Err(_) => Ok(default),
         }
     }
 
     fn path_list(name: &str) -> Vec<PathBuf> {
         std::env::var(name)
-            .map(|list| list.split(',').filter(|part| !part.is_empty()).map(PathBuf::from).collect())
+            .map(|list| {
+                list.split(',')
+                    .filter(|part| !part.is_empty())
+                    .map(PathBuf::from)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -95,7 +103,8 @@ mod ladder {
                 warmup: env_number("LADDER_WARMUP", 30)?,
                 variants: path_list("LADDER_VARIANTS"),
                 ggml_variants: path_list("LADDER_GGML_VARIANTS"),
-                ggml_dir: std::env::var("LADDER_GGML_DIR").map_or_else(|_| PathBuf::from(DEFAULT_GGML_DIR), PathBuf::from),
+                ggml_dir: std::env::var("LADDER_GGML_DIR")
+                    .map_or_else(|_| PathBuf::from(DEFAULT_GGML_DIR), PathBuf::from),
                 dump: std::env::var("LADDER_DUMP").ok().map(PathBuf::from),
             })
         }
@@ -106,11 +115,19 @@ mod ladder {
         let mut program = Vec::new();
         let weight = append(
             &mut program,
-            Op::Input { dtype: DType::UInt8, shape: vec![Extent::Static(k), Extent::Static(rows)], name: None },
+            Op::Input {
+                dtype: DType::UInt8,
+                shape: vec![Extent::Static(k), Extent::Static(rows)],
+                name: None,
+            },
         );
         let activation = append(
             &mut program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(tokens), Extent::Static(k)], name: None },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(tokens), Extent::Static(k)],
+                name: None,
+            },
         );
         let product = append(
             &mut program,
@@ -145,7 +162,10 @@ mod ladder {
         let mut lcg = Lcg(11);
         let values: Vec<f32> = (0..rows * k).map(|_| lcg.next_unit() * 2.0 - 1.0).collect();
         let mut blocks = vec![0u8; rows * row_bytes];
-        for (row, row_out) in values.chunks_exact(k).zip(blocks.chunks_exact_mut(row_bytes)) {
+        for (row, row_out) in values
+            .chunks_exact(k)
+            .zip(blocks.chunks_exact_mut(row_bytes))
+        {
             quantize(row, row_out).context("k is a whole number of q4_0 blocks")?;
         }
         Ok(blocks)
@@ -169,14 +189,16 @@ mod ladder {
         let (program, weight_node, sum_node) = matmul_program(config);
         let policy = NumericPolicy::llama_relaxed();
         let shapes = infer(&program, &[]).context("matmul program infers")?;
-        let mut bound_ops = bind(&program, &shapes, &[sum_node], policy).context("matmul program binds")?;
+        let mut bound_ops =
+            bind(&program, &shapes, &[sum_node], policy).context("matmul program binds")?;
         let packed_nodes: BTreeSet<NodeId> = [weight_node].into_iter().collect();
         correct_packed_matmul_layouts(&mut bound_ops, &packed_nodes);
         let bound = bound_ops
             .into_iter()
             .find(|op| op.node == sum_node)
             .context("the fused reduce is in the bound program")?;
-        let packed: omega::PackedOperands = std::collections::BTreeMap::from([(weight_node, omega::Codec::Q4_0)]);
+        let packed: omega::PackedOperands =
+            std::collections::BTreeMap::from([(weight_node, omega::Codec::Q4_0)]);
         let kernel = omega::emit(&bound, &packed, policy).context("production kernel emits")?;
         let uniforms = omega::metal::pack_uniforms_for(&bound, policy).context("uniforms pack")?;
         let spec = kernel
@@ -187,7 +209,11 @@ mod ladder {
             source: kernel.source,
             entry: kernel.entry,
             uniforms,
-            threadgroups: MTLSize { width: spec.threadgroups_x as usize, height: spec.threadgroups_y as usize, depth: 1 },
+            threadgroups: MTLSize {
+                width: spec.threadgroups_x as usize,
+                height: spec.threadgroups_y as usize,
+                depth: 1,
+            },
             threads: MTLSize {
                 width: spec.threads_per_threadgroup_x as usize,
                 height: spec.threads_per_threadgroup_y as usize,
@@ -197,7 +223,11 @@ mod ladder {
         })
     }
 
-    fn inline_includes(dirs: &[PathBuf], file: &str, seen: &mut BTreeSet<String>) -> anyhow::Result<String> {
+    fn inline_includes(
+        dirs: &[PathBuf],
+        file: &str,
+        seen: &mut BTreeSet<String>,
+    ) -> anyhow::Result<String> {
         if !seen.insert(file.to_string()) {
             return Ok(String::new());
         }
@@ -206,14 +236,18 @@ mod ladder {
             .map(|dir| dir.join(file))
             .find(|candidate| candidate.is_file())
             .with_context(|| format!("{file} not found under any of {dirs:?}"))?;
-        let text = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         let mut out = String::with_capacity(text.len());
         for line in text.lines() {
             let trimmed = line.trim();
             if trimmed == "#pragma once" {
                 continue;
             }
-            match trimmed.strip_prefix("#include \"").and_then(|rest| rest.strip_suffix('"')) {
+            match trimmed
+                .strip_prefix("#include \"")
+                .and_then(|rest| rest.strip_suffix('"'))
+            {
                 Some(name) => out.push_str(&inline_includes(dirs, name, seen)?),
                 None => {
                     out.push_str(line);
@@ -241,9 +275,14 @@ mod ladder {
         for line in text.lines() {
             if line.starts_with("constant ") && line.contains("[[function_constant(") {
                 let words: Vec<&str> = line.split_whitespace().collect();
-                let name = words.get(2).context("function constant declaration has a name")?;
+                let name = words
+                    .get(2)
+                    .context("function constant declaration has a name")?;
                 let literal = function_constant_literal(name, config)?;
-                out.push_str(&format!("constant constexpr {} {name} = {literal};\n", words[1]));
+                out.push_str(&format!(
+                    "constant constexpr {} {name} = {literal};\n",
+                    words[1]
+                ));
             } else {
                 out.push_str(line);
                 out.push('\n');
@@ -253,7 +292,11 @@ mod ladder {
     }
 
     fn ggml_source(config: &Config) -> anyhow::Result<String> {
-        let dirs = [config.ggml_dir.join("kernels"), config.ggml_dir.clone(), config.ggml_dir.join("..")];
+        let dirs = [
+            config.ggml_dir.join("kernels"),
+            config.ggml_dir.clone(),
+            config.ggml_dir.join(".."),
+        ];
         let mut seen = BTreeSet::new();
         let full = inline_includes(&dirs, "mul_mm.metal", &mut seen)?;
         let legacy_end = full
@@ -262,7 +305,9 @@ mod ladder {
             + "#endif // GGML_METAL_HAS_TENSOR\n".len();
         let typedef = full
             .lines()
-            .find(|line| line.starts_with("typedef decltype(kernel_mul_mm<") && line.ends_with("mul_mm_t;"))
+            .find(|line| {
+                line.starts_with("typedef decltype(kernel_mul_mm<") && line.ends_with("mul_mm_t;")
+            })
             .context("mul_mm_t typedef present")?;
         let instantiation = full
             .lines()
@@ -270,7 +315,10 @@ mod ladder {
             .context("q4_0_f32 instantiation present")?;
         let trimmed = format!("{}\n{typedef}\n{instantiation}\n", &full[..legacy_end]);
         let prelude = "#define GGML_COMMON_DECL_METAL\n#define GGML_COMMON_IMPL_METAL\n";
-        Ok(format!("{prelude}{}", bake_function_constants(&trimmed, config)?))
+        Ok(format!(
+            "{prelude}{}",
+            bake_function_constants(&trimmed, config)?
+        ))
     }
 
     fn ggml_shared_bytes(config: &Config) -> usize {
@@ -283,7 +331,9 @@ mod ladder {
         options.setMathMode(MTLMathMode::Relaxed);
         let library = device
             .newLibraryWithSource_options_error(&NSString::from_str(source), Some(&options))
-            .map_err(|error| anyhow::anyhow!("compile {entry}: {}", error.localizedDescription()))?;
+            .map_err(|error| {
+                anyhow::anyhow!("compile {entry}: {}", error.localizedDescription())
+            })?;
         let function = library
             .newFunctionWithName(&NSString::from_str(entry))
             .with_context(|| format!("{entry} present in its library"))?;
@@ -295,8 +345,14 @@ mod ladder {
     fn buffer_from_bytes(device: &Device, bytes: &[u8]) -> anyhow::Result<Buffer> {
         // SAFETY: `bytes` is live for the call and the API copies it before returning.
         let pointer = unsafe { NonNull::new_unchecked(bytes.as_ptr().cast_mut().cast::<c_void>()) };
-        unsafe { device.newBufferWithBytes_length_options(pointer, bytes.len(), MTLResourceOptions::StorageModeShared) }
-            .context("shared buffer allocates")
+        unsafe {
+            device.newBufferWithBytes_length_options(
+                pointer,
+                bytes.len(),
+                MTLResourceOptions::StorageModeShared,
+            )
+        }
+        .context("shared buffer allocates")
     }
 
     fn read_f32(buffer: &Buffer, count: usize) -> Vec<f32> {
@@ -325,8 +381,16 @@ mod ladder {
     }
 
     enum Launch {
-        Proxima { threadgroups: MTLSize, threads: MTLSize, dynamic_bytes: usize },
-        Ggml { kargs: GgmlKargs, threadgroups: MTLSize, threadgroup_bytes: usize },
+        Proxima {
+            threadgroups: MTLSize,
+            threads: MTLSize,
+            dynamic_bytes: usize,
+        },
+        Ggml {
+            kargs: GgmlKargs,
+            threadgroups: MTLSize,
+            threadgroup_bytes: usize,
+        },
     }
 
     struct Arm {
@@ -344,10 +408,16 @@ mod ladder {
 
     fn dispatch_ns(queue: &Queue, arm: &Arm, inputs: &Inputs) -> anyhow::Result<f64> {
         let command_buffer = queue.commandBuffer().context("command buffer")?;
-        let encoder = command_buffer.computeCommandEncoder().context("compute encoder")?;
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .context("compute encoder")?;
         encoder.setComputePipelineState(&arm.pipeline);
         match &arm.launch {
-            Launch::Proxima { threadgroups, threads, dynamic_bytes } => {
+            Launch::Proxima {
+                threadgroups,
+                threads,
+                dynamic_bytes,
+            } => {
                 // SAFETY: buffers outlive the command buffer, which is waited on below.
                 unsafe {
                     encoder.setBuffer_offset_atIndex(Some(&inputs.weight), 0, 0);
@@ -361,17 +431,30 @@ mod ladder {
                 }
                 encoder.dispatchThreadgroups_threadsPerThreadgroup(*threadgroups, *threads);
             }
-            Launch::Ggml { kargs, threadgroups, threadgroup_bytes } => {
+            Launch::Ggml {
+                kargs,
+                threadgroups,
+                threadgroup_bytes,
+            } => {
                 // SAFETY: `kargs` is copied by `setBytes`; buffers outlive the waited-on command buffer.
                 unsafe {
-                    let pointer = NonNull::new_unchecked((kargs as *const GgmlKargs).cast_mut().cast::<c_void>());
+                    let pointer = NonNull::new_unchecked(
+                        (kargs as *const GgmlKargs).cast_mut().cast::<c_void>(),
+                    );
                     encoder.setBytes_length_atIndex(pointer, size_of::<GgmlKargs>(), 0);
                     encoder.setBuffer_offset_atIndex(Some(&inputs.weight), 0, 1);
                     encoder.setBuffer_offset_atIndex(Some(&inputs.activation), 0, 2);
                     encoder.setBuffer_offset_atIndex(Some(&arm.output), 0, 3);
                     encoder.setThreadgroupMemoryLength_atIndex(*threadgroup_bytes, 0);
                 }
-                encoder.dispatchThreadgroups_threadsPerThreadgroup(*threadgroups, MTLSize { width: 32, height: 4, depth: 1 });
+                encoder.dispatchThreadgroups_threadsPerThreadgroup(
+                    *threadgroups,
+                    MTLSize {
+                        width: 32,
+                        height: 4,
+                        depth: 1,
+                    },
+                );
             }
         }
         encoder.endEncoding();
@@ -395,7 +478,11 @@ mod ladder {
             let mut sorted = arm_samples.clone();
             sorted.sort_by(f64::total_cmp);
             let mean = sorted.iter().sum::<f64>() / sorted.len() as f64;
-            let variance = sorted.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / sorted.len() as f64;
+            let variance = sorted
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>()
+                / sorted.len() as f64;
             let p25 = percentile(&sorted, 25);
             println!(
                 "TIME arm={} p25_us={:.1} median_us={:.1} min_us={:.1} cov_pct={:.2} tflops_p25={:.2} vs_ref_p25={:.4} n={}",
@@ -412,9 +499,20 @@ mod ladder {
     }
 
     fn compare(label: &str, candidate: &[f32], reference: &[f32]) {
-        let differing = candidate.iter().zip(reference).filter(|(left, right)| left.to_bits() != right.to_bits()).count();
-        let square_error: f64 = candidate.iter().zip(reference).map(|(left, right)| f64::from(left - right).powi(2)).sum();
-        let square_reference: f64 = reference.iter().map(|value| f64::from(*value).powi(2)).sum();
+        let differing = candidate
+            .iter()
+            .zip(reference)
+            .filter(|(left, right)| left.to_bits() != right.to_bits())
+            .count();
+        let square_error: f64 = candidate
+            .iter()
+            .zip(reference)
+            .map(|(left, right)| f64::from(left - right).powi(2))
+            .sum();
+        let square_reference: f64 = reference
+            .iter()
+            .map(|value| f64::from(*value).powi(2))
+            .sum();
         println!(
             "CHECK arm={label} differing_words={differing}/{} rms_relative_error={:.3e}",
             reference.len(),
@@ -422,7 +520,11 @@ mod ladder {
         );
     }
 
-    fn build_arms(config: &Config, device: &Device, production: &Production) -> anyhow::Result<Vec<Arm>> {
+    fn build_arms(
+        config: &Config,
+        device: &Device,
+        production: &Production,
+    ) -> anyhow::Result<Vec<Arm>> {
         let output_bytes = config.rows * config.tokens * 4;
         let zeroed = |count: usize| buffer_from_bytes(device, &vec![0u8; count]);
         let proxima_launch = |dynamic_bytes: usize| Launch::Proxima {
@@ -430,7 +532,13 @@ mod ladder {
             threads: production.threads,
             dynamic_bytes,
         };
-        let variant_bytes = |source: &str| if source.contains("[[threadgroup(0)]]") { 8192 } else { 0 };
+        let variant_bytes = |source: &str| {
+            if source.contains("[[threadgroup(0)]]") {
+                8192
+            } else {
+                0
+            }
+        };
         let mut arms = vec![Arm {
             label: "prod".into(),
             pipeline: compile(device, &production.source, &production.entry)?,
@@ -438,8 +546,12 @@ mod ladder {
             launch: proxima_launch(production.threadgroup_bytes),
         }];
         for path in &config.variants {
-            let source = std::fs::read_to_string(path).with_context(|| format!("read variant {}", path.display()))?;
-            let label = path.file_stem().map_or_else(|| "variant".into(), |stem| stem.to_string_lossy().into_owned());
+            let source = std::fs::read_to_string(path)
+                .with_context(|| format!("read variant {}", path.display()))?;
+            let label = path.file_stem().map_or_else(
+                || "variant".into(),
+                |stem| stem.to_string_lossy().into_owned(),
+            );
             arms.push(Arm {
                 label,
                 pipeline: compile(device, &source, &production.entry)?,
@@ -465,31 +577,53 @@ mod ladder {
             r2: 1,
             r3: 1,
         };
-        let threadgroups = MTLSize { width: config.tokens.div_ceil(32), height: config.rows.div_ceil(64), depth: 1 };
+        let threadgroups = MTLSize {
+            width: config.tokens.div_ceil(32),
+            height: config.rows.div_ceil(64),
+            depth: 1,
+        };
         let ggml = ggml_source(config)?;
         if let Some(dump) = &config.dump {
-            std::fs::write(dump.with_extension("ggml.metal"), &ggml).context("write ggml source dump")?;
+            std::fs::write(dump.with_extension("ggml.metal"), &ggml)
+                .context("write ggml source dump")?;
         }
         for path in &config.ggml_variants {
-            let source = std::fs::read_to_string(path).with_context(|| format!("read ggml variant {}", path.display()))?;
-            let stem = path.file_stem().map_or_else(|| "variant".into(), |stem| stem.to_string_lossy().into_owned());
+            let source = std::fs::read_to_string(path)
+                .with_context(|| format!("read ggml variant {}", path.display()))?;
+            let stem = path.file_stem().map_or_else(
+                || "variant".into(),
+                |stem| stem.to_string_lossy().into_owned(),
+            );
             arms.push(Arm {
                 label: format!("g_{stem}"),
                 pipeline: compile(device, &source, "kernel_mul_mm_q4_0_f32")?,
                 output: zeroed(output_bytes)?,
-                launch: Launch::Ggml { kargs, threadgroups, threadgroup_bytes: GGML_VARIANT_SHARED_BYTES },
+                launch: Launch::Ggml {
+                    kargs,
+                    threadgroups,
+                    threadgroup_bytes: GGML_VARIANT_SHARED_BYTES,
+                },
             });
         }
         arms.push(Arm {
             label: "ggml".into(),
             pipeline: compile(device, &ggml, "kernel_mul_mm_q4_0_f32")?,
             output: zeroed(output_bytes)?,
-            launch: Launch::Ggml { kargs, threadgroups, threadgroup_bytes: ggml_shared_bytes(config) },
+            launch: Launch::Ggml {
+                kargs,
+                threadgroups,
+                threadgroup_bytes: ggml_shared_bytes(config),
+            },
         });
         Ok(arms)
     }
 
-    fn run_rounds(config: &Config, queue: &Queue, arms: &[Arm], inputs: &Inputs) -> anyhow::Result<Vec<Vec<f64>>> {
+    fn run_rounds(
+        config: &Config,
+        queue: &Queue,
+        arms: &[Arm],
+        inputs: &Inputs,
+    ) -> anyhow::Result<Vec<Vec<f64>>> {
         let mut samples = vec![Vec::with_capacity(config.rounds); arms.len()];
         for round in 0..config.warmup + config.rounds {
             for offset in 0..arms.len() {
@@ -507,7 +641,8 @@ mod ladder {
         let config = Config::from_env()?;
         let production = emit_production(&config)?;
         if let Some(dump) = &config.dump {
-            std::fs::write(dump, &production.source).with_context(|| format!("write {}", dump.display()))?;
+            std::fs::write(dump, &production.source)
+                .with_context(|| format!("write {}", dump.display()))?;
         }
         let device = MTLCreateSystemDefaultDevice().context("a Metal device")?;
         let queue = device.newCommandQueue().context("command queue")?;
@@ -537,7 +672,10 @@ mod ladder {
             compare(&arm.label, &read_f32(&arm.output, count), &reference);
         }
         let samples = run_rounds(&config, &queue, &arms, &inputs)?;
-        println!("SHAPE rows={} k={} tokens={} rounds={}", config.rows, config.k, config.tokens, config.rounds);
+        println!(
+            "SHAPE rows={} k={} tokens={} rounds={}",
+            config.rows, config.k, config.tokens, config.rounds
+        );
         report(&config, &arms, &samples, arms.len() - 1);
         Ok(())
     }

@@ -262,7 +262,10 @@ fn run_real_attn_q_parity(rows_to_check: usize) {
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: sliced_weight },
+            QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: sliced_weight,
+            },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],

@@ -32,11 +32,19 @@ fn weighted_sum_program(dims: &[u32], reduce_axis: u16) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weights = append(
         &mut program,
-        Op::Input { dtype: DType::Float32, shape: shape.clone(), name: None },
+        Op::Input {
+            dtype: DType::Float32,
+            shape: shape.clone(),
+            name: None,
+        },
     );
     let values = append(
         &mut program,
-        Op::Input { dtype: DType::Float32, shape, name: None },
+        Op::Input {
+            dtype: DType::Float32,
+            shape,
+            name: None,
+        },
     );
     let identity_axes: Vec<u16> = (0..rank).collect();
     let product = append(
@@ -84,17 +92,32 @@ fn output_elements(dims: &[u32], reduce_axis: usize) -> usize {
 /// `PROXIMA_COORD_INDEX32` env value (`None` = unset, today's default emit)
 /// and returns the raw output bit patterns -- `to_bits()`, not the floats,
 /// for exact-equality comparison.
-fn run_bits(dims: &[u32], reduce_axis: usize, seed: u64, coord_index32_env: Option<&str>) -> Vec<u32> {
+fn run_bits(
+    dims: &[u32],
+    reduce_axis: usize,
+    seed: u64,
+    coord_index32_env: Option<&str>,
+) -> Vec<u32> {
     let total = total_elements(dims);
     let weights = random_vec(seed, total);
     let values = random_vec(seed + 9973, total);
     let (program, sum) = weighted_sum_program(dims, reduce_axis as u16);
-    let blocks = [QuantizedBlock::Float32(&weights), QuantizedBlock::Float32(&values)];
+    let blocks = [
+        QuantizedBlock::Float32(&weights),
+        QuantizedBlock::Float32(&values),
+    ];
 
     let output = temp_env::with_var("PROXIMA_COORD_INDEX32", coord_index32_env, || {
-        let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::llama_relaxed())
-            .expect("metal plans the weighted-sum reduce");
-        omega::execute_plan(&plan, &blocks).expect("metal runs the weighted-sum reduce on a real device")
+        let plan = omega::plan(
+            &program,
+            &[],
+            &blocks,
+            &[sum],
+            NumericPolicy::llama_relaxed(),
+        )
+        .expect("metal plans the weighted-sum reduce");
+        omega::execute_plan(&plan, &blocks)
+            .expect("metal runs the weighted-sum reduce on a real device")
     });
     output.root().iter().map(|value| value.to_bits()).collect()
 }

@@ -667,13 +667,10 @@ pub(super) fn preview_elementwise_buffer_count(
     values: &[Option<f32>],
     numeric_policy: NumericPolicy,
 ) -> Result<usize, TensorError> {
-    let entry = held
-        .get(&node)
-        .cloned()
-        .ok_or(TensorError::NotLowerable {
-            node,
-            reason: "elementwise ABI preview requires a held node",
-        })?;
+    let entry = held.get(&node).cloned().ok_or(TensorError::NotLowerable {
+        node,
+        reason: "elementwise ABI preview requires a held node",
+    })?;
     let held = RefCell::new(window_below(held, &entry.operands));
     let (_, operands) = compose(
         shapes,

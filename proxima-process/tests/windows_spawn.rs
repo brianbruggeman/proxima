@@ -6,7 +6,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use proxima_process::{Command, Stdio};
 use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
 
 #[test]

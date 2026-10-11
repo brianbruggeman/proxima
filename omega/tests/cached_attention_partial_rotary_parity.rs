@@ -41,10 +41,10 @@ fn assert_partial_rotary_parity_at(cached_extent: u64, cached_len: u64, policy: 
         qwen35_partial_rotary_forward_fixture(1, cached_extent, cached_len);
     let named = as_named_blocks(&owned);
 
-    let shapes = proxima_tensor::infer(&program, &symbols)
-        .expect("qwen35 partial-rotary fixture infers");
-    let resolved = bind(&program, &shapes, &roots, policy)
-        .expect("qwen35 partial-rotary fixture binds");
+    let shapes =
+        proxima_tensor::infer(&program, &symbols).expect("qwen35 partial-rotary fixture infers");
+    let resolved =
+        bind(&program, &shapes, &roots, policy).expect("qwen35 partial-rotary fixture binds");
     let fused = resolved
         .iter()
         .find(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
@@ -91,7 +91,10 @@ fn assert_partial_rotary_parity_at(cached_extent: u64, cached_len: u64, policy: 
         "cached_extent={cached_extent} cached_len={cached_len}"
     );
 
-    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
     let max_diff = expected
         .iter()
         .zip(actual.iter())

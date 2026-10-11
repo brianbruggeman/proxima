@@ -93,20 +93,26 @@ fn parse_attention_variant(value: &str) -> Result<AttentionVariant, String> {
                 selected.query_parallelism = AttentionQueryParallelism::SimdgroupRows;
             }
             ("simd_topology", "legacy") => selected.simd_topology = AttentionSimdTopology::Legacy,
-            ("simd_topology", "per_head") => selected.simd_topology = AttentionSimdTopology::PerHead,
+            ("simd_topology", "per_head") => {
+                selected.simd_topology = AttentionSimdTopology::PerHead
+            }
             ("simd_topology", "grouped_queries") => {
                 selected.simd_topology = AttentionSimdTopology::GroupedQueries;
             }
             ("prefetch", "off") => selected.prefetch = AttentionPrefetch::Off,
             ("prefetch", "next_block") => selected.prefetch = AttentionPrefetch::NextBlock,
             ("kv_storage", _) => return Err(format!("invalid kv_storage `{selected_value}`")),
-            ("mma_precision", _) => return Err(format!("invalid mma_precision `{selected_value}`")),
+            ("mma_precision", _) => {
+                return Err(format!("invalid mma_precision `{selected_value}`"));
+            }
             ("kv_reuse", _) => return Err(format!("invalid kv_reuse `{selected_value}`")),
             ("tile_height", _) => return Err(format!("invalid tile_height `{selected_value}`")),
             ("query_parallelism", _) => {
                 return Err(format!("invalid query_parallelism `{selected_value}`"));
             }
-            ("simd_topology", _) => return Err(format!("invalid simd_topology `{selected_value}`")),
+            ("simd_topology", _) => {
+                return Err(format!("invalid simd_topology `{selected_value}`"));
+            }
             ("prefetch", _) => return Err(format!("invalid prefetch `{selected_value}`")),
             _ => return Err(format!("unknown attention variant field `{name}`")),
         }
@@ -278,7 +284,12 @@ mod attention_variant_tests {
         assert_eq!(legacy_manifest.cache_codec, None);
         assert_eq!(legacy_manifest.kernel.grid.threads, 64_000);
         assert_eq!(legacy_manifest.kernel.grid.threadgroup_width, Some(64));
-        assert!(legacy_manifest.kernel.entry.starts_with("omega_cached_attention_"));
+        assert!(
+            legacy_manifest
+                .kernel
+                .entry
+                .starts_with("omega_cached_attention_")
+        );
 
         let selected = parse_attention_variant(
             "kv_storage=bf16,mma_precision=f16,kv_reuse=shared_k,tile_height=rows_8,query_parallelism=simdgroup_rows,simd_topology=per_head,prefetch=off",
@@ -296,21 +307,31 @@ mod attention_variant_tests {
                 "off",
             ]
         );
-        let selected_manifest = granite_dispatch_manifest(selected)
-            .expect("the multi-axis Granite dispatch inspects");
+        let selected_manifest =
+            granite_dispatch_manifest(selected).expect("the multi-axis Granite dispatch inspects");
         assert_eq!(selected_manifest.variant, selected);
+        assert_eq!(selected_manifest.cache_codec, Some(omega::Codec::BFloat16));
         assert_eq!(
-            selected_manifest.cache_codec,
-            Some(omega::Codec::BFloat16)
+            selected_manifest.accumulator,
+            proxima_tensor::DType::Float32
         );
-        assert_eq!(selected_manifest.accumulator, proxima_tensor::DType::Float32);
         assert_ne!(
             selected_manifest.dispatch_identity,
             legacy_manifest.dispatch_identity
         );
         assert!(selected_manifest.kernel.source.contains("shared_key_even"));
-        assert!(selected_manifest.kernel.source.contains("simd_per_head = true"));
-        assert!(selected_manifest.kernel.source.contains("query_parallel_rows = true"));
+        assert!(
+            selected_manifest
+                .kernel
+                .source
+                .contains("simd_per_head = true")
+        );
+        assert!(
+            selected_manifest
+                .kernel
+                .source
+                .contains("query_parallel_rows = true")
+        );
     }
 
     #[test]
@@ -417,11 +438,7 @@ mod harness {
         dispatches: Vec<CapturedDispatch>,
     }
 
-    fn load_variants(
-        dir: &PathBuf,
-        members: &[&CapturedDispatch],
-        base_width: u64,
-    ) -> Vec<Arm> {
+    fn load_variants(dir: &PathBuf, members: &[&CapturedDispatch], base_width: u64) -> Vec<Arm> {
         let base = members[0];
         let needle = format!("kernel void {}(", base.entry);
         let mut arms = Vec::new();
@@ -459,14 +476,15 @@ mod harness {
             let template = base
                 .with_kernel_variant(&source, &base.entry, threads, width, numeric_policy())
                 .unwrap_or_else(|error| panic!("variant {name} does not compile: {error}"));
-            let narrowed: Vec<usize> = std::fs::read_to_string(dir.join(name.replace(".metal", ".f16")))
-                .map(|text| {
-                    text.trim()
-                        .split(',')
-                        .map(|index| index.trim().parse().expect("f16 binding index integer"))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let narrowed: Vec<usize> =
+                std::fs::read_to_string(dir.join(name.replace(".metal", ".f16")))
+                    .map(|text| {
+                        text.trim()
+                            .split(',')
+                            .map(|index| index.trim().parse().expect("f16 binding index integer"))
+                            .collect()
+                    })
+                    .unwrap_or_default();
             let narrow_codec = std::fs::read_to_string(dir.join(name.replace(".metal", ".narrow")))
                 .ok()
                 .map(|text| parse_narrow_spec(text.trim()));
@@ -477,7 +495,9 @@ mod harness {
                     if let Some((indices, codec)) = &narrow_codec {
                         return replaced
                             .with_narrowed_buffers(indices, *codec)
-                            .unwrap_or_else(|error| panic!("variant {name} narrowed buffers: {error}"));
+                            .unwrap_or_else(|error| {
+                                panic!("variant {name} narrowed buffers: {error}")
+                            });
                     }
                     if narrowed.is_empty() {
                         replaced
@@ -497,25 +517,40 @@ mod harness {
     }
 
     fn replay_bytes(dispatch: &CapturedDispatch, elements: Option<u64>) -> Vec<u8> {
-        if dispatch.bindings.iter().any(|binding| matches!(binding, omega::Binding::Output(_))) {
-            return dispatch.replay_output_elements(elements).expect("output replay");
+        if dispatch
+            .bindings
+            .iter()
+            .any(|binding| matches!(binding, omega::Binding::Output(_)))
+        {
+            return dispatch
+                .replay_output_elements(elements)
+                .expect("output replay");
         }
         let scratch = dispatch
             .bindings
             .iter()
             .position(|binding| matches!(binding, omega::Binding::Scratch))
             .expect("a captured dispatch with neither output nor scratch binding");
-        assert!(dispatch.poison_bound_buffer(scratch), "scratch buffer is bound and poisonable");
+        assert!(
+            dispatch.poison_bound_buffer(scratch),
+            "scratch buffer is bound and poisonable"
+        );
         dispatch.time_gpu_ns(1).expect("scratch replay");
-        let mut bytes = dispatch.bound_buffer_bytes_at(scratch).expect("scratch bytes");
+        let mut bytes = dispatch
+            .bound_buffer_bytes_at(scratch)
+            .expect("scratch bytes");
         if let Some(elements) = elements {
-            bytes.truncate(usize::try_from(elements).expect("element count") * core::mem::size_of::<f32>());
+            bytes.truncate(
+                usize::try_from(elements).expect("element count") * core::mem::size_of::<f32>(),
+            );
         }
         bytes
     }
 
     fn parse_narrow_spec(text: &str) -> (Vec<usize>, omega::Codec) {
-        let (indices, codec) = text.split_once(':').expect("narrow spec `<i,j,k>:<f16|bf16|bf8>`");
+        let (indices, codec) = text
+            .split_once(':')
+            .expect("narrow spec `<i,j,k>:<f16|bf16|bf8>`");
         let codec = match codec {
             "f16" => omega::Codec::Float16,
             "bf16" => omega::Codec::BFloat16,
@@ -600,7 +635,11 @@ mod harness {
                 evict_system_cache(scratch, round + offset);
                 let total = CapturedDispatch::time_gpu_sequence_ns(&arms[index].1)
                     .expect("sequence replay");
-                let divisor = if per_dispatch { arms[index].1.len() as f64 } else { 1.0 };
+                let divisor = if per_dispatch {
+                    arms[index].1.len() as f64
+                } else {
+                    1.0
+                };
                 spans[index].push(total / divisor);
             }
         }
@@ -629,21 +668,31 @@ mod harness {
         let loaded: Vec<GroupVariants> = groups
             .iter()
             .filter_map(|(key, members)| {
-                let member_refs: Vec<&CapturedDispatch> = members.iter().map(|index| &dispatches[*index]).collect();
+                let member_refs: Vec<&CapturedDispatch> =
+                    members.iter().map(|index| &dispatches[*index]).collect();
                 let base_width = key.width.unwrap_or(key.threads).max(1);
                 let arms = load_variants(variant_dir, &member_refs, base_width);
-                (!arms.is_empty()).then(|| GroupVariants { members: members.clone(), arms })
+                (!arms.is_empty()).then(|| GroupVariants {
+                    members: members.clone(),
+                    arms,
+                })
             })
             .collect();
         assert!(!loaded.is_empty(), "N==0: no group carries a variant");
-        let sets: Vec<Vec<&str>> = spec.split(';').map(|set| set.split(',').collect()).collect();
+        let sets: Vec<Vec<&str>> = spec
+            .split(';')
+            .map(|set| set.split(',').collect())
+            .collect();
         let mut step_arms: Vec<(String, Vec<&CapturedDispatch>)> =
             vec![("base".to_string(), dispatches.iter().collect())];
         for set in &sets {
             let mut step: Vec<&CapturedDispatch> = dispatches.iter().collect();
             let mut swapped = 0usize;
             for group in &loaded {
-                let chosen = group.arms.iter().find(|arm| set.contains(&arm_tag(&arm.label).as_str()));
+                let chosen = group
+                    .arms
+                    .iter()
+                    .find(|arm| set.contains(&arm_tag(&arm.label).as_str()));
                 if let Some(arm) = chosen {
                     for (member, replacement) in group.members.iter().zip(&arm.dispatches) {
                         step[*member] = replacement;
@@ -651,7 +700,11 @@ mod harness {
                     swapped += group.members.len();
                 }
             }
-            println!("ab stepall set={} swapped_dispatches={swapped} of {}", set.join(","), dispatches.len());
+            println!(
+                "ab stepall set={} swapped_dispatches={swapped} of {}",
+                set.join(","),
+                dispatches.len()
+            );
             step_arms.push((set.join("+"), step));
         }
         let results = measure_sequence_spread(&step_arms, rounds, scratch, false);
@@ -699,8 +752,11 @@ mod harness {
     fn round_spread(samples: &[f64]) -> RoundSpread {
         let count = samples.len() as f64;
         let mean = samples.iter().sum::<f64>() / count;
-        let variance =
-            samples.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / (count - 1.0).max(1.0);
+        let variance = samples
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / (count - 1.0).max(1.0);
         RoundSpread {
             minimum: samples.iter().copied().fold(f64::INFINITY, f64::min),
             maximum: samples.iter().copied().fold(0.0, f64::max),
@@ -755,8 +811,12 @@ mod harness {
                 if dispatch.route_prepass_dispatches == 0 {
                     return dispatch;
                 }
-                let prepass_alone = dispatch.prepass_only().expect("a record with a route prepass");
-                prepass_alone.time_gpu_ns(1).expect("fill the compaction buffer");
+                let prepass_alone = dispatch
+                    .prepass_only()
+                    .expect("a record with a route prepass");
+                prepass_alone
+                    .time_gpu_ns(1)
+                    .expect("fill the compaction buffer");
                 if std::env::var_os("AB_PREPASS_ONLY").is_some() {
                     return prepass_alone;
                 }
@@ -776,7 +836,12 @@ mod harness {
             .iter()
             .copied()
             .zip(partial_replacements.iter().copied())
-            .chain(merge_members.iter().copied().zip(merge_replacements.iter().copied()))
+            .chain(
+                merge_members
+                    .iter()
+                    .copied()
+                    .zip(merge_replacements.iter().copied()),
+            )
             .collect();
         dispatches
             .iter()
@@ -828,8 +893,15 @@ mod harness {
             let merge = merge_variants
                 .iter()
                 .find(|arm| arm_tag(&arm.label) == tag)
-                .map_or_else(|| merge_base.to_vec(), |arm| arm.dispatches.iter().collect());
-            arms.push(PairArm { tag, partial, merge });
+                .map_or_else(
+                    || merge_base.to_vec(),
+                    |arm| arm.dispatches.iter().collect(),
+                );
+            arms.push(PairArm {
+                tag,
+                partial,
+                merge,
+            });
         }
         arms
     }
@@ -887,30 +959,66 @@ mod harness {
         (sha, extents): (&str, &[u64]),
         scratch: &mut [u8],
     ) {
-        let PairSetup { dispatches, groups, variant_dir, pair_prefix, rounds, resource_iterations } = *setup;
+        let PairSetup {
+            dispatches,
+            groups,
+            variant_dir,
+            pair_prefix,
+            rounds,
+            resource_iterations,
+        } = *setup;
         let (merge_key, merge_members) = groups
             .iter()
             .find(|(key, _)| key.sha.starts_with(pair_prefix))
             .expect("N==0: AB_PAIR_SHA matches no captured group");
-        assert_eq!(merge_members.len(), partial_members.len(), "pair groups differ in member count");
-        let merge_refs: Vec<&CapturedDispatch> = merge_members.iter().map(|index| &dispatches[*index]).collect();
+        assert_eq!(
+            merge_members.len(),
+            partial_members.len(),
+            "pair groups differ in member count"
+        );
+        let merge_refs: Vec<&CapturedDispatch> = merge_members
+            .iter()
+            .map(|index| &dispatches[*index])
+            .collect();
         let merge_width = merge_key.width.unwrap_or(merge_key.threads).max(1);
         let merge_variants = load_variants(variant_dir, &merge_refs, merge_width);
         let pair_arms = build_pair_arms(partial_arms, &merge_refs, &merge_variants);
         let sha = &sha[..SHA_PREFIX_CHARS];
         for arm in &pair_arms {
-            print_arm_resources(sha, &(format!("partial:{}", arm.tag), arm.partial.clone()), resource_iterations);
-            print_arm_resources(sha, &(format!("merge:{}", arm.tag), arm.merge.clone()), resource_iterations);
+            print_arm_resources(
+                sha,
+                &(format!("partial:{}", arm.tag), arm.partial.clone()),
+                resource_iterations,
+            );
+            print_arm_resources(
+                sha,
+                &(format!("merge:{}", arm.tag), arm.merge.clone()),
+                resource_iterations,
+            );
         }
         let reference = std::env::var_os("AB_ATTENTION_REFERENCE")
-            .and_then(|_| attention_reference::AttentionShape::from_entry(&partial_arms[0].1[0].entry))
-            .map(|shape| attention_reference::reference_output_decode(partial_arms[0].1[0], &shape));
-        print_pair_bits(sha, extents, &pair_arms, extents.iter().product(), reference.as_ref());
+            .and_then(|_| {
+                attention_reference::AttentionShape::from_entry(&partial_arms[0].1[0].entry)
+            })
+            .map(|shape| {
+                attention_reference::reference_output_decode(partial_arms[0].1[0], &shape)
+            });
+        print_pair_bits(
+            sha,
+            extents,
+            &pair_arms,
+            extents.iter().product(),
+            reference.as_ref(),
+        );
         let layers = partial_members.len();
         let sequence_arms: Vec<(String, Vec<&CapturedDispatch>)> = pair_arms
             .iter()
             .map(|arm| {
-                let ordered = arm.partial.iter().zip(&arm.merge).flat_map(|(partial, merge)| [*partial, *merge]);
+                let ordered = arm
+                    .partial
+                    .iter()
+                    .zip(&arm.merge)
+                    .flat_map(|(partial, merge)| [*partial, *merge]);
                 (arm.tag.clone(), ordered.collect())
             })
             .collect();
@@ -921,7 +1029,13 @@ mod harness {
         let mut step_arms: Vec<(String, Vec<&CapturedDispatch>)> = pair_arms
             .iter()
             .map(|arm| {
-                let replaced = step_with_pair_replaced(dispatches, partial_members, &arm.partial, merge_members, &arm.merge);
+                let replaced = step_with_pair_replaced(
+                    dispatches,
+                    partial_members,
+                    &arm.partial,
+                    merge_members,
+                    &arm.merge,
+                );
                 (arm.tag.clone(), replaced)
             })
             .collect();
@@ -960,12 +1074,10 @@ mod harness {
     }
 
     pub fn run() {
-        let attention_variant = std::env::var("AB_ATTENTION_VARIANT")
-            .ok()
-            .map(|value| {
-                parse_attention_variant(&value)
-                    .unwrap_or_else(|error| panic!("AB_ATTENTION_VARIANT: {error}"))
-            });
+        let attention_variant = std::env::var("AB_ATTENTION_VARIANT").ok().map(|value| {
+            parse_attention_variant(&value)
+                .unwrap_or_else(|error| panic!("AB_ATTENTION_VARIANT: {error}"))
+        });
         if std::env::var("AB_VARIANT_DESCRIBE_ONLY").as_deref() == Ok("1") {
             describe_attention_variant(attention_variant.unwrap_or_default())
                 .unwrap_or_else(|error| panic!("describe attention variant: {error}"));
@@ -1043,7 +1155,14 @@ mod harness {
             groups.len()
         );
         if let Ok(spec) = std::env::var("AB_STEP_ALL") {
-            run_step_all(&spec, &dispatches, &groups, &variant_dir, rounds, &mut scratch);
+            run_step_all(
+                &spec,
+                &dispatches,
+                &groups,
+                &variant_dir,
+                rounds,
+                &mut scratch,
+            );
             println!("ab {}", process_cell.end("process"));
             return;
         }
@@ -1063,11 +1182,17 @@ mod harness {
                 continue;
             }
             let sha_filter = std::env::var("AB_SHA").ok();
-            if sha_filter.as_ref().is_some_and(|prefix| !sha.starts_with(prefix.as_str())) {
+            if sha_filter
+                .as_ref()
+                .is_some_and(|prefix| !sha.starts_with(prefix.as_str()))
+            {
                 continue;
             }
             let group_name = format!("{}:{extents:?}", &sha[..SHA_PREFIX_CHARS]);
-            if skip_groups.iter().any(|skipped| group_name.starts_with(skipped.as_str())) {
+            if skip_groups
+                .iter()
+                .any(|skipped| group_name.starts_with(skipped.as_str()))
+            {
                 println!("ab skip group={group_name} count={}", members.len());
                 continue;
             }
@@ -1157,7 +1282,13 @@ mod harness {
                     rounds,
                     resource_iterations,
                 };
-                run_pair(&setup, members, &arms, (sha.as_str(), extents.as_slice()), &mut scratch);
+                run_pair(
+                    &setup,
+                    members,
+                    &arms,
+                    (sha.as_str(), extents.as_slice()),
+                    &mut scratch,
+                );
                 continue;
             }
             for arm in &arms {
@@ -1203,8 +1334,14 @@ mod harness {
                 for arm in &arms {
                     arm.1[0].poison_bound_buffer(slot);
                     arm.1[0].time_gpu_ns(1).expect("prepass arm replay");
-                    let bytes = arm.1[0].bound_buffer_bytes_at(slot).expect("compaction buffer");
-                    let differing = reference_bytes.iter().zip(&bytes).filter(|(left, right)| left != right).count();
+                    let bytes = arm.1[0]
+                        .bound_buffer_bytes_at(slot)
+                        .expect("compaction buffer");
+                    let differing = reference_bytes
+                        .iter()
+                        .zip(&bytes)
+                        .filter(|(left, right)| left != right)
+                        .count();
                     println!(
                         "ab compaction sha={} extents={extents:?} arm={} bytes={} differing={differing}",
                         &sha[..SHA_PREFIX_CHARS],
@@ -1217,7 +1354,9 @@ mod harness {
                 if let Some(radius) = window_radius {
                     let ordinals: Vec<usize> = match std::env::var("AB_MEMBER").as_deref() {
                         Ok("all") => (0..members.len()).collect(),
-                        Ok(value) => vec![value.parse::<usize>().unwrap_or(0).min(members.len() - 1)],
+                        Ok(value) => {
+                            vec![value.parse::<usize>().unwrap_or(0).min(members.len() - 1)]
+                        }
                         Err(_) => vec![0],
                     };
                     for ordinal in ordinals {
@@ -1229,7 +1368,11 @@ mod harness {
                             .map(|(label, group)| {
                                 let window = (low..high)
                                     .map(|index| {
-                                        if index == first { group[ordinal] } else { &dispatches[index] }
+                                        if index == first {
+                                            group[ordinal]
+                                        } else {
+                                            &dispatches[index]
+                                        }
                                     })
                                     .collect();
                                 (label.clone(), window)

@@ -230,7 +230,10 @@ fn metal_matmul_on_real_attn_k_q4_0_bytes_matches_the_dequantized_f32_cpu_path()
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: sliced_weight },
+            QuantizedBlock::Packed {
+                codec: Codec::Q4_0,
+                bytes: sliced_weight,
+            },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
@@ -272,7 +275,12 @@ fn metal_matmul_on_real_attn_k_q4_0_bytes_matches_the_dequantized_f32_cpu_path()
 /// rows]` -- restated here since no such multi-token oracle case existed for
 /// the real-checkpoint Q4_0 fixture before this change (only the `M = 1`
 /// `matmul_program` above did).
-fn matmul_program_multi_token(tokens: u32, k: u32, rows: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
+fn matmul_program_multi_token(
+    tokens: u32,
+    k: u32,
+    rows: u32,
+    weight_dtype: DType,
+) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = append(
         &mut program,

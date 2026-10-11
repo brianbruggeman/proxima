@@ -38,8 +38,14 @@ mod tests {
 
         assert_eq!(dense, ReadSpec::Dense);
         assert_eq!(operand, ReadSpec::Operand);
-        assert_eq!(serde_json::to_string(&ReadSpec::Dense).expect("dense writes"), "\"dense\"");
-        assert_eq!(serde_json::to_string(&ReadSpec::Operand).expect("operand writes"), "\"operand\"");
+        assert_eq!(
+            serde_json::to_string(&ReadSpec::Dense).expect("dense writes"),
+            "\"dense\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ReadSpec::Operand).expect("operand writes"),
+            "\"operand\""
+        );
         assert_eq!(ReadSpec::default(), ReadSpec::Dense);
         assert!(serde_json::from_str::<ReadSpec>("\"block\"").is_err());
         assert!(serde_json::from_str::<ReadSpec>("\"Dense\"").is_err());
@@ -47,8 +53,10 @@ mod tests {
 
     #[test]
     fn serving_grammar_assemble_steps_round_trip_json() {
-        let prefix: AssembleStep = serde_json::from_str(r#"{"kind":"prefix"}"#).expect("prefix parses");
-        let shift: AssembleStep = serde_json::from_str(r#"{"kind":"shift"}"#).expect("shift parses");
+        let prefix: AssembleStep =
+            serde_json::from_str(r#"{"kind":"prefix"}"#).expect("prefix parses");
+        let shift: AssembleStep =
+            serde_json::from_str(r#"{"kind":"shift"}"#).expect("shift parses");
         let ordered: Vec<AssembleStep> =
             serde_json::from_str(r#"[{"kind":"shift"},{"kind":"prefix"}]"#).expect("list parses");
 
@@ -57,7 +65,10 @@ mod tests {
         assert_eq!(ordered, vec![AssembleStep::Shift, AssembleStep::Prefix]);
         for step in [AssembleStep::Prefix, AssembleStep::Shift] {
             let written = serde_json::to_string(&step).expect("step writes");
-            assert_eq!(serde_json::from_str::<AssembleStep>(&written).expect("step reparses"), step);
+            assert_eq!(
+                serde_json::from_str::<AssembleStep>(&written).expect("step reparses"),
+                step
+            );
         }
         let unrun = r#"{"kind":"load","path":"/models/cartridges/legal-v3.cart"}"#;
         assert!(serde_json::from_str::<AssembleStep>(unrun).is_err());

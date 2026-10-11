@@ -137,11 +137,11 @@ mod lookup {
 #[cfg(feature = "moe-topk-fusion")]
 mod routed_moe {
     use super::metal_stage_totals;
-    use proxima_tensor::spec::{
-        Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter,
-        append_moe_ffn, input_leaf, scalar_constant,
-    };
     use omega::DispatchType;
+    use proxima_tensor::spec::{
+        Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter, append_moe_ffn,
+        input_leaf, scalar_constant,
+    };
     use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock};
 
     const EXPERT_COUNT: u32 = 32;
@@ -193,7 +193,9 @@ mod routed_moe {
         RoutedStep {
             program,
             output,
-            x: (0..EMBEDDING).map(|index| 0.1 + index as f32 * 0.05).collect(),
+            x: (0..EMBEDDING)
+                .map(|index| 0.1 + index as f32 * 0.05)
+                .collect(),
             logits: (0..EXPERT_COUNT)
                 .map(|index| ((index * 7 + 3) % EXPERT_COUNT) as f32 * 0.17)
                 .collect(),
@@ -241,7 +243,8 @@ mod routed_moe {
             cold_totals.physical_dispatch_calls
         );
         assert_eq!(
-            warm_totals.output_buffer_allocations, 0,
+            warm_totals.output_buffer_allocations,
+            0,
             "a warm step over {} dispatches allocated {} device buffers ({} bytes)",
             warm_totals.physical_dispatch_calls,
             warm_totals.output_buffer_allocations,
@@ -297,8 +300,17 @@ mod routed_moe {
             "a warm serial step over {} dispatches allocated {} device buffers",
             warm_totals.physical_dispatch_calls, warm_totals.output_buffer_allocations
         );
-        let reference_values = reference.get(step.output).expect("reference output present").0;
-        assert_eq!(cold.get(step.output).expect("cold output present").0, reference_values);
-        assert_eq!(warm.get(step.output).expect("warm output present").0, reference_values);
+        let reference_values = reference
+            .get(step.output)
+            .expect("reference output present")
+            .0;
+        assert_eq!(
+            cold.get(step.output).expect("cold output present").0,
+            reference_values
+        );
+        assert_eq!(
+            warm.get(step.output).expect("warm output present").0,
+            reference_values
+        );
     }
 }

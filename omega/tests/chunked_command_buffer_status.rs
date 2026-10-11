@@ -159,8 +159,14 @@ fn chunked_command_buffers_match_the_unsplit_run_bitwise_and_check_every_status(
         "K=3 must commit and status-check all three chunked command buffers, not only the last"
     );
     assert_eq!(
-        split_output.iter().map(|value| value.to_bits()).collect::<Vec<u32>>(),
-        unsplit_output.iter().map(|value| value.to_bits()).collect::<Vec<u32>>(),
+        split_output
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<u32>>(),
+        unsplit_output
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<u32>>(),
         "splitting 6 sibling dispatches into 3 command buffers must not change a single bit \
          of any output versus the unsplit K=1 run"
     );

@@ -52,7 +52,10 @@ pub(super) fn lay_out_whole_slots(allocations: &[Allocation], releases: &[Vec<us
     let mut slot_bytes: Vec<usize> = Vec::new();
     let mut free_by_size: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (position, released) in releases.iter().enumerate() {
-        while let Some(allocation) = allocations.get(places.len()).filter(|each| each.first == position) {
+        while let Some(allocation) = allocations
+            .get(places.len())
+            .filter(|each| each.first == position)
+        {
             let reused = (!allocation.resident)
                 .then(|| free_by_size.get_mut(&allocation.bytes).and_then(Vec::pop))
                 .flatten();
@@ -92,7 +95,10 @@ pub(super) fn lay_out_packed(allocations: &[Allocation], releases: &[Vec<usize>]
     let mut placed: Vec<(usize, usize, usize)> = Vec::with_capacity(packable.len());
     for index in packable {
         let extent = footprint(allocations[index].bytes);
-        let lifetime = (allocations[index].first, released_at[index].unwrap_or(usize::MAX));
+        let lifetime = (
+            allocations[index].first,
+            released_at[index].unwrap_or(usize::MAX),
+        );
         let offset = first_free_offset(&placed, allocations, &released_at, lifetime, extent);
         places[index] = (0, offset);
         slot_bytes[0] = slot_bytes[0].max(offset + extent);
@@ -114,7 +120,10 @@ pub(super) fn peak_live_bytes(allocations: &[Allocation], releases: &[Vec<usize>
             peak = peak.max(live);
             next += 1;
         }
-        live -= released.iter().map(|index| allocations[*index].bytes).sum::<usize>();
+        live -= released
+            .iter()
+            .map(|index| allocations[*index].bytes)
+            .sum::<usize>();
     }
     peak
 }
@@ -143,7 +152,10 @@ fn first_free_offset(
     let mut occupied: Vec<(usize, usize)> = placed
         .iter()
         .filter(|(index, _, _)| {
-            let other = (allocations[*index].first, released_at[*index].unwrap_or(usize::MAX));
+            let other = (
+                allocations[*index].first,
+                released_at[*index].unwrap_or(usize::MAX),
+            );
             other.0 <= lifetime.1 && lifetime.0 <= other.1
         })
         .map(|(_, offset, other_extent)| (*offset, *other_extent))
@@ -193,7 +205,8 @@ mod tests {
         let spans = lifetimes(allocations, releases);
         for first in 0..allocations.len() {
             for second in first + 1..allocations.len() {
-                let simultaneous = spans[first].0 <= spans[second].1 && spans[second].0 <= spans[first].1;
+                let simultaneous =
+                    spans[first].0 <= spans[second].1 && spans[second].0 <= spans[first].1;
                 let (slot_a, offset_a) = layout.places[first];
                 let (slot_b, offset_b) = layout.places[second];
                 let overlap = slot_a == slot_b
@@ -244,7 +257,11 @@ mod tests {
 
         let layout = lay_out_whole_slots(&allocations, &releases);
 
-        assert_eq!(layout.slot_bytes.len(), 2, "the third output reuses the first output's buffer");
+        assert_eq!(
+            layout.slot_bytes.len(),
+            2,
+            "the third output reuses the first output's buffer"
+        );
         assert_eq!(layout.places[2], layout.places[0]);
     }
 
@@ -261,12 +278,20 @@ mod tests {
 
     #[test]
     fn packed_range_serves_a_later_output_of_a_different_length() {
-        let allocations = vec![allocation(8192, 0), allocation(1024, 1), allocation(4096, 2)];
+        let allocations = vec![
+            allocation(8192, 0),
+            allocation(1024, 1),
+            allocation(4096, 2),
+        ];
         let releases = vec![vec![0], vec![1], vec![2]];
 
         let layout = lay_out_packed(&allocations, &releases);
 
-        assert_eq!(layout.slot_bytes.len(), 1, "every output is released, so one shared buffer holds all");
+        assert_eq!(
+            layout.slot_bytes.len(),
+            1,
+            "every output is released, so one shared buffer holds all"
+        );
         assert_eq!(
             layout.slot_bytes[0],
             footprint(8192),

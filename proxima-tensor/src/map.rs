@@ -136,7 +136,11 @@ impl AxisIndex {
         }
         match self.terms.as_slice() {
             [first, second] => {
-                let (unit, outer) = if first.axis == inner { (first, second) } else { (second, first) };
+                let (unit, outer) = if first.axis == inner {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
                 (unit.axis == inner && unit.coeff == 1 && outer.axis != inner && outer.coeff > 1)
                     .then_some((outer.axis, outer.coeff))
             }

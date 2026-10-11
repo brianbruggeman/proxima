@@ -113,7 +113,10 @@ fn qwen35_sequence_tail_projection_matches_cpu_on_packed_weight() {
         QuantizedBlock::Float32(z_values.as_slice()),
         QuantizedBlock::Float32(head_eps_values.as_slice()),
         QuantizedBlock::Float32(norm_values.as_slice()),
-        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: weight_blocks.as_slice() },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: weight_blocks.as_slice(),
+        },
     ];
 
     let cpu =

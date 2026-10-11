@@ -72,10 +72,7 @@ fn bind_rope(fixture: &RopeFixture) -> Vec<BoundOp> {
     .expect("rope program binds")
 }
 
-fn evaluate_twin(
-    bound: &BoundOp,
-    inputs: &BTreeMap<NodeId, &[f32]>,
-) -> (Vec<f32>, Vec<f32>) {
+fn evaluate_twin(bound: &BoundOp, inputs: &BTreeMap<NodeId, &[f32]>) -> (Vec<f32>, Vec<f32>) {
     let BoundOpKind::ElementwiseTwin {
         body,
         operands,
@@ -119,8 +116,16 @@ fn reference_outputs(fixture: &RopeFixture) -> (Vec<f32>, Vec<f32>) {
         &[fixture.first, fixture.second],
     )
     .expect("the two-dispatch rope path evaluates");
-    let first = evaluated.get(fixture.first).expect("first output").0.to_vec();
-    let second = evaluated.get(fixture.second).expect("second output").0.to_vec();
+    let first = evaluated
+        .get(fixture.first)
+        .expect("first output")
+        .0
+        .to_vec();
+    let second = evaluated
+        .get(fixture.second)
+        .expect("second output")
+        .0
+        .to_vec();
     (first, second)
 }
 
@@ -149,19 +154,38 @@ async fn one_twin_dispatch_matches_the_two_dispatch_rope_path_bit_for_bit(
 ) {
     let fixture = rope_fixture(head_dim, pairing);
     let bound = bind_rope(&fixture);
-    assert_eq!(bound.len(), 2, "fused_rope_pair binds to two plain elementwise ops");
+    assert_eq!(
+        bound.len(),
+        2,
+        "fused_rope_pair binds to two plain elementwise ops"
+    );
 
     let fused = fuse_twin_elementwise(bound, &fixture.program);
 
-    assert_eq!(fused.len(), 1, "the two sibling ops collapse to one dispatch");
+    assert_eq!(
+        fused.len(),
+        1,
+        "the two sibling ops collapse to one dispatch"
+    );
     let twin = &fused[0];
     assert_eq!(twin.kind.name(), "elementwise_twin");
-    let outputs = [twin.node, twin.twin_node().expect("twin carries a second node")];
+    let outputs = [
+        twin.node,
+        twin.twin_node().expect("twin carries a second node"),
+    ];
     assert!(outputs.contains(&fixture.first) && outputs.contains(&fixture.second));
     let (reference_first, reference_second) = reference_outputs(&fixture);
     let (twin_first, twin_second) = twin_in_original_order(&fixture, twin);
-    assert_eq!(bits(&twin_first), bits(&reference_first), "first rotated half");
-    assert_eq!(bits(&twin_second), bits(&reference_second), "second rotated half");
+    assert_eq!(
+        bits(&twin_first),
+        bits(&reference_first),
+        "first rotated half"
+    );
+    assert_eq!(
+        bits(&twin_second),
+        bits(&reference_second),
+        "second rotated half"
+    );
 }
 
 #[proxima::test]
@@ -179,7 +203,10 @@ async fn twin_halves_are_the_two_plain_ops_the_pass_merged(
 
     let restored: BTreeSet<NodeId> = [primary.node, secondary.node].into_iter().collect();
     let original: BTreeSet<NodeId> = bound.iter().map(|op| op.node).collect();
-    assert_eq!(restored, original, "the halves are exactly the merged nodes");
+    assert_eq!(
+        restored, original,
+        "the halves are exactly the merged nodes"
+    );
     for half in [&primary, &secondary] {
         assert_eq!(half.kind.name(), "elementwise");
         assert_eq!(half.extents, bound[0].extents);

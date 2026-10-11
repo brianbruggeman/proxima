@@ -255,11 +255,16 @@ fn matmul_op(m: u32, k: u32, n: u32) -> (BoundOp, proxima_tensor::NodeId) {
         }),
     );
     let shapes = infer(&program, &[]).expect("matmul infers");
-    let bound = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-        .expect("matmul lowers")
-        .into_iter()
-        .next()
-        .expect("one fused bound op emitted");
+    let bound = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("matmul lowers")
+    .into_iter()
+    .next()
+    .expect("one fused bound op emitted");
     (bound, weight)
 }
 

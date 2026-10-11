@@ -94,7 +94,13 @@ mod tests {
 
     #[test]
     fn safetensors_only_dtypes_have_no_ggml_counterpart() {
-        for dtype in [DType::Bool, DType::BFloat8, DType::UInt8, DType::UInt32, DType::Int128] {
+        for dtype in [
+            DType::Bool,
+            DType::BFloat8,
+            DType::UInt8,
+            DType::UInt32,
+            DType::Int128,
+        ] {
             assert_eq!(dtype_to_ggml(dtype), None, "{dtype:?}");
         }
     }

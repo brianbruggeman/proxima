@@ -229,7 +229,10 @@ impl ModelDescriptor {
     /// state a rejected draft would have to undo).
     #[must_use]
     pub fn verify(&self) -> Option<Self> {
-        let rewinds = self.layers.iter().all(|layer| layer.kind == LayerKind::Attention);
+        let rewinds = self
+            .layers
+            .iter()
+            .all(|layer| layer.kind == LayerKind::Attention);
         (self.speculative_verify && self.last_row_only && rewinds).then(|| Self {
             last_row_only: false,
             ..self.clone()
@@ -443,7 +446,9 @@ impl FamilyProfile {
     #[must_use]
     pub const fn rope_pairing(&self, rotary_dim: u32) -> RopePairing {
         match self.rope_layout {
-            RopeLayout::SplitHalf => RopePairing::SplitHalf { pairs: rotary_dim / 2 },
+            RopeLayout::SplitHalf => RopePairing::SplitHalf {
+                pairs: rotary_dim / 2,
+            },
             RopeLayout::Adjacent => RopePairing::Interleaved,
         }
     }
@@ -469,7 +474,10 @@ impl FamilyProfile {
 /// alone).
 ///
 /// [`DenseArch::bind`]: ../../../proxima_model_interop/dense/struct.DenseArch.html
-#[expect(clippy::too_many_arguments, reason = "mirrors the builder's own flat positional signature this descriptor replaces -- see build_forward's Bounded arm, which reads every one of these fields straight back off the descriptor it builds")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the builder's own flat positional signature this descriptor replaces -- see build_forward's Bounded arm, which reads every one of these fields straight back off the descriptor it builds"
+)]
 #[must_use]
 pub fn gqa_descriptor_from_shape(
     vocab: u32,
@@ -669,8 +677,17 @@ pub(super) fn refuse_when(
 ///
 /// [`ForwardProgram`]'s own doc names each root and which engine fills it.
 pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, TensorError> {
-    if descriptor.gated_attention || descriptor.layers.iter().any(|layer| layer.kind == LayerKind::Gdn) {
-        return if descriptor.layers.iter().any(|layer| layer.ffn.combination == FfnCombination::RoutedWithSharedExpert) {
+    if descriptor.gated_attention
+        || descriptor
+            .layers
+            .iter()
+            .any(|layer| layer.kind == LayerKind::Gdn)
+    {
+        return if descriptor
+            .layers
+            .iter()
+            .any(|layer| layer.ffn.combination == FfnCombination::RoutedWithSharedExpert)
+        {
             hybrid_routed_forward(descriptor)
         } else {
             hybrid_dense_forward(descriptor)
@@ -730,24 +747,25 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                 "build_forward(CacheStrategy::Cacheless)",
                 "a residual scale",
             )?;
-            let (program, logits, moe_sites, duplicate_head_roots) = scheduled_forward_program_with_experts_and_head_repeats(
-                descriptor.vocab,
-                descriptor.embedding,
-                descriptor.feed_forward,
-                descriptor.expert_feed_forward,
-                descriptor.query_heads,
-                descriptor.block_count,
-                descriptor.expert_count,
-                descriptor.expert_used_count,
-                descriptor.leading_dense_block_count,
-                descriptor.l_cache,
-                &descriptor.layers,
-                descriptor.embedding_scale,
-                descriptor.logit_softcap,
-                descriptor.last_row_only,
-                descriptor.ple_dim,
-                descriptor.head_repeats,
-            )?;
+            let (program, logits, moe_sites, duplicate_head_roots) =
+                scheduled_forward_program_with_experts_and_head_repeats(
+                    descriptor.vocab,
+                    descriptor.embedding,
+                    descriptor.feed_forward,
+                    descriptor.expert_feed_forward,
+                    descriptor.query_heads,
+                    descriptor.block_count,
+                    descriptor.expert_count,
+                    descriptor.expert_used_count,
+                    descriptor.leading_dense_block_count,
+                    descriptor.l_cache,
+                    &descriptor.layers,
+                    descriptor.embedding_scale,
+                    descriptor.logit_softcap,
+                    descriptor.last_row_only,
+                    descriptor.ple_dim,
+                    descriptor.head_repeats,
+                )?;
             Ok(ForwardProgram {
                 program,
                 logits,
@@ -792,15 +810,23 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                 });
             }
             refuse_when(
-                descriptor.layers.iter().any(|layer| layer.kind != LayerKind::Attention),
+                descriptor
+                    .layers
+                    .iter()
+                    .any(|layer| layer.kind != LayerKind::Attention),
                 "build_forward(CacheMask::Bounded)",
                 "a layer that is not attention",
             )?;
             let attention = &first.attention;
-            let layer_windows: Vec<Option<u32>> =
-                descriptor.layers.iter().map(|layer| layer.attention.mask_window).collect();
+            let layer_windows: Vec<Option<u32>> = descriptor
+                .layers
+                .iter()
+                .map(|layer| layer.attention.mask_window)
+                .collect();
             let pairing_the_moe_layer_derives = if descriptor.qk_norm {
-                RopePairing::SplitHalf { pairs: attention.head_dim / 2 }
+                RopePairing::SplitHalf {
+                    pairs: attention.head_dim / 2,
+                }
             } else {
                 RopePairing::Interleaved
             };

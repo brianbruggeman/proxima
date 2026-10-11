@@ -470,8 +470,7 @@ fn draft_k4v(
 ) {
     let stat_idx = map.keys[key_offset].stat_idx;
     for position in stat_idx..=match_pos {
-        if inp[position..position + size_key - 1]
-            != inp[match_pos..match_pos + size_key - 1]
+        if inp[position..position + size_key - 1] != inp[match_pos..match_pos + size_key - 1]
             || inp[position + size_key - 1] != inp[match_pos + size_key - 1]
         {
             continue;
@@ -626,7 +625,10 @@ mod tests {
 
         let mut cases_by_stream: BTreeMap<u32, Vec<&FixtureCase>> = BTreeMap::new();
         for case in &fixture.cases {
-            cases_by_stream.entry(case.stream_id).or_default().push(case);
+            cases_by_stream
+                .entry(case.stream_id)
+                .or_default()
+                .push(case);
         }
 
         let mut total = 0usize;
@@ -672,7 +674,10 @@ mod tests {
     fn ngram_map_k_matches_llama_fixture() {
         let (cases, non_empty) = run_fixture(NGRAM_MAP_K_JSON, true);
         println!("cases = {cases} non_empty = {non_empty}");
-        assert!(cases >= 200, "fixture must carry at least 200 cases per SPEC.md");
+        assert!(
+            cases >= 200,
+            "fixture must carry at least 200 cases per SPEC.md"
+        );
     }
 
     /// [`ngram_map_draft`] against every case in
@@ -686,7 +691,10 @@ mod tests {
     fn ngram_map_k4v_matches_llama_fixture() {
         let (cases, non_empty) = run_fixture(NGRAM_MAP_K4V_JSON, false);
         println!("cases = {cases} non_empty = {non_empty}");
-        assert!(cases >= 200, "fixture must carry at least 200 cases per SPEC.md");
+        assert!(
+            cases >= 200,
+            "fixture must carry at least 200 cases per SPEC.md"
+        );
     }
 
     /// Happy path, hand-computed key_only: `history`'s first four tokens are

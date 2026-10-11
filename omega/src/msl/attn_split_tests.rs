@@ -328,9 +328,18 @@ mod decode_split {
         for cached_key_rows in [32_u64, 2048] {
             let op = attention_op(9, 8, 256, cached_key_rows, 1, i64::MIN);
             for (label, body) in kernel_bodies(&op) {
-                assert!(!body.contains("long "), "{label} at {cached_key_rows}: a 64-bit declaration");
-                assert!(!body.contains("(long)"), "{label} at {cached_key_rows}: a 64-bit cast");
-                assert!(!body.contains("1L"), "{label} at {cached_key_rows}: a 64-bit literal");
+                assert!(
+                    !body.contains("long "),
+                    "{label} at {cached_key_rows}: a 64-bit declaration"
+                );
+                assert!(
+                    !body.contains("(long)"),
+                    "{label} at {cached_key_rows}: a 64-bit cast"
+                );
+                assert!(
+                    !body.contains("1L"),
+                    "{label} at {cached_key_rows}: a 64-bit literal"
+                );
             }
         }
         let op = attention_op(9, 8, 256, 2048, 1, i64::MIN);
@@ -346,7 +355,10 @@ mod decode_split {
         assert_default_sizing();
         let op = attention_op(9, 8, 256, 1 << 24, 1, i64::MIN);
         for (label, body) in kernel_bodies(&op) {
-            assert!(body.contains("long splits = (long)u.splits;"), "{label}: 64-bit splits");
+            assert!(
+                body.contains("long splits = (long)u.splits;"),
+                "{label}: 64-bit splits"
+            );
             assert!(!body.contains("int splits"), "{label}: no 32-bit splits");
         }
         let [(_, partial), _] = kernel_bodies(&op);
@@ -358,7 +370,10 @@ mod decode_split {
         assert_eq!(index_literal(i64::MIN, "int", ""), "-2147483647");
         assert_eq!(index_literal(i64::MAX, "int", ""), "2147483647");
         assert_eq!(index_literal(-511, "int", ""), "-511");
-        assert_eq!(index_literal(i64::MIN, "long", "L"), "-9223372036854775807L");
+        assert_eq!(
+            index_literal(i64::MIN, "long", "L"),
+            "-9223372036854775807L"
+        );
         assert_eq!(index_literal(0, "long", "L"), "0L");
     }
 
@@ -795,7 +810,11 @@ fn the_scalar_kernel_bounds_the_new_range_by_the_window_only_when_the_window_cut
             windowed,
             "new rows {new_rows}: the new range is bounded by the window exactly when the window cuts it"
         );
-        assert_eq!(kernel.source.contains(cached_only), !windowed, "new rows {new_rows}");
+        assert_eq!(
+            kernel.source.contains(cached_only),
+            !windowed,
+            "new rows {new_rows}"
+        );
         cells += 1;
     }
     assert_eq!(cells, 4);

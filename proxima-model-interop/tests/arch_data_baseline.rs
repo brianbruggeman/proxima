@@ -25,22 +25,24 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
-    BoundProgram, BoundWeights, Codec, KvLayout, LoadedModel, bind_checkpoint_with_kv_layout, bind_speculative_verify,
-    PromptCacheConfig, ServingConfig, SpeculativeConfig, SpeculativeDecodeStats, architecture_from_metadata, dense_descriptor_from_gguf, sliding_pattern,
-    metadata_f32_optional,
-    metadata_str, metadata_u32, profiles::family_profile, recurrent_interval_architecture_from_metadata,
-    recurrent_interval_descriptor_from_architecture, recurrent_routed_interval,
+    BoundProgram, BoundWeights, Codec, KvLayout, LoadedModel, PromptCacheConfig, ServingConfig,
+    SpeculativeConfig, SpeculativeDecodeStats, architecture_from_metadata,
+    bind_checkpoint_with_kv_layout, bind_speculative_verify, dense_descriptor_from_gguf,
+    metadata_f32_optional, metadata_str, metadata_u32, profiles::family_profile,
+    recurrent_interval_architecture_from_metadata, recurrent_interval_descriptor_from_architecture,
+    recurrent_routed_interval, sliding_pattern,
 };
-use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::TensorError;
+use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{Extent, Op};
 use proxima_tensor::spec::{
-    Activation, AttentionScoreScale, CacheMask, CacheStrategy, EmbeddingScale, ExpertGatingFunc, FfnCombination,
-    KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, ModelDescriptor,
-    ParallelDenseMoeConfig, CachedLayerRoots, ForwardProgram, LayerCacheRoots, RopePairing, RopeTableSel,
-    ValueSourceKind, build_forward,
-    SLIDING_KV_SYMBOL, sliding_pattern_descriptor_from_gguf, scheduled_two_range_cached_forward_program_with_experts,
-    gqa_cached_forward_program_with_experts_and_layer_taps, gqa_descriptor_from_shape,
+    Activation, AttentionScoreScale, CacheMask, CacheStrategy, CachedLayerRoots, EmbeddingScale,
+    ExpertGatingFunc, FfnCombination, ForwardProgram, KeySourceKind, LayerAttentionConfig,
+    LayerCacheRoots, LayerFfnConfig, LayerKind, LayerSchedule, ModelDescriptor,
+    ParallelDenseMoeConfig, RopePairing, RopeTableSel, SLIDING_KV_SYMBOL, ValueSourceKind,
+    build_forward, gqa_cached_forward_program_with_experts_and_layer_taps,
+    gqa_descriptor_from_shape, scheduled_two_range_cached_forward_program_with_experts,
+    sliding_pattern_descriptor_from_gguf,
 };
 use sha2::{Digest, Sha256};
 
@@ -227,7 +229,10 @@ fn digest_record(checkpoint: &Checkpoint) -> String {
     assert_architecture_key(checkpoint, &parsed);
     let bound = bind_checkpoint_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
         .unwrap_or_else(|error| {
-            panic!("{}: bind_checkpoint_with_kv_layout failed: {error:?}", checkpoint.name)
+            panic!(
+                "{}: bind_checkpoint_with_kv_layout failed: {error:?}",
+                checkpoint.name
+            )
         });
     let verify = bind_speculative_verify(&parsed, file_bytes, KvLayout::SlidingRing, None)
         .unwrap_or_else(|error| panic!("{}: verify bind failed: {error:?}", checkpoint.name));
@@ -298,7 +303,15 @@ fn bound_lines(weights: &BoundWeights<'_>) -> Vec<String> {
 fn is_step_input(name: &str) -> bool {
     matches!(
         name,
-        "ids" | "eps" | "rope_cos" | "rope_sin" | "rope_cos_swa" | "rope_sin_swa" | "cached_len" | "cached_len_swa" | "lm_head_row"
+        "ids"
+            | "eps"
+            | "rope_cos"
+            | "rope_sin"
+            | "rope_cos_swa"
+            | "rope_sin_swa"
+            | "cached_len"
+            | "cached_len_swa"
+            | "lm_head_row"
     ) || name.starts_with("kv_cache.")
         || name.starts_with("ssm_cache.")
 }
@@ -310,13 +323,21 @@ fn assert_unbound_leaves_are_step_inputs(checkpoint: &Checkpoint, bound: &BoundP
         .iter()
         .map(|(name, _)| name.as_str())
         .chain(bound.weights.packed().iter().map(|(name, _)| name.as_str()))
-        .chain(bound.weights.packed_owned().iter().map(|(name, _, _)| name.as_str()))
+        .chain(
+            bound
+                .weights
+                .packed_owned()
+                .iter()
+                .map(|(name, _, _)| name.as_str()),
+        )
         .collect();
     let weight_leaves_left_unbound: Vec<&str> = bound
         .program
         .iter()
         .filter_map(|op| match op {
-            Op::Input { name: Some(name), .. } => Some(name.as_str()),
+            Op::Input {
+                name: Some(name), ..
+            } => Some(name.as_str()),
             _ => None,
         })
         .filter(|name| !bound_names.contains(name) && !is_step_input(name))
@@ -335,7 +356,10 @@ fn bound_record(checkpoint: &Checkpoint) -> String {
     assert_architecture_key(checkpoint, &parsed);
     let bound = bind_checkpoint_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
         .unwrap_or_else(|error| {
-            panic!("{}: bind_checkpoint_with_kv_layout failed: {error:?}", checkpoint.name)
+            panic!(
+                "{}: bind_checkpoint_with_kv_layout failed: {error:?}",
+                checkpoint.name
+            )
         });
 
     let lines = bound_lines(&bound.weights);
@@ -363,10 +387,14 @@ fn without_f32_storage_class(record: &str) -> String {
     const HEADER_LINES: usize = 3;
     let lines: Vec<String> = record
         .lines()
-        .map(|line| match line.split('\t').collect::<Vec<_>>().as_slice() {
-            ["owned" | "packed", name, "f32", rest @ ..] => format!("f32\t{name}\tf32\t{}", rest.join("\t")),
-            _ => line.to_string(),
-        })
+        .map(
+            |line| match line.split('\t').collect::<Vec<_>>().as_slice() {
+                ["owned" | "packed", name, "f32", rest @ ..] => {
+                    format!("f32\t{name}\tf32\t{}", rest.join("\t"))
+                }
+                _ => line.to_string(),
+            },
+        )
         .collect();
     let (header, weights) = lines.split_at(HEADER_LINES.min(lines.len()));
     let mut weights = weights.to_vec();
@@ -391,7 +419,10 @@ fn assert_matches_fixture(checkpoint: &Checkpoint, extension: &str, actual: &str
         )
     });
     let (expected, actual) = if extension == "bound" {
-        (without_f32_storage_class(&expected), without_f32_storage_class(actual))
+        (
+            without_f32_storage_class(&expected),
+            without_f32_storage_class(actual),
+        )
     } else {
         (expected, actual.to_string())
     };
@@ -470,9 +501,15 @@ fn arch_data_digest_granite_moe() {
         "\nbind.router_roots=0 sha256=",
         "\nbind.single_position_step=false\n",
     ] {
-        assert!(record.contains(expected), "granite moe digest must contain {expected:?}, got:\n{record}");
+        assert!(
+            record.contains(expected),
+            "granite moe digest must contain {expected:?}, got:\n{record}"
+        );
     }
-    assert!(record.ends_with("verify=absent\n"), "granite moe digest must end with verify=absent, got:\n{record}");
+    assert!(
+        record.ends_with("verify=absent\n"),
+        "granite moe digest must end with verify=absent, got:\n{record}"
+    );
     assert_matches_fixture(&GRANITE_MOE, "digest", &record);
 }
 
@@ -514,7 +551,11 @@ fn generic_binder_qwen35moe() {
 #[test]
 fn generic_binder_granite_moe() {
     let record = bound_record(&GRANITE_MOE);
-    assert!(record.contains("\nbound_weights=243\n"), "granite moe must bind 243 weights (24 layers x 10 + token_embd + output_norm + output), got {:?}", record.lines().nth(1));
+    assert!(
+        record.contains("\nbound_weights=243\n"),
+        "granite moe must bind 243 weights (24 layers x 10 + token_embd + output_norm + output), got {:?}",
+        record.lines().nth(1)
+    );
     assert_matches_fixture(&GRANITE_MOE, "bound", &record);
 }
 
@@ -523,8 +564,12 @@ fn config_descriptors(
     parsed: &proxima_gguf::pipe::ParsedGguf,
 ) -> Vec<(&'static str, ModelDescriptor)> {
     if checkpoint.architecture == "gemma4" {
-        let decode = sliding_pattern::descriptor_from_gguf(parsed, true)
-            .unwrap_or_else(|error| panic!("{}: descriptor_from_gguf failed: {error:?}", checkpoint.name));
+        let decode = sliding_pattern::descriptor_from_gguf(parsed, true).unwrap_or_else(|error| {
+            panic!(
+                "{}: descriptor_from_gguf failed: {error:?}",
+                checkpoint.name
+            )
+        });
         let verify = ModelDescriptor {
             last_row_only: false,
             ..decode.clone()
@@ -532,23 +577,49 @@ fn config_descriptors(
         return vec![("bind", decode), ("verify", verify)];
     }
     if checkpoint.architecture == "qwen35" {
-        let architecture = recurrent_interval_architecture_from_metadata(parsed)
-            .unwrap_or_else(|error| panic!("{}: recurrent_interval_architecture_from_metadata failed: {error:?}", checkpoint.name));
+        let architecture =
+            recurrent_interval_architecture_from_metadata(parsed).unwrap_or_else(|error| {
+                panic!(
+                    "{}: recurrent_interval_architecture_from_metadata failed: {error:?}",
+                    checkpoint.name
+                )
+            });
         let descriptor = recurrent_interval_descriptor_from_architecture(&architecture)
-            .unwrap_or_else(|error| panic!("{}: the qwen35 descriptor failed: {error:?}", checkpoint.name));
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: the qwen35 descriptor failed: {error:?}",
+                    checkpoint.name
+                )
+            });
         return vec![("bind", descriptor)];
     }
     if checkpoint.architecture == "qwen35moe" {
-        let architecture = recurrent_routed_interval::from_metadata(parsed)
-            .unwrap_or_else(|error| panic!("{}: qwen35moe hparams failed: {error:?}", checkpoint.name));
-        let descriptor = recurrent_routed_interval::descriptor_from_architecture(&architecture, None)
-            .unwrap_or_else(|error| panic!("{}: the qwen35moe descriptor failed: {error:?}", checkpoint.name));
+        let architecture =
+            recurrent_routed_interval::from_metadata(parsed).unwrap_or_else(|error| {
+                panic!("{}: qwen35moe hparams failed: {error:?}", checkpoint.name)
+            });
+        let descriptor =
+            recurrent_routed_interval::descriptor_from_architecture(&architecture, None)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{}: the qwen35moe descriptor failed: {error:?}",
+                        checkpoint.name
+                    )
+                });
         return vec![("bind", descriptor)];
     }
-    let architecture = architecture_from_metadata(parsed)
-        .unwrap_or_else(|error| panic!("{}: architecture_from_metadata failed: {error:?}", checkpoint.name));
-    let descriptor = dense_descriptor_from_gguf(parsed, &architecture)
-        .unwrap_or_else(|error| panic!("{}: dense_descriptor_from_gguf failed: {error:?}", checkpoint.name));
+    let architecture = architecture_from_metadata(parsed).unwrap_or_else(|error| {
+        panic!(
+            "{}: architecture_from_metadata failed: {error:?}",
+            checkpoint.name
+        )
+    });
+    let descriptor = dense_descriptor_from_gguf(parsed, &architecture).unwrap_or_else(|error| {
+        panic!(
+            "{}: dense_descriptor_from_gguf failed: {error:?}",
+            checkpoint.name
+        )
+    });
     vec![("bind", descriptor)]
 }
 
@@ -565,23 +636,54 @@ fn model_config_roundtrip(checkpoint: &Checkpoint) {
         .filter(|label| incumbent.contains(&format!("\n{label}.ops=")))
         .collect::<Vec<_>>();
     assert_eq!(
-        descriptors.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+        descriptors
+            .iter()
+            .map(|(label, _)| *label)
+            .collect::<Vec<_>>(),
         incumbent_labels,
         "{}: the config set and the incumbent's programs disagree",
         checkpoint.name
     );
     for (label, descriptor) in descriptors {
-        let text = toml::to_string(&descriptor)
-            .unwrap_or_else(|error| panic!("{} {label}: descriptor does not serialize: {error}", checkpoint.name));
-        let restored: ModelDescriptor = toml::from_str(&text)
-            .unwrap_or_else(|error| panic!("{} {label}: descriptor toml does not parse: {error}\n{text}", checkpoint.name));
-        assert_eq!(restored, descriptor, "{} {label}: toml round trip changed the config", checkpoint.name);
-        conflaguration::Validate::validate(&restored)
-            .unwrap_or_else(|error| panic!("{} {label}: the real checkpoint's config fails validation: {error}", checkpoint.name));
+        let text = toml::to_string(&descriptor).unwrap_or_else(|error| {
+            panic!(
+                "{} {label}: descriptor does not serialize: {error}",
+                checkpoint.name
+            )
+        });
+        let restored: ModelDescriptor = toml::from_str(&text).unwrap_or_else(|error| {
+            panic!(
+                "{} {label}: descriptor toml does not parse: {error}\n{text}",
+                checkpoint.name
+            )
+        });
+        assert_eq!(
+            restored, descriptor,
+            "{} {label}: toml round trip changed the config",
+            checkpoint.name
+        );
+        conflaguration::Validate::validate(&restored).unwrap_or_else(|error| {
+            panic!(
+                "{} {label}: the real checkpoint's config fails validation: {error}",
+                checkpoint.name
+            )
+        });
 
-        let ForwardProgram { program, logits: logits_root, .. } = build_forward(&restored)
-            .unwrap_or_else(|error| panic!("{} {label}: restored config does not lower: {error:?}", checkpoint.name));
-        assert!(!program.is_empty(), "{} {label}: lowered zero ops", checkpoint.name);
+        let ForwardProgram {
+            program,
+            logits: logits_root,
+            ..
+        } = build_forward(&restored).unwrap_or_else(|error| {
+            panic!(
+                "{} {label}: restored config does not lower: {error:?}",
+                checkpoint.name
+            )
+        });
+        assert!(
+            !program.is_empty(),
+            "{} {label}: lowered zero ops",
+            checkpoint.name
+        );
         for expected in [
             format!("{label}.ops={}", program.len()),
             format!("{label}.ops_sha256={}", ops_digest(&program)),
@@ -641,21 +743,37 @@ fn model_config_roundtrip_qwen35moe() {
 fn model_config_text_edit_changes_the_lowered_program() {
     let mapping = GEMMA4_E2B.open();
     let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
-    let descriptor = sliding_pattern::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
+    let descriptor = sliding_pattern::descriptor_from_gguf(&parsed, true)
+        .expect("the e2b header carries every key the descriptor reads");
     let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
-    assert!(text.contains("activation = \"GeluTanh\""), "e2b runs a gelu ffn, got:\n{text}");
+    assert!(
+        text.contains("activation = \"GeluTanh\""),
+        "e2b runs a gelu ffn, got:\n{text}"
+    );
 
-    let edited: ModelDescriptor = toml::from_str(&text.replace("GeluTanh", "Silu")).expect("the edited toml parses");
+    let edited: ModelDescriptor =
+        toml::from_str(&text.replace("GeluTanh", "Silu")).expect("the edited toml parses");
     let ForwardProgram { program, .. } = build_forward(&edited).expect("the edited config lowers");
 
-    let incumbent = std::fs::read_to_string(GEMMA4_E2B.fixture("digest")).expect("incumbent digest exists");
+    let incumbent =
+        std::fs::read_to_string(GEMMA4_E2B.fixture("digest")).expect("incumbent digest exists");
     assert!(
-        !incumbent.lines().any(|line| line == format!("bind.ops_sha256={}", ops_digest(&program))),
+        !incumbent
+            .lines()
+            .any(|line| line == format!("bind.ops_sha256={}", ops_digest(&program))),
         "a silu ffn must not lower to the gelu program"
     );
     assert_ne!(
-        edited.layers.iter().map(|layer| layer.ffn.activation).collect::<Vec<_>>(),
-        descriptor.layers.iter().map(|layer| layer.ffn.activation).collect::<Vec<_>>(),
+        edited
+            .layers
+            .iter()
+            .map(|layer| layer.ffn.activation)
+            .collect::<Vec<_>>(),
+        descriptor
+            .layers
+            .iter()
+            .map(|layer| layer.ffn.activation)
+            .collect::<Vec<_>>(),
     );
 }
 
@@ -663,7 +781,9 @@ fn leaf_names(program: &[Op]) -> Vec<String> {
     program
         .iter()
         .filter_map(|op| match op {
-            Op::Input { name: Some(name), .. } => Some(name.clone()),
+            Op::Input {
+                name: Some(name), ..
+            } => Some(name.clone()),
             _ => None,
         })
         .collect()
@@ -673,21 +793,34 @@ fn leaf_names(program: &[Op]) -> Vec<String> {
 fn model_config_edit_moves_a_qwen35_attention_layer_to_the_recurrent_mixer() {
     let mapping = QWEN35.open();
     let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
-    let architecture = recurrent_interval_architecture_from_metadata(&parsed).expect("the qwen35 header reads");
-    let descriptor = recurrent_interval_descriptor_from_architecture(&architecture).expect("the qwen35 descriptor builds");
-    assert_eq!(descriptor.layers[3].kind, LayerKind::Attention, "the 0.8b checkpoint attends at layers 3, 7, 11, ...");
+    let architecture =
+        recurrent_interval_architecture_from_metadata(&parsed).expect("the qwen35 header reads");
+    let descriptor = recurrent_interval_descriptor_from_architecture(&architecture)
+        .expect("the qwen35 descriptor builds");
+    assert_eq!(
+        descriptor.layers[3].kind,
+        LayerKind::Attention,
+        "the 0.8b checkpoint attends at layers 3, 7, 11, ..."
+    );
     let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
 
     let mut edited: ModelDescriptor = toml::from_str(&text).expect("the descriptor toml parses");
     edited.layers[3].kind = LayerKind::Gdn;
-    let edited: ModelDescriptor = toml::from_str(&toml::to_string(&edited).expect("serializes")).expect("the edited toml parses");
+    let edited: ModelDescriptor = toml::from_str(&toml::to_string(&edited).expect("serializes"))
+        .expect("the edited toml parses");
     let base = build_forward(&descriptor).expect("the header config lowers");
     let variant = build_forward(&edited).expect("the edited config lowers");
 
     let (base_leaves, variant_leaves) = (leaf_names(&base.program), leaf_names(&variant.program));
     assert!(base_leaves.contains(&"blk.3.attn_q.weight".to_string()));
-    assert!(!variant_leaves.contains(&"blk.3.attn_q.weight".to_string()), "layer 3 no longer attends");
-    assert!(variant_leaves.contains(&"ssm_cache.3.state".to_string()), "layer 3 now carries a recurrent state");
+    assert!(
+        !variant_leaves.contains(&"blk.3.attn_q.weight".to_string()),
+        "layer 3 no longer attends"
+    );
+    assert!(
+        variant_leaves.contains(&"ssm_cache.3.state".to_string()),
+        "layer 3 now carries a recurrent state"
+    );
     assert_ne!(base.program.len(), variant.program.len());
 }
 
@@ -695,7 +828,8 @@ fn model_config_edit_moves_a_qwen35_attention_layer_to_the_recurrent_mixer() {
 fn model_config_rejects_an_unknown_field() {
     let mapping = GEMMA4_E2B.open();
     let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
-    let descriptor = sliding_pattern::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
+    let descriptor = sliding_pattern::descriptor_from_gguf(&parsed, true)
+        .expect("the e2b header carries every key the descriptor reads");
     let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
 
     let outcome = toml::from_str::<ModelDescriptor>(&format!("block_cuont = 30\n{text}"));
@@ -753,11 +887,26 @@ fn gemma4_26b_hand_written_layers() -> Vec<LayerSchedule> {
     (0..30u32)
         .map(|layer| {
             let is_full = (layer + 1).is_multiple_of(6);
-            let (head_dim, kv_heads, mask_window, value_source_kind, cos_name, sin_name) = if is_full {
-                (512, 2, None, ValueSourceKind::SharedWithKey, "rope_cos", "rope_sin")
-            } else {
-                (256, 8, Some(1024), ValueSourceKind::ProjectedV, "rope_cos_swa", "rope_sin_swa")
-            };
+            let (head_dim, kv_heads, mask_window, value_source_kind, cos_name, sin_name) =
+                if is_full {
+                    (
+                        512,
+                        2,
+                        None,
+                        ValueSourceKind::SharedWithKey,
+                        "rope_cos",
+                        "rope_sin",
+                    )
+                } else {
+                    (
+                        256,
+                        8,
+                        Some(1024),
+                        ValueSourceKind::ProjectedV,
+                        "rope_cos_swa",
+                        "rope_sin_swa",
+                    )
+                };
             LayerSchedule {
                 kind: LayerKind::Attention,
                 attention: LayerAttentionConfig {
@@ -766,8 +915,13 @@ fn gemma4_26b_hand_written_layers() -> Vec<LayerSchedule> {
                     mask_window,
                     value_source_kind,
                     key_source_kind: KeySourceKind::ProjectedK,
-                    rope_table: RopeTableSel { cos_name: cos_name.into(), sin_name: sin_name.into() },
-                    rope_pairing: RopePairing::SplitHalf { pairs: head_dim / 2 },
+                    rope_table: RopeTableSel {
+                        cos_name: cos_name.into(),
+                        sin_name: sin_name.into(),
+                    },
+                    rope_pairing: RopePairing::SplitHalf {
+                        pairs: head_dim / 2,
+                    },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                 },
@@ -791,9 +945,15 @@ fn descriptor_real_dims_gemma4_26b_program_equals_direct_builder() {
     assert_eq!(descriptor.feed_forward, 2112);
     assert_eq!(descriptor.expert_feed_forward, 704);
     assert_eq!(descriptor.query_heads, 16);
-    assert_eq!((descriptor.expert_count, descriptor.expert_used_count), (128, 8));
+    assert_eq!(
+        (descriptor.expert_count, descriptor.expert_used_count),
+        (128, 8)
+    );
     assert_eq!(descriptor.logit_softcap, Some(30.0));
-    assert_eq!((descriptor.cache_strategy, descriptor.cache_mask), (CacheStrategy::Cached, CacheMask::Padded));
+    assert_eq!(
+        (descriptor.cache_strategy, descriptor.cache_mask),
+        (CacheStrategy::Cached, CacheMask::Padded)
+    );
     let (direct, direct_logits, direct_roots, direct_moe, _head_repeats) =
         scheduled_two_range_cached_forward_program_with_experts(
             descriptor.vocab,
@@ -814,13 +974,26 @@ fn descriptor_real_dims_gemma4_26b_program_equals_direct_builder() {
         )
         .expect("direct real-dims build");
 
-    let ForwardProgram { program, logits, layer_roots, moe_sites, .. } =
-        build_forward(&descriptor).expect("build_forward real-dims build");
+    let ForwardProgram {
+        program,
+        logits,
+        layer_roots,
+        moe_sites,
+        ..
+    } = build_forward(&descriptor).expect("build_forward real-dims build");
 
     assert_programs_identical(&direct, &program);
     assert_eq!(direct_logits, logits, "root node id mismatch");
-    assert_eq!(direct_roots, owned_cache_roots(&layer_roots), "cache roots mismatch");
-    assert_eq!(direct_moe.0.len(), moe_sites.0.len(), "moe site count mismatch");
+    assert_eq!(
+        direct_roots,
+        owned_cache_roots(&layer_roots),
+        "cache roots mismatch"
+    );
+    assert_eq!(
+        direct_moe.0.len(),
+        moe_sites.0.len(),
+        "moe site count mismatch"
+    );
 }
 
 #[test]
@@ -829,7 +1002,14 @@ fn descriptor_real_dims_openchat_program_equals_direct_builder() {
     let parsed = parse_complete(&mapping).expect("the real openchat header parses");
     let shape = architecture_from_metadata(&parsed).expect("the real openchat header reads");
     assert_eq!(
-        (shape.embedding, shape.feed_forward, shape.query_heads, shape.kv_heads, shape.head_dim, shape.block_count),
+        (
+            shape.embedding,
+            shape.feed_forward,
+            shape.query_heads,
+            shape.kv_heads,
+            shape.head_dim,
+            shape.block_count
+        ),
         (4096, 14336, 32, 8, 128, 32),
     );
 
@@ -868,15 +1048,33 @@ fn descriptor_real_dims_openchat_program_equals_direct_builder() {
         &family_profile(OPENCHAT.architecture).expect("the openchat family profile is embedded"),
     );
 
-    let ForwardProgram { program, logits, layer_roots, moe_sites, layer_residuals, hidden, .. } =
-        build_forward(&descriptor).expect("build_forward real-dims build");
+    let ForwardProgram {
+        program,
+        logits,
+        layer_roots,
+        moe_sites,
+        layer_residuals,
+        hidden,
+        ..
+    } = build_forward(&descriptor).expect("build_forward real-dims build");
 
     assert_programs_identical(&direct, &program);
     assert_eq!(direct_roots.logits, logits, "root node id mismatch");
     assert_eq!(Some(direct_roots.hidden), hidden, "hidden root mismatch");
-    assert_eq!(direct_cache_roots, owned_cache_roots(&layer_roots), "cache roots mismatch");
-    assert_eq!(direct_moe.0.len(), moe_sites.0.len(), "moe site count mismatch");
-    assert_eq!(direct_residuals, layer_residuals, "layer-residual roots mismatch");
+    assert_eq!(
+        direct_cache_roots,
+        owned_cache_roots(&layer_roots),
+        "cache roots mismatch"
+    );
+    assert_eq!(
+        direct_moe.0.len(),
+        moe_sites.0.len(),
+        "moe site count mismatch"
+    );
+    assert_eq!(
+        direct_residuals, layer_residuals,
+        "layer-residual roots mismatch"
+    );
 }
 
 #[test]
@@ -905,7 +1103,8 @@ fn granite_moe_header_declares_the_scales_the_profile_cannot_carry() {
 
     let scale = |key: &str| metadata_f32_optional(&parsed, &format!("granitemoe.{key}"), -1.0);
     let count = |key: &str| {
-        metadata_u32(&parsed, &format!("granitemoe.{key}")).expect("granite header declares the key")
+        metadata_u32(&parsed, &format!("granitemoe.{key}"))
+            .expect("granite header declares the key")
     };
     assert_eq!(scale("embedding_scale"), 12.0);
     assert_eq!(scale("residual_scale"), 0.22_f32);
@@ -937,9 +1136,21 @@ fn granite_moe_program_carries_the_header_scales() {
         .expect("granite moe binds under the sliding ring layout");
 
     assert_eq!(constants_equal(&bound.program, 12.0), 1, "embedding scale");
-    assert_eq!(constants_equal(&bound.program, 1.0_f32 / 6.0_f32), 1, "reciprocal logit scale");
-    assert_eq!(constants_equal(&bound.program, 0.22_f32), 1, "residual scale");
-    assert_eq!(constants_equal(&bound.program, 0.015625), 1, "attention scale");
+    assert_eq!(
+        constants_equal(&bound.program, 1.0_f32 / 6.0_f32),
+        1,
+        "reciprocal logit scale"
+    );
+    assert_eq!(
+        constants_equal(&bound.program, 0.22_f32),
+        1,
+        "residual scale"
+    );
+    assert_eq!(
+        constants_equal(&bound.program, 0.015625),
+        1,
+        "attention scale"
+    );
 }
 
 const LLAMA_GENERATED_TOKENS: usize = 32;
@@ -1014,7 +1225,11 @@ fn llama_parity(checkpoint: &Checkpoint) {
     assert_llama_ids(checkpoint, &parsed, &model);
 }
 
-fn assert_llama_ids(checkpoint: &Checkpoint, parsed: &proxima_gguf::pipe::ParsedGguf, model: &LoadedModel<'_>) {
+fn assert_llama_ids(
+    checkpoint: &Checkpoint,
+    parsed: &proxima_gguf::pipe::ParsedGguf,
+    model: &LoadedModel<'_>,
+) {
     assert_llama_ids_for(
         checkpoint,
         parsed,
@@ -1057,12 +1272,9 @@ fn assert_llama_ids_for(
             ));
         }
         let (generated, _text, _stopped) = model
-            .generate_from_ids(
-                &case.prompt_ids,
-                generated_tokens,
-                &config,
-                &mut |_event| ControlFlow::Continue(()),
-            )
+            .generate_from_ids(&case.prompt_ids, generated_tokens, &config, &mut |_event| {
+                ControlFlow::Continue(())
+            })
             .unwrap_or_else(|error| {
                 panic!("{}: generate_from_ids failed: {error:?}", checkpoint.name)
             });
@@ -1185,7 +1397,12 @@ fn generic_verify_llama_parity(checkpoint: &Checkpoint) {
                     &mut stats,
                     Some(width),
                 )
-                .unwrap_or_else(|error| panic!("{}: speculative generate failed: {error:?}", checkpoint.name));
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{}: speculative generate failed: {error:?}",
+                        checkpoint.name
+                    )
+                });
             verify_steps_total += stats.verify_steps;
             let compared = &generated[..generated.len().min(case.generated_ids.len())];
             if let Some(index) = first_divergence(&case.generated_ids, compared) {
@@ -1235,7 +1452,10 @@ fn generic_verify_llama_parity_granite_moe() {
     generic_verify_llama_parity(&GRANITE_MOE);
 }
 
-fn armed_e2b_model<'file>(parsed: &proxima_gguf::pipe::ParsedGguf, file_bytes: &'file [u8]) -> LoadedModel<'file> {
+fn armed_e2b_model<'file>(
+    parsed: &proxima_gguf::pipe::ParsedGguf,
+    file_bytes: &'file [u8],
+) -> LoadedModel<'file> {
     let armed = ModelDescriptor {
         speculative_verify: true,
         ..config_descriptors(&GEMMA4_E2B, parsed).remove(0).1
@@ -1277,7 +1497,11 @@ fn serving_fsm_drives_a_plain_decode_through_prefill_then_decode_steps() {
             case.prompt
         );
         let evaluations = generated.len() + usize::from(stopped_by_eos);
-        assert_eq!(stats.prefill_steps, 1, "prompt {:?}: one prefill evaluation", case.prompt);
+        assert_eq!(
+            stats.prefill_steps, 1,
+            "prompt {:?}: one prefill evaluation",
+            case.prompt
+        );
         assert_eq!(
             stats.decode_steps,
             (evaluations - 1) as u64,
@@ -1329,11 +1553,26 @@ fn serving_fsm_drives_speculative_verify_through_accept_and_rollback() {
     let (forced_ids, forced) = run(config, Some(3));
     let (plain_ids, plain) = run(config.with_speculative(SpeculativeConfig::none()), None);
 
-    assert_eq!(drafted_ids, plain_ids, "n-gram drafts must not change the greedy ids");
-    assert_eq!(forced_ids, plain_ids, "forced drafts must not change the greedy ids");
-    assert_eq!(plain.verify_steps, 0, "control: with drafting off the machine never verifies");
-    assert!(drafted.accept_steps > 0, "the repeated prompt must produce a fully accepted verify step: {drafted:?}");
-    assert!(forced.rollback_steps > 0, "a repeated-token draft must be rejected, rewinding the cache: {forced:?}");
+    assert_eq!(
+        drafted_ids, plain_ids,
+        "n-gram drafts must not change the greedy ids"
+    );
+    assert_eq!(
+        forced_ids, plain_ids,
+        "forced drafts must not change the greedy ids"
+    );
+    assert_eq!(
+        plain.verify_steps, 0,
+        "control: with drafting off the machine never verifies"
+    );
+    assert!(
+        drafted.accept_steps > 0,
+        "the repeated prompt must produce a fully accepted verify step: {drafted:?}"
+    );
+    assert!(
+        forced.rollback_steps > 0,
+        "a repeated-token draft must be rejected, rewinding the cache: {forced:?}"
+    );
     for stats in [drafted, forced] {
         assert_eq!(
             stats.accept_steps + stats.rollback_steps,
@@ -1355,20 +1594,32 @@ fn load_from_config<'file>(
 }
 
 fn hand_written_config(file: &str) -> ModelDescriptor {
-    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/model-configs").join(file);
-    conflaguration::from_file(&config_path).unwrap_or_else(|error| panic!("{} does not load: {error}", config_path.display()))
+    let config_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/model-configs")
+        .join(file);
+    conflaguration::from_file(&config_path)
+        .unwrap_or_else(|error| panic!("{} does not load: {error}", config_path.display()))
 }
 
 fn assert_hand_written_config_equals_header(checkpoint: &Checkpoint, file: &str) {
     let written = hand_written_config(file);
     let mapping = checkpoint.open();
     let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
-    let architecture = architecture_from_metadata(&parsed).expect("the checkpoint declares an architecture");
+    let architecture =
+        architecture_from_metadata(&parsed).expect("the checkpoint declares an architecture");
 
-    let derived = dense_descriptor_from_gguf(&parsed, &architecture)
-        .unwrap_or_else(|error| panic!("{}: the header does not yield a descriptor: {error:?}", checkpoint.name));
+    let derived = dense_descriptor_from_gguf(&parsed, &architecture).unwrap_or_else(|error| {
+        panic!(
+            "{}: the header does not yield a descriptor: {error:?}",
+            checkpoint.name
+        )
+    });
 
-    assert_eq!(written, derived, "{file} disagrees with {}'s own header", checkpoint.name);
+    assert_eq!(
+        written, derived,
+        "{file} disagrees with {}'s own header",
+        checkpoint.name
+    );
 }
 
 #[test]
@@ -1380,8 +1631,13 @@ fn zero_rust_variant_hand_written_qwen2_config_reproduces_llama_ids() {
 
     let model = load_from_config(&parsed, file_bytes, &config);
 
-    let ForwardProgram { program, .. } = build_forward(&config).expect("the hand-written config lowers");
-    assert_eq!(model.op_count(), program.len(), "the loaded model must run the config's lowering");
+    let ForwardProgram { program, .. } =
+        build_forward(&config).expect("the hand-written config lowers");
+    assert_eq!(
+        model.op_count(),
+        program.len(),
+        "the loaded model must run the config's lowering"
+    );
     assert_llama_ids(&QWEN2, &parsed, &model);
 }
 
@@ -1428,26 +1684,54 @@ fn zero_rust_variant_full_attention_gemma4_e2b_lowers_and_runs() {
     let mapping = GEMMA4_E2B.open();
     let file_bytes: &[u8] = &mapping;
     let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
-    let base = sliding_pattern::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
-    let window = base.layers[0].attention.mask_window.expect("e2b's first layer is a sliding layer");
+    let base = sliding_pattern::descriptor_from_gguf(&parsed, true)
+        .expect("the e2b header carries every key the descriptor reads");
+    let window = base.layers[0]
+        .attention
+        .mask_window
+        .expect("e2b's first layer is a sliding layer");
 
-    assert_eq!(variant, full_attention(&base), "the file must differ from e2b in the layer windows and the ring only");
+    assert_eq!(
+        variant,
+        full_attention(&base),
+        "the file must differ from e2b in the layer windows and the ring only"
+    );
     assert!(
-        variant.layers.iter().all(|layer| layer.kind == LayerKind::Attention && layer.attention.mask_window.is_none()),
+        variant.layers.iter().all(
+            |layer| layer.kind == LayerKind::Attention && layer.attention.mask_window.is_none()
+        ),
         "every layer of the file must be a full-attention layer"
     );
 
-    let ForwardProgram { program: base_program, .. } = build_forward(&base).expect("the base lowers");
-    let ForwardProgram { program: variant_program, .. } = build_forward(&variant).expect("the file lowers");
+    let ForwardProgram {
+        program: base_program,
+        ..
+    } = build_forward(&base).expect("the base lowers");
+    let ForwardProgram {
+        program: variant_program,
+        ..
+    } = build_forward(&variant).expect("the file lowers");
     assert!(
         window_ceiling_constants(&base_program, window) > 0,
         "e2b's program must carry the {window}-token window mask the variant removes"
     );
-    assert_eq!(window_ceiling_constants(&variant_program, window), 0, "a full-attention program carries no window mask");
+    assert_eq!(
+        window_ceiling_constants(&variant_program, window),
+        0,
+        "a full-attention program carries no window mask"
+    );
 
     let model = load_from_config(&parsed, file_bytes, &variant);
-    assert_eq!(model.op_count(), variant_program.len(), "the loaded model must run the file's lowering");
-    assert_ne!(model.op_count(), base_program.len(), "removing every window must change the graph");
+    assert_eq!(
+        model.op_count(),
+        variant_program.len(),
+        "the loaded model must run the file's lowering"
+    );
+    assert_ne!(
+        model.op_count(),
+        base_program.len(),
+        "removing every window must change the graph"
+    );
     assert_llama_ids(&GEMMA4_E2B, &parsed, &model);
 }
 
@@ -1463,7 +1747,12 @@ fn generated_ids_diverge_from_llama(checkpoint: &Checkpoint, config: &ModelDescr
     };
 
     let (generated, _text, _stopped) = model
-        .generate_from_ids(&case.prompt_ids, LLAMA_GENERATED_TOKENS, &serving, &mut |_event| ControlFlow::Continue(()))
+        .generate_from_ids(
+            &case.prompt_ids,
+            LLAMA_GENERATED_TOKENS,
+            &serving,
+            &mut |_event| ControlFlow::Continue(()),
+        )
         .expect("the edited config runs");
 
     let compared = &generated[..generated.len().min(case.generated_ids.len())];
@@ -1483,7 +1772,12 @@ fn cases_diverging_from_llama(checkpoint: &Checkpoint, config: &ModelDescriptor)
         .iter()
         .filter(|case| {
             let (generated, _text, _stopped) = model
-                .generate_from_ids(&case.prompt_ids, LLAMA_GENERATED_TOKENS, &serving, &mut |_event| ControlFlow::Continue(()))
+                .generate_from_ids(
+                    &case.prompt_ids,
+                    LLAMA_GENERATED_TOKENS,
+                    &serving,
+                    &mut |_event| ControlFlow::Continue(()),
+                )
                 .expect("the edited config runs");
             let compared = &generated[..generated.len().min(case.generated_ids.len())];
             first_divergence(&case.generated_ids, compared).is_some()
@@ -1514,21 +1808,64 @@ fn lfm2_header_descriptor() -> ModelDescriptor {
 #[test]
 fn lfm2_header_descriptor_describes_the_hybrid_stack_and_round_trips_through_toml() {
     let descriptor = lfm2_header_descriptor();
-    let attention_layers: Vec<usize> = (0..24).filter(|layer| descriptor.layers[*layer].kind == LayerKind::Attention).collect();
+    let attention_layers: Vec<usize> = (0..24)
+        .filter(|layer| descriptor.layers[*layer].kind == LayerKind::Attention)
+        .collect();
 
-    assert_eq!(attention_layers, vec![2, 6, 10, 14, 18, 21], "the header's nonzero head_count_kv entries");
-    assert!(descriptor.layers.iter().filter(|layer| layer.kind == LayerKind::ShortConv).count() == 18);
-    assert_eq!((descriptor.cache_strategy, descriptor.l_cache, descriptor.leading_dense_block_count), (CacheStrategy::Cacheless, 3, 2));
-    assert_eq!((descriptor.feed_forward, descriptor.expert_feed_forward, descriptor.expert_count), (7168, 1792, 32));
-    let restored: ModelDescriptor = toml::from_str(&toml::to_string(&descriptor).expect("serializes")).expect("parses");
+    assert_eq!(
+        attention_layers,
+        vec![2, 6, 10, 14, 18, 21],
+        "the header's nonzero head_count_kv entries"
+    );
+    assert!(
+        descriptor
+            .layers
+            .iter()
+            .filter(|layer| layer.kind == LayerKind::ShortConv)
+            .count()
+            == 18
+    );
+    assert_eq!(
+        (
+            descriptor.cache_strategy,
+            descriptor.l_cache,
+            descriptor.leading_dense_block_count
+        ),
+        (CacheStrategy::Cacheless, 3, 2)
+    );
+    assert_eq!(
+        (
+            descriptor.feed_forward,
+            descriptor.expert_feed_forward,
+            descriptor.expert_count
+        ),
+        (7168, 1792, 32)
+    );
+    let restored: ModelDescriptor =
+        toml::from_str(&toml::to_string(&descriptor).expect("serializes")).expect("parses");
     assert_eq!(restored, descriptor);
     conflaguration::Validate::validate(&restored).expect("the real checkpoint's config validates");
 
-    let leaves = leaf_names(&build_forward(&restored).expect("the lfm2 config lowers").program);
-    for expected in ["blk.0.shortconv.in_proj.weight.b", "blk.0.ffn_gate.weight", "blk.2.attn_q.weight", "blk.2.ffn_gate_exps.weight"] {
-        assert!(leaves.iter().any(|leaf| leaf == expected), "{expected} is a leaf of the lowered program");
+    let leaves = leaf_names(
+        &build_forward(&restored)
+            .expect("the lfm2 config lowers")
+            .program,
+    );
+    for expected in [
+        "blk.0.shortconv.in_proj.weight.b",
+        "blk.0.ffn_gate.weight",
+        "blk.2.attn_q.weight",
+        "blk.2.ffn_gate_exps.weight",
+    ] {
+        assert!(
+            leaves.iter().any(|leaf| leaf == expected),
+            "{expected} is a leaf of the lowered program"
+        );
     }
-    assert!(!leaves.iter().any(|leaf| leaf == "blk.0.attn_q.weight"), "a convolution layer owns no attention weights");
+    assert!(
+        !leaves.iter().any(|leaf| leaf == "blk.0.attn_q.weight"),
+        "a convolution layer owns no attention weights"
+    );
 }
 
 #[test]
@@ -1552,7 +1889,10 @@ fn model_config_edit_to_the_lfm2_rope_pairing_diverges_from_llama_on_at_least_on
             .layers
             .iter()
             .map(|layer| LayerSchedule {
-                attention: LayerAttentionConfig { rope_pairing: RopePairing::Interleaved, ..layer.attention.clone() },
+                attention: LayerAttentionConfig {
+                    rope_pairing: RopePairing::Interleaved,
+                    ..layer.attention.clone()
+                },
                 ..layer.clone()
             })
             .collect(),
@@ -1587,7 +1927,9 @@ fn granite_moe_config_with_the_hf_split_half_pairing_is_refused_by_the_lowering(
         .iter()
         .map(|layer| LayerSchedule {
             attention: LayerAttentionConfig {
-                rope_pairing: RopePairing::SplitHalf { pairs: layer.attention.head_dim / 2 },
+                rope_pairing: RopePairing::SplitHalf {
+                    pairs: layer.attention.head_dim / 2,
+                },
                 ..layer.attention.clone()
             },
             ..layer.clone()
@@ -1595,10 +1937,17 @@ fn granite_moe_config_with_the_hf_split_half_pairing_is_refused_by_the_lowering(
         .collect();
     let split_half = ModelDescriptor { layers, ..written };
 
-    let refusal = build_forward(&split_half).expect_err("the moe layer expresses split-half only with qk-norm");
+    let refusal = build_forward(&split_half)
+        .expect_err("the moe layer expresses split-half only with qk-norm");
 
     assert!(
-        matches!(refusal, TensorError::UnsupportedInBuilder { feature: "a rope pairing the moe layer cannot express", .. }),
+        matches!(
+            refusal,
+            TensorError::UnsupportedInBuilder {
+                feature: "a rope pairing the moe layer cannot express",
+                ..
+            }
+        ),
         "got {refusal:?}"
     );
 }
@@ -1613,10 +1962,19 @@ fn a_config_that_pairs_gate_and_up_binds_the_fused_operand_it_adds() {
         .expect("binds from the header descriptor");
     let fused_leaf = |layer: u32| format!("blk.{layer}.ffn_gate_up.weight");
     let holds = |weights: &BoundWeights<'_>, name: &str| {
-        weights.packed().iter().any(|(bound_name, _)| bound_name == name)
-            || weights.packed_owned().iter().any(|(bound_name, _, _)| bound_name == name)
+        weights
+            .packed()
+            .iter()
+            .any(|(bound_name, _)| bound_name == name)
+            || weights
+                .packed_owned()
+                .iter()
+                .any(|(bound_name, _, _)| bound_name == name)
     };
-    assert!(!holds(&bound.weights, &fused_leaf(0)), "the header descriptor does not pair gate and up");
+    assert!(
+        !holds(&bound.weights, &fused_leaf(0)),
+        "the header descriptor does not pair gate and up"
+    );
 
     let config = ModelDescriptor {
         paired_gate_up_reduce: true,
@@ -1627,7 +1985,10 @@ fn a_config_that_pairs_gate_and_up_binds_the_fused_operand_it_adds() {
         .expect("lowers the config and binds the leaves it adds");
 
     for layer in 0..architecture.block_count {
-        assert!(holds(&lowered.weights, &fused_leaf(layer)), "layer {layer} fused gate/up operand is bound");
+        assert!(
+            holds(&lowered.weights, &fused_leaf(layer)),
+            "layer {layer} fused gate/up operand is bound"
+        );
     }
     assert_unbound_leaves_are_step_inputs(&OPENCHAT, &lowered);
 }
@@ -1636,7 +1997,8 @@ fn a_config_that_pairs_gate_and_up_binds_the_fused_operand_it_adds() {
 fn model_config_file_layer_turns_the_decode_config_into_the_verify_program() {
     let mapping = GEMMA4_E2B.open();
     let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
-    let decode = sliding_pattern::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
+    let decode = sliding_pattern::descriptor_from_gguf(&parsed, true)
+        .expect("the e2b header carries every key the descriptor reads");
     let directory = tempfile::tempdir().expect("a scratch directory");
     let layer_path = directory.path().join("verify.toml");
     std::fs::write(&layer_path, "last_row_only = false\n").expect("the layer file is written");
@@ -1649,8 +2011,13 @@ fn model_config_file_layer_turns_the_decode_config_into_the_verify_program() {
         .build()
         .expect("the layered descriptor validates");
 
-    let ForwardProgram { program, logits: logits_root, .. } = build_forward(&layered).expect("the layered config lowers");
-    let incumbent = std::fs::read_to_string(GEMMA4_E2B.fixture("digest")).expect("incumbent digest exists");
+    let ForwardProgram {
+        program,
+        logits: logits_root,
+        ..
+    } = build_forward(&layered).expect("the layered config lowers");
+    let incumbent =
+        std::fs::read_to_string(GEMMA4_E2B.fixture("digest")).expect("incumbent digest exists");
     for expected in [
         format!("verify.ops={}", program.len()),
         format!("verify.ops_sha256={}", ops_digest(&program)),
@@ -1684,7 +2051,11 @@ fn map_arena() -> usize {
             0,
         )
     };
-    assert_ne!(pointer, libc::MAP_FAILED, "the kv arena could not be reserved");
+    assert_ne!(
+        pointer,
+        libc::MAP_FAILED,
+        "the kv arena could not be reserved"
+    );
     pointer as usize
 }
 
@@ -1693,7 +2064,10 @@ fn arena_source(byte_len: usize) -> Result<omega::PlacedBuffer, omega::MetalErro
     let page = omega::page_size();
     let length = byte_len.max(1).div_ceil(page) * page;
     let offset = ARENA_USED.fetch_add(length, Ordering::SeqCst);
-    assert!(offset + length <= ARENA_BYTES, "the kv arena is exhausted at {offset} bytes");
+    assert!(
+        offset + length <= ARENA_BYTES,
+        "the kv arena is exhausted at {offset} bytes"
+    );
     ARENA_REQUESTS.fetch_add(1, Ordering::SeqCst);
     let base = *ARENA_BASE.get_or_init(map_arena);
     unsafe { omega::allocate_placed_buffer_over((base + offset) as *mut u8, length) }
@@ -1745,7 +2119,10 @@ fn kv_in_caller_memory(checkpoint: &Checkpoint, kv_owning_layers: usize, matches
 
     let hooked = model.with_kv_buffer_source(arena_source);
     let hooked_ids = generated_ids(&hooked, &cases, &config);
-    assert_eq!(hooked_ids, default_ids, "kv in caller memory changes the ids");
+    assert_eq!(
+        hooked_ids, default_ids,
+        "kv in caller memory changes the ids"
+    );
 
     if matches_llama {
         for (index, case) in cases.iter().enumerate() {
@@ -1764,7 +2141,10 @@ fn kv_in_caller_memory(checkpoint: &Checkpoint, kv_owning_layers: usize, matches
         3 * kv_owning_layers * cases.len(),
         "the arena serves three buffers per kv-owning layer per generate call"
     );
-    assert!(ARENA_USED.load(Ordering::SeqCst) > 0, "the arena served no bytes");
+    assert!(
+        ARENA_USED.load(Ordering::SeqCst) > 0,
+        "the arena served no bytes"
+    );
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -1789,7 +2169,11 @@ fn ring_layers(descriptor: &ModelDescriptor) -> Vec<bool> {
     let ForwardProgram { program, .. } = build_forward(descriptor).expect("the descriptor lowers");
     let leading_extent = |name: &str| {
         program.iter().find_map(|op| match op {
-            Op::Input { name: Some(leaf), shape, .. } if leaf == name => shape.first().copied(),
+            Op::Input {
+                name: Some(leaf),
+                shape,
+                ..
+            } if leaf == name => shape.first().copied(),
             _ => None,
         })
     };
@@ -1803,7 +2187,10 @@ fn ring_layers(descriptor: &ModelDescriptor) -> Vec<bool> {
                 _ => layer,
             };
             let extent = leading_extent(&format!("kv_cache.{owner}.k_even"));
-            assert!(extent.is_some(), "layer {layer} reads kv_cache.{owner}, which the program does not declare");
+            assert!(
+                extent.is_some(),
+                "layer {layer} reads kv_cache.{owner}, which the program does not declare"
+            );
             extent == Some(Extent::Symbolic(SLIDING_KV_SYMBOL))
         })
         .collect()
@@ -1814,18 +2201,34 @@ fn llama_swa_flags(checkpoint: &Checkpoint) -> Vec<bool> {
         .join("tests/fixtures/llama-parity")
         .join(checkpoint.name)
         .join("swa_layers.txt");
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
     let flags: Vec<(usize, bool)> = text
         .lines()
         .filter(|line| line.starts_with("load_tensors: layer"))
         .map(|line| {
-            let layer = line["load_tensors: layer".len()..].split_whitespace().next().expect("a layer index");
-            let flag = line.rsplit("is_swa = ").next().expect("an is_swa flag").trim();
-            (layer.parse().expect("layer index is an integer"), flag == "1")
+            let layer = line["load_tensors: layer".len()..]
+                .split_whitespace()
+                .next()
+                .expect("a layer index");
+            let flag = line
+                .rsplit("is_swa = ")
+                .next()
+                .expect("an is_swa flag")
+                .trim();
+            (
+                layer.parse().expect("layer index is an integer"),
+                flag == "1",
+            )
         })
         .collect();
     let indices: Vec<usize> = flags.iter().map(|(layer, _)| *layer).collect();
-    assert_eq!(indices, (0..flags.len()).collect::<Vec<_>>(), "{}: layers listed out of order or with gaps", path.display());
+    assert_eq!(
+        indices,
+        (0..flags.len()).collect::<Vec<_>>(),
+        "{}: layers listed out of order or with gaps",
+        path.display()
+    );
     flags.into_iter().map(|(_, flag)| flag).collect()
 }
 
@@ -1834,14 +2237,27 @@ fn window_ring_layers_equal_the_oracle_swa_flags_on_both_gemma4_checkpoints() {
     for checkpoint in [&GEMMA4_E2B, &GEMMA4_26B] {
         let mapping = checkpoint.open();
         let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
-        let descriptor = sliding_pattern::descriptor_from_gguf(&parsed, true)
-            .unwrap_or_else(|error| panic!("{}: descriptor_from_gguf failed: {error:?}", checkpoint.name));
+        let descriptor =
+            sliding_pattern::descriptor_from_gguf(&parsed, true).unwrap_or_else(|error| {
+                panic!(
+                    "{}: descriptor_from_gguf failed: {error:?}",
+                    checkpoint.name
+                )
+            });
 
         let ring = ring_layers(&descriptor);
         let oracle = llama_swa_flags(checkpoint);
 
-        assert!(oracle.iter().any(|flag| *flag) && oracle.iter().any(|flag| !*flag), "{}: the oracle must mix windowed and full layers", checkpoint.name);
-        assert_eq!(ring, oracle, "{}: the layers lowered onto the ring are not the layers llama.cpp marks is_swa", checkpoint.name);
+        assert!(
+            oracle.iter().any(|flag| *flag) && oracle.iter().any(|flag| !*flag),
+            "{}: the oracle must mix windowed and full layers",
+            checkpoint.name
+        );
+        assert_eq!(
+            ring, oracle,
+            "{}: the layers lowered onto the ring are not the layers llama.cpp marks is_swa",
+            checkpoint.name
+        );
     }
 }
 
@@ -1849,16 +2265,30 @@ fn window_ring_layers_equal_the_oracle_swa_flags_on_both_gemma4_checkpoints() {
 fn window_ring_layers_follow_a_window_on_one_dense_layer() {
     let mapping = QWEN2.open();
     let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
-    let architecture = architecture_from_metadata(&parsed).expect("the checkpoint declares an architecture");
-    let mut descriptor = dense_descriptor_from_gguf(&parsed, &architecture).expect("the header yields a descriptor");
+    let architecture =
+        architecture_from_metadata(&parsed).expect("the checkpoint declares an architecture");
+    let mut descriptor =
+        dense_descriptor_from_gguf(&parsed, &architecture).expect("the header yields a descriptor");
     let windowed_layer = 5;
     descriptor.layers[windowed_layer].attention.mask_window = Some(64);
     descriptor.sliding_kv_ring = true;
 
     let ring = ring_layers(&descriptor);
 
-    let expected: Vec<bool> = (0..descriptor.layers.len()).map(|layer| layer == windowed_layer).collect();
-    assert_eq!(ring, expected, "exactly the windowed dense layer sits on the ring");
-    let unwindowed = ModelDescriptor { sliding_kv_ring: true, ..dense_descriptor_from_gguf(&parsed, &architecture).expect("the header yields a descriptor") };
-    assert!(ring_layers(&unwindowed).iter().all(|on_ring| !on_ring), "control: a header with no window puts no layer on the ring");
+    let expected: Vec<bool> = (0..descriptor.layers.len())
+        .map(|layer| layer == windowed_layer)
+        .collect();
+    assert_eq!(
+        ring, expected,
+        "exactly the windowed dense layer sits on the ring"
+    );
+    let unwindowed = ModelDescriptor {
+        sliding_kv_ring: true,
+        ..dense_descriptor_from_gguf(&parsed, &architecture)
+            .expect("the header yields a descriptor")
+    };
+    assert!(
+        ring_layers(&unwindowed).iter().all(|on_ring| !on_ring),
+        "control: a header with no window puts no layer on the ring"
+    );
 }

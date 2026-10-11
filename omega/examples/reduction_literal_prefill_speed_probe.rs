@@ -128,7 +128,10 @@ fn run() {
         file_len: u64,
         name: &str,
     ) -> Option<(Vec<u8>, usize, usize)> {
-        let tensor = parsed.tensors.iter().find(|candidate| candidate.name == name)?;
+        let tensor = parsed
+            .tensors
+            .iter()
+            .find(|candidate| candidate.name == name)?;
         if tensor.ggml_type != GgmlType::Q4_0 {
             eprintln!(
                 "real_tensor_bytes: {name} is {:?} in this file, not Q4_0 -- probe skipped, not faked",
@@ -142,8 +145,10 @@ fn run() {
             .tensor_data_range(tensor, file_len)
             .expect("tensor byte range within file bounds");
         let mut buf = vec![0u8; (range.end - range.start) as usize];
-        file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
-        file.read_exact(&mut buf).expect("read exact tensor byte range");
+        file.seek(SeekFrom::Start(range.start))
+            .expect("seek to tensor data");
+        file.read_exact(&mut buf)
+            .expect("read exact tensor byte range");
         Some((buf, in_dim, out_dim))
     }
 
@@ -155,7 +160,8 @@ fn run() {
             .take(out_rows)
             .map(|row_blocks| {
                 let mut row = vec![0.0f32; in_dim];
-                q4_0::dequantize(row_blocks, &mut row).expect("a whole number of q4_0 blocks per row");
+                q4_0::dequantize(row_blocks, &mut row)
+                    .expect("a whole number of q4_0 blocks per row");
                 row
             })
             .collect()
@@ -164,10 +170,7 @@ fn run() {
     // `weight[row] . activation[token]`, for a `rows_checked x tokens_checked`
     // corner of the full output -- an independent oracle, never omega's own
     // evaluator, per `feedback_incumbent_is_llama_not_us.md`.
-    fn expected_output_multi_row(
-        rows: &[Vec<f32>],
-        activation_rows: &[Vec<f32>],
-    ) -> Vec<Vec<f32>> {
+    fn expected_output_multi_row(rows: &[Vec<f32>], activation_rows: &[Vec<f32>]) -> Vec<Vec<f32>> {
         activation_rows
             .iter()
             .map(|activation| {
@@ -244,8 +247,14 @@ fn run() {
     }
 
     const SHAPES: [Shape; 2] = [
-        Shape { label: "attn_k_K1536", tensor: "blk.0.attn_k.weight" },
-        Shape { label: "ffn_down_K12288", tensor: "blk.15.ffn_down.weight" },
+        Shape {
+            label: "attn_k_K1536",
+            tensor: "blk.0.attn_k.weight",
+        },
+        Shape {
+            label: "ffn_down_K12288",
+            tensor: "blk.15.ffn_down.weight",
+        },
     ];
     const TOKEN_TOTALS: [u32; 2] = [26, 510];
 
@@ -261,11 +270,17 @@ fn run() {
 
     fn cov_percent(values: &[f64]) -> f64 {
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / values.len() as f64;
+        let variance = values
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / values.len() as f64;
         100.0 * variance.sqrt() / mean
     }
 
-    if let Ok(output) = std::process::Command::new("pgrep").args(["-fl", "cargo|rustc"]).output()
+    if let Ok(output) = std::process::Command::new("pgrep")
+        .args(["-fl", "cargo|rustc"])
+        .output()
         && !output.stdout.is_empty()
     {
         eprintln!(
@@ -305,12 +320,16 @@ fn run() {
                 multi_row_repeated_program(out_dim as u32, in_dim as u32, tokens, repeat_count);
 
             let blocks = [
-                QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: &weight_bytes },
+                QuantizedBlock::Packed {
+                    codec: Codec::Q4_0,
+                    bytes: &weight_bytes,
+                },
                 QuantizedBlock::Float32(&activation),
             ];
 
-            let plan_runtime = omega::plan(&program, &[], &blocks, &roots, NumericPolicy::default())
-                .expect("plan compiles for the repeated prefill matmul program (runtime arm)");
+            let plan_runtime =
+                omega::plan(&program, &[], &blocks, &roots, NumericPolicy::default())
+                    .expect("plan compiles for the repeated prefill matmul program (runtime arm)");
             let plan_literal = temp_env::with_var("PROXIMA_REDUCTION_LITERAL", Some("1"), || {
                 omega::plan(&program, &[], &blocks, &roots, NumericPolicy::default())
                     .expect("plan compiles for the repeated prefill matmul program (literal arm)")
@@ -336,7 +355,9 @@ fn run() {
 
             let compiled_keys = omega::pipeline_cache_keys();
             let literal_marker = format!("_rl{in_dim}");
-            let literal_has_marker = compiled_keys.iter().any(|key| key.contains(&literal_marker));
+            let literal_has_marker = compiled_keys
+                .iter()
+                .any(|key| key.contains(&literal_marker));
             println!(
                 "{label}: repeat_count={repeat_count} token_groups={token_groups} weight_bytes={} bytes_per_op={bytes_per_op} stream_GB={stream_gb:.3} literal_key_marker={literal_marker} present={literal_has_marker}",
                 weight_bytes.len(),
@@ -349,9 +370,13 @@ fn run() {
             let mut compared_words = 0usize;
             let mut mismatched_words = 0usize;
             for &root in &roots {
-                let (runtime_values, _) = evaluated_runtime.get(root).expect("runtime output present");
-                let (literal_values, _) = evaluated_literal.get(root).expect("literal output present");
-                for (runtime_value, literal_value) in runtime_values.iter().zip(literal_values.iter()) {
+                let (runtime_values, _) =
+                    evaluated_runtime.get(root).expect("runtime output present");
+                let (literal_values, _) =
+                    evaluated_literal.get(root).expect("literal output present");
+                for (runtime_value, literal_value) in
+                    runtime_values.iter().zip(literal_values.iter())
+                {
                     compared_words += 1;
                     if runtime_value.to_bits() != literal_value.to_bits() {
                         mismatched_words += 1;
@@ -362,10 +387,14 @@ fn run() {
             let tokens_checked = (tokens as usize).min(4);
             let dequantized = dequantize_rows(&weight_bytes, in_dim, rows_checked);
             let activation_rows: Vec<Vec<f32>> = (0..tokens_checked)
-                .map(|token_index| activation[token_index * in_dim..(token_index + 1) * in_dim].to_vec())
+                .map(|token_index| {
+                    activation[token_index * in_dim..(token_index + 1) * in_dim].to_vec()
+                })
                 .collect();
             let oracle = expected_output_multi_row(&dequantized, &activation_rows);
-            let (first_runtime, _) = evaluated_runtime.get(roots[0]).expect("first runtime output");
+            let (first_runtime, _) = evaluated_runtime
+                .get(roots[0])
+                .expect("first runtime output");
             // output layout is [tokens, rows] row-major (out_map projection(3,&[0,1])).
             let mut max_abs_vs_oracle = 0.0f32;
             for (token_index, oracle_row) in oracle.iter().enumerate() {

@@ -55,11 +55,7 @@ impl<Entry, Cache> ServingState<Entry, Cache> {
     /// `Prefill { positions } -> Decode { last }`: the one `M`-row program
     /// evaluation prefill performs produced `next_token` and left `cache`
     /// holding the resulting recurrent/KV state.
-    pub fn advance_prefill(
-        self,
-        next_token: Entry,
-        cache: Cache,
-    ) -> Result<Self, ServingFsmError> {
+    pub fn advance_prefill(self, next_token: Entry, cache: Cache) -> Result<Self, ServingFsmError> {
         match self {
             Self::Prefill { .. } => Ok(Self::Decode {
                 last: next_token,
@@ -72,11 +68,7 @@ impl<Entry, Cache> ServingState<Entry, Cache> {
     }
 
     /// `Decode { last } -> Decode { last }`: one single-row evaluation.
-    pub fn advance_decode(
-        self,
-        next_token: Entry,
-        cache: Cache,
-    ) -> Result<Self, ServingFsmError> {
+    pub fn advance_decode(self, next_token: Entry, cache: Cache) -> Result<Self, ServingFsmError> {
         match self {
             Self::Decode { .. } => Ok(Self::Decode {
                 last: next_token,
@@ -255,8 +247,12 @@ mod tests {
 
     #[test]
     fn serving_fsm_error_names_the_attempted_transition() {
-        let accept = ServingFsmError::IllegalTransition { attempted: "accept" };
-        let resume = ServingFsmError::IllegalTransition { attempted: "resume" };
+        let accept = ServingFsmError::IllegalTransition {
+            attempted: "accept",
+        };
+        let resume = ServingFsmError::IllegalTransition {
+            attempted: "resume",
+        };
 
         assert_eq!(
             alloc::format!("{}", accept),
@@ -274,13 +270,19 @@ mod tests {
 
         assert_eq!(
             verifying,
-            ServingState::Verify { draft: alloc::vec![5], snapshot: 2, cache: 2 }
+            ServingState::Verify {
+                draft: alloc::vec![5],
+                snapshot: 2,
+                cache: 2
+            }
         );
         let done = verifying.finish();
         assert_eq!(done, ServingState::Done { cache: 2 });
         assert_eq!(
             done.advance_decode(6, 3),
-            Err(ServingFsmError::IllegalTransition { attempted: "advance_decode" })
+            Err(ServingFsmError::IllegalTransition {
+                attempted: "advance_decode"
+            })
         );
     }
 
@@ -308,7 +310,6 @@ mod tests {
             }
         }
     }
-
 
     /// Drives every legal transition the FSM defines: `Prefill -> Decode ->
     /// Decode -> Verify -> Accept -> Decode -> Verify -> Rollback -> Decode
@@ -495,7 +496,11 @@ mod tests {
     /// string match over ids already produced. Returns an empty draft (never
     /// entering `Verify`) when `history` is too short or no earlier occurrence
     /// exists.
-    fn draft_prompt_lookup<Entry: PartialEq + Clone>(history: &[Entry], ngram: usize, max_k: usize) -> Vec<Entry> {
+    fn draft_prompt_lookup<Entry: PartialEq + Clone>(
+        history: &[Entry],
+        ngram: usize,
+        max_k: usize,
+    ) -> Vec<Entry> {
         if ngram == 0 || max_k == 0 || history.len() <= ngram {
             return Vec::new();
         }
@@ -665,19 +670,34 @@ mod tests {
 
         assert_eq!(
             state.clone().accept_rows(0, &[3, 4], caches()),
-            Ok(ServingState::Rollback { snapshot: cache_one.clone(), to: 3 })
+            Ok(ServingState::Rollback {
+                snapshot: cache_one.clone(),
+                to: 3
+            })
         );
         assert_eq!(
             state.clone().accept_rows(2, &[3, 4], caches()),
-            Ok(ServingState::Accept { n: 2, next: 4, cache: cache_two.clone() })
+            Ok(ServingState::Accept {
+                n: 2,
+                next: 4,
+                cache: cache_two.clone()
+            })
         );
         assert_eq!(
             state.clone().accept_rows(3, &[3, 4], caches()),
-            Err(ServingFsmError::IllegalTransition { attempted: "accept_rows" })
+            Err(ServingFsmError::IllegalTransition {
+                attempted: "accept_rows"
+            })
         );
         assert_eq!(
-            ServingState::start(alloc::vec![1_u32], FakeCache::empty()).accept_rows(0, &[3, 4], caches()),
-            Err(ServingFsmError::IllegalTransition { attempted: "accept_rows" })
+            ServingState::start(alloc::vec![1_u32], FakeCache::empty()).accept_rows(
+                0,
+                &[3, 4],
+                caches()
+            ),
+            Err(ServingFsmError::IllegalTransition {
+                attempted: "accept_rows"
+            })
         );
     }
 
@@ -698,15 +718,24 @@ mod tests {
 
         assert_eq!(
             state.clone().accept_rows(1, &[3, 9], caches()),
-            Ok(ServingState::Rollback { snapshot: FakeCache::empty().advanced_by(2), to: 9 })
+            Ok(ServingState::Rollback {
+                snapshot: FakeCache::empty().advanced_by(2),
+                to: 9
+            })
         );
         assert_eq!(
             state.clone().accept_rows(3, &[], caches()),
-            Ok(ServingState::Accept { n: 3, next: 5, cache: FakeCache::empty().advanced_by(3) })
+            Ok(ServingState::Accept {
+                n: 3,
+                next: 5,
+                cache: FakeCache::empty().advanced_by(3)
+            })
         );
         assert_eq!(
             state.accept_rows(1, &[3], caches()),
-            Err(ServingFsmError::IllegalTransition { attempted: "accept_rows" })
+            Err(ServingFsmError::IllegalTransition {
+                attempted: "accept_rows"
+            })
         );
     }
 
@@ -726,7 +755,11 @@ mod tests {
             (1, 3, 10),
             (2, 3, 11),
         ]
-        .map(|(key, delta, version)| Action { key, delta, version });
+        .map(|(key, delta, version)| Action {
+            key,
+            delta,
+            version,
+        });
 
         let trace = run_sequential();
 
@@ -739,7 +772,11 @@ mod tests {
     }
 
     fn leading_equal(draft: &[Action], choices: &[Action]) -> usize {
-        draft.iter().zip(choices).take_while(|(drafted, chosen)| drafted == chosen).count()
+        draft
+            .iter()
+            .zip(choices)
+            .take_while(|(drafted, chosen)| drafted == chosen)
+            .count()
     }
 
     fn equality_policy(draft: &[Action], choices: &[Action]) -> usize {
@@ -763,7 +800,11 @@ mod tests {
         assert_eq!(speculative.history, sequential.history);
         assert_eq!(speculative.environment, sequential.environment);
         assert_eq!(
-            (speculative.rounds, speculative.rejected_rounds, speculative.accepted_rows),
+            (
+                speculative.rounds,
+                speculative.rejected_rounds,
+                speculative.accepted_rows
+            ),
             (4, 4, 8)
         );
     }
@@ -776,7 +817,11 @@ mod tests {
         assert_eq!(speculative.history, sequential.history);
         assert_eq!(speculative.environment, sequential.environment);
         assert_eq!(
-            (speculative.rounds, speculative.rejected_rounds, speculative.accepted_rows),
+            (
+                speculative.rounds,
+                speculative.rejected_rounds,
+                speculative.accepted_rows
+            ),
             (4, 4, 8)
         );
     }
@@ -789,7 +834,11 @@ mod tests {
         assert_eq!(speculative.history, sequential.history);
         assert_eq!(speculative.environment, sequential.environment);
         assert_eq!(
-            (speculative.rounds, speculative.rejected_rounds, speculative.accepted_rows),
+            (
+                speculative.rounds,
+                speculative.rejected_rounds,
+                speculative.accepted_rows
+            ),
             (6, 6, 6)
         );
     }

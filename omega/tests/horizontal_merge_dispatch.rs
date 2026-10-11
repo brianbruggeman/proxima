@@ -146,7 +146,10 @@ fn build_fixture() -> Fixture {
                 &mut program,
                 Op::Input {
                     dtype: DType::UInt8,
-                    shape: vec![Extent::Static(IN_DIM as u32), Extent::Static(OUT_DIM as u32)],
+                    shape: vec![
+                        Extent::Static(IN_DIM as u32),
+                        Extent::Static(OUT_DIM as u32),
+                    ],
                     name: Some(format!("weight_{round}")),
                 },
             )
@@ -181,11 +184,15 @@ fn build_fixture() -> Fixture {
     let weight_names: Vec<String> = (0..ROUNDS).map(|round| format!("weight_{round}")).collect();
     let mut named: Vec<(&str, proxima_tensor::QuantizedBlock<'_>)> =
         vec![("activation", proxima_tensor::QuantizedBlock::Float32(&[]))];
-    named.extend(
-        weight_names
-            .iter()
-            .map(|name| (name.as_str(), proxima_tensor::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &[] })),
-    );
+    named.extend(weight_names.iter().map(|name| {
+        (
+            name.as_str(),
+            proxima_tensor::QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: &[],
+            },
+        )
+    }));
 
     let plan = omega::plan_named_with_placed_inputs(
         &program,
@@ -201,8 +208,8 @@ fn build_fixture() -> Fixture {
     let weight_bytes_per_round = (IN_DIM / QK_K) * BLOCK_BYTES * OUT_DIM;
     let weight_buffer = omega::allocate_placed_buffer(weight_bytes_per_round * ROUNDS)
         .expect("allocates one shared weight buffer for all eight rounds");
-    let activation_buffer =
-        omega::allocate_placed_buffer(IN_DIM * size_of::<f32>()).expect("allocates the activation buffer");
+    let activation_buffer = omega::allocate_placed_buffer(IN_DIM * size_of::<f32>())
+        .expect("allocates the activation buffer");
     let output_buffer = omega::allocate_placed_buffer(OUT_DIM * size_of::<f32>() * ROUNDS)
         .expect("allocates one shared output buffer for all eight rounds");
 
@@ -210,7 +217,10 @@ fn build_fixture() -> Fixture {
         write_placed_buffer(
             &activation_buffer,
             0,
-            core::slice::from_raw_parts(activation.as_ptr().cast::<u8>(), core::mem::size_of_val(activation.as_slice())),
+            core::slice::from_raw_parts(
+                activation.as_ptr().cast::<u8>(),
+                core::mem::size_of_val(activation.as_slice()),
+            ),
         );
     }
 
@@ -220,7 +230,11 @@ fn build_fixture() -> Fixture {
             .map(|row| random_vec(1_000_000 + round as u64 * 10_000 + row as u64, IN_DIM))
             .collect();
         let packed = pack_rows(&rows);
-        assert_eq!(packed.len(), weight_bytes_per_round, "fixture's own byte-length arithmetic");
+        assert_eq!(
+            packed.len(),
+            weight_bytes_per_round,
+            "fixture's own byte-length arithmetic"
+        );
         unsafe {
             write_placed_buffer(&weight_buffer, round * weight_bytes_per_round, &packed);
         }
@@ -230,10 +244,18 @@ fn build_fixture() -> Fixture {
         // offset.
         unsafe {
             let readback = core::slice::from_raw_parts(
-                weight_buffer.contents().as_ptr().cast::<u8>().add(round * weight_bytes_per_round),
+                weight_buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(round * weight_bytes_per_round),
                 packed.len(),
             );
-            assert_eq!(readback, packed.as_slice(), "fixture wrote the wrong bytes at round {round}'s own offset");
+            assert_eq!(
+                readback,
+                packed.as_slice(),
+                "fixture wrote the wrong bytes at round {round}'s own offset"
+            );
         }
         expected.push(expected_output(&packed, &activation));
     }
@@ -260,11 +282,15 @@ impl Fixture {
     fn named(&self) -> Vec<(&str, proxima_tensor::QuantizedBlock<'_>)> {
         let mut named: Vec<(&str, proxima_tensor::QuantizedBlock<'_>)> =
             vec![("activation", proxima_tensor::QuantizedBlock::Float32(&[]))];
-        named.extend(
-            self.weight_names
-                .iter()
-                .map(|name| (name.as_str(), proxima_tensor::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &[] })),
-        );
+        named.extend(self.weight_names.iter().map(|name| {
+            (
+                name.as_str(),
+                proxima_tensor::QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes: &[],
+                },
+            )
+        }));
         named
     }
 
@@ -284,7 +310,13 @@ impl Fixture {
         self.output_nodes
             .iter()
             .enumerate()
-            .map(|(round, &node)| (node, &self.output_buffer, round * OUT_DIM * size_of::<f32>()))
+            .map(|(round, &node)| {
+                (
+                    node,
+                    &self.output_buffer,
+                    round * OUT_DIM * size_of::<f32>(),
+                )
+            })
             .collect()
     }
 
@@ -297,7 +329,9 @@ impl Fixture {
                 round * OUT_DIM * size_of::<f32>(),
                 OUT_DIM,
             );
-            for (index, (&value, &reference)) in actual.iter().zip(self.expected[round].iter()).enumerate() {
+            for (index, (&value, &reference)) in
+                actual.iter().zip(self.expected[round].iter()).enumerate()
+            {
                 let scale = reference.abs().max(f32::MIN_POSITIVE);
                 let relative = (value - reference).abs() / scale;
                 assert!(
@@ -357,7 +391,11 @@ fn dispatch_and_hazard_counts_match_the_design_note() {
     fixture.assert_outputs_match_reference(1e-2);
     #[cfg(feature = "instrument")]
     {
-        let expected_dispatches: u64 = if cfg!(feature = "metal-horizontal-merge") { 1 } else { 8 };
+        let expected_dispatches: u64 = if cfg!(feature = "metal-horizontal-merge") {
+            1
+        } else {
+            8
+        };
         assert_eq!(
             omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset(),
             expected_dispatches,
@@ -396,8 +434,8 @@ fn mixed_buffer_member_does_not_merge() {
     let fixture = build_fixture();
     let weight_bytes_per_round = (IN_DIM / QK_K) * BLOCK_BYTES * OUT_DIM;
     let odd_one_out = ROUNDS - 1;
-    let separate_weight_buffer =
-        omega::allocate_placed_buffer(weight_bytes_per_round).expect("allocates the odd-one-out's own weight buffer");
+    let separate_weight_buffer = omega::allocate_placed_buffer(weight_bytes_per_round)
+        .expect("allocates the odd-one-out's own weight buffer");
     unsafe {
         let source = core::slice::from_raw_parts(
             fixture
@@ -412,16 +450,29 @@ fn mixed_buffer_member_does_not_merge() {
     }
     let named = fixture.named();
     let mut input_placements = fixture.input_placements();
-    input_placements[1 + odd_one_out] = (fixture.weight_nodes[odd_one_out], &separate_weight_buffer, 0);
+    input_placements[1 + odd_one_out] = (
+        fixture.weight_nodes[odd_one_out],
+        &separate_weight_buffer,
+        0,
+    );
     let output_placements = fixture.output_placements();
     #[cfg(feature = "instrument")]
     let _ = omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset();
-    omega::execute_plan_named_with_placements(&fixture.plan, &named, &input_placements, &output_placements)
-        .expect("seven merged plus one ordinary dispatch execute");
+    omega::execute_plan_named_with_placements(
+        &fixture.plan,
+        &named,
+        &input_placements,
+        &output_placements,
+    )
+    .expect("seven merged plus one ordinary dispatch execute");
     fixture.assert_outputs_match_reference(1e-2);
     #[cfg(feature = "instrument")]
     {
-        let expected_dispatches: u64 = if cfg!(feature = "metal-horizontal-merge") { 2 } else { 8 };
+        let expected_dispatches: u64 = if cfg!(feature = "metal-horizontal-merge") {
+            2
+        } else {
+            8
+        };
         assert_eq!(
             omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset(),
             expected_dispatches,
@@ -475,17 +526,35 @@ fn raw_split_member_forces_its_own_dispatch() {
     );
     let mut output_nodes = Vec::with_capacity(RAW_SPLIT_ROUNDS);
     for (round, &weight_node) in weight_nodes.iter().enumerate() {
-        let this_round_activation = if round == 3 { output_nodes[2] } else { activation_node };
-        output_nodes.push(append_matvec(&mut program, weight_node, this_round_activation));
+        let this_round_activation = if round == 3 {
+            output_nodes[2]
+        } else {
+            activation_node
+        };
+        output_nodes.push(append_matvec(
+            &mut program,
+            weight_node,
+            this_round_activation,
+        ));
     }
 
     let activation = random_vec(11, RAW_SPLIT_SIZE);
     let mut placed_input_nodes = vec![activation_node];
     placed_input_nodes.extend(weight_nodes.iter().copied());
-    let weight_names: Vec<String> = (0..RAW_SPLIT_ROUNDS).map(|round| format!("raw_weight_{round}")).collect();
+    let weight_names: Vec<String> = (0..RAW_SPLIT_ROUNDS)
+        .map(|round| format!("raw_weight_{round}"))
+        .collect();
     let mut named: Vec<(&str, proxima_tensor::QuantizedBlock<'_>)> =
         vec![("activation", proxima_tensor::QuantizedBlock::Float32(&[]))];
-    named.extend(weight_names.iter().map(|name| (name.as_str(), proxima_tensor::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &[] })));
+    named.extend(weight_names.iter().map(|name| {
+        (
+            name.as_str(),
+            proxima_tensor::QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: &[],
+            },
+        )
+    }));
 
     let plan = omega::plan_named_with_placed_inputs(
         &program,
@@ -501,23 +570,32 @@ fn raw_split_member_forces_its_own_dispatch() {
     let weight_bytes_per_round = (RAW_SPLIT_SIZE / QK_K) * BLOCK_BYTES * RAW_SPLIT_SIZE;
     let weight_buffer = omega::allocate_placed_buffer(weight_bytes_per_round * RAW_SPLIT_ROUNDS)
         .expect("allocates the shared raw-split weight buffer");
-    let activation_buffer =
-        omega::allocate_placed_buffer(RAW_SPLIT_SIZE * size_of::<f32>()).expect("allocates the activation buffer");
-    let output_buffer = omega::allocate_placed_buffer(RAW_SPLIT_SIZE * size_of::<f32>() * RAW_SPLIT_ROUNDS)
-        .expect("allocates the shared output buffer");
+    let activation_buffer = omega::allocate_placed_buffer(RAW_SPLIT_SIZE * size_of::<f32>())
+        .expect("allocates the activation buffer");
+    let output_buffer =
+        omega::allocate_placed_buffer(RAW_SPLIT_SIZE * size_of::<f32>() * RAW_SPLIT_ROUNDS)
+            .expect("allocates the shared output buffer");
 
     unsafe {
         write_placed_buffer(
             &activation_buffer,
             0,
-            core::slice::from_raw_parts(activation.as_ptr().cast::<u8>(), core::mem::size_of_val(activation.as_slice())),
+            core::slice::from_raw_parts(
+                activation.as_ptr().cast::<u8>(),
+                core::mem::size_of_val(activation.as_slice()),
+            ),
         );
     }
 
     let mut packed_weights = Vec::with_capacity(RAW_SPLIT_ROUNDS);
     for round in 0..RAW_SPLIT_ROUNDS {
         let rows: Vec<Vec<f32>> = (0..RAW_SPLIT_SIZE)
-            .map(|row| random_vec(2_000_000 + round as u64 * 10_000 + row as u64, RAW_SPLIT_SIZE))
+            .map(|row| {
+                random_vec(
+                    2_000_000 + round as u64 * 10_000 + row as u64,
+                    RAW_SPLIT_SIZE,
+                )
+            })
             .collect();
         let mut packed = vec![0u8; RAW_SPLIT_SIZE / QK_K * BLOCK_BYTES];
         for (row, row_packed) in rows.iter().zip(packed.as_chunks_mut::<BLOCK_BYTES>().0) {
@@ -534,7 +612,12 @@ fn raw_split_member_forces_its_own_dispatch() {
         for row_packed in packed.as_chunks::<BLOCK_BYTES>().0 {
             let mut row = vec![0.0f32; RAW_SPLIT_SIZE];
             dequantize(row_packed, &mut row).expect("packed row dequantizes");
-            expected.push(row.iter().zip(input.iter()).map(|(weight, value)| weight * value).sum());
+            expected.push(
+                row.iter()
+                    .zip(input.iter())
+                    .map(|(weight, value)| weight * value)
+                    .sum(),
+            );
         }
         expected
     };
@@ -547,7 +630,13 @@ fn raw_split_member_forces_its_own_dispatch() {
     let output_placements: Vec<(NodeId, &omega::PlacedBuffer, usize)> = output_nodes
         .iter()
         .enumerate()
-        .map(|(round, &node)| (node, &output_buffer, round * RAW_SPLIT_SIZE * size_of::<f32>()))
+        .map(|(round, &node)| {
+            (
+                node,
+                &output_buffer,
+                round * RAW_SPLIT_SIZE * size_of::<f32>(),
+            )
+        })
         .collect();
     let mut input_placements = vec![(activation_node, &activation_buffer, 0usize)];
     input_placements.extend(
@@ -563,7 +652,11 @@ fn raw_split_member_forces_its_own_dispatch() {
         .expect("the raw-split program executes");
     #[cfg(feature = "instrument")]
     {
-        let expected_dispatches: u64 = if cfg!(feature = "metal-horizontal-merge") { 2 } else { 4 };
+        let expected_dispatches: u64 = if cfg!(feature = "metal-horizontal-merge") {
+            2
+        } else {
+            4
+        };
         assert_eq!(
             omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset(),
             expected_dispatches,
@@ -612,14 +705,24 @@ fn ladder_eight_dispatches_vs_one_merged_dispatch_gpu_time() {
     let input_placements = fixture.input_placements();
     let output_placements = fixture.output_placements();
     for _ in 0..2 {
-        omega::execute_plan_named_with_placements(&fixture.plan, &named, &input_placements, &output_placements)
-            .expect("warmup run executes");
+        omega::execute_plan_named_with_placements(
+            &fixture.plan,
+            &named,
+            &input_placements,
+            &output_placements,
+        )
+        .expect("warmup run executes");
     }
     let mut samples_us: Vec<f64> = Vec::with_capacity(7);
     for _ in 0..7 {
         let started = std::time::Instant::now();
-        omega::execute_plan_named_with_placements(&fixture.plan, &named, &input_placements, &output_placements)
-            .expect("timed run executes");
+        omega::execute_plan_named_with_placements(
+            &fixture.plan,
+            &named,
+            &input_placements,
+            &output_placements,
+        )
+        .expect("timed run executes");
         samples_us.push(started.elapsed().as_secs_f64() * 1_000_000.0);
     }
     fixture.assert_outputs_match_reference(1e-2);
@@ -656,7 +759,10 @@ fn lazy_activation_and_output_exercise_the_fresh_allocation_path() {
                 &mut program,
                 Op::Input {
                     dtype: DType::UInt8,
-                    shape: vec![Extent::Static(LAZY_SIZE as u32), Extent::Static(LAZY_SIZE as u32)],
+                    shape: vec![
+                        Extent::Static(LAZY_SIZE as u32),
+                        Extent::Static(LAZY_SIZE as u32),
+                    ],
                     name: Some(format!("lazy_weight_{round}")),
                 },
             )
@@ -694,10 +800,22 @@ fn lazy_activation_and_output_exercise_the_fresh_allocation_path() {
     let activation: Vec<f32> = raw_activation.iter().map(|value| value * 2.0).collect();
     let mut placed_input_nodes = vec![raw_activation_node];
     placed_input_nodes.extend(weight_nodes.iter().copied());
-    let weight_names: Vec<String> = (0..LAZY_ROUNDS).map(|round| format!("lazy_weight_{round}")).collect();
-    let mut named: Vec<(&str, proxima_tensor::QuantizedBlock<'_>)> =
-        vec![("raw_activation", proxima_tensor::QuantizedBlock::Float32(&[]))];
-    named.extend(weight_names.iter().map(|name| (name.as_str(), proxima_tensor::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &[] })));
+    let weight_names: Vec<String> = (0..LAZY_ROUNDS)
+        .map(|round| format!("lazy_weight_{round}"))
+        .collect();
+    let mut named: Vec<(&str, proxima_tensor::QuantizedBlock<'_>)> = vec![(
+        "raw_activation",
+        proxima_tensor::QuantizedBlock::Float32(&[]),
+    )];
+    named.extend(weight_names.iter().map(|name| {
+        (
+            name.as_str(),
+            proxima_tensor::QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: &[],
+            },
+        )
+    }));
 
     let plan = omega::plan_named_with_placed_inputs(
         &program,
@@ -713,8 +831,8 @@ fn lazy_activation_and_output_exercise_the_fresh_allocation_path() {
     let weight_bytes_per_round = (LAZY_SIZE / QK_K) * BLOCK_BYTES * LAZY_SIZE;
     let weight_buffer = omega::allocate_placed_buffer(weight_bytes_per_round * LAZY_ROUNDS)
         .expect("allocates the shared lazy weight buffer");
-    let raw_activation_buffer =
-        omega::allocate_placed_buffer(LAZY_SIZE * size_of::<f32>()).expect("allocates the raw activation buffer");
+    let raw_activation_buffer = omega::allocate_placed_buffer(LAZY_SIZE * size_of::<f32>())
+        .expect("allocates the raw activation buffer");
 
     unsafe {
         write_placed_buffer(
@@ -743,7 +861,12 @@ fn lazy_activation_and_output_exercise_the_fresh_allocation_path() {
         for row_packed in packed.as_chunks::<BLOCK_BYTES>().0 {
             let mut row = vec![0.0f32; LAZY_SIZE];
             dequantize(row_packed, &mut row).expect("packed row dequantizes");
-            round_expected.push(row.iter().zip(activation.iter()).map(|(weight, value)| weight * value).sum());
+            round_expected.push(
+                row.iter()
+                    .zip(activation.iter())
+                    .map(|(weight, value)| weight * value)
+                    .sum(),
+            );
         }
         expected.push(round_expected);
     }
@@ -763,14 +886,19 @@ fn lazy_activation_and_output_exercise_the_fresh_allocation_path() {
     // own MoE projection, never a caller-placed buffer.
     #[cfg(feature = "instrument")]
     let _ = omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset();
-    let evaluated = omega::execute_plan_named_with_placements(&plan, &named, &input_placements, &[])
-        .expect("the lazy-activation program executes");
+    let evaluated =
+        omega::execute_plan_named_with_placements(&plan, &named, &input_placements, &[])
+            .expect("the lazy-activation program executes");
     #[cfg(feature = "instrument")]
     {
         // +1 for the intermediate activation's own dispatch
         // (`raw_activation + raw_activation`), materialized because
         // multiple reduces below read it.
-        let expected_dispatches: u64 = if cfg!(feature = "metal-horizontal-merge") { 2 } else { 5 };
+        let expected_dispatches: u64 = if cfg!(feature = "metal-horizontal-merge") {
+            2
+        } else {
+            5
+        };
         assert_eq!(
             omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset(),
             expected_dispatches,
@@ -780,7 +908,9 @@ fn lazy_activation_and_output_exercise_the_fresh_allocation_path() {
     }
 
     for (round, &node) in output_nodes.iter().enumerate() {
-        let (actual, _shape) = evaluated.get(node).expect("this round's output is a plan root");
+        let (actual, _shape) = evaluated
+            .get(node)
+            .expect("this round's output is a plan root");
         for (index, (&value, &reference)) in actual.iter().zip(expected[round].iter()).enumerate() {
             let scale = reference.abs().max(f32::MIN_POSITIVE);
             let relative = (value - reference).abs() / scale;

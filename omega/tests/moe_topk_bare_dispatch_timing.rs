@@ -9,7 +9,12 @@
 //! `bind`'s own liveness reachability never pulls in the per-round FFN
 //! evaluation ops `append_moe_ffn` also builds.
 
-#![cfg(all(feature = "metal", feature = "instrument", feature = "moe-topk-fusion", target_os = "macos"))]
+#![cfg(all(
+    feature = "metal",
+    feature = "instrument",
+    feature = "moe-topk-fusion",
+    target_os = "macos"
+))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::spec::{
@@ -139,6 +144,12 @@ fn moe_topk_bare_dispatch_median_of_seven() {
     samples.sort_unstable();
     let median_ns = samples[samples.len() / 2];
     println!("moe_topk bare dispatch samples (ns): {samples:?}");
-    println!("moe_topk bare dispatch median: {median_ns} ns = {} us", median_ns as f64 / 1000.0);
-    assert!(median_ns > 0, "a real Metal dispatch must report nonzero gpu_ns");
+    println!(
+        "moe_topk bare dispatch median: {median_ns} ns = {} us",
+        median_ns as f64 / 1000.0
+    );
+    assert!(
+        median_ns > 0,
+        "a real Metal dispatch must report nonzero gpu_ns"
+    );
 }

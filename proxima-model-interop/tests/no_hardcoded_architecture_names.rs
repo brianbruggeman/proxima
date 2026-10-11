@@ -34,7 +34,10 @@ const ALLOWLIST: &[(&str, u32, &str)] = &[];
 /// condition is not a dispatch, so it is not the defect this test exists to
 /// catch.
 fn shapes_control_flow(line: &str) -> bool {
-    line.contains("==") || line.contains("!=") || line.contains("matches!") || line.contains(".name()")
+    line.contains("==")
+        || line.contains("!=")
+        || line.contains("matches!")
+        || line.contains(".name()")
 }
 
 /// `true` once `line` is a `mod` item declaration -- the point past which a
@@ -55,8 +58,7 @@ fn pipeline_dispatches_on_capability_not_name() {
 
     for rel in PIPELINE_FILES {
         let path = Path::new(crate_root).join(rel);
-        let src = std::fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        let src = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {rel}: {err}"));
 
         let mut pending_attribute_names_test = false;
         for (index, line) in src.lines().enumerate() {
@@ -94,7 +96,9 @@ fn pipeline_dispatches_on_capability_not_name() {
                 {
                     continue;
                 }
-                violations.push(format!("{rel}:{line_number}: hardcoded \"{name}\" -> {trimmed}"));
+                violations.push(format!(
+                    "{rel}:{line_number}: hardcoded \"{name}\" -> {trimmed}"
+                ));
             }
         }
     }

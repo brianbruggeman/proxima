@@ -7,10 +7,10 @@ use super::*;
 use crate::block_file::MappedBlockFile;
 use crate::{ColdTier, InteropError, PrefixState};
 
-#[path = "../../tests/support/block_write.rs"]
-mod block_write;
 #[path = "../../tests/support/block_keys.rs"]
 mod block_keys;
+#[path = "../../tests/support/block_write.rs"]
+mod block_write;
 #[path = "../../tests/support/disk_tier.rs"]
 mod disk_tier;
 
@@ -91,8 +91,14 @@ fn store_all(cache: &mut PromptCache, traces: &[[u32; 4]]) {
 
 fn widths() -> Vec<LayerPadRowWidths> {
     vec![
-        LayerPadRowWidths::Attention { even_odd_row: 2, v_row: 1 },
-        LayerPadRowWidths::Attention { even_odd_row: 2, v_row: 1 },
+        LayerPadRowWidths::Attention {
+            even_odd_row: 2,
+            v_row: 1,
+        },
+        LayerPadRowWidths::Attention {
+            even_odd_row: 2,
+            v_row: 1,
+        },
         LayerPadRowWidths::SharedFromLayer,
     ]
 }
@@ -106,19 +112,31 @@ fn tier_disk_demote_writes_the_entry_and_keeps_it_cold() {
     store_all(&mut cache, &[TRACE_A, TRACE_B, TRACE_C]);
 
     assert_eq!(cache.held(), vec![(0, true), (1, false), (2, false)]);
-    let cold = cache.entry(0).expect("the evicted entry stays in the cache");
+    let cold = cache
+        .entry(0)
+        .expect("the evicted entry stays in the cache");
     assert!(cold.state.layer_caches.is_empty());
     assert!(cold.checkpoints.is_empty());
     assert_eq!(cold.state.ids, TRACE_A);
-    assert_eq!(spilled_names(directory.path()), vec!["0000000000000000.pxkv".to_owned()]);
+    assert_eq!(
+        spilled_names(directory.path()),
+        vec!["0000000000000000.pxkv".to_owned()]
+    );
     let path = directory.path().join("0000000000000000.pxkv");
     let mapped = MappedBlockFile::open(&path).expect("the spilled file maps");
-    let key = mapped.view().expect("the spilled file decodes").header.content_key;
+    let key = mapped
+        .view()
+        .expect("the spilled file decodes")
+        .header
+        .content_key;
     let mut expected = Vec::new();
     original
         .to_block_file([0x22; 16], key, &mut expected)
         .expect("the original state encodes");
-    assert_eq!(std::fs::read(&path).expect("the spilled file reads"), expected);
+    assert_eq!(
+        std::fs::read(&path).expect("the spilled file reads"),
+        expected
+    );
     let mut prompt = TRACE_A.to_vec();
     prompt.push(9);
     let (_, report) = cache.take_best(&prompt, &base_key(), &widths(), 0);
@@ -155,7 +173,10 @@ fn tier_disk_trims_cold_files_past_the_limit() {
     store_all(&mut cache, &[TRACE_A, TRACE_B, TRACE_C, TRACE_D]);
 
     assert_eq!(cache.held(), vec![(1, true), (2, false), (3, false)]);
-    assert_eq!(spilled_names(directory.path()), vec!["0000000000000001.pxkv".to_owned()]);
+    assert_eq!(
+        spilled_names(directory.path()),
+        vec!["0000000000000001.pxkv".to_owned()]
+    );
 }
 
 #[test]
@@ -214,22 +235,40 @@ fn tier_round_trip_entry_survives_host_to_disk_to_host() {
     assert!(spilled_names(directory.path()).is_empty());
 
     shared.lock().store(entry_with_rows(&TRACE_C), &config);
-    assert_eq!(shared.lock().held(), vec![(0, true), (1, false), (2, false)]);
+    assert_eq!(
+        shared.lock().held(),
+        vec![(0, true), (1, false), (2, false)]
+    );
     assert_eq!(spilled_names(directory.path()), vec![first.clone()]);
 
     let restored = thaw_best_cold(&shared, &prompt_after(&TRACE_A), &base_key(), &config);
     assert!(restored.expect("the disk read succeeds"));
-    assert_eq!(shared.lock().held(), vec![(1, true), (2, false), (3, false)]);
+    assert_eq!(
+        shared.lock().held(),
+        vec![(1, true), (2, false), (3, false)]
+    );
     assert_eq!(spilled_names(directory.path()), vec![second.clone()]);
-    let hot_bytes = encoded(&shared.lock().entry(3).expect("the restored entry is hot").state);
+    let hot_bytes = encoded(
+        &shared
+            .lock()
+            .entry(3)
+            .expect("the restored entry is hot")
+            .state,
+    );
     assert_eq!(hot_bytes, encoded(&original));
 
     shared.lock().store(entry_with_rows(&TRACE_D), &config);
-    assert_eq!(shared.lock().held(), vec![(1, true), (2, true), (3, false), (4, false)]);
+    assert_eq!(
+        shared.lock().held(),
+        vec![(1, true), (2, true), (3, false), (4, false)]
+    );
     assert_eq!(spilled_names(directory.path()), vec![second, third.clone()]);
 
     shared.lock().store(entry_with_rows(&TRACE_E), &config);
-    assert_eq!(shared.lock().held(), vec![(2, true), (3, true), (4, false), (5, false)]);
+    assert_eq!(
+        shared.lock().held(),
+        vec![(2, true), (3, true), (4, false), (5, false)]
+    );
     assert_eq!(spilled_names(directory.path()), vec![third, fourth]);
 
     let prompt = prompt_after(&TRACE_B);
@@ -261,6 +300,9 @@ fn tier_policy_oldest_rule_list_moves_a_different_entry_to_disk() {
     fill(&mut default_cache);
     fill(&mut oldest_cache);
 
-    assert_eq!(default_cache.held(), vec![(0, false), (1, true), (2, false)]);
+    assert_eq!(
+        default_cache.held(),
+        vec![(0, false), (1, true), (2, false)]
+    );
     assert_eq!(oldest_cache.held(), vec![(0, true), (1, false), (2, false)]);
 }

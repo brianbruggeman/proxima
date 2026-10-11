@@ -54,7 +54,9 @@ fn main() -> anyhow::Result<()> {
     }
     #[cfg(not(all(feature = "metal", feature = "metal-tiled-gemm", target_os = "macos")))]
     {
-        println!("tiled_gemm_ggml_incumbent_arms requires --features metal,metal-tiled-gemm on macOS");
+        println!(
+            "tiled_gemm_ggml_incumbent_arms requires --features metal,metal-tiled-gemm on macOS"
+        );
         Ok(())
     }
 }
@@ -116,7 +118,9 @@ fn run() -> anyhow::Result<()> {
     // convention: each integration-test/example crate restates its own GGUF
     // reader rather than sharing one across separately-compiled binaries) --
 
-    fn real_gguf_header(path: &std::path::Path) -> anyhow::Result<Option<(ParsedGguf, u64, std::fs::File)>> {
+    fn real_gguf_header(
+        path: &std::path::Path,
+    ) -> anyhow::Result<Option<(ParsedGguf, u64, std::fs::File)>> {
         let Ok(mut file) = std::fs::File::open(path) else {
             return Ok(None);
         };
@@ -140,13 +144,18 @@ fn run() -> anyhow::Result<()> {
                         GgufEvent::Header { version: value, .. } => version = Some(value),
                         GgufEvent::Metadata { key, value } => metadata.push((key, value)),
                         GgufEvent::Tensor(tensor) => tensors.push(tensor),
-                        GgufEvent::Complete { data_offset, alignment } => {
+                        GgufEvent::Complete {
+                            data_offset,
+                            alignment,
+                        } => {
                             completion = Some((data_offset, alignment));
                         }
                     }
                 }
                 if let (Some(version), Some((data_offset, alignment))) = (version, completion) {
-                    parser.finish().context("parser reports complete and clean")?;
+                    parser
+                        .finish()
+                        .context("parser reports complete and clean")?;
                     return Ok(Some((
                         ParsedGguf {
                             version,
@@ -180,13 +189,19 @@ fn run() -> anyhow::Result<()> {
             .iter()
             .find(|candidate| candidate.name == name)
             .with_context(|| format!("{name} present in the real gemma4-E2B checkpoint"))?;
-        anyhow::ensure!(tensor.ggml_type == GgmlType::Q4_0, "{name} is Q4_0 in this checkpoint, found {:?}", tensor.ggml_type);
+        anyhow::ensure!(
+            tensor.ggml_type == GgmlType::Q4_0,
+            "{name} is Q4_0 in this checkpoint, found {:?}",
+            tensor.ggml_type
+        );
         let range = parsed
             .tensor_data_range(tensor, file_len)
             .context("tensor byte range within file bounds")?;
         let mut buf = vec![0u8; (range.end - range.start) as usize];
-        file.seek(SeekFrom::Start(range.start)).context("seek to tensor data")?;
-        file.read_exact(&mut buf).context("read exact tensor byte range")?;
+        file.seek(SeekFrom::Start(range.start))
+            .context("seek to tensor data")?;
+        file.read_exact(&mut buf)
+            .context("read exact tensor byte range")?;
         Ok(buf)
     }
 
@@ -259,14 +274,21 @@ fn run() -> anyhow::Result<()> {
         let ns_source = NSString::from_str(source);
         let library = device
             .newLibraryWithSource_options_error(&ns_source, Some(&options))
-            .map_err(|error| anyhow::anyhow!("compiles `{entry}`: {}", error.localizedDescription()))?;
+            .map_err(|error| {
+                anyhow::anyhow!("compiles `{entry}`: {}", error.localizedDescription())
+            })?;
         let ns_entry = NSString::from_str(entry);
         let function = library
             .newFunctionWithName(&ns_entry)
             .with_context(|| format!("entry `{entry}` present in its own compiled library"))?;
         device
             .newComputePipelineStateWithFunction_error(&function)
-            .map_err(|error| anyhow::anyhow!("creates the pipeline for `{entry}`: {}", error.localizedDescription()))
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "creates the pipeline for `{entry}`: {}",
+                    error.localizedDescription()
+                )
+            })
     }
 
     fn shared_buffer_from_bytes(
@@ -276,11 +298,20 @@ fn run() -> anyhow::Result<()> {
         // SAFETY: `bytes` outlives this call; `newBufferWithBytes_length_options`
         // copies once and never retains the pointer.
         let pointer = unsafe { NonNull::new_unchecked(bytes.as_ptr() as *mut c_void) };
-        unsafe { device.newBufferWithBytes_length_options(pointer, bytes.len(), MTLResourceOptions::StorageModeShared) }
-            .context("device allocates a fresh shared buffer")
+        unsafe {
+            device.newBufferWithBytes_length_options(
+                pointer,
+                bytes.len(),
+                MTLResourceOptions::StorageModeShared,
+            )
+        }
+        .context("device allocates a fresh shared buffer")
     }
 
-    fn zeroed_buffer(device: &ProtocolObject<dyn MTLDevice>, len: usize) -> anyhow::Result<Retained<ProtocolObject<dyn MTLBuffer>>> {
+    fn zeroed_buffer(
+        device: &ProtocolObject<dyn MTLDevice>,
+        len: usize,
+    ) -> anyhow::Result<Retained<ProtocolObject<dyn MTLBuffer>>> {
         shared_buffer_from_bytes(device, &vec![0u8; len])
     }
 
@@ -307,7 +338,9 @@ fn run() -> anyhow::Result<()> {
         threadgroup_width: usize,
     ) -> anyhow::Result<f64> {
         let command_buffer = queue.commandBuffer().context("command buffer")?;
-        let encoder = command_buffer.computeCommandEncoder().context("compute encoder")?;
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .context("compute encoder")?;
         encoder.setComputePipelineState(pipeline);
         unsafe {
             encoder.setBuffer_offset_atIndex(Some(weight), 0, 0);
@@ -315,8 +348,16 @@ fn run() -> anyhow::Result<()> {
             encoder.setBuffer_offset_atIndex(Some(output), 0, 2);
             encoder.setBuffer_offset_atIndex(Some(uniform), 0, 3);
         }
-        let grid = MTLSize { width: grid_threads as usize, height: 1, depth: 1 };
-        let threadgroup = MTLSize { width: threadgroup_width, height: 1, depth: 1 };
+        let grid = MTLSize {
+            width: grid_threads as usize,
+            height: 1,
+            depth: 1,
+        };
+        let threadgroup = MTLSize {
+            width: threadgroup_width,
+            height: 1,
+            depth: 1,
+        };
         encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
         encoder.endEncoding();
         command_buffer.commit();
@@ -342,7 +383,9 @@ fn run() -> anyhow::Result<()> {
         threads_per_threadgroup: MTLSize,
     ) -> anyhow::Result<f64> {
         let command_buffer = queue.commandBuffer().context("command buffer")?;
-        let encoder = command_buffer.computeCommandEncoder().context("compute encoder")?;
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .context("compute encoder")?;
         encoder.setComputePipelineState(pipeline);
         unsafe {
             encoder.setBuffer_offset_atIndex(Some(weight), 0, 0);
@@ -375,7 +418,9 @@ fn run() -> anyhow::Result<()> {
         threadgroup_mem_len: usize,
     ) -> anyhow::Result<f64> {
         let command_buffer = queue.commandBuffer().context("command buffer")?;
-        let encoder = command_buffer.computeCommandEncoder().context("compute encoder")?;
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .context("compute encoder")?;
         encoder.setComputePipelineState(pipeline);
         unsafe {
             let kargs_ptr = NonNull::new_unchecked((kargs as *const GgmlKargsMulMm) as *mut c_void);
@@ -425,9 +470,17 @@ fn run() -> anyhow::Result<()> {
 
     fn stats(samples: &[f64]) -> Stats {
         let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-        let variance = samples.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+        let variance = samples
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / samples.len() as f64;
         let cov_pct = (variance.sqrt() / mean) * 100.0;
-        Stats { mean, cov_pct, samples: samples.to_vec() }
+        Stats {
+            mean,
+            cov_pct,
+            samples: samples.to_vec(),
+        }
     }
 
     fn read_ggml_metal_src(src_dir: &std::path::Path, filename: &str) -> anyhow::Result<String> {
@@ -511,7 +564,10 @@ fn run() -> anyhow::Result<()> {
             legacy_kernel_end_marker_count == 1,
             "legacy kernel_mul_mm's closing #endif must appear exactly once, found {legacy_kernel_end_marker_count} occurrences"
         );
-        let legacy_kernel_end_index = mul_mm_metal.find(legacy_kernel_end_marker).context("legacy kernel end marker found")? + legacy_kernel_end_marker.len();
+        let legacy_kernel_end_index = mul_mm_metal
+            .find(legacy_kernel_end_marker)
+            .context("legacy kernel end marker found")?
+            + legacy_kernel_end_marker.len();
         let mul_mm_t_typedef = "typedef decltype(kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, float4x4, 1, dequantize_f32, float, float4x4, float, float2x4>) mul_mm_t;\n";
         let mul_mm_t_typedef_count = mul_mm_metal.matches(mul_mm_t_typedef).count();
         anyhow::ensure!(
@@ -537,15 +593,21 @@ fn run() -> anyhow::Result<()> {
         ))
     }
 
-    if let Ok(output) = std::process::Command::new("pgrep").args(["-fl", "cargo|rustc"]).output()
+    if let Ok(output) = std::process::Command::new("pgrep")
+        .args(["-fl", "cargo|rustc"])
+        .output()
         && !output.stdout.is_empty()
     {
-        eprintln!("WARNING: cargo/rustc running elsewhere:\n{}", String::from_utf8_lossy(&output.stdout));
+        eprintln!(
+            "WARNING: cargo/rustc running elsewhere:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 
     // -- real weight bytes --
-    let (parsed, file_len, mut file) = real_gguf_header(std::path::Path::new(REAL_GEMMA4_GGUF_PATH))?
-        .context("real gemma4-E2B gguf header parses")?;
+    let (parsed, file_len, mut file) =
+        real_gguf_header(std::path::Path::new(REAL_GEMMA4_GGUF_PATH))?
+            .context("real gemma4-E2B gguf header parses")?;
     let weight_bytes = real_tensor_bytes(&mut file, &parsed, file_len, "blk.0.ffn_gate.weight")?;
     let activation_bytes: Vec<u8> = random_activation(97, (TOKENS as usize) * (EMBEDDING as usize))
         .iter()
@@ -556,16 +618,20 @@ fn run() -> anyhow::Result<()> {
     let (program, weight_node, _activation_node, gate_node) = gate_program();
     let numeric_policy = NumericPolicy::llama_relaxed();
     let shapes = infer(&program, &[]).context("gate program infers")?;
-    let mut bound_ops = bind(&program, &shapes, &[gate_node], numeric_policy).context("gate program binds")?;
+    let mut bound_ops =
+        bind(&program, &shapes, &[gate_node], numeric_policy).context("gate program binds")?;
     let packed_node_set: BTreeSet<NodeId> = [weight_node].into_iter().collect();
     correct_packed_matmul_layouts(&mut bound_ops, &packed_node_set);
     let bound = bound_ops
         .into_iter()
         .find(|op| op.node == gate_node)
         .context("gate's own fused reduce is present in the bound program")?;
-    let packed_operands: omega::PackedOperands = std::collections::BTreeMap::from([(weight_node, omega::Codec::Q4_0)]);
-    let kernel = omega::emit(&bound, &packed_operands, numeric_policy).context("production kernel emits")?;
-    let uniform_bytes = omega::metal::pack_uniforms_for(&bound, numeric_policy).context("production uniforms pack")?;
+    let packed_operands: omega::PackedOperands =
+        std::collections::BTreeMap::from([(weight_node, omega::Codec::Q4_0)]);
+    let kernel =
+        omega::emit(&bound, &packed_operands, numeric_policy).context("production kernel emits")?;
+    let uniform_bytes = omega::metal::pack_uniforms_for(&bound, numeric_policy)
+        .context("production uniforms pack")?;
 
     eprintln!(
         "kernel entry={} grid_threads={} bindings={:?}",
@@ -598,9 +664,13 @@ fn run() -> anyhow::Result<()> {
     // loop; tile memory constant-filled ONCE outside the loop instead
     // (restated verbatim from `tiled_gemm_staging_mma_decomposition.rs`) --
     let loop_open = "    for (long k0 = 0; k0 < u.reduction_total; k0 += 32) {\n";
-    let loop_open_index = source_a.find(loop_open).context("k0 loop open marker present")?;
+    let loop_open_index = source_a
+        .find(loop_open)
+        .context("k0 loop open marker present")?;
     let sub_k_open = "        for (int sub_k = 0; sub_k < 4; ++sub_k) {";
-    let sub_k_open_index = source_a.find(sub_k_open).context("sub_k loop open marker present")?;
+    let sub_k_open_index = source_a
+        .find(sub_k_open)
+        .context("sub_k loop open marker present")?;
     let once_fill = "\
     for (long fill_idx = tiitg; fill_idx < 2048; fill_idx += 128) { tg_shared[fill_idx] = 1; }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -613,7 +683,10 @@ fn run() -> anyhow::Result<()> {
         &source_a[sub_k_open_index..]
     );
     let source_e_has_mma = source_e.contains("simdgroup_multiply_accumulate");
-    anyhow::ensure!(source_e_has_mma, "arm E must keep the MMA call, contains_mma={source_e_has_mma}");
+    anyhow::ensure!(
+        source_e_has_mma,
+        "arm E must keep the MMA call, contains_mma={source_e_has_mma}"
+    );
 
     // -- Arm A2_mma_removed: A2 (WIDE_WEIGHT_STAGE + DIRECT_STORE) with its
     // OWN `sub_k` MMA loop replaced by a forced-dependency read of
@@ -630,8 +703,12 @@ fn run() -> anyhow::Result<()> {
     // (`sub_k_steps`) and `loop_open`'s own hardcoded `+= 32` (`block_k`)
     // already assumed elsewhere in this harness.
     let out_tile_marker = "    threadgroup float *out_tile = (threadgroup float *)tg_shared;\n";
-    let sub_k_open_index_a2 = source_a2.find(sub_k_open).context("sub_k loop open marker present in A2")?;
-    let out_tile_marker_index_a2 = source_a2.find(out_tile_marker).context("out_tile alias marker present in A2")?;
+    let sub_k_open_index_a2 = source_a2
+        .find(sub_k_open)
+        .context("sub_k loop open marker present in A2")?;
+    let out_tile_marker_index_a2 = source_a2
+        .find(out_tile_marker)
+        .context("out_tile alias marker present in A2")?;
     let mma_removed_dep = "\
         acc[0] = make_filled_simdgroup_matrix<float, 8>(float(weight_tile[0]) + float(act_tile[0]));
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -643,13 +720,16 @@ fn run() -> anyhow::Result<()> {
         mma_removed_dep,
         &source_a2[out_tile_marker_index_a2..]
     );
-    let source_a2_mma_removed_has_mma = source_a2_mma_removed.contains("simdgroup_multiply_accumulate");
+    let source_a2_mma_removed_has_mma =
+        source_a2_mma_removed.contains("simdgroup_multiply_accumulate");
     anyhow::ensure!(
         !source_a2_mma_removed_has_mma,
         "arm A2_mma_removed must not carry any MMA call, contains_mma={source_a2_mma_removed_has_mma}"
     );
-    let source_a2_mma_removed_has_wide_stage = source_a2_mma_removed.contains("q4_0_dequant_half16(wws_blk0");
-    let source_a2_mma_removed_has_direct_store = source_a2_mma_removed.contains("direct_store_interior");
+    let source_a2_mma_removed_has_wide_stage =
+        source_a2_mma_removed.contains("q4_0_dequant_half16(wws_blk0");
+    let source_a2_mma_removed_has_direct_store =
+        source_a2_mma_removed.contains("direct_store_interior");
     anyhow::ensure!(
         source_a2_mma_removed_has_wide_stage && source_a2_mma_removed_has_direct_store,
         "arm A2_mma_removed must keep A2's real staging + direct-store text, has_wide_stage={source_a2_mma_removed_has_wide_stage} has_direct_store={source_a2_mma_removed_has_direct_store}"
@@ -667,7 +747,9 @@ fn run() -> anyhow::Result<()> {
     // DIRECT_STORE's real store-path epilogue (everything from `sub_k_open`
     // onward) stay completely untouched -- isolating "MMA + store only" for
     // A2 specifically, the direct converse of `A2_mma_removed` above.
-    let loop_open_index_a2 = source_a2.find(loop_open).context("k0 loop open marker present in A2")?;
+    let loop_open_index_a2 = source_a2
+        .find(loop_open)
+        .context("k0 loop open marker present in A2")?;
     let source_a2_mma_only = format!(
         "{}{}{}{}",
         &source_a2[..loop_open_index_a2],
@@ -709,12 +791,15 @@ fn run() -> anyhow::Result<()> {
         "A2_mma_only's b_frag load address expression must appear exactly once, found {b_frag_load_float_count} occurrences"
     );
     let b_frag_half_decl = "            simdgroup_half8x8 b_frag[2];\n";
-    let b_frag_load_half = "((threadgroup half*)act_tile) + (col_half * 2 + j) * 8 * 32 + sub_k * 8";
+    let b_frag_load_half =
+        "((threadgroup half*)act_tile) + (col_half * 2 + j) * 8 * 32 + sub_k * 8";
     let source_a2_mma_only_halfact = source_a2_mma_only
         .replacen(b_frag_float_decl, b_frag_half_decl, 1)
         .replacen(b_frag_load_float, b_frag_load_half, 1);
-    let source_a2_mma_only_halfact_has_decl = source_a2_mma_only_halfact.contains("simdgroup_half8x8 b_frag[2]");
-    let source_a2_mma_only_halfact_has_load = source_a2_mma_only_halfact.contains("(threadgroup half*)act_tile");
+    let source_a2_mma_only_halfact_has_decl =
+        source_a2_mma_only_halfact.contains("simdgroup_half8x8 b_frag[2]");
+    let source_a2_mma_only_halfact_has_load =
+        source_a2_mma_only_halfact.contains("(threadgroup half*)act_tile");
     anyhow::ensure!(
         source_a2_mma_only_halfact_has_decl && source_a2_mma_only_halfact_has_load,
         "arm A2_mma_only_halfact must carry the half8x8 fragment declaration and load, has_decl={source_a2_mma_only_halfact_has_decl} has_load={source_a2_mma_only_halfact_has_load}"
@@ -750,8 +835,11 @@ fn run() -> anyhow::Result<()> {
         },
     );
     let (source_a2_grid2d, grid2d_spec) = grid2d_result?;
-    let grid2d_spec = grid2d_spec.context("PROXIMA_TILED_GEMM_GRID2D=1 on a tiled-GEMM-eligible op must populate grid.grid2d")?;
-    let source_a2_grid2d_has_2d_attr = source_a2_grid2d.contains("[[threadgroup_position_in_grid]]");
+    let grid2d_spec = grid2d_spec.context(
+        "PROXIMA_TILED_GEMM_GRID2D=1 on a tiled-GEMM-eligible op must populate grid.grid2d",
+    )?;
+    let source_a2_grid2d_has_2d_attr =
+        source_a2_grid2d.contains("[[threadgroup_position_in_grid]]");
     anyhow::ensure!(
         source_a2_grid2d_has_2d_attr,
         "arm A2_grid2d must carry the 2D-attribute signature, has_2d_attr={source_a2_grid2d_has_2d_attr}"
@@ -783,7 +871,10 @@ fn run() -> anyhow::Result<()> {
 ";
     let source_g = source_f.replacen(mma_block.as_str(), mma_removed_with_dep, 1);
     let source_g_has_mma = source_g.contains("simdgroup_multiply_accumulate");
-    anyhow::ensure!(!source_g_has_mma, "arm G must not carry any MMA call, contains_mma={source_g_has_mma}");
+    anyhow::ensure!(
+        !source_g_has_mma,
+        "arm G must not carry any MMA call, contains_mma={source_g_has_mma}"
+    );
 
     // -- Arm H: F with the weight (Q4_0 dequant) staging block replaced by
     // a constant `half` fill into the SAME `sa` slots -- the ggml analogue
@@ -920,7 +1011,8 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     long row_half = sgitg & 1;
     long col_half = sgitg >> 1;
 ";
-    let source_s2_preamble = source_a2.replacen(a2_signature_and_preamble, s2_signature_and_preamble, 1);
+    let source_s2_preamble =
+        source_a2.replacen(a2_signature_and_preamble, s2_signature_and_preamble, 1);
     let s2_k0_loop_old = "    for (long k0 = 0; k0 < u.reduction_total; k0 += 32) {\n";
     let s2_k0_loop_old_count = source_s2_preamble.matches(s2_k0_loop_old).count();
     anyhow::ensure!(
@@ -1012,7 +1104,11 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         height: (FEED_FORWARD as usize).div_ceil(64),
         depth: 1,
     };
-    let ggml_threads_per_threadgroup = MTLSize { width: 32, height: 4, depth: 1 };
+    let ggml_threads_per_threadgroup = MTLSize {
+        width: 32,
+        height: 4,
+        depth: 1,
+    };
     // `tiled_gemm_threadgroups`'s own row/col-tile formula (`feature_extent.
     // div_ceil(BLOCK_M=64)`, `token_extent.div_ceil(BLOCK_N=32)`) is the
     // identical arithmetic ggml's own dispatch geometry above already uses
@@ -1020,12 +1116,18 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     // `ggml_threadgroups`/`ggml_threads_per_threadgroup` to dispatch
     // `A2_grid2d` below.
     let grid2d_threadgroup_count = (grid2d_spec.threadgroups_x, grid2d_spec.threadgroups_y);
-    let ggml_threadgroup_count = (ggml_threadgroups.width as u64, ggml_threadgroups.height as u64);
+    let ggml_threadgroup_count = (
+        ggml_threadgroups.width as u64,
+        ggml_threadgroups.height as u64,
+    );
     anyhow::ensure!(
         grid2d_threadgroup_count == ggml_threadgroup_count,
         "the production grid2d spec must describe the identical threadgroup-count grid ggml's own dispatch geometry does: grid2d={grid2d_threadgroup_count:?} ggml={ggml_threadgroup_count:?}"
     );
-    let grid2d_threadgroup_shape = (grid2d_spec.threads_per_threadgroup_x, grid2d_spec.threads_per_threadgroup_y);
+    let grid2d_threadgroup_shape = (
+        grid2d_spec.threads_per_threadgroup_x,
+        grid2d_spec.threads_per_threadgroup_y,
+    );
     anyhow::ensure!(
         grid2d_threadgroup_shape == (32, 4),
         "the production grid2d spec must describe the identical 32x4 threadgroup shape ggml's own dispatch does: grid2d={grid2d_threadgroup_shape:?} expected=(32, 4)"
@@ -1103,7 +1205,11 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     // -- pipeline facts, read from the compiled `MTLComputePipelineState`
     // itself (never inferred): the Metal API, not the source text, is the
     // authority on what the compiler actually allocated per kernel. --
-    for (label, pipeline, _) in proxima_pipelines.iter().chain(ggml_pipelines.iter()).chain(proxima_2d_pipelines.iter()) {
+    for (label, pipeline, _) in proxima_pipelines
+        .iter()
+        .chain(ggml_pipelines.iter())
+        .chain(proxima_2d_pipelines.iter())
+    {
         println!(
             "PIPELINE_FACTS label={label} max_total_threads_per_threadgroup={} thread_execution_width={} static_threadgroup_memory_length={}",
             pipeline.maxTotalThreadsPerThreadgroup(),
@@ -1113,15 +1219,41 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     }
 
     // -- correctness gate: arm A vs the real production path --
-    let production_plan = omega::plan(&program, &[], &[
-        QuantizedBlock::Packed { codec: omega::Codec::Q4_0, bytes: &weight_bytes },
-        QuantizedBlock::Float32(unsafe { std::slice::from_raw_parts(activation_bytes.as_ptr().cast::<f32>(), (TOKENS as usize) * (EMBEDDING as usize)) }),
-    ], &[gate_node], numeric_policy)
-        .context("production plan compiles")?;
-    let production_evaluated = omega::execute_plan(&production_plan, &[
-        QuantizedBlock::Packed { codec: omega::Codec::Q4_0, bytes: &weight_bytes },
-        QuantizedBlock::Float32(unsafe { std::slice::from_raw_parts(activation_bytes.as_ptr().cast::<f32>(), (TOKENS as usize) * (EMBEDDING as usize)) }),
-    ]).context("production plan executes")?;
+    let production_plan = omega::plan(
+        &program,
+        &[],
+        &[
+            QuantizedBlock::Packed {
+                codec: omega::Codec::Q4_0,
+                bytes: &weight_bytes,
+            },
+            QuantizedBlock::Float32(unsafe {
+                std::slice::from_raw_parts(
+                    activation_bytes.as_ptr().cast::<f32>(),
+                    (TOKENS as usize) * (EMBEDDING as usize),
+                )
+            }),
+        ],
+        &[gate_node],
+        numeric_policy,
+    )
+    .context("production plan compiles")?;
+    let production_evaluated = omega::execute_plan(
+        &production_plan,
+        &[
+            QuantizedBlock::Packed {
+                codec: omega::Codec::Q4_0,
+                bytes: &weight_bytes,
+            },
+            QuantizedBlock::Float32(unsafe {
+                std::slice::from_raw_parts(
+                    activation_bytes.as_ptr().cast::<f32>(),
+                    (TOKENS as usize) * (EMBEDDING as usize),
+                )
+            }),
+        ],
+    )
+    .context("production plan executes")?;
     let production_output: Vec<f32> = production_evaluated.root().to_vec();
 
     dispatch_proxima_gpu_ns(
@@ -1134,7 +1266,10 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         grid_threads,
         threadgroup_width,
     )?;
-    let arm_a_output = read_f32(&proxima_pipelines[0].2, (TOKENS as usize) * (FEED_FORWARD as usize));
+    let arm_a_output = read_f32(
+        &proxima_pipelines[0].2,
+        (TOKENS as usize) * (FEED_FORWARD as usize),
+    );
     let differing_words = arm_a_output
         .iter()
         .zip(production_output.iter())
@@ -1162,13 +1297,18 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         ggml_threads_per_threadgroup,
         ggml_threadgroup_mem_len,
     )?;
-    let arm_f_output = read_f32(&ggml_pipelines[0].2, (TOKENS as usize) * (FEED_FORWARD as usize));
+    let arm_f_output = read_f32(
+        &ggml_pipelines[0].2,
+        (TOKENS as usize) * (FEED_FORWARD as usize),
+    );
     // scale-floored relative error: a fixed `1e-6` floor blows up on the
     // near-zero elements every reduction over ~1536 terms produces (a
     // well-known FP gotcha, not a harness bug) -- floor the denominator at
     // 1% of the reference array's own peak magnitude instead, the standard
     // fix for comparing reduction outputs near their zero-crossings.
-    let max_abs_reference = arm_a_output.iter().fold(0.0f64, |acc, value| acc.max(f64::from(value.abs())));
+    let max_abs_reference = arm_a_output
+        .iter()
+        .fold(0.0f64, |acc, value| acc.max(f64::from(value.abs())));
     let scale_floor = 1e-2 * max_abs_reference;
     let mut max_abs_diff = 0.0f64;
     let mut max_abs_at = 0usize;
@@ -1176,7 +1316,8 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     let mut naive_max_rel_diff = 0.0f64;
     let mut sum_sq_rel_diff = 0.0f64;
     let mut exceeding_1pct_scaled: usize = 0;
-    for (index, (candidate, reference)) in arm_f_output.iter().zip(arm_a_output.iter()).enumerate() {
+    for (index, (candidate, reference)) in arm_f_output.iter().zip(arm_a_output.iter()).enumerate()
+    {
         let abs_diff = (f64::from(*candidate) - f64::from(*reference)).abs();
         let scaled_rel_diff = abs_diff / f64::from(reference.abs()).max(scale_floor);
         let naive_rel_diff = abs_diff / f64::from(reference.abs()).max(1e-6);
@@ -1198,7 +1339,10 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         .enumerate()
         .map(|(index, (candidate, reference))| {
             let abs_diff = (f64::from(*candidate) - f64::from(*reference)).abs();
-            (abs_diff / f64::from(reference.abs()).max(scale_floor), index)
+            (
+                abs_diff / f64::from(reference.abs()).max(scale_floor),
+                index,
+            )
         })
         .collect();
     worst.sort_by(|left, right| right.0.total_cmp(&left.0));
@@ -1213,7 +1357,9 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     }
     println!(
         "CORRECTNESS_GATE arm_f_vs_a max_abs_diff={max_abs_diff:.6e} max_abs_at_index={max_abs_at} a_value={:.6} f_value={:.6} max_abs_reference={max_abs_reference:.6} scale_floor={scale_floor:.6e} max_scaled_rel_diff={max_scaled_rel_diff:.6e} p99_scaled_rel_diff={p99_scaled_rel_diff:.6e} rms_scaled_rel_diff={rms_scaled_rel_diff:.6e} naive_max_rel_diff(1e-6 floor)={naive_max_rel_diff:.6e} elements_exceeding_1pct_scaled={exceeding_1pct_scaled}/{}",
-        arm_a_output[max_abs_at], arm_f_output[max_abs_at], arm_f_output.len()
+        arm_a_output[max_abs_at],
+        arm_f_output[max_abs_at],
+        arm_f_output.len()
     );
     // `max` over 3.1M elements is dominated by near-zero-crossing values of
     // a ~1536-term reduction: the 20 worst offenders above show a UNIFORM
@@ -1251,7 +1397,10 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         grid_threads,
         threadgroup_width,
     )?;
-    let arm_a2_output = read_f32(&proxima_pipelines[1].2, (TOKENS as usize) * (FEED_FORWARD as usize));
+    let arm_a2_output = read_f32(
+        &proxima_pipelines[1].2,
+        (TOKENS as usize) * (FEED_FORWARD as usize),
+    );
 
     dispatch_proxima_gpu_ns(
         &queue,
@@ -1263,9 +1412,15 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         grid_threads,
         threadgroup_width,
     )?;
-    let arm_s1_output = read_f32(&proxima_pipelines[4].2, (TOKENS as usize) * (FEED_FORWARD as usize));
+    let arm_s1_output = read_f32(
+        &proxima_pipelines[4].2,
+        (TOKENS as usize) * (FEED_FORWARD as usize),
+    );
     let s1_diff = differing_word_count(&arm_s1_output, &arm_a2_output);
-    println!("CORRECTNESS_GATE arm_s1_vs_a2 differing_words={s1_diff} total={}", arm_s1_output.len());
+    println!(
+        "CORRECTNESS_GATE arm_s1_vs_a2 differing_words={s1_diff} total={}",
+        arm_s1_output.len()
+    );
 
     dispatch_proxima_2d_gpu_ns(
         &queue,
@@ -1275,11 +1430,21 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         &proxima_2d_pipelines[0].2,
         &uniform_buffer,
         ggml_threadgroups,
-        MTLSize { width: threadgroup_width, height: 1, depth: 1 },
+        MTLSize {
+            width: threadgroup_width,
+            height: 1,
+            depth: 1,
+        },
     )?;
-    let arm_s2_output = read_f32(&proxima_2d_pipelines[0].2, (TOKENS as usize) * (FEED_FORWARD as usize));
+    let arm_s2_output = read_f32(
+        &proxima_2d_pipelines[0].2,
+        (TOKENS as usize) * (FEED_FORWARD as usize),
+    );
     let s2_diff = differing_word_count(&arm_s2_output, &arm_a2_output);
-    println!("CORRECTNESS_GATE arm_s2_vs_a2 differing_words={s2_diff} total={}", arm_s2_output.len());
+    println!(
+        "CORRECTNESS_GATE arm_s2_vs_a2 differing_words={s2_diff} total={}",
+        arm_s2_output.len()
+    );
 
     dispatch_proxima_2d_gpu_ns(
         &queue,
@@ -1289,11 +1454,21 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         &proxima_2d_pipelines[1].2,
         &uniform_buffer,
         ggml_threadgroups,
-        MTLSize { width: threadgroup_width, height: 1, depth: 1 },
+        MTLSize {
+            width: threadgroup_width,
+            height: 1,
+            depth: 1,
+        },
     )?;
-    let arm_s3_output = read_f32(&proxima_2d_pipelines[1].2, (TOKENS as usize) * (FEED_FORWARD as usize));
+    let arm_s3_output = read_f32(
+        &proxima_2d_pipelines[1].2,
+        (TOKENS as usize) * (FEED_FORWARD as usize),
+    );
     let s3_diff = differing_word_count(&arm_s3_output, &arm_a2_output);
-    println!("CORRECTNESS_GATE arm_s3_vs_a2 differing_words={s3_diff} total={}", arm_s3_output.len());
+    println!(
+        "CORRECTNESS_GATE arm_s3_vs_a2 differing_words={s3_diff} total={}",
+        arm_s3_output.len()
+    );
 
     dispatch_ggml_gpu_ns(
         &queue,
@@ -1306,9 +1481,15 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         ggml_threads_per_threadgroup,
         ggml_threadgroup_mem_len,
     )?;
-    let arm_s4_output = read_f32(&ggml_pipelines[3].2, (TOKENS as usize) * (FEED_FORWARD as usize));
+    let arm_s4_output = read_f32(
+        &ggml_pipelines[3].2,
+        (TOKENS as usize) * (FEED_FORWARD as usize),
+    );
     let s4_diff = differing_word_count(&arm_s4_output, &arm_f_output);
-    println!("CORRECTNESS_GATE arm_s4_vs_f differing_words={s4_diff} total={}", arm_s4_output.len());
+    println!(
+        "CORRECTNESS_GATE arm_s4_vs_f differing_words={s4_diff} total={}",
+        arm_s4_output.len()
+    );
 
     // -- A2_grid2d vs A2: PROXIMA_TILED_GEMM_GRID2D is now a real production
     // switch (`omega/tests/tiled_gemm_grid2d_parity.rs` already gates this
@@ -1326,7 +1507,10 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         ggml_threadgroups,
         ggml_threads_per_threadgroup,
     )?;
-    let arm_a2_grid2d_output = read_f32(&proxima_2d_pipelines[2].2, (TOKENS as usize) * (FEED_FORWARD as usize));
+    let arm_a2_grid2d_output = read_f32(
+        &proxima_2d_pipelines[2].2,
+        (TOKENS as usize) * (FEED_FORWARD as usize),
+    );
     let a2_grid2d_diff = differing_word_count(&arm_a2_grid2d_output, &arm_a2_output);
     println!(
         "CORRECTNESS_GATE arm_a2_grid2d_vs_a2 differing_words={a2_grid2d_diff} total={}",
@@ -1363,8 +1547,10 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         grid_threads,
         threadgroup_width,
     )?;
-    let arm_a2_mma_only_output =
-        read_f32(&proxima_pipelines[a2_mma_only_index].2, (TOKENS as usize) * (FEED_FORWARD as usize));
+    let arm_a2_mma_only_output = read_f32(
+        &proxima_pipelines[a2_mma_only_index].2,
+        (TOKENS as usize) * (FEED_FORWARD as usize),
+    );
     dispatch_proxima_gpu_ns(
         &queue,
         &proxima_pipelines[a2_mma_only_halfact_index].1,
@@ -1379,7 +1565,8 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         &proxima_pipelines[a2_mma_only_halfact_index].2,
         (TOKENS as usize) * (FEED_FORWARD as usize),
     );
-    let halfact_diff = differing_word_count(&arm_a2_mma_only_halfact_output, &arm_a2_mma_only_output);
+    let halfact_diff =
+        differing_word_count(&arm_a2_mma_only_halfact_output, &arm_a2_mma_only_output);
     let mut halfact_max_rel = 0.0f32;
     for (&halfact_value, &float_value) in arm_a2_mma_only_halfact_output
         .iter()
@@ -1403,7 +1590,11 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         .chain(ggml_pipelines.iter().map(|(label, ..)| *label))
         .chain(proxima_2d_pipelines.iter().map(|(label, ..)| *label))
         .collect();
-    let s2_s3_threadgroup = MTLSize { width: threadgroup_width, height: 1, depth: 1 };
+    let s2_s3_threadgroup = MTLSize {
+        width: threadgroup_width,
+        height: 1,
+        depth: 1,
+    };
     let mut samples: Vec<Vec<f64>> = vec![Vec::with_capacity(ITERS); arm_labels.len()];
     for iteration in 0..ITERS {
         for (index, (_label, pipeline, output_buffer)) in proxima_pipelines.iter().enumerate() {
@@ -1454,7 +1645,10 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         }
     }
 
-    println!("STEADY_STATE iters={} warmup_dropped={WARMUP}", ITERS - WARMUP);
+    println!(
+        "STEADY_STATE iters={} warmup_dropped={WARMUP}",
+        ITERS - WARMUP
+    );
     let mut baseline_mean = 0.0;
     let mut f_mean = 0.0;
     for (index, label) in arm_labels.iter().enumerate() {
@@ -1470,7 +1664,11 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
             run_stats.mean,
             run_stats.cov_pct,
             run_stats.mean / baseline_mean.max(f64::EPSILON),
-            run_stats.samples.iter().map(|value| format!("{value:.3}")).collect::<Vec<_>>()
+            run_stats
+                .samples
+                .iter()
+                .map(|value| format!("{value:.3}"))
+                .collect::<Vec<_>>()
         );
     }
     println!(

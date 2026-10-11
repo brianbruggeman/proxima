@@ -59,8 +59,7 @@ fn gemma4_moe_gguf_path() -> String {
 }
 
 fn gemma4_e2b_gguf_path() -> String {
-    std::env::var("PROXIMA_GEMMA4_E2B_GGUF")
-        .unwrap_or_else(|_| GEMMA4_E2B_DEFAULT_PATH.to_string())
+    std::env::var("PROXIMA_GEMMA4_E2B_GGUF").unwrap_or_else(|_| GEMMA4_E2B_DEFAULT_PATH.to_string())
 }
 
 fn require_fixture(path: &str, env_var: &str) {
@@ -73,8 +72,7 @@ fn require_fixture(path: &str, env_var: &str) {
 fn parse_real_blob(path: &str) -> (memmap2::Mmap, proxima_gguf::pipe::ParsedGguf) {
     let file = File::open(path).unwrap_or_else(|error| panic!("open {path}: {error}"));
     let mapping = unsafe { memmap2::Mmap::map(&file) }.expect("mmap the real checkpoint read-only");
-    let parsed =
-        parse_complete(&mapping).expect("parses the real checkpoint's own GGUF header");
+    let parsed = parse_complete(&mapping).expect("parses the real checkpoint's own GGUF header");
     (mapping, parsed)
 }
 
@@ -88,9 +86,12 @@ async fn family_profile_routes_real_gemma4_header_with_its_tensor_count() {
     require_fixture(&path, "PROXIMA_GEMMA4_GGUF");
     let (_mapping, parsed) = parse_real_blob(&path);
 
-    let family = metadata_str(&parsed, "general.architecture").expect("the real header names its family");
+    let family =
+        metadata_str(&parsed, "general.architecture").expect("the real header names its family");
     assert_eq!(
-        family_profile(family).expect("the gemma4 profile is embedded").schedule_source,
+        family_profile(family)
+            .expect("the gemma4 profile is embedded")
+            .schedule_source,
         ScheduleSource::SlidingPattern,
         "gemma4 must read through the sliding-pattern header reader, not the uniform one"
     );
@@ -154,9 +155,12 @@ async fn family_profile_routes_real_gemma4_e2b_dense_header() {
     require_fixture(&path, "PROXIMA_GEMMA4_E2B_GGUF");
     let (_mapping, parsed) = parse_real_blob(&path);
 
-    let family = metadata_str(&parsed, "general.architecture").expect("the real E2B header names its family");
+    let family = metadata_str(&parsed, "general.architecture")
+        .expect("the real E2B header names its family");
     assert_eq!(
-        family_profile(family).expect("the gemma4 profile is embedded").schedule_source,
+        family_profile(family)
+            .expect("the gemma4 profile is embedded")
+            .schedule_source,
         ScheduleSource::SlidingPattern,
         "the dense E2B checkpoint is still general.architecture = gemma4, not a separate profile"
     );

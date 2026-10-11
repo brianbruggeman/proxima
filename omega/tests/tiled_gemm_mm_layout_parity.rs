@@ -158,7 +158,12 @@ fn real_tensor_bytes(
 /// own `matmul_program`: `[tokens, in_dim] x [in_dim, rows] -> [tokens,
 /// rows]`, `weight_dtype` distinguishing "packed bytes" (`UInt8`) from a
 /// plain `f32` activation operand.
-fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
+fn matmul_program(
+    tokens: u32,
+    in_dim: u32,
+    out_dim: u32,
+    weight_dtype: DType,
+) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = append(
         &mut program,
@@ -221,7 +226,13 @@ fn run_lever_byte_identity(
     rows: usize,
     case: &Case,
 ) -> TestResult<()> {
-    let Case { tokens, lever, extra_env, label, .. } = *case;
+    let Case {
+        tokens,
+        lever,
+        extra_env,
+        label,
+        ..
+    } = *case;
     let mut lcg = Lcg(31001 + tokens as u64 + rows as u64);
     let activation: Vec<f32> = (0..tokens * in_dim)
         .map(|_| lcg.next_unit() * 4.0 - 2.0)
@@ -230,7 +241,10 @@ fn run_lever_byte_identity(
     let (packed_program, packed_sum) =
         matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::UInt8);
     let blocks = [
-        QuantizedBlock::Packed { codec, bytes: weight_bytes },
+        QuantizedBlock::Packed {
+            codec,
+            bytes: weight_bytes,
+        },
         QuantizedBlock::Float32(&activation),
     ];
 
@@ -254,8 +268,16 @@ fn run_lever_byte_identity(
     let baseline_root = baseline.root();
     let candidate_root = candidate.root();
     let element_count = tokens * rows;
-    assert_eq!(baseline_root.len(), element_count, "degenerate: {lever}=0 produced no output");
-    assert_eq!(candidate_root.len(), element_count, "degenerate: the {lever} default produced no output");
+    assert_eq!(
+        baseline_root.len(),
+        element_count,
+        "degenerate: {lever}=0 produced no output"
+    );
+    assert_eq!(
+        candidate_root.len(),
+        element_count,
+        "degenerate: the {lever} default produced no output"
+    );
 
     let differing = baseline_root
         .iter()
@@ -288,7 +310,13 @@ fn check_q4_0(tensor_name: &str, case: &Case) -> TestResult<()> {
     };
     let row_bytes = in_dim / q4_0::QK4_0 * q4_0::BLOCK_BYTES;
     let rows = case.rows_wanted.min(out_dim);
-    run_lever_byte_identity(Codec::Q4_0, &weight_bytes[..rows * row_bytes], in_dim, rows, case)
+    run_lever_byte_identity(
+        Codec::Q4_0,
+        &weight_bytes[..rows * row_bytes],
+        in_dim,
+        rows,
+        case,
+    )
 }
 
 fn check_q4k(tensor_name: &str, case: &Case) -> TestResult<()> {
@@ -306,7 +334,13 @@ fn check_q4k(tensor_name: &str, case: &Case) -> TestResult<()> {
     };
     let row_bytes = in_dim / q4_k::QK_K * q4_k::BLOCK_BYTES;
     let rows = case.rows_wanted.min(out_dim);
-    run_lever_byte_identity(Codec::Q4K, &weight_bytes[..rows * row_bytes], in_dim, rows, case)
+    run_lever_byte_identity(
+        Codec::Q4K,
+        &weight_bytes[..rows * row_bytes],
+        in_dim,
+        rows,
+        case,
+    )
 }
 
 const WIDE_ACT_LOAD_OFF: [(&str, Option<&str>); 2] = [
@@ -318,30 +352,55 @@ const ROW_MAJOR_LAYOUT: [(&str, Option<&str>); 1] = [("PROXIMA_TILED_GEMM_MM_LAY
 
 #[test]
 fn q4_0_mm_layout_matches_row_major_with_a_full_tile_grid() -> TestResult<()> {
-    let case = Case { tokens: 512, rows_wanted: 128, lever: MM_LAYOUT, extra_env: &RESTAGE, label: "full_tile_grid" };
+    let case = Case {
+        tokens: 512,
+        rows_wanted: 128,
+        lever: MM_LAYOUT,
+        extra_env: &RESTAGE,
+        label: "full_tile_grid",
+    };
     check_q4_0("blk.0.attn_q.weight", &case)
 }
 
 #[test]
 fn q4_0_mm_layout_matches_row_major_with_a_partial_token_tile() -> TestResult<()> {
-    let case = Case { tokens: 510, rows_wanted: 128, lever: MM_LAYOUT, extra_env: &RESTAGE, label: "partial_token_tile" };
+    let case = Case {
+        tokens: 510,
+        rows_wanted: 128,
+        lever: MM_LAYOUT,
+        extra_env: &RESTAGE,
+        label: "partial_token_tile",
+    };
     check_q4_0("blk.0.attn_q.weight", &case)
 }
 
 #[test]
 fn q4_0_mm_layout_matches_row_major_with_a_partial_feature_tile() -> TestResult<()> {
-    let case = Case { tokens: 510, rows_wanted: 100, lever: MM_LAYOUT, extra_env: &RESTAGE, label: "partial_feature_tile" };
+    let case = Case {
+        tokens: 510,
+        rows_wanted: 100,
+        lever: MM_LAYOUT,
+        extra_env: &RESTAGE,
+        label: "partial_feature_tile",
+    };
     check_q4_0("blk.0.attn_q.weight", &case)
 }
 
 #[test]
 fn q4_0_mm_layout_matches_row_major_at_the_gemma4_prefill_width() -> TestResult<()> {
-    let case = Case { tokens: 971, rows_wanted: 256, lever: MM_LAYOUT, extra_env: &RESTAGE, label: "prefill_width" };
+    let case = Case {
+        tokens: 971,
+        rows_wanted: 256,
+        lever: MM_LAYOUT,
+        extra_env: &RESTAGE,
+        label: "prefill_width",
+    };
     check_q4_0("blk.0.ffn_gate.weight", &case)
 }
 
 #[test]
-fn q4_0_mm_layout_matches_row_major_at_the_gemma4_prefill_width_with_the_direct_store_default() -> TestResult<()> {
+fn q4_0_mm_layout_matches_row_major_at_the_gemma4_prefill_width_with_the_direct_store_default()
+-> TestResult<()> {
     let case = Case {
         tokens: 971,
         rows_wanted: 256,
@@ -378,30 +437,57 @@ fn q4_0_mm_layout_matches_row_major_on_the_generic_activation_read() -> TestResu
 
 #[test]
 fn q4k_mm_layout_matches_row_major_with_a_full_tile_grid() -> TestResult<()> {
-    let case = Case { tokens: 512, rows_wanted: 128, lever: MM_LAYOUT, extra_env: &RESTAGE, label: "full_tile_grid" };
+    let case = Case {
+        tokens: 512,
+        rows_wanted: 128,
+        lever: MM_LAYOUT,
+        extra_env: &RESTAGE,
+        label: "full_tile_grid",
+    };
     check_q4k("blk.0.attn_q.weight", &case)
 }
 
 #[test]
 fn q4k_mm_layout_matches_row_major_with_partial_tiles() -> TestResult<()> {
-    let case = Case { tokens: 510, rows_wanted: 100, lever: MM_LAYOUT, extra_env: &RESTAGE, label: "partial_tiles" };
+    let case = Case {
+        tokens: 510,
+        rows_wanted: 100,
+        lever: MM_LAYOUT,
+        extra_env: &RESTAGE,
+        label: "partial_tiles",
+    };
     check_q4k("blk.0.attn_q.weight", &case)
 }
 
 #[test]
-fn q4_0_dynamic_threadgroup_memory_matches_the_declared_array_at_the_gemma4_prefill_width() -> TestResult<()> {
-    let case = Case { tokens: 971, rows_wanted: 256, lever: DYNAMIC_TGMEM, extra_env: &[], label: "dynamic_prefill_width" };
+fn q4_0_dynamic_threadgroup_memory_matches_the_declared_array_at_the_gemma4_prefill_width()
+-> TestResult<()> {
+    let case = Case {
+        tokens: 971,
+        rows_wanted: 256,
+        lever: DYNAMIC_TGMEM,
+        extra_env: &[],
+        label: "dynamic_prefill_width",
+    };
     check_q4_0("blk.0.ffn_gate.weight", &case)
 }
 
 #[test]
-fn q4_0_dynamic_threadgroup_memory_matches_the_declared_array_with_partial_tiles() -> TestResult<()> {
-    let case = Case { tokens: 510, rows_wanted: 100, lever: DYNAMIC_TGMEM, extra_env: &[], label: "dynamic_partial_tiles" };
+fn q4_0_dynamic_threadgroup_memory_matches_the_declared_array_with_partial_tiles() -> TestResult<()>
+{
+    let case = Case {
+        tokens: 510,
+        rows_wanted: 100,
+        lever: DYNAMIC_TGMEM,
+        extra_env: &[],
+        label: "dynamic_partial_tiles",
+    };
     check_q4_0("blk.0.attn_q.weight", &case)
 }
 
 #[test]
-fn q4_0_dynamic_threadgroup_memory_matches_the_declared_array_on_the_row_major_layout() -> TestResult<()> {
+fn q4_0_dynamic_threadgroup_memory_matches_the_declared_array_on_the_row_major_layout()
+-> TestResult<()> {
     let case = Case {
         tokens: 510,
         rows_wanted: 128,
@@ -413,7 +499,14 @@ fn q4_0_dynamic_threadgroup_memory_matches_the_declared_array_on_the_row_major_l
 }
 
 #[test]
-fn q4k_dynamic_threadgroup_memory_matches_the_declared_array_with_partial_tiles() -> TestResult<()> {
-    let case = Case { tokens: 510, rows_wanted: 100, lever: DYNAMIC_TGMEM, extra_env: &[], label: "dynamic_partial_tiles" };
+fn q4k_dynamic_threadgroup_memory_matches_the_declared_array_with_partial_tiles() -> TestResult<()>
+{
+    let case = Case {
+        tokens: 510,
+        rows_wanted: 100,
+        lever: DYNAMIC_TGMEM,
+        extra_env: &[],
+        label: "dynamic_partial_tiles",
+    };
     check_q4k("blk.0.attn_q.weight", &case)
 }

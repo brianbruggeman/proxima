@@ -1724,14 +1724,25 @@ fn push_super_element_fallback(
     let (weight, other) = (block.weight, block.other);
     let elements = codec_block_elements(block.codec);
     let scratch_len = resolved.operands().len().max(1);
-    source.push_str(&format!("            for (int e = 0; e < {elements}; ++e) {{\n"));
-    source.push_str(&format!("                {element_type} scratch[{scratch_len}];\n"));
+    source.push_str(&format!(
+        "            for (int e = 0; e < {elements}; ++e) {{\n"
+    ));
+    source.push_str(&format!(
+        "                {element_type} scratch[{scratch_len}];\n"
+    ));
     source.push_str(&format!(
         "                scratch[{weight}] = {element_fn}(blk, slot + (uint)e);\n"
     ));
     source.push_str(&format!("                scratch[{other}] = acts[e];\n"));
-    let value_expr = push_body_steps(source, resolved.element_body(), "                ", element_type);
-    source.push_str(&format!("                {element_type} value = {value_expr};\n"));
+    let value_expr = push_body_steps(
+        source,
+        resolved.element_body(),
+        "                ",
+        element_type,
+    );
+    source.push_str(&format!(
+        "                {element_type} value = {value_expr};\n"
+    ));
     let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
     source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
     source.push_str("            }\n");

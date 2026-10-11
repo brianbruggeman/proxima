@@ -75,7 +75,8 @@ fn matvec_program(in_dim: u32, out_dim: u32) -> (Vec<Op>, NodeId) {
 
 fn pack_rows(rows: &[Vec<f32>], in_dim: usize) -> Vec<u8> {
     let blocks_per_row = in_dim / proxima_gguf::quant::q4_0::QK4_0;
-    let mut packed = vec![0u8; rows.len() * blocks_per_row * proxima_gguf::quant::q4_0::BLOCK_BYTES];
+    let mut packed =
+        vec![0u8; rows.len() * blocks_per_row * proxima_gguf::quant::q4_0::BLOCK_BYTES];
     for (row, row_packed) in rows
         .iter()
         .zip(packed.chunks_exact_mut(blocks_per_row * proxima_gguf::quant::q4_0::BLOCK_BYTES))
@@ -97,7 +98,10 @@ fn run_bits(in_dim: usize, out_dim: usize, seed: u64, packed_rows_env: Option<&s
     let activation = random_vec(seed + 9973, in_dim);
     let (program, sum) = matvec_program(in_dim as u32, out_dim as u32);
     let blocks = [
-        QuantizedBlock::Packed { codec: omega::Codec::Q4_0, bytes: &packed },
+        QuantizedBlock::Packed {
+            codec: omega::Codec::Q4_0,
+            bytes: &packed,
+        },
         QuantizedBlock::Float32(&activation),
     ];
 

@@ -145,7 +145,10 @@ fn assert_ggml_port_matches_reference_at_stride(label: &str, stride: i32) {
 
     let (program, sum) = matmul_program_strided_activation(IN_DIM as u32, OUT_DIM as u32, stride);
     let blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &packed,
+        },
         QuantizedBlock::Float32(&physical_activation),
     ];
 

@@ -26,8 +26,8 @@ use crate::bind::{
     BoundWeights, architecture_from_metadata, metadata_f32_optional, metadata_str, metadata_u32,
     metadata_u32_optional, metadata_u32_optional_or, vocab_from_token_embedding,
 };
-use crate::dense::descriptor_from_gguf;
 use crate::bind_leaves::bind_program_leaves;
+use crate::dense::descriptor_from_gguf;
 use crate::error::InteropError;
 use crate::generate::build_position_inputs;
 use crate::profiles::binding_profile;
@@ -263,7 +263,9 @@ fn lower_and_bind<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
 ) -> Result<(Vec<Op>, NodeId, BoundWeights<'file>), InteropError> {
-    let ForwardProgram { program, logits, .. } = build_forward(&short_conv_descriptor(parsed)?)?;
+    let ForwardProgram {
+        program, logits, ..
+    } = build_forward(&short_conv_descriptor(parsed)?)?;
     let weights = bind_program_leaves(
         parsed,
         file_bytes,

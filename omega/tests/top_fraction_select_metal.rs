@@ -18,10 +18,21 @@ struct Fixture {
 
 fn fixture(with_keep_rows: bool) -> Fixture {
     let mut program = Vec::new();
-    let scores = input_leaf(&mut program, DType::Float32, vec![Extent::Symbolic(0)], "scores");
+    let scores = input_leaf(
+        &mut program,
+        DType::Float32,
+        vec![Extent::Symbolic(0)],
+        "scores",
+    );
     let keep_count = input_leaf(&mut program, DType::Float32, Vec::new(), "keep_count");
-    let keep_rows = with_keep_rows
-        .then(|| input_leaf(&mut program, DType::Float32, vec![Extent::Symbolic(0)], "keep_rows"));
+    let keep_rows = with_keep_rows.then(|| {
+        input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![Extent::Symbolic(0)],
+            "keep_rows",
+        )
+    });
     let mask = top_fraction_mask(&mut program, scores, keep_count, keep_rows).expect("mask lowers");
     Fixture { program, mask }
 }
@@ -45,7 +56,12 @@ fn hand_derived_set(rows: usize) -> Vec<usize> {
 }
 
 fn selected(values: &[f32]) -> Vec<usize> {
-    values.iter().enumerate().filter(|(_, value)| **value == 1.0).map(|(row, _)| row).collect()
+    values
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| **value == 1.0)
+        .map(|(row, _)| row)
+        .collect()
 }
 
 fn run_metal(rows: usize, keep_count: usize, keep_rows_data: Option<&[f32]>) -> Vec<f32> {
@@ -60,8 +76,14 @@ fn run_metal(rows: usize, keep_count: usize, keep_rows_data: Option<&[f32]>) -> 
         named.push(("keep_rows", QuantizedBlock::Float32(data)));
     }
     let symbols = [rows as u64];
-    let plan = omega::plan_named(&fixture.program, &symbols, &named, &[fixture.mask], NumericPolicy::default())
-        .expect("metal plan builds");
+    let plan = omega::plan_named(
+        &fixture.program,
+        &symbols,
+        &named,
+        &[fixture.mask],
+        NumericPolicy::default(),
+    )
+    .expect("metal plan builds");
     let evaluated = omega::execute_plan_named(&plan, &named).expect("metal evaluates");
     let (values, _shape) = evaluated.get(fixture.mask).expect("mask requested");
     values.to_vec()
@@ -75,8 +97,13 @@ fn run_cpu_plain(rows: usize, keep_count: usize, keep_rows_data: Option<&[f32]>)
     if let Some(data) = keep_rows_data {
         inputs.push(("keep_rows", data));
     }
-    let evaluated = proxima_tensor::cpu::evaluate_named(&fixture.program, &[rows as u64], &inputs, &[fixture.mask])
-        .expect("cpu evaluates");
+    let evaluated = proxima_tensor::cpu::evaluate_named(
+        &fixture.program,
+        &[rows as u64],
+        &inputs,
+        &[fixture.mask],
+    )
+    .expect("cpu evaluates");
     let (values, _shape) = evaluated.get(fixture.mask).expect("mask requested");
     values.to_vec()
 }
@@ -84,7 +111,11 @@ fn run_cpu_plain(rows: usize, keep_count: usize, keep_rows_data: Option<&[f32]>)
 fn ranked_reference_set(rows: usize) -> Vec<usize> {
     let scores = tiled_scores(rows);
     let mut order: Vec<usize> = (0..rows).collect();
-    order.sort_by(|left, right| scores[*right].total_cmp(&scores[*left]).then(left.cmp(right)));
+    order.sort_by(|left, right| {
+        scores[*right]
+            .total_cmp(&scores[*left])
+            .then(left.cmp(right))
+    });
     let mut chosen: Vec<usize> = order.into_iter().take(quarter_of_rows(rows)).collect();
     chosen.sort_unstable();
     chosen
@@ -99,7 +130,8 @@ fn selection_kernel_matches_hand_derived_set_at_threshold() {
     assert_eq!(metal, run_cpu_plain(rows, quarter_of_rows(rows), None));
     let keys = omega::pipeline_cache_keys();
     assert!(
-        keys.iter().any(|key| key.contains("top_fraction_select_r256_k0")),
+        keys.iter()
+            .any(|key| key.contains("top_fraction_select_r256_k0")),
         "the selection kernel must be what ran, got {keys:?}"
     );
 }
@@ -129,9 +161,14 @@ fn selection_kernel_unions_keep_rows() {
     expected.extend([0, 255]);
     expected.sort_unstable();
     assert_eq!(selected(&metal), expected);
-    assert_eq!(metal, run_cpu_plain(rows, quarter_of_rows(rows), Some(&keep)));
+    assert_eq!(
+        metal,
+        run_cpu_plain(rows, quarter_of_rows(rows), Some(&keep))
+    );
     assert!(
-        omega::pipeline_cache_keys().iter().any(|key| key.contains("top_fraction_select_r256_k1")),
+        omega::pipeline_cache_keys()
+            .iter()
+            .any(|key| key.contains("top_fraction_select_r256_k1")),
         "the selection kernel must be what ran with the keep flags operand"
     );
 }
@@ -144,7 +181,9 @@ fn selection_kernel_breaks_ties_by_index_across_thread_chunks() {
         assert_eq!(selected(&metal), ranked_reference_set(rows), "rows {rows}");
         let expected_key = format!("top_fraction_select_r{rows}_k0");
         assert!(
-            omega::pipeline_cache_keys().iter().any(|key| key.contains(&expected_key)),
+            omega::pipeline_cache_keys()
+                .iter()
+                .any(|key| key.contains(&expected_key)),
             "the selection kernel must be what ran at {rows} rows"
         );
     }

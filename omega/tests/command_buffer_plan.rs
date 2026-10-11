@@ -32,7 +32,8 @@ const SHORT_PLAN: MeasuredStep = MeasuredStep {
 
 fn first_gap_ns(step: &MeasuredStep, boundaries: &[usize]) -> u64 {
     let second_chunk = boundaries[1] - boundaries[0];
-    let encode_ns = step.second_chunk_encode_ns * second_chunk as u64 / step.second_chunk_ops as u64;
+    let encode_ns =
+        step.second_chunk_encode_ns * second_chunk as u64 / step.second_chunk_ops as u64;
     let head_gpu_ns = step.head_gpu_ns * boundaries[0] as u64 / HEAD_OPS as u64;
     encode_ns.saturating_sub(head_gpu_ns)
 }
@@ -81,8 +82,14 @@ fn grown_chunks_never_shrink_and_cover_every_op_exactly_once() {
         assert_eq!(boundaries.len(), CHUNKS - 1);
         assert!(boundaries.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(boundaries.iter().all(|boundary| *boundary < step.total_ops));
-        let widths: Vec<usize> = boundaries.windows(2).map(|pair| pair[1] - pair[0]).collect();
-        assert!(widths.windows(2).all(|pair| pair[1] + 1 >= pair[0]), "{widths:?}");
+        let widths: Vec<usize> = boundaries
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .collect();
+        assert!(
+            widths.windows(2).all(|pair| pair[1] + 1 >= pair[0]),
+            "{widths:?}"
+        );
     }
 }
 
@@ -113,6 +120,9 @@ fn growth_outside_the_supported_range_is_clamped() {
 
 #[test]
 fn shipped_policy_is_the_head_and_growth_the_tests_above_measure() {
-    assert_eq!(omega::sized::COMMAND_BUFFER_FIRST_CHUNK_OPS as usize, HEAD_OPS);
+    assert_eq!(
+        omega::sized::COMMAND_BUFFER_FIRST_CHUNK_OPS as usize,
+        HEAD_OPS
+    );
     assert_eq!(omega::sized::COMMAND_BUFFER_GROWTH_PERMILLE, 1350);
 }

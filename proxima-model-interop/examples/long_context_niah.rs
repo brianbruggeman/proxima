@@ -39,7 +39,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use memmap2::Mmap;
 use proxima_gguf::{GgmlType, parse_complete};
 use proxima_model_interop::{
-    ContextLength, GPU_LAYERS_ALL, InteropError, LoadedModel, PromptCacheConfig, RopeScaling, ServingConfig, kv_layers,
+    ContextLength, GPU_LAYERS_ALL, InteropError, LoadedModel, PromptCacheConfig, RopeScaling,
+    ServingConfig, kv_layers,
 };
 use proxima_tokenizer::gguf::vocab_from_metadata;
 use proxima_tokenizer::{TokenizerError, encode_with_bos_eos};

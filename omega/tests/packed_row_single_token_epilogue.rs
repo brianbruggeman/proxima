@@ -87,11 +87,18 @@ fn gated_matvec_program(in_dim: u32, out_dim: u32) -> (Vec<Op>, NodeId) {
         },
     );
     let gate_read = || (gate, IndexMap::Affine(projection(1, &[0])));
-    let squared = elementwise(&mut program, ScalarOp::Multiply, vec![gate_read(), gate_read()]);
+    let squared = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![gate_read(), gate_read()],
+    );
     let shaped = elementwise(
         &mut program,
         ScalarOp::Add,
-        vec![(squared, IndexMap::Affine(projection(1, &[0]))), gate_read()],
+        vec![
+            (squared, IndexMap::Affine(projection(1, &[0]))),
+            gate_read(),
+        ],
     );
     let gated = elementwise(
         &mut program,
@@ -118,7 +125,11 @@ fn q4_0_weights(in_dim: usize, out_dim: usize, seed: u64) -> Weights {
     }
     let mut dequantized = vec![0.0f32; out_dim * in_dim];
     q4_0::dequantize(&packed, &mut dequantized).unwrap();
-    Weights { codec: omega::Codec::Q4_0, packed, dequantized }
+    Weights {
+        codec: omega::Codec::Q4_0,
+        packed,
+        dequantized,
+    }
 }
 
 fn q6k_weights(in_dim: usize, out_dim: usize, seed: u64) -> Weights {
@@ -129,7 +140,11 @@ fn q6k_weights(in_dim: usize, out_dim: usize, seed: u64) -> Weights {
     }
     let mut dequantized = vec![0.0f32; out_dim * in_dim];
     q6_k::dequantize(&packed, &mut dequantized).unwrap();
-    Weights { codec: omega::Codec::Q6K, packed, dequantized }
+    Weights {
+        codec: omega::Codec::Q6K,
+        packed,
+        dequantized,
+    }
 }
 
 fn assert_gated_matvec_matches_the_cpu_oracle(
@@ -142,7 +157,10 @@ fn assert_gated_matvec_matches_the_cpu_oracle(
     let gate = random_vec(seed + 31, out_dim);
     let (program, root) = gated_matvec_program(in_dim as u32, out_dim as u32);
     let blocks = [
-        QuantizedBlock::Packed { codec: weights.codec, bytes: &weights.packed },
+        QuantizedBlock::Packed {
+            codec: weights.codec,
+            bytes: &weights.packed,
+        },
         QuantizedBlock::Float32(&activation),
         QuantizedBlock::Float32(&gate),
     ];
@@ -152,10 +170,15 @@ fn assert_gated_matvec_matches_the_cpu_oracle(
     let output = omega::execute_plan(&plan, &blocks).expect("metal runs the matvec");
 
     assert!(
-        keys.iter().any(|key| key.contains("epi") && key.contains("_al_e_0_0_0")),
+        keys.iter()
+            .any(|key| key.contains("epi") && key.contains("_al_e_0_0_0")),
         "the three mentions of the gate never fused into one epilogue with a repeated operand: {keys:?}"
     );
-    assert_eq!(output.root().len(), out_dim, "degenerate gate: wrong element count");
+    assert_eq!(
+        output.root().len(),
+        out_dim,
+        "degenerate gate: wrong element count"
+    );
     let expected: Vec<f32> = (0..out_dim)
         .map(|row| {
             let sum: f64 = (0..in_dim)

@@ -20,9 +20,19 @@
 //! touching the GPU. Weight/activation bytes are synthetic.
 
 fn main() -> anyhow::Result<()> {
-    #[cfg(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos"))]
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-tiled-gemm",
+        feature = "instrument",
+        target_os = "macos"
+    ))]
     return run();
-    #[cfg(not(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos")))]
+    #[cfg(not(all(
+        feature = "metal",
+        feature = "metal-tiled-gemm",
+        feature = "instrument",
+        target_os = "macos"
+    )))]
     {
         println!(
             "tiled_gemm_direct_store_speed_probe requires --features metal,metal-tiled-gemm,instrument on macOS"
@@ -31,7 +41,12 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-#[cfg(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos"))]
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-tiled-gemm",
+    feature = "instrument",
+    target_os = "macos"
+))]
 fn run() -> anyhow::Result<()> {
     use anyhow::Context;
     use proxima_gguf::quant::q4_0::{BLOCK_BYTES, QK4_0, quantize};
@@ -55,7 +70,10 @@ fn run() -> anyhow::Result<()> {
     fn pack_rows(rows: &[Vec<f32>], in_dim: usize) -> anyhow::Result<Vec<u8>> {
         let blocks_per_row = in_dim / QK4_0;
         let mut packed = vec![0u8; rows.len() * blocks_per_row * BLOCK_BYTES];
-        for (row, row_packed) in rows.iter().zip(packed.chunks_exact_mut(blocks_per_row * BLOCK_BYTES)) {
+        for (row, row_packed) in rows
+            .iter()
+            .zip(packed.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+        {
             quantize(row, row_packed).context("in_dim is a whole multiple of QK4_0")?;
         }
         Ok(packed)
@@ -114,7 +132,11 @@ fn run() -> anyhow::Result<()> {
             &mut program,
             Op::Input {
                 dtype: DType::Float32,
-                shape: vec![Extent::Static(feature), Extent::Static(batch), Extent::Static(reduce_len)],
+                shape: vec![
+                    Extent::Static(feature),
+                    Extent::Static(batch),
+                    Extent::Static(reduce_len),
+                ],
                 name: None,
             },
         );
@@ -122,7 +144,11 @@ fn run() -> anyhow::Result<()> {
             &mut program,
             Op::Input {
                 dtype: DType::Float32,
-                shape: vec![Extent::Static(token), Extent::Static(batch), Extent::Static(reduce_len)],
+                shape: vec![
+                    Extent::Static(token),
+                    Extent::Static(batch),
+                    Extent::Static(reduce_len),
+                ],
                 name: None,
             },
         );
@@ -151,11 +177,23 @@ fn run() -> anyhow::Result<()> {
                 name: None,
             }),
         );
-        (program, sum, token as usize, feature as usize, batch as usize, reduce_len as usize)
+        (
+            program,
+            sum,
+            token as usize,
+            feature as usize,
+            batch as usize,
+            reduce_len as usize,
+        )
     }
 
-    fn gpu_ns_once(program: &[Op], root: NodeId, blocks: &[QuantizedBlock<'_>]) -> anyhow::Result<u64> {
-        let plan = omega::plan(program, &[], blocks, &[root], NumericPolicy::default()).context("plan compiles")?;
+    fn gpu_ns_once(
+        program: &[Op],
+        root: NodeId,
+        blocks: &[QuantizedBlock<'_>],
+    ) -> anyhow::Result<u64> {
+        let plan = omega::plan(program, &[], blocks, &[root], NumericPolicy::default())
+            .context("plan compiles")?;
         let (_, timings) = omega::metal::execute_plan_op_timed(&plan, blocks, None)
             .context("metal executes on a real device")?;
         Ok(timings.iter().map(|timing| timing.gpu_ns).sum())
@@ -187,25 +225,35 @@ fn run() -> anyhow::Result<()> {
     }
 
     // === Q4_0 weight matmul ===
-    let rows: Vec<Vec<f32>> = (0..OUT_DIM).map(|row| random_vec(11 + row as u64, IN_DIM)).collect();
+    let rows: Vec<Vec<f32>> = (0..OUT_DIM)
+        .map(|row| random_vec(11 + row as u64, IN_DIM))
+        .collect();
     let packed = pack_rows(&rows, IN_DIM)?;
     let activation = random_vec(97, TOKENS * IN_DIM);
-    let (q4_0_program, q4_0_sum) = q4_0_matmul_program(TOKENS as u32, IN_DIM as u32, OUT_DIM as u32);
+    let (q4_0_program, q4_0_sum) =
+        q4_0_matmul_program(TOKENS as u32, IN_DIM as u32, OUT_DIM as u32);
     let q4_0_blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: &packed },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4_0,
+            bytes: &packed,
+        },
         QuantizedBlock::Float32(&activation),
     ];
 
-    println!("=== Q4_0 weight matmul [K={IN_DIM}, M={OUT_DIM}] x [N={TOKENS}, K={IN_DIM}] ({RUNS} interleaved iterations) ===");
+    println!(
+        "=== Q4_0 weight matmul [K={IN_DIM}, M={OUT_DIM}] x [N={TOKENS}, K={IN_DIM}] ({RUNS} interleaved iterations) ==="
+    );
     let mut baseline_samples = Vec::with_capacity(RUNS);
     let mut direct_store_samples = Vec::with_capacity(RUNS);
     for iteration in 0..RUNS {
-        let baseline_ns = temp_env::with_var("PROXIMA_TILED_GEMM_DIRECT_STORE", None::<&str>, || {
-            gpu_ns_once(&q4_0_program, q4_0_sum, &q4_0_blocks)
-        })?;
-        let direct_store_ns = temp_env::with_var("PROXIMA_TILED_GEMM_DIRECT_STORE", Some("1"), || {
-            gpu_ns_once(&q4_0_program, q4_0_sum, &q4_0_blocks)
-        })?;
+        let baseline_ns =
+            temp_env::with_var("PROXIMA_TILED_GEMM_DIRECT_STORE", None::<&str>, || {
+                gpu_ns_once(&q4_0_program, q4_0_sum, &q4_0_blocks)
+            })?;
+        let direct_store_ns =
+            temp_env::with_var("PROXIMA_TILED_GEMM_DIRECT_STORE", Some("1"), || {
+                gpu_ns_once(&q4_0_program, q4_0_sum, &q4_0_blocks)
+            })?;
         baseline_samples.push(baseline_ns);
         direct_store_samples.push(direct_store_ns);
         println!(
@@ -225,10 +273,14 @@ fn run() -> anyhow::Result<()> {
     );
 
     // === dense-batched score shape ===
-    let (dense_program, dense_sum, token, feature, batch, reduce_len) = dense_batched_value_program();
+    let (dense_program, dense_sum, token, feature, batch, reduce_len) =
+        dense_batched_value_program();
     let weight_data = random_vec(2026, feature * batch * reduce_len);
     let other_data = random_vec(2027, token * batch * reduce_len);
-    let dense_blocks = [QuantizedBlock::Float32(&weight_data), QuantizedBlock::Float32(&other_data)];
+    let dense_blocks = [
+        QuantizedBlock::Float32(&weight_data),
+        QuantizedBlock::Float32(&other_data),
+    ];
 
     println!(
         "=== dense batched [token={token} feature={feature} batch={batch} K={reduce_len}] ({RUNS} interleaved iterations) ==="
@@ -258,7 +310,8 @@ fn run() -> anyhow::Result<()> {
         );
     }
     let (dense_baseline_mean, dense_baseline_cov) = mean_and_cov(&dense_baseline_samples);
-    let (dense_direct_store_mean, dense_direct_store_cov) = mean_and_cov(&dense_direct_store_samples);
+    let (dense_direct_store_mean, dense_direct_store_cov) =
+        mean_and_cov(&dense_direct_store_samples);
     println!(
         "  DENSE SUMMARY: baseline mean={:.4}ms CoV={:.2}%  direct_store mean={:.4}ms CoV={:.2}%  mean-ratio={:.4}x",
         dense_baseline_mean / 1e6,

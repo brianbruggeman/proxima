@@ -2,8 +2,8 @@ use core::ops::ControlFlow;
 
 use proxima_core::{ServingFsmError, ServingState};
 
-use super::*;
 use super::drafter::{DrafterSet, draft_limit_for_step};
+use super::*;
 
 /// Measurement-only edge switch: mirrors `ServingConfig`'s three fusion
 /// bools into the process env vars `proxima_tensor::bind::bind_with_fusion`
@@ -108,7 +108,9 @@ fn live_cached_len(named_blocks: &[(&str, QuantizedBlock<'_>)]) -> Option<f32> {
     target_os = "macos"
 ))]
 fn bits_at_slice(values: &[u32], index: usize) -> String {
-    values.get(index).map_or("MISSING".to_string(), |bits| format!("0x{bits:08x}"))
+    values
+        .get(index)
+        .map_or("MISSING".to_string(), |bits| format!("0x{bits:08x}"))
 }
 
 /// First element where two equal-length f32 buffers diverge at the bit
@@ -196,27 +198,34 @@ fn attn_fuse_probe_layers(
             } => Some((bound.node, cached_weight_sum, new_weight_sum, new_attended)),
             _ => None,
         })
-        .filter_map(|(softmax_node, cached_weight_sum, new_weight_sum, new_attended)| {
-            let combine = resolved.iter().find(|bound| {
-                bound.all_read_sources().any(|(operand, _, _)| {
-                    *operand == new_attended || *operand == cached_weight_sum
-                })
-            })?;
-            let expected = NodeId((softmax_node.0 as i32 + 12) as u32);
-            if combine.node != expected {
-                debug!(
-                    step = step as u64,
-                    softmax_node = softmax_node.0,
-                    combine_node = combine.node.0,
-                    expected = expected.0,
-                    "parity_layer_offset_mismatch"
-                );
-            }
-            Some((
-                combine.node,
-                Some((softmax_node, cached_weight_sum, new_weight_sum, new_attended)),
-            ))
-        })
+        .filter_map(
+            |(softmax_node, cached_weight_sum, new_weight_sum, new_attended)| {
+                let combine = resolved.iter().find(|bound| {
+                    bound.all_read_sources().any(|(operand, _, _)| {
+                        *operand == new_attended || *operand == cached_weight_sum
+                    })
+                })?;
+                let expected = NodeId((softmax_node.0 as i32 + 12) as u32);
+                if combine.node != expected {
+                    debug!(
+                        step = step as u64,
+                        softmax_node = softmax_node.0,
+                        combine_node = combine.node.0,
+                        expected = expected.0,
+                        "parity_layer_offset_mismatch"
+                    );
+                }
+                Some((
+                    combine.node,
+                    Some((
+                        softmax_node,
+                        cached_weight_sum,
+                        new_weight_sum,
+                        new_attended,
+                    )),
+                ))
+            },
+        )
         .collect()
 }
 
@@ -253,7 +262,11 @@ fn run_attn_fuse_parity_probe(
         proxima_tensor::bind_with_fusion(program, &shapes, roots, true, runtime.numeric_policy)?;
     let layers = attn_fuse_probe_layers(step, &resolved);
     let candidates: Vec<NodeId> = layers.iter().map(|(attended, _)| *attended).collect();
-    debug!(step = step as u64, n = candidates.len() as u64, "parity_candidates");
+    debug!(
+        step = step as u64,
+        n = candidates.len() as u64,
+        "parity_candidates"
+    );
     for (layer, (attended, softmax)) in layers.iter().enumerate() {
         match softmax {
             None => trace!(
@@ -578,12 +591,20 @@ fn write_attn_layer0_failure_report(
         .take(8)
         .map(|(node, _, _)| *node)
         .collect();
-    let [q_even, q_odd, k_even_cache, k_odd_cache, new_k_even, new_k_odd, v_cache, v_new] =
-        operand_nodes[..8]
-            .try_into()
-            .map_err(|_| InteropError::MissingEvaluatedNode {
-                node: attended_node,
-            })?;
+    let [
+        q_even,
+        q_odd,
+        k_even_cache,
+        k_odd_cache,
+        new_k_even,
+        new_k_odd,
+        v_cache,
+        v_new,
+    ] = operand_nodes[..8]
+        .try_into()
+        .map_err(|_| InteropError::MissingEvaluatedNode {
+            node: attended_node,
+        })?;
     report.push_str(&format!(
         "layer0 node={} kv_heads={kv_heads} query_groups={query_groups} head_dim={head_dim} rotary_dim={rotary_dim} scale={scale} cached_lower_inclusive={cached_lower_inclusive} new_upper_inclusive={new_upper_inclusive}\n",
         attended_node.0
@@ -598,10 +619,17 @@ fn write_attn_layer0_failure_report(
     // layer 0's score/softmax/weighted-sum chain without assuming a node
     // numbering.
     let shapes = proxima_tensor::infer(program, symbols)?;
-    let unfused_resolved =
-        proxima_tensor::bind_with_fusion(program, &shapes, &[attended_node], false, numeric_policy)?;
-    let by_node: alloc::collections::BTreeMap<NodeId, &proxima_tensor::BoundOp> =
-        unfused_resolved.iter().map(|bound| (bound.node, bound)).collect();
+    let unfused_resolved = proxima_tensor::bind_with_fusion(
+        program,
+        &shapes,
+        &[attended_node],
+        false,
+        numeric_policy,
+    )?;
+    let by_node: alloc::collections::BTreeMap<NodeId, &proxima_tensor::BoundOp> = unfused_resolved
+        .iter()
+        .map(|bound| (bound.node, bound))
+        .collect();
     let leaves: alloc::collections::BTreeSet<NodeId> = operand_nodes.iter().copied().collect();
     let mut visited: alloc::collections::BTreeSet<NodeId> = alloc::collections::BTreeSet::new();
     let mut stack = alloc::vec![attended_node];
@@ -638,7 +666,10 @@ fn write_attn_layer0_failure_report(
                 .operands()
                 .iter()
                 .map(|(operand, layout, _)| {
-                    format!("{}@base={},strides={:?}", operand.0, layout.base, layout.strides)
+                    format!(
+                        "{}@base={},strides={:?}",
+                        operand.0, layout.base, layout.strides
+                    )
                 })
                 .collect();
             // `epilogue_operands` -- a `Reduce`'s epilogue reads these but
@@ -655,7 +686,10 @@ fn write_attn_layer0_failure_report(
                 } => epilogue_operands
                     .iter()
                     .map(|(operand, layout, _)| {
-                        format!("{}@base={},strides={:?}", operand.0, layout.base, layout.strides)
+                        format!(
+                            "{}@base={},strides={:?}",
+                            operand.0, layout.base, layout.strides
+                        )
                     })
                     .collect(),
                 _ => Vec::new(),
@@ -675,7 +709,10 @@ fn write_attn_layer0_failure_report(
                     }
                     format!(
                         "entry={} grid_threads={} threadgroup_width={:?} grid_depth={}",
-                        kernel.entry, kernel.grid.threads, kernel.grid.threadgroup_width, kernel.grid.depth
+                        kernel.entry,
+                        kernel.grid.threads,
+                        kernel.grid.threadgroup_width,
+                        kernel.grid.depth
                     )
                 }
                 Err(error) => format!("emit_failed={error:?}"),
@@ -778,7 +815,13 @@ fn write_attn_layer0_failure_report(
     // bind at the production indices -- printed complete (not truncated to
     // 16) since the dot-product walk needs every dim, not a preview.
     let leaf_labels = [
-        "q_even", "q_odd", "k_even_cache", "k_odd_cache", "new_k_even", "new_k_odd", "v_cache",
+        "q_even",
+        "q_odd",
+        "k_even_cache",
+        "k_odd_cache",
+        "new_k_even",
+        "new_k_odd",
+        "v_cache",
         "v_new",
     ];
     for (label, node) in leaf_labels.iter().zip(operand_nodes.iter()) {
@@ -791,7 +834,10 @@ fn write_attn_layer0_failure_report(
                 all_bits,
             ));
         } else {
-            report.push_str(&format!("leaf_full label={label} node={} MISSING\n", node.0));
+            report.push_str(&format!(
+                "leaf_full label={label} node={} MISSING\n",
+                node.0
+            ));
         }
     }
 
@@ -880,7 +926,9 @@ fn write_attn_layer0_failure_report(
                         bits_at_slice(metal_unfused_full, 1),
                     ));
                 }
-                Err(error) => report.push_str(&format!("context_chunks_one_probe execute_failed={error:?}\n")),
+                Err(error) => report.push_str(&format!(
+                    "context_chunks_one_probe execute_failed={error:?}\n"
+                )),
             }
         }
         Err(error) => report.push_str(&format!("context_chunks_one_probe plan_failed={error:?}\n")),
@@ -894,15 +942,16 @@ fn write_attn_layer0_failure_report(
     payload_outputs.push(attended_node);
     payload_outputs.sort_unstable_by_key(|node| node.0);
     payload_outputs.dedup();
-    let unfused_plan_evaluated = proxima_tensor::cpu::evaluate_quantized_named_with_scratch_and_experts(
-        program,
-        symbols,
-        named_blocks,
-        &payload_outputs,
-        &mut Vec::new(),
-        &mut None,
-        None,
-    )?;
+    let unfused_plan_evaluated =
+        proxima_tensor::cpu::evaluate_quantized_named_with_scratch_and_experts(
+            program,
+            symbols,
+            named_blocks,
+            &payload_outputs,
+            &mut Vec::new(),
+            &mut None,
+            None,
+        )?;
 
     let dump_slice = |report: &mut String, label: &str, node: NodeId, max_len: usize| {
         if let Some((values, shape)) = unfused_plan_evaluated.get(node) {
@@ -917,13 +966,17 @@ fn write_attn_layer0_failure_report(
                 report.push_str(&format!("{label} full_128={:?}\n", &values[..128]));
             }
         } else {
-            report.push_str(&format!("{label} node={} MISSING from unfused evaluation\n", node.0));
+            report.push_str(&format!(
+                "{label} node={} MISSING from unfused evaluation\n",
+                node.0
+            ));
         }
     };
     dump_slice(&mut report, "q_even_grouped", q_even, 128);
     dump_slice(&mut report, "q_odd_grouped", q_odd, 128);
 
-    let kv_stride = usize::try_from(kv_heads).unwrap_or(1) * usize::try_from(rotary_dim / 2).unwrap_or(1);
+    let kv_stride =
+        usize::try_from(kv_heads).unwrap_or(1) * usize::try_from(rotary_dim / 2).unwrap_or(1);
     if let Some((k_even_values, _)) = unfused_plan_evaluated.get(k_even_cache) {
         let rows = symbols.get(1).copied().unwrap_or_default() as usize;
         let row_width = usize::try_from(rotary_dim / 2).unwrap_or(1);
@@ -959,7 +1012,9 @@ fn write_attn_layer0_failure_report(
         let column_d0: Vec<f32> = (0..rows)
             .filter_map(|row| v_cache_values.get(row * v_stride).copied())
             .collect();
-        report.push_str(&format!("v_cache column_d0 kv_head=0 all_rows={column_d0:?}\n"));
+        report.push_str(&format!(
+            "v_cache column_d0 kv_head=0 all_rows={column_d0:?}\n"
+        ));
     }
     if let Some((v_new_values, _)) = unfused_plan_evaluated.get(v_new) {
         report.push_str(&format!(
@@ -1110,8 +1165,9 @@ fn write_attn_layer0_failure_report(
     feature = "metal-output-placement",
     target_os = "macos"
 ))]
-const ATTN_ABSORBED_NODE_OFFSETS: [i32; 14] =
-    [-32, -31, -27, -20, -24, -17, -15, -14, -12, -9, -10, -8, -4, -2];
+const ATTN_ABSORBED_NODE_OFFSETS: [i32; 14] = [
+    -32, -31, -27, -20, -24, -17, -15, -14, -12, -9, -10, -8, -4, -2,
+];
 
 #[cfg(all(
     feature = "metal",
@@ -1179,8 +1235,7 @@ fn write_attn_read_source_vectors(
     };
     plan.set_math_mode(vectors_math_mode)?;
     plan.set_dispatch_type(runtime.dispatch_type);
-    let evaluated =
-        execute_plan_named_with_placements(&plan, named_blocks, input_placements, &[])?;
+    let evaluated = execute_plan_named_with_placements(&plan, named_blocks, input_placements, &[])?;
 
     std::fs::create_dir_all(&dir)?;
 
@@ -1249,7 +1304,9 @@ fn write_attn_read_source_vectors(
         bits_at_slice(&attended_from_vectors_run, 0),
         bits_at_slice(&attended_from_vectors_run, 1),
     ));
-    let element_count = metal_unfused_full.len().max(attended_from_vectors_run.len());
+    let element_count = metal_unfused_full
+        .len()
+        .max(attended_from_vectors_run.len());
     let mut all_unchanged = true;
     for index in 0..element_count {
         let normal_probe = metal_unfused_full.get(index).copied();
@@ -1622,7 +1679,10 @@ impl<'file> LoadedModel<'file> {
                     );
                     #[cfg(not(feature = "instrument"))]
                     let _ = (conv_history, state);
-                    Ok(LayerCacheState::Ssm(SsmLayerCache::new(*conv_history_len, *state_len)))
+                    Ok(LayerCacheState::Ssm(SsmLayerCache::new(
+                        *conv_history_len,
+                        *state_len,
+                    )))
                 }
                 (LayerCacheNames::SharedFromLayer, LayerPadRowWidths::SharedFromLayer) => {
                     Ok(LayerCacheState::SharedFromLayer)
@@ -1812,7 +1872,8 @@ impl<'file> LoadedModel<'file> {
         out_dim: u32,
         in_dim: u32,
     ) -> Result<u64, InteropError> {
-        self.expert_slab.lock()
+        self.expert_slab
+            .lock()
             .page_expert(layer, expert, codec, bytes, out_dim, in_dim)
     }
 
@@ -1841,7 +1902,8 @@ impl<'file> LoadedModel<'file> {
         range: Range<usize>,
         dims: crate::expert_slab::WeightDims,
     ) -> Result<u64, InteropError> {
-        self.expert_slab.lock()
+        self.expert_slab
+            .lock()
             .page_expert_mapped(layer, expert, codec, mapping, range, dims)
     }
 
@@ -1894,8 +1956,7 @@ impl<'file> LoadedModel<'file> {
         &mut self,
         sidecar: crate::expert_sidecar::MappedExpertSidecar,
     ) -> Result<(), InteropError> {
-        if self.ffn_routing != FfnRouting::Routed
-        {
+        if self.ffn_routing != FfnRouting::Routed {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: self.architecture.family.clone(),
                 reason: String::from("expert sidecars require a routed-expert graph"),
@@ -2042,15 +2103,15 @@ impl<'file> LoadedModel<'file> {
     where
         Routes: AsRef<[crate::residency::ServeDecision]>,
         Router: FnOnce() -> Result<Routes, InteropError>,
-        Boundary:
-            FnOnce(crate::recurrent_routed_interval::execution::RouterResult<'_>) -> Result<Source, InteropError>,
+        Boundary: FnOnce(
+            crate::recurrent_routed_interval::execution::RouterResult<'_>,
+        ) -> Result<Source, InteropError>,
         Gather: FnOnce(
             crate::recurrent_routed_interval::execution::GatherPhase<'_, Source>,
         ) -> Result<Output, InteropError>,
     {
         let architecture = self.architecture.family.as_str();
-        if self.ffn_routing != FfnRouting::Routed
-        {
+        if self.ffn_routing != FfnRouting::Routed {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(architecture),
                 reason: String::from("the bound model is not a routed-expert graph"),
@@ -3244,7 +3305,8 @@ impl<'file> LoadedModel<'file> {
         #[cfg(not(feature = "metal"))]
         let monolithic_high_mmap_requested = false;
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        let monolithic_all_low_requested = self.monolithic_all_low_requested(serving_config, runtime);
+        let monolithic_all_low_requested =
+            self.monolithic_all_low_requested(serving_config, runtime);
         #[cfg(feature = "metal")]
         if moe_pre_gather_requested && !monolithic_high_mmap_requested {
             // A whole-checkpoint MTLBuffer makes mmap look cheap while still
@@ -3731,7 +3793,9 @@ only the single-row decode kernel reads the half-width device cache",
                     attempted: "evaluate_without_state",
                 })?;
                 let mut cached_len = match &state {
-                    ServingState::Prefill { cache, .. } | ServingState::Decode { cache, .. } => *cache,
+                    ServingState::Prefill { cache, .. } | ServingState::Decode { cache, .. } => {
+                        *cache
+                    }
                     _ => {
                         return Err(ServingFsmError::IllegalTransition {
                             attempted: "evaluate_from_settled_state",
@@ -3799,10 +3863,8 @@ only the single-row decode kernel reads the half-width device cache",
                     );
                     if let Some(forced_width) = forced_draft_width {
                         speculative_draft.clear();
-                        speculative_draft.resize(
-                            usize::from(forced_width).min(step_draft_limit),
-                            sampled,
-                        );
+                        speculative_draft
+                            .resize(usize::from(forced_width).min(step_draft_limit), sampled);
                     } else {
                         let history_len = token_history.len().saturating_sub(1);
                         drafter_set.draft(
@@ -3865,14 +3927,13 @@ only the single-row decode kernel reads the half-width device cache",
                     && next_ids.len() > 1
                     && one_evaluation_prefill_requested
                     && !one_evaluation_prefill_programs.is_empty();
-                let ubatch_chunks = if self.single_position_step
-                    || speculative_step
-                    || self.layer_roots.is_empty()
-                {
-                    1
-                } else {
-                    ubatch_prefill_chunks(serving_config.ubatch_size, next_ids.len())
-                };
+                let ubatch_chunks =
+                    if self.single_position_step || speculative_step || self.layer_roots.is_empty()
+                    {
+                        1
+                    } else {
+                        ubatch_prefill_chunks(serving_config.ubatch_size, next_ids.len())
+                    };
                 let chunked_prefill = ubatch_chunks > 1;
                 #[cfg(feature = "metal")]
                 if chunked_prefill
@@ -3890,10 +3951,9 @@ only the single-row decode kernel reads the half-width device cache",
                         "ubatch_below_tiled_threshold: every prefill chunk lowers to the matvec path"
                     );
                 }
-                let split_prefill = (self.single_position_step
-                    && next_ids.len() > 1
-                    && !one_evaluation_prefill)
-                    || chunked_prefill;
+                let split_prefill =
+                    (self.single_position_step && next_ids.len() > 1 && !one_evaluation_prefill)
+                        || chunked_prefill;
                 let batch_count = if one_evaluation_prefill {
                     one_evaluation_chunks.len()
                 } else if chunked_prefill {
@@ -4030,7 +4090,8 @@ only the single-row decode kernel reads the half-width device cache",
                     debug!(
                         step = step as u64,
                         phase = "weights_loop",
-                        ms = ticks_to_nanos(elapsed_ticks(named_blocks_weights_started)) as f64 / 1e6,
+                        ms = ticks_to_nanos(elapsed_ticks(named_blocks_weights_started)) as f64
+                            / 1e6,
                         "named_blocks_phase"
                     );
                     // Rounds `cached_len` up to `ServingConfig::kv_bucket_tokens`
@@ -4141,7 +4202,11 @@ only the single-row decode kernel reads the half-width device cache",
                                     buffers_allocated += 1;
                                 }
                                 kept.map_or_else(
-                                    || self.kv_buffer_source.unwrap_or(allocate_placed_buffer)(bytes),
+                                    || {
+                                        self.kv_buffer_source.unwrap_or(allocate_placed_buffer)(
+                                            bytes,
+                                        )
+                                    },
                                     Ok,
                                 )
                             },
@@ -4153,7 +4218,8 @@ only the single-row decode kernel reads the half-width device cache",
                             phase = "device_kv_adopt",
                             buffers_bound,
                             buffers_allocated,
-                            ms = ticks_to_nanos(elapsed_ticks(device_kv_adopt_started)) as f64 / 1e6,
+                            ms =
+                                ticks_to_nanos(elapsed_ticks(device_kv_adopt_started)) as f64 / 1e6,
                             "named_blocks_phase"
                         );
                         if let Some(device) = &device_kv {
@@ -4164,10 +4230,9 @@ only the single-row decode kernel reads the half-width device cache",
                             debug!(
                                 step = step as u64,
                                 cached_len = cached_len as u64,
-                                resident_layers = device_resident_flags
-                                    .iter()
-                                    .filter(|flag| **flag)
-                                    .count() as u64,
+                                resident_layers =
+                                    device_resident_flags.iter().filter(|flag| **flag).count()
+                                        as u64,
                                 "device_kv_adopted: attention layers keep their KV on the device from here"
                             );
                         } else {
@@ -4494,9 +4559,7 @@ did not hold every cached position)",
                         );
                     }
                     if std::env::var_os("PROXIMA_DEBUG_DENSE_DIGEST").is_some() {
-                        for (layer, diagnostic) in
-                            self.moe_layer_diagnostics.iter().enumerate()
-                        {
+                        for (layer, diagnostic) in self.moe_layer_diagnostics.iter().enumerate() {
                             if let Some(taps) = diagnostic.dense_attention_taps {
                                 if let Some(operation) = active_program.get(taps.q_split.0 as usize)
                                 {
@@ -4621,8 +4684,8 @@ did not hold every cached position)",
                     // a program's input names and the step's named blocks are the same set
                     // every step, so one check per program per call proves them all
                     if validated_programs.insert(active_program.as_ptr() as usize)
-                        && let Some(name) =
-                            missing_program_input(active_program, &named_blocks).filter(|name| {
+                        && let Some(name) = missing_program_input(active_program, &named_blocks)
+                            .filter(|name| {
                                 !(moe_pre_gather_enabled(
                                     serving_config.moe_pre_gather,
                                     self.ffn_routing == FfnRouting::Routed,
@@ -4715,8 +4778,7 @@ did not hold every cached position)",
                         };
                         let leaves = leaves
                             .get_or_insert_with(|| kv_leaf_nodes(active_program, &cache_names));
-                        let placements =
-                            device.placements(cached_len, leaves, active_layer_roots);
+                        let placements = device.placements(cached_len, leaves, active_layer_roots);
                         ssm_input_placements.extend(placements.inputs);
                         ssm_output_placements.extend(placements.outputs);
                     }
@@ -4896,11 +4958,10 @@ did not hold every cached position)",
                                         }
                                     }
                                 }
-                                if let (Some(policy), Some(sidecar)) = (
-                                    moe_residency.as_ref(),
-                                    expert_sidecar_for_gather.as_ref(),
-                                ) && let Some(next_history) =
-                                    moe_route_history.get(layer.saturating_add(1))
+                                if let (Some(policy), Some(sidecar)) =
+                                    (moe_residency.as_ref(), expert_sidecar_for_gather.as_ref())
+                                    && let Some(next_history) =
+                                        moe_route_history.get(layer.saturating_add(1))
                                 {
                                     let candidates = policy
                                         .prefetch_candidates::<16>(
@@ -4920,9 +4981,8 @@ did not hold every cached position)",
                                             sidecar.advise_expert_low(candidate.address)?;
                                         advised_bytes =
                                             advised_bytes.saturating_add(candidate_bytes);
-                                        moe_prefetch_advised_bytes =
-                                            moe_prefetch_advised_bytes
-                                                .saturating_add(candidate_bytes);
+                                        moe_prefetch_advised_bytes = moe_prefetch_advised_bytes
+                                            .saturating_add(candidate_bytes);
                                     }
                                     moe_prefetch_advice_events += 1;
                                     if advised_bytes > 0 {
@@ -5045,15 +5105,12 @@ did not hold every cached position)",
                         #[cfg(not(feature = "instrument"))]
                         unreachable!("the profiler is compiled out without instrumentation")
                     } else if pre_gather && !monolithic_all_low {
-                        let pre_gather_plan =
-                            moe_pre_gather_plan.as_ref().ok_or_else(|| {
-                                InteropError::PreGatherExecutionUnsupported {
-                                    architecture: String::from(self.family()),
-                                    reason: String::from(
-                                        "the routed segment plan was not prepared",
-                                    ),
-                                }
-                            })?;
+                        let pre_gather_plan = moe_pre_gather_plan.as_ref().ok_or_else(|| {
+                            InteropError::PreGatherExecutionUnsupported {
+                                architecture: String::from(self.family()),
+                                reason: String::from("the routed segment plan was not prepared"),
+                            }
+                        })?;
                         self.evaluate_moe_pre_gather(
                             runtime,
                             pre_gather_plan,
@@ -5171,15 +5228,12 @@ did not hold every cached position)",
                     }
                     #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
                     let evaluated = if pre_gather && !monolithic_all_low {
-                        let pre_gather_plan =
-                            moe_pre_gather_plan.as_ref().ok_or_else(|| {
-                                InteropError::PreGatherExecutionUnsupported {
-                                    architecture: String::from(self.family()),
-                                    reason: String::from(
-                                        "the routed segment plan was not prepared",
-                                    ),
-                                }
-                            })?;
+                        let pre_gather_plan = moe_pre_gather_plan.as_ref().ok_or_else(|| {
+                            InteropError::PreGatherExecutionUnsupported {
+                                architecture: String::from(self.family()),
+                                reason: String::from("the routed segment plan was not prepared"),
+                            }
+                        })?;
                         self.evaluate_moe_pre_gather(
                             runtime,
                             pre_gather_plan,
@@ -5214,9 +5268,7 @@ did not hold every cached position)",
                         )?
                     };
                     if std::env::var_os("PROXIMA_DEBUG_GDN_ALL_DIGEST").is_some() && step == 0 {
-                        for (layer, diagnostic) in
-                            self.moe_layer_diagnostics.iter().enumerate()
-                        {
+                        for (layer, diagnostic) in self.moe_layer_diagnostics.iter().enumerate() {
                             let mut digest_nodes = vec![
                                 ("post_mixer", diagnostic.post_mixer_residual),
                                 ("router", diagnostic.router_logits),
@@ -5254,9 +5306,7 @@ did not hold every cached position)",
                         }
                     }
                     if std::env::var_os("PROXIMA_DEBUG_GDN_BLOCK_DIGEST").is_some() && step == 0 {
-                        for (layer, diagnostic) in
-                            self.moe_layer_diagnostics.iter().enumerate()
-                        {
+                        for (layer, diagnostic) in self.moe_layer_diagnostics.iter().enumerate() {
                             let Some((values, shape)) = evaluated.get(diagnostic.block_output)
                             else {
                                 continue;
@@ -5304,9 +5354,7 @@ did not hold every cached position)",
                         }
                     }
                     if std::env::var_os("PROXIMA_DEBUG_DENSE_DIGEST").is_some() && step == 0 {
-                        for (layer, diagnostic) in
-                            self.moe_layer_diagnostics.iter().enumerate()
-                        {
+                        for (layer, diagnostic) in self.moe_layer_diagnostics.iter().enumerate() {
                             let Some(taps) = diagnostic.dense_attention_taps else {
                                 continue;
                             };
@@ -5449,15 +5497,22 @@ did not hold every cached position)",
                             batch_index = batch_index as u64,
                             prepare_ms = ticks_to_nanos(metal_stage.prepare_ticks) as f64 / 1e6,
                             emit_ms = ticks_to_nanos(metal_stage.emit_ticks) as f64 / 1e6,
-                            pipeline_lookup_ms = ticks_to_nanos(metal_stage.pipeline_lookup_ticks) as f64 / 1e6,
+                            pipeline_lookup_ms =
+                                ticks_to_nanos(metal_stage.pipeline_lookup_ticks) as f64 / 1e6,
                             pipeline_misses = metal_stage.pipeline_misses,
-                            pipeline_compile_ms = ticks_to_nanos(metal_stage.pipeline_compile_ticks) as f64 / 1e6,
+                            pipeline_compile_ms =
+                                ticks_to_nanos(metal_stage.pipeline_compile_ticks) as f64 / 1e6,
                             op_setup_ms = ticks_to_nanos(metal_stage.op_setup_ticks) as f64 / 1e6,
-                            block_upload_ms = ticks_to_nanos(metal_stage.block_upload_ticks) as f64 / 1e6,
+                            block_upload_ms =
+                                ticks_to_nanos(metal_stage.block_upload_ticks) as f64 / 1e6,
                             readback_ms = ticks_to_nanos(metal_stage.readback_ticks) as f64 / 1e6,
                             "prefill_batch_stages"
                         );
-                        #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
+                        #[cfg(not(all(
+                            feature = "instrument",
+                            feature = "metal",
+                            target_os = "macos"
+                        )))]
                         debug!(
                             batch_index = batch_index as u64,
                             cached_len = cached_len as u64,
@@ -5471,7 +5526,8 @@ did not hold every cached position)",
                             step = step as u64,
                             cached_len = cached_len as u64,
                             evaluate_ms = ticks_to_nanos(evaluate_ticks) as f64 / 1e6,
-                            evaluate_start_raw_s = ticks_to_nanos(evaluate_started.as_raw()) as f64 / 1e9,
+                            evaluate_start_raw_s =
+                                ticks_to_nanos(evaluate_started.as_raw()) as f64 / 1e9,
                             evaluate_end_raw_s = ticks_to_nanos(
                                 evaluate_started.as_raw().wrapping_add(evaluate_ticks)
                             ) as f64
@@ -5479,13 +5535,19 @@ did not hold every cached position)",
                             gpu_exec_ms = ticks_to_nanos(metal_stage.gpu_exec_ticks) as f64 / 1e6,
                             prepare_ms = ticks_to_nanos(metal_stage.prepare_ticks) as f64 / 1e6,
                             pipeline_misses = metal_stage.pipeline_misses,
-                            pipeline_compile_ms = ticks_to_nanos(metal_stage.pipeline_compile_ticks) as f64 / 1e6,
+                            pipeline_compile_ms =
+                                ticks_to_nanos(metal_stage.pipeline_compile_ticks) as f64 / 1e6,
                             op_setup_ms = ticks_to_nanos(metal_stage.op_setup_ticks) as f64 / 1e6,
-                            block_upload_ms = ticks_to_nanos(metal_stage.block_upload_ticks) as f64 / 1e6,
+                            block_upload_ms =
+                                ticks_to_nanos(metal_stage.block_upload_ticks) as f64 / 1e6,
                             readback_ms = ticks_to_nanos(metal_stage.readback_ticks) as f64 / 1e6,
                             "token_stages"
                         );
-                        #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
+                        #[cfg(not(all(
+                            feature = "instrument",
+                            feature = "metal",
+                            target_os = "macos"
+                        )))]
                         debug!(
                             step = step as u64,
                             cached_len = cached_len as u64,
@@ -5740,17 +5802,15 @@ did not hold every cached position)",
                     // empty `layer_caches` too, and this diagnostic must degrade
                     // to "nothing to report" rather than index out of bounds.
                     #[cfg(feature = "instrument")]
-                    let (layer0_before_len, layer0_before_checksum) =
-                        layer_caches
-                            .first()
-                            .filter(|_| cache_checksum_diag)
-                            .map_or((0, 0.0), layer_cache_checksum);
+                    let (layer0_before_len, layer0_before_checksum) = layer_caches
+                        .first()
+                        .filter(|_| cache_checksum_diag)
+                        .map_or((0, 0.0), layer_cache_checksum);
                     #[cfg(feature = "instrument")]
-                    let (layer3_before_len, layer3_before_checksum) =
-                        layer_caches
-                            .get(3)
-                            .filter(|_| cache_checksum_diag)
-                            .map_or((0, 0.0), layer_cache_checksum);
+                    let (layer3_before_len, layer3_before_checksum) = layer_caches
+                        .get(3)
+                        .filter(|_| cache_checksum_diag)
+                        .map_or((0, 0.0), layer_cache_checksum);
                     for (layer, roots_for_layer) in active_layer_roots.iter().enumerate() {
                         match (roots_for_layer, &mut layer_caches[layer]) {
                             (
@@ -5892,9 +5952,9 @@ did not hold every cached position)",
                                 LayerCacheRoots::ShortConv { state_out },
                                 LayerCacheState::ShortConv(cache),
                             ) => {
-                                let (history, _) = evaluated
-                                    .get(*state_out)
-                                    .ok_or(InteropError::MissingEvaluatedNode { node: *state_out })?;
+                                let (history, _) = evaluated.get(*state_out).ok_or(
+                                    InteropError::MissingEvaluatedNode { node: *state_out },
+                                )?;
                                 #[cfg(feature = "instrument")]
                                 {
                                     layer_cache_append_elements += history.len() as u64;
@@ -5908,7 +5968,10 @@ did not hold every cached position)",
                             // `roots.extend` loop's own `SharedFromLayer`
                             // no-op arm), so there is nothing here to fold
                             // in either.
-                            (LayerCacheRoots::SharedFromLayer(_), LayerCacheState::SharedFromLayer) => {}
+                            (
+                                LayerCacheRoots::SharedFromLayer(_),
+                                LayerCacheState::SharedFromLayer,
+                            ) => {}
                             _ => unreachable!(
                                 "layer_roots/layer_caches built from the same layer_roots, in lockstep"
                             ),
@@ -5971,7 +6034,13 @@ did not hold every cached position)",
                     // here rather than corrected twice.
                     if !active_layer_roots.is_empty() && !speculative_step {
                         cached_len += new_count;
-                        seal_attention_layers(&mut layer_caches, &layer_row_widths, block_tokens, seal_horizon_rows, summarizer);
+                        seal_attention_layers(
+                            &mut layer_caches,
+                            &layer_row_widths,
+                            block_tokens,
+                            seal_horizon_rows,
+                            summarizer,
+                        );
                     }
 
                     // Everything below samples a token off THIS batch's logits.
@@ -6104,9 +6173,12 @@ did not hold every cached position)",
                         // draft; when every draft matched that row is the next
                         // single-row decode step, already computed.
                         let resumed = match settled {
-                            accepted_all @ ServingState::Accept { .. } => accepted_all
-                                .resume()?
-                                .advance_decode(emitted[draft_rows], cached_len_before_step + draft_rows + 1)?,
+                            accepted_all @ ServingState::Accept { .. } => {
+                                accepted_all.resume()?.advance_decode(
+                                    emitted[draft_rows],
+                                    cached_len_before_step + draft_rows + 1,
+                                )?
+                            }
                             rejected @ ServingState::Rollback { .. } => rejected.rollback()?,
                             _ => {
                                 return Err(ServingFsmError::IllegalTransition {
@@ -6115,7 +6187,13 @@ did not hold every cached position)",
                                 .into());
                             }
                         };
-                        seal_attention_layers(&mut layer_caches, &layer_row_widths, block_tokens, seal_horizon_rows, summarizer);
+                        seal_attention_layers(
+                            &mut layer_caches,
+                            &layer_row_widths,
+                            block_tokens,
+                            seal_horizon_rows,
+                            summarizer,
+                        );
                         settled_tokens.extend_from_slice(&emitted);
                         serving = Some(resumed);
                         break 'evaluate;
@@ -6132,7 +6210,8 @@ did not hold every cached position)",
                         #[cfg(any(feature = "instrument", feature = "metal"))]
                         let logits_diag_enabled = std::env::var_os("PROXIMA_LOGITS_DIAG").is_some();
                         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                        let greedy_device_token: Option<u32> = match (greedy_step, &greedy_program) {
+                        let greedy_device_token: Option<u32> = match (greedy_step, &greedy_program)
+                        {
                             (true, Some((_, token, finite, _))) => {
                                 device_token(&evaluated, *token, *finite, vocab_size)
                             }
@@ -6143,21 +6222,23 @@ did not hold every cached position)",
                         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                         let placed_logits: Vec<f32>;
                         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                        let logits: &[f32] = match (greedy_step, &greedy_program, greedy_device_token) {
-                            (true, _, Some(_)) => &[],
-                            (true, Some((_, _, _, logits_buffer)), None) => {
-                                placed_logits = omega::read_placed_buffer_f32(logits_buffer, 0, vocab_size);
-                                &placed_logits
-                            }
-                            _ => {
-                                evaluated
-                                    .get(active_logits_root)
-                                    .ok_or(InteropError::MissingEvaluatedNode {
-                                        node: active_logits_root,
-                                    })?
-                                    .0
-                            }
-                        };
+                        let logits: &[f32] =
+                            match (greedy_step, &greedy_program, greedy_device_token) {
+                                (true, _, Some(_)) => &[],
+                                (true, Some((_, _, _, logits_buffer)), None) => {
+                                    placed_logits =
+                                        omega::read_placed_buffer_f32(logits_buffer, 0, vocab_size);
+                                    &placed_logits
+                                }
+                                _ => {
+                                    evaluated
+                                        .get(active_logits_root)
+                                        .ok_or(InteropError::MissingEvaluatedNode {
+                                            node: active_logits_root,
+                                        })?
+                                        .0
+                                }
+                            };
                         #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
                         let (logits, _shape) = evaluated.get(active_logits_root).ok_or(
                             InteropError::MissingEvaluatedNode {
@@ -6220,7 +6301,9 @@ did not hold every cached position)",
                                             && duplicate_logits
                                                 .iter()
                                                 .zip(last_position.iter())
-                                                .all(|(left, right)| left.to_bits() == right.to_bits());
+                                                .all(|(left, right)| {
+                                                    left.to_bits() == right.to_bits()
+                                                });
                                         const SENTINEL_BITS: u32 = 0x7fc0_0000;
                                         let sentinel_survived = duplicate_logits
                                             .iter()
@@ -6550,7 +6633,8 @@ did not hold every cached position)",
                     omega::set_capture_step(step as u64);
                     debug!(step = step as u64, "speculative_settled_token");
                 }
-                let elapsed_ms = u64::try_from(loop_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let elapsed_ms =
+                    u64::try_from(loop_started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let delivery = deliver_token(
                     &self.vocab,
                     token_id,
@@ -6570,7 +6654,9 @@ did not hold every cached position)",
             }
         }
 
-        let Some(ServingState::Done { cache: cached_len }) = serving.take().map(ServingState::finish) else {
+        let Some(ServingState::Done { cache: cached_len }) =
+            serving.take().map(ServingState::finish)
+        else {
             return Err(ServingFsmError::IllegalTransition {
                 attempted: "finish_without_state",
             }
@@ -7068,11 +7154,14 @@ did not hold every cached position)",
                     evaluate_ms = ticks_to_nanos(evaluate_ticks) as f64 / 1e6,
                     evaluate_start_raw_s = ticks_to_nanos(evaluate_started.as_raw()) as f64 / 1e9,
                     evaluate_end_raw_s =
-                        ticks_to_nanos(evaluate_started.as_raw().wrapping_add(evaluate_ticks)) as f64 / 1e9,
+                        ticks_to_nanos(evaluate_started.as_raw().wrapping_add(evaluate_ticks))
+                            as f64
+                            / 1e9,
                     gpu_exec_ms = ticks_to_nanos(metal_stage.gpu_exec_ticks) as f64 / 1e6,
                     prepare_ms = ticks_to_nanos(metal_stage.prepare_ticks) as f64 / 1e6,
                     pipeline_misses = metal_stage.pipeline_misses,
-                    pipeline_compile_ms = ticks_to_nanos(metal_stage.pipeline_compile_ticks) as f64 / 1e6,
+                    pipeline_compile_ms =
+                        ticks_to_nanos(metal_stage.pipeline_compile_ticks) as f64 / 1e6,
                     op_setup_ms = ticks_to_nanos(metal_stage.op_setup_ticks) as f64 / 1e6,
                     block_upload_ms = ticks_to_nanos(metal_stage.block_upload_ticks) as f64 / 1e6,
                     readback_ms = ticks_to_nanos(metal_stage.readback_ticks) as f64 / 1e6,
@@ -7345,7 +7434,8 @@ did not hold every cached position)",
         // ids.len()` -- this is always a one-shot forward from an empty
         // cache over the WHOLE prompt (this method's own doc).
         let (cache_names, layer_row_widths) = self.declared_layer_cache_names_and_widths()?;
-        let layer_caches = self.fresh_layer_caches(&cache_names, &layer_row_widths, ids.len(), 0)?;
+        let layer_caches =
+            self.fresh_layer_caches(&cache_names, &layer_row_widths, ids.len(), 0)?;
         let mut kv_pad_scratch: Vec<KvPadScratch> = self
             .layer_roots
             .iter()
@@ -7372,8 +7462,8 @@ did not hold every cached position)",
             named_blocks.push((name.as_str(), *block));
         }
         for (name, bytes, kind) in &self.weights.packed_owned {
-            let block =
-                crate::bind::as_block(*kind, bytes).ok_or(InteropError::UnsupportedCodec { codec: *kind })?;
+            let block = crate::bind::as_block(*kind, bytes)
+                .ok_or(InteropError::UnsupportedCodec { codec: *kind })?;
             named_blocks.push((name.as_str(), block));
         }
         // `gqa_cached_forward_program_with_experts`'s own `cached_len`

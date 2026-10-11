@@ -222,14 +222,16 @@ pub(super) fn elementwise_reciprocal_decomposition(
 ) -> bool {
     let total: u64 = resolved.extents.iter().product();
     !coordinate_dims.is_empty()
-        && (crate::sized::ELEMENTWISE_RECIPROCAL_MIN_ELEMENTS..=RECIPROCAL_DECOMPOSITION_MAX_ELEMENTS)
+        && (crate::sized::ELEMENTWISE_RECIPROCAL_MIN_ELEMENTS
+            ..=RECIPROCAL_DECOMPOSITION_MAX_ELEMENTS)
             .contains(&total)
 }
 
 /// `n / e` and `n % e` for the grids [`elementwise_reciprocal_decomposition`] admits, without
 /// an integer divide: a precise float reciprocal, a truncating multiply, and one signed
 /// correction for the estimate landing a unit high or low. Bit-identical to `/` and `%`.
-const RECIPROCAL_DIVMOD_FUNCTION: &str = "inline uint divmod_reciprocal(uint numerator, uint divisor, thread uint& remainder) {
+const RECIPROCAL_DIVMOD_FUNCTION: &str =
+    "inline uint divmod_reciprocal(uint numerator, uint divisor, thread uint& remainder) {
     float reciprocal = metal::precise::divide(1.0f, (float)divisor);
     int quotient = (int)((float)numerator * reciprocal);
     int residue = (int)numerator - quotient * (int)divisor;
@@ -508,7 +510,15 @@ pub(super) fn render_reduce(
     }
     source.push_str("}\n");
     if !expert_source_mode {
-        push_grouped_route_prepass_if_compacted(&mut source, resolved, quantized, *reduce_op, *init, output_axes, entry)?;
+        push_grouped_route_prepass_if_compacted(
+            &mut source,
+            resolved,
+            quantized,
+            *reduce_op,
+            *init,
+            output_axes,
+            entry,
+        )?;
     }
     Ok(source)
 }
@@ -931,7 +941,12 @@ pub(super) fn push_q4k_header_decode(source: &mut String) {
 /// ONCE, outside the loop, and folded into `hdr.scale` at the same combine
 /// point the deferred-scale algebra above already uses.
 #[cfg(not(feature = "metal-q4k-mask-fma"))]
-pub(super) fn push_q4k_product_reduce_body(source: &mut String, sub: usize, run: usize, element_type: &str) {
+pub(super) fn push_q4k_product_reduce_body(
+    source: &mut String,
+    sub: usize,
+    run: usize,
+    element_type: &str,
+) {
     source.push_str(&format!("            {element_type} raw_acc = 0;\n"));
     source.push_str(&format!("            {element_type} act_sum = 0;\n"));
     source.push_str(&format!(
@@ -954,7 +969,12 @@ pub(super) fn push_q4k_product_reduce_body(source: &mut String, sub: usize, run:
 }
 
 #[cfg(feature = "metal-q4k-mask-fma")]
-pub(super) fn push_q4k_product_reduce_body(source: &mut String, sub: usize, run: usize, element_type: &str) {
+pub(super) fn push_q4k_product_reduce_body(
+    source: &mut String,
+    sub: usize,
+    run: usize,
+    element_type: &str,
+) {
     source.push_str(&format!("            {element_type} raw_acc = 0;\n"));
     source.push_str(&format!("            {element_type} act_sum = 0;\n"));
     source.push_str("            bool q4k_hi = (slot % 64u) >= 32u;\n");
@@ -1566,7 +1586,9 @@ fn push_multi_row_lane_epilogue(source: &mut String, epilogue: &MultiRowEpilogue
     for round_first in (0..pair_total).step_by(SIMD_WIDTH as usize) {
         let round_last = (round_first + SIMD_WIDTH as usize).min(pair_total);
         source.push_str("    {\n");
-        source.push_str(&format!("        {element_type} pair_value = {identity};\n"));
+        source.push_str(&format!(
+            "        {element_type} pair_value = {identity};\n"
+        ));
         for pair in round_first..round_last {
             source.push_str(&format!(
                 "        pair_value = (lane == {}u) ? reduced_{}_{} : pair_value;\n",
@@ -1579,8 +1601,12 @@ fn push_multi_row_lane_epilogue(source: &mut String, epilogue: &MultiRowEpilogue
             "        uint pair_index = (uint)lane + {round_first}u;\n"
         ));
         source.push_str(&format!("        if (pair_index < {pair_total}u) {{\n"));
-        source.push_str(&format!("            uint token_slot = pair_index / {rows}u;\n"));
-        source.push_str(&format!("            uint feature_slot = pair_index % {rows}u;\n"));
+        source.push_str(&format!(
+            "            uint token_slot = pair_index / {rows}u;\n"
+        ));
+        source.push_str(&format!(
+            "            uint feature_slot = pair_index % {rows}u;\n"
+        ));
         source.push_str("            long token_flat = token_first + (long)token_slot;\n");
         source.push_str("            long feature_flat = feature_first + (long)feature_slot;\n");
         source.push_str(
@@ -1892,7 +1918,9 @@ fn push_q4_0_pair_lane_step(source: &mut String, rows: usize, cap: usize, block_
         source.push_str(&format!(
             "            uint packed_pair = (uint)(*(device const ushort *)(blk{row} + 2u + 2u * pair));\n"
         ));
-        source.push_str("            float w0 = fma((float)(packed_pair & 0x000Fu), scale, offset);\n");
+        source.push_str(
+            "            float w0 = fma((float)(packed_pair & 0x000Fu), scale, offset);\n",
+        );
         source.push_str("            float w1 = fma((float)(packed_pair & 0x0F00u), scale * 0.00390625f, offset);\n");
         source.push_str("            float w2 = fma((float)(packed_pair & 0x00F0u), scale * 0.0625f, offset);\n");
         source.push_str("            float w3 = fma((float)(packed_pair & 0xF000u), scale * 0.000244140625f, offset);\n");
@@ -1984,9 +2012,7 @@ pub(super) fn push_packed_row_multi_row_q4_0_body(
     );
     source.push_str("            q4_0_d_bits = simd_broadcast_first(q4_0_d_bits);\n");
     source.push_str("            float q4_0_d = (float)as_type<half>(q4_0_d_bits);\n");
-    source.push_str(
-        "            uchar q4_0_byte = q4_0_block[2u + (q4_0_local % 16u)];\n",
-    );
+    source.push_str("            uchar q4_0_byte = q4_0_block[2u + (q4_0_local % 16u)];\n");
     source.push_str(
         "            int q4_0_nibble = (q4_0_local < 16u) ? (int)(q4_0_byte & 0x0Fu) : (int)(q4_0_byte >> 4u);\n",
     );
@@ -2069,7 +2095,9 @@ pub(super) fn push_packed_row_multi_row_unroll_body(
             }
             _ => operand_read(weight, &format!("(weight_base[{q}] + k)"), weight_codec),
         };
-        source.push_str(&format!("            scratch[{weight}] = {weight_decode};\n"));
+        source.push_str(&format!(
+            "            scratch[{weight}] = {weight_decode};\n"
+        ));
         for s in 0..cap {
             source.push_str("            {\n");
             source.push_str(&format!(
@@ -2080,9 +2108,15 @@ pub(super) fn push_packed_row_multi_row_unroll_body(
                     other_codec
                 )
             ));
-            let value_expr =
-                push_body_steps(source, resolved.element_body(), "                ", element_type);
-            source.push_str(&format!("                {element_type} value = {value_expr};\n"));
+            let value_expr = push_body_steps(
+                source,
+                resolved.element_body(),
+                "                ",
+                element_type,
+            );
+            source.push_str(&format!(
+                "                {element_type} value = {value_expr};\n"
+            ));
             let sumf_expr = format!("sumf[{s}][{q}]");
             let combine_expr = scalar_op_expr(reduce_op, &[sumf_expr.as_str(), "value"]);
             source.push_str(&format!("                {sumf_expr} = {combine_expr};\n"));
@@ -2101,7 +2135,10 @@ pub(super) fn push_packed_row_multi_row_unroll_body(
 /// [`push_packed_row_group_bases`]'s `else` arm renders stays correct for
 /// every shape this does not apply to (batched decode, multi-row `M`
 /// blocks routed through [`push_packed_row_multi_row_body`] instead, etc).
-pub(super) fn packed_row_direct_output_axis(resolved: &BoundOp, output_axes: &[u16]) -> Option<u16> {
+pub(super) fn packed_row_direct_output_axis(
+    resolved: &BoundOp,
+    output_axes: &[u16],
+) -> Option<u16> {
     let mut found = None;
     for &axis in output_axes {
         if resolved.extents[axis as usize] > 1 {
@@ -2248,7 +2285,9 @@ pub(super) fn push_packed_row_group_bases(
             source.push_str(&format!(
                 "        coord_q_cache[q][{selected_axis}] = expert_slot;\n"
             ));
-            source.push_str(&format!("        coord_q_cache[q][{out_axis}] = out_row;\n"));
+            source.push_str(&format!(
+                "        coord_q_cache[q][{out_axis}] = out_row;\n"
+            ));
             source.push_str(&format!(
                 "        weight_base[q] = u.operand_base[{weight}] + expert_slot * weight_selected_stride + out_row * weight_out_stride;\n"
             ));

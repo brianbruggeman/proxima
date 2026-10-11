@@ -26,12 +26,11 @@ impl DiskTier {
 
 impl ColdTier for DiskTier {
     fn demote(&self, stamp: u64, ids: &[u32], state: &PrefixState) -> Result<u64, InteropError> {
-        let content_key = chained_keys(ids, ids.len(), 0)
-            .first()
-            .copied()
-            .ok_or(InteropError::BlockFileMalformed {
+        let content_key = chained_keys(ids, ids.len(), 0).first().copied().ok_or(
+            InteropError::BlockFileMalformed {
                 reason: "entry has no ids",
-            })?;
+            },
+        )?;
         let mut bytes = Vec::new();
         state.to_block_file(self.descriptor_digest, content_key, &mut bytes)?;
         write_block_file(&self.directory, stamp, &bytes)?;
@@ -48,7 +47,12 @@ impl ColdTier for DiskTier {
         }
     }
 
-    fn promote(&self, stamp: u64, ids: &[u32], cached_len: usize) -> Result<PrefixState, InteropError> {
+    fn promote(
+        &self,
+        stamp: u64,
+        ids: &[u32],
+        cached_len: usize,
+    ) -> Result<PrefixState, InteropError> {
         let mapped = MappedBlockFile::open(&self.path_of(stamp))?;
         let view = mapped.view()?;
         view.require_digest(self.descriptor_digest)?;

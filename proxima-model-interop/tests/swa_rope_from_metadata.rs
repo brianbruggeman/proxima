@@ -11,7 +11,9 @@ use std::path::Path;
 
 use proxima_gguf::parse_complete;
 use proxima_model_interop::sliding_pattern::program::sliding_rope_table;
-use proxima_model_interop::{KvLayout, StepInput, bind_checkpoint_with_kv_layout, sliding_rope_inputs};
+use proxima_model_interop::{
+    KvLayout, StepInput, bind_checkpoint_with_kv_layout, sliding_rope_inputs,
+};
 
 const POSITIONS: usize = 1500;
 
@@ -57,8 +59,7 @@ fn assert_swa_rope_matches_oracle(name: &str, env: &str, path: &str) {
     sliding_rope_inputs(&bound.architecture, 0, POSITIONS, &mut inputs);
 
     let positions: Vec<usize> = (0..POSITIONS).collect();
-    let (expected_cos, expected_sin) =
-        sliding_rope_table(&positions, freq_base, dimension_count);
+    let (expected_cos, expected_sin) = sliding_rope_table(&positions, freq_base, dimension_count);
     let cos = inputs
         .iter()
         .find(|input| input.name == "rope_cos_swa")

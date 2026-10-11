@@ -424,10 +424,7 @@ pub(super) fn execute_plan_inner(
         }
         #[cfg(feature = "instrument")]
         {
-            counter!(
-                RETIRE_SCAN_CALLS,
-                prepared.retires[position].len() as u64
-            );
+            counter!(RETIRE_SCAN_CALLS, prepared.retires[position].len() as u64);
             counter!(RETIRE_SCAN_TICKS, elapsed_ticks(retire_scan_started));
         }
     }
@@ -734,11 +731,26 @@ pub(super) fn expert_source_signature(source: &proxima_tensor::cpu::ExpertSource
     };
     for entry in source.entries() {
         let codec = match entry.block {
-            QuantizedBlock::Packed { codec: Codec::Q2K, bytes: _ } => 1_u64,
-            QuantizedBlock::Packed { codec: Codec::Q3K, bytes: _ } => 2_u64,
-            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: _ } => 3_u64,
-            QuantizedBlock::Packed { codec: Codec::Q5K, bytes: _ } => 4_u64,
-            QuantizedBlock::Packed { codec: Codec::Q6K, bytes: _ } => 5_u64,
+            QuantizedBlock::Packed {
+                codec: Codec::Q2K,
+                bytes: _,
+            } => 1_u64,
+            QuantizedBlock::Packed {
+                codec: Codec::Q3K,
+                bytes: _,
+            } => 2_u64,
+            QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: _,
+            } => 3_u64,
+            QuantizedBlock::Packed {
+                codec: Codec::Q5K,
+                bytes: _,
+            } => 4_u64,
+            QuantizedBlock::Packed {
+                codec: Codec::Q6K,
+                bytes: _,
+            } => 5_u64,
             _ => 0,
         };
         mix(codec);
@@ -776,10 +788,19 @@ pub(super) fn reject_non_reducing_expert_staging(
     for entry in source.entries() {
         if !matches!(
             entry.block,
-            QuantizedBlock::Packed { codec: Codec::Q2K, bytes: _ }
-                | QuantizedBlock::Packed { codec: Codec::Q3K, bytes: _ }
-                | QuantizedBlock::Packed { codec: Codec::Q4K, bytes: _ }
-                | QuantizedBlock::Packed { codec: Codec::Q6K, bytes: _ }
+            QuantizedBlock::Packed {
+                codec: Codec::Q2K,
+                bytes: _
+            } | QuantizedBlock::Packed {
+                codec: Codec::Q3K,
+                bytes: _
+            } | QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: _
+            } | QuantizedBlock::Packed {
+                codec: Codec::Q6K,
+                bytes: _
+            }
         ) {
             return Err(MetalError::ExpertSourceUnsupported {
                 node,
@@ -925,12 +946,13 @@ pub(super) fn stage_expert_sources(
         let signature = expert_source_signature(source);
         let cache_key = (plan_identity, *node);
         EXPERT_SOURCE_CACHE.with(|cache| -> Result<(), MetalError> {
-            let mut cache = cache.try_borrow_mut().map_err(|_| {
-                MetalError::ExpertSourceUnsupported {
-                    node: *node,
-                    reason: "expert source cache is already borrowed",
-                }
-            })?;
+            let mut cache =
+                cache
+                    .try_borrow_mut()
+                    .map_err(|_| MetalError::ExpertSourceUnsupported {
+                        node: *node,
+                        reason: "expert source cache is already borrowed",
+                    })?;
             let cache_state = cache.get(&cache_key).map(|(cached_signature, _)| {
                 if *cached_signature == signature {
                     ExpertSourceCacheState::Hit
@@ -1243,17 +1265,17 @@ pub fn read_placed_buffer_f16_as_f32(
 
 /// Stores `f32` values as two-byte `half::bf16` elements at `byte_offset`.
 #[cfg(feature = "metal-output-placement")]
-pub fn write_placed_buffer_f32_as_bf16(
-    buffer: &PlacedBuffer,
-    byte_offset: usize,
-    values: &[f32],
-) {
+pub fn write_placed_buffer_f32_as_bf16(buffer: &PlacedBuffer, byte_offset: usize, values: &[f32]) {
     let pointer = buffer.contents();
     // SAFETY: shared storage is CPU-writable with no command buffer in flight;
     // the caller keeps this aligned range inside the allocation.
     let destination = unsafe {
         core::slice::from_raw_parts_mut(
-            pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<half::bf16>(),
+            pointer
+                .as_ptr()
+                .cast::<u8>()
+                .add(byte_offset)
+                .cast::<half::bf16>(),
             values.len(),
         )
     };
@@ -1274,7 +1296,11 @@ pub fn read_placed_buffer_bf16_as_f32(
     // SAFETY: the caller keeps the aligned source range inside shared storage.
     let source = unsafe {
         core::slice::from_raw_parts(
-            pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<half::bf16>(),
+            pointer
+                .as_ptr()
+                .cast::<u8>()
+                .add(byte_offset)
+                .cast::<half::bf16>(),
             element_count,
         )
     };
@@ -1414,7 +1440,12 @@ pub fn narrow_placed_buffer_f32_to_f16(
     let (rows, narrowed) = unsafe {
         (
             core::slice::from_raw_parts(
-                source.contents().as_ptr().cast::<u8>().add(source_byte_offset).cast::<f32>(),
+                source
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(source_byte_offset)
+                    .cast::<f32>(),
                 element_count,
             ),
             core::slice::from_raw_parts_mut(
@@ -1526,7 +1557,6 @@ impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
         }
         self.read.extend(inputs.iter().copied());
     }
-
 }
 
 /// [`HazardTracker::classify`]'s result -- ROW 539's per-barrier attribution.
@@ -1616,7 +1646,11 @@ pub(super) fn record_hazard_op(
 #[cfg(feature = "instrument")]
 pub(super) fn record_internal_barrier(site: &'static str) {
     note_barrier_pending();
-    debug!(site, reason = "internal_true_dependency", "hazard_internal_barrier");
+    debug!(
+        site,
+        reason = "internal_true_dependency",
+        "hazard_internal_barrier"
+    );
 }
 
 #[cfg(feature = "instrument")]
@@ -1658,7 +1692,8 @@ pub(super) struct HazardState {
     /// can tell an input that reads the writer's own node from a buffer
     /// identity two unrelated nodes happen to share.
     #[cfg(feature = "instrument")]
-    pub(super) writer_nodes: std::collections::HashMap<*const ProtocolObject<dyn MTLBuffer>, NodeId>,
+    pub(super) writer_nodes:
+        std::collections::HashMap<*const ProtocolObject<dyn MTLBuffer>, NodeId>,
     /// Dispatching positions encoded since the last barrier this state saw.
     #[cfg(feature = "instrument")]
     pub(super) dispatches_since_barrier: u64,
@@ -2086,7 +2121,14 @@ mod card_04_tests {
     #[test]
     fn card_04_bf16_placed_roundtrips_special_values() {
         let buffer = allocate_placed_buffer(16).expect("allocates BF16 fixture bytes");
-        let values = [0.0f32, -0.0, 1.5, f32::INFINITY, f32::NEG_INFINITY, f32::NAN];
+        let values = [
+            0.0f32,
+            -0.0,
+            1.5,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ];
         write_placed_buffer_f32_as_bf16(&buffer, 0, &values);
         let actual = read_placed_buffer_bf16_as_f32(&buffer, 0, values.len());
 

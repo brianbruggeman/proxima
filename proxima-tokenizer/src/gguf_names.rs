@@ -35,8 +35,8 @@ impl PreType {
             "qwen35" => Some(Self::SingleDigitMarks),
             "default" => Some(Self::Default),
             "gpt-2" | "phi-2" | "jina-es" | "jina-de" | "gigachat" | "jina-v2-es"
-            | "jina-v2-de" | "a.x-4.0" | "mellum" | "modern-bert" | "exaone4" | "mpt"
-            | "olmo" | "jais" | "trillion" | "granite-docling" => Some(Self::Gpt2),
+            | "jina-v2-de" | "a.x-4.0" | "mellum" | "modern-bert" | "exaone4" | "mpt" | "olmo"
+            | "jais" | "trillion" | "granite-docling" => Some(Self::Gpt2),
             "starcoder" | "refact" | "command-r" | "smollm" | "codeshell" | "exaone"
             | "minerva-7b" | "mellum2" => Some(Self::DigitIsolatedGpt2),
             "falcon" => Some(Self::Falcon),
@@ -51,24 +51,54 @@ mod tests {
 
     #[test]
     fn gpt2_family_names_map_to_the_pass_pipelines_like_llama_cpp() {
-        assert_eq!(PreType::from_gguf_name("stablelm2"), Some(PreType::SingleDigit));
-        assert_eq!(PreType::from_gguf_name("hunyuan"), Some(PreType::SingleDigit));
-        assert_eq!(PreType::from_gguf_name("solar-open"), Some(PreType::SingleDigit));
-        assert_eq!(PreType::from_gguf_name("dbrx"), Some(PreType::GroupedDigits));
+        assert_eq!(
+            PreType::from_gguf_name("stablelm2"),
+            Some(PreType::SingleDigit)
+        );
+        assert_eq!(
+            PreType::from_gguf_name("hunyuan"),
+            Some(PreType::SingleDigit)
+        );
+        assert_eq!(
+            PreType::from_gguf_name("solar-open"),
+            Some(PreType::SingleDigit)
+        );
+        assert_eq!(
+            PreType::from_gguf_name("dbrx"),
+            Some(PreType::GroupedDigits)
+        );
         assert_eq!(PreType::from_gguf_name("mpt"), Some(PreType::Gpt2));
         assert_eq!(PreType::from_gguf_name("gpt-2"), Some(PreType::Gpt2));
-        assert_eq!(PreType::from_gguf_name("starcoder"), Some(PreType::DigitIsolatedGpt2));
+        assert_eq!(
+            PreType::from_gguf_name("starcoder"),
+            Some(PreType::DigitIsolatedGpt2)
+        );
         assert_eq!(PreType::from_gguf_name("falcon"), Some(PreType::Falcon));
     }
 
     #[test]
     fn gguf_pre_names_map_like_llama_cpp() {
-        assert_eq!(PreType::from_gguf_name("llama-bpe"), Some(PreType::GroupedDigits));
-        assert_eq!(PreType::from_gguf_name("lfm2"), Some(PreType::GroupedDigits));
+        assert_eq!(
+            PreType::from_gguf_name("llama-bpe"),
+            Some(PreType::GroupedDigits)
+        );
+        assert_eq!(
+            PreType::from_gguf_name("lfm2"),
+            Some(PreType::GroupedDigits)
+        );
         assert_eq!(PreType::from_gguf_name("qwen2"), Some(PreType::SingleDigit));
-        assert_eq!(PreType::from_gguf_name("deepseek-r1-qwen"), Some(PreType::SingleDigit));
-        assert_eq!(PreType::from_gguf_name("megrez"), Some(PreType::SingleDigit));
-        assert_eq!(PreType::from_gguf_name("qwen35"), Some(PreType::SingleDigitMarks));
+        assert_eq!(
+            PreType::from_gguf_name("deepseek-r1-qwen"),
+            Some(PreType::SingleDigit)
+        );
+        assert_eq!(
+            PreType::from_gguf_name("megrez"),
+            Some(PreType::SingleDigit)
+        );
+        assert_eq!(
+            PreType::from_gguf_name("qwen35"),
+            Some(PreType::SingleDigitMarks)
+        );
         assert_eq!(PreType::from_gguf_name("deepseek-coder"), None);
         assert_eq!(PreType::from_gguf_name("default"), Some(PreType::Default));
         assert_eq!(PreType::from_gguf_name("jina-v1-en"), None);

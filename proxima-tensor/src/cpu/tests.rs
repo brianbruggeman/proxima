@@ -13667,7 +13667,9 @@ fn e3m2_weight_bytes(code_of: impl Fn(usize, usize, usize) -> u8) -> Vec<u8> {
 fn e3m2_f64_dot(weights: &[u8], row: usize, activation: &[f32]) -> (f64, f64) {
     let row_bytes = E3M2_BLOCKS_PER_ROW * E3M2_BLOCK_BYTES;
     weights[row * row_bytes..(row + 1) * row_bytes]
-        .as_chunks::<E3M2_BLOCK_BYTES>().0.iter()
+        .as_chunks::<E3M2_BLOCK_BYTES>()
+        .0
+        .iter()
         .enumerate()
         .flat_map(|(block_index, block)| {
             let scale = f64::from(f16::from_le_bytes([block[0], block[1]]).to_f32());

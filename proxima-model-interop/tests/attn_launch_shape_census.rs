@@ -48,7 +48,8 @@ fn production_step_outputs(logits_root: NodeId, layer_roots: &[LayerCacheRoots])
 fn census_out_dir(scratch: &tempfile::TempDir) -> PathBuf {
     let out_dir = std::env::var_os("PROXIMA_CENSUS_OUT")
         .map_or_else(|| scratch.path().to_path_buf(), PathBuf::from);
-    std::fs::create_dir_all(&out_dir).unwrap_or_else(|error| panic!("create {}: {error}", out_dir.display()));
+    std::fs::create_dir_all(&out_dir)
+        .unwrap_or_else(|error| panic!("create {}: {error}", out_dir.display()));
     out_dir
 }
 
@@ -59,7 +60,8 @@ fn write_launch_shapes(
     program_outputs: &(Vec<proxima_tensor::bind::BoundOp>,),
 ) {
     let path = out_dir.join(file_name);
-    let mut csv = File::create(&path).unwrap_or_else(|error| panic!("create {}: {error}", path.display()));
+    let mut csv =
+        File::create(&path).unwrap_or_else(|error| panic!("create {}: {error}", path.display()));
     writeln!(csv, "index,node,kind,entry,grid_threads,threadgroup_width")
         .expect("write csv header");
     let packed_operands = PackedOperands::new();
@@ -117,8 +119,13 @@ async fn attn_launch_shape_census() {
 
     let outputs = production_step_outputs(bound_program.logits_root, &bound_program.layer_roots);
 
-    let symbols = bind_symbols(NEW_COUNT, KV_BUCKET_EXTENT, &[], bound_program.single_position_step)
-        .expect("bind_symbols: gemma4 declares no extra symbolic step_inputs");
+    let symbols = bind_symbols(
+        NEW_COUNT,
+        KV_BUCKET_EXTENT,
+        &[],
+        bound_program.single_position_step,
+    )
+    .expect("bind_symbols: gemma4 declares no extra symbolic step_inputs");
     let shapes =
         infer(&bound_program.program, &symbols).expect("shape inference over the real program");
 
@@ -131,13 +138,30 @@ async fn attn_launch_shape_census() {
         bound_program.single_position_step
     );
 
-    let unfused_bound_ops = bind_with_fusion(&bound_program.program, &shapes, &outputs, false, numeric_policy)
-        .expect("bind_with_fusion unfused (OFF)");
-    let fused_bound_ops = bind_with_fusion(&bound_program.program, &shapes, &outputs, true, numeric_policy)
-        .expect("bind_with_fusion fused (ON)");
+    let unfused_bound_ops = bind_with_fusion(
+        &bound_program.program,
+        &shapes,
+        &outputs,
+        false,
+        numeric_policy,
+    )
+    .expect("bind_with_fusion unfused (OFF)");
+    let fused_bound_ops = bind_with_fusion(
+        &bound_program.program,
+        &shapes,
+        &outputs,
+        true,
+        numeric_policy,
+    )
+    .expect("bind_with_fusion fused (ON)");
     let cached_attention_count = fused_bound_ops
         .iter()
-        .filter(|bound| matches!(bound.kind, proxima_tensor::bind::BoundOpKind::CachedAttention { .. }))
+        .filter(|bound| {
+            matches!(
+                bound.kind,
+                proxima_tensor::bind::BoundOpKind::CachedAttention { .. }
+            )
+        })
         .count();
     println!(
         "attn_launch_shape_census: unfused_len={} fused_len={} fused_cached_attention_count={cached_attention_count}",
@@ -195,15 +219,32 @@ async fn attn_launch_shape_census_decode_shaped() {
 
     let numeric_policy = NumericPolicy::llama_relaxed();
 
-    let unfused_bound_ops = bind_with_fusion(&bound_program.program, &shapes, &outputs, false, numeric_policy)
-        .expect("bind_with_fusion unfused (OFF)");
-    let fused_bound_ops = bind_with_fusion(&bound_program.program, &shapes, &outputs, true, numeric_policy)
-        .expect("bind_with_fusion fused (ON)");
+    let unfused_bound_ops = bind_with_fusion(
+        &bound_program.program,
+        &shapes,
+        &outputs,
+        false,
+        numeric_policy,
+    )
+    .expect("bind_with_fusion unfused (OFF)");
+    let fused_bound_ops = bind_with_fusion(
+        &bound_program.program,
+        &shapes,
+        &outputs,
+        true,
+        numeric_policy,
+    )
+    .expect("bind_with_fusion fused (ON)");
     let pruned_fused_bound_ops =
         proxima_tensor::bind::prune_dead(fused_bound_ops.clone(), &outputs);
     let cached_attention_count = fused_bound_ops
         .iter()
-        .filter(|bound| matches!(bound.kind, proxima_tensor::bind::BoundOpKind::CachedAttention { .. }))
+        .filter(|bound| {
+            matches!(
+                bound.kind,
+                proxima_tensor::bind::BoundOpKind::CachedAttention { .. }
+            )
+        })
         .count();
     println!(
         "attn_launch_shape_census_decode_shaped: unfused_len={} fused_len={} fused_pruned_len={} fused_cached_attention_count={cached_attention_count}",
@@ -214,6 +255,16 @@ async fn attn_launch_shape_census_decode_shaped() {
 
     let scratch = tempfile::tempdir().expect("scratch dir creates");
     let out_dir = census_out_dir(&scratch);
-    write_launch_shapes(&out_dir, OFF_CSV_DECODE_NAME, "off_unfused_decode", &(unfused_bound_ops,));
-    write_launch_shapes(&out_dir, ON_CSV_DECODE_NAME, "on_fused_decode_pruned", &(pruned_fused_bound_ops,));
+    write_launch_shapes(
+        &out_dir,
+        OFF_CSV_DECODE_NAME,
+        "off_unfused_decode",
+        &(unfused_bound_ops,),
+    );
+    write_launch_shapes(
+        &out_dir,
+        ON_CSV_DECODE_NAME,
+        "on_fused_decode_pruned",
+        &(pruned_fused_bound_ops,),
+    );
 }

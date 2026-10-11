@@ -251,20 +251,19 @@ pub use bfloat8::BFloat8;
 
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use align::AlignedBuffer;
+#[cfg(feature = "top-fraction-fusion")]
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub use bind::bind_with_top_fraction;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use bind::{
     BodyStep, BoundOp, BoundOpBuilder, BoundOpKind, ComposedBody, Layout, Lookup, StepArg, bind,
     bind_with_fusion, bind_without_reduce_epilogue_fusion, block_node_ids,
     correct_packed_matmul_layouts, dead_resolved_nodes, fuse_twin_elementwise, index_node_ids,
-    node_last_reader,
-    node_retirement, prune_dead, refit_cached_attention_rows,
+    node_last_reader, node_retirement, prune_dead, refit_cached_attention_rows,
 };
 #[cfg(feature = "instrument")]
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use bind::{RepeatNodeRefusal, apply_repeat_nodes};
-#[cfg(feature = "top-fraction-fusion")]
-#[cfg(any(feature = "std", feature = "alloc"))]
-pub use bind::bind_with_top_fraction;
 pub use convert::{Convert, SimdConvert};
 #[cfg(any(
     feature = "q4k-int8-dot",

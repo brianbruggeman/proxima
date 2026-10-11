@@ -100,27 +100,27 @@ mod gdn_moe_fusion_apply;
 mod cached_attention_epilogue_liveness;
 #[cfg(feature = "identity-copy-alias")]
 mod identity_copy_alias;
-#[cfg(feature = "instrument")]
-mod repeat_nodes;
 mod refit_cached_attention;
 mod refresh;
-mod twin_elementwise;
+#[cfg(feature = "instrument")]
+mod repeat_nodes;
 #[cfg(feature = "top-fraction-fusion")]
 mod top_fraction_fusion;
+mod twin_elementwise;
 pub use builder_compose_window::*;
 pub use cached_attention_epilogue_liveness::*;
 pub use dead_code_cached_attention::*;
 pub use gdn_moe_fusion_apply::*;
-pub use refit_cached_attention::refit_cached_attention_rows;
-pub use refresh::{RefreshRefusal, refresh_bound_ops};
-pub use twin_elementwise::fuse_twin_elementwise;
-#[cfg(feature = "top-fraction-fusion")]
-pub use top_fraction_fusion::{bind_with_top_fraction, top_fraction_candidates};
-pub use types_layout_boundop::*;
 #[cfg(feature = "identity-copy-alias")]
 use identity_copy_alias::apply_identity_copy_alias;
+pub use refit_cached_attention::refit_cached_attention_rows;
+pub use refresh::{RefreshRefusal, refresh_bound_ops};
 #[cfg(feature = "instrument")]
 pub use repeat_nodes::{RepeatNodeRefusal, apply_repeat_nodes};
+#[cfg(feature = "top-fraction-fusion")]
+pub use top_fraction_fusion::{bind_with_top_fraction, top_fraction_candidates};
+pub use twin_elementwise::fuse_twin_elementwise;
+pub use types_layout_boundop::*;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

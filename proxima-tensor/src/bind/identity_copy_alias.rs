@@ -28,13 +28,19 @@ fn identity_copy_source(bound: &BoundOp) -> Option<(NodeId, i64)> {
         body.steps.as_slice(),
         [BodyStep { op: ScalarOp::Identity, args }] if args.as_slice() == [StepArg::Operand(0)]
     );
-    if !is_identity_body || source_lookup.is_some() || !is_canonical_layout(source_layout, &bound.extents) {
+    if !is_identity_body
+        || source_lookup.is_some()
+        || !is_canonical_layout(source_layout, &bound.extents)
+    {
         return None;
     }
     Some((*source, source_layout.base))
 }
 
-fn rewrite_read_sources(operands: &mut [(NodeId, Layout, Option<Lookup>)], alias_of: &BTreeMap<NodeId, (NodeId, i64)>) {
+fn rewrite_read_sources(
+    operands: &mut [(NodeId, Layout, Option<Lookup>)],
+    alias_of: &BTreeMap<NodeId, (NodeId, i64)>,
+) {
     for entry in operands.iter_mut() {
         if let Some((source, source_base)) = alias_of.get(&entry.0) {
             entry.0 = *source;
@@ -163,7 +169,14 @@ mod tests {
             extents: alloc::vec![4],
             kind: BoundOpKind::Elementwise {
                 body: ComposedBody::leaf(ScalarOp::Identity),
-                operands: alloc::vec![(NodeId(source), Layout { base: 0, strides: smallvec::smallvec![1] }, None)],
+                operands: alloc::vec![(
+                    NodeId(source),
+                    Layout {
+                        base: 0,
+                        strides: smallvec::smallvec![1]
+                    },
+                    None
+                )],
             },
         }
     }
@@ -176,8 +189,22 @@ mod tests {
             kind: BoundOpKind::Elementwise {
                 body: ComposedBody::leaf(ScalarOp::Add),
                 operands: alloc::vec![
-                    (NodeId(reads), Layout { base: 0, strides: smallvec::smallvec![1] }, None),
-                    (NodeId(other), Layout { base: 0, strides: smallvec::smallvec![1] }, None),
+                    (
+                        NodeId(reads),
+                        Layout {
+                            base: 0,
+                            strides: smallvec::smallvec![1]
+                        },
+                        None
+                    ),
+                    (
+                        NodeId(other),
+                        Layout {
+                            base: 0,
+                            strides: smallvec::smallvec![1]
+                        },
+                        None
+                    ),
                 ],
             },
         }
@@ -190,7 +217,11 @@ mod tests {
 
         let rewritten = apply_identity_copy_alias(built, &outputs);
 
-        assert_eq!(rewritten.len(), 1, "the identity dispatch is dropped entirely");
+        assert_eq!(
+            rewritten.len(),
+            1,
+            "the identity dispatch is dropped entirely"
+        );
         assert_eq!(rewritten[0].node, NodeId(20));
         let BoundOpKind::Elementwise { operands, .. } = &rewritten[0].kind else {
             panic!("consumer stays elementwise");
@@ -202,7 +233,10 @@ mod tests {
         );
         assert_eq!(
             operands[0].1,
-            Layout { base: 0, strides: smallvec::smallvec![1] },
+            Layout {
+                base: 0,
+                strides: smallvec::smallvec![1]
+            },
             "the identity's own canonical read composes to the consumer's unchanged layout"
         );
     }

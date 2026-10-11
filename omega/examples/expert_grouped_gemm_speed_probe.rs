@@ -112,7 +112,10 @@ fn run() -> anyhow::Result<()> {
 
     fn env_list<T: std::str::FromStr>(name: &str, default: Vec<T>) -> Vec<T> {
         match std::env::var(name) {
-            Ok(value) => value.split(',').filter_map(|item| item.trim().parse().ok()).collect(),
+            Ok(value) => value
+                .split(',')
+                .filter_map(|item| item.trim().parse().ok())
+                .collect(),
             Err(_) => default,
         }
     }
@@ -148,12 +151,16 @@ fn run() -> anyhow::Result<()> {
     fn route(shape_name: &str, tokens: usize) -> Vec<f32> {
         let mut lcg = Lcg(5);
         let mut unit_draw = move || (lcg.next_unit() + 1.0) * 0.5;
-        let weights: Vec<f32> = (0..EXPERTS).map(|expert| 1.0 / (expert as f32 + 1.0)).collect();
+        let weights: Vec<f32> = (0..EXPERTS)
+            .map(|expert| 1.0 / (expert as f32 + 1.0))
+            .collect();
         let total: f32 = weights.iter().sum();
         (0..tokens)
             .map(|token| match shape_name {
                 "balanced" => (token % EXPERTS) as f32,
-                "uniform" => (unit_draw() * EXPERTS as f32).min(EXPERTS as f32 - 1.0).floor(),
+                "uniform" => (unit_draw() * EXPERTS as f32)
+                    .min(EXPERTS as f32 - 1.0)
+                    .floor(),
                 "single" => 7.0,
                 "chain" => ((token / 32) % EXPERTS) as f32,
                 _ => {
@@ -192,21 +199,44 @@ fn run() -> anyhow::Result<()> {
                 program,
                 Op::Input {
                     dtype,
-                    shape: extents.iter().map(|&extent| Extent::Static(extent as u32)).collect(),
+                    shape: extents
+                        .iter()
+                        .map(|&extent| Extent::Static(extent as u32))
+                        .collect(),
                     name: Some(name.into()),
                 },
             )
         };
-        let weight = input(&mut program, DType::UInt8, &[EXPERTS, shape.rows, shape.k], "weight");
-        let route_node = input(&mut program, DType::Float32, &[shape.tokens, shape.selected], "route");
+        let weight = input(
+            &mut program,
+            DType::UInt8,
+            &[EXPERTS, shape.rows, shape.k],
+            "weight",
+        );
+        let route_node = input(
+            &mut program,
+            DType::Float32,
+            &[shape.tokens, shape.selected],
+            "route",
+        );
         let (activation, activation_map) = if shape.per_selected_activation {
             (
-                input(&mut program, DType::Float32, &[shape.tokens, shape.selected, shape.k], "activation"),
+                input(
+                    &mut program,
+                    DType::Float32,
+                    &[shape.tokens, shape.selected, shape.k],
+                    "activation",
+                ),
                 map::projection(4, &[0, 1, 3]),
             )
         } else {
             (
-                input(&mut program, DType::Float32, &[shape.tokens, shape.k], "activation"),
+                input(
+                    &mut program,
+                    DType::Float32,
+                    &[shape.tokens, shape.k],
+                    "activation",
+                ),
                 map::projection(4, &[0, 3]),
             )
         };
@@ -236,7 +266,10 @@ fn run() -> anyhow::Result<()> {
             Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Multiply,
-                operands: vec![(weight, gather), (activation, IndexMap::Affine(activation_map))],
+                operands: vec![
+                    (weight, gather),
+                    (activation, IndexMap::Affine(activation_map)),
+                ],
                 name: None,
             },
         );
@@ -266,14 +299,27 @@ fn run() -> anyhow::Result<()> {
                 program,
                 Op::Input {
                     dtype,
-                    shape: extents.iter().map(|&extent| Extent::Static(extent as u32)).collect(),
+                    shape: extents
+                        .iter()
+                        .map(|&extent| Extent::Static(extent as u32))
+                        .collect(),
                     name: Some(name.into()),
                 },
             )
         };
-        let weight = input(&mut program, DType::UInt8, &[EXPERTS, shape.rows, shape.k], "weight");
+        let weight = input(
+            &mut program,
+            DType::UInt8,
+            &[EXPERTS, shape.rows, shape.k],
+            "weight",
+        );
         let route_node = input(&mut program, DType::Int32, &[shape.tokens], "route");
-        let activation = input(&mut program, DType::Float32, &[shape.tokens, shape.k], "activation");
+        let activation = input(
+            &mut program,
+            DType::Float32,
+            &[shape.tokens, shape.k],
+            "activation",
+        );
         let gather = IndexMap::Computed {
             indices: route_node,
             index_map: map::projection(3, &[0]),
@@ -338,13 +384,31 @@ fn run() -> anyhow::Result<()> {
         variance.sqrt() / mean * 100.0
     }
 
-    println!("probe=expert_grouped_gemm experts={EXPERTS} runs={RUNS} unit=us gpu_clock=GPUStartTime..GPUEndTime");
+    println!(
+        "probe=expert_grouped_gemm experts={EXPERTS} runs={RUNS} unit=us gpu_clock=GPUStartTime..GPUEndTime"
+    );
     let token_counts = env_list("PROBE_TOKEN_COUNTS", DEFAULT_TOKEN_COUNTS.to_vec());
-    let routings = env_list("PROBE_ROUTINGS", ROUTINGS.iter().map(|routing| (*routing).to_string()).collect());
-    let shape_names = env_list("PROBE_SHAPES", SHAPES.iter().map(|shape| shape.0.to_string()).collect());
-    let selected = env_list("PROBE_SELECTED", vec![1_usize]).first().copied().unwrap_or(1).max(1);
+    let routings = env_list(
+        "PROBE_ROUTINGS",
+        ROUTINGS
+            .iter()
+            .map(|routing| (*routing).to_string())
+            .collect(),
+    );
+    let shape_names = env_list(
+        "PROBE_SHAPES",
+        SHAPES.iter().map(|shape| shape.0.to_string()).collect(),
+    );
+    let selected = env_list("PROBE_SELECTED", vec![1_usize])
+        .first()
+        .copied()
+        .unwrap_or(1)
+        .max(1);
     let interleave_per_slot = std::env::var_os("PROBE_AB").is_some();
-    for (name, rows, k) in SHAPES.into_iter().filter(|shape| shape_names.iter().any(|wanted| wanted == shape.0)) {
+    for (name, rows, k) in SHAPES
+        .into_iter()
+        .filter(|shape| shape_names.iter().any(|wanted| wanted == shape.0))
+    {
         for &tokens in &token_counts {
             let shape = Shape {
                 tokens,
@@ -368,12 +432,19 @@ fn run() -> anyhow::Result<()> {
                     route(routing, tokens)
                 };
                 let named = [
-                    ("weight", QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &stack }),
+                    (
+                        "weight",
+                        QuantizedBlock::Packed {
+                            codec: Codec::Q8_0,
+                            bytes: &stack,
+                        },
+                    ),
                     ("route", QuantizedBlock::Float32(&route_values)),
                     ("activation", QuantizedBlock::Float32(&activation)),
                 ];
-                let plan = omega::plan_named(&program, &[], &named, &[root], NumericPolicy::default())
-                    .context("plan compiles")?;
+                let plan =
+                    omega::plan_named(&program, &[], &named, &[root], NumericPolicy::default())
+                        .context("plan compiles")?;
                 for _ in 0..WARMUP_RUNS {
                     omega::metal::execute_plan_named_op_timed(&plan, &named, None)
                         .context("metal warm-up executes on a real device")?;
@@ -398,7 +469,13 @@ fn run() -> anyhow::Result<()> {
                 let per_slot_plan = match &per_slot_case {
                     Some((single_program, single_root, single_activation, single_route)) => {
                         let single_named = [
-                            ("weight", QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &stack }),
+                            (
+                                "weight",
+                                QuantizedBlock::Packed {
+                                    codec: Codec::Q8_0,
+                                    bytes: &stack,
+                                },
+                            ),
                             ("route", QuantizedBlock::Float32(single_route)),
                             ("activation", QuantizedBlock::Float32(single_activation)),
                         ];
@@ -411,8 +488,12 @@ fn run() -> anyhow::Result<()> {
                         )
                         .context("per-slot plan compiles")?;
                         for _ in 0..WARMUP_RUNS {
-                            omega::metal::execute_plan_named_op_timed(&single_plan, &single_named, None)
-                                .context("per-slot warm-up executes")?;
+                            omega::metal::execute_plan_named_op_timed(
+                                &single_plan,
+                                &single_named,
+                                None,
+                            )
+                            .context("per-slot warm-up executes")?;
                         }
                         Some((single_plan, single_named))
                     }
@@ -420,13 +501,18 @@ fn run() -> anyhow::Result<()> {
                 };
                 for _ in 0..RUNS {
                     if let Some((single_plan, single_named)) = &per_slot_plan {
-                        let (_, timings) =
-                            omega::metal::execute_plan_named_op_timed(single_plan, single_named, None)
-                                .context("per-slot executes")?;
-                        per_slot_samples.push(timings.iter().map(|timing| timing.gpu_ns).sum::<u64>());
+                        let (_, timings) = omega::metal::execute_plan_named_op_timed(
+                            single_plan,
+                            single_named,
+                            None,
+                        )
+                        .context("per-slot executes")?;
+                        per_slot_samples
+                            .push(timings.iter().map(|timing| timing.gpu_ns).sum::<u64>());
                     }
-                    let (_, timings) = omega::metal::execute_plan_named_op_timed(&plan, &named, None)
-                        .context("metal executes on a real device")?;
+                    let (_, timings) =
+                        omega::metal::execute_plan_named_op_timed(&plan, &named, None)
+                            .context("metal executes on a real device")?;
                     samples.push(timings.iter().map(|timing| timing.gpu_ns).sum::<u64>());
                 }
                 if !per_slot_samples.is_empty() {

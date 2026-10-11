@@ -39,5 +39,8 @@ fn main() {
 
 #[cfg(not(unix))]
 fn main() -> Result<(), std::io::Error> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "POSIX interposition probe requires Unix"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "POSIX interposition probe requires Unix",
+    ))
 }

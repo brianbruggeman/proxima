@@ -165,61 +165,63 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
     block_nodes
         .iter()
         .zip(blocks.iter())
-        .filter_map(|(node, block)| match crate::msl::codec_from_quantized_block(block) {
-            Some(
-                codec @ (Codec::Q4K
-                | Codec::Q5K
-                | Codec::Q6K
-                | Codec::Q8_0
-                | Codec::Q4_0
-                | Codec::Float16
-                | Codec::BFloat16),
-            ) => Some((*node, codec)),
-            // `Codec::Q3K` exists (Metal has a real unpack kernel for
-            // it) but `crate::wgsl` does not -- `None` here routes a `Q3_K`
-            // node through `execute_plan`'s existing
-            // `WgpuError::UnsupportedBlock` path, the same "codec has no
-            // wgpu entry" rejection `emit_wgsl`'s own
-            // `EmitError::UnsupportedCodec` raises for a caller who
-            // reaches it directly.
-            //
-            // `Q2K`/`Q5_1`/`Q5_0` take the same `None` route as `Q3K` above
-            // -- no wgpu unpack entry exists for any of them yet, the same
-            // "decode-only so far" reasoning `Iq4Nl`/`Iq2Xs`/`Iq3Xxs` (and
-            // `Float32`/`Int32`, which have no `Codec` at all) already
-            // take through `codec_from_quantized_block`'s own `None`. The
-            // remaining codecs below join them for the identical reason:
-            // no `crate::wgsl` unpack entry exists for any of them either.
-            Some(
-                Codec::Q2K
-                | Codec::Q3K
-                | Codec::Q5_1
-                | Codec::Q5_0
-                | Codec::Q4_1
-                | Codec::Q8_1
-                | Codec::Q8K
-                | Codec::Iq1S
-                | Codec::Iq1M
-                | Codec::Iq2Xxs
-                | Codec::Iq2Xs
-                | Codec::Iq2S
-                | Codec::Iq3Xxs
-                | Codec::Iq3S
-                | Codec::Iq4Nl
-                | Codec::Iq4Xs
-                | Codec::Tq10
-                | Codec::Tq20
-                | Codec::Mxfp4
-                | Codec::Nvfp4
-                | Codec::Q1_0
-                | Codec::Q2_0
-                | Codec::BFloat8
-                | Codec::Bf8E5M2
-                | Codec::Bf4E2M1
-                | Codec::Fp6E3M2,
-            )
-            | None => None,
-        })
+        .filter_map(
+            |(node, block)| match crate::msl::codec_from_quantized_block(block) {
+                Some(
+                    codec @ (Codec::Q4K
+                    | Codec::Q5K
+                    | Codec::Q6K
+                    | Codec::Q8_0
+                    | Codec::Q4_0
+                    | Codec::Float16
+                    | Codec::BFloat16),
+                ) => Some((*node, codec)),
+                // `Codec::Q3K` exists (Metal has a real unpack kernel for
+                // it) but `crate::wgsl` does not -- `None` here routes a `Q3_K`
+                // node through `execute_plan`'s existing
+                // `WgpuError::UnsupportedBlock` path, the same "codec has no
+                // wgpu entry" rejection `emit_wgsl`'s own
+                // `EmitError::UnsupportedCodec` raises for a caller who
+                // reaches it directly.
+                //
+                // `Q2K`/`Q5_1`/`Q5_0` take the same `None` route as `Q3K` above
+                // -- no wgpu unpack entry exists for any of them yet, the same
+                // "decode-only so far" reasoning `Iq4Nl`/`Iq2Xs`/`Iq3Xxs` (and
+                // `Float32`/`Int32`, which have no `Codec` at all) already
+                // take through `codec_from_quantized_block`'s own `None`. The
+                // remaining codecs below join them for the identical reason:
+                // no `crate::wgsl` unpack entry exists for any of them either.
+                Some(
+                    Codec::Q2K
+                    | Codec::Q3K
+                    | Codec::Q5_1
+                    | Codec::Q5_0
+                    | Codec::Q4_1
+                    | Codec::Q8_1
+                    | Codec::Q8K
+                    | Codec::Iq1S
+                    | Codec::Iq1M
+                    | Codec::Iq2Xxs
+                    | Codec::Iq2Xs
+                    | Codec::Iq2S
+                    | Codec::Iq3Xxs
+                    | Codec::Iq3S
+                    | Codec::Iq4Nl
+                    | Codec::Iq4Xs
+                    | Codec::Tq10
+                    | Codec::Tq20
+                    | Codec::Mxfp4
+                    | Codec::Nvfp4
+                    | Codec::Q1_0
+                    | Codec::Q2_0
+                    | Codec::BFloat8
+                    | Codec::Bf8E5M2
+                    | Codec::Bf4E2M1
+                    | Codec::Fp6E3M2,
+                )
+                | None => None,
+            },
+        )
         .collect()
 }
 
@@ -273,46 +275,146 @@ fn packed_block_bytes_slice<'a>(
 /// undersized upload a hard [`TensorError::InputSizeMismatch`] instead of a
 /// kernel silently reading past the buffer's end.
 fn packed_expected_bytes(codec: Codec, elements: usize) -> usize {
-    elements.div_ceil(crate::msl::codec_block_elements(codec)) * crate::msl::codec_block_bytes(codec)
+    elements.div_ceil(crate::msl::codec_block_elements(codec))
+        * crate::msl::codec_block_bytes(codec)
 }
 
 fn block_codec_name(block: &QuantizedBlock<'_>) -> &'static str {
     match block {
         QuantizedBlock::Float32(_) => "float32",
         QuantizedBlock::Int32(_) => "int32",
-        QuantizedBlock::Packed { codec: Codec::Q2K, bytes: _ } => "q2_k",
-        QuantizedBlock::Packed { codec: Codec::Q3K, bytes: _ } => "q3_k",
-        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: _ } => "q4_k",
-        QuantizedBlock::Packed { codec: Codec::Q5K, bytes: _ } => "q5_k",
-        QuantizedBlock::Packed { codec: Codec::Q6K, bytes: _ } => "q6_k",
-        QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: _ } => "q8_0",
-        QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: _ } => "q4_0",
-        QuantizedBlock::Packed { codec: Codec::Q5_1, bytes: _ } => "q5_1",
-        QuantizedBlock::Packed { codec: Codec::Iq4Nl, bytes: _ } => "iq4_nl",
-        QuantizedBlock::Packed { codec: Codec::Iq2Xs, bytes: _ } => "iq2_xs",
-        QuantizedBlock::Packed { codec: Codec::Iq3Xxs, bytes: _ } => "iq3_xxs",
-        QuantizedBlock::Packed { codec: Codec::Float16, bytes: _ } => "float16",
-        QuantizedBlock::Packed { codec: Codec::BFloat16, bytes: _ } => "bfloat16",
-        QuantizedBlock::Packed { codec: Codec::Q5_0, bytes: _ } => "q5_0",
-        QuantizedBlock::Packed { codec: Codec::Q4_1, bytes: _ } => "q4_1",
-        QuantizedBlock::Packed { codec: Codec::Q8_1, bytes: _ } => "q8_1",
-        QuantizedBlock::Packed { codec: Codec::Q8K, bytes: _ } => "q8_k",
-        QuantizedBlock::Packed { codec: Codec::Iq1S, bytes: _ } => "iq1_s",
-        QuantizedBlock::Packed { codec: Codec::Iq1M, bytes: _ } => "iq1_m",
-        QuantizedBlock::Packed { codec: Codec::Iq2Xxs, bytes: _ } => "iq2_xxs",
-        QuantizedBlock::Packed { codec: Codec::Iq2S, bytes: _ } => "iq2_s",
-        QuantizedBlock::Packed { codec: Codec::Iq3S, bytes: _ } => "iq3_s",
-        QuantizedBlock::Packed { codec: Codec::Iq4Xs, bytes: _ } => "iq4_xs",
-        QuantizedBlock::Packed { codec: Codec::Tq10, bytes: _ } => "tq1_0",
-        QuantizedBlock::Packed { codec: Codec::Tq20, bytes: _ } => "tq2_0",
-        QuantizedBlock::Packed { codec: Codec::Mxfp4, bytes: _ } => "mxfp4",
-        QuantizedBlock::Packed { codec: Codec::Nvfp4, bytes: _ } => "nvfp4",
-        QuantizedBlock::Packed { codec: Codec::Q1_0, bytes: _ } => "q1_0",
-        QuantizedBlock::Packed { codec: Codec::Q2_0, bytes: _ } => "q2_0",
-        QuantizedBlock::Packed { codec: Codec::BFloat8, bytes: _ } => "bfloat8",
-        QuantizedBlock::Packed { codec: Codec::Bf8E5M2, bytes: _ } => "bf8_e5m2",
-        QuantizedBlock::Packed { codec: Codec::Bf4E2M1, bytes: _ } => "bf4_e2m1",
-        QuantizedBlock::Packed { codec: Codec::Fp6E3M2, bytes: _ } => "fp6_e3m2",
+        QuantizedBlock::Packed {
+            codec: Codec::Q2K,
+            bytes: _,
+        } => "q2_k",
+        QuantizedBlock::Packed {
+            codec: Codec::Q3K,
+            bytes: _,
+        } => "q3_k",
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: _,
+        } => "q4_k",
+        QuantizedBlock::Packed {
+            codec: Codec::Q5K,
+            bytes: _,
+        } => "q5_k",
+        QuantizedBlock::Packed {
+            codec: Codec::Q6K,
+            bytes: _,
+        } => "q6_k",
+        QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes: _,
+        } => "q8_0",
+        QuantizedBlock::Packed {
+            codec: Codec::Q4_0,
+            bytes: _,
+        } => "q4_0",
+        QuantizedBlock::Packed {
+            codec: Codec::Q5_1,
+            bytes: _,
+        } => "q5_1",
+        QuantizedBlock::Packed {
+            codec: Codec::Iq4Nl,
+            bytes: _,
+        } => "iq4_nl",
+        QuantizedBlock::Packed {
+            codec: Codec::Iq2Xs,
+            bytes: _,
+        } => "iq2_xs",
+        QuantizedBlock::Packed {
+            codec: Codec::Iq3Xxs,
+            bytes: _,
+        } => "iq3_xxs",
+        QuantizedBlock::Packed {
+            codec: Codec::Float16,
+            bytes: _,
+        } => "float16",
+        QuantizedBlock::Packed {
+            codec: Codec::BFloat16,
+            bytes: _,
+        } => "bfloat16",
+        QuantizedBlock::Packed {
+            codec: Codec::Q5_0,
+            bytes: _,
+        } => "q5_0",
+        QuantizedBlock::Packed {
+            codec: Codec::Q4_1,
+            bytes: _,
+        } => "q4_1",
+        QuantizedBlock::Packed {
+            codec: Codec::Q8_1,
+            bytes: _,
+        } => "q8_1",
+        QuantizedBlock::Packed {
+            codec: Codec::Q8K,
+            bytes: _,
+        } => "q8_k",
+        QuantizedBlock::Packed {
+            codec: Codec::Iq1S,
+            bytes: _,
+        } => "iq1_s",
+        QuantizedBlock::Packed {
+            codec: Codec::Iq1M,
+            bytes: _,
+        } => "iq1_m",
+        QuantizedBlock::Packed {
+            codec: Codec::Iq2Xxs,
+            bytes: _,
+        } => "iq2_xxs",
+        QuantizedBlock::Packed {
+            codec: Codec::Iq2S,
+            bytes: _,
+        } => "iq2_s",
+        QuantizedBlock::Packed {
+            codec: Codec::Iq3S,
+            bytes: _,
+        } => "iq3_s",
+        QuantizedBlock::Packed {
+            codec: Codec::Iq4Xs,
+            bytes: _,
+        } => "iq4_xs",
+        QuantizedBlock::Packed {
+            codec: Codec::Tq10,
+            bytes: _,
+        } => "tq1_0",
+        QuantizedBlock::Packed {
+            codec: Codec::Tq20,
+            bytes: _,
+        } => "tq2_0",
+        QuantizedBlock::Packed {
+            codec: Codec::Mxfp4,
+            bytes: _,
+        } => "mxfp4",
+        QuantizedBlock::Packed {
+            codec: Codec::Nvfp4,
+            bytes: _,
+        } => "nvfp4",
+        QuantizedBlock::Packed {
+            codec: Codec::Q1_0,
+            bytes: _,
+        } => "q1_0",
+        QuantizedBlock::Packed {
+            codec: Codec::Q2_0,
+            bytes: _,
+        } => "q2_0",
+        QuantizedBlock::Packed {
+            codec: Codec::BFloat8,
+            bytes: _,
+        } => "bfloat8",
+        QuantizedBlock::Packed {
+            codec: Codec::Bf8E5M2,
+            bytes: _,
+        } => "bf8_e5m2",
+        QuantizedBlock::Packed {
+            codec: Codec::Bf4E2M1,
+            bytes: _,
+        } => "bf4_e2m1",
+        QuantizedBlock::Packed {
+            codec: Codec::Fp6E3M2,
+            bytes: _,
+        } => "fp6_e3m2",
     }
 }
 
@@ -1359,7 +1461,10 @@ mod block_node_attribution_tests {
         // `block_node_ids(&program)` is `[activation, weight]`, so this is
         // the opposite order.
         let blocks = [
-            QuantizedBlock::Packed { codec: Codec::Q6K, bytes: &packed_weight },
+            QuantizedBlock::Packed {
+                codec: Codec::Q6K,
+                bytes: &packed_weight,
+            },
             QuantizedBlock::Float32(&activation_data),
         ];
 
@@ -1406,7 +1511,10 @@ mod block_node_attribution_tests {
 
         let blocks = [
             QuantizedBlock::Float32(&activation_data),
-            QuantizedBlock::Packed { codec: Codec::Q6K, bytes: &packed_weight },
+            QuantizedBlock::Packed {
+                codec: Codec::Q6K,
+                bytes: &packed_weight,
+            },
         ];
 
         match plan(&program, &[], &blocks, &[]) {

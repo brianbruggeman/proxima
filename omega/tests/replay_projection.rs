@@ -44,11 +44,15 @@ fn env_str(name: &str) -> Option<String> {
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
-    env_str(name).and_then(|value| value.parse().ok()).unwrap_or(default)
+    env_str(name)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
-    env_str(name).and_then(|value| value.parse().ok()).unwrap_or(default)
+    env_str(name)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
 }
 
 /// `true` when this process should skip `node`'s test entirely -- `REPLAY_NODE`
@@ -133,22 +137,90 @@ fn append_gelu_tanh(program: &mut Vec<Op>, x: NodeId, ones: NodeId) -> NodeId {
     let half = scalar_constant(program, 0.5);
     let cubic_coeff = scalar_constant(program, 0.044_715);
     let sqrt_two_over_pi = scalar_constant(program, 0.797_884_6);
-    let x_squared = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, "sg->sg"), (x, "sg->sg")]).unwrap();
-    let x_cubed = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x_squared, "sg->sg"), (x, "sg->sg")]).unwrap();
-    let cubic_term = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x_cubed, "sg->sg"), (cubic_coeff, "->sg")]).unwrap();
-    let inner = elementwise(program, DType::Float32, ScalarOp::Add, &[(x, "sg->sg"), (cubic_term, "sg->sg")]).unwrap();
-    let scaled_inner = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(inner, "sg->sg"), (sqrt_two_over_pi, "->sg")]).unwrap();
-    let tanh_term = elementwise(program, DType::Float32, ScalarOp::Tanh, &[(scaled_inner, "sg->sg")]).unwrap();
-    let one_plus_tanh = elementwise(program, DType::Float32, ScalarOp::Add, &[(tanh_term, "sg->sg"), (ones, "->sg")]).unwrap();
-    let half_x = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, "sg->sg"), (half, "->sg")]).unwrap();
-    elementwise(program, DType::Float32, ScalarOp::Multiply, &[(half_x, "sg->sg"), (one_plus_tanh, "sg->sg")]).unwrap()
+    let x_squared = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, "sg->sg"), (x, "sg->sg")],
+    )
+    .unwrap();
+    let x_cubed = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x_squared, "sg->sg"), (x, "sg->sg")],
+    )
+    .unwrap();
+    let cubic_term = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x_cubed, "sg->sg"), (cubic_coeff, "->sg")],
+    )
+    .unwrap();
+    let inner = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(x, "sg->sg"), (cubic_term, "sg->sg")],
+    )
+    .unwrap();
+    let scaled_inner = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(inner, "sg->sg"), (sqrt_two_over_pi, "->sg")],
+    )
+    .unwrap();
+    let tanh_term = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Tanh,
+        &[(scaled_inner, "sg->sg")],
+    )
+    .unwrap();
+    let one_plus_tanh = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(tanh_term, "sg->sg"), (ones, "->sg")],
+    )
+    .unwrap();
+    let half_x = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, "sg->sg"), (half, "->sg")],
+    )
+    .unwrap();
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(half_x, "sg->sg"), (one_plus_tanh, "sg->sg")],
+    )
+    .unwrap()
 }
 
 /// Node 2994's own replay: plain `[600,1536,12288]` Q4_0 reduce, no epilogue.
 fn gate_program() -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
-    let weight = append(&mut program, Op::Input { dtype: DType::UInt8, shape: vec![Extent::Static(FEED_FORWARD), Extent::Static(EMBEDDING)], name: None });
-    let activation = append(&mut program, Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(TOKENS), Extent::Static(EMBEDDING)], name: None });
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::UInt8,
+            shape: vec![Extent::Static(FEED_FORWARD), Extent::Static(EMBEDDING)],
+            name: None,
+        },
+    );
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(TOKENS), Extent::Static(EMBEDDING)],
+            name: None,
+        },
+    );
     let gate = append_matmul(&mut program, weight, activation);
     (program, gate)
 }
@@ -159,13 +231,40 @@ fn gate_program() -> (Vec<Op>, NodeId) {
 /// isolating exactly the dispatch under test.
 fn up_geglu_program() -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
-    let weight = append(&mut program, Op::Input { dtype: DType::UInt8, shape: vec![Extent::Static(FEED_FORWARD), Extent::Static(EMBEDDING)], name: None });
-    let activation = append(&mut program, Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(TOKENS), Extent::Static(EMBEDDING)], name: None });
-    let gate = append(&mut program, Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(TOKENS), Extent::Static(FEED_FORWARD)], name: None });
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::UInt8,
+            shape: vec![Extent::Static(FEED_FORWARD), Extent::Static(EMBEDDING)],
+            name: None,
+        },
+    );
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(TOKENS), Extent::Static(EMBEDDING)],
+            name: None,
+        },
+    );
+    let gate = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(TOKENS), Extent::Static(FEED_FORWARD)],
+            name: None,
+        },
+    );
     let up = append_matmul(&mut program, weight, activation);
     let ones = scalar_constant(&mut program, 1.0);
     let activated_gate = append_gelu_tanh(&mut program, gate, ones);
-    let ffn_hidden = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(activated_gate, "sg->sg"), (up, "sg->sg")]).unwrap();
+    let ffn_hidden = elementwise(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(activated_gate, "sg->sg"), (up, "sg->sg")],
+    )
+    .unwrap();
     (program, ffn_hidden)
 }
 
@@ -210,7 +309,9 @@ struct ReplayRun {
 fn check_bits(bits: &[u32], production: &[f32]) -> (usize, Vec<(usize, f32, f32)>) {
     let mut differing_words = 0usize;
     let mut first_differences = Vec::new();
-    for (index, (replayed_bits, &production_value)) in bits.iter().zip(production.iter()).enumerate() {
+    for (index, (replayed_bits, &production_value)) in
+        bits.iter().zip(production.iter()).enumerate()
+    {
         let replayed_value = f32::from_bits(*replayed_bits);
         if replayed_value.to_bits() != production_value.to_bits() {
             differing_words += 1;
@@ -222,7 +323,14 @@ fn check_bits(bits: &[u32], production: &[f32]) -> (usize, Vec<(usize, f32, f32)
     (differing_words, first_differences)
 }
 
-fn replay(program: &[Op], output: NodeId, blocks: &[QuantizedBlock<'_>], production: &[f32], env_vars: &[(&str, Option<&str>)], label: String) -> ReplayRun {
+fn replay(
+    program: &[Op],
+    output: NodeId,
+    blocks: &[QuantizedBlock<'_>],
+    production: &[f32],
+    env_vars: &[(&str, Option<&str>)],
+    label: String,
+) -> ReplayRun {
     let warm = env_usize("REPLAY_WARM", 2);
     let iters = env_usize("REPLAY_ITERS", 20);
     let idle_ms = env_u64("REPLAY_IDLE_MS", 1500);
@@ -241,14 +349,26 @@ fn replay(program: &[Op], output: NodeId, blocks: &[QuantizedBlock<'_>], product
         // pipeline_buffers_upload.rs`) all run BEFORE `window_begin` below --
         // grep this run's stderr for `pipeline_create` appearing before
         // `window_begin` to confirm the window holds execution only.
-        let plan = omega::plan(program, &[], blocks, &[output], NumericPolicy::llama_relaxed())
-            .expect("metal plans the replayed projection");
-        let kernel_keys = plan.kernel_keys().expect("plan reports its own kernel cache keys");
+        let plan = omega::plan(
+            program,
+            &[],
+            blocks,
+            &[output],
+            NumericPolicy::llama_relaxed(),
+        )
+        .expect("metal plans the replayed projection");
+        let kernel_keys = plan
+            .kernel_keys()
+            .expect("plan reports its own kernel cache keys");
         let mut warm_differing_words = 0usize;
         for _ in 0..warm {
-            let (evaluated, _gpu_ns) =
-                omega::execute_plan_timed(&plan, blocks).expect("metal runs the replayed projection (warm)");
-            let bits: Vec<u32> = evaluated.root().iter().map(|value| value.to_bits()).collect();
+            let (evaluated, _gpu_ns) = omega::execute_plan_timed(&plan, blocks)
+                .expect("metal runs the replayed projection (warm)");
+            let bits: Vec<u32> = evaluated
+                .root()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect();
             warm_differing_words += check_bits(&bits, production).0;
         }
         eprintln!(
@@ -285,11 +405,15 @@ fn replay(program: &[Op], output: NodeId, blocks: &[QuantizedBlock<'_>], product
             // `gpu_ns` is GPU-only (command-buffer start/end times, no host
             // encode/readback); `started.elapsed()` below is wall time
             // around the whole call, including any host conversion.
-            let (evaluated, gpu_ns) =
-                omega::execute_plan_timed(&plan, blocks).expect("metal runs the replayed projection");
+            let (evaluated, gpu_ns) = omega::execute_plan_timed(&plan, blocks)
+                .expect("metal runs the replayed projection");
             wall_ms.push(started.elapsed().as_secs_f64() * 1e3);
             gpu_ms.push(gpu_ns as f64 / 1e6);
-            let bits: Vec<u32> = evaluated.root().iter().map(|value| value.to_bits()).collect();
+            let bits: Vec<u32> = evaluated
+                .root()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect();
             let (this_differing, this_first) = check_bits(&bits, production);
             differing_words += this_differing;
             if first_differences.is_empty() {
@@ -308,7 +432,14 @@ fn replay(program: &[Op], output: NodeId, blocks: &[QuantizedBlock<'_>], product
             wall_now()
         );
 
-        ReplayRun { label, wall_ms, gpu_ms, differing_words, first_differences, kernel_keys }
+        ReplayRun {
+            label,
+            wall_ms,
+            gpu_ms,
+            differing_words,
+            first_differences,
+            kernel_keys,
+        }
     })
 }
 
@@ -346,11 +477,26 @@ fn replay_node2994_gate_matches_production_dump() {
         return;
     }
     let dir = dump_dir();
-    let weight = read_exact(&dir, "node2994_buf1_off2632245504_len67108864.bin", WEIGHT_BYTES);
-    let activation = f32_le(&read_exact(&dir, "node2994_buf0_off0_len3686400.bin", ACTIVATION_BYTES));
-    let production = f32_le(&read_exact(&dir, "node2994_buf2_off0_len29491200.bin", ROW_BYTES));
+    let weight = read_exact(
+        &dir,
+        "node2994_buf1_off2632245504_len67108864.bin",
+        WEIGHT_BYTES,
+    );
+    let activation = f32_le(&read_exact(
+        &dir,
+        "node2994_buf0_off0_len3686400.bin",
+        ACTIVATION_BYTES,
+    ));
+    let production = f32_le(&read_exact(
+        &dir,
+        "node2994_buf2_off0_len29491200.bin",
+        ROW_BYTES,
+    ));
     let blocks = [
-        QuantizedBlock::Packed { codec: omega::Codec::Q4_0, bytes: &weight },
+        QuantizedBlock::Packed {
+            codec: omega::Codec::Q4_0,
+            bytes: &weight,
+        },
         QuantizedBlock::Float32(&activation),
     ];
     let mut runs = Vec::new();
@@ -362,7 +508,11 @@ fn replay_node2994_gate_matches_production_dump() {
         runs.push(run);
     }
     for run in &runs {
-        assert_eq!(run.differing_words, 0, "{}: replay diverged from the production dump", run.label);
+        assert_eq!(
+            run.differing_words, 0,
+            "{}: replay diverged from the production dump",
+            run.label
+        );
     }
 }
 
@@ -373,12 +523,31 @@ fn replay_node3009_up_geglu_matches_production_dump() {
         return;
     }
     let dir = dump_dir();
-    let weight = read_exact(&dir, "node3009_buf1_off2642868480_len67108864.bin", WEIGHT_BYTES);
-    let activation = f32_le(&read_exact(&dir, "node3009_buf0_off0_len3686400.bin", ACTIVATION_BYTES));
-    let gate = f32_le(&read_exact(&dir, "node2994_buf2_off0_len29491200.bin", ROW_BYTES));
-    let production = f32_le(&read_exact(&dir, "node3009_buf11_off0_len29491200.bin", ROW_BYTES));
+    let weight = read_exact(
+        &dir,
+        "node3009_buf1_off2642868480_len67108864.bin",
+        WEIGHT_BYTES,
+    );
+    let activation = f32_le(&read_exact(
+        &dir,
+        "node3009_buf0_off0_len3686400.bin",
+        ACTIVATION_BYTES,
+    ));
+    let gate = f32_le(&read_exact(
+        &dir,
+        "node2994_buf2_off0_len29491200.bin",
+        ROW_BYTES,
+    ));
+    let production = f32_le(&read_exact(
+        &dir,
+        "node3009_buf11_off0_len29491200.bin",
+        ROW_BYTES,
+    ));
     let blocks = [
-        QuantizedBlock::Packed { codec: omega::Codec::Q4_0, bytes: &weight },
+        QuantizedBlock::Packed {
+            codec: omega::Codec::Q4_0,
+            bytes: &weight,
+        },
         QuantizedBlock::Float32(&activation),
         QuantizedBlock::Float32(&gate),
     ];
@@ -391,6 +560,10 @@ fn replay_node3009_up_geglu_matches_production_dump() {
         runs.push(run);
     }
     for run in &runs {
-        assert_eq!(run.differing_words, 0, "{}: replay diverged from the production dump", run.label);
+        assert_eq!(
+            run.differing_words, 0,
+            "{}: replay diverged from the production dump",
+            run.label
+        );
     }
 }

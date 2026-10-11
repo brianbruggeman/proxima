@@ -38,7 +38,10 @@ impl Codec {
     }
 
     fn quantized_block(self, packed: &[u8]) -> QuantizedBlock<'_> {
-        QuantizedBlock::Packed { codec: self.packed(), bytes: packed }
+        QuantizedBlock::Packed {
+            codec: self.packed(),
+            bytes: packed,
+        }
     }
 
     fn block_bytes(self) -> usize {
@@ -364,7 +367,10 @@ fn q4k_eight_activation_rows_is_byte_identical_across_twenty_runs() {
     let activation = random_vec(97, TOKENS * IN_DIM);
     let (program, sum) = matmul_program(TOKENS as u32, IN_DIM as u32, OUT_ROWS as u32);
     let blocks = [
-        QuantizedBlock::Packed { codec: omega::Codec::Q4K, bytes: &packed },
+        QuantizedBlock::Packed {
+            codec: omega::Codec::Q4K,
+            bytes: &packed,
+        },
         QuantizedBlock::Float32(&activation),
     ];
     let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())

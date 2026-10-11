@@ -106,7 +106,9 @@ pub fn vocab_from_metadata(metadata: &ParsedGguf) -> Result<Vocab, TokenizerErro
                 vocab.with_pre_type(pre_type_from_metadata(metadata)?)
             }
         }
-        (MODEL_BYTE_LEVEL_BPE, None) => return Err(TokenizerError::MissingMetadataKey { key: MERGES_KEY }),
+        (MODEL_BYTE_LEVEL_BPE, None) => {
+            return Err(TokenizerError::MissingMetadataKey { key: MERGES_KEY });
+        }
         (other, None) => {
             return Err(TokenizerError::UnsupportedTokenizerModel {
                 model: String::from(other),

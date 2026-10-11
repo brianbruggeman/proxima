@@ -38,6 +38,8 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+#[cfg(feature = "alloc")]
+pub mod accept_rule;
 pub mod arch;
 #[cfg(feature = "alloc")]
 pub mod arena;
@@ -45,8 +47,6 @@ pub mod kv_decision;
 pub mod ring;
 #[cfg(feature = "alloc")]
 pub mod serving_state;
-#[cfg(feature = "alloc")]
-pub mod accept_rule;
 // per-worker BytesMut reservoir; std-only (thread_local has no no_std
 // analog). folded in from the former proxima-io satellite crate.
 #[cfg(feature = "alloc")]

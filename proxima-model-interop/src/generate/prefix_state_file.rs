@@ -64,15 +64,16 @@ fn attention_layer(cache: &LayerCache, cached_len: usize) -> Result<BlockFileLay
     }
 }
 
-fn layer_record(entry: &LayerCacheState, cached_len: usize) -> Result<BlockFileLayer, InteropError> {
+fn layer_record(
+    entry: &LayerCacheState,
+    cached_len: usize,
+) -> Result<BlockFileLayer, InteropError> {
     match entry {
         LayerCacheState::SharedFromLayer => Ok(BlockFileLayer::default()),
         LayerCacheState::Attention(cache) => attention_layer(cache, cached_len),
         LayerCacheState::DenseAttention(_)
         | LayerCacheState::ShortConv(_)
-        | LayerCacheState::Ssm(_) => {
-            Err(malformed("layer kind has no row planes"))
-        }
+        | LayerCacheState::Ssm(_) => Err(malformed("layer kind has no row planes")),
     }
 }
 
@@ -83,7 +84,11 @@ fn layer_planes(entry: &LayerCacheState) -> [&[f32]; 3] {
     }
 }
 
-fn read_plane(view: &BlockFileView<'_>, layer: usize, plane: usize) -> Result<Vec<f32>, InteropError> {
+fn read_plane(
+    view: &BlockFileView<'_>,
+    layer: usize,
+    plane: usize,
+) -> Result<Vec<f32>, InteropError> {
     let mut values = Vec::new();
     view.plane_f32(layer, plane, &mut values)
         .ok_or(malformed("plane is not whole f32 values"))?;
@@ -101,7 +106,13 @@ fn restored_ring(record: &BlockFileLayer) -> Result<Option<KvRing>, InteropError
     }
     let even_odd_row = record.k_even_row_bytes as usize / size_of::<f32>();
     let v_row = record.v_row_bytes as usize / size_of::<f32>();
-    Ok(Some(KvRing::new(window, capacity - window, even_odd_row, v_row, 0)))
+    Ok(Some(KvRing::new(
+        window,
+        capacity - window,
+        even_odd_row,
+        v_row,
+        0,
+    )))
 }
 
 fn restored_layer(view: &BlockFileView<'_>, layer: usize) -> Result<LayerCacheState, InteropError> {
@@ -145,8 +156,17 @@ impl PrefixState {
             .iter()
             .map(|entry| layer_record(entry, self.cached_len))
             .collect::<Result<Vec<_>, _>>()?;
-        let header = BlockFileHeader { descriptor_digest, content_key, base_position: 0, layers };
-        let planes = self.layer_caches.iter().flat_map(layer_planes).collect::<Vec<_>>();
+        let header = BlockFileHeader {
+            descriptor_digest,
+            content_key,
+            base_position: 0,
+            layers,
+        };
+        let planes = self
+            .layer_caches
+            .iter()
+            .flat_map(layer_planes)
+            .collect::<Vec<_>>();
         encode_block(&header, &planes, out)
     }
 
@@ -171,7 +191,11 @@ impl PrefixState {
         let layer_caches = (0..view.header.layers.len())
             .map(|layer| restored_layer(view, layer))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(PrefixState { ids, layer_caches, cached_len })
+        Ok(PrefixState {
+            ids,
+            layer_caches,
+            cached_len,
+        })
     }
 }
 
@@ -222,7 +246,14 @@ mod tests {
             ring_window: window,
             ring_capacity: capacity,
         };
-        assert_eq!(view.header.layers, vec![ring_row(4, 0, 0), ring_row(3, 2, 3), BlockFileLayer::default()]);
+        assert_eq!(
+            view.header.layers,
+            vec![
+                ring_row(4, 0, 0),
+                ring_row(3, 2, 3),
+                BlockFileLayer::default()
+            ]
+        );
         assert_eq!(view.header.descriptor_digest, [0x33; 16]);
         assert_eq!(view.header.content_key, 0xABCD);
         assert_eq!(view.header.base_position, 0);
@@ -232,7 +263,8 @@ mod tests {
             panic!("fixture layers 0 and 1 are attention layers");
         };
         let mut plane = Vec::new();
-        view.plane_f32(0, 0, &mut plane).expect("layer 0 k_even plane");
+        view.plane_f32(0, 0, &mut plane)
+            .expect("layer 0 k_even plane");
         assert_eq!(bits(&plane), bits(&full.k_even));
         view.plane_f32(1, 2, &mut plane).expect("layer 1 v plane");
         assert_eq!(bits(&plane), bits(&ring.v));
@@ -253,7 +285,9 @@ mod tests {
 
         assert!(matches!(
             refused,
-            Err(InteropError::BlockFileMalformed { reason: "layer kind has no row planes" })
+            Err(InteropError::BlockFileMalformed {
+                reason: "layer kind has no row planes"
+            })
         ));
     }
 
@@ -270,7 +304,12 @@ mod tests {
 
         let refused = state.to_block_file([0; 16], 1, &mut out);
 
-        assert!(matches!(refused, Err(InteropError::BlockFileMalformed { reason: "ring is displaced" })));
+        assert!(matches!(
+            refused,
+            Err(InteropError::BlockFileMalformed {
+                reason: "ring is displaced"
+            })
+        ));
     }
 
     #[test]
@@ -281,7 +320,12 @@ mod tests {
 
         let refused = state.to_block_file([0; 16], 1, &mut out);
 
-        assert!(matches!(refused, Err(InteropError::BlockFileMalformed { reason: "nothing cached" })));
+        assert!(matches!(
+            refused,
+            Err(InteropError::BlockFileMalformed {
+                reason: "nothing cached"
+            })
+        ));
     }
 
     fn one_row_header(ring_window: u32, ring_capacity: u32) -> BlockFileHeader {
@@ -293,7 +337,12 @@ mod tests {
             ring_window,
             ring_capacity,
         };
-        BlockFileHeader { descriptor_digest: [0x33; 16], content_key: 1, base_position: 0, layers: vec![layer] }
+        BlockFileHeader {
+            descriptor_digest: [0x33; 16],
+            content_key: 1,
+            base_position: 0,
+            layers: vec![layer],
+        }
     }
 
     fn one_row_bytes(header: &BlockFileHeader) -> Vec<u8> {
@@ -306,7 +355,9 @@ mod tests {
     fn prefix_state_file_round_trips_every_layer_bit_for_bit() {
         let state = three_layer_state();
         let mut first = Vec::new();
-        state.to_block_file([0x33; 16], 0xABCD, &mut first).expect("the state encodes");
+        state
+            .to_block_file([0x33; 16], 0xABCD, &mut first)
+            .expect("the state encodes");
         let view = decode_block(&first).expect("the encoded state decodes");
 
         let restored = PrefixState::from_block_file(state.ids.clone(), state.cached_len, &view)
@@ -322,12 +373,20 @@ mod tests {
             assert_eq!(bits(&back.k_odd), bits(&source.k_odd));
             assert_eq!(bits(&back.v), bits(&source.v));
         }
-        assert_eq!(attention(&restored, 1).ring_geometry(), Some(&KvRing::new(2, 1, 2, 1, 0)));
-        assert!(matches!(restored.layer_caches[2], LayerCacheState::SharedFromLayer));
+        assert_eq!(
+            attention(&restored, 1).ring_geometry(),
+            Some(&KvRing::new(2, 1, 2, 1, 0))
+        );
+        assert!(matches!(
+            restored.layer_caches[2],
+            LayerCacheState::SharedFromLayer
+        ));
         assert_eq!(restored.cached_len, state.cached_len);
         assert_eq!(restored.ids, state.ids);
         let mut second = Vec::new();
-        restored.to_block_file([0x33; 16], 0xABCD, &mut second).expect("the restored state encodes");
+        restored
+            .to_block_file([0x33; 16], 0xABCD, &mut second)
+            .expect("the restored state encodes");
         assert_eq!(second, first);
     }
 
@@ -340,7 +399,9 @@ mod tests {
 
         assert!(matches!(
             refused,
-            Err(InteropError::BlockFileMalformed { reason: "ring window exceeds ring capacity" })
+            Err(InteropError::BlockFileMalformed {
+                reason: "ring window exceeds ring capacity"
+            })
         ));
     }
 
@@ -351,7 +412,12 @@ mod tests {
 
         let refused = PrefixState::from_block_file(vec![2, 818, 5279, 529], 5, &view);
 
-        assert!(matches!(refused, Err(InteropError::BlockFileMalformed { reason: "cached length exceeds ids" })));
+        assert!(matches!(
+            refused,
+            Err(InteropError::BlockFileMalformed {
+                reason: "cached length exceeds ids"
+            })
+        ));
     }
 
     #[test]
@@ -365,7 +431,9 @@ mod tests {
 
         assert!(matches!(
             refused,
-            Err(InteropError::BlockFileMalformed { reason: "plane is not whole f32 values" })
+            Err(InteropError::BlockFileMalformed {
+                reason: "plane is not whole f32 values"
+            })
         ));
     }
 }

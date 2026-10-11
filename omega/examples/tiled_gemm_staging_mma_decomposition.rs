@@ -41,7 +41,9 @@ fn main() -> anyhow::Result<()> {
     return run();
     #[cfg(not(all(feature = "metal", feature = "metal-tiled-gemm", target_os = "macos")))]
     {
-        println!("tiled_gemm_staging_mma_decomposition requires --features metal,metal-tiled-gemm on macOS");
+        println!(
+            "tiled_gemm_staging_mma_decomposition requires --features metal,metal-tiled-gemm on macOS"
+        );
         Ok(())
     }
 }
@@ -82,7 +84,9 @@ fn run() -> anyhow::Result<()> {
     // convention: each integration-test/example crate restates its own GGUF
     // reader rather than sharing one across separately-compiled binaries) --
 
-    fn real_gguf_header(path: &std::path::Path) -> anyhow::Result<Option<(ParsedGguf, u64, std::fs::File)>> {
+    fn real_gguf_header(
+        path: &std::path::Path,
+    ) -> anyhow::Result<Option<(ParsedGguf, u64, std::fs::File)>> {
         let Ok(mut file) = std::fs::File::open(path) else {
             return Ok(None);
         };
@@ -106,13 +110,18 @@ fn run() -> anyhow::Result<()> {
                         GgufEvent::Header { version: value, .. } => version = Some(value),
                         GgufEvent::Metadata { key, value } => metadata.push((key, value)),
                         GgufEvent::Tensor(tensor) => tensors.push(tensor),
-                        GgufEvent::Complete { data_offset, alignment } => {
+                        GgufEvent::Complete {
+                            data_offset,
+                            alignment,
+                        } => {
                             completion = Some((data_offset, alignment));
                         }
                     }
                 }
                 if let (Some(version), Some((data_offset, alignment))) = (version, completion) {
-                    parser.finish().context("parser reports complete and clean")?;
+                    parser
+                        .finish()
+                        .context("parser reports complete and clean")?;
                     return Ok(Some((
                         ParsedGguf {
                             version,
@@ -146,14 +155,23 @@ fn run() -> anyhow::Result<()> {
             .iter()
             .find(|candidate| candidate.name == name)
             .with_context(|| format!("{name} present in the real gemma4-E2B checkpoint"))?;
-        eprintln!("real_tensor_bytes name={name} dims={:?} ggml_type={:?}", tensor.dims, tensor.ggml_type);
-        anyhow::ensure!(tensor.ggml_type == GgmlType::Q4_0, "{name} is Q4_0 in this checkpoint, found {:?}", tensor.ggml_type);
+        eprintln!(
+            "real_tensor_bytes name={name} dims={:?} ggml_type={:?}",
+            tensor.dims, tensor.ggml_type
+        );
+        anyhow::ensure!(
+            tensor.ggml_type == GgmlType::Q4_0,
+            "{name} is Q4_0 in this checkpoint, found {:?}",
+            tensor.ggml_type
+        );
         let range = parsed
             .tensor_data_range(tensor, file_len)
             .context("tensor byte range within file bounds")?;
         let mut buf = vec![0u8; (range.end - range.start) as usize];
-        file.seek(SeekFrom::Start(range.start)).context("seek to tensor data")?;
-        file.read_exact(&mut buf).context("read exact tensor byte range")?;
+        file.seek(SeekFrom::Start(range.start))
+            .context("seek to tensor data")?;
+        file.read_exact(&mut buf)
+            .context("read exact tensor byte range")?;
         Ok(buf)
     }
 
@@ -226,14 +244,21 @@ fn run() -> anyhow::Result<()> {
         let ns_source = NSString::from_str(source);
         let library = device
             .newLibraryWithSource_options_error(&ns_source, Some(&options))
-            .map_err(|error| anyhow::anyhow!("compiles `{entry}`: {}", error.localizedDescription()))?;
+            .map_err(|error| {
+                anyhow::anyhow!("compiles `{entry}`: {}", error.localizedDescription())
+            })?;
         let ns_entry = NSString::from_str(entry);
         let function = library
             .newFunctionWithName(&ns_entry)
             .with_context(|| format!("entry `{entry}` present in its own compiled library"))?;
         device
             .newComputePipelineStateWithFunction_error(&function)
-            .map_err(|error| anyhow::anyhow!("creates the pipeline for `{entry}`: {}", error.localizedDescription()))
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "creates the pipeline for `{entry}`: {}",
+                    error.localizedDescription()
+                )
+            })
     }
 
     fn shared_buffer_from_bytes(
@@ -243,11 +268,20 @@ fn run() -> anyhow::Result<()> {
         // SAFETY: `bytes` outlives this call; `newBufferWithBytes_length_options`
         // copies once and never retains the pointer.
         let pointer = unsafe { NonNull::new_unchecked(bytes.as_ptr() as *mut c_void) };
-        unsafe { device.newBufferWithBytes_length_options(pointer, bytes.len(), MTLResourceOptions::StorageModeShared) }
-            .context("device allocates a fresh shared buffer")
+        unsafe {
+            device.newBufferWithBytes_length_options(
+                pointer,
+                bytes.len(),
+                MTLResourceOptions::StorageModeShared,
+            )
+        }
+        .context("device allocates a fresh shared buffer")
     }
 
-    fn zeroed_buffer(device: &ProtocolObject<dyn MTLDevice>, len: usize) -> anyhow::Result<Retained<ProtocolObject<dyn MTLBuffer>>> {
+    fn zeroed_buffer(
+        device: &ProtocolObject<dyn MTLDevice>,
+        len: usize,
+    ) -> anyhow::Result<Retained<ProtocolObject<dyn MTLBuffer>>> {
         shared_buffer_from_bytes(device, &vec![0u8; len])
     }
 
@@ -274,7 +308,9 @@ fn run() -> anyhow::Result<()> {
         threadgroup_width: usize,
     ) -> anyhow::Result<f64> {
         let command_buffer = queue.commandBuffer().context("command buffer")?;
-        let encoder = command_buffer.computeCommandEncoder().context("compute encoder")?;
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .context("compute encoder")?;
         encoder.setComputePipelineState(pipeline);
         unsafe {
             encoder.setBuffer_offset_atIndex(Some(weight), 0, 0);
@@ -282,8 +318,16 @@ fn run() -> anyhow::Result<()> {
             encoder.setBuffer_offset_atIndex(Some(output), 0, 2);
             encoder.setBuffer_offset_atIndex(Some(uniform), 0, 3);
         }
-        let grid = MTLSize { width: grid_threads as usize, height: 1, depth: 1 };
-        let threadgroup = MTLSize { width: threadgroup_width, height: 1, depth: 1 };
+        let grid = MTLSize {
+            width: grid_threads as usize,
+            height: 1,
+            depth: 1,
+        };
+        let threadgroup = MTLSize {
+            width: threadgroup_width,
+            height: 1,
+            depth: 1,
+        };
         encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
         encoder.endEncoding();
         command_buffer.commit();
@@ -299,20 +343,34 @@ fn run() -> anyhow::Result<()> {
 
     fn stats(samples: &[f64]) -> Stats {
         let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-        let variance = samples.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+        let variance = samples
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / samples.len() as f64;
         let cov_pct = (variance.sqrt() / mean) * 100.0;
-        Stats { mean, cov_pct, samples: samples.to_vec() }
+        Stats {
+            mean,
+            cov_pct,
+            samples: samples.to_vec(),
+        }
     }
 
-    if let Ok(output) = std::process::Command::new("pgrep").args(["-fl", "cargo|rustc"]).output()
+    if let Ok(output) = std::process::Command::new("pgrep")
+        .args(["-fl", "cargo|rustc"])
+        .output()
         && !output.stdout.is_empty()
     {
-        eprintln!("WARNING: cargo/rustc running elsewhere:\n{}", String::from_utf8_lossy(&output.stdout));
+        eprintln!(
+            "WARNING: cargo/rustc running elsewhere:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 
     // -- real weight bytes --
-    let (parsed, file_len, mut file) = real_gguf_header(std::path::Path::new(REAL_GEMMA4_GGUF_PATH))?
-        .context("real gemma4-E2B gguf header parses")?;
+    let (parsed, file_len, mut file) =
+        real_gguf_header(std::path::Path::new(REAL_GEMMA4_GGUF_PATH))?
+            .context("real gemma4-E2B gguf header parses")?;
     let weight_bytes = real_tensor_bytes(&mut file, &parsed, file_len, "blk.0.ffn_gate.weight")?;
     let activation_bytes: Vec<u8> = random_activation(97, (TOKENS as usize) * (EMBEDDING as usize))
         .iter()
@@ -324,16 +382,20 @@ fn run() -> anyhow::Result<()> {
     let (program, weight_node, _activation_node, gate_node) = gate_program();
     let numeric_policy = NumericPolicy::llama_relaxed();
     let shapes = infer(&program, &[]).context("gate program infers")?;
-    let mut bound_ops = bind(&program, &shapes, &[gate_node], numeric_policy).context("gate program binds")?;
+    let mut bound_ops =
+        bind(&program, &shapes, &[gate_node], numeric_policy).context("gate program binds")?;
     let packed_node_set: BTreeSet<NodeId> = [weight_node].into_iter().collect();
     correct_packed_matmul_layouts(&mut bound_ops, &packed_node_set);
     let bound = bound_ops
         .into_iter()
         .find(|op| op.node == gate_node)
         .context("gate's own fused reduce is present in the bound program")?;
-    let packed_operands: omega::PackedOperands = std::collections::BTreeMap::from([(weight_node, omega::Codec::Q4_0)]);
-    let kernel = omega::emit(&bound, &packed_operands, numeric_policy).context("production kernel emits")?;
-    let uniform_bytes = omega::metal::pack_uniforms_for(&bound, numeric_policy).context("production uniforms pack")?;
+    let packed_operands: omega::PackedOperands =
+        std::collections::BTreeMap::from([(weight_node, omega::Codec::Q4_0)]);
+    let kernel =
+        omega::emit(&bound, &packed_operands, numeric_policy).context("production kernel emits")?;
+    let uniform_bytes = omega::metal::pack_uniforms_for(&bound, numeric_policy)
+        .context("production uniforms pack")?;
 
     eprintln!(
         "kernel entry={} grid_threads={} bindings={:?}",
@@ -344,13 +406,15 @@ fn run() -> anyhow::Result<()> {
     let output_dir = std::env::temp_dir().join("proxima-tiled-gemm-staging-mma-decomposition");
     std::fs::create_dir_all(&output_dir).context("create staging-mma-decomposition output dir")?;
     std::fs::write(output_dir.join("live_source_a.metal"), &source_a).ok();
-    let source_a_has_wide_activation_marker = source_a.contains("act_tile[a_col * 32 + a_k] = wide.x;");
+    let source_a_has_wide_activation_marker =
+        source_a.contains("act_tile[a_col * 32 + a_k] = wide.x;");
     anyhow::ensure!(
         source_a_has_wide_activation_marker,
         "wide activation staging marker must be present, found={source_a_has_wide_activation_marker}"
     );
-    let source_a_has_mma_call_marker =
-        source_a.contains("simdgroup_multiply_accumulate(acc[i * 2 + j], a_frag[i], b_frag[j], acc[i * 2 + j]);");
+    let source_a_has_mma_call_marker = source_a.contains(
+        "simdgroup_multiply_accumulate(acc[i * 2 + j], a_frag[i], b_frag[j], acc[i * 2 + j]);",
+    );
     anyhow::ensure!(
         source_a_has_mma_call_marker,
         "MMA call marker must be present, found={source_a_has_mma_call_marker}"
@@ -380,8 +444,13 @@ fn run() -> anyhow::Result<()> {
     // -- Arm C: weight (dequant) staging -> constant half fill --
     let weight_stage_block_start = "            if (w_feat < feature_extent) {";
     let weight_stage_block_end = "            } else {\n                for (long fill_k = 0; fill_k < 32; ++fill_k) { weight_tile[w_row * 32 + fill_k] = 0.0h; }\n            }";
-    let weight_stage_start_index = source_a.find(weight_stage_block_start).context("weight staging start marker present")?;
-    let weight_stage_end_index = source_a.find(weight_stage_block_end).context("weight staging end marker present")? + weight_stage_block_end.len();
+    let weight_stage_start_index = source_a
+        .find(weight_stage_block_start)
+        .context("weight staging start marker present")?;
+    let weight_stage_end_index = source_a
+        .find(weight_stage_block_end)
+        .context("weight staging end marker present")?
+        + weight_stage_block_end.len();
     let weight_stage_full = &source_a[weight_stage_start_index..weight_stage_end_index];
     let weight_stage_constant = "\
                 for (int j = 0; j < 32; ++j) { weight_tile[w_row * 32 + j] = 1.0h; }";
@@ -389,9 +458,14 @@ fn run() -> anyhow::Result<()> {
 
     // -- Arm D: activation staging -> constant float fill --
     let act_stage_block_start = "        bool act_tile_interior";
-    let act_stage_block_end = "\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        for (int sub_k";
-    let act_stage_start_index = source_a.find(act_stage_block_start).context("activation staging start marker present")?;
-    let act_stage_barrier_index = source_a.find(act_stage_block_end).context("activation staging end marker present")?;
+    let act_stage_block_end =
+        "\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        for (int sub_k";
+    let act_stage_start_index = source_a
+        .find(act_stage_block_start)
+        .context("activation staging start marker present")?;
+    let act_stage_barrier_index = source_a
+        .find(act_stage_block_end)
+        .context("activation staging end marker present")?;
     let act_stage_full = &source_a[act_stage_start_index..act_stage_barrier_index];
     let act_stage_constant = "\
         for (long idx = tiitg; idx < 1024; idx += 128) { act_tile[idx] = 1.0f; }";
@@ -400,9 +474,13 @@ fn run() -> anyhow::Result<()> {
     // -- Arm E: both staging steps removed from the per-K-substep loop;
     // tile memory constant-filled ONCE outside the loop instead --
     let loop_open = "    for (long k0 = 0; k0 < u.reduction_total; k0 += 32) {\n";
-    let loop_open_index = source_a.find(loop_open).context("k0 loop open marker present")?;
+    let loop_open_index = source_a
+        .find(loop_open)
+        .context("k0 loop open marker present")?;
     let sub_k_open = "        for (int sub_k = 0; sub_k < 4; ++sub_k) {";
-    let sub_k_open_index = source_a.find(sub_k_open).context("sub_k loop open marker present")?;
+    let sub_k_open_index = source_a
+        .find(sub_k_open)
+        .context("sub_k loop open marker present")?;
     let once_fill = "\
     for (long fill_idx = tiitg; fill_idx < 2048; fill_idx += 128) { tg_shared[fill_idx] = 1; }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -415,7 +493,10 @@ fn run() -> anyhow::Result<()> {
         &source_a[sub_k_open_index..]
     );
     let source_e_has_mma = source_e.contains("simdgroup_multiply_accumulate");
-    anyhow::ensure!(source_e_has_mma, "arm E must keep the MMA call, contains_mma={source_e_has_mma}");
+    anyhow::ensure!(
+        source_e_has_mma,
+        "arm E must keep the MMA call, contains_mma={source_e_has_mma}"
+    );
 
     // -- Arm A': production kernel with `PROXIMA_TILED_GEMM_WIDE_WEIGHT_
     // STAGE=1` (see `docs/model-interop/discipline.md` ROW C4.12) -- and
@@ -448,8 +529,10 @@ fn run() -> anyhow::Result<()> {
         },
     );
     let source_a_wide_dstore = source_a_wide_dstore?;
-    let source_a_wide_dstore_has_wide_stage = source_a_wide_dstore.contains("q4_0_dequant_half16(wws_blk0");
-    let source_a_wide_dstore_has_direct_store = source_a_wide_dstore.contains("direct_store_interior");
+    let source_a_wide_dstore_has_wide_stage =
+        source_a_wide_dstore.contains("q4_0_dequant_half16(wws_blk0");
+    let source_a_wide_dstore_has_direct_store =
+        source_a_wide_dstore.contains("direct_store_interior");
     anyhow::ensure!(
         source_a_wide_dstore_has_wide_stage && source_a_wide_dstore_has_direct_store,
         "arm A'+dstore must carry both the wide-weight-stage and direct-store markers, has_wide_stage={source_a_wide_dstore_has_wide_stage} has_direct_store={source_a_wide_dstore_has_direct_store}"
@@ -491,15 +574,41 @@ fn run() -> anyhow::Result<()> {
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     // -- correctness gate: arm A vs the real production path --
-    let production_plan = omega::plan(&program, &[], &[
-        QuantizedBlock::Packed { codec: omega::Codec::Q4_0, bytes: &weight_bytes },
-        QuantizedBlock::Float32(unsafe { std::slice::from_raw_parts(activation_bytes.as_ptr().cast::<f32>(), (TOKENS as usize) * (EMBEDDING as usize)) }),
-    ], &[gate_node], numeric_policy)
-        .context("production plan compiles")?;
-    let production_evaluated = omega::execute_plan(&production_plan, &[
-        QuantizedBlock::Packed { codec: omega::Codec::Q4_0, bytes: &weight_bytes },
-        QuantizedBlock::Float32(unsafe { std::slice::from_raw_parts(activation_bytes.as_ptr().cast::<f32>(), (TOKENS as usize) * (EMBEDDING as usize)) }),
-    ]).context("production plan executes")?;
+    let production_plan = omega::plan(
+        &program,
+        &[],
+        &[
+            QuantizedBlock::Packed {
+                codec: omega::Codec::Q4_0,
+                bytes: &weight_bytes,
+            },
+            QuantizedBlock::Float32(unsafe {
+                std::slice::from_raw_parts(
+                    activation_bytes.as_ptr().cast::<f32>(),
+                    (TOKENS as usize) * (EMBEDDING as usize),
+                )
+            }),
+        ],
+        &[gate_node],
+        numeric_policy,
+    )
+    .context("production plan compiles")?;
+    let production_evaluated = omega::execute_plan(
+        &production_plan,
+        &[
+            QuantizedBlock::Packed {
+                codec: omega::Codec::Q4_0,
+                bytes: &weight_bytes,
+            },
+            QuantizedBlock::Float32(unsafe {
+                std::slice::from_raw_parts(
+                    activation_bytes.as_ptr().cast::<f32>(),
+                    (TOKENS as usize) * (EMBEDDING as usize),
+                )
+            }),
+        ],
+    )
+    .context("production plan executes")?;
     let production_output: Vec<f32> = production_evaluated.root().to_vec();
 
     dispatch_gpu_ns(
@@ -525,10 +634,9 @@ fn run() -> anyhow::Result<()> {
 
     // -- correctness gate: arm A' (wide-weight-stage) and A'+dstore vs A,
     // both dispatched off the same weight/activation/uniform buffers --
-    for (label, pipeline, output_buffer) in pipelines
-        .iter()
-        .filter(|(label, ..)| *label == "A_wide_weight_stage" || *label == "A_wide_weight_stage_dstore")
-    {
+    for (label, pipeline, output_buffer) in pipelines.iter().filter(|(label, ..)| {
+        *label == "A_wide_weight_stage" || *label == "A_wide_weight_stage_dstore"
+    }) {
         dispatch_gpu_ns(
             &queue,
             pipeline,
@@ -575,7 +683,10 @@ fn run() -> anyhow::Result<()> {
         }
     }
 
-    println!("STEADY_STATE iters={} warmup_dropped={WARMUP}", ITERS - WARMUP);
+    println!(
+        "STEADY_STATE iters={} warmup_dropped={WARMUP}",
+        ITERS - WARMUP
+    );
     let mut baseline_mean = 0.0;
     for (index, (label, _pipeline, _output_buffer)) in pipelines.iter().enumerate() {
         let run_stats = stats(&samples[index]);
@@ -587,7 +698,11 @@ fn run() -> anyhow::Result<()> {
             run_stats.mean,
             run_stats.cov_pct,
             run_stats.mean / baseline_mean.max(f64::EPSILON),
-            run_stats.samples.iter().map(|value| format!("{value:.3}")).collect::<Vec<_>>()
+            run_stats
+                .samples
+                .iter()
+                .map(|value| format!("{value:.3}"))
+                .collect::<Vec<_>>()
         );
     }
     Ok(())

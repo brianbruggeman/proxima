@@ -62,13 +62,12 @@ pub(super) fn flat_grid2d(
         }
         _ => SIMD_WIDTH,
     };
-    let (threadgroups_x, threadgroups_y) = split_threadgroups(threads.div_ceil(width)).ok_or(
-        EmitError::GridExceedsThreadIndex {
+    let (threadgroups_x, threadgroups_y) =
+        split_threadgroups(threads.div_ceil(width)).ok_or(EmitError::GridExceedsThreadIndex {
             node,
             threads,
             limit: u64::from(u32::MAX) * width,
-        },
-    )?;
+        })?;
     #[cfg(feature = "instrument")]
     proxima_telemetry::debug!(
         node = node.0,
@@ -140,7 +139,10 @@ const GRID_ATTRIBUTES: [GridAttribute; 6] = [
         parameter: "uint3 dense_batch_gid [[thread_position_in_grid]]",
         definition: "",
         body_reads: &[
-            ("(long)dense_batch_gid.x", "(long)(wide_group_index * ulong(wide_width.x) + ulong(wide_lane))"),
+            (
+                "(long)dense_batch_gid.x",
+                "(long)(wide_group_index * ulong(wide_width.x) + ulong(wide_lane))",
+            ),
             ("(long)dense_batch_gid.z", "(long)wide_group.z"),
         ],
     },
@@ -248,4 +250,3 @@ pub(super) fn widen_for_grid(
         _ => Ok(source),
     }
 }
-

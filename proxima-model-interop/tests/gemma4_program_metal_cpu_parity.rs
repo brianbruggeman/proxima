@@ -190,8 +190,13 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
 /// [`sliding_rope_table`], never a hand-rolled formula here), and
 /// every weight/norm leaf an `Lcg`-seeded fill of the right size so this
 /// test never has to enumerate gemma4's ~20 per-layer weight names by hand.
-fn seed_named_inputs(program: &[Op], symbols: &[u64], positions: &[usize]) -> Vec<(String, Vec<f32>)> {
-    let shapes = infer(program, symbols).expect("gemma4 synthetic forward program infers its own shapes");
+fn seed_named_inputs(
+    program: &[Op],
+    symbols: &[u64],
+    positions: &[usize],
+) -> Vec<(String, Vec<f32>)> {
+    let shapes =
+        infer(program, symbols).expect("gemma4 synthetic forward program infers its own shapes");
     let (cos_full, sin_full) = sliding_rope_table(positions, ROPE_FREQ_BASE, HEAD_DIM_FULL);
     let (cos_swa, sin_swa) = sliding_rope_table(positions, ROPE_FREQ_BASE_SWA, HEAD_DIM_SWA);
     block_node_ids(program)

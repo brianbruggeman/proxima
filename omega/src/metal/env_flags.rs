@@ -115,7 +115,8 @@ pub(super) fn substitute_blit_after_kernel() -> bool {
 #[cfg(feature = "instrument")]
 pub(super) fn substitute_dump_dir() -> Option<&'static OsString> {
     static CELL: OnceLock<Option<OsString>> = OnceLock::new();
-    CELL.get_or_init(|| std::env::var_os("PROXIMA_SUBSTITUTE_DUMP_DIR")).as_ref()
+    CELL.get_or_init(|| std::env::var_os("PROXIMA_SUBSTITUTE_DUMP_DIR"))
+        .as_ref()
 }
 
 pub(super) fn compare_bound_node() -> Option<NodeId> {
@@ -180,6 +181,9 @@ mod tests {
     fn segment_host_reads_the_environment_once_per_process() {
         let first = temp_env::with_var("PROXIMA_DEBUG_SEGMENT_HOST", Some("1"), segment_host);
         let second = temp_env::with_var("PROXIMA_DEBUG_SEGMENT_HOST", None::<&str>, segment_host);
-        assert_eq!(first, second, "the second read must serve the first read's value");
+        assert_eq!(
+            first, second,
+            "the second read must serve the first read's value"
+        );
     }
 }

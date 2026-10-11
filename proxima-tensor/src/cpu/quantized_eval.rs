@@ -218,7 +218,9 @@ pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
 ) -> Result<(), TensorError> {
     for computed in resolved {
         let sources: &[(NodeId, bind::Layout, Option<bind::Lookup>)] = match &computed.kind {
-            BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. } => computed.operands(),
+            BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. } => {
+                computed.operands()
+            }
             BoundOpKind::Reduce {
                 epilogue_operands, ..
             }

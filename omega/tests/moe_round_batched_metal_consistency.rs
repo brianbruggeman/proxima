@@ -24,7 +24,9 @@
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
-use proxima_tensor::spec::{elementwise, gathered_expert_product, input_leaf, reduce, scalar_constant};
+use proxima_tensor::spec::{
+    elementwise, gathered_expert_product, input_leaf, reduce, scalar_constant,
+};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     BoundOpKind, DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock, ReduceInit, ScalarOp,
@@ -49,7 +51,13 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     (0..count).map(|_| lcg.next_unit() * 2.0 - 1.0).collect()
 }
 
-fn stack_leaf(program: &mut Vec<Op>, name: &str, expert_count: u32, rows: u32, columns: u32) -> NodeId {
+fn stack_leaf(
+    program: &mut Vec<Op>,
+    name: &str,
+    expert_count: u32,
+    rows: u32,
+    columns: u32,
+) -> NodeId {
     input_leaf(
         program,
         DType::Float32,
@@ -191,8 +199,20 @@ fn routes_first_program(expert_count: u32, top_k: u32) -> RoutesFirstProgram {
         vec![Extent::Static(1), Extent::Static(expert_count)],
         "logits",
     );
-    let expert_w_gate = stack_leaf(&mut program, "expert_w_gate", expert_count, EMBEDDING, EXPERT_HIDDEN);
-    let expert_w_up = stack_leaf(&mut program, "expert_w_up", expert_count, EMBEDDING, EXPERT_HIDDEN);
+    let expert_w_gate = stack_leaf(
+        &mut program,
+        "expert_w_gate",
+        expert_count,
+        EMBEDDING,
+        EXPERT_HIDDEN,
+    );
+    let expert_w_up = stack_leaf(
+        &mut program,
+        "expert_w_up",
+        expert_count,
+        EMBEDDING,
+        EXPERT_HIDDEN,
+    );
 
     let (routes, weights) = routing_rounds(&mut program, logits, expert_count, top_k);
     let gates: Vec<NodeId> = routes
@@ -231,7 +251,8 @@ fn round_batched_and_topk_counts(fixture: &RoutesFirstProgram) -> (usize, usize)
         NumericPolicy::default(),
     )
     .expect("fixture binds");
-    let count = |wanted: fn(&BoundOpKind) -> bool| bound.iter().filter(|op| wanted(&op.kind)).count();
+    let count =
+        |wanted: fn(&BoundOpKind) -> bool| bound.iter().filter(|op| wanted(&op.kind)).count();
     (
         count(|kind| matches!(kind, BoundOpKind::RoundBatchedReduce { .. })),
         count(|kind| matches!(kind, BoundOpKind::MoeTopK { .. })),
@@ -252,7 +273,8 @@ fn run_on_metal(fixture: &RoutesFirstProgram) -> proxima_tensor::cpu::Evaluated 
         NumericPolicy::default(),
     )
     .expect("metal plans the routes-first moe projections");
-    omega::execute_plan_named(&plan, &named).expect("metal runs the moe projections on a real device")
+    omega::execute_plan_named(&plan, &named)
+        .expect("metal runs the moe projections on a real device")
 }
 
 fn output_bits(evaluated: &proxima_tensor::cpu::Evaluated, node: NodeId) -> Option<Vec<u32>> {
@@ -272,9 +294,9 @@ fn output_digest(evaluated: &proxima_tensor::cpu::Evaluated, outputs: &[NodeId])
         .filter_map(|&node| output_bits(evaluated, node))
         .flatten()
         .fold(OFFSET_BASIS, |digest, bits| {
-            bits.to_le_bytes()
-                .iter()
-                .fold(digest, |running, byte| (running ^ u64::from(*byte)).wrapping_mul(PRIME))
+            bits.to_le_bytes().iter().fold(digest, |running, byte| {
+                (running ^ u64::from(*byte)).wrapping_mul(PRIME)
+            })
         })
 }
 
@@ -288,11 +310,10 @@ fn round_batched_moe_matches_the_per_round_dispatches_on_metal() {
             let label = format!("experts={expert_count} top_k={top_k}");
 
             let (batched_ops, topk_ops) = round_batched_and_topk_counts(&fixture);
-            let (per_round_ops, per_round_topk_ops) = temp_env::with_var(
-                DISABLE_ROUND_GROUP_FUSION,
-                Some("1"),
-                || round_batched_and_topk_counts(&fixture),
-            );
+            let (per_round_ops, per_round_topk_ops) =
+                temp_env::with_var(DISABLE_ROUND_GROUP_FUSION, Some("1"), || {
+                    round_batched_and_topk_counts(&fixture)
+                });
             if batched_ops != 2 || topk_ops != 1 || per_round_ops != 0 || per_round_topk_ops != 1 {
                 failures.push(format!(
                     "{label} degenerate comparison: collapsed round_batched={batched_ops} \
@@ -303,11 +324,9 @@ fn round_batched_moe_matches_the_per_round_dispatches_on_metal() {
             }
 
             let batched = run_on_metal(&fixture);
-            let per_round = temp_env::with_var(
-                DISABLE_ROUND_GROUP_FUSION,
-                Some("1"),
-                || run_on_metal(&fixture),
-            );
+            let per_round = temp_env::with_var(DISABLE_ROUND_GROUP_FUSION, Some("1"), || {
+                run_on_metal(&fixture)
+            });
             for (slot, &node) in fixture.outputs.iter().enumerate() {
                 let batched_bits = output_bits(&batched, node);
                 if batched_bits.is_none() || batched_bits != output_bits(&per_round, node) {
@@ -347,8 +366,20 @@ fn host_routes_program(expert_count: u32, top_k: u32) -> RoutesFirstProgram {
         vec![Extent::Static(1), Extent::Static(EMBEDDING)],
         "x",
     );
-    let expert_w_gate = stack_leaf(&mut program, "expert_w_gate", expert_count, EMBEDDING, EXPERT_HIDDEN);
-    let expert_w_up = stack_leaf(&mut program, "expert_w_up", expert_count, EMBEDDING, EXPERT_HIDDEN);
+    let expert_w_gate = stack_leaf(
+        &mut program,
+        "expert_w_gate",
+        expert_count,
+        EMBEDDING,
+        EXPERT_HIDDEN,
+    );
+    let expert_w_up = stack_leaf(
+        &mut program,
+        "expert_w_up",
+        expert_count,
+        EMBEDDING,
+        EXPERT_HIDDEN,
+    );
     let route_names = &ROUTE_NAMES[..top_k as usize];
     let routes: Vec<NodeId> = route_names
         .iter()
@@ -395,11 +426,10 @@ fn round_batched_moe_over_host_routes_matches_the_per_round_dispatches_on_metal(
             let label = format!("host_routes experts={expert_count} top_k={top_k}");
 
             let (batched_ops, _) = round_batched_and_topk_counts(&fixture);
-            let (per_round_ops, _) = temp_env::with_var(
-                DISABLE_ROUND_GROUP_FUSION,
-                Some("1"),
-                || round_batched_and_topk_counts(&fixture),
-            );
+            let (per_round_ops, _) =
+                temp_env::with_var(DISABLE_ROUND_GROUP_FUSION, Some("1"), || {
+                    round_batched_and_topk_counts(&fixture)
+                });
             if batched_ops != 2 || per_round_ops != 0 {
                 failures.push(format!(
                     "{label} degenerate comparison: collapsed round_batched={batched_ops}, \
@@ -409,11 +439,9 @@ fn round_batched_moe_over_host_routes_matches_the_per_round_dispatches_on_metal(
             }
 
             let batched = run_on_metal(&fixture);
-            let per_round = temp_env::with_var(
-                DISABLE_ROUND_GROUP_FUSION,
-                Some("1"),
-                || run_on_metal(&fixture),
-            );
+            let per_round = temp_env::with_var(DISABLE_ROUND_GROUP_FUSION, Some("1"), || {
+                run_on_metal(&fixture)
+            });
             for (slot, &node) in fixture.outputs.iter().enumerate() {
                 let batched_bits = output_bits(&batched, node);
                 if batched_bits.is_none() || batched_bits != output_bits(&per_round, node) {
@@ -488,9 +516,11 @@ fn a_warm_round_batched_step_allocates_no_device_buffers() {
     .expect("metal plans the routes-first moe projections");
 
     let _ = omega::metal::metal_stage_totals();
-    let cold = omega::execute_plan_named_with_placements(&plan, &named, &[], &[]).expect("cold step resolves the folds and runs");
+    let cold = omega::execute_plan_named_with_placements(&plan, &named, &[], &[])
+        .expect("cold step resolves the folds and runs");
     let cold_totals = omega::metal::metal_stage_totals();
-    let warm = omega::execute_plan_named_with_placements(&plan, &named, &[], &[]).expect("warm step runs");
+    let warm =
+        omega::execute_plan_named_with_placements(&plan, &named, &[], &[]).expect("warm step runs");
     let warm_totals = omega::metal::metal_stage_totals();
 
     assert!(

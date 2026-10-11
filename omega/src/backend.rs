@@ -301,11 +301,19 @@ pub enum BackendError {
     #[error(transparent)]
     Metal(#[from] MetalError),
 
-    #[cfg(all(feature = "metal", target_os = "macos", feature = "metal-attn-variants"))]
+    #[cfg(all(
+        feature = "metal",
+        target_os = "macos",
+        feature = "metal-attn-variants"
+    ))]
     #[error(transparent)]
     Attention(#[from] crate::EmitError),
 
-    #[cfg(all(feature = "metal", target_os = "macos", feature = "metal-attn-variants"))]
+    #[cfg(all(
+        feature = "metal",
+        target_os = "macos",
+        feature = "metal-attn-variants"
+    ))]
     #[error("attention variants require a Metal plan")]
     AttentionVariantRequiresMetal,
 
@@ -750,7 +758,11 @@ pub fn set_dispatch_type(plan: &mut Plan, dispatch_type: metal::DispatchType) {
 
 /// Applies the selected cached-attention axes to a Metal plan before its
 /// attention pipelines resolve.
-#[cfg(all(feature = "metal", target_os = "macos", feature = "metal-attn-variants"))]
+#[cfg(all(
+    feature = "metal",
+    target_os = "macos",
+    feature = "metal-attn-variants"
+))]
 pub fn set_attention_variant(
     plan: &mut Plan,
     variant: crate::AttentionVariant,

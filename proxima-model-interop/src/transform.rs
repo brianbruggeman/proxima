@@ -167,9 +167,9 @@ mod mlx;
 #[cfg(feature = "std")]
 mod mlx_config;
 #[cfg(feature = "std")]
-mod mlx_names;
-#[cfg(feature = "std")]
 mod mlx_config_fields;
+#[cfg(feature = "std")]
+mod mlx_names;
 #[cfg(feature = "std")]
 mod mlx_tokenizer;
 #[cfg(feature = "std")]

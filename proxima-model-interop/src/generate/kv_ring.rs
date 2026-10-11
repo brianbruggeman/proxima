@@ -223,17 +223,18 @@ pub(super) fn speculative_draft_limit(
     config: &SpeculativeConfig<'_>,
     forced_draft_width: Option<u16>,
 ) -> Option<usize> {
-    let enabled = config
-        .speculative_types
-        .iter_priority_order()
-        .filter_map(|drafter| match drafter {
-            SpeculativeType::NgramSimple => Some(config.ngram_simple.size_m),
-            SpeculativeType::NgramMapK => Some(config.ngram_map_k.size_m),
-            SpeculativeType::NgramMapK4v => Some(config.ngram_map_k4v.size_m),
-            SpeculativeType::NgramMod => Some(config.ngram_mod.n_max),
-            SpeculativeType::NgramCache => Some(DEFAULT_N_DRAFT),
-            _ => None,
-        });
+    let enabled =
+        config
+            .speculative_types
+            .iter_priority_order()
+            .filter_map(|drafter| match drafter {
+                SpeculativeType::NgramSimple => Some(config.ngram_simple.size_m),
+                SpeculativeType::NgramMapK => Some(config.ngram_map_k.size_m),
+                SpeculativeType::NgramMapK4v => Some(config.ngram_map_k4v.size_m),
+                SpeculativeType::NgramMod => Some(config.ngram_mod.n_max),
+                SpeculativeType::NgramCache => Some(DEFAULT_N_DRAFT),
+                _ => None,
+            });
     enabled.chain(forced_draft_width).max().map(usize::from)
 }
 

@@ -218,7 +218,10 @@ fn run() {
         let activation = random_vec(13, k as usize);
         let (program, sum) = matvec_program(k, rows);
         let blocks = [
-            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed },
+            QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: &packed,
+            },
             QuantizedBlock::Float32(&activation),
         ];
 

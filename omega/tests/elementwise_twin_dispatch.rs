@@ -96,14 +96,9 @@ impl RopeCase {
 
     fn run_unplaced(&self) -> (Vec<f32>, Vec<f32>) {
         let plan = self.plan();
-        let evaluated = omega::execute_plan_with_placements(
-            &plan,
-            &self.blocks(),
-            &[],
-            &[],
-            &mut Vec::new(),
-        )
-        .expect("executes the rope pair");
+        let evaluated =
+            omega::execute_plan_with_placements(&plan, &self.blocks(), &[], &[], &mut Vec::new())
+                .expect("executes the rope pair");
         (
             evaluated.get(self.first).expect("first half").0.to_vec(),
             evaluated.get(self.second).expect("second half").0.to_vec(),
@@ -135,7 +130,11 @@ fn bits(values: &[f32]) -> Vec<u32> {
 }
 
 fn max_abs_difference(left: &[f32], right: &[f32]) -> f32 {
-    assert_eq!(left.len(), right.len(), "compared slices must be the same length");
+    assert_eq!(
+        left.len(),
+        right.len(),
+        "compared slices must be the same length"
+    );
     assert!(!left.is_empty(), "a zero-element comparison proves nothing");
     left.iter()
         .zip(right)
@@ -155,8 +154,14 @@ async fn the_metal_rope_pair_matches_the_cpu_reference_for_each_pairing(
     let (first, second) = case.run_unplaced();
 
     let (cpu_first, cpu_second) = case.cpu_reference();
-    assert!(max_abs_difference(&first, &cpu_first) <= 1e-6, "first half vs CPU");
-    assert!(max_abs_difference(&second, &cpu_second) <= 1e-6, "second half vs CPU");
+    assert!(
+        max_abs_difference(&first, &cpu_first) <= 1e-6,
+        "first half vs CPU"
+    );
+    assert!(
+        max_abs_difference(&second, &cpu_second) <= 1e-6,
+        "second half vs CPU"
+    );
 }
 
 #[proxima::test]
@@ -173,7 +178,11 @@ async fn the_twin_dispatch_reproduces_the_two_dispatch_plan_bit_for_bit(
     let (plain_first, plain_second) = case.run_two_dispatch();
 
     assert_eq!(bits(&twin_first), bits(&plain_first), "first rotated half");
-    assert_eq!(bits(&twin_second), bits(&plain_second), "second rotated half");
+    assert_eq!(
+        bits(&twin_second),
+        bits(&plain_second),
+        "second rotated half"
+    );
     assert_ne!(
         bits(&twin_first),
         bits(&twin_second),
@@ -196,9 +205,19 @@ async fn a_prefill_wide_rope_pair_decodes_its_coordinates_exactly(
     let (first, second) = case.run_unplaced();
 
     let (cpu_first, cpu_second) = case.cpu_reference();
-    assert_eq!(first.len(), (sequence * heads * pairs) as usize, "first half element count");
-    assert!(max_abs_difference(&first, &cpu_first) <= 1e-6, "first half vs CPU");
-    assert!(max_abs_difference(&second, &cpu_second) <= 1e-6, "second half vs CPU");
+    assert_eq!(
+        first.len(),
+        (sequence * heads * pairs) as usize,
+        "first half element count"
+    );
+    assert!(
+        max_abs_difference(&first, &cpu_first) <= 1e-6,
+        "first half vs CPU"
+    );
+    assert!(
+        max_abs_difference(&second, &cpu_second) <= 1e-6,
+        "second half vs CPU"
+    );
 }
 
 #[proxima::test]
@@ -234,8 +253,16 @@ async fn both_halves_land_in_caller_placed_cache_buffers_at_nonzero_offsets(
         omega::read_placed_buffer_f32(&first_cache, PLACEMENT_ALIGNMENT, case.half_len());
     let placed_second =
         omega::read_placed_buffer_f32(&second_cache, PLACEMENT_ALIGNMENT * 2, case.half_len());
-    assert_eq!(bits(&placed_first), bits(&expected_first), "first half in its cache");
-    assert_eq!(bits(&placed_second), bits(&expected_second), "second half in its cache");
+    assert_eq!(
+        bits(&placed_first),
+        bits(&expected_first),
+        "first half in its cache"
+    );
+    assert_eq!(
+        bits(&placed_second),
+        bits(&expected_second),
+        "second half in its cache"
+    );
     let head = omega::read_placed_buffer_f32(&second_cache, 0, PLACEMENT_ALIGNMENT / 4);
     assert!(
         head.iter().all(|value| *value == 0.0),
@@ -260,7 +287,11 @@ async fn only_the_second_half_placed_still_writes_the_first_into_the_arena() {
     )
     .expect("executes with the second half placed");
 
-    let first = evaluated.get(case.first).expect("first half read back").0.to_vec();
+    let first = evaluated
+        .get(case.first)
+        .expect("first half read back")
+        .0
+        .to_vec();
     let placed_second = omega::read_placed_buffer_f32(&cache, PLACEMENT_ALIGNMENT, case.half_len());
     assert_eq!(bits(&first), bits(&expected_first));
     assert_eq!(bits(&placed_second), bits(&expected_second));

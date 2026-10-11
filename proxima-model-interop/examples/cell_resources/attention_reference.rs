@@ -45,7 +45,10 @@ fn floats_at(dispatch: &CapturedDispatch, binding: usize) -> Vec<f32> {
 }
 
 fn dot(left: &[f32], right: &[f32]) -> f64 {
-    left.iter().zip(right).map(|(a_value, b_value)| f64::from(*a_value) * f64::from(*b_value)).sum()
+    left.iter()
+        .zip(right)
+        .map(|(a_value, b_value)| f64::from(*a_value) * f64::from(*b_value))
+        .sum()
 }
 
 struct Planes {
@@ -58,7 +61,11 @@ struct Planes {
 
 impl Planes {
     fn read(dispatch: &CapturedDispatch) -> Self {
-        assert_eq!(floats_at(dispatch, LIVE)[0], 0.0, "the reference reads the in-graph keys only");
+        assert_eq!(
+            floats_at(dispatch, LIVE)[0],
+            0.0,
+            "the reference reads the in-graph keys only"
+        );
         Self {
             query_even: floats_at(dispatch, QUERY_EVEN),
             query_odd: floats_at(dispatch, QUERY_ODD),
@@ -69,7 +76,15 @@ impl Planes {
     }
 }
 
-fn attend_vector(planes: &Planes, shape: &AttentionShape, rows: usize, row: usize, kv_head: usize, group: usize, out: &mut [f32]) {
+fn attend_vector(
+    planes: &Planes,
+    shape: &AttentionShape,
+    rows: usize,
+    row: usize,
+    kv_head: usize,
+    group: usize,
+    out: &mut [f32],
+) {
     let half_dim = shape.head_dim / 2;
     let query_index = (row * shape.kv_heads + kv_head) * shape.groups + group;
     let query_even = &planes.query_even[query_index * half_dim..][..half_dim];
@@ -92,7 +107,12 @@ fn attend_vector(planes: &Planes, shape: &AttentionShape, rows: usize, row: usiz
             .iter()
             .zip(lowest..=highest)
             .map(|(weight, key)| {
-                weight * f64::from(planes.value[key * shape.kv_heads * shape.head_dim + kv_head * shape.head_dim + dimension])
+                weight
+                    * f64::from(
+                        planes.value[key * shape.kv_heads * shape.head_dim
+                            + kv_head * shape.head_dim
+                            + dimension],
+                    )
             })
             .sum();
         *slot = (accumulated / total) as f32;
@@ -116,7 +136,12 @@ pub fn reference_output(dispatch: &CapturedDispatch, shape: &AttentionShape) -> 
 }
 
 pub fn floats_from_bytes(bytes: &[u8]) -> Vec<f32> {
-    bytes.as_chunks::<4>().0.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect()
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect()
 }
 
 pub fn agreement(reference: &[f32], other: &[f32]) -> String {
@@ -177,21 +202,36 @@ impl DecodePlanes {
 
     fn key_planes(&self, key: usize, offset: usize) -> (&[f32], &[f32]) {
         if key < self.cached_rows {
-            (&self.cached_key_even[offset..], &self.cached_key_odd[offset..])
+            (
+                &self.cached_key_even[offset..],
+                &self.cached_key_odd[offset..],
+            )
         } else {
             (&self.new_key_even[offset..], &self.new_key_odd[offset..])
         }
     }
 }
 
-fn decode_vector(planes: &DecodePlanes, shape: &AttentionShape, kv_head: usize, group: usize, out: &mut [f32]) {
+fn decode_vector(
+    planes: &DecodePlanes,
+    shape: &AttentionShape,
+    kv_head: usize,
+    group: usize,
+    out: &mut [f32],
+) {
     let half_dim = shape.head_dim / 2;
     let query_index = kv_head * shape.groups + group;
     let query_even = &planes.query_even[query_index * half_dim..][..half_dim];
     let query_odd = &planes.query_odd[query_index * half_dim..][..half_dim];
     let last_key = planes.cached_rows;
     let first_key = (planes.cached_rows as i128 + shape.cached_lower).max(0) as usize;
-    let row_offset = |key: usize| (key - if key < planes.cached_rows { 0 } else { planes.cached_rows }) * shape.kv_heads;
+    let row_offset = |key: usize| {
+        (key - if key < planes.cached_rows {
+            0
+        } else {
+            planes.cached_rows
+        }) * shape.kv_heads
+    };
     let scores: Vec<f64> = (first_key..=last_key)
         .map(|key| {
             let offset = row_offset(key) * half_dim + kv_head * half_dim;
@@ -207,7 +247,11 @@ fn decode_vector(planes: &DecodePlanes, shape: &AttentionShape, kv_head: usize, 
             .iter()
             .zip(first_key..=last_key)
             .map(|(weight, key)| {
-                let value = if key < planes.cached_rows { &planes.cached_value } else { &planes.new_value };
+                let value = if key < planes.cached_rows {
+                    &planes.cached_value
+                } else {
+                    &planes.new_value
+                };
                 let at = row_offset(key) * shape.head_dim + kv_head * shape.head_dim + dimension;
                 weight * f64::from(value[at])
             })

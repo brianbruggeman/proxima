@@ -36,10 +36,14 @@ fn blockfile_write_creates_the_final_name_only() {
     let bytes = fixture_bytes();
     let dir = tempfile::tempdir().expect("create a temp directory");
 
-    let written = write_block_file(dir.path(), 0x0102030405060708, &bytes).expect("write the block file");
+    let written =
+        write_block_file(dir.path(), 0x0102030405060708, &bytes).expect("write the block file");
 
     assert_eq!(written.file_name().unwrap(), "0102030405060708.pxkv");
-    assert_eq!(std::fs::read(&written).expect("read the block file back"), bytes);
+    assert_eq!(
+        std::fs::read(&written).expect("read the block file back"),
+        bytes
+    );
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 
     let absent = dir.path().join("absent");

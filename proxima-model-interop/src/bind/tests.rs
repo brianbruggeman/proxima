@@ -16,11 +16,15 @@ fn bf8_refuses_ggml_layout_and_cpu_packed_decode() {
     assert!(as_block(codec, &[0x3c]).is_none());
     assert!(matches!(
         codec_to_ggml_type(codec),
-        Err(InteropError::UnsupportedCodec { codec: Codec::BFloat8 })
+        Err(InteropError::UnsupportedCodec {
+            codec: Codec::BFloat8
+        })
     ));
     assert!(matches!(
         codec_byte_len_for(codec, 1),
-        Err(InteropError::UnsupportedCodec { codec: Codec::BFloat8 })
+        Err(InteropError::UnsupportedCodec {
+            codec: Codec::BFloat8
+        })
     ));
 }
 
@@ -155,10 +159,7 @@ fn raw_packed_f32_matmul_weight_matches_an_independent_hand_computed_matmul() {
             operands: alloc::vec![
                 (
                     activation_node,
-                    proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(
-                        2,
-                        &[1]
-                    ))
+                    proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(2, &[1]))
                 ),
                 (
                     weight_node,
@@ -201,9 +202,8 @@ fn raw_packed_f32_matmul_weight_matches_an_independent_hand_computed_matmul() {
             proxima_tensor::cpu::QuantizedBlock::Float32(bound_weight.as_slice()),
         ),
     ];
-    let evaluated =
-        proxima_tensor::cpu::evaluate_quantized_named(&program, &[], &named, &[logits])
-            .expect("evaluate the bound matmul weight through the real interpreter");
+    let evaluated = proxima_tensor::cpu::evaluate_quantized_named(&program, &[], &named, &[logits])
+        .expect("evaluate the bound matmul weight through the real interpreter");
     let ours = evaluated.root();
 
     let mut oracle = vec![0.0f32; out_dim];
@@ -356,8 +356,7 @@ fn q8_0_matmul_weight_binds_packed_and_matches_a_dequantized_oracle() {
         }],
     };
     let file_bytes = write_complete(&model).expect("writes gguf with a real q8_0 weight");
-    let parsed =
-        proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q8_0 weight gguf");
+    let parsed = proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q8_0 weight gguf");
 
     let mut state = BoundWeights {
         resident_bytes: 0,
@@ -383,7 +382,10 @@ fn q8_0_matmul_weight_binds_packed_and_matches_a_dequantized_oracle() {
     );
     assert_eq!(state.packed.len(), 1, "exactly one packed weight bound");
     let bound_bytes = match &state.packed[0].1 {
-        proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q8_0, bytes } => *bytes,
+        proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes,
+        } => *bytes,
         other => panic!("expected a QuantizedBlock::Packed with Codec::Q8_0, found {other:?}"),
     };
     assert_eq!(
@@ -399,16 +401,18 @@ fn q8_0_matmul_weight_binds_packed_and_matches_a_dequantized_oracle() {
     let named = [
         (
             "weight",
-            proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: bound_bytes },
+            proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q8_0,
+                bytes: bound_bytes,
+            },
         ),
         (
             "activation",
             proxima_tensor::cpu::QuantizedBlock::Float32(activation.as_slice()),
         ),
     ];
-    let evaluated =
-        proxima_tensor::cpu::evaluate_quantized_named(&program, &[], &named, &[sum])
-            .expect("evaluate the bound q8_0 packed weight through the real interpreter");
+    let evaluated = proxima_tensor::cpu::evaluate_quantized_named(&program, &[], &named, &[sum])
+        .expect("evaluate the bound q8_0 packed weight through the real interpreter");
     let ours = evaluated.root();
 
     let mut dequantized_weight = alloc::vec![0.0f32; Q8_0_TEST_ROWS * Q8_0_TEST_K];
@@ -483,8 +487,8 @@ fn q8_0_matmul_weight_packed_path_is_sensitive_to_a_corrupted_byte() {
         }],
     };
     let file_bytes = write_complete(&model).expect("writes gguf with a corrupted q8_0 weight");
-    let parsed = proxima_gguf::pipe::parse_complete(&file_bytes)
-        .expect("parses corrupted q8_0 weight gguf");
+    let parsed =
+        proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses corrupted q8_0 weight gguf");
 
     let mut state = BoundWeights {
         resident_bytes: 0,
@@ -504,7 +508,10 @@ fn q8_0_matmul_weight_packed_path_is_sensitive_to_a_corrupted_byte() {
     )
     .expect("binds the corrupted q8_0 matmul weight");
     let bound_bytes = match &state.packed[0].1 {
-        proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q8_0, bytes } => *bytes,
+        proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes,
+        } => *bytes,
         other => panic!("expected a QuantizedBlock::Packed with Codec::Q8_0, found {other:?}"),
     };
 
@@ -512,21 +519,21 @@ fn q8_0_matmul_weight_packed_path_is_sensitive_to_a_corrupted_byte() {
     let named = [
         (
             "weight",
-            proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: bound_bytes },
+            proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q8_0,
+                bytes: bound_bytes,
+            },
         ),
         (
             "activation",
             proxima_tensor::cpu::QuantizedBlock::Float32(activation.as_slice()),
         ),
     ];
-    let evaluated =
-        proxima_tensor::cpu::evaluate_quantized_named(&program, &[], &named, &[sum])
-            .expect("evaluate the corrupted q8_0 packed weight through the real interpreter");
+    let evaluated = proxima_tensor::cpu::evaluate_quantized_named(&program, &[], &named, &[sum])
+        .expect("evaluate the corrupted q8_0 packed weight through the real interpreter");
     let corrupted_result = evaluated.root();
 
-    std::println!(
-        "q8_0_corrupted corrupted={corrupted_result:?} clean_oracle={clean_oracle:?}"
-    );
+    std::println!("q8_0_corrupted corrupted={corrupted_result:?} clean_oracle={clean_oracle:?}");
     let max_diff = corrupted_result
         .iter()
         .zip(&clean_oracle)
@@ -726,11 +733,11 @@ fn architecture_from_metadata_reads_real_keys_and_derives_vocab_from_tensor_shap
         }],
     };
     let file_bytes = write_complete(&model).expect("writes gguf with architecture metadata");
-    let parsed = proxima_gguf::parse_complete(&file_bytes)
-        .expect("parses gguf with architecture metadata");
+    let parsed =
+        proxima_gguf::parse_complete(&file_bytes).expect("parses gguf with architecture metadata");
 
-    let architecture = architecture_from_metadata(&parsed)
-        .expect("derive architecture from real metadata keys");
+    let architecture =
+        architecture_from_metadata(&parsed).expect("derive architecture from real metadata keys");
     assert_eq!(
         architecture,
         ModelHparams {
@@ -789,11 +796,10 @@ fn architecture_from_metadata_reads_expert_count_when_present() {
         }],
     };
     let file_bytes = write_complete(&model).expect("writes gguf with moe metadata");
-    let parsed =
-        proxima_gguf::parse_complete(&file_bytes).expect("parses gguf with moe metadata");
+    let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses gguf with moe metadata");
 
-    let architecture = architecture_from_metadata(&parsed)
-        .expect("derive architecture from real metadata keys");
+    let architecture =
+        architecture_from_metadata(&parsed).expect("derive architecture from real metadata keys");
     assert_eq!(
         architecture.expert_count, 8,
         "expert_count must read the real metadata key, not default to 0"
@@ -1050,13 +1056,12 @@ async fn architecture_from_metadata_reads_the_real_rope_freq_base(#[case] freq_b
             data: &embed_bytes,
         }],
     };
-    let file_bytes =
-        write_complete(&model).expect("writes gguf with a non-default rope.freq_base");
+    let file_bytes = write_complete(&model).expect("writes gguf with a non-default rope.freq_base");
     let parsed = proxima_gguf::parse_complete(&file_bytes)
         .expect("parses gguf with a non-default rope.freq_base");
 
-    let architecture = architecture_from_metadata(&parsed)
-        .expect("derive architecture from real metadata keys");
+    let architecture =
+        architecture_from_metadata(&parsed).expect("derive architecture from real metadata keys");
     assert_eq!(
         architecture.rope_freq_base,
         freq_base,
@@ -1102,11 +1107,11 @@ fn architecture_from_metadata_reads_rope_freq_base_stored_as_f64() {
         }],
     };
     let file_bytes = write_complete(&model).expect("writes gguf with an f64 rope.freq_base");
-    let parsed = proxima_gguf::parse_complete(&file_bytes)
-        .expect("parses gguf with an f64 rope.freq_base");
+    let parsed =
+        proxima_gguf::parse_complete(&file_bytes).expect("parses gguf with an f64 rope.freq_base");
 
-    let architecture = architecture_from_metadata(&parsed)
-        .expect("derive architecture from real metadata keys");
+    let architecture =
+        architecture_from_metadata(&parsed).expect("derive architecture from real metadata keys");
     assert_eq!(
         architecture.rope_freq_base, 1_000_000.0,
         "an f64-encoded key must still be read"
@@ -1187,8 +1192,7 @@ fn weight_precision_rule_recodes_q4_k_to_q8_0_within_q8_0_error_bound() {
         .expect("q4_k::quantize handles a multi-super-block run directly");
 
     let (file_bytes, name) = one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
-    let parsed =
-        proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
+    let parsed = proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
 
     let rules = [crate::serving::WeightPrecisionRule {
         pattern: crate::serving::NamePattern::Exact(name.as_str()),
@@ -1291,8 +1295,7 @@ fn weight_precision_rule_recodes_to_f32_bit_identical_to_direct_dequant() {
         .expect("q4_k::quantize handles a multi-super-block run directly");
 
     let (file_bytes, name) = one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
-    let parsed =
-        proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
+    let parsed = proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
 
     let direct_dequant =
         gguf_tensor_as_f32(&parsed, &file_bytes, &name).expect("direct dequant baseline");
@@ -1352,8 +1355,7 @@ fn weight_precision_rule_to_unencodable_target_names_the_typed_error() {
     q4_k::quantize(&original_f32, &mut q4k_bytes).expect("one QK_K-sized row");
 
     let (file_bytes, name) = one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
-    let parsed =
-        proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
+    let parsed = proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
 
     let rules = [crate::serving::WeightPrecisionRule {
         pattern: crate::serving::NamePattern::Exact(name.as_str()),
@@ -1403,8 +1405,7 @@ fn no_matching_weight_precision_rule_is_byte_identical_to_the_no_rule_path() {
     q4_k::quantize(&original_f32, &mut q4k_bytes).expect("one QK_K-sized row");
 
     let (file_bytes, name) = one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
-    let parsed =
-        proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
+    let parsed = proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
 
     // A rule that names a DIFFERENT tensor must never fire here.
     let non_matching_rules = [crate::serving::WeightPrecisionRule {
@@ -1450,8 +1451,7 @@ fn no_matching_weight_precision_rule_is_byte_identical_to_the_no_rule_path() {
         with_rules.packed_owned, without_rules.packed_owned,
         "a non-matching rule must leave bind_dense_as byte-identical to having no rules"
     );
-    for (with_block, without_block) in with_rules.packed.iter().zip(without_rules.packed.iter())
-    {
+    for (with_block, without_block) in with_rules.packed.iter().zip(without_rules.packed.iter()) {
         assert_eq!(with_block.0, without_block.0);
     }
 }
@@ -1466,7 +1466,7 @@ fn no_matching_weight_precision_rule_is_byte_identical_to_the_no_rule_path() {
 #[cfg(feature = "std")]
 #[test]
 fn sequential_weight_precision_rebinds_produce_distinct_names_and_leave_the_first_entry_untouched()
- {
+{
     use proxima_gguf::quant::q4_k;
 
     let rows = 1usize;
@@ -1479,8 +1479,7 @@ fn sequential_weight_precision_rebinds_produce_distinct_names_and_leave_the_firs
     q4_k::quantize(&original_f32, &mut q4k_bytes).expect("one QK_K-sized row");
 
     let (file_bytes, name) = one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
-    let parsed =
-        proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
+    let parsed = proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
 
     let first_rules = [crate::serving::WeightPrecisionRule {
         pattern: crate::serving::NamePattern::Exact(name.as_str()),

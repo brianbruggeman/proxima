@@ -102,7 +102,12 @@ fn projection_program(rows: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
 const COOPERATIVE_KERNEL: Option<&str> = Some("f16");
 const TILED_KERNEL: Option<&str> = None;
 
-fn run_on_metal(rows: u32, activations: &[f32], weight_bytes: &[u8], disabled_tiled: Option<&str>) -> Vec<f32> {
+fn run_on_metal(
+    rows: u32,
+    activations: &[f32],
+    weight_bytes: &[u8],
+    disabled_tiled: Option<&str>,
+) -> Vec<f32> {
     let (program, sum) = projection_program(rows, DType::Float16);
     let blocks = [
         QuantizedBlock::Packed {
@@ -112,10 +117,16 @@ fn run_on_metal(rows: u32, activations: &[f32], weight_bytes: &[u8], disabled_ti
         QuantizedBlock::Float32(activations),
     ];
     temp_env::with_var("PROXIMA_TILED_GEMM_DISABLE", disabled_tiled, || {
-        omega::execute(&program, &[], &blocks, &[sum], NumericPolicy::llama_relaxed())
-            .expect("metal executes the per-layer projection")
-            .root()
-            .to_vec()
+        omega::execute(
+            &program,
+            &[],
+            &blocks,
+            &[sum],
+            NumericPolicy::llama_relaxed(),
+        )
+        .expect("metal executes the per-layer projection")
+        .root()
+        .to_vec()
     })
 }
 
@@ -141,7 +152,11 @@ fn synthetic_f16_weight_bytes() -> Vec<u8> {
     weight_bytes
 }
 
-fn assert_projection_is_fully_populated_and_correct(rows: u32, weight_bytes: &[u8], disabled_tiled: Option<&str>) {
+fn assert_projection_is_fully_populated_and_correct(
+    rows: u32,
+    weight_bytes: &[u8],
+    disabled_tiled: Option<&str>,
+) {
     let features = FEATURES as usize;
     let row_len = REDUCTION_LEN as usize;
     let mut dequantized = vec![0.0f32; row_len * features];
@@ -149,7 +164,11 @@ fn assert_projection_is_fully_populated_and_correct(rows: u32, weight_bytes: &[u
     let activations = random_vec(0x51A7_0001, rows as usize * row_len);
 
     let metal = run_on_metal(rows, &activations, weight_bytes, disabled_tiled);
-    assert_eq!(metal.len(), rows as usize * features, "rows={rows}: output element count");
+    assert_eq!(
+        metal.len(),
+        rows as usize * features,
+        "rows={rows}: output element count"
+    );
 
     let zero_positions: Vec<usize> = metal
         .iter()
@@ -197,7 +216,9 @@ fn assert_projection_is_fully_populated_and_correct(rows: u32, weight_bytes: &[u
     let tail_activations = &activations[tail_first * row_len..];
     let tail = &metal[tail_first * features..];
     match disabled_tiled {
-        Some(_) => assert_tail_matches_cpu_oracle(rows, tail_rows, tail_activations, &dequantized, tail),
+        Some(_) => {
+            assert_tail_matches_cpu_oracle(rows, tail_rows, tail_activations, &dequantized, tail)
+        }
         None => assert_tail_within_accumulation_bound(rows, tail_activations, &dequantized, tail),
     }
 }
@@ -210,7 +231,11 @@ fn assert_tail_matches_cpu_oracle(
     tail: &[f32],
 ) {
     let oracle = run_on_cpu(tail_rows, tail_activations, dequantized);
-    assert_eq!(oracle.len(), tail.len(), "rows={rows}: tail oracle element count");
+    assert_eq!(
+        oracle.len(),
+        tail.len(),
+        "rows={rows}: tail oracle element count"
+    );
     let worst = tail
         .iter()
         .zip(&oracle)
@@ -228,18 +253,24 @@ fn assert_tail_matches_cpu_oracle(
 /// 1.2e-4. A fixed 1e-3 therefore compares two accumulation orders, not the
 /// kernel against the truth. The bound used instead is the classical f32 sum
 /// bound `n * 2^-24 * sum(|a * w|)` against the f64 dot product, per element.
-fn assert_tail_within_accumulation_bound(rows: u32, tail_activations: &[f32], dequantized: &[f32], tail: &[f32]) {
+fn assert_tail_within_accumulation_bound(
+    rows: u32,
+    tail_activations: &[f32],
+    dequantized: &[f32],
+    tail: &[f32],
+) {
     let features = FEATURES as usize;
     let row_len = REDUCTION_LEN as usize;
     let unit_roundoff = f64::from(f32::EPSILON) / 2.0;
     let mut worst_ratio = 0.0f64;
     for (position, gpu_value) in tail.iter().enumerate() {
         let (row, feature) = (position / features, position % features);
-        let (dot, magnitude) = (0..row_len).fold((0.0f64, 0.0f64), |(dot, magnitude), reduction| {
-            let product = f64::from(tail_activations[row * row_len + reduction])
-                * f64::from(dequantized[feature * row_len + reduction]);
-            (dot + product, magnitude + product.abs())
-        });
+        let (dot, magnitude) =
+            (0..row_len).fold((0.0f64, 0.0f64), |(dot, magnitude), reduction| {
+                let product = f64::from(tail_activations[row * row_len + reduction])
+                    * f64::from(dequantized[feature * row_len + reduction]);
+                (dot + product, magnitude + product.abs())
+            });
         let bound = row_len as f64 * unit_roundoff * magnitude;
         worst_ratio = worst_ratio.max((f64::from(*gpu_value) - dot).abs() / bound);
     }
@@ -252,12 +283,20 @@ fn assert_tail_within_accumulation_bound(rows: u32, tail_activations: &[f32], de
 
 #[test]
 fn per_layer_projection_at_1873_rows_is_fully_populated_and_matches_the_cpu_oracle() {
-    assert_projection_is_fully_populated_and_correct(1873, &synthetic_f16_weight_bytes(), COOPERATIVE_KERNEL);
+    assert_projection_is_fully_populated_and_correct(
+        1873,
+        &synthetic_f16_weight_bytes(),
+        COOPERATIVE_KERNEL,
+    );
 }
 
 #[test]
 fn per_layer_projection_at_1880_rows_is_fully_populated_and_matches_the_cpu_oracle() {
-    assert_projection_is_fully_populated_and_correct(1880, &synthetic_f16_weight_bytes(), COOPERATIVE_KERNEL);
+    assert_projection_is_fully_populated_and_correct(
+        1880,
+        &synthetic_f16_weight_bytes(),
+        COOPERATIVE_KERNEL,
+    );
 }
 
 #[test]
@@ -270,13 +309,23 @@ fn per_layer_projection_at_the_last_linear_row_count_is_fully_populated() {
 }
 
 #[test]
-fn tiled_per_layer_projection_at_1873_rows_is_fully_populated_and_inside_the_f32_accumulation_bound() {
-    assert_projection_is_fully_populated_and_correct(1873, &synthetic_f16_weight_bytes(), TILED_KERNEL);
+fn tiled_per_layer_projection_at_1873_rows_is_fully_populated_and_inside_the_f32_accumulation_bound()
+ {
+    assert_projection_is_fully_populated_and_correct(
+        1873,
+        &synthetic_f16_weight_bytes(),
+        TILED_KERNEL,
+    );
 }
 
 #[test]
-fn tiled_per_layer_projection_at_1880_rows_is_fully_populated_and_inside_the_f32_accumulation_bound() {
-    assert_projection_is_fully_populated_and_correct(1880, &synthetic_f16_weight_bytes(), TILED_KERNEL);
+fn tiled_per_layer_projection_at_1880_rows_is_fully_populated_and_inside_the_f32_accumulation_bound()
+ {
+    assert_projection_is_fully_populated_and_correct(
+        1880,
+        &synthetic_f16_weight_bytes(),
+        TILED_KERNEL,
+    );
 }
 
 /// `PROXIMA_GEMMA4_E2B_GGUF` names the host-local checkpoint. There is no
@@ -313,7 +362,10 @@ fn real_per_layer_model_proj_weight_bytes() -> Vec<u8> {
                     GgufEvent::Header { version: found, .. } => version = Some(found),
                     GgufEvent::Metadata { key, value } => metadata.push((key, value)),
                     GgufEvent::Tensor(tensor) => tensors.push(tensor),
-                    GgufEvent::Complete { data_offset, alignment } => {
+                    GgufEvent::Complete {
+                        data_offset,
+                        alignment,
+                    } => {
                         completion = Some((data_offset, alignment));
                     }
                 }
@@ -342,7 +394,11 @@ fn real_per_layer_model_proj_weight_bytes() -> Vec<u8> {
         .iter()
         .find(|candidate| candidate.name == "per_layer_model_proj.weight")
         .expect("gemma4-E2B carries per_layer_model_proj.weight");
-    assert_eq!(tensor.ggml_type, GgmlType::F16, "the real projection weight is F16");
+    assert_eq!(
+        tensor.ggml_type,
+        GgmlType::F16,
+        "the real projection weight is F16"
+    );
     assert_eq!(
         tensor.dims.as_slice(),
         [u64::from(REDUCTION_LEN), u64::from(FEATURES)]
@@ -351,7 +407,8 @@ fn real_per_layer_model_proj_weight_bytes() -> Vec<u8> {
         .tensor_data_range(tensor, file_len)
         .expect("tensor byte range within file bounds");
     let mut bytes = vec![0u8; (range.end - range.start) as usize];
-    file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
+    file.seek(SeekFrom::Start(range.start))
+        .expect("seek to tensor data");
     file.read_exact(&mut bytes).expect("read the whole tensor");
     bytes
 }
@@ -371,7 +428,10 @@ fn cpu_tail_and_inputs() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let weight_bytes = synthetic_f16_weight_bytes();
     let mut dequantized = vec![0.0f32; REDUCTION_LEN as usize * FEATURES as usize];
     f16::dequantize(&weight_bytes, &mut dequantized).expect("weights decode from f16");
-    let activations = random_vec(0x51A7_0001, TAIL_ORACLE_ROWS as usize * REDUCTION_LEN as usize);
+    let activations = random_vec(
+        0x51A7_0001,
+        TAIL_ORACLE_ROWS as usize * REDUCTION_LEN as usize,
+    );
     let tail = run_on_cpu(TAIL_ORACLE_ROWS, &activations, &dequantized);
     (activations, dequantized, tail)
 }

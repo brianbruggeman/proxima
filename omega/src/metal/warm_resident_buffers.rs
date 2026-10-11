@@ -108,6 +108,9 @@ mod tests {
         reset_nocopy_cache_for_test();
         reset_resident_cache_for_test();
         reset_checkpoint_mapping_for_test();
-        assert!(matches!(warm_resident_buffers(), Ok(0)), "an empty set needs no device");
+        assert!(
+            matches!(warm_resident_buffers(), Ok(0)),
+            "an empty set needs no device"
+        );
     }
 }

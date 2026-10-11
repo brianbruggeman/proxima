@@ -78,7 +78,10 @@ pub trait ClientProtocolExt: Sized {
     /// let client = Client::builder().mqtt("mqtt://localhost:1883").build()?;
     /// # Ok::<(), proxima::ProximaError>(())
     /// ```
-    #[cfg(all(feature = "mqtt-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(all(
+        feature = "mqtt-client",
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
+    ))]
     #[must_use]
     fn mqtt(self, dsn: impl Into<String>) -> Self;
 
@@ -90,7 +93,10 @@ pub trait ClientProtocolExt: Sized {
     /// let client = Client::builder().amqp("amqp://localhost:5672").build()?;
     /// # Ok::<(), proxima::ProximaError>(())
     /// ```
-    #[cfg(all(feature = "amqp-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(all(
+        feature = "amqp-client",
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
+    ))]
     #[must_use]
     fn amqp(self, dsn: impl Into<String>) -> Self;
 
@@ -102,7 +108,10 @@ pub trait ClientProtocolExt: Sized {
     /// let client = Client::builder().dns("dns://1.1.1.1:53").build()?;
     /// # Ok::<(), proxima::ProximaError>(())
     /// ```
-    #[cfg(all(feature = "dns-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(all(
+        feature = "dns-client",
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
+    ))]
     #[must_use]
     fn dns(self, dsn: impl Into<String>) -> Self;
 
@@ -190,17 +199,26 @@ impl ClientProtocolExt for ClientBuilder {
         self.protocol(crate::upstreams::kafka::KafkaClientProtocol::dsn(dsn))
     }
 
-    #[cfg(all(feature = "mqtt-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(all(
+        feature = "mqtt-client",
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
+    ))]
     fn mqtt(self, dsn: impl Into<String>) -> Self {
         self.protocol(crate::upstreams::mqtt::MqttClientProtocol::dsn(dsn))
     }
 
-    #[cfg(all(feature = "amqp-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(all(
+        feature = "amqp-client",
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
+    ))]
     fn amqp(self, dsn: impl Into<String>) -> Self {
         self.protocol(crate::upstreams::amqp::AmqpClientProtocol::dsn(dsn))
     }
 
-    #[cfg(all(feature = "dns-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(all(
+        feature = "dns-client",
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
+    ))]
     fn dns(self, dsn: impl Into<String>) -> Self {
         self.protocol(crate::upstreams::dns::DnsClientProtocol::dsn(dsn))
     }

@@ -46,9 +46,9 @@ use std::path::{Path, PathBuf};
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use std::process::{Child, Command, Stdio};
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use std::sync::Arc;
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use std::time::{Duration, Instant};
 
@@ -632,9 +632,7 @@ impl GpuSampler {
             .spawn(move || {
                 while thread_running.load(Ordering::Relaxed) {
                     if let Some(sample) = gpu_utilization_sample() {
-                        thread_samples
-                            .lock()
-                            .push(sample);
+                        thread_samples.lock().push(sample);
                     }
                     std::thread::sleep(GPU_SAMPLE_INTERVAL);
                 }
@@ -1009,9 +1007,7 @@ struct ChildGuard {
 impl ChildGuard {
     fn new(child: Child) -> Self {
         let pid = child.id();
-        REAPABLE_PIDS
-            .lock()
-            .push(pid);
+        REAPABLE_PIDS.lock().push(pid);
         Self { child, pid }
     }
 
@@ -1051,9 +1047,7 @@ fn install_orphan_reaping_panic_hook() {
 
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn reap_orphaned_llama_servers() {
-    let pids = REAPABLE_PIDS
-        .lock()
-        .clone();
+    let pids = REAPABLE_PIDS.lock().clone();
     for pid in pids {
         eprintln!("speculative_bench: panic hook reaping orphaned llama-server pid={pid}");
         let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
@@ -3090,17 +3084,13 @@ mod tests {
             let guard = ChildGuard::new(child);
             assert_eq!(guard.pid(), pid);
             assert!(
-                REAPABLE_PIDS
-                    .lock()
-                    .contains(&pid),
+                REAPABLE_PIDS.lock().contains(&pid),
                 "ChildGuard::new must register its pid for the panic-hook fallback"
             );
         } // `guard` drops here -- kills and waits `sleep 60`.
 
         assert!(
-            !REAPABLE_PIDS
-                .lock()
-                .contains(&pid),
+            !REAPABLE_PIDS.lock().contains(&pid),
             "ChildGuard::drop must deregister its pid once it has reaped the child"
         );
         // `wait()` inside `Drop::drop` already reaped the process, so a

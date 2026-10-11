@@ -237,7 +237,10 @@ fn metal_matmul_on_real_ffn_up_q3k_bytes_matches_the_dequantized_f32_cpu_path() 
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Packed { codec: Codec::Q3K, bytes: sliced_weight },
+            QuantizedBlock::Packed {
+                codec: Codec::Q3K,
+                bytes: sliced_weight,
+            },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],

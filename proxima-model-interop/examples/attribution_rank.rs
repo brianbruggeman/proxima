@@ -147,7 +147,8 @@ fn proxima_shape(label: &str, extents: &[u64]) -> Option<String> {
 }
 
 fn read_proxima(directory: &Path) -> (Side, f64, usize) {
-    let dispatches = fs::read_to_string(directory.join("census_dispatches.csv")).expect("dispatch csv");
+    let dispatches =
+        fs::read_to_string(directory.join("census_dispatches.csv")).expect("dispatch csv");
     let mut extents_by_node: BTreeMap<u32, Vec<u64>> = BTreeMap::new();
     for line in dispatches.lines().skip(1) {
         let parts: Vec<&str> = line.splitn(10, ',').collect();
@@ -163,7 +164,9 @@ fn read_proxima(directory: &Path) -> (Side, f64, usize) {
         if !parts[12].is_empty() {
             untimed += count as usize;
         }
-        let extents = extents_by_node.get(&parts[7].parse().expect("rep node")).expect("rep extents");
+        let extents = extents_by_node
+            .get(&parts[7].parse().expect("rep node"))
+            .expect("rep extents");
         let warm_ns: f64 = parts[10].parse().expect("warm");
         let marginal_ns: f64 = parts[11].parse().expect("marginal");
         let cost = Cost {
@@ -172,8 +175,15 @@ fn read_proxima(directory: &Path) -> (Side, f64, usize) {
             marginal_ms: count * marginal_ns / 1e6,
             ..Cost::default()
         };
-        accumulate(side.by_label.entry(parts[0].to_string()).or_default(), &cost);
-        side.add(proxima_class(parts[0]), proxima_shape(parts[0], extents), &cost);
+        accumulate(
+            side.by_label.entry(parts[0].to_string()).or_default(),
+            &cost,
+        );
+        side.add(
+            proxima_class(parts[0]),
+            proxima_shape(parts[0], extents),
+            &cost,
+        );
     }
     let total_warm: f64 = side.by_class.values().map(|cost| cost.warm_ms).sum();
     (side, total_warm, dispatch_total - untimed)
@@ -187,8 +197,13 @@ fn field_value<'line>(line: &'line str, key: &str) -> &'line str {
 }
 
 fn bracket_dims(text: &str) -> Vec<u64> {
-    let inner = text.split_once('[').map_or("", |(_, rest)| rest.trim_end_matches(']'));
-    inner.split(',').filter_map(|token| token.parse().ok()).collect()
+    let inner = text
+        .split_once('[')
+        .map_or("", |(_, rest)| rest.trim_end_matches(']'));
+    inner
+        .split(',')
+        .filter_map(|token| token.parse().ok())
+        .collect()
 }
 
 fn llama_class(op: &str, name: &str, source_zero: &str) -> Class {
@@ -233,9 +248,12 @@ fn read_llama(path: &Path, filter: &LlamaFilter) -> Side {
         if class == Class::Matmul && dims.get(1).is_some_and(|rows| *rows >= VOCAB_WIDE_ROWS) {
             class = Class::Head;
         }
-        let shape = (class == Class::Matmul && dims.len() >= 2).then(|| shape_key(codec, &dims[..2]));
+        let shape =
+            (class == Class::Matmul && dims.len() >= 2).then(|| shape_key(codec, &dims[..2]));
         if let Some(key) = &shape {
-            side.labels.entry(key.clone()).or_insert_with(|| shape_label(key, &dims[..2]));
+            side.labels
+                .entry(key.clone())
+                .or_insert_with(|| shape_label(key, &dims[..2]));
         }
         side.add(class, shape, &cost);
     }
@@ -243,7 +261,11 @@ fn read_llama(path: &Path, filter: &LlamaFilter) -> Side {
 }
 
 fn render_classes(proxima: &Side, llama: &Side) -> String {
-    let mut classes: Vec<&Class> = proxima.by_class.keys().chain(llama.by_class.keys()).collect();
+    let mut classes: Vec<&Class> = proxima
+        .by_class
+        .keys()
+        .chain(llama.by_class.keys())
+        .collect();
     classes.sort();
     classes.dedup();
     let mut table = String::from(
@@ -251,7 +273,10 @@ fn render_classes(proxima: &Side, llama: &Side) -> String {
     );
     let mut rows: Vec<(f64, String)> = Vec::new();
     for class in classes {
-        let (ours, theirs) = (cost_of(&proxima.by_class, class), cost_of(&llama.by_class, class));
+        let (ours, theirs) = (
+            cost_of(&proxima.by_class, class),
+            cost_of(&llama.by_class, class),
+        );
         let line = format!(
             "| {} | {:.0} | {:.2} | {:.2} | {:.0} | {:.2} | {:.2} | {:+.2} | {} |\n",
             class.label(),
@@ -285,7 +310,11 @@ fn ratio_text(numerator: f64, denominator: f64) -> String {
 }
 
 fn render_shapes(proxima: &Side, llama: &Side, top: usize) -> String {
-    let mut keys: Vec<&String> = proxima.by_shape.keys().chain(llama.by_shape.keys()).collect();
+    let mut keys: Vec<&String> = proxima
+        .by_shape
+        .keys()
+        .chain(llama.by_shape.keys())
+        .collect();
     keys.sort();
     keys.dedup();
     let mut rows: Vec<(f64, String)> = keys
@@ -318,7 +347,13 @@ fn render_shapes(proxima: &Side, llama: &Side, top: usize) -> String {
 
 fn render_labels(proxima: &Side, top: usize) -> String {
     let mut rows: Vec<(&String, &Cost)> = proxima.by_label.iter().collect();
-    rows.sort_by(|left, right| right.1.warm_ms.partial_cmp(&left.1.warm_ms).expect("finite"));
+    rows.sort_by(|left, right| {
+        right
+            .1
+            .warm_ms
+            .partial_cmp(&left.1.warm_ms)
+            .expect("finite")
+    });
     let mut table = String::from(
         "| proxima census label | ops | ms (own cb) | ms (marginal) | us per op (own cb) |\n|---|---|---|---|---|\n",
     );
@@ -335,8 +370,13 @@ fn render_labels(proxima: &Side, top: usize) -> String {
 }
 
 fn flag_value(args: &[String], flag: &str) -> String {
-    let position = args.iter().position(|argument| argument == flag).unwrap_or_else(|| panic!("{flag} required"));
-    args.get(position + 1).unwrap_or_else(|| panic!("{flag} needs a value")).clone()
+    let position = args
+        .iter()
+        .position(|argument| argument == flag)
+        .unwrap_or_else(|| panic!("{flag} required"));
+    args.get(position + 1)
+        .unwrap_or_else(|| panic!("{flag} needs a value"))
+        .clone()
 }
 
 fn rank_text(census: &Path, llama_path: &Path, filter: &LlamaFilter) -> String {
@@ -345,8 +385,17 @@ fn rank_text(census: &Path, llama_path: &Path, filter: &LlamaFilter) -> String {
     let llama_total: f64 = llama.by_class.values().map(|cost| cost.llama_raw_ms).sum();
     let llama_ops: f64 = llama.by_class.values().map(|cost| cost.ops).sum();
     let mut text = String::new();
-    writeln!(text, "proxima timed dispatches={timed} sum(own cb)={proxima_total:.2} ms").expect("write to string");
-    writeln!(text, "llama ops per request={llama_ops:.0} sum(own cb)={llama_total:.2} ms floor_us={}", filter.floor_us).expect("write to string");
+    writeln!(
+        text,
+        "proxima timed dispatches={timed} sum(own cb)={proxima_total:.2} ms"
+    )
+    .expect("write to string");
+    writeln!(
+        text,
+        "llama ops per request={llama_ops:.0} sum(own cb)={llama_total:.2} ms floor_us={}",
+        filter.floor_us
+    )
+    .expect("write to string");
     writeln!(text, "\n{}", render_classes(&proxima, &llama)).expect("write to string");
     writeln!(text, "{}", render_shapes(&proxima, &llama, 14)).expect("write to string");
     writeln!(text, "{}", render_labels(&proxima, 12)).expect("write to string");
@@ -355,12 +404,22 @@ fn rank_text(census: &Path, llama_path: &Path, filter: &LlamaFilter) -> String {
 
 fn run_rank(args: &[String]) {
     let filter = LlamaFilter {
-        ntoks: flag_value(args, "--ntok").split(',').map(|token| token.parse().expect("ntok")).collect(),
+        ntoks: flag_value(args, "--ntok")
+            .split(',')
+            .map(|token| token.parse().expect("ntok"))
+            .collect(),
         requests: flag_value(args, "--requests").parse().expect("requests"),
         floor_us: flag_value(args, "--floor-us").parse().expect("floor"),
     };
     let census = PathBuf::from(flag_value(args, "--census"));
-    print!("{}", rank_text(&census, &PathBuf::from(flag_value(args, "--llama")), &filter));
+    print!(
+        "{}",
+        rank_text(
+            &census,
+            &PathBuf::from(flag_value(args, "--llama")),
+            &filter
+        )
+    );
 }
 
 fn parse_fields(line: &str) -> Fields {
@@ -371,7 +430,10 @@ fn parse_fields(line: &str) -> Fields {
 }
 
 fn number(fields: &Fields, key: &str) -> f64 {
-    fields.get(key).and_then(|value| value.parse().ok()).unwrap_or(f64::NAN)
+    fields
+        .get(key)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(f64::NAN)
 }
 
 struct StepRecord {
@@ -393,8 +455,14 @@ fn read_steps(path: &Path) -> Vec<StepRecord> {
             gpus.push(parse_fields(line));
         }
     }
-    assert!(!walls.is_empty(), "N==0: no token_breakdown wall events in {path:?}");
-    assert!(walls.len() == metals.len() && metals.len() == gpus.len(), "N mismatch across event kinds");
+    assert!(
+        !walls.is_empty(),
+        "N==0: no token_breakdown wall events in {path:?}"
+    );
+    assert!(
+        walls.len() == metals.len() && metals.len() == gpus.len(),
+        "N mismatch across event kinds"
+    );
     let mut run = 0usize;
     walls
         .into_iter()
@@ -402,7 +470,12 @@ fn read_steps(path: &Path) -> Vec<StepRecord> {
         .zip(gpus)
         .map(|((wall, metal), gpu)| {
             run += usize::from(number(&wall, "step") == 0.0);
-            StepRecord { run: run - 1, wall, metal, gpu }
+            StepRecord {
+                run: run - 1,
+                wall,
+                metal,
+                gpu,
+            }
         })
         .collect()
 }
@@ -454,7 +527,10 @@ fn column_value(record: &StepRecord, key: &str) -> f64 {
 fn step_row(label: &str, columns: &[Column], records: &[&StepRecord]) -> String {
     let mut row = format!("| {label} |");
     for (_, key) in columns {
-        let mut values: Vec<f64> = records.iter().map(|record| column_value(record, key)).collect();
+        let mut values: Vec<f64> = records
+            .iter()
+            .map(|record| column_value(record, key))
+            .collect();
         write!(row, " {:.2} |", median(&mut values)).expect("write to string");
     }
     row.push('\n');
@@ -462,7 +538,12 @@ fn step_row(label: &str, columns: &[Column], records: &[&StepRecord]) -> String 
 }
 
 fn step_table(records: &[StepRecord], columns: &[Column]) -> String {
-    let runs = records.iter().map(|record| record.run).max().expect("non-empty") + 1;
+    let runs = records
+        .iter()
+        .map(|record| record.run)
+        .max()
+        .expect("non-empty")
+        + 1;
     let mut table = String::from("| arm |");
     for (name, _) in columns {
         write!(table, " {name} |").expect("write to string");
@@ -472,21 +553,44 @@ fn step_table(records: &[StepRecord], columns: &[Column]) -> String {
     table.push('\n');
     for run in 0..runs {
         let in_run: Vec<&StepRecord> = records.iter().filter(|record| record.run == run).collect();
-        let prefill: Vec<&StepRecord> = in_run.iter().copied().filter(|record| number(&record.wall, "step") == 0.0).collect();
-        let steady: Vec<&StepRecord> = in_run.iter().copied().filter(|record| number(&record.wall, "step") >= 2.0).collect();
-        table.push_str(&step_row(&format!("run {run} step 0 (prefill, n={})", prefill.len()), columns, &prefill));
-        table.push_str(&step_row(&format!("run {run} steps >= 2 median (n={})", steady.len()), columns, &steady));
+        let prefill: Vec<&StepRecord> = in_run
+            .iter()
+            .copied()
+            .filter(|record| number(&record.wall, "step") == 0.0)
+            .collect();
+        let steady: Vec<&StepRecord> = in_run
+            .iter()
+            .copied()
+            .filter(|record| number(&record.wall, "step") >= 2.0)
+            .collect();
+        table.push_str(&step_row(
+            &format!("run {run} step 0 (prefill, n={})", prefill.len()),
+            columns,
+            &prefill,
+        ));
+        table.push_str(&step_row(
+            &format!("run {run} steps >= 2 median (n={})", steady.len()),
+            columns,
+            &steady,
+        ));
     }
     table
 }
 
 fn steps_text(events: &Path) -> String {
     let records = read_steps(events);
-    format!("{}\n{}\n", step_table(&records, &TIMELINE_COLUMNS), step_table(&records, &HOST_COLUMNS))
+    format!(
+        "{}\n{}\n",
+        step_table(&records, &TIMELINE_COLUMNS),
+        step_table(&records, &HOST_COLUMNS)
+    )
 }
 
 fn run_steps(args: &[String]) {
-    print!("{}", steps_text(&PathBuf::from(flag_value(args, "--events"))));
+    print!(
+        "{}",
+        steps_text(&PathBuf::from(flag_value(args, "--events")))
+    );
 }
 
 fn main() {
@@ -517,7 +621,10 @@ mod tests {
     #[test]
     fn fused_and_plain_norm_labels_share_one_class() {
         assert_eq!(proxima_class("RMSNorm sumsq + fused epilogue"), Class::Norm);
-        assert_eq!(llama_class("RMS_NORM", "norm", "f32[1536,1,1]"), Class::Norm);
+        assert_eq!(
+            llama_class("RMS_NORM", "norm", "f32[1536,1,1]"),
+            Class::Norm
+        );
     }
 
     #[test]
@@ -534,16 +641,30 @@ mod tests {
 
     fn assert_rank_matches(census: &str, llama: &str, filter: &LlamaFilter, saved: &str) {
         let text = rank_text(&evidence(census), &evidence(llama), filter);
-        assert!(text.contains("proxima timed dispatches="), "N==0: the rank report timed nothing");
-        assert_eq!(text, saved, "the committed raw evidence no longer reproduces the saved table");
+        assert!(
+            text.contains("proxima timed dispatches="),
+            "N==0: the rank report timed nothing"
+        );
+        assert_eq!(
+            text, saved,
+            "the committed raw evidence no longer reproduces the saved table"
+        );
     }
 
     fn prefill_filter(ntoks: &[u32]) -> LlamaFilter {
-        LlamaFilter { ntoks: ntoks.to_vec(), requests: 3.0, floor_us: 4.0 }
+        LlamaFilter {
+            ntoks: ntoks.to_vec(),
+            requests: 3.0,
+            floor_us: 4.0,
+        }
     }
 
     fn decode_filter() -> LlamaFilter {
-        LlamaFilter { ntoks: vec![1], requests: 381.0, floor_us: 4.0 }
+        LlamaFilter {
+            ntoks: vec![1],
+            requests: 381.0,
+            floor_us: 4.0,
+        }
     }
 
     #[test]
@@ -552,7 +673,9 @@ mod tests {
             "census_e2b_prefill",
             "llama_ops/e2b_ops.tsv",
             &prefill_filter(&[512, 455, 4]),
-            include_str!("../../proxima-tensor/specs/decode-prefill-parity/evidence/slice0/rank/e2b_prefill.md"),
+            include_str!(
+                "../../proxima-tensor/specs/decode-prefill-parity/evidence/slice0/rank/e2b_prefill.md"
+            ),
         );
     }
 
@@ -562,7 +685,9 @@ mod tests {
             "census_e2b_decode",
             "llama_ops/e2b_ops.tsv",
             &decode_filter(),
-            include_str!("../../proxima-tensor/specs/decode-prefill-parity/evidence/slice0/rank/e2b_decode.md"),
+            include_str!(
+                "../../proxima-tensor/specs/decode-prefill-parity/evidence/slice0/rank/e2b_decode.md"
+            ),
         );
     }
 
@@ -572,7 +697,9 @@ mod tests {
             "census_granite_prefill",
             "llama_ops/granite_ops.tsv",
             &prefill_filter(&[512, 488]),
-            include_str!("../../proxima-tensor/specs/decode-prefill-parity/evidence/slice0/rank/granite_prefill.md"),
+            include_str!(
+                "../../proxima-tensor/specs/decode-prefill-parity/evidence/slice0/rank/granite_prefill.md"
+            ),
         );
     }
 
@@ -582,7 +709,9 @@ mod tests {
             "census_granite_decode",
             "llama_ops/granite_ops.tsv",
             &decode_filter(),
-            include_str!("../../proxima-tensor/specs/decode-prefill-parity/evidence/slice0/rank/granite_decode.md"),
+            include_str!(
+                "../../proxima-tensor/specs/decode-prefill-parity/evidence/slice0/rank/granite_decode.md"
+            ),
         );
     }
 
@@ -593,15 +722,30 @@ mod tests {
             &evidence("llama_ops/e2b_ops.tsv"),
             &decode_filter(),
         );
-        let saved = include_str!("../../proxima-tensor/specs/decode-prefill-parity/evidence/slice0/rank/e2b_prefill.md");
-        assert_ne!(text, saved, "control: the wrong graph selection must change the table");
+        let saved = include_str!(
+            "../../proxima-tensor/specs/decode-prefill-parity/evidence/slice0/rank/e2b_prefill.md"
+        );
+        assert_ne!(
+            text, saved,
+            "control: the wrong graph selection must change the table"
+        );
     }
 
     #[test]
     fn the_step_timelines_reproduce_from_the_committed_token_breakdown_events() {
         let e2b = steps_text(&evidence("timeline/e2b_token_breakdown.log"));
         let granite = steps_text(&evidence("timeline/granite_token_breakdown.log"));
-        assert_eq!(e2b, include_str!("../../proxima-tensor/specs/decode-prefill-parity/evidence/slice0/rank/e2b_steps.md"));
-        assert_eq!(granite, include_str!("../../proxima-tensor/specs/decode-prefill-parity/evidence/slice0/rank/granite_steps.md"));
+        assert_eq!(
+            e2b,
+            include_str!(
+                "../../proxima-tensor/specs/decode-prefill-parity/evidence/slice0/rank/e2b_steps.md"
+            )
+        );
+        assert_eq!(
+            granite,
+            include_str!(
+                "../../proxima-tensor/specs/decode-prefill-parity/evidence/slice0/rank/granite_steps.md"
+            )
+        );
     }
 }

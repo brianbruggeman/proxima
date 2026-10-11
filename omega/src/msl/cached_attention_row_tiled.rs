@@ -169,7 +169,11 @@ pub(super) fn render_cached_attention_row_tiled_with(
     let _ = row_schedule;
     let block = row_tiled_block(*head_dim);
     let half_dim = *head_dim / 2;
-    let depth_unroll = if (half_dim / 8).is_multiple_of(2) { 2 } else { 1 };
+    let depth_unroll = if (half_dim / 8).is_multiple_of(2) {
+        2
+    } else {
+        1
+    };
     let query_blocks = if !(*query_groups).is_multiple_of(8) {
         (rows_per_threadgroup / 8) * *query_groups
     } else {
@@ -217,8 +221,8 @@ pub(super) fn render_cached_attention_row_tiled_with(
     let shared_kv_bytes = base_threadgroup_bytes + shared_k_bytes;
     let value_fragment_bytes = 64 * if half_operands { 2 } else { 4 };
     let shared_v_dimension_blocks = if shared_v {
-        let available = crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES
-            .saturating_sub(shared_kv_bytes);
+        let available =
+            crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES.saturating_sub(shared_kv_bytes);
         (available / value_fragment_bytes).min(*head_dim / 8)
     } else {
         1

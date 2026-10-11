@@ -1558,8 +1558,7 @@ fn the_half_setting_narrows_the_operands_and_keeps_scores_accumulators_and_softm
             );
         }
         assert!(
-            source
-                .contains("simdgroup_multiply_accumulate(scores[group][vector_slot], query_even")
+            source.contains("simdgroup_multiply_accumulate(scores[group][vector_slot], query_even")
         );
         assert!(source.contains("simdgroup_multiply_accumulate(accumulated[slot][vector_block], weights[vector_block], value"));
     }
@@ -2510,8 +2509,18 @@ fn explicit_four_simdgroup_dispatch_preserves_row_and_key_tiles() {
     };
     assert_eq!(composed_rows, 16);
     assert_eq!(composed_simdgroups, 4);
-    assert!(composed.kernel.source.contains("constexpr bool shared_k = true"));
-    assert!(composed.kernel.source.contains("constexpr bool shared_v = true"));
+    assert!(
+        composed
+            .kernel
+            .source
+            .contains("constexpr bool shared_k = true")
+    );
+    assert!(
+        composed
+            .kernel
+            .source
+            .contains("constexpr bool shared_v = true")
+    );
     assert!(
         composed
             .kernel

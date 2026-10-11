@@ -304,11 +304,8 @@ pub(crate) fn emit_inner_with_mma_selection(
     // caller that lacks the merge dispatch this binding shape requires --
     // `crate::metal::encode_op`'s own doc names that gap and the guard it
     // takes on its `resolved: None` (no plan-resolved merge sibling) path.
-    let is_split_cached_attention = cached_attention_merge_needed_with_schedule(
-        &resolved.kind,
-        numeric_policy,
-        row_schedule,
-    );
+    let is_split_cached_attention =
+        cached_attention_merge_needed_with_schedule(&resolved.kind, numeric_policy, row_schedule);
     let source = widen_for_grid(resolved.node, source, grid.grid2d)?;
     let kernel = Kernel {
         source,

@@ -7,13 +7,17 @@ use super::*;
 
 const NORM_BASE: &str = include_str!("../../tests/fixtures/index32/norm_epilogue_1536.base.msl");
 const NORM_TIP: &str = include_str!("../../tests/fixtures/index32/norm_epilogue_1536.tip.msl");
-const COMBINE_BASE: &str = include_str!("../../tests/fixtures/index32/combine_epilogue_1024.base.msl");
-const COMBINE_TIP: &str = include_str!("../../tests/fixtures/index32/combine_epilogue_1024.tip.msl");
+const COMBINE_BASE: &str =
+    include_str!("../../tests/fixtures/index32/combine_epilogue_1024.base.msl");
+const COMBINE_TIP: &str =
+    include_str!("../../tests/fixtures/index32/combine_epilogue_1024.tip.msl");
 const EXPERT_BASE: &str = include_str!("../../tests/fixtures/index32/expert_down_q8_0.base.msl");
 const EXPERT_TIP: &str = include_str!("../../tests/fixtures/index32/expert_down_q8_0.tip.msl");
-const EMBEDDING_BASE: &str = include_str!("../../tests/fixtures/index32/embedding_q6k_1536.base.msl");
+const EMBEDDING_BASE: &str =
+    include_str!("../../tests/fixtures/index32/embedding_q6k_1536.base.msl");
 const EMBEDDING_TIP: &str = include_str!("../../tests/fixtures/index32/embedding_q6k_1536.tip.msl");
-const LOOKUP_BASE: &str = include_str!("../../tests/fixtures/index32/embedding_lookup_f32.base.msl");
+const LOOKUP_BASE: &str =
+    include_str!("../../tests/fixtures/index32/embedding_lookup_f32.base.msl");
 const LOOKUP_TIP: &str = include_str!("../../tests/fixtures/index32/embedding_lookup_f32.tip.msl");
 
 fn kernel_body(source: &str) -> &str {
@@ -24,9 +28,15 @@ fn has_word(text: &str, word: &str) -> bool {
     replace_word(text, word, "") != text
 }
 
-fn emitted(bound: &BoundOp, packed: &BTreeMap<NodeId, Codec>, coord_override: Option<&str>) -> String {
+fn emitted(
+    bound: &BoundOp,
+    packed: &BTreeMap<NodeId, Codec>,
+    coord_override: Option<&str>,
+) -> String {
     temp_env::with_var("PROXIMA_COORD_INDEX32", coord_override, || {
-        emit(bound, packed, NumericPolicy::default()).expect("kernel emits").source
+        emit(bound, packed, NumericPolicy::default())
+            .expect("kernel emits")
+            .source
     })
 }
 
@@ -56,7 +66,11 @@ fn the_captured_expert_projection_narrows_only_its_two_prologue_divides() {
 
     assert_eq!(narrowed, EXPERT_TIP);
     assert_eq!(EXPERT_BASE.lines().count(), narrowed.lines().count());
-    let changed = EXPERT_BASE.lines().zip(narrowed.lines()).filter(|(base, tip)| base != tip).count();
+    let changed = EXPERT_BASE
+        .lines()
+        .zip(narrowed.lines())
+        .filter(|(base, tip)| base != tip)
+        .count();
     assert_eq!(changed, 2);
 }
 
@@ -65,7 +79,10 @@ fn the_captured_gathered_embedding_decodes_its_block_index_in_unsigned_32_bit() 
     let narrowed = narrow_block_remainders(&narrow_block_decode(EMBEDDING_BASE));
 
     assert_eq!(narrowed, EMBEDDING_TIP);
-    assert!(narrowed.contains("q6k_element(in0 + (long)((uint)off0 / 256u) * 210, ((uint)off0 % 256u))"));
+    assert!(
+        narrowed
+            .contains("q6k_element(in0 + (long)((uint)off0 / 256u) * 210, ((uint)off0 % 256u))")
+    );
 }
 
 #[test]
@@ -89,19 +106,31 @@ fn the_body_pass_wraps_nested_uniform_reads_and_drops_the_64_bit_literal_suffix(
 
     let narrowed = narrow_body_to_int32(source);
 
-    assert!(narrowed.contains("int span = ((int)u.operand_strides[0][(1)]) * 32 + (int)ulong_value;"), "{narrowed}");
+    assert!(
+        narrowed.contains("int span = ((int)u.operand_strides[0][(1)]) * 32 + (int)ulong_value;"),
+        "{narrowed}"
+    );
     assert!(narrowed.contains("ulong keep = 7UL;"), "{narrowed}");
-    assert!(narrowed.contains("int total = ((int)u.reduction_total);"), "{narrowed}");
+    assert!(
+        narrowed.contains("int total = ((int)u.reduction_total);"),
+        "{narrowed}"
+    );
 }
 
 #[test]
 fn a_block_read_that_is_not_an_offset_decode_is_left_alone() {
     let source = "float value = in0[(off0 + 3)] + q4_0_element(in1 + (index / 32) * 18, (uint)(index % 32));";
 
-    assert_eq!(narrow_block_remainders(&narrow_block_decode(source)), source);
+    assert_eq!(
+        narrow_block_remainders(&narrow_block_decode(source)),
+        source
+    );
 }
 
-#[cfg(all(feature = "reduce-epilogue-fusion", feature = "metal-wide-cooperative-reduce"))]
+#[cfg(all(
+    feature = "reduce-epilogue-fusion",
+    feature = "metal-wide-cooperative-reduce"
+))]
 mod norm_rows {
     use super::super::cooperative_fold_tests::normalization_rows::rmsnorm_over_row;
     use super::*;
@@ -115,8 +144,14 @@ mod norm_rows {
         let source = emitted(&bound, &NO_PACKED, None);
 
         assert!(!has_word(kernel_body(&source), "long"), "{source}");
-        assert!(source.contains("int epi_pre_r = (int)lane + (int)slot * "), "{source}");
-        assert!(source.contains("= ((int)u.epilogue_operand_base["), "{source}");
+        assert!(
+            source.contains("int epi_pre_r = (int)lane + (int)slot * "),
+            "{source}"
+        );
+        assert!(
+            source.contains("= ((int)u.epilogue_operand_base["),
+            "{source}"
+        );
         assert!(source.contains("    long output_total;"));
         assert!(cache_key(&bound, &NO_PACKED).contains("_c32"));
     }
@@ -127,7 +162,10 @@ mod norm_rows {
 
         let source = emitted(&bound, &NO_PACKED, Some("0"));
 
-        assert!(source.contains("long epi_pre_r = (long)lane + (long)slot * "), "{source}");
+        assert!(
+            source.contains("long epi_pre_r = (long)lane + (long)slot * "),
+            "{source}"
+        );
         assert!(!source.contains("int epi_pre_r"));
     }
 
@@ -136,7 +174,10 @@ mod norm_rows {
         let bound = rmsnorm_over_row(1 << 30);
 
         assert!(cache_key(&bound, &NO_PACKED).contains("_c32"));
-        assert!(!has_word(kernel_body(&emitted(&bound, &NO_PACKED, None)), "long"));
+        assert!(!has_word(
+            kernel_body(&emitted(&bound, &NO_PACKED, None)),
+            "long"
+        ));
     }
 
     #[test]
@@ -146,7 +187,10 @@ mod norm_rows {
         let source = emitted(&bound, &NO_PACKED, None);
 
         assert!(!cache_key(&bound, &NO_PACKED).contains("_c32"));
-        assert!(source.contains("long epi_pre_r = (long)lane + (long)slot * "), "{source}");
+        assert!(
+            source.contains("long epi_pre_r = (long)lane + (long)slot * "),
+            "{source}"
+        );
         assert!(!source.contains("int epi_pre_r"));
     }
 }
@@ -158,7 +202,10 @@ fn a_gathered_f32_lookup_renders_its_offsets_and_fault_check_in_32_bit() {
     let source = emitted(&bound, &BTreeMap::new(), None);
 
     assert!(!has_word(kernel_body(&source), "long"), "{source}");
-    assert!(source.contains("fetched0 < 0 || fetched0 >= ((int)u.gather_extent[0])"), "{source}");
+    assert!(
+        source.contains("fetched0 < 0 || fetched0 >= ((int)u.gather_extent[0])"),
+        "{source}"
+    );
     assert!(cache_key(&bound, &BTreeMap::new()).contains("_c32"));
 }
 
@@ -169,7 +216,10 @@ fn a_q6_k_embedding_table_past_i32_but_inside_u32_decodes_its_block_in_unsigned_
 
     let source = emitted(&bound, &packed, None);
 
-    assert!(source.contains("(long)((uint)off0 / 256u) * 210"), "{source}");
+    assert!(
+        source.contains("(long)((uint)off0 / 256u) * 210"),
+        "{source}"
+    );
     assert!(source.contains("((uint)off0 % 256u)"), "{source}");
     assert!(!source.contains("(off0 / 256)"));
     assert!(cache_key(&bound, &packed).contains("_c32"));
@@ -195,8 +245,14 @@ fn a_routed_q8_0_expert_projection_divides_its_flat_row_in_unsigned_32_bit() {
 
     let source = emitted(&bound, &packed, None);
 
-    assert!(source.contains("long expert_slot = (long)((uint)group_first / (uint)group_out_extent);"), "{source}");
-    assert!(source.contains("long out_row_base = (long)((uint)group_first % (uint)group_out_extent);"), "{source}");
+    assert!(
+        source.contains("long expert_slot = (long)((uint)group_first / (uint)group_out_extent);"),
+        "{source}"
+    );
+    assert!(
+        source.contains("long out_row_base = (long)((uint)group_first % (uint)group_out_extent);"),
+        "{source}"
+    );
     assert!(cache_key(&bound, &packed).contains("_c32"));
 }
 
@@ -208,7 +264,10 @@ fn a_routed_expert_projection_one_row_group_inside_u32_still_narrows() {
 
     let source = emitted(&bound, &packed, None);
 
-    assert!(source.contains("(uint)group_first / (uint)group_out_extent"), "{source}");
+    assert!(
+        source.contains("(uint)group_first / (uint)group_out_extent"),
+        "{source}"
+    );
     assert!(cache_key(&bound, &packed).contains("_c32"));
 }
 
@@ -220,8 +279,14 @@ fn a_routed_expert_projection_with_outputs_past_u32_keeps_the_64_bit_divides() {
 
     let source = emitted(&bound, &packed, None);
 
-    assert!(source.contains("long expert_slot = group_first / group_out_extent;"), "{source}");
-    assert!(source.contains("long out_row_base = group_first % group_out_extent;"), "{source}");
+    assert!(
+        source.contains("long expert_slot = group_first / group_out_extent;"),
+        "{source}"
+    );
+    assert!(
+        source.contains("long out_row_base = group_first % group_out_extent;"),
+        "{source}"
+    );
     assert!(!cache_key(&bound, &packed).contains("_c32"));
 }
 

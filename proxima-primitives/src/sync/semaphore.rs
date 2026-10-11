@@ -202,10 +202,10 @@ mod tests {
         clippy::needless_range_loop,
         clippy::default_constructed_unit_structs
     )]
-    use core::future::Future;
-    use core::task::{Context, Poll, Waker};
     use alloc::sync::Arc;
     use alloc::task::Wake;
+    use core::future::Future;
+    use core::task::{Context, Poll, Waker};
 
     use super::*;
 

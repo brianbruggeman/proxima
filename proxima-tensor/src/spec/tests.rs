@@ -1,5 +1,5 @@
-use conflaguration::Validate;
 use super::*;
+use conflaguration::Validate;
 use proxima_primitives::Codec;
 
 #[test]
@@ -214,8 +214,12 @@ fn stacked_projection_matches_the_per_route_moe_graph_and_issues_one_gather_per_
 }
 
 #[test]
-fn stacked_combined_projection_matches_the_per_route_moe_graph_and_issues_one_gather_per_projection() {
-    assert_stacked_strategy_matches_per_route_in_f32(MoeProjectionStrategy::StackedCombined, 1.0e-6);
+fn stacked_combined_projection_matches_the_per_route_moe_graph_and_issues_one_gather_per_projection()
+ {
+    assert_stacked_strategy_matches_per_route_in_f32(
+        MoeProjectionStrategy::StackedCombined,
+        1.0e-6,
+    );
 }
 
 fn assert_stacked_strategy_matches_per_route_in_f32(
@@ -231,65 +235,63 @@ fn assert_stacked_strategy_matches_per_route_in_f32(
         let mut lcg = crate::test_support::Lcg(seed);
         (0..count).map(|_| lcg.next_unit() * 2.0 - 1.0).collect()
     };
-    let build = |tokens: u32,
-                 strategy: MoeProjectionStrategy,
-                 scaled: bool,
-                 activation: Activation| {
-        let mut program = Vec::new();
-        let x = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(tokens), Extent::Static(EMBEDDING)],
-            "x",
-        );
-        let gate_inp = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(EMBEDDING), Extent::Static(EXPERT_COUNT)],
-            "gate_inp",
-        );
-        let stack = |program: &mut Vec<Op>, rows: u32, columns: u32, name: &str| {
-            input_leaf(
-                program,
-                DType::Float32,
-                alloc::vec![
-                    Extent::Static(EXPERT_COUNT),
-                    Extent::Static(rows),
-                    Extent::Static(columns),
-                ],
-                name,
-            )
-        };
-        let gate = stack(&mut program, EMBEDDING, FEED_FORWARD, "gate");
-        let up = stack(&mut program, EMBEDDING, FEED_FORWARD, "up");
-        let down = stack(&mut program, FEED_FORWARD, EMBEDDING, "down");
-        let expert_scale = scaled.then(|| {
-            input_leaf(
+    let build =
+        |tokens: u32, strategy: MoeProjectionStrategy, scaled: bool, activation: Activation| {
+            let mut program = Vec::new();
+            let x = input_leaf(
                 &mut program,
                 DType::Float32,
-                alloc::vec![Extent::Static(EXPERT_COUNT)],
-                "scale",
-            )
-        });
-        let ones = scalar_constant(&mut program, 1.0);
-        let moe_spec = MoeFfnSpec {
-            router: MoeRouter::GateInput(gate_inp),
-            expert_w_gate: gate,
-            expert_w_up: up,
-            expert_w_down: down,
-            expert_count: EXPERT_COUNT,
-            expert_used_count: EXPERT_USED_COUNT,
-            ones,
-            gating: ExpertGatingFunc::Softmax,
-            expert_bias: None,
-            expert_scale,
-            activation,
-            strategy,
+                alloc::vec![Extent::Static(tokens), Extent::Static(EMBEDDING)],
+                "x",
+            );
+            let gate_inp = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(EMBEDDING), Extent::Static(EXPERT_COUNT)],
+                "gate_inp",
+            );
+            let stack = |program: &mut Vec<Op>, rows: u32, columns: u32, name: &str| {
+                input_leaf(
+                    program,
+                    DType::Float32,
+                    alloc::vec![
+                        Extent::Static(EXPERT_COUNT),
+                        Extent::Static(rows),
+                        Extent::Static(columns),
+                    ],
+                    name,
+                )
+            };
+            let gate = stack(&mut program, EMBEDDING, FEED_FORWARD, "gate");
+            let up = stack(&mut program, EMBEDDING, FEED_FORWARD, "up");
+            let down = stack(&mut program, FEED_FORWARD, EMBEDDING, "down");
+            let expert_scale = scaled.then(|| {
+                input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(EXPERT_COUNT)],
+                    "scale",
+                )
+            });
+            let ones = scalar_constant(&mut program, 1.0);
+            let moe_spec = MoeFfnSpec {
+                router: MoeRouter::GateInput(gate_inp),
+                expert_w_gate: gate,
+                expert_w_up: up,
+                expert_w_down: down,
+                expert_count: EXPERT_COUNT,
+                expert_used_count: EXPERT_USED_COUNT,
+                ones,
+                gating: ExpertGatingFunc::Softmax,
+                expert_bias: None,
+                expert_scale,
+                activation,
+                strategy,
+            };
+            let (root, _) =
+                append_moe_ffn(&mut program, 0, x, &moe_spec).expect("the MoE graph builds");
+            (program, root)
         };
-        let (root, _) =
-            append_moe_ffn(&mut program, 0, x, &moe_spec).expect("the MoE graph builds");
-        (program, root)
-    };
     let gathered_count = |program: &[Op]| {
         program
             .iter()
@@ -316,8 +318,16 @@ fn assert_stacked_strategy_matches_per_route_in_f32(
 
         for (case, scaled, activation) in [
             ("silu without an output scale", false, Activation::Silu),
-            ("silu with a per-expert output scale", true, Activation::Silu),
-            ("gelu with a per-expert output scale", true, Activation::GeluTanh),
+            (
+                "silu with a per-expert output scale",
+                true,
+                Activation::Silu,
+            ),
+            (
+                "gelu with a per-expert output scale",
+                true,
+                Activation::GeluTanh,
+            ),
         ] {
             let blocks: Vec<&[f32]> = if scaled {
                 vec![&x, &gate_inp, &gate, &up, &down, &scale]
@@ -353,7 +363,11 @@ fn assert_stacked_strategy_matches_per_route_in_f32(
                     (stacked_value - per_route_value).abs() / per_route_value.abs().max(1.0e-3)
                 })
                 .fold(0.0_f32, f32::max);
-            assert_eq!(stacked.root().len(), (tokens * EMBEDDING) as usize, "{case}");
+            assert_eq!(
+                stacked.root().len(),
+                (tokens * EMBEDDING) as usize,
+                "{case}"
+            );
             assert!(
                 worst_relative_difference <= tolerance,
                 "{stacked_strategy:?}, {case}, {tokens} tokens: the stacked graph drifted {worst_relative_difference:e} from the per-route outputs; \
@@ -361,7 +375,12 @@ fn assert_stacked_strategy_matches_per_route_in_f32(
             );
             assert_eq!(
                 gathered_count(&per_route_program),
-                3 * EXPERT_USED_COUNT as usize + if scaled { EXPERT_USED_COUNT as usize } else { 0 },
+                3 * EXPERT_USED_COUNT as usize
+                    + if scaled {
+                        EXPERT_USED_COUNT as usize
+                    } else {
+                        0
+                    },
                 "{case}, {tokens} tokens: the per-route graph gathers once per selected expert and projection"
             );
             assert_eq!(
@@ -1306,7 +1325,8 @@ fn a_constant_axis_parses_as_a_fixed_index_with_no_terms() {
 
 #[test]
 fn a_constant_axis_with_a_declared_len_is_rejected_at_parse_time() {
-    let error = parse_operand_pattern("s,3@2,d->sd").expect_err("a constant has no extent to declare");
+    let error =
+        parse_operand_pattern("s,3@2,d->sd").expect_err("a constant has no extent to declare");
 
     assert!(matches!(error, TensorError::MalformedMap(_)), "{error}");
 }
@@ -2286,8 +2306,8 @@ fn a_routed_ffn_built_by_append_moe_ffn_matches_an_independent_topk_swiglu_refer
         activation: Activation::Silu,
         strategy: MoeProjectionStrategy::PerRoute,
     };
-    let (root, _site) = append_moe_ffn(&mut program, 0, x_node, &moe_spec)
-        .expect("the routed ffn lowers");
+    let (root, _site) =
+        append_moe_ffn(&mut program, 0, x_node, &moe_spec).expect("the routed ffn lowers");
 
     let gathered_products = program
         .iter()
@@ -2814,7 +2834,10 @@ fn ssm_out_projection_reduce_isolated_packed_matches_dequantized_and_hand_comput
         &[],
         &[
             crate::cpu::QuantizedBlock::Float32(&gated_data),
-            crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed },
+            crate::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: &packed,
+            },
         ],
         &[cur],
     )
@@ -3039,7 +3062,10 @@ fn gathered_expert_product_over_a_packed_q4k_stack_reads_the_routed_experts_own_
 
     let run = |route_data: &[f32]| -> alloc::vec::Vec<f32> {
         let quantized_blocks = [
-            crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &stacked_weight },
+            crate::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: &stacked_weight,
+            },
             crate::cpu::QuantizedBlock::Float32(route_data),
             crate::cpu::QuantizedBlock::Float32(&activation),
         ];
@@ -3218,9 +3244,18 @@ fn quantized_moe_ffn_over_a_packed_q4k_expert_stack_matches_the_routed_experts_o
     let quantized_blocks = [
         crate::cpu::QuantizedBlock::Float32(&x),
         crate::cpu::QuantizedBlock::Float32(&gate_inp),
-        crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &stacked_gate },
-        crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &stacked_up },
-        crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &stacked_down },
+        crate::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &stacked_gate,
+        },
+        crate::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &stacked_up,
+        },
+        crate::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &stacked_down,
+        },
     ];
     let evaluated = crate::cpu::evaluate_quantized(&program, &symbols, &quantized_blocks, &[root])
         .expect("the packed-stack routed ffn evaluates over Q4_K");
@@ -3335,11 +3370,15 @@ fn quantized_moe_ffn_over_a_packed_q4k_expert_stack_matches_the_routed_experts_o
 
 #[test]
 fn stacked_projection_over_packed_q4k_experts_matches_the_per_route_graph_at_every_token_count() {
-    assert_stacked_strategy_matches_per_route_over_packed_q4k(MoeProjectionStrategy::Stacked, 1.0e-6);
+    assert_stacked_strategy_matches_per_route_over_packed_q4k(
+        MoeProjectionStrategy::Stacked,
+        1.0e-6,
+    );
 }
 
 #[test]
-fn stacked_combined_projection_over_packed_q4k_experts_matches_the_per_route_graph_at_every_token_count() {
+fn stacked_combined_projection_over_packed_q4k_experts_matches_the_per_route_graph_at_every_token_count()
+ {
     assert_stacked_strategy_matches_per_route_over_packed_q4k(
         MoeProjectionStrategy::StackedCombined,
         1.0e-4,
@@ -3360,7 +3399,11 @@ fn assert_stacked_strategy_matches_per_route_over_packed_q4k(
     let pack_stack = |seed: u64, rows: usize, k: usize| -> alloc::vec::Vec<u8> {
         (0..EXPERT_COUNT as u64)
             .flat_map(|expert| {
-                quantize_rows(&synth_row(seed + expert, rows * k, 1.0 + expert as f32), rows, k)
+                quantize_rows(
+                    &synth_row(seed + expert, rows * k, 1.0 + expert as f32),
+                    rows,
+                    k,
+                )
             })
             .collect()
     };
@@ -3374,13 +3417,19 @@ fn assert_stacked_strategy_matches_per_route_over_packed_q4k(
         let x = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(tokens as u32), Extent::Static(EMBEDDING as u32)],
+            alloc::vec![
+                Extent::Static(tokens as u32),
+                Extent::Static(EMBEDDING as u32)
+            ],
             "x",
         );
         let gate_inp = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(EMBEDDING as u32), Extent::Static(EXPERT_COUNT)],
+            alloc::vec![
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(EXPERT_COUNT)
+            ],
             "gate_inp",
         );
         let stack = |program: &mut Vec<Op>, rows: usize, columns: usize, name: &str| {
@@ -3423,9 +3472,18 @@ fn assert_stacked_strategy_matches_per_route_over_packed_q4k(
         let blocks = [
             crate::cpu::QuantizedBlock::Float32(&x),
             crate::cpu::QuantizedBlock::Float32(&gate_inp),
-            crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &gate },
-            crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &up },
-            crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &down },
+            crate::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: &gate,
+            },
+            crate::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: &up,
+            },
+            crate::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: &down,
+            },
         ];
         let (per_route_program, per_route_root) = build(tokens, MoeProjectionStrategy::PerRoute);
         let per_route =
@@ -3437,7 +3495,11 @@ fn assert_stacked_strategy_matches_per_route_over_packed_q4k(
                 .expect("the stacked graph evaluates over packed Q4_K experts");
 
         assert_eq!(stacked.root().len(), tokens * EMBEDDING, "{tokens} tokens");
-        assert_eq!(per_route.root().len(), tokens * EMBEDDING, "{tokens} tokens");
+        assert_eq!(
+            per_route.root().len(),
+            tokens * EMBEDDING,
+            "{tokens} tokens"
+        );
         let worst_relative_difference = stacked
             .root()
             .iter()
@@ -6406,7 +6468,11 @@ fn architecture_matrix_shortconv_fused_projection_contracts_the_input_axis() {
             })
             .collect();
         assert_eq!(shape, [1, u64::from(EMBEDDING)], "band {band}");
-        assert_eq!(values, expected.as_slice(), "band {band}: row of the fused weight times the activation");
+        assert_eq!(
+            values,
+            expected.as_slice(),
+            "band {band}: row of the fused weight times the activation"
+        );
     }
 }
 
@@ -6443,23 +6509,7 @@ fn architecture_matrix_mixed_cached_conv_roots() {
 
     let (program, _logits, roots, _moe_sites, _head_repeats) =
         scheduled_two_range_cached_forward_program_with_layer_roots(
-            4,
-            EMBEDDING,
-            2,
-            2,
-            1,
-            2,
-            0,
-            0,
-            2,
-            &schedule,
-            None,
-            None,
-            true,
-            None,
-            false,
-            L_CACHE,
-            1,
+            4, EMBEDDING, 2, 2, 1, 2, 0, 0, 2, &schedule, None, None, true, None, false, L_CACHE, 1,
         )
         .expect("mixed attention and short-convolution schedule lowers");
 
@@ -7095,13 +7145,24 @@ fn assert_lfm_two_token_prefill_history_is_consumed() {
             crate::cpu::QuantizedBlock::Int32(&[1, 2, 0]),
             crate::cpu::QuantizedBlock::Float32(&[2.0]),
         ],
-        &[prefill_output, prefill_state, decode_output, decode_state, zero_history_output],
+        &[
+            prefill_output,
+            prefill_state,
+            decode_output,
+            decode_state,
+            zero_history_output,
+        ],
     )
     .expect("two-token prefill/decode and zero-history control evaluate");
-    let (prefill_values, prefill_shape) = evaluated.get(prefill_output).expect("prefill output exists");
-    let (prefill_history, prefill_history_shape) = evaluated.get(prefill_state).expect("prefill history exists");
+    let (prefill_values, prefill_shape) = evaluated
+        .get(prefill_output)
+        .expect("prefill output exists");
+    let (prefill_history, prefill_history_shape) = evaluated
+        .get(prefill_state)
+        .expect("prefill history exists");
     let (decode_values, decode_shape) = evaluated.get(decode_output).expect("decode output exists");
-    let (decode_history, decode_history_shape) = evaluated.get(decode_state).expect("decode history exists");
+    let (decode_history, decode_history_shape) =
+        evaluated.get(decode_state).expect("decode history exists");
     let (zero_history_values, zero_history_shape) = evaluated
         .get(zero_history_output)
         .expect("zero-history output exists");
@@ -7117,15 +7178,14 @@ fn assert_lfm_two_token_prefill_history_is_consumed() {
     assert_eq!(zero_history_shape, [1, 1]);
     assert_eq!(zero_history_values.len(), 1);
 
-    let normalized = [1.0f32, 2.0, 3.0]
-        .map(|value| value / (value * value + 1.0e-6).sqrt());
+    let normalized = [1.0f32, 2.0, 3.0].map(|value| value / (value * value + 1.0e-6).sqrt());
     let gated = normalized.map(|value| 8.0 * value * value);
     let expected_prefill = [
         1.0 + 6.0 * normalized[0] * 100.0 * gated[0],
         2.0 + 6.0 * normalized[1] * (10.0 * gated[0] + 100.0 * gated[1]),
     ];
-    let expected_decode = 3.0
-        + 6.0 * normalized[2] * (gated[0] + 10.0 * gated[1] + 100.0 * gated[2]);
+    let expected_decode =
+        3.0 + 6.0 * normalized[2] * (gated[0] + 10.0 * gated[1] + 100.0 * gated[2]);
     let zero_history_decode = 3.0 + 6.0 * normalized[2] * 100.0 * gated[2];
     for (found, expected) in prefill_values.iter().zip(expected_prefill) {
         assert!((found - expected).abs() < 1.0e-3);
@@ -7172,10 +7232,7 @@ fn evaluate_lfm_prefill_for_test(
     let evaluated = crate::cpu::evaluate_named(
         &program,
         &[u64::from(prefill_len.get())],
-        &[
-            ("gated_input", gated_values),
-            ("weight", &weight_values),
-        ],
+        &[("gated_input", gated_values), ("weight", &weight_values)],
         &[prefill_output, prefill_state],
     )
     .expect("prefill graph evaluates");
@@ -7876,9 +7933,8 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
     crate::instrument::reset_window_reduce();
     crate::instrument::reset_online_softmax_block_range();
 
-    let (program, logits, roots) =
-        gqa_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
-            .expect("the cached forward pass lowers to a program");
+    let (program, logits, roots) = gqa_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+        .expect("the cached forward pass lowers to a program");
     let mut outputs = alloc::vec![logits];
     for (even, odd, value) in &roots {
         outputs.extend_from_slice(&[*even, *odd, *value]);
@@ -7958,8 +8014,7 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
     // same function doc) is what this assert now pins.
     #[cfg(feature = "reduce-epilogue-fusion")]
     assert_eq!(
-        epilogued_reduce_count,
-        257,
+        epilogued_reduce_count, 257,
         "reduce-epilogue-fusion's fixpoint loop must absorb exactly 257 reduces on this \
          32-layer Mistral cached-forward program; NOT an identity-copy-alias interaction \
          -- confirmed by running this feature alone"
@@ -8529,13 +8584,19 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
     // 243/244, ... 2998/2999) -- 2 x 32 = 64 nodes, exactly the delta.
     // Neither node is a requested output, so the rule's own output guard
     // never blocks the fold.
-    #[cfg(all(not(feature = "reduce-epilogue-fusion"), not(feature = "identity-copy-alias")))]
+    #[cfg(all(
+        not(feature = "reduce-epilogue-fusion"),
+        not(feature = "identity-copy-alias")
+    ))]
     assert_eq!(
         materialized_elementwise_nodes.len(),
         547,
         "the materialized-elementwise set must have exactly 547 members, matching the bound count"
     );
-    #[cfg(all(not(feature = "reduce-epilogue-fusion"), feature = "identity-copy-alias"))]
+    #[cfg(all(
+        not(feature = "reduce-epilogue-fusion"),
+        feature = "identity-copy-alias"
+    ))]
     assert_eq!(
         materialized_elementwise_nodes.len(),
         547 - 64,
@@ -8547,7 +8608,10 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
     // `epilogued_reduce_count`'s own assert above, not the stale 128. Each
     // absorption converts exactly one `Elementwise`-kind consumer into the
     // fused `Reduce`'s own kind, so `elementwise` drops by the same 257.
-    #[cfg(all(feature = "reduce-epilogue-fusion", not(feature = "identity-copy-alias")))]
+    #[cfg(all(
+        feature = "reduce-epilogue-fusion",
+        not(feature = "identity-copy-alias")
+    ))]
     assert_eq!(
         materialized_elementwise_nodes.len(),
         547 - 257,
@@ -8623,7 +8687,10 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
     // `Op::Constant` no `outputs` entry reads (see `constant`'s own
     // count below, 36 not 37) -- previously bound and left as dead
     // weight in `bound`, now never bound at all.
-    #[cfg(all(not(feature = "reduce-epilogue-fusion"), not(feature = "identity-copy-alias")))]
+    #[cfg(all(
+        not(feature = "reduce-epilogue-fusion"),
+        not(feature = "identity-copy-alias")
+    ))]
     assert_eq!(
         total, 1195,
         "total BoundOps must match the measured forward"
@@ -8631,13 +8698,19 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
     // MEASURED (this debug session): 1131 = 1195 - 64, the same 64
     // identity-copy-alias folds as `materialized_elementwise_nodes`'s own
     // assert above -- each fold removes one whole `BoundOp` from `bound`.
-    #[cfg(all(not(feature = "reduce-epilogue-fusion"), feature = "identity-copy-alias"))]
+    #[cfg(all(
+        not(feature = "reduce-epilogue-fusion"),
+        feature = "identity-copy-alias"
+    ))]
     assert_eq!(
         total,
         1195 - 64,
         "1131 = 1195 unfused total minus the 64 identity-copy-alias folds (2/layer x 32 layers)"
     );
-    #[cfg(all(feature = "reduce-epilogue-fusion", not(feature = "identity-copy-alias")))]
+    #[cfg(all(
+        feature = "reduce-epilogue-fusion",
+        not(feature = "identity-copy-alias")
+    ))]
     assert_eq!(
         total,
         1195 - 257,
@@ -8661,19 +8734,28 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
          unaffected by reduce-epilogue-fusion -- an absorbed reduce keeps its \
          BoundOpKind::Reduce kind, it only gains a non-default epilogue"
     );
-    #[cfg(all(not(feature = "reduce-epilogue-fusion"), not(feature = "identity-copy-alias")))]
+    #[cfg(all(
+        not(feature = "reduce-epilogue-fusion"),
+        not(feature = "identity-copy-alias")
+    ))]
     assert_eq!(
         elementwise, 547,
         "elementwise BoundOps must match the measured forward"
     );
-    #[cfg(all(not(feature = "reduce-epilogue-fusion"), feature = "identity-copy-alias"))]
+    #[cfg(all(
+        not(feature = "reduce-epilogue-fusion"),
+        feature = "identity-copy-alias"
+    ))]
     assert_eq!(
         elementwise,
         547 - 64,
         "483 = 547 unfused elementwise BoundOps minus the 64 identity-copy-alias folds \
          (2/layer x 32 layers) -- see materialized_elementwise_nodes's own assert above"
     );
-    #[cfg(all(feature = "reduce-epilogue-fusion", not(feature = "identity-copy-alias")))]
+    #[cfg(all(
+        feature = "reduce-epilogue-fusion",
+        not(feature = "identity-copy-alias")
+    ))]
     assert_eq!(
         elementwise,
         547 - 257,
@@ -9295,21 +9377,7 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
 
     let build_start = std::time::Instant::now();
     let (program, _logits, _moe_sites, _head_repeats) = scheduled_forward_program_with_experts(
-        128_000,
-        2048,
-        7168,
-        1792,
-        32,
-        24,
-        32,
-        4,
-        2,
-        3,
-        &schedule,
-        None,
-        None,
-        false,
-        None,
+        128_000, 2048, 7168, 1792, 32, 24, 32, 4, 2, 3, &schedule, None, None, false, None,
     )
     .expect("the hybrid forward pass lowers to a program");
     let build_elapsed = build_start.elapsed();
@@ -9359,21 +9427,7 @@ async fn lfm2_forward_program_rejects_a_layer_schedule_length_mismatch() {
         },
     ];
     let error = scheduled_forward_program_with_experts(
-        128_000,
-        2048,
-        7168,
-        1792,
-        32,
-        24,
-        32,
-        4,
-        2,
-        3,
-        &schedule,
-        None,
-        None,
-        false,
-        None,
+        128_000, 2048, 7168, 1792, 32, 24, 32, 4, 2, 3, &schedule, None, None, false, None,
     )
     .expect_err("2 schedule entries against block_count=24 must be rejected");
     assert!(
@@ -12023,7 +12077,13 @@ fn qg_product_qg_raw_per_head_channel_range_matches_between_thirteen_row_and_one
         &[ROWS as u64],
         &[
             ("normed", crate::cpu::QuantizedBlock::Float32(&normed_data)),
-            ("wq_flat", crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed }),
+            (
+                "wq_flat",
+                crate::cpu::QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes: &packed,
+                },
+            ),
         ],
         &[qg_raw_wide, q_split_wide],
     )
@@ -12043,7 +12103,13 @@ fn qg_product_qg_raw_per_head_channel_range_matches_between_thirteen_row_and_one
             &[1u64],
             &[
                 ("normed", crate::cpu::QuantizedBlock::Float32(&row_input)),
-                ("wq_flat", crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed }),
+                (
+                    "wq_flat",
+                    crate::cpu::QuantizedBlock::Packed {
+                        codec: Codec::Q4K,
+                        bytes: &packed,
+                    },
+                ),
             ],
             &[qg_raw_single, q_split_single],
         )
@@ -13161,8 +13227,12 @@ fn causal_mask_merged_windowed_with_no_window_matches_causal_mask_merged_exactly
         .expect("merged causal mask lowers");
 
     let mut windowed_program = Vec::new();
-    let windowed_cached_len =
-        input_leaf(&mut windowed_program, DType::Float32, Vec::new(), "cached_len");
+    let windowed_cached_len = input_leaf(
+        &mut windowed_program,
+        DType::Float32,
+        Vec::new(),
+        "cached_len",
+    );
     let windowed_is_future =
         causal_mask_merged_windowed(&mut windowed_program, windowed_cached_len, None)
             .expect("merged windowed causal mask lowers");
@@ -13385,7 +13455,10 @@ mod gemma4_synthetic_parity {
 
     fn max_abs_diff(engine: &[f32], reference: &[f32]) -> f32 {
         assert!(
-            engine.iter().chain(reference).all(|value| value.is_finite()),
+            engine
+                .iter()
+                .chain(reference)
+                .all(|value| value.is_finite()),
             "non-finite logits: f32::max drops a NaN difference, so a NaN engine would read as parity"
         );
         engine
@@ -14522,7 +14595,8 @@ mod gemma4_synthetic_parity {
             (k_even, k_odd, v_out)
         }
 
-        let (layer0_k_even, layer0_k_odd, layer0_v) = reference_kv(&resid, &layer0, &cos_swa, &sin_swa);
+        let (layer0_k_even, layer0_k_odd, layer0_v) =
+            reference_kv(&resid, &layer0, &cos_swa, &sin_swa);
         let (layer1_k_even, layer1_k_odd, layer1_v) =
             reference_kv(&layer0_next, &layer1, &cos_full, &sin_full);
 
@@ -15789,7 +15863,9 @@ mod gemma4_synthetic_parity {
                 cos_name: "rope_cos_swa".into(),
                 sin_name: "rope_sin_swa".into(),
             },
-            rope_pairing: RopePairing::SplitHalf { pairs: PAIRS as u32 },
+            rope_pairing: RopePairing::SplitHalf {
+                pairs: PAIRS as u32,
+            },
             score_scale: AttentionScoreScale::Unscaled,
             value_norm: true,
         };
@@ -15803,7 +15879,9 @@ mod gemma4_synthetic_parity {
                 cos_name: "rope_cos".into(),
                 sin_name: "rope_sin".into(),
             },
-            rope_pairing: RopePairing::SplitHalf { pairs: PAIRS as u32 },
+            rope_pairing: RopePairing::SplitHalf {
+                pairs: PAIRS as u32,
+            },
             score_scale: AttentionScoreScale::Unscaled,
             value_norm: true,
         };
@@ -15817,7 +15895,9 @@ mod gemma4_synthetic_parity {
                 cos_name: "rope_cos".into(),
                 sin_name: "rope_sin".into(),
             },
-            rope_pairing: RopePairing::SplitHalf { pairs: PAIRS as u32 },
+            rope_pairing: RopePairing::SplitHalf {
+                pairs: PAIRS as u32,
+            },
             score_scale: AttentionScoreScale::Unscaled,
             // `ValueSource::Shared` already carries a post-norm `V` (the
             // donor normalized it once) -- re-normalizing here would
@@ -16070,13 +16150,9 @@ mod gemma4_synthetic_parity {
         named.push(("kv_cache.1.v", zero_v.as_slice()));
 
         let cached_symbols = [SEQ as u64, SEQ as u64];
-        let cached_evaluated = crate::cpu::evaluate_named(
-            &cached_program,
-            &cached_symbols,
-            &named,
-            &[cached_logits],
-        )
-        .expect("two-range shared-kv call evaluates");
+        let cached_evaluated =
+            crate::cpu::evaluate_named(&cached_program, &cached_symbols, &named, &[cached_logits])
+                .expect("two-range shared-kv call evaluates");
         let cached_logits_values = cached_evaluated
             .get(cached_logits)
             .expect("cached logits present")
@@ -16265,7 +16341,9 @@ mod gemma4_synthetic_parity {
             gated_attention: false,
         };
 
-        let ForwardProgram { program, logits, .. } = build_forward(&descriptor)
+        let ForwardProgram {
+            program, logits, ..
+        } = build_forward(&descriptor)
             .expect("build_forward's padded-mask path lowers the gemma4-shaped descriptor");
 
         let ids_i32: Vec<i32> = ids.iter().map(|&id| id as i32).collect();
@@ -16479,7 +16557,10 @@ mod gemma4_synthetic_parity {
             false,
             &profile,
         );
-        assert_eq!((descriptor_b.cache_strategy, descriptor_b.cache_mask), (CacheStrategy::Cached, CacheMask::Bounded));
+        assert_eq!(
+            (descriptor_b.cache_strategy, descriptor_b.cache_mask),
+            (CacheStrategy::Cached, CacheMask::Bounded)
+        );
 
         let ForwardProgram {
             program: program_b,
@@ -16803,12 +16884,36 @@ mod gemma4_synthetic_parity {
         let step1_evaluated =
             crate::cpu::evaluate_named(&program, &step1_symbols, &step1_named, &step1_roots)
                 .expect("two-range decode step 1 evaluates");
-        let layer0_k_even = step1_evaluated.get(cache_roots[0].0).expect("layer0 k_even").0.to_vec();
-        let layer0_k_odd = step1_evaluated.get(cache_roots[0].1).expect("layer0 k_odd").0.to_vec();
-        let layer0_v = step1_evaluated.get(cache_roots[0].2).expect("layer0 v").0.to_vec();
-        let layer1_k_even = step1_evaluated.get(cache_roots[1].0).expect("layer1 k_even").0.to_vec();
-        let layer1_k_odd = step1_evaluated.get(cache_roots[1].1).expect("layer1 k_odd").0.to_vec();
-        let layer1_v = step1_evaluated.get(cache_roots[1].2).expect("layer1 v").0.to_vec();
+        let layer0_k_even = step1_evaluated
+            .get(cache_roots[0].0)
+            .expect("layer0 k_even")
+            .0
+            .to_vec();
+        let layer0_k_odd = step1_evaluated
+            .get(cache_roots[0].1)
+            .expect("layer0 k_odd")
+            .0
+            .to_vec();
+        let layer0_v = step1_evaluated
+            .get(cache_roots[0].2)
+            .expect("layer0 v")
+            .0
+            .to_vec();
+        let layer1_k_even = step1_evaluated
+            .get(cache_roots[1].0)
+            .expect("layer1 k_even")
+            .0
+            .to_vec();
+        let layer1_k_odd = step1_evaluated
+            .get(cache_roots[1].1)
+            .expect("layer1 k_odd")
+            .0
+            .to_vec();
+        let layer1_v = step1_evaluated
+            .get(cache_roots[1].2)
+            .expect("layer1 v")
+            .0
+            .to_vec();
 
         // -- step 2: `cached_len=2` (step 1's own output folded in exactly
         // the way `LayerCache::append` folds it, real -- no padding beyond
@@ -16833,7 +16938,11 @@ mod gemma4_synthetic_parity {
         let step2_evaluated =
             crate::cpu::evaluate_named(&program, &step2_symbols, &step2_named, &[logits])
                 .expect("two-range decode step 2 evaluates");
-        let step2_logits = step2_evaluated.get(logits).expect("step2 logits present").0.to_vec();
+        let step2_logits = step2_evaluated
+            .get(logits)
+            .expect("step2 logits present")
+            .0
+            .to_vec();
         let reference_last_row = &reference_logits[2 * VOCAB..3 * VOCAB];
         let diff = max_abs_diff(&step2_logits, reference_last_row);
 
@@ -16865,8 +16974,7 @@ mod gemma4_synthetic_parity {
     /// KV-cache side-outputs, never its `logits` row -- this test is the one
     /// that actually reads and asserts on them).
     #[test]
-    fn two_range_cached_gemma4_all_positions_one_shot_matches_incremental_single_position_decode()
-     {
+    fn two_range_cached_gemma4_all_positions_one_shot_matches_incremental_single_position_decode() {
         let ids = [1usize, 3, 2];
         let embedding_table = wave("token_embd.weight", VOCAB * EMBEDDING);
         let output_norm = norm_wave("output_norm.weight", EMBEDDING);
@@ -17191,17 +17299,29 @@ mod gemma4_synthetic_parity {
             // exactly `LayerCache::append`'s own fold, real host-side state
             // `proxima-model-interop`'s decode loop carries between steps.
             layer0_k_even.extend_from_slice(
-                step_evaluated.get(cache_roots[0].0).expect("layer0 k_even").0,
+                step_evaluated
+                    .get(cache_roots[0].0)
+                    .expect("layer0 k_even")
+                    .0,
             );
             layer0_k_odd.extend_from_slice(
-                step_evaluated.get(cache_roots[0].1).expect("layer0 k_odd").0,
+                step_evaluated
+                    .get(cache_roots[0].1)
+                    .expect("layer0 k_odd")
+                    .0,
             );
             layer0_v.extend_from_slice(step_evaluated.get(cache_roots[0].2).expect("layer0 v").0);
             layer1_k_even.extend_from_slice(
-                step_evaluated.get(cache_roots[1].0).expect("layer1 k_even").0,
+                step_evaluated
+                    .get(cache_roots[1].0)
+                    .expect("layer1 k_even")
+                    .0,
             );
             layer1_k_odd.extend_from_slice(
-                step_evaluated.get(cache_roots[1].1).expect("layer1 k_odd").0,
+                step_evaluated
+                    .get(cache_roots[1].1)
+                    .expect("layer1 k_odd")
+                    .0,
             );
             layer1_v.extend_from_slice(step_evaluated.get(cache_roots[1].2).expect("layer1 v").0);
         }
@@ -17852,7 +17972,8 @@ mod gemma4_synthetic_parity {
                 for d in 0..HEAD_DIM {
                     let value = attended[(u * GROUP + g) * HEAD_DIM + d];
                     for (o, slot) in reference_out.iter_mut().enumerate() {
-                        *slot += value * weights.wo[((u * GROUP + g) * HEAD_DIM + d) * EMBEDDING + o];
+                        *slot +=
+                            value * weights.wo[((u * GROUP + g) * HEAD_DIM + d) * EMBEDDING + o];
                     }
                 }
             }
@@ -18408,7 +18529,8 @@ mod gemma4_synthetic_parity {
             for d in 0..HEAD_DIM {
                 let mut acc = 0.0f32;
                 for (i, &reference_normed_value) in reference_normed.iter().enumerate() {
-                    acc += reference_normed_value * weights.wq[(i * QUERY_HEADS + h) * HEAD_DIM + d];
+                    acc +=
+                        reference_normed_value * weights.wq[(i * QUERY_HEADS + h) * HEAD_DIM + d];
                 }
                 reference_q_raw[h * HEAD_DIM + d] = acc;
             }
@@ -18762,8 +18884,16 @@ fn greedy_argmax_over(rows: &[Vec<f32>]) -> (Vec<f32>, Vec<f32>) {
         &[token, finite],
     )
     .expect("argmax evaluates");
-    let picked = evaluated.get(token).expect("token root evaluated").0.to_vec();
-    let counted = evaluated.get(finite).expect("finite root evaluated").0.to_vec();
+    let picked = evaluated
+        .get(token)
+        .expect("token root evaluated")
+        .0
+        .to_vec();
+    let counted = evaluated
+        .get(finite)
+        .expect("finite root evaluated")
+        .0
+        .to_vec();
     (picked, counted)
 }
 
@@ -18830,8 +18960,16 @@ fn greedy_argmax_over_a_blocked_vocabulary_keeps_the_lowest_tied_index() {
 
     let (tokens, finite) = greedy_argmax_over(&[row, later_peak, poisoned]);
 
-    assert_eq!(tokens[..2], [100.0, 1537.0], "ties and peaks are found across 4 blocks of 512");
-    assert_eq!(finite, [2048.0, 2048.0, 2047.0], "only the poisoned row is short");
+    assert_eq!(
+        tokens[..2],
+        [100.0, 1537.0],
+        "ties and peaks are found across 4 blocks of 512"
+    );
+    assert_eq!(
+        finite,
+        [2048.0, 2048.0, 2047.0],
+        "only the poisoned row is short"
+    );
 }
 
 mod head_repeats {
@@ -18850,7 +18988,11 @@ mod head_repeats {
             })
     }
 
-    pub(super) fn descriptor(cache_strategy: CacheStrategy, cache_mask: CacheMask, head_repeats: u32) -> ModelDescriptor {
+    pub(super) fn descriptor(
+        cache_strategy: CacheStrategy,
+        cache_mask: CacheMask,
+        head_repeats: u32,
+    ) -> ModelDescriptor {
         let attention = LayerAttentionConfig {
             head_dim: 4,
             kv_heads: 1,
@@ -18912,10 +19054,17 @@ mod head_repeats {
         }
     }
 
-    fn built(cache_strategy: CacheStrategy, cache_mask: CacheMask, head_repeats: u32) -> (Vec<Op>, Vec<NodeId>) {
-        let ForwardProgram { program, duplicate_head_roots, .. } =
-            build_forward(&descriptor(cache_strategy, cache_mask, head_repeats))
-                .expect("the two-layer dense descriptor lowers");
+    fn built(
+        cache_strategy: CacheStrategy,
+        cache_mask: CacheMask,
+        head_repeats: u32,
+    ) -> (Vec<Op>, Vec<NodeId>) {
+        let ForwardProgram {
+            program,
+            duplicate_head_roots,
+            ..
+        } = build_forward(&descriptor(cache_strategy, cache_mask, head_repeats))
+            .expect("the two-layer dense descriptor lowers");
         (program, duplicate_head_roots)
     }
 
@@ -18939,7 +19088,10 @@ mod head_repeats {
 
     #[test]
     fn extra_repeats_append_duplicate_heads_after_the_unchanged_prefix() {
-        for (strategy, mask) in [(CacheStrategy::Cacheless, CacheMask::Padded), (CacheStrategy::Cached, CacheMask::Padded)] {
+        for (strategy, mask) in [
+            (CacheStrategy::Cacheless, CacheMask::Padded),
+            (CacheStrategy::Cached, CacheMask::Padded),
+        ] {
             let (single, _) = built(strategy, mask, 1);
             let (triple, duplicates) = built(strategy, mask, 3);
 
@@ -19001,8 +19153,9 @@ mod forward_scales {
     }
 
     fn built(descriptor: &ModelDescriptor) -> (Vec<Op>, NodeId) {
-        let ForwardProgram { program, logits, .. } =
-            build_forward(descriptor).expect("the single-range descriptor lowers");
+        let ForwardProgram {
+            program, logits, ..
+        } = build_forward(descriptor).expect("the single-range descriptor lowers");
         (program, logits)
     }
 
@@ -19078,7 +19231,10 @@ mod forward_scales {
 
     #[test]
     fn two_range_and_cacheless_refuse_a_logit_scale() {
-        for (strategy, mask) in [(CacheStrategy::Cached, CacheMask::Padded), (CacheStrategy::Cacheless, CacheMask::Padded)] {
+        for (strategy, mask) in [
+            (CacheStrategy::Cached, CacheMask::Padded),
+            (CacheStrategy::Cacheless, CacheMask::Padded),
+        ] {
             let mut scaled = head_repeats::descriptor(strategy, mask, 1);
             scaled.logit_scale = Some(6.0);
 
@@ -19117,7 +19273,10 @@ mod forward_scales {
 
     #[test]
     fn two_range_and_cacheless_refuse_a_residual_scale() {
-        for (strategy, mask) in [(CacheStrategy::Cached, CacheMask::Padded), (CacheStrategy::Cacheless, CacheMask::Padded)] {
+        for (strategy, mask) in [
+            (CacheStrategy::Cached, CacheMask::Padded),
+            (CacheStrategy::Cacheless, CacheMask::Padded),
+        ] {
             let mut descriptor = head_repeats::descriptor(strategy, mask, 1);
             descriptor.residual_scale = Some(0.22);
 
@@ -19226,10 +19385,21 @@ const TWELVE_SCORES: [f32; 12] = [0.5, 3.0, 1.5, 3.0, 0.1, 2.5, 0.9, 4.0, 1.1, 2
 
 fn evaluate_twelve_scores(rows: usize, keep_rows_data: Option<&[f32]>) -> Vec<f32> {
     let mut program = Vec::new();
-    let scores = input_leaf(&mut program, DType::Float32, vec![Extent::Symbolic(0)], "scores");
+    let scores = input_leaf(
+        &mut program,
+        DType::Float32,
+        vec![Extent::Symbolic(0)],
+        "scores",
+    );
     let keep_count = input_leaf(&mut program, DType::Float32, Vec::new(), "keep_count");
-    let keep_rows = keep_rows_data
-        .map(|_| input_leaf(&mut program, DType::Float32, vec![Extent::Symbolic(0)], "keep_rows"));
+    let keep_rows = keep_rows_data.map(|_| {
+        input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![Extent::Symbolic(0)],
+            "keep_rows",
+        )
+    });
     let mask = top_fraction_mask(&mut program, scores, keep_count, keep_rows)
         .expect("the top-fraction mask lowers");
     let keep = [rows.div_ceil(4) as f32];
@@ -19287,8 +19457,14 @@ mod descriptor_config {
         mixture.residual_scale = Some(0.22);
         mixture.embedding_scale = Some(EmbeddingScale::Factor(12.0));
         vec![
-            ("cacheless", head_repeats::descriptor(CacheStrategy::Cacheless, CacheMask::Padded, 1)),
-            ("two_range", head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1)),
+            (
+                "cacheless",
+                head_repeats::descriptor(CacheStrategy::Cacheless, CacheMask::Padded, 1),
+            ),
+            (
+                "two_range",
+                head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1),
+            ),
             ("single_range_dense", forward_scales::descriptor(0, 0)),
             ("single_range_moe", mixture),
         ]
@@ -19298,21 +19474,35 @@ mod descriptor_config {
     fn a_descriptor_round_trips_through_toml_and_lowers_the_same_program() {
         for (label, descriptor) in descriptors() {
             let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
-            let restored: ModelDescriptor = toml::from_str(&text).expect("the descriptor toml parses");
+            let restored: ModelDescriptor =
+                toml::from_str(&text).expect("the descriptor toml parses");
 
-            assert_eq!(restored, descriptor, "{label}: round trip changed the config:\n{text}");
+            assert_eq!(
+                restored, descriptor,
+                "{label}: round trip changed the config:\n{text}"
+            );
             let original = build_forward(&descriptor).expect("the descriptor lowers");
             let lowered = build_forward(&restored).expect("the restored descriptor lowers");
             assert!(!original.program.is_empty(), "{label}: lowered zero ops");
-            assert_eq!(original.program, lowered.program, "{label}: restored config lowers to a different program");
-            assert_eq!(original.logits, lowered.logits, "{label}: logits root differs");
+            assert_eq!(
+                original.program, lowered.program,
+                "{label}: restored config lowers to a different program"
+            );
+            assert_eq!(
+                original.logits, lowered.logits,
+                "{label}: logits root differs"
+            );
         }
     }
 
     #[test]
     fn rope_table_names_are_data_in_the_toml() {
-        let text = toml::to_string(&head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1))
-            .expect("a descriptor serializes to toml");
+        let text = toml::to_string(&head_repeats::descriptor(
+            CacheStrategy::Cached,
+            CacheMask::Padded,
+            1,
+        ))
+        .expect("a descriptor serializes to toml");
 
         assert!(text.contains("cos_name = \"rope_cos\""), "got:\n{text}");
         assert!(text.contains("sin_name = \"rope_sin\""), "got:\n{text}");
@@ -19327,19 +19517,30 @@ mod descriptor_config {
             } else {
                 text.replace("last_row_only = false", "last_row_only = true")
             };
-            let flipped: ModelDescriptor = toml::from_str(&flipped_text).expect("the edited toml parses");
+            let flipped: ModelDescriptor =
+                toml::from_str(&flipped_text).expect("the edited toml parses");
 
-            assert_ne!(flipped.last_row_only, descriptor.last_row_only, "{label}: the edit did not flip the field");
+            assert_ne!(
+                flipped.last_row_only, descriptor.last_row_only,
+                "{label}: the edit did not flip the field"
+            );
             let original = build_forward(&descriptor).expect("the descriptor lowers");
             let lowered = build_forward(&flipped).expect("the flipped descriptor lowers");
-            assert_ne!(original.program, lowered.program, "{label}: the verify shape must change the program");
+            assert_ne!(
+                original.program, lowered.program,
+                "{label}: the verify shape must change the program"
+            );
         }
     }
 
     #[test]
     fn an_unknown_field_is_an_error_not_a_silent_default() {
-        let text = toml::to_string(&head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1))
-            .expect("a descriptor serializes to toml");
+        let text = toml::to_string(&head_repeats::descriptor(
+            CacheStrategy::Cached,
+            CacheMask::Padded,
+            1,
+        ))
+        .expect("a descriptor serializes to toml");
 
         let error = toml::from_str::<ModelDescriptor>(&format!("block_cuont = 2\n{text}"))
             .expect_err("a misspelled key must be rejected");
@@ -19392,17 +19593,23 @@ mod descriptor_config {
     fn the_fluent_builder_and_the_toml_config_build_the_same_descriptor() {
         for (label, descriptor) in descriptors() {
             let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
-            let from_toml: ModelDescriptor = toml::from_str(&text).expect("the descriptor toml parses");
+            let from_toml: ModelDescriptor =
+                toml::from_str(&text).expect("the descriptor toml parses");
 
-            assert_eq!(rebuilt_by_builder(&descriptor), from_toml, "{label}: builder and toml diverged");
+            assert_eq!(
+                rebuilt_by_builder(&descriptor),
+                from_toml,
+                "{label}: builder and toml diverged"
+            );
         }
     }
 
     #[test]
     fn env_then_an_explicit_toml_layer_override_a_seeded_descriptor_in_that_order() {
         let seeded = head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1);
-        let variant: toml::Table = toml::from_str("vocab = 17\nlast_row_only = true\ncache_strategy = \"Cacheless\"\n")
-            .expect("the variant layer parses");
+        let variant: toml::Table =
+            toml::from_str("vocab = 17\nlast_row_only = true\ncache_strategy = \"Cacheless\"\n")
+                .expect("the variant layer parses");
         let environment = [
             ("PROXIMA_MODEL_VOCAB", Some("99")),
             ("PROXIMA_MODEL_QUERY_HEADS", Some("4")),
@@ -19424,7 +19631,10 @@ mod descriptor_config {
         assert_eq!(layered.logit_softcap, Some(50.0));
         assert!(layered.last_row_only);
         assert_eq!(layered.cache_strategy, CacheStrategy::Cacheless);
-        assert_eq!(layered.layers, seeded.layers, "a key no layer names keeps the seeded value");
+        assert_eq!(
+            layered.layers, seeded.layers,
+            "a key no layer names keeps the seeded value"
+        );
         assert_eq!(layered.embedding, seeded.embedding);
     }
 
@@ -19434,7 +19644,9 @@ mod descriptor_config {
         descriptor.layers.pop();
         descriptor.expert_used_count = 3;
 
-        let error = descriptor.validate().expect_err("one layer short and more experts used than exist");
+        let error = descriptor
+            .validate()
+            .expect_err("one layer short and more experts used than exist");
 
         let message = error.to_string();
         assert!(message.contains("layers"), "got: {message}");
@@ -19444,7 +19656,9 @@ mod descriptor_config {
     #[test]
     fn every_descriptor_the_lowering_tests_build_validates() {
         for (label, descriptor) in descriptors() {
-            descriptor.validate().unwrap_or_else(|error| panic!("{label}: {error}"));
+            descriptor
+                .validate()
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
         }
     }
 }
@@ -19490,15 +19704,19 @@ mod dense_windows {
 
     fn leading_extent(program: &[Op], name: &str) -> Option<Extent> {
         program.iter().find_map(|operation| match operation {
-            Op::Input { name: Some(leaf), shape, .. } if leaf == name => shape.first().copied(),
+            Op::Input {
+                name: Some(leaf),
+                shape,
+                ..
+            } if leaf == name => shape.first().copied(),
             _ => None,
         })
     }
 
     fn has_input(program: &[Op], name: &str) -> bool {
-        program
-            .iter()
-            .any(|operation| matches!(operation, Op::Input { name: Some(leaf), .. } if leaf == name))
+        program.iter().any(
+            |operation| matches!(operation, Op::Input { name: Some(leaf), .. } if leaf == name),
+        )
     }
 
     fn window_ceiling_constants(program: &[Op], window: u32) -> usize {
@@ -19513,9 +19731,14 @@ mod dense_windows {
     fn a_ring_binds_only_the_windowed_dense_layer_to_the_sliding_slot() {
         let descriptor = dense_descriptor(3, &[None, Some(WINDOW), None], true);
 
-        let ForwardProgram { program, .. } = build_forward(&descriptor).expect("a dense schedule with one window lowers");
+        let ForwardProgram { program, .. } =
+            build_forward(&descriptor).expect("a dense schedule with one window lowers");
 
-        for (layer, expected) in [(0, Extent::Symbolic(1)), (1, Extent::Symbolic(SLIDING_KV_SYMBOL)), (2, Extent::Symbolic(1))] {
+        for (layer, expected) in [
+            (0, Extent::Symbolic(1)),
+            (1, Extent::Symbolic(SLIDING_KV_SYMBOL)),
+            (2, Extent::Symbolic(1)),
+        ] {
             for leaf in ["k_even", "k_odd", "v"] {
                 assert_eq!(
                     leading_extent(&program, &format!("kv_cache.{layer}.{leaf}")),
@@ -19531,13 +19754,21 @@ mod dense_windows {
     fn a_dense_window_without_a_ring_keeps_every_layer_on_the_full_cache() {
         let descriptor = dense_descriptor(3, &[None, Some(WINDOW), None], false);
 
-        let ForwardProgram { program, .. } = build_forward(&descriptor).expect("a dense schedule with one window lowers");
+        let ForwardProgram { program, .. } =
+            build_forward(&descriptor).expect("a dense schedule with one window lowers");
 
         for layer in 0..3 {
-            assert_eq!(leading_extent(&program, &format!("kv_cache.{layer}.k_even")), Some(Extent::Symbolic(1)));
+            assert_eq!(
+                leading_extent(&program, &format!("kv_cache.{layer}.k_even")),
+                Some(Extent::Symbolic(1))
+            );
         }
         assert!(!has_input(&program, SLIDING_CACHED_LEN_INPUT));
-        assert_eq!(window_ceiling_constants(&program, WINDOW), 2, "the new-block and cached-block masks of the one windowed layer");
+        assert_eq!(
+            window_ceiling_constants(&program, WINDOW),
+            2,
+            "the new-block and cached-block masks of the one windowed layer"
+        );
     }
 
     #[test]
@@ -19545,11 +19776,20 @@ mod dense_windows {
         let plain = dense_descriptor(2, &[], true);
         let windowed_nowhere = dense_descriptor(2, &[None, None], true);
 
-        let ForwardProgram { program: plain_program, .. } = build_forward(&plain).expect("lowers");
-        let ForwardProgram { program: nowhere_program, .. } = build_forward(&windowed_nowhere).expect("lowers");
+        let ForwardProgram {
+            program: plain_program,
+            ..
+        } = build_forward(&plain).expect("lowers");
+        let ForwardProgram {
+            program: nowhere_program,
+            ..
+        } = build_forward(&windowed_nowhere).expect("lowers");
 
         assert_eq!(plain_program, nowhere_program);
-        assert!(!has_input(&plain_program, SLIDING_CACHED_LEN_INPUT), "no window, no ring input");
+        assert!(
+            !has_input(&plain_program, SLIDING_CACHED_LEN_INPUT),
+            "no window, no ring input"
+        );
     }
 
     #[test]
@@ -19603,18 +19843,33 @@ mod dense_windows {
         fn new(window: Option<u32>, last_row_only: bool) -> Self {
             let mut descriptor = dense_descriptor(1, &[window], false);
             descriptor.last_row_only = last_row_only;
-            Self { descriptor, weights: weights() }
+            Self {
+                descriptor,
+                weights: weights(),
+            }
         }
 
-        fn evaluate(&self, ids: &[f32], first_position: usize, cache: &CacheRows) -> (Vec<f32>, CacheRows) {
+        fn evaluate(
+            &self,
+            ids: &[f32],
+            first_position: usize,
+            cache: &CacheRows,
+        ) -> (Vec<f32>, CacheRows) {
             let new_count = ids.len();
             let eps = alloc::vec![1e-5f32; new_count];
             let (cos, sin) = rope_angles(first_position, new_count, PAIRS, HEAD_DIM);
             let cached_len = [cache.rows as f32];
-            let ForwardProgram { program, logits, layer_roots, .. } =
-                build_forward(&self.descriptor).expect("the one-layer dense program lowers");
-            let mut named: Vec<(&str, &[f32])> =
-                self.weights.iter().map(|(name, values)| (name.as_str(), values.as_slice())).collect();
+            let ForwardProgram {
+                program,
+                logits,
+                layer_roots,
+                ..
+            } = build_forward(&self.descriptor).expect("the one-layer dense program lowers");
+            let mut named: Vec<(&str, &[f32])> = self
+                .weights
+                .iter()
+                .map(|(name, values)| (name.as_str(), values.as_slice()))
+                .collect();
             named.push(("ids", ids));
             named.push(("eps", eps.as_slice()));
             named.push(("rope_cos", cos.as_slice()));
@@ -19668,7 +19923,10 @@ mod dense_windows {
 
     fn max_difference(left: &[f32], right: &[f32]) -> f32 {
         assert_eq!(left.len(), right.len());
-        left.iter().zip(right).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max)
+        left.iter()
+            .zip(right)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max)
     }
 
     const IDS: [f32; 7] = [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0];
@@ -19684,7 +19942,10 @@ mod dense_windows {
         let kept_rows = WINDOW as usize - 1;
         let (oracle_logits, _) = full.evaluate(&IDS[6..], 6, &history.slice(6 - kept_rows, 6));
         let (unwindowed_logits, _) = full.evaluate(&IDS[6..], 6, &history);
-        assert!(max_difference(&windowed_logits, &oracle_logits) < TOLERANCE, "window {WINDOW} keeps the last {kept_rows} cached rows and the new one");
+        assert!(
+            max_difference(&windowed_logits, &oracle_logits) < TOLERANCE,
+            "window {WINDOW} keeps the last {kept_rows} cached rows and the new one"
+        );
         assert!(
             max_difference(&windowed_logits, &unwindowed_logits) > TOLERANCE * 10.0,
             "the control must fail: dropping the older rows has to change the logits"
@@ -19715,7 +19976,10 @@ mod dense_windows {
             let from = row.saturating_sub(WINDOW as usize - 1);
             let (oracle, _) = full.evaluate(&IDS[row..=row], row, &history.slice(from, row));
             let produced = &windowed_rows[row * VOCAB..(row + 1) * VOCAB];
-            assert!(max_difference(produced, &oracle) < TOLERANCE, "prefill row {row} attends rows {from}..={row}");
+            assert!(
+                max_difference(produced, &oracle) < TOLERANCE,
+                "prefill row {row} attends rows {from}..={row}"
+            );
         }
     }
 
@@ -19727,7 +19991,10 @@ mod dense_windows {
 
         assert_eq!(logits.len(), VOCAB, "last_row_only keeps one row of logits");
         assert_eq!(rows.rows, 2);
-        assert!(logits.iter().any(|value| value.abs() > 1e-3), "a zero logit row would make every equality above trivially true");
+        assert!(
+            logits.iter().any(|value| value.abs() > 1e-3),
+            "a zero logit row would make every equality above trivially true"
+        );
     }
 }
 
@@ -19747,22 +20014,37 @@ mod verify_descriptor {
     fn an_armed_attention_descriptor_lowers_a_verify_that_keeps_every_row() {
         let decode = armed(CacheStrategy::Cached, CacheMask::Bounded);
 
-        let verify = decode.verify().expect("an armed attention-only descriptor has a verify program");
+        let verify = decode
+            .verify()
+            .expect("an armed attention-only descriptor has a verify program");
 
         assert!(!verify.last_row_only);
-        assert_eq!(ModelDescriptor { last_row_only: true, ..verify }, decode, "only the row count differs");
+        assert_eq!(
+            ModelDescriptor {
+                last_row_only: true,
+                ..verify
+            },
+            decode,
+            "only the row count differs"
+        );
     }
 
     #[test]
     fn a_descriptor_that_is_not_armed_has_no_verify_program() {
-        let decode = ModelDescriptor { speculative_verify: false, ..armed(CacheStrategy::Cached, CacheMask::Bounded) };
+        let decode = ModelDescriptor {
+            speculative_verify: false,
+            ..armed(CacheStrategy::Cached, CacheMask::Bounded)
+        };
 
         assert_eq!(decode.verify(), None);
     }
 
     #[test]
     fn a_pooled_embedding_descriptor_has_no_verify_program() {
-        let pooled = ModelDescriptor { last_row_only: false, ..armed(CacheStrategy::Cached, CacheMask::Bounded) };
+        let pooled = ModelDescriptor {
+            last_row_only: false,
+            ..armed(CacheStrategy::Cached, CacheMask::Bounded)
+        };
 
         assert_eq!(pooled.verify(), None);
     }
@@ -19783,10 +20065,19 @@ mod verify_descriptor {
         let mut hybrid = armed(CacheStrategy::Cached, CacheMask::Padded);
         hybrid.layers[0].kind = LayerKind::ShortConv;
 
-        let refusal = hybrid.validate().expect_err("a short-conv layer cannot be armed for verify");
+        let refusal = hybrid
+            .validate()
+            .expect_err("a short-conv layer cannot be armed for verify");
 
-        assert!(refusal.to_string().contains("speculative_verify"), "{refusal}");
-        assert!(armed(CacheStrategy::Cached, CacheMask::Padded).validate().is_ok());
+        assert!(
+            refusal.to_string().contains("speculative_verify"),
+            "{refusal}"
+        );
+        assert!(
+            armed(CacheStrategy::Cached, CacheMask::Padded)
+                .validate()
+                .is_ok()
+        );
     }
 }
 
@@ -19796,11 +20087,19 @@ mod cache_mask {
 
     fn selects(cache_mask: CacheMask) -> usize {
         let descriptor = head_repeats::descriptor(CacheStrategy::Cached, cache_mask, 1);
-        let ForwardProgram { program, .. } =
-            build_forward(&descriptor).expect("the two-layer attention descriptor lowers under either mask");
+        let ForwardProgram { program, .. } = build_forward(&descriptor)
+            .expect("the two-layer attention descriptor lowers under either mask");
         program
             .iter()
-            .filter(|op| matches!(op, Op::Elementwise { body: ScalarOp::Select, .. }))
+            .filter(|op| {
+                matches!(
+                    op,
+                    Op::Elementwise {
+                        body: ScalarOp::Select,
+                        ..
+                    }
+                )
+            })
             .count()
     }
 
@@ -19808,16 +20107,24 @@ mod cache_mask {
     fn the_padded_mask_adds_one_cached_block_select_per_layer_over_the_bounded_mask() {
         let layers = 2;
 
-        assert_eq!(selects(CacheMask::Padded), selects(CacheMask::Bounded) + layers);
+        assert_eq!(
+            selects(CacheMask::Padded),
+            selects(CacheMask::Bounded) + layers
+        );
     }
 
     #[test]
     fn a_config_without_a_cache_mask_lowers_the_bounded_mask() {
         let descriptor = head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Bounded, 1);
         let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
-        let without_mask: String = text.lines().filter(|line| !line.starts_with("cache_mask")).collect::<Vec<_>>().join("\n");
+        let without_mask: String = text
+            .lines()
+            .filter(|line| !line.starts_with("cache_mask"))
+            .collect::<Vec<_>>()
+            .join("\n");
 
-        let loaded: ModelDescriptor = toml::from_str(&without_mask).expect("a config from before the field still loads");
+        let loaded: ModelDescriptor =
+            toml::from_str(&without_mask).expect("a config from before the field still loads");
 
         assert_eq!(loaded.cache_mask, CacheMask::Bounded);
         assert_eq!(loaded, descriptor);
@@ -19871,7 +20178,11 @@ mod gdn_layer_kind {
         let loaded: ModelDescriptor = toml::from_str(&text).expect("the descriptor toml parses");
 
         assert_eq!(loaded.layers[1].kind, LayerKind::Gdn);
-        assert_eq!(loaded.verify(), None, "a recurrent state is not truncated to reject a draft");
+        assert_eq!(
+            loaded.verify(),
+            None,
+            "a recurrent state is not truncated to reject a draft"
+        );
     }
 }
 
@@ -19900,9 +20211,13 @@ mod recurrence_fields {
             .filter(|line| !RECURRENCE_KEYS.iter().any(|key| line.starts_with(key)))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(!without.contains("ssm_"), "the recurrence keys were stripped");
+        assert!(
+            !without.contains("ssm_"),
+            "the recurrence keys were stripped"
+        );
 
-        let loaded: ModelDescriptor = toml::from_str(&without).expect("a config from before the fields still loads");
+        let loaded: ModelDescriptor =
+            toml::from_str(&without).expect("a config from before the fields still loads");
 
         assert_eq!(loaded, descriptor);
     }
@@ -19938,11 +20253,15 @@ mod layer_roots {
     }
 
     fn layers(key_sources: &[KeySourceKind]) -> Vec<LayerSchedule> {
-        let template = head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1).layers[0].clone();
+        let template =
+            head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1).layers[0].clone();
         key_sources
             .iter()
             .map(|&key_source_kind| LayerSchedule {
-                attention: LayerAttentionConfig { key_source_kind, ..template.attention.clone() },
+                attention: LayerAttentionConfig {
+                    key_source_kind,
+                    ..template.attention.clone()
+                },
                 ..template.clone()
             })
             .collect()
@@ -19960,19 +20279,35 @@ mod layer_roots {
         let rebuilt = layer_roots_from_cache(&schedule, alloc::vec![roots(10), roots(20)])
             .expect("two roots for two owning layers");
 
-        assert!(matches!(rebuilt[0], LayerCacheRoots::Attention((NodeId(10), _, _))));
-        assert!(matches!(rebuilt[1], LayerCacheRoots::Attention((NodeId(20), _, _))));
+        assert!(matches!(
+            rebuilt[0],
+            LayerCacheRoots::Attention((NodeId(10), _, _))
+        ));
+        assert!(matches!(
+            rebuilt[1],
+            LayerCacheRoots::Attention((NodeId(20), _, _))
+        ));
         assert!(matches!(rebuilt[2], LayerCacheRoots::SharedFromLayer(1)));
         assert_eq!(rebuilt.len(), 4);
     }
 
     #[test]
     fn fewer_cache_roots_than_owning_layers_reports_both_counts() {
-        let schedule = layers(&[KeySourceKind::ProjectedK, KeySourceKind::ProjectedK, KeySourceKind::SharedFromLayer(0)]);
+        let schedule = layers(&[
+            KeySourceKind::ProjectedK,
+            KeySourceKind::ProjectedK,
+            KeySourceKind::SharedFromLayer(0),
+        ]);
 
         let outcome = layer_roots_from_cache(&schedule, alloc::vec![roots(10)]);
 
-        assert!(matches!(outcome, Err(TensorError::CacheRootsCountMismatch { produced: 1, expected: 2 })));
+        assert!(matches!(
+            outcome,
+            Err(TensorError::CacheRootsCountMismatch {
+                produced: 1,
+                expected: 2
+            })
+        ));
     }
 
     #[test]
@@ -19981,7 +20316,13 @@ mod layer_roots {
 
         let outcome = layer_roots_from_cache(&schedule, alloc::vec![roots(10), roots(20)]);
 
-        assert!(matches!(outcome, Err(TensorError::CacheRootsCountMismatch { produced: 2, expected: 1 })));
+        assert!(matches!(
+            outcome,
+            Err(TensorError::CacheRootsCountMismatch {
+                produced: 2,
+                expected: 1
+            })
+        ));
     }
 
     #[test]
@@ -19989,8 +20330,19 @@ mod layer_roots {
         let cacheless = head_repeats::descriptor(CacheStrategy::Cacheless, CacheMask::Bounded, 1);
         let cached = head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Bounded, 1);
 
-        assert!(build_forward(&cacheless).expect("cacheless lowers").layer_roots.is_empty());
-        assert_eq!(build_forward(&cached).expect("cached lowers").layer_roots.len(), 2);
+        assert!(
+            build_forward(&cacheless)
+                .expect("cacheless lowers")
+                .layer_roots
+                .is_empty()
+        );
+        assert_eq!(
+            build_forward(&cached)
+                .expect("cached lowers")
+                .layer_roots
+                .len(),
+            2
+        );
     }
 }
 
@@ -20009,14 +20361,23 @@ mod hybrid_dense_descriptor {
             mask_window: None,
             value_source_kind: ValueSourceKind::ProjectedV,
             key_source_kind: KeySourceKind::ProjectedK,
-            rope_table: RopeTableSel { cos_name: "rope_cos".into(), sin_name: "rope_sin".into() },
-            rope_pairing: RopePairing::SplitHalf { pairs: ROTARY_DIM / 2 },
+            rope_table: RopeTableSel {
+                cos_name: "rope_cos".into(),
+                sin_name: "rope_sin".into(),
+            },
+            rope_pairing: RopePairing::SplitHalf {
+                pairs: ROTARY_DIM / 2,
+            },
             score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(ATTN_HEAD_DIM),
             value_norm: false,
         };
         let layers = kinds
             .iter()
-            .map(|&kind| LayerSchedule { kind, attention: attention.clone(), ffn: LayerFfnConfig::exclusive() })
+            .map(|&kind| LayerSchedule {
+                kind,
+                attention: attention.clone(),
+                ffn: LayerFfnConfig::exclusive(),
+            })
             .collect();
         ModelDescriptor {
             vocab: VOCAB,
@@ -20062,7 +20423,9 @@ mod hybrid_dense_descriptor {
         program
             .iter()
             .filter_map(|op| match op {
-                Op::Input { name: Some(name), .. } => Some(name.clone()),
+                Op::Input {
+                    name: Some(name), ..
+                } => Some(name.clone()),
                 _ => None,
             })
             .collect()
@@ -20070,49 +20433,119 @@ mod hybrid_dense_descriptor {
 
     #[test]
     fn the_schedule_not_an_interval_decides_which_layers_attend_and_which_recur() {
-        let kinds = [LayerKind::Gdn, LayerKind::Attention, LayerKind::Gdn, LayerKind::Gdn, LayerKind::Attention];
+        let kinds = [
+            LayerKind::Gdn,
+            LayerKind::Attention,
+            LayerKind::Gdn,
+            LayerKind::Gdn,
+            LayerKind::Attention,
+        ];
 
-        let lowered = build_forward(&descriptor(&kinds)).expect("an off-pattern hybrid schedule lowers");
+        let lowered =
+            build_forward(&descriptor(&kinds)).expect("an off-pattern hybrid schedule lowers");
 
         let leaves = leaf_names(&lowered.program);
         for (layer, kind) in kinds.iter().enumerate() {
             let attends = leaves.contains(&alloc::format!("blk.{layer}.attn_q.weight"));
             let recurs = leaves.contains(&alloc::format!("ssm_cache.{layer}.state"));
-            assert_eq!((attends, recurs), (*kind == LayerKind::Attention, *kind == LayerKind::Gdn), "layer {layer}");
+            assert_eq!(
+                (attends, recurs),
+                (*kind == LayerKind::Attention, *kind == LayerKind::Gdn),
+                "layer {layer}"
+            );
         }
-        assert!(matches!(lowered.layer_roots[0], LayerCacheRoots::Ssm { .. }));
-        assert!(matches!(lowered.layer_roots[1], LayerCacheRoots::DenseAttention(_)));
-        assert!(matches!(lowered.layer_roots[4], LayerCacheRoots::DenseAttention(_)));
-        crate::shape::infer(&lowered.program, &[1, 0]).expect("the lowered program infers at a decode step");
+        assert!(matches!(
+            lowered.layer_roots[0],
+            LayerCacheRoots::Ssm { .. }
+        ));
+        assert!(matches!(
+            lowered.layer_roots[1],
+            LayerCacheRoots::DenseAttention(_)
+        ));
+        assert!(matches!(
+            lowered.layer_roots[4],
+            LayerCacheRoots::DenseAttention(_)
+        ));
+        crate::shape::infer(&lowered.program, &[1, 0])
+            .expect("the lowered program infers at a decode step");
     }
 
     #[test]
     fn an_all_attention_stack_that_sets_gated_attention_lowers_the_gated_variant() {
         let kinds = [LayerKind::Attention, LayerKind::Attention];
-        let plain = ModelDescriptor { gated_attention: false, ..descriptor(&kinds) };
+        let plain = ModelDescriptor {
+            gated_attention: false,
+            ..descriptor(&kinds)
+        };
 
-        let gated_leaves = leaf_names(&build_forward(&descriptor(&kinds)).expect("the gated stack lowers").program);
-        let plain_leaves = leaf_names(&build_forward(&plain).expect("the plain stack lowers").program);
+        let gated_leaves = leaf_names(
+            &build_forward(&descriptor(&kinds))
+                .expect("the gated stack lowers")
+                .program,
+        );
+        let plain_leaves = leaf_names(
+            &build_forward(&plain)
+                .expect("the plain stack lowers")
+                .program,
+        );
 
-        assert!(gated_leaves.contains(&"kv_cache.0.k_pass".to_string()), "the gated variant caches the pass-through channels");
-        assert!(plain_leaves.contains(&"kv_cache.0.k_even".to_string()), "the plain variant caches rotated even and odd halves");
-        assert!(!gated_leaves.iter().any(|leaf| leaf.starts_with("ssm_cache.")), "no layer recurs");
+        assert!(
+            gated_leaves.contains(&"kv_cache.0.k_pass".to_string()),
+            "the gated variant caches the pass-through channels"
+        );
+        assert!(
+            plain_leaves.contains(&"kv_cache.0.k_even".to_string()),
+            "the plain variant caches rotated even and odd halves"
+        );
+        assert!(
+            !gated_leaves
+                .iter()
+                .any(|leaf| leaf.starts_with("ssm_cache.")),
+            "no layer recurs"
+        );
     }
 
     #[test]
     fn a_schedule_of_only_recurrent_layers_lowers_the_leading_stack_of_a_hybrid() {
-        let lowered = build_forward(&descriptor(&[LayerKind::Gdn, LayerKind::Gdn])).expect("a recurrent-only prefix lowers");
+        let lowered = build_forward(&descriptor(&[LayerKind::Gdn, LayerKind::Gdn]))
+            .expect("a recurrent-only prefix lowers");
 
-        assert!(lowered.layer_roots.iter().all(|roots| matches!(roots, LayerCacheRoots::Ssm { .. })));
+        assert!(
+            lowered
+                .layer_roots
+                .iter()
+                .all(|roots| matches!(roots, LayerCacheRoots::Ssm { .. }))
+        );
         crate::shape::infer(&lowered.program, &[1, 0]).expect("the prefix infers at a decode step");
     }
 
     #[test]
     fn the_descriptor_and_the_positional_interval_builder_lower_one_program() {
-        let kinds = [LayerKind::Gdn, LayerKind::Attention, LayerKind::Gdn, LayerKind::Attention];
-        let (positional, logits, _roots) =
-            recurrent_interval_forward_program_with_last_row(VOCAB, EMBEDDING, 16, 2, 1, ROTARY_DIM, ATTN_HEAD_DIM, 4, 2, 2, 2, 1, 4, 3, 1e-5, true)
-                .expect("the positional builder lowers");
+        let kinds = [
+            LayerKind::Gdn,
+            LayerKind::Attention,
+            LayerKind::Gdn,
+            LayerKind::Attention,
+        ];
+        let (positional, logits, _roots) = recurrent_interval_forward_program_with_last_row(
+            VOCAB,
+            EMBEDDING,
+            16,
+            2,
+            1,
+            ROTARY_DIM,
+            ATTN_HEAD_DIM,
+            4,
+            2,
+            2,
+            2,
+            1,
+            4,
+            3,
+            1e-5,
+            true,
+        )
+        .expect("the positional builder lowers");
 
         let lowered = build_forward(&descriptor(&kinds)).expect("the descriptor lowers");
 
@@ -20129,21 +20562,32 @@ mod hybrid_dense_descriptor {
 
         assert_eq!(restored, original);
         assert_eq!(
-            build_forward(&restored).expect("the restored descriptor lowers").program,
-            build_forward(&original).expect("the descriptor lowers").program
+            build_forward(&restored)
+                .expect("the restored descriptor lowers")
+                .program,
+            build_forward(&original)
+                .expect("the descriptor lowers")
+                .program
         );
     }
 
     #[test]
     fn the_verify_row_shape_is_data_on_the_hybrid_descriptor() {
         let decode = descriptor(&[LayerKind::Gdn, LayerKind::Attention]);
-        let verify = ModelDescriptor { last_row_only: false, ..decode.clone() };
+        let verify = ModelDescriptor {
+            last_row_only: false,
+            ..decode.clone()
+        };
 
         let decode_logits = build_forward(&decode).expect("decode lowers");
         let verify_logits = build_forward(&verify).expect("verify lowers");
 
         let rows = |lowered: &ForwardProgram| {
-            *crate::shape::infer(&lowered.program, &[3, 0]).expect("infers for a three row step").of(lowered.logits).first().expect("a row axis")
+            *crate::shape::infer(&lowered.program, &[3, 0])
+                .expect("infers for a three row step")
+                .of(lowered.logits)
+                .first()
+                .expect("a row axis")
         };
         assert_eq!((rows(&decode_logits), rows(&verify_logits)), (1, 3));
     }
@@ -20179,7 +20623,10 @@ mod hybrid_dense_descriptor {
         ] {
             let outcome = build_forward(&refused);
 
-            assert!(matches!(outcome, Err(TensorError::UnsupportedInBuilder { .. })), "{label}: {outcome:?}");
+            assert!(
+                matches!(outcome, Err(TensorError::UnsupportedInBuilder { .. })),
+                "{label}: {outcome:?}"
+            );
         }
     }
 }
@@ -20194,7 +20641,10 @@ mod hybrid_routed_descriptor {
             mask_window: None,
             value_source_kind: ValueSourceKind::ProjectedV,
             key_source_kind: KeySourceKind::ProjectedK,
-            rope_table: RopeTableSel { cos_name: "rope_cos".into(), sin_name: "rope_sin".into() },
+            rope_table: RopeTableSel {
+                cos_name: "rope_cos".into(),
+                sin_name: "rope_sin".into(),
+            },
             rope_pairing: RopePairing::SplitHalf { pairs: 1 },
             score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(4),
             value_norm: false,
@@ -20209,7 +20659,10 @@ mod hybrid_routed_descriptor {
             .iter()
             .map(|&kind| LayerSchedule {
                 kind,
-                attention: LayerAttentionConfig { kv_heads: u32::from(kind == LayerKind::Attention), ..attention.clone() },
+                attention: LayerAttentionConfig {
+                    kv_heads: u32::from(kind == LayerKind::Attention),
+                    ..attention.clone()
+                },
                 ffn,
             })
             .collect();
@@ -20264,7 +20717,9 @@ mod hybrid_routed_descriptor {
                 continue;
             }
             match program.get(current.0 as usize) {
-                Some(Op::Elementwise { operands, .. }) => pending.extend(operands.iter().map(|(operand, _)| *operand)),
+                Some(Op::Elementwise { operands, .. }) => {
+                    pending.extend(operands.iter().map(|(operand, _)| *operand))
+                }
                 Some(Op::Reduce(reduce)) => pending.push(reduce.operand),
                 Some(Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. }) | None => {}
             }
@@ -20274,12 +20729,20 @@ mod hybrid_routed_descriptor {
 
     #[test]
     fn one_gdn_layer_and_one_attention_layer_lower_with_a_diagnostic_boundary_each() {
-        let lowered = build_forward(&descriptor(&[LayerKind::Gdn, LayerKind::Attention])).expect("the routed hybrid lowers");
+        let lowered = build_forward(&descriptor(&[LayerKind::Gdn, LayerKind::Attention]))
+            .expect("the routed hybrid lowers");
 
         assert_eq!(lowered.layer_roots.len(), 2, "one cache root per layer");
         assert_eq!(lowered.moe_sites.0.len(), 2, "one router site per layer");
-        assert_eq!(lowered.layer_diagnostics.len(), 2, "one diagnostic record per layer");
-        let gdn = lowered.layer_diagnostics[0].ssm_taps.clone().expect("the first layer is the gdn layer");
+        assert_eq!(
+            lowered.layer_diagnostics.len(),
+            2,
+            "one diagnostic record per layer"
+        );
+        let gdn = lowered.layer_diagnostics[0]
+            .ssm_taps
+            .clone()
+            .expect("the first layer is the gdn layer");
         assert!(
             gdn.query_sequence.0 < gdn.state_out.0
                 && gdn.key_sequence.0 < gdn.state_out.0
@@ -20293,16 +20756,30 @@ mod hybrid_routed_descriptor {
             "the production scan cut must expose its carried inputs before recurrence"
         );
         assert!(lowered.layer_diagnostics[1].dense_attention_taps.is_some());
-        assert_ne!(Some(lowered.logits), lowered.hidden, "logits follow the output projection");
+        assert_ne!(
+            Some(lowered.logits),
+            lowered.hidden,
+            "logits follow the output projection"
+        );
     }
 
     #[test]
     fn routed_experts_depend_on_the_diagnostic_router_logits() {
-        let lowered = build_forward(&descriptor(&[LayerKind::Gdn, LayerKind::Attention])).expect("the routed hybrid lowers");
+        let lowered = build_forward(&descriptor(&[LayerKind::Gdn, LayerKind::Attention]))
+            .expect("the routed hybrid lowers");
 
-        for (site, diagnostic) in lowered.moe_sites.0.iter().zip(lowered.layer_diagnostics.iter()) {
+        for (site, diagnostic) in lowered
+            .moe_sites
+            .0
+            .iter()
+            .zip(lowered.layer_diagnostics.iter())
+        {
             assert!(
-                site.selected.iter().all(|route| node_depends_on(&lowered.program, *route, diagnostic.router_logits)),
+                site.selected.iter().all(|route| node_depends_on(
+                    &lowered.program,
+                    *route,
+                    diagnostic.router_logits
+                )),
                 "layer {} route reductions must consume its diagnostic router logits",
                 site.layer
             );
@@ -20312,17 +20789,27 @@ mod hybrid_routed_descriptor {
     #[test]
     fn a_pinned_prefill_width_makes_the_position_axis_static() {
         let symbolic = descriptor(&[LayerKind::Gdn, LayerKind::Attention]);
-        let pinned = ModelDescriptor { prefill_width: Some(5), ..symbolic.clone() };
+        let pinned = ModelDescriptor {
+            prefill_width: Some(5),
+            ..symbolic.clone()
+        };
 
         let leading = |descriptor: &ModelDescriptor| {
             let lowered = build_forward(descriptor).expect("lowers");
             lowered.program.iter().find_map(|op| match op {
-                Op::Input { name: Some(name), shape, .. } if name == "ids" => shape.first().copied(),
+                Op::Input {
+                    name: Some(name),
+                    shape,
+                    ..
+                } if name == "ids" => shape.first().copied(),
                 _ => None,
             })
         };
 
-        assert_eq!((leading(&symbolic), leading(&pinned)), (Some(Extent::Symbolic(0)), Some(Extent::Static(5))));
+        assert_eq!(
+            (leading(&symbolic), leading(&pinned)),
+            (Some(Extent::Symbolic(0)), Some(Extent::Static(5)))
+        );
     }
 
     #[test]
@@ -20334,10 +20821,16 @@ mod hybrid_routed_descriptor {
             layer.ffn.routed_expert_bias = true;
         }
 
-        for (label, refused) in [("a layer that is not routed with a shared expert", mixed), ("a selection bias", biased)] {
+        for (label, refused) in [
+            ("a layer that is not routed with a shared expert", mixed),
+            ("a selection bias", biased),
+        ] {
             let outcome = build_forward(&refused);
 
-            assert!(matches!(outcome, Err(TensorError::UnsupportedInBuilder { .. })), "{label}: {outcome:?}");
+            assert!(
+                matches!(outcome, Err(TensorError::UnsupportedInBuilder { .. })),
+                "{label}: {outcome:?}"
+            );
         }
     }
 
@@ -20350,6 +20843,9 @@ mod hybrid_routed_descriptor {
 
         let outcome = build_forward(&attention_only);
 
-        assert!(matches!(outcome, Err(TensorError::UnsupportedInBuilder { .. })), "{outcome:?}");
+        assert!(
+            matches!(outcome, Err(TensorError::UnsupportedInBuilder { .. })),
+            "{outcome:?}"
+        );
     }
 }

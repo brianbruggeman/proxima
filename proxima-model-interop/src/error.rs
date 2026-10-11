@@ -54,7 +54,10 @@ pub enum InteropError {
     /// A kv block file could not be opened or mapped.
     #[cfg(feature = "std")]
     #[error("kv block file io at {path:?}: {source}")]
-    BlockFileIo { path: std::path::PathBuf, source: std::io::Error },
+    BlockFileIo {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
 
     /// A sidecar descriptor cannot encode its projection name in the fixed
     /// wire field.
@@ -66,7 +69,9 @@ pub enum InteropError {
     BlockFileMalformed { reason: &'static str },
 
     /// A kv block file was written for a different model than the one loading it.
-    #[error("kv block file was written for another model: expected digest {expected:02x?}, found {found:02x?}")]
+    #[error(
+        "kv block file was written for another model: expected digest {expected:02x?}, found {found:02x?}"
+    )]
     BlockFileDigestMismatch { expected: [u8; 16], found: [u8; 16] },
 
     /// A sidecar's header or data offsets overflow the representable format.
@@ -152,12 +157,16 @@ pub enum InteropError {
     /// `crate::bind_leaves::bind_program_leaves`: the program contracts some
     /// of a leaf's axes and keeps others, interleaved, so no single byte order
     /// of the stored matrix is the one the program reads.
-    #[error("leaf {leaf:?} interleaves its contracted and kept axes; a stored matrix cannot match that order")]
+    #[error(
+        "leaf {leaf:?} interleaves its contracted and kept axes; a stored matrix cannot match that order"
+    )]
     LeafAxesInterleaved { leaf: String },
 
     /// A safetensors weight and its lowered program input declare different
     /// axes, even though their element counts happen to match.
-    #[error("safetensors tensor {tensor:?} axes {tensor_axes:?} do not match leaf {leaf:?} axes {leaf_axes:?}")]
+    #[error(
+        "safetensors tensor {tensor:?} axes {tensor_axes:?} do not match leaf {leaf:?} axes {leaf_axes:?}"
+    )]
     SafetensorsAxesMismatch {
         leaf: String,
         tensor: String,
@@ -172,7 +181,9 @@ pub enum InteropError {
 
     /// A safetensors manifest range does not contain the bytes its shape and
     /// dtype declare.
-    #[error("safetensors tensor {tensor:?} declares {expected} bytes but its range contains {actual}")]
+    #[error(
+        "safetensors tensor {tensor:?} declares {expected} bytes but its range contains {actual}"
+    )]
     SafetensorsByteLengthMismatch {
         tensor: String,
         expected: u64,
@@ -193,16 +204,18 @@ pub enum InteropError {
     /// `crate::bind_leaves::bind_program_leaves`: a `part` alias cannot cut
     /// `tensor` into equal whole-block row slices.
     #[error("tensor {tensor:?} has {rows} rows, which do not split into {of} whole-block parts")]
-    TensorPartInvalid {
-        tensor: String,
-        rows: u64,
-        of: u32,
-    },
+    TensorPartInvalid { tensor: String, rows: u64, of: u32 },
 
     /// The uniform header reader: the header's `<arch>.rope.dimension_count`
     /// differs from the head width, so RoPE rotates only part of each head.
-    #[error("{family:?} rotates {rope_dimension_count} of {head_dim} head dims; the single-range dense program rotates the full head")]
-    PartialRotaryUnsupported { family: String, rope_dimension_count: u32, head_dim: u32 },
+    #[error(
+        "{family:?} rotates {rope_dimension_count} of {head_dim} head dims; the single-range dense program rotates the full head"
+    )]
+    PartialRotaryUnsupported {
+        family: String,
+        rope_dimension_count: u32,
+        head_dim: u32,
+    },
 
     /// [`crate::bind::architecture_from_metadata`]'s vocab derivation: the
     /// `token_embd.weight` tensor's element count did not divide evenly by
@@ -604,9 +617,7 @@ pub enum InteropError {
     /// forward program -- the step computed a leaf the program never declared,
     /// a mistake surfaced as data rather than the value silently sitting in
     /// `named_blocks` unread.
-    #[error(
-        "step input {name:?} named, which this program declares no Op::Input leaf for"
-    )]
+    #[error("step input {name:?} named, which this program declares no Op::Input leaf for")]
     UnknownStepInput { name: String },
 
     /// A forward program leaf beyond the decode loop's own builtin
@@ -626,9 +637,7 @@ pub enum InteropError {
     /// -- a step input's own slot must start at
     /// `crate::symbols::FIRST_FREE` (feature-gated behind `std`), never overwrite a
     /// builtin one out from under the loop.
-    #[error(
-        "step input named reserved symbol slot {slot}; step input slots start at FIRST_FREE"
-    )]
+    #[error("step input named reserved symbol slot {slot}; step input slots start at FIRST_FREE")]
     ReservedSymbolSlot { slot: u16 },
 
     /// `crate::lowering::BoundProgram::single_position_step` is set
@@ -872,7 +881,11 @@ pub enum InteropError {
     /// An affine pack was handed a shape or buffer that disagrees with the
     /// row count, the group size or the bit width.
     #[error("affine pack buffers disagree with shape {rows}x{columns}: {reason}")]
-    AffineShapeMismatch { rows: usize, columns: usize, reason: &'static str },
+    AffineShapeMismatch {
+        rows: usize,
+        columns: usize,
+        reason: &'static str,
+    },
 
     /// Affine scales and biases are stored in bf16, f16 or f32 only.
     #[error("affine scales dtype {dtype:?} is not bf16, f16 or f32")]

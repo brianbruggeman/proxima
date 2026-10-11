@@ -34,7 +34,10 @@ struct Lcg(u64);
 
 impl Lcg {
     fn next_unit(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         (((self.0 >> 33) as u32) as f32 / u32::MAX as f32) * 2.0 - 1.0
     }
 }
@@ -191,7 +194,14 @@ fn assert_fused_bind_matches(synthetic: &Synthetic, shape_name: &str, max_relati
     )
     .unwrap_or_else(|error| panic!("{shape_name}: metal evaluates: {error}"));
 
-    assert_matches(&cpu, &metal, synthetic.out, shape_name, "out", max_relative_error);
+    assert_matches(
+        &cpu,
+        &metal,
+        synthetic.out,
+        shape_name,
+        "out",
+        max_relative_error,
+    );
     assert_matches(
         &cpu,
         &metal,

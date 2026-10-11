@@ -92,8 +92,14 @@ mod tests {
             .expect("an empty environment must load the defaults");
 
         assert_eq!(loaded, RuntimeConfig::default());
-        assert!(loaded.pipeline_cache, "the on-disk pipeline cache is on by default");
-        assert_eq!(loaded.pipeline_cache_dir, "", "an empty directory selects the per-user cache");
+        assert!(
+            loaded.pipeline_cache,
+            "the on-disk pipeline cache is on by default"
+        );
+        assert_eq!(
+            loaded.pipeline_cache_dir, "",
+            "an empty directory selects the per-user cache"
+        );
         assert_eq!(loaded.pipeline_cache_max_bytes, 256 * 1024 * 1024);
     }
 
@@ -104,7 +110,10 @@ mod tests {
         variables.retain(|(name, _)| !name.starts_with("OMEGA_PIPELINE_CACHE"));
         variables.extend([
             ("OMEGA_PIPELINE_CACHE", Some("false")),
-            ("OMEGA_PIPELINE_CACHE_DIR", Some("/var/cache/omega-pipelines")),
+            (
+                "OMEGA_PIPELINE_CACHE_DIR",
+                Some("/var/cache/omega-pipelines"),
+            ),
             ("OMEGA_PIPELINE_CACHE_MAX_BYTES", Some("1048576")),
         ]);
 

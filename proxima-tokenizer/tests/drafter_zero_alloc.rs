@@ -54,9 +54,7 @@ struct Stream {
     tokens: Vec<u32>,
 }
 
-const STREAMS_JSON: &str = include_str!(
-    "fixtures/llama-ngram/fixtures/streams.json"
-);
+const STREAMS_JSON: &str = include_str!("fixtures/llama-ngram/fixtures/streams.json");
 
 /// Stream 4 (`streams.json`): 10 502 real gemma4-tokenized ids, the longest
 /// stream the fixture generator vendored -- long enough that cycling
@@ -109,7 +107,10 @@ fn drafter_zero_alloc_ngram_simple() {
     let after = allocations();
 
     println!("allocs = {} over {ITERATIONS} calls", after - before);
-    assert_eq!(after, before, "ngram_simple_draft must not allocate on its hot path");
+    assert_eq!(
+        after, before,
+        "ngram_simple_draft must not allocate on its hot path"
+    );
 }
 
 /// Shared setup + measured loop for both [`drafter_zero_alloc_ngram_map_key_only`]
@@ -155,7 +156,10 @@ fn run_ngram_map_zero_alloc(key_only: bool) -> usize {
 fn drafter_zero_alloc_ngram_map_key_only() {
     let allocs = run_ngram_map_zero_alloc(true);
     println!("allocs = {allocs} over {ITERATIONS} calls");
-    assert_eq!(allocs, 0, "ngram_map_draft/ngram_map_accept (key_only) must not allocate on their hot path");
+    assert_eq!(
+        allocs, 0,
+        "ngram_map_draft/ngram_map_accept (key_only) must not allocate on their hot path"
+    );
 }
 
 /// `ngram-map-k4v`'s own allocation profile: `draft_k4v` tallies up to
@@ -166,7 +170,10 @@ fn drafter_zero_alloc_ngram_map_key_only() {
 fn drafter_zero_alloc_ngram_map_four_value() {
     let allocs = run_ngram_map_zero_alloc(false);
     println!("allocs = {allocs} over {ITERATIONS} calls");
-    assert_eq!(allocs, 0, "ngram_map_draft/ngram_map_accept (key4v) must not allocate on their hot path");
+    assert_eq!(
+        allocs, 0,
+        "ngram_map_draft/ngram_map_accept (key4v) must not allocate on their hot path"
+    );
 }
 
 /// [`ngram_mod_draft`]/[`ngram_mod_begin`]/[`ngram_mod_accept`]: stateful,
@@ -204,7 +211,10 @@ fn drafter_zero_alloc_ngram_mod() {
     let after = allocations();
 
     println!("allocs = {} over {ITERATIONS} calls", after - before);
-    assert_eq!(after, before, "ngram_mod_draft/ngram_mod_accept must not allocate on their hot path");
+    assert_eq!(
+        after, before,
+        "ngram_mod_draft/ngram_mod_accept must not allocate on their hot path"
+    );
 }
 
 /// [`ngram_cache_state_draft`]'s PER-STEP path: update-then-draft, exactly
@@ -234,7 +244,13 @@ fn drafter_zero_alloc_ngram_cache() {
     // process may still pay one-time allocator bookkeeping (arena carve-out)
     // that is not this function's own allocation.
     let warmup_position = min_len + 1;
-    ngram_cache_state_draft(&mut state, &tokens[..warmup_position], tokens[warmup_position], 8, &mut drafted);
+    ngram_cache_state_draft(
+        &mut state,
+        &tokens[..warmup_position],
+        tokens[warmup_position],
+        8,
+        &mut drafted,
+    );
 
     let before = allocations();
     for step in 0..ITERATIONS {
@@ -245,7 +261,10 @@ fn drafter_zero_alloc_ngram_cache() {
     let after = allocations();
 
     println!("allocs = {} over {ITERATIONS} calls", after - before);
-    assert_eq!(after, before, "ngram_cache_state_draft's update+draft per-step path must not allocate");
+    assert_eq!(
+        after, before,
+        "ngram_cache_state_draft's update+draft per-step path must not allocate"
+    );
 }
 
 /// Degenerate control: proves [`CountingAllocator`] is actually live and

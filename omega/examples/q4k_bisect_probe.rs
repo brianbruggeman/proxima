@@ -116,7 +116,10 @@ fn run() {
 
         let (program, sum) = matmul_program(IN_DIM as u32, out_dim as u32);
         let blocks = [
-            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed },
+            QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: &packed,
+            },
             QuantizedBlock::Float32(&activation),
         ];
         let cpu = evaluate_quantized(&program, &[], &blocks, &[sum]).expect("cpu runs");

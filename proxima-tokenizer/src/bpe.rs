@@ -246,7 +246,14 @@ mod tests {
             .map(|byte| alloc::format!("<0x{byte:02X}>"))
             .collect();
         for piece in [
-            "\u{2581}", "h", "i", "hi", "\u{2581}hi", "\u{e9}", "\n", "\n\n",
+            "\u{2581}",
+            "h",
+            "i",
+            "hi",
+            "\u{2581}hi",
+            "\u{e9}",
+            "\n",
+            "\n\n",
         ] {
             tokens.push(alloc::string::String::from(piece));
         }
@@ -283,7 +290,11 @@ mod tests {
         let ids = encode_char_pretoken("\u{4eca}", &vocab).expect("encodes");
         let expected: Vec<u32> = [0xE4u8, 0xBB, 0x8A]
             .iter()
-            .map(|byte| vocab.token_id(&alloc::format!("<0x{byte:02X}>")).expect("hex"))
+            .map(|byte| {
+                vocab
+                    .token_id(&alloc::format!("<0x{byte:02X}>"))
+                    .expect("hex")
+            })
             .collect();
         assert_eq!(ids, expected);
     }
@@ -292,7 +303,10 @@ mod tests {
     fn char_level_literal_latin1_token_decodes_as_utf8_not_the_gpt2_inverse_remap() {
         let vocab = char_level_vocab();
         let id = vocab.token_id("\u{e9}").expect("token");
-        assert_eq!(decode_ids(&[id], &vocab).expect("decodes"), "\u{e9}".as_bytes());
+        assert_eq!(
+            decode_ids(&[id], &vocab).expect("decodes"),
+            "\u{e9}".as_bytes()
+        );
     }
 
     #[test]

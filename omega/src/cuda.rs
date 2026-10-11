@@ -666,7 +666,9 @@ fn grid_threads(resolved: &BoundOp, cooperative: bool) -> Result<u64, EmitError>
             let output_total: u64 = if epilogue_broadcast_axes.is_empty() {
                 checked_product(
                     resolved.node,
-                    output_axes.iter().map(|dim| resolved.extents[*dim as usize]),
+                    output_axes
+                        .iter()
+                        .map(|dim| resolved.extents[*dim as usize]),
                 )?
             } else {
                 extents_product()?
@@ -1115,9 +1117,7 @@ fn kernel_signature(
     }
     source.push_str(") {\n");
     source.push_str("    const Uniforms u = *u_ptr;\n");
-    source.push_str(
-        "    long gid = (long)blockIdx.x * (long)blockDim.x + (long)threadIdx.x;\n",
-    );
+    source.push_str("    long gid = (long)blockIdx.x * (long)blockDim.x + (long)threadIdx.x;\n");
 }
 
 fn push_gather_uniform_fields(source: &mut String, gather_count: usize, rank_len: usize) {
@@ -3002,6 +3002,10 @@ mod tests {
             kernel.source.contains(&kernel.entry),
             "the name a driver keys its compiled module on is the name the source declares"
         );
-        assert!(kernel.source.contains("(long)blockIdx.x * (long)blockDim.x"));
+        assert!(
+            kernel
+                .source
+                .contains("(long)blockIdx.x * (long)blockDim.x")
+        );
     }
 }

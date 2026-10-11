@@ -237,15 +237,15 @@ fn dequantize_expert(codec: Codec, source: &[u8], output: &mut [f32]) -> Result<
         Codec::Float16 => f16::dequantize(source, output),
         Codec::BFloat16 => bf16::dequantize(source, output),
         Codec::BFloat8 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "bf8" }),
-        Codec::Bf8E5M2 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec {
-            codec: "bf8_e5m2",
-        }),
-        Codec::Bf4E2M1 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec {
-            codec: "bf4_e2m1",
-        }),
-        Codec::Fp6E3M2 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec {
-            codec: "fp6_e3m2",
-        }),
+        Codec::Bf8E5M2 => {
+            Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "bf8_e5m2" })
+        }
+        Codec::Bf4E2M1 => {
+            Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "bf4_e2m1" })
+        }
+        Codec::Fp6E3M2 => {
+            Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "fp6_e3m2" })
+        }
         Codec::Q5_1 => q5_1::dequantize(source, output),
         Codec::Q5_0 => q5_0::dequantize(source, output),
         // The 15 newly-recognized codecs with no `proxima_tensor::cpu`
@@ -257,12 +257,16 @@ fn dequantize_expert(codec: Codec, source: &[u8], output: &mut [f32]) -> Result<
         Codec::Q8K => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "q8_k" }),
         Codec::Iq1S => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq1_s" }),
         Codec::Iq1M => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq1_m" }),
-        Codec::Iq2Xxs => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq2_xxs" }),
+        Codec::Iq2Xxs => {
+            Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq2_xxs" })
+        }
         Codec::Iq2S => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq2_s" }),
         Codec::Iq3S => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq3_s" }),
         Codec::Iq4Nl => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq4_nl" }),
         Codec::Iq2Xs => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq2_xs" }),
-        Codec::Iq3Xxs => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq3_xxs" }),
+        Codec::Iq3Xxs => {
+            Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq3_xxs" })
+        }
         Codec::Iq4Xs => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq4_xs" }),
         Codec::Tq10 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "tq1_0" }),
         Codec::Tq20 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "tq2_0" }),
@@ -876,9 +880,9 @@ impl<'file> ExpertSlab<'file> {
                 .iter()
                 .filter_map(Option::as_ref)
                 .map(|expert| {
-                    expert
-                        .entry()
-                        .ok_or(InteropError::UnsupportedCodec { codec: expert.codec })
+                    expert.entry().ok_or(InteropError::UnsupportedCodec {
+                        codec: expert.codec,
+                    })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             entries.push((weight_node, layer_entries));
@@ -928,9 +932,9 @@ impl<'file> ExpertSlab<'file> {
                 .iter()
                 .filter_map(Option::as_ref)
                 .map(|expert| {
-                    expert
-                        .entry()
-                        .ok_or(InteropError::UnsupportedCodec { codec: expert.codec })
+                    expert.entry().ok_or(InteropError::UnsupportedCodec {
+                        codec: expert.codec,
+                    })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             entries.push((weight_node, layer_entries));
@@ -990,7 +994,9 @@ impl<'file> ExpertSlab<'file> {
                 .experts
                 .iter()
                 .enumerate()
-                .filter_map(|(expert_index, expert)| expert.as_ref().map(|expert| (expert_index, expert)))
+                .filter_map(|(expert_index, expert)| {
+                    expert.as_ref().map(|expert| (expert_index, expert))
+                })
                 .map(|(expert_index, expert)| {
                     let replacement = sidecar.and_then(|scratch| {
                         projection.and_then(|projection| {

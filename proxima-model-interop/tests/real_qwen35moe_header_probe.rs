@@ -18,7 +18,9 @@ use std::fs::File;
 
 use proxima_gguf::parse_complete;
 use proxima_model_interop::profiles::family_profile;
-use proxima_model_interop::{LoadedModel, architecture_from_metadata, bind_checkpoint, metadata_str};
+use proxima_model_interop::{
+    LoadedModel, architecture_from_metadata, bind_checkpoint, metadata_str,
+};
 use proxima_tensor::spec::{FfnRouting, ScheduleSource};
 
 #[proxima::test]
@@ -44,9 +46,13 @@ async fn family_profile_routes_real_qwen35moe_header_with_per_layer_kv_configura
         }
     }
 
-    let family = metadata_str(&parsed, "general.architecture").expect("the real header names its family");
+    let family =
+        metadata_str(&parsed, "general.architecture").expect("the real header names its family");
     let profile = family_profile(family).expect("the qwen35moe profile is embedded");
-    assert_eq!(profile.schedule_source, ScheduleSource::RecurrentRoutedInterval);
+    assert_eq!(
+        profile.schedule_source,
+        ScheduleSource::RecurrentRoutedInterval
+    );
     assert_eq!(profile.ffn_routing, FfnRouting::Routed);
 
     let architecture = architecture_from_metadata(&parsed)

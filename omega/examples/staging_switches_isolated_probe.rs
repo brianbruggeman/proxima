@@ -26,9 +26,19 @@
 //! touching the GPU. Weight bytes are synthetic (random `Q4_0` blocks).
 
 fn main() -> anyhow::Result<()> {
-    #[cfg(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos"))]
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-tiled-gemm",
+        feature = "instrument",
+        target_os = "macos"
+    ))]
     return run();
-    #[cfg(not(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos")))]
+    #[cfg(not(all(
+        feature = "metal",
+        feature = "metal-tiled-gemm",
+        feature = "instrument",
+        target_os = "macos"
+    )))]
     {
         println!(
             "staging_switches_isolated_probe requires --features metal,metal-tiled-gemm,instrument on macOS"
@@ -43,9 +53,15 @@ fn main() -> anyhow::Result<()> {
 // `pipeline_buffers_upload.rs`'s `pipeline_for` -- installed here rather than
 // in the library because this is the one call site that needs a console sink
 // at all; `omega` itself stays a no-op emitter without an installed recorder.
-#[cfg(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos"))]
-fn install_footprint_telemetry()
--> anyhow::Result<std::sync::Arc<proxima_telemetry::recorder::Recorder<proxima_telemetry::clock::GlobalClock>>> {
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-tiled-gemm",
+    feature = "instrument",
+    target_os = "macos"
+))]
+fn install_footprint_telemetry() -> anyhow::Result<
+    std::sync::Arc<proxima_telemetry::recorder::Recorder<proxima_telemetry::clock::GlobalClock>>,
+> {
     use anyhow::Context;
 
     proxima_telemetry::emit::global::install(proxima_telemetry::emit::EnvFilter::parse("debug"));
@@ -57,7 +73,12 @@ fn install_footprint_telemetry()
         .context("telemetry recorder installs")
 }
 
-#[cfg(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos"))]
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-tiled-gemm",
+    feature = "instrument",
+    target_os = "macos"
+))]
 fn run() -> anyhow::Result<()> {
     use anyhow::Context;
     use proxima_gguf::quant::q4_0::{BLOCK_BYTES, QK4_0, quantize};
@@ -83,7 +104,10 @@ fn run() -> anyhow::Result<()> {
     fn pack_rows(rows: &[Vec<f32>], in_dim: usize) -> anyhow::Result<Vec<u8>> {
         let blocks_per_row = in_dim / QK4_0;
         let mut packed = vec![0u8; rows.len() * blocks_per_row * BLOCK_BYTES];
-        for (row, row_packed) in rows.iter().zip(packed.chunks_exact_mut(blocks_per_row * BLOCK_BYTES)) {
+        for (row, row_packed) in rows
+            .iter()
+            .zip(packed.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+        {
             quantize(row, row_packed).context("in_dim is a whole multiple of QK4_0")?;
         }
         Ok(packed)
@@ -144,7 +168,11 @@ fn run() -> anyhow::Result<()> {
             &mut program,
             Op::Input {
                 dtype: DType::Float32,
-                shape: vec![Extent::Static(feature), Extent::Static(batch), Extent::Static(reduce_len)],
+                shape: vec![
+                    Extent::Static(feature),
+                    Extent::Static(batch),
+                    Extent::Static(reduce_len),
+                ],
                 name: None,
             },
         );
@@ -152,7 +180,11 @@ fn run() -> anyhow::Result<()> {
             &mut program,
             Op::Input {
                 dtype: DType::Float32,
-                shape: vec![Extent::Static(token), Extent::Static(batch), Extent::Static(reduce_len)],
+                shape: vec![
+                    Extent::Static(token),
+                    Extent::Static(batch),
+                    Extent::Static(reduce_len),
+                ],
                 name: None,
             },
         );
@@ -181,11 +213,24 @@ fn run() -> anyhow::Result<()> {
                 name: None,
             }),
         );
-        (program, sum, token as usize, feature as usize, batch as usize, reduce_len as usize)
+        (
+            program,
+            sum,
+            token as usize,
+            feature as usize,
+            batch as usize,
+            reduce_len as usize,
+        )
     }
 
-    fn median_gpu_ns(program: &[Op], root: NodeId, blocks: &[QuantizedBlock<'_>], runs: usize) -> anyhow::Result<u64> {
-        let plan = omega::plan(program, &[], blocks, &[root], NumericPolicy::default()).context("plan compiles")?;
+    fn median_gpu_ns(
+        program: &[Op],
+        root: NodeId,
+        blocks: &[QuantizedBlock<'_>],
+        runs: usize,
+    ) -> anyhow::Result<u64> {
+        let plan = omega::plan(program, &[], blocks, &[root], NumericPolicy::default())
+            .context("plan compiles")?;
         let mut samples = Vec::with_capacity(runs);
         for _ in 0..runs {
             let (_, timings) = omega::metal::execute_plan_op_timed(&plan, blocks, None)
@@ -197,7 +242,9 @@ fn run() -> anyhow::Result<()> {
         Ok(samples[samples.len() / 2])
     }
 
-    if let Ok(output) = std::process::Command::new("pgrep").args(["-fl", "ollama|llama-server|Ollama"]).output()
+    if let Ok(output) = std::process::Command::new("pgrep")
+        .args(["-fl", "ollama|llama-server|Ollama"])
+        .output()
         && !output.stdout.is_empty()
     {
         eprintln!(
@@ -207,12 +254,17 @@ fn run() -> anyhow::Result<()> {
     }
 
     // Q4_0 weight-matmul shape (STAGING.md's own target).
-    let rows: Vec<Vec<f32>> = (0..OUT_DIM).map(|row| random_vec(11 + row as u64, IN_DIM)).collect();
+    let rows: Vec<Vec<f32>> = (0..OUT_DIM)
+        .map(|row| random_vec(11 + row as u64, IN_DIM))
+        .collect();
     let packed = pack_rows(&rows, IN_DIM)?;
     let activation = random_vec(97, TOKENS * IN_DIM);
     let (program, sum) = matmul_program(TOKENS as u32, IN_DIM as u32, OUT_DIM as u32);
     let blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: &packed },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4_0,
+            bytes: &packed,
+        },
         QuantizedBlock::Float32(&activation),
     ];
 
@@ -228,11 +280,17 @@ fn run() -> anyhow::Result<()> {
                 ("PROXIMA_TILED_GEMM_SLIM_TGMEM", "0"),
             ],
         ),
-        ("wide_act_load alone", &[("PROXIMA_TILED_GEMM_SLIM_TGMEM", "0")]),
+        (
+            "wide_act_load alone",
+            &[("PROXIMA_TILED_GEMM_SLIM_TGMEM", "0")],
+        ),
         // phase 2 (see `docs/model-interop/discipline.md` ROW C4.10):
         // `out_tile` aliased onto
         // `weight_tile`/`act_tile`'s backing bytes.
-        ("slim_tgmem alone", &[("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", "0")]),
+        (
+            "slim_tgmem alone",
+            &[("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", "0")],
+        ),
         ("slim_tgmem + wide_act_load (new default, unset)", &[]),
     ];
 
@@ -257,10 +315,14 @@ fn run() -> anyhow::Result<()> {
 
     // node 162's dense-batched shape -- none of these switches touch
     // `push_dense_batched_gemm_body` this session; expected null result.
-    let (dense_program, dense_sum, token, feature, batch, reduce_len) = dense_batched_value_program();
+    let (dense_program, dense_sum, token, feature, batch, reduce_len) =
+        dense_batched_value_program();
     let weight_data = random_vec(2026, feature * batch * reduce_len);
     let other_data = random_vec(2027, token * batch * reduce_len);
-    let dense_blocks = [QuantizedBlock::Float32(&weight_data), QuantizedBlock::Float32(&other_data)];
+    let dense_blocks = [
+        QuantizedBlock::Float32(&weight_data),
+        QuantizedBlock::Float32(&other_data),
+    ];
 
     println!(
         "=== node162-shaped dense batched value [token={token} feature={feature} batch={batch} K={reduce_len}] ==="
@@ -271,7 +333,9 @@ fn run() -> anyhow::Result<()> {
         for &(key, value) in extra {
             vars.push((key, Some(value)));
         }
-        let ns = temp_env::with_vars(vars, || median_gpu_ns(&dense_program, dense_sum, &dense_blocks, RUNS))?;
+        let ns = temp_env::with_vars(vars, || {
+            median_gpu_ns(&dense_program, dense_sum, &dense_blocks, RUNS)
+        })?;
         telemetry_recorder.drain();
         if label.starts_with("baseline") {
             dense_baseline_ns = ns;
@@ -287,7 +351,9 @@ fn run() -> anyhow::Result<()> {
     // / slim_tgmem comparison, 12 samples per round x 3 rounds, round-robin
     // across configs so a clock-ramp or thermal drift within one round
     // cannot land entirely on one config's numbers.
-    println!("=== interleaved baseline vs wide_act_load vs slim_tgmem (Q4_0 shape, 12 samples x 3 rounds) ===");
+    println!(
+        "=== interleaved baseline vs wide_act_load vs slim_tgmem (Q4_0 shape, 12 samples x 3 rounds) ==="
+    );
     let interleave_configs: &[(&str, &[(&str, &str)])] = &[
         (
             "baseline",

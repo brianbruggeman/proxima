@@ -76,7 +76,10 @@ fn q2k_metal_matmul_matches_dequantized_cpu() {
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &packed },
+            QuantizedBlock::Packed {
+                codec: Codec::Q2K,
+                bytes: &packed,
+            },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_root],

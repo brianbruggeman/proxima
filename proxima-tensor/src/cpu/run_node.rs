@@ -334,12 +334,10 @@ pub(super) fn run_round_batched_reduce<B: Deref<Target = [f32]> + Sync>(
         })?;
     for round in 0..*round_count as usize {
         let mut round_operands = operands.clone();
-        let route = *round_routes
-            .get(round)
-            .ok_or(TensorError::NotLowerable {
-                node: resolved.node,
-                reason: "round-batched reduce round_routes is shorter than round_count",
-            })?;
+        let route = *round_routes.get(round).ok_or(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "round-batched reduce round_routes is shorter than round_count",
+        })?;
         let Some(lookup) = &mut round_operands[stack_operand_index].2 else {
             unreachable!("stack_operand_index was found by locating a Some(lookup) above")
         };
@@ -919,8 +917,11 @@ pub(super) fn run_cached_softmax_weights<B: Deref<Target = [f32]> + Sync>(
             reason: "cached softmax weights runner received another bound operation",
         });
     };
-    let [(cached_scores_node, cached_layout, cached_lookup), (new_scores_node, new_layout, new_lookup), (new_value_node, value_layout, value_lookup)] =
-        operands.as_slice()
+    let [
+        (cached_scores_node, cached_layout, cached_lookup),
+        (new_scores_node, new_layout, new_lookup),
+        (new_value_node, value_layout, value_lookup),
+    ] = operands.as_slice()
     else {
         return Err(TensorError::NotLowerable {
             node: resolved.node,
@@ -2101,10 +2102,22 @@ pub(super) fn dequantize_row(
     if matches!(
         block,
         QuantizedBlock::Float32(_)
-            | QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: _ }
-            | QuantizedBlock::Packed { codec: Codec::Q5_0, bytes: _ }
-            | QuantizedBlock::Packed { codec: Codec::Float16, bytes: _ }
-            | QuantizedBlock::Packed { codec: Codec::BFloat16, bytes: _ }
+            | QuantizedBlock::Packed {
+                codec: Codec::Q4_0,
+                bytes: _
+            }
+            | QuantizedBlock::Packed {
+                codec: Codec::Q5_0,
+                bytes: _
+            }
+            | QuantizedBlock::Packed {
+                codec: Codec::Float16,
+                bytes: _
+            }
+            | QuantizedBlock::Packed {
+                codec: Codec::BFloat16,
+                bytes: _
+            }
     ) {
         return Err(unaligned_row());
     }
@@ -2173,7 +2186,9 @@ pub(super) fn run_top_fraction_select<B: Deref<Target = [f32]> + Sync>(
             reason: "top-fraction select runner received another bound operation",
         });
     };
-    let mut sources = operands.iter().map(|(node, _, _)| buffer_of(buffers, *node));
+    let mut sources = operands
+        .iter()
+        .map(|(node, _, _)| buffer_of(buffers, *node));
     let scores = sources.next().ok_or(TensorError::Empty)??;
     let keep_count = sources.next().ok_or(TensorError::Empty)??;
     let keep_rows = if *has_keep_rows {
@@ -2242,9 +2257,15 @@ mod rank_select_tests {
         keep_first[0] = 1.0;
         assert_eq!(selected(&TWELVE_SCORES[..11], 3, None), vec![1, 3, 7]);
         assert_eq!(selected(&TWELVE_SCORES, 3, None), vec![1, 7, 11]);
-        assert_eq!(selected(&TWELVE_SCORES, 3, Some(&keep_first)), vec![0, 1, 7, 11]);
+        assert_eq!(
+            selected(&TWELVE_SCORES, 3, Some(&keep_first)),
+            vec![0, 1, 7, 11]
+        );
         assert_eq!(selected(&TWELVE_SCORES, 0, None), Vec::<usize>::new());
-        assert_eq!(selected(&TWELVE_SCORES, 99, None), (0..12).collect::<Vec<_>>());
+        assert_eq!(
+            selected(&TWELVE_SCORES, 99, None),
+            (0..12).collect::<Vec<_>>()
+        );
         assert_eq!(selected(&[1.0, -0.0, 0.0, -1.0], 2, None), vec![0, 1]);
     }
 
@@ -2256,8 +2277,22 @@ mod rank_select_tests {
             extents: vec![12],
             kind: BoundOpKind::TopFractionSelect {
                 operands: vec![
-                    (NodeId(0), Layout { base: 0, strides: SmallVec::from_slice(&[1]) }, None),
-                    (NodeId(1), Layout { base: 0, strides: SmallVec::new() }, None),
+                    (
+                        NodeId(0),
+                        Layout {
+                            base: 0,
+                            strides: SmallVec::from_slice(&[1]),
+                        },
+                        None,
+                    ),
+                    (
+                        NodeId(1),
+                        Layout {
+                            base: 0,
+                            strides: SmallVec::new(),
+                        },
+                        None,
+                    ),
                 ],
                 rows: 12,
                 has_keep_rows: false,

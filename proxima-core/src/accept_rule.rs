@@ -6,7 +6,16 @@
 
 /// Three scalars that decide how many leading drafted rows are accepted; copyable so it can ride in a config.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "config", derive(bon::Builder, serde::Deserialize, serde::Serialize, conflaguration::Settings, conflaguration::Validate))]
+#[cfg_attr(
+    feature = "config",
+    derive(
+        bon::Builder,
+        serde::Deserialize,
+        serde::Serialize,
+        conflaguration::Settings,
+        conflaguration::Validate
+    )
+)]
 #[cfg_attr(feature = "config", settings(prefix = "PROXIMA_ACCEPT_RULE"))]
 #[cfg_attr(feature = "config", builder(derive(Clone, Debug)))]
 pub struct AcceptRule {
@@ -49,7 +58,11 @@ impl AcceptRule {
             .take(usize::from(self.max_rows))
             .take_while(|(drafted, chosen)| similarity(drafted, chosen) >= self.similarity_floor)
             .count();
-        if run < usize::from(self.min_run) { 0 } else { run }
+        if run < usize::from(self.min_run) {
+            0
+        } else {
+            run
+        }
     }
 }
 
@@ -65,7 +78,11 @@ mod tests {
     }
 
     fn rule(similarity_floor: f32, min_run: u16, max_rows: u16) -> AcceptRule {
-        AcceptRule { similarity_floor, min_run, max_rows }
+        AcceptRule {
+            similarity_floor,
+            min_run,
+            max_rows,
+        }
     }
 
     #[test]
@@ -98,9 +115,19 @@ mod tests {
         assert_eq!(
             results,
             alloc::vec![
-                Ok(ServingState::Accept { n: 3, next: 5, cache: 12 }),
-                Ok(ServingState::Rollback { snapshot: 11, to: 9 }),
-                Ok(ServingState::Rollback { snapshot: 10, to: 8 }),
+                Ok(ServingState::Accept {
+                    n: 3,
+                    next: 5,
+                    cache: 12
+                }),
+                Ok(ServingState::Rollback {
+                    snapshot: 11,
+                    to: 9
+                }),
+                Ok(ServingState::Rollback {
+                    snapshot: 10,
+                    to: 8
+                }),
             ]
         );
     }
@@ -111,9 +138,18 @@ mod tests {
         let choices = [10_u8, 21, 35];
         let similarity = |a: &u8, b: &u8| 1.0 - f32::from(a.abs_diff(*b)) / 10.0;
 
-        assert_eq!(rule(1.0, 0, u16::MAX).accepted_rows(&draft, &choices, similarity), 1);
-        assert_eq!(rule(0.85, 0, u16::MAX).accepted_rows(&draft, &choices, similarity), 2);
-        assert_eq!(rule(0.4, 0, u16::MAX).accepted_rows(&draft, &choices, similarity), 3);
+        assert_eq!(
+            rule(1.0, 0, u16::MAX).accepted_rows(&draft, &choices, similarity),
+            1
+        );
+        assert_eq!(
+            rule(0.85, 0, u16::MAX).accepted_rows(&draft, &choices, similarity),
+            2
+        );
+        assert_eq!(
+            rule(0.4, 0, u16::MAX).accepted_rows(&draft, &choices, similarity),
+            3
+        );
     }
 
     #[test]
@@ -130,9 +166,18 @@ mod tests {
         let draft = [1_u32, 2, 3, 9];
         let choices = [1_u32, 2, 3, 4];
 
-        assert_eq!(rule(1.0, 0, u16::MAX).accepted_rows(&draft, &choices, exact), 3);
-        assert_eq!(rule(1.0, 3, u16::MAX).accepted_rows(&draft, &choices, exact), 3);
-        assert_eq!(rule(1.0, 4, u16::MAX).accepted_rows(&draft, &choices, exact), 0);
+        assert_eq!(
+            rule(1.0, 0, u16::MAX).accepted_rows(&draft, &choices, exact),
+            3
+        );
+        assert_eq!(
+            rule(1.0, 3, u16::MAX).accepted_rows(&draft, &choices, exact),
+            3
+        );
+        assert_eq!(
+            rule(1.0, 4, u16::MAX).accepted_rows(&draft, &choices, exact),
+            0
+        );
         assert_eq!(rule(1.0, 3, 2).accepted_rows(&draft, &choices, exact), 0);
     }
 }
@@ -164,23 +209,33 @@ mod config_tests {
     fn assert_rule_matches_sequential(table: &str, counts: (usize, usize, usize)) {
         let rule = rule_from(table);
         let sequential = run_sequential();
-        let speculative = run_speculative(|draft, choices| rule.accepted_rows(draft, choices, field_agreement));
+        let speculative =
+            run_speculative(|draft, choices| rule.accepted_rows(draft, choices, field_agreement));
 
         assert_eq!(speculative.history, sequential.history);
         assert_eq!(speculative.environment, sequential.environment);
         assert_eq!(
-            (speculative.rounds, speculative.rejected_rounds, speculative.accepted_rows),
+            (
+                speculative.rounds,
+                speculative.rejected_rounds,
+                speculative.accepted_rows
+            ),
             counts
         );
     }
 
     fn assert_loaders_agree(expected: &AcceptRule, floor: &str, run: &str, rows: &str) {
         let table = format!("similarity_floor = {floor}\nmin_run = {run}\nmax_rows = {rows}\n");
-        let from_toml: AcceptRule = conflaguration::from_toml_str(&table).expect("the rule table parses");
+        let from_toml: AcceptRule =
+            conflaguration::from_toml_str(&table).expect("the rule table parses");
         assert_eq!(&from_toml, expected);
 
         temp_env::with_vars(
-            [(FLOOR_VAR, Some(floor)), (RUN_VAR, Some(run)), (ROWS_VAR, Some(rows))],
+            [
+                (FLOOR_VAR, Some(floor)),
+                (RUN_VAR, Some(run)),
+                (ROWS_VAR, Some(rows)),
+            ],
             || {
                 let from_env = AcceptRule::from_env().expect("the rule loads from env");
                 assert_eq!(&from_env, expected);
@@ -192,10 +247,13 @@ mod config_tests {
     fn accept_rule_builder_defaults_match_default_impl() {
         assert_eq!(AcceptRule::builder().build(), AcceptRule::default());
 
-        temp_env::with_vars([(FLOOR_VAR, None::<&str>), (RUN_VAR, None), (ROWS_VAR, None)], || {
-            let from_env = AcceptRule::from_env().expect("defaults load from an empty env");
-            assert_eq!(from_env, AcceptRule::default());
-        });
+        temp_env::with_vars(
+            [(FLOOR_VAR, None::<&str>), (RUN_VAR, None), (ROWS_VAR, None)],
+            || {
+                let from_env = AcceptRule::from_env().expect("defaults load from an empty env");
+                assert_eq!(from_env, AcceptRule::default());
+            },
+        );
     }
 
     #[test]
@@ -230,16 +288,25 @@ mod config_tests {
 
     #[test]
     fn configured_rule_equality_matches_sequential() {
-        assert_rule_matches_sequential("similarity_floor = 1.0\nmin_run = 0\nmax_rows = 8\n", (4, 4, 8));
+        assert_rule_matches_sequential(
+            "similarity_floor = 1.0\nmin_run = 0\nmax_rows = 8\n",
+            (4, 4, 8),
+        );
     }
 
     #[test]
     fn configured_rule_verifier_exact_matches_sequential() {
-        assert_rule_matches_sequential("similarity_floor = 1.0\nmin_run = 0\nmax_rows = 65535\n", (4, 4, 8));
+        assert_rule_matches_sequential(
+            "similarity_floor = 1.0\nmin_run = 0\nmax_rows = 65535\n",
+            (4, 4, 8),
+        );
     }
 
     #[test]
     fn configured_rule_anchor_run_matches_sequential() {
-        assert_rule_matches_sequential("similarity_floor = 1.0\nmin_run = 3\nmax_rows = 65535\n", (6, 6, 6));
+        assert_rule_matches_sequential(
+            "similarity_floor = 1.0\nmin_run = 3\nmax_rows = 65535\n",
+            (6, 6, 6),
+        );
     }
 }

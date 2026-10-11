@@ -86,8 +86,8 @@ fn gemma4_rope_twin_census() {
     let mapping = unsafe { Mmap::map(&file) }.expect("mmap the gemma4-E2B checkpoint");
     let bytes: &[u8] = &mapping;
     let parsed = parse_complete(bytes).expect("parse the gemma4-E2B checkpoint header");
-    let bound_program = bind_checkpoint(&parsed, bytes)
-        .expect("bind the gemma4-E2B production decode program");
+    let bound_program =
+        bind_checkpoint(&parsed, bytes).expect("bind the gemma4-E2B production decode program");
     let outputs = production_step_outputs(bound_program.logits_root, &bound_program.layer_roots);
     let symbols = bind_symbols(
         NEW_COUNT,
@@ -116,8 +116,11 @@ fn gemma4_rope_twin_census() {
     );
     let before_kinds = kind_histogram(&before);
     let after_kinds = kind_histogram(&after);
-    let names: std::collections::BTreeSet<&str> =
-        before_kinds.keys().chain(after_kinds.keys()).copied().collect();
+    let names: std::collections::BTreeSet<&str> = before_kinds
+        .keys()
+        .chain(after_kinds.keys())
+        .copied()
+        .collect();
     for name in names {
         println!(
             "rope twin census kind={name} before={} after={}",

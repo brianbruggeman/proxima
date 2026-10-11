@@ -1774,7 +1774,8 @@ pub fn write_expert_sidecar<W: Write + Seek>(
                 },
             ));
         }
-        let expected_output = crate::bind::codec_byte_len_for(spec.target_codec, expected_elements)?;
+        let expected_output =
+            crate::bind::codec_byte_len_for(spec.target_codec, expected_elements)?;
         if output.len() < expected_output {
             return Err(InteropError::Quant(
                 proxima_gguf::quant::QuantError::OutputSizeMismatch {

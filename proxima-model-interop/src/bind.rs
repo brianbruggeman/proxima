@@ -196,20 +196,62 @@ pub fn gguf_tensor_as_packed_block<'a>(
             .ok_or_else(|| InteropError::MisalignedFloat32Tensor {
                 tensor: tensor.name.clone(),
             }),
-        GgmlType::Q4_K => Ok(proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes }),
-        GgmlType::Q2_K => Ok(proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q2K, bytes }),
-        GgmlType::Q4_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q4_0, bytes }),
-        GgmlType::Q5_1 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q5_1, bytes }),
-        GgmlType::Q5_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q5_0, bytes }),
-        GgmlType::Q5_K => Ok(proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q5K, bytes }),
-        GgmlType::Q3_K => Ok(proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q3K, bytes }),
-        GgmlType::Q6_K => Ok(proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q6K, bytes }),
-        GgmlType::Q8_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q8_0, bytes }),
-        GgmlType::Iq2Xs => Ok(proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Iq2Xs, bytes }),
-        GgmlType::Iq3Xxs => Ok(proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Iq3Xxs, bytes }),
-        GgmlType::Iq4Nl => Ok(proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Iq4Nl, bytes }),
-        GgmlType::F16 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Float16, bytes }),
-        GgmlType::Bf16 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::BFloat16, bytes }),
+        GgmlType::Q4_K => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes,
+        }),
+        GgmlType::Q2_K => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q2K,
+            bytes,
+        }),
+        GgmlType::Q4_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q4_0,
+            bytes,
+        }),
+        GgmlType::Q5_1 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q5_1,
+            bytes,
+        }),
+        GgmlType::Q5_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q5_0,
+            bytes,
+        }),
+        GgmlType::Q5_K => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q5K,
+            bytes,
+        }),
+        GgmlType::Q3_K => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q3K,
+            bytes,
+        }),
+        GgmlType::Q6_K => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q6K,
+            bytes,
+        }),
+        GgmlType::Q8_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes,
+        }),
+        GgmlType::Iq2Xs => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Iq2Xs,
+            bytes,
+        }),
+        GgmlType::Iq3Xxs => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Iq3Xxs,
+            bytes,
+        }),
+        GgmlType::Iq4Nl => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Iq4Nl,
+            bytes,
+        }),
+        GgmlType::F16 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Float16,
+            bytes,
+        }),
+        GgmlType::Bf16 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::BFloat16,
+            bytes,
+        }),
         other => Err(InteropError::UnrepresentableGgmlType {
             tensor: tensor.name.clone(),
             ggml_type: other,
@@ -451,7 +493,10 @@ impl ModelHparams {
     pub fn uniform_attention_kv_heads(&self) -> Result<u32, InteropError> {
         uniform_u32_array(
             "attention.head_count_kv",
-            self.kv_heads_by_layer.iter().copied().filter(|kv_heads| *kv_heads != 0),
+            self.kv_heads_by_layer
+                .iter()
+                .copied()
+                .filter(|kv_heads| *kv_heads != 0),
         )
     }
 
@@ -461,12 +506,16 @@ impl ModelHparams {
     /// keeps the header's values, since one number cannot stand for it.
     #[must_use]
     pub fn reshaped_by(&self, descriptor: &ModelDescriptor) -> Self {
-        let uniform = descriptor.layers.first().map(|first| &first.attention).filter(|first| {
-            descriptor
-                .layers
-                .iter()
-                .all(|layer| layer.attention.kv_heads == first.kv_heads && layer.attention.head_dim == first.head_dim)
-        });
+        let uniform = descriptor
+            .layers
+            .first()
+            .map(|first| &first.attention)
+            .filter(|first| {
+                descriptor.layers.iter().all(|layer| {
+                    layer.attention.kv_heads == first.kv_heads
+                        && layer.attention.head_dim == first.head_dim
+                })
+            });
         Self {
             vocab: descriptor.vocab,
             embedding: descriptor.embedding,
@@ -1024,7 +1073,10 @@ pub use proxima_primitives::Codec;
 /// today; a caller reaching one propagates [`InteropError::UnsupportedCodec`]
 /// rather than panicking.
 #[cfg(feature = "std")]
-pub(crate) fn as_block(codec: Codec, bytes: &[u8]) -> Option<proxima_tensor::cpu::QuantizedBlock<'_>> {
+pub(crate) fn as_block(
+    codec: Codec,
+    bytes: &[u8],
+) -> Option<proxima_tensor::cpu::QuantizedBlock<'_>> {
     match codec {
         Codec::Q4K
         | Codec::Q5K
@@ -1217,7 +1269,10 @@ pub(crate) fn codec_to_ggml_type(codec: Codec) -> Result<GgmlType, InteropError>
 /// encode buffer before calling [`quantize_to_kind`]. BF8 returns
 /// [`InteropError::UnsupportedCodec`] before any layout arithmetic.
 #[cfg(feature = "std")]
-pub(crate) fn codec_byte_len_for(codec: Codec, element_count: usize) -> Result<usize, InteropError> {
+pub(crate) fn codec_byte_len_for(
+    codec: Codec,
+    element_count: usize,
+) -> Result<usize, InteropError> {
     let layout = codec_to_ggml_type(codec)?.block_layout();
     Ok((element_count as u64 / layout.block_elements * layout.block_bytes) as usize)
 }
@@ -1299,10 +1354,22 @@ pub fn bind_dense_as<'file>(
         // can decode one row at a time -- stays packed, same as `bind_matmul_weight_as`'s
         // own packed arm, instead of dequantizing the whole table up front.
         Ok(
-            block @ (proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes }
-            | proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q5K, bytes }
-            | proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q6K, bytes }
-            | proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q8_0, bytes }),
+            block @ (proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes,
+            }
+            | proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q5K,
+                bytes,
+            }
+            | proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q6K,
+                bytes,
+            }
+            | proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q8_0,
+                bytes,
+            }),
         ) => {
             state.resident_bytes += bytes.len();
             state.packed.push((target_name, block));
@@ -1725,11 +1792,26 @@ pub(crate) fn bind_matmul_weight_paired<'file>(
     if up_range.start == gate_range.end {
         let bytes = &file_bytes[gate_range.start as usize..up_range.end as usize];
         let block = match codec {
-            GgmlType::Q4_K => proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes },
-            GgmlType::Q5_K => proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q5K, bytes },
-            GgmlType::Q3_K => proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q3K, bytes },
-            GgmlType::Q6_K => proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q6K, bytes },
-            GgmlType::Q8_0 => proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q8_0, bytes },
+            GgmlType::Q4_K => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes,
+            },
+            GgmlType::Q5_K => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q5K,
+                bytes,
+            },
+            GgmlType::Q3_K => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q3K,
+                bytes,
+            },
+            GgmlType::Q6_K => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q6K,
+                bytes,
+            },
+            GgmlType::Q8_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q8_0,
+                bytes,
+            },
             other => {
                 return Err(InteropError::UnrepresentableGgmlType {
                     tensor: gate_name.into(),
@@ -1805,11 +1887,26 @@ pub(crate) fn bind_matmul_weight_triple<'file>(
     if k_range.start == q_range.end && v_range.start == k_range.end {
         let bytes = &file_bytes[q_range.start as usize..v_range.end as usize];
         let block = match codec {
-            GgmlType::Q4_K => proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes },
-            GgmlType::Q5_K => proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q5K, bytes },
-            GgmlType::Q3_K => proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q3K, bytes },
-            GgmlType::Q6_K => proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q6K, bytes },
-            GgmlType::Q8_0 => proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q8_0, bytes },
+            GgmlType::Q4_K => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes,
+            },
+            GgmlType::Q5_K => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q5K,
+                bytes,
+            },
+            GgmlType::Q3_K => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q3K,
+                bytes,
+            },
+            GgmlType::Q6_K => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q6K,
+                bytes,
+            },
+            GgmlType::Q8_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q8_0,
+                bytes,
+            },
             other => {
                 return Err(InteropError::UnrepresentableGgmlType {
                     tensor: q_name.into(),
@@ -2127,14 +2224,38 @@ fn quantized_block_as_owned_bytes(
     block: proxima_tensor::cpu::QuantizedBlock<'_>,
 ) -> Option<(&[u8], Codec)> {
     match block {
-        proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes } => Some((bytes, Codec::Q4K)),
-        proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q5K, bytes } => Some((bytes, Codec::Q5K)),
-        proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q6K, bytes } => Some((bytes, Codec::Q6K)),
-        proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q8_0, bytes } => Some((bytes, Codec::Q8_0)),
-        proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q3K, bytes } => Some((bytes, Codec::Q3K)),
-        proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q4_0, bytes } => Some((bytes, Codec::Q4_0)),
-        proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Float16, bytes } => Some((bytes, Codec::Float16)),
-        proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::BFloat16, bytes } => Some((bytes, Codec::BFloat16)),
+        proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes,
+        } => Some((bytes, Codec::Q4K)),
+        proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q5K,
+            bytes,
+        } => Some((bytes, Codec::Q5K)),
+        proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q6K,
+            bytes,
+        } => Some((bytes, Codec::Q6K)),
+        proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes,
+        } => Some((bytes, Codec::Q8_0)),
+        proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q3K,
+            bytes,
+        } => Some((bytes, Codec::Q3K)),
+        proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q4_0,
+            bytes,
+        } => Some((bytes, Codec::Q4_0)),
+        proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Float16,
+            bytes,
+        } => Some((bytes, Codec::Float16)),
+        proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::BFloat16,
+            bytes,
+        } => Some((bytes, Codec::BFloat16)),
         _ => None,
     }
 }
@@ -2632,8 +2753,14 @@ mod moe_memory_shape {
         .expect("binds the native q4_k-stacked experts");
 
         let (_, block) = &state.packed[0];
-        let proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: packed_bytes } = block else {
-            panic!("native q4_k stack must bind as QuantizedBlock::Packed with Codec::Q4K, got {block:?}");
+        let proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: packed_bytes,
+        } = block
+        else {
+            panic!(
+                "native q4_k stack must bind as QuantizedBlock::Packed with Codec::Q4K, got {block:?}"
+            );
         };
 
         let per_expert_bytes = packed_floor_bytes() / EXPERT_COUNT as usize;
@@ -3038,21 +3165,25 @@ mod real_qwen3moe_file {
             .unwrap_or_else(|error| panic!("layer 0's {projection} must bind, got {error:?}"));
             let (_, block) = &state.packed[0];
             let per_expert_bytes = match block {
-                proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes } => {
-                    bytes.len() / architecture.expert_count as usize
-                }
-                proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q6K, bytes } => {
-                    bytes.len() / architecture.expert_count as usize
-                }
+                proxima_tensor::cpu::QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes,
+                } => bytes.len() / architecture.expert_count as usize,
+                proxima_tensor::cpu::QuantizedBlock::Packed {
+                    codec: Codec::Q6K,
+                    bytes,
+                } => bytes.len() / architecture.expert_count as usize,
                 other => panic!("layer 0's {projection} must bind packed Q4_K/Q6_K, got {other:?}"),
             };
             let expert_bytes = match block {
-                proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes } => {
-                    &bytes[expert_index * per_expert_bytes..(expert_index + 1) * per_expert_bytes]
-                }
-                proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q6K, bytes } => {
-                    &bytes[expert_index * per_expert_bytes..(expert_index + 1) * per_expert_bytes]
-                }
+                proxima_tensor::cpu::QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes,
+                } => &bytes[expert_index * per_expert_bytes..(expert_index + 1) * per_expert_bytes],
+                proxima_tensor::cpu::QuantizedBlock::Packed {
+                    codec: Codec::Q6K,
+                    bytes,
+                } => &bytes[expert_index * per_expert_bytes..(expert_index + 1) * per_expert_bytes],
                 _ => unreachable!("matched above"),
             };
 
@@ -3969,8 +4100,9 @@ mod real_openchat_file {
         #[cfg(feature = "instrument")]
         struct RouteCountingObserver {
             calls: std::sync::atomic::AtomicUsize,
-            distinct_layer_positions:
-                proxima_primitives::sync::blocking::Mutex<alloc::collections::BTreeSet<(usize, usize)>>,
+            distinct_layer_positions: proxima_primitives::sync::blocking::Mutex<
+                alloc::collections::BTreeSet<(usize, usize)>,
+            >,
         }
 
         #[cfg(feature = "instrument")]
@@ -3987,7 +4119,9 @@ mod real_openchat_file {
         #[cfg(feature = "instrument")]
         static ROUTE_OBSERVER: RouteCountingObserver = RouteCountingObserver {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            distinct_layer_positions: proxima_primitives::sync::blocking::Mutex::new(alloc::collections::BTreeSet::new()),
+            distinct_layer_positions: proxima_primitives::sync::blocking::Mutex::new(
+                alloc::collections::BTreeSet::new(),
+            ),
         };
 
         #[cfg(feature = "instrument")]
@@ -4029,10 +4163,7 @@ mod real_openchat_file {
             let total_calls = ROUTE_OBSERVER
                 .calls
                 .load(std::sync::atomic::Ordering::Relaxed);
-            let distinct_layer_positions = ROUTE_OBSERVER
-                .distinct_layer_positions
-                .lock()
-                .len();
+            let distinct_layer_positions = ROUTE_OBSERVER.distinct_layer_positions.lock().len();
             std::println!(
                 "expert_observer_summary on_expert_routed_calls={total_calls} \
                  distinct_layer_positions={distinct_layer_positions}"
@@ -4545,9 +4676,27 @@ mod real_openchat_file {
                     (v_name, QuantizedBlock::Float32(v.as_slice())),
                 ],
                 LayerCache::Q8_0 { k_even, k_odd, v } => [
-                    (k_even_name, QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: k_even.as_slice() }),
-                    (k_odd_name, QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: k_odd.as_slice() }),
-                    (v_name, QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: v.as_slice() }),
+                    (
+                        k_even_name,
+                        QuantizedBlock::Packed {
+                            codec: Codec::Q8_0,
+                            bytes: k_even.as_slice(),
+                        },
+                    ),
+                    (
+                        k_odd_name,
+                        QuantizedBlock::Packed {
+                            codec: Codec::Q8_0,
+                            bytes: k_odd.as_slice(),
+                        },
+                    ),
+                    (
+                        v_name,
+                        QuantizedBlock::Packed {
+                            codec: Codec::Q8_0,
+                            bytes: v.as_slice(),
+                        },
+                    ),
                 ],
             }
         }
@@ -5713,7 +5862,10 @@ mod real_mixtral_file {
         let block = gguf_tensor_as_packed_block(&parsed, &prefix, router_name)
             .expect("f16 router tensor now decodes packed instead of UnrepresentableGgmlType");
         let router_bytes = match block {
-            proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Float16, bytes } => bytes,
+            proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Float16,
+                bytes,
+            } => bytes,
             other => panic!(
                 "expected a Float16 packed block for the real f16 router tensor, got {other:?}"
             ),

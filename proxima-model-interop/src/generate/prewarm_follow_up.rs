@@ -33,9 +33,7 @@ impl LoadedModel<'_> {
     /// user turn the draft matches continues straight into the reply. An
     /// empty list turns follow-up drafting off, its default.
     pub fn set_follow_up_closing(&self, closing: &[u32]) {
-        self.prompt_cache
-            .lock()
-            .set_follow_up_closing(closing);
+        self.prompt_cache.lock().set_follow_up_closing(closing);
     }
 
     /// Drafts [`crate::PromptCacheConfig::follow_up_branches`] likely next
@@ -82,11 +80,7 @@ impl LoadedModel<'_> {
         on_branch: &mut dyn FnMut(usize),
     ) -> Result<Vec<Vec<u32>>, InteropError> {
         let config = serving_config.prompt_cache;
-        let closing = self
-            .prompt_cache
-            .lock()
-            .follow_up_closing()
-            .to_vec();
+        let closing = self.prompt_cache.lock().follow_up_closing().to_vec();
         if !config.is_enabled()
             || config.follow_up_branches == 0
             || closing.is_empty()
@@ -103,10 +97,12 @@ impl LoadedModel<'_> {
         }
         let (_, widths) = self.declared_layer_cache_names_and_widths()?;
         let key = self.cache_key(serving_config, runtime, forced_draft_width);
-        let (found, _) = self
-            .prompt_cache
-            .lock()
-            .take_for_prewarm(base_ids, &key, &widths, config.min_similarity_milli);
+        let (found, _) = self.prompt_cache.lock().take_for_prewarm(
+            base_ids,
+            &key,
+            &widths,
+            config.min_similarity_milli,
+        );
         let Some(base) = found else {
             return Ok(Vec::new());
         };

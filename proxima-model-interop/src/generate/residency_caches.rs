@@ -1,9 +1,9 @@
 use core::ops::ControlFlow;
 
 use super::*;
+use proxima_core::ServingState;
 #[cfg(all(feature = "instrument", feature = "metal"))]
 use proxima_telemetry::metric::Counter;
-use proxima_core::ServingState;
 
 /// GAP.md's own residual: the `resolve_cached_plan` `BTreeMap` lookup runs
 /// between `evaluate_started` (`decode.rs:3847`) and `step_encode_start`
@@ -141,7 +141,12 @@ impl LayerCache {
     }
 
     /// Raises the sealed end to what `kv_decision::sealed_blocks` allows and returns the newly sealed block range.
-    pub(super) fn seal(&mut self, even_odd_row: usize, block_tokens: usize, horizon_rows: usize) -> core::ops::Range<usize> {
+    pub(super) fn seal(
+        &mut self,
+        even_odd_row: usize,
+        block_tokens: usize,
+        horizon_rows: usize,
+    ) -> core::ops::Range<usize> {
         // ring slots are overwritten in place, so a ring row is never immutable; rings restore through checkpoints
         if self.ring_geometry().is_some() || even_odd_row == 0 {
             return 0..0;
@@ -152,7 +157,12 @@ impl LayerCache {
             self.block_summaries.clear();
         }
         let rows = self.k_even.len() / even_odd_row;
-        let blocks = proxima_core::kv_decision::sealed_blocks(self.sealed_end, rows, block_tokens, horizon_rows);
+        let blocks = proxima_core::kv_decision::sealed_blocks(
+            self.sealed_end,
+            rows,
+            block_tokens,
+            horizon_rows,
+        );
         self.sealed_end = self.sealed_end.max(blocks.end * block_tokens);
         blocks
     }
@@ -195,12 +205,18 @@ impl LayerCache {
         self.sealed_end = self.sealed_end.min(keep_positions);
         if self.block_tokens > 0 {
             self.sealed_end -= self.sealed_end % self.block_tokens;
-            self.block_summaries.truncate(self.sealed_end / self.block_tokens);
+            self.block_summaries
+                .truncate(self.sealed_end / self.block_tokens);
         }
     }
 
     /// Brings the per-block records up to the sealed blocks, one `summarize` call per block that has none.
-    pub(super) fn summarize_sealed(&mut self, even_odd_row: usize, v_row: usize, summarize: BlockSummarizer) {
+    pub(super) fn summarize_sealed(
+        &mut self,
+        even_odd_row: usize,
+        v_row: usize,
+        summarize: BlockSummarizer,
+    ) {
         if self.ring_geometry().is_some() || self.block_tokens == 0 {
             return;
         }
@@ -265,9 +281,18 @@ mod layer_cache_truncate_tests {
         }
 
         let mut speculative = LayerCache::new();
-        let even_batch: Vec<f32> = positions.iter().flat_map(|(even, _, _)| even.clone()).collect();
-        let odd_batch: Vec<f32> = positions.iter().flat_map(|(_, odd, _)| odd.clone()).collect();
-        let value_batch: Vec<f32> = positions.iter().flat_map(|(_, _, value)| value.clone()).collect();
+        let even_batch: Vec<f32> = positions
+            .iter()
+            .flat_map(|(even, _, _)| even.clone())
+            .collect();
+        let odd_batch: Vec<f32> = positions
+            .iter()
+            .flat_map(|(_, odd, _)| odd.clone())
+            .collect();
+        let value_batch: Vec<f32> = positions
+            .iter()
+            .flat_map(|(_, _, value)| value.clone())
+            .collect();
         speculative.append(&even_batch, &odd_batch, &value_batch);
         speculative.truncate(2, even_odd_row, v_row);
 
@@ -309,7 +334,8 @@ mod layer_cache_truncate_tests {
 /// Folds one sealed block's rows into the record kept for that block: the K even plane rows, the K odd plane rows and
 /// the V rows, each row-major. K rows are `even_odd_row` wide; V rows are `value.len() / (k_even.len() / even_odd_row)`
 /// wide. [`LayerCache::summarize_sealed`] calls it once per newly sealed block of a full-attention layer.
-pub type BlockSummarizer = fn(k_even: &[f32], k_odd: &[f32], value: &[f32], even_odd_row: usize) -> Vec<f32>;
+pub type BlockSummarizer =
+    fn(k_even: &[f32], k_odd: &[f32], value: &[f32], even_odd_row: usize) -> Vec<f32>;
 
 /// Raises each attention layer's sealed end to what `kv_decision::sealed_blocks` allows for the rows it holds, then
 /// brings its per-block records up to the sealed blocks when a summarizer is given.
@@ -321,7 +347,14 @@ pub(super) fn seal_attention_layers(
     summarize: Option<BlockSummarizer>,
 ) {
     for (state, width) in layer_caches.iter_mut().zip(widths) {
-        let (LayerCacheState::Attention(cache), LayerPadRowWidths::Attention { even_odd_row, v_row }) = (state, width) else {
+        let (
+            LayerCacheState::Attention(cache),
+            LayerPadRowWidths::Attention {
+                even_odd_row,
+                v_row,
+            },
+        ) = (state, width)
+        else {
             continue;
         };
         cache.seal(*even_odd_row, block_tokens, horizon_rows);
@@ -334,7 +367,9 @@ pub(super) fn seal_attention_layers(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layer_cache_sealing_tests {
-    use super::{BlockSummarizer, LayerCache, LayerCacheState, LayerPadRowWidths, seal_attention_layers};
+    use super::{
+        BlockSummarizer, LayerCache, LayerCacheState, LayerPadRowWidths, seal_attention_layers,
+    };
     use crate::error::InteropError;
     use crate::generate::kv_ring::KvRing;
     use crate::generate::kv_seal_tests::key_minmax;
@@ -346,7 +381,10 @@ mod layer_cache_sealing_tests {
         layers
             .iter()
             .map(|state| match state {
-                LayerCacheState::Attention(_) => LayerPadRowWidths::Attention { even_odd_row: 2, v_row: 1 },
+                LayerCacheState::Attention(_) => LayerPadRowWidths::Attention {
+                    even_odd_row: 2,
+                    v_row: 1,
+                },
                 _ => LayerPadRowWidths::SharedFromLayer,
             })
             .collect()
@@ -359,7 +397,12 @@ mod layer_cache_sealing_tests {
         }
     }
 
-    fn seal(layers: &mut [LayerCacheState], block_tokens: usize, horizon_rows: usize, summarize: Option<BlockSummarizer>) {
+    fn seal(
+        layers: &mut [LayerCacheState],
+        block_tokens: usize,
+        horizon_rows: usize,
+        summarize: Option<BlockSummarizer>,
+    ) {
         let widths = widths_for(layers);
         seal_attention_layers(layers, &widths, block_tokens, horizon_rows, summarize);
     }
@@ -448,7 +491,11 @@ mod layer_cache_sealing_tests {
         seal(&mut layers, 4, 1, None);
         let cache = attention(&mut layers, 0);
         assert_eq!(cache.sealed_end, 4);
-        let (even, odd, value) = (cache.k_even[..8].to_vec(), cache.k_odd[..8].to_vec(), cache.v[..4].to_vec());
+        let (even, odd, value) = (
+            cache.k_even[..8].to_vec(),
+            cache.k_odd[..8].to_vec(),
+            cache.v[..4].to_vec(),
+        );
 
         for position in 5..10 {
             let (row_even, row_odd, row_value) = row_at(position);
@@ -458,7 +505,12 @@ mod layer_cache_sealing_tests {
 
         let cache = attention(&mut layers, 0);
         assert_eq!(cache.sealed_end, 8);
-        let bits = |values: &[f32]| values.iter().map(|value| value.to_bits()).collect::<Vec<u32>>();
+        let bits = |values: &[f32]| {
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<u32>>()
+        };
         assert_eq!(bits(&cache.k_even[..8]), bits(&even));
         assert_eq!(bits(&cache.k_odd[..8]), bits(&odd));
         assert_eq!(bits(&cache.v[..4]), bits(&value));
@@ -524,7 +576,10 @@ mod layer_cache_sealing_tests {
         seal(&mut layers, 4, 0, Some(value_sum));
         seal(&mut plain, 4, 0, None);
 
-        assert_eq!(attention(&mut layers, 0).block_summaries, vec![vec![60.0f32], vec![220.0f32]]);
+        assert_eq!(
+            attention(&mut layers, 0).block_summaries,
+            vec![vec![60.0f32], vec![220.0f32]]
+        );
         assert!(attention(&mut plain, 0).block_summaries.is_empty());
         assert_eq!(attention(&mut plain, 0).sealed_end, 8);
     }
@@ -537,10 +592,16 @@ mod layer_cache_sealing_tests {
         assert_eq!(attention(&mut layers, 0).sealed_end, 8);
         assert!(attention(&mut layers, 0).block_summaries.is_empty());
         seal(&mut layers, 4, 1, Some(value_sum));
-        assert_eq!(attention(&mut layers, 0).block_summaries, vec![vec![60.0f32], vec![220.0f32]]);
+        assert_eq!(
+            attention(&mut layers, 0).block_summaries,
+            vec![vec![60.0f32], vec![220.0f32]]
+        );
         seal(&mut layers, 4, 1, Some(value_sum));
 
-        assert_eq!(attention(&mut layers, 0).block_summaries, vec![vec![60.0f32], vec![220.0f32]]);
+        assert_eq!(
+            attention(&mut layers, 0).block_summaries,
+            vec![vec![60.0f32], vec![220.0f32]]
+        );
     }
 
     #[test]
@@ -629,21 +690,31 @@ mod layer_cache_sealing_tests {
         for (position, (rows, sealed_end)) in (0..).zip(appended) {
             append_and_seal(&mut cache, position);
             appends += 1;
-            assert_eq!((cache.k_even.len() / 2, cache.sealed_end), (rows, sealed_end));
+            assert_eq!(
+                (cache.k_even.len() / 2, cache.sealed_end),
+                (rows, sealed_end)
+            );
         }
 
         rewinds += 1;
-        cache.try_truncate(4, 2, 1).expect("a rewind to the sealed end is allowed");
+        cache
+            .try_truncate(4, 2, 1)
+            .expect("a rewind to the sealed end is allowed");
         assert_eq!((cache.k_even.len() / 2, cache.sealed_end), (4, 4));
         let regrown: [(usize, usize); 5] = [(5, 4), (6, 4), (7, 4), (8, 4), (9, 8)];
         for (position, (rows, sealed_end)) in (4..).zip(regrown) {
             append_and_seal(&mut cache, position);
             appends += 1;
-            assert_eq!((cache.k_even.len() / 2, cache.sealed_end), (rows, sealed_end));
+            assert_eq!(
+                (cache.k_even.len() / 2, cache.sealed_end),
+                (rows, sealed_end)
+            );
         }
 
         rewinds += 1;
-        cache.try_truncate(8, 2, 1).expect("a rewind to the sealed end is allowed");
+        cache
+            .try_truncate(8, 2, 1)
+            .expect("a rewind to the sealed end is allowed");
         assert_eq!((cache.k_even.len() / 2, cache.sealed_end), (8, 8));
 
         rewinds += 1;
@@ -660,8 +731,14 @@ mod layer_cache_sealing_tests {
 
         assert_eq!((appends, rewinds), (10, 3));
         assert_eq!(cache.block_summaries.len(), 2);
-        assert_record_bits(&cache.block_summaries[0], &[0.0, 0.5, -3.0, -3.5, 3.0, 3.5, -0.0, -0.5]);
-        assert_record_bits(&cache.block_summaries[1], &[4.0, 4.5, -7.0, -7.5, 7.0, 7.5, -4.0, -4.5]);
+        assert_record_bits(
+            &cache.block_summaries[0],
+            &[0.0, 0.5, -3.0, -3.5, 3.0, 3.5, -0.0, -0.5],
+        );
+        assert_record_bits(
+            &cache.block_summaries[1],
+            &[4.0, 4.5, -7.0, -7.5, 7.0, 7.5, -4.0, -4.5],
+        );
     }
 
     #[derive(Clone, Debug)]
@@ -673,7 +750,10 @@ mod layer_cache_sealing_tests {
     #[test]
     fn seal_proptest_never_seals_a_rewindable_row() {
         const CASES: usize = 256;
-        let operation = prop_oneof![(1usize..=5).prop_map(Op::Append), (0usize..40).prop_map(Op::Rewind)];
+        let operation = prop_oneof![
+            (1usize..=5).prop_map(Op::Append),
+            (0usize..40).prop_map(Op::Rewind)
+        ];
         let mut runner = TestRunner::new(Config {
             cases: CASES as u32,
             failure_persistence: None,
@@ -682,45 +762,58 @@ mod layer_cache_sealing_tests {
         let executed = std::cell::Cell::new(0_usize);
 
         runner
-            .run(&(0usize..=3, vec(operation, 1..60)), |(horizon, operations)| {
-                let mut cache = LayerCache::new();
-                let mut rows = 0_usize;
-                for operation in operations {
-                    let before = cache.sealed_end;
-                    match operation {
-                        Op::Append(count) => {
-                            for position in rows..rows + count {
-                                let (even, odd, value) = row_at(position);
-                                cache.append(&even, &odd, &value);
-                            }
-                            rows += count;
-                            cache.seal(2, 4, horizon);
-                            prop_assert_eq!(cache.sealed_end, before.max(rows.saturating_sub(horizon) / 4 * 4));
-                        }
-                        Op::Rewind(keep) => {
-                            let outcome = cache.try_truncate(keep, 2, 1);
-                            if keep < before {
-                                match outcome {
-                                    Err(InteropError::RewindIntoSealed { keep_positions, sealed_end }) => {
-                                        prop_assert_eq!(keep_positions, keep);
-                                        prop_assert_eq!(sealed_end, before);
-                                    }
-                                    other => prop_assert!(false, "expected a refusal, got {:?}", other),
+            .run(
+                &(0usize..=3, vec(operation, 1..60)),
+                |(horizon, operations)| {
+                    let mut cache = LayerCache::new();
+                    let mut rows = 0_usize;
+                    for operation in operations {
+                        let before = cache.sealed_end;
+                        match operation {
+                            Op::Append(count) => {
+                                for position in rows..rows + count {
+                                    let (even, odd, value) = row_at(position);
+                                    cache.append(&even, &odd, &value);
                                 }
-                            } else {
-                                prop_assert!(outcome.is_ok());
-                                rows = rows.min(keep);
+                                rows += count;
+                                cache.seal(2, 4, horizon);
+                                prop_assert_eq!(
+                                    cache.sealed_end,
+                                    before.max(rows.saturating_sub(horizon) / 4 * 4)
+                                );
+                            }
+                            Op::Rewind(keep) => {
+                                let outcome = cache.try_truncate(keep, 2, 1);
+                                if keep < before {
+                                    match outcome {
+                                        Err(InteropError::RewindIntoSealed {
+                                            keep_positions,
+                                            sealed_end,
+                                        }) => {
+                                            prop_assert_eq!(keep_positions, keep);
+                                            prop_assert_eq!(sealed_end, before);
+                                        }
+                                        other => prop_assert!(
+                                            false,
+                                            "expected a refusal, got {:?}",
+                                            other
+                                        ),
+                                    }
+                                } else {
+                                    prop_assert!(outcome.is_ok());
+                                    rows = rows.min(keep);
+                                }
                             }
                         }
+                        prop_assert_eq!(cache.k_even.len(), rows * 2);
+                        prop_assert_eq!(cache.sealed_end % 4, 0);
+                        prop_assert!(cache.sealed_end >= before);
+                        prop_assert!(cache.sealed_end <= rows);
                     }
-                    prop_assert_eq!(cache.k_even.len(), rows * 2);
-                    prop_assert_eq!(cache.sealed_end % 4, 0);
-                    prop_assert!(cache.sealed_end >= before);
-                    prop_assert!(cache.sealed_end <= rows);
-                }
-                executed.set(executed.get() + 1);
-                Ok(())
-            })
+                    executed.set(executed.get() + 1);
+                    Ok(())
+                },
+            )
             .expect("no sequence of appends and rewinds may seal a row a rewind can still reach");
 
         assert_eq!(executed.get(), CASES);
@@ -1228,9 +1321,7 @@ pub(super) fn layer_cache_checksum(cache: &LayerCacheState) -> (usize, f64) {
                 + sum_abs(&cache.k_pass)
                 + sum_abs(&cache.v),
         ),
-        LayerCacheState::ShortConv(cache) => {
-            (cache.history.len(), sum_abs(&cache.history))
-        }
+        LayerCacheState::ShortConv(cache) => (cache.history.len(), sum_abs(&cache.history)),
         LayerCacheState::Ssm(cache) => (
             cache.conv_history.len() + cache.state.len(),
             sum_abs(&cache.conv_history) + sum_abs(&cache.state),
@@ -1693,10 +1784,10 @@ pub(super) fn push_kv_named_blocks<'call>(
             ) => {
                 let shape = KvPadShape::for_cache(cache, kv_bound_extent, *even_odd_row, *v_row);
                 if device_resident.get(layer).copied().unwrap_or(false) {
-                    let resident_leaf = device_codec.map_or(
-                        QuantizedBlock::Float32(&[]),
-                        |codec| QuantizedBlock::Packed { codec, bytes: &[] },
-                    );
+                    let resident_leaf = device_codec
+                        .map_or(QuantizedBlock::Float32(&[]), |codec| {
+                            QuantizedBlock::Packed { codec, bytes: &[] }
+                        });
                     named_blocks.extend([
                         (k_even.as_str(), resident_leaf),
                         (k_odd.as_str(), resident_leaf),
@@ -2608,17 +2699,19 @@ impl BackendRuntime {
                     // program, not hybrid recurrent graphs.
                     set_dispatch_type(&mut plan, self.dispatch_type);
                     set_command_buffer_chunks(
-                    &mut plan,
-                    self.command_buffer_chunks,
-                    symbols.first().copied() == Some(1),
-                );
+                        &mut plan,
+                        self.command_buffer_chunks,
+                        symbols.first().copied() == Some(1),
+                    );
                 }
                 Ok(plan)
             },
         )?;
         #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-        if let (Some((previous_footprint, previous_kernel_keys)), omega::backend::Plan::Metal(metal_plan)) =
-            (previous_plan_snapshot, &*plan)
+        if let (
+            Some((previous_footprint, previous_kernel_keys)),
+            omega::backend::Plan::Metal(metal_plan),
+        ) = (previous_plan_snapshot, &*plan)
         {
             Self::emit_plan_footprint_diff(&previous_footprint, &previous_kernel_keys, metal_plan);
         }
@@ -2712,10 +2805,10 @@ impl BackendRuntime {
                     set_math_mode(&mut plan, self.math_mode)?;
                     set_dispatch_type(&mut plan, self.dispatch_type);
                     set_command_buffer_chunks(
-                    &mut plan,
-                    self.command_buffer_chunks,
-                    symbols.first().copied() == Some(1),
-                );
+                        &mut plan,
+                        self.command_buffer_chunks,
+                        symbols.first().copied() == Some(1),
+                    );
                 }
                 Ok(plan)
             },
@@ -3171,7 +3264,10 @@ impl BackendRuntime {
     /// `resolve_cached_plan`'s clear-on-miss.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) fn resolve_retained_plan<'cache>(
-        cache: &'cache mut alloc::collections::BTreeMap<resident_plans::DecodePlanKey, omega::metal::Plan>,
+        cache: &'cache mut alloc::collections::BTreeMap<
+            resident_plans::DecodePlanKey,
+            omega::metal::Plan,
+        >,
         order: &mut Vec<resident_plans::DecodePlanKey>,
         plan_hits: &mut usize,
         plan_misses: &mut usize,
@@ -3473,7 +3569,12 @@ impl BackendRuntime {
     /// it.
     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
     fn emit_plan_footprint_diff(
-        previous_footprint: &[(u32, &'static str, alloc::vec::Vec<u64>, alloc::vec::Vec<i64>)],
+        previous_footprint: &[(
+            u32,
+            &'static str,
+            alloc::vec::Vec<u64>,
+            alloc::vec::Vec<i64>,
+        )],
         previous_kernel_keys: &[alloc::string::String],
         plan: &omega::metal::Plan,
     ) {
@@ -4125,7 +4226,12 @@ impl SpeculativeDecodeStats {
     /// Attributes one verify step's counts to the `SpeculativeType` that
     /// actually drafted it -- a no-op for a type
     /// `speculative_ngram_type_index` does not recognise.
-    pub fn record_per_type(&mut self, type_id: crate::SpeculativeType, drafted: usize, accepted: usize) {
+    pub fn record_per_type(
+        &mut self,
+        type_id: crate::SpeculativeType,
+        drafted: usize,
+        accepted: usize,
+    ) {
         if let Some(index) = speculative_ngram_type_index(type_id) {
             self.per_type[index].drafted += drafted as u64;
             self.per_type[index].accepted += accepted as u64;

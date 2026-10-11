@@ -156,11 +156,17 @@ fn find_layer_span_bounds(
     let wo_weight_node = find_named_node(named, &format!("blk.{layer}.attn_output.weight"))?;
     let q_reduce_index = bound_ops.iter().position(|bound| {
         matches!(bound.kind, BoundOpKind::Reduce { .. })
-            && bound.operands().iter().any(|(node, _, _)| *node == q_weight_node)
+            && bound
+                .operands()
+                .iter()
+                .any(|(node, _, _)| *node == q_weight_node)
     })?;
     let wo_reduce_index = bound_ops.iter().position(|bound| {
         matches!(bound.kind, BoundOpKind::Reduce { .. })
-            && bound.operands().iter().any(|(node, _, _)| *node == wo_weight_node)
+            && bound
+                .operands()
+                .iter()
+                .any(|(node, _, _)| *node == wo_weight_node)
     })?;
     (wo_reduce_index > q_reduce_index).then_some((q_reduce_index, wo_reduce_index))
 }
@@ -208,8 +214,14 @@ fn run_one_bind(
     fuse_cached_attention: bool,
     numeric_policy: NumericPolicy,
 ) -> (Vec<BoundOp>, Vec<LayerChainCensus>) {
-    let bound_ops = bind_with_fusion(program, shapes, outputs, fuse_cached_attention, numeric_policy)
-        .unwrap_or_else(|error| panic!("bind_with_fusion[{label}] failed: {error}"));
+    let bound_ops = bind_with_fusion(
+        program,
+        shapes,
+        outputs,
+        fuse_cached_attention,
+        numeric_policy,
+    )
+    .unwrap_or_else(|error| panic!("bind_with_fusion[{label}] failed: {error}"));
     // `bind_with_fusion` alone never prunes a node unreachable from
     // `outputs` (this module's own doc, further down: `prune_dead` is
     // `omega`'s own plan-preparation step, never `bind_with_fusion`
@@ -350,8 +362,13 @@ async fn gemma4_attention_chain_census() {
     let named = named_input_nodes(&bound_program.program);
     let outputs = production_step_outputs(bound_program.logits_root, &bound_program.layer_roots);
 
-    let symbols = bind_symbols(NEW_COUNT, KV_BUCKET_EXTENT, &[], bound_program.single_position_step)
-        .expect("bind_symbols: gemma4 declares no extra symbolic step_inputs");
+    let symbols = bind_symbols(
+        NEW_COUNT,
+        KV_BUCKET_EXTENT,
+        &[],
+        bound_program.single_position_step,
+    )
+    .expect("bind_symbols: gemma4 declares no extra symbolic step_inputs");
     let shapes =
         infer(&bound_program.program, &symbols).expect("shape inference over the real program");
 
@@ -392,9 +409,13 @@ async fn gemma4_attention_chain_census() {
         unfused_bound_ops.len(),
         fused_bound_ops.len()
     );
-    println!("layer,chain_unfused_production,other_unfused_production,chain_fused_feature_on,other_fused_feature_on");
-    let fused_by_layer: BTreeMap<u32, &LayerChainCensus> =
-        fused_per_layer.iter().map(|entry| (entry.layer, entry)).collect();
+    println!(
+        "layer,chain_unfused_production,other_unfused_production,chain_fused_feature_on,other_fused_feature_on"
+    );
+    let fused_by_layer: BTreeMap<u32, &LayerChainCensus> = fused_per_layer
+        .iter()
+        .map(|entry| (entry.layer, entry))
+        .collect();
     for unfused_entry in &unfused_per_layer {
         let fused_entry = fused_by_layer.get(&unfused_entry.layer);
         println!(
@@ -432,7 +453,8 @@ async fn gemma4_attention_chain_census() {
     let scratch = tempfile::tempdir().expect("scratch dir creates");
     let out_dir = std::env::var_os("PROXIMA_CENSUS_OUT")
         .map_or_else(|| scratch.path().to_path_buf(), std::path::PathBuf::from);
-    std::fs::create_dir_all(&out_dir).unwrap_or_else(|error| panic!("create {}: {error}", out_dir.display()));
+    std::fs::create_dir_all(&out_dir)
+        .unwrap_or_else(|error| panic!("create {}: {error}", out_dir.display()));
     let absorbed_log_path = out_dir.join(ABSORBED_NODES_LOG_NAME);
     let mut absorbed_log = File::create(&absorbed_log_path)
         .unwrap_or_else(|error| panic!("create {}: {error}", absorbed_log_path.display()));
@@ -538,14 +560,21 @@ async fn gemma4_attention_chain_census() {
             .map(|bound| (bound.node.0, bound.kind.name()))
             .collect::<Vec<_>>()
     );
-    let orphan_ids: BTreeSet<u32> = orphaned_outside_spans.iter().map(|bound| bound.node.0).collect();
+    let orphan_ids: BTreeSet<u32> = orphaned_outside_spans
+        .iter()
+        .map(|bound| bound.node.0)
+        .collect();
     let unfused_kinds: BTreeMap<u32, &str> = unfused_bound_ops
         .iter()
         .map(|bound| (bound.node.0, bound.kind.name()))
         .collect();
     let rewritten_ids: BTreeSet<u32> = fused_bound_ops
         .iter()
-        .filter(|bound| unfused_kinds.get(&bound.node.0).is_some_and(|kind| *kind != bound.kind.name()))
+        .filter(|bound| {
+            unfused_kinds
+                .get(&bound.node.0)
+                .is_some_and(|kind| *kind != bound.kind.name())
+        })
         .map(|bound| bound.node.0)
         .collect();
     let surviving_readers: Vec<(u32, u32)> = orphaned_outside_spans

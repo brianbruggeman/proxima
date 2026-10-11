@@ -416,7 +416,10 @@ fn topological_order_by_read_sources_moves_a_late_producer_ahead_of_its_consumer
 /// raw-`Op`-shaped census in `reduce_epilogue_candidates` proposed but
 /// that never applied because cached-attention fusion had already
 /// absorbed one side of the pair).
-#[cfg(all(feature = "reduce-epilogue-fusion", feature = "cached-attention-streaming"))]
+#[cfg(all(
+    feature = "reduce-epilogue-fusion",
+    feature = "cached-attention-streaming"
+))]
 fn count_fused_epilogues(bound: &[BoundOp]) -> usize {
     bound
         .iter()
@@ -430,9 +433,8 @@ fn count_fused_epilogues(bound: &[BoundOp]) -> usize {
 #[test]
 #[cfg(feature = "cached-attention-streaming")]
 fn cached_attention_rewrite_replaces_the_bound_attention_subgraph() {
-    let (program, logits, roots) =
-        crate::spec::gqa_cached_forward_program(32, 16, 24, 4, 2, 4, 1)
-            .expect("cached attention fixture builds");
+    let (program, logits, roots) = crate::spec::gqa_cached_forward_program(32, 16, 24, 4, 2, 4, 1)
+        .expect("cached attention fixture builds");
     let shapes = crate::shape::infer(&program, &[1, 1]).expect("cached attention infers");
     let mut requested = alloc::vec![logits];
     for cache_roots in &roots {
@@ -740,20 +742,19 @@ fn moe_topk_fusion_keeps_the_cached_attention_ops_of_a_moe_decoder() {
 #[test]
 #[cfg(feature = "cached-attention-streaming")]
 fn single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape() {
-    let (program, logits, cache_roots, _) =
-        crate::spec::gqa_single_range_cached_forward_program(
-            32_002,
-            4096,
-            14336,
-            32,
-            8,
-            128,
-            32,
-            false,
-            crate::spec::DuplicateHeadPosition::None,
-            false,
-        )
-        .expect("openchat-shaped single-range forward pass lowers to a program");
+    let (program, logits, cache_roots, _) = crate::spec::gqa_single_range_cached_forward_program(
+        32_002,
+        4096,
+        14336,
+        32,
+        8,
+        128,
+        32,
+        false,
+        crate::spec::DuplicateHeadPosition::None,
+        false,
+    )
+    .expect("openchat-shaped single-range forward pass lowers to a program");
     let mut outputs = alloc::vec![logits];
     for (even, odd, value) in &cache_roots {
         outputs.extend_from_slice(&[*even, *odd, *value]);
@@ -826,20 +827,19 @@ fn single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_s
 #[test]
 #[cfg(feature = "cached-attention-streaming")]
 fn single_range_fusion_declares_an_empty_cached_range_not_a_duplicated_capacity() {
-    let (program, logits, cache_roots, _) =
-        crate::spec::gqa_single_range_cached_forward_program(
-            32,
-            16,
-            24,
-            4,
-            2,
-            4,
-            1,
-            false,
-            crate::spec::DuplicateHeadPosition::None,
-            false,
-        )
-        .expect("single-range fixture builds");
+    let (program, logits, cache_roots, _) = crate::spec::gqa_single_range_cached_forward_program(
+        32,
+        16,
+        24,
+        4,
+        2,
+        4,
+        1,
+        false,
+        crate::spec::DuplicateHeadPosition::None,
+        false,
+    )
+    .expect("single-range fixture builds");
     let mut outputs = alloc::vec![logits];
     for (even, odd, value) in &cache_roots {
         outputs.extend_from_slice(&[*even, *odd, *value]);
@@ -1783,20 +1783,19 @@ fn a_perturbed_pass_plane_map_declines_the_qwen35_fusion() {
 #[test]
 #[cfg(feature = "cached-attention-streaming")]
 fn a_gathered_source_aborts_the_single_range_candidate_entirely() {
-    let (program, logits, cache_roots, _) =
-        crate::spec::gqa_single_range_cached_forward_program(
-            32,
-            16,
-            24,
-            4,
-            2,
-            4,
-            1,
-            false,
-            crate::spec::DuplicateHeadPosition::None,
-            false,
-        )
-        .expect("single-range fixture builds");
+    let (program, logits, cache_roots, _) = crate::spec::gqa_single_range_cached_forward_program(
+        32,
+        16,
+        24,
+        4,
+        2,
+        4,
+        1,
+        false,
+        crate::spec::DuplicateHeadPosition::None,
+        false,
+    )
+    .expect("single-range fixture builds");
     let mut outputs = alloc::vec![logits];
     for (even, odd, value) in &cache_roots {
         outputs.extend_from_slice(&[*even, *odd, *value]);
@@ -2685,7 +2684,11 @@ fn correct_packed_matmul_layouts_leaves_a_routed_reduced_axis_out_of_the_row_wid
         &mut program,
         Op::Input {
             dtype: DType::UInt8,
-            shape: alloc::vec![Extent::Static(EXPERTS), Extent::Static(ROWS), Extent::Static(K)],
+            shape: alloc::vec![
+                Extent::Static(EXPERTS),
+                Extent::Static(ROWS),
+                Extent::Static(K)
+            ],
             name: None,
         },
     );
@@ -2777,14 +2780,26 @@ fn correct_packed_matmul_layouts_leaves_a_routed_reduced_axis_out_of_the_row_wid
         .find(|(node, _, _)| *node == weight)
         .expect("weight operand present in the reduce");
 
-    assert_eq!(weight_layout.stride(2), 1, "k is the contiguous axis of a weight row");
+    assert_eq!(
+        weight_layout.stride(2),
+        1,
+        "k is the contiguous axis of a weight row"
+    );
     assert_eq!(
         weight_layout.stride(3),
         i64::from(K),
         "a row is k elements wide; selected adds nothing to it"
     );
-    assert_eq!(weight_layout.stride(1), 0, "the weight does not vary along selected");
-    assert_eq!(weight_layout.stride(0), 0, "the weight does not vary along the sequence");
+    assert_eq!(
+        weight_layout.stride(1),
+        0,
+        "the weight does not vary along selected"
+    );
+    assert_eq!(
+        weight_layout.stride(0),
+        0,
+        "the weight does not vary along the sequence"
+    );
     assert_eq!(
         weight_gather.as_ref().map(|lookup| lookup.element_stride),
         Some(i64::from(ROWS * K)),
@@ -5052,7 +5067,11 @@ mod reduce_epilogue_fusion_tests {
                 name: None,
             },
         );
-        (program, [act, weight, inv_dim, eps, gamma, residual], output)
+        (
+            program,
+            [act, weight, inv_dim, eps, gamma, residual],
+            output,
+        )
     }
 
     /// The hidden-width post-norm of a decode step: a projection output read
@@ -5731,8 +5750,7 @@ mod gated_delta_net_tests {
     #[test]
     fn qwen35moe_mixer_census_at_real_shape_with_gated_delta_net_fusion() {
         use crate::spec::{
-            GdnOutputGate, append_delta_net_mixer_with_taps_and_layout, input_leaf,
-            scalar_constant,
+            GdnOutputGate, append_delta_net_mixer_with_taps_and_layout, input_leaf, scalar_constant,
         };
 
         let kv_heads: u32 = 16;
@@ -6063,8 +6081,7 @@ mod gated_delta_net_tests {
     #[test]
     fn qwen35moe_mixer_op_census_prints_every_bound_op() {
         use crate::spec::{
-            GdnOutputGate, append_delta_net_mixer_with_taps_and_layout, input_leaf,
-            scalar_constant,
+            GdnOutputGate, append_delta_net_mixer_with_taps_and_layout, input_leaf, scalar_constant,
         };
 
         let kv_heads: u32 = 16;
@@ -6305,8 +6322,8 @@ mod gated_delta_net_tests {
 mod moe_routing_census {
     use super::*;
     use crate::spec::{
-        Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter,
-        append_moe_ffn, input_leaf, scalar_constant,
+        Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter, append_moe_ffn,
+        input_leaf, scalar_constant,
     };
 
     const EXPERT_COUNT: u32 = 256;
@@ -6846,26 +6863,56 @@ mod moe_routing_census {
         let down_data = unit_values(stack_len);
 
         for token_count in [1_u64, 4, 33] {
-            let shapes = shape::infer(&built.program, &[token_count]).expect("stacked program infers");
+            let shapes =
+                shape::infer(&built.program, &[token_count]).expect("stacked program infers");
             let mut outputs = alloc::vec![built.output];
             outputs.extend(built.selected.iter().copied());
-            let probe = bind_with_fusion(&built.program, &shapes, &outputs, true, NumericPolicy::bit_exact())
-                .expect("fused stacked program binds");
+            let probe = bind_with_fusion(
+                &built.program,
+                &shapes,
+                &outputs,
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("fused stacked program binds");
             let topk = probe
                 .iter()
                 .find(|bound| matches!(bound.kind, BoundOpKind::MoeTopK { .. }))
                 .unwrap_or_else(|| panic!("{token_count} tokens: the top-k fusion must fire"));
-            assert_eq!(topk.dtype, DType::Float32, "{token_count} tokens: float routes");
-            assert_eq!(topk.extents, alloc::vec![token_count], "{token_count} tokens: one route per token");
-            let BoundOpKind::MoeTopK { stacked: Some((stacked_routes, stacked_weights)), .. } = &topk.kind else {
+            assert_eq!(
+                topk.dtype,
+                DType::Float32,
+                "{token_count} tokens: float routes"
+            );
+            assert_eq!(
+                topk.extents,
+                alloc::vec![token_count],
+                "{token_count} tokens: one route per token"
+            );
+            let BoundOpKind::MoeTopK {
+                stacked: Some((stacked_routes, stacked_weights)),
+                ..
+            } = &topk.kind
+            else {
                 panic!("{token_count} tokens: the route and weight stacks must be absorbed");
             };
             outputs.extend([*stacked_routes, *stacked_weights]);
 
-            let unfused = bind_plain(&built.program, &shapes, &outputs, NumericPolicy::bit_exact())
-                .expect("unfused stacked program binds");
-            let fused = bind_with_fusion(&built.program, &shapes, &outputs, true, NumericPolicy::bit_exact())
-                .expect("fused stacked program binds");
+            let unfused = bind_plain(
+                &built.program,
+                &shapes,
+                &outputs,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("unfused stacked program binds");
+            let fused = bind_with_fusion(
+                &built.program,
+                &shapes,
+                &outputs,
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("fused stacked program binds");
             assert!(
                 unfused.len() - fused.len() >= 3 * EXPERT_USED_COUNT as usize,
                 "{token_count} tokens: fusing must remove the routing chain and both stacks, \
@@ -6958,13 +7005,30 @@ mod top_fraction_fusion_tests {
 
     fn fixture(with_keep_rows: bool) -> Fixture {
         let mut program = Vec::new();
-        let scores = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0)], "scores");
+        let scores = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0)],
+            "scores",
+        );
         let keep_count = input_leaf(&mut program, DType::Float32, Vec::new(), "keep_count");
         let keep_rows = with_keep_rows.then(|| {
-            input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0)], "keep_rows")
+            input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Symbolic(0)],
+                "keep_rows",
+            )
         });
-        let mask = top_fraction_mask(&mut program, scores, keep_count, keep_rows).expect("mask lowers");
-        Fixture { program, scores, keep_count, keep_rows, mask }
+        let mask =
+            top_fraction_mask(&mut program, scores, keep_count, keep_rows).expect("mask lowers");
+        Fixture {
+            program,
+            scores,
+            keep_count,
+            keep_rows,
+            mask,
+        }
     }
 
     fn candidates_at(
@@ -6975,10 +7039,24 @@ mod top_fraction_fusion_tests {
         let shapes = shape::infer(&fixture.program, &[rows]).expect("program infers");
         let mut outputs = alloc::vec![fixture.mask, fixture.scores, fixture.keep_count];
         outputs.extend(fixture.keep_rows);
-        let resolved = bind_plain(&fixture.program, &shapes, &outputs, NumericPolicy::bit_exact())
-            .expect("plain binds");
-        let requested: Vec<NodeId> = [fixture.mask].into_iter().chain(extra_outputs.iter().copied()).collect();
-        top_fraction_candidates(&fixture.program, &shapes, &resolved, &requested, TWELVE_ROWS)
+        let resolved = bind_plain(
+            &fixture.program,
+            &shapes,
+            &outputs,
+            NumericPolicy::bit_exact(),
+        )
+        .expect("plain binds");
+        let requested: Vec<NodeId> = [fixture.mask]
+            .into_iter()
+            .chain(extra_outputs.iter().copied())
+            .collect();
+        top_fraction_candidates(
+            &fixture.program,
+            &shapes,
+            &resolved,
+            &requested,
+            TWELVE_ROWS,
+        )
     }
 
     #[test]
@@ -6996,14 +7074,33 @@ mod top_fraction_fusion_tests {
     fn rank_select_candidate_carries_keep_rows_operand() {
         let fixture = fixture(true);
         let candidates = candidates_at(&fixture, 12, &[]);
-        assert_eq!(candidates.len(), 1, "the mask-only prefix is covered by the union candidate");
+        assert_eq!(
+            candidates.len(),
+            1,
+            "the mask-only prefix is covered by the union candidate"
+        );
         let (fused, absorbed) = &candidates[0];
-        let BoundOpKind::TopFractionSelect { operands, rows, has_keep_rows } = &fused.kind else {
-            panic!("the candidate must be a top-fraction select, got {}", fused.kind.name());
+        let BoundOpKind::TopFractionSelect {
+            operands,
+            rows,
+            has_keep_rows,
+        } = &fused.kind
+        else {
+            panic!(
+                "the candidate must be a top-fraction select, got {}",
+                fused.kind.name()
+            );
         };
         assert_eq!((*rows, *has_keep_rows, operands.len()), (12, true, 3));
         let sources: Vec<NodeId> = operands.iter().map(|(node, _, _)| *node).collect();
-        assert_eq!(sources, [fixture.scores, fixture.keep_count, fixture.keep_rows.expect("union fixture")]);
+        assert_eq!(
+            sources,
+            [
+                fixture.scores,
+                fixture.keep_count,
+                fixture.keep_rows.expect("union fixture")
+            ]
+        );
         assert_eq!(absorbed.len(), 8, "the iota through the selected nodes");
     }
 
@@ -7036,16 +7133,32 @@ mod top_fraction_fusion_tests {
     fn bind_both(fixture: &Fixture, rows: usize) -> (Vec<BoundOp>, Vec<BoundOp>) {
         let shapes = shape::infer(&fixture.program, &[rows as u64]).expect("program infers");
         let outputs = [fixture.mask];
-        let plain = bind_with_fusion(&fixture.program, &shapes, &outputs, true, NumericPolicy::bit_exact())
-            .expect("plain binds");
+        let plain = bind_with_fusion(
+            &fixture.program,
+            &shapes,
+            &outputs,
+            true,
+            NumericPolicy::bit_exact(),
+        )
+        .expect("plain binds");
         let fused = bind_with_top_fraction(
-            &fixture.program, &shapes, &outputs, true, NumericPolicy::bit_exact(), TWELVE_ROWS,
+            &fixture.program,
+            &shapes,
+            &outputs,
+            true,
+            NumericPolicy::bit_exact(),
+            TWELVE_ROWS,
         )
         .expect("fused binds");
         (plain, fused)
     }
 
-    fn selected_rows(fixture: &Fixture, bound: &[BoundOp], rows: usize, keep_first: bool) -> Vec<usize> {
+    fn selected_rows(
+        fixture: &Fixture,
+        bound: &[BoundOp],
+        rows: usize,
+        keep_first: bool,
+    ) -> Vec<usize> {
         let keep = rows.div_ceil(4) as f32;
         let mut inputs = alloc::vec![
             (fixture.scores, TWELVE_SCORES[..rows].to_vec()),
@@ -7057,9 +7170,15 @@ mod top_fraction_fusion_tests {
             inputs.push((node, flags));
         }
         let buffers = run_resolved(fixture.program.len(), bound, inputs);
-        let mask = buffers[fixture.mask.0 as usize].as_ref().expect("mask resolves");
+        let mask = buffers[fixture.mask.0 as usize]
+            .as_ref()
+            .expect("mask resolves");
         assert_eq!(mask.len(), rows, "a vacuous mask proves nothing");
-        mask.iter().enumerate().filter(|(_, value)| **value == 1.0).map(|(row, _)| row).collect()
+        mask.iter()
+            .enumerate()
+            .filter(|(_, value)| **value == 1.0)
+            .map(|(row, _)| row)
+            .collect()
     }
 
     #[test]
@@ -7067,7 +7186,12 @@ mod top_fraction_fusion_tests {
         let fixture = fixture(false);
         let (plain, fused) = bind_both(&fixture, 12);
         assert_eq!(fused_count(&fused), 1, "kinds {:?}", kinds(&fused));
-        assert!(fused.len() < plain.len(), "fused {:?} plain {:?}", kinds(&fused), kinds(&plain));
+        assert!(
+            fused.len() < plain.len(),
+            "fused {:?} plain {:?}",
+            kinds(&fused),
+            kinds(&plain)
+        );
     }
 
     #[test]
@@ -7099,14 +7223,31 @@ mod top_fraction_fusion_tests {
     fn rank_select_fused_equals_plain_twelve_scores() {
         let plain_fixture = fixture(false);
         let union_fixture = fixture(true);
-        for (rows, expected) in [(11_usize, alloc::vec![1, 3, 7]), (12, alloc::vec![1, 7, 11])] {
+        for (rows, expected) in [
+            (11_usize, alloc::vec![1, 3, 7]),
+            (12, alloc::vec![1, 7, 11]),
+        ] {
             let (plain, fused) = bind_both(&plain_fixture, rows);
-            assert_eq!(selected_rows(&plain_fixture, &plain, rows, false), expected, "plain rows {rows}");
-            assert_eq!(selected_rows(&plain_fixture, &fused, rows, false), expected, "fused rows {rows}");
+            assert_eq!(
+                selected_rows(&plain_fixture, &plain, rows, false),
+                expected,
+                "plain rows {rows}"
+            );
+            assert_eq!(
+                selected_rows(&plain_fixture, &fused, rows, false),
+                expected,
+                "fused rows {rows}"
+            );
         }
         let (plain, fused) = bind_both(&union_fixture, 12);
-        assert_eq!(selected_rows(&union_fixture, &plain, 12, true), alloc::vec![0, 1, 7, 11]);
-        assert_eq!(selected_rows(&union_fixture, &fused, 12, true), alloc::vec![0, 1, 7, 11]);
+        assert_eq!(
+            selected_rows(&union_fixture, &plain, 12, true),
+            alloc::vec![0, 1, 7, 11]
+        );
+        assert_eq!(
+            selected_rows(&union_fixture, &fused, 12, true),
+            alloc::vec![0, 1, 7, 11]
+        );
         assert_eq!(fused_count(&fused), 1);
     }
 }

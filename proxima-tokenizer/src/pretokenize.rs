@@ -343,13 +343,22 @@ mod tests {
             spans_under("$1,299.99", PreType::SingleDigit),
             ["$", "1", ",", "2", "9", "9", ".", "9", "9"]
         );
-        assert_eq!(spans_under("3333", PreType::SingleDigitMarks), ["3", "3", "3", "3"]);
+        assert_eq!(
+            spans_under("3333", PreType::SingleDigitMarks),
+            ["3", "3", "3", "3"]
+        );
     }
 
     #[test]
     fn llama3_digits_still_group_in_threes_where_qwen_splits_singly() {
-        assert_eq!(spans_under("v2024", PreType::GroupedDigits), ["v", "202", "4"]);
-        assert_eq!(spans_under("v2024", PreType::SingleDigit), ["v", "2", "0", "2", "4"]);
+        assert_eq!(
+            spans_under("v2024", PreType::GroupedDigits),
+            ["v", "202", "4"]
+        );
+        assert_eq!(
+            spans_under("v2024", PreType::SingleDigit),
+            ["v", "2", "0", "2", "4"]
+        );
     }
 
     #[test]
@@ -394,7 +403,10 @@ mod tests {
 
     #[test]
     fn gpt2_pre_split_keeps_digit_runs_whole_and_attaches_the_space() {
-        assert_eq!(spans_under("don't 12345", PreType::Gpt2), ["don", "'t", " 12345"]);
+        assert_eq!(
+            spans_under("don't 12345", PreType::Gpt2),
+            ["don", "'t", " 12345"]
+        );
     }
 
     #[test]

@@ -80,7 +80,10 @@ use proxima_tensor::cpu::{
 use proxima_tensor::op::{Extent, NodeId, Op};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::spec::CachedLayerRoots;
-use proxima_tensor::spec::{ForwardProgram, ModelDescriptor, LayerCacheRoots, ScheduleSource, build_forward, gqa_descriptor_from_shape};
+use proxima_tensor::spec::{
+    ForwardProgram, LayerCacheRoots, ModelDescriptor, ScheduleSource, build_forward,
+    gqa_descriptor_from_shape,
+};
 use proxima_tokenizer::{SamplingConfig, TokenType, Vocab, sample_next_token};
 use std::cell::RefCell;
 use std::fs::File;
@@ -124,14 +127,14 @@ use omega::backend::set_dispatch_type;
 // `set_command_buffer_chunks` -- same `metal`+macos gate as `set_dispatch_type`
 // immediately above, same reasoning: its own signature is ungated but it
 // only means anything on a build carrying `omega::metal::Plan`.
-#[cfg(all(feature = "metal", target_os = "macos"))]
-use omega::backend::set_command_buffer_chunks;
 #[cfg(all(
     feature = "metal",
     feature = "metal-attn-variants",
     target_os = "macos"
 ))]
 use omega::backend::set_attention_variant;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use omega::backend::set_command_buffer_chunks;
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::metal::OpGpuTiming;
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -190,14 +193,14 @@ use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 use proxima_tensor::spec::{DuplicateHeadPosition, gqa_single_range_cached_forward_program};
 
 use crate::bind::{BoundWeights, Codec, ModelHparams, metadata_str};
+use crate::error::InteropError;
+use crate::hf_bind::bind_all_weights_from_safetensors;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use crate::lowering::KvCacheShape;
 use crate::lowering::{
-    FfnRouting, KvLayout, StepInput, bind_checkpoint_with_kv_layout, bind_symbols, rope_freq_factors,
-    sliding_rope_inputs,
+    FfnRouting, KvLayout, StepInput, bind_checkpoint_with_kv_layout, bind_symbols,
+    rope_freq_factors, sliding_rope_inputs,
 };
-use crate::error::InteropError;
-use crate::hf_bind::bind_all_weights_from_safetensors;
 use crate::profiles::family_profile;
 use crate::rope_scaling::{RopeScaling, f32_from_u32};
 #[cfg(feature = "metal")]
@@ -213,59 +216,59 @@ mod pregather;
 mod residency_caches;
 #[macro_use]
 mod decode;
-mod drafter;
-mod chunk_shift;
-mod kv_ring;
-#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-mod device_kv;
-#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-mod greedy_device;
-mod prompt_cache;
-mod prompt_cache_key;
-#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-mod resident_plans;
 #[cfg(test)]
 mod alloc_probe;
 mod arena;
-mod prefix_trie;
 mod block_bloom;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod block_index_real_model_tests;
+mod chunk_shift;
+#[cfg(test)]
+mod chunked_prefill_tests;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod cpu_forward_tests;
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+mod device_kv;
+#[cfg(test)]
+mod disk_tier_tests;
+mod drafter;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod epilogue_sources_real_model_tests;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod follow_up_conditioning_tests;
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+mod greedy_device;
+mod kv_ring;
+#[cfg(test)]
+mod kv_seal_tests;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod prefix_resume_long_prompt_tests;
 mod prefix_state_file;
+mod prefix_trie;
 mod prewarm;
 mod prewarm_follow_up;
 mod prewarm_gate;
 mod prewarm_queue;
-mod ring_checkpoint;
-mod serving_backend;
-mod warm_buffers;
-mod tests_all;
-#[cfg(test)]
-mod chunked_prefill_tests;
-#[cfg(test)]
-mod disk_tier_tests;
-#[cfg(test)]
-mod kv_seal_tests;
-#[cfg(all(test, feature = "metal", target_os = "macos"))]
-mod speculative_default_on_tests;
-#[cfg(all(test, feature = "metal", target_os = "macos"))]
-mod prefix_resume_long_prompt_tests;
-#[cfg(all(test, feature = "metal", target_os = "macos"))]
-mod epilogue_sources_real_model_tests;
-#[cfg(all(test, feature = "metal", target_os = "macos"))]
-mod cpu_forward_tests;
-#[cfg(all(test, feature = "metal", target_os = "macos"))]
-mod prompt_cache_real_model_tests;
-#[cfg(all(test, feature = "metal", target_os = "macos"))]
-mod prompt_cache_chunk_shift_real_model_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod prewarm_real_model_tests;
+mod prompt_cache;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
-mod block_index_real_model_tests;
+mod prompt_cache_chunk_shift_real_model_tests;
+mod prompt_cache_key;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
-mod follow_up_conditioning_tests;
-#[cfg(all(test, feature = "metal", target_os = "macos"))]
-mod thread_index_census_tests;
+mod prompt_cache_real_model_tests;
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+mod resident_plans;
 #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
 mod resident_plans_real_model_tests;
+mod ring_checkpoint;
+mod serving_backend;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod speculative_default_on_tests;
+mod tests_all;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod thread_index_census_tests;
+mod warm_buffers;
 use decode::*;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use device_kv::{DeviceKv, KvLeafNodes, kv_leaf_nodes};
@@ -276,12 +279,12 @@ use kv_ring::{
     sliding_ring_geometry, speculative_draft_limit,
 };
 pub use load_model::*;
+pub(crate) use pregather::*;
 pub use prewarm::{PrewarmReport, PrewarmSkip};
-pub use prompt_cache::{CachePath, CacheReport, ColdTier, EvictionRule, MissReason};
-use prompt_cache::PromptCache;
 use prewarm_gate::PrewarmGate;
 use prewarm_queue::PrewarmQueue;
+use prompt_cache::PromptCache;
+pub use prompt_cache::{CachePath, CacheReport, ColdTier, EvictionRule, MissReason};
 use prompt_cache_key::CacheKey;
-use ring_checkpoint::{RingCheckpoint, planned_positions, retained_positions};
-pub(crate) use pregather::*;
 pub use residency_caches::*;
+use ring_checkpoint::{RingCheckpoint, planned_positions, retained_positions};

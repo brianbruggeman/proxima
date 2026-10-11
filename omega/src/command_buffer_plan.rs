@@ -50,7 +50,11 @@ pub fn chunk_boundaries(
     if headed {
         boundaries.push(head_ops);
     }
-    let tail_growth = if headed { growth_permille } else { PERMILLE_ONE };
+    let tail_growth = if headed {
+        growth_permille
+    } else {
+        PERMILLE_ONE
+    };
     push_grown_split(&mut boundaries, start, total_ops, tail_chunks, tail_growth);
     boundaries
 }

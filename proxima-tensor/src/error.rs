@@ -312,7 +312,9 @@ pub enum TensorError {
     /// layer that owns a KV cache); this fires only when the two counts
     /// disagree, which is an engine that pushed a different number of roots
     /// than the schedule declares cache-owning layers.
-    #[error("engine produced {produced} cache roots, schedule declares {expected} cache-owning layers")]
+    #[error(
+        "engine produced {produced} cache roots, schedule declares {expected} cache-owning layers"
+    )]
     CacheRootsCountMismatch { produced: usize, expected: usize },
 
     /// [`crate::spec::recurrent_interval_forward_program`]'s own dense/SSM layer split
@@ -329,7 +331,9 @@ pub enum TensorError {
     /// cross-layer shared-KV shape (`key_source == KeySource::Shared`) has
     /// no local `K` to reuse this way; a schedule combining the two is
     /// malformed.
-    #[error("attention mixer combines ValueSource::SharedWithKey with a cross-layer KeySource::Shared -- no local K to reuse as V")]
+    #[error(
+        "attention mixer combines ValueSource::SharedWithKey with a cross-layer KeySource::Shared -- no local K to reuse as V"
+    )]
     SharedWithKeyRequiresProjectedKey,
 
     /// [`crate::spec::scheduled_forward_program_with_experts`]'s per-layer
@@ -338,7 +342,9 @@ pub enum TensorError {
     /// either the source index is `>=` the current layer (forward
     /// reference) or the named layer never ran as an owning attention layer
     /// (`LayerKind::ShortConv`, or itself another `SharedFromLayer`).
-    #[error("layer {layer} names shared-KV source layer {source_layer}, which has no own-KV to reuse")]
+    #[error(
+        "layer {layer} names shared-KV source layer {source_layer}, which has no own-KV to reuse"
+    )]
     SharedKvSourceNotAvailable { layer: u32, source_layer: u32 },
 
     /// [`crate::spec::scheduled_single_range_cached_forward_program_with_experts`]'s merged-cache decode
@@ -349,7 +355,9 @@ pub enum TensorError {
     /// wiring `ValueSourceKind::SharedFromLayer` here needs the merged
     /// cache's own source-layer's merged K/V, not a same-pass NodeId --
     /// separate forward-graph work, not yet built.
-    #[error("layer {layer} names ValueSourceKind::SharedFromLayer({source_layer}), unsupported in the merged-cache decode forward")]
+    #[error(
+        "layer {layer} names ValueSourceKind::SharedFromLayer({source_layer}), unsupported in the merged-cache decode forward"
+    )]
     SharedKvUnsupportedInCachedForward { layer: u32, source_layer: u32 },
 
     /// [`crate::numeric::admit`] rejected a rewrite: `granted` does not
@@ -429,7 +437,9 @@ pub enum TensorError {
     MissingGgufEntry { name: alloc::string::String },
 
     /// A per-layer metadata array's length is not the declared `block_count`.
-    #[error("gguf metadata key {key:?} has {found} per-layer values, expected block_count {expected}")]
+    #[error(
+        "gguf metadata key {key:?} has {found} per-layer values, expected block_count {expected}"
+    )]
     GgufPerLayerLengthMismatch {
         key: alloc::string::String,
         expected: usize,
@@ -438,6 +448,8 @@ pub enum TensorError {
 
     /// `token_embd.weight`'s element count does not divide by `embedding_length`,
     /// so no vocab size exists.
-    #[error("token_embd.weight has {elements} elements, which does not divide evenly by embedding_length {embedding}")]
+    #[error(
+        "token_embd.weight has {elements} elements, which does not divide evenly by embedding_length {embedding}"
+    )]
     GgufVocabShapeMismatch { elements: u64, embedding: u32 },
 }

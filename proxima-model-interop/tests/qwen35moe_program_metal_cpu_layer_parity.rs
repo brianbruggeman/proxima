@@ -18,7 +18,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
-use proxima_model_interop::recurrent_routed_interval::hparams::{RecurrentRoutedIntervalHparams, LayerKind};
+use proxima_model_interop::recurrent_routed_interval::hparams::{
+    LayerKind, RecurrentRoutedIntervalHparams,
+};
 use proxima_model_interop::recurrent_routed_interval::recurrent_routed_interval_forward_program_at_width;
 use proxima_primitives::Codec;
 use proxima_tensor::test_support::Lcg;
@@ -362,7 +364,10 @@ fn quantized_layer_parity(layer_count: u32, width: u32) -> Vec<(usize, f32)> {
                 let bytes = quantized_storage_iter
                     .next()
                     .expect("one packed buffer per quantized leaf");
-                QuantizedBlock::Packed { codec: Codec::Q4K, bytes: bytes.as_slice() }
+                QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes: bytes.as_slice(),
+                }
             } else {
                 QuantizedBlock::Float32(data.as_slice())
             }

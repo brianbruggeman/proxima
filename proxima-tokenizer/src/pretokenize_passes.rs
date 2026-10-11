@@ -172,7 +172,10 @@ fn contraction_len(chars: &[char]) -> Option<usize> {
 }
 
 fn run_len(chars: &[char], predicate: fn(char) -> bool) -> usize {
-    chars.iter().take_while(|character| predicate(**character)).count()
+    chars
+        .iter()
+        .take_while(|character| predicate(**character))
+        .count()
 }
 
 fn is_symbol_run_char(character: char) -> bool {

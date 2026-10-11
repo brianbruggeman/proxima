@@ -55,7 +55,10 @@ mod harness {
 
     fn cov_percent(values: &[f64]) -> f64 {
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f64>()
+        let variance = values
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
             / (values.len() as f64 - 1.0).max(1.0);
         100.0 * variance.sqrt() / mean
     }
@@ -104,7 +107,10 @@ mod harness {
             .map(|pair| (pair[1] - pair[0]).as_secs_f64() * 1e3)
             .collect();
         assert!(!gaps.is_empty(), "N==0: no decode gaps timed");
-        Live { per_token_ms: median(&gaps), cell_line }
+        Live {
+            per_token_ms: median(&gaps),
+            cell_line,
+        }
     }
 
     pub fn run() {
@@ -160,7 +166,10 @@ mod harness {
                 match (round + offset) % 3 {
                     0 => {
                         let live = live_generation(&model, &prompt, tokens);
-                        println!("seb live round={round} per_token_ms={:.4}", live.per_token_ms);
+                        println!(
+                            "seb live round={round} per_token_ms={:.4}",
+                            live.per_token_ms
+                        );
                         println!("{}", live.cell_line);
                         live_ms.push(live.per_token_ms);
                     }

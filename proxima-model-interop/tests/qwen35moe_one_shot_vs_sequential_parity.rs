@@ -14,7 +14,9 @@
 #![cfg(feature = "std")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_model_interop::recurrent_routed_interval::hparams::{RecurrentRoutedIntervalHparams, LayerKind};
+use proxima_model_interop::recurrent_routed_interval::hparams::{
+    LayerKind, RecurrentRoutedIntervalHparams,
+};
 use proxima_model_interop::recurrent_routed_interval::{
     MoeLayerDiagnostics, recurrent_routed_interval_forward_program_at_width,
 };

@@ -65,7 +65,10 @@ fn a_family_with_no_profile_is_refused_by_name_before_anything_binds() {
 
 #[test]
 fn a_sliding_rope_adds_a_cos_and_sin_row_per_new_position() {
-    let hparams = gemma4_shaped_hparams(Some(SlidingRope { freq_base: 10_000.0, dimension_count: 256 }));
+    let hparams = gemma4_shaped_hparams(Some(SlidingRope {
+        freq_base: 10_000.0,
+        dimension_count: 256,
+    }));
     let mut inputs = Vec::new();
 
     sliding_rope_inputs(&hparams, 40, 3, &mut inputs);
@@ -91,9 +94,14 @@ fn rope_freq_factors_read_the_bound_tensor_by_name_and_none_when_absent() {
     let mut weights = BoundWeights::new(&[]);
     assert!(rope_freq_factors(&weights).is_none());
 
-    weights.owned.push(("rope_freqs.weight".to_string(), vec![1.0, 1.0, 1.0e30]));
+    weights
+        .owned
+        .push(("rope_freqs.weight".to_string(), vec![1.0, 1.0, 1.0e30]));
 
-    assert_eq!(rope_freq_factors(&weights), Some([1.0, 1.0, 1.0e30].as_slice()));
+    assert_eq!(
+        rope_freq_factors(&weights),
+        Some([1.0, 1.0, 1.0e30].as_slice())
+    );
 }
 
 /// The measured `context_length` of each real checkpoint (`ollama

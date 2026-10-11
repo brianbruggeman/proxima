@@ -30,20 +30,38 @@ impl LayerRun {
     fn expand<E: Error>(self, layers: &mut Vec<LayerSchedule>) -> Result<(), E> {
         let mut unit = Vec::new();
         match (self.kind, self.attention, self.ffn, self.pattern.is_empty()) {
-            (Some(kind), Some(attention), Some(ffn), true) => unit.push(LayerSchedule { kind, attention, ffn }),
-            (None, None, None, false) => self.pattern.into_iter().try_for_each(|run| run.expand::<E>(&mut unit))?,
-            _ => return Err(E::custom("a layers entry is one layer (kind, attention, ffn) or a pattern, not both and not neither")),
+            (Some(kind), Some(attention), Some(ffn), true) => unit.push(LayerSchedule {
+                kind,
+                attention,
+                ffn,
+            }),
+            (None, None, None, false) => self
+                .pattern
+                .into_iter()
+                .try_for_each(|run| run.expand::<E>(&mut unit))?,
+            _ => {
+                return Err(E::custom(
+                    "a layers entry is one layer (kind, attention, ffn) or a pattern, not both and not neither",
+                ));
+            }
         }
-        let total = unit.len().saturating_mul(self.repeat as usize).saturating_add(layers.len());
+        let total = unit
+            .len()
+            .saturating_mul(self.repeat as usize)
+            .saturating_add(layers.len());
         if total > MAX_LAYERS {
-            return Err(E::custom(format_args!("layers expand to {total} entries, more than the {MAX_LAYERS} a model may hold")));
+            return Err(E::custom(format_args!(
+                "layers expand to {total} entries, more than the {MAX_LAYERS} a model may hold"
+            )));
         }
         (0..self.repeat).for_each(|_| layers.extend(unit.iter().cloned()));
         Ok(())
     }
 }
 
-pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<LayerSchedule>, D::Error> {
+pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<LayerSchedule>, D::Error> {
     let mut layers = Vec::new();
     Vec::<LayerRun>::deserialize(deserializer)?
         .into_iter()
@@ -127,7 +145,11 @@ ple = true
     }
 
     fn window_of(descriptor: &ModelDescriptor) -> alloc::vec::Vec<Option<u32>> {
-        descriptor.layers.iter().map(|layer| layer.attention.mask_window).collect()
+        descriptor
+            .layers
+            .iter()
+            .map(|layer| layer.attention.mask_window)
+            .collect()
     }
 
     #[test]
@@ -137,8 +159,16 @@ ple = true
         let descriptor = parse(&text).expect("a repeated layer parses");
 
         assert_eq!(descriptor.layers.len(), 6);
-        assert!(descriptor.layers.iter().all(|layer| *layer == descriptor.layers[0]));
-        assert_eq!(descriptor.layers[0].attention.rope_pairing, RopePairing::SplitHalf { pairs: 128 });
+        assert!(
+            descriptor
+                .layers
+                .iter()
+                .all(|layer| *layer == descriptor.layers[0])
+        );
+        assert_eq!(
+            descriptor.layers[0].attention.rope_pairing,
+            RopePairing::SplitHalf { pairs: 128 }
+        );
     }
 
     #[test]
@@ -159,10 +189,15 @@ ple = true
 
     #[test]
     fn the_expanded_form_a_dump_produces_still_loads_and_equals_the_runs() {
-        let compact = parse(&format!("[[layers]]\nrepeat = 3\n{SLIDING}[[layers]]\n{}", full_layer())).expect("runs parse");
+        let compact = parse(&format!(
+            "[[layers]]\nrepeat = 3\n{SLIDING}[[layers]]\n{}",
+            full_layer()
+        ))
+        .expect("runs parse");
         let expanded_text = toml::to_string(&compact).expect("a descriptor serializes");
 
-        let restored: ModelDescriptor = toml::from_str(&expanded_text).expect("the expanded dump parses");
+        let restored: ModelDescriptor =
+            toml::from_str(&expanded_text).expect("the expanded dump parses");
 
         assert_eq!(restored.layers.len(), 4);
         assert_eq!(restored, compact);
@@ -170,7 +205,10 @@ ple = true
 
     #[test]
     fn an_entry_that_is_both_a_layer_and_a_pattern_is_refused() {
-        let text = format!("[[layers]]\n{SLIDING}[[layers.pattern]]\n{}", SLIDING.replace("[layers.", "[layers.pattern."));
+        let text = format!(
+            "[[layers]]\n{SLIDING}[[layers.pattern]]\n{}",
+            SLIDING.replace("[layers.", "[layers.pattern.")
+        );
 
         let error = parse(&text).expect_err("a layer and a pattern in one entry is ambiguous");
 
@@ -179,21 +217,24 @@ ple = true
 
     #[test]
     fn an_entry_with_neither_a_layer_nor_a_pattern_is_refused() {
-        let error = parse("[[layers]]\nrepeat = 4\n").expect_err("an empty run has nothing to repeat");
+        let error =
+            parse("[[layers]]\nrepeat = 4\n").expect_err("an empty run has nothing to repeat");
 
         assert!(error.to_string().contains("one layer"), "got: {error}");
     }
 
     #[test]
     fn an_unknown_key_in_a_layer_entry_is_an_error_not_a_silent_default() {
-        let error = parse(&format!("[[layers]]\nrepeats = 2\n{SLIDING}")).expect_err("a misspelled repeat must not load");
+        let error = parse(&format!("[[layers]]\nrepeats = 2\n{SLIDING}"))
+            .expect_err("a misspelled repeat must not load");
 
         assert!(error.to_string().contains("unknown field"), "got: {error}");
     }
 
     #[test]
     fn a_repeat_that_would_exhaust_memory_is_refused_before_it_allocates() {
-        let error = parse(&format!("[[layers]]\nrepeat = 4000000000\n{SLIDING}")).expect_err("four billion layers must not expand");
+        let error = parse(&format!("[[layers]]\nrepeat = 4000000000\n{SLIDING}"))
+            .expect_err("four billion layers must not expand");
 
         assert!(error.to_string().contains("more than"), "got: {error}");
     }

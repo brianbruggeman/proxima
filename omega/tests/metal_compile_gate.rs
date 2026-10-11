@@ -46,7 +46,13 @@ fn elementwise_tanh_kernel() -> omega::Kernel {
         },
     );
     let shapes = infer(&program, &[]).expect("elementwise infers");
-    let nests = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("elementwise lowers");
+    let nests = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("elementwise lowers");
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
@@ -79,7 +85,13 @@ fn elementwise_erf_kernel() -> omega::Kernel {
         },
     );
     let shapes = infer(&program, &[]).expect("erf infers");
-    let nests = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("erf lowers");
+    let nests = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("erf lowers");
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
@@ -132,7 +144,13 @@ fn fused_matmul_kernel() -> omega::Kernel {
         }),
     );
     let shapes = infer(&program, &[]).expect("matmul infers");
-    let nests = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("matmul lowers");
+    let nests = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("matmul lowers");
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
@@ -197,7 +215,13 @@ fn tiled_gemm_q4k_kernel() -> omega::Kernel {
         }),
     );
     let shapes = infer(&program, &[]).expect("tiled gemm infers");
-    let nests = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("tiled gemm lowers");
+    let nests = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("tiled gemm lowers");
     let weight_node = nests[0].operands()[0].0;
     let mut q4k = std::collections::BTreeMap::new();
     q4k.insert(weight_node, omega::Codec::Q4K);
@@ -235,7 +259,13 @@ fn cumsum_kernel() -> omega::Kernel {
         }),
     );
     let shapes = infer(&program, &[]).expect("cumsum infers");
-    let nests = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("cumsum lowers");
+    let nests = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("cumsum lowers");
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
@@ -289,8 +319,13 @@ fn embedding_lookup_kernel() -> omega::Kernel {
         },
     );
     let shapes = infer(&program, &[]).expect("embedding lookup infers");
-    let nests =
-        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("embedding lookup lowers");
+    let nests = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("embedding lookup lowers");
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
@@ -366,8 +401,13 @@ fn embedding_matmul_kernel() -> omega::Kernel {
         }),
     );
     let shapes = infer(&program, &[]).expect("embedding matmul infers");
-    let nests =
-        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("embedding matmul lowers");
+    let nests = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("embedding matmul lowers");
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
@@ -390,7 +430,13 @@ fn iota_kernel() -> omega::Kernel {
         },
     );
     let shapes = infer(&program, &[]).expect("iota infers");
-    let nests = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("iota lowers");
+    let nests = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("iota lowers");
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),

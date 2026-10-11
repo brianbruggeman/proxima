@@ -10,19 +10,28 @@ fn hybrid_attention<'schedule>(
     descriptor: &'schedule ModelDescriptor,
     builder: &'static str,
 ) -> Result<&'schedule LayerAttentionConfig, TensorError> {
-    let first = descriptor.layers.first().ok_or(TensorError::UnsupportedInBuilder {
-        builder,
-        feature: "an empty schedule",
-    })?;
+    let first = descriptor
+        .layers
+        .first()
+        .ok_or(TensorError::UnsupportedInBuilder {
+            builder,
+            feature: "an empty schedule",
+        })?;
     refuse_when(
-        descriptor
-            .layers
-            .iter()
-            .any(|layer| LayerAttentionConfig { kv_heads: first.attention.kv_heads, ..layer.attention.clone() } != first.attention),
+        descriptor.layers.iter().any(|layer| {
+            LayerAttentionConfig {
+                kv_heads: first.attention.kv_heads,
+                ..layer.attention.clone()
+            } != first.attention
+        }),
         builder,
         "layers that differ in anything but kv heads",
     )?;
-    refuse_when(!descriptor.gated_attention, builder, "attention that is not gated")?;
+    refuse_when(
+        !descriptor.gated_attention,
+        builder,
+        "attention that is not gated",
+    )?;
     Ok(&first.attention)
 }
 
@@ -41,11 +50,18 @@ fn rotary_dim(attention: &LayerAttentionConfig, builder: &'static str) -> Result
 /// `layers[i].ffn` must be the plain SwiGLU the dense hybrid lowers: the
 /// routed-gating fields a dense layer never reads are free, everything else
 /// must be the [`LayerFfnConfig::exclusive`] default.
-fn refuse_unless_plain_swiglu(layers: &[LayerSchedule], builder: &'static str) -> Result<(), TensorError> {
+fn refuse_unless_plain_swiglu(
+    layers: &[LayerSchedule],
+    builder: &'static str,
+) -> Result<(), TensorError> {
     let plain = LayerFfnConfig::exclusive();
     refuse_when(
         layers.iter().any(|layer| {
-            LayerFfnConfig { routed_gating: plain.routed_gating, routed_expert_bias: plain.routed_expert_bias, ..layer.ffn } != plain
+            LayerFfnConfig {
+                routed_gating: plain.routed_gating,
+                routed_expert_bias: plain.routed_expert_bias,
+                ..layer.ffn
+            } != plain
         }),
         builder,
         "an ffn other than plain silu swiglu",
@@ -58,19 +74,41 @@ fn refuse_unless_plain_swiglu(layers: &[LayerSchedule], builder: &'static str) -
 /// attention shape from the first attention layer. This is the program
 /// `recurrent_interval_forward_program_with_last_row` has always built, with the
 /// `(layer + 1) % full_attention_interval` predicate replaced by the schedule.
-pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, TensorError> {
+pub(super) fn hybrid_dense_forward(
+    descriptor: &ModelDescriptor,
+) -> Result<ForwardProgram, TensorError> {
     const BUILDER: &str = "build_forward(hybrid dense)";
-    refuse_when(descriptor.layers.len() != descriptor.block_count as usize, BUILDER, "a schedule whose length is not block_count")?;
-    refuse_when(descriptor.layers.iter().any(|layer| layer.kind == LayerKind::ShortConv), BUILDER, "a short convolution layer")?;
+    refuse_when(
+        descriptor.layers.len() != descriptor.block_count as usize,
+        BUILDER,
+        "a schedule whose length is not block_count",
+    )?;
+    refuse_when(
+        descriptor
+            .layers
+            .iter()
+            .any(|layer| layer.kind == LayerKind::ShortConv),
+        BUILDER,
+        "a short convolution layer",
+    )?;
     refuse_when(descriptor.expert_count != 0, BUILDER, "routed experts")?;
     refuse_unless_plain_swiglu(&descriptor.layers, BUILDER)?;
     let attention = hybrid_attention(descriptor, BUILDER)?;
     refuse_when(
-        descriptor.layers.iter().any(|layer| layer.attention.kv_heads != attention.kv_heads),
+        descriptor
+            .layers
+            .iter()
+            .any(|layer| layer.attention.kv_heads != attention.kv_heads),
         BUILDER,
         "layers that differ in kv heads",
     )?;
-    refuse_when(descriptor.ssm_time_step_rank == 0 || descriptor.ssm_group_count == 0 || descriptor.ssm_conv_kernel == 0, BUILDER, "a recurrence shape with a zero extent")?;
+    refuse_when(
+        descriptor.ssm_time_step_rank == 0
+            || descriptor.ssm_group_count == 0
+            || descriptor.ssm_conv_kernel == 0,
+        BUILDER,
+        "a recurrence shape with a zero extent",
+    )?;
 
     let vocab = descriptor.vocab;
     let embedding = descriptor.embedding;
@@ -942,17 +980,47 @@ pub struct MoeLayerDiagnostics {
 /// [`append_sigmoid_gated_shared_expert`] for the shared expert, and
 /// [`elementwise`]/[`reduce`] for the residual adds and `lm_head`.
 #[allow(clippy::too_many_lines)]
-pub(super) fn hybrid_routed_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, TensorError> {
+pub(super) fn hybrid_routed_forward(
+    descriptor: &ModelDescriptor,
+) -> Result<ForwardProgram, TensorError> {
     const BUILDER: &str = "build_forward(hybrid routed)";
-    refuse_when(descriptor.layers.len() != descriptor.block_count as usize, BUILDER, "a schedule whose length is not block_count")?;
-    refuse_when(descriptor.layers.iter().any(|layer| layer.kind == LayerKind::ShortConv), BUILDER, "a short convolution layer")?;
-    refuse_when(descriptor.layers.iter().any(|layer| layer.ffn.combination != FfnCombination::RoutedWithSharedExpert), BUILDER, "a layer whose ffn is not routed with a shared expert")?;
     refuse_when(
-        descriptor.layers.iter().any(|layer| layer.ffn.routed_expert_bias || layer.ffn.routed_gating != ExpertGatingFunc::Softmax || layer.ffn.activation != Activation::Silu),
+        descriptor.layers.len() != descriptor.block_count as usize,
+        BUILDER,
+        "a schedule whose length is not block_count",
+    )?;
+    refuse_when(
+        descriptor
+            .layers
+            .iter()
+            .any(|layer| layer.kind == LayerKind::ShortConv),
+        BUILDER,
+        "a short convolution layer",
+    )?;
+    refuse_when(
+        descriptor
+            .layers
+            .iter()
+            .any(|layer| layer.ffn.combination != FfnCombination::RoutedWithSharedExpert),
+        BUILDER,
+        "a layer whose ffn is not routed with a shared expert",
+    )?;
+    refuse_when(
+        descriptor.layers.iter().any(|layer| {
+            layer.ffn.routed_expert_bias
+                || layer.ffn.routed_gating != ExpertGatingFunc::Softmax
+                || layer.ffn.activation != Activation::Silu
+        }),
         BUILDER,
         "a routed ffn other than softmax gating over silu experts without a bias",
     )?;
-    refuse_when(descriptor.ssm_time_step_rank == 0 || descriptor.ssm_group_count == 0 || descriptor.ssm_conv_kernel == 0, BUILDER, "a recurrence shape with a zero extent")?;
+    refuse_when(
+        descriptor.ssm_time_step_rank == 0
+            || descriptor.ssm_group_count == 0
+            || descriptor.ssm_conv_kernel == 0,
+        BUILDER,
+        "a recurrence shape with a zero extent",
+    )?;
     let attention = hybrid_attention(descriptor, BUILDER)?;
     let embedding = descriptor.embedding;
     let attn_head_dim = attention.head_dim;
@@ -970,10 +1038,7 @@ pub(super) fn hybrid_routed_forward(descriptor: &ModelDescriptor) -> Result<Forw
     let table = input_leaf(
         &mut program,
         DType::Float32,
-        alloc::vec![
-            Extent::Static(descriptor.vocab),
-            Extent::Static(embedding),
-        ],
+        alloc::vec![Extent::Static(descriptor.vocab), Extent::Static(embedding),],
         "token_embd.weight",
     );
     let mut x = embedding_lookup(&mut program, table, ids);
@@ -1147,7 +1212,10 @@ pub(super) fn hybrid_routed_forward(descriptor: &ModelDescriptor) -> Result<Forw
                     DType::Float32,
                     ScalarOp::Multiply,
                     &[
-                        (wk_flat, alloc::format!("i,{attn_head_dim}*u+d->iud").as_str()),
+                        (
+                            wk_flat,
+                            alloc::format!("i,{attn_head_dim}*u+d->iud").as_str(),
+                        ),
                         (k_head_ones, "ud->iud"),
                     ],
                 )?;
@@ -1174,7 +1242,10 @@ pub(super) fn hybrid_routed_forward(descriptor: &ModelDescriptor) -> Result<Forw
                     DType::Float32,
                     ScalarOp::Multiply,
                     &[
-                        (wv_flat, alloc::format!("i,{attn_head_dim}*u+d->iud").as_str()),
+                        (
+                            wv_flat,
+                            alloc::format!("i,{attn_head_dim}*u+d->iud").as_str(),
+                        ),
                         (v_head_ones, "ud->iud"),
                     ],
                 )?;
@@ -1207,8 +1278,11 @@ pub(super) fn hybrid_routed_forward(descriptor: &ModelDescriptor) -> Result<Forw
                     &[
                         (
                             wo_flat,
-                            alloc::format!("{}*u+{attn_head_dim}*g+d,e->ugde", attn_head_dim * group)
-                                .as_str(),
+                            alloc::format!(
+                                "{}*u+{attn_head_dim}*g+d,e->ugde",
+                                attn_head_dim * group
+                            )
+                            .as_str(),
                         ),
                         (o_head_ones, "ugd->ugde"),
                     ],
@@ -1571,10 +1645,7 @@ pub(super) fn hybrid_routed_forward(descriptor: &ModelDescriptor) -> Result<Forw
     let lm_head = input_leaf(
         &mut program,
         DType::Float32,
-        alloc::vec![
-            Extent::Static(embedding),
-            Extent::Static(descriptor.vocab),
-        ],
+        alloc::vec![Extent::Static(embedding), Extent::Static(descriptor.vocab),],
         "output.weight",
     );
     let logits_product = elementwise(

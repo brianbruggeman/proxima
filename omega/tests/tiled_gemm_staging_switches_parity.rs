@@ -59,10 +59,16 @@ fn real_gguf_header(path: &std::path::Path) -> Option<(ParsedGguf, u64, std::fs:
             let mut completion = None;
             for event in events {
                 match event {
-                    GgufEvent::Header { version: version_value, .. } => version = Some(version_value),
+                    GgufEvent::Header {
+                        version: version_value,
+                        ..
+                    } => version = Some(version_value),
                     GgufEvent::Metadata { key, value } => metadata.push((key, value)),
                     GgufEvent::Tensor(tensor) => tensors.push(tensor),
-                    GgufEvent::Complete { data_offset, alignment } => {
+                    GgufEvent::Complete {
+                        data_offset,
+                        alignment,
+                    } => {
                         completion = Some((data_offset, alignment));
                     }
                 }
@@ -95,7 +101,10 @@ fn real_tensor_bytes(
     name: &str,
     expect_type: GgmlType,
 ) -> Option<(Vec<u8>, usize, usize)> {
-    let tensor = parsed.tensors.iter().find(|candidate| candidate.name == name)?;
+    let tensor = parsed
+        .tensors
+        .iter()
+        .find(|candidate| candidate.name == name)?;
     if tensor.ggml_type != expect_type {
         eprintln!(
             "real_tensor_bytes: {name} is {:?} in this file, not {expect_type:?} -- test skipped, not faked",
@@ -105,14 +114,23 @@ fn real_tensor_bytes(
     }
     let in_dim = tensor.dims[0] as usize;
     let out_dim = tensor.dims[1] as usize;
-    let range = parsed.tensor_data_range(tensor, file_len).expect("tensor byte range within file bounds");
+    let range = parsed
+        .tensor_data_range(tensor, file_len)
+        .expect("tensor byte range within file bounds");
     let mut buf = vec![0u8; (range.end - range.start) as usize];
-    file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
-    file.read_exact(&mut buf).expect("read exact tensor byte range");
+    file.seek(SeekFrom::Start(range.start))
+        .expect("seek to tensor data");
+    file.read_exact(&mut buf)
+        .expect("read exact tensor byte range");
     Some((buf, in_dim, out_dim))
 }
 
-fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
+fn matmul_program(
+    tokens: u32,
+    in_dim: u32,
+    out_dim: u32,
+    weight_dtype: DType,
+) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = append(
         &mut program,
@@ -173,7 +191,10 @@ fn compare_to_oracle(actual: &[f32], oracle: &[f32]) -> ErrorSummary {
             max_relative = max_relative.max(abs_diff / want.abs());
         }
     }
-    ErrorSummary { max_abs, max_relative }
+    ErrorSummary {
+        max_abs,
+        max_relative,
+    }
 }
 
 /// One switch combination: the env vars set (ALWAYS includes
@@ -185,7 +206,10 @@ struct SwitchCombo {
 }
 
 const COMBOS: &[SwitchCombo] = &[
-    SwitchCombo { label: "baseline (Q4_0 tiled, no staging experiments)", extra_vars: &[] },
+    SwitchCombo {
+        label: "baseline (Q4_0 tiled, no staging experiments)",
+        extra_vars: &[],
+    },
     SwitchCombo {
         label: "wide_act_load alone",
         extra_vars: &[("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", "1")],
@@ -226,18 +250,31 @@ fn check_real_tensor_at_token_count(tensor_name: &str, tokens: usize) {
     };
 
     let blocks_per_row = in_dim / q4_0::QK4_0;
-    assert_eq!(blocks_per_row * q4_0::QK4_0, in_dim, "{tensor_name}'s in_dim is a whole number of Q4_0 blocks");
+    assert_eq!(
+        blocks_per_row * q4_0::QK4_0,
+        in_dim,
+        "{tensor_name}'s in_dim is a whole number of Q4_0 blocks"
+    );
     let row_bytes = blocks_per_row * q4_0::BLOCK_BYTES;
-    assert_eq!(weight_bytes.len(), row_bytes * out_dim, "{tensor_name} byte length matches its declared shape");
+    assert_eq!(
+        weight_bytes.len(),
+        row_bytes * out_dim,
+        "{tensor_name} byte length matches its declared shape"
+    );
 
     let rows = ROWS_TO_CHECK.min(out_dim);
     let sliced_weight = &weight_bytes[..rows * row_bytes];
 
     let mut lcg = Lcg(9101 + tokens as u64);
-    let activation: Vec<f32> = (0..tokens * in_dim).map(|_| lcg.next_unit() * 4.0 - 2.0).collect();
+    let activation: Vec<f32> = (0..tokens * in_dim)
+        .map(|_| lcg.next_unit() * 4.0 - 2.0)
+        .collect();
 
     let mut dequantized = vec![0.0f32; rows * in_dim];
-    for (row_blocks, row_f32) in sliced_weight.chunks_exact(row_bytes).zip(dequantized.chunks_exact_mut(in_dim)) {
+    for (row_blocks, row_f32) in sliced_weight
+        .chunks_exact(row_bytes)
+        .zip(dequantized.chunks_exact_mut(in_dim))
+    {
         q4_0::dequantize(row_blocks, row_f32).expect("a whole number of q4_0 blocks per row");
     }
     let mut dequantized_transposed = vec![0.0f32; rows * in_dim];
@@ -247,18 +284,32 @@ fn check_real_tensor_at_token_count(tensor_name: &str, tokens: usize) {
         }
     }
 
-    let (packed_program, packed_sum) = matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::UInt8);
+    let (packed_program, packed_sum) =
+        matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::UInt8);
     let blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: sliced_weight },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4_0,
+            bytes: sliced_weight,
+        },
         QuantizedBlock::Float32(&activation),
     ];
 
-    let (f32_program, f32_sum) = matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::Float32);
-    let oracle = evaluate(&f32_program, &[], &[&dequantized_transposed, &activation], &[f32_sum])
-        .expect("dequantized f32 cpu matmul evaluates");
+    let (f32_program, f32_sum) =
+        matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::Float32);
+    let oracle = evaluate(
+        &f32_program,
+        &[],
+        &[&dequantized_transposed, &activation],
+        &[f32_sum],
+    )
+    .expect("dequantized f32 cpu matmul evaluates");
     let oracle_root = oracle.root();
     let element_count = tokens * rows;
-    assert_eq!(oracle_root.len(), element_count, "degenerate: oracle produced no output");
+    assert_eq!(
+        oracle_root.len(),
+        element_count,
+        "degenerate: oracle produced no output"
+    );
 
     for combo in COMBOS {
         let mut vars: Vec<(&str, Option<&str>)> = vec![("PROXIMA_TILED_GEMM_Q4_0", Some("1"))];
@@ -266,8 +317,14 @@ fn check_real_tensor_at_token_count(tensor_name: &str, tokens: usize) {
             vars.push((key, Some(value)));
         }
         let result = temp_env::with_vars(vars, || {
-            omega::execute(&packed_program, &[], &blocks, &[packed_sum], NumericPolicy::default())
-                .expect("metal executes the combo")
+            omega::execute(
+                &packed_program,
+                &[],
+                &blocks,
+                &[packed_sum],
+                NumericPolicy::default(),
+            )
+            .expect("metal executes the combo")
         });
         let result_root = result.root();
         assert_eq!(
@@ -293,7 +350,10 @@ fn check_real_tensor_at_token_count(tensor_name: &str, tokens: usize) {
 
 #[test]
 fn attn_q_all_staging_switches_match_the_f32_oracle_at_min_tokens() {
-    check_real_tensor_at_token_count("blk.0.attn_q.weight", omega::sized::TILED_GEMM_MIN_TOKENS as usize);
+    check_real_tensor_at_token_count(
+        "blk.0.attn_q.weight",
+        omega::sized::TILED_GEMM_MIN_TOKENS as usize,
+    );
 }
 
 #[test]

@@ -143,10 +143,12 @@ fn windows_process_environment_directory_and_kill() {
         let descriptor = descriptor_command
             .to_descriptor()
             .expect("lower case-insensitive environment removal");
-        assert!(!descriptor
-            .env
-            .iter()
-            .any(|entry| entry.key.to_bytes().eq_ignore_ascii_case(b"PROXIMA_DESCRIPTOR_SECRET")));
+        assert!(!descriptor.env.iter().any(|entry| {
+            entry
+                .key
+                .to_bytes()
+                .eq_ignore_ascii_case(b"PROXIMA_DESCRIPTOR_SECRET")
+        }));
     });
 
     let mut waiting = command("set /p payload=");

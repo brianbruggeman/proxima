@@ -16,6 +16,7 @@
 #![cfg(all(feature = "metal", feature = "metal-grouped-gemm", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use omega::MetalError;
 use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, dequantize, quantize};
 use proxima_primitives::Codec;
 use proxima_tensor::map::{self, AxisIndex, AxisTerm};
@@ -24,7 +25,6 @@ use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
     ScalarOp, TensorError, append,
 };
-use omega::MetalError;
 
 const MIN_TOKENS_FOR_TILES: usize = 160;
 const RELATIVE_TOLERANCE: f32 = 2.0e-3;
@@ -49,7 +49,10 @@ fn input(program: &mut Vec<Op>, dtype: DType, shape: &[usize], name: &str) -> No
         program,
         Op::Input {
             dtype,
-            shape: shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(),
+            shape: shape
+                .iter()
+                .map(|&extent| Extent::Static(extent as u32))
+                .collect(),
             name: Some(name.into()),
         },
     )
@@ -80,13 +83,24 @@ fn expert_gather_map(route: NodeId) -> IndexMap {
 }
 
 fn program(case: &Case, weight_dtype: DType) -> (Vec<Op>, NodeId) {
-    let Shape { sequence, selected, rows, k, experts } = case.shape;
+    let Shape {
+        sequence,
+        selected,
+        rows,
+        k,
+        experts,
+    } = case.shape;
     let mut program = Vec::new();
     let weight = input(&mut program, weight_dtype, &[experts, rows, k], "weight");
     let route = input(&mut program, DType::Float32, &[sequence, selected], "route");
     let (activation, activation_map) = if case.activation_per_selected {
         (
-            input(&mut program, DType::Float32, &[sequence, selected, k], "activation"),
+            input(
+                &mut program,
+                DType::Float32,
+                &[sequence, selected, k],
+                "activation",
+            ),
             map::projection(4, &[0, 1, 3]),
         )
     } else {
@@ -123,7 +137,12 @@ fn program(case: &Case, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     if !case.fuse_gate {
         return (program, sum);
     }
-    let gate = input(&mut program, DType::Float32, &[sequence, selected, rows], "gate");
+    let gate = input(
+        &mut program,
+        DType::Float32,
+        &[sequence, selected, rows],
+        "gate",
+    );
     let gated = append(
         &mut program,
         Op::Elementwise {
@@ -151,10 +170,18 @@ fn quantized_expert_stack(shape: &Shape) -> Vec<u8> {
     let mut stack = vec![0u8; shape.experts * shape.rows * row_bytes];
     for expert in 0..shape.experts {
         let magnitude = 0.5 + expert as f32;
-        let weights = unit_values(1000 + expert as u64, shape.rows * shape.k, -magnitude, magnitude);
+        let weights = unit_values(
+            1000 + expert as u64,
+            shape.rows * shape.k,
+            -magnitude,
+            magnitude,
+        );
         let expert_bytes = shape.rows * row_bytes;
         let target = &mut stack[expert * expert_bytes..(expert + 1) * expert_bytes];
-        for (row, row_target) in weights.chunks_exact(shape.k).zip(target.chunks_exact_mut(row_bytes)) {
+        for (row, row_target) in weights
+            .chunks_exact(shape.k)
+            .zip(target.chunks_exact_mut(row_bytes))
+        {
             quantize(row, row_target).expect("a row is a whole number of q8_0 blocks");
         }
     }
@@ -216,19 +243,37 @@ fn named_blocks<'data>(
 }
 
 fn activation_len(case: &Case) -> usize {
-    let Shape { sequence, selected, k, .. } = case.shape;
-    if case.activation_per_selected { sequence * selected * k } else { sequence * k }
+    let Shape {
+        sequence,
+        selected,
+        k,
+        ..
+    } = case.shape;
+    if case.activation_per_selected {
+        sequence * selected * k
+    } else {
+        sequence * k
+    }
 }
 
 fn run(case: &Case) -> Outputs {
-    let Shape { sequence, selected, rows, .. } = case.shape;
+    let Shape {
+        sequence,
+        selected,
+        rows,
+        ..
+    } = case.shape;
     let stack = quantized_expert_stack(&case.shape);
     let reference_stack = dequantized(&case.shape, &stack);
     let activation = unit_values(2000, activation_len(case), -1.0, 1.0);
     let gate = unit_values(3000, sequence * selected * rows, 0.5, 1.5);
     let (reference_program, reference_output) = program(case, DType::Float32);
-    let reference_named =
-        named_blocks(case, QuantizedBlock::Float32(&reference_stack), &activation, &gate);
+    let reference_named = named_blocks(
+        case,
+        QuantizedBlock::Float32(&reference_stack),
+        &activation,
+        &gate,
+    );
     let mut free_buffers = Vec::new();
     let mut validated = None;
     let oracle = proxima_tensor::cpu::evaluate_quantized_named_with_scratch(
@@ -243,7 +288,10 @@ fn run(case: &Case) -> Outputs {
     let (program, output) = program(case, DType::UInt8);
     let named = named_blocks(
         case,
-        QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &stack },
+        QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes: &stack,
+        },
         &activation,
         &gate,
     );
@@ -253,7 +301,11 @@ fn run(case: &Case) -> Outputs {
     let kernel_keys = plan.kernel_keys().expect("plan exposes its kernel keys");
     let metal = omega::execute_plan_named(&plan, &named)
         .expect("metal runs the stacked q8_0 expert product on a real device");
-    Outputs { oracle: oracle.root().to_vec(), metal: metal.root().to_vec(), kernel_keys }
+    Outputs {
+        oracle: oracle.root().to_vec(),
+        metal: metal.root().to_vec(),
+        kernel_keys,
+    }
 }
 
 fn stacked_grouped_kernel_ran(keys: &[String]) -> bool {
@@ -267,7 +319,11 @@ fn worst_relative_row_error(oracle: &[f32], metal: &[f32], row_width: usize) -> 
         .chunks_exact(row_width)
         .zip(metal.chunks_exact(row_width))
         .map(|(want_row, got_row)| {
-            let norm = want_row.iter().map(|value| value * value).sum::<f32>().sqrt();
+            let norm = want_row
+                .iter()
+                .map(|value| value * value)
+                .sum::<f32>()
+                .sqrt();
             let worst = want_row
                 .iter()
                 .zip(got_row)
@@ -280,10 +336,23 @@ fn worst_relative_row_error(oracle: &[f32], metal: &[f32], row_width: usize) -> 
 
 fn assert_stacked_matches_oracle(case: &Case) {
     let outputs = run(case);
-    let Shape { sequence, selected, rows, .. } = case.shape;
+    let Shape {
+        sequence,
+        selected,
+        rows,
+        ..
+    } = case.shape;
     let element_count = sequence * selected * rows;
-    assert_eq!(outputs.oracle.len(), element_count, "degenerate: oracle produced no output");
-    assert_eq!(outputs.metal.len(), element_count, "degenerate: metal produced no output");
+    assert_eq!(
+        outputs.oracle.len(),
+        element_count,
+        "degenerate: oracle produced no output"
+    );
+    assert_eq!(
+        outputs.metal.len(),
+        element_count,
+        "degenerate: metal produced no output"
+    );
     assert!(
         stacked_grouped_kernel_ran(&outputs.kernel_keys),
         "the stacked expert-grouped kernel was never selected: {:?}",
@@ -302,66 +371,150 @@ fn assert_stacked_matches_oracle(case: &Case) {
 
 #[test]
 fn a_shared_activation_gate_over_top_k_routing_matches_the_f32_oracle() {
-    let shape = Shape { sequence: 120, selected: 8, rows: 192, k: 512, experts: 32 };
+    let shape = Shape {
+        sequence: 120,
+        selected: 8,
+        rows: 192,
+        k: 512,
+        experts: 32,
+    };
     let route = top_k_route(shape.sequence, shape.selected, shape.experts, 5);
-    assert_stacked_matches_oracle(&Case { shape, route, activation_per_selected: false, fuse_gate: false });
+    assert_stacked_matches_oracle(&Case {
+        shape,
+        route,
+        activation_per_selected: false,
+        fuse_gate: false,
+    });
 }
 
 #[test]
 fn a_per_selected_activation_down_over_top_k_routing_matches_the_f32_oracle() {
-    let shape = Shape { sequence: 120, selected: 8, rows: 128, k: 256, experts: 32 };
+    let shape = Shape {
+        sequence: 120,
+        selected: 8,
+        rows: 128,
+        k: 256,
+        experts: 32,
+    };
     let route = top_k_route(shape.sequence, shape.selected, shape.experts, 9);
-    assert_stacked_matches_oracle(&Case { shape, route, activation_per_selected: true, fuse_gate: false });
+    assert_stacked_matches_oracle(&Case {
+        shape,
+        route,
+        activation_per_selected: true,
+        fuse_gate: false,
+    });
 }
 
 #[test]
 fn one_expert_named_by_most_tokens_spans_many_token_tiles() {
-    let shape = Shape { sequence: 150, selected: 4, rows: 128, k: 256, experts: 12 };
+    let shape = Shape {
+        sequence: 150,
+        selected: 4,
+        rows: 128,
+        k: 256,
+        experts: 12,
+    };
     let route = heavy_expert_top_k_route(shape.sequence, shape.selected, shape.experts);
-    assert_stacked_matches_oracle(&Case { shape, route, activation_per_selected: false, fuse_gate: false });
+    assert_stacked_matches_oracle(&Case {
+        shape,
+        route,
+        activation_per_selected: false,
+        fuse_gate: false,
+    });
 }
 
 #[test]
 fn ragged_rows_and_tokens_match_the_f32_oracle() {
-    let shape = Shape { sequence: 41, selected: 4, rows: 100, k: 256, experts: 6 };
+    let shape = Shape {
+        sequence: 41,
+        selected: 4,
+        rows: 100,
+        k: 256,
+        experts: 6,
+    };
     let route = top_k_route(shape.sequence, shape.selected, shape.experts, 21);
-    assert_stacked_matches_oracle(&Case { shape, route, activation_per_selected: true, fuse_gate: false });
+    assert_stacked_matches_oracle(&Case {
+        shape,
+        route,
+        activation_per_selected: true,
+        fuse_gate: false,
+    });
 }
 
 #[test]
 fn a_fused_epilogue_reads_its_operands_at_the_sequence_and_selected_coordinates() {
-    let shape = Shape { sequence: 60, selected: 4, rows: 192, k: 512, experts: 8 };
+    let shape = Shape {
+        sequence: 60,
+        selected: 4,
+        rows: 192,
+        k: 512,
+        experts: 8,
+    };
     let route = top_k_route(shape.sequence, shape.selected, shape.experts, 33);
-    assert_stacked_matches_oracle(&Case { shape, route, activation_per_selected: false, fuse_gate: true });
+    assert_stacked_matches_oracle(&Case {
+        shape,
+        route,
+        activation_per_selected: false,
+        fuse_gate: true,
+    });
 }
 
 #[test]
 fn below_the_tiled_token_minimum_the_stacked_op_keeps_the_dense_gather_kernel() {
-    let shape = Shape { sequence: 1, selected: 8, rows: 128, k: 256, experts: 32 };
+    let shape = Shape {
+        sequence: 1,
+        selected: 8,
+        rows: 128,
+        k: 256,
+        experts: 32,
+    };
     let route = top_k_route(shape.sequence, shape.selected, shape.experts, 41);
     assert!(shape.sequence * shape.selected < MIN_TOKENS_FOR_TILES);
-    let outputs = run(&Case { shape, route, activation_per_selected: false, fuse_gate: false });
+    let outputs = run(&Case {
+        shape,
+        route,
+        activation_per_selected: false,
+        fuse_gate: false,
+    });
     assert!(
         !stacked_grouped_kernel_ran(&outputs.kernel_keys),
         "a decode step must not take the prefill tile kernel: {:?}",
         outputs.kernel_keys
     );
     let worst = worst_relative_row_error(&outputs.oracle, &outputs.metal, 128);
-    assert!(worst <= RELATIVE_TOLERANCE, "decode-width stacked op drifted by {worst:e}");
+    assert!(
+        worst <= RELATIVE_TOLERANCE,
+        "decode-width stacked op drifted by {worst:e}"
+    );
 }
 
 #[test]
 fn an_expert_index_past_the_slab_raises_the_same_error_as_cpu() {
-    let shape = Shape { sequence: 60, selected: 4, rows: 64, k: 256, experts: 8 };
+    let shape = Shape {
+        sequence: 60,
+        selected: 4,
+        rows: 64,
+        k: 256,
+        experts: 8,
+    };
     let mut route = top_k_route(shape.sequence, shape.selected, shape.experts, 3);
     route[137] = shape.experts as f32 + 5.0;
-    let case = Case { shape, route, activation_per_selected: false, fuse_gate: false };
+    let case = Case {
+        shape,
+        route,
+        activation_per_selected: false,
+        fuse_gate: false,
+    };
     let stack = quantized_expert_stack(&case.shape);
     let reference_stack = dequantized(&case.shape, &stack);
     let activation = unit_values(2000, activation_len(&case), -1.0, 1.0);
     let (reference_program, reference_output) = program(&case, DType::Float32);
-    let reference_named =
-        named_blocks(&case, QuantizedBlock::Float32(&reference_stack), &activation, &[]);
+    let reference_named = named_blocks(
+        &case,
+        QuantizedBlock::Float32(&reference_stack),
+        &activation,
+        &[],
+    );
     let mut free_buffers = Vec::new();
     let mut validated = None;
     let cpu_error = proxima_tensor::cpu::evaluate_quantized_named_with_scratch(
@@ -376,7 +529,10 @@ fn an_expert_index_past_the_slab_raises_the_same_error_as_cpu() {
     let (program, output) = program(&case, DType::UInt8);
     let named = named_blocks(
         &case,
-        QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &stack },
+        QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes: &stack,
+        },
         &activation,
         &[],
     );
@@ -385,21 +541,39 @@ fn an_expert_index_past_the_slab_raises_the_same_error_as_cpu() {
         .expect("metal plans the stacked q8_0 expert product");
     let metal_error = omega::execute_plan_named(&plan, &named)
         .expect_err("metal rejects the out-of-range expert instead of clamping it away");
-    let TensorError::GatherIndexOutOfRange { node: cpu_node, extent: cpu_extent, .. } = cpu_error
+    let TensorError::GatherIndexOutOfRange {
+        node: cpu_node,
+        extent: cpu_extent,
+        ..
+    } = cpu_error
     else {
         panic!("cpu raised {cpu_error} instead of GatherIndexOutOfRange");
     };
-    let MetalError::Tensor(TensorError::GatherIndexOutOfRange { node, index, extent }) = metal_error
+    let MetalError::Tensor(TensorError::GatherIndexOutOfRange {
+        node,
+        index,
+        extent,
+    }) = metal_error
     else {
         panic!("metal raised {metal_error:?} instead of GatherIndexOutOfRange");
     };
     assert_eq!((node, extent), (cpu_node, cpu_extent));
-    assert_eq!(index, case.shape.experts as i64 + 5, "the fault carries the raw fetched index");
+    assert_eq!(
+        index,
+        case.shape.experts as i64 + 5,
+        "the fault carries the raw fetched index"
+    );
 }
 
 #[test]
 fn control_an_oracle_routed_to_other_experts_disagrees_by_a_gross_factor() {
-    let shape = Shape { sequence: 60, selected: 4, rows: 192, k: 512, experts: 8 };
+    let shape = Shape {
+        sequence: 60,
+        selected: 4,
+        rows: 192,
+        k: 512,
+        experts: 8,
+    };
     let route = top_k_route(shape.sequence, shape.selected, shape.experts, 3);
     let matching = run(&Case {
         shape: Shape { ..shape },
@@ -407,8 +581,16 @@ fn control_an_oracle_routed_to_other_experts_disagrees_by_a_gross_factor() {
         activation_per_selected: false,
         fuse_gate: false,
     });
-    let rotated: Vec<f32> = route.iter().map(|expert| (expert + 1.0) % shape.experts as f32).collect();
-    let misrouted = run(&Case { shape, route: rotated, activation_per_selected: false, fuse_gate: false });
+    let rotated: Vec<f32> = route
+        .iter()
+        .map(|expert| (expert + 1.0) % shape.experts as f32)
+        .collect();
+    let misrouted = run(&Case {
+        shape,
+        route: rotated,
+        activation_per_selected: false,
+        fuse_gate: false,
+    });
     let gross = worst_relative_row_error(&misrouted.oracle, &matching.metal, 192);
     assert!(
         gross > RELATIVE_TOLERANCE,
@@ -420,9 +602,22 @@ const DECODE_AND_VERIFY_WIDTHS: [usize; 4] = [1, 2, 3, 4];
 
 fn assert_matches_oracle_below_the_tile_minimum(case: &Case) -> Vec<String> {
     let outputs = run(case);
-    let Shape { sequence, selected, rows, .. } = case.shape;
-    assert_eq!(outputs.oracle.len(), sequence * selected * rows, "degenerate: oracle produced no output");
-    assert_eq!(outputs.metal.len(), sequence * selected * rows, "degenerate: metal produced no output");
+    let Shape {
+        sequence,
+        selected,
+        rows,
+        ..
+    } = case.shape;
+    assert_eq!(
+        outputs.oracle.len(),
+        sequence * selected * rows,
+        "degenerate: oracle produced no output"
+    );
+    assert_eq!(
+        outputs.metal.len(),
+        sequence * selected * rows,
+        "degenerate: metal produced no output"
+    );
     assert!(
         !stacked_grouped_kernel_ran(&outputs.kernel_keys),
         "{sequence} tokens: a decode or verify width must not take the prefill tile kernel: {:?}",
@@ -441,8 +636,19 @@ fn assert_matches_oracle_below_the_tile_minimum(case: &Case) -> Vec<String> {
 fn a_stacked_projection_at_decode_and_verify_widths_matches_the_f32_oracle() {
     for sequence in DECODE_AND_VERIFY_WIDTHS {
         for activation_per_selected in [false, true] {
-            let shape = Shape { sequence, selected: 8, rows: 192, k: 512, experts: 32 };
-            let route = top_k_route(shape.sequence, shape.selected, shape.experts, 50 + sequence as u64);
+            let shape = Shape {
+                sequence,
+                selected: 8,
+                rows: 192,
+                k: 512,
+                experts: 32,
+            };
+            let route = top_k_route(
+                shape.sequence,
+                shape.selected,
+                shape.experts,
+                50 + sequence as u64,
+            );
             assert_matches_oracle_below_the_tile_minimum(&Case {
                 shape,
                 route,
@@ -455,7 +661,13 @@ fn a_stacked_projection_at_decode_and_verify_widths_matches_the_f32_oracle() {
 
 #[test]
 fn a_stacked_down_at_a_decode_step_takes_the_packed_matvec_not_the_dense_gather() {
-    let shape = Shape { sequence: 1, selected: 8, rows: 192, k: 512, experts: 32 };
+    let shape = Shape {
+        sequence: 1,
+        selected: 8,
+        rows: 192,
+        k: 512,
+        experts: 32,
+    };
     let route = top_k_route(shape.sequence, shape.selected, shape.experts, 61);
     let per_selected = assert_matches_oracle_below_the_tile_minimum(&Case {
         shape: Shape { ..shape },
@@ -469,8 +681,12 @@ fn a_stacked_down_at_a_decode_step_takes_the_packed_matvec_not_the_dense_gather(
         activation_per_selected: false,
         fuse_gate: false,
     });
-    let grouped_matvec_keys = |keys: &[String]| keys.iter().filter(|key| key.contains("_dg")).count();
-    assert!(grouped_matvec_keys(&shared) > 0, "the shared-activation form runs the packed matvec: {shared:?}");
+    let grouped_matvec_keys =
+        |keys: &[String]| keys.iter().filter(|key| key.contains("_dg")).count();
+    assert!(
+        grouped_matvec_keys(&shared) > 0,
+        "the shared-activation form runs the packed matvec: {shared:?}"
+    );
     assert_eq!(
         grouped_matvec_keys(&per_selected),
         grouped_matvec_keys(&shared),

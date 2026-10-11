@@ -459,7 +459,10 @@ mod tests {
         let mut cases_by_stream: alloc::collections::BTreeMap<u32, Vec<&FixtureCase>> =
             alloc::collections::BTreeMap::new();
         for case in &fixture.cases {
-            cases_by_stream.entry(case.stream_id).or_default().push(case);
+            cases_by_stream
+                .entry(case.stream_id)
+                .or_default()
+                .push(case);
         }
 
         let mut mod_ = NgramMod::new(config);
@@ -515,7 +518,10 @@ mod tests {
             mod_.occupancy_resets(),
             mod_.low_accept_resets()
         );
-        assert!(total >= 200, "fixture must carry at least 200 cases per SPEC.md");
+        assert!(
+            total >= 200,
+            "fixture must carry at least 200 cases per SPEC.md"
+        );
         assert!(
             mod_.occupancy_resets() >= 1,
             "the synthetic occupancy warmup replayed against llama.cpp must fire at least one reset"
@@ -590,11 +596,19 @@ mod tests {
 
         for _ in 0..4 {
             ngram_mod_accept(&mut mod_, 0);
-            assert_eq!(mod_.low_accept_resets(), 0, "fewer than five low rounds must not reset yet");
+            assert_eq!(
+                mod_.low_accept_resets(),
+                0,
+                "fewer than five low rounds must not reset yet"
+            );
             mod_.n_draft_last = 4;
         }
         ngram_mod_accept(&mut mod_, 0);
-        assert_eq!(mod_.low_accept_resets(), 1, "the fifth consecutive low round must reset");
+        assert_eq!(
+            mod_.low_accept_resets(),
+            1,
+            "the fifth consecutive low round must reset"
+        );
     }
 
     /// Sad path: `history` shorter than `n_match` must draft nothing.
@@ -692,7 +706,8 @@ mod tests {
             "cases = {} non_empty = {} occupancy_resets = {} low_accept_resets = {}",
             10, 3, 1, 1
         );
-        let expected: String = "cases = 10 non_empty = 3 occupancy_resets = 1 low_accept_resets = 1".into();
+        let expected: String =
+            "cases = 10 non_empty = 3 occupancy_resets = 1 low_accept_resets = 1".into();
         assert_eq!(line, expected);
     }
 }

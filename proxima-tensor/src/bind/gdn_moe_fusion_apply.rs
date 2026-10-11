@@ -76,8 +76,8 @@ pub fn bind_with_fusion(
     admit(numeric_policy, NumericRewrite::IdentityElimination)?;
     admit(numeric_policy, NumericRewrite::ChainFusion)?;
     #[cfg(feature = "std")]
-    let fuse_cached_attention = fuse_cached_attention
-        && env::var_os("PROXIMA_DISABLE_CACHED_ATTENTION_FUSION").is_none();
+    let fuse_cached_attention =
+        fuse_cached_attention && env::var_os("PROXIMA_DISABLE_CACHED_ATTENTION_FUSION").is_none();
     let built = bind_cached_attention_fusion(
         program,
         shapes,
@@ -1179,7 +1179,12 @@ pub(super) fn moe_topk_candidates(
             .chain(found.weights.iter())
             .chain(core::iter::once(&found.weight_total))
             .copied()
-            .chain(found.stacked.into_iter().flat_map(|(routes, weights)| [routes, weights]))
+            .chain(
+                found
+                    .stacked
+                    .into_iter()
+                    .flat_map(|(routes, weights)| [routes, weights]),
+            )
             .collect();
         if found
             .absorbed
@@ -1258,10 +1263,11 @@ pub(super) fn apply_moe_topk_fusion(
         // the stacks are planned as outputs so the bind's chain fusion stops at
         // them; otherwise it folds a stack into whatever elementwise op reads it
         // and that op keeps reading the stack's inner nodes after they are absorbed
-        let sources = operands
-            .iter()
-            .map(|(source, _, _)| *source)
-            .chain(stacked.iter().flat_map(|(routes, weights)| [*routes, *weights]));
+        let sources = operands.iter().map(|(source, _, _)| *source).chain(
+            stacked
+                .iter()
+                .flat_map(|(routes, weights)| [*routes, *weights]),
+        );
         for source in sources {
             if !planning_outputs.contains(&source) {
                 planning_outputs.push(source);
@@ -1385,11 +1391,17 @@ pub(super) fn apply_gated_delta_net_fusion(
 /// projections a `MoeSite` builds, keyed apart from each other by their own
 /// distinct `stack` node.
 #[cfg(feature = "metal-moe-mul-mat-id")]
-pub(super) fn moe_round_reduce_operand(program: &[Op], node: NodeId) -> Option<(NodeId, NodeId, NodeId)> {
+pub(super) fn moe_round_reduce_operand(
+    program: &[Op],
+    node: NodeId,
+) -> Option<(NodeId, NodeId, NodeId)> {
     let Some(Op::Reduce(reduce)) = program.get(node.0 as usize) else {
         return None;
     };
-    if reduce.body != ScalarOp::Add || reduce.init != ReduceInit::Zero || reduce.keep != Keep::Reduce {
+    if reduce.body != ScalarOp::Add
+        || reduce.init != ReduceInit::Zero
+        || reduce.keep != Keep::Reduce
+    {
         return None;
     }
     let Some(Op::Elementwise {
@@ -1645,7 +1657,8 @@ pub(super) fn apply_moe_round_group_fusion(
     if groups.is_empty() {
         return Ok(built);
     }
-    let resolved: BTreeMap<NodeId, &BoundOp> = built.iter().map(|bound| (bound.node, bound)).collect();
+    let resolved: BTreeMap<NodeId, &BoundOp> =
+        built.iter().map(|bound| (bound.node, bound)).collect();
     let mut round_siblings_by_node: BTreeMap<NodeId, (Vec<NodeId>, Vec<NodeId>)> = BTreeMap::new();
     let mut drop: BTreeSet<NodeId> = BTreeSet::new();
     for group in &groups {

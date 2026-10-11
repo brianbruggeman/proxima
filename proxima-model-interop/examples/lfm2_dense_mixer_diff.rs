@@ -209,24 +209,25 @@ fn main() {
     let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, add_bos, false)
         .expect("tokenize prompt");
 
-    let (full_program, _logits_root, _moe_sites, _head_repeats) = scheduled_forward_program_with_experts(
-        architecture.vocab,
-        architecture.embedding,
-        architecture.feed_forward,
-        architecture.expert_feed_forward,
-        architecture.query_heads,
-        architecture.block_count,
-        architecture.expert_count,
-        architecture.expert_used_count,
-        architecture.leading_dense_block_count,
-        architecture.l_cache,
-        &architecture.layers,
-        None,
-        None,
-        false,
-        None,
-    )
-    .expect("build full lfm2 program to walk this layer's node ids");
+    let (full_program, _logits_root, _moe_sites, _head_repeats) =
+        scheduled_forward_program_with_experts(
+            architecture.vocab,
+            architecture.embedding,
+            architecture.feed_forward,
+            architecture.expert_feed_forward,
+            architecture.query_heads,
+            architecture.block_count,
+            architecture.expert_count,
+            architecture.expert_used_count,
+            architecture.leading_dense_block_count,
+            architecture.l_cache,
+            &architecture.layers,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("build full lfm2 program to walk this layer's node ids");
 
     let w_gate_id = input_node_id(&full_program, &format!("blk.{layer}.ffn_gate.weight"));
     let gate_product_id = gate_product_node_id(&full_program, w_gate_id);

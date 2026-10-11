@@ -133,7 +133,12 @@ fn real_tensor_bytes(
 
 /// Same iteration-space convention as `tiled_gemm_wide_weight_stage_parity.
 /// rs`'s own `matmul_program`.
-fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
+fn matmul_program(
+    tokens: u32,
+    in_dim: u32,
+    out_dim: u32,
+    weight_dtype: DType,
+) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = append(
         &mut program,
@@ -180,8 +185,16 @@ fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32, weight_dtype: DType) -
 }
 
 fn assert_bit_identical(off_root: &[f32], on_root: &[f32], element_count: usize, label: &str) {
-    assert_eq!(off_root.len(), element_count, "degenerate: OFF produced no output");
-    assert_eq!(on_root.len(), element_count, "degenerate: ON produced no output");
+    assert_eq!(
+        off_root.len(),
+        element_count,
+        "degenerate: OFF produced no output"
+    );
+    assert_eq!(
+        on_root.len(),
+        element_count,
+        "degenerate: ON produced no output"
+    );
 
     let mut differing = 0usize;
     let mut max_abs_diff = 0.0f32;
@@ -220,11 +233,18 @@ fn run_grid2d_byte_identity(
     let (packed_program, packed_sum) =
         matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::UInt8);
     let blocks = [
-        QuantizedBlock::Packed { codec, bytes: weight_bytes },
+        QuantizedBlock::Packed {
+            codec,
+            bytes: weight_bytes,
+        },
         QuantizedBlock::Float32(&activation),
     ];
 
-    let wws_value = if wide_weight_stage { Some("1") } else { Some("0") };
+    let wws_value = if wide_weight_stage {
+        Some("1")
+    } else {
+        Some("0")
+    };
     let dstore_value = if direct_store { Some("1") } else { Some("0") };
 
     let off = temp_env::with_vars(
@@ -344,14 +364,28 @@ fn check_q4k(
 /// whole multiple of `TILED_GEMM_BLOCK_M` (64) -- interior tiles only.
 #[test]
 fn q4_0_grid2d_matches_flattened_gid_at_a_fully_interior_shape() {
-    check_q4_0("blk.0.attn_q.weight", 510, 128, false, false, "q4_0_fully_interior");
+    check_q4_0(
+        "blk.0.attn_q.weight",
+        510,
+        128,
+        false,
+        false,
+        "q4_0_fully_interior",
+    );
 }
 
 /// `rows=100` is NOT a multiple of `TILED_GEMM_BLOCK_M` (64) -- a genuine
 /// partial feature-row tile.
 #[test]
 fn q4_0_grid2d_matches_flattened_gid_with_a_partial_edge_tile() {
-    check_q4_0("blk.0.attn_q.weight", 510, 100, false, false, "q4_0_partial_edge_tile");
+    check_q4_0(
+        "blk.0.attn_q.weight",
+        510,
+        100,
+        false,
+        false,
+        "q4_0_partial_edge_tile",
+    );
 }
 
 /// Composed with `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE=1` -- the largest
@@ -359,38 +393,80 @@ fn q4_0_grid2d_matches_flattened_gid_with_a_partial_edge_tile() {
 /// preamble this switch's signature change sits directly upstream of.
 #[test]
 fn q4_0_grid2d_matches_flattened_gid_combined_with_wide_weight_stage() {
-    check_q4_0("blk.0.attn_q.weight", 510, 128, true, false, "q4_0_combined_with_wws");
+    check_q4_0(
+        "blk.0.attn_q.weight",
+        510,
+        128,
+        true,
+        false,
+        "q4_0_combined_with_wws",
+    );
 }
 
 /// Composed with `PROXIMA_TILED_GEMM_DIRECT_STORE=1`.
 #[test]
 fn q4_0_grid2d_matches_flattened_gid_combined_with_direct_store() {
-    check_q4_0("blk.0.attn_q.weight", 510, 128, false, true, "q4_0_combined_with_dstore");
+    check_q4_0(
+        "blk.0.attn_q.weight",
+        510,
+        128,
+        false,
+        true,
+        "q4_0_combined_with_dstore",
+    );
 }
 
 /// All three switches composed at once.
 #[test]
 fn q4_0_grid2d_matches_flattened_gid_combined_with_wws_and_direct_store() {
-    check_q4_0("blk.0.attn_q.weight", 510, 128, true, true, "q4_0_combined_with_wws_and_dstore");
+    check_q4_0(
+        "blk.0.attn_q.weight",
+        510,
+        128,
+        true,
+        true,
+        "q4_0_combined_with_wws_and_dstore",
+    );
 }
 
 /// `Q4_K` admits `classify_tiled_gemm` unconditionally.
 #[test]
 fn q4k_grid2d_matches_flattened_gid_at_a_fully_interior_shape() {
-    check_q4k("blk.0.attn_q.weight", 32, 128, false, false, "q4k_fully_interior");
+    check_q4k(
+        "blk.0.attn_q.weight",
+        32,
+        128,
+        false,
+        false,
+        "q4k_fully_interior",
+    );
 }
 
 /// `rows=100` is NOT a multiple of `TILED_GEMM_BLOCK_M` (64).
 #[test]
 fn q4k_grid2d_matches_flattened_gid_with_a_partial_edge_tile() {
-    check_q4k("blk.0.attn_q.weight", 32, 100, false, false, "q4k_partial_edge_tile");
+    check_q4k(
+        "blk.0.attn_q.weight",
+        32,
+        100,
+        false,
+        false,
+        "q4k_partial_edge_tile",
+    );
 }
 
 /// Composed with `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE=1` and
 /// `PROXIMA_TILED_GEMM_DIRECT_STORE=1` at once.
 #[test]
 fn q4k_grid2d_matches_flattened_gid_combined_with_wws_and_direct_store() {
-    check_q4k("blk.0.attn_q.weight", 32, 128, true, true, "q4k_combined_with_wws_and_dstore");
+    check_q4k(
+        "blk.0.attn_q.weight",
+        32,
+        128,
+        true,
+        true,
+        "q4k_combined_with_wws_and_dstore",
+    );
 }
 
 /// Iteration dims matching `dense_batched_direct_store_parity.rs`'s own
@@ -531,8 +607,15 @@ fn run_dense_grid2d_byte_identity(
     direct_store: bool,
     label: &str,
 ) {
-    let blocks = [QuantizedBlock::Float32(weight), QuantizedBlock::Float32(other)];
-    let wws_value = if wide_weight_stage { Some("1") } else { Some("0") };
+    let blocks = [
+        QuantizedBlock::Float32(weight),
+        QuantizedBlock::Float32(other),
+    ];
+    let wws_value = if wide_weight_stage {
+        Some("1")
+    } else {
+        Some("0")
+    };
     let dstore_value = if direct_store { Some("1") } else { Some("0") };
 
     let off = temp_env::with_vars(

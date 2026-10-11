@@ -420,10 +420,9 @@ pub(super) fn pipeline_for(
         numeric_policy,
         false,
         attention_mma_selection,
-            attention_row_schedule,
+        attention_row_schedule,
     )?;
-    if env_flags::debug_metal_source() && env_flags::compare_bound_node() == Some(bound.node)
-    {
+    if env_flags::debug_metal_source() && env_flags::compare_bound_node() == Some(bound.node) {
         eprintln!(
             "metal_bound_source node={:?}\n{}",
             bound.node, kernel.source
@@ -447,7 +446,9 @@ pub(super) fn pipeline_for(
         let quantized = crate::identity::operand_codecs(bound, packed_operands);
         if let Some(block) = crate::msl::packed_row_block(bound, &quantized) {
             let rows = crate::msl::codec_rows_per_simdgroup(block.codec);
-            if let Ok((_, grid)) = crate::msl::kernel_dispatch_shape(bound, packed_operands, numeric_policy) {
+            if let Ok((_, grid)) =
+                crate::msl::kernel_dispatch_shape(bound, packed_operands, numeric_policy)
+            {
                 let feature_total: u64 = block
                     .feature_axes
                     .iter()
@@ -874,7 +875,8 @@ pub static PREPARE_RETIRE_TICKS: Counter = Counter::new("omega.metal.prepare_ret
 /// `OnceCell` is already populated) -- the counter only ever advances on the
 /// same plan-cache-miss step [`PREPARE_TICKS`] does.
 #[cfg(feature = "instrument")]
-pub static BUILD_PLAN_UNIFORMS_TICKS: Counter = Counter::new("omega.metal.build_plan_uniforms_ticks");
+pub static BUILD_PLAN_UNIFORMS_TICKS: Counter =
+    Counter::new("omega.metal.build_plan_uniforms_ticks");
 /// [`arena_encode_dispatch_finish::resolve_steps`]'s own wall clock, timed
 /// past its staleness check so a plan-cache HIT (the common case, an
 /// immediate `return Ok(())`) never advances this counter -- only a genuine
@@ -886,7 +888,8 @@ pub static RESOLVE_STEPS_TICKS: Counter = Counter::new("omega.metal.resolve_step
 /// crossing pays once per fresh `Plan`, never again for that plan's
 /// lifetime.
 #[cfg(feature = "instrument")]
-pub static UNIFORM_BUFFER_ALLOCATIONS: Counter = Counter::new("omega.metal.uniform_buffer_allocations");
+pub static UNIFORM_BUFFER_ALLOCATIONS: Counter =
+    Counter::new("omega.metal.uniform_buffer_allocations");
 
 /// One [`execute_plan`] call's worth of the split-4019 counters above,
 /// snapshot-and-reset so a caller (the metal decode test) can read a
@@ -1945,4 +1948,3 @@ thread_local! {
     pub(super) static NOCOPY_BUFFERS: RefCell<BTreeMap<String, (usize, usize, MetalBuffer)>> =
         RefCell::new(BTreeMap::new());
 }
-

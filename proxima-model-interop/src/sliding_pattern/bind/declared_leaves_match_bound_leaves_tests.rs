@@ -1,12 +1,12 @@
 use super::*;
-use proxima_tensor::spec::{ForwardProgram, build_forward};
 use crate::sliding_pattern::SlidingPatternHparams;
 use arrayvec::ArrayVec;
-use proxima_tensor::spec::{CacheStrategy, KeySourceKind};
 use proxima_gguf::types::GgmlType;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_gguf::{GgufModel, TensorPayload, parse_complete, write_complete};
 use proxima_tensor::op::Op;
+use proxima_tensor::spec::{CacheStrategy, KeySourceKind};
+use proxima_tensor::spec::{ForwardProgram, build_forward};
 
 /// The real `e2b-it-qat` checkpoint's own measured
 /// `sliding_window_pattern`/`shared_kv_layers`/`block_count` (header
@@ -20,29 +20,46 @@ fn e2b_shaped(shared_kv_layers: u32) -> (ParsedGguf, SlidingPatternHparams) {
     feed_forward.extend(alloc::vec![12288u32; 20]);
     let u32_array = |values: Vec<u32>| MetadataValue::Array(MetadataArray::U32(values));
     let metadata = alloc::vec![
-        ("general.architecture", MetadataValue::String("gemma4".into())),
+        (
+            "general.architecture",
+            MetadataValue::String("gemma4".into())
+        ),
         ("gemma4.embedding_length", MetadataValue::U32(1536)),
         ("gemma4.block_count", MetadataValue::U32(35)),
         ("gemma4.attention.head_count", MetadataValue::U32(8)),
-        ("gemma4.attention.head_count_kv", u32_array(alloc::vec![1; 35])),
+        (
+            "gemma4.attention.head_count_kv",
+            u32_array(alloc::vec![1; 35])
+        ),
         (
             "gemma4.attention.sliding_window_pattern",
-            MetadataValue::Array(MetadataArray::Bool((0..35u32).map(|index| (index + 1) % 5 != 0).collect())),
+            MetadataValue::Array(MetadataArray::Bool(
+                (0..35u32).map(|index| (index + 1) % 5 != 0).collect()
+            )),
         ),
-        ("gemma4.attention.shared_kv_layers", MetadataValue::U32(shared_kv_layers)),
+        (
+            "gemma4.attention.shared_kv_layers",
+            MetadataValue::U32(shared_kv_layers)
+        ),
         ("gemma4.attention.key_length", MetadataValue::U32(512)),
         ("gemma4.attention.value_length", MetadataValue::U32(512)),
         ("gemma4.attention.key_length_swa", MetadataValue::U32(256)),
         ("gemma4.attention.value_length_swa", MetadataValue::U32(256)),
         ("gemma4.attention.sliding_window", MetadataValue::U32(512)),
-        ("gemma4.attention.layer_norm_rms_epsilon", MetadataValue::F32(1e-6)),
+        (
+            "gemma4.attention.layer_norm_rms_epsilon",
+            MetadataValue::F32(1e-6)
+        ),
         ("gemma4.feed_forward_length", u32_array(feed_forward)),
         ("gemma4.rope.freq_base", MetadataValue::F32(1_000_000.0)),
         ("gemma4.rope.freq_base_swa", MetadataValue::F32(10_000.0)),
         ("gemma4.rope.dimension_count", MetadataValue::U32(512)),
         ("gemma4.rope.dimension_count_swa", MetadataValue::U32(256)),
         ("gemma4.final_logit_softcapping", MetadataValue::F32(30.0)),
-        ("gemma4.embedding_length_per_layer_input", MetadataValue::U32(256)),
+        (
+            "gemma4.embedding_length_per_layer_input",
+            MetadataValue::U32(256)
+        ),
     ];
     let table = [0u8; 1536 * 4];
     let model = GgufModel {
@@ -60,7 +77,8 @@ fn e2b_shaped(shared_kv_layers: u32) -> (ParsedGguf, SlidingPatternHparams) {
     };
     let bytes = write_complete(&model).expect("the e2b-shaped model encodes");
     let parsed = parse_complete(&bytes).expect("bytes the encoder just wrote parse");
-    let architecture = from_metadata(&parsed).expect("gemma4 hparams parse from the e2b-shaped header");
+    let architecture =
+        from_metadata(&parsed).expect("gemma4 hparams parse from the e2b-shaped header");
     (parsed, architecture)
 }
 
@@ -97,14 +115,12 @@ fn stored_leaf_names(
 /// `sliding_pattern_descriptor_from_gguf`'s own output, built through the
 /// cacheless engine so the check is independent of which
 /// `CacheStrategy` bind picks -- declares as an `Input` leaf for `suffix`.
-fn declared_leaf_names(
-    parsed: &ParsedGguf,
-    suffix: &str,
-) -> alloc::collections::BTreeSet<String> {
+fn declared_leaf_names(parsed: &ParsedGguf, suffix: &str) -> alloc::collections::BTreeSet<String> {
     let mut descriptor = descriptor_from_gguf(parsed, false)
         .expect("the e2b-shaped header carries every key the descriptor reads");
     descriptor.cache_strategy = CacheStrategy::Cacheless;
-    let ForwardProgram { program, .. } = build_forward(&descriptor).expect("gemma4 e2b-shaped forward program lowers");
+    let ForwardProgram { program, .. } =
+        build_forward(&descriptor).expect("gemma4 e2b-shaped forward program lowers");
 
     program
         .iter()
@@ -182,10 +198,26 @@ fn gemma4_e2b_shared_kv_reuse_map_matches_hand_derived_table() {
     let descriptor = descriptor_from_gguf(&parsed, false)
         .expect("the e2b-shaped header carries every key the descriptor reads");
     let shared_sources: [(usize, u32); 20] = [
-        (15, 13), (16, 13), (17, 13), (18, 13), (19, 14),
-        (20, 13), (21, 13), (22, 13), (23, 13), (24, 14),
-        (25, 13), (26, 13), (27, 13), (28, 13), (29, 14),
-        (30, 13), (31, 13), (32, 13), (33, 13), (34, 14),
+        (15, 13),
+        (16, 13),
+        (17, 13),
+        (18, 13),
+        (19, 14),
+        (20, 13),
+        (21, 13),
+        (22, 13),
+        (23, 13),
+        (24, 14),
+        (25, 13),
+        (26, 13),
+        (27, 13),
+        (28, 13),
+        (29, 14),
+        (30, 13),
+        (31, 13),
+        (32, 13),
+        (33, 13),
+        (34, 14),
     ];
 
     for (layer, source) in shared_sources {

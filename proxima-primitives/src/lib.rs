@@ -33,8 +33,8 @@ extern crate alloc;
 extern crate std;
 
 pub mod codec;
-pub mod float_layout;
 pub mod driver;
+pub mod float_layout;
 pub mod pipe;
 pub mod stream;
 pub mod sync;

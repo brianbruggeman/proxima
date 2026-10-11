@@ -92,8 +92,14 @@ fn assert_default_matches_off(config: ServingConfig<'_>, label: &str) {
     let (on_ids, on_stats) = decode(&model, config);
     let (off_ids, off_stats) = decode(&model, config.with_speculative(SpeculativeConfig::none()));
 
-    assert_eq!(on_ids, off_ids, "{label}: default speculation must not change the output");
-    assert!(!on_ids.is_empty(), "{label}: the decode must produce tokens");
+    assert_eq!(
+        on_ids, off_ids,
+        "{label}: default speculation must not change the output"
+    );
+    assert!(
+        !on_ids.is_empty(),
+        "{label}: the decode must produce tokens"
+    );
     assert!(
         on_stats.verify_steps >= 1 && on_stats.drafted_total >= 1,
         "{label}: the default (ngram-simple) must fire on this repeated prompt: {on_stats:?}"

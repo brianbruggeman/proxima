@@ -119,7 +119,10 @@ fn half_bytes(values: &[f32]) -> Vec<u8> {
 }
 
 fn round_to_bf16(values: &[f32]) -> Vec<f32> {
-    values.iter().map(|value| bf16::from_f32(*value).to_f32()).collect()
+    values
+        .iter()
+        .map(|value| bf16::from_f32(*value).to_f32())
+        .collect()
 }
 
 fn bf16_bytes(values: &[f32]) -> Vec<u8> {
@@ -214,8 +217,8 @@ fn parity_cell(cached_len: u64, head_dim: u32, half_kv: bool) -> f32 {
     .expect("cpu runs the decode program");
     let metal_named: Vec<(&str, QuantizedBlock<'_>)> = named
         .iter()
-        .map(|(name, block)| {
-            match half_blocks.iter().find(|(half_name, _)| half_name == name) {
+        .map(
+            |(name, block)| match half_blocks.iter().find(|(half_name, _)| half_name == name) {
                 Some((_, bytes)) => (
                     *name,
                     QuantizedBlock::Packed {
@@ -224,8 +227,8 @@ fn parity_cell(cached_len: u64, head_dim: u32, half_kv: bool) -> f32 {
                     },
                 ),
                 None => (*name, *block),
-            }
-        })
+            },
+        )
         .collect();
     let plan = omega::plan_named(
         &fixture.program,
@@ -240,7 +243,11 @@ fn parity_cell(cached_len: u64, head_dim: u32, half_kv: bool) -> f32 {
 
     let expected = cpu.root();
     let actual = metal.root();
-    assert_eq!(actual.len(), expected.len(), "head_dim {head_dim} cached_len {cached_len}");
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "head_dim {head_dim} cached_len {cached_len}"
+    );
     assert!(
         !expected.is_empty(),
         "head_dim {head_dim} cached_len {cached_len}: an empty root compares nothing"
@@ -307,7 +314,11 @@ fn card_06_bf16_decode_matches_f32_decode_output_bits() {
             for (index, value) in values.iter_mut().enumerate() {
                 *value = exact_values[index % exact_values.len()];
             }
-            assert_eq!(*values, round_to_bf16(values), "fixture values are exact BF16 values");
+            assert_eq!(
+                *values,
+                round_to_bf16(values),
+                "fixture values are exact BF16 values"
+            );
             (name.clone(), bf16_bytes(values))
         })
         .collect();
@@ -318,18 +329,20 @@ fn card_06_bf16_decode_matches_f32_decode_output_bits() {
     let bf16_named: Vec<(&str, QuantizedBlock<'_>)> = fixture
         .named
         .iter()
-        .map(|(name, values)| match bf16_blocks.iter().find(|(cache_name, _)| cache_name == name) {
-            Some((_, bytes)) => (
-                name.as_str(),
-                QuantizedBlock::Packed {
-                    codec: omega::Codec::BFloat16,
-                    bytes,
-                },
-            ),
-            None => (
-                name.as_str(),
-                QuantizedBlock::Float32(values),
-            ),
+        .map(|(name, values)| {
+            match bf16_blocks
+                .iter()
+                .find(|(cache_name, _)| cache_name == name)
+            {
+                Some((_, bytes)) => (
+                    name.as_str(),
+                    QuantizedBlock::Packed {
+                        codec: omega::Codec::BFloat16,
+                        bytes,
+                    },
+                ),
+                None => (name.as_str(), QuantizedBlock::Float32(values)),
+            }
         })
         .collect();
     let f32_plan = omega::plan_named(
@@ -361,7 +374,10 @@ fn card_06_bf16_decode_matches_f32_decode_output_bits() {
         .iter()
         .map(|value| value.to_bits())
         .collect::<Vec<_>>();
-    assert_eq!(bf16_output, f32_output, "the cache decode has the same f32 inputs and operations");
+    assert_eq!(
+        bf16_output, f32_output,
+        "the cache decode has the same f32 inputs and operations"
+    );
 }
 
 #[test]
@@ -370,8 +386,8 @@ fn card_06_bf16_decode_selects_source_and_declines_mixed_cache_codecs() {
     let fixture = gqa_decode_fixture(31, 64);
     let output_roots = [fixture.roots[0]];
     let shapes = infer(&fixture.program, &fixture.symbols).expect("the decode program infers");
-    let resolved = bind(&fixture.program, &shapes, &output_roots, policy)
-        .expect("the decode program binds");
+    let resolved =
+        bind(&fixture.program, &shapes, &output_roots, policy).expect("the decode program binds");
     let attention = resolved
         .iter()
         .find(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
@@ -381,7 +397,10 @@ fn card_06_bf16_decode_selects_source_and_declines_mixed_cache_codecs() {
         .map(|index| (attention.operands()[index].0, omega::Codec::BFloat16))
         .collect::<omega::PackedOperands>();
     let emitted = omega::emit(attention, &bf16, policy).expect("BF16 decode source emits");
-    assert!(emitted.entry.ends_with("_ds"), "selected source is decode split");
+    assert!(
+        emitted.entry.ends_with("_ds"),
+        "selected source is decode split"
+    );
     assert!(emitted.source.contains("device const ushort* in2"));
     assert!(emitted.source.contains("omega_bf16x4_to_float4"));
     assert!(emitted.source.contains("float4(kr4_new[index])"));
@@ -395,7 +414,10 @@ fn card_06_bf16_decode_selects_source_and_declines_mixed_cache_codecs() {
     .collect::<omega::PackedOperands>();
     let error = omega::emit(attention, &mixed, policy)
         .expect_err("mixed BF16 and F16 cache operands must decline");
-    assert!(matches!(error, omega::EmitError::CachedAttentionKvCodecNotSupported { .. }));
+    assert!(matches!(
+        error,
+        omega::EmitError::CachedAttentionKvCodecNotSupported { .. }
+    ));
 }
 
 #[test]
@@ -420,8 +442,8 @@ fn card_09_bf8_decode_matches_golden_vectors_and_declines_mixed_cache_codecs() {
     ]
     .map(f32::from_bits);
     let encoded = [
-        0x00, 0x80, 0x3c, 0xbc, 0x3d, 0x3e, 0x3c, 0x3e, 0x04, 0x01, 0x7b, 0x7c, 0x7c, 0xfc,
-        0x7e, 0xfe,
+        0x00, 0x80, 0x3c, 0xbc, 0x3d, 0x3e, 0x3c, 0x3e, 0x04, 0x01, 0x7b, 0x7c, 0x7c, 0xfc, 0x7e,
+        0xfe,
     ];
     let decoded = [
         0x0000_0000,
@@ -441,7 +463,10 @@ fn card_09_bf8_decode_matches_golden_vectors_and_declines_mixed_cache_codecs() {
         0x7fc0_0000,
         0xffc0_0000,
     ];
-    assert_eq!(inputs.map(|value| BFloat8::from_f32(value).to_bits()), encoded);
+    assert_eq!(
+        inputs.map(|value| BFloat8::from_f32(value).to_bits()),
+        encoded
+    );
     assert_eq!(
         encoded.map(|value| BFloat8::from_bits(value).to_f32().to_bits()),
         decoded
@@ -451,8 +476,8 @@ fn card_09_bf8_decode_matches_golden_vectors_and_declines_mixed_cache_codecs() {
     let fixture = gqa_decode_fixture(31, 64);
     let output_roots = [fixture.roots[0]];
     let shapes = infer(&fixture.program, &fixture.symbols).expect("the decode program infers");
-    let resolved = bind(&fixture.program, &shapes, &output_roots, policy)
-        .expect("the decode program binds");
+    let resolved =
+        bind(&fixture.program, &shapes, &output_roots, policy).expect("the decode program binds");
     let attention = resolved
         .iter()
         .find(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
@@ -462,7 +487,10 @@ fn card_09_bf8_decode_matches_golden_vectors_and_declines_mixed_cache_codecs() {
         .map(|index| (attention.operands()[index].0, omega::Codec::BFloat8))
         .collect::<omega::PackedOperands>();
     let emitted = omega::emit(attention, &bf8, policy).expect("BF8 decode source emits");
-    assert!(emitted.entry.ends_with("_ds"), "selected source is decode split");
+    assert!(
+        emitted.entry.ends_with("_ds"),
+        "selected source is decode split"
+    );
     assert!(emitted.source.contains("device const uchar* in2"));
     assert!(emitted.source.contains("device const uchar4* kr4_cached"));
     assert!(emitted.source.contains("omega_bf8x4_to_float4"));
@@ -477,7 +505,10 @@ fn card_09_bf8_decode_matches_golden_vectors_and_declines_mixed_cache_codecs() {
     .collect::<omega::PackedOperands>();
     let error = omega::emit(attention, &mixed, policy)
         .expect_err("mixed BF8 and F16 cache operands must decline");
-    assert!(matches!(error, omega::EmitError::CachedAttentionKvCodecNotSupported { .. }));
+    assert!(matches!(
+        error,
+        omega::EmitError::CachedAttentionKvCodecNotSupported { .. }
+    ));
 }
 
 #[test]
@@ -493,7 +524,11 @@ fn card_09_bf8_decode_matches_f32_cache_output_bits() {
             for (index, value) in values.iter_mut().enumerate() {
                 *value = exact_values[index % exact_values.len()];
             }
-            assert_eq!(*values, round_to_bf8(values), "fixture values are exact BF8 values");
+            assert_eq!(
+                *values,
+                round_to_bf8(values),
+                "fixture values are exact BF8 values"
+            );
             (name.clone(), bf8_bytes(values))
         })
         .collect();
@@ -504,16 +539,18 @@ fn card_09_bf8_decode_matches_f32_cache_output_bits() {
     let bf8_named: Vec<(&str, QuantizedBlock<'_>)> = fixture
         .named
         .iter()
-        .map(|(name, values)| match bf8_blocks.iter().find(|(cache_name, _)| cache_name == name) {
-            Some((_, bytes)) => (
-                name.as_str(),
-                QuantizedBlock::Packed {
-                    codec: omega::Codec::BFloat8,
-                    bytes,
-                },
-            ),
-            None => (name.as_str(), QuantizedBlock::Float32(values)),
-        })
+        .map(
+            |(name, values)| match bf8_blocks.iter().find(|(cache_name, _)| cache_name == name) {
+                Some((_, bytes)) => (
+                    name.as_str(),
+                    QuantizedBlock::Packed {
+                        codec: omega::Codec::BFloat8,
+                        bytes,
+                    },
+                ),
+                None => (name.as_str(), QuantizedBlock::Float32(values)),
+            },
+        )
         .collect();
     let f32_plan = omega::plan_named(
         &fixture.program,
@@ -532,8 +569,12 @@ fn card_09_bf8_decode_matches_f32_cache_output_bits() {
     )
     .expect("BF8 cache dispatch plans");
     assert_ne!(
-        f32_plan.kernel_keys().expect("F32 plan exposes kernel identities"),
-        bf8_plan.kernel_keys().expect("BF8 plan exposes kernel identities"),
+        f32_plan
+            .kernel_keys()
+            .expect("F32 plan exposes kernel identities"),
+        bf8_plan
+            .kernel_keys()
+            .expect("BF8 plan exposes kernel identities"),
         "the BF8 cache reader has a distinct pipeline identity"
     );
 
@@ -549,12 +590,18 @@ fn card_09_bf8_decode_matches_f32_cache_output_bits() {
         .iter()
         .map(|value| value.to_bits())
         .collect::<Vec<_>>();
-    assert_eq!(bf8_output_repeat, bf8_output, "BF8 dispatch repeats its output bytes");
+    assert_eq!(
+        bf8_output_repeat, bf8_output,
+        "BF8 dispatch repeats its output bytes"
+    );
     let f32_output = omega::execute_plan_named(&f32_plan, &f32_named)
         .expect("F32 cache decode executes")
         .root()
         .iter()
         .map(|value| value.to_bits())
         .collect::<Vec<_>>();
-    assert_eq!(bf8_output, f32_output, "BF8 cache values widen into the same f32 decode");
+    assert_eq!(
+        bf8_output, f32_output,
+        "BF8 cache values widen into the same f32 decode"
+    );
 }

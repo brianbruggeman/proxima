@@ -68,7 +68,10 @@ fn weight_blocks(rows: usize, k: usize) -> anyhow::Result<Vec<u8>> {
     let row_bytes = k / QK4_0 * BLOCK_BYTES;
     let mut blocks = vec![0u8; rows * row_bytes];
     let values = unit_values(11, rows * k);
-    for (row, row_out) in values.chunks_exact(k).zip(blocks.chunks_exact_mut(row_bytes)) {
+    for (row, row_out) in values
+        .chunks_exact(k)
+        .zip(blocks.chunks_exact_mut(row_bytes))
+    {
         quantize(row, row_out).context("k is a whole number of q4_0 blocks")?;
     }
     Ok(blocks)
@@ -157,7 +160,13 @@ fn measure(name: &str, tokens: usize, rows: usize, k: usize) -> anyhow::Result<(
     let activation = unit_values(23, tokens * k);
     let (program, root) = program(tokens, rows, k);
     let named = [
-        ("weight", QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: &weights }),
+        (
+            "weight",
+            QuantizedBlock::Packed {
+                codec: Codec::Q4_0,
+                bytes: &weights,
+            },
+        ),
         ("activation", QuantizedBlock::Float32(&activation)),
     ];
     let plan = omega::plan_named(&program, &[], &named, &[root], NumericPolicy::default())
@@ -183,7 +192,10 @@ fn measure(name: &str, tokens: usize, rows: usize, k: usize) -> anyhow::Result<(
         "shape={name} tokens={tokens} rows={rows} k={k} median_us={microseconds:.1} p25_us={lower_quartile:.1} min_us={minimum:.1} max_us={maximum:.1} cov_pct={:.2} tflops={:.3} output_fnv={output_hash:016x} samples_us={:?}",
         coefficient_of_variation_percent(&samples),
         gflop / microseconds * 1.0e3,
-        samples.iter().map(|sample| sample / 1000).collect::<Vec<_>>()
+        samples
+            .iter()
+            .map(|sample| sample / 1000)
+            .collect::<Vec<_>>()
     );
     Ok(())
 }

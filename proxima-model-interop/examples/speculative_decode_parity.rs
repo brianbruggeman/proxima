@@ -415,9 +415,7 @@ fn print_lever_config() {
 fn main() {
     print_lever_config();
     let raw_args: Vec<String> = env::args().skip(1).collect();
-    let seed_mismatch_control = raw_args
-        .iter()
-        .any(|arg| arg == "--seed-mismatch-control");
+    let seed_mismatch_control = raw_args.iter().any(|arg| arg == "--seed-mismatch-control");
     let gpu_layers_flag_index = raw_args.iter().position(|arg| arg == "--gpu-layers");
     let gpu_layers = gpu_layers_flag_index
         .and_then(|flag_index| raw_args.get(flag_index + 1))
@@ -607,7 +605,9 @@ mod tests {
             );
         }
         assert!(
-            summary.split(' ').all(|field| field.ends_with("=true") || field.ends_with("=false")),
+            summary
+                .split(' ')
+                .all(|field| field.ends_with("=true") || field.ends_with("=false")),
             "every feature field must render a bool, got: {summary}"
         );
     }

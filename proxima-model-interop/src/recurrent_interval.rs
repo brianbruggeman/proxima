@@ -21,8 +21,8 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
-    CacheMask, CacheStrategy, ForwardProgram, KeySourceKind, LayerAttentionConfig, LayerKind, LayerSchedule,
-    ModelDescriptor, RopeTableSel, ValueSourceKind, build_forward,
+    CacheMask, CacheStrategy, ForwardProgram, KeySourceKind, LayerAttentionConfig, LayerKind,
+    LayerSchedule, ModelDescriptor, RopeTableSel, ValueSourceKind, build_forward,
 };
 
 use crate::bind::{
@@ -340,7 +340,9 @@ pub fn recurrent_interval_ssm_state_bytes(shape: SsmShape, block_count: u32) -> 
 /// # Errors
 ///
 /// The family has no embedded profile.
-pub fn descriptor_from_architecture(architecture: &RecurrentIntervalHparams) -> Result<ModelDescriptor, InteropError> {
+pub fn descriptor_from_architecture(
+    architecture: &RecurrentIntervalHparams,
+) -> Result<ModelDescriptor, InteropError> {
     let profile = family_profile(&architecture.family)?;
     let attention = LayerAttentionConfig {
         head_dim: architecture.attn_head_dim,
