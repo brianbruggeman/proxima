@@ -155,3 +155,27 @@ fn scaled_e3m2_render_model_name_free() {
         }
     }
 }
+
+#[cfg(all(
+    feature = "std",
+    any(
+        all(feature = "metal", target_os = "macos"),
+        feature = "cuda-driver",
+        feature = "wgpu-backend"
+    )
+))]
+#[test]
+fn scaled_e3m2_bind_maps_a_packed_operand_to_its_codec_and_a_float_operand_to_none() {
+    let packed_bytes = [0u8; 4 * Codec::FP6_E3M2_BLOCK_BYTES];
+    let activation = [0.5f32; 32];
+    let packed = QuantizedBlock::Packed {
+        codec: Codec::Fp6E3M2,
+        bytes: &packed_bytes,
+    };
+
+    assert_eq!(codec_from_quantized_block(&packed), Some(Codec::Fp6E3M2));
+    assert_eq!(
+        codec_from_quantized_block(&QuantizedBlock::Float32(&activation)),
+        None
+    );
+}
