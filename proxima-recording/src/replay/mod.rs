@@ -7,7 +7,10 @@
 //! `alloc` tier; the cassette-loading adapter below (file I/O, `Runtime`,
 //! the `Pipe`/`PipeFactory` surface) additionally needs `std`.
 
+pub mod fsm;
+pub mod index;
 pub mod keying;
+pub mod ledger;
 pub mod meta;
 #[cfg(feature = "std")]
 pub mod ws;
