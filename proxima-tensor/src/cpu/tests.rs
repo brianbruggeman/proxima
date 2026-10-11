@@ -501,6 +501,132 @@ fn a_reduce_with_a_sigmoid_epilogue_is_not_stranded_by_width_tile_packing() {
     }
 }
 
+/// A dense layer over `[batch, sequence]` rows followed by a bias add and a
+/// divide by a scalar constant, `q = (reduce(x * w) + bias) / 2`, the shape
+/// of a transformer feed-forward projection, with a different `bias` value
+/// per column. `biased` also feeds the `biased * q` tail of a gelu, which
+/// keeps chain fusion from merging the add and the divide, so
+/// `reduce-epilogue-fusion` folds the add onto the reduce and then the
+/// divide onto that fused reduce in two rounds. The second round must keep
+/// the bias addressed by the output coordinate, so every column reads its
+/// own bias.
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn dense_bias_divide_program() -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let mut input = |name: &str, shape: &[u32]| {
+        let shape = shape.iter().map(|&extent| Extent::Static(extent)).collect();
+        append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape,
+                name: Some(name.to_string()),
+            },
+        )
+    };
+    let (x, w, bias) = (
+        input("x", &[2, 2, 3]),
+        input("w", &[3, 5]),
+        input("bias", &[5]),
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (x, IndexMap::Affine(map::projection(4, &[0, 1, 2]))),
+                (w, IndexMap::Affine(map::projection(4, &[2, 3]))),
+            ],
+            name: None,
+        },
+    );
+    let folded = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+            out_map: IndexMap::Affine(map::projection(4, &[0, 1, 3])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+    let biased = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            operands: vec![
+                (bias, IndexMap::Affine(map::projection(3, &[2]))),
+                (folded, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+            ],
+            name: None,
+        },
+    );
+    let two = append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: Vec::new(),
+            value: 2.0,
+        },
+    );
+    let halved = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Divide,
+            operands: vec![
+                (biased, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                (two, IndexMap::Affine(map::projection(3, &[]))),
+            ],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (biased, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                (halved, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+            ],
+            name: None,
+        },
+    );
+    (program, halved)
+}
+
+/// Expected values are hand-derived: with `w[k][c] = (k + 1) * (c + 1)` each
+/// row folds to `(c + 1) * (x0 + 2 * x1 + 3 * x2)`, then `+ bias[c]`, then `/ 2`.
+#[test]
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn a_second_plain_epilogue_keeps_the_first_epilogues_per_column_operand() {
+    let (program, halved) = dense_bias_divide_program();
+    let x_data = [
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+    ];
+    let w_data: Vec<f32> = (1..=3)
+        .flat_map(|row| (1..=5).map(move |column| (row * column) as f32))
+        .collect();
+    let bias_data = [0.5, -1.5, 2.5, -3.5, 4.5];
+    let named: Vec<(&str, &[f32])> = vec![("x", &x_data), ("w", &w_data), ("bias", &bias_data)];
+
+    let evaluated = evaluate_named(&program, &[], &named, &[halved]).expect("the layer evaluates");
+
+    let expected = [
+        7.25, 13.25, 22.25, 26.25, 37.25, 16.25, 31.25, 49.25, 62.25, 82.25, 25.25, 49.25, 76.25,
+        98.25, 127.25, 34.25, 67.25, 103.25, 134.25, 172.25,
+    ];
+    let (actual, shape) = evaluated.get(halved).expect("the divide is an output");
+    assert_eq!(shape, &[2, 2, 5]);
+    assert_eq!(actual, &expected);
+}
+
 /// A placed output (`caller_owned` in `omega::metal::finish`) reports
 /// `is_placed() == true` and `get() == None` -- distinct from a node
 /// that was simply never requested, which reports `is_placed() ==
