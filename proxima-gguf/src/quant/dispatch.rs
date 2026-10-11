@@ -42,6 +42,7 @@ pub fn dequantize(kind: GgmlType, data: &[u8], output: &mut [f32]) -> Result<(),
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

@@ -7,6 +7,7 @@
 //! Usage: `GEMMA4_GGUF=<path> cargo run --example gemma4_quant_independent_check`
 
 use std::env;
+use std::error::Error;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
@@ -20,27 +21,30 @@ const Q3_K_BLOCK_ELEMENTS: usize = 256;
 const Q5_1_BLOCK_BYTES: usize = 24;
 const Q5_1_BLOCK_ELEMENTS: usize = 32;
 
-fn parse_header(file: &mut std::fs::File) -> proxima_gguf::pipe::ParsedGguf {
+fn parse_header(
+    file: &mut std::fs::File,
+) -> Result<proxima_gguf::pipe::ParsedGguf, Box<dyn Error>> {
     let mut header_buf = Vec::new();
     for cap in [4usize << 20, 16 << 20, 64 << 20, 128 << 20, 512 << 20] {
         header_buf.resize(cap, 0);
-        file.seek(SeekFrom::Start(0)).expect("seek to file start");
-        let read = file.read(&mut header_buf).expect("read gguf header region");
+        file.seek(SeekFrom::Start(0))?;
+        let read = file.read(&mut header_buf)?;
         header_buf.truncate(read);
         if let Ok(parsed) = parse_complete(&header_buf) {
-            return parsed;
+            return Ok(parsed);
         }
     }
-    panic!("gguf metadata region did not fit in 512 MiB");
+    Err("gguf metadata region did not fit in 512 MiB".into())
 }
 
-fn read_range(file: &mut std::fs::File, range: core::ops::Range<u64>) -> Vec<u8> {
+fn read_range(
+    file: &mut std::fs::File,
+    range: core::ops::Range<u64>,
+) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut buffer = vec![0u8; (range.end - range.start) as usize];
-    file.seek(SeekFrom::Start(range.start))
-        .expect("seek to tensor data range start");
-    file.read_exact(&mut buffer)
-        .expect("read exact tensor data range");
-    buffer
+    file.seek(SeekFrom::Start(range.start))?;
+    file.read_exact(&mut buffer)?;
+    Ok(buffer)
 }
 
 fn find_tensor<'parsed>(
@@ -69,8 +73,9 @@ fn independent_dequantize_q3_k_block(block: &[u8], output: &mut [f32; Q3_K_BLOCK
     let d_all = half::f16::from_le_bytes(d_bytes).to_f32();
 
     let mut aux = [0u32; 4];
-    for (word, chunk) in aux.iter_mut().zip(scales_raw.chunks_exact(4)) {
-        *word = u32::from_le_bytes(chunk.try_into().unwrap());
+    let (scale_words, _) = scales_raw.as_chunks::<4>();
+    for (word, chunk) in aux.iter_mut().zip(scale_words) {
+        *word = u32::from_le_bytes(*chunk);
     }
     let tmp = aux[2];
     aux[2] = ((aux[0] >> 4) & KMASK2) | (((tmp >> 4) & KMASK1) << 4);
@@ -144,17 +149,19 @@ fn compare_q3_k(
     parsed: &proxima_gguf::pipe::ParsedGguf,
     file_len: u64,
     tensor_name: &str,
-) {
+) -> Result<(), Box<dyn Error>> {
     let tensor = find_tensor(parsed, tensor_name);
-    assert_eq!(tensor.ggml_type, GgmlType::Q3_K, "{tensor_name} must be Q3_K");
-    let full_range = parsed
-        .tensor_data_range(tensor, file_len)
-        .expect("tensor data range within checkpoint");
+    assert_eq!(
+        tensor.ggml_type,
+        GgmlType::Q3_K,
+        "{tensor_name} must be Q3_K"
+    );
+    let full_range = parsed.tensor_data_range(tensor, file_len)?;
     let block_range = full_range.start..full_range.start + Q3_K_BLOCK_BYTES as u64;
-    let raw = read_range(file, block_range);
+    let raw = read_range(file, block_range)?;
 
     let mut proxima_out = [0.0f32; Q3_K_BLOCK_ELEMENTS];
-    proxima_dequantize(GgmlType::Q3_K, &raw, &mut proxima_out).expect("proxima q3_k decode");
+    proxima_dequantize(GgmlType::Q3_K, &raw, &mut proxima_out)?;
 
     let mut independent_out = [0.0f32; Q3_K_BLOCK_ELEMENTS];
     independent_dequantize_q3_k_block(&raw, &mut independent_out);
@@ -175,9 +182,14 @@ fn compare_q3_k(
     println!(
         "Q3_K tensor={tensor_name} block=0 max_abs_diff={max_abs_diff:e} first_five_nonzero_diffs={first_diffs:?}"
     );
-    println!("  raw_d_bytes={:02x?} first_raw_bytes={:02x?}", &raw[108..110], &raw[0..8]);
+    println!(
+        "  raw_d_bytes={:02x?} first_raw_bytes={:02x?}",
+        &raw[108..110],
+        &raw[0..8]
+    );
     println!("  proxima[0..8]={:?}", &proxima_out[0..8]);
     println!("  independent[0..8]={:?}", &independent_out[0..8]);
+    Ok(())
 }
 
 fn compare_q5_1(
@@ -186,18 +198,20 @@ fn compare_q5_1(
     file_len: u64,
     tensor_name: &str,
     block_index: u64,
-) {
+) -> Result<(), Box<dyn Error>> {
     let tensor = find_tensor(parsed, tensor_name);
-    assert_eq!(tensor.ggml_type, GgmlType::Q5_1, "{tensor_name} must be Q5_1");
-    let full_range = parsed
-        .tensor_data_range(tensor, file_len)
-        .expect("tensor data range within checkpoint");
+    assert_eq!(
+        tensor.ggml_type,
+        GgmlType::Q5_1,
+        "{tensor_name} must be Q5_1"
+    );
+    let full_range = parsed.tensor_data_range(tensor, file_len)?;
     let block_start = full_range.start + block_index * Q5_1_BLOCK_BYTES as u64;
     let block_range = block_start..block_start + Q5_1_BLOCK_BYTES as u64;
-    let raw = read_range(file, block_range);
+    let raw = read_range(file, block_range)?;
 
     let mut proxima_out = [0.0f32; Q5_1_BLOCK_ELEMENTS];
-    proxima_dequantize(GgmlType::Q5_1, &raw, &mut proxima_out).expect("proxima q5_1 decode");
+    proxima_dequantize(GgmlType::Q5_1, &raw, &mut proxima_out)?;
 
     let mut independent_out = [0.0f32; Q5_1_BLOCK_ELEMENTS];
     independent_dequantize_q5_1_block(&raw, &mut independent_out);
@@ -221,9 +235,10 @@ fn compare_q5_1(
     println!("  d_bytes={:02x?} m_bytes={:02x?}", &raw[0..2], &raw[2..4]);
     println!("  proxima={proxima_out:?}");
     println!("  independent={independent_out:?}");
+    Ok(())
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     let gguf_path = env::var("GEMMA4_GGUF").unwrap_or_else(|_| {
         "/Users/brianbruggeman/.ollama/models/blobs/sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129"
             .to_string()
@@ -231,9 +246,9 @@ fn main() {
     let gguf_path = Path::new(&gguf_path);
     assert!(gguf_path.exists(), "gguf path {gguf_path:?} does not exist");
 
-    let mut file = std::fs::File::open(gguf_path).expect("open gguf checkpoint");
-    let file_len = file.metadata().expect("stat gguf checkpoint").len();
-    let parsed = parse_header(&mut file);
+    let mut file = std::fs::File::open(gguf_path)?;
+    let file_len = file.metadata()?.len();
+    let parsed = parse_header(&mut file)?;
 
     println!(
         "parsed {} tensors, data_offset={}",
@@ -241,8 +256,21 @@ fn main() {
         parsed.data_offset
     );
 
-    compare_q3_k(&mut file, &parsed, file_len, "blk.0.attn_q.weight");
-    compare_q3_k(&mut file, &parsed, file_len, "blk.0.attn_k.weight");
-    compare_q5_1(&mut file, &parsed, file_len, "blk.0.ffn_down_exps.weight", 0);
-    compare_q5_1(&mut file, &parsed, file_len, "blk.0.ffn_down_exps.weight", 1);
+    compare_q3_k(&mut file, &parsed, file_len, "blk.0.attn_q.weight")?;
+    compare_q3_k(&mut file, &parsed, file_len, "blk.0.attn_k.weight")?;
+    compare_q5_1(
+        &mut file,
+        &parsed,
+        file_len,
+        "blk.0.ffn_down_exps.weight",
+        0,
+    )?;
+    compare_q5_1(
+        &mut file,
+        &parsed,
+        file_len,
+        "blk.0.ffn_down_exps.weight",
+        1,
+    )?;
+    Ok(())
 }

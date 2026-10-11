@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use proxima_gguf::quant::{QuantError, bf4_e2m1, bf8_e5m2};
 
 #[test]
