@@ -1,0 +1,8 @@
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+"Device Utilization %"=57
+"Device Utilization %"=0
+"Device Utilization %"=0
+22:04  up 10 days,  8:08, 4 users, load averages: 5.78 5.95 5.64
+ 70.2 user-daemon
+ 43.5 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+ 18.8 /usr/libexec/syspolicyd

@@ -1,0 +1,60 @@
+    |                         ^^^^ help: if this is intentional, prefix it with an underscore: `_form`
+
+error: unused variable: `mma_selection`
+   --> omega/src/msl/cached_attention_render.rs:160:5
+    |
+160 |     mma_selection: AttentionMmaSelection,
+    |     ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mma_selection`
+
+error: function `kernel_dispatch_shape_with_schedule` is never used
+    --> omega/src/msl/emit_and_classify.rs:1858:15
+     |
+1858 | pub(crate) fn kernel_dispatch_shape_with_schedule(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `-D dead-code` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: function `cached_attention_merge_needed` is never used
+    --> omega/src/msl/signature_tokens_prelude.rs:1716:15
+     |
+1716 | pub(crate) fn cached_attention_merge_needed(kind: &BoundOpKind, policy: NumericPolicy) -> bool {
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: method `cache_token_for` is never used
+    --> omega/src/msl/signature_tokens_prelude.rs:1864:19
+     |
+1853 | impl AttentionMmaSelection {
+     | -------------------------- method in this implementation
+...
+1864 |     pub(crate) fn cache_token_for(self, bound: &BoundOp) -> &'static str {
+     |                   ^^^^^^^^^^^^^^^
+
+error: method `explicit_rows` is never used
+    --> omega/src/msl/signature_tokens_prelude.rs:2010:14
+     |
+2009 | impl AttentionTileHeightSelection {
+     | --------------------------------- method in this implementation
+2010 |     const fn explicit_rows(self) -> Option<u64> {
+     |              ^^^^^^^^^^^^^
+
+error: methods `tile_height` and `cache_token_for` are never used
+    --> omega/src/msl/signature_tokens_prelude.rs:2112:25
+     |
+2039 | impl AttentionRowSchedule {
+     | ------------------------- methods in this implementation
+...
+2112 |     pub(crate) const fn tile_height(self) -> AttentionTileHeightSelection {
+     |                         ^^^^^^^^^^^
+...
+2237 |     pub(crate) fn cache_token_for(self, bound: &BoundOp) -> String {
+     |                   ^^^^^^^^^^^^^^^
+
+error: constant `BF8_VECTOR_HELPER` is never used
+  --> omega/src/msl/cached_attention_render.rs:72:18
+   |
+72 | pub(super) const BF8_VECTOR_HELPER: &str = "static inline float omega_bf8_to_float(uchar value) { uint sign = ((uint)value & 0x80u) ...
+   |                  ^^^^^^^^^^^^^^^^^
+
+error: could not compile `omega` (lib test) due to 11 previous errors
+error: command `/Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo '--color=auto' test --no-run --message-format json-render-diagnostics --package omega --lib --features std --no-default-features --profile gate` exited with code 101

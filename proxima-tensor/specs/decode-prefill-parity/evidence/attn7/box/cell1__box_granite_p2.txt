@@ -1,0 +1,8 @@
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+"Device Utilization %"=91
+"Device Utilization %"=0
+"Device Utilization %"=0
+21:55  up 10 days,  7:59, 4 users, load averages: 5.46 5.17 5.04
+ 76.8 user-daemon
+ 43.1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+ 13.5 /Applications/iTerm.app/Contents/MacOS/iTerm2

@@ -1,0 +1,9 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/omega)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-model-interop)
+    Finished `gate` profile [optimized] target(s) in 4.16s
+────────────
+ Nextest run ID 50e3b00c-3316-44f6-b89b-125d99684605 with nextest profile: default
+    Starting 1 test across 1 binary (64 tests skipped)
+        PASS [   2.280s] (1/1) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_granite_moe
+────────────
+     Summary [   2.281s] 1 test run: 1 passed, 64 skipped

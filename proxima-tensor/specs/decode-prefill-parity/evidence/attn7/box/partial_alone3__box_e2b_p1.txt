@@ -1,0 +1,8 @@
+gate_result=0
+"Device Utilization %"=93
+"Device Utilization %"=0
+"Device Utilization %"=0
+23:10  up 10 days,  9:14, 4 users, load averages: 8.05 8.75 8.86
+ 78.3 user-daemon
+ 48.2 claude
+ 41.2 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer

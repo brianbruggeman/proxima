@@ -1,0 +1,9 @@
+gate_result=1
+80881 cargo-val
+"Device Utilization %"=92
+"Device Utilization %"=0
+"Device Utilization %"=0
+23:15  up 10 days,  9:19, 4 users, load averages: 4.41 6.36 7.77
+ 69.2 user-daemon
+ 44.9 /usr/libexec/syspolicyd
+ 44.1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
