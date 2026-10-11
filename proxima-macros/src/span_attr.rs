@@ -2,7 +2,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
-use syn::{Error, Expr, Ident, ItemFn, LitStr, Meta, Token, parse_quote, parse2};
+use syn::{Error, Expr, Ident, ItemFn, LitStr, Meta, Stmt, Token, parse_quote, parse2};
 
 use crate::crate_path;
 use crate::runtime_args::extract_str_lit;
@@ -162,31 +162,14 @@ fn validate_kind(kind: &str, span: Span) -> Result<(), Error> {
     }
 }
 
-pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error> {
-    let func = parse2::<ItemFn>(item)?;
-    let span_args = parse_args(args)?;
-
-    let func_name = func.sig.ident.to_string();
-    let span_name = span_args.name.unwrap_or_else(|| func_name.clone());
-
-    let level_str = span_args.level.unwrap_or_else(|| "info".to_string());
-    validate_level(&level_str, Span::call_site())?;
-
-    if let Some(kind) = &span_args.kind {
-        validate_kind(kind, Span::call_site())?;
-    }
-
-    if func.sig.constness.is_some() {
-        return Err(Error::new_spanned(
-            func.sig.constness,
-            "#[span] cannot be applied to const fn",
-        ));
-    }
-
+// everything after the span is OPENED, applied to whatever builder
+// `.span(...)` / `.span_from_traceparent(...)` produced.
+fn rest_chain(span_args: &SpanArgs, is_async: bool) -> TokenStream {
     // The builder chain is `::core`-only + recorder inherent methods. The only
     // named proxima type is `Recorder::current()` on the default (ambient) path.
     let kind_call = span_args
         .kind
+        .as_ref()
         .map(|kind| quote! { .kind_str(#kind) })
         .unwrap_or_default();
     let field_calls: Vec<TokenStream> = span_args
@@ -203,6 +186,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error
     // overruns, regardless of head sampling.
     let budget_call = span_args
         .budget
+        .as_ref()
         .map(|budget| quote! { .budget(#budget) })
         .unwrap_or_default();
 
@@ -210,116 +194,169 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error
     // async body below), so its guard must NOT enter the current-span stack at
     // creation — `start_deferred` builds it un-entered. A sync span brackets the
     // stack over its own scope, so `start` enters it.
-    let start_call = if func.sig.asyncness.is_some() {
+    let start_call = if is_async {
         quote! { .start_deferred() }
     } else {
         quote! { .start() }
     };
 
-    // Everything after the span is OPENED, applied to whatever builder
-    // `.span(...)` / `.span_from_traceparent(...)` produced.
-    let rest_chain = quote! {
+    quote! {
         #kind_call
         #budget_call
         .module_path(::core::module_path!())
         .file_line(::core::line!(), ::core::column!())
         #(#field_calls)*
         #start_call
-    };
+    }
+}
 
-    // Proxima carries span context as EXPLICIT DATA, never an ambient /
-    // thread-local "current span" (a naive thread-local stack corrupts under
-    // concurrently-interleaved async tasks sharing an executor thread — the
-    // exact footgun this design avoids). `parent = <expr>` is that explicit
-    // seam: `<expr>` is an `Option<&[u8]>` W3C traceparent — a request
-    // boundary's `RequestContext::traceparent()`, or bytes carried by hand
-    // from a caller's own span. `Some` continues that trace (inherits
-    // trace_id, records parent_span_id) via `span_from_traceparent`; `None`,
-    // or no `parent` arg at all, opens a fresh root via `.span(...)`.
-    let open_expr = match &span_args.parent {
-        Some(parent_expr) => quote! {
+// Proxima carries span context as EXPLICIT DATA, never an ambient /
+// thread-local "current span" (a naive thread-local stack corrupts under
+// concurrently-interleaved async tasks sharing an executor thread — the
+// exact footgun this design avoids). `parent = <expr>` is that explicit
+// seam: `<expr>` is an `Option<&[u8]>` W3C traceparent — a request
+// boundary's `RequestContext::traceparent()`, or bytes carried by hand
+// from a caller's own span. `Some` continues that trace (inherits
+// trace_id, records parent_span_id) via `span_from_traceparent`; `None`,
+// or no `parent` arg at all, opens a fresh root via `.span(...)`.
+fn open_expr(parent: Option<&Expr>, span_name: &str) -> TokenStream {
+    if let Some(parent_expr) = parent {
+        quote! {
             match #parent_expr {
                 ::core::option::Option::Some(__proxima_traceparent) => {
                     __rec.span_from_traceparent(#span_name, __proxima_traceparent)
                 }
                 ::core::option::Option::None => __rec.span(#span_name),
             }
-        },
-        None => quote! { __rec.span(#span_name) },
-    };
+        }
+    } else {
+        quote! { __rec.span(#span_name) }
+    }
+}
 
-    // The guard is always `Option<guard>` so the err + drop paths are uniform.
-    // Explicit `recorder = <expr>` always resolves (Some); the default resolves
-    // the process-wide ambient recorder via `Recorder::current()` — zero wiring
-    // needed, and `None` (no recorder installed) just runs the body span-free,
-    // exactly like the `info!` / `debug!` emit macros.
-    let build_span = match span_args.recorder {
-        Some(recorder_expr) => quote! {
+// The guard is always `Option<guard>` so the err + drop paths are uniform.
+// Explicit `recorder = <expr>` always resolves (Some); the default resolves
+// the process-wide ambient recorder via `Recorder::current()` — zero wiring
+// needed, and `None` (no recorder installed) just runs the body span-free,
+// exactly like the `info!` / `debug!` emit macros.
+fn build_span(
+    recorder: Option<&Expr>,
+    open_expr: &TokenStream,
+    rest_chain: &TokenStream,
+) -> TokenStream {
+    if let Some(recorder_expr) = recorder {
+        quote! {
             ::core::option::Option::Some({
                 let __rec = #recorder_expr;
                 let __proxima_builder = #open_expr;
                 __proxima_builder #rest_chain
             })
-        },
-        None => {
-            let recorder_ty = recorder_path();
-            quote! {
-                #recorder_ty::current().map(|__rec| {
-                    let __proxima_builder = #open_expr;
-                    __proxima_builder #rest_chain
-                })
+        }
+    } else {
+        let recorder_ty = recorder_path();
+        quote! {
+            #recorder_ty::current().map(|__rec| {
+                let __proxima_builder = #open_expr;
+                __proxima_builder #rest_chain
+            })
+        }
+    }
+}
+
+// `err`: run the body, set error status on `Err`, then yield the value. The
+// body is moved into a closure (sync) / async block (async) so every return
+// path — including early `return` — flows through the status check. Requires
+// a `Result` return; the `Err(_)` arm is the compile-time enforcement.
+fn err_body(
+    is_async: bool,
+    build_span: &TokenStream,
+    span_name: &str,
+    stmts: &[Stmt],
+) -> TokenStream {
+    let outcome = if is_async {
+        quote! { async move { #(#stmts)* }.await }
+    } else {
+        quote! { (move || { #(#stmts)* })() }
+    };
+    quote! {
+        let mut __proxima_span = #build_span;
+        let __proxima_outcome = #outcome;
+        if ::core::result::Result::is_err(&__proxima_outcome) {
+            if let ::core::option::Option::Some(__proxima_guard) = &mut __proxima_span {
+                __proxima_guard.mark_error(#span_name);
             }
         }
-    };
+        __proxima_outcome
+    }
+}
+
+// Wave D Phase 1: an instrumented async fn's span rides on the
+// SAME primitive a spawned task's span does — `telemetry::Spanned`
+// wraps the future (here, the fn's own body) instead of holding
+// the guard as a bare local. Behavior-identical to the prior local-
+// variable form (the guard still finishes exactly when the body
+// resolves — `Spanned::poll` drops it on `Ready`, same as a local's
+// natural drop at scope exit) — this only changes the mechanism
+// to the one shared, wrap-don't-embed vocabulary.
+fn async_body(build_span: &TokenStream, stmts: &[Stmt]) -> TokenStream {
+    let spanned_ty = spanned_path();
+    quote! {
+        match #build_span {
+            ::core::option::Option::Some(__proxima_guard) => {
+                #spanned_ty::scoped(async move { #(#stmts)* }, __proxima_guard).await
+            }
+            ::core::option::Option::None => (async move { #(#stmts)* }).await,
+        }
+    }
+}
+
+fn sync_body(build_span: &TokenStream, stmts: &[Stmt]) -> TokenStream {
+    quote! {
+        let __proxima_span = #build_span;
+        #(#stmts)*
+    }
+}
+
+pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error> {
+    let func = parse2::<ItemFn>(item)?;
+    let span_args = parse_args(args)?;
+
+    let func_name = func.sig.ident.to_string();
+    let span_name = span_args.name.clone().unwrap_or(func_name);
+
+    let level_str = span_args
+        .level
+        .clone()
+        .unwrap_or_else(|| "info".to_string());
+    validate_level(&level_str, Span::call_site())?;
+
+    if let Some(kind) = &span_args.kind {
+        validate_kind(kind, Span::call_site())?;
+    }
+
+    if func.sig.constness.is_some() {
+        return Err(Error::new_spanned(
+            func.sig.constness,
+            "#[span] cannot be applied to const fn",
+        ));
+    }
+
+    let is_async = func.sig.asyncness.is_some();
+    let rest_chain = rest_chain(&span_args, is_async);
+    let open_expr = open_expr(span_args.parent.as_ref(), &span_name);
+    let build_span = build_span(span_args.recorder.as_ref(), &open_expr, &rest_chain);
 
     let attrs = &func.attrs;
     let vis = &func.vis;
     let sig = &func.sig;
     let stmts = &func.block.stmts;
 
-    // `err`: run the body, set error status on `Err`, then yield the value. The
-    // body is moved into a closure (sync) / async block (async) so every return
-    // path — including early `return` — flows through the status check. Requires
-    // a `Result` return; the `Err(_)` arm is the compile-time enforcement.
     let body = if span_args.err {
-        let outcome = if sig.asyncness.is_some() {
-            quote! { async move { #(#stmts)* }.await }
-        } else {
-            quote! { (move || { #(#stmts)* })() }
-        };
-        quote! {
-            let mut __proxima_span = #build_span;
-            let __proxima_outcome = #outcome;
-            if ::core::result::Result::is_err(&__proxima_outcome) {
-                if let ::core::option::Option::Some(__proxima_guard) = &mut __proxima_span {
-                    __proxima_guard.mark_error(#span_name);
-                }
-            }
-            __proxima_outcome
-        }
-    } else if sig.asyncness.is_some() {
-        // Wave D Phase 1: an instrumented async fn's span rides on the
-        // SAME primitive a spawned task's span does — `telemetry::Spanned`
-        // wraps the future (here, the fn's own body) instead of holding
-        // the guard as a bare local. Behavior-identical to the prior local-
-        // variable form (the guard still finishes exactly when the body
-        // resolves — `Spanned::poll` drops it on `Ready`, same as a local's
-        // natural drop at scope exit) — this only changes the mechanism
-        // to the one shared, wrap-don't-embed vocabulary.
-        let spanned_ty = spanned_path();
-        quote! {
-            match #build_span {
-                ::core::option::Option::Some(__proxima_guard) => {
-                    #spanned_ty::scoped(async move { #(#stmts)* }, __proxima_guard).await
-                }
-                ::core::option::Option::None => (async move { #(#stmts)* }).await,
-            }
-        }
+        err_body(is_async, &build_span, &span_name, stmts)
+    } else if is_async {
+        async_body(&build_span, stmts)
     } else {
-        quote! {
-            let __proxima_span = #build_span;
-            #(#stmts)*
-        }
+        sync_body(&build_span, stmts)
     };
 
     Ok(quote! {

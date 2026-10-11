@@ -33,7 +33,7 @@ fn assert_unpin<Type: Unpin>(_: &Type) {}
 
 #[piped]
 async fn double(input: u64) -> Result<u64, Infallible> {
-    Ok(input * 2)
+    ready(Ok(input * 2)).await
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn ready_future_from_a_generated_unpin_pipe_is_unpin() {
 
 #[piped(send)]
 async fn increment(input: u64) -> Result<u64, &'static str> {
-    input.checked_add(1).ok_or("overflow")
+    ready(input.checked_add(1).ok_or("overflow")).await
 }
 
 #[test]
@@ -119,13 +119,16 @@ fn unpin_send_pipe_future_is_send_and_unpin() {
 // ---- name = Ident override ----
 
 #[piped(name = CustomName)]
-fn identity_fn(input: u64) -> Result<u64, Infallible> {
+fn identity_fn(input: u64) -> Result<u64, &'static str> {
+    if input == u64::MAX {
+        return Err("u64::MAX is reserved");
+    }
     Ok(input)
 }
 
 #[test]
 fn name_arg_overrides_the_generated_struct_name() {
-    let out = block_on(UnpinPipe::call(&CustomName, 9)).expect("infallible identity");
+    let out = block_on(UnpinPipe::call(&CustomName, 9)).expect("non-reserved identity");
     assert_eq!(out, 9);
 }
 
@@ -134,34 +137,34 @@ fn name_arg_overrides_the_generated_struct_name() {
 /// wanting both the plain function and a pipe; calling it here is the proof.
 #[test]
 fn an_explicitly_named_pipe_leaves_the_fn_callable() {
-    let direct = identity_fn(4).expect("infallible identity");
+    let direct = identity_fn(4).expect("non-reserved identity");
     assert_eq!(direct, 4);
 }
 
 // ---- zero-arg fn: the source form, In = () ----
 
 #[piped]
-fn always_seven() -> Result<u64, Infallible> {
-    Ok(7)
+fn always_seven() -> Result<u64, &'static str> {
+    "7".parse::<u64>().map_err(|_| "not a number")
 }
 
 #[test]
 fn zero_arg_fn_generates_a_source_pipe() {
-    let out = block_on(UnpinPipe::call(&always_seven, ())).expect("infallible source");
+    let out = block_on(UnpinPipe::call(&always_seven, ())).expect("parsable source");
     assert_eq!(out, 7);
 }
 
 // ---- #[piped(unpin)] on a sync fn: redundant assertion, not an error ----
 
 #[piped(unpin)]
-fn negate(input: bool) -> Result<bool, Infallible> {
-    Ok(!input)
+fn negate(input: i64) -> Result<i64, &'static str> {
+    input.checked_neg().ok_or("overflow")
 }
 
 #[test]
 fn explicit_unpin_on_sync_fn_still_compiles_and_runs() {
-    let out = block_on(UnpinPipe::call(&negate, true)).expect("infallible negate");
-    assert!(!out);
+    let out = block_on(UnpinPipe::call(&negate, 5)).expect("no overflow");
+    assert_eq!(out, -5);
 }
 
 // ---- proof this is useful: a macro-generated UnpinPipe source drops into
@@ -214,7 +217,7 @@ fn generated_unpin_pipe_composes_into_the_real_fan_in() {
 
 #[piped(send)]
 async fn hello(_request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
-    Ok(Response::ok("hello, proxima\n"))
+    ready(Ok(Response::ok("hello, proxima\n"))).await
 }
 
 #[proxima::test]
@@ -242,7 +245,7 @@ async fn handler_shaped_send_pipe_mounts_directly_and_dispatches() {
 
 #[piped(send)]
 async fn always_ok(_input: u64) -> Result<u64, Infallible> {
-    Ok(1)
+    ready(Ok(1)).await
 }
 
 #[test]

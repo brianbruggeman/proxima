@@ -36,7 +36,7 @@
 //!   `Unpin` tier via `#[proxima::piped(unpin, boxed)]`, at the cost of one
 //!   heap allocation per call. `boxed` is never inferred — same opt-in
 //!   discipline as `send` — and is gated behind the invoking crate's own
-//!   `alloc` Cargo feature, so it cannot appear in a bare no_std build.
+//!   `alloc` Cargo feature, so it cannot appear in a bare `no_std` build.
 //! - The generated struct is always fieldless, so it always derives `Clone`
 //!   unconditionally — no `derive(...)` macro arg, `Clone` is the only bound
 //!   any combinator over a leaf pipe ever needs (`RateLimit`, `Retry`,
@@ -57,8 +57,8 @@ use quote::quote;
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::{
-    Error, Expr, FnArg, GenericArgument, Ident, ImplItem, ItemFn, ItemImpl, Meta, Pat,
-    PathArguments, ReturnType, Token, Type, TypeParamBound, Visibility, parse2,
+    Block, Error, Expr, FnArg, GenericArgument, Ident, ImplItem, ImplItemFn, ItemFn, ItemImpl,
+    Meta, Pat, PathArguments, ReturnType, Token, Type, TypeParamBound, Visibility, parse2,
 };
 
 use crate::crate_path;
@@ -300,13 +300,13 @@ fn future_output_result_types(sig: &syn::Signature) -> Result<(Type, Type), Erro
 
 /// `…::pipe::#tail` — the umbrella re-exports `pipe` at the same depth
 /// `proxima-primitives` owns it, so both tails are the same.
-pub(crate) fn pipe_path(tail: TokenStream) -> TokenStream {
+pub(crate) fn pipe_path(tail: &TokenStream) -> TokenStream {
     let tail = quote!(pipe::#tail);
     crate_path::resolve("proxima-primitives", &tail, &tail)
 }
 
 pub(crate) fn pipe_trait_path(trait_ident: &Ident) -> TokenStream {
-    pipe_path(quote!(#trait_ident))
+    pipe_path(&quote!(#trait_ident))
 }
 
 /// Which of the four standalone tiers this fn maps to. `asyncness` decides
@@ -434,8 +434,91 @@ impl ImplShape {
 /// to the original free-fn path unchanged.
 pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error> {
     match parse2::<ItemImpl>(item.clone()) {
-        Ok(item_impl) => expand_impl_form(args, item_impl),
+        Ok(item_impl) => expand_impl_form(args, &item_impl),
         Err(_) => expand_fn_form(args, item),
+    }
+}
+
+// point 4: refuse the impossible with a good error, rather than silently
+// picking a different tier than the one the caller asked for. six real
+// combinations of (is_async, unpin, boxed); three are refused, each with
+// the specific reason that combination is wrong, not one generic message.
+fn fn_future_shape(sig: &syn::Signature, pipe_args: &PipeArgs) -> Result<FutureShape, Error> {
+    match (sig.asyncness.as_ref(), pipe_args.unpin, pipe_args.boxed) {
+        (None, _, true) => Err(Error::new_spanned(
+            sig,
+            "#[proxima::piped(boxed)] is redundant on a plain `fn`: `core::future::ready` \
+             is already `Unpin` and allocates nothing. Remove `boxed`.",
+        )),
+        (None, _, false) => Ok(FutureShape::ReadyWrapped),
+        (Some(_), false, true) => Err(Error::new_spanned(
+            sig,
+            "`boxed` only matters when climbing to the `Unpin` tier; add `unpin`: \
+             `#[proxima::piped(unpin, boxed)]`.",
+        )),
+        (Some(_), true, true) => Ok(FutureShape::BoxPinWrapped),
+        (Some(async_token), true, false) => Err(Error::new_spanned(
+            async_token,
+            "#[proxima::piped(unpin)] cannot be applied to an `async fn` as-is: its body \
+             compiles to a compiler-generated state machine, which is `!Unpin`, so it \
+             can't be polled in place. Three ways to get an `Unpin` pipe here, in order \
+             of cost: (1) use a plain `fn` instead — `#[proxima::piped]` wraps its return \
+             in `core::future::ready`, whose future IS `Unpin`, for free; (2) hand-write \
+             the `Future` as an `Unpin` poll struct that still returns `Poll::Pending` \
+             and registers a waker — `Unpin` constrains how the future is spelled, not \
+             whether it awaits; see `proxima_primitives::pipe::signal_source::SignalCall` \
+             for a worked example; or (3) keep this `async fn` and pay one allocation per \
+             call with `#[proxima::piped(unpin, boxed)]`.",
+        )),
+        (Some(_), false, false) => Ok(FutureShape::Passthrough),
+    }
+}
+
+fn fn_call_body(shape: &FutureShape, fn_ident: &Ident, has_input: bool) -> TokenStream {
+    let call_expr = if has_input {
+        quote!(#fn_ident(__proxima_pipe_input))
+    } else {
+        quote!(#fn_ident())
+    };
+    match shape {
+        FutureShape::Passthrough => call_expr,
+        FutureShape::ReadyWrapped => quote!(::core::future::ready(#call_expr)),
+        // a local `extern crate alloc;` resolves `alloc::boxed::Box`
+        // regardless of whether the invoking crate already names it at its
+        // own crate root — the generated code carries no ambient assumption.
+        FutureShape::BoxPinWrapped => quote! {{
+            extern crate alloc;
+            alloc::boxed::Box::pin(#call_expr)
+        }},
+    }
+}
+
+// one impl block per tier in the downward closure — same `call_body`,
+// same `alloc_cfg`, only the trait and its future bound change.
+fn fn_tier_impl(
+    tier: &Tier,
+    alloc_cfg: &TokenStream,
+    struct_name: &Ident,
+    call_body: &TokenStream,
+    types: (&Type, &Type, &Type),
+) -> TokenStream {
+    let (in_type, out_type, err_type) = types;
+    let trait_path = pipe_trait_path(&tier.trait_ident());
+    let future_bound = tier.future_bound();
+    quote! {
+        #alloc_cfg
+        impl #trait_path for #struct_name {
+            type In = #in_type;
+            type Out = #out_type;
+            type Err = #err_type;
+
+            fn call(
+                &self,
+                __proxima_pipe_input: #in_type,
+            ) -> impl ::core::future::Future<Output = ::core::result::Result<#out_type, #err_type>> #future_bound {
+                #call_body
+            }
+        }
     }
 }
 
@@ -450,47 +533,7 @@ fn expand_fn_form(args: TokenStream, item: TokenStream) -> Result<TokenStream, E
         ));
     }
 
-    let is_async = func.sig.asyncness.is_some();
-
-    // point 4: refuse the impossible with a good error, rather than silently
-    // picking a different tier than the one the caller asked for. six real
-    // combinations of (is_async, unpin, boxed); three are refused, each with
-    // the specific reason that combination is wrong, not one generic message.
-    let shape = match (is_async, pipe_args.unpin, pipe_args.boxed) {
-        (false, _, true) => {
-            return Err(Error::new_spanned(
-                &func.sig,
-                "#[proxima::piped(boxed)] is redundant on a plain `fn`: `core::future::ready` \
-                 is already `Unpin` and allocates nothing. Remove `boxed`.",
-            ));
-        }
-        (false, _, false) => FutureShape::ReadyWrapped,
-        (true, false, true) => {
-            return Err(Error::new_spanned(
-                &func.sig,
-                "`boxed` only matters when climbing to the `Unpin` tier; add `unpin`: \
-                 `#[proxima::piped(unpin, boxed)]`.",
-            ));
-        }
-        (true, true, true) => FutureShape::BoxPinWrapped,
-        (true, true, false) => {
-            let async_token = func.sig.asyncness.as_ref().expect("checked is_async above");
-            return Err(Error::new_spanned(
-                async_token,
-                "#[proxima::piped(unpin)] cannot be applied to an `async fn` as-is: its body \
-                 compiles to a compiler-generated state machine, which is `!Unpin`, so it \
-                 can't be polled in place. Three ways to get an `Unpin` pipe here, in order \
-                 of cost: (1) use a plain `fn` instead — `#[proxima::piped]` wraps its return \
-                 in `core::future::ready`, whose future IS `Unpin`, for free; (2) hand-write \
-                 the `Future` as an `Unpin` poll struct that still returns `Poll::Pending` \
-                 and registers a waker — `Unpin` constrains how the future is spelled, not \
-                 whether it awaits; see `proxima_primitives::pipe::signal_source::SignalCall` \
-                 for a worked example; or (3) keep this `async fn` and pay one allocation per \
-                 call with `#[proxima::piped(unpin, boxed)]`.",
-            ));
-        }
-        (true, false, false) => FutureShape::Passthrough,
-    };
+    let shape = fn_future_shape(&func.sig, &pipe_args)?;
 
     let in_type = extract_in_type(&func.sig)?;
     let (out_type, err_type) = extract_result_types(&func.sig)?;
@@ -511,26 +554,9 @@ fn expand_fn_form(args: TokenStream, item: TokenStream) -> Result<TokenStream, E
 
     let tiers = Tier::plan(shape.climbs_to_unpin(), pipe_args.send);
 
-    let fn_ident = &func.sig.ident;
     let vis = &func.vis;
     let has_input = !func.sig.inputs.is_empty();
-
-    let call_expr = if has_input {
-        quote!(#fn_ident(__proxima_pipe_input))
-    } else {
-        quote!(#fn_ident())
-    };
-    let call_body = match shape {
-        FutureShape::Passthrough => call_expr,
-        FutureShape::ReadyWrapped => quote!(::core::future::ready(#call_expr)),
-        // a local `extern crate alloc;` resolves `alloc::boxed::Box`
-        // regardless of whether the invoking crate already names it at its
-        // own crate root — the generated code carries no ambient assumption.
-        FutureShape::BoxPinWrapped => quote! {{
-            extern crate alloc;
-            alloc::boxed::Box::pin(#call_expr)
-        }},
-    };
+    let call_body = fn_call_body(&shape, &func.sig.ident, has_input);
 
     // `boxed` is the only shape that allocates, so it is the only one gated
     // behind the invoking crate's `alloc` Cargo feature — without this, a
@@ -551,28 +577,11 @@ fn expand_fn_form(args: TokenStream, item: TokenStream) -> Result<TokenStream, E
         quote!()
     };
 
-    // one impl block per tier in the downward closure — same `call_body`,
-    // same `alloc_cfg`, only the trait and its future bound change.
     let tier_impls: Vec<TokenStream> = tiers
         .iter()
         .map(|tier| {
-            let trait_path = pipe_trait_path(&tier.trait_ident());
-            let future_bound = tier.future_bound();
-            quote! {
-                #alloc_cfg
-                impl #trait_path for #struct_name {
-                    type In = #in_type;
-                    type Out = #out_type;
-                    type Err = #err_type;
-
-                    fn call(
-                        &self,
-                        __proxima_pipe_input: #in_type,
-                    ) -> impl ::core::future::Future<Output = ::core::result::Result<#out_type, #err_type>> #future_bound {
-                        #call_body
-                    }
-                }
-            }
+            let types = (&in_type, &out_type, &err_type);
+            fn_tier_impl(tier, &alloc_cfg, &struct_name, &call_body, types)
         })
         .collect();
 
@@ -669,16 +678,7 @@ fn extract_call_param(sig: &syn::Signature) -> Result<(Pat, Type), Error> {
     }
 }
 
-/// The stateful counterpart to `expand_fn_form`: `#[proxima::piped(...)]` on a
-/// plain inherent `impl Foo { fn call(..) { .. } }` block, for a pipe whose
-/// struct already carries its own fields (a client, a pool, a counter)
-/// instead of being the always-fieldless ZST the free-fn form generates. No
-/// struct is generated here — `Foo` is relocated as-is into `impl #trait for
-/// Foo`, plus a leftover `impl Foo { .. }` for any other item the block
-/// carried alongside `call`.
-fn expand_impl_form(args: TokenStream, item_impl: ItemImpl) -> Result<TokenStream, Error> {
-    let pipe_args = parse_args(args)?;
-
+fn reject_impl_form_header(item_impl: &ItemImpl, pipe_args: &PipeArgs) -> Result<(), Error> {
     if let Some(name) = &pipe_args.name {
         return Err(Error::new_spanned(
             name,
@@ -702,8 +702,10 @@ fn expand_impl_form(args: TokenStream, item_impl: ItemImpl) -> Result<TokenStrea
         ));
     }
 
-    let struct_name = struct_name_from_self_ty(&item_impl.self_ty)?;
+    Ok(())
+}
 
+fn split_call_method(item_impl: &ItemImpl) -> Result<(&ImplItemFn, Vec<&ImplItem>), Error> {
     let mut call_methods = Vec::new();
     let mut leftover = Vec::new();
     for item in &item_impl.items {
@@ -715,7 +717,7 @@ fn expand_impl_form(args: TokenStream, item_impl: ItemImpl) -> Result<TokenStrea
 
     let [call_method] = call_methods.as_slice() else {
         return Err(Error::new_spanned(
-            &item_impl,
+            item_impl,
             "#[proxima::piped] on an impl block requires exactly one method named `call`",
         ));
     };
@@ -729,76 +731,64 @@ fn expand_impl_form(args: TokenStream, item_impl: ItemImpl) -> Result<TokenStrea
         ));
     }
 
-    validate_call_receiver(&call_method.sig)?;
-    let (in_pat, in_type) = extract_call_param(&call_method.sig)?;
+    Ok((call_method, leftover))
+}
 
-    let is_async = call_method.sig.asyncness.is_some();
+// the same six-combination matrix `expand_fn_form` refuses from, but
+// landing on `ImplShape` instead of `FutureShape`: an impl-block `call`
+// never returns a bare `Result` (see `ImplShape`'s docs), so the
+// no-climb sync arm is `Direct`, not `ReadyWrapped`.
+fn impl_shape(sig: &syn::Signature, pipe_args: &PipeArgs) -> Result<ImplShape, Error> {
+    match (sig.asyncness.as_ref(), pipe_args.unpin, pipe_args.boxed) {
+        (None, _, true) => Err(Error::new_spanned(
+            sig,
+            "#[proxima::piped(boxed)] is redundant on a sync `call` that already returns \
+             `impl Future<..> + Unpin`. Remove `boxed`.",
+        )),
+        (None, _, false) => Ok(ImplShape::Direct),
+        (Some(_), false, true) => Err(Error::new_spanned(
+            sig,
+            "`boxed` only matters when climbing to the `Unpin` tier; add `unpin`: \
+             `#[proxima::piped(unpin, boxed)]`.",
+        )),
+        (Some(_), true, true) => Ok(ImplShape::BoxPinWrapped),
+        (Some(async_token), true, false) => Err(Error::new_spanned(
+            async_token,
+            "#[proxima::piped(unpin)] cannot be applied to an `async fn call` as-is: its \
+             body compiles to a compiler-generated state machine, which is `!Unpin`, so it \
+             can't be polled in place. Two ways to get an `Unpin` pipe here: (1) write \
+             `call` as a sync `fn` returning a hand-written `impl Future<..> + Unpin` (a \
+             poll struct that still returns `Poll::Pending` and registers a waker — see \
+             `proxima_primitives::pipe::signal_source::SignalCall` for a worked example); \
+             or (2) keep this `async fn` and pay one allocation per call with \
+             `#[proxima::piped(unpin, boxed)]`.",
+        )),
+        (Some(_), false, false) => Ok(ImplShape::AsyncBlockWrapped),
+    }
+}
 
-    // the same six-combination matrix `expand_fn_form` refuses from, but
-    // landing on `ImplShape` instead of `FutureShape`: an impl-block `call`
-    // never returns a bare `Result` (see `ImplShape`'s docs), so the
-    // no-climb sync arm is `Direct`, not `ReadyWrapped`.
-    let shape = match (is_async, pipe_args.unpin, pipe_args.boxed) {
-        (false, _, true) => {
+fn impl_result_types(sig: &syn::Signature) -> Result<(Type, Type), Error> {
+    if sig.asyncness.is_none() {
+        return future_output_result_types(sig);
+    }
+    let return_type = match &sig.output {
+        ReturnType::Type(_, ty) => ty.as_ref(),
+        ReturnType::Default => {
             return Err(Error::new_spanned(
-                &call_method.sig,
-                "#[proxima::piped(boxed)] is redundant on a sync `call` that already returns \
-                 `impl Future<..> + Unpin`. Remove `boxed`.",
+                sig,
+                "an `async fn call` must return Result<Out, Err>; this method has no \
+                 return type",
             ));
         }
-        (false, _, false) => ImplShape::Direct,
-        (true, false, true) => {
-            return Err(Error::new_spanned(
-                &call_method.sig,
-                "`boxed` only matters when climbing to the `Unpin` tier; add `unpin`: \
-                 `#[proxima::piped(unpin, boxed)]`.",
-            ));
-        }
-        (true, true, true) => ImplShape::BoxPinWrapped,
-        (true, true, false) => {
-            let async_token = call_method
-                .sig
-                .asyncness
-                .as_ref()
-                .expect("checked is_async above");
-            return Err(Error::new_spanned(
-                async_token,
-                "#[proxima::piped(unpin)] cannot be applied to an `async fn call` as-is: its \
-                 body compiles to a compiler-generated state machine, which is `!Unpin`, so it \
-                 can't be polled in place. Two ways to get an `Unpin` pipe here: (1) write \
-                 `call` as a sync `fn` returning a hand-written `impl Future<..> + Unpin` (a \
-                 poll struct that still returns `Poll::Pending` and registers a waker — see \
-                 `proxima_primitives::pipe::signal_source::SignalCall` for a worked example); \
-                 or (2) keep this `async fn` and pay one allocation per call with \
-                 `#[proxima::piped(unpin, boxed)]`.",
-            ));
-        }
-        (true, false, false) => ImplShape::AsyncBlockWrapped,
     };
+    result_types_from_type(return_type)
+}
 
-    let (out_type, err_type) = if is_async {
-        let return_type = match &call_method.sig.output {
-            ReturnType::Type(_, ty) => ty.as_ref(),
-            ReturnType::Default => {
-                return Err(Error::new_spanned(
-                    &call_method.sig,
-                    "an `async fn call` must return Result<Out, Err>; this method has no \
-                     return type",
-                ));
-            }
-        };
-        result_types_from_type(return_type)?
-    } else {
-        future_output_result_types(&call_method.sig)?
-    };
-
-    let tiers = Tier::plan(shape.climbs_to_unpin(), pipe_args.send);
-
-    // the block is relocated exactly as written — none of these arms parse
-    // or rewrite a single statement inside it, they only choose how it gets
-    // wrapped to match the tier's required future shape.
-    let body = &call_method.block;
-    let call_body = match shape {
+// the block is relocated exactly as written — none of these arms parse
+// or rewrite a single statement inside it, they only choose how it gets
+// wrapped to match the tier's required future shape.
+fn impl_call_body(shape: &ImplShape, body: &Block) -> TokenStream {
+    match shape {
         ImplShape::AsyncBlockWrapped => quote!(async move #body),
         ImplShape::Direct => quote!(#body),
         // a local `extern crate alloc;` resolves `alloc::boxed::Box`
@@ -808,7 +798,31 @@ fn expand_impl_form(args: TokenStream, item_impl: ItemImpl) -> Result<TokenStrea
             extern crate alloc;
             alloc::boxed::Box::pin(async move #body)
         }},
-    };
+    }
+}
+
+/// The stateful counterpart to `expand_fn_form`: `#[proxima::piped(...)]` on a
+/// plain inherent `impl Foo { fn call(..) { .. } }` block, for a pipe whose
+/// struct already carries its own fields (a client, a pool, a counter)
+/// instead of being the always-fieldless ZST the free-fn form generates. No
+/// struct is generated here — `Foo` is relocated as-is into `impl #trait for
+/// Foo`, plus a leftover `impl Foo { .. }` for any other item the block
+/// carried alongside `call`.
+fn expand_impl_form(args: TokenStream, item_impl: &ItemImpl) -> Result<TokenStream, Error> {
+    let pipe_args = parse_args(args)?;
+    reject_impl_form_header(item_impl, &pipe_args)?;
+
+    let struct_name = struct_name_from_self_ty(&item_impl.self_ty)?;
+    let (call_method, leftover) = split_call_method(item_impl)?;
+
+    validate_call_receiver(&call_method.sig)?;
+    let (in_pat, in_type) = extract_call_param(&call_method.sig)?;
+
+    let shape = impl_shape(&call_method.sig, &pipe_args)?;
+    let (out_type, err_type) = impl_result_types(&call_method.sig)?;
+
+    let tiers = Tier::plan(shape.climbs_to_unpin(), pipe_args.send);
+    let call_body = impl_call_body(&shape, &call_method.block);
 
     let alloc_cfg = match shape {
         ImplShape::BoxPinWrapped => quote!(#[cfg(feature = "alloc")]),

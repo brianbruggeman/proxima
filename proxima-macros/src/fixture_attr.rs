@@ -189,11 +189,11 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error
             let ty = &dep.ty;
             quote!(#ident: #ty)
         });
-        let resolves = resolved.iter().map(resolve_dep);
+        let resolve_stmts = resolved.iter().map(resolve_dep);
         let all_idents = deps.iter().map(|dep| &dep.ident);
         quote! {
             #vis async fn #partial_name(#(#params),*) #output {
-                #(#resolves)*
+                #(#resolve_stmts)*
                 Self::get(#(#all_idents),*).await
             }
         }
