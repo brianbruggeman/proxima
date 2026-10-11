@@ -1,0 +1,26 @@
+2026-10-11T05:31:21Z
+ 0:31  up 10 days, 10:35, 3 users, load averages: 9.98 17.81 19.41
+pgrep:
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+97222 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+97226 /Users/brianbruggeman/.cargo/bin/cargo-nextest nextest run -p proxima-tensor --cargo-profile gate --no-fail-fast
+97877 /private/tmp/cargo_target_gate6/gate/deps/convert_zero_cost-ef9d74c9c0bd9e1c --list --format terse
+97878 /private/tmp/cargo_target_gate6/gate/deps/convert_zero_cost-ef9d74c9c0bd9e1c --list --format terse --ignored
+97883 /private/tmp/cargo_target_gate6/gate/deps/neon_tile_full_output-3a66dd025fc8b218 --list --format terse
+97884 /private/tmp/cargo_target_gate6/gate/deps/neon_tile_full_output-3a66dd025fc8b218 --list --format terse --ignored
+97885 /private/tmp/cargo_target_gate6/gate/deps/quantized_embedding_gather_validation-6eaf4866cd761b88 --list --format t
+97886 /private/tmp/cargo_target_gate6/gate/deps/quantized_embedding_gather_validation-6eaf4866cd761b88 --list --format t
+97887 /private/tmp/cargo_target_gate6/gate/deps/rewrite_law_equivalence-66c28e11c8af5441 --list --format terse
+97888 /private/tmp/cargo_target_gate6/gate/deps/rewrite_law_equivalence-66c28e11c8af5441 --list --format terse --ignored
+97889 /private/tmp/cargo_target_gate6/gate/deps/windows_instrument-e38dd65ece766972 --list --format terse
+97890 /private/tmp/cargo_target_gate6/gate/deps/windows_instrument-e38dd65ece766972 --list --format terse --ignored
+top:
+  PID  %CPU COMM
+ 1265  91.7 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectServi
+17029  78.2 /Users/brianbruggeman/.local/bin/user-daemon
+  476  38.3 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  542  37.4 /usr/libexec/syspolicyd
+  888  20.1 /usr/libexec/sysmond
+ioreg_sample_1: "Device Utilization %"=74
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

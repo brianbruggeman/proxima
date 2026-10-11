@@ -1,0 +1,11 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/pf7/scratch/pipecap/pipeline_209d743dffeea538.metal	2026-10-10 23:53:33
++++ 209d743dffeea538.weights_store_off.metal	2026-10-11 00:51:55
+@@ -1200,7 +1200,7 @@
+             FOR_UNROLL for (long item = 0L; item < block / 32L; item++) {
+                 if (item * 32L < columns) {
+                     float weight = (local_scores[item] == -INFINITY) ? 0.0f : exp(local_scores[item] - next_maximum);
+-                    score_tile[vector * block + (long)lane + item * 32L] = weight;
++                    (void)weight;
+                     block_sum += weight;
+                 }
+             }

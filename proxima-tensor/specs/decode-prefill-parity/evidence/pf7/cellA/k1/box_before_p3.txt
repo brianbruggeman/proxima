@@ -1,0 +1,15 @@
+2026-10-11T05:18:16Z
+ 0:18  up 10 days, 10:22, 3 users, load averages: 5.64 9.87 11.62
+pgrep:
+41137 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+top:
+  PID  %CPU COMM
+17029  80.9 /Users/brianbruggeman/.local/bin/user-daemon
+  476  35.4 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+54533  14.9 /Applications/iTerm.app/Contents/MacOS/iTerm2
+54647   6.6 claude
+ 9854   2.2 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+ioreg_sample_1: "Device Utilization %"=91
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

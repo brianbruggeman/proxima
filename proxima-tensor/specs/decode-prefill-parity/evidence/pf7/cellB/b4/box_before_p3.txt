@@ -1,0 +1,22 @@
+2026-10-11T05:58:59Z
+ 0:58  up 10 days, 11:03, 3 users, load averages: 9.19 10.85 13.71
+pgrep:
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+93330 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+93334 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo-clippy clippy -j2 -p proxima-model-
+93335 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo check -j2 -p proxima-model-interop 
+94904 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+95105 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+95107 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/clippy-driver /Users/brianbruggeman/.rust
+95127 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+95128 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/clippy-driver /Users/brianbruggeman/.rust
+top:
+  PID  %CPU COMM
+17029  69.3 /Users/brianbruggeman/.local/bin/user-daemon
+95107  62.3 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/clippy-driver
+ 1265  49.5 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectServi
+  476  33.2 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  542  29.1 /usr/libexec/syspolicyd
+ioreg_sample_1: "Device Utilization %"=96
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

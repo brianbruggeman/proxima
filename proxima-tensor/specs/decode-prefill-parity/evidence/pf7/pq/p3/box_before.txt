@@ -1,0 +1,23 @@
+2026-10-11T05:59:20Z
+ 0:59  up 10 days, 11:03, 3 users, load averages: 9.15 10.74 13.60
+pgrep:
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+94904 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+95642 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+95880 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+95884 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo doc -j2 -p proxima-model-interop --
+96030 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+96032 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo-clippy clippy -j2 -p proxima-model-
+96033 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo check -j2 -p proxima-model-interop 
+96193 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+96194 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_primitives --e
+top:
+  PID  %CPU COMM
+96194  98.6 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+17029  79.6 /Users/brianbruggeman/.local/bin/user-daemon
+  476  37.0 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  542  25.4 /usr/libexec/syspolicyd
+  888  17.8 /usr/libexec/sysmond
+ioreg_sample_1: "Device Utilization %"=96
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

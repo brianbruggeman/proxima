@@ -1,0 +1,21 @@
+2026-10-11T06:02:57Z
+ 1:02  up 10 days, 11:07, 3 users, load averages: 7.91 10.76 13.06
+pgrep:
+5089 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null |
+7481 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null |
+7641 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null |
+7677 /Users/brianbruggeman/.cargo/bin/cargo-nextest nextest run -j2 -p proxima-model-interop --features std -E test(/mlx
+7699 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo --color=auto test --no-run --message
+7803 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/r
+7804 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_telemetry --edi
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+top:
+  PID  %CPU COMM
+ 7804  94.2 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+17029  63.1 /Users/brianbruggeman/.local/bin/user-daemon
+  476  34.1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  542  23.2 /usr/libexec/syspolicyd
+  888  19.2 /usr/libexec/sysmond
+ioreg_sample_1: "Device Utilization %"=91
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

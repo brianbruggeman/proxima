@@ -1,0 +1,14 @@
+2026-10-11T05:16:08Z
+ 0:16  up 10 days, 10:20, 3 users, load averages: 16.61 12.80 12.79
+pgrep:
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+top:
+  PID  %CPU COMM
+17029  72.8 /Users/brianbruggeman/.local/bin/user-daemon
+  476  35.0 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+54533  25.2 /Applications/iTerm.app/Contents/MacOS/iTerm2
+54647   4.6 claude
+  888   4.6 /usr/libexec/sysmond
+ioreg_sample_1: "Device Utilization %"=95
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

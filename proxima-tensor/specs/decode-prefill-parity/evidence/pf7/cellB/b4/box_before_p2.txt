@@ -1,0 +1,21 @@
+2026-10-11T05:58:49Z
+ 0:58  up 10 days, 11:03, 3 users, load averages: 9.88 11.03 13.81
+pgrep:
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+90967 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+93045 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo doc -j2 -p proxima-model-interop --
+93330 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+93334 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo-clippy clippy -j2 -p proxima-model-
+93335 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo check -j2 -p proxima-model-interop 
+94565 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+94566 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name build_script_build --e
+top:
+  PID  %CPU COMM
+17029  55.3 /Users/brianbruggeman/.local/bin/user-daemon
+  542  44.3 /usr/libexec/syspolicyd
+  476  29.8 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+54647  11.9 claude
+  477  11.2 /System/Library/PrivateFrameworks/TCC.framework/Support/tccd
+ioreg_sample_1: "Device Utilization %"=97
+ioreg_sample_2: "Device Utilization %"=0
+ioreg_sample_3: "Device Utilization %"=0

@@ -1,0 +1,76 @@
+df speculative_types=none
+df capture mode=floor step=0 records=369 physical_dispatches=417 prepass_records=24 rounds=21
+df pipeline_states distinct=20 pipeline_switches_between_dispatches=320
+df static_threadgroup_bytes_over_distinct_pipelines original=53040 empty=53040
+df buffer_bindings_per_dispatch median=7 min=2 max=21
+df threadgroups_per_dispatch median=1000 min=1 max=6145
+df bound_bytes_per_dispatch_full median=283913952 min=4 max=1522717316
+df single_threadgroup_dispatches=6
+df barriers live_tracker=0 node_keyed=268 node_and_slot_keyed=364 live_only=0 node_only=268 longest_barrier_free_run_live=369 longest_barrier_free_run_node_keyed=4 longest_barrier_free_run_node_and_slot_keyed=4
+df isolated_marginal groups=21 sum_over_dispatches_ms=199.4588
+df replay arm=recorded round=0 gpu_span_ms=200.2765 stamped_first_start_to_last_end_ms=None
+cell label=recorded wall_ms=202.438 cpu_ms=2.054 cpu_pct=1.0 rss_peak_mb=1632.6 footprint_mb=297.8 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=empty_same_bindings round=0 gpu_span_ms=1.1733 stamped_first_start_to_last_end_ms=None
+cell label=empty_same_bindings wall_ms=2.282 cpu_ms=0.960 cpu_pct=42.1 rss_peak_mb=1632.6 footprint_mb=297.8 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=empty_minimal_bindings round=0 gpu_span_ms=0.9517 stamped_first_start_to_last_end_ms=None
+cell label=empty_minimal_bindings wall_ms=1.575 cpu_ms=0.463 cpu_pct=29.4 rss_peak_mb=1632.7 footprint_mb=297.8 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=empty_one_threadgroup round=0 gpu_span_ms=0.6055 stamped_first_start_to_last_end_ms=None
+cell label=empty_one_threadgroup wall_ms=1.655 cpu_ms=0.934 cpu_pct=56.4 rss_peak_mb=1632.7 footprint_mb=297.8 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=recorded_unordered round=0 gpu_span_ms=115.1762 stamped_first_start_to_last_end_ms=None
+cell label=recorded_unordered wall_ms=117.391 cpu_ms=2.050 cpu_pct=1.7 rss_peak_mb=1632.9 footprint_mb=297.9 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=empty_same_bindings round=1 gpu_span_ms=0.9732 stamped_first_start_to_last_end_ms=None
+cell label=empty_same_bindings wall_ms=1.986 cpu_ms=0.912 cpu_pct=45.9 rss_peak_mb=1632.9 footprint_mb=297.8 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=empty_minimal_bindings round=1 gpu_span_ms=0.9497 stamped_first_start_to_last_end_ms=None
+cell label=empty_minimal_bindings wall_ms=1.331 cpu_ms=0.243 cpu_pct=18.3 rss_peak_mb=1632.9 footprint_mb=297.8 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=empty_one_threadgroup round=1 gpu_span_ms=0.5964 stamped_first_start_to_last_end_ms=None
+cell label=empty_one_threadgroup wall_ms=1.532 cpu_ms=0.796 cpu_pct=51.9 rss_peak_mb=1632.9 footprint_mb=297.8 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=recorded_unordered round=1 gpu_span_ms=92.0397 stamped_first_start_to_last_end_ms=None
+cell label=recorded_unordered wall_ms=94.116 cpu_ms=1.913 cpu_pct=2.0 rss_peak_mb=1632.9 footprint_mb=297.9 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=recorded round=1 gpu_span_ms=200.8003 stamped_first_start_to_last_end_ms=None
+cell label=recorded wall_ms=202.807 cpu_ms=1.929 cpu_pct=1.0 rss_peak_mb=1632.9 footprint_mb=297.9 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=empty_minimal_bindings round=2 gpu_span_ms=0.9001 stamped_first_start_to_last_end_ms=None
+cell label=empty_minimal_bindings wall_ms=1.344 cpu_ms=0.319 cpu_pct=23.7 rss_peak_mb=1632.9 footprint_mb=297.9 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=empty_one_threadgroup round=2 gpu_span_ms=0.5970 stamped_first_start_to_last_end_ms=None
+cell label=empty_one_threadgroup wall_ms=1.569 cpu_ms=0.846 cpu_pct=53.9 rss_peak_mb=1632.9 footprint_mb=297.9 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=recorded_unordered round=2 gpu_span_ms=96.9913 stamped_first_start_to_last_end_ms=None
+cell label=recorded_unordered wall_ms=99.030 cpu_ms=1.879 cpu_pct=1.9 rss_peak_mb=1633.0 footprint_mb=298.0 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=recorded round=2 gpu_span_ms=200.6578 stamped_first_start_to_last_end_ms=None
+cell label=recorded wall_ms=202.707 cpu_ms=1.898 cpu_pct=0.9 rss_peak_mb=1633.0 footprint_mb=298.0 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=empty_same_bindings round=2 gpu_span_ms=0.9971 stamped_first_start_to_last_end_ms=None
+cell label=empty_same_bindings wall_ms=2.084 cpu_ms=0.953 cpu_pct=45.7 rss_peak_mb=1633.0 footprint_mb=298.0 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=empty_one_threadgroup round=3 gpu_span_ms=0.5962 stamped_first_start_to_last_end_ms=None
+cell label=empty_one_threadgroup wall_ms=1.577 cpu_ms=0.833 cpu_pct=52.8 rss_peak_mb=1633.0 footprint_mb=298.0 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=recorded_unordered round=3 gpu_span_ms=104.5861 stamped_first_start_to_last_end_ms=None
+cell label=recorded_unordered wall_ms=106.608 cpu_ms=1.860 cpu_pct=1.7 rss_peak_mb=1633.2 footprint_mb=298.2 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.57
+df replay arm=recorded round=3 gpu_span_ms=200.4450 stamped_first_start_to_last_end_ms=None
+cell label=recorded wall_ms=202.515 cpu_ms=1.935 cpu_pct=1.0 rss_peak_mb=1633.2 footprint_mb=298.2 gpu_alloc_mb=1516.4 load_before=8.57 load_after=8.29
+df replay arm=empty_same_bindings round=3 gpu_span_ms=0.9830 stamped_first_start_to_last_end_ms=None
+cell label=empty_same_bindings wall_ms=2.073 cpu_ms=0.947 cpu_pct=45.7 rss_peak_mb=1633.2 footprint_mb=298.2 gpu_alloc_mb=1516.4 load_before=8.29 load_after=8.29
+df replay arm=empty_minimal_bindings round=3 gpu_span_ms=0.9491 stamped_first_start_to_last_end_ms=None
+cell label=empty_minimal_bindings wall_ms=1.393 cpu_ms=0.282 cpu_pct=20.2 rss_peak_mb=1633.2 footprint_mb=298.2 gpu_alloc_mb=1516.4 load_before=8.29 load_after=8.29
+df replay arm=recorded_unordered round=4 gpu_span_ms=104.5713 stamped_first_start_to_last_end_ms=None
+cell label=recorded_unordered wall_ms=106.874 cpu_ms=2.074 cpu_pct=1.9 rss_peak_mb=1633.2 footprint_mb=298.2 gpu_alloc_mb=1516.4 load_before=8.29 load_after=8.29
+df replay arm=recorded round=4 gpu_span_ms=200.7098 stamped_first_start_to_last_end_ms=None
+cell label=recorded wall_ms=202.799 cpu_ms=1.919 cpu_pct=0.9 rss_peak_mb=1633.2 footprint_mb=298.2 gpu_alloc_mb=1516.4 load_before=8.29 load_after=8.29
+df replay arm=empty_same_bindings round=4 gpu_span_ms=1.0020 stamped_first_start_to_last_end_ms=None
+cell label=empty_same_bindings wall_ms=2.132 cpu_ms=0.984 cpu_pct=46.2 rss_peak_mb=1633.2 footprint_mb=298.2 gpu_alloc_mb=1516.4 load_before=8.29 load_after=8.29
+df replay arm=empty_minimal_bindings round=4 gpu_span_ms=0.9499 stamped_first_start_to_last_end_ms=None
+cell label=empty_minimal_bindings wall_ms=1.440 cpu_ms=0.331 cpu_pct=23.0 rss_peak_mb=1633.2 footprint_mb=298.2 gpu_alloc_mb=1516.4 load_before=8.29 load_after=8.29
+df replay arm=empty_one_threadgroup round=4 gpu_span_ms=0.5980 stamped_first_start_to_last_end_ms=None
+cell label=empty_one_threadgroup wall_ms=1.725 cpu_ms=1.004 cpu_pct=58.2 rss_peak_mb=1633.2 footprint_mb=298.2 gpu_alloc_mb=1516.4 load_before=8.29 load_after=8.29
+df replay arm=recorded round=5 gpu_span_ms=201.0409 stamped_first_start_to_last_end_ms=None
+cell label=recorded wall_ms=203.179 cpu_ms=2.029 cpu_pct=1.0 rss_peak_mb=1633.3 footprint_mb=298.3 gpu_alloc_mb=1516.4 load_before=8.29 load_after=8.29
+df replay arm=empty_same_bindings round=5 gpu_span_ms=0.9870 stamped_first_start_to_last_end_ms=None
+cell label=empty_same_bindings wall_ms=2.116 cpu_ms=0.950 cpu_pct=44.9 rss_peak_mb=1633.3 footprint_mb=298.3 gpu_alloc_mb=1516.4 load_before=8.29 load_after=8.29
+df replay arm=empty_minimal_bindings round=5 gpu_span_ms=0.9497 stamped_first_start_to_last_end_ms=None
+cell label=empty_minimal_bindings wall_ms=1.391 cpu_ms=0.277 cpu_pct=19.9 rss_peak_mb=1633.3 footprint_mb=298.3 gpu_alloc_mb=1516.4 load_before=8.29 load_after=8.29
+df replay arm=empty_one_threadgroup round=5 gpu_span_ms=0.5753 stamped_first_start_to_last_end_ms=None
+cell label=empty_one_threadgroup wall_ms=1.641 cpu_ms=0.947 cpu_pct=57.7 rss_peak_mb=1633.3 footprint_mb=298.3 gpu_alloc_mb=1516.4 load_before=8.29 load_after=8.29
+df replay arm=recorded_unordered round=5 gpu_span_ms=112.2335 stamped_first_start_to_last_end_ms=None
+cell label=recorded_unordered wall_ms=114.472 cpu_ms=2.068 cpu_pct=1.8 rss_peak_mb=1633.3 footprint_mb=298.3 gpu_alloc_mb=1516.4 load_before=8.29 load_after=8.29
+df replay arm=empty_same_bindings round=6 gpu_span_ms=0.9801 stamped_first_start_to_last_end_ms=None
+cell label=empty_same_bindings wall_ms=2.085 cpu_ms=0.951 cpu_pct=45.6 rss_peak_mb=1633.3 footprint_mb=298.3 gpu_alloc_mb=1516.4 load_before=8.29 load_after=8.29
+df replay arm=empty_minimal_bindings round=6 gpu_span_ms=0.9493 stamped_first_start_to_last_end_ms=None
+cell label=empty_minimal_bindings wall_ms=1.381 cpu_ms=0.265 cpu_pct=19.2 rss_peak_mb=1633.3 footprint_mb=298.3 gpu_alloc_mb=1516.4 load_before=8.29 load_after=8.29
+df replay arm=empty_one_threadgroup round=6 gpu_span_ms=0.5954 stamped_first_start_to_last_end_ms=None
+cell label=empty_one_threadgroup wall_ms=1.616 cpu_ms=0.862 cpu_pct=53.3 rss_peak_mb=1633.3 footprint_mb=298.3 gpu_alloc_mb=1516.4 load_before=8.29 load_after=8.29

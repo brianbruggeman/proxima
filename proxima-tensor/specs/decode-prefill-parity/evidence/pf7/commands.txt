@@ -1,0 +1,19 @@
+tools (rustc -O --edition 2024 <file>.rs): tools/warm_timeline.rs, tools/make_prefill_variants.rs, tools/tg_bytes.rs; attn7/tools/ab_summary.rs; attr4/tools/queueing_summary.rs
+builds (release): cargo build --release -p proxima-model-interop --features std,metal,instrument --example decode_gbps_baseline   (base_instr at 8417f133; tip2 after 317a8414 and 5bd62124)
+                  cargo build --release -p proxima-model-interop --features std,metal --example decode_gbps_baseline               (base_plain)
+                  cargo build --release -p proxima-model-interop --features std,metal,instrument,metal-attn-variants --example norm_variant_ab --example prefill_queueing
+                  cargo build --release -p proxima-model-interop --features std,metal,instrument --example dispatch_floor
+cell A process: env -i PROXIMA_DECODE_MODEL_GGUF=<granite blob> PROXIMA_SPECULATIVE_TYPES=none PROXIMA_PROMPT="$(prompt1k verbatim)" PROXIMA_MAX_TOKENS=24 PROXIMA_RUNS=5 \
+                PROXIMA_TELEMETRY_FILE=<dir>/telemetry.log RUST_LOG=proxima_model_interop=info,proxima_model_interop::generate::decode=debug,omega::metal::placements_execute_named=debug \
+                [PROXIMA_COMMAND_BUFFER_CHUNKS=K | PROXIMA_BOUNDARIES_PREFILL=1 PROXIMA_COMMAND_BUFFER_BOUNDARIES=N | PROXIMA_PRECOMMIT_WAIT=1 | PROXIMA_PRECOMMIT_PING=1 | PROXIMA_COMMAND_BUFFER_ENQUEUE_EARLY=1 | PROXIMA_RESIDENT_PREFILL_PLAN_BYTES=0] \
+                /usr/bin/time -l decode_gbps_baseline_tip2_instr ;  warm_timeline <p1/telemetry.log> <p2/telemetry.log> <p3/telemetry.log>
+cell A plain:   the same without the telemetry variables, decode_gbps_baseline_base_plain ;  warm_timeline --resources-only <p*/stderr.log>
+queueing:       PROXIMA_GEMMA4_E2B_GGUF=<granite blob> PROXIMA_PROMPT_FILE=prompt1k.txt PQ_SMALL_PROMPT=<short prompt> PQ_STAGES=prefill,prefill,prefill,prefill,prefill PQ_OUT=<dir> prefill_queueing_var_instr ; queueing_summary <dir>/telemetry.log
+floor:          PROXIMA_DECODE_MODEL_GGUF=<granite blob> PROXIMA_PROMPT_FILE=prompt1k.txt DF_MODE=floor DF_STEP=0 DF_ROUNDS=21 DF_OUT_DIR=<dir> dispatch_floor_tip2_instr
+base source:    PROXIMA_PIPELINE_CAPTURE=<dir> PROXIMA_GEMMA4_E2B_GGUF=<granite blob> PROXIMA_PROMPT_FILE=prompt1k.txt AB_VARIANT_DIR=<empty dir> AB_DESCRIBE=1 AB_STEP=0 AB_PACKED=1 norm_variant_ab   -> pipeline_209d743dffeea538.metal
+variants:       make_prefill_variants variants/base_emitted_209d743dffeea538.metal <dir> 209d743dffeea538   (36 files; cells b1 b2 b2b b3 b4 are subsets named in cellB/*/p*.ab_lines.txt)
+cell B process: env -i PROXIMA_GEMMA4_E2B_GGUF=<granite blob> PROXIMA_PROMPT_FILE=prompt1k.txt AB_STEP=0 AB_ROUNDS=21 AB_PACKED=1 AB_SPAN_FULL=1 AB_VARIANT_DIR=<subset dir> AB_SHA=209d743d AB_ATTENTION_REFERENCE=1 PROXIMA_SPECULATIVE_TYPES=none /usr/bin/time -l norm_variant_ab_var_instr
+                ab_summary group single_us p1.out p2.out p3.out
+bytes:          tg_bytes 64 ; tg_bytes 32
+gates:          cargo nextest run -p omega --features metal,instrument --cargo-profile gate --no-fail-fast ; cargo clippy -p omega --features metal,instrument --no-deps --all-targets -- -D warnings ; cargo clippy -p proxima-model-interop --features std,metal,instrument --no-deps -- -D warnings
+CI: none of these cells runs in CI (Metal A/B and timing); each row re-proves on this box only. Raw telemetry logs (1.9 MB each) and ab outputs stay in .long_ctx_backups/pf7/raw.

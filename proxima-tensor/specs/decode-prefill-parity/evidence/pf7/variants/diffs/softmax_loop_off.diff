@@ -1,0 +1,11 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/pf7/scratch/pipecap/pipeline_209d743dffeea538.metal	2026-10-10 23:53:33
++++ 209d743dffeea538.softmax_loop_off.metal	2026-10-11 00:51:55
+@@ -1171,7 +1171,7 @@
+             }
+         }
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+-        for (long vector = (long)simdgroup_slot; vector < tile_vectors; vector += simdgroups) {
++        for (long vector = (long)simdgroup_slot; vector < 0L; vector += simdgroups) {
+             long query_row = (long)vector_row[vector];
+             float local_scores[block / 32];
+             float block_maximum = -INFINITY;
