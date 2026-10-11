@@ -6,7 +6,7 @@
 //! tunable axis is a key of `proxima-mil.toml`, resolved by `build.rs` into
 //! [`sized`]; teaching pointer: `proxima-tensor/build.rs` and
 //! `proxima_build::sizing::SizingSource` are the pattern this mirrors.
-//! [`wire`] and [`weights`] are `core` only; [`census`] and [`writer`] need
+//! [`wire`] and [`weights`] are `core` only; `census` and `writer` need
 //! `alloc`.
 #![no_std]
 
