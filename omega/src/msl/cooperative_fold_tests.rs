@@ -116,10 +116,10 @@ fn bit_exact_policy_keeps_the_serial_fold_and_never_batches() {
 }
 
 #[cfg(all(feature = "reduce-epilogue-fusion", feature = "metal-wide-cooperative-reduce"))]
-mod normalization_rows {
+pub(super) mod normalization_rows {
     use super::*;
 
-    fn rmsnorm_over_row(width: u32) -> BoundOp {
+    pub(crate) fn rmsnorm_over_row(width: u32) -> BoundOp {
         let mut program = Vec::new();
         let full = || IndexMap::Affine(map::projection(2, &[0, 1]));
         let keep_row = || IndexMap::Affine(map::projection(1, &[0]));

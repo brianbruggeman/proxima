@@ -124,6 +124,7 @@ mod packed_row_blocked_ggml;
 #[macro_use]
 mod tiled_gemm_cooperative_scan;
 mod expert_grouped_gemm;
+mod index_narrowing;
 mod wide_grid;
 pub(crate) use emit_and_classify::emit_inner_with_mma_selection;
 #[cfg(feature = "metal-attn-variants")]
@@ -185,6 +186,7 @@ pub(crate) use elementwise_reduce_core::*;
 ))]
 pub(crate) use expert_grouped_gemm::ROUTE_COMPACTION_MISMATCH_FAULT;
 use expert_grouped_gemm::*;
+use index_narrowing::*;
 #[cfg(any(
     all(test, feature = "metal-grouped-gemm"),
     all(feature = "metal", target_os = "macos")

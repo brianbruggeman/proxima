@@ -2234,7 +2234,7 @@ pub(super) fn push_cooperative_reduce_body(
         source.push_str(&format!("    long output_coord[{output_rank_len}];\n"));
         // narrows the coordinate decomposition's divisors to `uint` only
         // when every output extent fits `u32`.
-        if coord_index32_extents_fit(resolved, output_axes) && coord_index32_override() {
+        if metal.coord_index32 {
             source.push_str("    uint remaining = (uint)output_index;\n");
             for index in (0..output_rank).rev() {
                 source.push_str(&format!(

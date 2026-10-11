@@ -290,6 +290,10 @@ pub(crate) fn emit_inner_with_mma_selection(
         BoundOpKind::MoeTopK { .. } => render_moe_topk(resolved, &entry),
         BoundOpKind::TopFractionSelect { .. } => render_top_fraction_select(resolved, &entry),
     }?;
+    let source = match index_family(resolved, &quantized) {
+        Some(family) if extras.coord_index32 => apply_index_family(family, source),
+        _ => source,
+    };
     // Coupled to `render_cached_attention`'s own final-store branch by
     // construction: whenever the rendered SOURCE writes the scratch layout
     // instead of the real output (`cached_attention_merge_needed`), the
@@ -1374,15 +1378,37 @@ pub(super) fn multi_row_index32_active(
     multi_row_index32_override()
 }
 
-/// admission for the generic cooperative-reduce seam's coordinate
-/// decomposition: narrows its divisors to `uint` only when every output
-/// extent fits `u32`.
+/// the one 32-bit index predicate and the `_c32` cache-key bit: the generic
+/// cooperative and serial seams narrow their coordinate decomposition when
+/// every output extent fits `u32`; the three families of
+/// [`index_family`] additionally narrow the rendered index arithmetic when
+/// their own reach fits (`index_family_fits`). The bit decides the rendered
+/// text of every one of them, so a shape that does not fit renders the
+/// 64-bit form under a key without `_c32`.
 pub(super) fn coord_index32_active(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
 ) -> bool {
+    if !coord_index32_override() {
+        return false;
+    }
+    if let Some(family) = index_family(resolved, quantized) {
+        return index_family_fits(resolved, quantized, family)
+            && generic_coordinate_fits(resolved, quantized, numeric_policy, expert_source_mode)
+                .unwrap_or(true);
+    }
+    generic_coordinate_fits(resolved, quantized, numeric_policy, expert_source_mode)
+        .unwrap_or(false)
+}
+
+fn generic_coordinate_fits(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+    expert_source_mode: bool,
+) -> Option<bool> {
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -1390,13 +1416,12 @@ pub(super) fn coord_index32_active(
         ..
     } = &resolved.kind
     else {
-        return false;
+        return None;
     };
-    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some() {
-        return false;
-    }
-    if packed_row_block(resolved, quantized).is_some() {
-        return false;
+    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
+        || packed_row_block(resolved, quantized).is_some()
+    {
+        return None;
     }
     let cooperative = reduce_is_cooperative_dispatch(
         resolved,
@@ -1407,12 +1432,11 @@ pub(super) fn coord_index32_active(
         output_axes,
         expert_source_mode,
     );
-    let fits = if cooperative {
+    Some(if cooperative {
         coord_index32_extents_fit(resolved, output_axes)
     } else {
         serial_reduce_index32_fits(resolved, output_axes)
-    };
-    fits && coord_index32_override()
+    })
 }
 
 /// The serial reduce body's bound for 32-bit coordinate arithmetic: its one
