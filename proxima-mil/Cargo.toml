@@ -11,9 +11,13 @@ readme.workspace = true
 
 [features]
 default = []
-alloc = []
-std = ["alloc"]
+alloc = ["dep:proxima-tensor", "proxima-tensor/alloc"]
+std = ["alloc", "thiserror/std"]
 alloc-count = ["std"]
+
+[dependencies]
+proxima-tensor = { workspace = true, optional = true }
+thiserror.workspace = true
 
 [lints]
 workspace = true

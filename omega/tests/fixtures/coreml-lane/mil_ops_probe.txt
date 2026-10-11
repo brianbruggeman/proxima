@@ -1,0 +1,53 @@
+compiler coremlcompiler=3500.32.1 mil=3510.2.1 specification_version=7 opset=CoreML6 date=2026-10-11
+program operations=41 distinct=38 compiled_operations=41
+probe operator=add verdict=compiled emitted=1 compiled=1
+probe operator=cast verdict=compiled emitted=3 compiled=3
+probe operator=concat verdict=compiled emitted=1 compiled=1
+probe operator=cumsum verdict=compiled emitted=1 compiled=1
+probe operator=equal verdict=compiled emitted=1 compiled=1
+probe operator=erf verdict=compiled emitted=1 compiled=1
+probe operator=exp verdict=compiled emitted=1 compiled=1
+probe operator=expand_dims verdict=compiled emitted=1 compiled=1
+probe operator=gather verdict=compiled emitted=1 compiled=1
+probe operator=gather_along_axis verdict=compiled emitted=1 compiled=1
+probe operator=greater verdict=compiled emitted=1 compiled=1
+probe operator=identity verdict=compiled emitted=1 compiled=1
+probe operator=inverse verdict=compiled emitted=1 compiled=1
+probe operator=layer_norm verdict=compiled emitted=1 compiled=1
+probe operator=log verdict=compiled emitted=1 compiled=1
+probe operator=matmul verdict=compiled emitted=1 compiled=1
+probe operator=maximum verdict=compiled emitted=1 compiled=1
+probe operator=minimum verdict=compiled emitted=1 compiled=1
+probe operator=mul verdict=compiled emitted=1 compiled=1
+probe operator=pow verdict=compiled emitted=1 compiled=1
+probe operator=range_1d verdict=compiled emitted=1 compiled=1
+probe operator=real_div verdict=compiled emitted=1 compiled=1
+probe operator=reduce_argmax verdict=compiled emitted=1 compiled=1
+probe operator=reduce_max verdict=compiled emitted=1 compiled=1
+probe operator=reduce_mean verdict=compiled emitted=1 compiled=1
+probe operator=reduce_min verdict=compiled emitted=1 compiled=1
+probe operator=reduce_prod verdict=compiled emitted=1 compiled=1
+probe operator=reduce_sum verdict=compiled emitted=1 compiled=1
+probe operator=reshape verdict=compiled emitted=1 compiled=1
+probe operator=scatter_along_axis verdict=compiled emitted=1 compiled=1
+probe operator=select verdict=compiled emitted=1 compiled=1
+probe operator=shape verdict=compiled emitted=1 compiled=1
+probe operator=slice_by_index verdict=compiled emitted=1 compiled=1
+probe operator=softmax verdict=compiled emitted=1 compiled=1
+probe operator=sqrt verdict=compiled emitted=1 compiled=1
+probe operator=sub verdict=compiled emitted=1 compiled=1
+probe operator=tanh verdict=compiled emitted=1 compiled=1
+probe operator=transpose verdict=compiled emitted=2 compiled=2
+probe operator=abs verdict=accepted
+probe operator=floor verdict=accepted
+probe operator=ceil verdict=accepted
+probe operator=round verdict=accepted
+probe operator=sign verdict=accepted
+probe operator=sigmoid verdict=accepted
+probe operator=neg verdict=unknown_operator
+probe operator=cummax verdict=unknown_operator
+probe operator=cummin verdict=unknown_operator
+probe operator=cumprod verdict=unknown_operator
+probe operator=log_softmax verdict=unknown_operator
+probe operator=cumsum verdict=required_param param=reverse
+probe operator=matmul verdict=required_param param=transpose_y

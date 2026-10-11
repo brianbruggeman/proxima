@@ -531,8 +531,8 @@ door = [
 ]
 # the ONNX door (`onnx_door`): the door instantiated with the ONNX reader.
 onnx-door = ["door", "dep:proxima-onnx", "dep:sha2", "dep:bon"]
-# the Core ML lane writer sink (`mil-writer`): the door instantiated with the MIL writer; proxima-mil joins when it lands.
-mil-writer = ["door"]
+# the MIL writer lane (`proxima-mil`): the sans-IO census, encoder and package assembler the door's Emit and Package stages plug in.
+mil-writer = ["door", "dep:proxima-mil"]
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
@@ -569,6 +569,7 @@ proxima-tensor = { version = "0.1.0", path = "../proxima-tensor", default-featur
 const_format = { version = "0.2.36", default-features = false }
 bon = { workspace = true, optional = true, features = ["experimental-overwritable"] }
 proxima-onnx = { version = "0.1.0", path = "../proxima-onnx", features = ["std"], optional = true }
+proxima-mil = { version = "0.1.0", path = "../proxima-mil", features = ["std"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # objc2: the message-send runtime (Retained<T>, extern_methods!) every Metal
