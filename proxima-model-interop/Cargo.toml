@@ -347,7 +347,7 @@ proxima-tensor = { path = "../proxima-tensor", default-features = false, feature
 # already requires (it evaluates through `proxima_tensor::cpu`, itself std-gated)
 # -- optional, wired on only by this crate's own `std` feature above, so the
 # alloc-only floor never pulls it in.
-proxima-tokenizer = { path = "../proxima-tokenizer", default-features = false, features = ["gguf"], optional = true }
+proxima-tokenizer = { path = "../proxima-tokenizer", default-features = false, features = ["gguf", "hf"], optional = true }
 rustix = { version = "1.1", features = ["std", "mm"] }
 serde = { workspace = true, features = ["derive", "alloc"] }
 # `hf_config::HfConfig` deserializes a real HF config.json (alloc-tier, no
