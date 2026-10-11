@@ -33,6 +33,8 @@ mod bind_leaves;
 pub mod block_file;
 pub mod capability;
 #[cfg(feature = "std")]
+pub mod cold_artifact;
+#[cfg(feature = "std")]
 mod dense;
 mod dtype;
 mod error;
