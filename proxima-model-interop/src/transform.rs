@@ -186,3 +186,5 @@ pub use mlx_plain::{DEFAULT_PLAIN_DTYPE, PlainTensor, export_plain, export_plain
 
 #[cfg(feature = "std")]
 mod mlx_reference;
+#[cfg(feature = "std")]
+mod mlx_reference_pack;
