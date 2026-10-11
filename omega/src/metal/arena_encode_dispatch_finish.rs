@@ -2393,6 +2393,78 @@ impl CapturedDispatch {
         })
     }
 
+    /// [`Self::with_f16_buffers`] for the cache codecs the decode split reads:
+    /// the buffers at `indices` hold the same values narrowed to `codec`
+    /// (`Float16`, `BFloat16` or `BFloat8`), so a variant kernel that reads
+    /// `ushort4` or `uchar4` there runs on the data the f32 kernel ran on.
+    ///
+    /// # Errors
+    ///
+    /// [`MetalError::CompileFailed`] for a codec with no narrow cache read, a
+    /// binding that is not bound, or a refused allocation.
+    pub fn with_narrowed_buffers(&self, indices: &[usize], codec: Codec) -> Result<Self, MetalError> {
+        let narrow: fn(f32) -> Vec<u8> = match codec {
+            Codec::Float16 => |value| f16::from_f32(value).to_le_bytes().to_vec(),
+            Codec::BFloat16 => |value| half::bf16::from_f32(value).to_le_bytes().to_vec(),
+            Codec::BFloat8 => |value| vec![proxima_tensor::BFloat8::from_f32(value).to_bits()],
+            other => {
+                return Err(MetalError::CompileFailed {
+                    log: format!("codec {other:?} has no narrow cache read"),
+                });
+            }
+        };
+        let (device, _queue) = device_and_queue()?;
+        let mut narrowed = self.clone_record();
+        for index in indices {
+            let slot = narrowed
+                .buffers
+                .iter_mut()
+                .find(|(bound_index, _, _)| bound_index == index)
+                .ok_or_else(|| MetalError::CompileFailed {
+                    log: format!("binding {index} is not bound in this record"),
+                })?;
+            let (_, source, offset) = slot.clone();
+            let count = source.length().saturating_sub(offset) / core::mem::size_of::<f32>();
+            // SAFETY: shared-storage buffer idle between replays; `offset + count * 4 <= length`.
+            let floats = unsafe {
+                core::slice::from_raw_parts(
+                    source.contents().as_ptr().cast::<u8>().add(offset).cast::<f32>(),
+                    count,
+                )
+            };
+            let bytes: Vec<u8> = floats.iter().flat_map(|value| narrow(*value)).collect();
+            *slot = (*index, shared_buffer_from(&device, &bytes)?, 0);
+        }
+        Ok(narrowed)
+    }
+
+    fn clone_record(&self) -> Self {
+        Self {
+            step: self.step,
+            node: self.node,
+            kind_name: self.kind_name,
+            entry: self.entry.clone(),
+            msl_sha256: String::new(),
+            operands: self.operands.clone(),
+            chunk_index: self.chunk_index,
+            extents: self.extents.clone(),
+            grid: self.grid,
+            bindings: self.bindings.clone(),
+            unreplayable: self.unreplayable.clone(),
+            route_prepass_dispatches: self.route_prepass_dispatches,
+            route_prepass_grid: self.route_prepass_grid,
+            route_prepass_max_threads: self.route_prepass_max_threads,
+            uniform_bytes: self.uniform_bytes.clone(),
+            pipeline: self.pipeline.clone(),
+            buffers: self.buffers.clone(),
+            uniforms_index: self.uniforms_index,
+            fault_index: self.fault_index,
+            prepass: self.prepass.clone(),
+            prepass_owner: self.prepass_owner,
+            barrier_before: self.barrier_before,
+        }
+    }
+
     /// The bytes of the buffer bound at `binding`, from its offset to its end,
     /// as they stand after the last replay; `None` for an unbound index or a
     /// resident checkpoint mapping. Compares what a kernel variant left in a
