@@ -519,6 +519,15 @@ pub enum InteropError {
     #[error("leaves {leaves} have no stored tensor and no layout row for an mlx export")]
     MlxUnmappedLeaves { leaves: String },
 
+    /// The MLX directory export could not read the GGUF or create or write one
+    /// of the output files, e.g. `/models/granite/config.json`.
+    #[cfg(feature = "std")]
+    #[error("mlx export io at {path:?}: {source}")]
+    MlxDirectoryIo {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+
     /// `crate::short_conv::short_conv_architecture_from_metadata`'s (`std`-gated) `key` (e.g.
     /// `lfm2moe.attention.head_count_kv`) is a per-layer array whose
     /// nonzero entries (the real attention layers' own kv head count)

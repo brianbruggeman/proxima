@@ -21,10 +21,11 @@ use super::mlx_config_fields::{
     FamilyFields, GEMMA_FLOATS, GEMMA_INTS, GRANITE_FLOATS, GRANITE_INTS, KeyTable, gemma_fields,
     granite_fields, table_fields, tied_embeddings,
 };
-use crate::bind::ModelHparams;
+use super::mlx_names::{Layout, SANDWICH_NORM_LAYOUT, STANDARD_LAYOUT};
+use crate::bind::{ModelHparams, architecture_from_metadata, metadata_str};
 use crate::error::InteropError;
 use crate::hf_config::{HF_CONFIG_KEYS, HF_CONFIG_PASSTHROUGH_KEYS};
-use crate::sliding_pattern::hparams::SlidingPatternHparams;
+use crate::sliding_pattern::hparams::{SlidingPatternHparams, from_metadata};
 
 /// How one GGUF `general.architecture` spells itself in an HF `config.json`.
 /// `nested` names the sub-object (and its `model_type`) a multimodal
@@ -41,7 +42,12 @@ struct FamilyLayout {
     floats: KeyTable,
     ints: KeyTable,
     computed: FamilyFields,
+    tensor_layout: Layout,
+    tensor_prefix: &'static str,
+    hparams: HparamsReader,
 }
+
+type HparamsReader = fn(&ParsedGguf) -> Result<ModelHparams, InteropError>;
 
 const FAMILIES: [FamilyLayout; 2] = [
     FamilyLayout {
@@ -53,6 +59,9 @@ const FAMILIES: [FamilyLayout; 2] = [
         floats: GRANITE_FLOATS,
         ints: GRANITE_INTS,
         computed: granite_fields,
+        tensor_layout: STANDARD_LAYOUT,
+        tensor_prefix: "model.",
+        hparams: architecture_from_metadata,
     },
     FamilyLayout {
         gguf_architecture: "gemma4",
@@ -63,6 +72,9 @@ const FAMILIES: [FamilyLayout; 2] = [
         floats: GEMMA_FLOATS,
         ints: GEMMA_INTS,
         computed: gemma_fields,
+        tensor_layout: SANDWICH_NORM_LAYOUT,
+        tensor_prefix: "language_model.model.",
+        hparams: gemma_hparams,
     },
 ];
 
@@ -135,6 +147,26 @@ pub fn copy_config(source: &[u8]) -> Result<Vec<u8>, InteropError> {
         Ok(_) => Err(malformed("config.json is not a json object")),
         Err(error) => Err(malformed(&error.to_string())),
     }
+}
+
+/// The tensor naming and hyperparameters an MLX export of `parsed` needs:
+/// the name layout, the HF prefix of the decoder tensors, and the
+/// [`ModelHparams`] the family reads from its GGUF.
+///
+/// # Errors
+///
+/// [`InteropError::UnknownFamilyConfig`] for a family with no layout here;
+/// the metadata errors of the family's reader.
+pub(super) fn family_export(
+    parsed: &ParsedGguf,
+) -> Result<(Layout, &'static str, ModelHparams), InteropError> {
+    let layout = family_layout(metadata_str(parsed, "general.architecture")?)?;
+    let hparams = (layout.hparams)(parsed)?;
+    Ok((layout.tensor_layout, layout.tensor_prefix, hparams))
+}
+
+fn gemma_hparams(parsed: &ParsedGguf) -> Result<ModelHparams, InteropError> {
+    Ok(sliding_pattern_hparams(&from_metadata(parsed)?))
 }
 
 fn family_layout(family: &str) -> Result<&'static FamilyLayout, InteropError> {

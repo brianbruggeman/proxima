@@ -34,6 +34,22 @@ pub fn export_plain_named(
     layout: Layout,
     hf_prefix: &str,
 ) -> Result<Vec<PlainTensor>, InteropError> {
+    let names = leaf_names(parsed, binding, layout, hf_prefix)?;
+    let mut by_leaf: BTreeMap<_, _> = export_plain(parsed, file_bytes, dtype)?
+        .into_iter()
+        .map(|tensor| (tensor.name.clone(), tensor))
+        .collect();
+    let mut named = rename_mapped(&names, &mut by_leaf);
+    named.extend(fuse_halves(&names, &mut by_leaf));
+    Ok(named)
+}
+
+pub(super) fn leaf_names(
+    parsed: &ParsedGguf,
+    binding: &BindingProfile,
+    layout: Layout,
+    hf_prefix: &str,
+) -> Result<MlxNames, InteropError> {
     let directory: Vec<&str> = parsed
         .tensors
         .iter()
@@ -45,18 +61,12 @@ pub fn export_plain_named(
         .filter(|name| !binding.extra.iter().any(|extra| extra == name))
         .collect();
     let names = dense_names(&leaves, &directory, binding, layout, hf_prefix);
-    if !names.unmapped.is_empty() {
-        return Err(InteropError::MlxUnmappedLeaves {
+    match names.unmapped.is_empty() {
+        true => Ok(names),
+        false => Err(InteropError::MlxUnmappedLeaves {
             leaves: names.unmapped.join(", "),
-        });
+        }),
     }
-    let mut by_leaf: BTreeMap<_, _> = export_plain(parsed, file_bytes, dtype)?
-        .into_iter()
-        .map(|tensor| (tensor.name.clone(), tensor))
-        .collect();
-    let mut named = rename_mapped(&names, &mut by_leaf);
-    named.extend(fuse_halves(&names, &mut by_leaf));
-    Ok(named)
 }
 
 fn rename_mapped(
@@ -98,7 +108,7 @@ fn fuse_halves(
         .collect()
 }
 
-fn interleave(name: &str, parts: &[PlainTensor]) -> PlainTensor {
+pub(super) fn interleave(name: &str, parts: &[PlainTensor]) -> PlainTensor {
     let experts = usize::try_from(parts[0].shape[0]).unwrap_or(1);
     let chunk = parts[0].bytes.len() / experts;
     let mut bytes = Vec::with_capacity(chunk * experts * parts.len());

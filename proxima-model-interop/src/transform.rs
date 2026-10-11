@@ -189,6 +189,16 @@ mod mlx_plain_named;
 pub use mlx_plain_named::export_plain_named;
 
 #[cfg(feature = "std")]
+mod mlx_packed_named;
+#[cfg(feature = "std")]
+pub use mlx_packed_named::export_affine_named;
+
+#[cfg(feature = "std")]
+mod mlx_directory;
+#[cfg(feature = "std")]
+pub use mlx_directory::{export_mlx_directory, mlx_directory_files};
+
+#[cfg(feature = "std")]
 mod mlx_reference;
 #[cfg(feature = "std")]
 mod mlx_reference_pack;
