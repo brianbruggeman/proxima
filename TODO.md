@@ -234,3 +234,15 @@ public route to Qualcomm and MediaTek NPUs without the vendor SDKs; (2) a
 (3) an incumbent (LiteRT-LM phone decode numbers) for an Android build. On a
 Mac it adds nothing CoreML does not. Verify the current API surface and the
 NPU delegate list before any card.
+
+## MLIR and omega (owner question, 2026-10-11)
+
+Recorded so the position is in the tree, not only in session memory. Status: no slice, no card before this one.
+
+- Positioning (owner, 2026-09-09): proxima-tensor's algebra sits in the MLIR Linalg / Halide / TVM tradition: a generic expression (indexing maps + scalar body, parallel and reduction dims), with the schedule separate from the algorithm. A specialized executor must account for the whole composed expression and its addressing, never recognize a familiar fragment. Omega is that lowering for Metal today; CPU, wgpu and cuda back ends exist with narrower codec coverage.
+- Where MLIR already appears: as other compilers in the NPU lane census above (`qualcomm/hexagon-mlir`, AMD MLIR-AIE / IRON). Those lanes consume MLIR; omega does not emit it.
+- Two directions worth a card each, neither started:
+  1. Export: omega IR -> MLIR text (Linalg generic + tensor/memref, or StableHLO) so MLIR-consuming back ends (hexagon-mlir, MLIR-AIE, IREE) become lanes without a bespoke driver each. First measurement: take one captured decode step (granite or gemma4 E2B, the same captures the parity rounds use), emit it as Linalg text, and count the ops that have no faithful Linalg form. Expected gaps to count, not assume: the block-quantized codecs (Q4_0, Q8_0, bf8, bf4, fp6 e3m2 are byte layouts Linalg has no type for), gather-based MoE routing and the expert slab, KV residency and the hazard tracker's barrier policy, the 32-bit index class. The count decides whether export is a lane or a paper.
+  2. Import: MLIR (torch-mlir / StableHLO) -> omega IR, so a PyTorch graph lowers through omega's existing codec and residency machinery. First measurement: how many ops of a torch-mlir dump of the same two models map onto omega's op set with no new op.
+- Non-goals until a measurement says otherwise: no MLIR (LLVM) dependency in the core crates; textual emission and parsing only; no dialect registration.
+- Unsourced: whether hexagon-mlir or MLIR-AIE accept Linalg text at the level omega would emit (their user guides were read for the lane census, not for this question).
