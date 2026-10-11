@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use proxima_gguf::parse_complete;
 use proxima_model_interop::LoadedModel;
 use proxima_primitives::pipe::Pipe;
