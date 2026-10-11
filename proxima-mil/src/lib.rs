@@ -8,11 +8,22 @@
 //! `proxima_build::sizing::SizingSource` are the pattern this mirrors.
 #![no_std]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
 #[cfg(test)]
 extern crate std;
 
+#[cfg(feature = "alloc")]
+pub mod census;
 pub mod sized;
 
 /// Names of the modules this build compiles, so a tier build that gates every
 /// module off reports zero names instead of passing silently.
+#[cfg(feature = "alloc")]
+pub const MODULES: [&str; 2] = ["census", "sized"];
+
+/// Names of the modules this build compiles, so a tier build that gates every
+/// module off reports zero names instead of passing silently.
+#[cfg(not(feature = "alloc"))]
 pub const MODULES: [&str; 1] = ["sized"];

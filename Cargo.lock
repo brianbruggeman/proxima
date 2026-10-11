@@ -3227,6 +3227,7 @@ dependencies = [
  "proxima-autograd",
  "proxima-build",
  "proxima-gguf",
+ "proxima-mil",
  "proxima-onnx",
  "proxima-primitives",
  "proxima-safetensors",
@@ -4615,6 +4616,7 @@ name = "proxima-mil"
 version = "0.1.0"
 dependencies = [
  "proxima-build",
+ "proxima-tensor",
  "temp-env",
  "thiserror 2.0.19",
  "toml 0.8.23",
