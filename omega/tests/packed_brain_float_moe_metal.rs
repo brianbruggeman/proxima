@@ -1,4 +1,5 @@
 #![cfg(all(feature = "metal", target_os = "macos"))]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use omega::emit;
 use proxima_primitives::Codec as PrimitiveCodec;

@@ -19,6 +19,9 @@ use proxima_tensor::map::{self, AxisIndex, AxisTerm, IndexMap, IndexPattern};
 use proxima_tensor::op::{self, Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 use proxima_tensor::test_support::Lcg;
 
+pub type TokenEvaluation = (Vec<f32>, f32, Vec<f32>);
+pub type OptimizerState = (Vec<f32>, Vec<f32>, Vec<f32>);
+
 pub const TRAIN_INPUTS: [u32; 8] = [0, 1, 2, 3, 0, 1, 2, 3];
 pub const TRAIN_TARGETS: [u32; 8] = [1, 2, 3, 0, 1, 2, 3, 0];
 pub const HELD_OUT_INPUTS: [u32; 8] = [0, 0, 1, 1, 2, 2, 3, 3];
@@ -252,7 +255,7 @@ pub fn evaluate_token(
     weight_values: &[f32],
     token_id: u32,
     target_id: u32,
-) -> Result<(Vec<f32>, f32, Vec<f32>), Box<dyn Error>> {
+) -> Result<TokenEvaluation, Box<dyn Error>> {
     let input_values = one_hot(token_id);
     let target_values = one_hot(target_id);
     let route = [(token_id % 2) as f32];
@@ -292,7 +295,7 @@ pub fn encode_packed_weights(
             .map(|value| proxima_gguf::quant::bf8_e5m2::encode(*value))
             .collect()),
         WeightFormat::Bf4E2M1 => master_weights
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|pair| {
                 proxima_gguf::quant::bf4_e2m1::pack_pair(pair[0], pair[1]).map_err(Into::into)
             })
@@ -405,7 +408,7 @@ pub fn evaluate_packed_token(
     token_id: u32,
     target_id: u32,
     epoch: u64,
-) -> Result<(Vec<f32>, f32, Vec<f32>), Box<dyn Error>> {
+) -> Result<TokenEvaluation, Box<dyn Error>> {
     let codec = match format {
         WeightFormat::Bf8E5M2 => Codec::Bf8E5M2,
         WeightFormat::Bf4E2M1 => Codec::Bf4E2M1,
@@ -521,6 +524,10 @@ pub fn optimizer_program() -> (Vec<Op>, NodeId, NodeId, NodeId) {
     (program, updated_parameters, updated_first, updated_second)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the four output nodes and four state slices are the optimizer program's own named operands"
+)]
 pub fn run_optimizer(
     optimizer: &[Op],
     output_parameters: NodeId,
@@ -531,7 +538,7 @@ pub fn run_optimizer(
     first_moment: &[f32],
     second_moment: &[f32],
     step: f32,
-) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), Box<dyn Error>> {
+) -> Result<OptimizerState, Box<dyn Error>> {
     let step_values = [step];
     let evaluated = evaluate_named(
         optimizer,
@@ -755,11 +762,11 @@ pub fn run_arm(
             "held_out_logits": held_out_logits,
             "held_out_token_losses": held_out_token_losses,
             "held_out_loss": held_out_loss,
-            "compact_gradient_rows": gradient_values.chunks_exact(16).collect::<Vec<_>>(),
-            "coalesced_gradient_rows": coalesced_gradients.chunks_exact(16).collect::<Vec<_>>(),
-            "updated_master_rows": parameters.chunks_exact(16).collect::<Vec<_>>(),
-            "updated_first_moment_rows": first_moment.chunks_exact(16).collect::<Vec<_>>(),
-            "updated_second_moment_rows": second_moment.chunks_exact(16).collect::<Vec<_>>(),
+            "compact_gradient_rows": gradient_values.as_chunks::<16>().0.iter().collect::<Vec<_>>(),
+            "coalesced_gradient_rows": coalesced_gradients.as_chunks::<16>().0.iter().collect::<Vec<_>>(),
+            "updated_master_rows": parameters.as_chunks::<16>().0.iter().collect::<Vec<_>>(),
+            "updated_first_moment_rows": first_moment.as_chunks::<16>().0.iter().collect::<Vec<_>>(),
+            "updated_second_moment_rows": second_moment.as_chunks::<16>().0.iter().collect::<Vec<_>>(),
             "non_finite_count": non_finite_count,
             "wall_time_ns": elapsed_ns,
             "tokens_per_second": tokens_per_second,
@@ -771,10 +778,10 @@ pub fn run_arm(
                 "held_out_token_losses": scalar_held_out_losses,
                 "held_out_loss": scalar_held_out_loss,
                 "compact_gradient_rows": scalar_compact_gradients,
-                "coalesced_gradient_rows": scalar_coalesced_gradients.chunks_exact(16).collect::<Vec<_>>(),
-                "updated_master_rows": scalar_updated_masters.chunks_exact(16).collect::<Vec<_>>(),
-                "updated_first_moment_rows": scalar_updated_first.chunks_exact(16).collect::<Vec<_>>(),
-                "updated_second_moment_rows": scalar_updated_second.chunks_exact(16).collect::<Vec<_>>()
+                "coalesced_gradient_rows": scalar_coalesced_gradients.as_chunks::<16>().0.iter().collect::<Vec<_>>(),
+                "updated_master_rows": scalar_updated_masters.as_chunks::<16>().0.iter().collect::<Vec<_>>(),
+                "updated_first_moment_rows": scalar_updated_first.as_chunks::<16>().0.iter().collect::<Vec<_>>(),
+                "updated_second_moment_rows": scalar_updated_second.as_chunks::<16>().0.iter().collect::<Vec<_>>()
             }
         }));
     }

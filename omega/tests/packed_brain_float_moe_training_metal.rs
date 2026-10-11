@@ -1,4 +1,5 @@
 #![cfg(all(feature = "cpu", feature = "metal", target_os = "macos"))]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 extern crate moe_test_json as pilot_json;
 
@@ -249,7 +250,7 @@ fn encode_masters(codec: Codec, masters: &[f32]) -> Vec<u8> {
             .map(|value| proxima_gguf::quant::bf8_e5m2::encode(*value))
             .collect(),
         Codec::Bf4E2M1 => masters
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|pair| {
                 proxima_gguf::quant::bf4_e2m1::pack_pair(pair[0], pair[1])
                     .expect("the finite master pair encodes as BF4")
@@ -548,8 +549,8 @@ fn independent_reference() -> ReferenceValues {
     let mut compact_gradients = vec![0.0; 12];
     let mut coalesced_gradients = vec![0.0; 12];
     let mut loss = 0.0f32;
-    for token_index in 0..3 {
-        let expert_index = ROUTES[token_index] as usize;
+    for (token_index, route) in ROUTES.iter().enumerate() {
+        let expert_index = *route as usize;
         let activation_start = token_index * 2;
         let mut prediction = [0.0; 2];
         for output_index in 0..2 {
@@ -1370,6 +1371,7 @@ fn pilot_outputs(fixture: &PilotBatchFixture, gathered: GatheredContribution) ->
     ]
 }
 
+#[expect(clippy::too_many_arguments, reason = "the codec, packed bytes, ids, routes and plan or optimizer state are distinct fixture inputs each call site names")]
 fn plan_pilot_metal(
     fixture: &PilotBatchFixture,
     differentiated: &Differentiated,
@@ -1423,6 +1425,7 @@ fn plan_pilot_metal(
     .expect("Metal builds one reusable 64-step plan")
 }
 
+#[expect(clippy::too_many_arguments, reason = "the codec, packed bytes, ids, routes and plan or optimizer state are distinct fixture inputs each call site names")]
 fn execute_pilot_plan(
     fixture: &PilotBatchFixture,
     gathered: GatheredContribution,
@@ -1460,6 +1463,7 @@ fn execute_pilot_plan(
     }
 }
 
+#[expect(clippy::too_many_arguments, reason = "the codec, packed bytes, ids, routes and plan or optimizer state are distinct fixture inputs each call site names")]
 fn evaluate_pilot_cpu(
     fixture: &PilotBatchFixture,
     differentiated: &Differentiated,
@@ -1562,6 +1566,7 @@ fn pilot_adam_state(
     }
 }
 
+#[expect(clippy::too_many_arguments, reason = "the codec, packed bytes, ids, routes and plan or optimizer state are distinct fixture inputs each call site names")]
 fn scalar_pilot_batch_routed(
     codec: Codec,
     packed_bytes: &[u8],
@@ -2131,15 +2136,15 @@ fn packed_pilot_cross_entropy_64step_records_payload() {
                  held_out: &PilotBatchValues| {
                     serde_json::json!({
                         "backend": backend,
-                        "train_logits": train.logits.chunks_exact(4).map(<[f32]>::to_vec).collect::<Vec<_>>(),
+                        "train_logits": train.logits.as_chunks::<4>().0.iter().map(|chunk| chunk.to_vec()).collect::<Vec<_>>(),
                         "train_token_losses": train.token_losses,
                         "train_mean_loss": train.mean_loss,
-                        "compact_gradients": train.compact_gradients.chunks_exact(16).map(<[f32]>::to_vec).collect::<Vec<_>>(),
-                        "coalesced_gradients": coalesced.chunks_exact(16).map(<[f32]>::to_vec).collect::<Vec<_>>(),
+                        "compact_gradients": train.compact_gradients.as_chunks::<16>().0.iter().map(|chunk| chunk.to_vec()).collect::<Vec<_>>(),
+                        "coalesced_gradients": coalesced.as_chunks::<16>().0.iter().map(|chunk| chunk.to_vec()).collect::<Vec<_>>(),
                         "updated_masters": update.masters,
                         "updated_first_moment": update.first_moments,
                         "updated_second_moment": update.second_moments,
-                        "held_out_logits": held_out.logits.chunks_exact(4).map(<[f32]>::to_vec).collect::<Vec<_>>(),
+                        "held_out_logits": held_out.logits.as_chunks::<4>().0.iter().map(|chunk| chunk.to_vec()).collect::<Vec<_>>(),
                         "held_out_token_losses": held_out.token_losses,
                         "held_out_mean_loss": held_out.mean_loss,
                     })
@@ -2150,15 +2155,15 @@ fn packed_pilot_cross_entropy_64step_records_payload() {
                 "master_input": master_input, "first_moment_input": first_moment_input,
                 "second_moment_input": second_moment_input, "train_packed_bytes": train_packed_bytes,
                 "routes": TRAIN_ROUTES_JSON, "token_ids": TRAIN_IDS, "target_ids": TRAIN_TARGETS,
-                "train_logits": metal_train.logits.chunks_exact(4).map(<[f32]>::to_vec).collect::<Vec<_>>(),
+                "train_logits": metal_train.logits.as_chunks::<4>().0.iter().map(|chunk| chunk.to_vec()).collect::<Vec<_>>(),
                 "train_token_losses": metal_train.token_losses, "train_mean_loss": metal_train.mean_loss,
-                "compact_gradients": metal_train.compact_gradients.chunks_exact(16).map(<[f32]>::to_vec).collect::<Vec<_>>(),
-                "coalesced_gradients": metal_coalesced.chunks_exact(16).map(<[f32]>::to_vec).collect::<Vec<_>>(),
+                "compact_gradients": metal_train.compact_gradients.as_chunks::<16>().0.iter().map(|chunk| chunk.to_vec()).collect::<Vec<_>>(),
+                "coalesced_gradients": metal_coalesced.as_chunks::<16>().0.iter().map(|chunk| chunk.to_vec()).collect::<Vec<_>>(),
                 "updated_masters": metal_update.masters, "updated_first_moment": metal_update.first_moments,
                 "updated_second_moment": metal_update.second_moments, "held_out_packed_bytes": held_out_packed_bytes,
                 "held_out_routes": HELD_OUT_ROUTES_JSON, "held_out_token_ids": HELD_OUT_IDS,
                 "held_out_target_ids": HELD_OUT_TARGETS,
-                "held_out_logits": metal_held_out.logits.chunks_exact(4).map(<[f32]>::to_vec).collect::<Vec<_>>(),
+                "held_out_logits": metal_held_out.logits.as_chunks::<4>().0.iter().map(|chunk| chunk.to_vec()).collect::<Vec<_>>(),
                 "held_out_token_losses": metal_held_out.token_losses,
                 "held_out_mean_loss": metal_held_out.mean_loss,
                 "cpu_reference": encode_reference("cpu", &cpu_train, &cpu_coalesced, &cpu_update, &cpu_held_out),

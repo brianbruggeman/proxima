@@ -2072,6 +2072,7 @@ pub(super) fn register_skipped_output(
 }
 
 #[cfg(all(test, feature = "metal-output-placement"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod card_04_tests {
     use super::*;
 
@@ -2107,6 +2108,7 @@ mod card_04_tests {
 }
 
 #[cfg(all(test, feature = "metal-output-placement"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod card_07_tests {
     use super::*;
 
