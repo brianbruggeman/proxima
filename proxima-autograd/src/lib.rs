@@ -86,6 +86,7 @@ extern crate alloc;
 
 pub mod activation;
 pub mod adjoint;
+mod affine_scatter;
 pub mod conv;
 pub mod error;
 pub(crate) mod expr;
