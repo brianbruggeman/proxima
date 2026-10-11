@@ -1,0 +1,60 @@
+
+    thread 'msl::attn_rows_tests::the_row_tiled_softmax_is_one_online_pass_per_vector_with_one_max_and_one_sum_reduction' (91579449) panicked at omega/src/msl/attn_rows_tests.rs:1033:5:
+    the vector loop is not unrolled by turn: the unrolled form measured 122 us slower per op at the prompt shape
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.013s] (23/30) omega msl::attn_rows_tests::the_row_tiled_kernel_stages_the_query_tile_once_and_keeps_its_four_barriers
+  stdout ───
+
+    running 1 test
+    test msl::attn_rows_tests::the_row_tiled_kernel_stages_the_query_tile_once_and_keeps_its_four_barriers ... FAILED
+
+    failures:
+
+    failures:
+        msl::attn_rows_tests::the_row_tiled_kernel_stages_the_query_tile_once_and_keeps_its_four_barriers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 486 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'msl::attn_rows_tests::the_row_tiled_kernel_stages_the_query_tile_once_and_keeps_its_four_barriers' (91579453) panicked at omega/src/msl/attn_rows_tests.rs:1053:5:
+    assertion `left == right` failed: one after the setup and the staging, three per key block
+      left: 9
+     right: 4
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.013s] (24/30) omega msl::attn_rows_tests::the_query_tile_is_staged_only_while_it_fits_the_threadgroup_budget_and_the_staged_byte_cap
+        PASS [   0.014s] (25/30) omega msl::attn_rows_tests::the_row_count_the_policy_and_the_head_group_choose_the_form
+        PASS [   0.009s] (26/30) omega msl::attn_rows_tests::the_staged_byte_cap_at_the_threadgroup_budget_reproduces_the_fit_only_rule
+        FAIL [   0.011s] (27/30) omega msl::attn_rows_tests::the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads
+  stdout ───
+
+    running 1 test
+    test msl::attn_rows_tests::the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads ... FAILED
+
+    failures:
+
+    failures:
+        msl::attn_rows_tests::the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 486 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'msl::attn_rows_tests::the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads' (91579462) panicked at omega/src/msl/attn_rows_tests.rs:1604:13:
+    head_dim 64: first mismatch Some((942, ("    threadgroup half prefetched_key_even[1];", "    threadgroup float prefetched_key_even[1];")))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.014s] (28/30) omega msl::attn_rows_tests::the_split_binds_scratch_and_the_merge_runs_one_threadgroup_per_row_and_head
+        PASS [   0.139s] (29/30) omega msl::attn_rows_tests::the_new_range_visits_every_key_a_row_of_the_tile_can_see_exactly_once
+        PASS [   0.190s] (30/30) omega msl::attn_rows_tests::every_cached_and_new_key_is_scored_by_exactly_one_split
+────────────
+     Summary [   0.192s] 30 tests run: 24 passed, 6 failed, 458 skipped
+        FAIL [   0.013s] (11/30) omega msl::attn_rows_tests::the_kernel_source_carries_the_tile_decode_the_band_and_the_interleaved_store
+        FAIL [   0.014s] (15/30) omega msl::attn_rows_tests::the_half_setting_narrows_the_operands_and_keeps_scores_accumulators_and_softmax_float
+        FAIL [   0.015s] (16/30) omega msl::attn_rows_tests::the_float_setting_multiplies_float_fragments_and_names_no_half_type
+        FAIL [   0.012s] (22/30) omega msl::attn_rows_tests::the_row_tiled_softmax_is_one_online_pass_per_vector_with_one_max_and_one_sum_reduction
+        FAIL [   0.013s] (23/30) omega msl::attn_rows_tests::the_row_tiled_kernel_stages_the_query_tile_once_and_keeps_its_four_barriers
+        FAIL [   0.011s] (27/30) omega msl::attn_rows_tests::the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads
+error: test run failed
