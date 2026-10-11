@@ -1394,34 +1394,23 @@ pub(super) fn coord_index32_active(
     if !coord_index32_override() {
         return false;
     }
-    if let Some(family) = index_family(resolved, quantized) {
-        return index_family_fits(resolved, quantized, family)
-            && generic_coordinate_fits(resolved, quantized, numeric_policy, expert_source_mode)
-                .unwrap_or(true);
-    }
-    generic_coordinate_fits(resolved, quantized, numeric_policy, expert_source_mode)
-        .unwrap_or(false)
-}
-
-fn generic_coordinate_fits(
-    resolved: &BoundOp,
-    quantized: &[Option<Codec>],
-    numeric_policy: NumericPolicy,
-    expert_source_mode: bool,
-) -> Option<bool> {
     let BoundOpKind::Reduce {
         reduce_op,
         init,
         output_axes,
+        epilogue_operands,
         ..
     } = &resolved.kind
     else {
-        return None;
+        return index_family(resolved, quantized)
+            .is_some_and(|family| index_family_fits(resolved, quantized, family));
     };
-    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
-        || packed_row_block(resolved, quantized).is_some()
-    {
-        return None;
+    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some() {
+        return false;
+    }
+    if let Some(block) = packed_row_block(resolved, quantized) {
+        return expert_divide_is_rendered(resolved, output_axes, &block)
+            && output_total_fits_u32(resolved);
     }
     let cooperative = reduce_is_cooperative_dispatch(
         resolved,
@@ -1432,11 +1421,16 @@ fn generic_coordinate_fits(
         output_axes,
         expert_source_mode,
     );
-    Some(if cooperative {
+    let coordinates_fit = if cooperative {
         coord_index32_extents_fit(resolved, output_axes)
     } else {
         serial_reduce_index32_fits(resolved, output_axes)
-    })
+    };
+    let body_family = quantized.iter().all(Option::is_none)
+        && !epilogue_operands.is_empty()
+        && gather_count(resolved) == 0
+        && dense_batched_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_none();
+    coordinates_fit && (!body_family || body_reach_fits(resolved))
 }
 
 /// The serial reduce body's bound for 32-bit coordinate arithmetic: its one
