@@ -193,7 +193,7 @@ async fn serve_unix(
     // serve_default_uds binds in-future, so a naive println here would
     // race the bind. drive serve until a probe-connect succeeds; if
     // serve errors before then, surface that error.
-    let probe = probe_uds_until_ready(&unix_path);
+    let probe = probe_uds_until_ready(unix_path);
     tokio::pin!(probe);
     tokio::select! {
         outcome = &mut serve => return outcome,
