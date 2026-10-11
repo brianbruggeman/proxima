@@ -831,9 +831,10 @@ fn card_13_mma_precision_f16_exact_fixture_preserves_attention_output_bits() {
             values.fill(1.0);
         } else if name.ends_with("attn_q.weight") {
             values.fill(1.0 / 256.0);
-        } else if name.ends_with("norm.weight") || name.ends_with("layer_output_scale.weight") {
-            values.fill(1.0);
-        } else if name.starts_with("rope_cos") {
+        } else if name.ends_with("norm.weight")
+            || name.ends_with("layer_output_scale.weight")
+            || name.starts_with("rope_cos")
+        {
             values.fill(1.0);
         } else if name.starts_with("rope_sin") {
             values.fill(0.0);
