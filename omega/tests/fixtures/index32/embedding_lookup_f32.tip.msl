@@ -1,0 +1,42 @@
+struct Uniforms {
+    long total_elements;
+    long extents[2];
+    long operand_base[1];
+    long operand_strides[1][2];
+    long gather_index_base[1];
+    long gather_index_strides[1][2];
+    long gather_element_stride[1];
+    long gather_extent[1];
+};
+
+kernel void omega_elementwise_r2_n1_identity_g1(
+    device const float* in0 [[buffer(0)]],
+    device const float* gather_idx0 [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant Uniforms& u [[buffer(3)]],
+    device atomic_uint* fault [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if ((int)gid >= ((int)u.total_elements)) { return; }
+    uint coord[2];
+    uint remaining = (uint)gid;
+    coord[1] = remaining;
+    remaining /= (uint)((int)u.extents[1]);
+    coord[0] = remaining;
+    int off0 = ((int)u.operand_base[0]);
+    off0 += (int)coord[0] * ((int)u.operand_strides[0][0]);
+    off0 += (int)coord[1] * ((int)u.operand_strides[0][1]);
+    int gather_off0 = ((int)u.gather_index_base[0]);
+    gather_off0 += coord[0] * ((int)u.gather_index_strides[0][0]);
+    gather_off0 += coord[1] * ((int)u.gather_index_strides[0][1]);
+    int fetched0 = (int)gather_idx0[gather_off0];
+    if (fetched0 < 0 || fetched0 >= ((int)u.gather_extent[0])) {
+        atomic_fetch_max_explicit(&fault[0], (uint)max(fetched0, (int)0) + 1u, memory_order_relaxed);
+    }
+    fetched0 = max((int)0, min(fetched0, ((int)u.gather_extent[0]) - 1));
+    off0 += fetched0 * ((int)u.gather_element_stride[0]);
+    float scratch[1];
+    scratch[0] = in0[off0];
+    float step0 = scratch[0];
+    out[gid] = step0;
+}
