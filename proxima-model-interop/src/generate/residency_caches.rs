@@ -96,7 +96,7 @@ impl LogitsSink<'_> {
         match self {
             Self::Discard => {}
             Self::Collect(buffer) => buffer.push(logits.to_vec()),
-            #[cfg(all(test, feature = "metal", target_os = "macos"))]
+            #[cfg(all(test, feature = "metal"))]
             Self::SumBarriers(total) => **total += _barriers_step,
         }
     }

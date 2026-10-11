@@ -1,4 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#![cfg(feature = "std")]
 
 use std::collections::BTreeMap;
 use std::vec;

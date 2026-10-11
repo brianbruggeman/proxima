@@ -72,6 +72,7 @@ fn process_cpu_ms() -> (f64, f64) {
 /// (`proc_pid_rusage`): the current values, not the peaks `/usr/bin/time -l`
 /// reports at exit. Footprint is what `footprint(1)` and Activity Monitor's
 /// memory column read. `(0, 0)` where the call is unavailable.
+#[cfg(target_os = "macos")]
 fn process_memory_bytes() -> (u64, u64) {
     let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
     // SAFETY: `RUSAGE_INFO_V2` fills a `rusage_info_v2`; the C signature takes the struct's address cast to `rusage_info_t *`.
@@ -88,6 +89,11 @@ fn process_memory_bytes() -> (u64, u64) {
     // SAFETY: the call returned 0, so the struct is filled.
     let info = unsafe { info.assume_init() };
     (info.ri_resident_size, info.ri_phys_footprint)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_memory_bytes() -> (u64, u64) {
+    (0, 0)
 }
 
 /// Generated tokens before the steady-state memory samples start: the first

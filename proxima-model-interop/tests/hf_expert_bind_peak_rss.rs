@@ -1,4 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#![cfg(feature = "std")]
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
