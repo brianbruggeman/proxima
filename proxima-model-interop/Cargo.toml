@@ -386,6 +386,11 @@ temp-env.workspace = true
 proptest.workspace = true
 sha2 = { version = "0.10.9", default-features = false }
 
+[[bin]]
+name = "granite-cold-quantize"
+path = "src/bin/granite-cold-quantize.rs"
+required-features = ["std"]
+
 # Both examples below need `LoadedModel` (`std`-gated in `lib.rs`) and
 # `proxima_telemetry`'s recorder/macros (only pulled in by `instrument`,
 # `dep:proxima-telemetry` above) -- `required-features` keeps a default
