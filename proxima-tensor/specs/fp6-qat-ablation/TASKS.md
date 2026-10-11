@@ -4,7 +4,7 @@ Each slice: one commit, one behaviour change, one validation command, one expect
 
 | # | slice | discharges | validation command | expected | done | note |
 |---|---|---|---|---|---|---|
-| 1 | feature `qat` on `proxima-model-interop` (`cargo add proxima-autograd --optional`), shared module `examples/qat/mod.rs`, example `qat_census` over the granite config at 1 and 24 layers and its `--control bfloat16_input` mode | AC1 | command block AC1 | `3` | [ ] | behind gpu.lock; the census is the first slice that runs; a nonzero `metal_reject` on a real cell is the recorded outcome and names the ops to land first |
+| 1 | feature `qat` on `proxima-model-interop` (`cargo add proxima-autograd --optional`), shared module `examples/qat/mod.rs`, example `qat_census` over the granite config at 1 and 24 layers and its `--control bfloat16_input` mode | AC1 | command block AC1 | `3` | [ ] | 2026-10-11 AC printed 1 of 3: control only; 1 layer 785/508 nodes, 6 refusals; 24 layers 15965/10352, 144 refusals, all Elementwise(Multiply) NonProjectionOperandMap at the kv-head merge and rope interleave maps; see slice 1a |
 | 2 | example `qat_step_bench`: 64 steps, 1 layer and 24 layers, 3 processes each, fake-quant off, bf16-grid masters, Adam via `adam_step` | AC2 | command block AC2 | `8` | [ ] | behind gpu.lock, TIMING; this number replaces the derivation; the output file and the `box_before` files are kept under `$OUT` |
 | 3 | `fake_quant_e3m2` function over `quantize_block` and `dequantize_block`, policy selection through `policy_selects`, the four tests | AC3 | `PROXIMA_ARCH_GRANITE_MOE_GGUF=$GRANITE cargo nextest run -p proxima-model-interop --features std,metal,qat -E 'test(/qat_fake_quant_cpu_/)'` | `4 passed` | [ ] | the CPU function is the oracle for slices 5 and 14 |
 | 4 | the STE wiring: `Add(master, delta)` leaves per selected tensor in the step graph, with the f64 loop oracle | AC4 | `cargo nextest run -p proxima-model-interop --features std,metal,qat -E 'test(/qat_ste_/)'` | `3 passed` | [ ] | no new op; the control forces the true quantizer derivative and must fail |
@@ -28,9 +28,9 @@ In the table above `\|` stands for a literal pipe character; the SPEC's `### com
 
 ## resume
 
-Last landed slice: none
-Next action: slice 1 (add the `qat` feature with `cargo add`, write `qat_census`, run it under gpu.lock); slice 19 lands before slice 10
-Open question, if any: none; the 0.05 nats gap and the 0.001 identity bound are pre-registered with status plausible
+Last landed slice: none (slice 1 code landed, row unticked: AC1 printed 1 of 3)
+Next action: slice 1a, the adjoint rule for `NonProjectionOperandMap` (`proxima-autograd/src/error.rs:52`), then slice 2; slice 19 lands before slice 10
+Open question, if any: whether the adjoint rule or a forward program without multi-term head-split maps closes the refusal; the 0.05 nats gap and the 0.001 identity bound are pre-registered with status plausible
 
 ## struck
 

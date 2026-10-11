@@ -322,6 +322,8 @@ conflaguration = ["dep:conflaguration"]
 libc = ["dep:libc"]
 bon = ["dep:bon"]
 toml = ["dep:toml"]
+proxima-autograd = ["dep:proxima-autograd"]
+qat = ["std", "metal", "proxima-autograd"]
 
 [dependencies]
 arrayvec.workspace = true
@@ -336,6 +338,7 @@ md-5 = { version = "0.11.0", optional = true }
 memmap2 = { version = "0.9.11", optional = true }
 omega = { version = "0.1.0", path = "../omega", default-features = false, features = ["metal", "cpu"], optional = true }
 prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool"], optional = true }
+proxima-autograd = { version = "0.1.0", path = "../proxima-autograd", optional = true }
 proxima-core = { workspace = true, features = ["alloc"], optional = true }
 proxima-gguf = { path = "../proxima-gguf", default-features = false }
 proxima-primitives = { workspace = true, default-features = false }
@@ -700,3 +703,7 @@ required-features = ["std"]
 [[example]]
 name = "mlx_plain_export"
 required-features = ["std"]
+
+[[example]]
+name = "qat_census"
+required-features = ["std", "metal", "qat"]
