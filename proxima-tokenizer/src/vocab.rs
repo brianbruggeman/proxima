@@ -556,6 +556,21 @@ impl Vocab {
         self.id_to_token.get(token_id as usize).map(String::as_str)
     }
 
+    /// The merge table as `(left id, right id)` pairs, highest priority
+    /// first -- the inverse of the `"left right"` rules [`Vocab::new`]
+    /// resolved, so a writer can spell each rule back out with
+    /// [`Vocab::token_str`]. `O(n log n)` in the rule count; cold path.
+    #[must_use]
+    pub fn merge_pairs(&self) -> Vec<(u32, u32)> {
+        let mut ranked: Vec<(u32, (u32, u32))> = self
+            .merge_ranks
+            .iter()
+            .map(|(pair, rule)| (rule.rank, *pair))
+            .collect();
+        ranked.sort_unstable_by_key(|entry| entry.0);
+        ranked.into_iter().map(|(_, pair)| pair).collect()
+    }
+
     /// The raw decoded bytes a token id represents.
     #[must_use]
     pub fn token_bytes(&self, token_id: u32) -> Option<&[u8]> {
