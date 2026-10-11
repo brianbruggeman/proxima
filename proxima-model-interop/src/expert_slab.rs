@@ -201,6 +201,7 @@ fn source_codec_name(codec: Codec) -> &'static str {
         Codec::BFloat8 => "bf8",
         Codec::Bf8E5M2 => "bf8_e5m2",
         Codec::Bf4E2M1 => "bf4_e2m1",
+        Codec::Fp6E3M2 => "fp6_e3m2",
         Codec::Q5_1 => "q5_1",
         Codec::Q5_0 => "q5_0",
         Codec::Q4_1 => "q4_1",
@@ -241,6 +242,9 @@ fn dequantize_expert(codec: Codec, source: &[u8], output: &mut [f32]) -> Result<
         }),
         Codec::Bf4E2M1 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec {
             codec: "bf4_e2m1",
+        }),
+        Codec::Fp6E3M2 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec {
+            codec: "fp6_e3m2",
         }),
         Codec::Q5_1 => q5_1::dequantize(source, output),
         Codec::Q5_0 => q5_0::dequantize(source, output),

@@ -1057,7 +1057,8 @@ pub(crate) fn as_block(codec: Codec, bytes: &[u8]) -> Option<proxima_tensor::cpu
         | Codec::Q2_0
         | Codec::BFloat8
         | Codec::Bf8E5M2
-        | Codec::Bf4E2M1 => None,
+        | Codec::Bf4E2M1
+        | Codec::Fp6E3M2 => None,
     }
 }
 
@@ -1141,6 +1142,7 @@ fn codec_name_suffix(codec: Codec) -> &'static str {
         Codec::BFloat8 => "bf8",
         Codec::Bf8E5M2 => "bf8_e5m2",
         Codec::Bf4E2M1 => "bf4_e2m1",
+        Codec::Fp6E3M2 => "fp6_e3m2",
         Codec::Q2K => "q2_k",
         Codec::Q5_1 => "q5_1",
         Codec::Q5_0 => "q5_0",
@@ -1202,7 +1204,7 @@ pub(crate) fn codec_to_ggml_type(codec: Codec) -> Result<GgmlType, InteropError>
         Codec::Nvfp4 => GgmlType::Nvfp4,
         Codec::Q1_0 => GgmlType::Q1_0,
         Codec::Q2_0 => GgmlType::Q2_0,
-        Codec::BFloat8 | Codec::Bf8E5M2 | Codec::Bf4E2M1 => {
+        Codec::BFloat8 | Codec::Bf8E5M2 | Codec::Bf4E2M1 | Codec::Fp6E3M2 => {
             return Err(InteropError::UnsupportedCodec { codec });
         }
     })
@@ -1670,6 +1672,7 @@ pub(crate) fn quantize_to_kind(
         Codec::BFloat8 => Err(QuantError::UnsupportedCodec { codec: "bf8" }),
         Codec::Bf8E5M2 => Err(QuantError::UnsupportedCodec { codec: "bf8_e5m2" }),
         Codec::Bf4E2M1 => Err(QuantError::UnsupportedCodec { codec: "bf4_e2m1" }),
+        Codec::Fp6E3M2 => Err(QuantError::UnsupportedCodec { codec: "fp6_e3m2" }),
     }
 }
 

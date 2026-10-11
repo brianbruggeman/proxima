@@ -1364,7 +1364,7 @@ pub(super) const fn codec_to_decodable_ggml_type(codec: Codec) -> Option<proxima
         Codec::Iq3Xxs => Some(proxima_gguf::GgmlType::Iq3Xxs),
         Codec::Float16 => Some(proxima_gguf::GgmlType::F16),
         Codec::BFloat16 => Some(proxima_gguf::GgmlType::Bf16),
-        Codec::Bf8E5M2 | Codec::Bf4E2M1 => None,
+        Codec::Bf8E5M2 | Codec::Bf4E2M1 | Codec::Fp6E3M2 => None,
         Codec::BFloat8 => None,
         Codec::Q4_1
         | Codec::Q8_1
@@ -1415,6 +1415,7 @@ pub(super) const fn codec_matmul_f32_kernel(
         Codec::BFloat16 => Some(matmul_bf16_f32),
         Codec::Bf8E5M2 => Some(matmul_bf8_e5m2_f32),
         Codec::Bf4E2M1 => Some(matmul_bf4_e2m1_f32),
+        Codec::Fp6E3M2 => None,
         Codec::BFloat8 => None,
         Codec::Q4K
         | Codec::Q5K
@@ -1467,6 +1468,7 @@ pub(super) const fn codec_dequantize_fn(
         Codec::BFloat16 => Some(gguf_bf16::dequantize),
         Codec::Bf8E5M2 => Some(dequantize_bf8_e5m2),
         Codec::Bf4E2M1 => Some(dequantize_bf4_e2m1),
+        Codec::Fp6E3M2 => None,
         Codec::Q4_0
         | Codec::Q5_0
         | Codec::BFloat8
@@ -2051,6 +2053,7 @@ const fn codec_name_for_error(codec: Codec) -> &'static str {
         Codec::BFloat8 => "bfloat8",
         Codec::Bf8E5M2 => "bf8_e5m2",
         Codec::Bf4E2M1 => "bf4_e2m1",
+        Codec::Fp6E3M2 => "fp6_e3m2",
         Codec::Q2K => "q2_k",
         Codec::Q5_1 => "q5_1",
         Codec::Q5_0 => "q5_0",
