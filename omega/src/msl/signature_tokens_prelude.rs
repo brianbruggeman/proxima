@@ -1714,7 +1714,7 @@ pub(crate) fn splits_for(context_length: u64, policy: NumericPolicy) -> u64 {
 /// SAME discriminator [`render_cached_attention`] (`:3414`) and `grid_threads`
 /// (`:2477`) already compute correctly, so all four call sites now agree by
 /// construction instead of by convention.
-#[cfg(test)]
+#[cfg(all(test, feature = "metal-attn-split-decode"))]
 pub(crate) fn cached_attention_merge_needed(kind: &BoundOpKind, policy: NumericPolicy) -> bool {
     cached_attention_merge_needed_with_schedule(kind, policy, AttentionRowSchedule::legacy())
 }
@@ -1863,6 +1863,10 @@ impl AttentionMmaSelection {
         }
     }
 
+    #[cfg(any(
+        feature = "metal-attn-variants",
+        all(feature = "metal", target_os = "macos")
+    ))]
     pub(crate) fn cache_token_for(self, bound: &BoundOp) -> &'static str {
         if matches!(bound.kind, BoundOpKind::CachedAttention { .. }) {
             self.cache_token()
@@ -2009,6 +2013,7 @@ pub(crate) enum AttentionTileHeightSelection {
 }
 
 impl AttentionTileHeightSelection {
+    #[cfg(feature = "metal-attn-split-rows")]
     const fn explicit_rows(self) -> Option<u64> {
         match self {
             Self::Legacy => None,
@@ -2111,6 +2116,7 @@ impl AttentionRowSchedule {
         }
     }
 
+    #[cfg(feature = "metal-attn-split-rows")]
     pub(crate) const fn tile_height(self) -> AttentionTileHeightSelection {
         self.tile_height
     }
@@ -2236,6 +2242,10 @@ impl AttentionRowSchedule {
         )
     }
 
+    #[cfg(any(
+        feature = "metal-attn-variants",
+        all(feature = "metal", target_os = "macos")
+    ))]
     pub(crate) fn cache_token_for(self, bound: &BoundOp) -> String {
         if matches!(bound.kind, BoundOpKind::CachedAttention { .. }) {
             self.cache_token()
@@ -2459,6 +2469,8 @@ pub(crate) fn cached_attention_form_with_schedule(
     else {
         return None;
     };
+    #[cfg(not(feature = "metal-attn-split-rows"))]
+    let _ = schedule;
     let base_operand_len = if rotary_dim < head_dim { 11 } else { 8 };
     if operands.len() != base_operand_len + 1 {
         return Some(CachedAttentionForm::Static);

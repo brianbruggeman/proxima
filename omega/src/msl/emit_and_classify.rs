@@ -1879,6 +1879,7 @@ pub(crate) fn kernel_dispatch_shape(
     )
 }
 
+#[cfg(feature = "metal-core")]
 pub(crate) fn kernel_dispatch_shape_with_schedule(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
