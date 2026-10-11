@@ -1,5 +1,6 @@
 use half::bf16;
 use proxima_gguf::quant::float_layout::{decode, encode, encode_counting};
+use proxima_gguf::quant::{bf4_e2m1, bf8_e5m2};
 use proxima_primitives::float_layout::FloatLayout;
 
 fn positive_finite_codes(layout: FloatLayout) -> Vec<u32> {
@@ -293,5 +294,51 @@ fn assert_row_decodes(row: &Bf8Row) {
         assert_same_float(decoded, row.input, row.case);
     } else {
         assert_eq!(encode(decoded, FloatLayout::E5M2), row.code, "{}", row.case);
+    }
+}
+
+fn wrapper_corpus() -> impl Iterator<Item = f32> {
+    (0..65_536u32).map(|index| f32::from_bits(index.wrapping_mul(65_537)))
+}
+
+#[test]
+fn float_layout_wrapper_bf8_equals_generic_e5m2_saturating() {
+    for code in 0..=u8::MAX {
+        let expected = decode(u32::from(code), FloatLayout::E5M2_SATURATING);
+        assert_same_float(
+            bf8_e5m2::decode(code),
+            expected,
+            &format!("decode {code:#04x}"),
+        );
+    }
+    for value in wrapper_corpus() {
+        let expected = encode(value, FloatLayout::E5M2_SATURATING);
+        assert_eq!(
+            u32::from(bf8_e5m2::encode(value)),
+            expected,
+            "encode {:#010x}",
+            value.to_bits()
+        );
+    }
+}
+
+#[test]
+fn float_layout_wrapper_bf4_equals_generic_e2m1() {
+    for code in 0..16u8 {
+        let expected = decode(u32::from(code), FloatLayout::E2M1);
+        assert_same_float(
+            bf4_e2m1::decode(code),
+            expected,
+            &format!("decode {code:#x}"),
+        );
+    }
+    for value in wrapper_corpus().filter(|value| value.is_finite()) {
+        let expected = encode(value, FloatLayout::E2M1);
+        assert_eq!(
+            bf4_e2m1::encode(value).map(u32::from),
+            Ok(expected),
+            "encode {:#010x}",
+            value.to_bits()
+        );
     }
 }

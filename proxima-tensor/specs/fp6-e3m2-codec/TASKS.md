@@ -7,7 +7,7 @@ Each slice: one commit, one behaviour change, one validation command, one expect
 | 1 | `FloatLayout` with derived values and the constants `E5M2`, `E2M1`, `E3M2`, `E2M3`, `BF32`, `BF16`, `BF8`, `BF4` in `proxima-primitives/src/float_layout.rs` | AC1 | `cargo nextest run -p proxima-primitives -E 'test(/float_layout_/)'` | `11 passed` | [x] | the one new type; BF8 and BF4 are the E5M2 and E2M1 values; 11 passed, no_std+alloc check, clippy and doc clean |
 | 2 | generic `encode`, `encode_counting` and `decode` (u32) in `proxima-gguf/src/quant/float_layout.rs`; round to nearest even, range handling, NaN report; the new `proxima-gguf/tests/float_layout_oracles.rs` | AC2 | `cargo nextest run -p proxima-gguf -E 'test(/float_layout_midpoint/) + test(/float_layout_range/) + test(/float_layout_nan/)'` | `10 passed` | [x] | decode lands here because the midpoint oracle needs it; 10 passed, const fn over u32 fields, nan_count is &mut u64, alloc-tier clippy and doc clean |
 | 3 | the BF32, BF16 and E5M2 oracle tests with their controls | AC3 | `cargo nextest run -p proxima-gguf -E 'test(/float_layout_bf32/) + test(/float_layout_bf16/) + test(/float_layout_e5m2/)'` | `9 passed` | [x] | 9 passed; the csv contradicted the saturating E5M2 (rows overflow and +-infinity expect 0x7c, contract test expects 0x7b): E5M2 and BF8 are now InfinityOnOverflow, the new E5M2_SATURATING is the gguf bf8 policy; AC1 11 and AC2 10 still pass |
-| 4 | `bf8_e5m2` and `bf4_e2m1` bodies become calls into the generic functions; wrapper equality tests; the contract test file untouched | AC4 | `cargo nextest run -p proxima-gguf -E 'test(/bf8_e5m2_bf4_e2m1_encoding_contract/) + test(/float_layout_wrapper/)'` | `3 passed` | [ ] | the 256-code E5M2 table stays the oracle; bf8 wrapper uses E5M2_SATURATING |
+| 4 | `bf8_e5m2` and `bf4_e2m1` bodies become calls into the generic functions; wrapper equality tests; the contract test file untouched | AC4 | `cargo nextest run -p proxima-gguf -E 'test(/bf8_e5m2_bf4_e2m1_encoding_contract/) + test(/float_layout_wrapper/)'` | `3 passed` | [x] | 3 passed; wrappers are one-line calls into the generic codec, nan 0x7e unchanged, contract test untouched; whole-crate nextest 224 passed |
 | 5 | vendor the OCP text as `proxima-gguf/src/quant/fixtures/ocp_mx_v1_0.txt` (copy of `.long_ctx_backups/mlx_fp6/ocp/ocp-mx-v1.0.txt`); E3M2 golden table tests and control | AC5 | `cargo nextest run -p proxima-gguf -E 'test(/float_layout_e3m2_golden/)'` | `4 passed` | [ ] | 592 newline bytes asserted |
 | 6 | `Codec::Fp6E3M2` tag 32, block 26 bytes, 32 elements | AC6 | `cargo nextest run -p proxima-primitives -E 'test(/fp6_e3m2_codec/)'` | `3 passed` | [ ] | interop capability names in the same commit |
 | 7 | `scaled_float.rs` block quantize and dequantize generic over the layout | AC7 | `cargo nextest run -p proxima-gguf -E 'test(/scaled_e3m2_block/)'` | `3 passed` | [ ] | rows from the Q8_0 1024x512 tensors; subnormal bound 0.03125 x scale |
@@ -27,8 +27,8 @@ In the table above `\|` stands for a literal pipe character; the SPEC's `### com
 
 ## resume
 
-Last landed slice: 3
-Next action: slice 4, route `bf8_e5m2` through `FloatLayout::E5M2_SATURATING` and `bf4_e2m1` through `E2M1` (generic functions are at `proxima-gguf/src/quant/float_layout.rs`), contract test file untouched
+Last landed slice: 4
+Next action: slice 5 (vendor the OCP text, E3M2 golden table tests and control), slice 6 may run in parallel
 Open question, if any: none for the E3M2 definition (the OCP text, SPEC section "Definition of E3M2", gives bias 3 and no override); slice 11 answers whether the grouped GEMM can stage 3-byte groups
 
 ## struck
