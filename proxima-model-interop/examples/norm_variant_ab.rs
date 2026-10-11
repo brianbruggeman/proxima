@@ -466,10 +466,18 @@ mod harness {
                         .collect()
                 })
                 .unwrap_or_default();
+            let narrow_codec = std::fs::read_to_string(dir.join(name.replace(".metal", ".narrow")))
+                .ok()
+                .map(|text| parse_narrow_spec(text.trim()));
             let dispatches = members
                 .iter()
                 .map(|member| {
                     let replaced = member.with_pipeline_of(&template);
+                    if let Some((indices, codec)) = &narrow_codec {
+                        return replaced
+                            .with_narrowed_buffers(indices, *codec)
+                            .unwrap_or_else(|error| panic!("variant {name} narrowed buffers: {error}"));
+                    }
                     if narrowed.is_empty() {
                         replaced
                     } else {
@@ -485,6 +493,39 @@ mod harness {
             });
         }
         arms
+    }
+
+    fn replay_bytes(dispatch: &CapturedDispatch, elements: Option<u64>) -> Vec<u8> {
+        if dispatch.bindings.iter().any(|binding| matches!(binding, omega::Binding::Output(_))) {
+            return dispatch.replay_output_elements(elements).expect("output replay");
+        }
+        let scratch = dispatch
+            .bindings
+            .iter()
+            .position(|binding| matches!(binding, omega::Binding::Scratch))
+            .expect("a captured dispatch with neither output nor scratch binding");
+        assert!(dispatch.poison_bound_buffer(scratch), "scratch buffer is bound and poisonable");
+        dispatch.time_gpu_ns(1).expect("scratch replay");
+        let mut bytes = dispatch.bound_buffer_bytes_at(scratch).expect("scratch bytes");
+        if let Some(elements) = elements {
+            bytes.truncate(usize::try_from(elements).expect("element count") * core::mem::size_of::<f32>());
+        }
+        bytes
+    }
+
+    fn parse_narrow_spec(text: &str) -> (Vec<usize>, omega::Codec) {
+        let (indices, codec) = text.split_once(':').expect("narrow spec `<i,j,k>:<f16|bf16|bf8>`");
+        let codec = match codec {
+            "f16" => omega::Codec::Float16,
+            "bf16" => omega::Codec::BFloat16,
+            "bf8" => omega::Codec::BFloat8,
+            other => panic!("narrow codec `{other}`: expected f16, bf16 or bf8"),
+        };
+        let indices = indices
+            .split(',')
+            .map(|index| index.trim().parse().expect("narrow binding index integer"))
+            .collect();
+        (indices, codec)
     }
 
     fn ulp_distance(left: f32, right: f32) -> u32 {
@@ -539,6 +580,18 @@ mod harness {
         scratch: &mut [u8],
         per_dispatch: bool,
     ) -> Vec<f64> {
+        measure_sequence_spread(arms, rounds, scratch, per_dispatch)
+            .into_iter()
+            .map(|(median_ns, _)| median_ns)
+            .collect()
+    }
+
+    fn measure_sequence_spread(
+        arms: &[(String, Vec<&CapturedDispatch>)],
+        rounds: usize,
+        scratch: &mut [u8],
+        per_dispatch: bool,
+    ) -> Vec<(f64, RoundSpread)> {
         let mut spans: Vec<Vec<f64>> = vec![Vec::new(); arms.len()];
         for round in 0..rounds {
             for offset in 0..arms.len() {
@@ -550,7 +603,13 @@ mod harness {
                 spans[index].push(total / divisor);
             }
         }
-        spans.iter_mut().map(|samples| median(samples)).collect()
+        spans
+            .iter_mut()
+            .map(|samples| {
+                let spread = round_spread(samples);
+                (median(samples), spread)
+            })
+            .collect()
     }
 
     fn step_with_group_replaced<'a>(
@@ -651,6 +710,200 @@ mod harness {
             .collect()
     }
 
+    fn step_with_pair_replaced<'a>(
+        dispatches: &'a [CapturedDispatch],
+        partial_members: &[usize],
+        partial_replacements: &[&'a CapturedDispatch],
+        merge_members: &[usize],
+        merge_replacements: &[&'a CapturedDispatch],
+    ) -> Vec<&'a CapturedDispatch> {
+        let replaced: BTreeMap<usize, &CapturedDispatch> = partial_members
+            .iter()
+            .copied()
+            .zip(partial_replacements.iter().copied())
+            .chain(merge_members.iter().copied().zip(merge_replacements.iter().copied()))
+            .collect();
+        dispatches
+            .iter()
+            .enumerate()
+            .map(|(index, dispatch)| replaced.get(&index).copied().unwrap_or(dispatch))
+            .collect()
+    }
+
+    struct PairArm<'a> {
+        tag: String,
+        partial: Vec<&'a CapturedDispatch>,
+        merge: Vec<&'a CapturedDispatch>,
+    }
+
+    fn arm_tag(label: &str) -> String {
+        label
+            .split_once('.')
+            .map_or_else(|| label.to_string(), |(_, tag)| tag.to_string())
+    }
+
+    fn build_pair_arms<'a>(
+        partial_arms: &'a [(String, Vec<&'a CapturedDispatch>)],
+        merge_base: &[&'a CapturedDispatch],
+        merge_variants: &'a [Arm],
+    ) -> Vec<PairArm<'a>> {
+        let mut tags: Vec<String> = Vec::new();
+        for label in partial_arms
+            .iter()
+            .skip(1)
+            .map(|arm| arm.0.as_str())
+            .chain(merge_variants.iter().map(|arm| arm.label.as_str()))
+        {
+            let tag = arm_tag(label);
+            if !tags.contains(&tag) {
+                tags.push(tag);
+            }
+        }
+        let mut arms = vec![PairArm {
+            tag: "base".to_string(),
+            partial: partial_arms[0].1.clone(),
+            merge: merge_base.to_vec(),
+        }];
+        for tag in tags {
+            let partial = partial_arms
+                .iter()
+                .skip(1)
+                .find(|arm| arm_tag(&arm.0) == tag)
+                .map_or_else(|| partial_arms[0].1.clone(), |arm| arm.1.clone());
+            let merge = merge_variants
+                .iter()
+                .find(|arm| arm_tag(&arm.label) == tag)
+                .map_or_else(|| merge_base.to_vec(), |arm| arm.dispatches.iter().collect());
+            arms.push(PairArm { tag, partial, merge });
+        }
+        arms
+    }
+
+    fn print_pair_bits(
+        sha: &str,
+        extents: &[u64],
+        pair_arms: &[PairArm<'_>],
+        output_elements: u64,
+        reference: Option<&Vec<f32>>,
+    ) {
+        let outputs: Vec<Vec<u8>> = pair_arms
+            .iter()
+            .map(|arm| {
+                arm.partial[0].time_gpu_ns(1).expect("pair partial replay");
+                replay_bytes(arm.merge[0], Some(output_elements))
+            })
+            .collect();
+        let base_floats = attention_reference::floats_from_bytes(&outputs[0]);
+        for (arm, output) in pair_arms.iter().zip(&outputs) {
+            let floats = attention_reference::floats_from_bytes(output);
+            println!(
+                "ab pbits sha={sha} extents={extents:?} arm={} {}",
+                arm.tag,
+                compare_outputs(&outputs[0], output)
+            );
+            println!(
+                "ab pagree sha={sha} extents={extents:?} arm={} against=base {}",
+                arm.tag,
+                attention_reference::agreement(&base_floats, &floats)
+            );
+            if let Some(reference) = reference {
+                println!(
+                    "ab pref sha={sha} extents={extents:?} arm={} against=cpu_f64 {}",
+                    arm.tag,
+                    attention_reference::agreement(reference, &floats)
+                );
+            }
+        }
+    }
+
+    struct PairSetup<'a> {
+        dispatches: &'a [CapturedDispatch],
+        groups: &'a BTreeMap<GroupKey, Vec<usize>>,
+        variant_dir: &'a PathBuf,
+        pair_prefix: &'a str,
+        rounds: usize,
+        resource_iterations: usize,
+    }
+
+    fn run_pair(
+        setup: &PairSetup<'_>,
+        partial_members: &[usize],
+        partial_arms: &[(String, Vec<&CapturedDispatch>)],
+        (sha, extents): (&str, &[u64]),
+        scratch: &mut [u8],
+    ) {
+        let PairSetup { dispatches, groups, variant_dir, pair_prefix, rounds, resource_iterations } = *setup;
+        let (merge_key, merge_members) = groups
+            .iter()
+            .find(|(key, _)| key.sha.starts_with(pair_prefix))
+            .expect("N==0: AB_PAIR_SHA matches no captured group");
+        assert_eq!(merge_members.len(), partial_members.len(), "pair groups differ in member count");
+        let merge_refs: Vec<&CapturedDispatch> = merge_members.iter().map(|index| &dispatches[*index]).collect();
+        let merge_width = merge_key.width.unwrap_or(merge_key.threads).max(1);
+        let merge_variants = load_variants(variant_dir, &merge_refs, merge_width);
+        let pair_arms = build_pair_arms(partial_arms, &merge_refs, &merge_variants);
+        let sha = &sha[..SHA_PREFIX_CHARS];
+        for arm in &pair_arms {
+            print_arm_resources(sha, &(format!("partial:{}", arm.tag), arm.partial.clone()), resource_iterations);
+            print_arm_resources(sha, &(format!("merge:{}", arm.tag), arm.merge.clone()), resource_iterations);
+        }
+        let reference = std::env::var_os("AB_ATTENTION_REFERENCE")
+            .and_then(|_| attention_reference::AttentionShape::from_entry(&partial_arms[0].1[0].entry))
+            .map(|shape| attention_reference::reference_output_decode(partial_arms[0].1[0], &shape));
+        print_pair_bits(sha, extents, &pair_arms, extents.iter().product(), reference.as_ref());
+        let layers = partial_members.len();
+        let sequence_arms: Vec<(String, Vec<&CapturedDispatch>)> = pair_arms
+            .iter()
+            .map(|arm| {
+                let ordered = arm.partial.iter().zip(&arm.merge).flat_map(|(partial, merge)| [*partial, *merge]);
+                (arm.tag.clone(), ordered.collect())
+            })
+            .collect();
+        let single_arms: Vec<(String, Vec<&CapturedDispatch>)> = pair_arms
+            .iter()
+            .map(|arm| (arm.tag.clone(), vec![arm.partial[0], arm.merge[0]]))
+            .collect();
+        let mut step_arms: Vec<(String, Vec<&CapturedDispatch>)> = pair_arms
+            .iter()
+            .map(|arm| {
+                let replaced = step_with_pair_replaced(dispatches, partial_members, &arm.partial, merge_members, &arm.merge);
+                (arm.tag.clone(), replaced)
+            })
+            .collect();
+        let omitted: Vec<&CapturedDispatch> = dispatches
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !partial_members.contains(index) && !merge_members.contains(index))
+            .map(|(_, dispatch)| dispatch)
+            .collect();
+        step_arms.push(("omit_pair".to_string(), omitted));
+        let sequence = measure_sequence_spread(&sequence_arms, rounds, scratch, false);
+        let single = measure_sequence_spread(&single_arms, rounds, scratch, false);
+        let step = measure_sequence_spread(&step_arms, rounds, scratch, false);
+        for (index, arm) in pair_arms.iter().enumerate() {
+            println!(
+                "ab pair sha={sha} extents={extents:?} layers={layers} arm={} pair_seq_us={:.3} seq_cov_pct={:.3} pair_single_us={:.3} single_cov_pct={:.3} step_ms={:.4} step_cov_pct={:.3} rounds={rounds} p_threads={} p_tg={:?} m_threads={} m_tg={:?}",
+                arm.tag,
+                sequence[index].0 / layers as f64 / 1e3,
+                sequence[index].1.cov_percent,
+                single[index].0 / 1e3,
+                single[index].1.cov_percent,
+                step[index].0 / 1e6,
+                step[index].1.cov_percent,
+                arm.partial[0].grid.threads,
+                arm.partial[0].grid.threadgroup_width,
+                arm.merge[0].grid.threads,
+                arm.merge[0].grid.threadgroup_width,
+            );
+        }
+        let omit = &step[pair_arms.len()];
+        println!(
+            "ab pairomit sha={sha} extents={extents:?} layers={layers} arm=omit_pair step_ms={:.4} step_cov_pct={:.3} rounds={rounds}",
+            omit.0 / 1e6,
+            omit.1.cov_percent
+        );
+    }
+
     pub fn run() {
         let attention_variant = std::env::var("AB_ATTENTION_VARIANT")
             .ok()
@@ -684,7 +937,9 @@ mod harness {
             .ok()
             .and_then(|value| value.parse::<usize>().ok());
         let step_sequence = std::env::var_os("AB_STEP_SEQUENCE").is_some();
+        let pair_prefix = std::env::var("AB_PAIR_SHA").ok();
         let sequence = step_sequence
+            || pair_prefix.is_some()
             || window_radius.is_some()
             || std::env::var_os("AB_SEQUENCE").is_some();
         let mut scratch = vec![0u8; env_usize("AB_FLUSH_MIB", 384) << 20];
@@ -766,6 +1021,17 @@ mod harness {
                 for line in base.describe_buffers() {
                     println!("ab describe   {line}");
                 }
+                let uniforms: Vec<i64> = base
+                    .uniform_bytes
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|chunk| i64::from_le_bytes(*chunk))
+                    .collect();
+                println!(
+                    "ab describe   uniform_i64={uniforms:?} grid_threads={} threadgroup_width={:?}",
+                    base.grid.threads, base.grid.threadgroup_width
+                );
                 timed_groups += 1;
                 continue;
             }
@@ -817,10 +1083,23 @@ mod harness {
                 .iter()
                 .find(|arm| arm.0 == reference_label)
                 .map_or(base, |arm| arm.1[0]);
-            let span = span_full.then(|| extents.iter().product::<u64>());
-            let base_output = reference
-                .replay_output_elements(span)
-                .expect("reference output");
+            let span = std::env::var("AB_SPAN_ELEMENTS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .or_else(|| span_full.then(|| extents.iter().product::<u64>()));
+            let base_output = replay_bytes(reference, span);
+            if let Some(prefix) = &pair_prefix {
+                let setup = PairSetup {
+                    dispatches: &dispatches,
+                    groups: &groups,
+                    variant_dir: &variant_dir,
+                    pair_prefix: prefix,
+                    rounds,
+                    resource_iterations,
+                };
+                run_pair(&setup, members, &arms, (sha.as_str(), extents.as_slice()), &mut scratch);
+                continue;
+            }
             for arm in &arms {
                 print_arm_resources(&sha[..SHA_PREFIX_CHARS], arm, resource_iterations);
             }
@@ -828,7 +1107,7 @@ mod harness {
                 .and_then(|_| attention_reference::AttentionShape::from_entry(&base.entry))
                 .map(|shape| attention_reference::reference_output(base, &shape));
             for arm in &arms {
-                let output = arm.1[0].replay_output_elements(span).expect("arm output");
+                let output = replay_bytes(arm.1[0], span);
                 println!(
                     "ab bits sha={} threads={threads} extents={extents:?} arm={} {}",
                     &sha[..SHA_PREFIX_CHARS],

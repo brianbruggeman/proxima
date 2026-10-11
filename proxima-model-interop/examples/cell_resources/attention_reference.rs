@@ -143,3 +143,88 @@ pub fn agreement(reference: &[f32], other: &[f32]) -> String {
         (difference_norm / reference_norm.max(f64::MIN_POSITIVE)).sqrt()
     )
 }
+
+const CACHED_KEY_EVEN: usize = 2;
+const CACHED_KEY_ODD: usize = 3;
+const CACHED_VALUE: usize = 6;
+
+struct DecodePlanes {
+    query_even: Vec<f32>,
+    query_odd: Vec<f32>,
+    cached_key_even: Vec<f32>,
+    cached_key_odd: Vec<f32>,
+    cached_value: Vec<f32>,
+    new_key_even: Vec<f32>,
+    new_key_odd: Vec<f32>,
+    new_value: Vec<f32>,
+    cached_rows: usize,
+}
+
+impl DecodePlanes {
+    fn read(dispatch: &CapturedDispatch) -> Self {
+        Self {
+            query_even: floats_at(dispatch, QUERY_EVEN),
+            query_odd: floats_at(dispatch, QUERY_ODD),
+            cached_key_even: floats_at(dispatch, CACHED_KEY_EVEN),
+            cached_key_odd: floats_at(dispatch, CACHED_KEY_ODD),
+            cached_value: floats_at(dispatch, CACHED_VALUE),
+            new_key_even: floats_at(dispatch, KEY_EVEN),
+            new_key_odd: floats_at(dispatch, KEY_ODD),
+            new_value: floats_at(dispatch, VALUE),
+            cached_rows: floats_at(dispatch, LIVE)[0] as usize,
+        }
+    }
+
+    fn key_planes(&self, key: usize, offset: usize) -> (&[f32], &[f32]) {
+        if key < self.cached_rows {
+            (&self.cached_key_even[offset..], &self.cached_key_odd[offset..])
+        } else {
+            (&self.new_key_even[offset..], &self.new_key_odd[offset..])
+        }
+    }
+}
+
+fn decode_vector(planes: &DecodePlanes, shape: &AttentionShape, kv_head: usize, group: usize, out: &mut [f32]) {
+    let half_dim = shape.head_dim / 2;
+    let query_index = kv_head * shape.groups + group;
+    let query_even = &planes.query_even[query_index * half_dim..][..half_dim];
+    let query_odd = &planes.query_odd[query_index * half_dim..][..half_dim];
+    let last_key = planes.cached_rows;
+    let first_key = (planes.cached_rows as i128 + shape.cached_lower).max(0) as usize;
+    let row_offset = |key: usize| (key - if key < planes.cached_rows { 0 } else { planes.cached_rows }) * shape.kv_heads;
+    let scores: Vec<f64> = (first_key..=last_key)
+        .map(|key| {
+            let offset = row_offset(key) * half_dim + kv_head * half_dim;
+            let (even, odd) = planes.key_planes(key, offset);
+            shape.scale * (dot(query_even, &even[..half_dim]) + dot(query_odd, &odd[..half_dim]))
+        })
+        .collect();
+    let maximum = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let weights: Vec<f64> = scores.iter().map(|score| (score - maximum).exp()).collect();
+    let total: f64 = weights.iter().sum();
+    for (dimension, slot) in out.iter_mut().enumerate().take(shape.head_dim) {
+        let accumulated: f64 = weights
+            .iter()
+            .zip(first_key..=last_key)
+            .map(|(weight, key)| {
+                let value = if key < planes.cached_rows { &planes.cached_value } else { &planes.new_value };
+                let at = row_offset(key) * shape.head_dim + kv_head * shape.head_dim + dimension;
+                weight * f64::from(value[at])
+            })
+            .sum();
+        *slot = (accumulated / total) as f32;
+    }
+}
+
+pub fn reference_output_decode(dispatch: &CapturedDispatch, shape: &AttentionShape) -> Vec<f32> {
+    let planes = DecodePlanes::read(dispatch);
+    let mut output = vec![0.0_f32; shape.kv_heads * shape.groups * shape.head_dim];
+    for kv_head in 0..shape.kv_heads {
+        for group in 0..shape.groups {
+            let query_index = kv_head * shape.groups + group;
+            let target = &mut output[query_index * shape.head_dim..][..shape.head_dim];
+            decode_vector(&planes, shape, kv_head, group, target);
+        }
+    }
+    output
+}
