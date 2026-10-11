@@ -168,6 +168,7 @@ its AC in the same commit.
 | the mlx 3, 5, 6-bit kernel forms were read from an excerpt without line numbers (facts.md) | medium | AC6 oracle is a transcription | slice 6 re-fetches `quantized.cpp`, records the commit and line range in the test, and AC12 cross-checks one real packed tensor at the reference's bits |
 | a vendored `tokenizer.json` is large | medium | repo size | slice 2 checks the repo's fixture storage policy before adding the file and follows it |
 | bf16 export of a Q8_0 source loses the quantization's information | certain, by design | the plain export is a dequantized model | the CLI prints source codecs and target dtype; the quantized form is the lossless-in-bits case |
+| ~~`gguf_to_safetensors` wrote GGUF `dims` unreversed, so shapes disagreed with the HF header (granite `k_proj` `[1024, 512]` vs `[512, 1024]`)~~ | fixed | every shape the transform wrote was ggml order | the transform writes reversed dims and `safetensors_to_gguf` reverses them back; tests `transform_shapes_follow_hf_row_major_*` |
 
 ## context
 

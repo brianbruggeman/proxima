@@ -31,7 +31,9 @@ pub use mlx::{
     MLX_INDEX_FILE_NAME, MLX_MAX_SHARD_BYTES, MLX_SINGLE_SHARD_FILE_NAME, MlxExport, MlxShard,
 };
 
-/// GGUF -> safetensors. Every tensor with a mapped `GgmlType` (see
+/// GGUF -> safetensors. Shapes follow the HF row-major convention: GGUF
+/// `dims` are ggml order (fastest axis first), so they are written reversed.
+/// Every tensor with a mapped `GgmlType` (see
 /// [`crate::dtype::ggml_to_dtype`]) carries its name, dtype, shape, and
 /// exact bytes across losslessly; a tensor with a block-quantized type
 /// makes the whole call fail with [`InteropError::UnrepresentableGgmlType`]
@@ -71,7 +73,7 @@ pub fn gguf_to_safetensors<'a>(
         tensors.push(SafetensorsTensorPayload {
             name: tensor.name.clone(),
             dtype,
-            shape: tensor.dims.iter().copied().collect(),
+            shape: tensor.dims.iter().rev().copied().collect(),
             data,
         });
     }
@@ -84,7 +86,8 @@ pub fn gguf_to_safetensors<'a>(
     Ok(SafetensorsModel { tensors, metadata })
 }
 
-/// safetensors -> GGUF. Every tensor with a mapped `DType` (see
+/// safetensors -> GGUF. Shapes are reversed back into ggml `dims` order, so
+/// a GGUF round trip is dims-identical. Every tensor with a mapped `DType` (see
 /// [`crate::dtype::dtype_to_ggml`]) carries its name, dtype, shape, and
 /// exact bytes across losslessly.
 ///
@@ -115,7 +118,7 @@ pub fn safetensors_to_gguf<'a>(
             })?;
 
         let mut dims: ArrayVec<u64, MAX_DIMS> = ArrayVec::new();
-        for dim in &tensor.shape {
+        for dim in tensor.shape.iter().rev() {
             dims.try_push(*dim)
                 .map_err(|_| InteropError::TooManyDimensions {
                     tensor: tensor.name.clone(),
@@ -162,17 +165,17 @@ mod tests;
 
 mod mlx;
 #[cfg(feature = "std")]
-mod mlx_names;
-#[cfg(feature = "std")]
 mod mlx_config;
 #[cfg(feature = "std")]
-mod mlx_tokenizer;
+mod mlx_names;
 #[cfg(feature = "std")]
-pub use mlx_tokenizer::{TokenizerFiles, copy_tokenizer, export_tokenizer};
+mod mlx_tokenizer;
 #[cfg(feature = "std")]
 pub use mlx_config::{copy_config, hf_config_bytes, sliding_pattern_hparams};
 #[cfg(feature = "std")]
 pub use mlx_names::{Layout, MlxNames, SANDWICH_NORM_LAYOUT, STANDARD_LAYOUT, dense_names};
+#[cfg(feature = "std")]
+pub use mlx_tokenizer::{TokenizerFiles, copy_tokenizer, export_tokenizer};
 
 #[cfg(feature = "std")]
 mod mlx_plain;
