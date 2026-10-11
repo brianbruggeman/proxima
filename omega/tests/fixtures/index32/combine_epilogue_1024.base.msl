@@ -1,0 +1,153 @@
+struct Uniforms {
+    long output_total;
+    long reduction_total;
+    long output_extents[2];
+    long reduction_extents[1];
+    long operand_base[2];
+    long operand_strides[2][3];
+    long out_base;
+    long out_strides[3];
+    long epilogue_operand_base[10];
+    long epilogue_operand_strides[10][2];
+};
+
+kernel void omega_reduce_r3_o2_n2_multiply_add_zero_epi10_fused_identity_o10__add_o8_o9__add_s1_o7__add_s2_o6__add_s3_o5__add_s4_o4__add_s5_o3__add_s6_o2__reciprocal_s7__multiply_s0_s8__multiply_s9_o1__add_s10_o0(
+    device const float* in0 [[buffer(0)]],
+    device const float* in1 [[buffer(1)]],
+    device const float* epi0 [[buffer(2)]],
+    device const float* epi1 [[buffer(3)]],
+    device const float* epi2 [[buffer(4)]],
+    device const float* epi3 [[buffer(5)]],
+    device const float* epi4 [[buffer(6)]],
+    device const float* epi5 [[buffer(7)]],
+    device const float* epi6 [[buffer(8)]],
+    device const float* epi7 [[buffer(9)]],
+    device const float* epi8 [[buffer(10)]],
+    device const float* epi9 [[buffer(11)]],
+    device float* out [[buffer(12)]],
+    constant Uniforms& u [[buffer(13)]],
+    uint gid [[thread_position_in_grid]])
+{
+    long output_index = (long)gid / 32;
+    if (output_index >= u.output_total) { return; }
+    uint lane = gid % 32u;
+    long full_coord[3];
+    full_coord[0] = 0;
+    full_coord[1] = 0;
+    full_coord[2] = 0;
+    long output_coord[2];
+    uint remaining = (uint)output_index;
+    output_coord[1] = remaining % (uint)u.output_extents[1]; remaining /= (uint)u.output_extents[1];
+    output_coord[0] = remaining % (uint)u.output_extents[0]; remaining /= (uint)u.output_extents[0];
+    full_coord[0] = output_coord[0];
+    full_coord[2] = output_coord[1];
+    float accumulator;
+    bool seeded;
+    if (lane == 0u) {
+        accumulator = 0.0f;
+        seeded = true;
+    } else {
+        accumulator = 0.0f;
+        seeded = true;
+    }
+    long stride0 = u.operand_strides[0][1];
+    long off0 = u.operand_base[0];
+    off0 += full_coord[0] * u.operand_strides[0][0];
+    off0 += full_coord[2] * u.operand_strides[0][2];
+    off0 += (long)lane * stride0;
+    int walk0 = (int)off0;
+    int advance0 = (int)(stride0 * 32);
+    long stride1 = u.operand_strides[1][1];
+    long off1 = u.operand_base[1];
+    off1 += full_coord[0] * u.operand_strides[1][0];
+    off1 += full_coord[2] * u.operand_strides[1][2];
+    off1 += (long)lane * stride1;
+    int walk1 = (int)off1;
+    int advance1 = (int)(stride1 * 32);
+    int total_r = (int)u.reduction_total;
+    for (int r = (int)lane; r < total_r; r += 256) {
+        float batch[8][2];
+        #pragma unroll
+        for (int slot = 0; slot < 8; ++slot) {
+            bool in_range = (r + slot * 32) < total_r;
+            batch[slot][0] = in_range ? in0[walk0 + slot * advance0] : (float)0;
+            batch[slot][1] = in_range ? in1[walk1 + slot * advance1] : (float)0;
+        }
+        #pragma unroll
+        for (int slot = 0; slot < 8; ++slot) {
+            if ((r + slot * 32) < total_r) {
+                float scratch[2];
+                scratch[0] = batch[slot][0];
+                scratch[1] = batch[slot][1];
+                float step0 = (scratch[0] * scratch[1]);
+                float value = step0;
+                accumulator = seeded ? (accumulator + value) : value;
+                seeded = true;
+            }
+        }
+        walk0 += 8 * advance0;
+        walk1 += 8 * advance1;
+    }
+    float reduced = simd_sum(accumulator);
+    if (lane == 0u) {
+        long out_offset = u.out_base;
+        out_offset += full_coord[0] * u.out_strides[0];
+        out_offset += full_coord[1] * u.out_strides[1];
+        out_offset += full_coord[2] * u.out_strides[2];
+        float epi_scratch[11];
+        long epi_off0 = u.epilogue_operand_base[0];
+        epi_off0 += output_coord[0] * u.epilogue_operand_strides[0][0];
+        epi_off0 += output_coord[1] * u.epilogue_operand_strides[0][1];
+        epi_scratch[0] = epi0[epi_off0];
+        long epi_off1 = u.epilogue_operand_base[1];
+        epi_off1 += output_coord[0] * u.epilogue_operand_strides[1][0];
+        epi_off1 += output_coord[1] * u.epilogue_operand_strides[1][1];
+        epi_scratch[1] = epi1[epi_off1];
+        long epi_off2 = u.epilogue_operand_base[2];
+        epi_off2 += output_coord[0] * u.epilogue_operand_strides[2][0];
+        epi_off2 += output_coord[1] * u.epilogue_operand_strides[2][1];
+        epi_scratch[2] = epi2[epi_off2];
+        long epi_off3 = u.epilogue_operand_base[3];
+        epi_off3 += output_coord[0] * u.epilogue_operand_strides[3][0];
+        epi_off3 += output_coord[1] * u.epilogue_operand_strides[3][1];
+        epi_scratch[3] = epi3[epi_off3];
+        long epi_off4 = u.epilogue_operand_base[4];
+        epi_off4 += output_coord[0] * u.epilogue_operand_strides[4][0];
+        epi_off4 += output_coord[1] * u.epilogue_operand_strides[4][1];
+        epi_scratch[4] = epi4[epi_off4];
+        long epi_off5 = u.epilogue_operand_base[5];
+        epi_off5 += output_coord[0] * u.epilogue_operand_strides[5][0];
+        epi_off5 += output_coord[1] * u.epilogue_operand_strides[5][1];
+        epi_scratch[5] = epi5[epi_off5];
+        long epi_off6 = u.epilogue_operand_base[6];
+        epi_off6 += output_coord[0] * u.epilogue_operand_strides[6][0];
+        epi_off6 += output_coord[1] * u.epilogue_operand_strides[6][1];
+        epi_scratch[6] = epi6[epi_off6];
+        long epi_off7 = u.epilogue_operand_base[7];
+        epi_off7 += output_coord[0] * u.epilogue_operand_strides[7][0];
+        epi_off7 += output_coord[1] * u.epilogue_operand_strides[7][1];
+        epi_scratch[7] = epi7[epi_off7];
+        long epi_off8 = u.epilogue_operand_base[8];
+        epi_off8 += output_coord[0] * u.epilogue_operand_strides[8][0];
+        epi_off8 += output_coord[1] * u.epilogue_operand_strides[8][1];
+        epi_scratch[8] = epi8[epi_off8];
+        long epi_off9 = u.epilogue_operand_base[9];
+        epi_off9 += output_coord[0] * u.epilogue_operand_strides[9][0];
+        epi_off9 += output_coord[1] * u.epilogue_operand_strides[9][1];
+        epi_scratch[9] = epi9[epi_off9];
+        epi_scratch[10] = reduced;
+        float epi_step0 = epi_scratch[10];
+        float epi_step1 = (epi_scratch[8] + epi_scratch[9]);
+        float epi_step2 = (epi_step1 + epi_scratch[7]);
+        float epi_step3 = (epi_step2 + epi_scratch[6]);
+        float epi_step4 = (epi_step3 + epi_scratch[5]);
+        float epi_step5 = (epi_step4 + epi_scratch[4]);
+        float epi_step6 = (epi_step5 + epi_scratch[3]);
+        float epi_step7 = (epi_step6 + epi_scratch[2]);
+        float epi_step8 = (1.0f / epi_step7);
+        float epi_step9 = (epi_step0 * epi_step8);
+        float epi_step10 = (epi_step9 * epi_scratch[1]);
+        float epi_step11 = (epi_step10 + epi_scratch[0]);
+        out[out_offset] = epi_step11;
+    }
+}
