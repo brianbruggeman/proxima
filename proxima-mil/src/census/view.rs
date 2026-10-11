@@ -175,28 +175,23 @@ pub(crate) fn is_contraction(reduce: &Reduce, left: &IndexMap, right: &IndexMap)
         return false;
     };
     let rank = usize::from(input.iter_rank);
-    let (left_used, right_used) = (used_axes(left, rank), used_axes(right, rank));
-    let kept = used_axes(output, rank);
-    let reduced: Vec<usize> = (0..rank).filter(|axis| !kept[*axis]).collect();
-    let exclusive = (0..rank).any(|axis| kept[axis] && left_used[axis] != right_used[axis]);
+    let exclusive = (0..rank)
+        .any(|axis| reads_axis(output, axis) && reads_axis(left, axis) != reads_axis(right, axis));
+    let mut reduced = (0..rank)
+        .filter(|axis| !reads_axis(output, *axis))
+        .peekable();
     is_identity(input)
         && exclusive
-        && !reduced.is_empty()
-        && reduced
-            .iter()
-            .all(|axis| left_used[*axis] && right_used[*axis])
+        && reduced.peek().is_some()
+        && reduced.all(|axis| reads_axis(left, axis) && reads_axis(right, axis))
 }
 
-fn used_axes(pattern: &IndexPattern, rank: usize) -> Vec<bool> {
-    (0..rank)
-        .map(|axis| {
-            pattern
-                .axes
-                .iter()
-                .flat_map(|index| index.terms.iter())
-                .any(|term| usize::from(term.axis) == axis)
-        })
-        .collect()
+fn reads_axis(pattern: &IndexPattern, axis: usize) -> bool {
+    pattern
+        .axes
+        .iter()
+        .flat_map(|index| index.terms.iter())
+        .any(|term| usize::from(term.axis) == axis)
 }
 
 fn is_identity(pattern: &IndexPattern) -> bool {

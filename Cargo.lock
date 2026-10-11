@@ -4622,6 +4622,7 @@ version = "0.1.0"
 dependencies = [
  "half",
  "proxima-build",
+ "proxima-onnx",
  "proxima-primitives",
  "proxima-tensor",
  "temp-env",

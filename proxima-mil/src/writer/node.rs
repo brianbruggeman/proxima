@@ -259,6 +259,14 @@ fn scalar_inputs(encoder: &mut Encoder<'_>, body: ScalarOp, inputs: &[Name]) {
     }
 }
 
+fn reads_node(op: &Op, node: NodeId) -> bool {
+    match op {
+        Op::Elementwise { operands, .. } => operands.iter().any(|(operand, _)| *operand == node),
+        Op::Reduce(reduce) => reduce.operand == node,
+        Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => false,
+    }
+}
+
 fn absorbed_by_contraction(context: &Context<'_>, node: NodeId) -> bool {
     let is_product = matches!(
         context.program.get(node.0 as usize),
@@ -272,7 +280,7 @@ fn absorbed_by_contraction(context: &Context<'_>, node: NodeId) -> bool {
         .iter()
         .enumerate()
         .skip(node.0 as usize + 1)
-        .filter(|(_, op)| op.dependencies().contains(&node))
+        .filter(|(_, op)| reads_node(op, node))
         .peekable();
     is_product
         && readers.peek().is_some()
