@@ -4026,6 +4026,13 @@ only the single-row decode kernel reads the half-width device cache",
                             .ok_or(InteropError::UnsupportedCodec { codec: *kind })?;
                         named_blocks.push((name.as_str(), block));
                     }
+                    #[cfg(feature = "instrument")]
+                    debug!(
+                        step = step as u64,
+                        phase = "weights_loop",
+                        ms = ticks_to_nanos(elapsed_ticks(named_blocks_weights_started)) as f64 / 1e6,
+                        "named_blocks_phase"
+                    );
                     // Rounds `cached_len` up to `ServingConfig::kv_bucket_tokens`
                     // (`kv_extent`'s own doc) -- `usize::MAX` in place of the
                     // placed-KV path's fixed buffer capacity: the two-range KV
@@ -4110,6 +4117,8 @@ only the single-row decode kernel reads the half-width device cache",
                         && new_count <= device_kv_step_rows
                     {
                         device_kv_attempted = true;
+                        #[cfg(feature = "instrument")]
+                        let device_kv_adopt_started = read_ticks();
                         device_kv = DeviceKv::adopt(
                             &mut layer_caches,
                             &layer_row_widths,
@@ -4120,6 +4129,13 @@ only the single-row decode kernel reads the half-width device cache",
                             self.kv_buffer_source,
                             serving_config.kv_cache_key_quant.into(),
                         )?;
+                        #[cfg(feature = "instrument")]
+                        debug!(
+                            step = step as u64,
+                            phase = "device_kv_adopt",
+                            ms = ticks_to_nanos(elapsed_ticks(device_kv_adopt_started)) as f64 / 1e6,
+                            "named_blocks_phase"
+                        );
                         if let Some(device) = &device_kv {
                             device_resident_flags = device.resident_layers();
                             if device.cache_codec().is_some() {
@@ -4174,6 +4190,8 @@ did not hold every cached position)",
                     #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
                     let device_cache_codec: Option<Codec> = None;
                     let sliding_len_scalar = sliding_cached_len_scalar(&layer_caches, cached_len);
+                    #[cfg(feature = "instrument")]
+                    let push_named_blocks_started = read_ticks();
                     let symbols = self.push_step_named_blocks(
                         &inputs,
                         &cached_len_scalar,
@@ -4193,6 +4211,15 @@ did not hold every cached position)",
                         &mut named_blocks,
                         active_single_position_step,
                     )?;
+                    #[cfg(feature = "instrument")]
+                    debug!(
+                        step = step as u64,
+                        phase = "push_step_named_blocks",
+                        ms = ticks_to_nanos(elapsed_ticks(push_named_blocks_started)) as f64 / 1e6,
+                        "named_blocks_phase"
+                    );
+                    #[cfg(feature = "instrument")]
+                    let greedy_build_started = read_ticks();
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     if greedy_on_device
                         && greedy_program.is_none()
@@ -4221,6 +4248,13 @@ did not hold every cached position)",
                             }
                         }
                     }
+                    #[cfg(feature = "instrument")]
+                    debug!(
+                        step = step as u64,
+                        phase = "greedy_program",
+                        ms = ticks_to_nanos(elapsed_ticks(greedy_build_started)) as f64 / 1e6,
+                        "named_blocks_phase"
+                    );
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     let greedy_step = greedy_program.is_some()
                         && !speculative_step
