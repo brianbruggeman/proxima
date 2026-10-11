@@ -101,7 +101,6 @@ impl BinSource {
     ///
     /// S1 of the proxima-notify initiative.
     #[cfg(feature = "durable-wal")]
-    #[must_use]
     pub fn events_from_offset<'lt>(&'lt self, start_offset: u64) -> OffsetEventStream<'lt> {
         let path = self.path.clone();
         let runtime = Arc::clone(&self.runtime);

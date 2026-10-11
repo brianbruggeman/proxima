@@ -83,6 +83,8 @@ pub use config::ReplayConfig;
 
 #[cfg(feature = "std")]
 impl ReplayUpstream {
+    /// # Errors
+    /// Returns the loader error when the jsonl file cannot be read or indexed.
     pub async fn from_jsonl(
         path: impl Into<PathBuf>,
         label: impl Into<String>,
@@ -91,6 +93,8 @@ impl ReplayUpstream {
         Self::from_jsonl_with(path, label, runtime, MatchSpec::default()).await
     }
 
+    /// # Errors
+    /// Returns the loader error when the jsonl file cannot be read or indexed.
     pub async fn from_jsonl_with(
         path: impl Into<PathBuf>,
         label: impl Into<String>,
@@ -113,6 +117,9 @@ impl ReplayUpstream {
     /// factory to plug in arbitrary registered formats (jsonl, bin, oram-
     /// wrapped, etc) without coupling the replay machinery to a single
     /// on-disk format.
+    ///
+    /// # Errors
+    /// Returns the loader error when the source cannot be read or indexed.
     pub async fn from_source(
         source: DynRecordingSource,
         label: impl Into<String>,
@@ -120,6 +127,8 @@ impl ReplayUpstream {
         Self::from_source_with(source, label, MatchSpec::default()).await
     }
 
+    /// # Errors
+    /// Returns the loader error when the source cannot be read or indexed.
     pub async fn from_source_with(
         source: DynRecordingSource,
         label: impl Into<String>,
@@ -301,7 +310,7 @@ impl ReplayPipeFactory {
 
 #[cfg(feature = "std")]
 impl PipeFactory for ReplayPipeFactory {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "replay"
     }
 
@@ -328,7 +337,6 @@ impl PipeFactory for ReplayPipeFactory {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use std::collections::BTreeMap;
 

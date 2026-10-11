@@ -497,7 +497,6 @@ fn combine_unix_nanos(lo: u64, hi: u64, negative: bool) -> i128 {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use bytes::Bytes;

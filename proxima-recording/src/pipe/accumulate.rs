@@ -102,7 +102,6 @@ impl SendPipe for AccumulatingSink {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::sync::Arc as StdArc;

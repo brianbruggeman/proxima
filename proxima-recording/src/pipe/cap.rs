@@ -206,7 +206,6 @@ async fn run_worker(inner: Arc<BoundedInner>) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::event::InteractionId;

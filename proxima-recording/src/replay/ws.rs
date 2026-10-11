@@ -49,6 +49,8 @@ pub struct WsReplayUpstream {
 }
 
 impl WsReplayUpstream {
+    /// # Errors
+    /// Returns the loader error when the source cannot be read or indexed.
     pub async fn from_source(
         source: std::sync::Arc<dyn RecordingSource>,
         label: impl Into<String>,
@@ -199,7 +201,6 @@ async fn index_ws_recording(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

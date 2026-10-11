@@ -1,5 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration-test helpers sit outside #[test] fns, where allow-*-in-tests does not reach"
+)]
 // unwrap/expect are workspace-denied; tests are the sanctioned exception.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Integration tests for S1: durable WAL semantics on the spigot write
 //! terminal + `BinSource` read side.
 //!
