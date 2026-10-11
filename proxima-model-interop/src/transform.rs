@@ -27,6 +27,10 @@ use proxima_safetensors::{SafetensorsModel, TensorPayload as SafetensorsTensorPa
 use crate::dtype::{dtype_to_ggml, ggml_to_dtype};
 use crate::error::InteropError;
 
+pub use mlx::{
+    MLX_INDEX_FILE_NAME, MLX_MAX_SHARD_BYTES, MLX_SINGLE_SHARD_FILE_NAME, MlxExport, MlxShard,
+};
+
 /// GGUF -> safetensors. Every tensor with a mapped `GgmlType` (see
 /// [`crate::dtype::ggml_to_dtype`]) carries its name, dtype, shape, and
 /// exact bytes across losslessly; a tensor with a block-quantized type
@@ -152,6 +156,7 @@ fn stringify_metadata_value(value: &MetadataValue) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;
 
+mod mlx;
 #[cfg(feature = "std")]
 mod mlx_names;
 #[cfg(feature = "std")]
