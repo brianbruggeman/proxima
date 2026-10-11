@@ -302,11 +302,9 @@ pub fn evaluate(
 /// reaches that loop, since it never has anything but `Float32` blocks to
 /// hand it.
 ///
-/// `peak_live_buffers()` on the result is always `None` here (see
-/// [`Evaluated`]'s own doc): [`StaticArena`]'s buffers persist across calls
-/// rather than being freed and recounted per call, so there is no
-/// per-call high-water mark to report, the same reason
-/// [`evaluate_named_with_arena`] itself reports `None`.
+/// `peak_live_buffers()` on the result is the plan's retirement-schedule
+/// high-water mark, counted the way [`evaluate_quantized_named`] counts it,
+/// so the f32 and packed loops report the same number for one program.
 pub fn evaluate_named(
     program: &[Op],
     symbols: &[u64],
@@ -605,6 +603,21 @@ pub struct StaticArena {
     /// `layer_norm_cluster_plan` grouped by `fire_position`, sibling to
     /// `epilogue_fuse_fire_at` above.
     pub(super) layer_norm_cluster_fire_at: BTreeMap<usize, Vec<NodeId>>,
+    /// Per `resolved` position, the recyclable nodes whose last reader is
+    /// that position (cluster operands deferred to their fire position):
+    /// `run_resolved_nodes_in_arena` moves each one's buffer into
+    /// `free_buffers` there. Inputs, static and dead nodes, and requested
+    /// outputs never appear, so they stay resident across calls.
+    pub(super) retires: Vec<Vec<NodeId>>,
+    /// Buffers retired by `retires`, handed back out by `take_or_allocate`
+    /// to the next node that needs an output; persists across calls, so a
+    /// steady-state call allocates nothing.
+    pub(super) free_buffers: Vec<Vec<f32>>,
+    /// The most buffers the retirement schedule holds live at once, counted
+    /// the way `evaluate_quantized_with_scratch` counts them (inputs live
+    /// from the start, one per produced node, one per fused fire, one less
+    /// per retirement), call-invariant so derived once at build time.
+    pub(super) peak_live_buffers: usize,
 }
 
 // `StaticArena::dead`'s own computation -- every `resolved` node neither
@@ -638,15 +651,14 @@ pub(super) fn static_resolved_nodes(
 }
 
 /// Builds a [`StaticArena`] for `program`: runs shape inference and
-/// [`bind::bind`] once, then pre-sizes every node's output buffer (both
-/// [`Op::Input`] slots and every computed [`BoundOp`]) at its final,
-/// call-invariant length. Every subsequent [`evaluate_named_with_arena`]
-/// call against this arena reuses these SAME allocations — no per-step
-/// `shape::infer`, no per-step `bind::bind`, no per-step `Vec` allocation,
-/// and no [`evaluate_with_scratch`]-style runtime best-fit search over a
-/// shared pool (`docs/discipline.md` ROW 159 measured that search losing)
-/// — each node's buffer lives at a fixed index for the arena's whole
-/// lifetime.
+/// [`bind::bind`] once, then pre-sizes the buffer of every [`Op::Input`], every
+/// static or dead node and every requested output at its final,
+/// call-invariant length; those live at a fixed index for the arena's whole
+/// lifetime. Every other computed node takes its output from `free_buffers`
+/// and returns it there at its last read per the plan's retirement schedule,
+/// so a steady-state [`evaluate_named_with_arena`] call does no
+/// `shape::infer`, no `bind::bind` and no `Vec` allocation, and the arena
+/// holds the schedule's peak instead of one buffer per node.
 ///
 /// # Errors
 /// The same shape/dtype/output errors [`evaluate_named`] itself raises,
@@ -729,8 +741,13 @@ pub fn build_static_arena_with_constants(
         &effective_outputs,
         NumericPolicy::bit_exact(),
     )?;
+    let dead = dead_resolved_nodes(&resolved, &effective_outputs);
+    let static_nodes = static_resolved_nodes(&resolved, &dead);
+    let recyclable = recyclable_nodes(&resolved, &dead, &static_nodes, &effective_outputs);
     for computed in &resolved {
-        buffers[computed.node.0 as usize] = Some(vec![0.0f32; node_output_len(computed)]);
+        if !recyclable.contains(&computed.node) {
+            buffers[computed.node.0 as usize] = Some(vec![0.0f32; node_output_len(computed)]);
+        }
         // `state_out` (ROW 547, `docs/discipline.md`): `GatedDeltaNet`'s own
         // second output never appears as any resolved node's `.node`, so the
         // loop above never sizes its slot -- size it here, once, the same
@@ -789,8 +806,6 @@ pub fn build_static_arena_with_constants(
             }
         }
     }
-    let dead = dead_resolved_nodes(&resolved, &effective_outputs);
-    let static_nodes = static_resolved_nodes(&resolved, &dead);
 
     // Computed exactly once, here, never inside `run_resolved_nodes_in_arena`
     // -- fusion is call-invariant over `resolved`'s own structure, the same
@@ -808,6 +823,13 @@ pub fn build_static_arena_with_constants(
     record_rewrite_engine_fires(&rewrite_fires);
     let (epilogue_fuse_skip, epilogue_fuse_fire_at, layer_norm_cluster_fire_at) =
         fusion_schedule(&resolved, &epilogue_fuse_plan, &layer_norm_cluster_plan);
+    let logical_retires = retirement_schedule(
+        &resolved,
+        &effective_outputs,
+        &layer_norm_cluster_plan,
+        &epilogue_fuse_skip,
+    );
+    let retires = physical_retires(&logical_retires, &recyclable);
 
     // bound before the static pass so a `Constant`/`Iota` node consuming one
     // of these (unlikely for a weight but not disallowed) sees the real
@@ -854,7 +876,7 @@ pub fn build_static_arena_with_constants(
     #[cfg(not(target_arch = "aarch64"))]
     let packed_width_panels = BTreeMap::new();
 
-    Ok(StaticArena {
+    let mut arena = StaticArena {
         resolved,
         shapes,
         effective_outputs,
@@ -870,7 +892,137 @@ pub fn build_static_arena_with_constants(
         epilogue_fuse_skip,
         epilogue_fuse_fire_at,
         layer_norm_cluster_fire_at,
-    })
+        retires,
+        free_buffers: Vec::new(),
+        peak_live_buffers: 0,
+    };
+    arena.peak_live_buffers = arena.peak_live_under(&logical_retires);
+    Ok(arena)
+}
+
+fn recyclable_nodes(
+    resolved: &[BoundOp],
+    dead: &BTreeSet<NodeId>,
+    static_nodes: &BTreeSet<NodeId>,
+    effective_outputs: &[NodeId],
+) -> BTreeSet<NodeId> {
+    resolved
+        .iter()
+        .map(|computed| computed.node)
+        .filter(|node| {
+            !dead.contains(node)
+                && !static_nodes.contains(node)
+                && !effective_outputs.contains(node)
+        })
+        .collect()
+}
+
+fn physical_retires(
+    logical_retires: &[Vec<NodeId>],
+    recyclable: &BTreeSet<NodeId>,
+) -> Vec<Vec<NodeId>> {
+    logical_retires
+        .iter()
+        .map(|nodes| {
+            nodes
+                .iter()
+                .copied()
+                .filter(|node| recyclable.contains(node))
+                .collect()
+        })
+        .collect()
+}
+
+fn extra_output_slots(computed: &BoundOp) -> Vec<(NodeId, bool)> {
+    let token_count = computed.extents.iter().product::<u64>() as usize;
+    let topk = computed
+        .kind
+        .moe_topk_extra_outputs(token_count)
+        .into_iter()
+        .map(|(node, _)| (node, true));
+    let others: Vec<(NodeId, bool)> = match &computed.kind {
+        BoundOpKind::GatedDeltaNet { state_out, .. } => vec![(*state_out, false)],
+        BoundOpKind::CachedSoftmaxWeights {
+            cached_weight_sum,
+            new_weight_sum,
+            new_attended,
+            ..
+        } => vec![
+            (*cached_weight_sum, true),
+            (*new_weight_sum, true),
+            (*new_attended, true),
+        ],
+        BoundOpKind::RoundBatchedReduce { round_outputs, .. } => round_outputs
+            .iter()
+            .skip(1)
+            .map(|node| (*node, false))
+            .collect(),
+        _ => Vec::new(),
+    };
+    topk.chain(others).collect()
+}
+
+pub(super) fn output_buffer(
+    slot: &mut Option<Vec<f32>>,
+    pool: &mut Vec<Vec<f32>>,
+    length: usize,
+) -> Vec<f32> {
+    slot.take()
+        .unwrap_or_else(|| take_or_allocate(pool, length))
+}
+
+impl StaticArena {
+    fn produced_at(&self, position: usize) -> Vec<(NodeId, bool)> {
+        let computed = &self.resolved[position];
+        let mut produced = Vec::new();
+        if !self.epilogue_fuse_skip.contains(&computed.node) {
+            produced.extend(extra_output_slots(computed));
+            produced.push((computed.node, true));
+        }
+        for reduce_node in self
+            .epilogue_fuse_fire_at
+            .get(&position)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(&(consumer_index, ..)) = self.epilogue_fuse_plan.get(reduce_node) {
+                produced.push((self.resolved[consumer_index].node, true));
+            }
+        }
+        for reduce_node in self
+            .layer_norm_cluster_fire_at
+            .get(&position)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(cluster) = self.layer_norm_cluster_plan.get(reduce_node) {
+                produced.push((self.resolved[cluster.tail_index].node, true));
+            }
+        }
+        produced
+    }
+
+    fn peak_live_under(&self, retires: &[Vec<NodeId>]) -> usize {
+        let mut live = vec![false; self.buffers.len()];
+        for (node, _) in &self.input_names {
+            live[node.0 as usize] = true;
+        }
+        let mut count = self.input_names.len();
+        let mut peak = count;
+        for (position, retired_here) in retires.iter().enumerate() {
+            for (node, counted) in self.produced_at(position) {
+                live[node.0 as usize] = true;
+                count += usize::from(counted);
+                peak = peak.max(count);
+            }
+            for retired in retired_here {
+                if core::mem::take(&mut live[retired.0 as usize]) {
+                    count = count.saturating_sub(1);
+                }
+            }
+        }
+        peak
+    }
 }
 
 /// Runs `arena`'s already-[`bind::bind`]-resolved program once against this
@@ -907,7 +1059,11 @@ pub fn evaluate_named_with_arena(
         })
         .collect();
 
-    Ok(Evaluated::from_parts(arena.root, results, None))
+    Ok(Evaluated::from_parts(
+        arena.root,
+        results,
+        Some(arena.peak_live_buffers),
+    ))
 }
 
 /// Reinterprets `slice` as raw bytes, no copy -- `f32` has no padding and
@@ -1052,10 +1208,11 @@ pub(super) fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(),
             || arena.epilogue_fuse_skip.contains(&node);
         if !skip_compute {
             let node_index = node.0 as usize;
-            let mut output = arena.buffers[node_index].take().ok_or(TensorError::NotLowerable {
-                node,
-                reason: "static arena has no pre-sized slot for this resolved node -- build_static_arena did not size it",
-            })?;
+            let mut output = output_buffer(
+                &mut arena.buffers[node_index],
+                &mut arena.free_buffers,
+                node_output_len(computed),
+            );
             #[cfg(feature = "epilogue-profile-probe")]
             let profile_start = std::time::Instant::now();
             #[cfg(feature = "instrument")]
@@ -1157,10 +1314,11 @@ pub(super) fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(),
                     continue;
                 };
                 let consumer_node = arena.resolved[consumer_index].node;
-                let mut output = arena.buffers[consumer_node.0 as usize].take().ok_or(TensorError::NotLowerable {
-                    node: consumer_node,
-                    reason: "static arena has no pre-sized slot for this epilogue-fused node -- build_static_arena did not size it",
-                })?;
+                let mut output = output_buffer(
+                    &mut arena.buffers[consumer_node.0 as usize],
+                    &mut arena.free_buffers,
+                    node_output_len(&arena.resolved[consumer_index]),
+                );
                 let reduce_values = arena.buffers[reduce_node.0 as usize]
                     .as_deref()
                     .unwrap_or(&[]);
@@ -1193,10 +1351,11 @@ pub(super) fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(),
                     continue;
                 };
                 let tail_node = arena.resolved[cluster.tail_index].node;
-                let mut output = arena.buffers[tail_node.0 as usize].take().ok_or(TensorError::NotLowerable {
-                    node: tail_node,
-                    reason: "static arena has no pre-sized slot for this layer-norm-cluster node -- build_static_arena did not size it",
-                })?;
+                let mut output = output_buffer(
+                    &mut arena.buffers[tail_node.0 as usize],
+                    &mut arena.free_buffers,
+                    node_output_len(&arena.resolved[cluster.tail_index]),
+                );
                 let fuse_started = std::time::Instant::now();
                 apply_layer_norm_cluster_fused(
                     &arena.resolved[cluster.tail_index],
@@ -1219,6 +1378,11 @@ pub(super) fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(),
                 LAYER_NORM_CLUSTER_ELEMENTS
                     .fetch_add(output.len() as u64, EpilogueFuseOrdering::Relaxed);
                 arena.buffers[tail_node.0 as usize] = Some(output);
+            }
+        }
+        for retired in &arena.retires[position] {
+            if let Some(buffer) = arena.buffers[retired.0 as usize].take() {
+                arena.free_buffers.push(buffer);
             }
         }
     }
@@ -1463,7 +1627,8 @@ pub(super) fn evaluate_named_via_arena(
                     (*node, shape, data)
                 })
                 .collect();
-            let evaluated = Evaluated::from_parts(arena.root, results, None);
+            let evaluated =
+                Evaluated::from_parts(arena.root, results, Some(arena.peak_live_buffers));
             checkin_arena(entry);
             Ok(evaluated)
         }

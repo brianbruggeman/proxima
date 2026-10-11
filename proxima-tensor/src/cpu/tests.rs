@@ -14277,3 +14277,182 @@ fn advance_reduction_offsets_matches_offset_of_at_every_flat_index() {
     assert_eq!(coordinate, [0, 0], "a full sweep wraps back to the origin");
     assert_eq!(running, origin, "a full sweep restores every offset");
 }
+
+const GRANITE_SYMBOLS: [u64; 2] = [1, 5];
+
+fn granite_input_values(name: &str, length: usize, seed: u64) -> Vec<f32> {
+    match name {
+        "ids" => vec![7.0],
+        "eps" => vec![1e-5],
+        "cached_len" => vec![4.0],
+        "rope_cos" => (0..length)
+            .map(|index| (index as f32 * 0.1).cos())
+            .collect(),
+        "rope_sin" => (0..length)
+            .map(|index| (index as f32 * 0.1).sin())
+            .collect(),
+        _ if name.ends_with("norm.weight") => random_vec(seed, length)
+            .into_iter()
+            .map(|value| 0.9 + value * 0.2)
+            .collect(),
+        _ => random_vec(seed, length)
+            .into_iter()
+            .map(|value| (value - 0.5) * 0.2)
+            .collect(),
+    }
+}
+
+type GraniteInputs = Vec<(String, Vec<f32>)>;
+
+fn granite_decoder_fixture() -> (Vec<Op>, Vec<NodeId>, GraniteInputs) {
+    let (program, roots, cache_roots, _moe_sites) =
+        crate::spec::gqa_cached_forward_program_with_experts(
+            64, 64, 128, 4, 2, 16, 2, 8, 2, false, false, false, false,
+        )
+        .expect("granite-shaped two-layer moe decoder builds");
+    let mut outputs = vec![roots.logits];
+    for (even, odd, value) in cache_roots {
+        outputs.extend_from_slice(&[even, odd, value]);
+    }
+    let shapes = shape::infer(&program, &GRANITE_SYMBOLS).expect("decoder shapes infer");
+    let named = block_node_ids(&program)
+        .into_iter()
+        .map(|node| {
+            let name = program[node.0 as usize]
+                .name()
+                .expect("every decoder input is named");
+            let length = element_count(shapes.of(node));
+            let values = granite_input_values(name, length, 1000 + u64::from(node.0));
+            (String::from(name), values)
+        })
+        .collect();
+    (program, outputs, named)
+}
+
+fn granite_named_slices(named: &[(String, Vec<f32>)]) -> Vec<(&str, &[f32])> {
+    named
+        .iter()
+        .map(|(name, values)| (name.as_str(), values.as_slice()))
+        .collect()
+}
+
+fn granite_packed_reference(
+    program: &[Op],
+    outputs: &[NodeId],
+    named: &[(String, Vec<f32>)],
+) -> Evaluated {
+    let blocks: Vec<(&str, QuantizedBlock)> = named
+        .iter()
+        .map(|(name, values)| (name.as_str(), QuantizedBlock::Float32(values)))
+        .collect();
+    evaluate_quantized_named(program, &GRANITE_SYMBOLS, &blocks, outputs)
+        .expect("packed loop evaluates the granite-shaped decoder")
+}
+
+fn assert_outputs_bit_identical(found: &Evaluated, expected: &Evaluated, outputs: &[NodeId]) {
+    for node in outputs {
+        let (found_data, found_shape) = found.get(*node).expect("arena result carries the output");
+        let (expected_data, expected_shape) = expected
+            .get(*node)
+            .expect("packed result carries the output");
+        assert_eq!(found_shape, expected_shape, "shape of output {node:?}");
+        let found_bits: Vec<u32> = found_data.iter().map(|value| value.to_bits()).collect();
+        let expected_bits: Vec<u32> = expected_data.iter().map(|value| value.to_bits()).collect();
+        assert_eq!(found_bits, expected_bits, "bits of output {node:?}");
+    }
+}
+
+#[test]
+fn evaluate_retirement_arena_peak_live_buffers_equals_the_packed_loop_on_a_granite_shaped_decoder()
+{
+    let (program, outputs, named) = granite_decoder_fixture();
+    let packed = granite_packed_reference(&program, &outputs, &named);
+
+    let arena = evaluate_named(
+        &program,
+        &GRANITE_SYMBOLS,
+        &granite_named_slices(&named),
+        &outputs,
+    )
+    .expect("arena loop evaluates the granite-shaped decoder");
+
+    let packed_peak = packed
+        .peak_live_buffers()
+        .expect("the packed loop reports peak_live_buffers");
+    assert!(
+        packed_peak > named.len(),
+        "the peak must exceed the {} resident inputs or nothing was counted, got {packed_peak}",
+        named.len()
+    );
+    assert_eq!(arena.peak_live_buffers(), Some(packed_peak));
+}
+
+#[test]
+fn evaluate_retirement_arena_output_is_bit_identical_to_the_packed_loop_on_every_call() {
+    let (program, outputs, named) = granite_decoder_fixture();
+    let packed = granite_packed_reference(&program, &outputs, &named);
+    let slices = granite_named_slices(&named);
+
+    let mut arena = build_static_arena(&program, &GRANITE_SYMBOLS, &outputs)
+        .expect("granite-shaped decoder builds a static arena");
+    for _ in 0..3 {
+        let owned = evaluate_named_with_arena(&mut arena, &slices)
+            .expect("owned arena evaluates the granite-shaped decoder");
+        assert_outputs_bit_identical(&owned, &packed, &outputs);
+    }
+    let cached = evaluate_named(&program, &GRANITE_SYMBOLS, &slices, &outputs)
+        .expect("cached arena evaluates the granite-shaped decoder");
+    assert_outputs_bit_identical(&cached, &packed, &outputs);
+}
+
+#[test]
+fn evaluate_retirement_arena_pool_reaches_a_fixed_point_after_the_first_call() {
+    let (program, outputs, named) = granite_decoder_fixture();
+    let slices = granite_named_slices(&named);
+    let mut arena = build_static_arena(&program, &GRANITE_SYMBOLS, &outputs)
+        .expect("granite-shaped decoder builds a static arena");
+    assert!(
+        arena.free_buffers.is_empty(),
+        "a fresh arena holds no recycled buffer before its first call"
+    );
+
+    evaluate_named_with_arena(&mut arena, &slices).expect("first call evaluates");
+    let pooled_after_first = arena.free_buffers.len();
+    let capacity_after_first: usize = arena.free_buffers.iter().map(Vec::capacity).sum();
+    evaluate_named_with_arena(&mut arena, &slices).expect("second call evaluates");
+
+    assert!(
+        pooled_after_first > 0,
+        "the retirement schedule must have returned intermediates to the pool"
+    );
+    assert_eq!(arena.free_buffers.len(), pooled_after_first);
+    assert_eq!(
+        arena.free_buffers.iter().map(Vec::capacity).sum::<usize>(),
+        capacity_after_first,
+        "the second call must reuse the pooled storage instead of allocating"
+    );
+}
+
+#[test]
+fn evaluate_retirement_arena_keeps_inputs_statics_and_outputs_resident() {
+    let (program, outputs, named) = granite_decoder_fixture();
+    let slices = granite_named_slices(&named);
+    let mut arena = build_static_arena(&program, &GRANITE_SYMBOLS, &outputs)
+        .expect("granite-shaped decoder builds a static arena");
+    evaluate_named_with_arena(&mut arena, &slices).expect("call evaluates");
+
+    for (node, _) in &arena.input_names {
+        assert!(arena_output(&arena, *node).is_some(), "input {node:?}");
+    }
+    for node in arena.static_nodes.iter().chain(&arena.effective_outputs) {
+        assert!(arena_output(&arena, *node).is_some(), "kept node {node:?}");
+    }
+    let scheduled: usize = arena.retires.iter().map(Vec::len).sum();
+    assert!(scheduled > 0, "the granite-shaped decoder retires nodes");
+    for node in arena.retires.iter().flatten() {
+        assert!(
+            arena_output(&arena, *node).is_none(),
+            "retired node {node:?} must have left its slot"
+        );
+    }
+}
