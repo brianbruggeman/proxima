@@ -1,0 +1,6 @@
+codec = "Q6K"
+elements = 4096
+source = "checkpoint"
+origin = "sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd tensor per_layer_token_embd.weight byte_offset 43345696"
+blocks_sha256 = "b03b98df4c3c7e15e2e475124bd65f4e30b016297423f3255f50b23958cd00a9"
+decoded_f32_sha256 = "6b4e6996ea6f2fc5f8e474b8fefddd026216398d44fe26d381513b9fdcd3409b"

@@ -12,6 +12,7 @@ readme.workspace = true
 [features]
 default = ["std"]
 alloc = []
+float-layout-dtype = []
 # runtime config surface ([`config::GgufParserConfig`]): conflaguration is
 # std-only (Settings/env/file), so it rides in only here -- the
 # no_std+alloc floor never sees it and always uses `crate::sized` directly.

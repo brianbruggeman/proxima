@@ -19,6 +19,7 @@ default = ["std", "metal", "cpu"]
 std = ["alloc", "thiserror/std", "proxima-tensor/std", "dep:conflaguration", "dep:serde"]
 mlx-gdn = ["std"]
 alloc = []
+float-layout-dtype = ["proxima-tensor/float-layout-dtype", "proxima-gguf/float-layout-dtype"]
 cached-attention-streaming = ["proxima-tensor/cached-attention-streaming"]
 # Passthrough (implied by `metal-attn-split-decode`) to `proxima-tensor/metal-fuse-attn-decode` (the
 # gemma4-shaped windowed/padded cached-attention matcher extension) -- same
