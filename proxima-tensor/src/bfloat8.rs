@@ -117,6 +117,7 @@ fn decode_f32_bits(source: u8) -> u32 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::BFloat8;
     use crate::convert::Convert;

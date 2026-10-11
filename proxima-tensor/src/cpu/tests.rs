@@ -7082,7 +7082,7 @@ fn card_03_bf8_element_widens_reduce_and_rejects_bf8_accumulation() {
     let operand = TypedBuffer::BFloat8(values.map(BFloat8::from_f32).to_vec());
     let (widened_program, _) =
         typed_widened_reduce_program(DType::BFloat8, DType::Float32, values.len() as u32);
-    let widened = evaluate_typed(&widened_program, &[], &[operand.clone()], &[])
+    let widened = evaluate_typed(&widened_program, &[], core::slice::from_ref(&operand), &[])
         .expect("BF8 inputs reduce into the explicitly selected F32 accumulator");
     assert_eq!(widened[0].2, TypedBuffer::Float32(alloc::vec![1.375]));
 
