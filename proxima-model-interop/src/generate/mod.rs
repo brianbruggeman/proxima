@@ -194,12 +194,11 @@ use proxima_tensor::spec::{DuplicateHeadPosition, gqa_single_range_cached_forwar
 
 use crate::bind::{BoundWeights, Codec, ModelHparams, metadata_str};
 use crate::error::InteropError;
-use crate::hf_bind::bind_all_weights_from_safetensors;
+use crate::hf_bind::{HfShard, bind_all_weights_from_safetensors};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use crate::lowering::KvCacheShape;
 use crate::lowering::{
-    FfnRouting, KvLayout, StepInput, bind_checkpoint_with_kv_layout, bind_symbols,
-    rope_freq_factors, sliding_rope_inputs,
+    FfnRouting, KvLayout, StepInput, bind_symbols, rope_freq_factors, sliding_rope_inputs,
 };
 use crate::profiles::family_profile;
 use crate::rope_scaling::{RopeScaling, f32_from_u32};
@@ -210,6 +209,9 @@ use crate::serving::{GdnPrefillBackend, PromptCacheConfig, ServingConfig, resolv
 
 #[macro_use]
 mod load_model;
+#[cfg(feature = "std")]
+mod weight_source;
+use weight_source::WeightSource;
 #[macro_use]
 mod pregather;
 #[macro_use]

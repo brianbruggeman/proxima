@@ -2408,7 +2408,14 @@ impl<'file> LoadedModel<'file> {
     /// [`proxima_tensor::spec::gqa_cached_forward_program_with_experts`]
     /// can fail with.
     pub fn load(parsed: &ParsedGguf, file_bytes: &'file [u8]) -> Result<Self, InteropError> {
-        Self::load_inner(parsed, file_bytes, KvLayout::SlidingRing, None)
+        Self::load_inner(
+            parsed,
+            file_bytes,
+            KvLayout::SlidingRing,
+            None,
+            WeightSource::Gguf,
+            None,
+        )
     }
 
     /// [`Self::load`] with the sliding-window layers' KV layout chosen
@@ -2430,7 +2437,7 @@ impl<'file> LoadedModel<'file> {
         file_bytes: &'file [u8],
         layout: KvLayout,
     ) -> Result<Self, InteropError> {
-        Self::load_inner(parsed, file_bytes, layout, None)
+        Self::load_inner(parsed, file_bytes, layout, None, WeightSource::Gguf, None)
     }
 
     /// Writes every sliding-ring row `offset` slots away from where the read
@@ -2536,7 +2543,14 @@ impl<'file> LoadedModel<'file> {
             fused_qkv_reduce,
             ..header
         };
-        Self::load_inner(parsed, file_bytes, KvLayout::SlidingRing, Some(&descriptor))
+        Self::load_inner(
+            parsed,
+            file_bytes,
+            KvLayout::SlidingRing,
+            Some(&descriptor),
+            WeightSource::Gguf,
+            None,
+        )
     }
 
     /// [`Self::load`] with the forward program lowered from `descriptor`
@@ -2565,7 +2579,58 @@ impl<'file> LoadedModel<'file> {
         } else {
             KvLayout::Full
         };
-        Self::load_inner(parsed, file_bytes, kv_layout, Some(descriptor))
+        Self::load_inner(
+            parsed,
+            file_bytes,
+            kv_layout,
+            Some(descriptor),
+            WeightSource::Gguf,
+            None,
+        )
+    }
+
+    /// [`Self::load`] for a Hugging Face directory: the weights bind out of
+    /// `shards` under the family's binding profile
+    /// ([`crate::bind_hf_checkpoint`], [`crate::bind_safetensors_shards`]) and
+    /// `vocab` is the one the directory's own `tokenizer.json` builds. The
+    /// descriptor and hyperparameters come from `header_source`'s metadata,
+    /// the family profile's header reader, because a `config.json` carries
+    /// them for the uniform dense shape only
+    /// ([`crate::architecture_from_hf_config`]); `header_bytes` is the GGUF those
+    /// bytes parse to, read only for the binding profile's `extra` tables.
+    ///
+    /// Compose the primitives directly when the checkpoint is a GGUF
+    /// ([`Self::load`]) or a single-buffer uniform dense safetensors file
+    /// ([`Self::load_from_safetensors`]); this is the one that reads a sharded
+    /// export of a mixture-of-experts or sliding-pattern family. Speculative
+    /// verify stays off, as it does for [`Self::load_from_safetensors`].
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::load`] and [`crate::bind_hf_checkpoint`] can fail
+    /// with; [`InteropError::UnknownTensor`] for a weight no shard stores.
+    pub fn load_from_hf_directory(
+        header_source: &ParsedGguf,
+        header_bytes: &'file [u8],
+        shards: &[HfShard<'file>],
+        vocab: Vocab,
+    ) -> Result<Self, InteropError> {
+        let registered = shards
+            .iter()
+            .map(|shard| shard.1)
+            .max_by_key(|bytes| bytes.len())
+            .unwrap_or(&[]);
+        Self::load_inner(
+            header_source,
+            registered,
+            KvLayout::SlidingRing,
+            None,
+            WeightSource::Directory {
+                header_bytes,
+                shards,
+            },
+            Some(vocab),
+        )
     }
 
     pub(super) fn load_inner(
@@ -2573,6 +2638,8 @@ impl<'file> LoadedModel<'file> {
         file_bytes: &'file [u8],
         kv_layout: KvLayout,
         descriptor: Option<&ModelDescriptor>,
+        source: WeightSource<'_, 'file>,
+        vocab: Option<Vocab>,
     ) -> Result<Self, InteropError> {
         // ROW 533's own mechanism (`proxima-tensor/docs/discipline.md`): a
         // non-resident page behind the no-copy `MTLBuffer`
@@ -2596,7 +2663,7 @@ impl<'file> LoadedModel<'file> {
                         .min(facts.physical_memory_bytes),
                     os_headroom_bytes: omega::sized::LOAD_TIME_FIT_OS_HEADROOM_BYTES,
                 };
-                crate::memory_fit::fit_mapping_bytes(file_bytes.len() as u64, limit)?;
+                crate::memory_fit::fit_mapping_bytes(source.mapped_bytes(file_bytes), limit)?;
             }
             let residency_report = crate::mapping_residency::prove_resident(file_bytes)?;
             #[cfg(feature = "instrument")]
@@ -2606,7 +2673,9 @@ impl<'file> LoadedModel<'file> {
                 mapping_missing_pages = residency_report.missing_pages,
                 "checkpoint_mapping_residency: proved resident before metal no-copy registration"
             );
-            residency_report.rung
+            residency_report
+                .rung
+                .max(source.prove_other_shards_resident(file_bytes)?)
         };
         // registers `file_bytes` -- the checkpoint's own mmap, page-aligned
         // at its base by construction -- as the single mapping every packed
@@ -2623,7 +2692,7 @@ impl<'file> LoadedModel<'file> {
         // branches below.
         #[cfg(all(feature = "metal", target_os = "macos"))]
         let (dense_weight_bytes, expert_weight_bytes, table_weight_bytes) =
-            crate::bind::tensor_bytes_by_class(parsed);
+            source.weight_class_bytes(parsed, file_bytes);
         // The checkpoint's own `general.architecture` keys its family profile,
         // which names the header reader, the cache shape, the routing and the
         // chunk default; `crate::lowering` binds and lowers from that one
@@ -2635,14 +2704,9 @@ impl<'file> LoadedModel<'file> {
             ffn_routing = ?profile.ffn_routing,
             "family_route"
         );
-        let bound = bind_checkpoint_with_kv_layout(parsed, file_bytes, kv_layout)?;
-        let bound = match descriptor {
-            Some(config) => bound.lowered_from(config, parsed, file_bytes)?,
-            None => bound,
-        };
+        let bound = source.bind(parsed, file_bytes, kv_layout, descriptor)?;
         #[cfg(all(feature = "metal", target_os = "macos"))]
         let step_state = crate::lowering::step_state(parsed)?;
-        let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
         // The single-range program is dense-uniform-only
         // (`SingleRangeProgram`'s own field doc): it has no concept of
         // recurrent layers, and `build_single_range_program` itself already
@@ -2677,9 +2741,14 @@ impl<'file> LoadedModel<'file> {
         // Armed by the descriptor ([`ModelDescriptor::verify`]), never by a
         // name: a config decides directly, and without one the family's
         // header descriptor does.
-        let speculative_verify_program =
-            crate::lowering::bind_speculative_verify(parsed, file_bytes, kv_layout, descriptor)?
-                .map(|verify| (verify.program, verify.logits_root, verify.layer_roots));
+        let speculative_verify_program = source
+            .speculative_verify(parsed, file_bytes, kv_layout, descriptor)?
+            .map(|verify| (verify.program, verify.logits_root, verify.layer_roots));
+        let checkpoint_bytes = source.checkpoint_bytes(file_bytes);
+        let vocab = match vocab {
+            Some(vocab) => vocab,
+            None => proxima_tokenizer::gguf::vocab_from_metadata(parsed)?,
+        };
         let expert_slab =
             crate::bind::build_expert_slab(&bound.architecture, &bound.program, &bound.weights);
         let rope_scaling = RopeScaling::from_gguf(parsed)?;
@@ -2729,7 +2798,7 @@ impl<'file> LoadedModel<'file> {
                 .then(|| crate::recurrent_routed_interval::hparams::from_metadata(parsed).ok())
                 .flatten(),
             model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
-            checkpoint_bytes: file_bytes.len(),
+            checkpoint_bytes,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
             speculative_verify_program,

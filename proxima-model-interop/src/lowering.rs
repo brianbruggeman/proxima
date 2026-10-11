@@ -24,9 +24,10 @@ use proxima_tensor::spec::{
     ForwardProgram, LayerCacheRoots, LayerKind, ModelDescriptor, ScheduleSource, build_forward,
 };
 
-use crate::bind::{BoundWeights, ModelHparams, metadata_str};
+use crate::bind::{BoundWeights, ModelHparams, bind_native_f32, metadata_str};
 use crate::bind_leaves::{bind_missing_leaves, bind_program_leaves};
 use crate::error::InteropError;
+use crate::hf_bind::{HfShard, bind_safetensors_shards};
 use crate::profiles::{binding_profile, family_profile};
 use crate::recurrent_routed_interval::MoeLayerDiagnostics;
 
@@ -327,43 +328,83 @@ fn bind_descriptor<'file>(
     architecture: ModelHparams,
     descriptor: &ModelDescriptor,
 ) -> Result<BoundProgram<'file>, InteropError> {
-    let ForwardProgram {
-        program,
-        logits,
-        layer_roots,
-        moe_sites,
-        layer_residuals,
-        hidden,
-        duplicate_head_roots,
-        layer_diagnostics,
-    } = build_forward(descriptor)?;
+    let forward = build_forward(descriptor)?;
     let weights = bind_program_leaves(
         parsed,
         file_bytes,
-        &program,
+        &forward.program,
         &binding_profile(&architecture.family)?,
         &[],
     )?;
-    Ok(BoundProgram {
+    Ok(bound_program(weights, architecture, forward, descriptor))
+}
+
+fn bound_program<'file>(
+    weights: BoundWeights<'file>,
+    architecture: ModelHparams,
+    forward: ForwardProgram,
+    descriptor: &ModelDescriptor,
+) -> BoundProgram<'file> {
+    BoundProgram {
         weights,
         architecture,
-        program,
-        logits_root: logits,
-        hidden_root: hidden,
-        residual_roots: layer_residuals,
-        layer_roots,
-        router_roots: layer_diagnostics
+        program: forward.program,
+        logits_root: forward.logits,
+        hidden_root: forward.hidden,
+        residual_roots: forward.layer_residuals,
+        layer_roots: forward.layer_roots,
+        router_roots: forward
+            .layer_diagnostics
             .iter()
             .map(|diagnostic| diagnostic.router_logits)
             .collect(),
-        moe_layer_diagnostics: layer_diagnostics,
-        moe_sites,
-        duplicate_head_roots,
+        moe_layer_diagnostics: forward.layer_diagnostics,
+        moe_sites: forward.moe_sites,
+        duplicate_head_roots: forward.duplicate_head_roots,
         single_position_step: descriptor
             .layers
             .iter()
             .any(|layer| layer.kind == LayerKind::Gdn),
-    })
+    }
+}
+
+/// [`bind_checkpoint_with_kv_layout`] for a Hugging Face directory: the
+/// descriptor and hyperparameters come from `header_source`'s metadata (the
+/// family profile's header reader), the program is lowered from them, and the
+/// weights its `Input` leaves name are bound out of `shards`
+/// ([`crate::bind_safetensors_shards`]) under the family's binding profile.
+///
+/// Teaching pointer: the GGUF `header_source` stands in for the header that a
+/// `config.json` alone does not yet carry for every family
+/// ([`crate::architecture_from_hf_config`] reads the uniform dense shape
+/// only); the tensors are the directory's, not the GGUF's, except the
+/// binding profile's `extra` tables (`rope_freqs.weight`), which a Hugging Face
+/// directory does not hold and which bind from `header_bytes`.
+///
+/// # Errors
+///
+/// Whatever the family's header reader, the lowering or the shard bind can
+/// fail with.
+pub fn bind_hf_checkpoint<'file>(
+    header_source: &ParsedGguf,
+    header_bytes: &'file [u8],
+    layout: KvLayout,
+    shards: &[HfShard<'file>],
+) -> Result<BoundProgram<'file>, InteropError> {
+    let (descriptor, architecture) = header(header_source, layout)?;
+    let forward = build_forward(&descriptor)?;
+    let binding = binding_profile(&architecture.family)?;
+    let mut weights = bind_safetensors_shards(shards, &forward.program, &binding)?;
+    for name in &binding.extra {
+        bind_native_f32(
+            header_source,
+            header_bytes,
+            name,
+            name.clone(),
+            &mut weights,
+        )?;
+    }
+    Ok(bound_program(weights, architecture, forward, &descriptor))
 }
 
 /// The all-positions counterpart of [`bind_checkpoint_with_kv_layout`] for
