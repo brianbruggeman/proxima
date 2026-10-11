@@ -1,9 +1,10 @@
-use proxima_onnx::{LowerError, OnnxError};
-
+use super::reader::Reader;
+use super::writer::Writer;
 use crate::backend::BackendError;
 
-/// The five stages of the door, ordered as they run. A [`DoorError`] names
-/// the stage that raised it with this tag, and
+/// The eight stages of the door in pipeline order: reading is parse,
+/// validate, lower; writing is emit, package, verify; running is plan,
+/// execute. A [`DoorError`] names the stage that raised it with this tag, and
 /// [`DoorStage::kind`](super::DoorStage::kind) names the stage that produced a
 /// state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -11,11 +12,26 @@ pub enum StageKind {
     Parse,
     Validate,
     Lower,
+    Emit,
+    Package,
+    Verify,
     Plan,
     Execute,
 }
 
 impl StageKind {
+    /// Every stage, in pipeline order.
+    pub const ALL: [Self; 8] = [
+        Self::Parse,
+        Self::Validate,
+        Self::Lower,
+        Self::Emit,
+        Self::Package,
+        Self::Verify,
+        Self::Plan,
+        Self::Execute,
+    ];
+
     /// Lowercase stage name as it appears in error messages.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -23,50 +39,39 @@ impl StageKind {
             Self::Parse => "parse",
             Self::Validate => "validate",
             Self::Lower => "lower",
+            Self::Emit => "emit",
+            Self::Package => "package",
+            Self::Verify => "verify",
             Self::Plan => "plan",
             Self::Execute => "execute",
         }
     }
 }
 
-/// Why the validate stage refused a graph before paying for lowering.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ValidationError {
-    /// The model parsed but its `graph` field is absent.
-    #[error("model carries no graph")]
-    NoGraph,
-
-    /// Every reason the graph cannot lower, gathered in one pass so a caller
-    /// fixes them together instead of one lowering error at a time.
-    #[error(
-        "graph cannot lower: unlowerable ops (name, nodes) {unlowerable:?}, unpinned dimensions {unpinned:?}"
-    )]
-    Rejected {
-        /// Op types with no lowering arm and their node counts, e.g.
-        /// `[("DequantizeLinear", 12)]`.
-        unlowerable: Vec<(String, usize)>,
-        /// Symbolic input dimension names with no entry in the batch pins,
-        /// e.g. `["batch_size", "sequence_length"]`.
-        unpinned: Vec<String>,
-    },
-}
-
 /// A door failure: one variant per stage, carrying that stage's own error, so
 /// the caller learns where the call failed from one type.
 ///
-/// This is the single error [`OnnxDoor`](super::OnnxDoor) returns; the four
-/// error types it replaces ([`OnnxError`], [`LowerError`], [`BackendError`]
-/// twice) stay reachable as the `#[source]` of each variant.
+/// The reader's and writer's errors are the `#[source]` of their stages; the
+/// backend's error is the source of plan and execute.
 #[derive(Debug, thiserror::Error)]
-pub enum DoorError {
+pub enum DoorError<R: Reader, W: Writer> {
     #[error("parse stage failed: {0}")]
-    Parse(#[source] OnnxError),
+    Parse(#[source] R::ParseError),
 
     #[error("validate stage failed: {0}")]
-    Validate(#[source] ValidationError),
+    Validate(#[source] R::ValidateError),
 
     #[error("lower stage failed: {0}")]
-    Lower(#[source] LowerError),
+    Lower(#[source] R::LowerError),
+
+    #[error("emit stage failed: {0}")]
+    Emit(#[source] W::Error),
+
+    #[error("package stage failed: {0}")]
+    Package(#[source] W::Error),
+
+    #[error("verify stage failed: {0}")]
+    Verify(#[source] W::Error),
 
     #[error("plan stage failed: {0}")]
     Plan(#[source] BackendError),
@@ -75,7 +80,7 @@ pub enum DoorError {
     Execute(#[source] BackendError),
 }
 
-impl DoorError {
+impl<R: Reader, W: Writer> DoorError<R, W> {
     /// The stage that raised this error.
     #[must_use]
     pub const fn stage(&self) -> StageKind {
@@ -83,6 +88,9 @@ impl DoorError {
             Self::Parse(_) => StageKind::Parse,
             Self::Validate(_) => StageKind::Validate,
             Self::Lower(_) => StageKind::Lower,
+            Self::Emit(_) => StageKind::Emit,
+            Self::Package(_) => StageKind::Package,
+            Self::Verify(_) => StageKind::Verify,
             Self::Plan(_) => StageKind::Plan,
             Self::Execute(_) => StageKind::Execute,
         }

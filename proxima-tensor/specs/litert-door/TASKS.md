@@ -12,7 +12,7 @@ Dependencies: 1 none; 2 none; 3 on 2; 4 on 2; 5 on 2; 6 on 2; 7 on 4, 5, 6; 8 on
 
 | # | slice | discharges | validation command | expected | done | note |
 |---|---|---|---|---|---|---|
-| 1 | generalize the door: `omega/src/door/`, `Door<Read, Write>`, `StageKind` with 8 names, the write-direction stages with a stub writer pipe, the ONNX reader pipe in `proxima-onnx`, the format-name counter | AC2 (core part) | `cargo nextest run -p omega --features onnx-door,cpu -E 'test(/door_shared_core_/) + test(/onnx_door_contract_/) + test(/onnx_door_plan_cache_/)'` | `20 passed` | [ ] | 4 `door_shared_core_` plus the 12 and 4 landed ONNX tests with unchanged assertions; the two-call-site test that decides whether a new program type is needed is recorded here |
+| 1 | generalize the door: `omega/src/door/`, `Door<Read, Write>`, `StageKind` with 8 names, the write-direction stages with a stub writer pipe, the ONNX reader pipe in `proxima-onnx`, the format-name counter | AC2 (core part) | `cargo nextest run -p omega --features onnx-door,cpu -E 'test(/door_shared_core_/) + test(/onnx_door_contract_/) + test(/onnx_door_plan_cache_/)'` | `20 passed` | [x] | 4 `door_shared_core_` plus the 12 and 4 landed ONNX tests with unchanged assertions; the two-call-site test that decides whether a new program type is needed is recorded here; landed with the generic `Door<R, W>`: the 4 `door_shared_core_` cases pass with the 16 ONNX cases; the reader stays in `omega/src/onnx_door/reader.rs`, not in `proxima-onnx`, because the reader trait is omega's |
 | 2 | `proxima-litert` crate skeleton (features `alloc`, `std`), omega features `door`, `litert-door`; the gate | AC24 | `for features in "" "--features litert-door"; do cargo tree -p omega $features -e normal --prefix none \| grep -c '^proxima-litert v'; done \| paste -sd' ' -` | `0 1` | [ ] | the crate adds no module yet; `cargo add` for every dependency |
 | 3 | `proxima-litert.toml`, `build.rs`, `sized` module, the scan counter | AC28 | `cargo nextest run -p proxima-litert --features std -E 'test(/litert_sized_/)'` | `7 passed` | [ ] | 10 keys: tflite.max_subgraphs, max_tensors, max_operators, max_buffers, max_operator_codes, max_signature_defs; wire.max_depth, max_vtable_slots; litertlm.max_sections, max_items; env names `PROXIMA_LITERT_<SECTION>_<KEY>` |
 | 4 | `wire::read` and `wire::write`; vendored `gecko_64_f32_head_4096.bin` and `gemma_e2b_litertlm_head_16384.bin` | AC4 | `cargo nextest run -p proxima-litert --no-default-features --features alloc -E 'test(/litert_wire_/)'` | `12 passed` | [ ] | worked examples hand-encoded from the FlatBuffers internals document; header blocks cut from the cached files with `head -c` and hashed |
@@ -50,8 +50,8 @@ Dependencies: 1 none; 2 none; 3 on 2; 4 on 2; 5 on 2; 6 on 2; 7 on 4, 5, 6; 8 on
 
 ## resume
 
-Last landed slice: none (spec audited, no code)
-Next action: slice 1, `git grep -n -E 'pub struct (Door|OnnxDoor)|DoorStage' origin/main -- omega/src`, then `git mv omega/src/onnx_door omega/src/door` and the generalization
+Last landed slice: slice 1 (the generic door)
+Next action: slice 2
 Open question, if any: none
 
 ## struck

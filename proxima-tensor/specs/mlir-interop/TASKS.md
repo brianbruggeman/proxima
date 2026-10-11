@@ -8,7 +8,7 @@ Dependencies: 1 none (first checks whether `origin/main` already carries the gen
 
 | # | slice | discharges | validation command | expected | done | note |
 |---|---|---|---|---|---|---|
-| 1 | generalize the door over the format: `omega/src/door/` from `omega/src/onnx_door/`, `Lowered` to `proxima-tensor` with a re-export, `OnnxDoor = Door<OnnxReader>`, feature `door`; no test edit | AC1 | `test "$(git diff --numstat 69b3c744 -- omega/tests/onnx_door.rs \| wc -l)" = 0 && cargo nextest run -p omega --features onnx-door,cpu -E 'test(/onnx_door_contract_/) + test(/onnx_door_plan_cache_/)' 2>&1 \| grep -o -E '[0-9]+ passed' \| head -1` | `16 passed` | [ ] | first act: `git grep -n "Door<" origin/main -- omega/src` and the onnx-door TASKS for a landed generalization; reuse it if present and amend this row |
+| 1 | generalize the door over the format: `omega/src/door/` from `omega/src/onnx_door/`, `Lowered` to `proxima-tensor` with a re-export, `OnnxDoor = Door<OnnxReader>`, feature `door`; no test edit | AC1 | `test "$(git diff --numstat 69b3c744 -- omega/tests/onnx_door.rs \| wc -l)" = 0 && cargo nextest run -p omega --features onnx-door,cpu -E 'test(/onnx_door_contract_/) + test(/onnx_door_plan_cache_/)' 2>&1 \| grep -o -E '[0-9]+ passed' \| head -1` | `16 passed` | [x] | first act: `git grep -n "Door<" origin/main -- omega/src` and the onnx-door TASKS for a landed generalization; reuse it if present and amend this row; landed: the generic `Door<R, W>` in `omega/src/door/` (`Reader`, `Writer`, `NoSink`, eight `StageKind`s), `OnnxReader` in `omega/src/onnx_door/reader.rs` so no door source names a format, `Lowered` in `proxima-tensor` re-exported by `proxima-onnx`, `DoorSettings` as the format-free config the per-format `DoorConfig` resolves to; `onnx_door_contract_` 12 and `onnx_door_plan_cache_` 4 pass with the test file diff at 0 |
 | 2 | `proxima-mlir` crate with only `tests/support/tool.rs` and the tool tests: pin `mlir-opt` and `mlir-runner` 21.1.8, runner libraries, loud failures | AC2 | `cargo nextest run -p proxima-mlir --features std -E 'test(/mlir_tool_/)'` | `5 passed` | [ ] | `cargo new` plus `cargo add` for dependencies, workspace membership by manual edit; the matmul probe is the one verified by hand at spec time (`19, 22, 43, 50` through `one-shot-bufferize`, `convert-linalg-to-loops`, `finalize-memref-to-llvm`, `mlir-runner`) |
 | 3 | `proxima-mlir.toml`, `build.rs`, generated `sized.rs` with the lexer, parser and emitter tunables | AC27 | `cargo nextest run -p proxima-mlir --features std -E 'test(/mlir_sized_/)'` | `4 passed` | [ ] | same step as `omega/build.rs` and `omega/omega-runtime.toml`; the no-bare-constant case scans the sources of later slices too, so it is re-run at each slice that adds a constant |
 | 4 | `lex.rs` at tier 3: `Copy` tokens with spans, `memchr` delimiter scans, byte-class table; `tier_report` example | AC23 (tier 3 half) | `cargo run -q -p proxima-mlir --no-default-features --example tier_report \| grep -c '^module '` | `1` | [ ] | the lexer is the one module compiled with no alloc; the tier-3 half of AC24 is re-run here: `cargo build -p proxima-mlir --no-default-features --target thumbv7em-none-eabihf --message-format json \| grep -c '"reason":"build-finished","success":true'` printing `1` |
@@ -45,8 +45,8 @@ Dependencies: 1 none (first checks whether `origin/main` already carries the gen
 
 ## resume
 
-Last landed slice: none
-Next action: slice 1, first `git grep -n "Door<" origin/main -- omega/src` and `git log origin/main -- omega/src/onnx_door` for a generalization landed by another spec; then slice 2 in parallel
+Last landed slice: slice 1 (the generic door)
+Next action: slice 2
 Open question, if any: none; the owner may reject the use of a Python-packaged vendor tool for the dumps (`SPEC.md`, first risk), in which case slice 6 vendors the already-produced dumps and the README records that they are not reproducible without it
 
 ## struck
