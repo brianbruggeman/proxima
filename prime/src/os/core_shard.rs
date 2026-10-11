@@ -16,12 +16,13 @@
     ),
 ))]
 
-use std::cell::{Cell, RefCell, UnsafeCell};
+use std::cell::{Cell, OnceCell, RefCell, UnsafeCell};
 use std::future::Future;
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::ptr;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{self, Ordering};
 use std::task::{Context, Poll};
@@ -85,6 +86,11 @@ const SPIN_BEFORE_PARK_IDLE: u32 = sized::REACTOR_SPIN_BEFORE_PARK_IDLE;
 /// P12: `prime-runtime.toml`'s `[reactor].idle_park_threshold`
 /// (`PRIME_REACTOR_IDLE_PARK_THRESHOLD`).
 const IDLE_PARK_THRESHOLD: u32 = sized::REACTOR_IDLE_PARK_THRESHOLD;
+/// consecutive busy task polls before the worker services timers and the reactor
+/// without parking, so a self-waking task cannot starve them.
+///
+/// `prime-runtime.toml` `[reactor].event_interval`.
+const EVENT_INTERVAL: u32 = sized::REACTOR_EVENT_INTERVAL;
 
 thread_local! {
     /// set once at worker startup; tasks query this via `current_core()`.
@@ -640,21 +646,7 @@ fn launch_with_clock(
     setup: Option<WorkerSetup>,
     clock: StdClock,
 ) -> Result<CoreShardHandle, ProximaError> {
-    #[cfg(not(feature = "runtime-prime-inbox-dynamic"))]
-    let (producer, consumer) =
-        inbox_impl::channel::<SpawnRequest<InlineTask>>(num_lanes, lane_capacity);
-    // dynamic inbox: num_lanes is the eager FLOOR; lanes grow lazily to the
-    // ceiling on demand (no task loss), rings allocate per active producer.
-    #[cfg(feature = "runtime-prime-inbox-dynamic")]
-    let (producer, consumer) = {
-        let config = inbox_impl::InboxDynamicConfig {
-            floor: num_lanes.max(1),
-            ceiling: 1024,
-            release: inbox_impl::ReleasePolicy::Always,
-            lane_capacity,
-        };
-        inbox_impl::channel::<SpawnRequest<InlineTask>>(&config)
-    };
+    let (producer, consumer) = new_inbox(num_lanes, lane_capacity);
     // build the reactor outside the worker so the wakeup handle is
     // available to the parent thread before launch returns.
     let reactor = Reactor::new()
@@ -700,6 +692,15 @@ fn map_inbox_error<T>(send_err: &inbox_impl::SendError<T>) -> SpawnError {
     }
 }
 
+struct WorkerParts {
+    core_id: CoreId,
+    affinity: Option<core_affinity::CoreId>,
+    consumer: inbox_impl::Consumer<SpawnRequest<InlineTask>>,
+    reactor: Reactor,
+    setup: Option<WorkerSetup>,
+    clock: StdClock,
+}
+
 fn worker_main(
     core_id: CoreId,
     affinity: Option<core_affinity::CoreId>,
@@ -708,6 +709,99 @@ fn worker_main(
     setup: Option<WorkerSetup>,
     clock: StdClock,
 ) {
+    let parts = WorkerParts {
+        core_id,
+        affinity,
+        consumer,
+        reactor,
+        setup,
+        clock,
+    };
+    drive_worker(parts, |_| {}, || false);
+}
+
+/// Runs `root` with the CALLING thread as core `core`'s worker. This is the
+/// worker loop of [`launch`] (inbox drain, `LocalExecutor::tick`, timer
+/// advance, reactor park). It is not a foreign-thread park: no channel, no
+/// second thread. Returns when `root` completes.
+///
+/// Setup allocations, counted: the reactor and inbox, the root task box, and
+/// the output `Rc`. Nothing allocates per tick.
+///
+/// # Errors
+/// Returns [`ProximaError::Config`] when the reactor cannot be created or the
+/// worker loop ends before `root` completes.
+#[must_use = "the root future's output is the program's result"]
+pub fn run_on_this_thread<Root>(core: CoreId, root: Root) -> Result<Root::Output, ProximaError>
+where
+    Root: Future + 'static,
+    Root::Output: 'static,
+{
+    // the producer stays alive so try_recv reports Empty, never Disconnected.
+    let (producer, consumer) = new_inbox(1, sized::INBOX_CAPACITY);
+    let reactor = Reactor::new()
+        .map_err(|err| ProximaError::Config(format!("init proxima reactor: {err}")))?;
+    let output: Rc<OnceCell<Root::Output>> = Rc::new(OnceCell::new());
+    let output_for_root = Rc::clone(&output);
+    let output_for_exit = Rc::clone(&output);
+    let parts = WorkerParts {
+        core_id: core,
+        affinity: None,
+        consumer,
+        reactor,
+        setup: None,
+        clock: StdClock::real(),
+    };
+    drive_worker(
+        parts,
+        move |executor| {
+            executor.spawn_local(async move {
+                let _ = output_for_root.set(root.await);
+            });
+        },
+        move || output_for_exit.get().is_some(),
+    );
+    drop(producer);
+    Rc::try_unwrap(output)
+        .ok()
+        .and_then(OnceCell::into_inner)
+        .ok_or_else(|| ProximaError::Config("root future did not complete".to_owned()))
+}
+
+fn new_inbox(
+    num_lanes: usize,
+    lane_capacity: usize,
+) -> (
+    Producer<SpawnRequest<InlineTask>>,
+    inbox_impl::Consumer<SpawnRequest<InlineTask>>,
+) {
+    #[cfg(not(feature = "runtime-prime-inbox-dynamic"))]
+    {
+        inbox_impl::channel::<SpawnRequest<InlineTask>>(num_lanes, lane_capacity)
+    }
+    // dynamic inbox: num_lanes is the eager FLOOR; lanes grow lazily to the
+    // ceiling on demand (no task loss), rings allocate per active producer.
+    #[cfg(feature = "runtime-prime-inbox-dynamic")]
+    {
+        let config = inbox_impl::InboxDynamicConfig {
+            floor: num_lanes.max(1),
+            ceiling: 1024,
+            release: inbox_impl::ReleasePolicy::Always,
+            lane_capacity,
+        };
+        inbox_impl::channel::<SpawnRequest<InlineTask>>(&config)
+    }
+}
+
+fn drive_worker(parts: WorkerParts, seed: impl FnOnce(&LocalExecutor), until: impl Fn() -> bool) {
+    let WorkerParts {
+        core_id,
+        affinity,
+        consumer,
+        reactor,
+        setup,
+        clock,
+    } = parts;
     let guards = CurrentGuards;
 
     // setup token lives on the worker's stack for the worker's lifetime.
@@ -755,6 +849,8 @@ fn worker_main(
     CURRENT_REACTOR.with(|cell| cell.set(reactor.get()));
     // retire published pointers before owned reactors and their arbitrary wakers drop.
     let _guards = guards;
+    seed(&executor);
+    let mut busy_polls: u32 = 0;
 
     // tracks consecutive empty parks where NO inbox activity was observed.
     // the spin gate's only purpose is catching cross-core inbox pushes
@@ -803,7 +899,10 @@ fn worker_main(
         }
 
         // 2. poll ready tasks.
-        let polled = executor.tick();
+        let polled = executor.tick_budget(EVENT_INTERVAL as usize);
+        if until() {
+            break;
+        }
 
         if inbox_arrivals > 0 {
             // producer-driven workload (cross-core spawn). the spin gate
@@ -818,6 +917,23 @@ fn worker_main(
         // busy iteration — measurable on I/O-bound workloads (h2 hot
         // path runs ~4-8 worker iterations per request).
         let reactor_pending_after_tick = take_reactor_pending_hint();
+        if polled == 0 {
+            busy_polls = 0;
+        } else {
+            busy_polls = busy_polls.saturating_add(u32::try_from(polled).unwrap_or(u32::MAX));
+            if busy_polls >= EVENT_INTERVAL {
+                busy_polls = 0;
+                timer.borrow_mut().advance(clock.now());
+                let turn_result =
+                    with_current_reactor(|reactor| reactor.turn(Some(Duration::ZERO)));
+                if let Some(Err(err)) = turn_result
+                    && err.kind() != std::io::ErrorKind::Interrupted
+                {
+                    warn!(error = %err, "proxima reactor busy-interval turn failed");
+                }
+                continue;
+            }
+        }
         if polled > 0 && !reactor_pending_after_tick {
             continue;
         }
@@ -1013,7 +1129,7 @@ fn worker_main(
                     with_current_reactor(|reactor| reactor.disarm_wakeup());
                     break;
                 }
-                let recheck_polled = executor.tick();
+                let recheck_polled = executor.tick_budget(EVENT_INTERVAL as usize);
                 let recheck_fired = timer.borrow_mut().advance(clock.now());
                 #[cfg(feature = "runtime-prime-reactor-trace")]
                 if reactor_pending_after_tick {
@@ -2243,5 +2359,81 @@ mod tests {
             "36 simulated seconds must resolve in well under 500ms of wall clock \
              (got {elapsed:?}) — auto-advance must jump the clock, not wait it out",
         );
+    }
+
+    #[test]
+    fn run_on_this_thread_returns_root_output() {
+        let output = run_on_this_thread(CoreId(0), async { 42_u32 }).expect("root completes");
+
+        assert_eq!(output, 42);
+    }
+
+    #[test]
+    fn root_awaiting_timer_completes_on_calling_thread() {
+        let caller = thread::current().id();
+
+        let (inside, waited) = run_on_this_thread(CoreId(0), async {
+            let started = current_tick();
+            timer_at(started + 5).await;
+            (thread::current().id(), current_tick() - started)
+        })
+        .expect("root completes");
+
+        assert_eq!(inside, caller);
+        assert!(
+            waited >= 5,
+            "timer fired after {waited} ticks, wanted at least 5"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn self_waking_root_still_lets_socket_event_through() {
+        use super::super::readiness::{Readiness, ReadyState};
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        const FLOOD_ITERATIONS: u32 = 10_000;
+        const WRITE_AT: u32 = 10;
+        let (mut writer, reader) = UnixStream::pair().expect("socketpair");
+        reader.set_nonblocking(true).expect("nonblocking reader");
+
+        let opened_at = run_on_this_thread(CoreId(0), async move {
+            let mut gate = Readiness::new(reader.as_raw_fd());
+            let mut parked_before = false;
+            for iteration in 0..FLOOD_ITERATIONS {
+                if iteration == WRITE_AT {
+                    writer.write_all(b"x").expect("write one byte to the peer");
+                }
+                let mut yielded = false;
+                let state = std::future::poll_fn(|context| {
+                    if yielded {
+                        return Poll::Ready(());
+                    }
+                    yielded = true;
+                    context.waker().wake_by_ref();
+                    Poll::Pending
+                });
+                state.await;
+                let outcome = std::future::poll_fn(|context| {
+                    Poll::Ready(gate.poll(context).expect("gate poll on a live socketpair"))
+                })
+                .await;
+                match outcome {
+                    ReadyState::Retry if parked_before => return Some(iteration),
+                    ReadyState::Parked => parked_before = true,
+                    ReadyState::Retry | ReadyState::OffWorker => {}
+                }
+            }
+            None
+        })
+        .expect("root completes");
+
+        let opened = opened_at.expect("gate opened before the flood ended");
+        let bound = WRITE_AT + EVENT_INTERVAL + 2;
+        eprintln!("gate opened at iteration {opened}, bound {bound}, flood {FLOOD_ITERATIONS}");
+        assert!(opened < FLOOD_ITERATIONS);
+        assert!(opened <= bound, "gate opened at {opened}, bound {bound}");
     }
 }
