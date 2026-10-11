@@ -1286,7 +1286,10 @@ pub(crate) fn route_compaction_key(
     ))
 }
 
-#[cfg(not(feature = "metal-grouped-gemm"))]
+#[cfg(all(
+    not(feature = "metal-grouped-gemm"),
+    any(test, feature = "metal-core")
+))]
 pub(crate) fn route_compaction_key(
     _resolved: &BoundOp,
     _packed_operands: &PackedOperands,
