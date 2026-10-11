@@ -31,6 +31,8 @@ fn packed_pilot_step_matches_scalar_reference() {
             WeightFormat::Bf4E2M1 => "bf4_e2m1",
             WeightFormat::Fp32 => "fp32",
         };
+        let mut clock =
+            pilot::phases::PhaseClock::install(None).expect("phase clock without a log installs");
         let mut lcg = Lcg(17);
         let masters: Vec<f32> = (0..32).map(|_| lcg.next_unit() * 0.5).collect();
         let packed_bytes = match format {
@@ -47,8 +49,10 @@ fn packed_pilot_step_matches_scalar_reference() {
         let mut scalar_losses = Vec::with_capacity(8);
         for (token_id, target_id) in pilot::TRAIN_INPUTS.into_iter().zip(pilot::TRAIN_TARGETS) {
             let (logits, loss, gradient) = match format {
-                WeightFormat::Fp32 => pilot::evaluate_token(&model, &masters, token_id, target_id)
-                    .expect("FP32 control token evaluates"),
+                WeightFormat::Fp32 => {
+                    pilot::evaluate_token(&model, &masters, token_id, target_id, &mut clock)
+                        .expect("FP32 control token evaluates")
+                }
                 _ => pilot::evaluate_packed_token(
                     &model,
                     &packed_bytes,
@@ -56,6 +60,7 @@ fn packed_pilot_step_matches_scalar_reference() {
                     token_id,
                     target_id,
                     1,
+                    &mut clock,
                 )
                 .expect("packed BF token evaluates without a decoded expert table"),
             };
@@ -121,7 +126,7 @@ fn packed_pilot_step_matches_scalar_reference() {
         {
             let (logits, loss, _) = match format {
                 WeightFormat::Fp32 => {
-                    pilot::evaluate_token(&model, &updated_masters, token_id, target_id)
+                    pilot::evaluate_token(&model, &updated_masters, token_id, target_id, &mut clock)
                         .expect("FP32 held-out token evaluates")
                 }
                 _ => pilot::evaluate_packed_token(
@@ -131,6 +136,7 @@ fn packed_pilot_step_matches_scalar_reference() {
                     token_id,
                     target_id,
                     1,
+                    &mut clock,
                 )
                 .expect("held-out token consumes newly packed updated masters"),
             };
