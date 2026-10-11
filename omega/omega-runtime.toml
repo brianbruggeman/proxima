@@ -656,3 +656,13 @@ linear_thread_limit = 4294967295
 # changes which thread computes which element. Overridable per-build via
 # `OMEGA_GRID_MAX_THREADGROUPS_X`.
 max_threadgroups_x = 65535
+
+[onnx_door]
+# most pin sets the ONNX door keeps a lowering and a plan for. A pin set is the
+# map from a graph's symbolic dimension names to extents; each one retains its
+# own lowering and its own plan arena, so the cost of raising this is one
+# arena of the model's weights per pin set. A caller that buckets sequence
+# length into four widths needs four. When one more arrives the least recently
+# used pin set is dropped and counted. Overridable per-build via
+# `OMEGA_ONNX_DOOR_MAX_PIN_SETS`.
+max_pin_sets = 4
