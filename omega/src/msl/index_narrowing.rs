@@ -44,7 +44,7 @@ pub(super) fn index_family(resolved: &BoundOp, quantized: &[Option<Codec>]) -> O
     }
 }
 
-fn expert_divide_is_rendered(resolved: &BoundOp, output_axes: &[u16], block: &PackedRowBlock) -> bool {
+pub(super) fn expert_divide_is_rendered(resolved: &BoundOp, output_axes: &[u16], block: &PackedRowBlock) -> bool {
     let rows = codec_rows_per_simdgroup(block.codec) as u64;
     packed_row_block_token_total(block, &resolved.extents) <= 1
         && packed_row_direct_output_axis(resolved, output_axes).is_none()
@@ -76,7 +76,7 @@ fn gathered_reach(layout: &Layout, lookup: Option<&Lookup>, extents: &[u64]) -> 
     direct.checked_add(fetched)?.checked_add(index_reach)
 }
 
-fn body_reach_fits(resolved: &BoundOp) -> bool {
+pub(super) fn body_reach_fits(resolved: &BoundOp) -> bool {
     let Some(iteration_space) = resolved.extents.iter().try_fold(1u64, |total, extent| total.checked_mul(*extent)) else {
         return false;
     };
@@ -97,7 +97,7 @@ fn body_reach_fits(resolved: &BoundOp) -> bool {
         && reaches.iter().all(|reach| reach.is_some_and(|value| value <= INDEX32_REACH_LIMIT))
 }
 
-fn output_total_fits_u32(resolved: &BoundOp) -> bool {
+pub(super) fn output_total_fits_u32(resolved: &BoundOp) -> bool {
     let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
         return false;
     };
