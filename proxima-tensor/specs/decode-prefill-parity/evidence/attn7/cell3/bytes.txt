@@ -1,0 +1,35 @@
+shape granite_f32: kv_heads=8 groups=2 head_dim=64 live_keys=1023 splits=32 chunks=4 element_bytes=4
+  threadgroups=512 threads_per_threadgroup=128 keys_per_threadgroup=31.97 keys_per_simdgroup=7.99 bytes_per_threadgroup_requested=16888
+  key+value unique MB=4.1902 requested-by-every-query-head MB=8.3804 query MB=0.0041
+  partial scratch written MB=0.1352 (values 0.1311, stats 0.0041) re-read by merge MB=0.1352 merge output MB=0.0041
+  partial moves MB=4.3295 -> 86.4 GB/s unique-bytes basis at 50.12 us; key+value unique alone 83.6 GB/s
+  merge moves MB=0.1393 -> 22.0 GB/s at 6.33 us
+  pair moves MB=4.4687; the split's own partials (written then re-read) are 0.2703 MB = 6.0 % of the pair's bytes; pair 56.46 us
+shape granite_bf16: kv_heads=8 groups=2 head_dim=64 live_keys=1023 splits=32 chunks=4 element_bytes=2
+  threadgroups=512 threads_per_threadgroup=128 keys_per_threadgroup=31.97 keys_per_simdgroup=7.99 bytes_per_threadgroup_requested=8704
+  key+value unique MB=2.0951 requested-by-every-query-head MB=4.1902 query MB=0.0041
+  partial scratch written MB=0.1352 (values 0.1311, stats 0.0041) re-read by merge MB=0.1352 merge output MB=0.0041
+  partial moves MB=2.2344 -> 22.6 GB/s unique-bytes basis at 99.00 us; key+value unique alone 21.2 GB/s
+  merge moves MB=0.1393 -> 22.0 GB/s at 6.33 us
+  pair moves MB=2.3736; the split's own partials (written then re-read) are 0.2703 MB = 11.4 % of the pair's bytes; pair 105.33 us
+shape granite_i32_all: kv_heads=8 groups=2 head_dim=64 live_keys=1023 splits=32 chunks=4 element_bytes=4
+  threadgroups=512 threads_per_threadgroup=128 keys_per_threadgroup=31.97 keys_per_simdgroup=7.99 bytes_per_threadgroup_requested=16888
+  key+value unique MB=4.1902 requested-by-every-query-head MB=8.3804 query MB=0.0041
+  partial scratch written MB=0.1352 (values 0.1311, stats 0.0041) re-read by merge MB=0.1352 merge output MB=0.0041
+  partial moves MB=4.3295 -> 127.3 GB/s unique-bytes basis at 34.00 us; key+value unique alone 123.2 GB/s
+  merge moves MB=0.1393 -> 21.6 GB/s at 6.46 us
+  pair moves MB=4.4687; the split's own partials (written then re-read) are 0.2703 MB = 6.0 % of the pair's bytes; pair 40.46 us
+shape e2b_sliding_f32: kv_heads=1 groups=8 head_dim=256 live_keys=512 splits=17 chunks=4 element_bytes=4
+  threadgroups=136 threads_per_threadgroup=128 keys_per_threadgroup=30.12 keys_per_simdgroup=7.53 bytes_per_threadgroup_requested=63737
+  key+value unique MB=1.0486 requested-by-every-query-head MB=8.3886 query MB=0.0082
+  partial scratch written MB=0.1404 (values 0.1393, stats 0.0011) re-read by merge MB=0.1404 merge output MB=0.0082
+  partial moves MB=1.1971 -> 50.9 GB/s unique-bytes basis at 23.50 us; key+value unique alone 44.6 GB/s
+  merge moves MB=0.1485 -> 20.0 GB/s at 7.42 us
+  pair moves MB=1.3457; the split's own partials (written then re-read) are 0.2807 MB = 20.9 % of the pair's bytes; pair 30.92 us
+shape e2b_global_f32: kv_heads=1 groups=8 head_dim=512 live_keys=972 splits=32 chunks=4 element_bytes=4
+  threadgroups=256 threads_per_threadgroup=128 keys_per_threadgroup=30.38 keys_per_simdgroup=7.59 bytes_per_threadgroup_requested=128520
+  key+value unique MB=3.9813 requested-by-every-query-head MB=31.8505 query MB=0.0164
+  partial scratch written MB=0.5263 (values 0.5243, stats 0.0020) re-read by merge MB=0.5263 merge output MB=0.0164
+  partial moves MB=4.5240 -> 75.4 GB/s unique-bytes basis at 60.00 us; key+value unique alone 66.4 GB/s
+  merge moves MB=0.5427 -> 73.3 GB/s at 7.40 us
+  pair moves MB=5.0668; the split's own partials (written then re-read) are 1.0527 MB = 20.8 % of the pair's bytes; pair 67.40 us

@@ -1,0 +1,8 @@
+gate_result=0
+"Device Utilization %"=93
+"Device Utilization %"=0
+"Device Utilization %"=0
+23:10  up 10 days,  9:15, 4 users, load averages: 7.13 8.53 8.78
+ 70.5 user-daemon
+ 35.2 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+ 26.1 /sbin/launchd

@@ -1,0 +1,10 @@
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+91716 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791686958282-9njppl.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'cd /tmp/cargo_target_cargoval_hang/crate && S=/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/8982ea1a-8aa3-4a7f-a8ba-1241ecf1803a/scratchpad/loop.zsh; B=/tmp/cargo_target_cargoval_hang/target/debug/deps/cargo_val-2c571b90bf905325; time $S $B 1500 3 mod cargo_source:: --test-threads=1 > /tmp/cargo_target_cargoval_hang/logs/loop_mod.log 2>&1; echo EXIT=$?; cat /tmp/cargo_target_cargoval_hang/logs/loop_mod.log' < /dev/null && pwd -P >| /tmp/claude-4a00-cwd
+91718 /bin/zsh /private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/8982ea1a-8aa3-4a7f-a8ba-1241ecf1803a/scratchpad/loop.zsh /tmp/cargo_target_cargoval_hang/target/debug/deps/cargo_val-2c571b90bf905325 1500 3 mod cargo_source:: --test-threads=1
+"Device Utilization %"=93
+"Device Utilization %"=0
+"Device Utilization %"=0
+22:38  up 10 days,  8:42, 4 users, load averages: 5.82 8.04 10.92
+ 77.0 user-daemon
+ 33.4 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  8.1 /Applications/iTerm.app/Contents/MacOS/iTerm2

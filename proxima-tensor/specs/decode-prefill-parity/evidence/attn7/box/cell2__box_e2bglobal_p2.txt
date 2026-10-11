@@ -1,0 +1,8 @@
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+"Device Utilization %"=58
+"Device Utilization %"=0
+"Device Utilization %"=0
+22:03  up 10 days,  8:08, 4 users, load averages: 4.67 5.77 5.56
+ 60.6 user-daemon
+ 41.1 /System/Library/CoreServices/SystemUIServer.app/Contents/MacOS/SystemUIServer
+ 37.4 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectService.xpc/Contents/MacOS/XprotectService

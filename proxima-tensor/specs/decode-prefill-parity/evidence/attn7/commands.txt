@@ -1,0 +1,12 @@
+variants (tools/make_attn_variants.rs, rustc -O --edition 2024):
+  make_attn_variants ablate|ablate32 <partial.metal> <merge.metal> <dir> <capacity> <head_dim> <splits> <chunks>
+  make_attn_variants sweep|kv|int32  <same arguments>
+  granite partial 2ff6fe0d86be46db merge 2aafa67c215ef2d9: 1024 64 32 4
+  E2B sliding partial a335ade581d15b38 merge b5d6d35f862d0f5e: 513 256 17 4
+  E2B global  partial 7134997e734eef34 merge 969743cd64a10259: 1024 512 32 4
+a/b runs (release, cargo build --release -p proxima-model-interop --features std,metal,instrument --example norm_variant_ab):
+  PROXIMA_GEMMA4_E2B_GGUF=<blob> PROXIMA_PROMPT_FILE=prompt1k.txt AB_STEP=23 AB_ROUNDS=21 AB_SHA=<partial sha8> [AB_PAIR_SHA=<merge sha8> AB_ATTENTION_REFERENCE=1] AB_VARIANT_DIR=<dir> norm_variant_ab
+  tables: tools/ab_summary.rs  (ab_summary <group|pair> <field> <p1.out> <p2.out> <p3.out>)
+  bytes:  tools/decode_bytes.rs
+bench (release, --features std,metal): decode_arms --prompt-file <p> --processes 3 --runs 5 --case gemma4_e2b=<blob> --case granite_moe=<blob> --arm base=<bin> --arm tip=<bin> --arm control=<tip bin>
+  base = origin/main 32f21d65 export plus the one-line cfg gate on simdgroup_count (without it the omega lib does not compile under -D warnings)

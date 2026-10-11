@@ -1,0 +1,9 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/omega)
+    Finished `gate` profile [optimized] target(s) in 9.36s
+     Running unittests src/lib.rs (/private/tmp/cargo_target_attn7/gate/deps/omega-d17b867cd4c9e009)
+
+running 1 test
+test msl::attn_golden_tests::record_main_goldens ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 486 filtered out; finished in 0.01s
+

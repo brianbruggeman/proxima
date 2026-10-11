@@ -1,0 +1,8 @@
+gate_result=0
+"Device Utilization %"=96
+"Device Utilization %"=0
+"Device Utilization %"=0
+23:10  up 10 days,  9:15, 4 users, load averages: 7.49 8.62 8.81
+ 78.7 user-daemon
+ 39.7 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+ 10.8 /Applications/iTerm.app/Contents/MacOS/iTerm2

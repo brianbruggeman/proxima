@@ -1,0 +1,50 @@
+    Blocking waiting for file lock on package cache
+   Compiling typenum v1.20.1
+   Compiling proxima-core v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-core)
+   Compiling proxima-primitives v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-primitives)
+   Compiling proxima-telemetry v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-telemetry)
+   Compiling prime v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/prime)
+   Compiling proxima-protocols v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-protocols)
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-tensor)
+   Compiling proxima-listen v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-listen)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/omega)
+   Compiling proxima-process v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-process)
+   Compiling proxima-runtime v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-runtime)
+   Compiling proxima-config v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-config)
+   Compiling proxima-codec v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-codec)
+   Compiling proxima-http v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-http)
+   Compiling proxima-patterns v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-patterns)
+   Compiling generic-array v0.14.7
+   Compiling proxima-clock v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-clock)
+   Compiling proxima-gguf v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-gguf)
+   Compiling proxima-tls v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-tls)
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling inout v0.1.4
+   Compiling universal-hash v0.5.1
+   Compiling aead v0.5.2
+   Compiling digest v0.10.7
+   Compiling cipher v0.4.4
+   Compiling proxima-tokenizer v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-tokenizer)
+   Compiling polyval v0.6.2
+   Compiling poly1305 v0.8.0
+   Compiling sha2 v0.10.9
+   Compiling hmac v0.12.1
+   Compiling sha1 v0.10.7
+   Compiling chacha20 v0.9.1
+   Compiling ghash v0.5.1
+   Compiling aes v0.8.4
+   Compiling ctr v0.9.2
+   Compiling hkdf v0.12.4
+   Compiling chacha20poly1305 v0.10.1
+   Compiling md-5 v0.10.6
+   Compiling proxima-auth v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-auth)
+   Compiling aes-gcm v0.10.3
+   Compiling proxima-test v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-test)
+   Compiling proxima-net v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-net)
+   Compiling proxima-recording v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-recording)
+   Compiling proxima-quic v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-quic)
+   Compiling proxima v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree)
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-safetensors)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn7/tree/proxima-model-interop)
+    Finished `release` profile [optimized] target(s) in 1m 31s
