@@ -17,7 +17,7 @@ use core::future::{Future, ready};
 use core::marker::PhantomData;
 
 use proxima_primitives::pipe::Pipe;
-use proxima_tensor::{DType, NodeId, Op, Shapes};
+use proxima_tensor::{DType, NodeId, Op, Shapes, TensorError};
 
 use crate::census::NoMilForm;
 use crate::sized;
@@ -110,6 +110,18 @@ pub enum MilError {
     /// A program with no node to be its output.
     #[error("the program has no nodes")]
     EmptyProgram,
+    /// Shape inference refused the program.
+    #[error("shape inference failed: {0}")]
+    Shape(#[from] TensorError),
+    /// A lowered program that declares no output.
+    #[error("the program declares no output")]
+    NoOutput,
+    /// The declared output is not the last node, which is where the writer reads it.
+    #[error("output node {node} is not the final node of the program")]
+    OutputNotFinal { node: NodeId },
+    /// A package file the compiler reads is empty.
+    #[error("package file {path} is empty")]
+    EmptyPackageFile { path: &'static str },
 }
 
 /// One weight tensor as the source holds it, e.g. an ONNX initializer.

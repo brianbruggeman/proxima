@@ -20,14 +20,14 @@ fn float_bytes(values: &[f32]) -> Vec<u8> {
         .collect()
 }
 
-fn fixed(extent: i64) -> Dimension<'static> {
+pub fn fixed(extent: i64) -> Dimension<'static> {
     Dimension {
         value: Some(DimensionValue::Value(extent)),
         denotation: "",
     }
 }
 
-fn float_input(name: &'static str, dims: Vec<Dimension<'static>>) -> ValueInfoProto<'static> {
+pub fn float_input(name: &'static str, dims: Vec<Dimension<'static>>) -> ValueInfoProto<'static> {
     let tensor = TypeProtoTensor {
         elem_type: 1,
         shape: Some(TensorShapeProto { dim: dims }),
@@ -42,7 +42,7 @@ fn float_input(name: &'static str, dims: Vec<Dimension<'static>>) -> ValueInfoPr
     }
 }
 
-fn weights<'a>(name: &'a str, dims: &[i64], raw: &'a [u8]) -> TensorProto<'a> {
+pub fn weights<'a>(name: &'a str, dims: &[i64], raw: &'a [u8]) -> TensorProto<'a> {
     TensorProto {
         dims: dims.to_vec(),
         data_type: 1,
@@ -52,7 +52,7 @@ fn weights<'a>(name: &'a str, dims: &[i64], raw: &'a [u8]) -> TensorProto<'a> {
     }
 }
 
-fn node<'a>(op_type: &'a str, inputs: &[&'a str], output: &'a str) -> NodeProto<'a> {
+pub fn node<'a>(op_type: &'a str, inputs: &[&'a str], output: &'a str) -> NodeProto<'a> {
     NodeProto {
         input: inputs.to_vec(),
         output: vec![output],
