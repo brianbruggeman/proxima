@@ -187,3 +187,5 @@ pub use serving_settings::AttentionTileHeightSetting;
 pub use source::{CheckpointMapping, CheckpointSourceError};
 pub use task::{ModelTask, TaskProfile, classify_task};
 pub use transform::{gguf_to_safetensors, safetensors_to_gguf};
+#[cfg(feature = "std")]
+pub use transform::{Layout, MlxNames, SANDWICH_NORM_LAYOUT, STANDARD_LAYOUT, dense_names};
