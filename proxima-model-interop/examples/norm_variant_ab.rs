@@ -41,6 +41,7 @@
 //! every kernel group is timed by omission instead: the step with the group's dispatches
 //! removed against the whole step, one `ab omit` line per group (its in-situ cost on a
 //! GPU kept busy, unlike an isolated single-dispatch command buffer).
+//! With `AB_STEP_ALL=<set>;<set>` (a set is comma-separated variant tags) one step arm per set replays the whole captured step with every group that has a variant of one of the set's tags replaced at once, against the unmodified step (one `ab stepall` line per arm).
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 #[cfg(feature = "metal-attn-variants")]
@@ -612,6 +613,60 @@ mod harness {
             .collect()
     }
 
+    struct GroupVariants {
+        members: Vec<usize>,
+        arms: Vec<Arm>,
+    }
+
+    fn run_step_all(
+        spec: &str,
+        dispatches: &[CapturedDispatch],
+        groups: &BTreeMap<GroupKey, Vec<usize>>,
+        variant_dir: &PathBuf,
+        rounds: usize,
+        scratch: &mut [u8],
+    ) {
+        let loaded: Vec<GroupVariants> = groups
+            .iter()
+            .filter_map(|(key, members)| {
+                let member_refs: Vec<&CapturedDispatch> = members.iter().map(|index| &dispatches[*index]).collect();
+                let base_width = key.width.unwrap_or(key.threads).max(1);
+                let arms = load_variants(variant_dir, &member_refs, base_width);
+                (!arms.is_empty()).then(|| GroupVariants { members: members.clone(), arms })
+            })
+            .collect();
+        assert!(!loaded.is_empty(), "N==0: no group carries a variant");
+        let sets: Vec<Vec<&str>> = spec.split(';').map(|set| set.split(',').collect()).collect();
+        let mut step_arms: Vec<(String, Vec<&CapturedDispatch>)> =
+            vec![("base".to_string(), dispatches.iter().collect())];
+        for set in &sets {
+            let mut step: Vec<&CapturedDispatch> = dispatches.iter().collect();
+            let mut swapped = 0usize;
+            for group in &loaded {
+                let chosen = group.arms.iter().find(|arm| set.contains(&arm_tag(&arm.label).as_str()));
+                if let Some(arm) = chosen {
+                    for (member, replacement) in group.members.iter().zip(&arm.dispatches) {
+                        step[*member] = replacement;
+                    }
+                    swapped += group.members.len();
+                }
+            }
+            println!("ab stepall set={} swapped_dispatches={swapped} of {}", set.join(","), dispatches.len());
+            step_arms.push((set.join("+"), step));
+        }
+        let results = measure_sequence_spread(&step_arms, rounds, scratch, false);
+        for (arm, (median_ns, spread)) in step_arms.iter().zip(results) {
+            println!(
+                "ab stepall arm={} step_ms={:.4} round_min_ms={:.4} round_max_ms={:.4} round_cov_pct={:.3} rounds={rounds}",
+                arm.0,
+                median_ns / 1e6,
+                spread.minimum / 1e6,
+                spread.maximum / 1e6,
+                spread.cov_percent
+            );
+        }
+    }
+
     fn step_with_group_replaced<'a>(
         dispatches: &'a [CapturedDispatch],
         members: &[usize],
@@ -987,6 +1042,11 @@ mod harness {
             dispatches.len(),
             groups.len()
         );
+        if let Ok(spec) = std::env::var("AB_STEP_ALL") {
+            run_step_all(&spec, &dispatches, &groups, &variant_dir, rounds, &mut scratch);
+            println!("ab {}", process_cell.end("process"));
+            return;
+        }
         let mut timed_groups = 0usize;
         for (
             GroupKey {
