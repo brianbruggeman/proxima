@@ -1125,6 +1125,13 @@ pub fn zero_placed_buffer_range(buffer: &PlacedBuffer, byte_offset: usize, byte_
     slots.fill(0);
 }
 
+/// Bytes the device allocated for `buffer`: the length a caller that pools placed buffers compares against the bytes it needs.
+#[cfg(feature = "metal-output-placement")]
+#[must_use]
+pub fn placed_buffer_len(buffer: &PlacedBuffer) -> usize {
+    buffer.length()
+}
+
 /// Row 555 diagnostic: the device pointer identity behind a [`PlacedBuffer`],
 /// so a caller can prove whether the buffer bound as `state_out` at step N is
 /// the SAME buffer bound as `state_in` at step N+1, rather than inferring it

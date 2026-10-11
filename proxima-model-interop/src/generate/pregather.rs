@@ -2461,11 +2461,11 @@ impl<'file> LoadedModel<'file> {
         self
     }
 
-    /// The placement hook of the device kv, `DeviceKv::adopt` in `device_kv.rs`: replaces where its buffers come from. Compose it with [`omega::allocate_placed_buffer_over`] to put the kv in memory you own; the default, [`omega::allocate_placed_buffer`], reproduces today's allocation.
+    /// The placement hook of the device kv, `DeviceKv::adopt` in `device_kv.rs`: replaces where its buffers come from. Compose it with [`omega::allocate_placed_buffer_over`] to put the kv in memory you own; the default, [`omega::allocate_placed_buffer`], reproduces today's allocation. A replaced source is asked for every buffer of every generation and its buffers are freed with the generation; only the default source feeds the resident store (`ServingConfig::resident_kv_bytes`).
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     #[must_use]
     pub fn with_kv_buffer_source(mut self, source: fn(usize) -> Result<omega::PlacedBuffer, omega::MetalError>) -> Self {
-        self.kv_buffer_source = source;
+        self.kv_buffer_source = Some(source);
         self
     }
 
@@ -2691,7 +2691,7 @@ impl<'file> LoadedModel<'file> {
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: Arc::new(()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-            kv_buffer_source: allocate_placed_buffer,
+            kv_buffer_source: None,
             prewarm_gate: PrewarmGate::new(),
             prewarm_queue: PrewarmQueue::new(),
             weights: bound.weights,
@@ -2816,7 +2816,7 @@ impl<'file> LoadedModel<'file> {
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: Arc::new(()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-            kv_buffer_source: allocate_placed_buffer,
+            kv_buffer_source: None,
             prewarm_gate: PrewarmGate::new(),
             prewarm_queue: PrewarmQueue::new(),
             weights,

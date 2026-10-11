@@ -283,6 +283,12 @@ fn main() {
         }),
         Err(_) => ServingConfig::default().resident_prefill_plan_bytes,
     };
+    let resident_kv_bytes: usize = match std::env::var("PROXIMA_RESIDENT_KV_BYTES") {
+        Ok(value) => value.parse().unwrap_or_else(|_| {
+            panic!("PROXIMA_RESIDENT_KV_BYTES={value}: expected a byte count")
+        }),
+        Err(_) => ServingConfig::default().resident_kv_bytes,
+    };
     let kv_cache_type = match std::env::var("PROXIMA_KV_CACHE_TYPE").as_deref() {
         Ok("f16") => GgmlType::F16,
         Ok("f32") | Err(_) => GgmlType::F32,
@@ -310,6 +316,7 @@ fn main() {
         reasoning_budget: 0,
         kv_bucket_tokens,
         resident_prefill_plan_bytes,
+        resident_kv_bytes,
         prompt_cache: PromptCacheConfig::off(),
         #[cfg(all(feature = "metal", target_os = "macos"))]
         dispatch_type,
@@ -532,8 +539,9 @@ fn main() {
             );
         }
         eprintln!(
-            "decode_gbps_baseline held_bytes run_index={run_index} prompt_cache_bytes={} resident_prefill_plan_budget_bytes={resident_prefill_plan_bytes} speculative_types={:?}",
+            "decode_gbps_baseline held_bytes run_index={run_index} prompt_cache_bytes={} resident_prefill_plan_budget_bytes={resident_prefill_plan_bytes} resident_kv_budget_bytes={resident_kv_bytes} gpu_allocated_between_runs_bytes={} speculative_types={:?}",
             model.prompt_cache_bytes(),
+            gpu_allocated_bytes(),
             speculative.speculative_types,
         );
         #[cfg(all(feature = "metal", target_os = "macos"))]

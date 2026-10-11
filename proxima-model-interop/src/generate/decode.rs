@@ -4119,6 +4119,10 @@ only the single-row decode kernel reads the half-width device cache",
                         device_kv_attempted = true;
                         #[cfg(feature = "instrument")]
                         let device_kv_adopt_started = read_ticks();
+                        #[cfg(feature = "instrument")]
+                        let mut buffers_bound = 0u64;
+                        #[cfg(feature = "instrument")]
+                        let mut buffers_allocated = 0u64;
                         device_kv = DeviceKv::adopt(
                             &mut layer_caches,
                             &layer_row_widths,
@@ -4126,13 +4130,29 @@ only the single-row decode kernel reads the half-width device cache",
                             positions_needed + device_kv_decode_rows,
                             serving_config.kv_bucket_tokens,
                             device_kv_step_rows,
-                            self.kv_buffer_source,
+                            |bytes| {
+                                let kept = self
+                                    .kv_buffer_source
+                                    .map_or_else(|| runtime.take_kv_buffer(bytes), |_| None);
+                                #[cfg(feature = "instrument")]
+                                if kept.is_some() {
+                                    buffers_bound += 1;
+                                } else {
+                                    buffers_allocated += 1;
+                                }
+                                kept.map_or_else(
+                                    || self.kv_buffer_source.unwrap_or(allocate_placed_buffer)(bytes),
+                                    Ok,
+                                )
+                            },
                             serving_config.kv_cache_key_quant.into(),
                         )?;
                         #[cfg(feature = "instrument")]
                         debug!(
                             step = step as u64,
                             phase = "device_kv_adopt",
+                            buffers_bound,
+                            buffers_allocated,
                             ms = ticks_to_nanos(elapsed_ticks(device_kv_adopt_started)) as f64 / 1e6,
                             "named_blocks_phase"
                         );
@@ -6567,6 +6587,10 @@ did not hold every cached position)",
                 seal_horizon_rows,
                 summarizer,
             );
+        }
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        if let Some(device) = device_kv.take().filter(|_| self.kv_buffer_source.is_none()) {
+            runtime.keep_kv_buffers(device.into_buffers());
         }
 
         #[cfg(feature = "moe-expert-prefetch")]

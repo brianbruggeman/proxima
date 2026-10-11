@@ -192,6 +192,8 @@ impl CacheKey {
             max_command_buffers_per_token: _,
             // device memory held for plans between calls: never changes rows
             resident_prefill_plan_bytes: _,
+            // device KV buffers kept bound between calls: where the rows live, never what they hold
+            resident_kv_bytes: _,
             overlap_transfer_compute: _,
             warm_model_buffers_at_load: _,
             // request ordering and residency scheduling levels

@@ -35,6 +35,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use omega::PlacedBuffer;
 use omega::metal::{DispatchType, MathMode, Plan};
 use proxima_gguf::GgmlType;
 use proxima_tensor::NumericPolicy;
@@ -50,18 +51,21 @@ pub(super) type DecodePlanKey = (usize, usize, Vec<NodeId>, bool);
 pub(super) type DecodePlans = BTreeMap<DecodePlanKey, Plan>;
 
 /// Everything one model keeps resident on one thread: the decode plans, the
-/// wide plans, and the order the wide plans were last used in (least recent
-/// first). A key in `wide_order` that is not in `wide` is stale and ignored.
+/// wide plans, the order the wide plans were last used in (least recent
+/// first), and the device KV buffers a finished generation handed back
+/// (`ServingConfig::resident_kv_bytes`). A key in `wide_order` that is not in
+/// `wide` is stale and ignored.
 #[derive(Default)]
 pub(super) struct ResidentPlans {
     pub(super) decode: DecodePlans,
     pub(super) wide: DecodePlans,
     pub(super) wide_order: Vec<DecodePlanKey>,
+    pub(super) kv_buffers: Vec<PlacedBuffer>,
 }
 
 impl ResidentPlans {
     fn is_empty(&self) -> bool {
-        self.decode.is_empty() && self.wide.is_empty()
+        self.decode.is_empty() && self.wide.is_empty() && self.kv_buffers.is_empty()
     }
 }
 
@@ -179,6 +183,8 @@ impl PlanIdentity {
             max_command_buffers_per_token: _,
             // device memory held for wide plans between calls: trims, never changes a plan
             resident_prefill_plan_bytes: _,
+            // device KV buffers kept bound between calls: where the rows live, never a plan
+            resident_kv_bytes: _,
             overlap_transfer_compute: _,
             warm_model_buffers_at_load: _,
             admission_schedule: _,
@@ -263,6 +269,8 @@ pub(super) fn put(owner: &Arc<()>, identity: PlanIdentity, plans: ResidentPlans)
         wide_plans = plans.wide.len() as u64,
         decode_bytes = plans.decode.values().map(plan_bytes).sum::<usize>() as u64,
         wide_bytes = plans.wide.values().map(plan_bytes).sum::<usize>() as u64,
+        kv_buffers = plans.kv_buffers.len() as u64,
+        kv_bytes = kv_bytes(&plans.kv_buffers) as u64,
         "resident_plans_held"
     );
     RESIDENT.with(|cell| {
@@ -281,6 +289,37 @@ pub(super) fn put(owner: &Arc<()>, identity: PlanIdentity, plans: ResidentPlans)
 /// slots stay allocated for the plan's life, which is what residency costs.
 pub(super) fn plan_bytes(plan: &Plan) -> usize {
     plan.arena_allocated_bytes().unwrap_or_default()
+}
+
+/// Device bytes the kept KV `buffers` hold.
+pub(super) fn kv_bytes(buffers: &[PlacedBuffer]) -> usize {
+    buffers.iter().map(omega::placed_buffer_len).sum()
+}
+
+/// Removes and returns the smallest kept buffer that holds `bytes`, or `None`
+/// when no kept buffer does. A kept buffer larger than `bytes` serves a
+/// shorter context; the rows past `bytes` are never bound.
+pub(super) fn take_kv_buffer(buffers: &mut Vec<PlacedBuffer>, bytes: usize) -> Option<PlacedBuffer> {
+    let index = buffers
+        .iter()
+        .enumerate()
+        .filter(|(_, buffer)| omega::placed_buffer_len(buffer) >= bytes)
+        .min_by_key(|(_, buffer)| omega::placed_buffer_len(buffer))
+        .map(|(index, _)| index)?;
+    Some(buffers.remove(index))
+}
+
+/// Adds `returned` to the kept buffers and frees the oldest until what is
+/// kept holds at most `budget` bytes. A budget of `0` frees them all.
+pub(super) fn keep_kv_buffers(kept: &mut Vec<PlacedBuffer>, returned: Vec<PlacedBuffer>, budget: usize) {
+    kept.extend(returned);
+    let mut held = kv_bytes(kept);
+    let mut freed = 0;
+    while held > budget && freed < kept.len() {
+        held -= omega::placed_buffer_len(&kept[freed]);
+        freed += 1;
+    }
+    kept.drain(..freed);
 }
 
 /// Marks `key` as the most recently used wide plan.
@@ -522,6 +561,57 @@ mod tests {
 
         assert_eq!(evicted.len(), 2);
         assert!(plans.is_empty());
+    }
+
+    const PAGE: usize = 16384;
+
+    fn placed(pages: usize) -> Result<PlacedBuffer, omega::MetalError> {
+        omega::allocate_placed_buffer(pages * PAGE)
+    }
+
+    fn pages_of(buffers: &[PlacedBuffer]) -> Vec<usize> {
+        buffers.iter().map(|buffer| omega::placed_buffer_len(buffer) / PAGE).collect()
+    }
+
+    #[test]
+    fn a_request_binds_the_smallest_kept_buffer_that_holds_it() -> Result<(), omega::MetalError> {
+        let mut kept = vec![placed(8)?, placed(2)?, placed(4)?];
+
+        let taken = take_kv_buffer(&mut kept, 3 * PAGE);
+
+        assert_eq!(taken.map(|buffer| omega::placed_buffer_len(&buffer) / PAGE), Some(4), "the 4 page buffer is the smallest that holds 3 pages");
+        assert_eq!(pages_of(&kept), vec![8, 2], "the others stay kept in their order");
+        Ok(())
+    }
+
+    #[test]
+    fn a_request_larger_than_every_kept_buffer_binds_nothing() -> Result<(), omega::MetalError> {
+        let mut kept = vec![placed(2)?, placed(4)?];
+
+        assert!(take_kv_buffer(&mut kept, 5 * PAGE).is_none());
+        assert_eq!(pages_of(&kept), vec![2, 4], "a miss leaves the kept buffers alone");
+        Ok(())
+    }
+
+    #[test]
+    fn buffers_handed_back_past_the_budget_free_the_oldest_first() -> Result<(), omega::MetalError> {
+        let mut kept = vec![placed(4)?, placed(4)?];
+
+        keep_kv_buffers(&mut kept, vec![placed(2)?, placed(2)?], 9 * PAGE);
+
+        assert_eq!(pages_of(&kept), vec![4, 2, 2], "12 pages held, the oldest 4 page buffer leaves to reach 8");
+        assert!(kv_bytes(&kept) <= 9 * PAGE);
+        Ok(())
+    }
+
+    #[test]
+    fn a_zero_budget_keeps_nothing_between_generations() -> Result<(), omega::MetalError> {
+        let mut kept = Vec::new();
+
+        keep_kv_buffers(&mut kept, vec![placed(4)?, placed(2)?], 0);
+
+        assert!(kept.is_empty());
+        Ok(())
     }
 
     #[test]
