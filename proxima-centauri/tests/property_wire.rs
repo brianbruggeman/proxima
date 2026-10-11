@@ -15,8 +15,11 @@
 
 use proptest::prelude::*;
 use proxima_centauri::cookie::{CookieSecret, Verdict, examine};
+#[cfg(any(feature = "aead-chacha20poly1305", feature = "aead-aes-gcm"))]
 use proxima_centauri::esp::{HEADER_LEN, OVERHEAD};
-use proxima_centauri::{ChildSa, Entropy32, EspSpi, Handshake, IkeSpi, Progress, Role};
+#[cfg(any(feature = "aead-chacha20poly1305", feature = "aead-aes-gcm"))]
+use proxima_centauri::{ChildSa, EspSpi, Role};
+use proxima_centauri::{Entropy32, Handshake, IkeSpi, Progress};
 use proxima_clock::ticks::Ticks;
 
 const PSK: [u8; 32] = [0xAB; 32];
@@ -25,6 +28,7 @@ fn now() -> Ticks {
     Ticks::from_raw(1_000)
 }
 
+#[cfg(any(feature = "aead-chacha20poly1305", feature = "aead-aes-gcm"))]
 fn agreed_pair() -> (ChildSa, ChildSa) {
     let mut initiator = Handshake::initiator(PSK, IkeSpi::new(1));
     let mut responder = Handshake::responder(PSK, IkeSpi::new(2));
@@ -78,6 +82,7 @@ proptest! {
     }
 
     /// The AEAD opener must survive anything, and open nothing it did not seal.
+    #[cfg(any(feature = "aead-chacha20poly1305", feature = "aead-aes-gcm"))]
     #[test]
     fn arbitrary_bytes_never_open_a_packet(bytes in prop::collection::vec(any::<u8>(), 0..2048)) {
         let (_, mut receiver) = agreed_pair();
@@ -91,6 +96,7 @@ proptest! {
     /// Any single-byte corruption of a real packet is caught, at any offset
     /// and with any replacement value — the randomised complement to the
     /// exhaustive bit-flip sweep in the unit tests.
+    #[cfg(any(feature = "aead-chacha20poly1305", feature = "aead-aes-gcm"))]
     #[test]
     fn any_corruption_of_a_real_packet_is_caught(
         offset in 0usize..(64 + OVERHEAD),
