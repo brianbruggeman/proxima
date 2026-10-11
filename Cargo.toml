@@ -499,6 +499,7 @@ omega = { path = "omega", features = ["metal", "instrument"] }
 # mirrors bind.rs's own real_openchat_file test rather than adding an
 # accessor to the in-flight generate.rs surface.
 proxima-tokenizer = { path = "proxima-tokenizer", default-features = false, features = ["gguf"] }
+libtest-mimic = "0.8.2"
 
 [lints]
 workspace = true
@@ -2130,6 +2131,15 @@ required-features = ["test-prime", "otlp-grpc", "http-prime", "runtime-prime-exe
 # tracing-init-specific ones are individually #[cfg]-gated inside the file.
 [[test]]
 name = "console_logging_regression"
+
+# config-only `type = "vm"` upstream booting a real guest under KVM or
+# Hypervisor.framework. owns `fn main()` and re-executes itself as the signed
+# hypervisor child, so `harness = false`; libtest-mimic keeps nextest
+# discovery working.
+[[test]]
+name = "vm_registry"
+harness = false
+required-features = ["vm"]
 
 # proxima::sync vs tokio::sync — primitive-level shootout (Phase E.0/E.2/E.5)
 # and home-turf retrofits (Phase E.HT). All require the sync-wrappers feature

@@ -4,13 +4,13 @@
 //! that boots a real guest ELF under a real hypervisor and returns the
 //! bytes it emitted (`tools/proxima-vm/ROADMAP.md`'s M2 exit criterion 1).
 //!
-//! `proxima` (the crate that owns the `vm` upstream factory,
-//! `src/upstreams/vm.rs`) can only be a **dev**-dependency of `proxima-vm`:
-//! `proxima` optionally depends on `proxima-vm` under its own `vm` feature,
-//! so a real (non-dev) dependency in the other direction would cycle. That
-//! rules out a `[[bin]]` target the way `tests/dispatch_hypercall.rs` uses
-//! `dispatch_probe` — a `[[bin]]` only sees `[dependencies]`. So this file
-//! owns `fn main()` (`harness = false` in `Cargo.toml`) and re-executes
+//! `proxima` owns the `vm` upstream factory (`src/upstreams/vm.rs`, behind
+//! the `vm` feature that links `proxima-vm`), so this test lives in
+//! `proxima`'s own `tests/`, gated by `required-features = ["vm"]`;
+//! `proxima-vm` never depends on `proxima` with that feature, which keeps
+//! its own test binaries from linking `proxima-vm` a second time. A
+//! `[[bin]]` target cannot carry the signed child either, so this file
+//! owns `fn main()` (`harness = false` in the root `Cargo.toml`) and re-executes
 //! ITSELF as the signed hypervisor-entitled child, dispatching on argv:
 //! `--vm-registry-probe-child <config-path> <pipe-name>` runs the App/
 //! registry/dispatch path and prints the guest's emitted bytes to stdout;
@@ -21,7 +21,7 @@
 //! Hypervisor.framework answers `hv_vm_create` with `HV_DENIED` for a
 //! process lacking the `com.apple.security.hypervisor` entitlement, and
 //! applying it is a post-link `codesign` step — same constraint
-//! `tests/boot.rs`'s module doc explains for `SignedGuest`.
+//! `tools/proxima-vm/tests/boot.rs`'s module doc explains for `SignedGuest`.
 //!
 //! `harness = false` hands this file `fn main()` outright, which would
 //! normally make nextest unable to enumerate/run it (it drives the binary
@@ -30,7 +30,7 @@
 //! working while `main` still owns the child-dispatch branch below it.
 
 // the workspace lint set denies expect_used everywhere; test files opt out
-// the same way `tests/boot.rs`/`tests/dispatch_hypercall.rs` do.
+// the same way `tools/proxima-vm/tests/boot.rs`/`tools/proxima-vm/tests/dispatch_hypercall.rs` do.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::env;
@@ -43,10 +43,23 @@ use std::time::{Duration, Instant};
 use libtest_mimic::{Arguments, Trial};
 use tempfile::TempDir;
 
-const ENTITLEMENTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/entitlements.plist");
-const GUEST_MANIFEST_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/guests/lambda");
+const ENTITLEMENTS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tools/proxima-vm/entitlements.plist"
+);
+const GUEST_MANIFEST_DIR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tools/proxima-vm/guests/lambda"
+);
 const HYPERVISOR_LANE: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 const KVM_LANE: bool = cfg!(all(target_os = "linux", target_arch = "x86_64"));
+
+/// the guest ISA must match the hypervisor lane: x86_64 under KVM, aarch64 under HVF
+const GUEST_TARGET: &str = if KVM_LANE {
+    "x86_64-unknown-none"
+} else {
+    "aarch64-unknown-none"
+};
 const CHILD_FLAG: &str = "--vm-registry-probe-child";
 
 fn main() {
@@ -114,7 +127,7 @@ fn run_child(config_path: &str, pipe_name: &str) -> Result<(), Box<dyn Error>> {
 
 /// Builds `proxima-vm-guest-lambda` for `aarch64-unknown-none` into a
 /// per-case tempdir's own `CARGO_TARGET_DIR` — same discipline
-/// `tests/dispatch_hypercall.rs`'s `build_guest_elf` uses, copied rather
+/// `tools/proxima-vm/tests/dispatch_hypercall.rs`'s `build_guest_elf` uses, copied rather
 /// than shared because that helper lives in a `harness = true` target this
 /// file (`harness = false`) cannot import as a sibling module.
 fn build_guest_elf(target_dir: &Path) -> PathBuf {
@@ -124,7 +137,7 @@ fn build_guest_elf(target_dir: &Path) -> PathBuf {
             "--manifest-path",
             &format!("{GUEST_MANIFEST_DIR}/Cargo.toml"),
             "--target",
-            "aarch64-unknown-none",
+            GUEST_TARGET,
             "--release",
         ])
         .env("CARGO_TARGET_DIR", target_dir)
@@ -132,7 +145,7 @@ fn build_guest_elf(target_dir: &Path) -> PathBuf {
         .expect("run cargo build for the guest ELF");
     assert!(status.success(), "guest ELF build failed");
     target_dir
-        .join("aarch64-unknown-none")
+        .join(GUEST_TARGET)
         .join("release")
         .join("proxima-vm-guest-lambda")
 }
