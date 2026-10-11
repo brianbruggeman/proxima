@@ -186,9 +186,7 @@ fn generation_prompt(parsed: &proxima_gguf::pipe::ParsedGguf, prompt: &str) -> S
         .is_some();
     let already_framed = prompt.contains("<|im_start|>");
     if has_chat_template && architecture.starts_with("qwen35") && !already_framed {
-        return format!(
-            "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
-        );
+        return format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n");
     }
     prompt.to_owned()
 }
@@ -817,23 +815,15 @@ fn main() {
             // fall back from -- a CPU request always produces a CPU run.
             let config =
                 supported_serving_config(gguf_path, RequestedBackend::Cpu.gpu_layers(), &settings);
-            let outcome = model.generate_streaming(
-                &generation_prompt,
-                max_tokens,
-                config,
-                &mut on_token,
-            );
+            let outcome =
+                model.generate_streaming(&generation_prompt, max_tokens, config, &mut on_token);
             (outcome, "CPU (requested)")
         }
         RequestedBackend::Gpu => {
             let config =
                 supported_serving_config(gguf_path, RequestedBackend::Gpu.gpu_layers(), &settings);
-            let mut outcome = model.generate_streaming(
-                &generation_prompt,
-                max_tokens,
-                config,
-                &mut on_token,
-            );
+            let mut outcome =
+                model.generate_streaming(&generation_prompt, max_tokens, config, &mut on_token);
             let mut backend_label = "GPU/METAL (requested, gpu_layers = GPU_LAYERS_ALL)";
             if let Err(error) = &outcome {
                 println!("METAL RUN FAILED: {error}");
@@ -967,13 +957,19 @@ mod tests {
     #[test]
     fn speculation_is_ngram_simple_when_env_is_unset() {
         let types = drafter_types_for(None);
-        assert_eq!(types, SpeculativeTypeSet::single(SpeculativeType::NgramSimple));
+        assert_eq!(
+            types,
+            SpeculativeTypeSet::single(SpeculativeType::NgramSimple)
+        );
     }
 
     #[test]
     fn speculation_is_off_when_env_is_none() {
         let types = drafter_types_for(Some("none"));
-        assert!(types.is_empty(), "PROXIMA_SPECULATIVE_TYPES=none must clear every drafter, got {types:?}");
+        assert!(
+            types.is_empty(),
+            "PROXIMA_SPECULATIVE_TYPES=none must clear every drafter, got {types:?}"
+        );
     }
 
     #[test]

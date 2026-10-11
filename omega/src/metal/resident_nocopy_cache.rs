@@ -1009,8 +1009,8 @@ pub(super) fn allocate_fault_buffer(
     device: &ProtocolObject<dyn MTLDevice>,
     gather_count: usize,
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
-    let recycled = FAULT_BUFFER_POOL
-        .with(|pool| pool.borrow_mut().get_mut(&gather_count).and_then(Vec::pop));
+    let recycled =
+        FAULT_BUFFER_POOL.with(|pool| pool.borrow_mut().get_mut(&gather_count).and_then(Vec::pop));
     if let Some(buffer) = recycled {
         zero_fault_buffer(&buffer, gather_count);
         return Ok(buffer);
@@ -1032,7 +1032,12 @@ pub(super) fn allocate_fault_buffer(
 /// Returns a fault buffer to [`allocate_fault_buffer`]'s pool. Call only once
 /// the command buffers that wrote it have completed.
 pub(super) fn recycle_fault_buffer(buffer: MetalBuffer, gather_count: usize) {
-    FAULT_BUFFER_POOL.with(|pool| pool.borrow_mut().entry(gather_count).or_default().push(buffer));
+    FAULT_BUFFER_POOL.with(|pool| {
+        pool.borrow_mut()
+            .entry(gather_count)
+            .or_default()
+            .push(buffer)
+    });
 }
 
 pub(super) fn zero_fault_buffer(buffer: &ProtocolObject<dyn MTLBuffer>, gather_count: usize) {
@@ -1260,9 +1265,7 @@ pub(super) fn buffer_for(
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
     node: NodeId,
 ) -> Result<DeviceBuffer, MetalError> {
-    if env_flags::segment_host()
-        && !device_buffers.contains_key(&node)
-    {
+    if env_flags::segment_host() && !device_buffers.contains_key(&node) {
         eprintln!(
             "metal missing operand node={node:?} available={:?}",
             device_buffers.keys().collect::<Vec<_>>()
@@ -1329,9 +1332,7 @@ pub(super) fn bind_buffers(
                     })?
             }
             Binding::Input(node) | Binding::Indices(node) => {
-                if env_flags::segment_host()
-                    && !device_buffers.contains_key(node)
-                {
+                if env_flags::segment_host() && !device_buffers.contains_key(node) {
                     eprintln!("metal binding missing node={node:?} bindings={bindings:?}");
                 }
                 buffer_for(device_buffers, *node)?
@@ -1393,10 +1394,8 @@ pub(super) fn dispatch(
     if let Some(grid2d) = grid.grid2d {
         // the 1D branch below clamps its width to the pipeline's own cap; the flat
         // form must too, or a pinned width past it is a Metal validation error
-        let grid2d = crate::msl::fit_flat_width(
-            grid2d,
-            pipeline.maxTotalThreadsPerThreadgroup() as u64,
-        );
+        let grid2d =
+            crate::msl::fit_flat_width(grid2d, pipeline.maxTotalThreadsPerThreadgroup() as u64);
         let threadgroups = MTLSize {
             width: grid2d.threadgroups_x as usize,
             height: grid2d.threadgroups_y as usize,
@@ -1438,4 +1437,3 @@ pub(super) fn dispatch(
     #[cfg(feature = "instrument")]
     counter!(PHYSICAL_DISPATCH_CALLS, 1);
 }
-

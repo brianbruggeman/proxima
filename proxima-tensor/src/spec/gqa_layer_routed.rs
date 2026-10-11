@@ -1267,56 +1267,62 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
             ScalarOp::Multiply,
             &[(activated_gate, "sko->sko"), (up, "sko->sko")],
         )?;
-        weighted_sum = Some(if projection_strategy == MoeProjectionStrategy::StackedCombined {
-            let slot_weights =
-                stacked_slot_weights(program, expert_scale, routes, stacked_weights)?;
-            let weighted_hidden = elementwise(
-                program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[(hidden, "sko->sko"), (slot_weights, "sk->sko")],
-            )?;
-            let down_product =
-                slotwise_gathered_expert_product(program, expert_w_down, routes, weighted_hidden);
-            reduce(
-                program,
-                DType::Float32,
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                down_product,
-                "skio->skio",
-                "so->skio",
-            )?
-        } else {
-            let down_product =
-                slotwise_gathered_expert_product(program, expert_w_down, routes, hidden);
-            let down = reduce(
-                program,
-                DType::Float32,
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                down_product,
-                "skio->skio",
-                "sko->skio",
-            )?;
-            let slot_weights =
-                stacked_slot_weights(program, expert_scale, routes, stacked_weights)?;
-            let weighted = elementwise(
-                program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[(down, "sko->sko"), (slot_weights, "sk->sko")],
-            )?;
-            reduce(
-                program,
-                DType::Float32,
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                weighted,
-                "sko->sko",
-                "so->sko",
-            )?
-        });
+        weighted_sum = Some(
+            if projection_strategy == MoeProjectionStrategy::StackedCombined {
+                let slot_weights =
+                    stacked_slot_weights(program, expert_scale, routes, stacked_weights)?;
+                let weighted_hidden = elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Multiply,
+                    &[(hidden, "sko->sko"), (slot_weights, "sk->sko")],
+                )?;
+                let down_product = slotwise_gathered_expert_product(
+                    program,
+                    expert_w_down,
+                    routes,
+                    weighted_hidden,
+                );
+                reduce(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    ReduceInit::Zero,
+                    down_product,
+                    "skio->skio",
+                    "so->skio",
+                )?
+            } else {
+                let down_product =
+                    slotwise_gathered_expert_product(program, expert_w_down, routes, hidden);
+                let down = reduce(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    ReduceInit::Zero,
+                    down_product,
+                    "skio->skio",
+                    "sko->skio",
+                )?;
+                let slot_weights =
+                    stacked_slot_weights(program, expert_scale, routes, stacked_weights)?;
+                let weighted = elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Multiply,
+                    &[(down, "sko->sko"), (slot_weights, "sk->sko")],
+                )?;
+                reduce(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    ReduceInit::Zero,
+                    weighted,
+                    "sko->sko",
+                    "so->sko",
+                )?
+            },
+        );
         for weight in round_weights.iter().copied() {
             weight_total = Some(match weight_total {
                 Some(accumulated) => elementwise(

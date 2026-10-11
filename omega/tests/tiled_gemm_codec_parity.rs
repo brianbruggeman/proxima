@@ -29,12 +29,12 @@ use proxima_gguf::quant::{f16, q3_k, q4_0, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0};
 use proxima_gguf::types::GgmlType;
 use proxima_primitives::Codec;
 use proxima_tensor::map::{self, AxisIndex, AxisTerm};
-use rayon::prelude::*;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
     ScalarOp, append,
 };
+use rayon::prelude::*;
 
 const RELATIVE_TOLERANCE: f32 = 2.0e-3;
 
@@ -67,7 +67,11 @@ fn ggml_type(codec: Codec) -> GgmlType {
 fn row_bytes(codec: Codec, row_length: usize) -> usize {
     let layout = ggml_type(codec).block_layout();
     let elements = layout.block_elements as usize;
-    assert_eq!(row_length % elements, 0, "{codec:?}: a row is a whole number of blocks");
+    assert_eq!(
+        row_length % elements,
+        0,
+        "{codec:?}: a row is a whole number of blocks"
+    );
     row_length / elements * layout.block_bytes as usize
 }
 
@@ -90,9 +94,15 @@ fn quantize_q5_0(row: &[f32], output: &mut [u8]) {
     let (blocks, _) = row.as_chunks::<32>();
     let (targets, _) = output.as_chunks_mut::<22>();
     for (block, target) in blocks.iter().zip(targets.iter_mut()) {
-        let (_, extreme) = block.iter().fold((0.0f32, 0.0f32), |(amax, extreme), &value| {
-            if amax < value.abs() { (value.abs(), value) } else { (amax, extreme) }
-        });
+        let (_, extreme) = block
+            .iter()
+            .fold((0.0f32, 0.0f32), |(amax, extreme), &value| {
+                if amax < value.abs() {
+                    (value.abs(), value)
+                } else {
+                    (amax, extreme)
+                }
+            });
         let scale = extreme / -16.0;
         let inverse = if scale == 0.0 { 0.0 } else { 1.0 / scale };
         target[0..2].copy_from_slice(&fp16_bytes(scale));
@@ -182,7 +192,10 @@ fn input(program: &mut Vec<Op>, dtype: DType, shape: &[usize], name: &str) -> No
         program,
         Op::Input {
             dtype,
-            shape: shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(),
+            shape: shape
+                .iter()
+                .map(|&extent| Extent::Static(extent as u32))
+                .collect(),
             name: Some(name.into()),
         },
     )
@@ -213,7 +226,12 @@ struct DenseShape {
 fn dense_program(shape: &DenseShape) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = input(&mut program, DType::UInt8, &[shape.rows, shape.k], "weight");
-    let activation = input(&mut program, DType::Float32, &[shape.tokens, shape.k], "activation");
+    let activation = input(
+        &mut program,
+        DType::Float32,
+        &[shape.tokens, shape.k],
+        "activation",
+    );
     let product = append(
         &mut program,
         Op::Elementwise {
@@ -270,7 +288,12 @@ fn grouped_program(shape: &GroupedShape) -> (Vec<Op>, NodeId) {
         "weight",
     );
     let route = input(&mut program, DType::Int32, &[shape.tokens], "route");
-    let activation = input(&mut program, DType::Float32, &[shape.tokens, shape.k], "activation");
+    let activation = input(
+        &mut program,
+        DType::Float32,
+        &[shape.tokens, shape.k],
+        "activation",
+    );
     let product = append(
         &mut program,
         Op::Elementwise {
@@ -331,19 +354,34 @@ fn dot_in_f64(row: &[f32], token: &[f32]) -> f32 {
 fn dense_oracle(weights: &[f32], activation: &[f32], shape: &DenseShape) -> Vec<f32> {
     let per_token: Vec<Vec<f32>> = activation
         .par_chunks_exact(shape.k)
-        .map(|token| weights.chunks_exact(shape.k).map(|row| dot_in_f64(row, token)).collect())
+        .map(|token| {
+            weights
+                .chunks_exact(shape.k)
+                .map(|row| dot_in_f64(row, token))
+                .collect()
+        })
         .collect();
     per_token.concat()
 }
 
-fn grouped_oracle(weights: &[f32], route: &[f32], activation: &[f32], shape: &GroupedShape) -> Vec<f32> {
+fn grouped_oracle(
+    weights: &[f32],
+    route: &[f32],
+    activation: &[f32],
+    shape: &GroupedShape,
+) -> Vec<f32> {
     let expert_len = shape.rows * shape.k;
-    let tokens: Vec<(&[f32], f32)> = activation.chunks_exact(shape.k).zip(route.iter().copied()).collect();
+    let tokens: Vec<(&[f32], f32)> = activation
+        .chunks_exact(shape.k)
+        .zip(route.iter().copied())
+        .collect();
     let per_token: Vec<Vec<f32>> = tokens
         .par_iter()
         .map(|(token, expert)| {
             let slab = &weights[*expert as usize * expert_len..][..expert_len];
-            slab.chunks_exact(shape.k).map(|row| dot_in_f64(row, token)).collect()
+            slab.chunks_exact(shape.k)
+                .map(|row| dot_in_f64(row, token))
+                .collect()
         })
         .collect();
     per_token.concat()
@@ -355,7 +393,13 @@ fn run_dense(codec: Codec, shape: &DenseShape, weight_seed: u64, oracle_seed: u6
     let bytes = quantize_rows(codec, &weight_values(weight_seed, count), shape.k);
     let activation = unit_values(2000, shape.tokens * shape.k, -1.0, 1.0);
     let named = [
-        ("weight", QuantizedBlock::Packed { codec, bytes: &bytes }),
+        (
+            "weight",
+            QuantizedBlock::Packed {
+                codec,
+                bytes: &bytes,
+            },
+        ),
         ("activation", QuantizedBlock::Float32(&activation)),
     ];
     let metal = run_metal(&program, output, &named);
@@ -368,13 +412,25 @@ fn run_dense(codec: Codec, shape: &DenseShape, weight_seed: u64, oracle_seed: u6
     }
 }
 
-fn run_grouped(codec: Codec, shape: &GroupedShape, route: &[f32], weight_seed: u64, oracle_seed: u64) -> Outputs {
+fn run_grouped(
+    codec: Codec,
+    shape: &GroupedShape,
+    route: &[f32],
+    weight_seed: u64,
+    oracle_seed: u64,
+) -> Outputs {
     let (program, output) = grouped_program(shape);
     let count = shape.experts * shape.rows * shape.k;
     let bytes = quantize_rows(codec, &weight_values(weight_seed, count), shape.k);
     let activation = unit_values(2000, shape.tokens * shape.k, -1.0, 1.0);
     let named = [
-        ("weight", QuantizedBlock::Packed { codec, bytes: &bytes }),
+        (
+            "weight",
+            QuantizedBlock::Packed {
+                codec,
+                bytes: &bytes,
+            },
+        ),
         ("route", QuantizedBlock::Float32(route)),
         ("activation", QuantizedBlock::Float32(&activation)),
     ];
@@ -389,11 +445,13 @@ fn run_grouped(codec: Codec, shape: &GroupedShape, route: &[f32], weight_seed: u
 }
 
 fn dense_tiled_kernel_ran(keys: &[String]) -> bool {
-    keys.iter().any(|key| key.contains("_mml") && key.contains("_wws"))
+    keys.iter()
+        .any(|key| key.contains("_mml") && key.contains("_wws"))
 }
 
 fn grouped_kernel_ran(keys: &[String]) -> bool {
-    keys.iter().any(|key| key.contains("_g10") && key.contains("E_w128"))
+    keys.iter()
+        .any(|key| key.contains("_g10") && key.contains("E_w128"))
 }
 
 fn worst_relative_row_error(oracle: &[f32], metal: &[f32], row_width: usize) -> f32 {
@@ -401,7 +459,11 @@ fn worst_relative_row_error(oracle: &[f32], metal: &[f32], row_width: usize) -> 
         .chunks_exact(row_width)
         .zip(metal.chunks_exact(row_width))
         .map(|(want_row, got_row)| {
-            let norm = want_row.iter().map(|value| value * value).sum::<f32>().sqrt();
+            let norm = want_row
+                .iter()
+                .map(|value| value * value)
+                .sum::<f32>()
+                .sqrt();
             let worst = want_row
                 .iter()
                 .zip(got_row)
@@ -413,8 +475,16 @@ fn worst_relative_row_error(oracle: &[f32], metal: &[f32], row_width: usize) -> 
 }
 
 fn assert_matches_oracle(label: &str, outputs: &Outputs, element_count: usize, row_width: usize) {
-    assert_eq!(outputs.oracle.len(), element_count, "{label}: degenerate, oracle produced no output");
-    assert_eq!(outputs.metal.len(), element_count, "{label}: degenerate, metal produced no output");
+    assert_eq!(
+        outputs.oracle.len(),
+        element_count,
+        "{label}: degenerate, oracle produced no output"
+    );
+    assert_eq!(
+        outputs.metal.len(),
+        element_count,
+        "{label}: degenerate, metal produced no output"
+    );
     let worst = worst_relative_row_error(&outputs.oracle, &outputs.metal, row_width);
     eprintln!("{label}: elements={element_count} worst_relative_row_error={worst:e}");
     assert!(
@@ -431,7 +501,10 @@ fn assert_dense_codec_matches(codec: Codec, shape: DenseShape) {
         outputs.kernel_keys
     );
     assert_matches_oracle(
-        &format!("dense {codec:?} tokens={} rows={} k={}", shape.tokens, shape.rows, shape.k),
+        &format!(
+            "dense {codec:?} tokens={} rows={} k={}",
+            shape.tokens, shape.rows, shape.k
+        ),
         &outputs,
         shape.tokens * shape.rows,
         shape.rows,
@@ -467,8 +540,17 @@ fn assert_grouped_codec_matches(codec: Codec, shape: GroupedShape) {
 #[case::q6k(Codec::Q6K)]
 #[case::q4_0(Codec::Q4_0)]
 #[case::q4k(Codec::Q4K)]
-async fn dense_tiled_gemm_matches_the_cpu_dequant_oracle_with_partial_row_and_token_tiles(#[case] codec: Codec) {
-    assert_dense_codec_matches(codec, DenseShape { tokens: 200, rows: 100, k: 512 });
+async fn dense_tiled_gemm_matches_the_cpu_dequant_oracle_with_partial_row_and_token_tiles(
+    #[case] codec: Codec,
+) {
+    assert_dense_codec_matches(
+        codec,
+        DenseShape {
+            tokens: 200,
+            rows: 100,
+            k: 512,
+        },
+    );
 }
 
 #[proxima::test(runtime = "tokio")]
@@ -477,24 +559,59 @@ async fn dense_tiled_gemm_matches_the_cpu_dequant_oracle_with_partial_row_and_to
 #[case::q5_0(Codec::Q5_0)]
 #[case::q5_1(Codec::Q5_1)]
 #[case::q4_0(Codec::Q4_0)]
-async fn flat_codecs_run_the_tiled_gemm_at_an_extent_the_row_blocked_kernel_refuses(#[case] codec: Codec) {
-    assert_dense_codec_matches(codec, DenseShape { tokens: 193, rows: 70, k: 160 });
+async fn flat_codecs_run_the_tiled_gemm_at_an_extent_the_row_blocked_kernel_refuses(
+    #[case] codec: Codec,
+) {
+    assert_dense_codec_matches(
+        codec,
+        DenseShape {
+            tokens: 193,
+            rows: 70,
+            k: 160,
+        },
+    );
 }
 
 #[test]
 fn dense_1024_by_512_projection_shape_matches_for_q8_0() {
-    assert_dense_codec_matches(Codec::Q8_0, DenseShape { tokens: 510, rows: 1024, k: 1024 });
+    assert_dense_codec_matches(
+        Codec::Q8_0,
+        DenseShape {
+            tokens: 510,
+            rows: 1024,
+            k: 1024,
+        },
+    );
 }
 
 #[test]
 fn dense_per_layer_projection_shape_matches_for_float16() {
-    assert_dense_codec_matches(Codec::Float16, DenseShape { tokens: 200, rows: 640, k: 1536 });
+    assert_dense_codec_matches(
+        Codec::Float16,
+        DenseShape {
+            tokens: 200,
+            rows: 640,
+            k: 1536,
+        },
+    );
 }
 
 #[test]
 fn control_dense_oracle_built_from_other_weights_disagrees_by_a_gross_factor() {
-    for codec in [Codec::Q8_0, Codec::Float16, Codec::Q3K, Codec::Q5_0, Codec::Q5_1, Codec::Q5K, Codec::Q6K] {
-        let shape = DenseShape { tokens: 200, rows: 100, k: 512 };
+    for codec in [
+        Codec::Q8_0,
+        Codec::Float16,
+        Codec::Q3K,
+        Codec::Q5_0,
+        Codec::Q5_1,
+        Codec::Q5K,
+        Codec::Q6K,
+    ] {
+        let shape = DenseShape {
+            tokens: 200,
+            rows: 100,
+            k: 512,
+        };
         let outputs = run_dense(codec, &shape, 1000, 4000);
         let gross = worst_relative_row_error(&outputs.oracle, &outputs.metal, shape.rows);
         assert!(
@@ -517,7 +634,15 @@ fn control_dense_oracle_built_from_other_weights_disagrees_by_a_gross_factor() {
 async fn expert_grouped_gemm_matches_the_cpu_dequant_oracle_for_a_heavy_expert_and_empty_experts(
     #[case] codec: Codec,
 ) {
-    assert_grouped_codec_matches(codec, GroupedShape { tokens: 300, rows: 192, k: 512, experts: 8 });
+    assert_grouped_codec_matches(
+        codec,
+        GroupedShape {
+            tokens: 300,
+            rows: 192,
+            k: 512,
+            experts: 8,
+        },
+    );
 }
 
 #[proxima::test(runtime = "tokio")]
@@ -525,14 +650,37 @@ async fn expert_grouped_gemm_matches_the_cpu_dequant_oracle_for_a_heavy_expert_a
 #[case::q5_0(Codec::Q5_0)]
 #[case::q5_1(Codec::Q5_1)]
 #[case::float16(Codec::Float16)]
-async fn expert_grouped_gemm_runs_flat_codecs_at_an_extent_the_row_blocked_kernel_refuses(#[case] codec: Codec) {
-    assert_grouped_codec_matches(codec, GroupedShape { tokens: 161, rows: 100, k: 160, experts: 6 });
+async fn expert_grouped_gemm_runs_flat_codecs_at_an_extent_the_row_blocked_kernel_refuses(
+    #[case] codec: Codec,
+) {
+    assert_grouped_codec_matches(
+        codec,
+        GroupedShape {
+            tokens: 161,
+            rows: 100,
+            k: 160,
+            experts: 6,
+        },
+    );
 }
 
 #[test]
 fn control_grouped_oracle_built_from_other_experts_disagrees_by_a_gross_factor() {
-    for codec in [Codec::Q8_0, Codec::Float16, Codec::Q3K, Codec::Q5_0, Codec::Q5_1, Codec::Q5K, Codec::Q6K] {
-        let shape = GroupedShape { tokens: 300, rows: 192, k: 512, experts: 8 };
+    for codec in [
+        Codec::Q8_0,
+        Codec::Float16,
+        Codec::Q3K,
+        Codec::Q5_0,
+        Codec::Q5_1,
+        Codec::Q5K,
+        Codec::Q6K,
+    ] {
+        let shape = GroupedShape {
+            tokens: 300,
+            rows: 192,
+            k: 512,
+            experts: 8,
+        };
         let route = heavy_expert_route(shape.tokens, shape.experts);
         let outputs = run_grouped(codec, &shape, &route, 1000, 4000);
         let gross = worst_relative_row_error(&outputs.oracle, &outputs.metal, shape.rows);

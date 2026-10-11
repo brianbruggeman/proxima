@@ -17,8 +17,8 @@ use std::process::Command;
 use omega::msl::Grid2DForm;
 use omega::{Codec, Kernel};
 use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, Layout, NodeId, NumericPolicy, Op,
-    Reduce, ReduceInit, ScalarOp, append, bind, infer, map,
+    BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, Layout, NodeId, NumericPolicy, Op, Reduce,
+    ReduceInit, ScalarOp, append, bind, infer, map,
 };
 
 fn terminal(program: &[Op]) -> NodeId {
@@ -62,14 +62,24 @@ fn reduce(
 
 fn bound_of(program: &[Op]) -> BoundOp {
     let shapes = infer(program, &[]).expect("program infers");
-    bind(program, &shapes, &[terminal(program)], NumericPolicy::default())
-        .expect("program lowers")
-        .into_iter()
-        .next_back()
-        .expect("one bound op")
+    bind(
+        program,
+        &shapes,
+        &[terminal(program)],
+        NumericPolicy::default(),
+    )
+    .expect("program lowers")
+    .into_iter()
+    .next_back()
+    .expect("one bound op")
 }
 
-fn emit_flat(label: &str, bound: &BoundOp, packed: &BTreeMap<NodeId, Codec>, policy: NumericPolicy) -> Kernel {
+fn emit_flat(
+    label: &str,
+    bound: &BoundOp,
+    packed: &BTreeMap<NodeId, Codec>,
+    policy: NumericPolicy,
+) -> Kernel {
     let kernel = omega::emit(bound, packed, policy)
         .unwrap_or_else(|error| panic!("{label}: emit failed: {error}"));
     assert!(
@@ -143,7 +153,14 @@ fn per_layer_projection() -> (BoundOp, BTreeMap<NodeId, Codec>) {
             name: None,
         },
     );
-    reduce(&mut program, ScalarOp::Add, product, 3, &[0, 1], Keep::Reduce);
+    reduce(
+        &mut program,
+        ScalarOp::Add,
+        product,
+        3,
+        &[0, 1],
+        Keep::Reduce,
+    );
     let bound = bound_of(&program);
     let weight = bound.operands()[0].0;
     (bound, BTreeMap::from([(weight, Codec::Float16)]))
@@ -152,14 +169,28 @@ fn per_layer_projection() -> (BoundOp, BTreeMap<NodeId, Codec>) {
 fn serial_maximum_over_a_pair() -> BoundOp {
     let mut program = Vec::new();
     let source = input(&mut program, DType::Float32, &[70_000, 70_000, 2]);
-    reduce(&mut program, ScalarOp::Maximum, source, 3, &[0, 1], Keep::Reduce);
+    reduce(
+        &mut program,
+        ScalarOp::Maximum,
+        source,
+        3,
+        &[0, 1],
+        Keep::Reduce,
+    );
     bound_of(&program)
 }
 
 fn scan_over_lines() -> BoundOp {
     let mut program = Vec::new();
     let source = input(&mut program, DType::Float32, &[70_000, 70_000, 4]);
-    reduce(&mut program, ScalarOp::Add, source, 3, &[0, 1, 2], Keep::Scan);
+    reduce(
+        &mut program,
+        ScalarOp::Add,
+        source,
+        3,
+        &[0, 1, 2],
+        Keep::Scan,
+    );
     bound_of(&program)
 }
 
@@ -179,7 +210,14 @@ fn tiled_q4k_gemm() -> (BoundOp, BTreeMap<NodeId, Codec>) {
             name: None,
         },
     );
-    reduce(&mut program, ScalarOp::Add, product, 3, &[1, 0], Keep::Reduce);
+    reduce(
+        &mut program,
+        ScalarOp::Add,
+        product,
+        3,
+        &[1, 0],
+        Keep::Reduce,
+    );
     let bound = bound_of(&program);
     let weight = bound.operands()[0].0;
     (bound, BTreeMap::from([(weight, Codec::Q4K)]))
@@ -201,7 +239,14 @@ fn packed_row_q4k_matvec(rows: u32) -> (BoundOp, BTreeMap<NodeId, Codec>) {
             name: None,
         },
     );
-    reduce(&mut program, ScalarOp::Add, product, 3, &[0, 1], Keep::Reduce);
+    reduce(
+        &mut program,
+        ScalarOp::Add,
+        product,
+        3,
+        &[0, 1],
+        Keep::Reduce,
+    );
     let bound = bound_of(&program);
     let weight = bound.operands()[0].0;
     (bound, BTreeMap::from([(weight, Codec::Q4K)]))
@@ -223,7 +268,14 @@ fn dense_batched_scores() -> BoundOp {
             name: None,
         },
     );
-    reduce(&mut program, ScalarOp::Add, product, 4, &[0, 2, 3], Keep::Reduce);
+    reduce(
+        &mut program,
+        ScalarOp::Add,
+        product,
+        4,
+        &[0, 2, 3],
+        Keep::Reduce,
+    );
     bound_of(&program)
 }
 
@@ -349,9 +401,21 @@ fn round_batched_gathered_matmul(round_count: u32) -> BoundOp {
             name: None,
         },
     );
-    reduce(&mut program, ScalarOp::Add, product, 3, &[0, 1], Keep::Reduce);
+    reduce(
+        &mut program,
+        ScalarOp::Add,
+        product,
+        3,
+        &[0, 1],
+        Keep::Reduce,
+    );
     let gathered = bound_of(&program);
-    let BoundOp { node, dtype, extents, kind } = gathered;
+    let BoundOp {
+        node,
+        dtype,
+        extents,
+        kind,
+    } = gathered;
     let BoundOpKind::Reduce {
         element_body,
         reduce_op,
@@ -406,46 +470,111 @@ fn flat_kernels() -> Vec<(&'static str, Kernel)> {
     let (packed_even, packed_even_codecs) = packed_row_q4k_matvec(4_000_000_000);
     let (packed_odd, packed_odd_codecs) = packed_row_q4k_matvec(4_000_000_004);
     let kernels = vec![
-        ("iota", emit_flat("iota", &position_only(BoundOpKind::Iota), &none, default_policy)),
+        (
+            "iota",
+            emit_flat(
+                "iota",
+                &position_only(BoundOpKind::Iota),
+                &none,
+                default_policy,
+            ),
+        ),
         (
             "constant",
-            emit_flat("constant", &position_only(BoundOpKind::Constant { value: 1.5 }), &none, default_policy),
+            emit_flat(
+                "constant",
+                &position_only(BoundOpKind::Constant { value: 1.5 }),
+                &none,
+                default_policy,
+            ),
         ),
-        ("elementwise", emit_flat("elementwise", &elementwise_tanh_2d(), &none, default_policy)),
+        (
+            "elementwise",
+            emit_flat("elementwise", &elementwise_tanh_2d(), &none, default_policy),
+        ),
         (
             "cooperative reduce",
-            emit_flat("cooperative reduce", &projection, &projection_codecs, NumericPolicy::llama_relaxed()),
+            emit_flat(
+                "cooperative reduce",
+                &projection,
+                &projection_codecs,
+                NumericPolicy::llama_relaxed(),
+            ),
         ),
         (
             "serial reduce",
-            emit_flat("serial reduce", &serial_maximum_over_a_pair(), &none, default_policy),
+            emit_flat(
+                "serial reduce",
+                &serial_maximum_over_a_pair(),
+                &none,
+                default_policy,
+            ),
         ),
-        ("scan", emit_flat("scan", &scan_over_lines(), &none, default_policy)),
-        ("tiled gemm", emit_flat("tiled gemm", &tiled, &tiled_codecs, default_policy)),
+        (
+            "scan",
+            emit_flat("scan", &scan_over_lines(), &none, default_policy),
+        ),
+        (
+            "tiled gemm",
+            emit_flat("tiled gemm", &tiled, &tiled_codecs, default_policy),
+        ),
         (
             "dense batched gemm",
-            emit_flat("dense batched gemm", &dense_batched_scores(), &none, default_policy),
+            emit_flat(
+                "dense batched gemm",
+                &dense_batched_scores(),
+                &none,
+                default_policy,
+            ),
         ),
-        ("gated delta net", emit_flat("gated delta net", &gated_delta_net(), &none, default_policy)),
+        (
+            "gated delta net",
+            emit_flat("gated delta net", &gated_delta_net(), &none, default_policy),
+        ),
         (
             "cached softmax weights",
-            emit_flat("cached softmax weights", &cached_softmax_weights(), &none, default_policy),
+            emit_flat(
+                "cached softmax weights",
+                &cached_softmax_weights(),
+                &none,
+                default_policy,
+            ),
         ),
         (
             "packed row-blocked, groups divide the pinned width",
-            emit_flat("packed row even", &packed_even, &packed_even_codecs, default_policy),
+            emit_flat(
+                "packed row even",
+                &packed_even,
+                &packed_even_codecs,
+                default_policy,
+            ),
         ),
         (
             "packed row-blocked, odd group count falls back to one simdgroup",
-            emit_flat("packed row odd", &packed_odd, &packed_odd_codecs, default_policy),
+            emit_flat(
+                "packed row odd",
+                &packed_odd,
+                &packed_odd_codecs,
+                default_policy,
+            ),
         ),
         (
             "cached attention, per-query-head grid",
-            emit_flat("cached attention", &cached_attention(1, 8), &none, default_policy),
+            emit_flat(
+                "cached attention",
+                &cached_attention(1, 8),
+                &none,
+                default_policy,
+            ),
         ),
         (
             "cached attention, four query groups sharing a threadgroup",
-            emit_flat("cached attention groups", &cached_attention(4, 1_000_000), &none, default_policy),
+            emit_flat(
+                "cached attention groups",
+                &cached_attention(4, 1_000_000),
+                &none,
+                default_policy,
+            ),
         ),
     ];
     #[cfg(feature = "metal-moe-mul-mat-id")]
@@ -499,9 +628,7 @@ fn every_flat_form_kernel_compiles_with_the_metal_toolchain() {
             .arg(&air_path)
             .output()
             .unwrap_or_else(|error| {
-                panic!(
-                    "metal toolchain unavailable ({error}) -- this is a red gate, not a skip"
-                )
+                panic!("metal toolchain unavailable ({error}) -- this is a red gate, not a skip")
             });
 
         assert!(
@@ -533,12 +660,13 @@ fn the_packed_row_fixtures_take_the_launch_widths_their_labels_name() {
     let (even, even_codecs) = packed_row_q4k_matvec(4_000_000_000);
     let (odd, odd_codecs) = packed_row_q4k_matvec(4_000_000_004);
 
-    let (even_kernel, odd_kernel) = temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("0"), || {
-        (
-            emit_flat("packed row even", &even, &even_codecs, default_policy),
-            emit_flat("packed row odd", &odd, &odd_codecs, default_policy),
-        )
-    });
+    let (even_kernel, odd_kernel) =
+        temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("0"), || {
+            (
+                emit_flat("packed row even", &even, &even_codecs, default_policy),
+                emit_flat("packed row odd", &odd, &odd_codecs, default_policy),
+            )
+        });
 
     let pinned_even = even_kernel
         .grid
@@ -563,16 +691,30 @@ fn the_packed_row_fixtures_take_the_launch_widths_their_labels_name() {
         omega::sized::SIMD_WIDTH,
         "past split-k's row ceiling the pinned width is one simdgroup"
     );
-    assert_eq!(even_kernel.grid.threads % pinned_even, 0, "even grid divides the pinned width");
+    assert_eq!(
+        even_kernel.grid.threads % pinned_even,
+        0,
+        "even grid divides the pinned width"
+    );
     assert_eq!(launch_width("packed row even", &even_kernel), pinned_even);
     #[cfg(not(feature = "metal-q4k-split-k"))]
     {
-        assert_ne!(odd_kernel.grid.threads % pinned_odd, 0, "odd grid must not divide the pinned width");
-        assert_eq!(launch_width("packed row odd", &odd_kernel), omega::sized::SIMD_WIDTH);
+        assert_ne!(
+            odd_kernel.grid.threads % pinned_odd,
+            0,
+            "odd grid must not divide the pinned width"
+        );
+        assert_eq!(
+            launch_width("packed row odd", &odd_kernel),
+            omega::sized::SIMD_WIDTH
+        );
     }
     #[cfg(feature = "metal-q4k-split-k")]
     assert_eq!(
-        (pinned_odd, odd_kernel.grid.threads % omega::sized::SIMD_WIDTH),
+        (
+            pinned_odd,
+            odd_kernel.grid.threads % omega::sized::SIMD_WIDTH
+        ),
         (omega::sized::SIMD_WIDTH, 0),
         "a one-simdgroup row-blocked grid is always a whole number of simdgroups, so the odd \
          fixture has no indivisible case under split-k"

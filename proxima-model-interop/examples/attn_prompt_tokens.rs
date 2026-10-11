@@ -52,5 +52,8 @@ fn main() {
         .expect("tokenize prompt under the cached_len convention");
 
     let first_six: Vec<u32> = ids.iter().take(6).copied().collect();
-    println!("count={} add_bos={add_bos} add_eos={add_eos} first_six_ids={first_six:?}", ids.len());
+    println!(
+        "count={} add_bos={add_bos} add_eos={add_eos} first_six_ids={first_six:?}",
+        ids.len()
+    );
 }

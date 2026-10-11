@@ -299,7 +299,10 @@ pub(super) fn kv_bytes(buffers: &[PlacedBuffer]) -> usize {
 /// Removes and returns the smallest kept buffer that holds `bytes`, or `None`
 /// when no kept buffer does. A kept buffer larger than `bytes` serves a
 /// shorter context; the rows past `bytes` are never bound.
-pub(super) fn take_kv_buffer(buffers: &mut Vec<PlacedBuffer>, bytes: usize) -> Option<PlacedBuffer> {
+pub(super) fn take_kv_buffer(
+    buffers: &mut Vec<PlacedBuffer>,
+    bytes: usize,
+) -> Option<PlacedBuffer> {
     let index = buffers
         .iter()
         .enumerate()
@@ -311,7 +314,11 @@ pub(super) fn take_kv_buffer(buffers: &mut Vec<PlacedBuffer>, bytes: usize) -> O
 
 /// Adds `returned` to the kept buffers and frees the oldest until what is
 /// kept holds at most `budget` bytes. A budget of `0` frees them all.
-pub(super) fn keep_kv_buffers(kept: &mut Vec<PlacedBuffer>, returned: Vec<PlacedBuffer>, budget: usize) {
+pub(super) fn keep_kv_buffers(
+    kept: &mut Vec<PlacedBuffer>,
+    returned: Vec<PlacedBuffer>,
+    budget: usize,
+) {
     kept.extend(returned);
     let mut held = kv_bytes(kept);
     let mut freed = 0;
@@ -393,7 +400,13 @@ pub(super) fn make_room<Entry>(
         })
         .max()
         .unwrap_or_default();
-    evict_to(plans, order, budget.saturating_sub(estimate), None, bytes_of)
+    evict_to(
+        plans,
+        order,
+        budget.saturating_sub(estimate),
+        None,
+        bytes_of,
+    )
 }
 
 /// Plans `owner` holds resident on this thread right now, decode and wide.
@@ -444,14 +457,25 @@ mod tests {
 
     #[test]
     fn eviction_removes_the_least_recently_used_plan_first() {
-        let mut plans = plans_of(&[(key(970, 1024), 400), (key(512, 1024), 200), (key(64, 1024), 50)]);
+        let mut plans = plans_of(&[
+            (key(970, 1024), 400),
+            (key(512, 1024), 200),
+            (key(64, 1024), 50),
+        ]);
         let mut order = vec![key(512, 1024), key(970, 1024), key(64, 1024)];
 
         let evicted = evict_to(&mut plans, &mut order, 450, None, bytes);
 
         assert_eq!(evicted, vec![200], "the plan used longest ago leaves first");
-        assert_eq!(plans.keys().cloned().collect::<Vec<_>>(), vec![key(64, 1024), key(970, 1024)]);
-        assert_eq!(order, vec![key(970, 1024), key(64, 1024)], "recency drops the evicted key");
+        assert_eq!(
+            plans.keys().cloned().collect::<Vec<_>>(),
+            vec![key(64, 1024), key(970, 1024)]
+        );
+        assert_eq!(
+            order,
+            vec![key(970, 1024), key(64, 1024)],
+            "recency drops the evicted key"
+        );
     }
 
     #[test]
@@ -462,7 +486,10 @@ mod tests {
         let evicted = evict_to(&mut plans, &mut order, 100, Some(&key(970, 1024)), bytes);
 
         assert_eq!(evicted, vec![50]);
-        assert!(plans.contains_key(&key(970, 1024)), "the plan being executed is never evicted");
+        assert!(
+            plans.contains_key(&key(970, 1024)),
+            "the plan being executed is never evicted"
+        );
     }
 
     #[test]
@@ -517,7 +544,10 @@ mod tests {
         touch(&mut order, &key(970, 1024));
         touch(&mut order, &key(8, 1024));
 
-        assert_eq!(order, vec![key(512, 1024), key(64, 1024), key(970, 1024), key(8, 1024)]);
+        assert_eq!(
+            order,
+            vec![key(512, 1024), key(64, 1024), key(970, 1024), key(8, 1024)]
+        );
     }
 
     #[test]
@@ -527,7 +557,10 @@ mod tests {
 
         let evicted = make_room(&mut plans, &mut order, 512 << 20, 8, bytes);
 
-        assert!(evicted.is_empty(), "an 8-row plan needs about 3 MiB, which fits beside 402 MiB");
+        assert!(
+            evicted.is_empty(),
+            "an 8-row plan needs about 3 MiB, which fits beside 402 MiB"
+        );
         assert_eq!(plans.len(), 1);
     }
 
@@ -538,7 +571,11 @@ mod tests {
 
         let evicted = make_room(&mut plans, &mut order, 512 << 20, 1000, bytes);
 
-        assert_eq!(evicted.len(), 1, "a 1000-row plan scales to about 414 MiB and cannot sit beside 402 MiB");
+        assert_eq!(
+            evicted.len(),
+            1,
+            "a 1000-row plan scales to about 414 MiB and cannot sit beside 402 MiB"
+        );
         assert!(plans.is_empty());
     }
 
@@ -570,7 +607,10 @@ mod tests {
     }
 
     fn pages_of(buffers: &[PlacedBuffer]) -> Vec<usize> {
-        buffers.iter().map(|buffer| omega::placed_buffer_len(buffer) / PAGE).collect()
+        buffers
+            .iter()
+            .map(|buffer| omega::placed_buffer_len(buffer) / PAGE)
+            .collect()
     }
 
     #[test]
@@ -579,8 +619,16 @@ mod tests {
 
         let taken = take_kv_buffer(&mut kept, 3 * PAGE);
 
-        assert_eq!(taken.map(|buffer| omega::placed_buffer_len(&buffer) / PAGE), Some(4), "the 4 page buffer is the smallest that holds 3 pages");
-        assert_eq!(pages_of(&kept), vec![8, 2], "the others stay kept in their order");
+        assert_eq!(
+            taken.map(|buffer| omega::placed_buffer_len(&buffer) / PAGE),
+            Some(4),
+            "the 4 page buffer is the smallest that holds 3 pages"
+        );
+        assert_eq!(
+            pages_of(&kept),
+            vec![8, 2],
+            "the others stay kept in their order"
+        );
         Ok(())
     }
 
@@ -589,17 +637,26 @@ mod tests {
         let mut kept = vec![placed(2)?, placed(4)?];
 
         assert!(take_kv_buffer(&mut kept, 5 * PAGE).is_none());
-        assert_eq!(pages_of(&kept), vec![2, 4], "a miss leaves the kept buffers alone");
+        assert_eq!(
+            pages_of(&kept),
+            vec![2, 4],
+            "a miss leaves the kept buffers alone"
+        );
         Ok(())
     }
 
     #[test]
-    fn buffers_handed_back_past_the_budget_free_the_oldest_first() -> Result<(), omega::MetalError> {
+    fn buffers_handed_back_past_the_budget_free_the_oldest_first() -> Result<(), omega::MetalError>
+    {
         let mut kept = vec![placed(4)?, placed(4)?];
 
         keep_kv_buffers(&mut kept, vec![placed(2)?, placed(2)?], 9 * PAGE);
 
-        assert_eq!(pages_of(&kept), vec![4, 2, 2], "12 pages held, the oldest 4 page buffer leaves to reach 8");
+        assert_eq!(
+            pages_of(&kept),
+            vec![4, 2, 2],
+            "12 pages held, the oldest 4 page buffer leaves to reach 8"
+        );
         assert!(kv_bytes(&kept) <= 9 * PAGE);
         Ok(())
     }

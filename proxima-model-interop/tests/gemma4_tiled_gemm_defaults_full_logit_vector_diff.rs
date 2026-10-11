@@ -280,7 +280,9 @@ fn gemma4_e2b_tiled_gemm_defaults_vs_all_off_full_logit_vector_diff() {
             Some(
                 model
                     .forward_logits_on_backend(prompt, 0)
-                    .unwrap_or_else(|error| panic!("{name}: CPU f32 oracle forward failed: {error}")),
+                    .unwrap_or_else(|error| {
+                        panic!("{name}: CPU f32 oracle forward failed: {error}")
+                    }),
             )
         } else {
             None
@@ -294,14 +296,19 @@ fn gemma4_e2b_tiled_gemm_defaults_vs_all_off_full_logit_vector_diff() {
         let defaults = temp_env::with_vars(unset_pairs, || {
             model
                 .forward_logits_on_backend(prompt, GPU_LAYERS_ALL)
-                .unwrap_or_else(|error| panic!("{name}: defaults-arm Metal forward failed: {error}"))
+                .unwrap_or_else(|error| {
+                    panic!("{name}: defaults-arm Metal forward failed: {error}")
+                })
         });
 
         let mut off_pairs: Vec<(&str, Option<&str>)> = TILED_GEMM_SWITCH_NAMES
             .iter()
             .map(|switch| (*switch, Some("0")))
             .collect();
-        off_pairs.push(("PROXIMA_TILED_GEMM_DISABLE", Some(TILED_GEMM_DISABLE_ALL_CODECS)));
+        off_pairs.push((
+            "PROXIMA_TILED_GEMM_DISABLE",
+            Some(TILED_GEMM_DISABLE_ALL_CODECS),
+        ));
         let all_off = temp_env::with_vars(off_pairs, || {
             model
                 .forward_logits_on_backend(prompt, GPU_LAYERS_ALL)
@@ -319,12 +326,14 @@ fn gemma4_e2b_tiled_gemm_defaults_vs_all_off_full_logit_vector_diff() {
         worst_row_norm_relative_defaults_vs_off =
             worst_row_norm_relative_defaults_vs_off.max(defaults_vs_off.row_norm_relative);
 
-        let defaults_vs_cpu_display = defaults_vs_cpu
-            .as_ref()
-            .map_or_else(|| "skipped(time budget)".to_string(), |diff| format!("{:e}", diff.row_norm_relative));
-        let off_vs_cpu_display = off_vs_cpu
-            .as_ref()
-            .map_or_else(|| "skipped(time budget)".to_string(), |diff| format!("{:e}", diff.row_norm_relative));
+        let defaults_vs_cpu_display = defaults_vs_cpu.as_ref().map_or_else(
+            || "skipped(time budget)".to_string(),
+            |diff| format!("{:e}", diff.row_norm_relative),
+        );
+        let off_vs_cpu_display = off_vs_cpu.as_ref().map_or_else(
+            || "skipped(time budget)".to_string(),
+            |diff| format!("{:e}", diff.row_norm_relative),
+        );
 
         println!(
             "{name} tokens={token_count} defaults_vs_all_off max_abs={} mean_abs={} \

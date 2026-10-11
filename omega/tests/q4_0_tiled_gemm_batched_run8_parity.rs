@@ -132,7 +132,12 @@ fn real_tensor_bytes(
 /// declared reduction-axis-first (`q4k_matmul_layout.rs`'s own convention,
 /// the real spec's declared order) with an explicit `tokens` axis so
 /// `classify_tiled_gemm`'s `TILED_GEMM_MIN_TOKENS` gate can actually open.
-fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
+fn matmul_program(
+    tokens: u32,
+    in_dim: u32,
+    out_dim: u32,
+    weight_dtype: DType,
+) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = append(
         &mut program,
@@ -270,7 +275,10 @@ fn check_real_tensor_at_token_count(tensor_name: &str, tokens: usize) {
     let (packed_program, packed_sum) =
         matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::UInt8);
     let blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: sliced_weight },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4_0,
+            bytes: sliced_weight,
+        },
         QuantizedBlock::Float32(&activation),
     ];
 
@@ -308,9 +316,21 @@ fn check_real_tensor_at_token_count(tensor_name: &str, tokens: usize) {
     let new_root = new_tiled.root();
     let oracle_root = oracle.root();
     let element_count = tokens * rows;
-    assert_eq!(current_root.len(), element_count, "degenerate: current produced no output");
-    assert_eq!(new_root.len(), element_count, "degenerate: new tiled path produced no output");
-    assert_eq!(oracle_root.len(), element_count, "degenerate: oracle produced no output");
+    assert_eq!(
+        current_root.len(),
+        element_count,
+        "degenerate: current produced no output"
+    );
+    assert_eq!(
+        new_root.len(),
+        element_count,
+        "degenerate: new tiled path produced no output"
+    );
+    assert_eq!(
+        oracle_root.len(),
+        element_count,
+        "degenerate: oracle produced no output"
+    );
 
     let (diff_words, max_abs_vs_current) = differing_word_count(new_root, current_root);
     let new_vs_oracle = compare_to_oracle(new_root, oracle_root);
@@ -426,7 +446,10 @@ fn check_real_tensor_epilogue_at_token_count(tensor_name: &str, tokens: usize) {
         matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::UInt8);
     let packed_epilogue = append_epilogue(&mut packed_program, packed_sum, DType::Float32);
     let blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: sliced_weight },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4_0,
+            bytes: sliced_weight,
+        },
         QuantizedBlock::Float32(&activation),
         QuantizedBlock::Float32(&epilogue_scale),
     ];
@@ -469,9 +492,21 @@ fn check_real_tensor_epilogue_at_token_count(tensor_name: &str, tokens: usize) {
     let new_root = new_tiled.root();
     let oracle_root = oracle.root();
     let element_count = tokens * rows;
-    assert_eq!(current_root.len(), element_count, "degenerate: current produced no output");
-    assert_eq!(new_root.len(), element_count, "degenerate: new tiled path produced no output");
-    assert_eq!(oracle_root.len(), element_count, "degenerate: oracle produced no output");
+    assert_eq!(
+        current_root.len(),
+        element_count,
+        "degenerate: current produced no output"
+    );
+    assert_eq!(
+        new_root.len(),
+        element_count,
+        "degenerate: new tiled path produced no output"
+    );
+    assert_eq!(
+        oracle_root.len(),
+        element_count,
+        "degenerate: oracle produced no output"
+    );
 
     let (diff_words, max_abs_vs_current) = differing_word_count(new_root, current_root);
     let new_vs_oracle = compare_to_oracle(new_root, oracle_root);

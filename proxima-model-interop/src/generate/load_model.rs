@@ -1,7 +1,7 @@
-use super::*;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use super::device_kv::KvBufferSource;
 use super::residency_caches::BlockSummarizer;
+use super::*;
 
 /// How many of [`OpGpuTiming`]'s entries [`report_op_timings`] names
 /// individually -- the discipline log's own "top 20 ops by GPU time" ask.
@@ -946,7 +946,8 @@ pub struct LoadedModel<'file> {
     /// branch -- and swaps it into `program`/`logits_root`/`layer_roots`/
     /// `single_position_step` for exactly that one evaluation, restoring
     /// the ordinary `Extent::Symbolic(0)` decode program right after.
-    pub(super) recurrent_routed_interval_hparams: Option<crate::recurrent_routed_interval::hparams::RecurrentRoutedIntervalHparams>,
+    pub(super) recurrent_routed_interval_hparams:
+        Option<crate::recurrent_routed_interval::hparams::RecurrentRoutedIntervalHparams>,
     /// The single-range, device-resident-KV counterpart of `program`/
     /// `logits_root`/`layer_roots` above -- `None` unless this build was
     /// compiled with `metal-output-placement` AND this checkpoint took the
@@ -1159,10 +1160,12 @@ pub(super) struct MoeLayerSegments {
     /// makes the layer boundary explicit for a future double-buffered
     /// working set, while the latter remains the fallback when a recurrent
     /// placement or a final suffix prevents boundary batching.
-    pub(super) gather_next_router: Option<crate::recurrent_routed_interval::execution::MappedLayerSegment>,
+    pub(super) gather_next_router:
+        Option<crate::recurrent_routed_interval::execution::MappedLayerSegment>,
     /// Exact two-layer window, present on the first layer of each pair when
     /// the caller requests `moe_layer_window=2`.
-    pub(super) layer_window: Option<crate::recurrent_routed_interval::execution::MappedLayerSegment>,
+    pub(super) layer_window:
+        Option<crate::recurrent_routed_interval::execution::MappedLayerSegment>,
     pub(super) router_future_cuts: Vec<(NodeId, String)>,
     pub(super) next_cuts: Vec<(NodeId, String)>,
     /// Original gather cuts owned by later layers.  This is part of the

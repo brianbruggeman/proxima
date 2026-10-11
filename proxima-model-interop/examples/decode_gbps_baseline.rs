@@ -41,6 +41,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+use conflaguration::Settings as _;
 use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
@@ -48,7 +49,6 @@ use proxima_model_interop::{
     GPU_LAYERS_ALL, LoadedModel, Phase, PromptCacheConfig, ServingConfig, SpeculativeSettings,
     TokenEvent,
 };
-use conflaguration::Settings as _;
 #[cfg(feature = "instrument")]
 use proxima_telemetry::export::Exporter;
 #[cfg(feature = "instrument")]
@@ -76,7 +76,11 @@ fn process_memory_bytes() -> (u64, u64) {
     let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
     // SAFETY: `RUSAGE_INFO_V2` fills a `rusage_info_v2`; the C signature takes the struct's address cast to `rusage_info_t *`.
     let status = unsafe {
-        libc::proc_pid_rusage(std::process::id() as libc::c_int, libc::RUSAGE_INFO_V2, info.as_mut_ptr().cast())
+        libc::proc_pid_rusage(
+            std::process::id() as libc::c_int,
+            libc::RUSAGE_INFO_V2,
+            info.as_mut_ptr().cast(),
+        )
     };
     if status != 0 {
         return (0, 0);
@@ -272,21 +276,26 @@ fn main() {
         Err(_) => ServingConfig::default().kv_bucket_tokens,
     };
     let numeric_policy = match std::env::var("PROXIMA_EPILOGUE_SOURCES").as_deref() {
-        Ok("0") => ServingConfig::default().numeric_policy.with_epilogue_sources(false),
-        Ok("1") => ServingConfig::default().numeric_policy.with_epilogue_sources(true),
+        Ok("0") => ServingConfig::default()
+            .numeric_policy
+            .with_epilogue_sources(false),
+        Ok("1") => ServingConfig::default()
+            .numeric_policy
+            .with_epilogue_sources(true),
         Ok(other) => panic!("PROXIMA_EPILOGUE_SOURCES={other}: expected `0` or `1`"),
         Err(_) => ServingConfig::default().numeric_policy,
     };
-    let resident_prefill_plan_bytes: usize = match std::env::var("PROXIMA_RESIDENT_PREFILL_PLAN_BYTES") {
-        Ok(value) => value.parse().unwrap_or_else(|_| {
-            panic!("PROXIMA_RESIDENT_PREFILL_PLAN_BYTES={value}: expected a byte count")
-        }),
-        Err(_) => ServingConfig::default().resident_prefill_plan_bytes,
-    };
+    let resident_prefill_plan_bytes: usize =
+        match std::env::var("PROXIMA_RESIDENT_PREFILL_PLAN_BYTES") {
+            Ok(value) => value.parse().unwrap_or_else(|_| {
+                panic!("PROXIMA_RESIDENT_PREFILL_PLAN_BYTES={value}: expected a byte count")
+            }),
+            Err(_) => ServingConfig::default().resident_prefill_plan_bytes,
+        };
     let resident_kv_bytes: usize = match std::env::var("PROXIMA_RESIDENT_KV_BYTES") {
-        Ok(value) => value.parse().unwrap_or_else(|_| {
-            panic!("PROXIMA_RESIDENT_KV_BYTES={value}: expected a byte count")
-        }),
+        Ok(value) => value
+            .parse()
+            .unwrap_or_else(|_| panic!("PROXIMA_RESIDENT_KV_BYTES={value}: expected a byte count")),
         Err(_) => ServingConfig::default().resident_kv_bytes,
     };
     let kv_cache_type = match std::env::var("PROXIMA_KV_CACHE_TYPE").as_deref() {
@@ -294,15 +303,18 @@ fn main() {
         Ok("f32") | Err(_) => GgmlType::F32,
         Ok(other) => panic!("PROXIMA_KV_CACHE_TYPE={other}: expected `f32` or `f16`"),
     };
-    let speculative_settings =
-        SpeculativeSettings::from_env().expect("PROXIMA_SPECULATIVE_* env parses as the serving speculative settings");
+    let speculative_settings = SpeculativeSettings::from_env()
+        .expect("PROXIMA_SPECULATIVE_* env parses as the serving speculative settings");
     let speculative = speculative_settings.as_speculative_config();
-    let warm_model_buffers_at_load = match std::env::var("PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD").as_deref() {
-        Ok("true") => true,
-        Ok("false") => false,
-        Ok(other) => panic!("PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD={other}: expected `true` or `false`"),
-        Err(_) => ServingConfig::default().warm_model_buffers_at_load,
-    };
+    let warm_model_buffers_at_load =
+        match std::env::var("PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD").as_deref() {
+            Ok("true") => true,
+            Ok("false") => false,
+            Ok(other) => panic!(
+                "PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD={other}: expected `true` or `false`"
+            ),
+            Err(_) => ServingConfig::default().warm_model_buffers_at_load,
+        };
     let serving_config = ServingConfig {
         warm_model_buffers_at_load,
         speculative,

@@ -235,7 +235,10 @@ fn metal_matmul_on_real_attn_k_q8_0_bytes_matches_the_dequantized_f32_cpu_path()
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: sliced_weight },
+            QuantizedBlock::Packed {
+                codec: Codec::Q8_0,
+                bytes: sliced_weight,
+            },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],

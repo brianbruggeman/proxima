@@ -102,48 +102,145 @@ pub(super) fn gemma4_checkpoint() -> Vec<u8> {
     rope_frequencies.values[64..].fill(1.0e30);
     specs.push(rope_frequencies);
     for (layer, &is_sliding) in GEMMA4_SLIDING_PATTERN.iter().enumerate() {
-        let head_dim = if is_sliding { SLIDING_HEAD_DIM } else { FULL_HEAD_DIM };
+        let head_dim = if is_sliding {
+            SLIDING_HEAD_DIM
+        } else {
+            FULL_HEAD_DIM
+        };
         let name = |suffix: &str| alloc::format!("blk.{layer}.{suffix}");
         specs.extend([
             spec(&name("attn_norm.weight"), &[EMBEDDING], 0.1, 1.0, &mut rng),
-            spec(&name("post_attention_norm.weight"), &[EMBEDDING], 0.1, 1.0, &mut rng),
+            spec(
+                &name("post_attention_norm.weight"),
+                &[EMBEDDING],
+                0.1,
+                1.0,
+                &mut rng,
+            ),
             spec(&name("attn_q_norm.weight"), &[head_dim], 0.1, 1.0, &mut rng),
             spec(&name("attn_k_norm.weight"), &[head_dim], 0.1, 1.0, &mut rng),
-            spec(&name("attn_q.weight"), &[EMBEDDING, head_dim], 0.25, 0.0, &mut rng),
-            spec(&name("attn_k.weight"), &[EMBEDDING, head_dim], 0.25, 0.0, &mut rng),
-            spec(&name("attn_v.weight"), &[EMBEDDING, head_dim], 0.25, 0.0, &mut rng),
-            spec(&name("attn_output.weight"), &[head_dim, EMBEDDING], 0.25, 0.0, &mut rng),
+            spec(
+                &name("attn_q.weight"),
+                &[EMBEDDING, head_dim],
+                0.25,
+                0.0,
+                &mut rng,
+            ),
+            spec(
+                &name("attn_k.weight"),
+                &[EMBEDDING, head_dim],
+                0.25,
+                0.0,
+                &mut rng,
+            ),
+            spec(
+                &name("attn_v.weight"),
+                &[EMBEDDING, head_dim],
+                0.25,
+                0.0,
+                &mut rng,
+            ),
+            spec(
+                &name("attn_output.weight"),
+                &[head_dim, EMBEDDING],
+                0.25,
+                0.0,
+                &mut rng,
+            ),
             spec(&name("layer_output_scale.weight"), &[1], 0.0, 1.0, &mut rng),
             spec(&name("ffn_norm.weight"), &[EMBEDDING], 0.1, 1.0, &mut rng),
-            spec(&name("ffn_gate.weight"), &[EMBEDDING, FEED_FORWARD], 0.25, 0.0, &mut rng),
-            spec(&name("ffn_up.weight"), &[EMBEDDING, FEED_FORWARD], 0.25, 0.0, &mut rng),
-            spec(&name("ffn_down.weight"), &[FEED_FORWARD, EMBEDDING], 0.25, 0.0, &mut rng),
-            spec(&name("post_ffw_norm.weight"), &[EMBEDDING], 0.1, 1.0, &mut rng),
+            spec(
+                &name("ffn_gate.weight"),
+                &[EMBEDDING, FEED_FORWARD],
+                0.25,
+                0.0,
+                &mut rng,
+            ),
+            spec(
+                &name("ffn_up.weight"),
+                &[EMBEDDING, FEED_FORWARD],
+                0.25,
+                0.0,
+                &mut rng,
+            ),
+            spec(
+                &name("ffn_down.weight"),
+                &[FEED_FORWARD, EMBEDDING],
+                0.25,
+                0.0,
+                &mut rng,
+            ),
+            spec(
+                &name("post_ffw_norm.weight"),
+                &[EMBEDDING],
+                0.1,
+                1.0,
+                &mut rng,
+            ),
         ]);
     }
     let metadata = alloc::vec![
-        key("general.architecture", MetadataValue::String("gemma4".to_string())),
-        key("gemma4.embedding_length", MetadataValue::U32(EMBEDDING as u32)),
-        key("gemma4.block_count", MetadataValue::U32(GEMMA4_SLIDING_PATTERN.len() as u32)),
-        key("gemma4.feed_forward_length", MetadataValue::U32(FEED_FORWARD as u32)),
+        key(
+            "general.architecture",
+            MetadataValue::String("gemma4".to_string())
+        ),
+        key(
+            "gemma4.embedding_length",
+            MetadataValue::U32(EMBEDDING as u32)
+        ),
+        key(
+            "gemma4.block_count",
+            MetadataValue::U32(GEMMA4_SLIDING_PATTERN.len() as u32)
+        ),
+        key(
+            "gemma4.feed_forward_length",
+            MetadataValue::U32(FEED_FORWARD as u32)
+        ),
         key("gemma4.attention.head_count", MetadataValue::U32(1)),
         key("gemma4.attention.head_count_kv", MetadataValue::U32(1)),
-        key("gemma4.attention.key_length", MetadataValue::U32(FULL_HEAD_DIM as u32)),
-        key("gemma4.attention.value_length", MetadataValue::U32(FULL_HEAD_DIM as u32)),
-        key("gemma4.attention.key_length_swa", MetadataValue::U32(SLIDING_HEAD_DIM as u32)),
-        key("gemma4.attention.value_length_swa", MetadataValue::U32(SLIDING_HEAD_DIM as u32)),
-        key("gemma4.attention.sliding_window", MetadataValue::U32(SLIDING_WINDOW)),
+        key(
+            "gemma4.attention.key_length",
+            MetadataValue::U32(FULL_HEAD_DIM as u32)
+        ),
+        key(
+            "gemma4.attention.value_length",
+            MetadataValue::U32(FULL_HEAD_DIM as u32)
+        ),
+        key(
+            "gemma4.attention.key_length_swa",
+            MetadataValue::U32(SLIDING_HEAD_DIM as u32)
+        ),
+        key(
+            "gemma4.attention.value_length_swa",
+            MetadataValue::U32(SLIDING_HEAD_DIM as u32)
+        ),
+        key(
+            "gemma4.attention.sliding_window",
+            MetadataValue::U32(SLIDING_WINDOW)
+        ),
         key(
             "gemma4.attention.sliding_window_pattern",
             MetadataValue::Array(MetadataArray::Bool(GEMMA4_SLIDING_PATTERN.to_vec())),
         ),
         key("gemma4.rope.freq_base", MetadataValue::F32(1.0e6)),
         key("gemma4.rope.freq_base_swa", MetadataValue::F32(1.0e4)),
-        key("gemma4.rope.dimension_count", MetadataValue::U32(FULL_HEAD_DIM as u32)),
-        key("gemma4.rope.dimension_count_swa", MetadataValue::U32(SLIDING_HEAD_DIM as u32)),
-        key("tokenizer.ggml.model", MetadataValue::String("gpt2".to_string())),
+        key(
+            "gemma4.rope.dimension_count",
+            MetadataValue::U32(FULL_HEAD_DIM as u32)
+        ),
+        key(
+            "gemma4.rope.dimension_count_swa",
+            MetadataValue::U32(SLIDING_HEAD_DIM as u32)
+        ),
+        key(
+            "tokenizer.ggml.model",
+            MetadataValue::String("gpt2".to_string())
+        ),
         key("tokenizer.ggml.tokens", tokens()),
-        key("tokenizer.ggml.merges", MetadataValue::Array(MetadataArray::String(Vec::new()))),
+        key(
+            "tokenizer.ggml.merges",
+            MetadataValue::Array(MetadataArray::String(Vec::new()))
+        ),
     ];
     encode(metadata, &specs)
 }
@@ -161,25 +258,82 @@ fn dense_checkpoint() -> Vec<u8> {
         specs.extend([
             spec(&name("attn_norm.weight"), &[EMBEDDING], 0.1, 1.0, &mut rng),
             spec(&name("ffn_norm.weight"), &[EMBEDDING], 0.1, 1.0, &mut rng),
-            spec(&name("attn_q.weight"), &[EMBEDDING, projection], 0.25, 0.0, &mut rng),
-            spec(&name("attn_k.weight"), &[EMBEDDING, projection], 0.25, 0.0, &mut rng),
-            spec(&name("attn_v.weight"), &[EMBEDDING, projection], 0.25, 0.0, &mut rng),
-            spec(&name("attn_output.weight"), &[projection, EMBEDDING], 0.25, 0.0, &mut rng),
-            spec(&name("ffn_gate.weight"), &[EMBEDDING, FEED_FORWARD], 0.25, 0.0, &mut rng),
-            spec(&name("ffn_up.weight"), &[EMBEDDING, FEED_FORWARD], 0.25, 0.0, &mut rng),
-            spec(&name("ffn_down.weight"), &[FEED_FORWARD, EMBEDDING], 0.25, 0.0, &mut rng),
+            spec(
+                &name("attn_q.weight"),
+                &[EMBEDDING, projection],
+                0.25,
+                0.0,
+                &mut rng,
+            ),
+            spec(
+                &name("attn_k.weight"),
+                &[EMBEDDING, projection],
+                0.25,
+                0.0,
+                &mut rng,
+            ),
+            spec(
+                &name("attn_v.weight"),
+                &[EMBEDDING, projection],
+                0.25,
+                0.0,
+                &mut rng,
+            ),
+            spec(
+                &name("attn_output.weight"),
+                &[projection, EMBEDDING],
+                0.25,
+                0.0,
+                &mut rng,
+            ),
+            spec(
+                &name("ffn_gate.weight"),
+                &[EMBEDDING, FEED_FORWARD],
+                0.25,
+                0.0,
+                &mut rng,
+            ),
+            spec(
+                &name("ffn_up.weight"),
+                &[EMBEDDING, FEED_FORWARD],
+                0.25,
+                0.0,
+                &mut rng,
+            ),
+            spec(
+                &name("ffn_down.weight"),
+                &[FEED_FORWARD, EMBEDDING],
+                0.25,
+                0.0,
+                &mut rng,
+            ),
         ]);
     }
     let metadata = alloc::vec![
-        key("general.architecture", MetadataValue::String("llama".to_string())),
-        key("llama.embedding_length", MetadataValue::U32(EMBEDDING as u32)),
-        key("llama.feed_forward_length", MetadataValue::U32(FEED_FORWARD as u32)),
+        key(
+            "general.architecture",
+            MetadataValue::String("llama".to_string())
+        ),
+        key(
+            "llama.embedding_length",
+            MetadataValue::U32(EMBEDDING as u32)
+        ),
+        key(
+            "llama.feed_forward_length",
+            MetadataValue::U32(FEED_FORWARD as u32)
+        ),
         key("llama.attention.head_count", MetadataValue::U32(1)),
         key("llama.attention.head_count_kv", MetadataValue::U32(1)),
         key("llama.block_count", MetadataValue::U32(DENSE_LAYERS as u32)),
-        key("tokenizer.ggml.model", MetadataValue::String("gpt2".to_string())),
+        key(
+            "tokenizer.ggml.model",
+            MetadataValue::String("gpt2".to_string())
+        ),
         key("tokenizer.ggml.tokens", tokens()),
-        key("tokenizer.ggml.merges", MetadataValue::Array(MetadataArray::String(Vec::new()))),
+        key(
+            "tokenizer.ggml.merges",
+            MetadataValue::Array(MetadataArray::String(Vec::new()))
+        ),
     ];
     encode(metadata, &specs)
 }
@@ -207,7 +361,11 @@ fn prefill(model: &LoadedModel<'_>, prompt: &str, ubatch_size: u32) -> Prefilled
     prefill_with(model, prompt, &config(ubatch_size))
 }
 
-pub(super) fn prefill_with(model: &LoadedModel<'_>, prompt: &str, serving_config: &ServingConfig<'_>) -> Prefilled {
+pub(super) fn prefill_with(
+    model: &LoadedModel<'_>,
+    prompt: &str,
+    serving_config: &ServingConfig<'_>,
+) -> Prefilled {
     let evaluation_capture = EvaluationCapture::install();
     let mut runtime = BackendRuntime::new(serving_config);
     let mut collected: Vec<Vec<f32>> = Vec::new();
@@ -227,7 +385,9 @@ pub(super) fn prefill_with(model: &LoadedModel<'_>, prompt: &str, serving_config
             None,
         )
         .expect("the synthetic checkpoint prefills");
-    let logits = collected.pop().expect("the last prefill chunk requested logits");
+    let logits = collected
+        .pop()
+        .expect("the last prefill chunk requested logits");
     Prefilled {
         logits,
         state,
@@ -262,7 +422,11 @@ impl EvaluationCapture {
                 .expect("the in-memory evaluation recorder starts"),
         );
         set_default_recorder(Arc::clone(&recorder));
-        Self { recorder, pipe, _serialized: serialized }
+        Self {
+            recorder,
+            pipe,
+            _serialized: serialized,
+        }
     }
 
     fn rows(&self) -> Vec<usize> {
@@ -272,7 +436,10 @@ impl EvaluationCapture {
             .iter()
             .flat_map(|log| log.attrs.iter())
             .filter_map(|tag| match tag {
-                Tag::Scalar { key: "rows", value: ScalarValue::U64(rows) } => usize::try_from(*rows).ok(),
+                Tag::Scalar {
+                    key: "rows",
+                    value: ScalarValue::U64(rows),
+                } => usize::try_from(*rows).ok(),
                 _ => None,
             })
             .collect()
@@ -284,9 +451,12 @@ fn cache_rows(state: &PrefixState) -> Vec<f32> {
         .layer_caches
         .iter()
         .flat_map(|cache| match cache {
-            LayerCacheState::Attention(layer) => {
-                [layer.k_even.as_slice(), layer.k_odd.as_slice(), layer.v.as_slice()].concat()
-            }
+            LayerCacheState::Attention(layer) => [
+                layer.k_even.as_slice(),
+                layer.k_odd.as_slice(),
+                layer.v.as_slice(),
+            ]
+            .concat(),
             _ => Vec::new(),
         })
         .collect()
@@ -307,8 +477,14 @@ fn gamma(reductions: usize) -> f64 {
 }
 
 fn worst_relative_error(reference: &[f32], candidate: &[f32]) -> f64 {
-    assert_eq!(reference.len(), candidate.len(), "both runs hold the same row count");
-    let scale = reference.iter().fold(0.0f64, |peak, value| peak.max(f64::from(value.abs())));
+    assert_eq!(
+        reference.len(),
+        candidate.len(),
+        "both runs hold the same row count"
+    );
+    let scale = reference
+        .iter()
+        .fold(0.0f64, |peak, value| peak.max(f64::from(value.abs())));
     reference
         .iter()
         .zip(candidate)
@@ -350,22 +526,47 @@ fn chunked_prefill_matches_one_evaluation_on_two_range_gemma4() {
     let bound = GEMMA4_SLIDING_PATTERN.len() as f64
         * DEPENDENT_REDUCTIONS_PER_LAYER as f64
         * gamma(MAX_REDUCTION.max(prompt_rows));
-    assert!(prompt_rows > 33, "the widest chunk must be shorter than the prompt: {prompt_rows}");
-    assert_eq!(reference.evaluation_rows, [prompt_rows], "ubatch 0 is one evaluation");
+    assert!(
+        prompt_rows > 33,
+        "the widest chunk must be shorter than the prompt: {prompt_rows}"
+    );
+    assert_eq!(
+        reference.evaluation_rows,
+        [prompt_rows],
+        "ubatch 0 is one evaluation"
+    );
 
     for width in [3u32, 7, 16, 33] {
         let chunked = prefill(&model, &prompt, width);
-        assert_eq!(chunked.state.len(), prompt_rows, "width {width} caches every row");
-        assert_eq!(chunked.evaluation_rows, chunk_rows(width, prompt_rows), "width {width}");
-        let rows_error = worst_relative_error(&cache_rows(&reference.state), &cache_rows(&chunked.state));
+        assert_eq!(
+            chunked.state.len(),
+            prompt_rows,
+            "width {width} caches every row"
+        );
+        assert_eq!(
+            chunked.evaluation_rows,
+            chunk_rows(width, prompt_rows),
+            "width {width}"
+        );
+        let rows_error =
+            worst_relative_error(&cache_rows(&reference.state), &cache_rows(&chunked.state));
         let logits_error = worst_relative_error(&reference.logits, &chunked.logits);
-        assert!(rows_error <= bound, "width {width}: cached rows differ by {rows_error} > {bound}");
-        assert!(logits_error <= bound, "width {width}: logits differ by {logits_error} > {bound}");
+        assert!(
+            rows_error <= bound,
+            "width {width}: cached rows differ by {rows_error} > {bound}"
+        );
+        assert!(
+            logits_error <= bound,
+            "width {width}: logits differ by {logits_error} > {bound}"
+        );
     }
 
     let changed = prefill(&model, &prompt_of(40, '4'), 0);
     let control_error = worst_relative_error(&reference.logits, &changed.logits);
-    assert!(control_error > bound, "control moved logits by {control_error}, not above {bound}");
+    assert!(
+        control_error > bound,
+        "control moved logits by {control_error}, not above {bound}"
+    );
 }
 
 /// A dense checkpoint's prefill of `L` rows at `-ub C` is `ceil(L / C)`
@@ -385,7 +586,10 @@ fn chunked_prefill_evaluation_count_is_ceil_of_rows_over_ubatch() {
             chunk_rows(width, prompt_rows),
             "width {width} over {prompt_rows} rows"
         );
-        assert_eq!(chunked.evaluation_rows.len(), prompt_rows.div_ceil(width as usize));
+        assert_eq!(
+            chunked.evaluation_rows.len(),
+            prompt_rows.div_ceil(width as usize)
+        );
     }
 }
 
@@ -418,9 +622,24 @@ fn chunked_prefill_chunk_count_edges() {
 /// configuration's doing. 160 is `omega-runtime.toml`'s `[tiled_gemm].min_tokens`.
 #[test]
 fn ubatch_below_the_row_threshold_forgoes_the_kernel_only_for_a_long_enough_prompt() {
-    assert!(ubatch_forgoes_row_kernel(32, 971, 160), "-ub 32 on a 971-row prompt");
-    assert!(!ubatch_forgoes_row_kernel(512, 971, 160), "-ub 512 clears the threshold");
-    assert!(!ubatch_forgoes_row_kernel(160, 971, 160), "-ub equal to the threshold clears it");
-    assert!(!ubatch_forgoes_row_kernel(0, 971, 160), "-ub 0 is the single pass");
-    assert!(!ubatch_forgoes_row_kernel(32, 100, 160), "a short prompt misses the kernel on its own");
+    assert!(
+        ubatch_forgoes_row_kernel(32, 971, 160),
+        "-ub 32 on a 971-row prompt"
+    );
+    assert!(
+        !ubatch_forgoes_row_kernel(512, 971, 160),
+        "-ub 512 clears the threshold"
+    );
+    assert!(
+        !ubatch_forgoes_row_kernel(160, 971, 160),
+        "-ub equal to the threshold clears it"
+    );
+    assert!(
+        !ubatch_forgoes_row_kernel(0, 971, 160),
+        "-ub 0 is the single pass"
+    );
+    assert!(
+        !ubatch_forgoes_row_kernel(32, 100, 160),
+        "a short prompt misses the kernel on its own"
+    );
 }

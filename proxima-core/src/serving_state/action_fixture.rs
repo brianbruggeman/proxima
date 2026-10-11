@@ -98,7 +98,11 @@ fn verify_rows(environment: &Environment, draft: &[Action]) -> (Vec<Action>, Vec
 }
 
 pub(crate) fn run_speculative(accept_policy: impl Fn(&[Action], &[Action]) -> usize) -> Trace {
-    let genesis = Action { key: 0, delta: 0, version: 0 };
+    let genesis = Action {
+        key: 0,
+        delta: 0,
+        version: 0,
+    };
     let mut state = ServingState::start(Vec::new(), Environment::default())
         .advance_prefill(genesis, Environment::default())
         .expect("a fresh prefill state advances to decode");
@@ -106,12 +110,19 @@ pub(crate) fn run_speculative(accept_policy: impl Fn(&[Action], &[Action]) -> us
     let mut history: Vec<Action> = Vec::with_capacity(TARGET_STEPS);
     let (mut rounds, mut rejected_rounds, mut accepted_rows) = (0, 0, 0);
     while history.len() < TARGET_STEPS {
-        let ServingState::Decode { cache: environment, .. } = &state else {
+        let ServingState::Decode {
+            cache: environment, ..
+        } = &state
+        else {
             panic!("speculation loop expects a decode state at the top of a round");
         };
         let environment = environment.clone();
         let rows = (TARGET_STEPS - history.len()).min(DRAFT_ROWS);
-        let base = if rounds % 3 == 2 { &previous } else { &environment };
+        let base = if rounds % 3 == 2 {
+            &previous
+        } else {
+            &environment
+        };
         let draft = draft_from(base, rows);
         let (observed, row_caches) = verify_rows(&environment, &draft);
         let accepted = accept_policy(&draft, &observed);
@@ -138,8 +149,17 @@ pub(crate) fn run_speculative(accept_policy: impl Fn(&[Action], &[Action]) -> us
         previous = environment;
         rounds += 1;
     }
-    let ServingState::Decode { cache: environment, .. } = state else {
+    let ServingState::Decode {
+        cache: environment, ..
+    } = state
+    else {
         panic!("speculation loop ends in a decode state");
     };
-    Trace { history, environment, rounds, rejected_rounds, accepted_rows }
+    Trace {
+        history,
+        environment,
+        rounds,
+        rejected_rounds,
+        accepted_rows,
+    }
 }

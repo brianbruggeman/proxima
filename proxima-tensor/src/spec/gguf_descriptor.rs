@@ -39,8 +39,11 @@ pub fn sliding_pattern_descriptor_from_gguf(
     let block_count = metadata_u32(parsed, &key("block_count"))?;
     let kv_heads_by_layer =
         metadata_u32_per_layer(parsed, &key("attention.head_count_kv"), block_count)?;
-    let sliding_window_pattern =
-        metadata_bool_per_layer(parsed, &key("attention.sliding_window_pattern"), block_count)?;
+    let sliding_window_pattern = metadata_bool_per_layer(
+        parsed,
+        &key("attention.sliding_window_pattern"),
+        block_count,
+    )?;
     let feed_forward_by_layer =
         metadata_u32_per_layer(parsed, &key("feed_forward_length"), block_count)?;
     let expert_count = metadata_u32_optional(parsed, &key("expert_count"));
@@ -50,7 +53,10 @@ pub fn sliding_pattern_descriptor_from_gguf(
     let key_length_swa = metadata_u32(parsed, &key("attention.key_length_swa"))?;
     let sliding_window = metadata_u32(parsed, &key("attention.sliding_window"))?;
     let softcap = metadata_f32_optional(parsed, &key("final_logit_softcapping"), 0.0);
-    let rotary_dim = rotary_or_head_dim(metadata_u32_optional(parsed, &key("rope.dimension_count")), key_length);
+    let rotary_dim = rotary_or_head_dim(
+        metadata_u32_optional(parsed, &key("rope.dimension_count")),
+        key_length,
+    );
     let rotary_dim_swa = rotary_or_head_dim(
         metadata_u32_optional(parsed, &key("rope.dimension_count_swa")),
         key_length_swa,
@@ -99,11 +105,19 @@ pub fn sliding_pattern_descriptor_from_gguf(
         .zip(&feed_forward_by_layer)
         .enumerate()
         .map(|(layer, ((&is_sliding, &kv_heads), &feed_forward))| {
-            let template = if is_sliding { sliding.clone() } else { full.clone() };
-            let attention = LayerAttentionConfig { kv_heads, ..template };
+            let template = if is_sliding {
+                sliding.clone()
+            } else {
+                full.clone()
+            };
+            let attention = LayerAttentionConfig {
+                kv_heads,
+                ..template
+            };
             // a shared layer's V is already post-norm, re-norming would double-apply
             let attention = if layer as u32 >= first_shared_idx {
-                let source = shared_kv_source_layer(&sliding_window_pattern, first_shared_idx, layer);
+                let source =
+                    shared_kv_source_layer(&sliding_window_pattern, first_shared_idx, layer);
                 LayerAttentionConfig {
                     key_source_kind: KeySourceKind::SharedFromLayer(source),
                     value_source_kind: ValueSourceKind::SharedFromLayer(source),
@@ -124,7 +138,10 @@ pub fn sliding_pattern_descriptor_from_gguf(
         })
         .collect();
 
-    let cache_strategy = if layers.iter().all(|entry| entry.kind == LayerKind::Attention) {
+    let cache_strategy = if layers
+        .iter()
+        .all(|entry| entry.kind == LayerKind::Attention)
+    {
         CacheStrategy::Cached
     } else {
         CacheStrategy::Cacheless
@@ -176,7 +193,11 @@ pub fn sliding_pattern_descriptor_from_gguf(
 /// `first_shared_idx` with the same sliding-vs-full kind (ollama
 /// the reference Go source, lines 590-611). Falls back to `first_shared_idx - 1` when no layer
 /// of that kind precedes it, which no real checkpoint reaches.
-fn shared_kv_source_layer(sliding_window_pattern: &[bool], first_shared_idx: u32, layer: usize) -> u32 {
+fn shared_kv_source_layer(
+    sliding_window_pattern: &[bool],
+    first_shared_idx: u32,
+    layer: usize,
+) -> u32 {
     let is_sliding = sliding_window_pattern[layer];
     (0..first_shared_idx as usize)
         .rev()
@@ -188,7 +209,10 @@ fn missing(name: &str) -> TensorError {
     TensorError::MissingGgufEntry { name: name.into() }
 }
 
-fn metadata_str<'parsed>(parsed: &'parsed ParsedGguf, key: &str) -> Result<&'parsed str, TensorError> {
+fn metadata_str<'parsed>(
+    parsed: &'parsed ParsedGguf,
+    key: &str,
+) -> Result<&'parsed str, TensorError> {
     parsed
         .metadata_value(key)
         .and_then(MetadataValue::as_str)
@@ -236,7 +260,11 @@ fn per_layer_len(key: &str, block_count: u32, found: usize) -> Result<(), Tensor
     })
 }
 
-fn metadata_u32_per_layer(parsed: &ParsedGguf, key: &str, block_count: u32) -> Result<Vec<u32>, TensorError> {
+fn metadata_u32_per_layer(
+    parsed: &ParsedGguf,
+    key: &str,
+    block_count: u32,
+) -> Result<Vec<u32>, TensorError> {
     match parsed.metadata_value(key) {
         Some(MetadataValue::U32(value)) => Ok(alloc::vec![*value; block_count as usize]),
         Some(MetadataValue::I32(value)) => u32::try_from(*value)
@@ -257,7 +285,11 @@ fn metadata_u32_per_layer(parsed: &ParsedGguf, key: &str, block_count: u32) -> R
     }
 }
 
-fn metadata_bool_per_layer(parsed: &ParsedGguf, key: &str, block_count: u32) -> Result<Vec<bool>, TensorError> {
+fn metadata_bool_per_layer(
+    parsed: &ParsedGguf,
+    key: &str,
+    block_count: u32,
+) -> Result<Vec<bool>, TensorError> {
     match parsed.metadata_value(key) {
         Some(MetadataValue::Array(MetadataArray::Bool(values))) => {
             per_layer_len(key, block_count, values.len())?;
@@ -277,7 +309,10 @@ fn vocab_from_token_embedding(parsed: &ParsedGguf, embedding: u32) -> Result<u32
     let elements = tensor.element_count();
     let divisor = u64::from(embedding);
     if divisor == 0 || !elements.is_multiple_of(divisor) {
-        return Err(TensorError::GgufVocabShapeMismatch { elements, embedding });
+        return Err(TensorError::GgufVocabShapeMismatch {
+            elements,
+            embedding,
+        });
     }
     Ok((elements / divisor) as u32)
 }

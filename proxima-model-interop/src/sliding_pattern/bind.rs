@@ -10,7 +10,6 @@
 //! on `scheduled_forward_program_with_experts` before touching this file -- every
 //! knob the descriptor sets is documented there, not here.
 
-
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{ModelDescriptor, sliding_pattern_descriptor_from_gguf};
 
@@ -29,7 +28,11 @@ pub fn descriptor_from_gguf(
     sliding_kv_ring: bool,
 ) -> Result<ModelDescriptor, InteropError> {
     let profile = family_profile(metadata_str(parsed, "general.architecture")?)?;
-    Ok(sliding_pattern_descriptor_from_gguf(parsed, sliding_kv_ring, &profile)?)
+    Ok(sliding_pattern_descriptor_from_gguf(
+        parsed,
+        sliding_kv_ring,
+        &profile,
+    )?)
 }
 
 /// `PROXIMA_HEAD_REPEATS=1|2|3` (unset or unparsable reads as `1`): the

@@ -35,15 +35,15 @@ use alloc::vec::Vec;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::tensor::TensorInfo;
 use proxima_gguf::types::GgmlType;
+use proxima_tensor::IndexPattern;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{Extent, Op, Reduce, ScalarOp};
-use proxima_tensor::IndexPattern;
 
 use crate::bind::{
     BoundWeights, aligned_f32_view, as_block, bind_dense_as, bind_matmul_weight_as,
-    bind_matmul_weight_paired, bind_matmul_weight_triple, bind_moe_expert_weights,
-    bind_moe_stacked_experts, bind_native_f32, bind_matmul_weight_transposed_f32,
-    codec_from_ggml_type, reinterpret_f32,
+    bind_matmul_weight_paired, bind_matmul_weight_transposed_f32, bind_matmul_weight_triple,
+    bind_moe_expert_weights, bind_moe_stacked_experts, bind_native_f32, codec_from_ggml_type,
+    reinterpret_f32,
 };
 use crate::error::InteropError;
 use crate::profiles::{BindingProfile, TensorAlias};
@@ -200,7 +200,8 @@ fn resolve<'directory>(
                     of: *of,
                 }),
             TensorAlias::Join { from, .. } => {
-                let names: Vec<String> = from.iter().map(|part| format!("{prefix}{part}")).collect();
+                let names: Vec<String> =
+                    from.iter().map(|part| format!("{prefix}{part}")).collect();
                 names
                     .iter()
                     .all(|name| directory.contains_key(name.as_str()))
@@ -222,7 +223,9 @@ fn bind_leaf<'file>(
             check_elements(leaf, tensor, tensor.element_count())?;
             bind_direct(parsed, file_bytes, binding, leaf, tensor, state)
         }
-        Source::Part { tensor, part, of } => bind_part(parsed, file_bytes, leaf, tensor, *part, *of, state),
+        Source::Part { tensor, part, of } => {
+            bind_part(parsed, file_bytes, leaf, tensor, *part, *of, state)
+        }
         Source::Join(names) => bind_join(parsed, file_bytes, leaf.name, names, state),
     }
 }
@@ -297,15 +300,9 @@ fn bind_join<'file>(
         [first, second] => {
             bind_matmul_weight_paired(parsed, file_bytes, first, second, leaf.into(), state)
         }
-        [first, second, third] => bind_matmul_weight_triple(
-            parsed,
-            file_bytes,
-            first,
-            second,
-            third,
-            leaf.into(),
-            state,
-        ),
+        [first, second, third] => {
+            bind_matmul_weight_triple(parsed, file_bytes, first, second, third, leaf.into(), state)
+        }
         _ => Err(InteropError::UnknownTensor { name: leaf.into() }),
     }
 }
@@ -370,7 +367,9 @@ fn bind_part<'file>(
         assembled.extend_from_slice(slice_of(outer_index));
     }
     state.resident_bytes += assembled.len();
-    state.packed_owned.push((leaf.name.into(), assembled, codec));
+    state
+        .packed_owned
+        .push((leaf.name.into(), assembled, codec));
     Ok(())
 }
 
@@ -382,7 +381,9 @@ fn push_borrowed_part<'file>(
 ) -> Result<(), InteropError> {
     if tensor.ggml_type == GgmlType::F32 {
         match aligned_f32_view(slice) {
-            Some(view) => state.packed.push((leaf.into(), QuantizedBlock::Float32(view))),
+            Some(view) => state
+                .packed
+                .push((leaf.into(), QuantizedBlock::Float32(view))),
             None => {
                 let owned = reinterpret_f32(slice);
                 state.resident_bytes += owned.len() * core::mem::size_of::<f32>();
@@ -410,8 +411,14 @@ fn bind_per_expert_stack<'file>(
     leaf: &Leaf<'_>,
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
-    let (Role::Gathered, [Extent::Static(experts), Extent::Static(input), Extent::Static(output)]) =
-        (leaf.role, leaf.shape)
+    let (
+        Role::Gathered,
+        [
+            Extent::Static(experts),
+            Extent::Static(input),
+            Extent::Static(output),
+        ],
+    ) = (leaf.role, leaf.shape)
     else {
         return Ok(());
     };
@@ -591,7 +598,10 @@ mod tests {
     }
 
     fn f32_bytes(values: &[f32]) -> Vec<u8> {
-        values.iter().flat_map(|value| value.to_le_bytes()).collect()
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
     }
 
     fn input(program: &mut Vec<Op>, name: &str, extents: &[u32]) -> NodeId {
@@ -669,7 +679,12 @@ mod tests {
     #[test]
     fn a_matmul_weight_the_program_declares_in_out_binds_transposed_f32() {
         let stored: Vec<f32> = (0..6).map(|value| value as f32).collect();
-        let bytes = gguf(&[("blk.0.ffn_down.weight", &[3, 2], GgmlType::F32, &f32_bytes(&stored))]);
+        let bytes = gguf(&[(
+            "blk.0.ffn_down.weight",
+            &[3, 2],
+            GgmlType::F32,
+            &f32_bytes(&stored),
+        )]);
         let program = contraction("blk.0.ffn_down.weight", &[3, 2], [2, 1]);
 
         let weights = bind(&bytes, &program, &defaults()).expect("binds");
@@ -684,7 +699,12 @@ mod tests {
     #[test]
     fn a_leaf_the_program_declares_out_in_binds_as_stored() {
         let stored: Vec<f32> = (0..6).map(|value| value as f32).collect();
-        let bytes = gguf(&[("blk.0.ffn_down.weight", &[3, 2], GgmlType::F32, &f32_bytes(&stored))]);
+        let bytes = gguf(&[(
+            "blk.0.ffn_down.weight",
+            &[3, 2],
+            GgmlType::F32,
+            &f32_bytes(&stored),
+        )]);
         let program = contraction("blk.0.ffn_down.weight", &[2, 3], [1, 2]);
 
         let weights = bind(&bytes, &program, &defaults()).expect("binds");
@@ -698,7 +718,12 @@ mod tests {
 
     #[test]
     fn a_leaf_no_tensor_names_is_a_runtime_input_and_binds_nothing() {
-        let bytes = gguf(&[("blk.0.ffn_down.weight", &[3, 2], GgmlType::F32, &f32_bytes(&[0.0; 6]))]);
+        let bytes = gguf(&[(
+            "blk.0.ffn_down.weight",
+            &[3, 2],
+            GgmlType::F32,
+            &f32_bytes(&[0.0; 6]),
+        )]);
         let program = contraction("blk.0.ffn_down.weight", &[3, 2], [2, 1]);
 
         let weights = bind(&bytes, &program, &defaults()).expect("binds");
@@ -709,13 +734,22 @@ mod tests {
             .map(|(name, _)| name.as_str())
             .chain(weights.packed().iter().map(|(name, _)| name.as_str()))
             .collect();
-        assert_eq!(bound, ["blk.0.ffn_down.weight"], "`activations` is fed per step, never bound");
+        assert_eq!(
+            bound,
+            ["blk.0.ffn_down.weight"],
+            "`activations` is fed per step, never bound"
+        );
     }
 
     #[test]
     fn a_tied_output_reads_the_embedding_table_through_the_default_alias() {
         let stored: Vec<f32> = (0..6).map(|value| value as f32).collect();
-        let bytes = gguf(&[("token_embd.weight", &[3, 2], GgmlType::F32, &f32_bytes(&stored))]);
+        let bytes = gguf(&[(
+            "token_embd.weight",
+            &[3, 2],
+            GgmlType::F32,
+            &f32_bytes(&stored),
+        )]);
         let program = contraction("output.weight", &[3, 2], [2, 1]);
 
         let weights = bind(&bytes, &program, &defaults()).expect("binds");
@@ -738,24 +772,43 @@ mod tests {
         let profile = defaults();
         let down = contraction("blk.0.ffn_down.weight", &[3, 2], [2, 1]);
         let up = contraction("blk.0.ffn_up.weight", &[3, 2], [2, 1]);
-        let mut weights = bind_program_leaves(&parsed, &bytes, &down, &profile, &[]).expect("binds");
+        let mut weights =
+            bind_program_leaves(&parsed, &bytes, &down, &profile, &[]).expect("binds");
 
-        bind_missing_leaves(&parsed, &bytes, &up, &profile, &mut weights).expect("adds the new leaf");
-        bind_missing_leaves(&parsed, &bytes, &down, &profile, &mut weights).expect("leaves the bound one");
+        bind_missing_leaves(&parsed, &bytes, &up, &profile, &mut weights)
+            .expect("adds the new leaf");
+        bind_missing_leaves(&parsed, &bytes, &down, &profile, &mut weights)
+            .expect("leaves the bound one");
 
-        let names: Vec<&str> = weights.owned().iter().map(|(name, _)| name.as_str()).collect();
+        let names: Vec<&str> = weights
+            .owned()
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
         assert_eq!(names, ["blk.0.ffn_down.weight", "blk.0.ffn_up.weight"]);
     }
 
     #[test]
     fn a_leaf_whose_element_count_disagrees_with_its_tensor_is_refused() {
-        let bytes = gguf(&[("blk.0.ffn_down.weight", &[3, 2], GgmlType::F32, &f32_bytes(&[0.0; 6]))]);
+        let bytes = gguf(&[(
+            "blk.0.ffn_down.weight",
+            &[3, 2],
+            GgmlType::F32,
+            &f32_bytes(&[0.0; 6]),
+        )]);
         let program = contraction("blk.0.ffn_down.weight", &[3, 3], [2, 1]);
 
         let refused = bind(&bytes, &program, &defaults());
 
         assert!(
-            matches!(refused, Err(InteropError::LeafShapeMismatch { leaf_elements: 9, tensor_elements: 6, .. })),
+            matches!(
+                refused,
+                Err(InteropError::LeafShapeMismatch {
+                    leaf_elements: 9,
+                    tensor_elements: 6,
+                    ..
+                })
+            ),
             "got {:?}",
             refused.err()
         );
@@ -791,11 +844,20 @@ mod tests {
                 name: None,
             }),
         );
-        let bytes = gguf(&[("blk.0.ffn_down.weight", &[3, 2, 2], GgmlType::F32, &f32_bytes(&[0.0; 12]))]);
+        let bytes = gguf(&[(
+            "blk.0.ffn_down.weight",
+            &[3, 2, 2],
+            GgmlType::F32,
+            &f32_bytes(&[0.0; 12]),
+        )]);
 
         let refused = bind(&bytes, &program, &defaults());
 
-        assert!(matches!(refused, Err(InteropError::LeafAxesInterleaved { .. })), "got {:?}", refused.err());
+        assert!(
+            matches!(refused, Err(InteropError::LeafAxesInterleaved { .. })),
+            "got {:?}",
+            refused.err()
+        );
     }
 
     fn quantized_rows(rows: usize, row_value: impl Fn(usize) -> f32) -> Vec<u8> {
@@ -817,28 +879,49 @@ mod tests {
     #[test]
     fn a_part_alias_borrows_each_third_of_a_fused_projection_in_row_order() {
         let fused = quantized_rows(768, |row| row as f32);
-        let bytes = gguf(&[("blk.0.shortconv.in_proj.weight", &[256, 768], GgmlType::Q4_K, &fused)]);
+        let bytes = gguf(&[(
+            "blk.0.shortconv.in_proj.weight",
+            &[256, 768],
+            GgmlType::Q4_K,
+            &fused,
+        )]);
         let mut program = Vec::new();
         for suffix in ["b", "c", "x"] {
-            input(&mut program, &format!("blk.0.shortconv.in_proj.weight.{suffix}"), &[256, 256]);
+            input(
+                &mut program,
+                &format!("blk.0.shortconv.in_proj.weight.{suffix}"),
+                &[256, 256],
+            );
         }
 
         let weights = bind(&bytes, &program, &fused_thirds()).expect("binds");
 
-        assert_eq!(weights.packed().len(), 3, "each third borrows from the mapping");
-        for ((name, block), (suffix, first_row)) in weights
-            .packed()
-            .iter()
-            .zip([("b", 0usize), ("c", 256), ("x", 512)])
+        assert_eq!(
+            weights.packed().len(),
+            3,
+            "each third borrows from the mapping"
+        );
+        for ((name, block), (suffix, first_row)) in
+            weights
+                .packed()
+                .iter()
+                .zip([("b", 0usize), ("c", 256), ("x", 512)])
         {
             assert_eq!(name, &format!("blk.0.shortconv.in_proj.weight.{suffix}"));
-            let QuantizedBlock::Packed { codec: Codec::Q4K, bytes } = block else {
+            let QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes,
+            } = block
+            else {
                 panic!("expected a Q4K slice, got {block:?}");
             };
             let rows = dequantized_row_values(bytes, 256);
             for (offset, value) in rows.iter().enumerate() {
                 let expected = (first_row + offset) as f32;
-                assert!((value - expected).abs() < 0.5, "{suffix} row {offset}: {value} vs {expected}");
+                assert!(
+                    (value - expected).abs() < 0.5,
+                    "{suffix} row {offset}: {value} vs {expected}"
+                );
             }
         }
     }
@@ -846,21 +929,38 @@ mod tests {
     #[test]
     fn a_part_alias_over_a_stack_assembles_each_experts_half_into_its_own_buffer() {
         let fused = quantized_rows(8, |row| (row / 4 * 10 + row % 4) as f32);
-        let bytes = gguf(&[("blk.0.ffn_gate_up_exps.weight", &[256, 4, 2], GgmlType::Q4_K, &fused)]);
+        let bytes = gguf(&[(
+            "blk.0.ffn_gate_up_exps.weight",
+            &[256, 4, 2],
+            GgmlType::Q4_K,
+            &fused,
+        )]);
         let mut program = Vec::new();
         input(&mut program, "blk.0.ffn_gate_exps.weight", &[2, 256, 2]);
         input(&mut program, "blk.0.ffn_up_exps.weight", &[2, 256, 2]);
 
         let weights = bind(&bytes, &program, &defaults()).expect("binds");
 
-        assert!(weights.packed().is_empty(), "a stack's halves are not contiguous, so none borrow");
+        assert!(
+            weights.packed().is_empty(),
+            "a stack's halves are not contiguous, so none borrow"
+        );
         let [(gate_name, gate, gate_codec), (up_name, up, _)] = weights.packed_owned() else {
             panic!("two assembled halves, got {}", weights.packed_owned().len());
         };
-        assert_eq!((gate_name.as_str(), up_name.as_str()), ("blk.0.ffn_gate_exps.weight", "blk.0.ffn_up_exps.weight"));
+        assert_eq!(
+            (gate_name.as_str(), up_name.as_str()),
+            ("blk.0.ffn_gate_exps.weight", "blk.0.ffn_up_exps.weight")
+        );
         assert_eq!(*gate_codec, Codec::Q4K);
         let near = |actual: Vec<f32>, expected: [f32; 4]| {
-            assert!(actual.iter().zip(expected).all(|(left, right)| (left - right).abs() < 0.5), "{actual:?} vs {expected:?}");
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(left, right)| (left - right).abs() < 0.5),
+                "{actual:?} vs {expected:?}"
+            );
         };
         near(dequantized_row_values(gate, 4), [0.0, 1.0, 10.0, 11.0]);
         near(dequantized_row_values(up, 4), [2.0, 3.0, 12.0, 13.0]);
@@ -869,7 +969,12 @@ mod tests {
     #[test]
     fn a_part_alias_that_cannot_cut_whole_rows_is_refused() {
         let fused = quantized_rows(3, |row| row as f32);
-        let bytes = gguf(&[("blk.0.shortconv.in_proj.weight", &[256, 3], GgmlType::Q4_K, &fused)]);
+        let bytes = gguf(&[(
+            "blk.0.shortconv.in_proj.weight",
+            &[256, 3],
+            GgmlType::Q4_K,
+            &fused,
+        )]);
         let mut program = Vec::new();
         input(&mut program, "blk.0.shortconv.in_proj.weight.b", &[384]);
 
@@ -886,14 +991,30 @@ mod tests {
 
         let refused = bind_program_leaves(&parsed, &bytes, &program, &profile, &[]);
 
-        assert!(matches!(refused, Err(InteropError::TensorPartInvalid { rows: 3, of: 2, .. })));
+        assert!(matches!(
+            refused,
+            Err(InteropError::TensorPartInvalid { rows: 3, of: 2, .. })
+        ));
     }
 
     #[test]
     fn a_family_extra_binds_a_tensor_no_leaf_reads() {
-        let bytes = gguf(&[("rope_freqs.weight", &[4], GgmlType::F32, &f32_bytes(&[1.0, 1.0, 1.0e30, 1.0e30]))]);
+        let bytes = gguf(&[(
+            "rope_freqs.weight",
+            &[4],
+            GgmlType::F32,
+            &f32_bytes(&[1.0, 1.0, 1.0e30, 1.0e30]),
+        )]);
 
-        let weights = bind(&bytes, &[], &BindingProfile { extra: vec!["rope_freqs.weight".into()], ..defaults() }).expect("binds");
+        let weights = bind(
+            &bytes,
+            &[],
+            &BindingProfile {
+                extra: vec!["rope_freqs.weight".into()],
+                ..defaults()
+            },
+        )
+        .expect("binds");
 
         let [(name, values)] = weights.owned() else {
             panic!("one owned table, got {}", weights.owned().len());
@@ -939,13 +1060,34 @@ mod tests {
         };
 
         let packed = bind(&bytes, &program, &defaults()).expect("binds without a rule");
-        let decoded = bind(&bytes, &program, &BindingProfile { decode_f32: vec!["ssm_alpha.weight".into()], ..defaults() }).expect("binds with the family rule");
+        let decoded = bind(
+            &bytes,
+            &program,
+            &BindingProfile {
+                decode_f32: vec!["ssm_alpha.weight".into()],
+                ..defaults()
+            },
+        )
+        .expect("binds with the family rule");
 
-        assert!(matches!(packed.packed(), [(_, QuantizedBlock::Packed { codec: Codec::Q4K, .. })]));
+        assert!(matches!(
+            packed.packed(),
+            [(
+                _,
+                QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    ..
+                }
+            )]
+        ));
         let [(_, values)] = decoded.owned() else {
             panic!("one owned weight, got {}", decoded.owned().len());
         };
         assert_eq!(values.len(), 512);
-        assert!((values[0] - 1.0).abs() < 0.5 && (values[1] - 2.0).abs() < 0.5, "input row 0, both outputs: {:?}", &values[..2]);
+        assert!(
+            (values[0] - 1.0).abs() < 0.5 && (values[1] - 2.0).abs() < 0.5,
+            "input row 0, both outputs: {:?}",
+            &values[..2]
+        );
     }
 }

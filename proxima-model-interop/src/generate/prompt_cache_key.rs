@@ -18,14 +18,14 @@
 //! ([`LoadedModel::attach_expert_sidecar`] takes `&mut self`), which clears the
 //! cache instead.
 
-#[cfg(all(feature = "metal", target_os = "macos"))]
-use omega::MathMode;
 #[cfg(all(
     feature = "metal",
     feature = "metal-attn-variants",
     target_os = "macos"
 ))]
 use omega::AttentionVariant;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use omega::MathMode;
 use proxima_tensor::NumericPolicy;
 
 use crate::rope_scaling::RopeScaling;
@@ -249,7 +249,9 @@ mod tests {
     fn cache_key_separates_read_specs() {
         let dense = ServingConfig::default();
         let operand = ServingConfig {
-            attention: AttentionConfig { read: ReadSpec::Operand },
+            attention: AttentionConfig {
+                read: ReadSpec::Operand,
+            },
             ..dense
         };
 

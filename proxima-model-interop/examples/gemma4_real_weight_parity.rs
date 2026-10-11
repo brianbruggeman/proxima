@@ -46,7 +46,9 @@ fn find_input(program: &[Op], name: &str) -> NodeId {
 /// budget). This reproduces the exact same `(Vec<Op>, NodeId, MoeSites)`
 /// `LoadedModel::load` built internally, so its `NodeId`s are the same ones
 /// `LoadedModel::forward_node_values` evaluates against the real blob.
-fn gemma4_program(architecture: &proxima_model_interop::sliding_pattern::SlidingPatternHparams) -> (Vec<Op>, NodeId) {
+fn gemma4_program(
+    architecture: &proxima_model_interop::sliding_pattern::SlidingPatternHparams,
+) -> (Vec<Op>, NodeId) {
     let ffn = LayerFfnConfig {
         post_attention_norm: true,
         combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
@@ -815,8 +817,16 @@ fn main() {
         out_features_v,
     );
 
-    report_diff("STAGE1 layer0 q_raw (pre qk-norm)", engine_q_raw, &reference_q);
-    report_diff("STAGE1 layer0 k_raw (pre qk-norm)", engine_k_raw, &reference_k);
+    report_diff(
+        "STAGE1 layer0 q_raw (pre qk-norm)",
+        engine_q_raw,
+        &reference_q,
+    );
+    report_diff(
+        "STAGE1 layer0 k_raw (pre qk-norm)",
+        engine_k_raw,
+        &reference_k,
+    );
     report_diff(
         "STAGE1 layer0 v_raw0 (pre value_norm)",
         engine_v_raw0,
@@ -841,7 +851,9 @@ fn main() {
     // layer 5's STAGE 2 uses.
     let (qn0_gamma, qn0_dims) = dequant_tensor(&parsed, file_bytes, "blk.0.attn_q_norm.weight");
     let (kn0_gamma, kn0_dims) = dequant_tensor(&parsed, file_bytes, "blk.0.attn_k_norm.weight");
-    println!("blk.0.attn_q_norm.weight: dims={qn0_dims:?} blk.0.attn_k_norm.weight: dims={kn0_dims:?}");
+    println!(
+        "blk.0.attn_q_norm.weight: dims={qn0_dims:?} blk.0.attn_k_norm.weight: dims={kn0_dims:?}"
+    );
     let reference_q_normed0 = rmsnorm_per_head_raw_gamma_ref(
         engine_q_raw,
         &qn0_gamma,
@@ -1092,15 +1104,25 @@ fn main() {
         embedding,
         out_features_k5,
     );
-    report_diff("STAGE1 layer5 q_raw (pre qk-norm)", engine_q_raw5, &reference_q_raw5);
-    report_diff("STAGE1 layer5 k_raw (pre qk-norm)", engine_k_raw5, &reference_k_raw5);
+    report_diff(
+        "STAGE1 layer5 q_raw (pre qk-norm)",
+        engine_q_raw5,
+        &reference_q_raw5,
+    );
+    report_diff(
+        "STAGE1 layer5 k_raw (pre qk-norm)",
+        engine_k_raw5,
+        &reference_k_raw5,
+    );
 
     // STAGE 2: q_normed5/k_normed5 -- independent rmsnorm_per_head with the
     // RAW (no +1) q_norm/k_norm gamma, over the FULL head_dim=512, confirming
     // both the RAW-gamma binding AND the per-head reduction axis.
     let (qn5_gamma, qn5_dims) = dequant_tensor(&parsed, file_bytes, "blk.5.attn_q_norm.weight");
     let (kn5_gamma, kn5_dims) = dequant_tensor(&parsed, file_bytes, "blk.5.attn_k_norm.weight");
-    println!("blk.5.attn_q_norm.weight: dims={qn5_dims:?} blk.5.attn_k_norm.weight: dims={kn5_dims:?}");
+    println!(
+        "blk.5.attn_q_norm.weight: dims={qn5_dims:?} blk.5.attn_k_norm.weight: dims={kn5_dims:?}"
+    );
     let reference_q_normed5 = rmsnorm_per_head_raw_gamma_ref(
         engine_q_raw5,
         &qn5_gamma,
@@ -1439,11 +1461,20 @@ fn main() {
         let engine_combined = taps_values[6];
         let engine_x = taps_values[7];
 
-        let (post_ffw_norm_gamma, _) =
-            dequant_tensor(&parsed, file_bytes, &format!("blk.{layer}.post_ffw_norm.weight"));
-        let (layer_output_scale, layer_output_scale_dims) =
-            dequant_tensor(&parsed, file_bytes, &format!("blk.{layer}.layer_output_scale.weight"));
-        let los_min = layer_output_scale.iter().cloned().fold(f32::INFINITY, f32::min);
+        let (post_ffw_norm_gamma, _) = dequant_tensor(
+            &parsed,
+            file_bytes,
+            &format!("blk.{layer}.post_ffw_norm.weight"),
+        );
+        let (layer_output_scale, layer_output_scale_dims) = dequant_tensor(
+            &parsed,
+            file_bytes,
+            &format!("blk.{layer}.layer_output_scale.weight"),
+        );
+        let los_min = layer_output_scale
+            .iter()
+            .cloned()
+            .fold(f32::INFINITY, f32::min);
         let los_max = layer_output_scale
             .iter()
             .cloned()
@@ -1770,14 +1801,14 @@ fn main() {
         let down_start = expert_id as u64 * per_expert_bytes_down;
         let down_source =
             &down_full_source[down_start as usize..(down_start + per_expert_bytes_down) as usize];
-        let down_dequant = dequant_range(
-            down_ggml_type,
-            down_source,
-            embedding * expert_feed_forward,
-        );
+        let down_dequant =
+            dequant_range(down_ggml_type, down_source, embedding * expert_feed_forward);
 
-        let gate_dequant_correct =
-            dequant_range(fused_ggml_type, gate_source, expert_feed_forward * embedding);
+        let gate_dequant_correct = dequant_range(
+            fused_ggml_type,
+            gate_source,
+            expert_feed_forward * embedding,
+        );
         let up_dequant_correct =
             dequant_range(fused_ggml_type, up_source, expert_feed_forward * embedding);
         let out_correct = compute_expert_ffn(
@@ -1797,8 +1828,11 @@ fn main() {
         // (`gemma4/bind.rs:394-440`) -- must NOT match the engine.
         let gate_dequant_swapped =
             dequant_range(fused_ggml_type, up_source, expert_feed_forward * embedding);
-        let up_dequant_swapped =
-            dequant_range(fused_ggml_type, gate_source, expert_feed_forward * embedding);
+        let up_dequant_swapped = dequant_range(
+            fused_ggml_type,
+            gate_source,
+            expert_feed_forward * embedding,
+        );
         let out_swapped = compute_expert_ffn(
             routed_input_row,
             &gate_dequant_swapped,
@@ -1827,7 +1861,10 @@ fn main() {
     // own min/max/mean rather than a single "the value" number.
     let (layer_output_scale0, layer_output_scale0_dims) =
         dequant_tensor(&parsed, file_bytes, "blk.0.layer_output_scale.weight");
-    let los0_min = layer_output_scale0.iter().cloned().fold(f32::INFINITY, f32::min);
+    let los0_min = layer_output_scale0
+        .iter()
+        .cloned()
+        .fold(f32::INFINITY, f32::min);
     let los0_max = layer_output_scale0
         .iter()
         .cloned()
@@ -2231,10 +2268,9 @@ fn gqa_scores_ref(
                     for dim in 0..head_dim {
                         sum += q[q_base + dim] * k[k_base + dim];
                     }
-                    let out_index = ((query_position * positions + key_position) * kv_heads
-                        + kv_head)
-                        * group
-                        + group_index;
+                    let out_index =
+                        ((query_position * positions + key_position) * kv_heads + kv_head) * group
+                            + group_index;
                     out[out_index] = sum;
                 }
             }
@@ -2262,23 +2298,20 @@ fn causal_softmax_ref(
             for group_index in 0..group {
                 let mut max_score = f32::NEG_INFINITY;
                 for key_position in 0..=query_position {
-                    let index = ((query_position * positions + key_position) * kv_heads
-                        + kv_head)
+                    let index = ((query_position * positions + key_position) * kv_heads + kv_head)
                         * group
                         + group_index;
                     max_score = max_score.max(scores_scaled[index]);
                 }
                 let mut sum_exp = 0f32;
                 for key_position in 0..=query_position {
-                    let index = ((query_position * positions + key_position) * kv_heads
-                        + kv_head)
+                    let index = ((query_position * positions + key_position) * kv_heads + kv_head)
                         * group
                         + group_index;
                     sum_exp += (scores_scaled[index] - max_score).exp();
                 }
                 for key_position in 0..positions {
-                    let index = ((query_position * positions + key_position) * kv_heads
-                        + kv_head)
+                    let index = ((query_position * positions + key_position) * kv_heads + kv_head)
                         * group
                         + group_index;
                     out[index] = if key_position <= query_position {
@@ -2316,11 +2349,9 @@ fn attended_from_probabilities_ref(
                 let out_base =
                     ((query_position * kv_heads + kv_head) * group + group_index) * head_dim;
                 for key_position in 0..positions {
-                    let probability_index = ((query_position * positions + key_position)
-                        * kv_heads
-                        + kv_head)
-                        * group
-                        + group_index;
+                    let probability_index =
+                        ((query_position * positions + key_position) * kv_heads + kv_head) * group
+                            + group_index;
                     let probability = probabilities[probability_index];
                     if probability == 0.0 {
                         continue;

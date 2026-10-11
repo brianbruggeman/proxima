@@ -396,12 +396,22 @@ fn emit_sizing_consts() {
         let route_compacted = match route_mode.as_str() {
             "segments" => false,
             "compacted" => true,
-            other => panic!("grouped_gemm.route_mode must be \"segments\" or \"compacted\", got {other:?}"),
+            other => panic!(
+                "grouped_gemm.route_mode must be \"segments\" or \"compacted\", got {other:?}"
+            ),
         };
-        out.push_str(&format!("pub const GROUPED_GEMM_ROUTE_COMPACTED: bool = {route_compacted};\n"));
-        out.push_str(&format!("pub const GROUPED_GEMM_ROUTE_SEGMENTS: u64 = {route_segments};\n"));
-        out.push_str(&format!("pub const GROUPED_GEMM_SCAN_AHEAD: u64 = {scan_ahead};\n"));
-        out.push_str(&format!("pub const GROUPED_GEMM_PREPASS_ENTRIES: u64 = {prepass_entries};\n"));
+        out.push_str(&format!(
+            "pub const GROUPED_GEMM_ROUTE_COMPACTED: bool = {route_compacted};\n"
+        ));
+        out.push_str(&format!(
+            "pub const GROUPED_GEMM_ROUTE_SEGMENTS: u64 = {route_segments};\n"
+        ));
+        out.push_str(&format!(
+            "pub const GROUPED_GEMM_SCAN_AHEAD: u64 = {scan_ahead};\n"
+        ));
+        out.push_str(&format!(
+            "pub const GROUPED_GEMM_PREPASS_ENTRIES: u64 = {prepass_entries};\n"
+        ));
     }
 
     if env::var_os("CARGO_FEATURE_METAL_WIDE_COOPERATIVE_REDUCE").is_some() {
@@ -675,11 +685,14 @@ fn emit_sizing_consts() {
     out.push_str(&format!(
         "pub const ATTENTION_ROWS_MIN_SIMDGROUPS: u64 = {attention_rows_min_simdgroups};\n"
     ));
-    let attention_rows_mma_half = match resolve_str(&root, "attention_rows", "mma_precision").as_str() {
-        "float" => false,
-        "half" => true,
-        other => panic!("attention_rows.mma_precision must be \"float\" or \"half\", got {other:?}"),
-    };
+    let attention_rows_mma_half =
+        match resolve_str(&root, "attention_rows", "mma_precision").as_str() {
+            "float" => false,
+            "half" => true,
+            other => {
+                panic!("attention_rows.mma_precision must be \"float\" or \"half\", got {other:?}")
+            }
+        };
     out.push_str(&format!(
         "pub const ATTENTION_ROWS_MMA_HALF: bool = {attention_rows_mma_half};\n"
     ));

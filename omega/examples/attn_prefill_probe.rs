@@ -80,7 +80,11 @@ mod imp {
                 rows: env_usize("PROBE_ROWS", 971),
                 cached_rows: env_usize("PROBE_CACHED_ROWS", 992),
                 live: env_usize("PROBE_LIVE", 0),
-                lower: if window == 0 { i64::MIN } else { 1 - window as i64 },
+                lower: if window == 0 {
+                    i64::MIN
+                } else {
+                    1 - window as i64
+                },
                 upper: env_usize("PROBE_UPPER", 0) as i64,
                 layers: env_usize("PROBE_LAYERS", 7),
                 scale: std::env::var("PROBE_SCALE").map_or(1.0, |value| value.parse().unwrap()),
@@ -179,7 +183,10 @@ mod imp {
         device
             .newComputePipelineStateWithFunction_error(&function)
             .unwrap_or_else(|error| {
-                panic!("creates the pipeline for {entry}: {}", error.localizedDescription())
+                panic!(
+                    "creates the pipeline for {entry}: {}",
+                    error.localizedDescription()
+                )
             })
     }
 
@@ -203,7 +210,10 @@ mod imp {
         device: &ProtocolObject<dyn MTLDevice>,
         values: &[f32],
     ) -> Retained<ProtocolObject<dyn MTLBuffer>> {
-        let bytes: Vec<u8> = values.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let bytes: Vec<u8> = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
         shared_buffer(device, &bytes)
     }
 
@@ -280,7 +290,9 @@ mod imp {
         repeats: usize,
     ) -> f64 {
         let command_buffer = queue.commandBuffer().expect("command buffer");
-        let encoder = command_buffer.computeCommandEncoder().expect("compute encoder");
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .expect("compute encoder");
         for repeat in 0..repeats {
             encode(&encoder, launch, &layers[repeat % layers.len()]);
         }
@@ -332,7 +344,10 @@ mod imp {
                 ));
             }
         }
-        let maximum = keys.iter().map(|(score, _)| *score).fold(f64::NEG_INFINITY, f64::max);
+        let maximum = keys
+            .iter()
+            .map(|(score, _)| *score)
+            .fold(f64::NEG_INFINITY, f64::max);
         let total: f64 = keys.iter().map(|(score, _)| (score - maximum).exp()).sum();
         (0..shape.head_dim)
             .map(|dim| {
@@ -344,13 +359,7 @@ mod imp {
             .collect()
     }
 
-    fn merged(
-        out: &[f32],
-        shape: &Shape,
-        splits: usize,
-        row: usize,
-        head: usize,
-    ) -> Vec<f64> {
+    fn merged(out: &[f32], shape: &Shape, splits: usize, row: usize, head: usize) -> Vec<f64> {
         let vectors = shape.rows * shape.heads();
         let query_index = row * shape.heads() + head;
         if splits == 1 {
@@ -364,7 +373,9 @@ mod imp {
             let at = stats_base + (query_index * splits + split) * 2;
             (f64::from(out[at]), f64::from(out[at + 1]))
         };
-        let global_max = (0..splits).map(|split| stats(split).0).fold(f64::NEG_INFINITY, f64::max);
+        let global_max = (0..splits)
+            .map(|split| stats(split).0)
+            .fold(f64::NEG_INFINITY, f64::max);
         let weight = |split: usize| {
             let maximum = stats(split).0;
             if maximum == f64::NEG_INFINITY {
@@ -373,7 +384,9 @@ mod imp {
                 (maximum - global_max).exp()
             }
         };
-        let total: f64 = (0..splits).map(|split| stats(split).1 * weight(split)).sum();
+        let total: f64 = (0..splits)
+            .map(|split| stats(split).1 * weight(split))
+            .sum();
         (0..shape.head_dim)
             .map(|dim| {
                 let at = |split: usize| {
@@ -390,7 +403,10 @@ mod imp {
 
     fn entry_number(entry: &str, marker: &str) -> Option<usize> {
         let start = entry.find(marker)? + marker.len();
-        let digits: String = entry[start..].chars().take_while(char::is_ascii_digit).collect();
+        let digits: String = entry[start..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
         digits.parse().ok()
     }
 
@@ -414,7 +430,8 @@ mod imp {
         let Ok(arms) = std::env::var("PROBE_ARMS") else {
             let settings = std::env::vars()
                 .filter_map(|(name, value)| {
-                    name.strip_prefix("PROBE_DEFINE_").map(|key| (key.to_string(), value))
+                    name.strip_prefix("PROBE_DEFINE_")
+                        .map(|key| (key.to_string(), value))
                 })
                 .chain(
                     [
@@ -427,7 +444,9 @@ mod imp {
                     ]
                     .into_iter()
                     .filter_map(|(key, name)| {
-                        std::env::var(name).ok().map(|value| (key.to_string(), value))
+                        std::env::var(name)
+                            .ok()
+                            .map(|value| (key.to_string(), value))
                     }),
                 )
                 .collect();
@@ -463,7 +482,8 @@ mod imp {
     }
 
     fn template_source(path: &str, shape: &Shape, settings: &Settings) -> String {
-        let body = std::fs::read_to_string(path).unwrap_or_else(|error| panic!("reads {path}: {error}"));
+        let body =
+            std::fs::read_to_string(path).unwrap_or_else(|error| panic!("reads {path}: {error}"));
         let lower = if shape.lower == i64::MIN {
             "-9223372036854775807L".to_string()
         } else {
@@ -486,7 +506,8 @@ mod imp {
         .collect();
         if let Ok(defaults) = std::env::var("PROBE_DEFAULTS") {
             substitutions.extend(defaults.split(',').filter_map(|pair| {
-                pair.split_once('=').map(|(key, value)| (key.to_string(), value.to_string()))
+                pair.split_once('=')
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
             }));
         }
         substitutions.extend(settings.clone());
@@ -534,7 +555,10 @@ mod imp {
                     let width = production
                         .grid
                         .threadgroup_width
-                        .or(production.grid.grid2d.map(|grid| grid.threads_per_threadgroup_x))
+                        .or(production
+                            .grid
+                            .grid2d
+                            .map(|grid| grid.threads_per_threadgroup_x))
                         .unwrap_or(SIMD_WIDTH) as usize;
                     let groups = (production.grid.threads as usize) / width;
                     let row_tiled = production.entry.ends_with("_rt");
@@ -597,7 +621,9 @@ mod imp {
             threads_per_threadgroup: arm.threads_per_threadgroup,
         };
         let command_buffer = queue.commandBuffer().expect("command buffer");
-        let encoder = command_buffer.computeCommandEncoder().expect("compute encoder");
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .expect("compute encoder");
         encode(&encoder, &launch, layer);
         encoder.endEncoding();
         command_buffer.commit();
@@ -659,7 +685,8 @@ mod imp {
             .iter()
             .map(|spec| build_arm(&device, &shape, spec, &production))
             .filter(|arm| {
-                let fits = arm.threads_per_threadgroup <= arm.pipeline.maxTotalThreadsPerThreadgroup();
+                let fits =
+                    arm.threads_per_threadgroup <= arm.pipeline.maxTotalThreadsPerThreadgroup();
                 if !fits {
                     println!(
                         "probe arm={} skipped width={} max={}",
@@ -675,14 +702,19 @@ mod imp {
         let mut lcg = Lcg(0x5eed_0001);
         let plane = shape.head_dim / 2;
         let vectors = shape.rows * shape.heads();
-        let query = [lcg.vector(vectors * plane, 0.5), lcg.vector(vectors * plane, 0.5)];
+        let query = [
+            lcg.vector(vectors * plane, 0.5),
+            lcg.vector(vectors * plane, 0.5),
+        ];
         let max_splits = arms.iter().map(|arm| arm.splits).max().unwrap_or(1);
         let out_floats = if max_splits > 1 {
             vectors * shape.head_dim * max_splits + vectors * max_splits * 2
         } else {
             vectors * shape.head_dim
         };
-        let caches: Vec<CacheSet> = (0..shape.layers).map(|_| cache_set(&mut lcg, &shape)).collect();
+        let caches: Vec<CacheSet> = (0..shape.layers)
+            .map(|_| cache_set(&mut lcg, &shape))
+            .collect();
         let layers: Vec<LayerBuffers> = caches
             .iter()
             .map(|cache| layer_buffers(&device, &query, cache, shape.live, out_floats))
@@ -700,8 +732,9 @@ mod imp {
             shape.layers,
         );
         for arm in &arms {
-            let (worst, magnitude, non_finite) =
-                parity(&queue, arm, &shape, &layers[0], out_floats, &query, &caches[0]);
+            let (worst, magnitude, non_finite) = parity(
+                &queue, arm, &shape, &layers[0], out_floats, &query, &caches[0],
+            );
             println!(
                 "probe arm={} entry={} threadgroups={} threads={} splits={} static_threadgroup_bytes={} parity_max_abs_diff={worst:e} max_abs_reference={magnitude:e} non_finite={non_finite}",
                 arm.name,
@@ -741,9 +774,16 @@ mod imp {
             let mut sorted = values.clone();
             sorted.sort_by(f64::total_cmp);
             let mean = values.iter().sum::<f64>() / values.len() as f64;
-            let variance =
-                values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / values.len() as f64;
-            let mut ratios: Vec<f64> = values.iter().zip(&first).map(|(value, base)| value / base).collect();
+            let variance = values
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>()
+                / values.len() as f64;
+            let mut ratios: Vec<f64> = values
+                .iter()
+                .zip(&first)
+                .map(|(value, base)| value / base)
+                .collect();
             ratios.sort_by(f64::total_cmp);
             println!(
                 "probe timing arm={} median_us={:.1} min_us={:.1} max_us={:.1} cov_pct={:.1} paired_ratio_vs_first={:.3} rounds={rounds} repeats={repeats}",

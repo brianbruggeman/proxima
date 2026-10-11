@@ -609,7 +609,9 @@ impl BoundOpKind {
                     .map(move |node| (*node, token_count));
                 let per_slot = stacked
                     .iter()
-                    .flat_map(|(stacked_routes, stacked_weights)| [*stacked_routes, *stacked_weights])
+                    .flat_map(|(stacked_routes, stacked_weights)| {
+                        [*stacked_routes, *stacked_weights]
+                    })
                     .map(move |node| (node, token_count * top_k as usize));
                 per_token.chain(per_slot)
             })

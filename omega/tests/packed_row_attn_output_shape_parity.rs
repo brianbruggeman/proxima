@@ -96,14 +96,21 @@ fn assert_attention_output_matches_the_cpu_oracle(rows: usize, seed: u64) {
 
     let (program, root) = attention_output_program(rows as u32);
     let blocks = [
-        QuantizedBlock::Packed { codec: omega::Codec::Q4_0, bytes: &packed },
+        QuantizedBlock::Packed {
+            codec: omega::Codec::Q4_0,
+            bytes: &packed,
+        },
         QuantizedBlock::Float32(&activation),
     ];
     let plan = omega::plan(&program, &[], &blocks, &[root], NumericPolicy::default())
         .expect("metal plans the attention-output matvec");
     let output = omega::execute_plan(&plan, &blocks).expect("metal runs the matvec");
 
-    assert_eq!(output.root().len(), rows, "wrong element count for rows={rows}");
+    assert_eq!(
+        output.root().len(),
+        rows,
+        "wrong element count for rows={rows}"
+    );
     assert!(
         output.root().iter().all(|value| value.is_finite()),
         "rows={rows}: a lane wrote nothing or garbage"
@@ -112,7 +119,8 @@ fn assert_attention_output_matches_the_cpu_oracle(rows: usize, seed: u64) {
         .map(|row| {
             (0..in_dim)
                 .map(|position| {
-                    f64::from(dequantized[row * in_dim + position]) * f64::from(activation[position])
+                    f64::from(dequantized[row * in_dim + position])
+                        * f64::from(activation[position])
                 })
                 .sum::<f64>() as f32
         })

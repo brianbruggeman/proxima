@@ -97,7 +97,11 @@ fn assert_default_chunk_matches_single_pass(name: &str, env: &str, default_path:
     let default_config = ServingConfig::default();
     assert_eq!(default_config.ubatch_size, DEFAULT_UBATCH_SIZE);
     let (default_ids, _text, _stopped) = model
-        .generate_with_serving_config(&prompt, GENERATED_TOKENS, serving_config(default_config.ubatch_size))
+        .generate_with_serving_config(
+            &prompt,
+            GENERATED_TOKENS,
+            serving_config(default_config.ubatch_size),
+        )
         .unwrap_or_else(|error| panic!("{name}: default-ubatch generate failed: {error}"));
     let (single_pass_ids, _text, _stopped) = model
         .generate_with_serving_config(&prompt, GENERATED_TOKENS, serving_config(0))

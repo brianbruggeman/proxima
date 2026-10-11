@@ -271,7 +271,13 @@ fn moe_gather_parity_q8_0_within_measured_tolerance_on_metal() {
 
     let symbols: Vec<u64> = Vec::new();
     let named = [
-        ("weight", QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &stacked_weight }),
+        (
+            "weight",
+            QuantizedBlock::Packed {
+                codec: Codec::Q8_0,
+                bytes: &stacked_weight,
+            },
+        ),
         ("route", QuantizedBlock::Float32(&ROUTE_DATA)),
         ("activation", QuantizedBlock::Float32(&activation)),
     ];
@@ -430,8 +436,14 @@ fn kquant_gather_parity<Q>(
 
     let symbols: Vec<u64> = Vec::new();
     let weight_block = match codec_name {
-        "q4_k" => QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &stacked_weight },
-        "q6_k" => QuantizedBlock::Packed { codec: Codec::Q6K, bytes: &stacked_weight },
+        "q4_k" => QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &stacked_weight,
+        },
+        "q6_k" => QuantizedBlock::Packed {
+            codec: Codec::Q6K,
+            bytes: &stacked_weight,
+        },
         other => panic!("kquant_gather_parity: unknown codec {other}"),
     };
     let named = [

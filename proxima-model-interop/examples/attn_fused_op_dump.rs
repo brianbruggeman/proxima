@@ -24,7 +24,8 @@ const OUTPUT_FILE_NAME: &str = "gemma_fused_op.metal";
 fn output_path() -> std::path::PathBuf {
     let output_dir = std::env::var_os("PROXIMA_ATTN_WIRING_DIR").map_or_else(
         || {
-            let target_dir = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
+            let target_dir =
+                std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
             std::path::Path::new(&target_dir).join("attn_fused_op_dump")
         },
         std::path::PathBuf::from,
@@ -36,7 +37,8 @@ const NEW_COUNT: usize = 1;
 const KV_BUCKET_EXTENT: usize = 32;
 
 fn main() {
-    let file = std::fs::File::open(REAL_GEMMA4_E2B_GGUF_PATH).expect("open the real gemma4-E2B checkpoint");
+    let file = std::fs::File::open(REAL_GEMMA4_E2B_GGUF_PATH)
+        .expect("open the real gemma4-E2B checkpoint");
     let mapping = unsafe { Mmap::map(&file) }.expect("mmap the real gemma4-E2B checkpoint");
     let bytes: &[u8] = &mapping;
     let parsed = parse_complete(bytes).expect("parse the real gemma4-E2B checkpoint header");
@@ -46,8 +48,13 @@ fn main() {
 
     let outputs = alloc_outputs(&bound_program);
 
-    let symbols = bind_symbols(NEW_COUNT, KV_BUCKET_EXTENT, &[], bound_program.single_position_step)
-        .expect("bind_symbols: gemma4 declares no extra symbolic step_inputs");
+    let symbols = bind_symbols(
+        NEW_COUNT,
+        KV_BUCKET_EXTENT,
+        &[],
+        bound_program.single_position_step,
+    )
+    .expect("bind_symbols: gemma4 declares no extra symbolic step_inputs");
     let shapes =
         infer(&bound_program.program, &symbols).expect("shape inference over the real program");
 
@@ -57,15 +64,24 @@ fn main() {
     // BoundOpKind::CachedAttention per attention layer instead of the 15
     // unfused per-node kernels `attn_node_dump.rs`'s own `false` shape
     // resolves.
-    let bound_ops = bind_with_fusion(&bound_program.program, &shapes, &outputs, true, numeric_policy)
-        .expect("bind_with_fusion (production, fused)");
+    let bound_ops = bind_with_fusion(
+        &bound_program.program,
+        &shapes,
+        &outputs,
+        true,
+        numeric_policy,
+    )
+    .expect("bind_with_fusion (production, fused)");
     let bound_ops = prune_dead(bound_ops, &outputs);
 
     let cached_attention_ops: Vec<_> = bound_ops
         .iter()
         .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
         .collect();
-    println!("attn_fused_op_dump: cached_attention_op_count={}", cached_attention_ops.len());
+    println!(
+        "attn_fused_op_dump: cached_attention_op_count={}",
+        cached_attention_ops.len()
+    );
 
     let first = cached_attention_ops
         .first()
@@ -75,7 +91,10 @@ fn main() {
     let kernel = omega::emit(first, &packed_operands, numeric_policy)
         .unwrap_or_else(|error| panic!("emit node={} failed: {error}", first.node.0));
 
-    println!("attn_fused_op_dump: node={} entry={}", first.node.0, kernel.entry);
+    println!(
+        "attn_fused_op_dump: node={} entry={}",
+        first.node.0, kernel.entry
+    );
     let output_path = output_path();
     fs::create_dir_all(output_path.parent().expect("has parent")).expect("create output dir");
     fs::write(&output_path, &kernel.source)
@@ -90,7 +109,9 @@ fn main() {
     // kernel fallback text left to dump for this op shape.
 }
 
-fn alloc_outputs(bound_program: &proxima_model_interop::BoundProgram<'_>) -> Vec<proxima_tensor::NodeId> {
+fn alloc_outputs(
+    bound_program: &proxima_model_interop::BoundProgram<'_>,
+) -> Vec<proxima_tensor::NodeId> {
     let mut outputs = Vec::with_capacity(1 + bound_program.layer_roots.len() * 3);
     outputs.push(bound_program.logits_root);
     for roots_for_layer in &bound_program.layer_roots {

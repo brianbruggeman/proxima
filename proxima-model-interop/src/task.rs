@@ -8,8 +8,8 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::MetadataValue;
+use proxima_gguf::pipe::ParsedGguf;
 
 /// The model-level task family a serving harness must choose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

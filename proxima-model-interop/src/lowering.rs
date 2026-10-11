@@ -21,7 +21,7 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
-    ForwardProgram, LayerKind, ModelDescriptor, LayerCacheRoots, ScheduleSource, build_forward,
+    ForwardProgram, LayerCacheRoots, LayerKind, ModelDescriptor, ScheduleSource, build_forward,
 };
 
 use crate::bind::{BoundWeights, ModelHparams, metadata_str};
@@ -277,7 +277,10 @@ fn header(parsed: &ParsedGguf, layout: KvLayout) -> Result<Header, InteropError>
 /// # Errors
 ///
 /// The family has no profile, or its header reader refuses the header.
-pub fn header_descriptor(parsed: &ParsedGguf, layout: KvLayout) -> Result<ModelDescriptor, InteropError> {
+pub fn header_descriptor(
+    parsed: &ParsedGguf,
+    layout: KvLayout,
+) -> Result<ModelDescriptor, InteropError> {
     header(parsed, layout).map(|(descriptor, _)| descriptor)
 }
 
@@ -356,7 +359,10 @@ fn bind_descriptor<'file>(
         moe_layer_diagnostics: layer_diagnostics,
         moe_sites,
         duplicate_head_roots,
-        single_position_step: descriptor.layers.iter().any(|layer| layer.kind == LayerKind::Gdn),
+        single_position_step: descriptor
+            .layers
+            .iter()
+            .any(|layer| layer.kind == LayerKind::Gdn),
     })
 }
 
@@ -396,7 +402,9 @@ pub fn bind_speculative_verify<'file>(
 /// Whatever the family's header reader can fail with.
 pub fn step_state(parsed: &ParsedGguf) -> Result<Option<StepState>, InteropError> {
     match family_profile(family(parsed)?)?.schedule_source {
-        ScheduleSource::RecurrentInterval => crate::recurrent_interval::step_state(parsed).map(Some),
+        ScheduleSource::RecurrentInterval => {
+            crate::recurrent_interval::step_state(parsed).map(Some)
+        }
         _ => Ok(None),
     }
 }
@@ -410,8 +418,12 @@ pub fn step_state(parsed: &ParsedGguf) -> Result<Option<StepState>, InteropError
 /// Whatever the family's metadata reads can fail with.
 pub fn kv_layers(parsed: &ParsedGguf) -> Result<Vec<(u32, u32, Option<u32>)>, InteropError> {
     match family_profile(family(parsed)?)?.schedule_source {
-        ScheduleSource::SlidingPattern => crate::sliding_pattern::hparams::kv_layers_from_metadata(parsed),
-        ScheduleSource::RecurrentRoutedInterval => crate::recurrent_routed_interval::hparams::kv_layers_from_metadata(parsed),
+        ScheduleSource::SlidingPattern => {
+            crate::sliding_pattern::hparams::kv_layers_from_metadata(parsed)
+        }
+        ScheduleSource::RecurrentRoutedInterval => {
+            crate::recurrent_routed_interval::hparams::kv_layers_from_metadata(parsed)
+        }
         ScheduleSource::Uniform | ScheduleSource::RecurrentInterval => {
             crate::bind::kv_layers_from_metadata(parsed)
         }
@@ -460,9 +472,21 @@ pub fn sliding_rope_inputs(
         return;
     };
     let positions: Vec<usize> = (new_start..new_start + new_count).collect();
-    let (cos, sin) = crate::sliding_pattern::program::sliding_rope_table(&positions, rope.freq_base, rope.dimension_count);
-    out.push(StepInput { name: "rope_cos_swa", values: cos, symbol: None });
-    out.push(StepInput { name: "rope_sin_swa", values: sin, symbol: None });
+    let (cos, sin) = crate::sliding_pattern::program::sliding_rope_table(
+        &positions,
+        rope.freq_base,
+        rope.dimension_count,
+    );
+    out.push(StepInput {
+        name: "rope_cos_swa",
+        values: cos,
+        symbol: None,
+    });
+    out.push(StepInput {
+        name: "rope_sin_swa",
+        values: sin,
+        symbol: None,
+    });
 }
 
 impl<'file> BoundProgram<'file> {
@@ -511,21 +535,27 @@ impl<'file> BoundProgram<'file> {
             program,
             logits_root: logits,
             hidden_root: self.hidden_root.and(hidden),
-            residual_roots: if self.residual_roots.is_empty() { Vec::new() } else { layer_residuals },
+            residual_roots: if self.residual_roots.is_empty() {
+                Vec::new()
+            } else {
+                layer_residuals
+            },
             layer_roots,
             moe_sites,
             duplicate_head_roots,
             router_roots: if self.router_roots.is_empty() {
                 Vec::new()
             } else {
-                layer_diagnostics.iter().map(|diagnostic| diagnostic.router_logits).collect()
+                layer_diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.router_logits)
+                    .collect()
             },
             moe_layer_diagnostics: layer_diagnostics,
             ..self
         })
     }
 }
-
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

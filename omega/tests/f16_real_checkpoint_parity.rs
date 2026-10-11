@@ -206,7 +206,10 @@ fn metal_matmul_on_real_ffn_gate_inp_f16_bytes_matches_the_dequantized_f32_cpu_p
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Packed { codec: Codec::Float16, bytes: &weight_bytes },
+            QuantizedBlock::Packed {
+                codec: Codec::Float16,
+                bytes: &weight_bytes,
+            },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],

@@ -64,13 +64,17 @@ pub fn family_profile(family: &str) -> Result<FamilyProfile, InteropError> {
 mod tests {
     use super::*;
     use proxima_tensor::spec::{
-        Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination, FfnRouting,
-        KvCacheShape, RopePairing, ScheduleSource,
+        Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
+        FfnRouting, KvCacheShape, RopePairing, ScheduleSource,
     };
 
     #[test]
     fn every_embedded_profile_parses() {
-        assert_eq!(FAMILY_PROFILES.len(), 13, "one row per embedded family string");
+        assert_eq!(
+            FAMILY_PROFILES.len(),
+            13,
+            "one row per embedded family string"
+        );
         for (family, _) in FAMILY_PROFILES {
             family_profile(family).unwrap_or_else(|error| panic!("{family}: {error}"));
         }
@@ -83,7 +87,10 @@ mod tests {
         assert_eq!(profile.embedding_scale, Some(EmbeddingScale::Sqrt));
         assert_eq!(profile.ffn.activation, Activation::GeluTanh);
         assert_eq!(profile.score_scale(256), AttentionScoreScale::Unscaled);
-        assert_eq!(profile.rope_pairing(256), RopePairing::SplitHalf { pairs: 128 });
+        assert_eq!(
+            profile.rope_pairing(256),
+            RopePairing::SplitHalf { pairs: 128 }
+        );
         assert!(profile.value_norm);
         assert!(matches!(
             profile.layer_ffn(128).combination,
@@ -98,7 +105,10 @@ mod tests {
 
         assert_eq!(profile.embedding_scale, None);
         assert_eq!(profile.ffn.activation, Activation::Silu);
-        assert_eq!(profile.score_scale(128), AttentionScoreScale::InverseSqrtQueryPreAttnScalar(128));
+        assert_eq!(
+            profile.score_scale(128),
+            AttentionScoreScale::InverseSqrtQueryPreAttnScalar(128)
+        );
         assert_eq!(profile.rope_pairing(128), RopePairing::Interleaved);
     }
 
@@ -116,7 +126,9 @@ mod tests {
     #[test]
     fn only_the_family_whose_verify_step_was_measured_to_pay_arms_it_by_default() {
         for (family, _) in FAMILY_PROFILES {
-            let armed = family_profile(family).expect("profile embedded").speculative_verify;
+            let armed = family_profile(family)
+                .expect("profile embedded")
+                .speculative_verify;
 
             assert_eq!(armed, *family == "gemma4", "{family}");
         }
@@ -125,14 +137,62 @@ mod tests {
     #[test]
     fn each_profile_names_its_header_reader_cache_shape_routing_and_chunk_default() {
         let table = [
-            ("llama", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
-            ("mixtral", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
-            ("granitemoe", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 8),
-            ("qwen2", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
-            ("qwen3", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
-            ("lfm2moe", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
-            ("gemma4", ScheduleSource::SlidingPattern, KvCacheShape::Custom, FfnRouting::Dense, 8),
-            ("qwen35", ScheduleSource::RecurrentInterval, KvCacheShape::Custom, FfnRouting::Dense, 1),
+            (
+                "llama",
+                ScheduleSource::Uniform,
+                KvCacheShape::Uniform,
+                FfnRouting::Dense,
+                1,
+            ),
+            (
+                "mixtral",
+                ScheduleSource::Uniform,
+                KvCacheShape::Uniform,
+                FfnRouting::Dense,
+                1,
+            ),
+            (
+                "granitemoe",
+                ScheduleSource::Uniform,
+                KvCacheShape::Uniform,
+                FfnRouting::Dense,
+                8,
+            ),
+            (
+                "qwen2",
+                ScheduleSource::Uniform,
+                KvCacheShape::Uniform,
+                FfnRouting::Dense,
+                1,
+            ),
+            (
+                "qwen3",
+                ScheduleSource::Uniform,
+                KvCacheShape::Uniform,
+                FfnRouting::Dense,
+                1,
+            ),
+            (
+                "lfm2moe",
+                ScheduleSource::Uniform,
+                KvCacheShape::Uniform,
+                FfnRouting::Dense,
+                1,
+            ),
+            (
+                "gemma4",
+                ScheduleSource::SlidingPattern,
+                KvCacheShape::Custom,
+                FfnRouting::Dense,
+                8,
+            ),
+            (
+                "qwen35",
+                ScheduleSource::RecurrentInterval,
+                KvCacheShape::Custom,
+                FfnRouting::Dense,
+                1,
+            ),
             (
                 "qwen35moe",
                 ScheduleSource::RecurrentRoutedInterval,
@@ -147,7 +207,10 @@ mod tests {
             assert_eq!(profile.schedule_source, source, "{family} schedule source");
             assert_eq!(profile.kv_cache_shape, shape, "{family} cache shape");
             assert_eq!(profile.ffn_routing, routing, "{family} routing");
-            assert_eq!(profile.command_buffer_chunks, chunks, "{family} chunk default");
+            assert_eq!(
+                profile.command_buffer_chunks, chunks,
+                "{family} chunk default"
+            );
         }
     }
 
@@ -155,7 +218,10 @@ mod tests {
     fn qwen2_profile_is_split_half_from_its_own_data() {
         let profile = family_profile("qwen2").expect("qwen2 profile embedded");
 
-        assert_eq!(profile.rope_pairing(128), RopePairing::SplitHalf { pairs: 64 });
+        assert_eq!(
+            profile.rope_pairing(128),
+            RopePairing::SplitHalf { pairs: 64 }
+        );
     }
 
     /// llama.cpp `llama_model_rope_type` (`src/llama-model.cpp:2968-3140`, f1ea20621):
@@ -181,7 +247,11 @@ mod tests {
             ("lfm2", true),
             ("lfm2moe", true),
         ];
-        assert_eq!(table.len(), FAMILY_PROFILES.len(), "one expectation per embedded family string");
+        assert_eq!(
+            table.len(),
+            FAMILY_PROFILES.len(),
+            "one expectation per embedded family string"
+        );
         for (family, split_half) in table {
             let expected = if split_half {
                 RopePairing::SplitHalf { pairs: 64 }
@@ -194,20 +264,30 @@ mod tests {
     }
 
     fn fixture_kv(fixture: &str) -> Vec<(String, String)> {
-        let path = format!("{}/tests/fixtures/llama-parity/{fixture}/gguf_kv.txt", env!("CARGO_MANIFEST_DIR"));
+        let path = format!(
+            "{}/tests/fixtures/llama-parity/{fixture}/gguf_kv.txt",
+            env!("CARGO_MANIFEST_DIR")
+        );
         let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
         let entries: Vec<(String, String)> = text
             .lines()
             .filter_map(|line| line.splitn(3, " | ").nth(2))
             .filter_map(|entry| entry.split_once(" = "))
-            .map(|(key, value)| (key.trim().to_string(), value.trim().trim_matches('\'').to_string()))
+            .map(|(key, value)| {
+                (
+                    key.trim().to_string(),
+                    value.trim().trim_matches('\'').to_string(),
+                )
+            })
             .collect();
         assert!(!entries.is_empty(), "{path} yielded no key/value rows");
         entries
     }
 
     fn kv_value(kv: &[(String, String)], key: &str) -> Option<String> {
-        kv.iter().find(|(name, _)| name == key).map(|(_, value)| value.clone())
+        kv.iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.clone())
     }
 
     #[test]
@@ -222,12 +302,18 @@ mod tests {
         ];
         for (fixture, expected) in cases {
             let kv = fixture_kv(fixture);
-            let family = kv_value(&kv, "general.architecture").expect("header names its architecture");
+            let family =
+                kv_value(&kv, "general.architecture").expect("header names its architecture");
             let width = kv_value(&kv, &format!("{family}.rope.dimension_count"))
                 .or_else(|| kv_value(&kv, &format!("{family}.attention.key_length")))
                 .map_or(128, |text| text.parse::<u32>().expect("integer width"));
-            let profile = family_profile(&family).expect("profile embedded for the header's family");
-            assert_eq!(profile.rope_pairing(width), expected, "{fixture} ({family})");
+            let profile =
+                family_profile(&family).expect("profile embedded for the header's family");
+            assert_eq!(
+                profile.rope_pairing(width),
+                expected,
+                "{fixture} ({family})"
+            );
         }
     }
 
@@ -235,17 +321,31 @@ mod tests {
     fn qwen35_headers_carry_the_partial_rotary_width_the_profile_pairs_split_half() {
         for fixture in ["qwen35", "qwen35moe"] {
             let kv = fixture_kv(fixture);
-            let family = kv_value(&kv, "general.architecture").expect("header names its architecture");
+            let family =
+                kv_value(&kv, "general.architecture").expect("header names its architecture");
 
-            assert_eq!(kv_value(&kv, &format!("{family}.rope.dimension_count")).as_deref(), Some("64"), "{fixture}");
-            assert_eq!(kv_value(&kv, &format!("{family}.attention.key_length")).as_deref(), Some("256"), "{fixture}");
+            assert_eq!(
+                kv_value(&kv, &format!("{family}.rope.dimension_count")).as_deref(),
+                Some("64"),
+                "{fixture}"
+            );
+            assert_eq!(
+                kv_value(&kv, &format!("{family}.attention.key_length")).as_deref(),
+                Some("256"),
+                "{fixture}"
+            );
             assert_eq!(
                 kv_value(&kv, &format!("{family}.rope.dimension_sections")).as_deref(),
                 Some("[11, 11, 10]"),
                 "{fixture}"
             );
-            let profile = family_profile(&family).expect("the recurrent-hybrid families have a profile");
-            assert_eq!(profile.rope_pairing(64), RopePairing::SplitHalf { pairs: 32 }, "{fixture}");
+            let profile =
+                family_profile(&family).expect("the recurrent-hybrid families have a profile");
+            assert_eq!(
+                profile.rope_pairing(64),
+                RopePairing::SplitHalf { pairs: 32 },
+                "{fixture}"
+            );
         }
     }
 
@@ -254,7 +354,10 @@ mod tests {
         let routed = family_profile("qwen35moe").expect("qwen35moe profile embedded");
         let dense = family_profile("qwen35").expect("qwen35 profile embedded");
 
-        assert_eq!(routed.layer_ffn(256).combination, FfnCombination::RoutedWithSharedExpert);
+        assert_eq!(
+            routed.layer_ffn(256).combination,
+            FfnCombination::RoutedWithSharedExpert
+        );
         assert_eq!(dense.layer_ffn(0).combination, FfnCombination::Exclusive);
     }
 
@@ -262,7 +365,10 @@ mod tests {
     fn lfm2_profile_routes_with_sigmoid_gating_and_a_selection_bias() {
         let kv = fixture_kv("lfm2");
         let family = kv_value(&kv, "general.architecture").expect("header names its architecture");
-        assert_eq!(kv_value(&kv, &format!("{family}.expert_gating_func")).as_deref(), Some("2"));
+        assert_eq!(
+            kv_value(&kv, &format!("{family}.expert_gating_func")).as_deref(),
+            Some("2")
+        );
         let profile = family_profile(&family).expect("lfm2moe profile embedded");
 
         assert_eq!(profile.ffn.routed_gating, ExpertGatingFunc::Sigmoid);

@@ -110,8 +110,8 @@ fn build_fixture(seq: u32, expert_count: u32, expert_used_count: u32) -> MoeFixt
         activation: Activation::Silu,
         strategy: MoeProjectionStrategy::PerRoute,
     };
-    let (routed_out, moe_site) = append_moe_ffn(&mut program, 0, x, &moe_spec)
-        .expect("routed moe ffn lowers at 128/8");
+    let (routed_out, moe_site) =
+        append_moe_ffn(&mut program, 0, x, &moe_spec).expect("routed moe ffn lowers at 128/8");
 
     let mut extra_outputs = moe_site.selected.clone();
     extra_outputs.extend(moe_site.weights.iter().copied());

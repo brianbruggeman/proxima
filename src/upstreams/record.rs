@@ -1745,7 +1745,9 @@ mod tests {
         #[cfg(feature = "http-prime-deps")]
         mod multi_connection {
             use super::*;
-            use proxima_primitives::stream::{ConnectFuture, PeerInfo, StreamConnection, StreamUpstream};
+            use proxima_primitives::stream::{
+                ConnectFuture, PeerInfo, StreamConnection, StreamUpstream,
+            };
 
             const MULTI_CONN_RUNS: usize = 300;
 
@@ -1780,9 +1782,11 @@ mod tests {
                             .conn
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        guard.take().ok_or_else(|| std::io::Error::other(
-                            "single-connection upstream already connected once",
-                        ))
+                        guard.take().ok_or_else(|| {
+                            std::io::Error::other(
+                                "single-connection upstream already connected once",
+                            )
+                        })
                     })
                 }
             }

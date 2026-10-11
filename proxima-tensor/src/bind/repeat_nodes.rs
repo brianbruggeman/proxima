@@ -5,7 +5,11 @@ use super::*;
 /// pairing table `PROXIMA_REPEAT_VERIFY`'s byte-compare harness reads back
 /// (`arena_encode_dispatch_finish::finish`'s doc) — named here so the
 /// function signature states a type instead of a three-tuple literal.
-pub type RepeatNodesOutcome = (Vec<BoundOp>, Vec<RepeatNodeRefusal>, Vec<(NodeId, Vec<NodeId>)>);
+pub type RepeatNodesOutcome = (
+    Vec<BoundOp>,
+    Vec<RepeatNodeRefusal>,
+    Vec<(NodeId, Vec<NodeId>)>,
+);
 
 /// One [`BoundOp`] the duplicate-dispatch attribution harness could not copy
 /// byte-identically — the caller's typed refusal instead of a silent partial
@@ -229,7 +233,10 @@ mod tests {
                 body: ComposedBody::leaf(ScalarOp::Identity),
                 operands: alloc::vec![(
                     NodeId(source),
-                    Layout { base: 0, strides: smallvec::smallvec![1] },
+                    Layout {
+                        base: 0,
+                        strides: smallvec::smallvec![1]
+                    },
                     None
                 )],
             },
@@ -241,17 +248,37 @@ mod tests {
         let built = alloc::vec![elementwise_op(1, 0), elementwise_op(2, 1)];
         let mut outputs = alloc::vec![NodeId(2)];
 
-        let mut shapes = Shapes::from_rows(alloc::vec![alloc::vec![4], alloc::vec![4], alloc::vec![4]]);
+        let mut shapes =
+            Shapes::from_rows(alloc::vec![alloc::vec![4], alloc::vec![4], alloc::vec![4]]);
 
         let (rewritten, refusals, pairs) =
             apply_repeat_nodes(built, &[NodeId(1)], 2, &mut outputs, &mut shapes);
 
-        assert!(refusals.is_empty(), "an elementwise target must never be refused");
-        assert_eq!(rewritten.len(), 4, "two copies appended to the original two-op program");
+        assert!(
+            refusals.is_empty(),
+            "an elementwise target must never be refused"
+        );
+        assert_eq!(
+            rewritten.len(),
+            4,
+            "two copies appended to the original two-op program"
+        );
         assert_eq!(rewritten[0].node, NodeId(1), "the original stays in place");
-        assert_eq!(rewritten[1].node, NodeId(3), "first copy lands immediately after node 1");
-        assert_eq!(rewritten[2].node, NodeId(4), "second copy lands immediately after the first copy");
-        assert_eq!(rewritten[3].node, NodeId(2), "the untouched original consumer stays last");
+        assert_eq!(
+            rewritten[1].node,
+            NodeId(3),
+            "first copy lands immediately after node 1"
+        );
+        assert_eq!(
+            rewritten[2].node,
+            NodeId(4),
+            "second copy lands immediately after the first copy"
+        );
+        assert_eq!(
+            rewritten[3].node,
+            NodeId(2),
+            "the untouched original consumer stays last"
+        );
         assert_eq!(
             outputs,
             alloc::vec![NodeId(2), NodeId(3), NodeId(4)],
@@ -273,8 +300,21 @@ mod tests {
         let (rewritten, refusals, pairs) =
             apply_repeat_nodes(built, &[NodeId(99)], 1, &mut outputs, &mut shapes);
 
-        assert_eq!(rewritten.len(), 1, "no copy is inserted for an unmatched node");
-        assert_eq!(refusals, alloc::vec![RepeatNodeRefusal { node: NodeId(99), kind_name: "unknown" }]);
-        assert!(pairs.is_empty(), "an unmatched target contributes no pairing entry");
+        assert_eq!(
+            rewritten.len(),
+            1,
+            "no copy is inserted for an unmatched node"
+        );
+        assert_eq!(
+            refusals,
+            alloc::vec![RepeatNodeRefusal {
+                node: NodeId(99),
+                kind_name: "unknown"
+            }]
+        );
+        assert!(
+            pairs.is_empty(),
+            "an unmatched target contributes no pairing entry"
+        );
     }
 }

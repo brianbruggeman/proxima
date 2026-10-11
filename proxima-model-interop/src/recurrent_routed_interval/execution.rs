@@ -476,10 +476,9 @@ mod tests {
     #[cfg(feature = "moe-linked-suffix")]
     use super::{MappedLayerSegment, split_gather_and_suffix_segment};
     use super::{
-        MoeExecutionMode, execute_pre_gather, route_address,
-        split_gather_and_next_router_segment, split_layer_program, split_layer_segment,
-        split_mapped_layer_segment, split_mapped_router_and_gather_segments,
-        split_router_and_gather_segments,
+        MoeExecutionMode, execute_pre_gather, route_address, split_gather_and_next_router_segment,
+        split_layer_program, split_layer_segment, split_mapped_layer_segment,
+        split_mapped_router_and_gather_segments, split_router_and_gather_segments,
     };
     use crate::residency::{ExpertAddress, ServeDecision, ServePrecision};
     use core::cell::Cell;
@@ -666,14 +665,8 @@ mod tests {
 
     #[test]
     fn default_mode_does_not_require_the_pre_gather_protocol() {
-        assert_eq!(
-            MoeExecutionMode::SinglePass,
-            MoeExecutionMode::SinglePass
-        );
-        assert_ne!(
-            MoeExecutionMode::SinglePass,
-            MoeExecutionMode::PreGather
-        );
+        assert_eq!(MoeExecutionMode::SinglePass, MoeExecutionMode::SinglePass);
+        assert_ne!(MoeExecutionMode::SinglePass, MoeExecutionMode::PreGather);
     }
 
     #[test]

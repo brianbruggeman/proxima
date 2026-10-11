@@ -28,8 +28,8 @@ fn memory_budget_qwen35moe() {
         ("qwen35moe.attention.key_length", Value::U32(256)),
     ]);
 
-    let layers = crate::lowering::kv_layers(&parsed)
-        .expect("the header carries every key kv_layers reads");
+    let layers =
+        crate::lowering::kv_layers(&parsed).expect("the header carries every key kv_layers reads");
     let budget = MemoryBudget::derive(WeightClassBytes::default(), &layers, 262_144, 0, 0);
     let every_layer = vec![(2u32, 256u32, None); 40];
     let today = MemoryBudget::derive(WeightClassBytes::default(), &every_layer, 262_144, 0, 0);

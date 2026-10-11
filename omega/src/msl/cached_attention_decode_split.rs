@@ -58,7 +58,12 @@ pub(super) fn render_cached_attention_decode_split(
     let cached_lower = index_literal(*cached_lower_inclusive, index_type, literal_suffix);
     let new_upper = index_literal(*new_upper_inclusive, index_type, literal_suffix);
     let (cached_kv_type, kv_pointers, key_load, value_load) = match cached_kv_codec {
-        None => (element_type, PLAIN_KV_POINTERS, PLAIN_KEY_LOAD, PLAIN_VALUE_LOAD),
+        None => (
+            element_type,
+            PLAIN_KV_POINTERS,
+            PLAIN_KEY_LOAD,
+            PLAIN_VALUE_LOAD,
+        ),
         Some(Codec::Float16) => ("half", HALF_KV_POINTERS, HALF_KEY_LOAD, HALF_VALUE_LOAD),
         Some(Codec::BFloat16) => ("ushort", BF16_KV_POINTERS, BF16_KEY_LOAD, BF16_VALUE_LOAD),
         Some(Codec::BFloat8) => ("uchar", BF8_KV_POINTERS, BF8_KEY_LOAD, BF8_VALUE_LOAD),
@@ -119,7 +124,8 @@ pub(super) fn index_literal(value: i64, index_type: &str, literal_suffix: &str) 
     format!("{}{literal_suffix}", value.clamp(lowest, highest))
 }
 
-const PLAIN_KV_POINTERS: &str = "device const @T@4* kr4 = (device const @T@4*)((cached ? in2 : in4) + kbase);
+const PLAIN_KV_POINTERS: &str =
+    "device const @T@4* kr4 = (device const @T@4*)((cached ? in2 : in4) + kbase);
                 device const @T@4* ki4 = (device const @T@4*)((cached ? in3 : in5) + kbase);
                 device const @T@4* v4 = (device const @T@4*)((cached ? in6 : in7) + kbase * 2);";
 
@@ -130,7 +136,8 @@ const PLAIN_VALUE_LOAD: &str = "value_row[step][slot] = float4(v4[index]);";
 
 // the cached range is half-width and the new range is the op's own element
 // type, so one pointer cannot select between them as the plain form does
-const HALF_KV_POINTERS: &str = "device const @KV@4* kr4_cached = (device const @KV@4*)(in2 + kbase);
+const HALF_KV_POINTERS: &str =
+    "device const @KV@4* kr4_cached = (device const @KV@4*)(in2 + kbase);
                 device const @KV@4* ki4_cached = (device const @KV@4*)(in3 + kbase);
                 device const @KV@4* v4_cached = (device const @KV@4*)(in6 + kbase * 2);
                 device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
@@ -139,10 +146,10 @@ const HALF_KV_POINTERS: &str = "device const @KV@4* kr4_cached = (device const @
 
 const HALF_KEY_LOAD: &str = "if (cached) { key_real[step][slot] = float4(kr4_cached[index]); key_imag[step][slot] = float4(ki4_cached[index]); } else { key_real[step][slot] = float4(kr4_new[index]); key_imag[step][slot] = float4(ki4_new[index]); }";
 
-const HALF_VALUE_LOAD: &str =
-    "if (cached) { value_row[step][slot] = float4(v4_cached[index]); } else { value_row[step][slot] = float4(v4_new[index]); }";
+const HALF_VALUE_LOAD: &str = "if (cached) { value_row[step][slot] = float4(v4_cached[index]); } else { value_row[step][slot] = float4(v4_new[index]); }";
 
-const BF16_KV_POINTERS: &str = "device const ushort4* kr4_cached = (device const ushort4*)(in2 + kbase);
+const BF16_KV_POINTERS: &str =
+    "device const ushort4* kr4_cached = (device const ushort4*)(in2 + kbase);
                 device const ushort4* ki4_cached = (device const ushort4*)(in3 + kbase);
                 device const ushort4* v4_cached = (device const ushort4*)(in6 + kbase * 2);
                 device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
@@ -155,7 +162,8 @@ const BF16_VALUE_LOAD: &str = "if (cached) { value_row[step][slot] = omega_bf16x
 
 const BF16_VECTOR_HELPER: &str = "static inline float4 omega_bf16x4_to_float4(ushort4 value) { return float4(as_type<float>((uint)value.x << 16u), as_type<float>((uint)value.y << 16u), as_type<float>((uint)value.z << 16u), as_type<float>((uint)value.w << 16u)); }\n";
 
-const BF8_KV_POINTERS: &str = "device const uchar4* kr4_cached = (device const uchar4*)(in2 + kbase);
+const BF8_KV_POINTERS: &str =
+    "device const uchar4* kr4_cached = (device const uchar4*)(in2 + kbase);
                 device const uchar4* ki4_cached = (device const uchar4*)(in3 + kbase);
                 device const uchar4* v4_cached = (device const uchar4*)(in6 + kbase * 2);
                 device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
@@ -166,7 +174,7 @@ const BF8_KEY_LOAD: &str = "if (cached) { key_real[step][slot] = omega_bf8x4_to_
 
 const BF8_VALUE_LOAD: &str = "if (cached) { value_row[step][slot] = omega_bf8x4_to_float4(v4_cached[index]); } else { value_row[step][slot] = float4(v4_new[index]); }";
 
-const DECODE_SPLIT_KERNEL: &str =r#"struct Uniforms { long total_elements; long context_chunks; long splits; };
+const DECODE_SPLIT_KERNEL: &str = r#"struct Uniforms { long total_elements; long context_chunks; long splits; };
 
 #define OMEGA_UNROLL _Pragma("clang loop unroll(full)")
 

@@ -158,7 +158,9 @@ fn parse_arguments() -> Arguments {
             "--arm-env" => {
                 let spec = value();
                 let (label, assignment) = spec.split_once(':').expect("--arm-env label:KEY=VALUE");
-                let (key, setting) = assignment.split_once('=').expect("--arm-env label:KEY=VALUE");
+                let (key, setting) = assignment
+                    .split_once('=')
+                    .expect("--arm-env label:KEY=VALUE");
                 arguments
                     .arm_envs
                     .push((label.to_string(), key.to_string(), setting.to_string()));
@@ -372,7 +374,9 @@ fn print_metric(label: &str, metric: &str, runs: &[(usize, usize, f64)]) {
     let values: Vec<f64> = runs.iter().map(|run| run.2).collect();
     let flags = outlier_flags(&values);
     for ((process, run, value), flagged) in runs.iter().zip(&flags) {
-        println!("arm={label} metric={metric} process={process} run={run} value={value:.4} outlier={flagged}");
+        println!(
+            "arm={label} metric={metric} process={process} run={run} value={value:.4} outlier={flagged}"
+        );
     }
     let kept = kept_values(runs);
     println!(
@@ -426,7 +430,10 @@ fn print_memory(arm: &ArmRuns) {
         ("peak_gpu_bytes", &arm.gpu_peak_runs),
     ] {
         for (process, _, value) in series {
-            println!("memory arm={} metric={name} process={process} value={value:.0}", arm.label);
+            println!(
+                "memory arm={} metric={name} process={process} value={value:.0}",
+                arm.label
+            );
         }
         let values: Vec<f64> = series.iter().map(|entry| entry.2).collect();
         if !values.is_empty() {
@@ -470,12 +477,22 @@ fn print_bounds(arms: &[ArmRuns]) {
             bound_line(arm, reference, "ttft_ms", |each| &each.ttft_runs);
             bound_line(arm, reference, "wall_ms", |each| &each.wall_runs);
             bound_line(arm, reference, "cpu_ms", |each| &each.cpu_ms_runs);
-            memory_bound_line(arm, reference, "peak_rss_bytes", |each| &each.rss_by_process);
-            memory_bound_line(arm, reference, "peak_footprint_bytes", |each| &each.footprint_by_process);
+            memory_bound_line(arm, reference, "peak_rss_bytes", |each| {
+                &each.rss_by_process
+            });
+            memory_bound_line(arm, reference, "peak_footprint_bytes", |each| {
+                &each.footprint_by_process
+            });
             memory_bound_line(arm, reference, "peak_gpu_bytes", |each| &each.gpu_peak_runs);
-            memory_bound_line(arm, reference, "steady_rss_bytes", |each| &each.steady_rss_runs);
-            memory_bound_line(arm, reference, "steady_footprint_bytes", |each| &each.steady_footprint_runs);
-            memory_bound_line(arm, reference, "steady_gpu_bytes", |each| &each.steady_gpu_runs);
+            memory_bound_line(arm, reference, "steady_rss_bytes", |each| {
+                &each.steady_rss_runs
+            });
+            memory_bound_line(arm, reference, "steady_footprint_bytes", |each| {
+                &each.steady_footprint_runs
+            });
+            memory_bound_line(arm, reference, "steady_gpu_bytes", |each| {
+                &each.steady_gpu_runs
+            });
         }
     }
 }
@@ -490,7 +507,10 @@ fn memory_bound_line(
     let arm_values: Vec<f64> = select(arm).iter().map(|entry| entry.2).collect();
     let reference_values: Vec<f64> = select(reference).iter().map(|entry| entry.2).collect();
     if arm_values.is_empty() || reference_values.is_empty() {
-        println!("bound metric={metric} arm={} vs={} n=0", arm.label, reference.label);
+        println!(
+            "bound metric={metric} arm={} vs={} n=0",
+            arm.label, reference.label
+        );
         return;
     }
     let reference_median = median(&reference_values);
@@ -514,7 +534,10 @@ fn bound_line(
     let arm_kept = kept_values(select(arm));
     let reference_kept = kept_values(select(reference));
     if arm_kept.is_empty() || reference_kept.is_empty() {
-        println!("bound metric={metric} arm={} vs={} n=0", arm.label, reference.label);
+        println!(
+            "bound metric={metric} arm={} vs={} n=0",
+            arm.label, reference.label
+        );
         return;
     }
     let reference_median = median(&reference_kept);
@@ -645,7 +668,9 @@ fn run_proxima_process(
             if let Some(ttft) = ttft.filter(|_| run_index > 0) {
                 arm.ttft_runs.push((process, run_index, ttft));
             }
-            if let Some(bytes) = field_after(line, "gpu_peak_bytes=").and_then(|text| text.parse::<f64>().ok()) {
+            if let Some(bytes) =
+                field_after(line, "gpu_peak_bytes=").and_then(|text| text.parse::<f64>().ok())
+            {
                 gpu_peak = gpu_peak.max(bytes);
             }
             if run_index > 0 {
@@ -654,7 +679,9 @@ fn run_proxima_process(
                     ("steady_footprint_bytes=", &mut arm.steady_footprint_runs),
                     ("steady_gpu_bytes=", &mut arm.steady_gpu_runs),
                 ] {
-                    if let Some(bytes) = field_after(line, key).and_then(|text| text.parse::<f64>().ok()) {
+                    if let Some(bytes) =
+                        field_after(line, key).and_then(|text| text.parse::<f64>().ok())
+                    {
                         series.push((process, run_index, bytes));
                     }
                 }
@@ -836,14 +863,23 @@ fn dump_llama_record(directory: &PathBuf, case: &str, prompt: &str, ids_by_run: 
     std::fs::create_dir_all(directory).expect("create llama ids directory");
     let name = if case.is_empty() { "case" } else { case };
     let path = directory.join(format!("{name}_llama_ids.json"));
-    std::fs::write(&path, serde_json::to_string_pretty(&record).expect("serialize record"))
-        .expect("write llama ids record");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&record).expect("serialize record"),
+    )
+    .expect("write llama ids record");
     println!("llama ids record case={case} path={}", path.display());
 }
 
 fn llama_request(prompt: &str) -> ServerRun {
     let body = json!({"prompt": prompt, "n_predict": new_tokens(), "temperature": 0, "top_k": 1, "seed": 1, "cache_prompt": false, "ignore_eos": true, "stream": true, "return_tokens": true}).to_string();
-    let exchange = http_exchange(LLAMA_PORT, "POST", "/completion", &body, Duration::from_secs(120));
+    let exchange = http_exchange(
+        LLAMA_PORT,
+        "POST",
+        "/completion",
+        &body,
+        Duration::from_secs(120),
+    );
     let events = json_lines(&exchange.body, "data: ");
     let timings = events
         .iter()
@@ -1024,7 +1060,10 @@ fn run_llama_round(
     push_time_report(arm, process, &report);
     log_line(
         arguments,
-        &format!("EXIT decode_arms llama-server arm={} process={process}", arm.label),
+        &format!(
+            "EXIT decode_arms llama-server arm={} process={process}",
+            arm.label
+        ),
     );
 }
 

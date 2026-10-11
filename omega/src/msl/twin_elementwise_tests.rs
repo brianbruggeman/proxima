@@ -32,8 +32,13 @@ fn rope_ops(head_dim: u32, pairing: RopePairing) -> (Vec<BoundOp>, Vec<Op>) {
     let (first, second) = fused_rope_pair(&mut program, source, 'h', cosine, sine, pairing)
         .expect("rope pair builds");
     let shapes = infer(&program, &[]).expect("rope program infers");
-    let bound = bind(&program, &shapes, &[first, second], NumericPolicy::default())
-        .expect("rope program binds");
+    let bound = bind(
+        &program,
+        &shapes,
+        &[first, second],
+        NumericPolicy::default(),
+    )
+    .expect("rope program binds");
     (bound, program)
 }
 
@@ -71,8 +76,16 @@ async fn the_second_output_is_bound_right_past_the_kernels_own_bindings(
 
     let declared = extra_output_buffer_index(&kernel.source);
 
-    assert_eq!(declared, kernel.bindings.len(), "encode_op binds extras at bindings.len()");
-    assert_eq!(kernel.bindings.len(), twin.operands().len() + 2, "inputs, output, uniforms");
+    assert_eq!(
+        declared,
+        kernel.bindings.len(),
+        "encode_op binds extras at bindings.len()"
+    );
+    assert_eq!(
+        kernel.bindings.len(),
+        twin.operands().len() + 2,
+        "inputs, output, uniforms"
+    );
     assert!(kernel.bindings.contains(&Binding::Output(twin.node)));
     assert!(
         !kernel
@@ -99,7 +112,11 @@ async fn one_kernel_reads_each_operand_once_and_stores_two_outputs(
     let primary_stores = kernel.source.matches("out[gid] = ").count();
     let twin_stores = kernel.source.matches("extra_out0[gid] = ").count();
 
-    assert_eq!(operand_reads, twin.operands().len(), "one read per shared operand");
+    assert_eq!(
+        operand_reads,
+        twin.operands().len(),
+        "one read per shared operand"
+    );
     assert_eq!(primary_stores, 1);
     assert_eq!(twin_stores, 1);
     assert_eq!(
@@ -133,5 +150,8 @@ async fn the_twin_entry_name_differs_from_both_plain_halves_it_replaces() {
 
     assert_ne!(kernel.entry, primary_kernel.entry);
     assert_ne!(kernel.entry, secondary_kernel.entry);
-    assert_ne!(primary_kernel.entry, secondary_kernel.entry, "different bodies, different kernels");
+    assert_ne!(
+        primary_kernel.entry, secondary_kernel.entry,
+        "different bodies, different kernels"
+    );
 }

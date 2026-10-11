@@ -397,12 +397,13 @@ impl ExpertResidency {
                 ResidencyAction::Evict(address) => (address, false),
             };
             let last_token = self.last_token;
-            let state = self.state_mut(address).map_err(|_| {
-                InteropError::ExpertSlabIndexOutOfRange {
-                    layer: address.layer,
-                    expert: address.expert,
-                }
-            })?;            state.resident = resident;
+            let state =
+                self.state_mut(address)
+                    .map_err(|_| InteropError::ExpertSlabIndexOutOfRange {
+                        layer: address.layer,
+                        expert: address.expert,
+                    })?;
+            state.resident = resident;
             state.resident_since = if resident { last_token } else { 0 };
         }
         self.actions.entries.clear();
@@ -411,7 +412,8 @@ impl ExpertResidency {
 
     #[must_use]
     pub fn resident(&self, address: ExpertAddress) -> Option<bool> {
-        self.index(address).map(|slot| self.states[slot].resident)    }
+        self.index(address).map(|slot| self.states[slot].resident)
+    }
 
     fn capacity(&self) -> usize {
         let all_experts = self.states.len();
@@ -431,10 +433,12 @@ impl ExpertResidency {
     }
 
     fn state_mut(&mut self, address: ExpertAddress) -> Result<&mut ExpertState, ResidencyError> {
-        let slot = self.index(address).ok_or(ResidencyError::AddressOutOfRange {
-            layer: address.layer,
-            expert: address.expert,
-        })?;
+        let slot = self
+            .index(address)
+            .ok_or(ResidencyError::AddressOutOfRange {
+                layer: address.layer,
+                expert: address.expert,
+            })?;
         Ok(&mut self.states[slot])
     }
 
@@ -467,15 +471,16 @@ impl ExpertResidency {
     }
 
     fn coldest_target(&self, target: &[bool]) -> Option<usize> {
-        (0..self.states.len())
-            .filter(|slot| target[*slot])
-            .fold(None, |coldest: Option<usize>, slot| {
+        (0..self.states.len()).filter(|slot| target[*slot]).fold(
+            None,
+            |coldest: Option<usize>, slot| {
                 if coldest.is_none_or(|current| self.hotness(slot) < self.hotness(current)) {
                     Some(slot)
                 } else {
                     coldest
                 }
-            })
+            },
+        )
     }
 }
 
@@ -503,11 +508,7 @@ mod tests {
             .collect()
     }
 
-    fn apply<'a>(
-        policy: &mut ExpertResidency,
-        slab: &mut ExpertSlab<'a>,
-        bytes: &'a [u8],
-    ) {
+    fn apply<'a>(policy: &mut ExpertResidency, slab: &mut ExpertSlab<'a>, bytes: &'a [u8]) {
         policy
             .apply_at_boundary(slab, |address| {
                 let start = address.expert * 144;
@@ -601,7 +602,8 @@ mod tests {
                 .expect("expert 3 is inside the fixed matrix");
             let staged = policy.reconcile().as_slice().to_vec();
             apply(&mut policy, &mut slab, &bytes);
-            last_actions = Some(staged);        }
+            last_actions = Some(staged);
+        }
 
         assert_eq!(
             policy.resident(ExpertAddress {

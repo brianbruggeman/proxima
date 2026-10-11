@@ -125,8 +125,8 @@ mod packed_row_blocked_ggml;
 mod tiled_gemm_cooperative_scan;
 mod expert_grouped_gemm;
 mod index_narrowing;
-mod wide_grid;
 mod scaled_float_render;
+mod wide_grid;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) use emit_and_classify::emit_inner_with_mma_selection;
 #[cfg(feature = "metal-attn-variants")]
@@ -158,10 +158,10 @@ pub use signature_tokens_prelude::{
 // needed) is `tests.rs`'s `#[cfg(test)]` module -- gating this `use` any
 // wider leaves it unused in a plain (non-test) `metal`+macos lib build,
 // since nothing else ever names it through `msl`'s namespace.
-#[cfg(feature = "metal-attn-split-decode")]
-use cached_attention_decode_split::render_cached_attention_decode_split;
 #[cfg(all(test, feature = "metal-attn-split-decode"))]
 use cached_attention_decode_split::index_literal;
+#[cfg(feature = "metal-attn-split-decode")]
+use cached_attention_decode_split::render_cached_attention_decode_split;
 #[cfg(test)]
 use cached_attention_render::render_cached_attention;
 use cached_attention_render::{
@@ -191,12 +191,12 @@ pub(crate) use elementwise_reduce_core::*;
 ))]
 pub(crate) use expert_grouped_gemm::ROUTE_COMPACTION_MISMATCH_FAULT;
 use expert_grouped_gemm::*;
-use index_narrowing::*;
 #[cfg(any(
     all(test, feature = "metal-grouped-gemm"),
     all(feature = "metal", target_os = "macos")
 ))]
 pub(crate) use expert_grouped_gemm::{route_compaction_key, route_prepass, route_prepass_active};
+use index_narrowing::*;
 use packed_row_blocked_ggml::*;
 use scaled_float_render::*;
 use selection_render::render_top_fraction_select;
@@ -230,16 +230,16 @@ mod attn_split_tests;
 mod cooperative_fold_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod serial_fold_index32_tests;
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod index_narrowing_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-pub(crate) mod tests;
+mod scaled_e3m2_render_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod scaled_e3m2_render_tests;
+mod serial_fold_index32_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+pub(crate) mod tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod twin_elementwise_tests;

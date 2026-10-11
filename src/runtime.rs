@@ -721,7 +721,10 @@ fn install_prime_ambient(inner: &Arc<PrimeRuntime>, visible_cores: usize) {
     feature = "runtime-prime-inbox-alloc",
     feature = "runtime-prime-reactor",
     feature = "runtime-prime-bgpool",
-    not(all(feature = "serve-prime", any(target_os = "linux", target_os = "macos", target_os = "windows")))
+    not(all(
+        feature = "serve-prime",
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
+    ))
 ))]
 fn install_prime_ambient(_inner: &Arc<PrimeRuntime>, _visible_cores: usize) {}
 

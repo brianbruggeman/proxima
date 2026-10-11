@@ -126,7 +126,8 @@ pub fn append_single_range_cached_attention(
         v_new_raw
     };
 
-    let (rotated_q_even, rotated_q_odd) = fused_rope_pair(program, q, 'h', cos_new, sin_new, rope_pairing)?;
+    let (rotated_q_even, rotated_q_odd) =
+        fused_rope_pair(program, q, 'h', cos_new, sin_new, rope_pairing)?;
     let (rotated_k_new_even, rotated_k_new_odd) =
         fused_rope_pair(program, k_new, 'u', cos_new, sin_new, rope_pairing)?;
 
@@ -501,7 +502,8 @@ pub fn append_two_range_cached_attention(
                 "sudi->sudi",
                 "sud->sudi",
             )?;
-            let k_new = rmsnorm_per_head(program, k_new_raw, k_norm_weight, inv_head_dim, eps, "u")?;
+            let k_new =
+                rmsnorm_per_head(program, k_new_raw, k_norm_weight, inv_head_dim, eps, "u")?;
             let (rotated_even, rotated_odd) =
                 fused_rope_pair(program, k_new, 'u', cos_new, sin_new, rope_pairing)?;
             (Some(k_new_raw), rotated_even, rotated_odd)
@@ -530,8 +532,9 @@ pub fn append_two_range_cached_attention(
                 "sud->sudi",
             )?
         }
-        ValueSource::SharedWithKey => k_new_raw_for_shared_with_key
-            .ok_or(TensorError::SharedWithKeyRequiresProjectedKey)?,
+        ValueSource::SharedWithKey => {
+            k_new_raw_for_shared_with_key.ok_or(TensorError::SharedWithKeyRequiresProjectedKey)?
+        }
         ValueSource::Shared(v) => v,
     };
     let v_new = if value_norm {
@@ -540,7 +543,8 @@ pub fn append_two_range_cached_attention(
         v_new_raw
     };
 
-    let (rotated_q_even, rotated_q_odd) = fused_rope_pair(program, q, 'h', cos_new, sin_new, rope_pairing)?;
+    let (rotated_q_even, rotated_q_odd) =
+        fused_rope_pair(program, q, 'h', cos_new, sin_new, rope_pairing)?;
 
     let (q_even_grouped, q_odd_grouped) =
         group_queries(program, rotated_q_even, rotated_q_odd, group, group_ones)?;
@@ -638,7 +642,10 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
             found: schedule.len(),
         });
     }
-    if schedule.iter().any(|entry| entry.kind != LayerKind::Attention) {
+    if schedule
+        .iter()
+        .any(|entry| entry.kind != LayerKind::Attention)
+    {
         return Err(TensorError::UnsupportedInBuilder {
             builder: "scheduled_single_range_cached_forward_program_with_experts",
             feature: "LayerKind::ShortConv (no single-range cache-state contract yet)",
@@ -749,7 +756,10 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
             }
             ValueSourceKind::SharedWithKey => ValueSource::SharedWithKey,
             ValueSourceKind::SharedFromLayer(source) => {
-                return Err(TensorError::SharedKvUnsupportedInCachedForward { layer, source_layer: source });
+                return Err(TensorError::SharedKvUnsupportedInCachedForward {
+                    layer,
+                    source_layer: source,
+                });
             }
         };
         let wo = input_leaf(
@@ -1095,7 +1105,13 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
             }
         }
     }
-    Ok((program, logits, cache_roots, moe_sites, duplicate_head_roots))
+    Ok((
+        program,
+        logits,
+        cache_roots,
+        moe_sites,
+        duplicate_head_roots,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1130,8 +1146,14 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             feature: "LayerKind::Gdn",
         });
     }
-    if short_conv_cache_len == 0 && schedule.iter().any(|entry| entry.kind == LayerKind::ShortConv) {
-        return Err(TensorError::InvalidConvConfig { l_cache: short_conv_cache_len });
+    if short_conv_cache_len == 0
+        && schedule
+            .iter()
+            .any(|entry| entry.kind == LayerKind::ShortConv)
+    {
+        return Err(TensorError::InvalidConvConfig {
+            l_cache: short_conv_cache_len,
+        });
     }
     if sliding_kv_ring {
         let mut windows = schedule
@@ -1287,8 +1309,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             None
         };
         if let Some(shared) = &ple_shared {
-            ple_layer_inputs[layer as usize] =
-                Some(ple_layer_input(&mut program, shared, layer)?);
+            ple_layer_inputs[layer as usize] = Some(ple_layer_input(&mut program, shared, layer)?);
         }
 
         if entry.kind == LayerKind::ShortConv {
@@ -1303,7 +1324,10 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             let conv_weight = input_leaf(
                 &mut program,
                 DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(short_conv_cache_len)],
+                alloc::vec![
+                    Extent::Static(embedding),
+                    Extent::Static(short_conv_cache_len)
+                ],
                 &alloc::format!("blk.{layer}.shortconv.conv.weight"),
             );
             let out_proj = input_leaf(
@@ -1315,7 +1339,10 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             let state_in = input_leaf(
                 &mut program,
                 DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(short_conv_cache_len)],
+                alloc::vec![
+                    Extent::Static(embedding),
+                    Extent::Static(short_conv_cache_len)
+                ],
                 &alloc::format!("shortconv_cache.{layer}.history"),
             );
             let roll_indices = input_leaf(
@@ -1393,7 +1420,10 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             Extent::Symbolic(1)
         };
         let shared_source = match (config.key_source_kind, config.value_source_kind) {
-            (KeySourceKind::SharedFromLayer(key_source), ValueSourceKind::SharedFromLayer(value_source)) => {
+            (
+                KeySourceKind::SharedFromLayer(key_source),
+                ValueSourceKind::SharedFromLayer(value_source),
+            ) => {
                 if key_source != value_source {
                     return Err(TensorError::SharedKvUnsupportedInCachedForward {
                         layer,
@@ -1402,16 +1432,23 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                 }
                 Some(key_source)
             }
-            (KeySourceKind::SharedFromLayer(source), _) | (_, ValueSourceKind::SharedFromLayer(source)) => {
-                return Err(TensorError::SharedKvUnsupportedInCachedForward { layer, source_layer: source });
+            (KeySourceKind::SharedFromLayer(source), _)
+            | (_, ValueSourceKind::SharedFromLayer(source)) => {
+                return Err(TensorError::SharedKvUnsupportedInCachedForward {
+                    layer,
+                    source_layer: source,
+                });
             }
             (KeySourceKind::ProjectedK, _) => None,
         };
 
         let (key_source, value_source, k_even_cache, k_odd_cache, v_cache) = match shared_source {
             Some(source) => {
-                let donor = stored_kv[source as usize]
-                    .ok_or(TensorError::SharedKvSourceNotAvailable { layer, source_layer: source })?;
+                let donor =
+                    stored_kv[source as usize].ok_or(TensorError::SharedKvSourceNotAvailable {
+                        layer,
+                        source_layer: source,
+                    })?;
                 (
                     KeySource::Shared {
                         rotated_even: donor.rotated_k_even,
@@ -1456,7 +1493,10 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                     }
                     ValueSourceKind::SharedWithKey => ValueSource::SharedWithKey,
                     ValueSourceKind::SharedFromLayer(source) => {
-                        return Err(TensorError::SharedKvUnsupportedInCachedForward { layer, source_layer: source });
+                        return Err(TensorError::SharedKvUnsupportedInCachedForward {
+                            layer,
+                            source_layer: source,
+                        });
                     }
                 };
                 let k_even_cache = input_leaf(
@@ -1641,8 +1681,12 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                     ScalarOp::Divide,
                     &[(logits, "sv->sv"), (cap_node, "->sv")],
                 )?;
-                let tanh =
-                    elementwise(program, DType::Float32, ScalarOp::Tanh, &[(scaled, "sv->sv")])?;
+                let tanh = elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Tanh,
+                    &[(scaled, "sv->sv")],
+                )?;
                 elementwise(
                     program,
                     DType::Float32,

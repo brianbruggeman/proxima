@@ -191,7 +191,9 @@ impl SpeculativeTypeNameSet {
     /// This set's members in llama.cpp's own fixed priority order
     /// (`PRIORITY_ORDER`'s own doc).
     pub fn iter(self) -> impl Iterator<Item = SpeculativeTypeName> {
-        PRIORITY_ORDER.into_iter().filter(move |&name| self.contains(name))
+        PRIORITY_ORDER
+            .into_iter()
+            .filter(move |&name| self.contains(name))
     }
 }
 
@@ -407,8 +409,7 @@ mod tests {
             .ngram_simple_min_hits(2)
             .build();
 
-        let mut toml_file = NamedTempFile::with_suffix(".toml")
-            .expect("create temp toml file");
+        let mut toml_file = NamedTempFile::with_suffix(".toml").expect("create temp toml file");
         writeln!(
             toml_file,
             r#"
@@ -434,13 +435,28 @@ mod tests {
         let via_file: SpeculativeSettings = conflaguration::from_file(toml_file.path())
             .unwrap_or_else(|err| panic!("from_file failed: {err}"));
         assert_eq!(via_builder, via_file, "builder must match the TOML loader");
-        assert!(via_file.speculative_types.contains(SpeculativeTypeName::NgramSimple));
-        assert!(via_file.speculative_types.contains(SpeculativeTypeName::NgramMapK));
-        assert!(!via_file.speculative_types.contains(SpeculativeTypeName::NgramMod));
+        assert!(
+            via_file
+                .speculative_types
+                .contains(SpeculativeTypeName::NgramSimple)
+        );
+        assert!(
+            via_file
+                .speculative_types
+                .contains(SpeculativeTypeName::NgramMapK)
+        );
+        assert!(
+            !via_file
+                .speculative_types
+                .contains(SpeculativeTypeName::NgramMod)
+        );
 
         temp_env::with_vars(
             [
-                ("PROXIMA_SPECULATIVE_TYPES", Some("ngram-simple,ngram-map-k")),
+                (
+                    "PROXIMA_SPECULATIVE_TYPES",
+                    Some("ngram-simple,ngram-map-k"),
+                ),
                 ("PROXIMA_SPECULATIVE_NGRAM_SIMPLE_SIZE_N", Some("16")),
                 ("PROXIMA_SPECULATIVE_NGRAM_SIMPLE_SIZE_M", Some("32")),
                 ("PROXIMA_SPECULATIVE_NGRAM_SIMPLE_MIN_HITS", Some("2")),
@@ -480,8 +496,15 @@ mod tests {
             || {
                 let settings = SpeculativeSettings::from_env()
                     .unwrap_or_else(|err| panic!("from_env failed: {err}"));
-                assert_eq!(settings.speculative_types, SpeculativeTypeNameSet::ngram_simple());
-                assert!(settings.speculative_types.contains(SpeculativeTypeName::NgramSimple));
+                assert_eq!(
+                    settings.speculative_types,
+                    SpeculativeTypeNameSet::ngram_simple()
+                );
+                assert!(
+                    settings
+                        .speculative_types
+                        .contains(SpeculativeTypeName::NgramSimple)
+                );
                 assert_eq!(settings.n_max, 3);
                 assert_eq!(settings.n_min, 0);
                 assert_eq!(settings.p_min, 0.0);
@@ -569,16 +592,26 @@ mod tests {
         temp_env::with_vars(env_with_types(None), || {
             let via_env = SpeculativeSettings::from_env()
                 .unwrap_or_else(|err| panic!("from_env failed: {err}"));
-            assert_eq!(via_builder, via_env, "builder default must match the env loader default");
+            assert_eq!(
+                via_builder, via_env,
+                "builder default must match the env loader default"
+            );
         });
-        assert!(via_builder.speculative_types.contains(SpeculativeTypeName::NgramSimple));
+        assert!(
+            via_builder
+                .speculative_types
+                .contains(SpeculativeTypeName::NgramSimple)
+        );
     }
 
     #[test]
     fn default_settings_lower_to_the_same_config_as_serving_config_default() {
         let settings = SpeculativeSettings::builder().build();
 
-        assert_eq!(settings.as_speculative_config(), SpeculativeConfig::default());
+        assert_eq!(
+            settings.as_speculative_config(),
+            SpeculativeConfig::default()
+        );
         assert_eq!(
             settings.as_speculative_config(),
             crate::serving::ServingConfig::default().speculative
@@ -640,7 +673,10 @@ mod tests {
             let via_env = SpeculativeSettings::from_env()
                 .unwrap_or_else(|err| panic!("from_env failed: {err}"));
 
-            assert_eq!(via_env.speculative_types, SpeculativeTypeNameSet::ngram_simple());
+            assert_eq!(
+                via_env.speculative_types,
+                SpeculativeTypeNameSet::ngram_simple()
+            );
         });
     }
 
@@ -659,7 +695,10 @@ mod tests {
         temp_env::with_vars(env_with_types(Some("quantum-mtp")), || {
             let result = SpeculativeSettings::from_env();
 
-            assert!(result.is_err(), "an unknown type must not fall back to a default");
+            assert!(
+                result.is_err(),
+                "an unknown type must not fall back to a default"
+            );
         });
     }
 
@@ -737,12 +776,18 @@ mod tests {
     #[test]
     fn as_speculative_config_borrows_cache_paths() {
         let settings = SpeculativeSettings::builder()
-            .speculative_types(SpeculativeTypeNameSet::empty().insert(SpeculativeTypeName::NgramCache))
+            .speculative_types(
+                SpeculativeTypeNameSet::empty().insert(SpeculativeTypeName::NgramCache),
+            )
             .ngram_cache_lookup_static("static.cache".to_string())
             .ngram_cache_lookup_dynamic("dynamic.cache".to_string())
             .build();
         let config = settings.as_speculative_config();
-        assert!(config.speculative_types.contains(SpeculativeType::NgramCache));
+        assert!(
+            config
+                .speculative_types
+                .contains(SpeculativeType::NgramCache)
+        );
         assert_eq!(config.ngram_cache_lookup_static, Some("static.cache"));
         assert_eq!(config.ngram_cache_lookup_dynamic, Some("dynamic.cache"));
     }

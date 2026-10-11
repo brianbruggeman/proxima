@@ -77,7 +77,7 @@ fn a_warm_plan_hit_allocates_the_same_amount_every_call() {
         &[],
         NumericPolicy::default(),
     )
-        .expect("plans the two-step identity chain");
+    .expect("plans the two-step identity chain");
 
     // Cold: builds `resolved_steps` from empty, compiles both kernels'
     // pipelines for the first time -- allocation-heavy by construction, not
@@ -241,7 +241,7 @@ fn a_warm_plan_hit_s_allocations_are_named_by_size() {
         &[],
         NumericPolicy::default(),
     )
-        .expect("plans the two-step identity chain");
+    .expect("plans the two-step identity chain");
     // fed by `into_scratch` after each call below, so a warm call's root
     // read-back (`finish`'s `recycle` parameter) reuses the PREVIOUS call's
     // own buffer instead of allocating fresh -- this test's whole point.
@@ -364,7 +364,7 @@ fn a_warm_plan_hit_reuses_a_resident_block_s_device_buffer() {
         &[],
         NumericPolicy::default(),
     )
-        .expect("plans the one-op resident chain");
+    .expect("plans the one-op resident chain");
     plan.mark_resident(&std::collections::BTreeSet::from(["weight"]));
 
     omega::execute_plan_with_placements(
@@ -464,7 +464,10 @@ fn narrowing_the_math_mode_re_resolves_the_plans_pipelines() {
         "the plan must start at the mode the policy projects to, or narrowing to Safe changes nothing"
     );
 
-    for call in ["cold call resolves under Relaxed", "first warm call under Relaxed"] {
+    for call in [
+        "cold call resolves under Relaxed",
+        "first warm call under Relaxed",
+    ] {
         omega::execute_plan_with_placements(
             &plan,
             &[QuantizedBlock::Float32(&block)],

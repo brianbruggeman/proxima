@@ -459,7 +459,8 @@ mod harness {
     }
 
     fn arm_capture(max_tokens: usize) {
-        let steps = std::env::var("M0_CAPTURE_STEPS").unwrap_or_else(|_| capture_steps_arg(max_tokens));
+        let steps =
+            std::env::var("M0_CAPTURE_STEPS").unwrap_or_else(|_| capture_steps_arg(max_tokens));
         // SAFETY: called from `main` before any thread is spawned, so no
         // concurrent environment reader exists.
         unsafe {
@@ -471,14 +472,19 @@ mod harness {
 
     fn decode(config: &Config) -> (usize, String) {
         let model_path = std::env::var("M0_MODEL_GGUF").unwrap_or_else(|_| MODEL_PATH.to_string());
-        let file = File::open(&model_path).unwrap_or_else(|error| panic!("open {model_path}: {error}"));
+        let file =
+            File::open(&model_path).unwrap_or_else(|error| panic!("open {model_path}: {error}"));
         // SAFETY: read-only mapping of a checkpoint no other process writes.
         let bytes: Mmap = unsafe { MmapOptions::new().map(&file) }.expect("map checkpoint blob");
         let parsed = parse_complete(&bytes).expect("parse gemma4-E2B header");
         let model = LoadedModel::load(&parsed, &bytes).expect("bind gemma4-E2B");
         let numeric_policy = match std::env::var("PROXIMA_EPILOGUE_SOURCES").as_deref() {
-            Ok("0") => ServingConfig::default().numeric_policy.with_epilogue_sources(false),
-            Ok("1") => ServingConfig::default().numeric_policy.with_epilogue_sources(true),
+            Ok("0") => ServingConfig::default()
+                .numeric_policy
+                .with_epilogue_sources(false),
+            Ok("1") => ServingConfig::default()
+                .numeric_policy
+                .with_epilogue_sources(true),
             Ok(other) => panic!("PROXIMA_EPILOGUE_SOURCES={other}: expected `0` or `1`"),
             Err(_) => ServingConfig::default().numeric_policy,
         };
@@ -845,26 +851,44 @@ mod harness {
 
     fn mean_and_cov_percent(values: &[f64]) -> (f64, f64) {
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / values.len() as f64;
+        let variance = values
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / values.len() as f64;
         (mean, 100.0 * variance.sqrt() / mean)
     }
 
     fn sequence_family_arms(launched: &[CapturedDispatch], classes: &[Class], runs: usize) {
         let mut by_family: BTreeMap<&'static str, Vec<&CapturedDispatch>> = BTreeMap::new();
         for (dispatch, class) in launched.iter().zip(classes) {
-            by_family.entry(sequence_family(class)).or_default().push(dispatch);
+            by_family
+                .entry(sequence_family(class))
+                .or_default()
+                .push(dispatch);
         }
-        let excluded: usize = launched.iter().filter(|dispatch| dispatch.unreplayable.is_some()).count();
+        let excluded: usize = launched
+            .iter()
+            .filter(|dispatch| dispatch.unreplayable.is_some())
+            .count();
         for members in by_family.values_mut() {
             members.retain(|dispatch| dispatch.unreplayable.is_none());
         }
-        println!("m0 family sequence replay excludes {excluded} unreplayable dispatches of {}", launched.len());
+        println!(
+            "m0 family sequence replay excludes {excluded} unreplayable dispatches of {}",
+            launched.len()
+        );
         let member_total: usize = by_family.values().map(Vec::len).sum();
-        assert_eq!(member_total + excluded, launched.len(), "N: family arms plus the excluded must partition the captured dispatches");
+        assert_eq!(
+            member_total + excluded,
+            launched.len(),
+            "N: family arms plus the excluded must partition the captured dispatches"
+        );
         let mut samples: BTreeMap<&'static str, Vec<f64>> = BTreeMap::new();
         for _ in 0..runs {
             for (family, members) in &by_family {
-                let nanos = CapturedDispatch::time_gpu_sequence_ns(members).expect("family sequence replays");
+                let nanos = CapturedDispatch::time_gpu_sequence_ns(members)
+                    .expect("family sequence replays");
                 samples.entry(family).or_default().push(nanos / 1e6);
             }
         }
@@ -878,8 +902,13 @@ mod harness {
             );
         }
     }
-    fn replay_chunk_sequences(replayable: &[&CapturedDispatch]) -> Result<Vec<f64>, omega::MetalError> {
-        let mut chunk_indices: Vec<usize> = replayable.iter().map(|dispatch| dispatch.chunk_index).collect();
+    fn replay_chunk_sequences(
+        replayable: &[&CapturedDispatch],
+    ) -> Result<Vec<f64>, omega::MetalError> {
+        let mut chunk_indices: Vec<usize> = replayable
+            .iter()
+            .map(|dispatch| dispatch.chunk_index)
+            .collect();
         chunk_indices.dedup();
         chunk_indices
             .into_iter()
@@ -964,7 +993,10 @@ mod harness {
                 println!("m0 replay: group {position}/{group_total}");
             }
         }
-        let replayable: Vec<&CapturedDispatch> = launched.iter().filter(|dispatch| dispatch.unreplayable.is_none()).collect();
+        let replayable: Vec<&CapturedDispatch> = launched
+            .iter()
+            .filter(|dispatch| dispatch.unreplayable.is_none())
+            .collect();
         let sequence_replay_ns: Vec<f64> = (0..3)
             .map(|_| CapturedDispatch::time_gpu_sequence_ns(&replayable))
             .collect::<Result<_, _>>()
@@ -1118,7 +1150,10 @@ mod harness {
             launched.len(),
             "invariant 1: distinct kernels x counts must equal captured dispatches"
         );
-        let prepass_dispatches: u64 = launched.iter().map(|dispatch| dispatch.route_prepass_dispatches).sum();
+        let prepass_dispatches: u64 = launched
+            .iter()
+            .map(|dispatch| dispatch.route_prepass_dispatches)
+            .sum();
         assert_eq!(
             Some(launched.len() as u64 + prepass_dispatches),
             capture_stats.physical_dispatch_calls,
@@ -1131,7 +1166,10 @@ mod harness {
         println!(
             "m0 unreplayable by capture: groups={} dispatches={}",
             failed.len() - unexplained.len(),
-            launched.iter().filter(|dispatch| dispatch.unreplayable.is_some()).count()
+            launched
+                .iter()
+                .filter(|dispatch| dispatch.unreplayable.is_some())
+                .count()
         );
         assert!(
             unexplained.is_empty(),
@@ -1430,8 +1468,8 @@ mod real_program_names {
         // SAFETY: read-only mapping of a checkpoint no other process writes.
         let mapping = unsafe { Mmap::map(&file) }.expect("mmap the real checkpoint");
         let parsed = parse_complete(&mapping).expect("parse the real checkpoint header");
-        let bound_program = bind_checkpoint(&parsed, &mapping)
-            .expect("bind gemma4 production program");
+        let bound_program =
+            bind_checkpoint(&parsed, &mapping).expect("bind gemma4 production program");
         let outputs = production_outputs(bound_program.logits_root, &bound_program.layer_roots);
         let symbols = bind_symbols(
             NEW_COUNT,

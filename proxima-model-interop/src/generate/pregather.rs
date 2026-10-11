@@ -69,13 +69,9 @@ impl<'file> LoadedModel<'file> {
         prompt: &str,
         gpu_layers: i32,
     ) -> Result<Vec<Vec<f32>>, InteropError> {
-        if self.router_roots.is_empty()
-            || self.ffn_routing != FfnRouting::Routed
-        {
+        if self.router_roots.is_empty() || self.ffn_routing != FfnRouting::Routed {
             return Err(InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from(
-                    self.family(),
-                ),
+                architecture: String::from(self.family()),
                 reason: String::from("the bound model does not expose routed-expert router roots"),
             });
         }
@@ -89,14 +85,11 @@ impl<'file> LoadedModel<'file> {
     pub fn moe_layer_boundaries(
         &self,
         symbols: &[u64],
-    ) -> Result<Vec<crate::recurrent_routed_interval::execution::LayerProgramBoundary>, InteropError> {
-        if self.moe_layer_diagnostics.is_empty()
-            || self.ffn_routing != FfnRouting::Routed
-        {
+    ) -> Result<Vec<crate::recurrent_routed_interval::execution::LayerProgramBoundary>, InteropError>
+    {
+        if self.moe_layer_diagnostics.is_empty() || self.ffn_routing != FfnRouting::Routed {
             return Err(InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from(
-                    self.family(),
-                ),
+                architecture: String::from(self.family()),
                 reason: String::from("the bound model has no routed-expert layer diagnostics"),
             });
         }
@@ -128,27 +121,24 @@ impl<'file> LoadedModel<'file> {
         )>,
         InteropError,
     > {
-        if self.moe_layer_diagnostics.is_empty()
-            || self.ffn_routing != FfnRouting::Routed
-        {
+        if self.moe_layer_diagnostics.is_empty() || self.ffn_routing != FfnRouting::Routed {
             return Err(InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from(
-                    self.family(),
-                ),
+                architecture: String::from(self.family()),
                 reason: String::from("the bound model has no routed-expert layer diagnostics"),
             });
         }
         let mut segments = Vec::with_capacity(self.moe_layer_diagnostics.len());
         let mut previous_output = None;
         for diagnostic in &self.moe_layer_diagnostics {
-            let pair = crate::recurrent_routed_interval::execution::split_router_and_gather_segments(
-                &self.program,
-                symbols,
-                previous_output,
-                diagnostic.router_logits,
-                diagnostic.block_output,
-            )
-            .map_err(InteropError::from)?;
+            let pair =
+                crate::recurrent_routed_interval::execution::split_router_and_gather_segments(
+                    &self.program,
+                    symbols,
+                    previous_output,
+                    diagnostic.router_logits,
+                    diagnostic.block_output,
+                )
+                .map_err(InteropError::from)?;
             segments.push(pair);
             previous_output = Some(diagnostic.block_output);
         }
@@ -319,8 +309,7 @@ impl<'file> LoadedModel<'file> {
                         crate::recurrent_routed_interval::execution::split_two_layer_window_segment(
                             &self.program,
                             symbols,
-                            (layer > 0)
-                                .then(|| self.moe_layer_diagnostics[layer - 1].block_output),
+                            (layer > 0).then(|| self.moe_layer_diagnostics[layer - 1].block_output),
                             self.moe_layer_diagnostics[layer].router_logits,
                             next.router_logits,
                             next.block_output,
@@ -2036,7 +2025,10 @@ impl<'file> LoadedModel<'file> {
                         if std::env::var_os("PROXIMA_DEBUG_MOE_MISSING_NODE").is_some() {
                             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                             let placed = plan.router_cut_placements.contains_key(&original);
-                            #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+                            #[cfg(not(all(
+                                feature = "metal-output-placement",
+                                target_os = "macos"
+                            )))]
                             let placed = false;
                             debug!(
                                 phase = if is_router { "router" } else { "gather" },
@@ -2319,7 +2311,9 @@ impl<'file> LoadedModel<'file> {
     /// Graph-level producer boundaries for every recurrent-routed layer, in layer
     /// order. Non-recurrent-routed models return an empty slice.
     #[must_use]
-    pub fn moe_layer_diagnostics(&self) -> &[crate::recurrent_routed_interval::MoeLayerDiagnostics] {
+    pub fn moe_layer_diagnostics(
+        &self,
+    ) -> &[crate::recurrent_routed_interval::MoeLayerDiagnostics] {
         &self.moe_layer_diagnostics
     }
 
@@ -2464,7 +2458,10 @@ impl<'file> LoadedModel<'file> {
     /// The placement hook of the device kv, `DeviceKv::adopt` in `device_kv.rs`: replaces where its buffers come from. Compose it with [`omega::allocate_placed_buffer_over`] to put the kv in memory you own; the default, [`omega::allocate_placed_buffer`], reproduces today's allocation. A replaced source is asked for every buffer of every generation and its buffers are freed with the generation; only the default source feeds the resident store (`ServingConfig::resident_kv_bytes`).
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     #[must_use]
-    pub fn with_kv_buffer_source(mut self, source: fn(usize) -> Result<omega::PlacedBuffer, omega::MetalError>) -> Self {
+    pub fn with_kv_buffer_source(
+        mut self,
+        source: fn(usize) -> Result<omega::PlacedBuffer, omega::MetalError>,
+    ) -> Self {
         self.kv_buffer_source = Some(source);
         self
     }
@@ -2671,15 +2668,18 @@ impl<'file> LoadedModel<'file> {
         let single_range = if profile.kv_cache_shape != KvCacheShape::Uniform {
             None
         } else {
-            let qk_norm = descriptor
-                .map_or_else(|| crate::bind::checkpoint_has_qk_norm(parsed), |config| config.qk_norm);
+            let qk_norm = descriptor.map_or_else(
+                || crate::bind::checkpoint_has_qk_norm(parsed),
+                |config| config.qk_norm,
+            );
             build_single_range_program(&bound.architecture, qk_norm)?
         };
         // Armed by the descriptor ([`ModelDescriptor::verify`]), never by a
         // name: a config decides directly, and without one the family's
         // header descriptor does.
-        let speculative_verify_program = crate::lowering::bind_speculative_verify(parsed, file_bytes, kv_layout, descriptor)?
-            .map(|verify| (verify.program, verify.logits_root, verify.layer_roots));
+        let speculative_verify_program =
+            crate::lowering::bind_speculative_verify(parsed, file_bytes, kv_layout, descriptor)?
+                .map(|verify| (verify.program, verify.logits_root, verify.layer_roots));
         let expert_slab =
             crate::bind::build_expert_slab(&bound.architecture, &bound.program, &bound.weights);
         let rope_scaling = RopeScaling::from_gguf(parsed)?;

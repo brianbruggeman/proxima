@@ -28,7 +28,10 @@ fn host_local_gguf(name: &str) -> PathBuf {
     let dir = std::env::var(MODELS_DIR_ENV)
         .unwrap_or_else(|_| panic!("set {MODELS_DIR_ENV} to {MODELS_DIR_ABSENT}"));
     let path = PathBuf::from(dir).join(format!("ggml-vocab-{name}.gguf"));
-    assert!(path.exists(), "{path:?} is absent; {MODELS_DIR_ENV} must name {MODELS_DIR_ABSENT}");
+    assert!(
+        path.exists(),
+        "{path:?} is absent; {MODELS_DIR_ENV} must name {MODELS_DIR_ABSENT}"
+    );
     path
 }
 
@@ -72,7 +75,11 @@ fn parse_cases(name: &str) -> Vec<(String, Vec<u32>)> {
     };
     let inputs = split_cases(read("inp").leak());
     let outputs: Vec<&str> = read("out").leak().lines().collect();
-    assert_eq!(inputs.len(), outputs.len(), "{name}: .inp and .out case counts differ");
+    assert_eq!(
+        inputs.len(),
+        outputs.len(),
+        "{name}: .inp and .out case counts differ"
+    );
     inputs
         .into_iter()
         .zip(outputs)
@@ -87,7 +94,11 @@ fn parse_cases(name: &str) -> Vec<(String, Vec<u32>)> {
 }
 
 fn assert_vectors_match_llama(vocab: &Vocab, name: &str, expected_pre: PreType) -> usize {
-    assert_eq!(vocab.pre_type(), expected_pre, "{name}: pre type read from the gguf");
+    assert_eq!(
+        vocab.pre_type(),
+        expected_pre,
+        "{name}: pre type read from the gguf"
+    );
     let cases = parse_cases(name);
     assert!(!cases.is_empty(), "{name}: no vector cases were parsed");
     let mismatched: Vec<&str> = cases
@@ -95,7 +106,10 @@ fn assert_vectors_match_llama(vocab: &Vocab, name: &str, expected_pre: PreType) 
         .filter(|(input, expected)| &encode(input, vocab).expect("encodes") != expected)
         .map(|(input, _)| input.as_str())
         .collect();
-    assert!(mismatched.is_empty(), "{name}: ids differ from llama.cpp on {mismatched:?}");
+    assert!(
+        mismatched.is_empty(),
+        "{name}: ids differ from llama.cpp on {mismatched:?}"
+    );
     eprintln!("VECTORS {name}: {} cases asserted", cases.len());
     cases.len()
 }
@@ -103,7 +117,11 @@ fn assert_vectors_match_llama(vocab: &Vocab, name: &str, expected_pre: PreType) 
 #[test]
 #[ignore = "needs LLAMA_CPP_MODELS_DIR: ggml-vocab-gpt-2.gguf is not vendored"]
 fn gpt2_word_regex_tokenizes_llama_gpt2_vectors_like_llama() {
-    assert_vectors_match_llama(&load_vocab(&host_local_gguf("gpt-2")), "gpt-2", PreType::Gpt2);
+    assert_vectors_match_llama(
+        &load_vocab(&host_local_gguf("gpt-2")),
+        "gpt-2",
+        PreType::Gpt2,
+    );
 }
 
 #[test]
@@ -115,13 +133,21 @@ fn gpt2_word_regex_tokenizes_llama_mpt_vectors_like_llama() {
 #[test]
 #[ignore = "needs LLAMA_CPP_MODELS_DIR: ggml-vocab-starcoder.gguf is not vendored"]
 fn digit_isolated_gpt2_tokenizes_llama_starcoder_vectors_like_llama() {
-    assert_vectors_match_llama(&load_vocab(&host_local_gguf("starcoder")), "starcoder", PreType::DigitIsolatedGpt2);
+    assert_vectors_match_llama(
+        &load_vocab(&host_local_gguf("starcoder")),
+        "starcoder",
+        PreType::DigitIsolatedGpt2,
+    );
 }
 
 #[test]
 #[ignore = "needs LLAMA_CPP_MODELS_DIR: ggml-vocab-refact.gguf is not vendored"]
 fn digit_isolated_gpt2_tokenizes_llama_refact_vectors_like_llama() {
-    assert_vectors_match_llama(&load_vocab(&host_local_gguf("refact")), "refact", PreType::DigitIsolatedGpt2);
+    assert_vectors_match_llama(
+        &load_vocab(&host_local_gguf("refact")),
+        "refact",
+        PreType::DigitIsolatedGpt2,
+    );
 }
 
 #[test]

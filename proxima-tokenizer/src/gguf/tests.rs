@@ -122,7 +122,10 @@ fn byte_level_metadata(pre: Option<&str>) -> ParsedGguf {
         ),
     ];
     if let Some(pre) = pre {
-        metadata.push((String::from(PRE_KEY), MetadataValue::String(String::from(pre))));
+        metadata.push((
+            String::from(PRE_KEY),
+            MetadataValue::String(String::from(pre)),
+        ));
     }
     ParsedGguf {
         version: 3,
@@ -153,12 +156,19 @@ fn pre_value_selects_the_pre_split_the_way_llama_cpp_maps_it() {
 
 #[test]
 fn unmapped_pre_value_is_an_error_carrying_the_value() {
-    for pre in ["deepseek-coder", "jina-v1-en", "hunyuan-dense", "qwen3-unreleased"] {
+    for pre in [
+        "deepseek-coder",
+        "jina-v1-en",
+        "hunyuan-dense",
+        "qwen3-unreleased",
+    ] {
         let error = vocab_from_metadata(&byte_level_metadata(Some(pre)))
             .expect_err("an unmapped pre value is rejected");
         assert_eq!(
             error,
-            TokenizerError::UnsupportedPreTokenizer { pre: String::from(pre) }
+            TokenizerError::UnsupportedPreTokenizer {
+                pre: String::from(pre)
+            }
         );
     }
 }
@@ -193,7 +203,10 @@ fn char_level_metadata(model: &str, pre: Option<&str>) -> ParsedGguf {
         ),
     ];
     if let Some(pre) = pre {
-        metadata.push((String::from(PRE_KEY), MetadataValue::String(String::from(pre))));
+        metadata.push((
+            String::from(PRE_KEY),
+            MetadataValue::String(String::from(pre)),
+        ));
     }
     ParsedGguf {
         version: 3,
@@ -229,7 +242,9 @@ fn unknown_model_without_merges_or_scores_is_unsupported() {
     let error = vocab_from_metadata(&metadata).expect_err("no engine to select");
     assert_eq!(
         error,
-        TokenizerError::UnsupportedTokenizerModel { model: String::from("bert") }
+        TokenizerError::UnsupportedTokenizerModel {
+            model: String::from("bert")
+        }
     );
 }
 
@@ -248,15 +263,13 @@ fn empty_pre_value_is_treated_as_missing() {
 #[test]
 #[ignore = "depends on a real .gguf checkout outside this repo"]
 fn builds_a_vocab_from_the_real_llama_bpe_fixture() {
-    let candidate = Path::new(
-        "/Users/brianbruggeman/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf",
-    );
+    let candidate =
+        Path::new("/Users/brianbruggeman/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf");
     if !candidate.exists() {
         eprintln!("no real .gguf found at {candidate:?}, skipping");
         return;
     }
-    let (parsed, _bytes) =
-        proxima_gguf::edge::read_file(candidate).expect("parse real gguf file");
+    let (parsed, _bytes) = proxima_gguf::edge::read_file(candidate).expect("parse real gguf file");
     let vocab = vocab_from_metadata(&parsed).expect("builds vocab from real metadata");
     assert_eq!(vocab.len(), 128_256);
     assert_eq!(vocab.bos_token_id(), Some(128_000));
@@ -291,8 +304,7 @@ fn load_real_openchat_vocab() -> Option<Vocab> {
         return None;
     }
 
-    let mut file =
-        std::fs::File::open(candidate).expect("open host-local openchat gguf fixture");
+    let mut file = std::fs::File::open(candidate).expect("open host-local openchat gguf fixture");
     let mut header_buf = Vec::new();
     let parsed = 'grow: {
         for cap in [4usize << 20, 16 << 20, 64 << 20] {
@@ -372,8 +384,8 @@ fn real_deepseek_coder_vocab_has_no_add_bos_eos_metadata_at_all() {
         parsed.metadata_value(ADD_EOS_KEY).is_none(),
         "deepseek-coder's real gguf metadata carries no add_eos_token key"
     );
-    let vocab = vocab_from_metadata(&parsed)
-        .expect("builds vocab from real deepseek-coder metadata");
+    let vocab =
+        vocab_from_metadata(&parsed).expect("builds vocab from real deepseek-coder metadata");
     assert_eq!(
         vocab.pre_type(),
         PreType::Default,
@@ -583,9 +595,8 @@ fn encode_with_bos_eos_matches_llama_cpp_oracle_prompt_ids() {
     };
 
     for case in ORACLE_CASES {
-        let ids = crate::encode_with_bos_eos(case.prompt, &vocab, true, false).unwrap_or_else(
-            |error| panic!("{}: encode_with_bos_eos failed: {error}", case.name),
-        );
+        let ids = crate::encode_with_bos_eos(case.prompt, &vocab, true, false)
+            .unwrap_or_else(|error| panic!("{}: encode_with_bos_eos failed: {error}", case.name));
         assert_eq!(
             ids.as_slice(),
             case.prompt_ids,
@@ -628,9 +639,8 @@ fn encode_with_bos_eos_matches_llama_cpp_oracle_end_of_turn_marker() {
 
     let prompt = "GPT4 Correct User: Write a Python function that returns the nth Fibonacci number.<|end_of_turn|>GPT4 Correct Assistant:";
     let expected_ids: [u32; 31] = [
-        1, 420, 6316, 28781, 3198, 3123, 1247, 28747, 12018, 264, 21366, 908, 369, 5723, 272,
-        307, 362, 401, 593, 266, 28127, 1474, 28723, 32000, 420, 6316, 28781, 3198, 3123,
-        21631, 28747,
+        1, 420, 6316, 28781, 3198, 3123, 1247, 28747, 12018, 264, 21366, 908, 369, 5723, 272, 307,
+        362, 401, 593, 266, 28127, 1474, 28723, 32000, 420, 6316, 28781, 3198, 3123, 21631, 28747,
     ];
 
     let ids = crate::encode_with_bos_eos(prompt, &vocab, true, false)
@@ -697,7 +707,13 @@ fn real_gemma4_vocab_merges_space_into_the_following_word() {
         "no phantom Ġ separator (id {phantom_separator_id}) between words, got {ids:?}"
     );
 
-    let expected_words = ["The", "\u{2581}capital", "\u{2581}of", "\u{2581}France", "\u{2581}is"];
+    let expected_words = [
+        "The",
+        "\u{2581}capital",
+        "\u{2581}of",
+        "\u{2581}France",
+        "\u{2581}is",
+    ];
     let expected_ids: Vec<u32> = expected_words
         .iter()
         .map(|word| {

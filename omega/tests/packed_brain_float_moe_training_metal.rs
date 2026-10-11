@@ -250,7 +250,9 @@ fn encode_masters(codec: Codec, masters: &[f32]) -> Vec<u8> {
             .map(|value| proxima_gguf::quant::bf8_e5m2::encode(*value))
             .collect(),
         Codec::Bf4E2M1 => masters
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 proxima_gguf::quant::bf4_e2m1::pack_pair(pair[0], pair[1])
                     .expect("the finite master pair encodes as BF4")
@@ -1371,7 +1373,10 @@ fn pilot_outputs(fixture: &PilotBatchFixture, gathered: GatheredContribution) ->
     ]
 }
 
-#[expect(clippy::too_many_arguments, reason = "the codec, packed bytes, ids, routes and plan or optimizer state are distinct fixture inputs each call site names")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the codec, packed bytes, ids, routes and plan or optimizer state are distinct fixture inputs each call site names"
+)]
 fn plan_pilot_metal(
     fixture: &PilotBatchFixture,
     differentiated: &Differentiated,
@@ -1425,7 +1430,10 @@ fn plan_pilot_metal(
     .expect("Metal builds one reusable 64-step plan")
 }
 
-#[expect(clippy::too_many_arguments, reason = "the codec, packed bytes, ids, routes and plan or optimizer state are distinct fixture inputs each call site names")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the codec, packed bytes, ids, routes and plan or optimizer state are distinct fixture inputs each call site names"
+)]
 fn execute_pilot_plan(
     fixture: &PilotBatchFixture,
     gathered: GatheredContribution,
@@ -1463,7 +1471,10 @@ fn execute_pilot_plan(
     }
 }
 
-#[expect(clippy::too_many_arguments, reason = "the codec, packed bytes, ids, routes and plan or optimizer state are distinct fixture inputs each call site names")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the codec, packed bytes, ids, routes and plan or optimizer state are distinct fixture inputs each call site names"
+)]
 fn evaluate_pilot_cpu(
     fixture: &PilotBatchFixture,
     differentiated: &Differentiated,
@@ -1566,7 +1577,10 @@ fn pilot_adam_state(
     }
 }
 
-#[expect(clippy::too_many_arguments, reason = "the codec, packed bytes, ids, routes and plan or optimizer state are distinct fixture inputs each call site names")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the codec, packed bytes, ids, routes and plan or optimizer state are distinct fixture inputs each call site names"
+)]
 fn scalar_pilot_batch_routed(
     codec: Codec,
     packed_bytes: &[u8],

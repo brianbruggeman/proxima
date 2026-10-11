@@ -210,7 +210,10 @@ fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two
     let (program, sum) =
         multi_axis_matmul_program(TOKENS as u32, IN_DIM as u32, HEADS as u32, HEAD_DIM as u32);
     let blocks = [
-        QuantizedBlock::Packed { codec: omega::Codec::Q4K, bytes: &packed },
+        QuantizedBlock::Packed {
+            codec: omega::Codec::Q4K,
+            bytes: &packed,
+        },
         QuantizedBlock::Float32(&activation),
     ];
 
@@ -221,9 +224,13 @@ fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two
     let shapes = proxima_tensor::infer(&program, &[]).expect("the synthetic program infers");
     let packed_operands: omega::PackedOperands =
         [(NodeId(0), omega::Codec::Q4K)].into_iter().collect();
-    let mut bound =
-        proxima_tensor::bind(&program, &shapes, &[sum], proxima_tensor::NumericPolicy::default())
-            .expect("the synthetic program binds");
+    let mut bound = proxima_tensor::bind(
+        &program,
+        &shapes,
+        &[sum],
+        proxima_tensor::NumericPolicy::default(),
+    )
+    .expect("the synthetic program binds");
     proxima_tensor::correct_packed_matmul_layouts(&mut bound, &[NodeId(0)].into_iter().collect());
     let resolved = bound
         .iter()
@@ -323,9 +330,13 @@ fn metal_decode_shaped_attention_matmul_stays_on_the_row_blocked_vector_path() {
     let shapes = proxima_tensor::infer(&program, &[]).expect("the synthetic program infers");
     let packed_operands: omega::PackedOperands =
         [(NodeId(0), omega::Codec::Q4K)].into_iter().collect();
-    let mut bound =
-        proxima_tensor::bind(&program, &shapes, &[sum], proxima_tensor::NumericPolicy::default())
-            .expect("the synthetic program binds");
+    let mut bound = proxima_tensor::bind(
+        &program,
+        &shapes,
+        &[sum],
+        proxima_tensor::NumericPolicy::default(),
+    )
+    .expect("the synthetic program binds");
     proxima_tensor::correct_packed_matmul_layouts(&mut bound, &[NodeId(0)].into_iter().collect());
     let resolved = bound
         .iter()

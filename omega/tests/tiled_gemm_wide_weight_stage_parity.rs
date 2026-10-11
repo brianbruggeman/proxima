@@ -136,7 +136,12 @@ fn real_tensor_bytes(
 /// own `matmul_program`: `[tokens, in_dim] x [in_dim, rows] -> [tokens,
 /// rows]`, `weight_dtype` distinguishing "packed bytes" (`UInt8`) from a
 /// plain `f32` activation operand.
-fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
+fn matmul_program(
+    tokens: u32,
+    in_dim: u32,
+    out_dim: u32,
+    weight_dtype: DType,
+) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = append(
         &mut program,
@@ -199,11 +204,18 @@ fn run_wide_weight_stage_byte_identity(
     let (packed_program, packed_sum) =
         matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::UInt8);
     let blocks = [
-        QuantizedBlock::Packed { codec, bytes: weight_bytes },
+        QuantizedBlock::Packed {
+            codec,
+            bytes: weight_bytes,
+        },
         QuantizedBlock::Float32(&activation),
     ];
 
-    let direct_store_value = if also_direct_store { Some("1") } else { Some("0") };
+    let direct_store_value = if also_direct_store {
+        Some("1")
+    } else {
+        Some("0")
+    };
 
     let off = temp_env::with_vars(
         [
@@ -242,8 +254,16 @@ fn run_wide_weight_stage_byte_identity(
     let off_root = off.root();
     let on_root = on.root();
     let element_count = tokens * rows;
-    assert_eq!(off_root.len(), element_count, "degenerate: OFF produced no output");
-    assert_eq!(on_root.len(), element_count, "degenerate: ON produced no output");
+    assert_eq!(
+        off_root.len(),
+        element_count,
+        "degenerate: OFF produced no output"
+    );
+    assert_eq!(
+        on_root.len(),
+        element_count,
+        "degenerate: ON produced no output"
+    );
 
     let mut differing = 0usize;
     let mut max_abs_diff = 0.0f32;
@@ -268,7 +288,13 @@ fn run_wide_weight_stage_byte_identity(
     );
 }
 
-fn check_q4_0(tensor_name: &str, tokens: usize, rows_wanted: usize, also_direct_store: bool, label: &str) {
+fn check_q4_0(
+    tensor_name: &str,
+    tokens: usize,
+    rows_wanted: usize,
+    also_direct_store: bool,
+    label: &str,
+) {
     let path = std::path::Path::new(REAL_GEMMA4_GGUF_PATH);
     let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
         eprintln!("real gguf file not found at {REAL_GEMMA4_GGUF_PATH}; test skipped");
@@ -297,7 +323,13 @@ fn check_q4_0(tensor_name: &str, tokens: usize, rows_wanted: usize, also_direct_
     );
 }
 
-fn check_q4k(tensor_name: &str, tokens: usize, rows_wanted: usize, also_direct_store: bool, label: &str) {
+fn check_q4k(
+    tensor_name: &str,
+    tokens: usize,
+    rows_wanted: usize,
+    also_direct_store: bool,
+    label: &str,
+) {
     let path_string = real_q4k_gguf_path();
     let path = std::path::Path::new(&path_string);
     let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
@@ -350,7 +382,13 @@ fn q4_0_wide_weight_stage_matches_default_path_with_a_partial_edge_tile() {
 /// switches must compose to the same bit-identical result.
 #[test]
 fn q4_0_wide_weight_stage_matches_default_path_combined_with_direct_store() {
-    check_q4_0("blk.0.attn_q.weight", 510, 128, true, "combined_with_direct_store");
+    check_q4_0(
+        "blk.0.attn_q.weight",
+        510,
+        128,
+        true,
+        "combined_with_direct_store",
+    );
 }
 
 /// `Q4_K` admits `classify_tiled_gemm` unconditionally (no env override

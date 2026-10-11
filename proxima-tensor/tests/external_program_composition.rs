@@ -235,8 +235,8 @@ fn external_crate_composes_a_one_layer_forward_program() {
         activation: Activation::Silu,
         strategy: MoeProjectionStrategy::PerRoute,
     };
-    let (routed_out, _moe_site) = append_moe_ffn(&mut program, 0, hidden, &moe_spec)
-        .expect("routed moe ffn lowers");
+    let (routed_out, _moe_site) =
+        append_moe_ffn(&mut program, 0, hidden, &moe_spec).expect("routed moe ffn lowers");
 
     // A sigmoid-gated shared-expert FFN, run alongside the routed one and
     // added into its output -- the shape a private `sigmoid` could not

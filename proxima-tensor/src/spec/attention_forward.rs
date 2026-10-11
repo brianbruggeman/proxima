@@ -27,8 +27,14 @@ pub enum ValueSource {
 /// POST-k-norm `K` halves, reused verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeySource {
-    Projected { wk: NodeId, k_norm_weight: NodeId },
-    Shared { rotated_even: NodeId, rotated_odd: NodeId },
+    Projected {
+        wk: NodeId,
+        k_norm_weight: NodeId,
+    },
+    Shared {
+        rotated_even: NodeId,
+        rotated_odd: NodeId,
+    },
 }
 
 /// [`append_attention_mixer`]'s own output: the layer's post-residual
@@ -177,7 +183,12 @@ pub(super) fn append_activation(
     let broadcast_axes = alloc::format!("->{axes}");
     match activation {
         Activation::Silu => {
-            let neg_x = elementwise(program, DType::Float32, ScalarOp::Negate, &[(x, &same_axes)])?;
+            let neg_x = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Negate,
+                &[(x, &same_axes)],
+            )?;
             let exp_neg_x = elementwise(
                 program,
                 DType::Float32,
@@ -586,7 +597,11 @@ where
 ///
 /// this function has always built -- no new node, no new required
 /// binding, every existing per-position-logits caller unaffected.
-pub(super) fn gather_last_row(program: &mut Vec<Op>, normed_final: NodeId, last_row_only: bool) -> NodeId {
+pub(super) fn gather_last_row(
+    program: &mut Vec<Op>,
+    normed_final: NodeId,
+    last_row_only: bool,
+) -> NodeId {
     if last_row_only {
         let lm_head_row = input_leaf(
             program,
@@ -744,8 +759,7 @@ pub fn append_attention_mixer(
         v_raw
     };
 
-    let (rotated_q_even, rotated_q_odd) =
-        fused_rope_pair(program, q, 'h', cos, sin, rope_pairing)?;
+    let (rotated_q_even, rotated_q_odd) = fused_rope_pair(program, q, 'h', cos, sin, rope_pairing)?;
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
@@ -1935,7 +1949,8 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
     // `KeySourceKind::SharedFromLayer(source)`/`ValueSourceKind::SharedFromLayer(source)`
     // schedule entry (the E2B checkpoint's cross-layer shared-KV) reads
     // `stored_kv[source as usize]` rather than re-projecting.
-    let mut stored_kv: Vec<Option<(NodeId, NodeId, NodeId)>> = alloc::vec![None; block_count as usize];
+    let mut stored_kv: Vec<Option<(NodeId, NodeId, NodeId)>> =
+        alloc::vec![None; block_count as usize];
 
     for (layer, entry) in schedule.iter().enumerate() {
         let layer = layer as u32;
@@ -1965,8 +1980,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
         };
 
         if let Some(shared) = &ple_shared {
-            ple_layer_inputs[layer as usize] =
-                Some(ple_layer_input(&mut program, shared, layer)?);
+            ple_layer_inputs[layer as usize] = Some(ple_layer_input(&mut program, shared, layer)?);
         }
 
         let post_mixer = match kind {
@@ -2017,9 +2031,12 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                         KeySource::Projected { wk, k_norm_weight }
                     }
                     KeySourceKind::SharedFromLayer(source) => {
-                        let (rotated_even, rotated_odd, _) = stored_kv
-                            [source as usize]
-                            .ok_or(TensorError::SharedKvSourceNotAvailable { layer, source_layer: source })?;
+                        let (rotated_even, rotated_odd, _) = stored_kv[source as usize].ok_or(
+                            TensorError::SharedKvSourceNotAvailable {
+                                layer,
+                                source_layer: source,
+                            },
+                        )?;
                         KeySource::Shared {
                             rotated_even,
                             rotated_odd,
@@ -2042,8 +2059,12 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                     }
                     ValueSourceKind::SharedWithKey => ValueSource::SharedWithKey,
                     ValueSourceKind::SharedFromLayer(source) => {
-                        let (_, _, v) = stored_kv[source as usize]
-                            .ok_or(TensorError::SharedKvSourceNotAvailable { layer, source_layer: source })?;
+                        let (_, _, v) = stored_kv[source as usize].ok_or(
+                            TensorError::SharedKvSourceNotAvailable {
+                                layer,
+                                source_layer: source,
+                            },
+                        )?;
                         ValueSource::Shared(v)
                     }
                 };
@@ -2213,7 +2234,12 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                     ScalarOp::Divide,
                     &[(logits, "sv->sv"), (cap_node, "->sv")],
                 )?;
-                let tanh = elementwise(program, DType::Float32, ScalarOp::Tanh, &[(scaled, "sv->sv")])?;
+                let tanh = elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Tanh,
+                    &[(scaled, "sv->sv")],
+                )?;
                 elementwise(
                     program,
                     DType::Float32,
@@ -2506,7 +2532,12 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
             found: layer_windows.len(),
         });
     }
-    let windows: Vec<u32> = layer_windows.iter().flatten().copied().filter(|width| *width > 0).collect();
+    let windows: Vec<u32> = layer_windows
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|width| *width > 0)
+        .collect();
     if sliding_kv_ring && windows.iter().any(|width| *width != windows[0]) {
         return Err(TensorError::UnsupportedInBuilder {
             builder: "gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing",
@@ -2619,7 +2650,12 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
     // rows from the sliding slot's own length input. A schedule with no window
     // adds no node here.
     let ring_len = (sliding_kv_ring && !windows.is_empty()).then(|| {
-        input_leaf(&mut program, DType::Float32, Vec::new(), SLIDING_CACHED_LEN_INPUT)
+        input_leaf(
+            &mut program,
+            DType::Float32,
+            Vec::new(),
+            SLIDING_CACHED_LEN_INPUT,
+        )
     });
     let mut window_masks: Vec<(u32, NodeId, (NodeId, NodeId))> = Vec::new();
     for &width in &windows {
@@ -2634,7 +2670,12 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
                 Extent::Symbolic(SLIDING_KV_SYMBOL),
                 Some(width),
             )?,
-            None => causal_mask_cached_windowed(&mut program, cached_len, Extent::Symbolic(1), Some(width))?,
+            None => causal_mask_cached_windowed(
+                &mut program,
+                cached_len,
+                Extent::Symbolic(1),
+                Some(width),
+            )?,
         };
         window_masks.push((width, new_block, cached_block));
     }
@@ -2644,8 +2685,13 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
     let mut moe_sites: Vec<MoeSite> = Vec::new();
 
     for layer in 0..block_count {
-        let window = layer_windows.get(layer as usize).copied().flatten().filter(|width| *width > 0);
-        let masks = window.and_then(|width| window_masks.iter().find(|(built, ..)| *built == width));
+        let window = layer_windows
+            .get(layer as usize)
+            .copied()
+            .flatten()
+            .filter(|width| *width > 0);
+        let masks =
+            window.and_then(|width| window_masks.iter().find(|(built, ..)| *built == width));
         let layer_is_future = masks.map_or(is_future, |(_, new_block, _)| *new_block);
         let cached_window_mask = masks.map(|(_, _, cached_block)| *cached_block);
         let cache_bound = if ring_len.is_some() && window.is_some() {
@@ -2745,21 +2791,13 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
         let k_even_cache = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![
-                cache_bound,
-                Extent::Static(kv_heads),
-                Extent::Static(pairs)
-            ],
+            alloc::vec![cache_bound, Extent::Static(kv_heads), Extent::Static(pairs)],
             &alloc::format!("kv_cache.{layer}.k_even"),
         );
         let k_odd_cache = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![
-                cache_bound,
-                Extent::Static(kv_heads),
-                Extent::Static(pairs)
-            ],
+            alloc::vec![cache_bound, Extent::Static(kv_heads), Extent::Static(pairs)],
             &alloc::format!("kv_cache.{layer}.k_odd"),
         );
         let v_cache = input_leaf(
@@ -3163,7 +3201,9 @@ pub fn recurrent_interval_forward_program_with_last_row(
             cos_name: "rope_cos".into(),
             sin_name: "rope_sin".into(),
         },
-        rope_pairing: RopePairing::SplitHalf { pairs: head_dim / 2 },
+        rope_pairing: RopePairing::SplitHalf {
+            pairs: head_dim / 2,
+        },
         score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(attn_head_dim),
         value_norm: false,
     };
@@ -3216,7 +3256,12 @@ pub fn recurrent_interval_forward_program_with_last_row(
         prefill_width: None,
         gated_attention: true,
     };
-    let ForwardProgram { program, logits, layer_roots, .. } = hybrid_dense_forward(&descriptor)?;
+    let ForwardProgram {
+        program,
+        logits,
+        layer_roots,
+        ..
+    } = hybrid_dense_forward(&descriptor)?;
     Ok((program, logits, layer_roots))
 }
 
@@ -3236,8 +3281,8 @@ mod activation_tests {
             "x",
         );
         let ones = scalar_constant(&mut program, 1.0);
-        let root =
-            append_activation(&mut program, x, ones, activation, "sg").expect("append_activation lowers");
+        let root = append_activation(&mut program, x, ones, activation, "sg")
+            .expect("append_activation lowers");
 
         let symbols: [u64; 0] = [];
         let blocks: [&[f32]; 1] = [&VALUES];
@@ -3302,10 +3347,7 @@ mod ple_stage_a_tests {
     /// `per_layer_model_proj.weight`, declared `[embedding, ple_total]`
     /// (in, out) -- the worked example's `W_proj` (`P` rows of `H` each,
     /// out-major) transposed to this crate's in-major leaf convention.
-    const W_PROJ_OUT_MAJOR: [[f32; 4]; 2] = [
-        [0.1, 0.2, -0.1, 0.05],
-        [-0.05, 0.1, 0.2, 0.1],
-    ];
+    const W_PROJ_OUT_MAJOR: [[f32; 4]; 2] = [[0.1, 0.2, -0.1, 0.05], [-0.05, 0.1, 0.2, 0.1]];
     pub(super) const PROJ_NORM_WEIGHT: [f32; 2] = [1.2, 0.8];
     /// The single token's already-gathered per-layer-token embedding row
     /// (`per_layer_token_embd.weight`'s one vocab row, `vocab=1`) -- the
@@ -3408,19 +3450,11 @@ mod ple_stage_b_tests {
     /// out) -- the worked example's `W_gate` (`P` rows of `H` each,
     /// out-major) transposed to this crate's in-major leaf convention, the
     /// same transform [`proj_table_in_major`] applies to `W_proj`.
-    const W_GATE_OUT_MAJOR: [[f32; 4]; 2] = [
-        [0.2, -0.1, 0.3, 0.05],
-        [0.1, 0.2, -0.2, 0.15],
-    ];
+    const W_GATE_OUT_MAJOR: [[f32; 4]; 2] = [[0.2, -0.1, 0.3, 0.05], [0.1, 0.2, -0.2, 0.15]];
     /// `blk.{layer}.proj.weight`, declared `[ple_dim, embedding]` (in,
     /// out) -- the worked example's `W_proj2` (`H` rows of `P` each,
     /// out-major already, since `proj`'s OWN `in` axis is `ple_dim`).
-    const W_PROJ2_OUT_MAJOR: [[f32; 2]; 4] = [
-        [0.5, -0.3],
-        [0.2, 0.4],
-        [-0.1, 0.6],
-        [0.3, 0.1],
-    ];
+    const W_PROJ2_OUT_MAJOR: [[f32; 2]; 4] = [[0.5, -0.3], [0.2, 0.4], [-0.1, 0.6], [0.3, 0.1]];
     const POST_NORM_WEIGHT: [f32; 4] = [1.1, 0.9, 1.0, 1.05];
     const LAYER_OUTPUT_SCALE: f32 = 0.98;
     const EPS: f32 = 1e-6;
@@ -3486,8 +3520,7 @@ mod ple_stage_b_tests {
             ple_dim,
         )
         .expect("append_ple_shared_projections lowers");
-        let ple_input =
-            ple_layer_input(&mut program, &shared, 0).expect("ple_layer_input lowers");
+        let ple_input = ple_layer_input(&mut program, &shared, 0).expect("ple_layer_input lowers");
 
         let ffn_norm_weight = input_leaf(
             &mut program,
@@ -3628,8 +3661,14 @@ mod ple_single_reduce_parity_tests {
             &[(flat.emb_flat, window.as_str())],
         )
         .expect("window slice of the embedding lowers");
-        let normed = rmsnorm(program, proj_slice, flat.proj_norm_weight, flat.inv_ple_dim, eps)
-            .expect("per-layer rmsnorm lowers");
+        let normed = rmsnorm(
+            program,
+            proj_slice,
+            flat.proj_norm_weight,
+            flat.inv_ple_dim,
+            eps,
+        )
+        .expect("per-layer rmsnorm lowers");
         let summed = elementwise(
             program,
             DType::Float32,
@@ -3687,7 +3726,10 @@ mod ple_single_reduce_parity_tests {
         let h0_block = fill(tokens * EMBEDDING as usize, 0.5);
         let emb_block = fill((VOCAB * ple_total) as usize, 3.0);
         let proj_block = fill((EMBEDDING * ple_total) as usize, 7.0);
-        let norm_block: Vec<f32> = fill(PLE_DIM as usize, 11.0).iter().map(|value| 1.0 + value).collect();
+        let norm_block: Vec<f32> = fill(PLE_DIM as usize, 11.0)
+            .iter()
+            .map(|value| 1.0 + value)
+            .collect();
         let eps_block = alloc::vec![EPS; tokens];
         let blocks: [&[f32]; 6] = [
             &IDS,
@@ -3704,7 +3746,13 @@ mod ple_single_reduce_parity_tests {
         let collect = |nodes: &[NodeId]| -> Vec<Vec<f32>> {
             nodes
                 .iter()
-                .map(|node| evaluated.get(*node).expect("requested output present").0.to_vec())
+                .map(|node| {
+                    evaluated
+                        .get(*node)
+                        .expect("requested output present")
+                        .0
+                        .to_vec()
+                })
                 .collect()
         };
         let reduces = program
@@ -3720,7 +3768,11 @@ mod ple_single_reduce_parity_tests {
 
         assert_eq!(single.len(), LAYERS as usize);
         for (layer, (new_form, old_form)) in single.iter().zip(&windowed).enumerate() {
-            assert_eq!(new_form.len(), IDS.len() * PLE_DIM as usize, "layer {layer} shape");
+            assert_eq!(
+                new_form.len(),
+                IDS.len() * PLE_DIM as usize,
+                "layer {layer} shape"
+            );
             for (index, (new_value, old_value)) in new_form.iter().zip(old_form).enumerate() {
                 assert!(
                     (new_value - old_value).abs() < 1e-6,
@@ -3885,8 +3937,8 @@ mod exclusive_dense_post_norm_tests {
             .zip(POST_MIXER.iter())
             .map(|(total, mixer)| total - mixer)
             .collect();
-        let mean_square = ffn_out_raw.iter().map(|value| value * value).sum::<f32>()
-            / ffn_out_raw.len() as f32;
+        let mean_square =
+            ffn_out_raw.iter().map(|value| value * value).sum::<f32>() / ffn_out_raw.len() as f32;
         let inv_rms = 1.0 / (mean_square + EPS).sqrt();
         let expected: Vec<f32> = ffn_out_raw
             .iter()

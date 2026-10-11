@@ -21,15 +21,15 @@
 //! `LoadedModel::load_with_descriptor`) with no Rust change.
 
 use proxima_tensor::spec::{
-    ForwardProgram, ForwardRoots, LayerAttentionConfig, LayerKind, LayerSchedule, ModelDescriptor,
-    LayerCacheRoots, MoeSites, build_forward, CacheMask, CacheStrategy, KeySourceKind, ValueSourceKind,
-    RopeTableSel,
+    CacheMask, CacheStrategy, ForwardProgram, ForwardRoots, KeySourceKind, LayerAttentionConfig,
+    LayerCacheRoots, LayerKind, LayerSchedule, ModelDescriptor, MoeSites, RopeTableSel,
+    ValueSourceKind, build_forward,
 };
 use proxima_tensor::{Op, TensorError};
 
 pub use proxima_tensor::spec::MoeLayerDiagnostics;
 
-use super::hparams::{RecurrentRoutedIntervalHparams, LayerKind as HeaderLayerKind};
+use super::hparams::{LayerKind as HeaderLayerKind, RecurrentRoutedIntervalHparams};
 use crate::error::InteropError;
 use crate::profiles::family_profile;
 
@@ -133,7 +133,9 @@ pub fn descriptor_from_architecture(
 /// # Errors
 ///
 /// [`InteropError::Tensor`] if the descriptor does not lower.
-pub fn recurrent_routed_interval_forward_program(architecture: &RecurrentRoutedIntervalHparams) -> Result<MoeForwardProgram, InteropError> {
+pub fn recurrent_routed_interval_forward_program(
+    architecture: &RecurrentRoutedIntervalHparams,
+) -> Result<MoeForwardProgram, InteropError> {
     recurrent_routed_interval_forward_program_at_width(architecture, None)
 }
 
@@ -163,5 +165,11 @@ pub fn recurrent_routed_interval_forward_program_at_width(
         builder: "recurrent_routed_interval_forward_program_at_width",
         feature: "a program with no hidden root",
     })?;
-    Ok((program, ForwardRoots { logits, hidden }, layer_roots, moe_sites, layer_diagnostics))
+    Ok((
+        program,
+        ForwardRoots { logits, hidden },
+        layer_roots,
+        moe_sites,
+        layer_diagnostics,
+    ))
 }

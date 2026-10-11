@@ -145,7 +145,11 @@ mod tests {
 
     #[test]
     fn every_embedded_binding_file_parses() {
-        assert_eq!(FAMILY_BINDINGS.len(), 6, "one row per embedded family string");
+        assert_eq!(
+            FAMILY_BINDINGS.len(),
+            6,
+            "one row per embedded family string"
+        );
         for (family, _) in FAMILY_BINDINGS {
             binding_profile(family).unwrap_or_else(|error| panic!("{family}: {error}"));
         }
@@ -164,14 +168,22 @@ mod tests {
         let profile = binding_profile("llama").expect("defaults parse");
 
         assert!(profile.aliases_for("output.weight").next().is_some());
-        assert!(profile.aliases_for("blk.0.attn_output.weight").next().is_none());
+        assert!(
+            profile
+                .aliases_for("blk.0.attn_output.weight")
+                .next()
+                .is_none()
+        );
     }
 
     #[test]
     fn the_layer_prefix_is_carried_onto_the_alias_source() {
         let profile = binding_profile("qwen35").expect("qwen35 parses");
 
-        let (alias, prefix) = profile.aliases_for("blk.12.ssm_in.weight").next().expect("ssm_in aliases");
+        let (alias, prefix) = profile
+            .aliases_for("blk.12.ssm_in.weight")
+            .next()
+            .expect("ssm_in aliases");
 
         assert_eq!(prefix, "blk.12.");
         assert!(matches!(alias, TensorAlias::Rename { from, .. } if from == "attn_qkv.weight"));
@@ -186,7 +198,10 @@ mod tests {
         .unwrap()
         .inherits(parse("default", DEFAULT_BINDING).unwrap());
 
-        let (alias, _) = family.aliases_for("output.weight").next().expect("output aliases");
+        let (alias, _) = family
+            .aliases_for("output.weight")
+            .next()
+            .expect("output aliases");
 
         assert!(matches!(alias, TensorAlias::Rename { from, .. } if from == "lm_head.weight"));
     }
@@ -195,7 +210,10 @@ mod tests {
     fn an_unknown_key_is_refused() {
         let refused = parse("fixture", "decode = [\"x\"]\n");
 
-        assert!(matches!(refused, Err(InteropError::InvalidBindingProfile { .. })));
+        assert!(matches!(
+            refused,
+            Err(InteropError::InvalidBindingProfile { .. })
+        ));
     }
 
     #[test]

@@ -52,16 +52,16 @@ pub mod draft;
 pub mod error;
 #[cfg(feature = "gguf")]
 pub mod gguf;
+mod gguf_names;
 #[cfg(feature = "hf")]
 pub mod hf;
 #[cfg(feature = "hf")]
 pub mod hf_write;
 pub mod pipe;
 pub mod pretokenize;
+mod pretokenize_passes;
 pub mod sample;
 pub mod sized;
-mod gguf_names;
-mod pretokenize_passes;
 mod unicode_tables;
 pub mod unigram;
 pub mod vocab;

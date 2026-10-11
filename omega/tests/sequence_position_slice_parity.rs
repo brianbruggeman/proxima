@@ -22,7 +22,12 @@ const GROUPS: u32 = 2;
 /// Reproduces `proxima_tensor::spec::delta_net_sequence_position` verbatim
 /// (the fn is private) -- an affine-offset slice of the `s` axis followed by
 /// a sum-of-one reduction that squeezes it back off.
-fn sequence_position(program: &mut Vec<Op>, node: NodeId, rest_letters: &str, position: u32) -> NodeId {
+fn sequence_position(
+    program: &mut Vec<Op>,
+    node: NodeId,
+    rest_letters: &str,
+    position: u32,
+) -> NodeId {
     let rest_terms = rest_letters
         .chars()
         .map(|letter| letter.to_string())
@@ -33,7 +38,10 @@ fn sequence_position(program: &mut Vec<Op>, node: NodeId, rest_letters: &str, po
         program,
         DType::Float32,
         ScalarOp::Identity,
-        &[(node, format!("s+{position}@1,{rest_terms}->{iteration}").as_str())],
+        &[(
+            node,
+            format!("s+{position}@1,{rest_terms}->{iteration}").as_str(),
+        )],
     )
     .expect("affine s-offset slice lowers");
     reduce(
@@ -68,7 +76,12 @@ fn build_fixture(positions: &[u32]) -> SliceFixture {
     );
     let slices = positions
         .iter()
-        .map(|&position| (position, sequence_position(&mut program, x, "dug", position)))
+        .map(|&position| {
+            (
+                position,
+                sequence_position(&mut program, x, "dug", position),
+            )
+        })
         .collect();
     SliceFixture { program, slices }
 }
@@ -92,7 +105,9 @@ fn row_slice(x_data: &[f32], row: usize) -> &[f32] {
 #[case::position_0(0)]
 #[case::position_5(5)]
 #[case::position_12(12)]
-async fn metal_sequence_position_slice_matches_cpu_and_source_row_at_position(#[case] position: u32) {
+async fn metal_sequence_position_slice_matches_cpu_and_source_row_at_position(
+    #[case] position: u32,
+) {
     let positions = [position];
     let fixture = build_fixture(&positions);
     let x_data = build_x_data();
@@ -114,9 +129,16 @@ async fn metal_sequence_position_slice_matches_cpu_and_source_row_at_position(#[
     )
     .expect("cpu reference evaluates the slice program");
 
-    let plan = omega::plan_named(&fixture.program, &symbols, &named, &outputs, NumericPolicy::default())
-        .expect("metal plan builds");
-    let metal = omega::execute_plan_named(&plan, &named).expect("metal evaluates the slice program");
+    let plan = omega::plan_named(
+        &fixture.program,
+        &symbols,
+        &named,
+        &outputs,
+        NumericPolicy::default(),
+    )
+    .expect("metal plan builds");
+    let metal =
+        omega::execute_plan_named(&plan, &named).expect("metal evaluates the slice program");
 
     let (_, node) = fixture.slices[0];
     let cpu_values = cpu.get(node).map(|(values, _)| values.to_vec());
@@ -131,10 +153,19 @@ async fn metal_sequence_position_slice_matches_cpu_and_source_row_at_position(#[
         &case_label,
         1,
         1e-6,
-        &ParityRun { label: "source_row", values: &expected_row },
+        &ParityRun {
+            label: "source_row",
+            values: &expected_row,
+        },
         &[
-            ParityRun { label: "cpu", values: &cpu_values },
-            ParityRun { label: "metal", values: &metal_values },
+            ParityRun {
+                label: "cpu",
+                values: &cpu_values,
+            },
+            ParityRun {
+                label: "metal",
+                values: &metal_values,
+            },
         ],
     );
 

@@ -231,9 +231,14 @@ fn push_token_coordinates(
     token_expr: &str,
     prefix: &str,
 ) {
-    source.push_str(&format!("{indent}uint {prefix}_rest = (uint)({token_expr});\n"));
+    source.push_str(&format!(
+        "{indent}uint {prefix}_rest = (uint)({token_expr});\n"
+    ));
     for ordinal in (1..geometry.token_positions.len()).rev() {
-        let extent = format!("(uint)u.output_extents[{}]", geometry.token_positions[ordinal]);
+        let extent = format!(
+            "(uint)u.output_extents[{}]",
+            geometry.token_positions[ordinal]
+        );
         source.push_str(&format!(
             "{indent}long {prefix}{ordinal} = (long)({prefix}_rest % {extent});\n"
         ));
@@ -279,11 +284,13 @@ fn push_grouped_entry(
         ),
         None => "uint3 grouped_gid [[thread_position_in_grid]]".to_string(),
     };
-    let gid_offset = source.find(scalar_gid).ok_or(EmitError::RenderKindMismatch {
-        node,
-        expected: "scalar thread_position_in_grid parameter",
-        found: "missing",
-    })?;
+    let gid_offset = source
+        .find(scalar_gid)
+        .ok_or(EmitError::RenderKindMismatch {
+            node,
+            expected: "scalar thread_position_in_grid parameter",
+            found: "missing",
+        })?;
     source.replace_range(gid_offset..gid_offset + scalar_gid.len(), &vector_gid);
     source.push_str("    long gid = (long)grouped_gid.x;\n");
     if compaction_buffer.is_none() {
@@ -293,8 +300,13 @@ fn push_grouped_entry(
         "    long feature_extent = {};\n",
         geometry.feature_extent_expr
     ));
-    source.push_str(&format!("    long token_extent = {};\n", geometry.token_extent_expr));
-    source.push_str(&format!("    long tiitg = (long)gid % {GROUPED_THREADS};\n"));
+    source.push_str(&format!(
+        "    long token_extent = {};\n",
+        geometry.token_extent_expr
+    ));
+    source.push_str(&format!(
+        "    long tiitg = (long)gid % {GROUPED_THREADS};\n"
+    ));
     source.push_str(&format!("    long sgitg = tiitg / {SIMD_WIDTH};\n"));
     source.push_str(&format!(
         "    long group_index = (long)gid / {GROUPED_THREADS};\n"
@@ -385,7 +397,9 @@ fn push_grouped_locate(
     source.push_str(&format!(
         "    device const uint *tile_list = route_compaction + {GROUPED_ROUTE_HEADER_WORDS}u + 2u * experts + route_compaction[{GROUPED_ROUTE_HEADER_WORDS}u + experts + (uint)grouped_expert] + (uint)expert_tile * {tile_tokens}u;\n"
     ));
-    source.push_str("    if ((uint)tiitg < tile_count) { tile_token[tiitg] = (int)tile_list[tiitg]; }\n");
+    source.push_str(
+        "    if ((uint)tiitg < tile_count) { tile_token[tiitg] = (int)tile_list[tiitg]; }\n",
+    );
     source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     Ok(())
 }
@@ -419,7 +433,9 @@ fn push_grouped_threadgroup_memory(source: &mut String, geometry: &GroupedGeomet
     let act_tile_bytes = GROUPED_TILE_TOKENS * GROUPED_TILE_DEPTH * 2;
     let out_tile_bytes = GROUPED_TILE_ROWS * GROUPED_TILE_TOKENS * 4;
     let shared_bytes = (weight_tile_bytes + act_tile_bytes).max(out_tile_bytes);
-    source.push_str(&format!("    threadgroup uchar tg_shared[{shared_bytes}];\n"));
+    source.push_str(&format!(
+        "    threadgroup uchar tg_shared[{shared_bytes}];\n"
+    ));
     source.push_str("    threadgroup half *weight_tile = (threadgroup half *)tg_shared;\n");
     source.push_str(&format!(
         "    threadgroup half *act_tile = (threadgroup half *)(tg_shared + {weight_tile_bytes});\n"
@@ -496,7 +512,9 @@ fn push_grouped_refill(
         "                    fetched{weight} = max((long)0, min(fetched{weight}, u.gather_extent[{slot}] - 1));\n"
     ));
     source.push_str("                }\n");
-    source.push_str(&format!("                routed_entry[entry] = fetched{weight};\n"));
+    source.push_str(&format!(
+        "                routed_entry[entry] = fetched{weight};\n"
+    ));
     source.push_str(&format!(
         "                own_count += (fetched{weight} == grouped_expert) ? 1u : 0u;\n"
     ));
@@ -619,7 +637,13 @@ fn push_grouped_tile(
     source.push_str(&format!("                a_ptr += {GROUPED_TILE_DEPTH};\n"));
     source.push_str("            }\n");
     source.push_str("            threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-    push_grouped_writeback(source, geometry, element_type, epilogue_body, epilogue_operands);
+    push_grouped_writeback(
+        source,
+        geometry,
+        element_type,
+        epilogue_body,
+        epilogue_operands,
+    );
     source.push_str("            threadgroup_barrier(mem_flags::mem_threadgroup);\n");
 }
 
@@ -671,7 +695,13 @@ fn push_grouped_stage_pointers(
     source.push_str(
         "            threadgroup half4 *a_slot = (threadgroup half4 *)(act_tile + 64 * (4 * a_k_block + a_row / 8) + 8 * (a_row % 8));\n",
     );
-    push_token_coordinates(source, geometry, "            ", "(a_tok < 0 ? 0 : a_tok)", "a_c");
+    push_token_coordinates(
+        source,
+        geometry,
+        "            ",
+        "(a_tok < 0 ? 0 : a_tok)",
+        "a_c",
+    );
     let activation_offset = token_offset_expr(geometry, "a_c", |axis| {
         format!("u.operand_strides[{other}][{axis}]")
     });
@@ -699,7 +729,9 @@ fn push_grouped_load(source: &mut String, decode: &TiledDecode, indent: &str) {
         "if (w_valid) {".to_string(),
         format!("    {};", decode.call("w_blk", "w_pos", "w_regs")),
         "} else {".to_string(),
-        format!("    for (int element = 0; element < {DECODE_RUN_ELEMENTS}; ++element) {{ w_regs[element] = 0.0h; }}"),
+        format!(
+            "    for (int element = 0; element < {DECODE_RUN_ELEMENTS}; ++element) {{ w_regs[element] = 0.0h; }}"
+        ),
         "}".to_string(),
     ];
     for line in weight_load {
@@ -739,7 +771,9 @@ fn push_grouped_store(source: &mut String) {
             "                w_slot[{slot}] = w_regs[{element}];\n"
         ));
     }
-    source.push_str("                if (a_staged) { a_slot[0] = a_regs[0]; a_slot[1] = a_regs[1]; }\n");
+    source.push_str(
+        "                if (a_staged) { a_slot[0] = a_regs[0]; a_slot[1] = a_regs[1]; }\n",
+    );
 }
 
 /// The `simdgroup_matrix` step over the staged tiles, one 8-deep K block at a
@@ -817,9 +851,8 @@ fn push_grouped_writeback(
     ));
     source.push_str("                long o_tok = (long)tile_token[j];\n");
     push_token_coordinates(source, geometry, "                ", "o_tok", "o_c");
-    let output_token_offset = token_offset_expr(geometry, "o_c", |axis| {
-        format!("u.out_strides[{axis}]")
-    });
+    let output_token_offset =
+        token_offset_expr(geometry, "o_c", |axis| format!("u.out_strides[{axis}]"));
     source.push_str(&format!(
         "                for (long o_col = (long)grouped_lane; o_col < {GROUPED_TILE_ROWS}; o_col += {SIMD_WIDTH}) {{\n"
     ));
@@ -827,7 +860,9 @@ fn push_grouped_writeback(
         "                    long o_feat = row_tile * {GROUPED_TILE_ROWS} + o_col;\n"
     ));
     source.push_str("                    if (o_feat < feature_extent) {\n");
-    source.push_str(&format!("                        coord[{feature_axis}] = o_feat;\n"));
+    source.push_str(&format!(
+        "                        coord[{feature_axis}] = o_feat;\n"
+    ));
     for (ordinal, axis) in geometry.token_axes.iter().enumerate() {
         source.push_str(&format!(
             "                        coord[{axis}] = o_c{ordinal};\n"
@@ -860,7 +895,10 @@ fn push_grouped_writeback(
 /// bound of token tiles ([`grouped_tile_upper_bound`]) per row tile, one
 /// threadgroup each, and the tiles past the realized total exit at once.
 #[cfg(feature = "metal-grouped-gemm")]
-pub(super) fn expert_grouped_launch_tokens(resolved: &BoundOp, block: &TiledGemmBlock) -> Option<u64> {
+pub(super) fn expert_grouped_launch_tokens(
+    resolved: &BoundOp,
+    block: &TiledGemmBlock,
+) -> Option<u64> {
     if !is_expert_grouped(block) {
         return None;
     }
@@ -876,7 +914,10 @@ pub(super) fn expert_grouped_launch_tokens(resolved: &BoundOp, block: &TiledGemm
 }
 
 #[cfg(not(feature = "metal-grouped-gemm"))]
-pub(super) fn expert_grouped_launch_tokens(_resolved: &BoundOp, _block: &TiledGemmBlock) -> Option<u64> {
+pub(super) fn expert_grouped_launch_tokens(
+    _resolved: &BoundOp,
+    _block: &TiledGemmBlock,
+) -> Option<u64> {
     None
 }
 /// Never invoked: without `metal-grouped-gemm`, [`classify_tiled_gemm`] never
@@ -905,7 +946,10 @@ pub(super) fn push_expert_grouped_gemm_body(
 /// expert-source misses set the top bit with `expert + 1`; the all-ones word
 /// is neither, so the host names the stale prepass instead of reporting a
 /// route index equal to the expert extent.
-#[cfg(any(feature = "metal-grouped-gemm", all(feature = "metal", target_os = "macos")))]
+#[cfg(any(
+    feature = "metal-grouped-gemm",
+    all(feature = "metal", target_os = "macos")
+))]
 pub(crate) const ROUTE_COMPACTION_MISMATCH_FAULT: u32 = u32::MAX;
 
 /// Words of the route-compaction buffer ahead of the per-expert tables: word 0
@@ -965,7 +1009,9 @@ pub(super) fn grouped_tile_upper_bound(tokens: u64, experts: u64) -> u64 {
 /// `GROUPED_GEMM_PREPASS_ENTRIES` entries, one threadgroup per chunk, at least one.
 #[cfg(feature = "metal-grouped-gemm")]
 pub(super) fn grouped_prepass_threadgroups(tokens: u64) -> u64 {
-    tokens.div_ceil(crate::sized::GROUPED_GEMM_PREPASS_ENTRIES).max(1)
+    tokens
+        .div_ceil(crate::sized::GROUPED_GEMM_PREPASS_ENTRIES)
+        .max(1)
 }
 
 /// Words of the compaction buffer: header, per-expert counts, per-expert
@@ -974,7 +1020,10 @@ pub(super) fn grouped_prepass_threadgroups(tokens: u64) -> u64 {
 /// that the place pass reduces. The GEMM reads only the first four regions.
 #[cfg(feature = "metal-grouped-gemm")]
 pub(super) fn grouped_compaction_words(tokens: u64, experts: u64) -> u64 {
-    GROUPED_ROUTE_HEADER_WORDS + 2 * experts + tokens + grouped_prepass_threadgroups(tokens) * experts
+    GROUPED_ROUTE_HEADER_WORDS
+        + 2 * experts
+        + tokens
+        + grouped_prepass_threadgroups(tokens) * experts
 }
 
 #[cfg(feature = "metal-grouped-gemm")]
@@ -1093,13 +1142,17 @@ fn push_prepass_count_body(source: &mut String, fetch: &str) {
         "    for (uint scan_expert = sgitg; scan_expert < experts; scan_expert += sgcount) {\n",
     );
     source.push_str("        uint tally = 0u;\n");
-    source.push_str("        for (long scan_base = chunk_begin; scan_base < chunk_end; scan_base += 32l) {\n");
+    source.push_str(
+        "        for (long scan_base = chunk_begin; scan_base < chunk_end; scan_base += 32l) {\n",
+    );
     source.push_str(fetch);
     source.push_str("            tally += hit;\n");
     source.push_str("        }\n");
     source.push_str("        tally = simd_sum(tally);\n");
     source.push_str("        if (tiisg == 0u) {\n");
-    source.push_str("            route_compaction[scratch_base + tgid * experts + scan_expert] = tally;\n");
+    source.push_str(
+        "            route_compaction[scratch_base + tgid * experts + scan_expert] = tally;\n",
+    );
     source.push_str("        }\n");
     source.push_str("    }\n");
 }
@@ -1117,7 +1170,9 @@ fn push_prepass_place_body(source: &mut String, fetch: &str) {
         "    for (uint scan_expert = sgitg; scan_expert < experts; scan_expert += sgcount) {\n",
     );
     source.push_str("        uint placed = 0u;\n");
-    source.push_str("        for (long scan_base = chunk_begin; scan_base < chunk_end; scan_base += 32l) {\n");
+    source.push_str(
+        "        for (long scan_base = chunk_begin; scan_base < chunk_end; scan_base += 32l) {\n",
+    );
     source.push_str(fetch);
     source.push_str("            uint rank = simd_prefix_exclusive_sum(hit);\n");
     source.push_str(
@@ -1188,7 +1243,10 @@ fn push_prepass_offsets(source: &mut String) {
 /// segment-scan mode. Lowering it as sibling dispatches of the same op follows
 /// [`emit_cached_attention_merge`]'s precedent: the place pass reads what the
 /// count pass wrote, as the merge reads the split's scratch.
-#[cfg(all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos"))))]
+#[cfg(all(
+    feature = "metal-grouped-gemm",
+    any(test, all(feature = "metal", target_os = "macos"))
+))]
 pub(crate) fn route_prepass(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
@@ -1225,7 +1283,10 @@ pub(crate) fn route_prepass(
     )))
 }
 
-#[cfg(all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos"))))]
+#[cfg(all(
+    feature = "metal-grouped-gemm",
+    any(test, all(feature = "metal", target_os = "macos"))
+))]
 fn grouped_block(resolved: &BoundOp, quantized: &[Option<Codec>]) -> Option<TiledGemmBlock> {
     let BoundOpKind::Reduce {
         reduce_op,
@@ -1242,13 +1303,20 @@ fn grouped_block(resolved: &BoundOp, quantized: &[Option<Codec>]) -> Option<Tile
 
 /// Cheap form of [`route_prepass`]'s decision: classification only, no source
 /// rendered.
-#[cfg(all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos"))))]
+#[cfg(all(
+    feature = "metal-grouped-gemm",
+    any(test, all(feature = "metal", target_os = "macos"))
+))]
 pub(crate) fn route_prepass_active(resolved: &BoundOp, packed_operands: &PackedOperands) -> bool {
     let quantized = operand_codecs(resolved, packed_operands);
     grouped_block(resolved, &quantized).is_some()
 }
 
-#[cfg(all(not(feature = "metal-grouped-gemm"), feature = "metal", target_os = "macos"))]
+#[cfg(all(
+    not(feature = "metal-grouped-gemm"),
+    feature = "metal",
+    target_os = "macos"
+))]
 pub(crate) fn route_prepass(
     _resolved: &BoundOp,
     _packed_operands: &PackedOperands,
@@ -1257,7 +1325,11 @@ pub(crate) fn route_prepass(
     Ok(None)
 }
 
-#[cfg(all(not(feature = "metal-grouped-gemm"), feature = "metal", target_os = "macos"))]
+#[cfg(all(
+    not(feature = "metal-grouped-gemm"),
+    feature = "metal",
+    target_os = "macos"
+))]
 pub(crate) fn route_prepass_active(_resolved: &BoundOp, _packed_operands: &PackedOperands) -> bool {
     false
 }
@@ -1268,7 +1340,10 @@ pub(crate) fn route_prepass_active(_resolved: &BoundOp, _packed_operands: &Packe
 /// Two compacted grouped ops with equal keys produce byte-identical
 /// compactions, so the host runs [`route_prepass`] once for both. `None` for
 /// every op that has no prepass.
-#[cfg(all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos"))))]
+#[cfg(all(
+    feature = "metal-grouped-gemm",
+    any(test, all(feature = "metal", target_os = "macos"))
+))]
 pub(crate) fn route_compaction_key(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
@@ -1286,10 +1361,7 @@ pub(crate) fn route_compaction_key(
     ))
 }
 
-#[cfg(all(
-    not(feature = "metal-grouped-gemm"),
-    any(test, feature = "metal-core")
-))]
+#[cfg(all(not(feature = "metal-grouped-gemm"), any(test, feature = "metal-core")))]
 pub(crate) fn route_compaction_key(
     _resolved: &BoundOp,
     _packed_operands: &PackedOperands,

@@ -419,7 +419,14 @@ fn bind_safetensors_expert_stack<'file>(
     match expert_stack_codec(entry.dtype) {
         Some(codec) => {
             let bytes = tensor_bytes(file_bytes, data_start, entry)?;
-            bind_packed_expert_stack(bytes, leaf, codec, [experts, rows, input], (part, of), weights)
+            bind_packed_expert_stack(
+                bytes,
+                leaf,
+                codec,
+                [experts, rows, input],
+                (part, of),
+                weights,
+            )
         }
         None => {
             let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &name)?;

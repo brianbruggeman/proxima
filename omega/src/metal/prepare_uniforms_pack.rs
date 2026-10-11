@@ -1635,8 +1635,7 @@ pub(super) fn pack_cached_attention_uniforms_with_schedule(
             &bound.kind,
             numeric_policy,
             schedule,
-        )
-    {
+        ) {
         i64::try_from(crate::sized::ATTENTION_SPLIT_MAX).unwrap_or(splits)
     } else {
         1

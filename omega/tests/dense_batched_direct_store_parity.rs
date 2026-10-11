@@ -101,9 +101,18 @@ fn check_dense_direct_store_byte_identity(
     label: &str,
 ) {
     let (program, sum) = dense_batched_feature_fastest_program(token, reduce_len, batch, feature);
-    let weight = random_vec(7001 + u64::from(feature), (feature * batch * reduce_len) as usize);
-    let other = random_vec(8002 + u64::from(token), (token * batch * reduce_len) as usize);
-    let blocks = [QuantizedBlock::Float32(&weight), QuantizedBlock::Float32(&other)];
+    let weight = random_vec(
+        7001 + u64::from(feature),
+        (feature * batch * reduce_len) as usize,
+    );
+    let other = random_vec(
+        8002 + u64::from(token),
+        (token * batch * reduce_len) as usize,
+    );
+    let blocks = [
+        QuantizedBlock::Float32(&weight),
+        QuantizedBlock::Float32(&other),
+    ];
 
     let direct_store_off = temp_env::with_vars(
         [
@@ -129,8 +138,16 @@ fn check_dense_direct_store_byte_identity(
     let off_root = direct_store_off.root();
     let on_root = direct_store_on.root();
     let element_count = (token * batch * feature) as usize;
-    assert_eq!(off_root.len(), element_count, "degenerate: OFF produced no output");
-    assert_eq!(on_root.len(), element_count, "degenerate: ON produced no output");
+    assert_eq!(
+        off_root.len(),
+        element_count,
+        "degenerate: OFF produced no output"
+    );
+    assert_eq!(
+        on_root.len(),
+        element_count,
+        "degenerate: ON produced no output"
+    );
 
     let mut differing = 0usize;
     let mut max_abs_diff = 0.0f32;
@@ -250,9 +267,18 @@ fn check_dense_batch_innermost_byte_identity(
     label: &str,
 ) {
     let (program, sum) = dense_batched_batch_innermost_program(token, reduce_len, feature, batch);
-    let weight = random_vec(9001 + u64::from(feature), (feature * batch * reduce_len) as usize);
-    let other = random_vec(9502 + u64::from(token), (token * batch * reduce_len) as usize);
-    let blocks = [QuantizedBlock::Float32(&weight), QuantizedBlock::Float32(&other)];
+    let weight = random_vec(
+        9001 + u64::from(feature),
+        (feature * batch * reduce_len) as usize,
+    );
+    let other = random_vec(
+        9502 + u64::from(token),
+        (token * batch * reduce_len) as usize,
+    );
+    let blocks = [
+        QuantizedBlock::Float32(&weight),
+        QuantizedBlock::Float32(&other),
+    ];
 
     let direct_store_off = temp_env::with_vars(
         [
@@ -270,16 +296,25 @@ fn check_dense_batch_innermost_byte_identity(
             ("PROXIMA_TILED_GEMM_DENSE", None::<&str>),
         ],
         || {
-            omega::execute(&program, &[], &blocks, &[sum], NumericPolicy::default())
-                .expect("metal executes the direct-store-requested batch-innermost dense-batched matmul")
+            omega::execute(&program, &[], &blocks, &[sum], NumericPolicy::default()).expect(
+                "metal executes the direct-store-requested batch-innermost dense-batched matmul",
+            )
         },
     );
 
     let off_root = direct_store_off.root();
     let on_root = direct_store_on.root();
     let element_count = (token * feature * batch) as usize;
-    assert_eq!(off_root.len(), element_count, "degenerate: OFF produced no output");
-    assert_eq!(on_root.len(), element_count, "degenerate: ON produced no output");
+    assert_eq!(
+        off_root.len(),
+        element_count,
+        "degenerate: OFF produced no output"
+    );
+    assert_eq!(
+        on_root.len(),
+        element_count,
+        "degenerate: ON produced no output"
+    );
 
     let mut differing = 0usize;
     let mut max_abs_diff = 0.0f32;

@@ -682,9 +682,7 @@ fn the_rows_a_shifted_request_stores_match_a_fresh_prefill_where_the_context_is_
             len: length - short_opening.len() - 2200,
         };
         let stored_rows: Vec<(usize, f32, f32)> = {
-            let cache = model
-                .prompt_cache
-                .lock();
+            let cache = model.prompt_cache.lock();
             let state = cache
                 .entry_states()
                 .next()
@@ -745,9 +743,7 @@ fn the_squash_stores_the_lifted_rows_in_every_layer_not_the_fresh_ones() {
         let lifted = extract_run(&old_state, lifted_run, &widths, &rotations)
             .expect("the old state lifts the run");
         let comparisons: Vec<(usize, bool, f32, f32, f32)> = {
-            let cache = model
-                .prompt_cache
-                .lock();
+            let cache = model.prompt_cache.lock();
             let state = cache
                 .entry_states()
                 .next()

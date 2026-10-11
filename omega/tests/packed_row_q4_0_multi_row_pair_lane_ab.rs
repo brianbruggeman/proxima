@@ -48,7 +48,10 @@ fn matmul_program(
         &mut program,
         Op::Input {
             dtype: DType::Float32,
-            shape: vec![Extent::Static(tokens), Extent::Static(in_dim * stride as u32)],
+            shape: vec![
+                Extent::Static(tokens),
+                Extent::Static(in_dim * stride as u32),
+            ],
             name: None,
         },
     );
@@ -161,12 +164,27 @@ struct Case {
 }
 
 fn run(case: Case, fixture: &Fixture, pair_lane: &str) -> Run {
-    let Case { tokens, in_dim, out_dim, stride, fused_scale, .. } = case;
-    let (program, root) =
-        matmul_program(tokens as u32, in_dim as u32, out_dim as u32, stride as i32, fused_scale);
+    let Case {
+        tokens,
+        in_dim,
+        out_dim,
+        stride,
+        fused_scale,
+        ..
+    } = case;
+    let (program, root) = matmul_program(
+        tokens as u32,
+        in_dim as u32,
+        out_dim as u32,
+        stride as i32,
+        fused_scale,
+    );
     let activation = spread_activation(&fixture.dense, tokens, in_dim, stride);
     let mut blocks = vec![
-        QuantizedBlock::Packed { codec: omega::Codec::Q4_0, bytes: &fixture.packed },
+        QuantizedBlock::Packed {
+            codec: omega::Codec::Q4_0,
+            bytes: &fixture.packed,
+        },
         QuantizedBlock::Float32(&activation),
     ];
     if fused_scale {
@@ -182,13 +200,22 @@ fn run(case: Case, fixture: &Fixture, pair_lane: &str) -> Run {
                 .expect("metal plans the Q4_0 matmul");
             let kernel_keys = plan.kernel_keys().expect("plan exposes its kernel keys");
             let output = omega::execute_plan(&plan, &blocks).expect("metal runs the matmul");
-            Run { output: output.root().to_vec(), kernel_keys }
+            Run {
+                output: output.root().to_vec(),
+                kernel_keys,
+            }
         },
     )
 }
 
 fn oracle(case: Case, fixture: &Fixture) -> Vec<f32> {
-    let Case { tokens, in_dim, out_dim, fused_scale, .. } = case;
+    let Case {
+        tokens,
+        in_dim,
+        out_dim,
+        fused_scale,
+        ..
+    } = case;
     let mut expected = vec![0.0f32; tokens * out_dim];
     for token in 0..tokens {
         for row in 0..out_dim {
@@ -198,7 +225,11 @@ fn oracle(case: Case, fixture: &Fixture) -> Vec<f32> {
                         * f64::from(fixture.dense[token * in_dim + position])
                 })
                 .sum();
-            let scale = if fused_scale { f64::from(fixture.scale[row]) } else { 1.0 };
+            let scale = if fused_scale {
+                f64::from(fixture.scale[row])
+            } else {
+                1.0
+            };
             expected[token * out_dim + row] = (sum * scale) as f32;
         }
     }
@@ -206,7 +237,11 @@ fn oracle(case: Case, fixture: &Fixture) -> Vec<f32> {
 }
 
 fn relative_error(actual: &[f32], expected: &[f32]) -> f32 {
-    let max_diff = actual.iter().zip(expected).map(|(left, right)| (left - right).abs()).fold(0.0, f32::max);
+    let max_diff = actual
+        .iter()
+        .zip(expected)
+        .map(|(left, right)| (left - right).abs())
+        .fold(0.0, f32::max);
     let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0, f32::max);
     max_diff / max_magnitude
 }
@@ -236,12 +271,23 @@ fn assert_matches_the_cpu_oracle(case: Case, expect_pair_lane: bool) {
     assert!(
         error < RELATIVE_TOLERANCE,
         "tokens={} K={} rows={} stride={} fused={}: relative error {error} against the f32 CPU oracle",
-        case.tokens, case.in_dim, case.out_dim, case.stride, case.fused_scale
+        case.tokens,
+        case.in_dim,
+        case.out_dim,
+        case.stride,
+        case.fused_scale
     );
 }
 
 const fn case(tokens: usize, in_dim: usize, out_dim: usize, seed: u64) -> Case {
-    Case { tokens, in_dim, out_dim, stride: 1, fused_scale: false, seed }
+    Case {
+        tokens,
+        in_dim,
+        out_dim,
+        stride: 1,
+        fused_scale: false,
+        seed,
+    }
 }
 
 #[test]
@@ -287,7 +333,10 @@ fn tokens2_rows6_fewer_rows_than_two_groups_match_the_oracle() {
 #[test]
 fn tokens4_k1536_rows1536_fused_epilogue_matches_the_oracle() {
     assert_matches_the_cpu_oracle(
-        Case { fused_scale: true, ..case(4, 1536, 1536, 89) },
+        Case {
+            fused_scale: true,
+            ..case(4, 1536, 1536, 89)
+        },
         true,
     );
 }
@@ -295,14 +344,23 @@ fn tokens4_k1536_rows1536_fused_epilogue_matches_the_oracle() {
 #[test]
 fn tokens8_k1536_rows512_fused_epilogue_matches_the_oracle_with_thirty_two_pairs() {
     assert_matches_the_cpu_oracle(
-        Case { fused_scale: true, ..case(8, 1536, 512, 97) },
+        Case {
+            fused_scale: true,
+            ..case(8, 1536, 512, 97)
+        },
         true,
     );
 }
 
 #[test]
 fn tokens3_k1536_rows512_strided_activation_stays_on_the_generic_arm_and_matches_the_oracle() {
-    assert_matches_the_cpu_oracle(Case { stride: 2, ..case(3, 1536, 512, 101) }, false);
+    assert_matches_the_cpu_oracle(
+        Case {
+            stride: 2,
+            ..case(3, 1536, 512, 101)
+        },
+        false,
+    );
 }
 
 #[test]

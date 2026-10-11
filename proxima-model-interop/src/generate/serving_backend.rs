@@ -159,7 +159,9 @@ mod tests {
                     LayerCacheState::SharedFromLayer => {}
                 }
             }
-            let last = *positions.last().expect("evaluate is never called with zero positions");
+            let last = *positions
+                .last()
+                .expect("evaluate is never called with zero positions");
             let next_token = (last + 1) % self.vocab;
             Ok((next_token, cache))
         }

@@ -53,7 +53,11 @@ fn top_logprobs(record: &serde_json::Value) -> Vec<f64> {
                 .as_array()
                 .expect("a step carries a top array")
                 .iter()
-                .map(|entry| entry["logprob"].as_f64().expect("a top entry carries a logprob"))
+                .map(|entry| {
+                    entry["logprob"]
+                        .as_f64()
+                        .expect("a top entry carries a logprob")
+                })
         })
         .collect()
 }
@@ -73,7 +77,11 @@ fn max_logprob_gap(left: &serde_json::Value, right: &serde_json::Value) -> f64 {
         .fold(0.0, f64::max)
 }
 
-fn first_record<'a>(value: &'a serde_json::Value, checkpoint: &str, name: &str) -> &'a serde_json::Value {
+fn first_record<'a>(
+    value: &'a serde_json::Value,
+    checkpoint: &str,
+    name: &str,
+) -> &'a serde_json::Value {
     value
         .as_array()
         .and_then(|records| records.first())
@@ -86,7 +94,10 @@ fn self_match_ids(name: &str, request: &str) -> usize {
         .map(|checkpoint| {
             let value = fixture(checkpoint, name);
             let ids = ids_of(&first_record(&value, checkpoint, name)[request]["generated_ids"]);
-            assert!(!ids.is_empty(), "{checkpoint}: {name} {request} has no generated ids");
+            assert!(
+                !ids.is_empty(),
+                "{checkpoint}: {name} {request} has no generated ids"
+            );
             assert_eq!(first_divergence(&ids, &ids), None, "{checkpoint}: {name}");
         })
         .count()
@@ -108,7 +119,9 @@ fn fsm_oracle_control_n_probs_match_themselves() {
         .iter()
         .map(|checkpoint| {
             let records = fixture(checkpoint, "n_probs.json");
-            let records = records.as_array().expect("n_probs is a json array of records");
+            let records = records
+                .as_array()
+                .expect("n_probs is a json array of records");
             records
                 .iter()
                 .map(|record| {
@@ -128,7 +141,8 @@ fn fsm_oracle_control_n_probs_match_themselves() {
 #[test]
 fn fsm_oracle_control_flipped_id_is_rejected() {
     let value = fixture("gemma4_e2b", "followup_ids.json");
-    let original = ids_of(&first_record(&value, "gemma4_e2b", "followup_ids.json")["turn2"]["generated_ids"]);
+    let original =
+        ids_of(&first_record(&value, "gemma4_e2b", "followup_ids.json")["turn2"]["generated_ids"]);
     let mut flipped = original.clone();
     flipped[7] ^= 1;
     assert_eq!(first_divergence(&original, &flipped), Some(7));
@@ -139,7 +153,9 @@ fn fsm_oracle_control_perturbed_probability_is_rejected() {
     let records = fixture("gemma4_e2b", "n_probs.json");
     let original = &records.as_array().expect("n_probs is a json array")[0];
     let mut perturbed = original.clone();
-    let shifted = perturbed["steps"][0]["top"][0]["logprob"].as_f64().expect("logprob")
+    let shifted = perturbed["steps"][0]["top"][0]["logprob"]
+        .as_f64()
+        .expect("logprob")
         + 2.0 * tolerance("gemma4_e2b");
     perturbed["steps"][0]["top"][0]["logprob"] = serde_json::json!(shifted);
     assert!(max_logprob_gap(original, &perturbed) > tolerance("gemma4_e2b"));

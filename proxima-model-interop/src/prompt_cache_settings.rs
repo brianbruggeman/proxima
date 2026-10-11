@@ -225,7 +225,10 @@ mod tests {
         assert_eq!(PromptCacheConfig::standard().seal_horizon_rows, 256);
         assert_eq!(PromptCacheConfig::off().seal_horizon_rows, 256);
         assert_eq!(built.seal_horizon_rows, 256);
-        assert_eq!(built.as_prompt_cache_config(), PromptCacheConfig::standard());
+        assert_eq!(
+            built.as_prompt_cache_config(),
+            PromptCacheConfig::standard()
+        );
     }
 
     /// With nothing set, every loader lands on the shipped default: the

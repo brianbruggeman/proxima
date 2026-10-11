@@ -139,7 +139,10 @@ fn metal_agrees_with_cpu_and_the_independent_reference_on_a_q4k_weight_declared_
 
     let (program, sum) = matmul_program(IN_DIM as u32, OUT_DIM as u32);
     let blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &packed,
+        },
         QuantizedBlock::Float32(&activation),
     ];
 

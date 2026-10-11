@@ -85,7 +85,10 @@ pub fn encode_block(
     out.extend_from_slice(&header.content_key.to_le_bytes());
     out.extend_from_slice(&header.base_position.to_le_bytes());
     out.extend_from_slice(&(header.layers.len() as u32).to_le_bytes());
-    header.layers.iter().for_each(|layer| write_layer_record(layer, out));
+    header
+        .layers
+        .iter()
+        .for_each(|layer| write_layer_record(layer, out));
     planes
         .iter()
         .flat_map(|plane| plane.iter())
@@ -109,21 +112,36 @@ fn write_layer_record(layer: &BlockFileLayer, out: &mut Vec<u8>) {
 fn check_planes(header: &BlockFileHeader, planes: &[&[f32]]) -> Result<(), InteropError> {
     let expected_planes = header.layers.len().checked_mul(PLANES_PER_LAYER);
     if expected_planes != Some(planes.len()) {
-        return Err(InteropError::BlockFileMalformed { reason: "plane count is not 3 per layer" });
+        return Err(InteropError::BlockFileMalformed {
+            reason: "plane count is not 3 per layer",
+        });
     }
     let row_bytes_per_plane = |layer: &BlockFileLayer| {
-        [layer.k_even_row_bytes, layer.k_odd_row_bytes, layer.v_row_bytes]
+        [
+            layer.k_even_row_bytes,
+            layer.k_odd_row_bytes,
+            layer.v_row_bytes,
+        ]
     };
-    let agrees = header.layers.iter().zip(planes.chunks(PLANES_PER_LAYER)).all(|(layer, chunk)| {
-        chunk.iter().zip(row_bytes_per_plane(layer)).all(|(plane, row_bytes)| {
-            plane.len().checked_mul(4)
-                == (layer.rows as usize).checked_mul(row_bytes as usize)
-        })
-    });
+    let agrees = header
+        .layers
+        .iter()
+        .zip(planes.chunks(PLANES_PER_LAYER))
+        .all(|(layer, chunk)| {
+            chunk
+                .iter()
+                .zip(row_bytes_per_plane(layer))
+                .all(|(plane, row_bytes)| {
+                    plane.len().checked_mul(4)
+                        == (layer.rows as usize).checked_mul(row_bytes as usize)
+                })
+        });
     if agrees {
         Ok(())
     } else {
-        Err(InteropError::BlockFileMalformed { reason: "plane length disagrees with the header" })
+        Err(InteropError::BlockFileMalformed {
+            reason: "plane length disagrees with the header",
+        })
     }
 }
 
@@ -160,12 +178,20 @@ pub fn decode_block(bytes: &[u8]) -> Result<BlockFileView<'_>, InteropError> {
         descriptor_digest,
         content_key: read_u64(fixed, 28),
         base_position: read_u64(fixed, 36),
-        layers: table.as_chunks::<LAYER_RECORD_BYTES>().0.iter().map(|record| read_layer_record(record)).collect(),
+        layers: table
+            .as_chunks::<LAYER_RECORD_BYTES>()
+            .0
+            .iter()
+            .map(|record| read_layer_record(record))
+            .collect(),
     };
     if bytes.len() != encoded_len(&header) {
         return Err(malformed("payload length disagrees with the header"));
     }
-    Ok(BlockFileView { header, payload: &bytes[table_end..] })
+    Ok(BlockFileView {
+        header,
+        payload: &bytes[table_end..],
+    })
 }
 
 impl BlockFileView<'_> {
@@ -173,14 +199,21 @@ impl BlockFileView<'_> {
     pub fn require_digest(&self, expected: [u8; 16]) -> Result<(), InteropError> {
         match self.header.descriptor_digest == expected {
             true => Ok(()),
-            false => Err(InteropError::BlockFileDigestMismatch { expected, found: self.header.descriptor_digest }),
+            false => Err(InteropError::BlockFileDigestMismatch {
+                expected,
+                found: self.header.descriptor_digest,
+            }),
         }
     }
 
     fn plane(&self, layer: usize, plane: usize) -> Option<&[u8]> {
         let record = self.header.layers.get(layer)?;
-        let sizes = [record.k_even_row_bytes, record.k_odd_row_bytes, record.v_row_bytes]
-            .map(|row_bytes| (record.rows as usize) * (row_bytes as usize));
+        let sizes = [
+            record.k_even_row_bytes,
+            record.k_odd_row_bytes,
+            record.v_row_bytes,
+        ]
+        .map(|row_bytes| (record.rows as usize) * (row_bytes as usize));
         let before: usize = self.header.layers[..layer].iter().map(plane_bytes).sum();
         let within: usize = sizes.get(..plane)?.iter().sum();
         let start = before + within;
@@ -207,7 +240,12 @@ fn malformed(reason: &'static str) -> InteropError {
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]])
+    u32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ])
 }
 
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
@@ -240,7 +278,10 @@ pub struct MappedBlockFile {
 impl MappedBlockFile {
     /// Opens and maps the block file at `path`.
     pub fn open(path: &std::path::Path) -> Result<Self, InteropError> {
-        let wrap = |source| InteropError::BlockFileIo { path: path.to_path_buf(), source };
+        let wrap = |source| InteropError::BlockFileIo {
+            path: path.to_path_buf(),
+            source,
+        };
         let file = std::fs::File::open(path).map_err(wrap)?;
         // a block file is written once, renamed into place and never modified in place
         let map = unsafe { memmap2::Mmap::map(&file) }.map_err(wrap)?;
@@ -279,8 +320,22 @@ mod tests {
             content_key: 0x0102_0304_0506_0708,
             base_position: 64,
             layers: vec![
-                BlockFileLayer { rows: 4, k_even_row_bytes: 8, k_odd_row_bytes: 8, v_row_bytes: 4, ring_window: 0, ring_capacity: 0 },
-                BlockFileLayer { rows: 3, k_even_row_bytes: 8, k_odd_row_bytes: 8, v_row_bytes: 4, ring_window: 2, ring_capacity: 3 },
+                BlockFileLayer {
+                    rows: 4,
+                    k_even_row_bytes: 8,
+                    k_odd_row_bytes: 8,
+                    v_row_bytes: 4,
+                    ring_window: 0,
+                    ring_capacity: 0,
+                },
+                BlockFileLayer {
+                    rows: 3,
+                    k_even_row_bytes: 8,
+                    k_odd_row_bytes: 8,
+                    v_row_bytes: 4,
+                    ring_window: 2,
+                    ring_capacity: 3,
+                },
                 BlockFileLayer::default(),
             ],
         }
@@ -289,10 +344,20 @@ mod tests {
     #[test]
     fn blockfile_encoded_len_counts_header_table_and_planes() {
         let single = BlockFileHeader {
-            layers: vec![BlockFileLayer { rows: 1, k_even_row_bytes: 4, k_odd_row_bytes: 4, v_row_bytes: 4, ring_window: 0, ring_capacity: 0 }],
+            layers: vec![BlockFileLayer {
+                rows: 1,
+                k_even_row_bytes: 4,
+                k_odd_row_bytes: 4,
+                v_row_bytes: 4,
+                ring_window: 0,
+                ring_capacity: 0,
+            }],
             ..fixture_header()
         };
-        let empty = BlockFileHeader { layers: Vec::new(), ..fixture_header() };
+        let empty = BlockFileHeader {
+            layers: Vec::new(),
+            ..fixture_header()
+        };
 
         assert_eq!(encoded_len(&fixture_header()), 260);
         assert_eq!(encoded_len(&empty), 48);
@@ -385,13 +450,17 @@ mod tests {
         let short_result = encode_block(&fixture_header(), &short, &mut out);
         assert!(matches!(
             short_result,
-            Err(InteropError::BlockFileMalformed { reason: "plane length disagrees with the header" })
+            Err(InteropError::BlockFileMalformed {
+                reason: "plane length disagrees with the header"
+            })
         ));
         assert_eq!(out, vec![0xAB; 5]);
         let fewer_result = encode_block(&fixture_header(), &fewer, &mut out);
         assert!(matches!(
             fewer_result,
-            Err(InteropError::BlockFileMalformed { reason: "plane count is not 3 per layer" })
+            Err(InteropError::BlockFileMalformed {
+                reason: "plane count is not 3 per layer"
+            })
         ));
         assert_eq!(out, vec![0xAB; 5]);
     }
@@ -412,7 +481,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(InteropError::BlockFileMalformed { reason: "shorter than the fixed header" })
+            Err(InteropError::BlockFileMalformed {
+                reason: "shorter than the fixed header"
+            })
         ));
     }
 
@@ -423,7 +494,12 @@ mod tests {
 
         let result = decode_block(&bytes);
 
-        assert!(matches!(result, Err(InteropError::BlockFileMalformed { reason: "bad magic" })));
+        assert!(matches!(
+            result,
+            Err(InteropError::BlockFileMalformed {
+                reason: "bad magic"
+            })
+        ));
     }
 
     #[test]
@@ -435,7 +511,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(InteropError::BlockFileMalformed { reason: "unsupported version" })
+            Err(InteropError::BlockFileMalformed {
+                reason: "unsupported version"
+            })
         ));
     }
 
@@ -447,7 +525,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(InteropError::BlockFileMalformed { reason: "truncated layer table" })
+            Err(InteropError::BlockFileMalformed {
+                reason: "truncated layer table"
+            })
         ));
     }
 
@@ -457,14 +537,18 @@ mod tests {
         let shorter = decode_block(&bytes[..bytes.len() - 4]);
         assert!(matches!(
             shorter,
-            Err(InteropError::BlockFileMalformed { reason: "payload length disagrees with the header" })
+            Err(InteropError::BlockFileMalformed {
+                reason: "payload length disagrees with the header"
+            })
         ));
         bytes.push(0);
         let longer = decode_block(&bytes);
 
         assert!(matches!(
             longer,
-            Err(InteropError::BlockFileMalformed { reason: "payload length disagrees with the header" })
+            Err(InteropError::BlockFileMalformed {
+                reason: "payload length disagrees with the header"
+            })
         ));
     }
 
@@ -485,7 +569,8 @@ mod tests {
 
     fn read_plane(view: &BlockFileView<'_>, layer: usize, plane: usize) -> Vec<f32> {
         let mut out = Vec::new();
-        view.plane_f32(layer, plane, &mut out).expect("read a plane of the fixture");
+        view.plane_f32(layer, plane, &mut out)
+            .expect("read a plane of the fixture");
         out
     }
 
@@ -524,7 +609,14 @@ mod tests {
             descriptor_digest: [0x11; 16],
             content_key: 1,
             base_position: 0,
-            layers: vec![BlockFileLayer { rows: 1, k_even_row_bytes: 4, k_odd_row_bytes: 4, v_row_bytes: 4, ring_window: 0, ring_capacity: 0 }],
+            layers: vec![BlockFileLayer {
+                rows: 1,
+                k_even_row_bytes: 4,
+                k_odd_row_bytes: 4,
+                v_row_bytes: 4,
+                ring_window: 0,
+                ring_capacity: 0,
+            }],
         };
         let planes = [ramp(1, 0.0), ramp(1, 1.0), ramp(1, 2.0)];
         let views: Vec<&[f32]> = planes.iter().map(Vec::as_slice).collect();
@@ -564,7 +656,9 @@ mod tests {
         let truncated = MappedBlockFile::open(&path).expect("map the truncated file");
         assert!(matches!(
             truncated.view(),
-            Err(InteropError::BlockFileMalformed { reason: "truncated layer table" })
+            Err(InteropError::BlockFileMalformed {
+                reason: "truncated layer table"
+            })
         ));
     }
 

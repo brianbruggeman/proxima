@@ -217,27 +217,28 @@ use proxima_telemetry::trace;
 #[cfg(feature = "instrument")]
 use objc2_metal::{MTLCounterSampleBuffer, MTLCounterSet};
 #[cfg(feature = "instrument")]
+use proxima_tensor::apply_repeat_nodes;
+#[cfg(not(feature = "top-fraction-fusion"))]
+use proxima_tensor::bind_with_fusion;
+#[cfg(feature = "top-fraction-fusion")]
+use proxima_tensor::bind_with_top_fraction;
+#[cfg(feature = "twin-elementwise-fusion")]
+use proxima_tensor::fuse_twin_elementwise;
+#[cfg(feature = "instrument")]
 use proxima_tensor::instrument::{
     OpKind, elapsed_ticks, read_ticks, record_op_kind, ticks_to_nanos,
 };
-use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, NumericPolicy, Op,
-    QuantizedBlock, Shapes, TensorError, block_node_ids,
-    correct_packed_matmul_layouts, index_node_ids, infer, node_retirement, prune_dead,
-    refit_cached_attention_rows,
-    resolve_named_blocks,
-};
-#[cfg(not(feature = "top-fraction-fusion"))]
-use proxima_tensor::bind_with_fusion;
-#[cfg(feature = "twin-elementwise-fusion")]
-use proxima_tensor::fuse_twin_elementwise;
-#[cfg(feature = "top-fraction-fusion")]
-use proxima_tensor::bind_with_top_fraction;
 #[cfg(any(not(feature = "metal-buffer-pool"), test))]
 use proxima_tensor::node_last_reader;
-#[cfg(feature = "instrument")]
-use proxima_tensor::apply_repeat_nodes;
+use proxima_tensor::{
+    BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, NumericPolicy, Op,
+    QuantizedBlock, Shapes, TensorError, block_node_ids, correct_packed_matmul_layouts,
+    index_node_ids, infer, node_retirement, prune_dead, refit_cached_attention_rows,
+    resolve_named_blocks,
+};
 
+#[cfg(feature = "instrument")]
+use crate::emit;
 use crate::error::EmitError;
 #[cfg(feature = "instrument")]
 use crate::msl::diagnose_packed_row_block;
@@ -250,9 +251,6 @@ use crate::sized::ARENA_TRANSIENT_CAP;
 #[cfg(feature = "metal-buffer-pool")]
 use crate::sized::OUTPUT_POOL_MAX_PER_BUCKET;
 use crate::{Binding, Codec, GridSpec, Kernel, PackedOperands};
-#[cfg(feature = "instrument")]
-use crate::emit;
-
 
 #[macro_use]
 mod device_buffers_arena_plan;
@@ -275,24 +273,24 @@ mod warm_resident_buffers;
 mod arena_encode_dispatch_finish;
 #[cfg(feature = "metal-plan-stable-buffers")]
 mod arena_layout;
-pub use device_buffers_arena_plan::*;
-pub use execute_and_hazards::*;
-pub use placements_execute_named::*;
-#[cfg(feature = "instrument")]
-pub use dispatch_timed_and_classify::*;
-use prepare_uniforms_pack::*;
-pub use pipeline_buffers_upload::*;
-use pipeline_disk_cache::*;
-pub use pipeline_disk_cache::{pipeline_disk_cache_counts, set_runtime_config};
-pub use resident_nocopy_cache::*;
-pub use warm_resident_buffers::warm_resident_buffers;
 use arena_encode_dispatch_finish::*;
-#[cfg(feature = "metal-plan-stable-buffers")]
-use arena_layout::{Allocation, lay_out_packed, lay_out_whole_slots, peak_live_bytes};
 #[cfg(feature = "instrument")]
 pub use arena_encode_dispatch_finish::{
     CapturedDispatch, flush_gpu_caches, take_captured_dispatches, time_empty_command_buffer_gpu_ns,
 };
+#[cfg(feature = "metal-plan-stable-buffers")]
+use arena_layout::{Allocation, lay_out_packed, lay_out_whole_slots, peak_live_bytes};
+pub use device_buffers_arena_plan::*;
+#[cfg(feature = "instrument")]
+pub use dispatch_timed_and_classify::*;
+pub use execute_and_hazards::*;
+pub use pipeline_buffers_upload::*;
+use pipeline_disk_cache::*;
+pub use pipeline_disk_cache::{pipeline_disk_cache_counts, set_runtime_config};
+pub use placements_execute_named::*;
+use prepare_uniforms_pack::*;
+pub use resident_nocopy_cache::*;
+pub use warm_resident_buffers::warm_resident_buffers;
 
 /// Commits `command_buffer` and blocks until the GPU finishes it, THEN
 /// checks the outcome -- `waitUntilCompleted` returning is proof the buffer
@@ -389,7 +387,10 @@ fn check_command_buffer_status(
             .map(|error| (error.code() as i64, nserror_description(error)))
             .unwrap_or((0, "no NSError attached".to_string()));
         let encoder_infos = if diagnostics.encoder_status_requested {
-            error_handle.as_deref().map(encoder_failure_infos).unwrap_or_default()
+            error_handle
+                .as_deref()
+                .map(encoder_failure_infos)
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -435,7 +436,9 @@ fn check_command_buffer_status(
 /// `-[MTLCommandBufferEncoderInfo label]` is nil for an unlabeled encoder, and
 /// the generated objc2-metal getter panics on nil; this failure path must
 /// never abort the process, so the label is read with an `Option` return.
-fn encoder_info_label(info: &ProtocolObject<dyn MTLCommandBufferEncoderInfo>) -> Option<Retained<NSString>> {
+fn encoder_info_label(
+    info: &ProtocolObject<dyn MTLCommandBufferEncoderInfo>,
+) -> Option<Retained<NSString>> {
     // SAFETY: `label` takes no arguments and returns an `NSString` or nil,
     // which the `Option<Retained<NSString>>` return type models.
     unsafe { msg_send![info, label] }
@@ -463,13 +466,19 @@ fn encoder_failure_infos(error: &NSError) -> Vec<CommandBufferEncoderFailureInfo
     // `MTLCommandBufferEncoderInfo` -- Metal itself is the only writer of
     // this `userInfo` entry, never this crate.
     let infos = unsafe {
-        Retained::cast_unchecked::<NSArray<ProtocolObject<dyn MTLCommandBufferEncoderInfo>>>(raw_infos)
+        Retained::cast_unchecked::<NSArray<ProtocolObject<dyn MTLCommandBufferEncoderInfo>>>(
+            raw_infos,
+        )
     };
     infos
         .to_vec()
         .into_iter()
         .map(|info| CommandBufferEncoderFailureInfo {
-            label: label_or_unlabeled(encoder_info_label(&info).map(|label| label.to_string()).as_deref()),
+            label: label_or_unlabeled(
+                encoder_info_label(&info)
+                    .map(|label| label.to_string())
+                    .as_deref(),
+            ),
             error_state: info.errorState().0 as i64,
         })
         .collect()
@@ -501,7 +510,10 @@ fn check_all_command_buffers(
 /// the same packer [`execute`] uses per dispatch, exposed so a caller outside
 /// this module (a probe/dump binary) can pack the exact bytes a real
 /// dispatch would upload without duplicating the per-`BoundOpKind` match.
-pub fn pack_uniforms_for(bound: &BoundOp, numeric_policy: NumericPolicy) -> Result<Vec<u8>, EmitError> {
+pub fn pack_uniforms_for(
+    bound: &BoundOp,
+    numeric_policy: NumericPolicy,
+) -> Result<Vec<u8>, EmitError> {
     prepare_uniforms_pack::pack_uniforms(bound, numeric_policy)
 }
 
@@ -516,7 +528,10 @@ mod command_buffer_failed_label_tests {
 
     #[test]
     fn present_label_is_kept_verbatim() {
-        assert_eq!(label_or_unlabeled(Some("decode_layer_17")), "decode_layer_17");
+        assert_eq!(
+            label_or_unlabeled(Some("decode_layer_17")),
+            "decode_layer_17"
+        );
     }
 
     #[test]

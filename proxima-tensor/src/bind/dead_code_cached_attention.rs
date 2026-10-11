@@ -206,7 +206,12 @@ fn output_nodes(computed: &BoundOp) -> Vec<NodeId> {
     let mut nodes = vec![computed.node];
     match &computed.kind {
         BoundOpKind::MoeTopK { .. } => {
-            nodes.extend(computed.kind.moe_topk_extra_outputs_iter(0).map(|(node, _)| node));
+            nodes.extend(
+                computed
+                    .kind
+                    .moe_topk_extra_outputs_iter(0)
+                    .map(|(node, _)| node),
+            );
         }
         BoundOpKind::CachedSoftmaxWeights {
             cached_weight_sum,
@@ -883,7 +888,8 @@ pub(super) fn cached_attention_candidates(
             );
             continue;
         };
-        let negative_infinity_ok = constant_value(program, *negative_infinity) == Some(f32::NEG_INFINITY);
+        let negative_infinity_ok =
+            constant_value(program, *negative_infinity) == Some(f32::NEG_INFINITY);
         #[cfg(feature = "metal-fuse-attn-decode")]
         let local_row_bound = negative_infinity_ok
             .then(|| local_causal_mask_new_row_bound(program, *mask))
@@ -1522,7 +1528,11 @@ pub(super) fn cached_attention_candidates(
             let Some(softmax_node) = resolved.iter().find(|bound| bound.node == cached_weights)
             else {
                 #[cfg(feature = "instrument")]
-                debug!(node = output.0, stage = "softmax_weights_node_unresolved", "cached_softmax_weights decline -- node 154's own role is not separately resolved");
+                debug!(
+                    node = output.0,
+                    stage = "softmax_weights_node_unresolved",
+                    "cached_softmax_weights decline -- node 154's own role is not separately resolved"
+                );
                 continue;
             };
             let Some(new_shift_node) = resolved.iter().find(|bound| bound.node == new_weights)
@@ -1587,8 +1597,7 @@ pub(super) fn cached_attention_candidates(
             let Some(sum_b_layout) = find_operand_layout(combine_node, sum_parts[1]) else {
                 continue;
             };
-            let Some(attended_layout) = find_operand_layout(combine_node, attended_parts[1])
-            else {
+            let Some(attended_layout) = find_operand_layout(combine_node, attended_parts[1]) else {
                 continue;
             };
 
@@ -1690,8 +1699,7 @@ pub(super) fn cached_attention_candidates(
                     softmax_absorbed.insert(*node);
                 }
             }
-            let combine_absorbed: BTreeSet<NodeId> =
-                core::iter::once(attended_parts[0]).collect();
+            let combine_absorbed: BTreeSet<NodeId> = core::iter::once(attended_parts[0]).collect();
             #[cfg(feature = "instrument")]
             debug!(
                 node = output.0,
@@ -2174,7 +2182,9 @@ pub(super) fn cached_attention_single_range_candidates(
 /// to eleven sources this way, and the scan it replaces walked every operand
 /// of every resolved op per source per candidate.
 #[cfg(feature = "cached-attention-streaming")]
-fn first_reader_operands(resolved: &[BoundOp]) -> BTreeMap<NodeId, &(NodeId, Layout, Option<Lookup>)> {
+fn first_reader_operands(
+    resolved: &[BoundOp],
+) -> BTreeMap<NodeId, &(NodeId, Layout, Option<Lookup>)> {
     let mut first = BTreeMap::new();
     for operand in resolved.iter().flat_map(|bound| bound.operands().iter()) {
         first.entry(operand.0).or_insert(operand);
@@ -2233,9 +2243,7 @@ pub(super) struct ProgramConsumers {
 #[cfg(feature = "cached-attention-streaming")]
 impl ProgramConsumers {
     pub(super) fn of(&self, node: NodeId) -> &[NodeId] {
-        self.by_node
-            .get(node.0 as usize)
-            .map_or(&[], Vec::as_slice)
+        self.by_node.get(node.0 as usize).map_or(&[], Vec::as_slice)
     }
 }
 

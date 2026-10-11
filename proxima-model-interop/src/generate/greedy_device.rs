@@ -100,12 +100,19 @@ mod tests {
             ],
             "logits",
         );
-        let (augmented, token, finite) =
-            with_greedy_argmax(&program, logits, VOCAB as u32, &[1]).expect("argmax fits [1, vocab]");
+        let (augmented, token, finite) = with_greedy_argmax(&program, logits, VOCAB as u32, &[1])
+            .expect("argmax fits [1, vocab]");
         let named = [("logits", QuantizedBlock::Float32(row))];
-        let plan = omega::plan_named(&augmented, &[1], &named, &[token, finite], NumericPolicy::default())
-            .expect("plans on the real Metal device");
-        let evaluated = omega::execute_plan_named(&plan, &named).expect("argmax runs on the device");
+        let plan = omega::plan_named(
+            &augmented,
+            &[1],
+            &named,
+            &[token, finite],
+            NumericPolicy::default(),
+        )
+        .expect("plans on the real Metal device");
+        let evaluated =
+            omega::execute_plan_named(&plan, &named).expect("argmax runs on the device");
         device_token(&evaluated, token, finite, VOCAB)
     }
 

@@ -368,9 +368,9 @@ pub fn model(inputs: &Inputs, shape: &Shape, tiling: &Tiling) -> Vec<f32> {
                     output[(query_index * head_dim + dimension) as usize] =
                         if sum == 0.0 { 0.0 } else { value / sum };
                 } else {
-                    let slot =
-                        ((query_index * (head_dim / 4) + (dimension >> 2)) * splits + split) * 4
-                            + (dimension & 3);
+                    let slot = ((query_index * (head_dim / 4) + (dimension >> 2)) * splits + split)
+                        * 4
+                        + (dimension & 3);
                     scratch[slot as usize] = value;
                 }
             }

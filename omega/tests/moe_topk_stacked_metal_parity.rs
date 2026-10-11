@@ -47,7 +47,11 @@ fn build(strategy: MoeProjectionStrategy, token_count: u32) -> Fixture {
         input_leaf(
             program,
             DType::Float32,
-            vec![Extent::Static(EXPERT_COUNT), Extent::Static(rows), Extent::Static(columns)],
+            vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(rows),
+                Extent::Static(columns),
+            ],
             name,
         )
     };
@@ -69,8 +73,14 @@ fn build(strategy: MoeProjectionStrategy, token_count: u32) -> Fixture {
         activation: Activation::Silu,
         strategy,
     };
-    let (output, site) = append_moe_ffn(&mut program, 0, x, &moe_spec).expect("the routed block lowers");
-    Fixture { program, output, selected: site.selected, weights: site.weights }
+    let (output, site) =
+        append_moe_ffn(&mut program, 0, x, &moe_spec).expect("the routed block lowers");
+    Fixture {
+        program,
+        output,
+        selected: site.selected,
+        weights: site.weights,
+    }
 }
 
 fn unit_values(seed: u64, count: usize, scale: f32) -> Vec<f32> {
@@ -139,40 +149,93 @@ fn assert_stacked_matches(token_count: u32) {
     let mut outputs = vec![stacked.output];
     outputs.extend(stacked.selected.iter().copied());
     outputs.extend(stacked.weights.iter().copied());
-    let plan = omega::plan_named(&stacked.program, &[], &named, &outputs, NumericPolicy::default())
-        .expect("metal plans the stacked layer");
+    let plan = omega::plan_named(
+        &stacked.program,
+        &[],
+        &named,
+        &outputs,
+        NumericPolicy::default(),
+    )
+    .expect("metal plans the stacked layer");
     let kernel_keys = plan.kernel_keys().expect("plan exposes its kernel keys");
     assert!(
-        kernel_keys.iter().any(|key| key.contains("moe_topk_e32_k8_stacked")),
+        kernel_keys
+            .iter()
+            .any(|key| key.contains("moe_topk_e32_k8_stacked")),
         "{token_count} tokens: the stacked top-k kernel was never selected: {kernel_keys:?}"
     );
     let metal = omega::execute_plan_named(&plan, &named).expect("metal runs the stacked layer");
 
-    let actual = metal.get(stacked.output).map(|(values, _)| values.to_vec()).expect("layer output");
-    assert_eq!(actual.len(), expected.len(), "{token_count} tokens: output length");
-    let norm = expected.iter().map(|value| value * value).sum::<f32>().sqrt().max(1.0e-6);
+    let actual = metal
+        .get(stacked.output)
+        .map(|(values, _)| values.to_vec())
+        .expect("layer output");
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{token_count} tokens: output length"
+    );
+    let norm = expected
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt()
+        .max(1.0e-6);
     let worst = expected
         .iter()
         .zip(&actual)
         .map(|(want, got)| (want - got).abs())
         .fold(0.0_f32, f32::max);
-    eprintln!("tokens={token_count} worst_abs_over_norm={:e}", worst / norm);
-    assert!(worst / norm <= 1.0e-4, "{token_count} tokens: layer output drifted by {:e} of the norm", worst / norm);
+    eprintln!(
+        "tokens={token_count} worst_abs_over_norm={:e}",
+        worst / norm
+    );
+    assert!(
+        worst / norm <= 1.0e-4,
+        "{token_count} tokens: layer output drifted by {:e} of the norm",
+        worst / norm
+    );
 
     for token in 0..tokens {
         let row = &logits[token * EXPERT_COUNT as usize..(token + 1) * EXPERT_COUNT as usize];
         let (routes, weights, total) = reference_topk(row, EXPERT_USED_COUNT as usize);
         for (round, &route_node) in stacked.selected.iter().enumerate() {
-            let values = metal.get(route_node).map(|(values, _)| values.to_vec()).expect("route");
-            assert_eq!(values[token], routes[round], "{token_count} tokens, token {token}, round {round}: route");
+            let values = metal
+                .get(route_node)
+                .map(|(values, _)| values.to_vec())
+                .expect("route");
+            assert_eq!(
+                values[token], routes[round],
+                "{token_count} tokens, token {token}, round {round}: route"
+            );
         }
-        for (round, &weight_node) in stacked.weights.iter().take(EXPERT_USED_COUNT as usize).enumerate() {
-            let values = metal.get(weight_node).map(|(values, _)| values.to_vec()).expect("weight");
-            assert!((values[token] - weights[round]).abs() <= 1.0e-6, "{token_count} tokens, token {token}, round {round}: weight");
+        for (round, &weight_node) in stacked
+            .weights
+            .iter()
+            .take(EXPERT_USED_COUNT as usize)
+            .enumerate()
+        {
+            let values = metal
+                .get(weight_node)
+                .map(|(values, _)| values.to_vec())
+                .expect("weight");
+            assert!(
+                (values[token] - weights[round]).abs() <= 1.0e-6,
+                "{token_count} tokens, token {token}, round {round}: weight"
+            );
         }
-        let total_node = *stacked.weights.last().expect("weight_total closes the weights");
-        let values = metal.get(total_node).map(|(values, _)| values.to_vec()).expect("weight_total");
-        assert!((values[token] - total).abs() <= 1.0e-5, "{token_count} tokens, token {token}: weight_total");
+        let total_node = *stacked
+            .weights
+            .last()
+            .expect("weight_total closes the weights");
+        let values = metal
+            .get(total_node)
+            .map(|(values, _)| values.to_vec())
+            .expect("weight_total");
+        assert!(
+            (values[token] - total).abs() <= 1.0e-5,
+            "{token_count} tokens, token {token}: weight_total"
+        );
     }
 }
 

@@ -59,7 +59,9 @@ fn first_softmax_outputs(resolved: &[proxima_tensor::BoundOp]) -> (usize, Softma
         .iter()
         .filter(|bound| matches!(bound.kind, BoundOpKind::CachedSoftmaxWeights { .. }))
         .collect();
-    let first = fused.first().expect("the program binds a softmax weights op");
+    let first = fused
+        .first()
+        .expect("the program binds a softmax weights op");
     let BoundOpKind::CachedSoftmaxWeights {
         cached_weight_sum,
         new_weight_sum,
@@ -92,7 +94,10 @@ fn differing_bits(left: &[f32], right: &[f32]) -> usize {
 fn relative_difference(expected: &[f32], actual: &[f32]) -> f32 {
     assert_eq!(expected.len(), actual.len());
     assert!(!expected.is_empty(), "an empty output compares nothing");
-    let magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
     let difference = expected
         .iter()
         .zip(actual)
@@ -190,8 +195,7 @@ fn the_fused_k_row_softmax_weights_return_the_unfused_chains_bytes() {
                 &output(&unfused_result, outputs.cached_weight_sum),
                 &output(&fused_result, outputs.cached_weight_sum),
             );
-            let logits_relative =
-                relative_difference(unfused_result.root(), fused_result.root());
+            let logits_relative = relative_difference(unfused_result.root(), fused_result.root());
             eprintln!(
                 "softmax_weights rows parity: {cell} weights_differing={weights_bits} \
                  new_sum_differing={new_sum_bits} new_attended_differing={attended_bits} \

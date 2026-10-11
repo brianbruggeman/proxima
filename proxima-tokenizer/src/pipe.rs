@@ -255,9 +255,10 @@ mod tests {
     fn gemma4_shaped_decode_unescapes_space_marker_to_a_real_space() {
         let vocab = tiny_gemma4_vocab();
         let hi_id = vocab.token_id("hi").expect("hi token exists");
-        let space_id = vocab.token_id("\u{2581}").expect("space marker token exists");
-        let decoded =
-            decode(&[hi_id, space_id, hi_id], &vocab).expect("decode succeeds");
+        let space_id = vocab
+            .token_id("\u{2581}")
+            .expect("space marker token exists");
+        let decoded = decode(&[hi_id, space_id, hi_id], &vocab).expect("decode succeeds");
         assert_eq!(decoded, "hi hi");
         assert!(!decoded.contains('\u{2581}'), "no literal U+2581 survives");
     }

@@ -58,22 +58,33 @@ fn emit_chunk_phase(chunk: usize, phase: &'static str, start_raw_ticks: u64, end
 fn watch_command_buffer(buffer: &ProtocolObject<dyn MTLCommandBuffer>, chunk: usize) {
     let step = CAPTURE_STEP.load(core::sync::atomic::Ordering::Relaxed);
     let chunk = chunk as u64;
-    let scheduled = RcBlock::new(move |_buffer: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
-        let now = raw_now_seconds();
-        debug!(step, chunk, phase = "scheduled", start_raw_s = now, end_raw_s = now, "chunk_phase");
-    });
-    let completed = RcBlock::new(move |finished: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
-        // SAFETY: Metal passes the live command buffer to its own completion handler.
-        let finished = unsafe { finished.as_ref() };
-        debug!(
-            step,
-            chunk,
-            phase = "gpu",
-            start_raw_s = finished.GPUStartTime(),
-            end_raw_s = finished.GPUEndTime(),
-            "chunk_phase"
-        );
-    });
+    let scheduled = RcBlock::new(
+        move |_buffer: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+            let now = raw_now_seconds();
+            debug!(
+                step,
+                chunk,
+                phase = "scheduled",
+                start_raw_s = now,
+                end_raw_s = now,
+                "chunk_phase"
+            );
+        },
+    );
+    let completed = RcBlock::new(
+        move |finished: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+            // SAFETY: Metal passes the live command buffer to its own completion handler.
+            let finished = unsafe { finished.as_ref() };
+            debug!(
+                step,
+                chunk,
+                phase = "gpu",
+                start_raw_s = finished.GPUStartTime(),
+                end_raw_s = finished.GPUEndTime(),
+                "chunk_phase"
+            );
+        },
+    );
     // SAFETY: both pointers are valid blocks for the duration of the call; Metal copies them.
     unsafe {
         buffer.addScheduledHandler(RcBlock::as_ptr(&scheduled));
@@ -94,7 +105,10 @@ fn precommit_toggles(
     queue: &ProtocolObject<dyn MTLCommandQueue>,
     committed: &[Retained<ProtocolObject<dyn MTLCommandBuffer>>],
 ) {
-    let previous = committed.len().checked_sub(2).and_then(|index| committed.get(index));
+    let previous = committed
+        .len()
+        .checked_sub(2)
+        .and_then(|index| committed.get(index));
     if env_flags::precommit_wait()
         && let Some(previous) = previous
     {
@@ -447,7 +461,12 @@ fn chunk_audit_on_commit() {
 /// satisfy `dispatch.chunk_index <= write.committed_chunks` for a real
 /// dispatch, since chunks are numbered from 1).
 #[cfg(feature = "instrument")]
-pub(super) fn chunk_audit_record_write(buffer_ptr: usize, offset: usize, len: usize, position: usize) {
+pub(super) fn chunk_audit_record_write(
+    buffer_ptr: usize,
+    offset: usize,
+    len: usize,
+    position: usize,
+) {
     if !chunk_audit_enabled() {
         return;
     }
@@ -805,9 +824,11 @@ pub(super) fn execute_plan_with_placements_inner(
     // alike), independent of `next_boundary`/`chunk_count` so a substitute
     // blit's extra buffer still gets its own distinct label.
     let mut chunk_label_sequence: usize = 0;
-    let mut command_buffer = new_labeled_command_buffer(&queue, "omega.chunk.0")
-        .ok_or_else(|| MetalError::CompileFailed {
-            log: "command queue refused to hand out a command buffer".to_string(),
+    let mut command_buffer =
+        new_labeled_command_buffer(&queue, "omega.chunk.0").ok_or_else(|| {
+            MetalError::CompileFailed {
+                log: "command queue refused to hand out a command buffer".to_string(),
+            }
         })?;
     chunk_label_sequence += 1;
     #[cfg(feature = "instrument")]
@@ -911,8 +932,7 @@ pub(super) fn execute_plan_with_placements_inner(
             BTreeMap::new()
         };
     #[cfg(feature = "instrument")]
-    let substitute_blit_after_kernel =
-        env_flags::substitute_blit_after_kernel();
+    let substitute_blit_after_kernel = env_flags::substitute_blit_after_kernel();
     #[cfg(feature = "instrument")]
     let mut substitutions_applied: u64 = 0;
     let mut next_boundary = 0usize;
@@ -943,7 +963,11 @@ pub(super) fn execute_plan_with_placements_inner(
     #[cfg(feature = "instrument")]
     let step_encode_start_ticks = read_ticks();
     #[cfg(feature = "instrument")]
-    emit_step_phase("pre_encode", pre_encode_started.as_raw(), step_encode_start_ticks.as_raw());
+    emit_step_phase(
+        "pre_encode",
+        pre_encode_started.as_raw(),
+        step_encode_start_ticks.as_raw(),
+    );
     #[cfg(feature = "instrument")]
     let mut current_chunk_encode_start_ticks = step_encode_start_ticks.as_raw();
     #[cfg(feature = "instrument")]
@@ -1061,8 +1085,10 @@ pub(super) fn execute_plan_with_placements_inner(
             #[cfg(feature = "instrument")]
             let closing_commit_ms = commit_call_started.elapsed().as_secs_f64() * 1e3;
             #[cfg(feature = "instrument")]
-            let closing_commit_at_ms =
-                commit_call_started.duration_since(step_encode_start).as_secs_f64() * 1e3;
+            let closing_commit_at_ms = commit_call_started
+                .duration_since(step_encode_start)
+                .as_secs_f64()
+                * 1e3;
             // `PROXIMA_CAPTURE_DUMP_DIR` (see `capture_dispatch`'s own doc):
             // an extra `waitUntilCompleted` a normal run never pays -- this
             // closing buffer is exactly the one whose LAST op was the
@@ -1215,85 +1241,84 @@ pub(super) fn execute_plan_with_placements_inner(
         if !substitute_blit_after_kernel
             && let Some((source_buffer, source_len)) = substitute_buffers.get(&bound.node)
         {
-                let (dest_buffer, dest_offset) = match placement {
-                    Some((buffer, offset)) => (buffer.clone(), offset),
-                    None => (allocate_buffer(&device, bound_output_len(bound), bound.dtype)?, 0),
-                };
-                let blit_command_buffer = new_labeled_command_buffer(
-                    &queue,
-                    &format!("omega.chunk.{chunk_label_sequence}.substitute-blit"),
-                )
-                .ok_or_else(|| MetalError::CompileFailed {
-                    log: "command queue refused to hand out a command buffer for the blit"
-                        .to_string(),
-                })?;
-                chunk_label_sequence += 1;
-                let blit = blit_command_buffer.blitCommandEncoder().ok_or_else(|| {
-                    MetalError::CompileFailed {
-                        log: "command buffer refused to hand out a blit encoder".to_string(),
-                    }
-                })?;
-                unsafe {
-                    blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                        source_buffer,
-                        0,
-                        &dest_buffer,
-                        dest_offset,
-                        *source_len,
-                    );
+            let (dest_buffer, dest_offset) = match placement {
+                Some((buffer, offset)) => (buffer.clone(), offset),
+                None => (
+                    allocate_buffer(&device, bound_output_len(bound), bound.dtype)?,
+                    0,
+                ),
+            };
+            let blit_command_buffer = new_labeled_command_buffer(
+                &queue,
+                &format!("omega.chunk.{chunk_label_sequence}.substitute-blit"),
+            )
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "command queue refused to hand out a command buffer for the blit".to_string(),
+            })?;
+            chunk_label_sequence += 1;
+            let blit = blit_command_buffer.blitCommandEncoder().ok_or_else(|| {
+                MetalError::CompileFailed {
+                    log: "command buffer refused to hand out a blit encoder".to_string(),
                 }
-                blit.endEncoding();
-                let continuation_command_buffer = new_labeled_command_buffer(
-                    &queue,
-                    &format!("omega.chunk.{chunk_label_sequence}"),
-                )
-                .ok_or_else(|| MetalError::CompileFailed {
-                    log: "command queue refused to hand out a command buffer".to_string(),
-                })?;
-                chunk_label_sequence += 1;
-                let continuation_encoder = EncoderGuard::new(
-                    continuation_command_buffer
-                        .computeCommandEncoderWithDispatchType(dispatch_type.as_mtl())
-                        .ok_or_else(|| MetalError::CompileFailed {
-                            log: "command buffer refused to hand out a compute encoder"
-                                .to_string(),
-                        })?,
+            })?;
+            unsafe {
+                blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    source_buffer,
+                    0,
+                    &dest_buffer,
+                    dest_offset,
+                    *source_len,
                 );
-                let closing_encoder = core::mem::replace(&mut encoder, continuation_encoder);
-                let closing_command_buffer =
-                    core::mem::replace(&mut command_buffer, continuation_command_buffer);
-                closing_encoder.finish();
-                chunk_status_buffers.push(closing_command_buffer.clone());
-                chunk_status_diagnostics.push(BufferDiagnostics {
-                    chunk_index: chunk_status_diagnostics.len(),
-                    chunk_count,
-                    dispatch_count: chunk_op_count,
-                    first_op_label: resolved_op_label(&prepared.resolved, chunk_first_op),
-                    last_op_label: resolved_op_label(
-                        &prepared.resolved,
-                        position.saturating_sub(1).max(chunk_first_op),
-                    ),
-                    encoder_status_requested: encoder_error_status_requested(),
-                });
-                chunk_status_buffers.push(blit_command_buffer.clone());
-                chunk_status_diagnostics.push(BufferDiagnostics {
-                    chunk_index: chunk_status_diagnostics.len(),
-                    chunk_count,
-                    dispatch_count: 0,
-                    first_op_label: "substitute-blit",
-                    last_op_label: "substitute-blit",
-                    encoder_status_requested: encoder_error_status_requested(),
-                });
-                chunk_first_op = position + 1;
-                chunk_op_count = 0;
-                closing_command_buffer.commit();
-                blit_command_buffer.commit();
-                device_buffers.insert(bound.node, (dest_buffer, dest_offset));
-                substitutions_applied += 1;
-                for retired in &prepared.retires[position] {
-                    device_buffers.remove(retired);
-                }
-                continue;
+            }
+            blit.endEncoding();
+            let continuation_command_buffer =
+                new_labeled_command_buffer(&queue, &format!("omega.chunk.{chunk_label_sequence}"))
+                    .ok_or_else(|| MetalError::CompileFailed {
+                        log: "command queue refused to hand out a command buffer".to_string(),
+                    })?;
+            chunk_label_sequence += 1;
+            let continuation_encoder = EncoderGuard::new(
+                continuation_command_buffer
+                    .computeCommandEncoderWithDispatchType(dispatch_type.as_mtl())
+                    .ok_or_else(|| MetalError::CompileFailed {
+                        log: "command buffer refused to hand out a compute encoder".to_string(),
+                    })?,
+            );
+            let closing_encoder = core::mem::replace(&mut encoder, continuation_encoder);
+            let closing_command_buffer =
+                core::mem::replace(&mut command_buffer, continuation_command_buffer);
+            closing_encoder.finish();
+            chunk_status_buffers.push(closing_command_buffer.clone());
+            chunk_status_diagnostics.push(BufferDiagnostics {
+                chunk_index: chunk_status_diagnostics.len(),
+                chunk_count,
+                dispatch_count: chunk_op_count,
+                first_op_label: resolved_op_label(&prepared.resolved, chunk_first_op),
+                last_op_label: resolved_op_label(
+                    &prepared.resolved,
+                    position.saturating_sub(1).max(chunk_first_op),
+                ),
+                encoder_status_requested: encoder_error_status_requested(),
+            });
+            chunk_status_buffers.push(blit_command_buffer.clone());
+            chunk_status_diagnostics.push(BufferDiagnostics {
+                chunk_index: chunk_status_diagnostics.len(),
+                chunk_count,
+                dispatch_count: 0,
+                first_op_label: "substitute-blit",
+                last_op_label: "substitute-blit",
+                encoder_status_requested: encoder_error_status_requested(),
+            });
+            chunk_first_op = position + 1;
+            chunk_op_count = 0;
+            closing_command_buffer.commit();
+            blit_command_buffer.commit();
+            device_buffers.insert(bound.node, (dest_buffer, dest_offset));
+            substitutions_applied += 1;
+            for retired in &prepared.retires[position] {
+                device_buffers.remove(retired);
+            }
+            continue;
         }
         // attn_parity followon (2026-09-22, OWNER_BRIEF_gemma_head): per-node
         // pre-dispatch buffer identity + sentinel fill for the
@@ -1304,8 +1329,7 @@ pub(super) fn execute_plan_with_placements_inner(
         // sentinel-filled -- an early exit is exactly the case this must
         // catch, and every one of those arms is reached only further down.
         #[cfg(feature = "instrument")]
-        if let (Some(target_nodes), Some((buffer, offset))) =
-            (head_debug_target_nodes(), placement)
+        if let (Some(target_nodes), Some((buffer, offset))) = (head_debug_target_nodes(), placement)
             && let Some(target_index) = target_nodes.iter().position(|node| *node == bound.node)
         {
             let byte_length = bound_output_len(bound).max(1) * bound.dtype.size_bytes();
@@ -1368,9 +1392,7 @@ pub(super) fn execute_plan_with_placements_inner(
         // map, and `encode_op`'s own doc names why skipping this silently
         // discarded recurrent state on every fused `GatedDeltaNet` dispatch.
         let state_out_placement = match &bound.kind {
-            BoundOpKind::GatedDeltaNet { state_out, .. } => {
-                output_placed.get(state_out).copied()
-            }
+            BoundOpKind::GatedDeltaNet { state_out, .. } => output_placed.get(state_out).copied(),
             _ => None,
         };
         // `ablation_skip` is `false` on every non-`instrument` build (the
@@ -1661,74 +1683,73 @@ pub(super) fn execute_plan_with_placements_inner(
                     device_buffers.get(&bound.node).cloned(),
                 )
             {
-                    let blit_command_buffer = new_labeled_command_buffer(
-                        &queue,
-                        &format!("omega.chunk.{chunk_label_sequence}.substitute-blit"),
-                    )
-                    .ok_or_else(|| MetalError::CompileFailed {
-                        log: "command queue refused to hand out a command buffer for the blit"
-                            .to_string(),
-                    })?;
-                    chunk_label_sequence += 1;
-                    let blit = blit_command_buffer.blitCommandEncoder().ok_or_else(|| {
-                        MetalError::CompileFailed {
-                            log: "command buffer refused to hand out a blit encoder".to_string(),
-                        }
-                    })?;
-                    unsafe {
-                        blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                            source_buffer,
-                            0,
-                            &dest_buffer,
-                            dest_offset,
-                            *source_len,
-                        );
+                let blit_command_buffer = new_labeled_command_buffer(
+                    &queue,
+                    &format!("omega.chunk.{chunk_label_sequence}.substitute-blit"),
+                )
+                .ok_or_else(|| MetalError::CompileFailed {
+                    log: "command queue refused to hand out a command buffer for the blit"
+                        .to_string(),
+                })?;
+                chunk_label_sequence += 1;
+                let blit = blit_command_buffer.blitCommandEncoder().ok_or_else(|| {
+                    MetalError::CompileFailed {
+                        log: "command buffer refused to hand out a blit encoder".to_string(),
                     }
-                    blit.endEncoding();
-                    let continuation_command_buffer = new_labeled_command_buffer(
-                        &queue,
-                        &format!("omega.chunk.{chunk_label_sequence}"),
-                    )
-                    .ok_or_else(|| MetalError::CompileFailed {
-                        log: "command queue refused to hand out a command buffer".to_string(),
-                    })?;
-                    chunk_label_sequence += 1;
-                    let continuation_encoder = EncoderGuard::new(
-                        continuation_command_buffer
-                            .computeCommandEncoderWithDispatchType(dispatch_type.as_mtl())
-                            .ok_or_else(|| MetalError::CompileFailed {
-                                log: "command buffer refused to hand out a compute encoder"
-                                    .to_string(),
-                            })?,
+                })?;
+                unsafe {
+                    blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                        source_buffer,
+                        0,
+                        &dest_buffer,
+                        dest_offset,
+                        *source_len,
                     );
-                    let closing_encoder = core::mem::replace(&mut encoder, continuation_encoder);
-                    let closing_command_buffer =
-                        core::mem::replace(&mut command_buffer, continuation_command_buffer);
-                    closing_encoder.finish();
-                    chunk_status_buffers.push(closing_command_buffer.clone());
-                    chunk_status_diagnostics.push(BufferDiagnostics {
-                        chunk_index: chunk_status_diagnostics.len(),
-                        chunk_count,
-                        dispatch_count: chunk_op_count,
-                        first_op_label: resolved_op_label(&prepared.resolved, chunk_first_op),
-                        last_op_label: resolved_op_label(&prepared.resolved, position),
-                        encoder_status_requested: encoder_error_status_requested(),
-                    });
-                    chunk_status_buffers.push(blit_command_buffer.clone());
-                    chunk_status_diagnostics.push(BufferDiagnostics {
-                        chunk_index: chunk_status_diagnostics.len(),
-                        chunk_count,
-                        dispatch_count: 0,
-                        first_op_label: "substitute-blit",
-                        last_op_label: "substitute-blit",
-                        encoder_status_requested: encoder_error_status_requested(),
-                    });
-                    chunk_first_op = position + 1;
-                    chunk_op_count = 0;
-                    closing_command_buffer.commit();
-                    blit_command_buffer.commit();
-                    substitutions_applied += 1;
                 }
+                blit.endEncoding();
+                let continuation_command_buffer = new_labeled_command_buffer(
+                    &queue,
+                    &format!("omega.chunk.{chunk_label_sequence}"),
+                )
+                .ok_or_else(|| MetalError::CompileFailed {
+                    log: "command queue refused to hand out a command buffer".to_string(),
+                })?;
+                chunk_label_sequence += 1;
+                let continuation_encoder = EncoderGuard::new(
+                    continuation_command_buffer
+                        .computeCommandEncoderWithDispatchType(dispatch_type.as_mtl())
+                        .ok_or_else(|| MetalError::CompileFailed {
+                            log: "command buffer refused to hand out a compute encoder".to_string(),
+                        })?,
+                );
+                let closing_encoder = core::mem::replace(&mut encoder, continuation_encoder);
+                let closing_command_buffer =
+                    core::mem::replace(&mut command_buffer, continuation_command_buffer);
+                closing_encoder.finish();
+                chunk_status_buffers.push(closing_command_buffer.clone());
+                chunk_status_diagnostics.push(BufferDiagnostics {
+                    chunk_index: chunk_status_diagnostics.len(),
+                    chunk_count,
+                    dispatch_count: chunk_op_count,
+                    first_op_label: resolved_op_label(&prepared.resolved, chunk_first_op),
+                    last_op_label: resolved_op_label(&prepared.resolved, position),
+                    encoder_status_requested: encoder_error_status_requested(),
+                });
+                chunk_status_buffers.push(blit_command_buffer.clone());
+                chunk_status_diagnostics.push(BufferDiagnostics {
+                    chunk_index: chunk_status_diagnostics.len(),
+                    chunk_count,
+                    dispatch_count: 0,
+                    first_op_label: "substitute-blit",
+                    last_op_label: "substitute-blit",
+                    encoder_status_requested: encoder_error_status_requested(),
+                });
+                chunk_first_op = position + 1;
+                chunk_op_count = 0;
+                closing_command_buffer.commit();
+                blit_command_buffer.commit();
+                substitutions_applied += 1;
+            }
         }
         // explicit liveness exclusion (see this function's doc): a placed
         // node, input or output, is externally owned and always live, so it
@@ -1834,7 +1855,10 @@ pub(super) fn execute_plan_with_placements_inner(
         );
     }
     #[cfg(feature = "instrument")]
-    let commit_at_ms = commit_call_started.duration_since(step_encode_start).as_secs_f64() * 1e3;
+    let commit_at_ms = commit_call_started
+        .duration_since(step_encode_start)
+        .as_secs_f64()
+        * 1e3;
     #[cfg(feature = "instrument")]
     chunk_host_timings.push(ChunkHostTiming {
         first_op: current_chunk_first_op,
@@ -1891,10 +1915,8 @@ pub(super) fn execute_plan_with_placements_inner(
             let final_commit_to_wait_ms =
                 proxima_tensor::instrument::ticks_to_nanos(elapsed_ticks(gpu_exec_started)) as f64
                     / 1e6;
-            let commit_call_start_s = proxima_tensor::instrument::ticks_to_nanos(
-                gpu_exec_started.as_raw(),
-            ) as f64
-                / 1e9;
+            let commit_call_start_s =
+                proxima_tensor::instrument::ticks_to_nanos(gpu_exec_started.as_raw()) as f64 / 1e9;
             // Intervention 6 (OWNER_BRIEF_structural_difference): with
             // `chunks > 1` this is no longer one command buffer -- `gpu_busy`
             // must span the FIRST chunk's `GPUStartTime` to the LAST
@@ -1918,7 +1940,10 @@ pub(super) fn execute_plan_with_placements_inner(
                 commit_to_gpu_start_ms,
                 gpu_busy_ms,
                 gpu_end_to_wait_return_ms,
-                sum_ms = commit_call_ms + commit_to_gpu_start_ms + gpu_busy_ms + gpu_end_to_wait_return_ms,
+                sum_ms = commit_call_ms
+                    + commit_to_gpu_start_ms
+                    + gpu_busy_ms
+                    + gpu_end_to_wait_return_ms,
                 final_commit_to_wait_ms,
                 gpu_start_raw_s = gpu_start_s,
                 gpu_end_raw_s = gpu_end_s,
@@ -1941,20 +1966,22 @@ pub(super) fn execute_plan_with_placements_inner(
             } else {
                 "prefill"
             };
-            let step_epoch_s = proxima_tensor::instrument::ticks_to_nanos(
-                step_encode_start_ticks.as_raw(),
-            ) as f64
-                / 1e9;
+            let step_epoch_s =
+                proxima_tensor::instrument::ticks_to_nanos(step_encode_start_ticks.as_raw()) as f64
+                    / 1e9;
             gpu_span_raw_s = (gpu_start_s, gpu_end_s);
             let mut sum_gpu_exec_ms = 0.0f64;
-            let mut gpu_starts_ends: Vec<(f64, f64)> = Vec::with_capacity(chunk_command_buffers.len());
+            let mut gpu_starts_ends: Vec<(f64, f64)> =
+                Vec::with_capacity(chunk_command_buffers.len());
             for (index, buffer) in chunk_command_buffers.iter().enumerate() {
                 let timing = &chunk_host_timings[index];
                 let gpu_start_ms = ((buffer.GPUStartTime() - step_epoch_s) * 1e3).max(0.0);
                 let gpu_end_ms = ((buffer.GPUEndTime() - step_epoch_s) * 1e3).max(0.0);
                 sum_gpu_exec_ms += (gpu_end_ms - gpu_start_ms).max(0.0);
                 let gpu_idle_before_ms = gpu_start_ms
-                    - gpu_starts_ends.last().map_or(0.0, |&(_, previous_end_ms)| previous_end_ms);
+                    - gpu_starts_ends
+                        .last()
+                        .map_or(0.0, |&(_, previous_end_ms)| previous_end_ms);
                 gpu_starts_ends.push((gpu_start_ms, gpu_end_ms));
                 debug!(
                     step,
@@ -2063,7 +2090,15 @@ pub fn plan_named(
     numeric_policy: NumericPolicy,
 ) -> Result<Plan, MetalError> {
     let blocks = resolve_named_blocks(program, named)?;
-    plan_with_placed_inputs(program, symbols, &blocks, outputs, numeric_policy, &[], true)
+    plan_with_placed_inputs(
+        program,
+        symbols,
+        &blocks,
+        outputs,
+        numeric_policy,
+        &[],
+        true,
+    )
 }
 
 /// [`plan`] against named blocks plus caller-owned input placements.
@@ -2579,8 +2614,7 @@ pub(super) fn validate_selected_expert_routes(
     bound: &BoundOp,
     expert_buffers: Option<&ExpertSourceBuffers>,
 ) -> Result<(), MetalError> {
-    let Some(selected) = env_flags::compare_bound_node()
-    else {
+    let Some(selected) = env_flags::compare_bound_node() else {
         return Ok(());
     };
     if selected != bound.node {
@@ -2627,7 +2661,12 @@ pub(super) fn validate_selected_expert_routes(
             *lookup_offset,
             element_count(prepared.shapes.of(lookup.indices)),
             lookup.indices,
-            gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, lookup.indices),
+            gpu_dtype(
+                program,
+                &prepared.index_nodes,
+                &prepared.resolved,
+                lookup.indices,
+            ),
         )?;
         eprintln!(
             "metal_expert_lookup node={:?} values={:?}",
@@ -2853,7 +2892,12 @@ pub(super) fn report_bound_operands(
             *lookup_offset,
             element_count(prepared.shapes.of(lookup.indices)),
             lookup.indices,
-            gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, lookup.indices),
+            gpu_dtype(
+                program,
+                &prepared.index_nodes,
+                &prepared.resolved,
+                lookup.indices,
+            ),
         )
         && let Some(route) = route_values.first().copied().map(|value| value as usize)
         && let Some(descriptor) = expert_buffers.descriptor_records.get(route)
@@ -2867,7 +2911,12 @@ pub(super) fn report_bound_operands(
             *activation_offset,
             element_count(prepared.shapes.of(*activation_source)),
             *activation_source,
-            gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, *activation_source),
+            gpu_dtype(
+                program,
+                &prepared.index_nodes,
+                &prepared.resolved,
+                *activation_source,
+            ),
         )
     {
         let payload_pointer = expert_buffers.payloads.contents().as_ptr().cast::<u8>();
@@ -2965,10 +3014,7 @@ fn head_debug_fill_sentinel(buffer: &MetalBuffer, offset: usize, byte_length: us
     // for this position's own output -- the same range `encode_op`'s later
     // write targets.
     let destination = unsafe {
-        core::slice::from_raw_parts_mut(
-            pointer.as_ptr().cast::<u8>().add(offset),
-            byte_length,
-        )
+        core::slice::from_raw_parts_mut(pointer.as_ptr().cast::<u8>().add(offset), byte_length)
     };
     let (chunks, _remainder) = destination.as_chunks_mut::<4>();
     for chunk in chunks {
@@ -2991,7 +3037,6 @@ pub(super) fn q2k_debug_value(blocks: &[u8], index: usize) -> f32 {
     let level = (block[16 + chunk * 32 + (within % 32)] >> (2 * group)) & 3;
     d * f32::from(scale_min & 0x0f) * f32::from(level) - dmin * f32::from(scale_min >> 4)
 }
-
 
 #[cfg(test)]
 mod chunk_boundary_tests {

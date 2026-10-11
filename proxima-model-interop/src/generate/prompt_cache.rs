@@ -237,10 +237,7 @@ impl CacheReport {
     }
 }
 
-fn relabel_after_tier(
-    report: CacheReport,
-    restored: &Result<bool, InteropError>,
-) -> CacheReport {
+fn relabel_after_tier(report: CacheReport, restored: &Result<bool, InteropError>) -> CacheReport {
     match (restored, report.miss) {
         (Ok(true), None) => CacheReport {
             path: CachePath::Tier,
@@ -434,7 +431,12 @@ pub trait ColdTier: Send + Sync {
     /// Rebuilds the entry the tier holds for `stamp`, given the ids and
     /// cached length the cache kept for it; `Err` means the tier cannot.
     /// The cache calls this without holding its lock.
-    fn promote(&self, stamp: u64, ids: &[u32], cached_len: usize) -> Result<PrefixState, InteropError>;
+    fn promote(
+        &self,
+        stamp: u64,
+        ids: &[u32],
+        cached_len: usize,
+    ) -> Result<PrefixState, InteropError>;
 
     /// Makes `model`'s prompt cache hand its evicted entries to this tier.
     /// `max_entries` bounds the cold entries the cache keeps; past it the
@@ -444,7 +446,10 @@ pub trait ColdTier: Send + Sync {
     where
         Self: Sized + 'static,
     {
-        model.prompt_cache.lock().set_cold(self, max_entries, byte_budget);
+        model
+            .prompt_cache
+            .lock()
+            .set_cold(self, max_entries, byte_budget);
     }
 }
 
@@ -745,10 +750,14 @@ impl PromptCache {
         }
     }
 
-    pub(super) fn set_eviction_rules(&mut self, rules: &[EvictionRule]) -> Result<(), InteropError> {
+    pub(super) fn set_eviction_rules(
+        &mut self,
+        rules: &[EvictionRule],
+    ) -> Result<(), InteropError> {
         if rules.last() != Some(&EvictionRule::Oldest) {
             return Err(InteropError::UnsupportedServingConfig(
-                "eviction rules must end with the oldest rule so a full cache always has a victim".into(),
+                "eviction rules must end with the oldest rule so a full cache always has a victim"
+                    .into(),
             ));
         }
         self.eviction_rules = rules.to_vec();
@@ -1029,12 +1038,14 @@ impl PromptCache {
             let entries = &self.entries;
             match self.index.insert(stamp, ids, &|held| ids_in(entries, held)) {
                 Ok(()) => return true,
-                Err(TrieError::Full { .. }) => match self.cold_victim().or_else(|| self.eviction_victim()) {
-                    Some(victim) => {
-                        self.drop_entry(victim);
+                Err(TrieError::Full { .. }) => {
+                    match self.cold_victim().or_else(|| self.eviction_victim()) {
+                        Some(victim) => {
+                            self.drop_entry(victim);
+                        }
+                        None => return false,
                     }
-                    None => return false,
-                },
+                }
                 Err(lost) => {
                     self.rebuild_after(&lost);
                     return false;
@@ -1076,7 +1087,10 @@ impl PromptCache {
     }
 
     fn cold_count(&self) -> usize {
-        self.entries.values().filter(|entry| entry.is_cold()).count()
+        self.entries
+            .values()
+            .filter(|entry| entry.is_cold())
+            .count()
     }
 
     fn cold_bytes(&self) -> u64 {
@@ -1088,7 +1102,10 @@ impl PromptCache {
     }
 
     fn trim_cold(&mut self) {
-        let limit = self.cold.as_ref().map_or(usize::MAX, |slot| slot.max_entries);
+        let limit = self
+            .cold
+            .as_ref()
+            .map_or(usize::MAX, |slot| slot.max_entries);
         let budget = self.cold.as_ref().map_or(u64::MAX, |slot| slot.byte_budget);
         while self.cold_count() > limit || self.cold_bytes() > budget {
             let Some(victim) = self.cold_victim() else {
@@ -1099,7 +1116,10 @@ impl PromptCache {
     }
 
     fn hot_count(&self) -> usize {
-        self.entries.values().filter(|entry| !entry.is_cold()).count()
+        self.entries
+            .values()
+            .filter(|entry| !entry.is_cold())
+            .count()
     }
 
     /// Moves entry `stamp` to the cold tier when one is installed and takes
@@ -1228,8 +1248,8 @@ impl PromptCache {
     /// and the index when the config asks for other ones than it holds.
     fn reconfigure(&mut self, config: &PromptCacheConfig) {
         let block = (config.block_tokens as usize).max(1);
-        let entry_capacity = config.max_entries as usize
-            + self.cold.as_ref().map_or(0, |slot| slot.max_entries);
+        let entry_capacity =
+            config.max_entries as usize + self.cold.as_ref().map_or(0, |slot| slot.max_entries);
         let unchanged = self.index.block_tokens() == block
             && self.index.entry_capacity() >= entry_capacity
             && self.bloom_bits == config.bloom_bits_per_entry
@@ -1334,17 +1354,13 @@ impl LoadedModel<'_> {
     /// expert sidecar, [`Self::attach_expert_sidecar`]) just changed, so every
     /// stored row was built under a model this one no longer is.
     pub(super) fn clear_prompt_cache(&mut self) {
-        self.prompt_cache
-            .get_mut()
-            .clear();
+        self.prompt_cache.get_mut().clear();
     }
 
     /// Host bytes the prompt cache holds across all entries.
     #[must_use]
     pub fn prompt_cache_bytes(&self) -> usize {
-        self.prompt_cache
-            .lock()
-            .stored_bytes()
+        self.prompt_cache.lock().stored_bytes()
     }
 
     /// Sets the ordered rules a full prompt cache uses to pick the entry it
@@ -1360,9 +1376,7 @@ impl LoadedModel<'_> {
     /// with [`EvictionRule::Oldest`], because a full cache must always have a
     /// victim.
     pub fn set_eviction_rules(&self, rules: &[EvictionRule]) -> Result<(), InteropError> {
-        self.prompt_cache
-            .lock()
-            .set_eviction_rules(rules)
+        self.prompt_cache.lock().set_eviction_rules(rules)
     }
 
     /// The report of the most recent request that went through the prompt
@@ -1370,9 +1384,7 @@ impl LoadedModel<'_> {
     /// it right after the request it describes.
     #[must_use]
     pub fn last_prompt_cache_report(&self) -> Option<CacheReport> {
-        self.prompt_cache
-            .lock()
-            .last_report()
+        self.prompt_cache.lock().last_report()
     }
 
     /// The key a request (or prewarm) under these inputs may reuse rows from.
@@ -1409,9 +1421,7 @@ impl LoadedModel<'_> {
         };
         let shifting = config.cache_reuse_min > 0 && config.ring_rewind_slack > 0;
         let restored = thaw_best_cold(&self.prompt_cache, prompt_ids, key, &config);
-        let mut cache = self
-            .prompt_cache
-            .lock();
+        let mut cache = self.prompt_cache.lock();
         let (mut entry, mut report) = cache.take_best_shifting(
             prompt_ids,
             key,
@@ -1449,10 +1459,7 @@ impl LoadedModel<'_> {
     pub(super) fn prompt_cache_store(&self, entry: CacheEntry, config: &PromptCacheConfig) -> bool {
         let cached_tokens = entry.state.cached_len;
         let checkpoints = entry.checkpoints.len();
-        let entries = self
-            .prompt_cache
-            .lock()
-            .store(entry, config);
+        let entries = self.prompt_cache.lock().store(entry, config);
         debug!(
             cache_stored_tokens = cached_tokens as u64,
             cache_checkpoints = checkpoints as u64,
@@ -1996,10 +2003,16 @@ mod tests {
         let default = [EvictionRule::Branch, EvictionRule::Oldest];
 
         assert_eq!(rule_victim(mixed.into_iter(), &default), Some(5));
-        assert_eq!(rule_victim(mixed.into_iter(), &[EvictionRule::Oldest]), Some(3));
+        assert_eq!(
+            rule_victim(mixed.into_iter(), &[EvictionRule::Oldest]),
+            Some(3)
+        );
         assert_eq!(rule_victim(plain.into_iter(), &default), Some(3));
         assert_eq!(rule_victim(std::iter::empty(), &default), None);
-        assert_eq!(rule_victim(plain.into_iter(), &[EvictionRule::Branch]), None);
+        assert_eq!(
+            rule_victim(plain.into_iter(), &[EvictionRule::Branch]),
+            None
+        );
     }
 
     #[test]
@@ -2042,7 +2055,10 @@ mod tests {
             cache.set_eviction_rules(&[EvictionRule::Branch]),
             Err(InteropError::UnsupportedServingConfig(_))
         ));
-        assert!(matches!(cache.set_eviction_rules(&[EvictionRule::Oldest]), Ok(())));
+        assert!(matches!(
+            cache.set_eviction_rules(&[EvictionRule::Oldest]),
+            Ok(())
+        ));
         assert!(matches!(
             cache.set_eviction_rules(&[EvictionRule::Branch, EvictionRule::Oldest]),
             Ok(())
@@ -2058,7 +2074,9 @@ mod tests {
         let filled = |rules: Option<&[EvictionRule]>| {
             let mut cache = PromptCache::new();
             if let Some(rules) = rules {
-                cache.set_eviction_rules(rules).expect("a list ending in oldest is accepted");
+                cache
+                    .set_eviction_rules(rules)
+                    .expect("a list ending in oldest is accepted");
             }
             cache.store(state_with_ids(&[1, 1, 1]), &config);
             cache.store(branch_entry(&[1, 1, 1, 5], 3), &config);
@@ -2073,7 +2091,11 @@ mod tests {
                 .lcp
         };
 
-        assert_eq!(held(filled(None)), 3, "the default rules evicted the branch");
+        assert_eq!(
+            held(filled(None)),
+            3,
+            "the default rules evicted the branch"
+        );
         assert_eq!(
             held(filled(Some(&[EvictionRule::Oldest]))),
             4,
@@ -2158,7 +2180,9 @@ mod tests {
                 .get(&stamp)
                 .map(PrefixState::branch)
                 .ok_or_else(|| {
-                    InteropError::UnsupportedServingConfig("recording tier holds no such entry".into())
+                    InteropError::UnsupportedServingConfig(
+                        "recording tier holds no such entry".into(),
+                    )
                 })
         }
     }
@@ -2192,7 +2216,9 @@ mod tests {
         store_trace(&mut cache);
 
         assert_eq!(cache.held(), vec![(0, true), (1, false), (2, false)]);
-        let cold = cache.entry(0).expect("the evicted entry stays in the cache");
+        let cold = cache
+            .entry(0)
+            .expect("the evicted entry stays in the cache");
         assert!(cold.state.layer_caches.is_empty());
         assert!(cold.checkpoints.is_empty());
         assert_eq!(cold.state.ids, TRACE_A);
@@ -2341,7 +2367,12 @@ mod tests {
         store_trace(&mut cache);
         let shared = Mutex::new(cache);
 
-        let restored = thaw_best_cold(&shared, &prompt_after(&TRACE_A), &base_key(), &restore_config());
+        let restored = thaw_best_cold(
+            &shared,
+            &prompt_after(&TRACE_A),
+            &base_key(),
+            &restore_config(),
+        );
 
         assert!(matches!(
             restored,
@@ -3783,7 +3814,10 @@ mod tests {
 
         assert_eq!(named.miss, Some(MissReason::TierRestoreFailed));
         assert_eq!(named.path, CachePath::Miss);
-        assert_eq!(MissReason::TierRestoreFailed.as_str(), "tier_restore_failed");
+        assert_eq!(
+            MissReason::TierRestoreFailed.as_str(),
+            "tier_restore_failed"
+        );
     }
 
     #[test]

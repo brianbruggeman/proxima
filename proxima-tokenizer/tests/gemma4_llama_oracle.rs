@@ -59,9 +59,13 @@ fn parse_ids(text: &str) -> Vec<u32> {
 fn assert_matches_llama(vocab: &Vocab, input: &str, expected_ids: &str) {
     let expected = parse_ids(expected_ids);
     let actual = encode_with_bos_eos(input, vocab, true, false).expect("encodes");
-    let first_diff = actual.iter().zip(&expected).position(|(left, right)| left != right);
+    let first_diff = actual
+        .iter()
+        .zip(&expected)
+        .position(|(left, right)| left != right);
     assert_eq!(
-        actual, expected,
+        actual,
+        expected,
         "llama.cpp mismatch; lengths {} vs {}, first differing index {first_diff:?}",
         actual.len(),
         expected.len()
@@ -82,21 +86,57 @@ macro_rules! oracle_case {
     };
 }
 
-oracle_case!(gemma4_tokenizer_matches_llama_ascii_single_spaces, "ascii_single_spaces");
-oracle_case!(gemma4_tokenizer_matches_llama_chat_template_user_turn, "chat_template_user_turn");
+oracle_case!(
+    gemma4_tokenizer_matches_llama_ascii_single_spaces,
+    "ascii_single_spaces"
+);
+oracle_case!(
+    gemma4_tokenizer_matches_llama_chat_template_user_turn,
+    "chat_template_user_turn"
+);
 oracle_case!(gemma4_tokenizer_matches_llama_cjk, "cjk");
-oracle_case!(gemma4_tokenizer_matches_llama_curly_quote_leading_space, "curly_quote_leading_space");
+oracle_case!(
+    gemma4_tokenizer_matches_llama_curly_quote_leading_space,
+    "curly_quote_leading_space"
+);
 oracle_case!(gemma4_tokenizer_matches_llama_curly_quotes, "curly_quotes");
 oracle_case!(gemma4_tokenizer_matches_llama_emoji, "emoji");
-oracle_case!(gemma4_tokenizer_matches_llama_latin1_tab_crlf, "latin1_tab_crlf");
-oracle_case!(gemma4_tokenizer_matches_llama_newline_double, "newline_double");
-oracle_case!(gemma4_tokenizer_matches_llama_newline_mixed_paragraphs, "newline_mixed_paragraphs");
-oracle_case!(gemma4_tokenizer_matches_llama_newline_single, "newline_single");
-oracle_case!(gemma4_tokenizer_matches_llama_newline_triple_only, "newline_triple_only");
-oracle_case!(gemma4_tokenizer_matches_llama_space_runs_edges, "space_runs_edges");
-oracle_case!(gemma4_tokenizer_matches_llama_space_runs_inner, "space_runs_inner");
-oracle_case!(gemma4_tokenizer_matches_llama_war_and_peace_2000, "war_and_peace_2000");
-oracle_case!(gemma4_tokenizer_matches_llama_war_and_peace_30000, "war_and_peace_30000");
+oracle_case!(
+    gemma4_tokenizer_matches_llama_latin1_tab_crlf,
+    "latin1_tab_crlf"
+);
+oracle_case!(
+    gemma4_tokenizer_matches_llama_newline_double,
+    "newline_double"
+);
+oracle_case!(
+    gemma4_tokenizer_matches_llama_newline_mixed_paragraphs,
+    "newline_mixed_paragraphs"
+);
+oracle_case!(
+    gemma4_tokenizer_matches_llama_newline_single,
+    "newline_single"
+);
+oracle_case!(
+    gemma4_tokenizer_matches_llama_newline_triple_only,
+    "newline_triple_only"
+);
+oracle_case!(
+    gemma4_tokenizer_matches_llama_space_runs_edges,
+    "space_runs_edges"
+);
+oracle_case!(
+    gemma4_tokenizer_matches_llama_space_runs_inner,
+    "space_runs_inner"
+);
+oracle_case!(
+    gemma4_tokenizer_matches_llama_war_and_peace_2000,
+    "war_and_peace_2000"
+);
+oracle_case!(
+    gemma4_tokenizer_matches_llama_war_and_peace_30000,
+    "war_and_peace_30000"
+);
 
 #[test]
 fn gemma4_tokenizer_vocab_lookups_by_string() {
@@ -121,7 +161,11 @@ fn gemma4_tokenizer_round_trips_real_text_shapes() {
     ];
     for text in texts {
         let ids = encode_with_bos_eos(text, vocab, false, false).expect("encodes");
-        assert_eq!(decode(&ids, vocab).expect("decodes"), text, "round trip of {text:?}");
+        assert_eq!(
+            decode(&ids, vocab).expect("decodes"),
+            text,
+            "round trip of {text:?}"
+        );
     }
 }
 
@@ -138,9 +182,16 @@ fn gemma4_tokenizer_decodes_byte_fallback_tokens_to_utf8() {
 #[test]
 fn gemma4_tokenizer_ascii_single_space_ids_equal_the_pre_fix_gpt2_path() {
     let Some(vocab) = vocab() else { return };
-    let pre_fix_gpt2_ids = [2, 818, 3823, 8864, 37423, 38167, 1024, 506, 31770, 4799, 236761];
-    let actual = encode_with_bos_eos("The quick brown fox jumps over the lazy dog.", vocab, true, false)
-        .expect("encodes");
+    let pre_fix_gpt2_ids = [
+        2, 818, 3823, 8864, 37423, 38167, 1024, 506, 31770, 4799, 236761,
+    ];
+    let actual = encode_with_bos_eos(
+        "The quick brown fox jumps over the lazy dog.",
+        vocab,
+        true,
+        false,
+    )
+    .expect("encodes");
     assert_eq!(actual, pre_fix_gpt2_ids);
 }
 
@@ -153,7 +204,14 @@ fn gemma4_tokenizer_legacy_byte_level_path_still_splits_newlines_into_gpt2_remap
     let legacy = Vocab::new(tokens, &[], Some(BOS_ID), None, None).expect("legacy-shaped vocab");
     assert!(!legacy.is_char_level_bpe());
     let ids = encode_with_bos_eos("\n\n", &legacy, true, false).expect("encodes");
-    let remapped_newline = legacy.token_id("\u{10a}").expect("gpt2 remap of 0x0A is present");
+    let remapped_newline = legacy
+        .token_id("\u{10a}")
+        .expect("gpt2 remap of 0x0A is present");
     assert_eq!(ids, [BOS_ID, remapped_newline, remapped_newline]);
-    assert_ne!(ids, parse_ids(include_str!("fixtures/llama-gemma4-tokenize/newline_double.ids")));
+    assert_ne!(
+        ids,
+        parse_ids(include_str!(
+            "fixtures/llama-gemma4-tokenize/newline_double.ids"
+        ))
+    );
 }

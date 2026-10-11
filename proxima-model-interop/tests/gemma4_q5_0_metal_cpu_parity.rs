@@ -145,7 +145,12 @@ fn real_q5_0_expert0_down_projection_rows(rows: usize) -> (Vec<u8>, usize) {
 
 /// Max-abs diff, relative to the reference row's own norm.
 fn relative_error(found: &[f32], wanted: &[f32]) -> f32 {
-    let norm: f32 = wanted.iter().map(|value| value * value).sum::<f32>().sqrt().max(1e-6);
+    let norm: f32 = wanted
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt()
+        .max(1e-6);
     found
         .iter()
         .zip(wanted.iter())
@@ -175,7 +180,8 @@ fn metal_matches_cpu_on_real_q5_0_ffn_down_exps_bytes() {
         .chunks_exact(block_row_bytes)
         .zip(dequantized_weight.chunks_exact_mut(k))
     {
-        dequantize(row_bytes, row_f32).expect("real q5_0 row decodes under its own real block count");
+        dequantize(row_bytes, row_f32)
+            .expect("real q5_0 row decodes under its own real block count");
     }
     let independent_reference: Vec<f32> = (0..rows)
         .map(|row| {
@@ -189,7 +195,10 @@ fn metal_matches_cpu_on_real_q5_0_ffn_down_exps_bytes() {
 
     let (program, sum) = quantized_matmul_program(rows as u32, k as u32);
     let blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q5_0, bytes: &weight_bytes },
+        QuantizedBlock::Packed {
+            codec: Codec::Q5_0,
+            bytes: &weight_bytes,
+        },
         QuantizedBlock::Float32(&activation),
     ];
 
@@ -197,7 +206,9 @@ fn metal_matches_cpu_on_real_q5_0_ffn_down_exps_bytes() {
         .expect("cpu evaluates the real q5_0 quantized matmul");
     let cpu_values = cpu.get(sum).expect("cpu produced the matmul output").0;
     let cpu_vs_independent = relative_error(cpu_values, &independent_reference);
-    std::println!("gemma4_q5_0_parity cpu_vs_independent_dequant relative_error={cpu_vs_independent:e}");
+    std::println!(
+        "gemma4_q5_0_parity cpu_vs_independent_dequant relative_error={cpu_vs_independent:e}"
+    );
     assert!(
         cpu_vs_independent <= 1e-4,
         "cpu's own Q5_0 quantized-matmul kernel disagrees with an independent dequantize-then-f32 \

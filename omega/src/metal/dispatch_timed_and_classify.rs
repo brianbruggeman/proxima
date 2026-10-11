@@ -175,7 +175,12 @@ pub(super) fn execute_op_timed(
             return Err(MetalError::UnresolvedHazardOperand { node: bound.node });
         };
         let shape = prepared.shapes.of(bound.node).to_vec();
-        let dtype = gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, bound.node);
+        let dtype = gpu_dtype(
+            program,
+            &prepared.index_nodes,
+            &prepared.resolved,
+            bound.node,
+        );
         let metal_values = read_back(buffer, *offset, element_count(&shape), bound.node, dtype)?;
         let first_mismatch = compare_bound_f32(bound.node, &metal_values, &cpu_values)?;
         if let Some((element, metal_value, cpu_value, relative, max_rel_diff)) = first_mismatch {
@@ -234,7 +239,12 @@ pub(super) fn execute_op_timed(
             && let Some((buffer, offset)) = device_buffers.get(&bound.node)
         {
             let shape = prepared.shapes.of(bound.node).to_vec();
-            let dtype = gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, bound.node);
+            let dtype = gpu_dtype(
+                program,
+                &prepared.index_nodes,
+                &prepared.resolved,
+                bound.node,
+            );
             let metal_values =
                 read_back(buffer, *offset, element_count(&shape), bound.node, dtype)?;
             if let Some((element, metal_value, cpu_value, relative, maximum)) =
@@ -600,9 +610,7 @@ pub fn execute_plan_with_placements_op_timed(
         // keyed by `state_out` instead, so this diagnostic path carries
         // state exactly like the production dispatch below does.
         let state_out_placement = match &bound.kind {
-            BoundOpKind::GatedDeltaNet { state_out, .. } => {
-                output_placed.get(state_out).copied()
-            }
+            BoundOpKind::GatedDeltaNet { state_out, .. } => output_placed.get(state_out).copied(),
             _ => None,
         };
         let uniform_buffer = plan_uniform_buffer(plan, position)?;
@@ -985,9 +993,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
         };
         // row 555: same fused-`state_out`-key gap `encode_op`'s own doc names.
         let state_out_placement = match &bound.kind {
-            BoundOpKind::GatedDeltaNet { state_out, .. } => {
-                output_placed.get(state_out).copied()
-            }
+            BoundOpKind::GatedDeltaNet { state_out, .. } => output_placed.get(state_out).copied(),
             _ => None,
         };
         let uniform_buffer = plan_uniform_buffer(plan, position)?;
@@ -1548,11 +1554,16 @@ pub(super) mod classify_kind_packed_row_marker_tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("matmul infers");
-        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-            .expect("matmul lowers")
-            .into_iter()
-            .next()
-            .expect("one fused bound emitted")
+        bind(
+            &program,
+            &shapes,
+            &[terminal(&program)],
+            NumericPolicy::default(),
+        )
+        .expect("matmul lowers")
+        .into_iter()
+        .next()
+        .expect("one fused bound emitted")
     }
 
     fn packed_operands_for(bound: &BoundOp, codec: Codec) -> PackedOperands {
@@ -1563,12 +1574,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
 
     #[test]
     fn every_k_quant_codec_classifies_as_packed_row_blocked_plain_product() {
-        for codec in [
-            Codec::Q3K,
-            Codec::Q4K,
-            Codec::Q5K,
-            Codec::Q6K,
-        ] {
+        for codec in [Codec::Q3K, Codec::Q4K, Codec::Q5K, Codec::Q6K] {
             // Add-reduce over a plain `weight * activation` body selects the
             // `plain_product` pair-dot arm (`push_packed_row_blocked_body`'s
             // own `plain_product` gate) for every codec that supports it.
@@ -1585,12 +1591,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
 
     #[test]
     fn every_k_quant_codec_classifies_as_packed_row_blocked_scalar_fallback() {
-        for codec in [
-            Codec::Q3K,
-            Codec::Q4K,
-            Codec::Q5K,
-            Codec::Q6K,
-        ] {
+        for codec in [Codec::Q3K, Codec::Q4K, Codec::Q5K, Codec::Q6K] {
             // A non-Add reduce op takes `push_packed_row_blocked_body`'s
             // per-element scalar fallback arm instead of the pair-dot arm.
             let bound = matmul_op_with_reduce(4, 256, 5, ScalarOp::Maximum);
@@ -1692,11 +1693,16 @@ pub(super) mod classify_kind_packed_row_marker_tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("multi-token matmul infers");
-        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
-            .expect("multi-token matmul lowers")
-            .into_iter()
-            .next()
-            .expect("one fused bound emitted")
+        bind(
+            &program,
+            &shapes,
+            &[terminal(&program)],
+            NumericPolicy::default(),
+        )
+        .expect("multi-token matmul lowers")
+        .into_iter()
+        .next()
+        .expect("one fused bound emitted")
     }
 
     /// the E2B checkpoint's width-2 verify matmul: a 2-token `Q4_0` reduce whose
@@ -1983,7 +1989,8 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         .expect("grouped down reduce lowers");
 
         let symbols = [SEQUENCE as u64];
-        let shapes = infer(&program, &symbols).expect("the routed-expert-shaped grouped ffn infers");
+        let shapes =
+            infer(&program, &symbols).expect("the routed-expert-shaped grouped ffn infers");
         let mut resolved =
             bind_with_fusion(&program, &shapes, &[root], true, NumericPolicy::default())
                 .expect("the routed-expert-shaped grouped ffn binds");
@@ -2267,8 +2274,9 @@ pub(super) mod classify_kind_packed_row_marker_tests {
             activation: Activation::Silu,
             strategy: proxima_tensor::spec::MoeProjectionStrategy::GroupedGateUp,
         };
-        let (root, _site) = proxima_tensor::spec::append_moe_ffn(&mut program, 0, x_node, &moe_spec)
-            .expect("append_moe_ffn with GroupedGateUp lowers at the real routed-expert shape");
+        let (root, _site) =
+            proxima_tensor::spec::append_moe_ffn(&mut program, 0, x_node, &moe_spec)
+                .expect("append_moe_ffn with GroupedGateUp lowers at the real routed-expert shape");
 
         let symbols = [SEQUENCE as u64];
         let shapes = infer(&program, &symbols).expect("the routed-expert-shaped ffn infers");

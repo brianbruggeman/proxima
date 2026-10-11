@@ -14,7 +14,8 @@ const PROMPT: &str = "<|turn>user\nWhich of these is smaller in size: a hippopot
 
 /// A shorter prompt than [`PROMPT`], so its prefill is a different
 /// `new_count`; both stay inside one 32-token kv bucket for [`TOKENS`] steps.
-const OTHER_PROMPT: &str = "<|turn>user\nName a prime number greater than ten.<turn|>\n<|turn>model\n";
+const OTHER_PROMPT: &str =
+    "<|turn>user\nName a prime number greater than ten.<turn|>\n<|turn>model\n";
 
 /// The prompt is 26 tokens and `kv_bucket_tokens` is 32: five tokens keep every
 /// decode step of a generation in one bucket, so the plan one generation
@@ -40,7 +41,11 @@ fn generate(model: &LoadedModel<'_>, config: &ServingConfig<'_>) -> Generation {
     run(model, config, ResumeFrom::Resident)
 }
 
-fn generate_prompt(model: &LoadedModel<'_>, prompt: &str, config: &ServingConfig<'_>) -> Generation {
+fn generate_prompt(
+    model: &LoadedModel<'_>,
+    prompt: &str,
+    config: &ServingConfig<'_>,
+) -> Generation {
     run_prompt(model, prompt, config, ResumeFrom::Resident)
 }
 
@@ -150,7 +155,10 @@ fn a_prompt_of_another_length_leaves_the_first_prompt_plan_resident() {
         let other = generate_prompt(model, OTHER_PROMPT, &config);
         let first_again = generate_prompt(model, PROMPT, &config);
 
-        assert_eq!(first.plan_misses, 2, "the first prompt builds its prefill and the decode plan");
+        assert_eq!(
+            first.plan_misses, 2,
+            "the first prompt builds its prefill and the decode plan"
+        );
         assert_eq!(
             (other.plan_misses, other.plan_refits),
             (1, 0),

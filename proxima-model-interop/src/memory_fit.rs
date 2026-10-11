@@ -428,13 +428,19 @@ mod tests {
         const FIXED: u64 = 28_311_552;
         const PER_ROW: u64 = 894_647;
 
-        assert_eq!(super::prefill_arena_allowance_bytes(FIXED, PER_ROW, 0), FIXED);
+        assert_eq!(
+            super::prefill_arena_allowance_bytes(FIXED, PER_ROW, 0),
+            FIXED
+        );
         assert_eq!(
             super::prefill_arena_allowance_bytes(FIXED, PER_ROW, 512),
             FIXED + 512 * PER_ROW
         );
         assert_eq!(super::prefill_arena_allowance_bytes(FIXED, 0, 512), FIXED);
-        assert_eq!(super::prefill_arena_allowance_bytes(u64::MAX, PER_ROW, 512), u64::MAX);
+        assert_eq!(
+            super::prefill_arena_allowance_bytes(u64::MAX, PER_ROW, 512),
+            u64::MAX
+        );
     }
 
     /// The exact formula `run_decode_loop_placed_kv` derives its own

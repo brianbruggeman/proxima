@@ -39,7 +39,10 @@ fn input(program: &mut Vec<Op>, dtype: DType, shape: &[usize], name: &str) -> No
         program,
         Op::Input {
             dtype,
-            shape: shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(),
+            shape: shape
+                .iter()
+                .map(|&extent| Extent::Static(extent as u32))
+                .collect(),
             name: Some(name.into()),
         },
     )
@@ -70,11 +73,22 @@ fn expert_gather_map(route: NodeId) -> IndexMap {
 }
 
 fn program(shape: &Shape, weight_dtype: DType) -> (Vec<Op>, NodeId) {
-    let Shape { sequence, selected, rows, k, experts } = *shape;
+    let Shape {
+        sequence,
+        selected,
+        rows,
+        k,
+        experts,
+    } = *shape;
     let mut program = Vec::new();
     let weight = input(&mut program, weight_dtype, &[experts, rows, k], "weight");
     let route = input(&mut program, DType::Float32, &[sequence, selected], "route");
-    let activation = input(&mut program, DType::Float32, &[sequence, selected, k], "activation");
+    let activation = input(
+        &mut program,
+        DType::Float32,
+        &[sequence, selected, k],
+        "activation",
+    );
     let product = append(
         &mut program,
         Op::Elementwise {
@@ -115,10 +129,18 @@ fn quantized_expert_stack(shape: &Shape) -> Vec<u8> {
     let mut stack = vec![0u8; shape.experts * shape.rows * row_bytes];
     for expert in 0..shape.experts {
         let magnitude = 0.5 + expert as f32 * 0.1;
-        let weights = unit_values(1000 + expert as u64, shape.rows * shape.k, -magnitude, magnitude);
+        let weights = unit_values(
+            1000 + expert as u64,
+            shape.rows * shape.k,
+            -magnitude,
+            magnitude,
+        );
         let expert_bytes = shape.rows * row_bytes;
         let target = &mut stack[expert * expert_bytes..(expert + 1) * expert_bytes];
-        for (row, row_target) in weights.chunks_exact(shape.k).zip(target.chunks_exact_mut(row_bytes)) {
+        for (row, row_target) in weights
+            .chunks_exact(shape.k)
+            .zip(target.chunks_exact_mut(row_bytes))
+        {
             quantize(row, row_target).expect("a row is a whole number of q8_0 blocks");
         }
     }
@@ -139,16 +161,32 @@ fn top_k_route(sequence: usize, selected: usize, experts: usize, seed: u64) -> V
     route
 }
 
-fn definition_of_the_fold(shape: &Shape, slab: &[f32], route: &[f32], activation: &[f32]) -> Vec<f32> {
-    let Shape { sequence, selected, rows, k, .. } = *shape;
+fn definition_of_the_fold(
+    shape: &Shape,
+    slab: &[f32],
+    route: &[f32],
+    activation: &[f32],
+) -> Vec<f32> {
+    let Shape {
+        sequence,
+        selected,
+        rows,
+        k,
+        ..
+    } = *shape;
     let mut folded = vec![0.0f32; sequence * rows];
     for token in 0..sequence {
         for slot in 0..selected {
             let expert = route[token * selected + slot] as usize;
-            let hidden = &activation[(token * selected + slot) * k..(token * selected + slot + 1) * k];
+            let hidden =
+                &activation[(token * selected + slot) * k..(token * selected + slot + 1) * k];
             for row in 0..rows {
                 let weights = &slab[(expert * rows + row) * k..(expert * rows + row + 1) * k];
-                let dot: f32 = weights.iter().zip(hidden).map(|(weight, value)| weight * value).sum();
+                let dot: f32 = weights
+                    .iter()
+                    .zip(hidden)
+                    .map(|(weight, value)| weight * value)
+                    .sum();
                 folded[token * rows + row] += dot;
             }
         }
@@ -196,13 +234,24 @@ fn run(shape: &Shape, route: &[f32]) -> Outputs {
     .expect("cpu evaluates the selection fold over the dequantized slab");
 
     let (program, output) = program(shape, DType::UInt8);
-    let named = named(QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &stack }, route, &activation);
+    let named = named(
+        QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes: &stack,
+        },
+        route,
+        &activation,
+    );
     let outputs = [output];
     let plan = omega::plan_named(&program, &[], &named, &outputs, NumericPolicy::default())
         .expect("metal plans the selection fold over packed q8_0 experts");
     let metal = omega::execute_plan_named(&plan, &named)
         .expect("metal runs the selection fold over packed q8_0 experts on a real device");
-    Outputs { definition, cpu: cpu.root().to_vec(), metal: metal.root().to_vec() }
+    Outputs {
+        definition,
+        cpu: cpu.root().to_vec(),
+        metal: metal.root().to_vec(),
+    }
 }
 
 fn worst_relative_row_error(oracle: &[f32], candidate: &[f32], row_width: usize) -> f32 {
@@ -210,7 +259,11 @@ fn worst_relative_row_error(oracle: &[f32], candidate: &[f32], row_width: usize)
         .chunks_exact(row_width)
         .zip(candidate.chunks_exact(row_width))
         .map(|(want_row, got_row)| {
-            let norm = want_row.iter().map(|value| value * value).sum::<f32>().sqrt();
+            let norm = want_row
+                .iter()
+                .map(|value| value * value)
+                .sum::<f32>()
+                .sqrt();
             let worst = want_row
                 .iter()
                 .zip(got_row)
@@ -224,50 +277,98 @@ fn worst_relative_row_error(oracle: &[f32], candidate: &[f32], row_width: usize)
 fn assert_fold_matches_both_oracles(shape: &Shape, route: &[f32]) {
     let outputs = run(shape, route);
     let element_count = shape.sequence * shape.rows;
-    assert_eq!(outputs.definition.len(), element_count, "degenerate: definition produced no output");
-    assert_eq!(outputs.cpu.len(), element_count, "degenerate: cpu produced no output");
-    assert_eq!(outputs.metal.len(), element_count, "degenerate: metal produced no output");
+    assert_eq!(
+        outputs.definition.len(),
+        element_count,
+        "degenerate: definition produced no output"
+    );
+    assert_eq!(
+        outputs.cpu.len(),
+        element_count,
+        "degenerate: cpu produced no output"
+    );
+    assert_eq!(
+        outputs.metal.len(),
+        element_count,
+        "degenerate: metal produced no output"
+    );
     let cpu_error = worst_relative_row_error(&outputs.definition, &outputs.cpu, shape.rows);
     let metal_error = worst_relative_row_error(&outputs.definition, &outputs.metal, shape.rows);
     eprintln!(
         "sequence={} selected={} rows={} k={} experts={} cpu_error={cpu_error:e} metal_error={metal_error:e}",
         shape.sequence, shape.selected, shape.rows, shape.k, shape.experts
     );
-    assert!(cpu_error <= RELATIVE_TOLERANCE, "cpu drifted from the definition by {cpu_error:e}");
-    assert!(metal_error <= RELATIVE_TOLERANCE, "metal drifted from the definition by {metal_error:e}");
+    assert!(
+        cpu_error <= RELATIVE_TOLERANCE,
+        "cpu drifted from the definition by {cpu_error:e}"
+    );
+    assert!(
+        metal_error <= RELATIVE_TOLERANCE,
+        "metal drifted from the definition by {metal_error:e}"
+    );
 }
 
 #[test]
 fn a_decode_step_folds_its_selected_experts_into_one_row() {
-    let shape = Shape { sequence: 1, selected: 8, rows: 192, k: 512, experts: 32 };
+    let shape = Shape {
+        sequence: 1,
+        selected: 8,
+        rows: 192,
+        k: 512,
+        experts: 32,
+    };
     let route = top_k_route(shape.sequence, shape.selected, shape.experts, 11);
     assert_fold_matches_both_oracles(&shape, &route);
 }
 
 #[test]
 fn a_verify_width_batch_folds_each_token_over_its_own_experts() {
-    let shape = Shape { sequence: 8, selected: 8, rows: 192, k: 512, experts: 32 };
+    let shape = Shape {
+        sequence: 8,
+        selected: 8,
+        rows: 192,
+        k: 512,
+        experts: 32,
+    };
     let route = top_k_route(shape.sequence, shape.selected, shape.experts, 12);
     assert_fold_matches_both_oracles(&shape, &route);
 }
 
 #[test]
 fn a_prefill_chunk_folds_every_token_over_its_own_experts() {
-    let shape = Shape { sequence: 120, selected: 8, rows: 128, k: 256, experts: 32 };
+    let shape = Shape {
+        sequence: 120,
+        selected: 8,
+        rows: 128,
+        k: 256,
+        experts: 32,
+    };
     let route = top_k_route(shape.sequence, shape.selected, shape.experts, 13);
     assert_fold_matches_both_oracles(&shape, &route);
 }
 
 #[test]
 fn ragged_rows_and_tokens_fold_correctly() {
-    let shape = Shape { sequence: 41, selected: 4, rows: 100, k: 256, experts: 6 };
+    let shape = Shape {
+        sequence: 41,
+        selected: 4,
+        rows: 100,
+        k: 256,
+        experts: 6,
+    };
     let route = top_k_route(shape.sequence, shape.selected, shape.experts, 21);
     assert_fold_matches_both_oracles(&shape, &route);
 }
 
 #[test]
 fn control_an_oracle_routed_to_other_experts_disagrees_by_a_gross_factor() {
-    let shape = Shape { sequence: 8, selected: 8, rows: 192, k: 512, experts: 32 };
+    let shape = Shape {
+        sequence: 8,
+        selected: 8,
+        rows: 192,
+        k: 512,
+        experts: 32,
+    };
     let route = top_k_route(shape.sequence, shape.selected, shape.experts, 12);
     let other_route = top_k_route(shape.sequence, shape.selected, shape.experts, 99);
     let outputs = run(&shape, &route);
@@ -279,12 +380,21 @@ fn control_an_oracle_routed_to_other_experts_disagrees_by_a_gross_factor() {
 
     let gap = worst_relative_row_error(&wrong, &outputs.metal, shape.rows);
 
-    assert!(gap > 0.1, "the control must disagree by a gross factor, got {gap:e}");
+    assert!(
+        gap > 0.1,
+        "the control must disagree by a gross factor, got {gap:e}"
+    );
 }
 
 #[test]
 fn an_expert_index_past_the_slab_raises_the_same_error_as_cpu() {
-    let shape = Shape { sequence: 8, selected: 8, rows: 128, k: 256, experts: 12 };
+    let shape = Shape {
+        sequence: 8,
+        selected: 8,
+        rows: 128,
+        k: 256,
+        experts: 12,
+    };
     let mut route = top_k_route(shape.sequence, shape.selected, shape.experts, 31);
     route[10] = shape.experts as f32;
     let stack = quantized_expert_stack(&shape);
@@ -305,18 +415,29 @@ fn an_expert_index_past_the_slab_raises_the_same_error_as_cpu() {
         &mut validated,
     )
     .expect_err("cpu rejects an expert index past the slab");
-    let TensorError::GatherIndexOutOfRange { extent: cpu_extent, .. } = cpu_error else {
+    let TensorError::GatherIndexOutOfRange {
+        extent: cpu_extent, ..
+    } = cpu_error
+    else {
         panic!("cpu raised {cpu_error} instead of GatherIndexOutOfRange");
     };
 
     let (program, output) = program(&shape, DType::UInt8);
-    let named = named(QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &stack }, &route, &activation);
+    let named = named(
+        QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes: &stack,
+        },
+        &route,
+        &activation,
+    );
     let outputs = [output];
     let plan = omega::plan_named(&program, &[], &named, &outputs, NumericPolicy::default())
         .expect("metal plans the selection fold");
     let metal_error = omega::execute_plan_named(&plan, &named)
         .expect_err("metal rejects an expert index past the slab");
-    let MetalError::Tensor(TensorError::GatherIndexOutOfRange { index, extent, .. }) = metal_error else {
+    let MetalError::Tensor(TensorError::GatherIndexOutOfRange { index, extent, .. }) = metal_error
+    else {
         panic!("metal raised {metal_error:?} instead of GatherIndexOutOfRange");
     };
 

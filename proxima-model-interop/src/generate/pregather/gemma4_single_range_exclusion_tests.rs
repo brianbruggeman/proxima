@@ -67,7 +67,9 @@ fn build_single_range_program_declares_blk15_attn_k_for_gemma4_shaped_architectu
 #[allow(clippy::expect_used)]
 fn load_single_range_exclusion_covers_gemma4() {
     assert_ne!(
-        family_profile("gemma4").expect("gemma4 profile embedded").kv_cache_shape,
+        family_profile("gemma4")
+            .expect("gemma4 profile embedded")
+            .kv_cache_shape,
         KvCacheShape::Uniform,
         "gemma4 must stay excluded from the placed-KV single-range program"
     );

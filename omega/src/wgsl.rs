@@ -555,7 +555,9 @@ fn grid_threads(resolved: &BoundOp) -> Result<u64, EmitError> {
             if epilogue_broadcast_axes.is_empty() {
                 checked_product(
                     resolved.node,
-                    output_axes.iter().map(|dim| resolved.extents[*dim as usize]),
+                    output_axes
+                        .iter()
+                        .map(|dim| resolved.extents[*dim as usize]),
                 )
             } else {
                 extents_product()
@@ -2436,7 +2438,13 @@ mod tests {
         let rejected = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new());
 
         assert!(
-            matches!(rejected, Err(EmitError::GridExceedsThreadIndex { threads: u64::MAX, .. })),
+            matches!(
+                rejected,
+                Err(EmitError::GridExceedsThreadIndex {
+                    threads: u64::MAX,
+                    ..
+                })
+            ),
             "{rejected:?}"
         );
     }
@@ -2447,7 +2455,11 @@ mod tests {
         let padded_exactly_to_the_limit = elementwise_tanh_op(i32::MAX as u32 + 1 - WORKGROUP_SIZE);
 
         let rejected = emit_wgsl(&padded_past, WgslCaps::default(), &PackedOperands::new());
-        let accepted = emit_wgsl(&padded_exactly_to_the_limit, WgslCaps::default(), &PackedOperands::new());
+        let accepted = emit_wgsl(
+            &padded_exactly_to_the_limit,
+            WgslCaps::default(),
+            &PackedOperands::new(),
+        );
 
         assert!(
             matches!(rejected, Err(EmitError::GridExceedsThreadIndex { threads, .. }) if threads == i32::MAX as u64),
@@ -2456,7 +2468,9 @@ mod tests {
         );
         assert_eq!(
             accepted
-                .expect("a grid already a whole number of workgroups, padded count 2^31 - 256, fits")
+                .expect(
+                    "a grid already a whole number of workgroups, padded count 2^31 - 256, fits"
+                )
                 .threads,
             u64::from(i32::MAX as u32 + 1 - WORKGROUP_SIZE)
         );

@@ -4,7 +4,8 @@ use proxima_gguf::pipe::parse_complete;
 
 use super::*;
 
-const FIXTURE_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf";
+const FIXTURE_PATH: &str =
+    "/Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf";
 
 macro_rules! parse_header_region {
     ($file:expr, $header_buf:ident) => {{
@@ -51,7 +52,10 @@ fn architecture_from_metadata_names_the_heterogeneous_kv_heads_honestly() {
     let architecture = outcome.expect(
         "LFM2's real per-layer-varying head_count_kv must parse (never MissingMetadataKey)",
     );
-    assert_eq!(architecture.kv_heads, 0, "the uniform view is zero when the array varies");
+    assert_eq!(
+        architecture.kv_heads, 0,
+        "the uniform view is zero when the array varies"
+    );
     assert_eq!(
         architecture.kv_heads_by_layer.len(),
         architecture.block_count as usize,
@@ -59,7 +63,10 @@ fn architecture_from_metadata_names_the_heterogeneous_kv_heads_honestly() {
     );
     assert!(
         architecture.kv_heads_by_layer.contains(&0)
-            && architecture.kv_heads_by_layer.iter().any(|&heads| heads > 0),
+            && architecture
+                .kv_heads_by_layer
+                .iter()
+                .any(|&heads| heads > 0),
         "conv layers carry zero and attention layers a positive count: {:?}",
         architecture.kv_heads_by_layer
     );

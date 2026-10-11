@@ -229,7 +229,10 @@ fn run_real_ffn_down_parity(relative_tolerance: f32) {
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Packed { codec: Codec::Q5K, bytes: sliced_weight },
+            QuantizedBlock::Packed {
+                codec: Codec::Q5K,
+                bytes: sliced_weight,
+            },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],

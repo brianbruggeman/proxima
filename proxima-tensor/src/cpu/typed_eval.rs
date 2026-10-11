@@ -632,7 +632,9 @@ pub(super) fn evaluate_uniform_typed(
         DType::Float32 => dispatch!(f32, Float32),
         DType::Float64 => dispatch!(f64, Float64),
         DType::BFloat8 => dispatch!(BFloat8, BFloat8),
-        DType::Bool | DType::Fp6E3M2 => unreachable!("typed_program_plan already rejected this dtype"),
+        DType::Bool | DType::Fp6E3M2 => {
+            unreachable!("typed_program_plan already rejected this dtype")
+        }
     })
 }
 

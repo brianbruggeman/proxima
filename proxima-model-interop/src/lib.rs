@@ -26,8 +26,6 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-#[cfg(feature = "std")]
-mod lowering;
 mod bind;
 #[cfg(feature = "std")]
 mod bind_leaves;
@@ -43,64 +41,58 @@ pub mod expert_sidecar;
 #[cfg(feature = "std")]
 pub mod expert_slab;
 #[cfg(feature = "std")]
-pub mod sliding_pattern;
-#[cfg(feature = "std")]
 mod generate;
 #[cfg(feature = "std")]
 mod hf_bind;
 mod hf_config;
-pub mod pinned_source;
-#[cfg(feature = "std")]
-mod short_conv;
 #[cfg(feature = "std")]
 mod loader;
+#[cfg(feature = "std")]
+mod lowering;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod mapping_residency;
+pub mod pinned_source;
 #[cfg(feature = "std")]
 pub mod recurrent_routed_interval;
 #[cfg(feature = "std")]
 pub mod residency;
+#[cfg(feature = "std")]
+mod short_conv;
+#[cfg(feature = "std")]
+pub mod sliding_pattern;
 // The arithmetic is pure, but its production consumer is the std+metal
 // serving path (including CUDA/Vulkan builds, which inherit the metal feature
 // bundle). Keep `cfg(test)` so its unit tests remain available in a bare
 // alloc-tier test build without making a plain `--features std` library carry
 // an unreachable module under `warnings = "deny"`.
+#[cfg(feature = "std")]
+mod codec_policy_settings;
 #[cfg(any(test, all(feature = "std", feature = "metal", target_os = "macos")))]
 mod memory_fit;
 #[cfg(feature = "std")]
-mod quality;
-#[cfg(feature = "std")]
 pub mod profiles;
+#[cfg(feature = "std")]
+mod prompt_cache_settings;
+#[cfg(feature = "std")]
+mod quality;
 #[cfg(feature = "std")]
 mod recurrent_interval;
 pub mod rope_scaling;
 mod serving;
 mod serving_grammar;
 #[cfg(feature = "std")]
-mod codec_policy_settings;
-#[cfg(feature = "std")]
-mod prompt_cache_settings;
-#[cfg(feature = "std")]
-mod speculative_settings;
-#[cfg(feature = "std")]
 mod serving_settings;
 #[cfg(all(feature = "std", feature = "proxima-storage"))]
 mod source;
+#[cfg(feature = "std")]
+mod speculative_settings;
 pub mod task;
 #[cfg(all(test, feature = "std"))]
 mod test_support;
 mod transform;
 
 #[cfg(feature = "std")]
-pub use lowering::{
-    BoundProgram, FfnRouting, KvCacheShape, KvLayout, StepInput, StepState, bind_checkpoint,
-    bind_checkpoint_with_kv_layout, bind_speculative_verify, bind_symbols, header_descriptor, kv_layers,
-    rope_freq_factors, sliding_rope_inputs, step_state, symbols, trained_context_length,
-};
-#[cfg(feature = "std")]
 pub use bind::gguf_tensor_as_packed_block;
-#[cfg(feature = "std")]
-pub use bind_leaves::bind_program_leaves;
 #[cfg(feature = "std")]
 pub use bind::{
     BoundWeights, Codec, bind_dense, bind_dense_as, bind_matmul_weight, bind_matmul_weight_as,
@@ -109,6 +101,10 @@ pub use bind::{
     vocab_from_token_embedding,
 };
 pub use bind::{ModelHparams, SlidingRope, architecture_from_metadata, gguf_tensor_as_f32};
+#[cfg(feature = "std")]
+pub use bind_leaves::bind_program_leaves;
+#[cfg(feature = "std")]
+pub use codec_policy_settings::{CodecPolicySettings, CodecPolicyWeights};
 #[cfg(feature = "std")]
 pub use dense::descriptor_from_gguf as dense_descriptor_from_gguf;
 pub use dtype::{dtype_to_ggml, ggml_to_dtype};
@@ -125,33 +121,39 @@ pub use expert_slab::{
 #[cfg(feature = "std")]
 pub use generate::{
     CachePath, CacheReport, ColdTier, DecodeMetrics, EvictionRule, LoadedModel, MissReason, Phase,
-    PrefixState,
-    PrewarmReport, PrewarmSkip,
-    SpeculativeDecodeStats, SpeculativeTypeStats, TokenEvent,
+    PrefixState, PrewarmReport, PrewarmSkip, SpeculativeDecodeStats, SpeculativeTypeStats,
+    TokenEvent,
 };
 #[cfg(feature = "std")]
 pub use hf_bind::{
     SafetensorsTensorView, bind_safetensors_program_leaves, bind_safetensors_program_views,
-    refuse_mlx_quantized, refuse_mlx_quantized_header,
-    names as hf_names, node_names as hf_node_names, permute_rope_rows,
+    names as hf_names, node_names as hf_node_names, permute_rope_rows, refuse_mlx_quantized,
+    refuse_mlx_quantized_header,
 };
 pub use hf_config::{
     HfConfig, architecture_from_hf_config, lfm_layer_kinds_from_manifest, parse_hf_config,
 };
 #[cfg(feature = "std")]
-pub use short_conv::{
-    ShortConvHparams, short_conv_architecture_from_metadata, short_conv_descriptor, short_conv_forward_values,
+pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
+#[cfg(feature = "std")]
+pub use lowering::{
+    BoundProgram, FfnRouting, KvCacheShape, KvLayout, StepInput, StepState, bind_checkpoint,
+    bind_checkpoint_with_kv_layout, bind_speculative_verify, bind_symbols, header_descriptor,
+    kv_layers, rope_freq_factors, sliding_rope_inputs, step_state, symbols, trained_context_length,
 };
 #[cfg(feature = "std")]
-pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
+pub use prompt_cache_settings::PromptCacheSettings;
+#[cfg(feature = "std")]
+pub use proxima_core::ServingState;
 #[cfg(all(feature = "std", feature = "instrument"))]
 pub use quality::print_quality_report;
 #[cfg(feature = "std")]
 pub use quality::{Prompt, PromptQuality, QualityReport, parse_prompts_jsonl, quality_report};
 #[cfg(feature = "std")]
 pub use recurrent_interval::{
-    RecurrentIntervalHparams, IntervalLayerKind, SsmShape, bind_recurrent_interval_checkpoint,
-    descriptor_from_architecture as recurrent_interval_descriptor_from_architecture, recurrent_interval_architecture_from_metadata,
+    IntervalLayerKind, RecurrentIntervalHparams, SsmShape, bind_recurrent_interval_checkpoint,
+    descriptor_from_architecture as recurrent_interval_descriptor_from_architecture,
+    recurrent_interval_architecture_from_metadata,
 };
 #[cfg(feature = "std")]
 pub use residency::{
@@ -160,27 +162,15 @@ pub use residency::{
     ServeDecision, ServePrecision,
 };
 pub use rope_scaling::RopeScaling;
-pub use serving_grammar::{AssembleStep, ReadSpec};
 #[cfg(feature = "std")]
 pub use serving::GdnPrefillBackend;
 pub use serving::{
-    ContextLength, DEFAULT_BATCH_SIZE, DEFAULT_MODEL_PATH, DEFAULT_UBATCH_SIZE, GPU_LAYERS_ALL, NamePattern, NgramMapParams, NgramModParams,
-    AttentionConfig, PrefillConfig, PromptCacheConfig, REASONING_BUDGET_UNBOUNDED, ServingConfig, SpeculativeConfig, SpeculativeType,
+    AttentionConfig, ContextLength, DEFAULT_BATCH_SIZE, DEFAULT_MODEL_PATH, DEFAULT_UBATCH_SIZE,
+    GPU_LAYERS_ALL, NamePattern, NgramMapParams, NgramModParams, PrefillConfig, PromptCacheConfig,
+    REASONING_BUDGET_UNBOUNDED, ServingConfig, SpeculativeConfig, SpeculativeType,
     SpeculativeTypeSet, WeightPrecisionRule, apply_serving_config, resolve_context_length,
 };
-#[cfg(feature = "std")]
-pub use proxima_core::ServingState;
-#[cfg(feature = "std")]
-pub use codec_policy_settings::{CodecPolicySettings, CodecPolicyWeights};
-#[cfg(feature = "std")]
-pub use prompt_cache_settings::PromptCacheSettings;
-#[cfg(feature = "std")]
-pub use speculative_settings::{SpeculativeSettings, SpeculativeTypeName, SpeculativeTypeNameSet};
-#[cfg(feature = "std")]
-pub use serving_settings::{
-    AdmissionScheduleSettings, CacheType, ExpertResidencyScheduleSettings, PhaseScheduleSettings,
-    ServingSettings, WeightPrecisionRuleSettings,
-};
+pub use serving_grammar::{AssembleStep, ReadSpec};
 #[cfg(all(
     feature = "std",
     feature = "metal",
@@ -188,19 +178,31 @@ pub use serving_settings::{
     target_os = "macos"
 ))]
 pub use serving_settings::AttentionTileHeightSetting;
+#[cfg(feature = "std")]
+pub use serving_settings::{
+    AdmissionScheduleSettings, CacheType, ExpertResidencyScheduleSettings, PhaseScheduleSettings,
+    ServingSettings, WeightPrecisionRuleSettings,
+};
+#[cfg(feature = "std")]
+pub use short_conv::{
+    ShortConvHparams, short_conv_architecture_from_metadata, short_conv_descriptor,
+    short_conv_forward_values,
+};
 #[cfg(all(feature = "std", feature = "proxima-storage"))]
 pub use source::{CheckpointMapping, CheckpointSourceError};
+#[cfg(feature = "std")]
+pub use speculative_settings::{SpeculativeSettings, SpeculativeTypeName, SpeculativeTypeNameSet};
 pub use task::{ModelTask, TaskProfile, classify_task};
 pub use transform::{
     AffineExport, AffinePacked, AffineParams, MLX_INDEX_FILE_NAME, MLX_MAX_SHARD_BYTES,
-    MLX_SINGLE_SHARD_FILE_NAME, MlxExport, MlxShard, export_affine, gguf_to_safetensors, pack_affine,
-    safetensors_to_gguf,
+    MLX_SINGLE_SHARD_FILE_NAME, MlxExport, MlxShard, export_affine, gguf_to_safetensors,
+    pack_affine, safetensors_to_gguf,
 };
-#[cfg(feature = "std")]
-pub use transform::{Layout, MlxNames, SANDWICH_NORM_LAYOUT, STANDARD_LAYOUT, dense_names};
-#[cfg(feature = "std")]
-pub use transform::{copy_config, hf_config_bytes, sliding_pattern_hparams};
 #[cfg(feature = "std")]
 pub use transform::{DEFAULT_PLAIN_DTYPE, PlainTensor, export_plain, export_plain_tensor};
 #[cfg(feature = "std")]
+pub use transform::{Layout, MlxNames, SANDWICH_NORM_LAYOUT, STANDARD_LAYOUT, dense_names};
+#[cfg(feature = "std")]
 pub use transform::{TokenizerFiles, copy_tokenizer, export_tokenizer};
+#[cfg(feature = "std")]
+pub use transform::{copy_config, hf_config_bytes, sliding_pattern_hparams};

@@ -29,7 +29,10 @@ fn matvec_program() -> (Vec<Op>, NodeId) {
         &mut program,
         Op::Input {
             dtype: DType::UInt8,
-            shape: vec![Extent::Static(OUT_DIM as u32), Extent::Static(IN_DIM as u32)],
+            shape: vec![
+                Extent::Static(OUT_DIM as u32),
+                Extent::Static(IN_DIM as u32),
+            ],
             name: None,
         },
     );
@@ -78,7 +81,10 @@ fn capture_one_matvec() -> (Vec<omega::CapturedDispatch>, Vec<f32>) {
     let activation = random_vec(99, IN_DIM);
     let (program, root) = matvec_program();
     let blocks = [
-        QuantizedBlock::Packed { codec: omega::Codec::Q4_0, bytes: &packed },
+        QuantizedBlock::Packed {
+            codec: omega::Codec::Q4_0,
+            bytes: &packed,
+        },
         QuantizedBlock::Float32(&activation),
     ];
     let plan = omega::plan(&program, &[], &blocks, &[root], NumericPolicy::default())
@@ -103,7 +109,9 @@ fn a_captured_matvec_replays_the_values_the_plan_wrote() {
         .find(|dispatch| dispatch.operands.iter().any(|(_, codec)| codec == "Q4_0"))
         .expect("the packed matvec was captured");
 
-    let replayed = matvec.replay_output().expect("the captured dispatch replays");
+    let replayed = matvec
+        .replay_output()
+        .expect("the captured dispatch replays");
 
     assert_eq!(
         replayed.len(),
@@ -145,7 +153,10 @@ fn every_bound_buffer_is_described_once() {
 
     let lines = matvec.describe_buffers();
 
-    assert!(lines.len() >= 3, "weights, activation and output are bound: {lines:?}");
+    assert!(
+        lines.len() >= 3,
+        "weights, activation and output are bound: {lines:?}"
+    );
     assert!(
         lines.iter().all(|line| line.starts_with("binding=")),
         "{lines:?}"

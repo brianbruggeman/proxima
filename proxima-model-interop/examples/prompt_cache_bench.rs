@@ -52,8 +52,7 @@ use memmap2::Mmap;
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{
-    CacheReport, GPU_LAYERS_ALL, LoadedModel, PromptCacheConfig, ServingConfig,
-    SpeculativeConfig,
+    CacheReport, GPU_LAYERS_ALL, LoadedModel, PromptCacheConfig, ServingConfig, SpeculativeConfig,
 };
 use proxima_tokenizer::vocab::Vocab;
 use serde_json::{Value, json};
@@ -113,7 +112,8 @@ fn parse_list<T: std::str::FromStr>(value: &str) -> Vec<T> {
 fn parse_args() -> Args {
     let mut args = Args {
         mode: Mode::Ttft,
-        model_path: env::var("PROXIMA_GEMMA4_E2B_GGUF").unwrap_or_else(|_| DEFAULT_MODEL_PATH.to_string()),
+        model_path: env::var("PROXIMA_GEMMA4_E2B_GGUF")
+            .unwrap_or_else(|_| DEFAULT_MODEL_PATH.to_string()),
         llama_bin: None,
         pairs: 10,
         max_tokens: 32,
@@ -125,7 +125,9 @@ fn parse_args() -> Args {
     };
     let mut iterator = env::args().skip(1);
     while let Some(flag) = iterator.next() {
-        let value = iterator.next().unwrap_or_else(|| panic!("{flag} needs a value"));
+        let value = iterator
+            .next()
+            .unwrap_or_else(|| panic!("{flag} needs a value"));
         match flag.as_str() {
             "--mode" => args.mode = parse_mode(&value),
             "--model" => args.model_path = value,
@@ -170,7 +172,8 @@ struct Recorder {
 impl Recorder {
     fn create(path: &Path) -> Self {
         Self {
-            file: File::create(path).unwrap_or_else(|err| panic!("create {}: {err}", path.display())),
+            file: File::create(path)
+                .unwrap_or_else(|err| panic!("create {}: {err}", path.display())),
         }
     }
 
@@ -203,7 +206,11 @@ fn coefficient_of_variation(values: &[f64]) -> f64 {
         return 0.0;
     }
     let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
+    let variance = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / (values.len() - 1) as f64;
     variance.sqrt() / mean
 }
 
@@ -252,7 +259,9 @@ fn gpu_utilization_percent() -> Option<f64> {
     let needle = "\"Device Utilization %\"=";
     let start = stdout.find(needle)? + needle.len();
     let rest = &stdout[start..];
-    let end = rest.find(|character: char| !character.is_ascii_digit()).unwrap_or(rest.len());
+    let end = rest
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(rest.len());
     rest[..end].parse().ok()
 }
 
@@ -267,7 +276,10 @@ fn top_processes() -> Vec<String> {
         })
         .collect();
     rows.sort_by(|left, right| right.0.total_cmp(&left.0));
-    rows.iter().take(5).map(|(cpu, rest)| format!("{cpu}% {rest}")).collect()
+    rows.iter()
+        .take(5)
+        .map(|(cpu, rest)| format!("{cpu}% {rest}"))
+        .collect()
 }
 
 fn watched_process_cpu_percent() -> f64 {
@@ -296,7 +308,10 @@ fn build_summary() -> Value {
     let features: Vec<&str> = [
         ("std", cfg!(feature = "std")),
         ("metal", cfg!(feature = "metal")),
-        ("metal-fuse-attn-decode", cfg!(feature = "metal-fuse-attn-decode")),
+        (
+            "metal-fuse-attn-decode",
+            cfg!(feature = "metal-fuse-attn-decode"),
+        ),
         ("identity-copy-alias", cfg!(feature = "identity-copy-alias")),
         ("metal-tiled-gemm", cfg!(feature = "metal-tiled-gemm")),
     ]
@@ -349,7 +364,8 @@ fn checkpointed(interval: u32, max_checkpoints: u32) -> PromptCacheConfig {
 }
 
 fn with_model<T>(model_path: &str, body: impl FnOnce(&LoadedModel<'_>, &Vocab) -> T) -> T {
-    let file = File::open(model_path).unwrap_or_else(|err| panic!("open model {model_path}: {err}"));
+    let file =
+        File::open(model_path).unwrap_or_else(|err| panic!("open model {model_path}: {err}"));
     // SAFETY: read-only mapping of a checkpoint nothing else writes during the run.
     let mapping = unsafe { Mmap::map(&file) }.expect("map the model");
     let bytes: &[u8] = &mapping;
@@ -366,12 +382,18 @@ fn wants_bos(vocab: &Vocab) -> bool {
 }
 
 fn encode_opening(vocab: &Vocab, text: &str) -> Vec<u32> {
-    proxima_tokenizer::encode_with_bos_eos(text, vocab, wants_bos(vocab), vocab.add_eos_token().unwrap_or(false))
-        .expect("tokenize the opening prompt")
+    proxima_tokenizer::encode_with_bos_eos(
+        text,
+        vocab,
+        wants_bos(vocab),
+        vocab.add_eos_token().unwrap_or(false),
+    )
+    .expect("tokenize the opening prompt")
 }
 
 fn encode_continuation(vocab: &Vocab, text: &str) -> Vec<u32> {
-    proxima_tokenizer::encode_with_bos_eos(text, vocab, false, false).expect("tokenize a continuation")
+    proxima_tokenizer::encode_with_bos_eos(text, vocab, false, false)
+        .expect("tokenize a continuation")
 }
 
 fn corpus_document(id: &str) -> String {
@@ -426,7 +448,10 @@ fn user_texts(kind: TranscriptKind) -> Vec<String> {
                     turn["from_char"].as_u64().expect("from_char") as usize,
                     turn["chars"].as_u64().expect("chars") as usize,
                 );
-                format!("{}\n\n{body}", turn["instruction"].as_str().expect("instruction"))
+                format!(
+                    "{}\n\n{body}",
+                    turn["instruction"].as_str().expect("instruction")
+                )
             })
             .collect(),
     }
@@ -466,14 +491,18 @@ fn timed_request_with_turn_ends(
         .expect("generate from ids");
     let total = start.elapsed();
     Timed {
-        ttft_ms: first_token.expect("the request emitted a token").as_secs_f64() * 1000.0,
+        ttft_ms: first_token
+            .expect("the request emitted a token")
+            .as_secs_f64()
+            * 1000.0,
         total_ms: total.as_secs_f64() * 1000.0,
         generated,
         stopped_by_eos,
-        report: config
-            .prompt_cache
-            .is_enabled()
-            .then(|| model.last_prompt_cache_report().expect("a cached request records its report")),
+        report: config.prompt_cache.is_enabled().then(|| {
+            model
+                .last_prompt_cache_report()
+                .expect("a cached request records its report")
+        }),
     }
 }
 
@@ -490,12 +519,19 @@ fn clear_cache(model: &LoadedModel<'_>, vocab: &Vocab) {
         ..PromptCacheConfig::standard()
     });
     let ids = probe_ids(vocab);
-    assert_ne!(ids[0], encode_opening(vocab, "x")[0], "the probe must not start with the BOS token");
+    assert_ne!(
+        ids[0],
+        encode_opening(vocab, "x")[0],
+        "the probe must not start with the BOS token"
+    );
     model
         .generate_from_ids(&ids, 1, &probe, &mut |_event| ControlFlow::Continue(()))
         .expect("clearing request");
     let bytes = model.prompt_cache_bytes();
-    assert!(bytes < PROBE_ENTRY_BYTES_BOUND, "the clearing request left {bytes} cache bytes behind");
+    assert!(
+        bytes < PROBE_ENTRY_BYTES_BOUND,
+        "the clearing request left {bytes} cache bytes behind"
+    );
 }
 
 fn tokens_held_after(prompt_len: usize, timed: &Timed) -> usize {
@@ -525,7 +561,12 @@ struct TurnPlan {
     generated: Vec<u32>,
 }
 
-fn build_plans(model: &LoadedModel<'_>, vocab: &Vocab, kind: TranscriptKind, max_tokens: usize) -> Vec<TurnPlan> {
+fn build_plans(
+    model: &LoadedModel<'_>,
+    vocab: &Vocab,
+    kind: TranscriptKind,
+    max_tokens: usize,
+) -> Vec<TurnPlan> {
     clear_cache(model, vocab);
     let config = config_with(PromptCacheConfig::standard());
     let mut plans: Vec<TurnPlan> = Vec::new();
@@ -551,7 +592,14 @@ fn build_plans(model: &LoadedModel<'_>, vocab: &Vocab, kind: TranscriptKind, max
     plans
 }
 
-const ARM_ORDERS: [[usize; 3]; 6] = [[0, 1, 2], [1, 2, 0], [2, 0, 1], [0, 2, 1], [2, 1, 0], [1, 0, 2]];
+const ARM_ORDERS: [[usize; 3]; 6] = [
+    [0, 1, 2],
+    [1, 2, 0],
+    [2, 0, 1],
+    [0, 2, 1],
+    [2, 1, 0],
+    [1, 0, 2],
+];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Arm {
@@ -590,10 +638,21 @@ fn run_arm(
 ) -> (Timed, usize) {
     let cached = config_with(PromptCacheConfig::standard());
     match arm {
-        Arm::CacheOn => (timed_request(model, &plan.prompt_ids, max_tokens, &cached), plan.prompt_ids.len()),
-        Arm::CacheOff => (timed_request(model, &plan.prompt_ids, max_tokens, &uncached()), plan.prompt_ids.len()),
+        Arm::CacheOn => (
+            timed_request(model, &plan.prompt_ids, max_tokens, &cached),
+            plan.prompt_ids.len(),
+        ),
+        Arm::CacheOff => (
+            timed_request(model, &plan.prompt_ids, max_tokens, &uncached()),
+            plan.prompt_ids.len(),
+        ),
         Arm::PrefixOnly => (
-            timed_request(model, &plan.prompt_ids[..plan.held_before], max_tokens, &uncached()),
+            timed_request(
+                model,
+                &plan.prompt_ids[..plan.held_before],
+                max_tokens,
+                &uncached(),
+            ),
             plan.held_before,
         ),
     }
@@ -660,7 +719,9 @@ fn record_pair(samples: &mut TurnSamples, measured: [Option<f64>; 3], identical:
 }
 
 fn print_ttft_summary(samples: &[TurnSamples], plans: &[TurnPlan]) {
-    println!("proxima ttft ms (cache on vs off, prefix_only = prefill time of the tokens the cache reuses)");
+    println!(
+        "proxima ttft ms (cache on vs off, prefix_only = prefill time of the tokens the cache reuses)"
+    );
     for (turn, (turn_samples, plan)) in samples.iter().zip(plans).enumerate() {
         println!(
             "turn={turn} prompt_tokens={} held_tokens={} ids_identical_on_vs_reference={}/{}",
@@ -731,13 +792,24 @@ impl LlamaServer {
         if let Some(directory) = bin.parent() {
             command.env("DYLD_LIBRARY_PATH", directory);
         }
-        let arguments: Vec<String> = ["--model", model_path, "--host", "127.0.0.1", "--port", &port.to_string()]
-            .iter()
-            .map(ToString::to_string)
-            .chain(llama_args(&base_config(), context))
-            .chain(extra.iter().map(ToString::to_string))
-            .collect();
-        eprintln!("llama-server command: {} {}", bin.display(), arguments.join(" "));
+        let arguments: Vec<String> = [
+            "--model",
+            model_path,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .chain(llama_args(&base_config(), context))
+        .chain(extra.iter().map(ToString::to_string))
+        .collect();
+        eprintln!(
+            "llama-server command: {} {}",
+            bin.display(),
+            arguments.join(" ")
+        );
         let child = command
             .args(&arguments)
             .stdout(Stdio::null())
@@ -772,7 +844,8 @@ fn health_ok(port: u16) -> bool {
     let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
         return false;
     };
-    let request = format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    let request =
+        format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
@@ -828,10 +901,16 @@ fn read_llama_stream(mut reader: BufReader<TcpStream>, start: Instant) -> LlamaR
         let Some(payload) = line.strip_prefix("data: ") else {
             continue;
         };
-        let event: Value = serde_json::from_str(payload.trim()).unwrap_or_else(|err| panic!("stream event {payload:?}: {err}"));
+        let event: Value = serde_json::from_str(payload.trim())
+            .unwrap_or_else(|err| panic!("stream event {payload:?}: {err}"));
         let tokens: Vec<u32> = event["tokens"]
             .as_array()
-            .map(|array| array.iter().map(|token| token.as_u64().expect("token id") as u32).collect())
+            .map(|array| {
+                array
+                    .iter()
+                    .map(|token| token.as_u64().expect("token id") as u32)
+                    .collect()
+            })
             .unwrap_or_default();
         if !tokens.is_empty() && result.ttft_wall_ms.is_nan() {
             result.ttft_wall_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -886,7 +965,10 @@ fn oracle_request(
 
 fn oracle_ac2(model: &LoadedModel<'_>, vocab: &Vocab, max_tokens: usize) -> Vec<OracleRequest> {
     clear_cache(model, vocab);
-    let config = config_with(checkpointed(PromptCacheConfig::standard().checkpoint_interval, 8));
+    let config = config_with(checkpointed(
+        PromptCacheConfig::standard().checkpoint_interval,
+        8,
+    ));
     let mut requests: Vec<OracleRequest> = Vec::new();
     let mut held = 0;
     for (turn, text) in user_texts(TranscriptKind::Ac2).iter().enumerate() {
@@ -904,7 +986,15 @@ fn oracle_ac2(model: &LoadedModel<'_>, vocab: &Vocab, max_tokens: usize) -> Vec<
         } else {
             format!("extend lcp={held} prefilled={}", ids.len() - held)
         };
-        let request = oracle_request(model, "ac2_three_turn_extension", turn, ids, &config, expectation, max_tokens);
+        let request = oracle_request(
+            model,
+            "ac2_three_turn_extension",
+            turn,
+            ids,
+            &config,
+            expectation,
+            max_tokens,
+        );
         held = request.ids.len() + request.cached.len() - 1;
         requests.push(request);
     }
@@ -922,7 +1012,15 @@ fn oracle_rewrite(
 ) -> Vec<OracleRequest> {
     clear_cache(model, vocab);
     let opening = encode_opening(vocab, opening_text);
-    let first = oracle_request(model, scenario, 0, opening.clone(), config, "miss".to_string(), max_tokens);
+    let first = oracle_request(
+        model,
+        scenario,
+        0,
+        opening.clone(),
+        config,
+        "miss".to_string(),
+        max_tokens,
+    );
     let held = opening.len() + first.cached.len() - 1;
     let mut stored = opening;
     stored.extend_from_slice(&first.cached);
@@ -934,10 +1032,16 @@ fn oracle_rewrite(
         next_turn(&excerpt(&document, 3200, 1500))
     );
     let tail = encode_continuation(vocab, &tail_text);
-    assert_ne!(tail[0], stored[kept], "the rewrite must diverge at its first token");
+    assert_ne!(
+        tail[0], stored[kept],
+        "the rewrite must diverge at its first token"
+    );
     let mut ids = stored[..kept].to_vec();
     ids.extend_from_slice(&tail);
-    let expectation = format!("kept={kept} rewritten={rewritten} tail={} stored={held}", tail.len());
+    let expectation = format!(
+        "kept={kept} rewritten={rewritten} tail={} stored={held}",
+        tail.len()
+    );
     let second = oracle_request(model, scenario, 1, ids, config, expectation, max_tokens);
     vec![first, second]
 }
@@ -946,7 +1050,10 @@ fn run_oracle_proxima(args: &Args) -> Vec<OracleRequest> {
     with_model(&args.model_path, |model, vocab| {
         let max_tokens = args.max_tokens;
         let mut requests = oracle_ac2(model, vocab, max_tokens);
-        let within = config_with(checkpointed(PromptCacheConfig::standard().checkpoint_interval, 8));
+        let within = config_with(checkpointed(
+            PromptCacheConfig::standard().checkpoint_interval,
+            8,
+        ));
         requests.extend(oracle_rewrite(
             model,
             vocab,
@@ -971,20 +1078,31 @@ fn run_oracle_proxima(args: &Args) -> Vec<OracleRequest> {
 }
 
 fn run_oracle(args: &Args, recorder: &mut Recorder) {
-    let bin = args.llama_bin.as_ref().expect("--llama-server-bin is required for the oracle");
+    let bin = args
+        .llama_bin
+        .as_ref()
+        .expect("--llama-server-bin is required for the oracle");
     let requests = run_oracle_proxima(args);
-    let context = requests.iter().map(|request| request.ids.len()).max().unwrap_or(0)
+    let context = requests
+        .iter()
+        .map(|request| request.ids.len())
+        .max()
+        .unwrap_or(0)
         + args.max_tokens
         + LLAMA_CONTEXT_HEADROOM_TOKENS;
     let mut identical = 0;
     let mut cached_equals_fresh = 0;
     let mut llama_is_prefix = 0;
-    let mut scenarios: Vec<&'static str> = requests.iter().map(|request| request.scenario).collect();
+    let mut scenarios: Vec<&'static str> =
+        requests.iter().map(|request| request.scenario).collect();
     scenarios.dedup();
     for scenario in scenarios {
         let server = LlamaServer::spawn(bin, &args.model_path, LLAMA_PORT_ON, context, &[]);
         recorder.write(&json!({"kind": "llama_server", "scenario": scenario, "pid": server.pid()}));
-        for request in requests.iter().filter(|request| request.scenario == scenario) {
+        for request in requests
+            .iter()
+            .filter(|request| request.scenario == scenario)
+        {
             let llama = llama_completion(LLAMA_PORT_ON, &request.ids, args.max_tokens, true);
             let divergence = first_divergence(&request.cached, &llama.ids);
             identical += usize::from(divergence.is_none());
@@ -1018,7 +1136,11 @@ fn oracle_record(request: &OracleRequest, llama: &LlamaResult, divergence: Optio
 
 fn run_llama_ttft(args: &Args, plans: &[TurnPlan], flush_ids: &[u32], recorder: &mut Recorder) {
     let bin = args.llama_bin.as_ref().expect("llama binary");
-    let context = plans.iter().map(|plan| plan.prompt_ids.len()).max().unwrap_or(0)
+    let context = plans
+        .iter()
+        .map(|plan| plan.prompt_ids.len())
+        .max()
+        .unwrap_or(0)
         + args.max_tokens
         + LLAMA_CONTEXT_HEADROOM_TOKENS;
     let extra = ["--cache-ram", "0"];
@@ -1034,9 +1156,17 @@ fn run_llama_ttft(args: &Args, plans: &[TurnPlan], flush_ids: &[u32], recorder: 
         llama_completion(LLAMA_PORT_ON, flush_ids, 1, true);
         for (turn, plan) in plans.iter().enumerate() {
             let on_first = (pair + turn) % 2 == 0;
-            let order = if on_first { [true, false] } else { [false, true] };
+            let order = if on_first {
+                [true, false]
+            } else {
+                [false, true]
+            };
             for cache_on in order {
-                let port = if cache_on { LLAMA_PORT_ON } else { LLAMA_PORT_OFF };
+                let port = if cache_on {
+                    LLAMA_PORT_ON
+                } else {
+                    LLAMA_PORT_OFF
+                };
                 let result = llama_completion(port, &plan.prompt_ids, args.max_tokens, cache_on);
                 let prompt_ms = result.timings["prompt_ms"].as_f64().unwrap_or(f64::NAN);
                 recorder.write(&json!({
@@ -1049,21 +1179,36 @@ fn run_llama_ttft(args: &Args, plans: &[TurnPlan], flush_ids: &[u32], recorder: 
                     "first_divergence_vs_proxima": first_divergence(&plan.generated, &result.ids),
                 }));
                 if pair > 0 {
-                    let (wall, prompt) = if cache_on { (&mut on_ttft, &mut on_prompt_ms) } else { (&mut off_ttft, &mut off_prompt_ms) };
+                    let (wall, prompt) = if cache_on {
+                        (&mut on_ttft, &mut on_prompt_ms)
+                    } else {
+                        (&mut off_ttft, &mut off_prompt_ms)
+                    };
                     wall[turn].push(result.ttft_wall_ms);
                     prompt[turn].push(prompt_ms);
                 }
             }
         }
     }
-    println!("llama-server ttft (wall to first streamed token; prompt_ms is llama's own timings.prompt_ms)");
+    println!(
+        "llama-server ttft (wall to first streamed token; prompt_ms is llama's own timings.prompt_ms)"
+    );
     for turn in 0..plans.len() {
         println!("turn={turn} prompt_tokens={}", plans[turn].prompt_ids.len());
         println!("  cache_on  wall {}", spread(&on_ttft[turn]).text());
         println!("  cache_off wall {}", spread(&off_ttft[turn]).text());
-        println!("  cache_on  prompt_ms {}", spread(&on_prompt_ms[turn]).text());
-        println!("  cache_off prompt_ms {}", spread(&off_prompt_ms[turn]).text());
-        println!("  median_on/median_off wall={:.3}", median(&on_ttft[turn]) / median(&off_ttft[turn]));
+        println!(
+            "  cache_on  prompt_ms {}",
+            spread(&on_prompt_ms[turn]).text()
+        );
+        println!(
+            "  cache_off prompt_ms {}",
+            spread(&off_prompt_ms[turn]).text()
+        );
+        println!(
+            "  median_on/median_off wall={:.3}",
+            median(&on_ttft[turn]) / median(&off_ttft[turn])
+        );
     }
 }
 
@@ -1087,8 +1232,16 @@ fn split_arms(length: usize, intervals: &[u32]) -> Vec<SplitArm> {
     let splits_at = |interval: u32| (length - 1) / interval as usize;
     let standard = PromptCacheConfig::standard();
     let mut arms = vec![
-        SplitArm { label: "cache_off".into(), config: PromptCacheConfig::off(), splits: 0 },
-        SplitArm { label: "cache_on_max_checkpoints_0".into(), config: checkpointed(standard.checkpoint_interval, 0), splits: 0 },
+        SplitArm {
+            label: "cache_off".into(),
+            config: PromptCacheConfig::off(),
+            splits: 0,
+        },
+        SplitArm {
+            label: "cache_on_max_checkpoints_0".into(),
+            config: checkpointed(standard.checkpoint_interval, 0),
+            splits: 0,
+        },
         SplitArm {
             label: format!("cache_on_default_interval_{}", standard.checkpoint_interval),
             config: standard,
@@ -1106,19 +1259,37 @@ fn split_arms(length: usize, intervals: &[u32]) -> Vec<SplitArm> {
 fn run_split(args: &Args, recorder: &mut Recorder) {
     with_model(&args.model_path, |model, vocab| {
         let source = encode_opening(vocab, &opening_turn(&long_document(60_000)));
-        let longest = args.lengths.iter().copied().max().expect("--lengths is not empty");
-        assert!(source.len() >= longest, "the source prompt has {} tokens, need {longest}", source.len());
+        let longest = args
+            .lengths
+            .iter()
+            .copied()
+            .max()
+            .expect("--lengths is not empty");
+        assert!(
+            source.len() >= longest,
+            "the source prompt has {} tokens, need {longest}",
+            source.len()
+        );
         for &length in &args.lengths {
             run_split_length(model, vocab, &source[..length], args, recorder);
         }
     });
 }
 
-fn run_split_length(model: &LoadedModel<'_>, vocab: &Vocab, ids: &[u32], args: &Args, recorder: &mut Recorder) {
+fn run_split_length(
+    model: &LoadedModel<'_>,
+    vocab: &Vocab,
+    ids: &[u32],
+    args: &Args,
+    recorder: &mut Recorder,
+) {
     let arms = split_arms(ids.len(), &args.intervals);
     let mut ttft: Vec<Vec<f64>> = vec![Vec::new(); arms.len()];
     for pair in 0..=args.pairs {
-        recorder.write(&host_snapshot(&format!("split_{}_pair_{pair}_start", ids.len())));
+        recorder.write(&host_snapshot(&format!(
+            "split_{}_pair_{pair}_start",
+            ids.len()
+        )));
         for step in 0..arms.len() {
             let index = (step + pair) % arms.len();
             let arm = &arms[index];
@@ -1142,7 +1313,11 @@ fn print_split_summary(length: usize, arms: &[SplitArm], ttft: &[Vec<f64>]) {
     let baseline = median(&ttft[1]);
     for (arm, values) in arms.iter().zip(ttft) {
         let delta = median(values) - baseline;
-        let per_split = if arm.splits == 0 { f64::NAN } else { delta / arm.splits as f64 };
+        let per_split = if arm.splits == 0 {
+            f64::NAN
+        } else {
+            delta / arm.splits as f64
+        };
         println!(
             "  {:<42} splits={:<2} {}  vs_max_checkpoints_0_ms={delta:+.1} per_split_ms={per_split:.1}",
             arm.label,
@@ -1168,7 +1343,12 @@ struct PrewarmPlan {
     user_tokens: usize,
 }
 
-fn build_prewarm_plans(model: &LoadedModel<'_>, vocab: &Vocab, kind: TranscriptKind, max_tokens: usize) -> Vec<PrewarmPlan> {
+fn build_prewarm_plans(
+    model: &LoadedModel<'_>,
+    vocab: &Vocab,
+    kind: TranscriptKind,
+    max_tokens: usize,
+) -> Vec<PrewarmPlan> {
     model.set_prewarm_suffix(&[]);
     clear_cache(model, vocab);
     let suffix = turn_boundary_suffix(vocab);
@@ -1186,7 +1366,11 @@ fn build_prewarm_plans(model: &LoadedModel<'_>, vocab: &Vocab, kind: TranscriptK
             }
         };
         let reference = timed_request(model, &prompt_ids, max_tokens, &uncached()).generated;
-        plans.push(PrewarmPlan { prompt_ids, reference, user_tokens });
+        plans.push(PrewarmPlan {
+            prompt_ids,
+            reference,
+            user_tokens,
+        });
     }
     plans
 }
@@ -1225,19 +1409,30 @@ fn run_prewarm_arm(
     if prewarm {
         model.set_prewarm_suffix(&turn_boundary_suffix(vocab));
     }
-    let arm = model.with_prewarm_worker(&cached, || {
-        let previous = timed_request(model, &plans[turn - 1].prompt_ids, max_tokens, &cached);
-        let waiting = Instant::now();
-        model.wait_for_prewarm();
-        let prewarm_ms = waiting.elapsed().as_secs_f64() * 1000.0;
-        let timed = timed_request(model, &plans[turn].prompt_ids, max_tokens, &cached);
-        PrewarmArm { previous, prewarm_ms, timed }
-    }).expect("start the prewarm worker");
+    let arm = model
+        .with_prewarm_worker(&cached, || {
+            let previous = timed_request(model, &plans[turn - 1].prompt_ids, max_tokens, &cached);
+            let waiting = Instant::now();
+            model.wait_for_prewarm();
+            let prewarm_ms = waiting.elapsed().as_secs_f64() * 1000.0;
+            let timed = timed_request(model, &plans[turn].prompt_ids, max_tokens, &cached);
+            PrewarmArm {
+                previous,
+                prewarm_ms,
+                timed,
+            }
+        })
+        .expect("start the prewarm worker");
     model.set_prewarm_suffix(&[]);
     arm
 }
 
-fn run_prewarm_pairs(model: &LoadedModel<'_>, vocab: &Vocab, args: &Args, recorder: &mut Recorder) -> (Vec<PrewarmSamples>, Vec<PrewarmPlan>) {
+fn run_prewarm_pairs(
+    model: &LoadedModel<'_>,
+    vocab: &Vocab,
+    args: &Args,
+    recorder: &mut Recorder,
+) -> (Vec<PrewarmSamples>, Vec<PrewarmPlan>) {
     let plans = build_prewarm_plans(model, vocab, args.transcript, args.max_tokens);
     for (turn, plan) in plans.iter().enumerate() {
         recorder.write(&json!({
@@ -1245,13 +1440,22 @@ fn run_prewarm_pairs(model: &LoadedModel<'_>, vocab: &Vocab, args: &Args, record
             "user_tokens": plan.user_tokens, "reference": plan.reference,
         }));
     }
-    let mut samples: Vec<PrewarmSamples> = plans.iter().map(|_| PrewarmSamples::default()).collect();
+    let mut samples: Vec<PrewarmSamples> =
+        plans.iter().map(|_| PrewarmSamples::default()).collect();
     for pair in 0..=args.pairs {
         recorder.write(&host_snapshot(&format!("prewarm_pair_{pair}_start")));
         for turn in 1..plans.len() {
-            let order = if (pair + turn) % 2 == 0 { [true, false] } else { [false, true] };
+            let order = if (pair + turn) % 2 == 0 {
+                [true, false]
+            } else {
+                [false, true]
+            };
             for (position, prewarm) in order.into_iter().enumerate() {
-                let PrewarmArm { previous, prewarm_ms, timed } = run_prewarm_arm(model, vocab, &plans, turn, prewarm, args.max_tokens);
+                let PrewarmArm {
+                    previous,
+                    prewarm_ms,
+                    timed,
+                } = run_prewarm_arm(model, vocab, &plans, turn, prewarm, args.max_tokens);
                 let report = timed.report.expect("a cached request records its report");
                 recorder.write(&json!({
                     "kind": "request", "mode": "prewarm", "pair": pair, "warmup": pair == 0, "turn": turn,
@@ -1295,11 +1499,23 @@ fn print_prewarm_summary(samples: &[PrewarmSamples], plans: &[PrewarmPlan]) {
             turn_samples.identical,
             turn_samples.pairs * 2
         );
-        println!("  with_prewarm    {}", spread(&turn_samples.with_prewarm).text());
+        println!(
+            "  with_prewarm    {}",
+            spread(&turn_samples.with_prewarm).text()
+        );
         println!("  without_prewarm {}", spread(&turn_samples.without).text());
-        println!("  answer_call_total_ms with_suffix    {}", spread(&turn_samples.answer_total_with).text());
-        println!("  answer_call_total_ms without_suffix {}", spread(&turn_samples.answer_total_without).text());
-        println!("  prewarm_ms_after_answer (worker, off the return path) {}", spread(&turn_samples.prewarm_ms).text());
+        println!(
+            "  answer_call_total_ms with_suffix    {}",
+            spread(&turn_samples.answer_total_with).text()
+        );
+        println!(
+            "  answer_call_total_ms without_suffix {}",
+            spread(&turn_samples.answer_total_without).text()
+        );
+        println!(
+            "  prewarm_ms_after_answer (worker, off the return path) {}",
+            spread(&turn_samples.prewarm_ms).text()
+        );
         println!(
             "  median_with/median_without={:.3} prefilled_tokens with={:?} without={:?} prewarm_hit_tokens={:?}",
             median(&turn_samples.with_prewarm) / median(&turn_samples.without),
@@ -1406,12 +1622,16 @@ fn run_chat(
         base.extend_from_slice(&timed.generated);
         base.extend_from_slice(&suffix);
         let drafted = if branches > 0 && turn + 1 < turns.len() {
-            model.run_pending_prewarm(&request_config).expect("prewarm the answer entry");
+            model
+                .run_pending_prewarm(&request_config)
+                .expect("prewarm the answer entry");
             let started = Instant::now();
             let drafts = model
                 .prewarm_follow_ups(&base, &follow_up_config(branches))
                 .expect("draft follow-up branches");
-            totals.draft_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+            totals
+                .draft_ms
+                .push(started.elapsed().as_secs_f64() * 1000.0);
             totals.cache_bytes.push(model.prompt_cache_bytes());
             drafts
         } else {
@@ -1435,11 +1655,23 @@ fn print_follow_up_summary(label: &str, totals: &FollowUpTotals) {
         totals.saved_tokens,
         spread(&totals.ttft).text()
     );
-    let hit_tokens: Vec<usize> = totals.saved_tokens.iter().copied().filter(|saved| *saved > 0).collect();
+    let hit_tokens: Vec<usize> = totals
+        .saved_tokens
+        .iter()
+        .copied()
+        .filter(|saved| *saved > 0)
+        .collect();
     let mean_per_hit = hit_tokens.iter().sum::<usize>() as f64 / hit_tokens.len().max(1) as f64;
-    println!("  hits={} shared_tokens_per_hit_mean={mean_per_hit:.1}", hit_tokens.len());
+    println!(
+        "  hits={} shared_tokens_per_hit_mean={mean_per_hit:.1}",
+        hit_tokens.len()
+    );
     if !totals.draft_ms.is_empty() {
-        println!("  drafting ms per answer {}  cache_bytes_after_drafting {:?}", spread(&totals.draft_ms).text(), totals.cache_bytes);
+        println!(
+            "  drafting ms per answer {}  cache_bytes_after_drafting {:?}",
+            spread(&totals.draft_ms).text(),
+            totals.cache_bytes
+        );
     }
 }
 
@@ -1450,10 +1682,30 @@ fn run_follow_up(args: &Args, recorder: &mut Recorder) {
         let mut without = FollowUpTotals::default();
         for chat in &chats {
             recorder.write(&host_snapshot(&format!("follow_up_{}_start", chat.0)));
-            run_chat(model, vocab, chat, FOLLOW_UP_BRANCHES, args.max_tokens, &mut with_branches, recorder);
-            run_chat(model, vocab, chat, 0, args.max_tokens, &mut without, recorder);
+            run_chat(
+                model,
+                vocab,
+                chat,
+                FOLLOW_UP_BRANCHES,
+                args.max_tokens,
+                &mut with_branches,
+                recorder,
+            );
+            run_chat(
+                model,
+                vocab,
+                chat,
+                0,
+                args.max_tokens,
+                &mut without,
+                recorder,
+            );
         }
-        println!("follow-up branches, {} chats, max_tokens={}", chats.len(), args.max_tokens);
+        println!(
+            "follow-up branches, {} chats, max_tokens={}",
+            chats.len(),
+            args.max_tokens
+        );
         print_follow_up_summary("branches", &with_branches);
         print_follow_up_summary("no_branches", &without);
     });
@@ -1462,7 +1714,8 @@ fn run_follow_up(args: &Args, recorder: &mut Recorder) {
 const SHIFT_REUSE_MIN: u32 = 256;
 const SHIFT_TURNS: usize = 6;
 const LLAMA_PORT_SHIFT: u16 = 18492;
-const SHIFT_VARIANTS: [(usize, usize); 6] = [(2, 90), (1, 90), (3, 90), (2, 700), (1, 700), (3, 700)];
+const SHIFT_VARIANTS: [(usize, usize); 6] =
+    [(2, 90), (1, 90), (3, 90), (2, 700), (1, 700), (3, 700)];
 
 /// A cached conversation of a system prompt, six completed turns and a last user turn, and the
 /// ids that replace its middle.
@@ -1483,7 +1736,10 @@ fn chat_turn(user: &str, answer: &str) -> String {
 
 fn squash_transcript(vocab: &Vocab, kept_turns: usize, summary_chars: usize) -> Squash {
     let pool = long_document(38_000);
-    let system = encode_opening(vocab, &format!("<|turn>system\n{}<turn|>\n", excerpt(&pool, 0, 2400)));
+    let system = encode_opening(
+        vocab,
+        &format!("<|turn>system\n{}<turn|>\n", excerpt(&pool, 0, 2400)),
+    );
     let mut old_prompt = system.clone();
     let mut turn_ends = vec![system.len()];
     let mut kept_start = 0;
@@ -1492,11 +1748,17 @@ fn squash_transcript(vocab: &Vocab, kept_turns: usize, summary_chars: usize) -> 
             kept_start = old_prompt.len();
         }
         let from = 2400 + index * 2000;
-        let turn = chat_turn(&excerpt(&pool, from, 1200), &excerpt(&pool, from + 1200, 800));
+        let turn = chat_turn(
+            &excerpt(&pool, from, 1200),
+            &excerpt(&pool, from + 1200, 800),
+        );
         old_prompt.extend(encode_continuation(vocab, &turn));
         turn_ends.push(old_prompt.len());
     }
-    old_prompt.extend(encode_continuation(vocab, &opening_turn(&excerpt(&pool, 14_400, 1400))));
+    old_prompt.extend(encode_continuation(
+        vocab,
+        &opening_turn(&excerpt(&pool, 14_400, 1400)),
+    ));
     let summary_text = format!(
         "Summary of the conversation so far: the user shared several documents and asked about each. {}",
         excerpt(&pool, 30_000, summary_chars)
@@ -1528,7 +1790,11 @@ impl Squash {
     }
 
     fn label(&self, with_summary: bool) -> String {
-        let middle = if with_summary { format!("summary{}", self.summary_chars) } else { "dropped".to_string() };
+        let middle = if with_summary {
+            format!("summary{}", self.summary_chars)
+        } else {
+            "dropped".to_string()
+        };
         format!("kept{}_{middle}", self.kept_turns)
     }
 }
@@ -1555,10 +1821,24 @@ fn shift_config(cache_reuse_min: u32) -> ServingConfig<'static> {
     })
 }
 
-fn old_prompt_answer(model: &LoadedModel<'_>, vocab: &Vocab, squash: &Squash, config: &ServingConfig<'_>, max_tokens: usize) -> Timed {
+fn old_prompt_answer(
+    model: &LoadedModel<'_>,
+    vocab: &Vocab,
+    squash: &Squash,
+    config: &ServingConfig<'_>,
+    max_tokens: usize,
+) -> Timed {
     clear_cache(model, vocab);
-    let first = timed_request_with_turn_ends(model, &squash.old_prompt, &squash.turn_ends, max_tokens, config);
-    model.run_pending_prewarm(config).expect("run the queued end-of-answer prewarm");
+    let first = timed_request_with_turn_ends(
+        model,
+        &squash.old_prompt,
+        &squash.turn_ends,
+        max_tokens,
+        config,
+    );
+    model
+        .run_pending_prewarm(config)
+        .expect("run the queued end-of-answer prewarm");
     first
 }
 
@@ -1598,12 +1878,24 @@ fn shift_record(case: &ShiftCase) -> Value {
     })
 }
 
-fn run_shift_variants(model: &LoadedModel<'_>, vocab: &Vocab, args: &Args, recorder: &mut Recorder) -> Vec<ShiftCase> {
+fn run_shift_variants(
+    model: &LoadedModel<'_>,
+    vocab: &Vocab,
+    args: &Args,
+    recorder: &mut Recorder,
+) -> Vec<ShiftCase> {
     let mut cases = Vec::new();
     for &(kept_turns, summary_chars) in SHIFT_VARIANTS.iter().take(args.variants) {
         let squash = squash_transcript(vocab, kept_turns, summary_chars);
         for with_summary in [true, false] {
-            let shifting = proxima_squash(model, vocab, &squash, with_summary, SHIFT_REUSE_MIN, args.max_tokens);
+            let shifting = proxima_squash(
+                model,
+                vocab,
+                &squash,
+                with_summary,
+                SHIFT_REUSE_MIN,
+                args.max_tokens,
+            );
             let reuse_off = proxima_squash(model, vocab, &squash, with_summary, 0, args.max_tokens);
             let label = squash.label(with_summary);
             let case = ShiftCase {
@@ -1619,25 +1911,51 @@ fn run_shift_variants(model: &LoadedModel<'_>, vocab: &Vocab, args: &Args, recor
         }
     }
     let total = cases.len();
-    let equal = cases.iter().filter(|case| case.shifting.cached.generated == case.shifting.fresh.generated).count();
-    let off_equal = cases.iter().filter(|case| case.reuse_off.cached.generated == case.reuse_off.fresh.generated).count();
-    println!("shift summary: proxima_shifted_ids_equal_fresh={equal}/{total} proxima_reuse_off_ids_equal_fresh={off_equal}/{total}");
+    let equal = cases
+        .iter()
+        .filter(|case| case.shifting.cached.generated == case.shifting.fresh.generated)
+        .count();
+    let off_equal = cases
+        .iter()
+        .filter(|case| case.reuse_off.cached.generated == case.reuse_off.fresh.generated)
+        .count();
+    println!(
+        "shift summary: proxima_shifted_ids_equal_fresh={equal}/{total} proxima_reuse_off_ids_equal_fresh={off_equal}/{total}"
+    );
     cases
 }
 
 fn llama_squash(args: &Args, case: &ShiftCase, swa_full: bool, recorder: &mut Recorder) {
     let bin = args.llama_bin.as_ref().expect("--llama-server-bin");
     let shifting = &case.shifting;
-    let context = case.squash.old_prompt.len() + shifting.new_prompt.len() + 2 * args.max_tokens + LLAMA_CONTEXT_HEADROOM_TOKENS;
+    let context = case.squash.old_prompt.len()
+        + shifting.new_prompt.len()
+        + 2 * args.max_tokens
+        + LLAMA_CONTEXT_HEADROOM_TOKENS;
     let reuse = SHIFT_REUSE_MIN.to_string();
     let mut extra = vec!["--cache-reuse", reuse.as_str()];
     if swa_full {
         extra.push("--swa-full");
     }
     let server = LlamaServer::spawn(bin, &args.model_path, LLAMA_PORT_SHIFT, context, &extra);
-    let first = llama_completion(LLAMA_PORT_SHIFT, &case.squash.old_prompt, args.max_tokens, true);
-    let second = llama_completion(LLAMA_PORT_SHIFT, &shifting.new_prompt, args.max_tokens, true);
-    let fresh = llama_completion(LLAMA_PORT_SHIFT, &shifting.new_prompt, args.max_tokens, false);
+    let first = llama_completion(
+        LLAMA_PORT_SHIFT,
+        &case.squash.old_prompt,
+        args.max_tokens,
+        true,
+    );
+    let second = llama_completion(
+        LLAMA_PORT_SHIFT,
+        &shifting.new_prompt,
+        args.max_tokens,
+        true,
+    );
+    let fresh = llama_completion(
+        LLAMA_PORT_SHIFT,
+        &shifting.new_prompt,
+        args.max_tokens,
+        false,
+    );
     let report = shifting.cached.report.expect("the cached request report");
     let record = json!({
         "kind": "shift_llama", "variant": case.label, "swa_full": swa_full, "pid": server.pid(),
@@ -1700,10 +2018,18 @@ fn run_shift_ttft(model: &LoadedModel<'_>, vocab: &Vocab, args: &Args, recorder:
         }
         recorder.write(&host_snapshot(&format!("pair_{pair}_end")));
     }
-    println!("shift ttft ms ({} pairs, warmup pair excluded; prompt_tokens={})", args.pairs, new_prompt.len());
+    println!(
+        "shift ttft ms ({} pairs, warmup pair excluded; prompt_tokens={})",
+        args.pairs,
+        new_prompt.len()
+    );
     println!("  shifted      {}", spread(&shifted_ms).text());
     println!("  full_prefill {}", spread(&full_ms).text());
-    println!("  median_shifted/median_full={:.3} ids_identical_shifted_vs_full={identical}/{}", median(&shifted_ms) / median(&full_ms), args.pairs);
+    println!(
+        "  median_shifted/median_full={:.3} ids_identical_shifted_vs_full={identical}/{}",
+        median(&shifted_ms) / median(&full_ms),
+        args.pairs
+    );
 }
 
 fn run_shift(args: &Args, recorder: &mut Recorder) {

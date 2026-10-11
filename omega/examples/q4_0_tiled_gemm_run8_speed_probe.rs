@@ -14,9 +14,19 @@
 //! not this probe's.
 
 fn main() -> anyhow::Result<()> {
-    #[cfg(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos"))]
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-tiled-gemm",
+        feature = "instrument",
+        target_os = "macos"
+    ))]
     return run();
-    #[cfg(not(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos")))]
+    #[cfg(not(all(
+        feature = "metal",
+        feature = "metal-tiled-gemm",
+        feature = "instrument",
+        target_os = "macos"
+    )))]
     {
         println!(
             "q4_0_tiled_gemm_run8_speed_probe requires --features metal,metal-tiled-gemm,instrument on macOS"
@@ -25,7 +35,12 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-#[cfg(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos"))]
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-tiled-gemm",
+    feature = "instrument",
+    target_os = "macos"
+))]
 fn run() -> anyhow::Result<()> {
     use anyhow::Context;
     use proxima_gguf::quant::q4_0::{BLOCK_BYTES, QK4_0, quantize};
@@ -122,7 +137,9 @@ fn run() -> anyhow::Result<()> {
         Ok(samples[samples.len() / 2])
     }
 
-    if let Ok(output) = std::process::Command::new("pgrep").args(["-fl", "cargo|rustc"]).output()
+    if let Ok(output) = std::process::Command::new("pgrep")
+        .args(["-fl", "cargo|rustc"])
+        .output()
         && !output.stdout.is_empty()
     {
         eprintln!(
@@ -131,7 +148,9 @@ fn run() -> anyhow::Result<()> {
         );
     }
 
-    let rows: Vec<Vec<f32>> = (0..OUT_DIM).map(|row| random_vec(11 + row as u64, IN_DIM)).collect();
+    let rows: Vec<Vec<f32>> = (0..OUT_DIM)
+        .map(|row| random_vec(11 + row as u64, IN_DIM))
+        .collect();
     let packed = pack_rows(&rows, IN_DIM)?;
     let weight_bytes = packed.len() as u64;
 
@@ -139,7 +158,10 @@ fn run() -> anyhow::Result<()> {
         let activation = random_vec(97, tokens * IN_DIM);
         let (program, sum) = matmul_program(tokens as u32, IN_DIM as u32, OUT_DIM as u32);
         let blocks = [
-            QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: &packed },
+            QuantizedBlock::Packed {
+                codec: Codec::Q4_0,
+                bytes: &packed,
+            },
             QuantizedBlock::Float32(&activation),
         ];
 

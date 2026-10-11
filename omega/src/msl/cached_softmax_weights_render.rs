@@ -40,21 +40,32 @@ pub(super) fn render_cached_softmax_weights(
         return render_cached_softmax_weights_rows(resolved, entry);
     }
     if *new_key_rows != 1 {
-        return Err(EmitError::CachedSoftmaxWeightsNotSupported { node: resolved.node });
+        return Err(EmitError::CachedSoftmaxWeightsNotSupported {
+            node: resolved.node,
+        });
     }
-    let [(_, cached_layout, cached_lookup), (_, new_layout, new_lookup), (_, value_layout, value_lookup)] =
-        operands.as_slice()
+    let [
+        (_, cached_layout, cached_lookup),
+        (_, new_layout, new_lookup),
+        (_, value_layout, value_lookup),
+    ] = operands.as_slice()
     else {
-        return Err(EmitError::CachedSoftmaxWeightsNotSupported { node: resolved.node });
+        return Err(EmitError::CachedSoftmaxWeightsNotSupported {
+            node: resolved.node,
+        });
     };
     if cached_lookup.is_some() || new_lookup.is_some() || value_lookup.is_some() {
-        return Err(EmitError::CachedSoftmaxWeightsNotSupported { node: resolved.node });
+        return Err(EmitError::CachedSoftmaxWeightsNotSupported {
+            node: resolved.node,
+        });
     }
     if cached_layout.strides.len() != 2
         || new_layout.strides.len() != 1
         || value_layout.strides.len() != 2
     {
-        return Err(EmitError::CachedSoftmaxWeightsNotSupported { node: resolved.node });
+        return Err(EmitError::CachedSoftmaxWeightsNotSupported {
+            node: resolved.node,
+        });
     }
 
     let cached_key_rows = *cached_key_rows;

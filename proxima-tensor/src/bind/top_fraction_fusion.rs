@@ -137,7 +137,12 @@ fn apply_top_fraction_fusion(
             }
         }
     }
-    let rebuilt = bind_plain(program, shapes, &planning_outputs, NumericPolicy::bit_exact())?;
+    let rebuilt = bind_plain(
+        program,
+        shapes,
+        &planning_outputs,
+        NumericPolicy::bit_exact(),
+    )?;
     let candidates = top_fraction_candidates(program, shapes, &rebuilt, outputs, min_rows);
     if candidates.is_empty() {
         return Ok(built);

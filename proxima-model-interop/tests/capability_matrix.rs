@@ -390,18 +390,38 @@ mod metal_backend {
 #[proxima::test]
 async fn a_config_that_keeps_every_logits_row_is_refused_instead_of_sampling_row_zero() {
     let file_bytes = support::checkpoint_bytes(GgmlType::F32);
-    let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
-    let header = header_descriptor(&parsed, KvLayout::Full).expect("the synthetic header names a profiled family");
-    assert!(header.last_row_only, "the header descriptor gathers the last row");
-    let config = ModelDescriptor { last_row_only: false, ..header };
-    let model = LoadedModel::load_with_descriptor(&parsed, &file_bytes, &config)
-        .expect("loads: lowering never evaluates the program, so the shape is only observable at decode");
+    let parsed =
+        proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
+    let header = header_descriptor(&parsed, KvLayout::Full)
+        .expect("the synthetic header names a profiled family");
+    assert!(
+        header.last_row_only,
+        "the header descriptor gathers the last row"
+    );
+    let config = ModelDescriptor {
+        last_row_only: false,
+        ..header
+    };
+    let model = LoadedModel::load_with_descriptor(&parsed, &file_bytes, &config).expect(
+        "loads: lowering never evaluates the program, so the shape is only observable at decode",
+    );
 
     match Pipe::call(&model, (PROMPT.to_string(), 1)).await {
-        Err(InteropError::LogitsShapeMismatch { expected_rows, found_rows, vocab }) => {
+        Err(InteropError::LogitsShapeMismatch {
+            expected_rows,
+            found_rows,
+            vocab,
+        }) => {
             assert_eq!(expected_rows, 1, "the contract is exactly one row");
-            assert!(found_rows > 1, "found_rows must report the multi-row buffer, got {found_rows}");
-            assert_eq!(vocab, support::VOCAB as usize, "vocab is this checkpoint's own");
+            assert!(
+                found_rows > 1,
+                "found_rows must report the multi-row buffer, got {found_rows}"
+            );
+            assert_eq!(
+                vocab,
+                support::VOCAB as usize,
+                "vocab is this checkpoint's own"
+            );
         }
         Ok(_) => panic!("expected LogitsShapeMismatch: the program never gathers to the last row"),
         Err(other) => panic!("expected LogitsShapeMismatch, got {other}"),
@@ -411,9 +431,10 @@ async fn a_config_that_keeps_every_logits_row_is_refused_instead_of_sampling_row
 #[proxima::test]
 async fn the_header_descriptor_decodes_through_the_same_one_row_check() {
     let file_bytes = support::checkpoint_bytes(GgmlType::F32);
-    let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
-    let header =
-        header_descriptor(&parsed, KvLayout::SlidingRing).expect("the synthetic header names a profiled family");
+    let parsed =
+        proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
+    let header = header_descriptor(&parsed, KvLayout::SlidingRing)
+        .expect("the synthetic header names a profiled family");
     let model = LoadedModel::load_with_descriptor(&parsed, &file_bytes, &header)
         .expect("loads the header's own descriptor");
 
@@ -421,7 +442,10 @@ async fn the_header_descriptor_decodes_through_the_same_one_row_check() {
         .await
         .expect("a one-row logits_root decodes without LogitsShapeMismatch");
 
-    assert!(!ids.is_empty() && ids.len() <= 2, "decodes within the budget, got {ids:?}");
+    assert!(
+        !ids.is_empty() && ids.len() <= 2,
+        "decodes within the budget, got {ids:?}"
+    );
 }
 
 /// The two diagnostic reduce flags are descriptor fields: a load that sets one
@@ -436,9 +460,12 @@ async fn a_reduce_flag_load_decodes_the_same_ids_as_the_baseline(
     #[case] fused_qkv_reduce: bool,
 ) {
     let file_bytes = support::checkpoint_bytes(GgmlType::Q8_0);
-    let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
+    let parsed =
+        proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
     let baseline = LoadedModel::load(&parsed, &file_bytes).expect("loads the baseline");
-    let (expected, _, _) = Pipe::call(&baseline, (PROMPT.to_string(), 3)).await.expect("the baseline decodes");
+    let (expected, _, _) = Pipe::call(&baseline, (PROMPT.to_string(), 3))
+        .await
+        .expect("the baseline decodes");
 
     let flagged = if paired_gate_up_reduce {
         LoadedModel::load_with_paired_gate_up_reduce(&parsed, &file_bytes, true)
@@ -446,12 +473,17 @@ async fn a_reduce_flag_load_decodes_the_same_ids_as_the_baseline(
         LoadedModel::load_with_fused_qkv_reduce(&parsed, &file_bytes, fused_qkv_reduce)
     }
     .expect("loads with the reduce flag set");
-    let (ids, _, _) = Pipe::call(&flagged, (PROMPT.to_string(), 3)).await.expect("the flagged load decodes");
+    let (ids, _, _) = Pipe::call(&flagged, (PROMPT.to_string(), 3))
+        .await
+        .expect("the flagged load decodes");
 
     assert_ne!(
         flagged.op_count(),
         baseline.op_count(),
         "the flag must reach the lowering: the flagged program differs from the baseline"
     );
-    assert_eq!(ids, expected, "the reduce flag must not change the decoded ids");
+    assert_eq!(
+        ids, expected,
+        "the reduce flag must not change the decoded ids"
+    );
 }

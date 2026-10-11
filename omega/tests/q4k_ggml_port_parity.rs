@@ -215,7 +215,10 @@ fn assert_matches_dequantized_oracle(
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: weight_bytes },
+            QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: weight_bytes,
+            },
             QuantizedBlock::Float32(activation),
         ],
         &[packed_sum],

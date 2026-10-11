@@ -15,7 +15,10 @@ const PREFILL_COMBINE_EXTENTS: [u32; 3] = [1000, 8, 1024];
 /// any rank so the same fixture covers the sole-axis and multi-axis decode.
 fn product_fold_op(extents: &[u32], reduce_axes: &[u16]) -> BoundOp {
     let rank = extents.len() as u16;
-    let shape: Vec<Extent> = extents.iter().map(|&extent| Extent::Static(extent)).collect();
+    let shape: Vec<Extent> = extents
+        .iter()
+        .map(|&extent| Extent::Static(extent))
+        .collect();
     let all_axes: Vec<u16> = (0..rank).collect();
     let output_axes: Vec<u16> = all_axes
         .iter()
@@ -23,8 +26,22 @@ fn product_fold_op(extents: &[u32], reduce_axes: &[u16]) -> BoundOp {
         .filter(|axis| !reduce_axes.contains(axis))
         .collect();
     let mut program = Vec::new();
-    let lhs = append(&mut program, Op::Input { dtype: DType::Float32, shape: shape.clone(), name: None });
-    let rhs = append(&mut program, Op::Input { dtype: DType::Float32, shape, name: None });
+    let lhs = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: shape.clone(),
+            name: None,
+        },
+    );
+    let rhs = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape,
+            name: None,
+        },
+    );
     let product = append(
         &mut program,
         Op::Elementwise {
@@ -69,7 +86,8 @@ fn emitted_source(bound: &BoundOp, coord_override: Option<&str>) -> String {
 
 fn cache_key(bound: &BoundOp) -> String {
     temp_env::with_var("PROXIMA_COORD_INDEX32", None::<&str>, || {
-        kernel_cache_key(bound, &BTreeMap::new(), NumericPolicy::default()).expect("cache key builds")
+        kernel_cache_key(bound, &BTreeMap::new(), NumericPolicy::default())
+            .expect("cache key builds")
     })
 }
 
@@ -82,13 +100,27 @@ fn prefill_combine_fold_decodes_outputs_in_32_bit_and_drops_the_sole_axis_divmod
 
     let source = emitted_source(&bound, None);
 
-    assert!(!source.contains("simd_sum"), "this shape must take the serial body\n{source}");
+    assert!(
+        !source.contains("simd_sum"),
+        "this shape must take the serial body\n{source}"
+    );
     assert!(source.contains(NARROW_OUTPUT_DECODE), "{source}");
-    assert!(source.contains("output_coord[0] = (long)((uint)remaining % (uint)u.output_extents[0]);"));
+    assert!(
+        source.contains("output_coord[0] = (long)((uint)remaining % (uint)u.output_extents[0]);")
+    );
     assert!(source.contains("reduction_coord[0] = r;"), "{source}");
-    assert!(!source.contains("remaining_r"), "a sole reduction axis needs no running remainder");
-    assert!(!source.contains("u.reduction_extents[0];"), "the identity divmod must be gone");
-    assert!(!source.contains("remaining % u.output_extents"), "no 64-bit modulo survives");
+    assert!(
+        !source.contains("remaining_r"),
+        "a sole reduction axis needs no running remainder"
+    );
+    assert!(
+        !source.contains("u.reduction_extents[0];"),
+        "the identity divmod must be gone"
+    );
+    assert!(
+        !source.contains("remaining % u.output_extents"),
+        "no 64-bit modulo survives"
+    );
 }
 
 #[test]
@@ -97,9 +129,14 @@ fn an_iteration_space_past_u32_keeps_the_64_bit_decode() {
 
     let source = emitted_source(&bound, None);
 
-    assert!(source.contains("output_coord[1] = remaining % u.output_extents[1]; remaining /= u.output_extents[1];"));
+    assert!(source.contains(
+        "output_coord[1] = remaining % u.output_extents[1]; remaining /= u.output_extents[1];"
+    ));
     assert!(!source.contains("(uint)remaining"));
-    assert!(source.contains("reduction_coord[0] = r;"), "the identity elision holds at any width");
+    assert!(
+        source.contains("reduction_coord[0] = r;"),
+        "the identity elision holds at any width"
+    );
 }
 
 #[test]
@@ -119,10 +156,13 @@ fn a_two_axis_reduction_narrows_its_inner_divmod_and_hands_the_outer_axis_the_re
     let source = emitted_source(&bound, None);
 
     assert!(source.contains("long remaining_r = r;"), "{source}");
-    assert!(source.contains(
-        "reduction_coord[1] = (long)((uint)remaining_r % (uint)u.reduction_extents[1]); \
+    assert!(
+        source.contains(
+            "reduction_coord[1] = (long)((uint)remaining_r % (uint)u.reduction_extents[1]); \
          remaining_r = (long)((uint)remaining_r / (uint)u.reduction_extents[1]);"
-    ), "{source}");
+        ),
+        "{source}"
+    );
     assert!(source.contains("reduction_coord[0] = remaining_r;"));
     assert!(!source.contains("remaining_r % u.reduction_extents[0]"));
 }
@@ -132,7 +172,11 @@ fn the_narrow_decode_is_part_of_the_pipeline_identity() {
     let narrow = product_fold_op(&PREFILL_COMBINE_EXTENTS, &[1]);
     let wide = product_fold_op(&[70_000, 8, 70_000], &[1]);
 
-    assert!(cache_key(&narrow).contains("_c32"), "{}", cache_key(&narrow));
+    assert!(
+        cache_key(&narrow).contains("_c32"),
+        "{}",
+        cache_key(&narrow)
+    );
     assert!(!cache_key(&wide).contains("_c32"), "{}", cache_key(&wide));
 }
 
@@ -158,11 +202,16 @@ fn the_narrow_unflatten_equals_the_wide_one_across_the_captured_output_space() {
         panic!("a fold binds as a reduce");
     };
     assert!(serial_reduce_index32_fits(&bound, output_axes));
-    let output_extents: Vec<u64> = output_axes.iter().map(|&axis| bound.extents[axis as usize]).collect();
+    let output_extents: Vec<u64> = output_axes
+        .iter()
+        .map(|&axis| bound.extents[axis as usize])
+        .collect();
     let output_total: u64 = output_extents.iter().product();
 
     let mismatches = (0..output_total)
-        .filter(|&flat| unflatten(flat, &output_extents, true) != unflatten(flat, &output_extents, false))
+        .filter(|&flat| {
+            unflatten(flat, &output_extents, true) != unflatten(flat, &output_extents, false)
+        })
         .count();
 
     assert_eq!(output_total, 1_024_000);

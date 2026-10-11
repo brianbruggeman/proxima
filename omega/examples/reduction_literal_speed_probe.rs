@@ -129,7 +129,10 @@ fn run() {
         file_len: u64,
         name: &str,
     ) -> Option<(Vec<u8>, usize, usize)> {
-        let tensor = parsed.tensors.iter().find(|candidate| candidate.name == name)?;
+        let tensor = parsed
+            .tensors
+            .iter()
+            .find(|candidate| candidate.name == name)?;
         if tensor.ggml_type != GgmlType::Q4_0 {
             eprintln!(
                 "real_tensor_bytes: {name} is {:?} in this file, not Q4_0 -- test skipped, not faked",
@@ -143,8 +146,10 @@ fn run() {
             .tensor_data_range(tensor, file_len)
             .expect("tensor byte range within file bounds");
         let mut buf = vec![0u8; (range.end - range.start) as usize];
-        file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
-        file.read_exact(&mut buf).expect("read exact tensor byte range");
+        file.seek(SeekFrom::Start(range.start))
+            .expect("seek to tensor data");
+        file.read_exact(&mut buf)
+            .expect("read exact tensor byte range");
         Some((buf, in_dim, out_dim))
     }
 
@@ -156,7 +161,8 @@ fn run() {
             .take(out_rows)
             .map(|row_blocks| {
                 let mut row = vec![0.0f32; in_dim];
-                q4_0::dequantize(row_blocks, &mut row).expect("a whole number of q4_0 blocks per row");
+                q4_0::dequantize(row_blocks, &mut row)
+                    .expect("a whole number of q4_0 blocks per row");
                 row
             })
             .collect()
@@ -181,7 +187,11 @@ fn run() {
     // current default), so this really does encode `repeat_count` back-to-
     // back dispatches of one compiled pipeline.
 
-    fn single_axis_repeated_program(in_dim: u32, out_dim: u32, repeat_count: usize) -> (Vec<Op>, Vec<NodeId>) {
+    fn single_axis_repeated_program(
+        in_dim: u32,
+        out_dim: u32,
+        repeat_count: usize,
+    ) -> (Vec<Op>, Vec<NodeId>) {
         let mut program = Vec::new();
         let weight = append(
             &mut program,
@@ -304,12 +314,36 @@ fn run() {
     }
 
     const SHAPES: [Shape; 6] = [
-        Shape { label: "attn_k_K1536", tensor: "blk.0.attn_k.weight", multi_axis: false },
-        Shape { label: "proj_K256", tensor: "blk.0.proj.weight", multi_axis: false },
-        Shape { label: "attn_output_K2048_multiaxis", tensor: "blk.0.attn_output.weight", multi_axis: true },
-        Shape { label: "attn_output_K4096_multiaxis", tensor: "blk.4.attn_output.weight", multi_axis: true },
-        Shape { label: "ffn_down_K6144", tensor: "blk.0.ffn_down.weight", multi_axis: false },
-        Shape { label: "ffn_down_K12288", tensor: "blk.15.ffn_down.weight", multi_axis: false },
+        Shape {
+            label: "attn_k_K1536",
+            tensor: "blk.0.attn_k.weight",
+            multi_axis: false,
+        },
+        Shape {
+            label: "proj_K256",
+            tensor: "blk.0.proj.weight",
+            multi_axis: false,
+        },
+        Shape {
+            label: "attn_output_K2048_multiaxis",
+            tensor: "blk.0.attn_output.weight",
+            multi_axis: true,
+        },
+        Shape {
+            label: "attn_output_K4096_multiaxis",
+            tensor: "blk.4.attn_output.weight",
+            multi_axis: true,
+        },
+        Shape {
+            label: "ffn_down_K6144",
+            tensor: "blk.0.ffn_down.weight",
+            multi_axis: false,
+        },
+        Shape {
+            label: "ffn_down_K12288",
+            tensor: "blk.15.ffn_down.weight",
+            multi_axis: false,
+        },
     ];
 
     fn median_and_min(mut values: Vec<f64>) -> (f64, f64) {
@@ -324,7 +358,11 @@ fn run() {
 
     fn cov_percent(values: &[f64]) -> f64 {
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / values.len() as f64;
+        let variance = values
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / values.len() as f64;
         100.0 * variance.sqrt() / mean
     }
 
@@ -352,14 +390,22 @@ fn run() {
 
             let (program, roots) = if shape.multi_axis {
                 let head_dim = (in_dim / 8) as u32;
-                assert_eq!(head_dim as usize * 8, in_dim, "{}: in_dim must be a whole multiple of 8", shape.label);
+                assert_eq!(
+                    head_dim as usize * 8,
+                    in_dim,
+                    "{}: in_dim must be a whole multiple of 8",
+                    shape.label
+                );
                 multi_axis_repeated_program(2, 4, head_dim, out_dim as u32, repeat_count)
             } else {
                 single_axis_repeated_program(in_dim as u32, out_dim as u32, repeat_count)
             };
 
             let blocks = [
-                QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: &weight_bytes },
+                QuantizedBlock::Packed {
+                    codec: Codec::Q4_0,
+                    bytes: &weight_bytes,
+                },
                 QuantizedBlock::Float32(&activation),
             ];
 
@@ -371,8 +417,9 @@ fn run() {
             // plan, not merely its `plan()` call -- matching
             // `reduction_literal_ab.rs::run_with_env`'s own scoping (the env
             // wraps `omega::execute`, never just the plan build).
-            let plan_runtime = omega::plan(&program, &[], &blocks, &roots, NumericPolicy::default())
-                .expect("plan compiles for the repeated matvec program (runtime arm)");
+            let plan_runtime =
+                omega::plan(&program, &[], &blocks, &roots, NumericPolicy::default())
+                    .expect("plan compiles for the repeated matvec program (runtime arm)");
             let plan_literal = temp_env::with_var("PROXIMA_REDUCTION_LITERAL", Some("1"), || {
                 omega::plan(&program, &[], &blocks, &roots, NumericPolicy::default())
                     .expect("plan compiles for the repeated matvec program (literal arm)")
@@ -397,7 +444,9 @@ fn run() {
             let compiled_keys = omega::pipeline_cache_keys();
             eprintln!("{}: compiled_keys={compiled_keys:?}", shape.label);
             let literal_marker = format!("_rl{in_dim}");
-            let literal_has_marker = compiled_keys.iter().any(|key| key.contains(&literal_marker));
+            let literal_has_marker = compiled_keys
+                .iter()
+                .any(|key| key.contains(&literal_marker));
             println!(
                 "{}: repeat_count={repeat_count} weight_bytes={} stream_bytes={:.3}GB literal_key_marker={literal_marker} present={literal_has_marker}",
                 shape.label,
@@ -412,9 +461,13 @@ fn run() {
             let mut compared_words = 0usize;
             let mut mismatched_words = 0usize;
             for &root in &roots {
-                let (runtime_values, _) = evaluated_runtime.get(root).expect("runtime output present");
-                let (literal_values, _) = evaluated_literal.get(root).expect("literal output present");
-                for (runtime_value, literal_value) in runtime_values.iter().zip(literal_values.iter()) {
+                let (runtime_values, _) =
+                    evaluated_runtime.get(root).expect("runtime output present");
+                let (literal_values, _) =
+                    evaluated_literal.get(root).expect("literal output present");
+                for (runtime_value, literal_value) in
+                    runtime_values.iter().zip(literal_values.iter())
+                {
                     compared_words += 1;
                     if runtime_value.to_bits() != literal_value.to_bits() {
                         mismatched_words += 1;
@@ -423,7 +476,9 @@ fn run() {
             }
             let dequantized = dequantize_rows(&weight_bytes, in_dim, out_dim.min(64));
             let oracle = expected_output(&dequantized, &activation);
-            let (first_runtime, _) = evaluated_runtime.get(roots[0]).expect("first runtime output");
+            let (first_runtime, _) = evaluated_runtime
+                .get(roots[0])
+                .expect("first runtime output");
             let max_abs_vs_oracle = first_runtime
                 .iter()
                 .zip(oracle.iter())
@@ -481,7 +536,9 @@ fn run() {
         }
     }
 
-    if let Ok(output) = std::process::Command::new("pgrep").args(["-fl", "cargo|rustc"]).output()
+    if let Ok(output) = std::process::Command::new("pgrep")
+        .args(["-fl", "cargo|rustc"])
+        .output()
         && !output.stdout.is_empty()
     {
         eprintln!(

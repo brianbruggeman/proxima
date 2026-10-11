@@ -90,7 +90,12 @@ fn build_fixture(positions: u32) -> RealDimsFixture {
         "x",
     );
     let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
-    let eps = input_leaf(&mut program, DType::Float32, vec![Extent::Static(positions)], "eps");
+    let eps = input_leaf(
+        &mut program,
+        DType::Float32,
+        vec![Extent::Static(positions)],
+        "eps",
+    );
     let head_eps = input_leaf(
         &mut program,
         DType::Float32,
@@ -148,7 +153,12 @@ fn build_fixture(positions: u32) -> RealDimsFixture {
         vec![Extent::Static(num_v_heads)],
         "ssm_dt_bias",
     );
-    let ssm_a = input_leaf(&mut program, DType::Float32, vec![Extent::Static(num_v_heads)], "ssm_a");
+    let ssm_a = input_leaf(
+        &mut program,
+        DType::Float32,
+        vec![Extent::Static(num_v_heads)],
+        "ssm_a",
+    );
     let ssm_norm_weight = input_leaf(
         &mut program,
         DType::Float32,
@@ -222,7 +232,12 @@ fn build_fixture(positions: u32) -> RealDimsFixture {
         ("state_in", initial_state),
     ];
 
-    RealDimsFixture { program, mixer_out, taps, named }
+    RealDimsFixture {
+        program,
+        mixer_out,
+        taps,
+        named,
+    }
 }
 
 /// Production output set: only what a serving loop actually reads back --
@@ -264,7 +279,11 @@ fn wide_outputs(fixture: &RealDimsFixture) -> Vec<NodeId> {
 
 fn assert_production_parity(positions: u32, include_wide: bool) {
     let fixture = build_fixture(positions);
-    let named: Vec<(&str, &[f32])> = fixture.named.iter().map(|(name, data)| (*name, data.as_slice())).collect();
+    let named: Vec<(&str, &[f32])> = fixture
+        .named
+        .iter()
+        .map(|(name, data)| (*name, data.as_slice()))
+        .collect();
     let quantized_named: Vec<(&str, QuantizedBlock<'_>)> = fixture
         .named
         .iter()
@@ -274,32 +293,60 @@ fn assert_production_parity(positions: u32, include_wide: bool) {
     let production = production_outputs(&fixture);
     let symbols = [u64::from(positions)];
 
-    let cpu_production = proxima_tensor::cpu::evaluate_named(&fixture.program, &symbols, &named, &production)
-        .expect("cpu reference evaluates the production output set");
-    let production_plan =
-        omega::plan_named(&fixture.program, &symbols, &quantized_named, &production, NumericPolicy::default())
-            .expect("metal plan builds for the production output set");
+    let cpu_production =
+        proxima_tensor::cpu::evaluate_named(&fixture.program, &symbols, &named, &production)
+            .expect("cpu reference evaluates the production output set");
+    let production_plan = omega::plan_named(
+        &fixture.program,
+        &symbols,
+        &quantized_named,
+        &production,
+        NumericPolicy::default(),
+    )
+    .expect("metal plan builds for the production output set");
     let metal_production = omega::execute_plan_named(&production_plan, &quantized_named)
         .expect("metal evaluates the production output set");
 
     let wide_result = include_wide.then(|| {
         let wide = wide_outputs(&fixture);
-        let wide_plan =
-            omega::plan_named(&fixture.program, &symbols, &quantized_named, &wide, NumericPolicy::default())
-                .expect("metal plan builds for the wide output set");
-        omega::execute_plan_named(&wide_plan, &quantized_named).expect("metal evaluates the wide output set")
+        let wide_plan = omega::plan_named(
+            &fixture.program,
+            &symbols,
+            &quantized_named,
+            &wide,
+            NumericPolicy::default(),
+        )
+        .expect("metal plan builds for the wide output set");
+        omega::execute_plan_named(&wide_plan, &quantized_named)
+            .expect("metal evaluates the wide output set")
     });
 
     let mut failures = Vec::new();
-    for (label, node) in [("mixer_out", fixture.mixer_out), ("state_out", fixture.taps.state_out)] {
-        let cpu_values = cpu_production.get(node).expect("cpu reference produced this node").0;
-        let metal_values = metal_production.get(node).expect("metal production run produced this node").0;
-        let wide_values =
-            wide_result.as_ref().map(|wide| wide.get(node).expect("metal wide run produced this node").0);
+    for (label, node) in [
+        ("mixer_out", fixture.mixer_out),
+        ("state_out", fixture.taps.state_out),
+    ] {
+        let cpu_values = cpu_production
+            .get(node)
+            .expect("cpu reference produced this node")
+            .0;
+        let metal_values = metal_production
+            .get(node)
+            .expect("metal production run produced this node")
+            .0;
+        let wide_values = wide_result
+            .as_ref()
+            .map(|wide| wide.get(node).expect("metal wide run produced this node").0);
 
-        let mut candidates = vec![ParityRun { label: "metal_production", values: metal_values }];
+        let mut candidates = vec![ParityRun {
+            label: "metal_production",
+            values: metal_values,
+        }];
         if let Some(wide_values) = wide_values {
-            candidates.push(ParityRun { label: "metal_wide", values: wide_values });
+            candidates.push(ParityRun {
+                label: "metal_wide",
+                values: wide_values,
+            });
         }
 
         let case_label = format!("qwen35_mixer_multi_position m={positions} tap={label}");
@@ -307,10 +354,17 @@ fn assert_production_parity(positions: u32, include_wide: bool) {
             &case_label,
             positions as usize,
             1e-4,
-            &ParityRun { label: "cpu", values: cpu_values },
+            &ParityRun {
+                label: "cpu",
+                values: cpu_values,
+            },
             &candidates,
         );
-        failures.extend(case_failures.into_iter().filter(|failure| failure.contains("metal_production")));
+        failures.extend(
+            case_failures
+                .into_iter()
+                .filter(|failure| failure.contains("metal_production")),
+        );
     }
 
     assert!(
@@ -325,6 +379,8 @@ fn assert_production_parity(positions: u32, include_wide: bool) {
 #[case::m8(8)]
 #[case::m13(13)]
 #[case::m16(16)]
-async fn metal_multi_position_qwen35_mixer_matches_cpu_at_real_dims_on_production_outputs(#[case] positions: u32) {
+async fn metal_multi_position_qwen35_mixer_matches_cpu_at_real_dims_on_production_outputs(
+    #[case] positions: u32,
+) {
     assert_production_parity(positions, false);
 }

@@ -158,7 +158,9 @@ impl<'a> NgramCachePart<'a> {
     /// followed by it -- llama.cpp's own `part.find(token)`.
     #[must_use]
     pub fn get(&self, token: u32) -> Option<u32> {
-        self.iter().find(|&(candidate, _)| candidate == token).map(|(_, count)| count)
+        self.iter()
+            .find(|&(candidate, _)| candidate == token)
+            .map(|(_, count)| count)
     }
 
     /// Every `(token, count)` pair recorded for this n-gram, in the arena's
@@ -169,7 +171,10 @@ impl<'a> NgramCachePart<'a> {
     /// replays 200+ real llama.cpp cases; a tie-breaking divergence would
     /// surface there).
     pub fn iter(&self) -> NgramCachePartIter<'a> {
-        NgramCachePartIter { parts: self.parts, cursor: self.head }
+        NgramCachePartIter {
+            parts: self.parts,
+            cursor: self.head,
+        }
     }
 }
 
@@ -211,7 +216,11 @@ struct KeySlot {
     part_head: u32,
 }
 
-const EMPTY_SLOT: KeySlot = KeySlot { key: [None; LLAMA_NGRAM_MAX], occupied: false, part_head: NONE_LINK };
+const EMPTY_SLOT: KeySlot = KeySlot {
+    key: [None; LLAMA_NGRAM_MAX],
+    occupied: false,
+    part_head: NONE_LINK,
+};
 
 fn hash_key(key: &NgramKey) -> u64 {
     // FNV-1a over the up to LLAMA_NGRAM_MAX slots -- an internal-only hash
@@ -305,7 +314,10 @@ impl NgramCache {
                 return None;
             }
             if &slot.key == key {
-                return Some(NgramCachePart { parts: &self.parts, head: slot.part_head });
+                return Some(NgramCachePart {
+                    parts: &self.parts,
+                    head: slot.part_head,
+                });
             }
             index = (index + 1) & self.mask;
         }
@@ -324,7 +336,11 @@ impl NgramCache {
         let mut index = (hash_key(&key) as usize) & self.mask;
         loop {
             if !self.slots[index].occupied {
-                self.slots[index] = KeySlot { key, occupied: true, part_head: NONE_LINK };
+                self.slots[index] = KeySlot {
+                    key,
+                    occupied: true,
+                    part_head: NONE_LINK,
+                };
                 self.len += 1;
                 return index;
             }
@@ -366,7 +382,11 @@ impl NgramCache {
             cursor = entry.next;
         }
         let new_index = u32::try_from(self.parts.len()).unwrap_or(NONE_LINK - 1);
-        self.parts.push(PartEntry { token, count: 1, next: self.slots[index].part_head });
+        self.parts.push(PartEntry {
+            token,
+            count: 1,
+            next: self.slots[index].part_head,
+        });
         self.slots[index].part_head = new_index;
     }
 
@@ -386,7 +406,11 @@ impl NgramCache {
             cursor = entry.next;
         }
         let new_index = u32::try_from(self.parts.len()).unwrap_or(NONE_LINK - 1);
-        self.parts.push(PartEntry { token, count, next: self.slots[index].part_head });
+        self.parts.push(PartEntry {
+            token,
+            count,
+            next: self.slots[index].part_head,
+        });
         self.slots[index].part_head = new_index;
     }
 }
@@ -446,7 +470,12 @@ pub fn ngram_cache_update(cache: &mut NgramCache, inp_data: &[u32], nnew: usize)
 /// maintenance chunking" section, for why this is faithful rather than an
 /// approximation. `cache_size` is the caller's own
 /// [`NgramCacheState`]-tracked high-water mark.
-fn ngram_cache_update_delta(cache: &mut NgramCache, history: &[u32], sampled: u32, cache_size: usize) {
+fn ngram_cache_update_delta(
+    cache: &mut NgramCache,
+    history: &[u32],
+    sampled: u32,
+    cache_size: usize,
+) {
     let local_size = history.len() + 1 - cache_size;
     update_via_indexer(cache, local_size, local_size, |local| {
         if local + 1 == local_size {
@@ -519,7 +548,9 @@ fn try_draft_primary(
         let mut max_token = None;
 
         for (token, count_primary) in part_primary {
-            let count_static = part_static.and_then(|part| part.get(token)).map_or(1, |count| 100 * count);
+            let count_static = part_static
+                .and_then(|part| part.get(token))
+                .map_or(1, |count| 100 * count);
 
             if count_primary * count_static > max_count_primary * max_count_static {
                 max_token = Some(token);
@@ -662,7 +693,11 @@ impl NgramCacheState {
     /// every sequence's `sinfo`. `context` is presized the same way
     /// [`NgramCacheState::new`]'s own doc documents.
     #[must_use]
-    pub fn with_caches(max_context_len: usize, dynamic: NgramCache, static_cache: NgramCache) -> Self {
+    pub fn with_caches(
+        max_context_len: usize,
+        dynamic: NgramCache,
+        static_cache: NgramCache,
+    ) -> Self {
         Self {
             context: NgramCache::with_capacity(max_context_len),
             dynamic,
@@ -709,7 +744,9 @@ pub enum NgramCacheLoadError {
     /// (`common_ngram_cache_load`, `:222-258`) asserts on this rather than
     /// returning an error (`GGML_ASSERT(!hashmap_file.eof())`); this port
     /// reports it instead of aborting the process.
-    #[error("truncated llama.cpp ngram cache: expected {expected} more bytes at offset {offset}, found {found}")]
+    #[error(
+        "truncated llama.cpp ngram cache: expected {expected} more bytes at offset {offset}, found {found}"
+    )]
     Truncated {
         /// Bytes the next field needed.
         expected: usize,
@@ -772,7 +809,9 @@ pub fn load_llama_ngram_cache_bytes(bytes: &[u8]) -> Result<NgramCache, NgramCac
 /// and this is the equivalent entry point for a caller with a real
 /// filesystem.
 #[cfg(feature = "std")]
-pub fn load_llama_ngram_cache_file(path: &std::path::Path) -> Result<NgramCache, NgramCacheLoadIoError> {
+pub fn load_llama_ngram_cache_file(
+    path: &std::path::Path,
+) -> Result<NgramCache, NgramCacheLoadIoError> {
     let bytes = std::fs::read(path).map_err(NgramCacheLoadIoError::Io)?;
     load_llama_ngram_cache_bytes(&bytes).map_err(NgramCacheLoadIoError::Parse)
 }
@@ -863,7 +902,10 @@ mod tests {
 
         let mut cases_by_stream: BTreeMap<u32, Vec<&FixtureCase>> = BTreeMap::new();
         for case in &fixture.cases {
-            cases_by_stream.entry(case.stream_id).or_default().push(case);
+            cases_by_stream
+                .entry(case.stream_id)
+                .or_default()
+                .push(case);
         }
 
         let mut total = 0usize;
@@ -900,7 +942,10 @@ mod tests {
         }
 
         println!("cases = {total} non_empty = {non_empty}");
-        assert!(total >= 200, "fixture must carry at least 200 cases per SPEC.md");
+        assert!(
+            total >= 200,
+            "fixture must carry at least 200 cases per SPEC.md"
+        );
     }
 
     /// the spec's second half, "loads llama.cpp static/dynamic
@@ -930,7 +975,8 @@ mod tests {
             .find(|stream| stream.id == 2)
             .expect("stream 2 (the source the static cache was built from) exists");
 
-        let mut state = NgramCacheState::with_caches(stream.tokens.len(), super::NgramCache::new(), cache);
+        let mut state =
+            NgramCacheState::with_caches(stream.tokens.len(), super::NgramCache::new(), cache);
         let mut drafted: Vec<u32> = Vec::new();
         let mut static_only_drafts = 0usize;
 
@@ -946,7 +992,10 @@ mod tests {
             position += 1;
         }
 
-        println!("static_only_drafts = {static_only_drafts} over {} positions replayed", start + 400 - start);
+        println!(
+            "static_only_drafts = {static_only_drafts} over {} positions replayed",
+            start + 400 - start
+        );
         assert!(
             static_only_drafts > 0,
             "the loaded static cache (built from the same stream being replayed) must produce at least one real draft"
@@ -995,7 +1044,11 @@ mod tests {
     fn update_with_a_single_new_token_delta_learns_nothing() {
         let mut cache = super::NgramCache::new();
         super::ngram_cache_update(&mut cache, &[42u32], 1);
-        assert_eq!(cache.len(), 0, "a one-token delta can never record a single n-gram");
+        assert_eq!(
+            cache.len(),
+            0,
+            "a one-token delta can never record a single n-gram"
+        );
     }
 
     /// Happy path, hand-computed, against the pure [`ngram_cache_draft`] +
@@ -1024,7 +1077,15 @@ mod tests {
         let history = &stream[..16];
         let sampled = stream[16];
         let mut drafted = Vec::new();
-        ngram_cache_draft(history, sampled, 4, &context, &dynamic, &static_cache, &mut drafted);
+        ngram_cache_draft(
+            history,
+            sampled,
+            4,
+            &context,
+            &dynamic,
+            &static_cache,
+            &mut drafted,
+        );
 
         assert_eq!(drafted, vec![2u32, 3, 4, 5]);
     }
@@ -1049,11 +1110,27 @@ mod tests {
         let history = &stream[..16];
         let sampled = stream[16];
         let mut drafted: Vec<u32> = vec![111, 222, 333];
-        ngram_cache_draft(history, sampled, 4, &context, &dynamic, &static_cache, &mut drafted);
+        ngram_cache_draft(
+            history,
+            sampled,
+            4,
+            &context,
+            &dynamic,
+            &static_cache,
+            &mut drafted,
+        );
         assert_eq!(drafted, vec![2u32, 3, 4, 5]);
 
         let never_seen_history = vec![900u32, 901, 902, 903, 904];
-        ngram_cache_draft(&never_seen_history, 9_999, 4, &context, &dynamic, &static_cache, &mut drafted);
+        ngram_cache_draft(
+            &never_seen_history,
+            9_999,
+            4,
+            &context,
+            &dynamic,
+            &static_cache,
+            &mut drafted,
+        );
         assert_eq!(
             drafted,
             Vec::<u32>::new(),

@@ -76,29 +76,31 @@ mod short_conv_delta_net;
 mod attention_forward;
 #[macro_use]
 mod scheduled_cached;
-mod two_block_attention;
 mod descriptor;
+mod gguf_descriptor;
 mod hybrid_forward;
 mod layer_runs;
 #[cfg(feature = "config")]
 mod program_spec;
-mod gguf_descriptor;
-pub use attention_forward::*;
+mod two_block_attention;
 pub use crate::op::{SLIDING_CACHED_LEN_INPUT, SLIDING_KV_SYMBOL};
+pub use attention_forward::*;
 pub use descriptor::*;
-pub use gguf_descriptor::*;
-pub use hybrid_forward::{MoeLayerDiagnostics, append_sigmoid_gated_shared_expert};
-use hybrid_forward::{hybrid_dense_forward, hybrid_routed_forward};
 pub use gated_attention::*;
-pub use short_conv_delta_net::*;
-pub use scheduled_cached::*;
+pub use gguf_descriptor::*;
 pub use gqa_forward_cached::*;
 pub use gqa_layer_routed::*;
+pub use hybrid_forward::{MoeLayerDiagnostics, append_sigmoid_gated_shared_expert};
+use hybrid_forward::{hybrid_dense_forward, hybrid_routed_forward};
+pub use primitives::*;
 #[cfg(feature = "config")]
 pub use program_spec::*;
-pub use primitives::*;
+pub use scheduled_cached::*;
+pub use short_conv_delta_net::*;
 pub use single_range_moe_cached::*;
-use two_block_attention::{append_cached_block_scores, append_local_block_and_combine, group_queries};
+use two_block_attention::{
+    append_cached_block_scores, append_local_block_and_combine, group_queries,
+};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

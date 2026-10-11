@@ -98,7 +98,12 @@ fn build_fixture() -> RoutingFixture {
     }
 }
 
-fn run_case(fixture: &RoutingFixture, logits_data: &[f32], case: usize, failures: &mut Vec<String>) {
+fn run_case(
+    fixture: &RoutingFixture,
+    logits_data: &[f32],
+    case: usize,
+    failures: &mut Vec<String>,
+) {
     let mut outputs = vec![fixture.output];
     outputs.extend(fixture.selected.iter().copied());
     outputs.extend(fixture.weights.iter().copied());
@@ -112,7 +117,10 @@ fn run_case(fixture: &RoutingFixture, logits_data: &[f32], case: usize, failures
     let symbols: Vec<u64> = Vec::new();
     let named: Vec<(&str, proxima_tensor::QuantizedBlock)> = vec![
         ("x", proxima_tensor::QuantizedBlock::Float32(&x_data)),
-        ("logits", proxima_tensor::QuantizedBlock::Float32(logits_data)),
+        (
+            "logits",
+            proxima_tensor::QuantizedBlock::Float32(logits_data),
+        ),
         (
             "expert_w_gate",
             proxima_tensor::QuantizedBlock::Float32(&expert_w_gate_data),
@@ -158,11 +166,17 @@ fn run_case(fixture: &RoutingFixture, logits_data: &[f32], case: usize, failures
             ));
         }
     }
-    for (round, &weight_node) in fixture.weights.iter().take(EXPERT_USED_COUNT as usize).enumerate() {
+    for (round, &weight_node) in fixture
+        .weights
+        .iter()
+        .take(EXPERT_USED_COUNT as usize)
+        .enumerate()
+    {
         let cpu_weight = cpu.get(weight_node).map(|(values, _)| values[0]);
         let metal_weight = metal.get(weight_node).map(|(values, _)| values[0]);
         match (cpu_weight, metal_weight) {
-            (Some(cpu_weight), Some(metal_weight)) if (cpu_weight - metal_weight).abs() <= 1e-6 => {}
+            (Some(cpu_weight), Some(metal_weight)) if (cpu_weight - metal_weight).abs() <= 1e-6 => {
+            }
             (cpu_weight, metal_weight) => failures.push(format!(
                 "case {case} round {round}: weight cpu={cpu_weight:?} metal={metal_weight:?}"
             )),

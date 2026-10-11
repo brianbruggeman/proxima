@@ -30,27 +30,27 @@ fn main() {
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod imp {
 
-use core::ffi::c_void;
-use core::ptr::NonNull;
+    use core::ffi::c_void;
+    use core::ptr::NonNull;
 
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_foundation::NSString;
-use objc2_metal::{
-    MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCompileOptions,
-    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
-    MTLLibrary, MTLMathMode, MTLResourceOptions, MTLSize,
-};
+    use objc2::rc::Retained;
+    use objc2::runtime::ProtocolObject;
+    use objc2_foundation::NSString;
+    use objc2_metal::{
+        MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCompileOptions,
+        MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
+        MTLLibrary, MTLMathMode, MTLResourceOptions, MTLSize,
+    };
 
-// verbatim node=139 kernel body from
-// `<r4>/fixture/manifest_safe_nodekernels.txt:853-938`, minus the unused
-// quantization-decode helper preamble (node139 calls none of it -- plain
-// float buffers only). Store-only diagnostic adds: `diag_k`/`diag_q` (raw
-// operand reads), `diag_product` (per-iteration `scratch[0]*scratch[1]`),
-// `diag_accum` (running accumulator after each `+=`), `diag_reduced`
-// (post-`simd_sum` value), all keyed `lane*4 + r` for output_index==16
-// (key=2, group=0) only -- no arithmetic in the kernel changes.
-const NODE139_DIAG_KERNEL: &str = r#"
+    // verbatim node=139 kernel body from
+    // `<r4>/fixture/manifest_safe_nodekernels.txt:853-938`, minus the unused
+    // quantization-decode helper preamble (node139 calls none of it -- plain
+    // float buffers only). Store-only diagnostic adds: `diag_k`/`diag_q` (raw
+    // operand reads), `diag_product` (per-iteration `scratch[0]*scratch[1]`),
+    // `diag_accum` (running accumulator after each `+=`), `diag_reduced`
+    // (post-`simd_sum` value), all keyed `lane*4 + r` for output_index==16
+    // (key=2, group=0) only -- no arithmetic in the kernel changes.
+    const NODE139_DIAG_KERNEL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
@@ -142,10 +142,10 @@ kernel void diag_node139(
 }
 "#;
 
-// verbatim node=142 kernel body from
-// `<r4>/fixture/manifest_safe_nodekernels.txt:1777-1890`, same diagnostic
-// treatment as node139 plus the epilogue inputs/output at output_index==16.
-const NODE142_DIAG_KERNEL: &str = r#"
+    // verbatim node=142 kernel body from
+    // `<r4>/fixture/manifest_safe_nodekernels.txt:1777-1890`, same diagnostic
+    // treatment as node139 plus the epilogue inputs/output at output_index==16.
+    const NODE142_DIAG_KERNEL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
@@ -274,12 +274,12 @@ kernel void diag_node142(
 }
 "#;
 
-// same per-lane 4-term even-dot accumulation the FUSED production kernel
-// computes (`in0[qbase+pair] * in2[kbase+pair]`, qbase=0 for query_row=0
-// group=0, kbase=256 for key=2), but with a per-`r` store so it can be
-// diffed op-by-op against `diag_node142`'s real per-`r` stores over the
-// SAME two operand buffers (k_even_cache, q_even) at the SAME offsets.
-const FUSED_STYLE_EVEN_DIAG_KERNEL: &str = r#"
+    // same per-lane 4-term even-dot accumulation the FUSED production kernel
+    // computes (`in0[qbase+pair] * in2[kbase+pair]`, qbase=0 for query_row=0
+    // group=0, kbase=256 for key=2), but with a per-`r` store so it can be
+    // diffed op-by-op against `diag_node142`'s real per-`r` stores over the
+    // SAME two operand buffers (k_even_cache, q_even) at the SAME offsets.
+    const FUSED_STYLE_EVEN_DIAG_KERNEL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
@@ -310,13 +310,13 @@ kernel void fused_style_even_diag(
 }
 "#;
 
-// byte-identical to `attn_fused_replay.rs`'s `LANE_DIAG_KERNEL` (same
-// qbase/kbase derivation, same separate partial_even/partial_odd
-// accumulators, same 768-thread/768-threadgroup dispatch shape) but
-// compiled ALONE in a fresh `MTLDevice` session with no other pipeline
-// compiled first -- isolates whether the LANE_DIAG_KERNEL per-lane values
-// depend on compile order/context rather than on the arithmetic itself.
-const ISOLATED_LANE_DIAG_KERNEL: &str = r#"
+    // byte-identical to `attn_fused_replay.rs`'s `LANE_DIAG_KERNEL` (same
+    // qbase/kbase derivation, same separate partial_even/partial_odd
+    // accumulators, same 768-thread/768-threadgroup dispatch shape) but
+    // compiled ALONE in a fresh `MTLDevice` session with no other pipeline
+    // compiled first -- isolates whether the LANE_DIAG_KERNEL per-lane values
+    // depend on compile order/context rather than on the arithmetic itself.
+    const ISOLATED_LANE_DIAG_KERNEL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
@@ -369,15 +369,15 @@ kernel void isolated_lane_diag(device const float* in0 [[buffer(0)]], device con
 }
 "#;
 
-// same as `FUSED_STYLE_EVEN_DIAG_KERNEL` (constexpr qbase/kbase, no
-// threadgroup memory, no barrier, isolated 32-thread dispatch) but with
-// ONE change: the operand read goes through the SAME runtime
-// `cached ? in2[...] : in4[...]` ternary the production/LANE_DIAG kernels
-// use, `cached` a runtime bool that is always true for key=2 -- isolates
-// whether the ternary alone (independent of dispatch shape, threadgroup
-// memory, or barriers) reproduces the divergence from the real node142
-// kernel.
-const TERNARY_STYLE_EVEN_DIAG_KERNEL: &str = r#"
+    // same as `FUSED_STYLE_EVEN_DIAG_KERNEL` (constexpr qbase/kbase, no
+    // threadgroup memory, no barrier, isolated 32-thread dispatch) but with
+    // ONE change: the operand read goes through the SAME runtime
+    // `cached ? in2[...] : in4[...]` ternary the production/LANE_DIAG kernels
+    // use, `cached` a runtime bool that is always true for key=2 -- isolates
+    // whether the ternary alone (independent of dispatch shape, threadgroup
+    // memory, or barriers) reproduces the divergence from the real node142
+    // kernel.
+    const TERNARY_STYLE_EVEN_DIAG_KERNEL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
@@ -407,353 +407,556 @@ kernel void ternary_style_even_diag(
 }
 "#;
 
-fn parse_leaf(manifest: &str, label: &str) -> Vec<f32> {
-    let marker = format!("leaf_full label={label} ");
-    let line = manifest
-        .lines()
-        .find(|line| line.starts_with(&marker))
-        .unwrap_or_else(|| panic!("fixture manifest missing leaf_full label={label}"));
-    let bits_start = line.find("bits=[").expect("leaf_full line carries bits=[...]") + "bits=[".len();
-    let bits_end = line.rfind(']').expect("leaf_full line's bits array is closed");
-    line[bits_start..bits_end]
-        .split(", ")
-        .map(|token| f32::from_bits(token.parse::<u32>().expect("leaf bit token parses as u32")))
-        .collect()
-}
+    fn parse_leaf(manifest: &str, label: &str) -> Vec<f32> {
+        let marker = format!("leaf_full label={label} ");
+        let line = manifest
+            .lines()
+            .find(|line| line.starts_with(&marker))
+            .unwrap_or_else(|| panic!("fixture manifest missing leaf_full label={label}"));
+        let bits_start = line
+            .find("bits=[")
+            .expect("leaf_full line carries bits=[...]")
+            + "bits=[".len();
+        let bits_end = line
+            .rfind(']')
+            .expect("leaf_full line's bits array is closed");
+        line[bits_start..bits_end]
+            .split(", ")
+            .map(|token| {
+                f32::from_bits(token.parse::<u32>().expect("leaf bit token parses as u32"))
+            })
+            .collect()
+    }
 
-fn compile(device: &ProtocolObject<dyn MTLDevice>, source: &str, entry: &str, mode: MTLMathMode) -> Retained<ProtocolObject<dyn MTLComputePipelineState>> {
-    let options = MTLCompileOptions::new();
-    options.setMathMode(mode);
-    let library = device
-        .newLibraryWithSource_options_error(&NSString::from_str(source), Some(&options))
-        .unwrap_or_else(|error| panic!("compiles {entry}: {}", error.localizedDescription()));
-    let function = library
-        .newFunctionWithName(&NSString::from_str(entry))
-        .unwrap_or_else(|| panic!("kernel entry `{entry}` missing from its own compiled library"));
-    device
-        .newComputePipelineStateWithFunction_error(&function)
-        .unwrap_or_else(|error| panic!("creates the pipeline for {entry}: {}", error.localizedDescription()))
-}
+    fn compile(
+        device: &ProtocolObject<dyn MTLDevice>,
+        source: &str,
+        entry: &str,
+        mode: MTLMathMode,
+    ) -> Retained<ProtocolObject<dyn MTLComputePipelineState>> {
+        let options = MTLCompileOptions::new();
+        options.setMathMode(mode);
+        let library = device
+            .newLibraryWithSource_options_error(&NSString::from_str(source), Some(&options))
+            .unwrap_or_else(|error| panic!("compiles {entry}: {}", error.localizedDescription()));
+        let function = library
+            .newFunctionWithName(&NSString::from_str(entry))
+            .unwrap_or_else(|| {
+                panic!("kernel entry `{entry}` missing from its own compiled library")
+            });
+        device
+            .newComputePipelineStateWithFunction_error(&function)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "creates the pipeline for {entry}: {}",
+                    error.localizedDescription()
+                )
+            })
+    }
 
-fn shared_buffer(device: &ProtocolObject<dyn MTLDevice>, bytes: &[u8]) -> Retained<ProtocolObject<dyn MTLBuffer>> {
-    let pointer = unsafe { NonNull::new_unchecked(bytes.as_ptr() as *mut c_void) };
-    unsafe { device.newBufferWithBytes_length_options(pointer, bytes.len(), MTLResourceOptions::StorageModeShared) }
+    fn shared_buffer(
+        device: &ProtocolObject<dyn MTLDevice>,
+        bytes: &[u8],
+    ) -> Retained<ProtocolObject<dyn MTLBuffer>> {
+        let pointer = unsafe { NonNull::new_unchecked(bytes.as_ptr() as *mut c_void) };
+        unsafe {
+            device.newBufferWithBytes_length_options(
+                pointer,
+                bytes.len(),
+                MTLResourceOptions::StorageModeShared,
+            )
+        }
         .expect("device allocates a fresh shared buffer copied from real fixture bytes")
-}
-
-fn f32_bytes(values: &[f32]) -> Vec<u8> {
-    values.iter().flat_map(|value| value.to_le_bytes()).collect()
-}
-
-fn read_f32_buffer(buffer: &ProtocolObject<dyn MTLBuffer>, count: usize) -> Vec<f32> {
-    let pointer = buffer.contents().as_ptr().cast::<f32>();
-    unsafe { core::slice::from_raw_parts(pointer, count) }.to_vec()
-}
-
-fn i64_bytes(values: &[i64]) -> Vec<u8> {
-    values.iter().flat_map(|value| value.to_le_bytes()).collect()
-}
-
-// packs the node=139 `Uniforms` struct byte-for-byte in field declaration
-// order (all fields are `long`/`long[]`, 8-byte aligned, so no padding).
-fn pack_uniforms_node139(output_total: i64, reduction_total: i64, output_extents: [i64; 4], operand_strides: [[i64; 5]; 2], out_strides: [i64; 5]) -> Vec<u8> {
-    let mut fields: Vec<i64> = Vec::new();
-    fields.push(output_total);
-    fields.push(reduction_total);
-    fields.extend_from_slice(&output_extents);
-    fields.push(reduction_total); // reduction_extents[1]
-    fields.extend_from_slice(&[0, 0]); // operand_base[2]
-    fields.extend_from_slice(&operand_strides[0]);
-    fields.extend_from_slice(&operand_strides[1]);
-    fields.push(0); // out_base
-    fields.extend_from_slice(&out_strides);
-    i64_bytes(&fields)
-}
-
-// packs the node=142 `Uniforms` struct: node=139's layout plus the
-// epilogue_operand_base[3]/epilogue_operand_strides[3][4] tail.
-fn pack_uniforms_node142(output_total: i64, reduction_total: i64, output_extents: [i64; 4], operand_strides: [[i64; 5]; 2], out_strides: [i64; 5], epilogue_strides: [[i64; 4]; 3]) -> Vec<u8> {
-    let mut bytes = pack_uniforms_node139(output_total, reduction_total, output_extents, operand_strides, out_strides);
-    let mut tail: Vec<i64> = Vec::new();
-    tail.extend_from_slice(&[0, 0, 0]); // epilogue_operand_base[3]
-    tail.extend_from_slice(&epilogue_strides[0]);
-    tail.extend_from_slice(&epilogue_strides[1]);
-    tail.extend_from_slice(&epilogue_strides[2]);
-    bytes.extend_from_slice(&i64_bytes(&tail));
-    bytes
-}
-
-fn dispatch(
-    device: &ProtocolObject<dyn MTLDevice>,
-    queue: &ProtocolObject<dyn objc2_metal::MTLCommandQueue>,
-    pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
-    buffers: &[&ProtocolObject<dyn MTLBuffer>],
-    grid_threads: usize,
-    threadgroup_width: usize,
-) {
-    let command_buffer = queue.commandBuffer().expect("command buffer");
-    let encoder = command_buffer.computeCommandEncoder().expect("compute encoder");
-    encoder.setComputePipelineState(pipeline);
-    for (index, buffer) in buffers.iter().enumerate() {
-        unsafe { encoder.setBuffer_offset_atIndex(Some(*buffer), 0, index) };
-    }
-    let grid = MTLSize { width: grid_threads, height: 1, depth: 1 };
-    let threadgroup = MTLSize { width: threadgroup_width, height: 1, depth: 1 };
-    encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
-    encoder.endEncoding();
-    command_buffer.commit();
-    command_buffer.waitUntilCompleted();
-    let _ = device;
-}
-
-pub fn run() {
-    let manifest_path = std::env::var("ATTN_FIXTURE_MANIFEST")
-        .expect("ATTN_FIXTURE_MANIFEST must point at the round-4 manifest_safe_nodekernels.txt");
-    let manifest = std::fs::read_to_string(&manifest_path).expect("read fixture manifest");
-
-    // node=134/135 (materialized q_even/q_odd_grouped) are bit-identical
-    // identity copies of leaf q_even/q_odd -- confirmed by comparing
-    // `unfused_metal_intermediate node=134 qg0_column` against
-    // `leaf_full label=q_even ... bits=` in the SAME manifest (both begin
-    // 1049295111, 3196595778, ...). Using the leaf arrays directly is
-    // therefore the real operand-134/135 bytes, group-major [8,128].
-    let q_even = parse_leaf(&manifest, "q_even");
-    let q_odd = parse_leaf(&manifest, "q_odd");
-    let k_even_cache = parse_leaf(&manifest, "k_even_cache");
-    let k_odd_cache = parse_leaf(&manifest, "k_odd_cache");
-
-    println!(
-        "attn_unfused_reduce_replay fixture_loaded q_even={} q_odd={} k_even_cache={} k_odd_cache={}",
-        q_even.len(), q_odd.len(), k_even_cache.len(), k_odd_cache.len(),
-    );
-
-    let device = MTLCreateSystemDefaultDevice().expect("system default Metal device");
-    let queue = device.newCommandQueue().expect("command queue");
-
-    let output_extents: [i64; 4] = [1, 32, 1, 8];
-    let output_total: i64 = 256;
-    let reduction_total: i64 = 128;
-    // operand_strides[op][0..5] = [batch, key, dim2, group, reduction] --
-    // real values dumped at `manifest_safe_nodekernels.txt:941` (node=139)
-    // and `:1893` (node=142); base=0 for both operands on both nodes.
-    let k_strides: [i64; 5] = [0, 128, 128, 0, 1];
-    let q_strides: [i64; 5] = [1024, 0, 1024, 128, 1];
-    let out_strides: [i64; 5] = [256, 8, 8, 1, 0];
-
-    // === node=139: odd-dot fold, no epilogue ===
-    let in0_odd = shared_buffer(&device, &f32_bytes(&k_odd_cache));
-    let in1_odd = shared_buffer(&device, &f32_bytes(&q_odd));
-    let out139 = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 256]));
-    let uniforms139 = shared_buffer(&device, &pack_uniforms_node139(output_total, reduction_total, output_extents, [k_strides, q_strides], out_strides));
-    let diag139_k = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let diag139_q = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let diag139_product = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let diag139_accum = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let diag139_reduced = shared_buffer(&device, &f32_bytes(&[0.0_f32; 4]));
-
-    let pipeline139 = compile(&device, NODE139_DIAG_KERNEL, "diag_node139", MTLMathMode::Safe);
-    dispatch(
-        &device, &queue, &pipeline139,
-        &[&in0_odd, &in1_odd, &out139, &uniforms139, &diag139_k, &diag139_q, &diag139_product, &diag139_accum, &diag139_reduced],
-        8192, 32,
-    );
-    let out139_values = read_f32_buffer(&out139, 256);
-    const NODE139_REFERENCE_BITS_KEY2_GROUP0: u32 = 0xbea5746d;
-    println!(
-        "attn_unfused_reduce_replay node139 output_index16(key2,g0)_bits=0x{:08x} production_reference=0x{:08x} match={}",
-        out139_values[16].to_bits(), NODE139_REFERENCE_BITS_KEY2_GROUP0,
-        out139_values[16].to_bits() == NODE139_REFERENCE_BITS_KEY2_GROUP0,
-    );
-
-    // === node=142: even-dot fold, epilogue add(node139) + select(mask) ===
-    // epi0 = node=51 causal mask (per key, key=2 value 0.0 -> not masked);
-    // epi1 = node=47 constant -inf broadcast; epi2 = node=139's OWN output
-    // (chained from the standalone dispatch above, not the production
-    // capture, so this run reproduces the real two-kernel pipeline).
-    let epi0_mask: Vec<f32> = vec![
-        0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-    ];
-    let epi1_neg_inf = vec![f32::NEG_INFINITY];
-    let epi0_buf = shared_buffer(&device, &f32_bytes(&epi0_mask));
-    let epi1_buf = shared_buffer(&device, &f32_bytes(&epi1_neg_inf));
-    let epi2_buf = shared_buffer(&device, &f32_bytes(&out139_values));
-
-    let in0_even = shared_buffer(&device, &f32_bytes(&k_even_cache));
-    let in1_even = shared_buffer(&device, &f32_bytes(&q_even));
-    let out142 = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 256]));
-    let epi_strides: [[i64; 4]; 3] = [[32, 1, 0, 0], [0, 0, 0, 0], [256, 8, 8, 1]];
-    let uniforms142 = shared_buffer(&device, &pack_uniforms_node142(output_total, reduction_total, output_extents, [k_strides, q_strides], out_strides, epi_strides));
-    let diag142_k = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let diag142_q = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let diag142_product = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let diag142_accum = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let diag142_reduced = shared_buffer(&device, &f32_bytes(&[0.0_f32; 4]));
-    let diag142_epi = shared_buffer(&device, &f32_bytes(&[0.0_f32; 8]));
-
-    let pipeline142 = compile(&device, NODE142_DIAG_KERNEL, "diag_node142", MTLMathMode::Safe);
-    dispatch(
-        &device, &queue, &pipeline142,
-        &[&in0_even, &in1_even, &epi0_buf, &epi1_buf, &epi2_buf, &out142, &uniforms142, &diag142_k, &diag142_q, &diag142_product, &diag142_accum, &diag142_reduced, &diag142_epi],
-        8192, 32,
-    );
-    let out142_values = read_f32_buffer(&out142, 256);
-    const NODE142_PRODUCTION_REFERENCE_BITS: u32 = 0x403e2846;
-    println!(
-        "attn_unfused_reduce_replay node142 output_index16(key2,g0)_bits=0x{:08x} production_reference=0x{:08x} match={}",
-        out142_values[16].to_bits(), NODE142_PRODUCTION_REFERENCE_BITS,
-        out142_values[16].to_bits() == NODE142_PRODUCTION_REFERENCE_BITS,
-    );
-
-    // per-lane, per-iteration dump for BOTH real kernels at key=2, group=0
-    let diag139_k_values = read_f32_buffer(&diag139_k, 128);
-    let diag139_q_values = read_f32_buffer(&diag139_q, 128);
-    let diag139_product_values = read_f32_buffer(&diag139_product, 128);
-    let diag139_accum_values = read_f32_buffer(&diag139_accum, 128);
-    let diag139_reduced_values = read_f32_buffer(&diag139_reduced, 4);
-    let diag142_k_values = read_f32_buffer(&diag142_k, 128);
-    let diag142_q_values = read_f32_buffer(&diag142_q, 128);
-    let diag142_product_values = read_f32_buffer(&diag142_product, 128);
-    let diag142_accum_values = read_f32_buffer(&diag142_accum, 128);
-    let diag142_reduced_values = read_f32_buffer(&diag142_reduced, 4);
-    let diag142_epi_values = read_f32_buffer(&diag142_epi, 8);
-
-    for lane in 0..32usize {
-        for r in 0..4usize {
-            let slot = lane * 4 + r;
-            println!(
-                "attn_unfused_reduce_replay node139 lane={lane} r={r} k=0x{:08x} q=0x{:08x} product=0x{:08x} accum=0x{:08x}",
-                diag139_k_values[slot].to_bits(), diag139_q_values[slot].to_bits(),
-                diag139_product_values[slot].to_bits(), diag139_accum_values[slot].to_bits(),
-            );
-            println!(
-                "attn_unfused_reduce_replay node142 lane={lane} r={r} k=0x{:08x} q=0x{:08x} product=0x{:08x} accum=0x{:08x}",
-                diag142_k_values[slot].to_bits(), diag142_q_values[slot].to_bits(),
-                diag142_product_values[slot].to_bits(), diag142_accum_values[slot].to_bits(),
-            );
-        }
-    }
-    println!(
-        "attn_unfused_reduce_replay node139 reduced=0x{:08x} node142 reduced=0x{:08x} node142 epi_mask=0x{:08x} epi_neginf=0x{:08x} epi_node139=0x{:08x} epi_self_reduced=0x{:08x} epi_step1(add)=0x{:08x} epi_step2(select/out)=0x{:08x}",
-        diag139_reduced_values[0].to_bits(),
-        diag142_reduced_values[0].to_bits(),
-        diag142_epi_values[0].to_bits(),
-        diag142_epi_values[1].to_bits(),
-        diag142_epi_values[2].to_bits(),
-        diag142_epi_values[3].to_bits(),
-        diag142_epi_values[4].to_bits(),
-        diag142_epi_values[5].to_bits(),
-    );
-
-    // fused-style per-lane even-dot accumulation over the SAME two operand
-    // buffers/offsets as node142's real kernel -- op-by-op comparison
-    // target for locating the first divergent (lane, r) pair.
-    let fused_diag_k = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let fused_diag_q = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let fused_diag_product = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let fused_diag_accum = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let fused_pipeline = compile(&device, FUSED_STYLE_EVEN_DIAG_KERNEL, "fused_style_even_diag", MTLMathMode::Safe);
-    dispatch(
-        &device, &queue, &fused_pipeline,
-        &[&in0_even, &in1_even, &fused_diag_k, &fused_diag_q, &fused_diag_product, &fused_diag_accum],
-        768, 768,
-    );
-    let fused_diag_k_values = read_f32_buffer(&fused_diag_k, 128);
-    let fused_diag_q_values = read_f32_buffer(&fused_diag_q, 128);
-    let fused_diag_product_values = read_f32_buffer(&fused_diag_product, 128);
-    let fused_diag_accum_values = read_f32_buffer(&fused_diag_accum, 128);
-
-    let mut first_divergence: Option<(usize, usize)> = None;
-    for lane in 0..32usize {
-        for r in 0..4usize {
-            let slot = lane * 4 + r;
-            let real_accum = diag142_accum_values[slot].to_bits();
-            let fused_accum = fused_diag_accum_values[slot].to_bits();
-            let real_product = diag142_product_values[slot].to_bits();
-            let fused_product = fused_diag_product_values[slot].to_bits();
-            let real_k = diag142_k_values[slot].to_bits();
-            let fused_k = fused_diag_k_values[slot].to_bits();
-            let real_q = diag142_q_values[slot].to_bits();
-            let fused_q = fused_diag_q_values[slot].to_bits();
-            println!(
-                "attn_unfused_reduce_replay compare lane={lane} r={r} real_k=0x{real_k:08x} fused_k=0x{fused_k:08x} k_eq={} real_q=0x{real_q:08x} fused_q=0x{fused_q:08x} q_eq={} real_product=0x{real_product:08x} fused_product=0x{fused_product:08x} product_eq={} real_accum=0x{real_accum:08x} fused_accum=0x{fused_accum:08x} accum_eq={}",
-                real_k == fused_k, real_q == fused_q, real_product == fused_product, real_accum == fused_accum,
-            );
-            if first_divergence.is_none() && real_accum != fused_accum {
-                first_divergence = Some((lane, r));
-            }
-        }
-    }
-    match first_divergence {
-        Some((lane, r)) => println!("attn_unfused_reduce_replay FIRST_DIVERGENT_OP lane={lane} r={r}"),
-        None => println!("attn_unfused_reduce_replay FIRST_DIVERGENT_OP none (all 128 lane/r accum slots matched)"),
     }
 
-    // compile-order isolation control: same LANE_DIAG body, fresh device,
-    // nothing else compiled first in this process.
-    let dummy = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let cached_len = shared_buffer(&device, &f32_bytes(&[6.0_f32]));
-    let uniforms_total = shared_buffer(&device, &24_i64.to_le_bytes());
-    let isolated_pipeline = compile(&device, ISOLATED_LANE_DIAG_KERNEL, "isolated_lane_diag", MTLMathMode::Safe);
-    let isolated_out = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 2048]));
-    let isolated_diag = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    dispatch(
-        &device, &queue, &isolated_pipeline,
-        &[&in1_even, &in1_odd, &in0_even, &in0_odd, &dummy, &dummy, &dummy, &dummy, &cached_len, &isolated_out, &uniforms_total, &isolated_diag],
-        768, 768,
-    );
-    let isolated_diag_values = read_f32_buffer(&isolated_diag, 128);
-    let mut isolated_first_divergence: Option<usize> = None;
-    for lane in 0..32usize {
-        let real_final = diag142_accum_values[lane * 4 + 3].to_bits();
-        let isolated_even = isolated_diag_values[lane].to_bits();
-        println!(
-            "attn_unfused_reduce_replay isolated_lane_diag lane={lane} isolated_partial_even=0x{isolated_even:08x} real_node142_final_accum=0x{real_final:08x} eq={}",
-            isolated_even == real_final,
+    fn f32_bytes(values: &[f32]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    fn read_f32_buffer(buffer: &ProtocolObject<dyn MTLBuffer>, count: usize) -> Vec<f32> {
+        let pointer = buffer.contents().as_ptr().cast::<f32>();
+        unsafe { core::slice::from_raw_parts(pointer, count) }.to_vec()
+    }
+
+    fn i64_bytes(values: &[i64]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    // packs the node=139 `Uniforms` struct byte-for-byte in field declaration
+    // order (all fields are `long`/`long[]`, 8-byte aligned, so no padding).
+    fn pack_uniforms_node139(
+        output_total: i64,
+        reduction_total: i64,
+        output_extents: [i64; 4],
+        operand_strides: [[i64; 5]; 2],
+        out_strides: [i64; 5],
+    ) -> Vec<u8> {
+        let mut fields: Vec<i64> = Vec::new();
+        fields.push(output_total);
+        fields.push(reduction_total);
+        fields.extend_from_slice(&output_extents);
+        fields.push(reduction_total); // reduction_extents[1]
+        fields.extend_from_slice(&[0, 0]); // operand_base[2]
+        fields.extend_from_slice(&operand_strides[0]);
+        fields.extend_from_slice(&operand_strides[1]);
+        fields.push(0); // out_base
+        fields.extend_from_slice(&out_strides);
+        i64_bytes(&fields)
+    }
+
+    // packs the node=142 `Uniforms` struct: node=139's layout plus the
+    // epilogue_operand_base[3]/epilogue_operand_strides[3][4] tail.
+    fn pack_uniforms_node142(
+        output_total: i64,
+        reduction_total: i64,
+        output_extents: [i64; 4],
+        operand_strides: [[i64; 5]; 2],
+        out_strides: [i64; 5],
+        epilogue_strides: [[i64; 4]; 3],
+    ) -> Vec<u8> {
+        let mut bytes = pack_uniforms_node139(
+            output_total,
+            reduction_total,
+            output_extents,
+            operand_strides,
+            out_strides,
         );
-        if isolated_first_divergence.is_none() && isolated_even != real_final {
-            isolated_first_divergence = Some(lane);
-        }
-    }
-    match isolated_first_divergence {
-        Some(lane) => println!("attn_unfused_reduce_replay ISOLATED_FIRST_DIVERGENT_LANE lane={lane}"),
-        None => println!("attn_unfused_reduce_replay ISOLATED_FIRST_DIVERGENT_LANE none (isolated compile matches real node142 on all 32 lanes)"),
+        let mut tail: Vec<i64> = Vec::new();
+        tail.extend_from_slice(&[0, 0, 0]); // epilogue_operand_base[3]
+        tail.extend_from_slice(&epilogue_strides[0]);
+        tail.extend_from_slice(&epilogue_strides[1]);
+        tail.extend_from_slice(&epilogue_strides[2]);
+        bytes.extend_from_slice(&i64_bytes(&tail));
+        bytes
     }
 
-    // ternary-only isolation: constexpr qbase/kbase, 32-thread dispatch,
-    // no threadgroup memory, no barrier -- ONLY the `cached ? : ` operand
-    // select differs from `FUSED_STYLE_EVEN_DIAG_KERNEL` above.
-    let ternary_diag_accum = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let ternary_diag_product = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let ternary_diag_selected_k = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let ternary_pipeline = compile(&device, TERNARY_STYLE_EVEN_DIAG_KERNEL, "ternary_style_even_diag", MTLMathMode::Safe);
-    dispatch(&device, &queue, &ternary_pipeline, &[&in0_even, &in1_even, &dummy, &ternary_diag_accum, &ternary_diag_product, &ternary_diag_selected_k], 32, 32);
-    let ternary_diag_accum_values = read_f32_buffer(&ternary_diag_accum, 128);
-    let ternary_diag_product_values = read_f32_buffer(&ternary_diag_product, 128);
-    let ternary_diag_selected_k_values = read_f32_buffer(&ternary_diag_selected_k, 128);
-    let mut ternary_first_divergence: Option<(usize, usize)> = None;
-    for lane in 0..32usize {
-        for r in 0..4usize {
-            let slot = lane * 4 + r;
-            let real_accum = diag142_accum_values[slot].to_bits();
-            let ternary_accum = ternary_diag_accum_values[slot].to_bits();
-            let real_product = diag142_product_values[slot].to_bits();
-            let ternary_product = ternary_diag_product_values[slot].to_bits();
-            let real_k = diag142_k_values[slot].to_bits();
-            let ternary_k = ternary_diag_selected_k_values[slot].to_bits();
-            println!(
-                "attn_unfused_reduce_replay ternary_detail lane={lane} r={r} real_k=0x{real_k:08x} ternary_k=0x{ternary_k:08x} k_eq={} real_product=0x{real_product:08x} ternary_product=0x{ternary_product:08x} product_eq={} real_accum=0x{real_accum:08x} ternary_accum=0x{ternary_accum:08x} accum_eq={}",
-                real_k == ternary_k, real_product == ternary_product, real_accum == ternary_accum,
-            );
-            if ternary_first_divergence.is_none() && real_accum != ternary_accum {
-                ternary_first_divergence = Some((lane, r));
+    fn dispatch(
+        device: &ProtocolObject<dyn MTLDevice>,
+        queue: &ProtocolObject<dyn objc2_metal::MTLCommandQueue>,
+        pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
+        buffers: &[&ProtocolObject<dyn MTLBuffer>],
+        grid_threads: usize,
+        threadgroup_width: usize,
+    ) {
+        let command_buffer = queue.commandBuffer().expect("command buffer");
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .expect("compute encoder");
+        encoder.setComputePipelineState(pipeline);
+        for (index, buffer) in buffers.iter().enumerate() {
+            unsafe { encoder.setBuffer_offset_atIndex(Some(*buffer), 0, index) };
+        }
+        let grid = MTLSize {
+            width: grid_threads,
+            height: 1,
+            depth: 1,
+        };
+        let threadgroup = MTLSize {
+            width: threadgroup_width,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
+        encoder.endEncoding();
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+        let _ = device;
+    }
+
+    pub fn run() {
+        let manifest_path = std::env::var("ATTN_FIXTURE_MANIFEST").expect(
+            "ATTN_FIXTURE_MANIFEST must point at the round-4 manifest_safe_nodekernels.txt",
+        );
+        let manifest = std::fs::read_to_string(&manifest_path).expect("read fixture manifest");
+
+        // node=134/135 (materialized q_even/q_odd_grouped) are bit-identical
+        // identity copies of leaf q_even/q_odd -- confirmed by comparing
+        // `unfused_metal_intermediate node=134 qg0_column` against
+        // `leaf_full label=q_even ... bits=` in the SAME manifest (both begin
+        // 1049295111, 3196595778, ...). Using the leaf arrays directly is
+        // therefore the real operand-134/135 bytes, group-major [8,128].
+        let q_even = parse_leaf(&manifest, "q_even");
+        let q_odd = parse_leaf(&manifest, "q_odd");
+        let k_even_cache = parse_leaf(&manifest, "k_even_cache");
+        let k_odd_cache = parse_leaf(&manifest, "k_odd_cache");
+
+        println!(
+            "attn_unfused_reduce_replay fixture_loaded q_even={} q_odd={} k_even_cache={} k_odd_cache={}",
+            q_even.len(),
+            q_odd.len(),
+            k_even_cache.len(),
+            k_odd_cache.len(),
+        );
+
+        let device = MTLCreateSystemDefaultDevice().expect("system default Metal device");
+        let queue = device.newCommandQueue().expect("command queue");
+
+        let output_extents: [i64; 4] = [1, 32, 1, 8];
+        let output_total: i64 = 256;
+        let reduction_total: i64 = 128;
+        // operand_strides[op][0..5] = [batch, key, dim2, group, reduction] --
+        // real values dumped at `manifest_safe_nodekernels.txt:941` (node=139)
+        // and `:1893` (node=142); base=0 for both operands on both nodes.
+        let k_strides: [i64; 5] = [0, 128, 128, 0, 1];
+        let q_strides: [i64; 5] = [1024, 0, 1024, 128, 1];
+        let out_strides: [i64; 5] = [256, 8, 8, 1, 0];
+
+        // === node=139: odd-dot fold, no epilogue ===
+        let in0_odd = shared_buffer(&device, &f32_bytes(&k_odd_cache));
+        let in1_odd = shared_buffer(&device, &f32_bytes(&q_odd));
+        let out139 = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 256]));
+        let uniforms139 = shared_buffer(
+            &device,
+            &pack_uniforms_node139(
+                output_total,
+                reduction_total,
+                output_extents,
+                [k_strides, q_strides],
+                out_strides,
+            ),
+        );
+        let diag139_k = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        let diag139_q = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        let diag139_product = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        let diag139_accum = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        let diag139_reduced = shared_buffer(&device, &f32_bytes(&[0.0_f32; 4]));
+
+        let pipeline139 = compile(
+            &device,
+            NODE139_DIAG_KERNEL,
+            "diag_node139",
+            MTLMathMode::Safe,
+        );
+        dispatch(
+            &device,
+            &queue,
+            &pipeline139,
+            &[
+                &in0_odd,
+                &in1_odd,
+                &out139,
+                &uniforms139,
+                &diag139_k,
+                &diag139_q,
+                &diag139_product,
+                &diag139_accum,
+                &diag139_reduced,
+            ],
+            8192,
+            32,
+        );
+        let out139_values = read_f32_buffer(&out139, 256);
+        const NODE139_REFERENCE_BITS_KEY2_GROUP0: u32 = 0xbea5746d;
+        println!(
+            "attn_unfused_reduce_replay node139 output_index16(key2,g0)_bits=0x{:08x} production_reference=0x{:08x} match={}",
+            out139_values[16].to_bits(),
+            NODE139_REFERENCE_BITS_KEY2_GROUP0,
+            out139_values[16].to_bits() == NODE139_REFERENCE_BITS_KEY2_GROUP0,
+        );
+
+        // === node=142: even-dot fold, epilogue add(node139) + select(mask) ===
+        // epi0 = node=51 causal mask (per key, key=2 value 0.0 -> not masked);
+        // epi1 = node=47 constant -inf broadcast; epi2 = node=139's OWN output
+        // (chained from the standalone dispatch above, not the production
+        // capture, so this run reproduces the real two-kernel pipeline).
+        let epi0_mask: Vec<f32> = vec![
+            0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        ];
+        let epi1_neg_inf = vec![f32::NEG_INFINITY];
+        let epi0_buf = shared_buffer(&device, &f32_bytes(&epi0_mask));
+        let epi1_buf = shared_buffer(&device, &f32_bytes(&epi1_neg_inf));
+        let epi2_buf = shared_buffer(&device, &f32_bytes(&out139_values));
+
+        let in0_even = shared_buffer(&device, &f32_bytes(&k_even_cache));
+        let in1_even = shared_buffer(&device, &f32_bytes(&q_even));
+        let out142 = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 256]));
+        let epi_strides: [[i64; 4]; 3] = [[32, 1, 0, 0], [0, 0, 0, 0], [256, 8, 8, 1]];
+        let uniforms142 = shared_buffer(
+            &device,
+            &pack_uniforms_node142(
+                output_total,
+                reduction_total,
+                output_extents,
+                [k_strides, q_strides],
+                out_strides,
+                epi_strides,
+            ),
+        );
+        let diag142_k = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        let diag142_q = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        let diag142_product = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        let diag142_accum = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        let diag142_reduced = shared_buffer(&device, &f32_bytes(&[0.0_f32; 4]));
+        let diag142_epi = shared_buffer(&device, &f32_bytes(&[0.0_f32; 8]));
+
+        let pipeline142 = compile(
+            &device,
+            NODE142_DIAG_KERNEL,
+            "diag_node142",
+            MTLMathMode::Safe,
+        );
+        dispatch(
+            &device,
+            &queue,
+            &pipeline142,
+            &[
+                &in0_even,
+                &in1_even,
+                &epi0_buf,
+                &epi1_buf,
+                &epi2_buf,
+                &out142,
+                &uniforms142,
+                &diag142_k,
+                &diag142_q,
+                &diag142_product,
+                &diag142_accum,
+                &diag142_reduced,
+                &diag142_epi,
+            ],
+            8192,
+            32,
+        );
+        let out142_values = read_f32_buffer(&out142, 256);
+        const NODE142_PRODUCTION_REFERENCE_BITS: u32 = 0x403e2846;
+        println!(
+            "attn_unfused_reduce_replay node142 output_index16(key2,g0)_bits=0x{:08x} production_reference=0x{:08x} match={}",
+            out142_values[16].to_bits(),
+            NODE142_PRODUCTION_REFERENCE_BITS,
+            out142_values[16].to_bits() == NODE142_PRODUCTION_REFERENCE_BITS,
+        );
+
+        // per-lane, per-iteration dump for BOTH real kernels at key=2, group=0
+        let diag139_k_values = read_f32_buffer(&diag139_k, 128);
+        let diag139_q_values = read_f32_buffer(&diag139_q, 128);
+        let diag139_product_values = read_f32_buffer(&diag139_product, 128);
+        let diag139_accum_values = read_f32_buffer(&diag139_accum, 128);
+        let diag139_reduced_values = read_f32_buffer(&diag139_reduced, 4);
+        let diag142_k_values = read_f32_buffer(&diag142_k, 128);
+        let diag142_q_values = read_f32_buffer(&diag142_q, 128);
+        let diag142_product_values = read_f32_buffer(&diag142_product, 128);
+        let diag142_accum_values = read_f32_buffer(&diag142_accum, 128);
+        let diag142_reduced_values = read_f32_buffer(&diag142_reduced, 4);
+        let diag142_epi_values = read_f32_buffer(&diag142_epi, 8);
+
+        for lane in 0..32usize {
+            for r in 0..4usize {
+                let slot = lane * 4 + r;
+                println!(
+                    "attn_unfused_reduce_replay node139 lane={lane} r={r} k=0x{:08x} q=0x{:08x} product=0x{:08x} accum=0x{:08x}",
+                    diag139_k_values[slot].to_bits(),
+                    diag139_q_values[slot].to_bits(),
+                    diag139_product_values[slot].to_bits(),
+                    diag139_accum_values[slot].to_bits(),
+                );
+                println!(
+                    "attn_unfused_reduce_replay node142 lane={lane} r={r} k=0x{:08x} q=0x{:08x} product=0x{:08x} accum=0x{:08x}",
+                    diag142_k_values[slot].to_bits(),
+                    diag142_q_values[slot].to_bits(),
+                    diag142_product_values[slot].to_bits(),
+                    diag142_accum_values[slot].to_bits(),
+                );
             }
         }
-    }
-    match ternary_first_divergence {
-        Some((lane, r)) => println!("attn_unfused_reduce_replay TERNARY_FIRST_DIVERGENT_OP lane={lane} r={r}"),
-        None => println!("attn_unfused_reduce_replay TERNARY_FIRST_DIVERGENT_OP none (ternary-only kernel matches real node142 on all 128 slots)"),
-    }
-}
+        println!(
+            "attn_unfused_reduce_replay node139 reduced=0x{:08x} node142 reduced=0x{:08x} node142 epi_mask=0x{:08x} epi_neginf=0x{:08x} epi_node139=0x{:08x} epi_self_reduced=0x{:08x} epi_step1(add)=0x{:08x} epi_step2(select/out)=0x{:08x}",
+            diag139_reduced_values[0].to_bits(),
+            diag142_reduced_values[0].to_bits(),
+            diag142_epi_values[0].to_bits(),
+            diag142_epi_values[1].to_bits(),
+            diag142_epi_values[2].to_bits(),
+            diag142_epi_values[3].to_bits(),
+            diag142_epi_values[4].to_bits(),
+            diag142_epi_values[5].to_bits(),
+        );
 
+        // fused-style per-lane even-dot accumulation over the SAME two operand
+        // buffers/offsets as node142's real kernel -- op-by-op comparison
+        // target for locating the first divergent (lane, r) pair.
+        let fused_diag_k = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        let fused_diag_q = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        let fused_diag_product = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        let fused_diag_accum = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        let fused_pipeline = compile(
+            &device,
+            FUSED_STYLE_EVEN_DIAG_KERNEL,
+            "fused_style_even_diag",
+            MTLMathMode::Safe,
+        );
+        dispatch(
+            &device,
+            &queue,
+            &fused_pipeline,
+            &[
+                &in0_even,
+                &in1_even,
+                &fused_diag_k,
+                &fused_diag_q,
+                &fused_diag_product,
+                &fused_diag_accum,
+            ],
+            768,
+            768,
+        );
+        let fused_diag_k_values = read_f32_buffer(&fused_diag_k, 128);
+        let fused_diag_q_values = read_f32_buffer(&fused_diag_q, 128);
+        let fused_diag_product_values = read_f32_buffer(&fused_diag_product, 128);
+        let fused_diag_accum_values = read_f32_buffer(&fused_diag_accum, 128);
+
+        let mut first_divergence: Option<(usize, usize)> = None;
+        for lane in 0..32usize {
+            for r in 0..4usize {
+                let slot = lane * 4 + r;
+                let real_accum = diag142_accum_values[slot].to_bits();
+                let fused_accum = fused_diag_accum_values[slot].to_bits();
+                let real_product = diag142_product_values[slot].to_bits();
+                let fused_product = fused_diag_product_values[slot].to_bits();
+                let real_k = diag142_k_values[slot].to_bits();
+                let fused_k = fused_diag_k_values[slot].to_bits();
+                let real_q = diag142_q_values[slot].to_bits();
+                let fused_q = fused_diag_q_values[slot].to_bits();
+                println!(
+                    "attn_unfused_reduce_replay compare lane={lane} r={r} real_k=0x{real_k:08x} fused_k=0x{fused_k:08x} k_eq={} real_q=0x{real_q:08x} fused_q=0x{fused_q:08x} q_eq={} real_product=0x{real_product:08x} fused_product=0x{fused_product:08x} product_eq={} real_accum=0x{real_accum:08x} fused_accum=0x{fused_accum:08x} accum_eq={}",
+                    real_k == fused_k,
+                    real_q == fused_q,
+                    real_product == fused_product,
+                    real_accum == fused_accum,
+                );
+                if first_divergence.is_none() && real_accum != fused_accum {
+                    first_divergence = Some((lane, r));
+                }
+            }
+        }
+        match first_divergence {
+            Some((lane, r)) => {
+                println!("attn_unfused_reduce_replay FIRST_DIVERGENT_OP lane={lane} r={r}")
+            }
+            None => println!(
+                "attn_unfused_reduce_replay FIRST_DIVERGENT_OP none (all 128 lane/r accum slots matched)"
+            ),
+        }
+
+        // compile-order isolation control: same LANE_DIAG body, fresh device,
+        // nothing else compiled first in this process.
+        let dummy = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        let cached_len = shared_buffer(&device, &f32_bytes(&[6.0_f32]));
+        let uniforms_total = shared_buffer(&device, &24_i64.to_le_bytes());
+        let isolated_pipeline = compile(
+            &device,
+            ISOLATED_LANE_DIAG_KERNEL,
+            "isolated_lane_diag",
+            MTLMathMode::Safe,
+        );
+        let isolated_out = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 2048]));
+        let isolated_diag = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        dispatch(
+            &device,
+            &queue,
+            &isolated_pipeline,
+            &[
+                &in1_even,
+                &in1_odd,
+                &in0_even,
+                &in0_odd,
+                &dummy,
+                &dummy,
+                &dummy,
+                &dummy,
+                &cached_len,
+                &isolated_out,
+                &uniforms_total,
+                &isolated_diag,
+            ],
+            768,
+            768,
+        );
+        let isolated_diag_values = read_f32_buffer(&isolated_diag, 128);
+        let mut isolated_first_divergence: Option<usize> = None;
+        for lane in 0..32usize {
+            let real_final = diag142_accum_values[lane * 4 + 3].to_bits();
+            let isolated_even = isolated_diag_values[lane].to_bits();
+            println!(
+                "attn_unfused_reduce_replay isolated_lane_diag lane={lane} isolated_partial_even=0x{isolated_even:08x} real_node142_final_accum=0x{real_final:08x} eq={}",
+                isolated_even == real_final,
+            );
+            if isolated_first_divergence.is_none() && isolated_even != real_final {
+                isolated_first_divergence = Some(lane);
+            }
+        }
+        match isolated_first_divergence {
+            Some(lane) => {
+                println!("attn_unfused_reduce_replay ISOLATED_FIRST_DIVERGENT_LANE lane={lane}")
+            }
+            None => println!(
+                "attn_unfused_reduce_replay ISOLATED_FIRST_DIVERGENT_LANE none (isolated compile matches real node142 on all 32 lanes)"
+            ),
+        }
+
+        // ternary-only isolation: constexpr qbase/kbase, 32-thread dispatch,
+        // no threadgroup memory, no barrier -- ONLY the `cached ? : ` operand
+        // select differs from `FUSED_STYLE_EVEN_DIAG_KERNEL` above.
+        let ternary_diag_accum = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        let ternary_diag_product = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        let ternary_diag_selected_k = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
+        let ternary_pipeline = compile(
+            &device,
+            TERNARY_STYLE_EVEN_DIAG_KERNEL,
+            "ternary_style_even_diag",
+            MTLMathMode::Safe,
+        );
+        dispatch(
+            &device,
+            &queue,
+            &ternary_pipeline,
+            &[
+                &in0_even,
+                &in1_even,
+                &dummy,
+                &ternary_diag_accum,
+                &ternary_diag_product,
+                &ternary_diag_selected_k,
+            ],
+            32,
+            32,
+        );
+        let ternary_diag_accum_values = read_f32_buffer(&ternary_diag_accum, 128);
+        let ternary_diag_product_values = read_f32_buffer(&ternary_diag_product, 128);
+        let ternary_diag_selected_k_values = read_f32_buffer(&ternary_diag_selected_k, 128);
+        let mut ternary_first_divergence: Option<(usize, usize)> = None;
+        for lane in 0..32usize {
+            for r in 0..4usize {
+                let slot = lane * 4 + r;
+                let real_accum = diag142_accum_values[slot].to_bits();
+                let ternary_accum = ternary_diag_accum_values[slot].to_bits();
+                let real_product = diag142_product_values[slot].to_bits();
+                let ternary_product = ternary_diag_product_values[slot].to_bits();
+                let real_k = diag142_k_values[slot].to_bits();
+                let ternary_k = ternary_diag_selected_k_values[slot].to_bits();
+                println!(
+                    "attn_unfused_reduce_replay ternary_detail lane={lane} r={r} real_k=0x{real_k:08x} ternary_k=0x{ternary_k:08x} k_eq={} real_product=0x{real_product:08x} ternary_product=0x{ternary_product:08x} product_eq={} real_accum=0x{real_accum:08x} ternary_accum=0x{ternary_accum:08x} accum_eq={}",
+                    real_k == ternary_k,
+                    real_product == ternary_product,
+                    real_accum == ternary_accum,
+                );
+                if ternary_first_divergence.is_none() && real_accum != ternary_accum {
+                    ternary_first_divergence = Some((lane, r));
+                }
+            }
+        }
+        match ternary_first_divergence {
+            Some((lane, r)) => {
+                println!("attn_unfused_reduce_replay TERNARY_FIRST_DIVERGENT_OP lane={lane} r={r}")
+            }
+            None => println!(
+                "attn_unfused_reduce_replay TERNARY_FIRST_DIVERGENT_OP none (ternary-only kernel matches real node142 on all 128 slots)"
+            ),
+        }
+    }
 }

@@ -60,16 +60,17 @@ mod harness {
     use std::fs::File;
     use std::sync::Arc;
 
+    use conflaguration::Settings as _;
     use memmap2::{Mmap, MmapOptions};
     use omega::CapturedDispatch;
     use proxima_gguf::parse_complete;
     use proxima_gguf::types::GgmlType;
+    use proxima_model_interop::{
+        GPU_LAYERS_ALL, LoadedModel, ServingConfig, SpeculativeConfig, SpeculativeSettings,
+        TokenEvent,
+    };
     use proxima_telemetry::export::Exporter;
     use proxima_telemetry::recorder::Recorder;
-    use conflaguration::Settings as _;
-    use proxima_model_interop::{
-        GPU_LAYERS_ALL, LoadedModel, ServingConfig, SpeculativeConfig, SpeculativeSettings, TokenEvent,
-    };
 
     use super::cell::Cell;
 
@@ -92,7 +93,10 @@ mod harness {
 
     fn cov_percent(values: &[f64]) -> f64 {
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f64>()
+        let variance = values
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
             / (values.len() as f64 - 1.0).max(1.0);
         100.0 * variance.sqrt() / mean
     }
@@ -103,7 +107,10 @@ mod harness {
         })
     }
 
-    fn serving_config(dispatch_type: omega::DispatchType, speculative: SpeculativeConfig<'_>) -> ServingConfig<'_> {
+    fn serving_config(
+        dispatch_type: omega::DispatchType,
+        speculative: SpeculativeConfig<'_>,
+    ) -> ServingConfig<'_> {
         ServingConfig {
             speculative,
             gpu_layers: GPU_LAYERS_ALL,
@@ -127,7 +134,12 @@ mod harness {
         );
     }
 
-    fn capture(model: &LoadedModel<'_>, prompt: &str, step: usize, concurrent: bool) -> Vec<CapturedDispatch> {
+    fn capture(
+        model: &LoadedModel<'_>,
+        prompt: &str,
+        step: usize,
+        concurrent: bool,
+    ) -> Vec<CapturedDispatch> {
         // SAFETY: called before any thread other than the telemetry-free main one exists.
         unsafe {
             std::env::set_var("PROXIMA_CAPTURE_NODES", "all");
@@ -140,8 +152,12 @@ mod harness {
             omega::DispatchType::Serial
         };
         let mut on_token = |_event: TokenEvent<'_>| ControlFlow::Continue(());
-        let speculative_settings = SpeculativeSettings::from_env().expect("PROXIMA_SPECULATIVE_* env parses");
-        println!("df speculative_types={}", speculative_settings.speculative_types);
+        let speculative_settings =
+            SpeculativeSettings::from_env().expect("PROXIMA_SPECULATIVE_* env parses");
+        println!(
+            "df speculative_types={}",
+            speculative_settings.speculative_types
+        );
         model
             .generate_streaming(
                 prompt,
@@ -162,7 +178,9 @@ mod harness {
         }
         assert!(!dispatches.is_empty(), "N==0: nothing captured");
         assert!(
-            dispatches.iter().all(|dispatch| dispatch.unreplayable.is_none()),
+            dispatches
+                .iter()
+                .all(|dispatch| dispatch.unreplayable.is_none()),
             "a captured dispatch is not replayable"
         );
         dispatches
@@ -217,7 +235,11 @@ mod harness {
             .map(|_| {
                 let (_, stamps) = CapturedDispatch::time_gpu_sequence_split_ns(&batch, true, false)
                     .expect("stamped isolated replay");
-                let durations: Vec<f64> = stamps.iter().skip(1).map(|stamp| (stamp[1] - stamp[0]) as f64).collect();
+                let durations: Vec<f64> = stamps
+                    .iter()
+                    .skip(1)
+                    .map(|stamp| (stamp[1] - stamp[0]) as f64)
+                    .collect();
                 median(&durations)
             })
             .collect();
@@ -240,24 +262,50 @@ mod harness {
 
     enum Replay {
         Serial,
-        Noop { minimal_bindings: bool, one_threadgroup: bool },
-        Barriered { flags: Vec<bool>, prepass_barrier: bool },
-        Split { sample: bool, empty_kernels: bool },
+        Noop {
+            minimal_bindings: bool,
+            one_threadgroup: bool,
+        },
+        Barriered {
+            flags: Vec<bool>,
+            prepass_barrier: bool,
+        },
+        Split {
+            sample: bool,
+            empty_kernels: bool,
+        },
     }
 
     impl Replay {
         fn run(&self, dispatches: &[CapturedDispatch]) -> (f64, Vec<[u64; 2]>) {
             let span = match self {
                 Self::Serial => CapturedDispatch::time_gpu_sequence_ns(dispatches),
-                Self::Noop { minimal_bindings, one_threadgroup } => {
-                    CapturedDispatch::time_gpu_noop_sequence_ns(dispatches, *minimal_bindings, *one_threadgroup)
-                }
-                Self::Barriered { flags, prepass_barrier } => {
-                    CapturedDispatch::time_gpu_sequence_barriered_ns(dispatches, flags, *prepass_barrier)
-                }
-                Self::Split { sample, empty_kernels } => {
-                    return CapturedDispatch::time_gpu_sequence_split_ns(dispatches, *sample, *empty_kernels)
-                        .expect("split whole-step replay");
+                Self::Noop {
+                    minimal_bindings,
+                    one_threadgroup,
+                } => CapturedDispatch::time_gpu_noop_sequence_ns(
+                    dispatches,
+                    *minimal_bindings,
+                    *one_threadgroup,
+                ),
+                Self::Barriered {
+                    flags,
+                    prepass_barrier,
+                } => CapturedDispatch::time_gpu_sequence_barriered_ns(
+                    dispatches,
+                    flags,
+                    *prepass_barrier,
+                ),
+                Self::Split {
+                    sample,
+                    empty_kernels,
+                } => {
+                    return CapturedDispatch::time_gpu_sequence_split_ns(
+                        dispatches,
+                        *sample,
+                        *empty_kernels,
+                    )
+                    .expect("split whole-step replay");
                 }
             };
             (span.expect("whole-step replay"), Vec::new())
@@ -271,44 +319,74 @@ mod harness {
 
     fn floor_arms(records: usize) -> Vec<Arm> {
         vec![
-            Arm { label: "recorded", replay: Replay::Serial },
+            Arm {
+                label: "recorded",
+                replay: Replay::Serial,
+            },
             Arm {
                 label: "empty_same_bindings",
-                replay: Replay::Noop { minimal_bindings: false, one_threadgroup: false },
+                replay: Replay::Noop {
+                    minimal_bindings: false,
+                    one_threadgroup: false,
+                },
             },
             Arm {
                 label: "empty_minimal_bindings",
-                replay: Replay::Noop { minimal_bindings: true, one_threadgroup: false },
+                replay: Replay::Noop {
+                    minimal_bindings: true,
+                    one_threadgroup: false,
+                },
             },
             Arm {
                 label: "empty_one_threadgroup",
-                replay: Replay::Noop { minimal_bindings: false, one_threadgroup: true },
+                replay: Replay::Noop {
+                    minimal_bindings: false,
+                    one_threadgroup: true,
+                },
             },
             Arm {
                 label: "recorded_unordered",
-                replay: Replay::Barriered { flags: vec![false; records], prepass_barrier: false },
+                replay: Replay::Barriered {
+                    flags: vec![false; records],
+                    prepass_barrier: false,
+                },
             },
         ]
     }
 
     fn stamped_arms() -> Vec<Arm> {
         vec![
-            Arm { label: "recorded", replay: Replay::Serial },
+            Arm {
+                label: "recorded",
+                replay: Replay::Serial,
+            },
             Arm {
                 label: "split_unstamped",
-                replay: Replay::Split { sample: false, empty_kernels: false },
+                replay: Replay::Split {
+                    sample: false,
+                    empty_kernels: false,
+                },
             },
             Arm {
                 label: "split_stamped",
-                replay: Replay::Split { sample: true, empty_kernels: false },
+                replay: Replay::Split {
+                    sample: true,
+                    empty_kernels: false,
+                },
             },
             Arm {
                 label: "empty_split_stamped",
-                replay: Replay::Split { sample: true, empty_kernels: true },
+                replay: Replay::Split {
+                    sample: true,
+                    empty_kernels: true,
+                },
             },
             Arm {
                 label: "empty_same_bindings",
-                replay: Replay::Noop { minimal_bindings: false, one_threadgroup: false },
+                replay: Replay::Noop {
+                    minimal_bindings: false,
+                    one_threadgroup: false,
+                },
             },
         ]
     }
@@ -366,7 +444,12 @@ mod harness {
     /// nothing precedes it in the stamped span.
     fn duration_and_gap(rounds: &[Vec<[u64; 2]>], count: usize) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
         let durations = (0..count)
-            .map(|index| rounds.iter().map(|round| (round[index][1] - round[index][0]) as f64).collect())
+            .map(|index| {
+                rounds
+                    .iter()
+                    .map(|round| (round[index][1] - round[index][0]) as f64)
+                    .collect()
+            })
             .collect();
         let gaps = (0..count)
             .map(|index| {
@@ -416,11 +499,19 @@ mod harness {
                     stamped_isolated_ns: stamped_isolated[index],
                     round4_isolated_ns: round4
                         .get(&index)
-                        .filter(|(node, kernel, _)| *node == dispatch.node && *kernel == dispatch.entry)
+                        .filter(|(node, kernel, _)| {
+                            *node == dispatch.node && *kernel == dispatch.entry
+                        })
                         .map_or(f64::NAN, |(_, _, isolated)| *isolated),
                     instream_ns: median(&durations[index]),
-                    instream_min_ns: durations[index].iter().copied().fold(f64::INFINITY, f64::min),
-                    instream_max_ns: durations[index].iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                    instream_min_ns: durations[index]
+                        .iter()
+                        .copied()
+                        .fold(f64::INFINITY, f64::min),
+                    instream_max_ns: durations[index]
+                        .iter()
+                        .copied()
+                        .fold(f64::NEG_INFINITY, f64::max),
                     instream_cov_pct: cov_percent(&durations[index]),
                     gap_ns: median(&gaps[index]),
                     empty_instream_ns: median(&empty_durations[index]),
@@ -467,7 +558,8 @@ mod harness {
             )
             .unwrap();
         }
-        std::fs::write(format!("{directory}/dispatch_instream.csv"), table).expect("write dispatch_instream");
+        std::fs::write(format!("{directory}/dispatch_instream.csv"), table)
+            .expect("write dispatch_instream");
     }
 
     /// The stream's shapes, independent of any timing: iteration-space extents and the codec of each operand.
@@ -475,11 +567,23 @@ mod harness {
         let mut table = String::from("index,node,kernel,extents,operand_codecs\n");
         for (index, dispatch) in dispatches.iter().enumerate() {
             let extents: Vec<String> = dispatch.extents.iter().map(u64::to_string).collect();
-            let codecs: Vec<String> =
-                dispatch.operands.iter().map(|(node, codec)| format!("{node}:{codec}")).collect();
-            writeln!(table, "{index},{},{},{},{}", dispatch.node, dispatch.entry, extents.join("x"), codecs.join(";")).unwrap();
+            let codecs: Vec<String> = dispatch
+                .operands
+                .iter()
+                .map(|(node, codec)| format!("{node}:{codec}"))
+                .collect();
+            writeln!(
+                table,
+                "{index},{},{},{},{}",
+                dispatch.node,
+                dispatch.entry,
+                extents.join("x"),
+                codecs.join(";")
+            )
+            .unwrap();
         }
-        std::fs::write(format!("{directory}/dispatch_shapes.csv"), table).expect("write dispatch_shapes");
+        std::fs::write(format!("{directory}/dispatch_shapes.csv"), table)
+            .expect("write dispatch_shapes");
     }
 
     fn write_instream_groups(directory: &str, rows: &[InstreamRow]) {
@@ -491,7 +595,9 @@ mod harness {
             "kernel,dispatches,threadgroups_mean,single_threadgroup_dispatches,isolated_ms,instream_ms,gap_ms,empty_instream_ms,empty_gap_ms,instream_minus_isolated_ms,instream_over_isolated,work_ms,work_minus_isolated_ms,cold_penalty_ms,stamped_isolated_ms,stamped_excess_ms\n",
         );
         for (kernel, members) in &groups {
-            let sum = |field: fn(&InstreamRow) -> f64| members.iter().map(|row| field(row)).sum::<f64>() / 1e6;
+            let sum = |field: fn(&InstreamRow) -> f64| {
+                members.iter().map(|row| field(row)).sum::<f64>() / 1e6
+            };
             let (isolated, instream) = (sum(|row| row.isolated_ns), sum(|row| row.instream_ns));
             writeln!(
                 table,
@@ -512,11 +618,21 @@ mod harness {
             )
             .unwrap();
         }
-        std::fs::write(format!("{directory}/dispatch_instream_groups.csv"), table).expect("write instream groups");
+        std::fs::write(format!("{directory}/dispatch_instream_groups.csv"), table)
+            .expect("write instream groups");
     }
 
-    fn print_top(label: &str, rows: &[InstreamRow], min_isolated_ns: f64, key: fn(&InstreamRow) -> f64, count: usize) {
-        let mut ranked: Vec<&InstreamRow> = rows.iter().filter(|row| row.isolated_ns >= min_isolated_ns).collect();
+    fn print_top(
+        label: &str,
+        rows: &[InstreamRow],
+        min_isolated_ns: f64,
+        key: fn(&InstreamRow) -> f64,
+        count: usize,
+    ) {
+        let mut ranked: Vec<&InstreamRow> = rows
+            .iter()
+            .filter(|row| row.isolated_ns >= min_isolated_ns)
+            .collect();
         ranked.sort_by(|left, right| key(right).partial_cmp(&key(left)).expect("finite"));
         for row in ranked.into_iter().take(count) {
             println!(
@@ -550,7 +666,9 @@ mod harness {
     }
 
     fn print_group_sums(label: &str, members: &[&InstreamRow]) {
-        let sum_ms = |field: fn(&InstreamRow) -> f64| members.iter().map(|row| field(row)).sum::<f64>() / 1e6;
+        let sum_ms = |field: fn(&InstreamRow) -> f64| {
+            members.iter().map(|row| field(row)).sum::<f64>() / 1e6
+        };
         println!(
             "df instream {label} dispatches={} isolated_ms={:.4} round4_isolated_ms={:.4} instream_ms={:.4} gap_ms={:.4} empty_instream_ms={:.4} empty_gap_ms={:.4} excess_ms={:.4} work_ms={:.4} work_excess_ms={:.4} cold_penalty_ms={:.4} stamped_isolated_ms={:.4} stamped_excess_ms={:.4}",
             members.len(),
@@ -569,7 +687,11 @@ mod harness {
         );
     }
 
-    fn print_instream_summary(rows: &[InstreamRow], stamped: &[Vec<[u64; 2]>], empty: &[Vec<[u64; 2]>]) {
+    fn print_instream_summary(
+        rows: &[InstreamRow],
+        stamped: &[Vec<[u64; 2]>],
+        empty: &[Vec<[u64; 2]>],
+    ) {
         let (span, empty_span) = (span_ms(stamped), span_ms(empty));
         println!(
             "df instream spans stamped_p50_ms={:.4} stamped_cov_pct={:.2} empty_stamped_p50_ms={:.4} empty_stamped_cov_pct={:.2} round4_matched={}",
@@ -577,7 +699,9 @@ mod harness {
             cov_percent(&span),
             median(&empty_span),
             cov_percent(&empty_span),
-            rows.iter().filter(|row| !row.round4_isolated_ns.is_nan()).count()
+            rows.iter()
+                .filter(|row| !row.round4_isolated_ns.is_nan())
+                .count()
         );
         let all: Vec<&InstreamRow> = rows.iter().collect();
         let singles: Vec<&InstreamRow> = rows.iter().filter(|row| row.threadgroups <= 1).collect();
@@ -586,22 +710,64 @@ mod harness {
         print_group_sums("single_threadgroup", &singles);
         print_group_sums("multi_threadgroup", &others);
         print_top("excess_absolute", rows, 0.0, InstreamRow::excess_ns, 40);
-        print_top("excess_ratio_isolated_at_least_2us", rows, 2000.0, InstreamRow::ratio, 40);
-        print_top("work_excess_absolute", rows, 0.0, InstreamRow::work_excess_ns, 40);
-        print_top("stamped_excess_absolute", rows, 0.0, InstreamRow::stamped_excess_ns, 40);
+        print_top(
+            "excess_ratio_isolated_at_least_2us",
+            rows,
+            2000.0,
+            InstreamRow::ratio,
+            40,
+        );
+        print_top(
+            "work_excess_absolute",
+            rows,
+            0.0,
+            InstreamRow::work_excess_ns,
+            40,
+        );
+        print_top(
+            "stamped_excess_absolute",
+            rows,
+            0.0,
+            InstreamRow::stamped_excess_ns,
+            40,
+        );
     }
 
     fn barrier_arms(live: Vec<bool>, node: Vec<bool>, slot: Vec<bool>) -> Vec<Arm> {
         let records = live.len();
         vec![
-            Arm { label: "live_tracker", replay: Replay::Barriered { flags: live, prepass_barrier: true } },
-            Arm { label: "node_keyed", replay: Replay::Barriered { flags: node, prepass_barrier: true } },
-            Arm { label: "node_and_slot_keyed", replay: Replay::Barriered { flags: slot, prepass_barrier: true } },
+            Arm {
+                label: "live_tracker",
+                replay: Replay::Barriered {
+                    flags: live,
+                    prepass_barrier: true,
+                },
+            },
+            Arm {
+                label: "node_keyed",
+                replay: Replay::Barriered {
+                    flags: node,
+                    prepass_barrier: true,
+                },
+            },
+            Arm {
+                label: "node_and_slot_keyed",
+                replay: Replay::Barriered {
+                    flags: slot,
+                    prepass_barrier: true,
+                },
+            },
             Arm {
                 label: "no_barriers",
-                replay: Replay::Barriered { flags: vec![false; records], prepass_barrier: false },
+                replay: Replay::Barriered {
+                    flags: vec![false; records],
+                    prepass_barrier: false,
+                },
             },
-            Arm { label: "serial_encoder", replay: Replay::Serial },
+            Arm {
+                label: "serial_encoder",
+                replay: Replay::Serial,
+            },
         ]
     }
 
@@ -667,7 +833,8 @@ mod harness {
             row.3 += usize::from(dispatch.threadgroup_count() <= 1);
             row.4 += usize::from(switch);
         }
-        std::fs::write(format!("{directory}/dispatch_table.csv"), table).expect("write dispatch table");
+        std::fs::write(format!("{directory}/dispatch_table.csv"), table)
+            .expect("write dispatch table");
         let mut groups = String::from(
             "kernel,dispatches,isolated_marginal_ms_sum,threadgroups_mean,single_threadgroup_dispatches,pipeline_switches",
         );
@@ -688,7 +855,8 @@ mod harness {
             }
             groups.push('\n');
         }
-        std::fs::write(format!("{directory}/group_rollup.csv"), groups).expect("write group rollup");
+        std::fs::write(format!("{directory}/group_rollup.csv"), groups)
+            .expect("write group rollup");
     }
 
     type StampRecorder = Arc<Recorder<proxima_telemetry::clock::GlobalClock>>;
@@ -734,15 +902,28 @@ mod harness {
         let text = std::fs::read_to_string(&path).expect("read DF_ISOLATED_TABLE");
         let mut lines = text.lines();
         let header: Vec<&str> = lines.next().expect("table header").split(',').collect();
-        let column = |name: &str| header.iter().position(|candidate| *candidate == name).expect("column present");
-        let (index, node, kernel, isolated) =
-            (column("index"), column("node"), column("kernel"), column("isolated_marginal_ns"));
+        let column = |name: &str| {
+            header
+                .iter()
+                .position(|candidate| *candidate == name)
+                .expect("column present")
+        };
+        let (index, node, kernel, isolated) = (
+            column("index"),
+            column("node"),
+            column("kernel"),
+            column("isolated_marginal_ns"),
+        );
         lines
             .map(|line| {
                 let fields: Vec<&str> = line.split(',').collect();
                 (
                     fields[index].parse().expect("index"),
-                    (fields[node].parse().expect("node"), fields[kernel].to_string(), fields[isolated].parse().expect("isolated")),
+                    (
+                        fields[node].parse().expect("node"),
+                        fields[kernel].to_string(),
+                        fields[isolated].parse().expect("isolated"),
+                    ),
                 )
             })
             .collect()
@@ -756,14 +937,28 @@ mod harness {
         stamps: &[Vec<Vec<[u64; 2]>>],
     ) {
         let rounds_of = |label: &str| {
-            let arm = labels.iter().position(|candidate| *candidate == label).expect("arm exists");
-            assert!(!stamps[arm].is_empty(), "N==0: arm {label} produced no stamps");
+            let arm = labels
+                .iter()
+                .position(|candidate| *candidate == label)
+                .expect("arm exists");
+            assert!(
+                !stamps[arm].is_empty(),
+                "N==0: arm {label} produced no stamps"
+            );
             &stamps[arm]
         };
         let (stamped, empty) = (rounds_of("split_stamped"), rounds_of("empty_split_stamped"));
         let cold_penalties: Vec<f64> = dispatches.iter().map(cold_penalty_ns).collect();
         let stamped_isolated: Vec<f64> = dispatches.iter().map(stamped_isolated_ns).collect();
-        let rows = instream_rows(dispatches, marginals, stamped, empty, &round4_table(), &cold_penalties, &stamped_isolated);
+        let rows = instream_rows(
+            dispatches,
+            marginals,
+            stamped,
+            empty,
+            &round4_table(),
+            &cold_penalties,
+            &stamped_isolated,
+        );
         write_instream_csv(directory, &rows);
         write_instream_groups(directory, &rows);
         write_shapes_csv(directory, dispatches);
@@ -800,8 +995,10 @@ mod harness {
                 .iter()
                 .map(|dispatch| dispatch.route_prepass_dispatches as usize)
                 .sum::<usize>();
-        let identities: BTreeSet<usize> =
-            dispatches.iter().map(CapturedDispatch::pipeline_identity).collect();
+        let identities: BTreeSet<usize> = dispatches
+            .iter()
+            .map(CapturedDispatch::pipeline_identity)
+            .collect();
         let bindings: Vec<f64> = dispatches
             .iter()
             .map(|dispatch| dispatch.buffer_binding_count() as f64)
@@ -823,10 +1020,14 @@ mod harness {
             "df capture mode={mode} step={step} records={} physical_dispatches={physical} prepass_records={prepass_records} rounds={rounds}",
             dispatches.len()
         );
-        println!("df pipeline_states distinct={} pipeline_switches_between_dispatches={switches}", identities.len());
+        println!(
+            "df pipeline_states distinct={} pipeline_switches_between_dispatches={switches}",
+            identities.len()
+        );
         if !barriers_mode {
             let (_, original_static, empty_static) =
-                CapturedDispatch::floor_pipeline_resources(&dispatches).expect("empty kernels compile");
+                CapturedDispatch::floor_pipeline_resources(&dispatches)
+                    .expect("empty kernels compile");
             println!(
                 "df static_threadgroup_bytes_over_distinct_pipelines original={original_static} empty={empty_static}"
             );
@@ -840,8 +1041,16 @@ mod harness {
             live_flags.iter().filter(|flag| **flag).count(),
             node_flags.iter().filter(|flag| **flag).count(),
             slot_flags.iter().filter(|flag| **flag).count(),
-            live_flags.iter().zip(&node_flags).filter(|(live, node)| **live && !**node).count(),
-            live_flags.iter().zip(&node_flags).filter(|(live, node)| !**live && **node).count(),
+            live_flags
+                .iter()
+                .zip(&node_flags)
+                .filter(|(live, node)| **live && !**node)
+                .count(),
+            live_flags
+                .iter()
+                .zip(&node_flags)
+                .filter(|(live, node)| !**live && **node)
+                .count(),
             longest_run(&live_flags),
             longest_run(&node_flags),
             longest_run(&slot_flags)
@@ -857,7 +1066,10 @@ mod harness {
             for arm in [&arms[0], &arms[0], &arms[1], &arms[2], &arms[3], &arms[4]] {
                 arm.replay.run(&dispatches);
                 let (last, all) = digests(&dispatches);
-                println!("df digest arm={} last_output={last:016x} all_outputs={all:016x}", arm.label);
+                println!(
+                    "df digest arm={} last_output={last:016x} all_outputs={all:016x}",
+                    arm.label
+                );
             }
         }
         let mut marginals: BTreeMap<(String, u64, u64), f64> = BTreeMap::new();
@@ -869,7 +1081,11 @@ mod harness {
         println!(
             "df isolated_marginal groups={} sum_over_dispatches_ms={:.4}",
             marginals.len(),
-            dispatches.iter().map(|dispatch| marginals[&group_key(dispatch)]).sum::<f64>() / 1e6
+            dispatches
+                .iter()
+                .map(|dispatch| marginals[&group_key(dispatch)])
+                .sum::<f64>()
+                / 1e6
         );
         let recorder = stamped_mode.then(install_stamp_recorder).flatten();
         if stamped_mode {
@@ -883,10 +1099,17 @@ mod harness {
         for round in 0..rounds {
             for offset in 0..arms.len() {
                 let arm = (round + offset) % arms.len();
-                proxima_telemetry::info!(arm = arms[arm].label, round = round as u64, "dispatch_stamp_replay");
+                proxima_telemetry::info!(
+                    arm = arms[arm].label,
+                    round = round as u64,
+                    "dispatch_stamp_replay"
+                );
                 let cell = Cell::begin();
                 let (span, round_stamps) = arms[arm].replay.run(&dispatches);
-                let stamped_span_ms = round_stamps.last().zip(round_stamps.first()).map(|(last, first)| (last[1] - first[0]) as f64 / 1e6);
+                let stamped_span_ms = round_stamps
+                    .last()
+                    .zip(round_stamps.first())
+                    .map(|(last, first)| (last[1] - first[0]) as f64 / 1e6);
                 if let Some(stamped_ms) = stamped_span_ms {
                     assert!(
                         (stamped_ms - span / 1e6).abs() <= 0.02 * span / 1e6,
@@ -923,7 +1146,14 @@ mod harness {
             );
         }
         let labels: Vec<&str> = arms.iter().map(|arm| arm.label).collect();
-        write_tables(&directory, &dispatches, [&live_flags, &node_flags, &slot_flags], &labels, &means_us, &marginals);
+        write_tables(
+            &directory,
+            &dispatches,
+            [&live_flags, &node_flags, &slot_flags],
+            &labels,
+            &means_us,
+            &marginals,
+        );
         let p50: Vec<f64> = spans.iter().map(|values| median(values)).collect();
         let line: Vec<String> = labels
             .iter()

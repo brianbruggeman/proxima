@@ -85,7 +85,10 @@ impl Shapes {
     #[cfg(test)]
     #[cfg_attr(
         not(feature = "instrument"),
-        allow(dead_code, reason = "only called by bind::repeat_nodes's tests, gated on identity-copy-alias+instrument")
+        allow(
+            dead_code,
+            reason = "only called by bind::repeat_nodes's tests, gated on identity-copy-alias+instrument"
+        )
     )]
     pub(crate) fn from_rows(rows: alloc::vec::Vec<alloc::vec::Vec<u64>>) -> Self {
         Self { extents: rows }
@@ -642,7 +645,8 @@ fn split_outer_extent(
         return Ok(None);
     };
     let width = u64::from(width.unsigned_abs());
-    let whole_tiles = resolve_extent(len, symbols)? == width && operand_extent.is_multiple_of(width);
+    let whole_tiles =
+        resolve_extent(len, symbols)? == width && operand_extent.is_multiple_of(width);
     Ok(whole_tiles.then_some((outer, operand_extent / width)))
 }
 
@@ -895,9 +899,10 @@ fn reduce_output_axis_masks(reduce: &Reduce, iteration_masks: &[u64]) -> Vec<u64
             .axes
             .iter()
             .map(|axis| match axis.terms.as_slice() {
-                [term] if term.coeff == 1 => {
-                    iteration_masks.get(term.axis as usize).copied().unwrap_or(0)
-                }
+                [term] if term.coeff == 1 => iteration_masks
+                    .get(term.axis as usize)
+                    .copied()
+                    .unwrap_or(0),
                 _ => 0,
             })
             .collect(),
@@ -1236,7 +1241,10 @@ mod tests {
 
     fn split_view_program(flat_width: u32, tile: i32, declared_tile: u32) -> (Vec<Op>, NodeId) {
         let mut program = Vec::new();
-        let source = leaf(&mut program, &[Extent::Static(2), Extent::Static(flat_width)]);
+        let source = leaf(
+            &mut program,
+            &[Extent::Static(2), Extent::Static(flat_width)],
+        );
         let split_map = IndexMap::Affine(map::IndexPattern {
             iter_rank: 3,
             axes: alloc::vec![
@@ -1284,7 +1292,10 @@ mod tests {
 
         let error = infer(&program, &[]).expect_err("141 is not a whole number of 4-wide tiles");
 
-        assert!(matches!(error, TensorError::UnconstrainedDim { dim: 1, .. }), "{error}");
+        assert!(
+            matches!(error, TensorError::UnconstrainedDim { dim: 1, .. }),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1293,7 +1304,10 @@ mod tests {
 
         let error = infer(&program, &[]).expect_err("len 2 does not tile a stride of 4");
 
-        assert!(matches!(error, TensorError::UnconstrainedDim { dim: 1, .. }), "{error}");
+        assert!(
+            matches!(error, TensorError::UnconstrainedDim { dim: 1, .. }),
+            "{error}"
+        );
     }
 
     /// `len` states a fact, not a wish: declaring a length wider than the
@@ -2486,8 +2500,16 @@ mod tests {
     fn matmul_program_propagates_the_symbolic_operands_mask_through_reduce() {
         let (program, product, sum) = matmul_program();
         let masks = symbol_dependency_masks(&program);
-        assert_eq!(masks[product.0 as usize], 1 << 0, "elementwise inherits lhs's symbol 0");
-        assert_eq!(masks[sum.0 as usize], 1 << 0, "reduce inherits its operand's mask");
+        assert_eq!(
+            masks[product.0 as usize],
+            1 << 0,
+            "elementwise inherits lhs's symbol 0"
+        );
+        assert_eq!(
+            masks[sum.0 as usize],
+            1 << 0,
+            "reduce inherits its operand's mask"
+        );
     }
 
     #[test]
@@ -2534,10 +2556,7 @@ mod tests {
     #[test]
     fn a_keep_reduce_fold_that_contracts_a_symbolic_axis_drops_it_from_the_output_mask() {
         let mut program = Vec::new();
-        let matrix = leaf(
-            &mut program,
-            &[Extent::Static(4), Extent::Symbolic(0)],
-        );
+        let matrix = leaf(&mut program, &[Extent::Static(4), Extent::Symbolic(0)]);
         let sum = append(
             &mut program,
             Op::Reduce(Reduce {

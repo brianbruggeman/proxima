@@ -115,7 +115,10 @@ fn bit_exact_policy_keeps_the_serial_fold_and_never_batches() {
     assert!(source.contains("for (long r = 0; r < u.reduction_total; r++)"));
 }
 
-#[cfg(all(feature = "reduce-epilogue-fusion", feature = "metal-wide-cooperative-reduce"))]
+#[cfg(all(
+    feature = "reduce-epilogue-fusion",
+    feature = "metal-wide-cooperative-reduce"
+))]
 pub(super) mod normalization_rows {
     use super::*;
 
@@ -134,22 +137,31 @@ pub(super) mod normalization_rows {
                 },
             )
         };
-        let row = input(&mut program, vec![Extent::Static(1), Extent::Static(width)], "x");
+        let row = input(
+            &mut program,
+            vec![Extent::Static(1), Extent::Static(width)],
+            "x",
+        );
         let gamma = input(&mut program, vec![Extent::Static(width)], "gamma");
         let inverse_width = input(&mut program, Vec::new(), "inv_dim");
         let epsilon = input(&mut program, Vec::new(), "eps");
-        let elementwise = |program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, IndexMap)>| {
-            append(
-                program,
-                Op::Elementwise {
-                    dtype: DType::Float32,
-                    body,
-                    operands,
-                    name: None,
-                },
-            )
-        };
-        let squared = elementwise(&mut program, ScalarOp::Multiply, vec![(row, full()), (row, full())]);
+        let elementwise =
+            |program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, IndexMap)>| {
+                append(
+                    program,
+                    Op::Elementwise {
+                        dtype: DType::Float32,
+                        body,
+                        operands,
+                        name: None,
+                    },
+                )
+            };
+        let squared = elementwise(
+            &mut program,
+            ScalarOp::Multiply,
+            vec![(row, full()), (row, full())],
+        );
         let sum_squares = append(
             &mut program,
             Op::Reduce(Reduce {
@@ -168,13 +180,33 @@ pub(super) mod normalization_rows {
             ScalarOp::Multiply,
             vec![(sum_squares, keep_row()), (inverse_width, scalar_row())],
         );
-        let shifted = elementwise(&mut program, ScalarOp::Add, vec![(mean, keep_row()), (epsilon, scalar_row())]);
-        let root_mean_square = elementwise(&mut program, ScalarOp::SquareRoot, vec![(shifted, keep_row())]);
-        let inverse = elementwise(&mut program, ScalarOp::Reciprocal, vec![(root_mean_square, keep_row())]);
+        let shifted = elementwise(
+            &mut program,
+            ScalarOp::Add,
+            vec![(mean, keep_row()), (epsilon, scalar_row())],
+        );
+        let root_mean_square = elementwise(
+            &mut program,
+            ScalarOp::SquareRoot,
+            vec![(shifted, keep_row())],
+        );
+        let inverse = elementwise(
+            &mut program,
+            ScalarOp::Reciprocal,
+            vec![(root_mean_square, keep_row())],
+        );
         let broadcast_row = IndexMap::Affine(map::projection(2, &[0]));
-        let normed = elementwise(&mut program, ScalarOp::Multiply, vec![(row, full()), (inverse, broadcast_row)]);
+        let normed = elementwise(
+            &mut program,
+            ScalarOp::Multiply,
+            vec![(row, full()), (inverse, broadcast_row)],
+        );
         let broadcast_gamma = IndexMap::Affine(map::projection(2, &[1]));
-        let scaled = elementwise(&mut program, ScalarOp::Multiply, vec![(normed, full()), (gamma, broadcast_gamma)]);
+        let scaled = elementwise(
+            &mut program,
+            ScalarOp::Multiply,
+            vec![(normed, full()), (gamma, broadcast_gamma)],
+        );
         let shapes = infer(&program, &[]).expect("rmsnorm infers");
         bind(&program, &shapes, &[scaled], NumericPolicy::default())
             .expect("rmsnorm lowers")
@@ -184,9 +216,13 @@ pub(super) mod normalization_rows {
     }
 
     fn emitted(width: u32) -> String {
-        emit(&rmsnorm_over_row(width), &BTreeMap::new(), NumericPolicy::default())
-            .expect("normalization row emits")
-            .source
+        emit(
+            &rmsnorm_over_row(width),
+            &BTreeMap::new(),
+            NumericPolicy::default(),
+        )
+        .expect("normalization row emits")
+        .source
     }
 
     fn dispatch_width(width: u32) -> u64 {
@@ -211,7 +247,10 @@ pub(super) mod normalization_rows {
     fn row_of_one_simdgroup_keeps_the_single_simd_fold() {
         let source = emitted(128);
         assert_eq!(dispatch_width(128), 32);
-        assert!(!source.contains("partials["), "one simdgroup has no partials to combine:\n{source}");
+        assert!(
+            !source.contains("partials["),
+            "one simdgroup has no partials to combine:\n{source}"
+        );
         assert!(!source.contains("threadgroup_barrier"));
     }
 
@@ -224,7 +263,11 @@ pub(super) mod normalization_rows {
             assert_eq!(source.matches("threadgroup_barrier(").count(), 2);
             return;
         }
-        assert_eq!(source.matches("threadgroup_barrier(").count(), 1, "{source}");
+        assert_eq!(
+            source.matches("threadgroup_barrier(").count(),
+            1,
+            "{source}"
+        );
         assert!(
             source.contains(&format!(
                 "float reduced = simd_sum((lane % 32u) < {simdgroups}u ? partials[lane % 32u] : (float)0.0f);"
@@ -240,9 +283,15 @@ pub(super) mod normalization_rows {
             return;
         }
         let source = emitted(1536);
-        let publish = source.find("partials[lane / 32u] = partial;").expect("lane 0 of each simdgroup publishes");
-        let barrier = source.find("threadgroup_barrier(").expect("a barrier orders the publish");
-        let combine = source.find("partials[lane % 32u]").expect("every lane reads one partial");
+        let publish = source
+            .find("partials[lane / 32u] = partial;")
+            .expect("lane 0 of each simdgroup publishes");
+        let barrier = source
+            .find("threadgroup_barrier(")
+            .expect("a barrier orders the publish");
+        let combine = source
+            .find("partials[lane % 32u]")
+            .expect("every lane reads one partial");
         assert!(publish < barrier && barrier < combine, "{source}");
     }
 }

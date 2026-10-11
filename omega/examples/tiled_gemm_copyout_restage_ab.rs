@@ -29,7 +29,9 @@ fn main() -> anyhow::Result<()> {
     return run();
     #[cfg(not(all(feature = "metal", feature = "metal-tiled-gemm", target_os = "macos")))]
     {
-        println!("tiled_gemm_copyout_restage_ab requires --features metal,metal-tiled-gemm on macOS");
+        println!(
+            "tiled_gemm_copyout_restage_ab requires --features metal,metal-tiled-gemm on macOS"
+        );
         Ok(())
     }
 }
@@ -55,9 +57,8 @@ fn run() -> anyhow::Result<()> {
     use proxima_gguf::pipe::ParsedGguf;
     use proxima_gguf::types::GgmlType;
     use proxima_tensor::{
-        DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce,
-        ReduceInit, ScalarOp, append, bind, correct_packed_matmul_layouts, infer, projection,
-        test_support::Lcg,
+        DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp,
+        append, bind, correct_packed_matmul_layouts, infer, projection, test_support::Lcg,
     };
 
     const REAL_GEMMA4_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
@@ -90,7 +91,9 @@ fn run() -> anyhow::Result<()> {
 
     // -- shared plumbing, restated per omega/tests/*.rs convention --
 
-    fn real_gguf_header(path: &std::path::Path) -> anyhow::Result<Option<(ParsedGguf, u64, std::fs::File)>> {
+    fn real_gguf_header(
+        path: &std::path::Path,
+    ) -> anyhow::Result<Option<(ParsedGguf, u64, std::fs::File)>> {
         let Ok(mut file) = std::fs::File::open(path) else {
             return Ok(None);
         };
@@ -114,13 +117,18 @@ fn run() -> anyhow::Result<()> {
                         GgufEvent::Header { version: value, .. } => version = Some(value),
                         GgufEvent::Metadata { key, value } => metadata.push((key, value)),
                         GgufEvent::Tensor(tensor) => tensors.push(tensor),
-                        GgufEvent::Complete { data_offset, alignment } => {
+                        GgufEvent::Complete {
+                            data_offset,
+                            alignment,
+                        } => {
                             completion = Some((data_offset, alignment));
                         }
                     }
                 }
                 if let (Some(version), Some((data_offset, alignment))) = (version, completion) {
-                    parser.finish().context("parser reports complete and clean")?;
+                    parser
+                        .finish()
+                        .context("parser reports complete and clean")?;
                     return Ok(Some((
                         ParsedGguf {
                             version,
@@ -154,14 +162,23 @@ fn run() -> anyhow::Result<()> {
             .iter()
             .find(|candidate| candidate.name == name)
             .with_context(|| format!("{name} present in the real gemma4-E2B checkpoint"))?;
-        eprintln!("real_tensor_bytes name={name} dims={:?} ggml_type={:?}", tensor.dims, tensor.ggml_type);
-        anyhow::ensure!(tensor.ggml_type == GgmlType::Q4_0, "{name} is Q4_0 in this checkpoint, found {:?}", tensor.ggml_type);
+        eprintln!(
+            "real_tensor_bytes name={name} dims={:?} ggml_type={:?}",
+            tensor.dims, tensor.ggml_type
+        );
+        anyhow::ensure!(
+            tensor.ggml_type == GgmlType::Q4_0,
+            "{name} is Q4_0 in this checkpoint, found {:?}",
+            tensor.ggml_type
+        );
         let range = parsed
             .tensor_data_range(tensor, file_len)
             .context("tensor byte range within file bounds")?;
         let mut buf = vec![0u8; (range.end - range.start) as usize];
-        file.seek(SeekFrom::Start(range.start)).context("seek to tensor data")?;
-        file.read_exact(&mut buf).context("read exact tensor byte range")?;
+        file.seek(SeekFrom::Start(range.start))
+            .context("seek to tensor data")?;
+        file.read_exact(&mut buf)
+            .context("read exact tensor byte range")?;
         Ok(buf)
     }
 
@@ -171,7 +188,10 @@ fn run() -> anyhow::Result<()> {
     }
 
     fn f32_bytes(values: &[f32]) -> Vec<u8> {
-        values.iter().flat_map(|value| value.to_le_bytes()).collect()
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
     }
 
     fn compile_pipeline(
@@ -185,14 +205,21 @@ fn run() -> anyhow::Result<()> {
         let ns_source = NSString::from_str(source);
         let library = device
             .newLibraryWithSource_options_error(&ns_source, Some(&options))
-            .map_err(|error| anyhow::anyhow!("compiles `{entry}`: {}", error.localizedDescription()))?;
+            .map_err(|error| {
+                anyhow::anyhow!("compiles `{entry}`: {}", error.localizedDescription())
+            })?;
         let ns_entry = NSString::from_str(entry);
         let function = library
             .newFunctionWithName(&ns_entry)
             .with_context(|| format!("entry `{entry}` present in its own compiled library"))?;
         device
             .newComputePipelineStateWithFunction_error(&function)
-            .map_err(|error| anyhow::anyhow!("creates the pipeline for `{entry}`: {}", error.localizedDescription()))
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "creates the pipeline for `{entry}`: {}",
+                    error.localizedDescription()
+                )
+            })
     }
 
     fn shared_buffer_from_bytes(
@@ -202,11 +229,20 @@ fn run() -> anyhow::Result<()> {
         // SAFETY: `bytes` outlives this call; `newBufferWithBytes_length_options`
         // copies once and never retains the pointer.
         let pointer = unsafe { NonNull::new_unchecked(bytes.as_ptr() as *mut c_void) };
-        unsafe { device.newBufferWithBytes_length_options(pointer, bytes.len(), MTLResourceOptions::StorageModeShared) }
-            .context("device allocates a fresh shared buffer")
+        unsafe {
+            device.newBufferWithBytes_length_options(
+                pointer,
+                bytes.len(),
+                MTLResourceOptions::StorageModeShared,
+            )
+        }
+        .context("device allocates a fresh shared buffer")
     }
 
-    fn zeroed_buffer(device: &ProtocolObject<dyn MTLDevice>, len: usize) -> anyhow::Result<Retained<ProtocolObject<dyn MTLBuffer>>> {
+    fn zeroed_buffer(
+        device: &ProtocolObject<dyn MTLDevice>,
+        len: usize,
+    ) -> anyhow::Result<Retained<ProtocolObject<dyn MTLBuffer>>> {
         shared_buffer_from_bytes(device, &vec![0u8; len])
     }
 
@@ -233,7 +269,9 @@ fn run() -> anyhow::Result<()> {
         threadgroup_width: usize,
     ) -> anyhow::Result<f64> {
         let command_buffer = queue.commandBuffer().context("command buffer")?;
-        let encoder = command_buffer.computeCommandEncoder().context("compute encoder")?;
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .context("compute encoder")?;
         encoder.setComputePipelineState(pipeline);
         for (index, binding) in bindings.iter().enumerate() {
             let buffer: &ProtocolObject<dyn MTLBuffer> = match *binding {
@@ -241,12 +279,22 @@ fn run() -> anyhow::Result<()> {
                 omega::Binding::Input(id) if id == other_node => other,
                 omega::Binding::Output(_) => output,
                 omega::Binding::Uniforms => uniform,
-                other_binding => anyhow::bail!("unexpected binding {other_binding:?} at index {index}"),
+                other_binding => {
+                    anyhow::bail!("unexpected binding {other_binding:?} at index {index}")
+                }
             };
             unsafe { encoder.setBuffer_offset_atIndex(Some(buffer), 0, index) };
         }
-        let grid = MTLSize { width: grid_threads as usize, height: 1, depth: 1 };
-        let threadgroup = MTLSize { width: threadgroup_width, height: 1, depth: 1 };
+        let grid = MTLSize {
+            width: grid_threads as usize,
+            height: 1,
+            depth: 1,
+        };
+        let threadgroup = MTLSize {
+            width: threadgroup_width,
+            height: 1,
+            depth: 1,
+        };
         encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
         encoder.endEncoding();
         command_buffer.commit();
@@ -262,9 +310,17 @@ fn run() -> anyhow::Result<()> {
 
     fn stats(samples: &[f64]) -> Stats {
         let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-        let variance = samples.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+        let variance = samples
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / samples.len() as f64;
         let cov_pct = (variance.sqrt() / mean) * 100.0;
-        Stats { mean, cov_pct, samples: samples.to_vec() }
+        Stats {
+            mean,
+            cov_pct,
+            samples: samples.to_vec(),
+        }
     }
 
     // -- copy-out splice: parse the current renderer's own emitted text and
@@ -283,7 +339,9 @@ fn run() -> anyhow::Result<()> {
             .1;
         Ok(after
             .split_once(suffix)
-            .with_context(|| format!("suffix `{suffix}` present after prefix `{prefix}` in `{text}`"))?
+            .with_context(|| {
+                format!("suffix `{suffix}` present after prefix `{prefix}` in `{text}`")
+            })?
             .0)
     }
 
@@ -344,7 +402,9 @@ fn run() -> anyhow::Result<()> {
         let loop_idx = after_barrier + loop_rel;
         let pre_loop_setup = &source[after_barrier..loop_idx];
 
-        let if_rel = source[loop_idx..].find(IF_LINE).context("bounds-check if present")?;
+        let if_rel = source[loop_idx..]
+            .find(IF_LINE)
+            .context("bounds-check if present")?;
         let if_idx = loop_idx + if_rel;
         let after_if_open = if_idx + IF_LINE.len();
         let shared_loop_header = &source[loop_idx..after_if_open];
@@ -365,15 +425,21 @@ fn run() -> anyhow::Result<()> {
 
         let mut old_inner = String::new();
         old_inner.push_str(&format!("            long coord[{rank}];\n"));
-        old_inner.push_str(&format!("            for (int d = 0; d < {rank}; ++d) {{ coord[d] = 0; }}\n"));
+        old_inner.push_str(&format!(
+            "            for (int d = 0; d < {rank}; ++d) {{ coord[d] = 0; }}\n"
+        ));
         old_inner.push_str(&format!("            coord[{feature_axis}] = o_feat;\n"));
         old_inner.push_str(&format!("            coord[{token_axis}] = o_tok;\n"));
         for axis in &batch_axes {
-            old_inner.push_str(&format!("            coord[{axis}] = dense_batch_coord_{axis};\n"));
+            old_inner.push_str(&format!(
+                "            coord[{axis}] = dense_batch_coord_{axis};\n"
+            ));
         }
         old_inner.push_str("            long out_offset = u.out_base;\n");
         for dim in 0..rank {
-            old_inner.push_str(&format!("            out_offset += coord[{dim}] * u.out_strides[{dim}];\n"));
+            old_inner.push_str(&format!(
+                "            out_offset += coord[{dim}] * u.out_strides[{dim}];\n"
+            ));
         }
 
         let old_source = format!(
@@ -383,19 +449,36 @@ fn run() -> anyhow::Result<()> {
             old_inner,
             &source[epi_idx..],
         );
-        Ok((old_source, RestageParams { rank, feature_axis, token_axis, batch_axes }))
+        Ok((
+            old_source,
+            RestageParams {
+                rank,
+                feature_axis,
+                token_axis,
+                batch_axes,
+            },
+        ))
     }
 
     // -- family A ("score", batch-innermost): restates
     // omega/tests/dense_batched_direct_store_parity.rs::dense_batched_batch_innermost_program --
 
-    fn family_a_program(token: u32, reduce_len: u32, feature: u32, batch: u32) -> (Vec<Op>, NodeId, NodeId, NodeId) {
+    fn family_a_program(
+        token: u32,
+        reduce_len: u32,
+        feature: u32,
+        batch: u32,
+    ) -> (Vec<Op>, NodeId, NodeId, NodeId) {
         let mut program = Vec::new();
         let weight = append(
             &mut program,
             Op::Input {
                 dtype: DType::Float32,
-                shape: vec![Extent::Static(feature), Extent::Static(batch), Extent::Static(reduce_len)],
+                shape: vec![
+                    Extent::Static(feature),
+                    Extent::Static(batch),
+                    Extent::Static(reduce_len),
+                ],
                 name: None,
             },
         );
@@ -403,7 +486,11 @@ fn run() -> anyhow::Result<()> {
             &mut program,
             Op::Input {
                 dtype: DType::Float32,
-                shape: vec![Extent::Static(token), Extent::Static(batch), Extent::Static(reduce_len)],
+                shape: vec![
+                    Extent::Static(token),
+                    Extent::Static(batch),
+                    Extent::Static(reduce_len),
+                ],
                 name: None,
             },
         );
@@ -438,13 +525,22 @@ fn run() -> anyhow::Result<()> {
     // -- family B ("attended"/P.V, feature-fastest): restates
     // omega/tests/dense_batched_direct_store_parity.rs::dense_batched_feature_fastest_program --
 
-    fn family_b_program(token: u32, reduce_len: u32, batch: u32, feature: u32) -> (Vec<Op>, NodeId, NodeId, NodeId) {
+    fn family_b_program(
+        token: u32,
+        reduce_len: u32,
+        batch: u32,
+        feature: u32,
+    ) -> (Vec<Op>, NodeId, NodeId, NodeId) {
         let mut program = Vec::new();
         let weight = append(
             &mut program,
             Op::Input {
                 dtype: DType::Float32,
-                shape: vec![Extent::Static(feature), Extent::Static(batch), Extent::Static(reduce_len)],
+                shape: vec![
+                    Extent::Static(feature),
+                    Extent::Static(batch),
+                    Extent::Static(reduce_len),
+                ],
                 name: None,
             },
         );
@@ -452,7 +548,11 @@ fn run() -> anyhow::Result<()> {
             &mut program,
             Op::Input {
                 dtype: DType::Float32,
-                shape: vec![Extent::Static(token), Extent::Static(batch), Extent::Static(reduce_len)],
+                shape: vec![
+                    Extent::Static(token),
+                    Extent::Static(batch),
+                    Extent::Static(reduce_len),
+                ],
                 name: None,
             },
         );
@@ -489,7 +589,11 @@ fn run() -> anyhow::Result<()> {
     // out_dim=6144 (not the synthetic 12288 the brief's own cited figure
     // used) --
 
-    fn q4_0_gate_program(tokens: u32, embedding: u32, feed_forward: u32) -> (Vec<Op>, NodeId, NodeId, NodeId) {
+    fn q4_0_gate_program(
+        tokens: u32,
+        embedding: u32,
+        feed_forward: u32,
+    ) -> (Vec<Op>, NodeId, NodeId, NodeId) {
         let mut program = Vec::new();
         let weight = append(
             &mut program,
@@ -538,7 +642,9 @@ fn run() -> anyhow::Result<()> {
     // -- disclose foreign load immediately before the timed run, matching
     // the convention in reduction_literal_prefill_speed_probe.rs and
     // tiled_gemm_ggml_incumbent_arms.rs --
-    if let Ok(output) = std::process::Command::new("pgrep").args(["-fl", "cargo|rustc"]).output()
+    if let Ok(output) = std::process::Command::new("pgrep")
+        .args(["-fl", "cargo|rustc"])
+        .output()
         && !output.stdout.is_empty()
     {
         eprintln!(
@@ -578,15 +684,22 @@ fn run() -> anyhow::Result<()> {
     // ==================== ARM 1: family A, score, weather shape ====================
     {
         let (token, reduce_len, feature, batch) = (563u32, 128u32, 576u32, 8u32);
-        let (program, weight_node, other_node, sum) = family_a_program(token, reduce_len, feature, batch);
+        let (program, weight_node, other_node, sum) =
+            family_a_program(token, reduce_len, feature, batch);
         let shapes = infer(&program, &[]).context("family A infers")?;
-        let bound_ops = bind(&program, &shapes, &[sum], NumericPolicy::default()).context("family A binds")?;
-        let bound = bound_ops.into_iter().find(|op| op.node == sum).context("family A fused reduce present")?;
+        let bound_ops =
+            bind(&program, &shapes, &[sum], NumericPolicy::default()).context("family A binds")?;
+        let bound = bound_ops
+            .into_iter()
+            .find(|op| op.node == sum)
+            .context("family A fused reduce present")?;
         let packed_operands = omega::PackedOperands::new();
-        let uniform_bytes = omega::metal::pack_uniforms_for(&bound, NumericPolicy::default()).context("family A uniforms pack")?;
+        let uniform_bytes = omega::metal::pack_uniforms_for(&bound, NumericPolicy::default())
+            .context("family A uniforms pack")?;
 
         let kernel_new = temp_env::with_var("PROXIMA_TILED_GEMM_DENSE", Some("1"), || {
-            omega::emit(&bound, &packed_operands, NumericPolicy::default()).context("family A new-copyout kernel emits")
+            omega::emit(&bound, &packed_operands, NumericPolicy::default())
+                .context("family A new-copyout kernel emits")
         })?;
         let (old_source, params) = render_old_copyout(&kernel_new.source)?;
         anyhow::ensure!(
@@ -619,13 +732,19 @@ fn run() -> anyhow::Result<()> {
             grid_threads: kernel_new.grid.threads,
             element_count: (token * feature * batch) as usize,
         });
-        let output_len = (token as usize) * (feature as usize) * (batch as usize) * size_of::<f32>();
+        let output_len =
+            (token as usize) * (feature as usize) * (batch as usize) * size_of::<f32>();
         let new_label = "A_new_copyout".to_string();
         let old_label = "A_old_copyout".to_string();
         pipelines.push(PipelineEntry {
             label: new_label.clone(),
             group: group_index,
-            pipeline: compile_pipeline(device_ref, &kernel_new.source, &kernel_new.entry, math_mode)?,
+            pipeline: compile_pipeline(
+                device_ref,
+                &kernel_new.source,
+                &kernel_new.entry,
+                math_mode,
+            )?,
             output_buffer: zeroed_buffer(device_ref, output_len)?,
         });
         pipelines.push(PipelineEntry {
@@ -640,23 +759,36 @@ fn run() -> anyhow::Result<()> {
     // ==================== ARM 2: family B, attended/P.V, weather shape, DIRECT_STORE on/off ====================
     {
         let (token, reduce_len, batch, feature) = (563u32, 32u32, 8u32, 256u32);
-        let (program, weight_node, other_node, sum) = family_b_program(token, reduce_len, batch, feature);
+        let (program, weight_node, other_node, sum) =
+            family_b_program(token, reduce_len, batch, feature);
         let shapes = infer(&program, &[]).context("family B infers")?;
-        let bound_ops = bind(&program, &shapes, &[sum], NumericPolicy::default()).context("family B binds")?;
-        let bound = bound_ops.into_iter().find(|op| op.node == sum).context("family B fused reduce present")?;
+        let bound_ops =
+            bind(&program, &shapes, &[sum], NumericPolicy::default()).context("family B binds")?;
+        let bound = bound_ops
+            .into_iter()
+            .find(|op| op.node == sum)
+            .context("family B fused reduce present")?;
         let packed_operands = omega::PackedOperands::new();
-        let uniform_bytes = omega::metal::pack_uniforms_for(&bound, NumericPolicy::default()).context("family B uniforms pack")?;
+        let uniform_bytes = omega::metal::pack_uniforms_for(&bound, NumericPolicy::default())
+            .context("family B uniforms pack")?;
 
         let device_ref = &device;
         let weight_bytes = f32_bytes(&random_f32(12001, (feature * batch * reduce_len) as usize));
         let other_bytes = f32_bytes(&random_f32(12502, (token * batch * reduce_len) as usize));
         let group_index = groups.len();
-        let output_len = (token as usize) * (batch as usize) * (feature as usize) * size_of::<f32>();
+        let output_len =
+            (token as usize) * (batch as usize) * (feature as usize) * size_of::<f32>();
 
         for (dstore_tag, dstore_env) in [("dstore0", None::<&str>), ("dstore1", Some("1"))] {
             let kernel_new = temp_env::with_vars(
-                [("PROXIMA_TILED_GEMM_DENSE", Some("1")), ("PROXIMA_TILED_GEMM_DIRECT_STORE", dstore_env)],
-                || omega::emit(&bound, &packed_operands, NumericPolicy::default()).context("family B new-copyout kernel emits"),
+                [
+                    ("PROXIMA_TILED_GEMM_DENSE", Some("1")),
+                    ("PROXIMA_TILED_GEMM_DIRECT_STORE", dstore_env),
+                ],
+                || {
+                    omega::emit(&bound, &packed_operands, NumericPolicy::default())
+                        .context("family B new-copyout kernel emits")
+                },
             )?;
             let (old_source, params) = render_old_copyout(&kernel_new.source)?;
             println!(
@@ -682,7 +814,12 @@ fn run() -> anyhow::Result<()> {
             pipelines.push(PipelineEntry {
                 label: new_label.clone(),
                 group: group_index,
-                pipeline: compile_pipeline(device_ref, &kernel_new.source, &kernel_new.entry, math_mode)?,
+                pipeline: compile_pipeline(
+                    device_ref,
+                    &kernel_new.source,
+                    &kernel_new.entry,
+                    math_mode,
+                )?,
                 output_buffer: zeroed_buffer(device_ref, output_len)?,
             });
             pipelines.push(PipelineEntry {
@@ -701,32 +838,45 @@ fn run() -> anyhow::Result<()> {
         const EMBEDDING: u32 = 1536;
         const FEED_FORWARD: u32 = 6144;
 
-        let (parsed, file_len, mut file) = real_gguf_header(std::path::Path::new(REAL_GEMMA4_GGUF_PATH))?
-            .context("real gemma4-E2B gguf header parses")?;
-        let weight_bytes = real_tensor_bytes(&mut file, &parsed, file_len, "blk.0.ffn_gate.weight")?;
+        let (parsed, file_len, mut file) =
+            real_gguf_header(std::path::Path::new(REAL_GEMMA4_GGUF_PATH))?
+                .context("real gemma4-E2B gguf header parses")?;
+        let weight_bytes =
+            real_tensor_bytes(&mut file, &parsed, file_len, "blk.0.ffn_gate.weight")?;
         let activation_bytes = f32_bytes(&random_f32(97, (TOKENS as usize) * (EMBEDDING as usize)));
 
-        let (program, weight_node, activation_node, gate_node) = q4_0_gate_program(TOKENS, EMBEDDING, FEED_FORWARD);
+        let (program, weight_node, activation_node, gate_node) =
+            q4_0_gate_program(TOKENS, EMBEDDING, FEED_FORWARD);
         let numeric_policy = NumericPolicy::llama_relaxed();
         let shapes = infer(&program, &[]).context("gate program infers")?;
-        let mut bound_ops = bind(&program, &shapes, &[gate_node], numeric_policy).context("gate program binds")?;
-        let packed_node_set: std::collections::BTreeSet<NodeId> = [weight_node].into_iter().collect();
+        let mut bound_ops =
+            bind(&program, &shapes, &[gate_node], numeric_policy).context("gate program binds")?;
+        let packed_node_set: std::collections::BTreeSet<NodeId> =
+            [weight_node].into_iter().collect();
         correct_packed_matmul_layouts(&mut bound_ops, &packed_node_set);
-        let bound = bound_ops.into_iter().find(|op| op.node == gate_node).context("gate fused reduce present")?;
-        let packed_operands: omega::PackedOperands = BTreeMap::from([(weight_node, omega::Codec::Q4_0)]);
-        let uniform_bytes = omega::metal::pack_uniforms_for(&bound, numeric_policy).context("Q4_0 uniforms pack")?;
+        let bound = bound_ops
+            .into_iter()
+            .find(|op| op.node == gate_node)
+            .context("gate fused reduce present")?;
+        let packed_operands: omega::PackedOperands =
+            BTreeMap::from([(weight_node, omega::Codec::Q4_0)]);
+        let uniform_bytes = omega::metal::pack_uniforms_for(&bound, numeric_policy)
+            .context("Q4_0 uniforms pack")?;
 
         // -- golden self-check: base kernel (no WWS, no DSTORE) must
         // reconstruct byte-identical to GOLDEN_COPYOUT_TAIL, captured at
         // this exact shape before the copy-out rewrite (ROW C4.13) landed --
-        let kernel_base = omega::emit(&bound, &packed_operands, numeric_policy).context("Q4_0 base kernel emits")?;
+        let kernel_base = omega::emit(&bound, &packed_operands, numeric_policy)
+            .context("Q4_0 base kernel emits")?;
         let (reconstructed_old, base_params) = render_old_copyout(&kernel_base.source)?;
         // Only the copy-out TAIL (from the last threadgroup barrier onward)
         // is what the rewrite touched; other uncommitted lever work
         // (grid_threads, WIDE_WEIGHT_STAGE plumbing, etc.) has touched the
         // kernel body text ABOVE this point even with every switch off, so
         // the golden compare is scoped to the tail this splice replaces.
-        let reconstructed_tail = &reconstructed_old[reconstructed_old.rfind(BARRIER).context("reconstructed tail has a barrier")?..];
+        let reconstructed_tail = &reconstructed_old[reconstructed_old
+            .rfind(BARRIER)
+            .context("reconstructed tail has a barrier")?..];
         let reconstructed_tail_trimmed = reconstructed_tail.trim_end();
         let golden_copyout_tail_trimmed = GOLDEN_COPYOUT_TAIL.trim_end();
         anyhow::ensure!(
@@ -735,7 +885,10 @@ fn run() -> anyhow::Result<()> {
         );
         println!(
             "GOLDEN_CHECK reconstructed_old_matches_live_source_a=true rank={} feature_axis={} token_axis={} batch_axes={:?}",
-            base_params.rank, base_params.feature_axis, base_params.token_axis, base_params.batch_axes
+            base_params.rank,
+            base_params.feature_axis,
+            base_params.token_axis,
+            base_params.batch_axes
         );
 
         let device_ref = &device;
@@ -744,8 +897,14 @@ fn run() -> anyhow::Result<()> {
 
         for (dstore_tag, dstore_env) in [("dstore0", None::<&str>), ("dstore1", Some("1"))] {
             let kernel_new = temp_env::with_vars(
-                [("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("1")), ("PROXIMA_TILED_GEMM_DIRECT_STORE", dstore_env)],
-                || omega::emit(&bound, &packed_operands, numeric_policy).context("Q4_0 new-copyout kernel emits"),
+                [
+                    ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("1")),
+                    ("PROXIMA_TILED_GEMM_DIRECT_STORE", dstore_env),
+                ],
+                || {
+                    omega::emit(&bound, &packed_operands, numeric_policy)
+                        .context("Q4_0 new-copyout kernel emits")
+                },
             )?;
             let (old_source, params) = render_old_copyout(&kernel_new.source)?;
             println!(
@@ -771,7 +930,12 @@ fn run() -> anyhow::Result<()> {
             pipelines.push(PipelineEntry {
                 label: new_label.clone(),
                 group: group_index,
-                pipeline: compile_pipeline(device_ref, &kernel_new.source, &kernel_new.entry, math_mode)?,
+                pipeline: compile_pipeline(
+                    device_ref,
+                    &kernel_new.source,
+                    &kernel_new.entry,
+                    math_mode,
+                )?,
                 output_buffer: zeroed_buffer(device_ref, output_len)?,
             });
             pipelines.push(PipelineEntry {
@@ -784,7 +948,11 @@ fn run() -> anyhow::Result<()> {
         }
     }
 
-    println!("PIPELINES built={} groups={}", pipelines.len(), groups.len());
+    println!(
+        "PIPELINES built={} groups={}",
+        pipelines.len(),
+        groups.len()
+    );
 
     // -- correctness gate: old == new, 0 differing words, BEFORE timing --
 
@@ -835,8 +1003,7 @@ fn run() -> anyhow::Result<()> {
             .count();
         println!(
             "VALIDATE op={} new={new_label} old={old_label} differing_words={differing} total={}",
-            group.op_label,
-            group.element_count
+            group.op_label, group.element_count
         );
         anyhow::ensure!(
             differing == 0,
@@ -869,7 +1036,10 @@ fn run() -> anyhow::Result<()> {
         }
     }
 
-    println!("STEADY_STATE iters={} warmup_dropped={WARMUP} clock=GPUStartTime/GPUEndTime", ITERS - WARMUP);
+    println!(
+        "STEADY_STATE iters={} warmup_dropped={WARMUP} clock=GPUStartTime/GPUEndTime",
+        ITERS - WARMUP
+    );
     for (group_index, new_label, old_label) in &parity_pairs {
         let group = &groups[*group_index];
         let new_index = find_entry(new_label)?;
@@ -878,11 +1048,25 @@ fn run() -> anyhow::Result<()> {
         let old_stats = stats(&samples[old_index]);
         println!(
             "ARM op={} new_label={new_label} new_mean_ms={:.5} new_cov_pct={:.2} new_samples={:?}",
-            group.op_label, new_stats.mean, new_stats.cov_pct, new_stats.samples.iter().map(|value| format!("{value:.4}")).collect::<Vec<_>>()
+            group.op_label,
+            new_stats.mean,
+            new_stats.cov_pct,
+            new_stats
+                .samples
+                .iter()
+                .map(|value| format!("{value:.4}"))
+                .collect::<Vec<_>>()
         );
         println!(
             "ARM op={} old_label={old_label} old_mean_ms={:.5} old_cov_pct={:.2} old_samples={:?}",
-            group.op_label, old_stats.mean, old_stats.cov_pct, old_stats.samples.iter().map(|value| format!("{value:.4}")).collect::<Vec<_>>()
+            group.op_label,
+            old_stats.mean,
+            old_stats.cov_pct,
+            old_stats
+                .samples
+                .iter()
+                .map(|value| format!("{value:.4}"))
+                .collect::<Vec<_>>()
         );
         println!(
             "RATIO op={} pair={new_label}_vs_{old_label} old_over_new={:.4} new_over_old={:.4}",

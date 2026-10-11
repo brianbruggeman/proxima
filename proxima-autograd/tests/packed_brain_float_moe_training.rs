@@ -172,7 +172,9 @@ fn encode_master(codec: Codec) -> Vec<u8> {
             .map(|value| proxima_gguf::quant::bf8_e5m2::encode(*value))
             .collect(),
         Codec::Bf4E2M1 => MASTER
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 proxima_gguf::quant::bf4_e2m1::pack_pair(pair[0], pair[1])
                     .expect("finite master pair encodes")

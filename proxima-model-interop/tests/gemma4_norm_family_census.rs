@@ -97,7 +97,13 @@ fn bind_decode(policy: NumericPolicy) -> Vec<BoundOp> {
 fn folded_reduces_by_extents(bound_ops: &[BoundOp]) -> BTreeMap<Vec<u64>, usize> {
     let mut histogram = BTreeMap::new();
     for bound in bound_ops {
-        if matches!(&bound.kind, BoundOpKind::Reduce { keep: Keep::Reduce, .. }) {
+        if matches!(
+            &bound.kind,
+            BoundOpKind::Reduce {
+                keep: Keep::Reduce,
+                ..
+            }
+        ) {
             *histogram.entry(bound.extents.clone()).or_insert(0) += 1;
         }
     }

@@ -30,8 +30,8 @@ use alloc::vec::Vec;
 
 use proxima_tokenizer::draft::{
     DEFAULT_N_DRAFT, NgramCacheState, NgramMap, NgramMapConfig, NgramMod, NgramModConfig,
-    NgramSimpleConfig, ngram_cache_state_draft, ngram_map_accept, ngram_map_begin,
-    ngram_map_draft, ngram_mod_accept, ngram_mod_begin, ngram_mod_draft, ngram_simple_draft,
+    NgramSimpleConfig, ngram_cache_state_draft, ngram_map_accept, ngram_map_begin, ngram_map_draft,
+    ngram_mod_accept, ngram_mod_begin, ngram_mod_draft, ngram_simple_draft,
 };
 
 use crate::serving::{SpeculativeConfig, SpeculativeType};
@@ -280,7 +280,10 @@ mod tests {
         set.begin(&history);
         let mut out = Vec::new();
         set.draft(&history, sampled, usize::MAX, &mut out);
-        assert!(!out.is_empty(), "this history has a real repeated pattern to draft from");
+        assert!(
+            !out.is_empty(),
+            "this history has a real repeated pattern to draft from"
+        );
         assert_eq!(
             set.active_type(),
             Some(SpeculativeType::NgramSimple),

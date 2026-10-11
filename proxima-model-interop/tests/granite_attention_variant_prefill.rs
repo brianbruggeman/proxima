@@ -15,16 +15,15 @@ use memmap2::Mmap;
 use omega::metal::MetalError;
 use omega::msl::Binding;
 use omega::{
-    AttentionKvReuse, AttentionSimdgroupCount, AttentionTileHeight, AttentionVariant, CapturedDispatch,
-    set_capture_step, take_captured_dispatches,
+    AttentionKvReuse, AttentionSimdgroupCount, AttentionTileHeight, AttentionVariant,
+    CapturedDispatch, set_capture_step, take_captured_dispatches,
 };
 use proxima_gguf::parse_complete;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{
     AttentionTileHeightSetting, GPU_LAYERS_ALL, InteropError, LoadedModel, PromptCacheConfig,
-    ServingConfig, ServingSettings,
-    SpeculativeConfig,
+    ServingConfig, ServingSettings, SpeculativeConfig,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1633,7 +1632,6 @@ fn measure_granite_attention_shape(
     })
 }
 
-
 fn run_granite_attention_measurement(
     nominal_targets: &[usize],
     baseline_variant: Option<AttentionVariant>,
@@ -1674,7 +1672,10 @@ fn run_granite_attention_measurement_with_samples(
     warmup_rounds: usize,
     measured_rounds: usize,
 ) {
-    assert!(measured_rounds >= 20, "measured rounds must retain at least 20 pairs");
+    assert!(
+        measured_rounds >= 20,
+        "measured rounds must retain at least 20 pairs"
+    );
     assert!(
         env::var_os("PROXIMA_CAPTURE_LIVE").is_some(),
         "run with PROXIMA_CAPTURE_LIVE=1"
@@ -1861,7 +1862,6 @@ async fn perf_card_02_granite_two_prefill_shapes() {
     );
 }
 
-
 #[proxima::test]
 async fn perf_granite_simdgroups4_warmup_control_against_f16_legacy() {
     let baseline = f16_variant();
@@ -1877,7 +1877,6 @@ async fn perf_granite_simdgroups4_warmup_control_against_f16_legacy() {
         2,
     );
 }
-
 
 #[proxima::test]
 async fn perf_granite_simdgroups4_warmup_control_two_shapes_against_f16_legacy() {
@@ -1923,7 +1922,6 @@ async fn perf_granite_simdgroups4_tail_revalidation_1000_pairs_two_shapes() {
         1000,
     );
 }
-
 
 #[proxima::test]
 async fn perf_granite_simdgroup_count_warmup_control_two_shapes_against_f16_legacy() {
@@ -2012,7 +2010,6 @@ async fn perf_granite_per_head_topology_warmup_control_two_shapes_against_f16_le
         2,
     );
 }
-
 
 #[proxima::test]
 async fn perf_granite_simdgroup_count_against_f16_legacy() {
@@ -2203,7 +2200,6 @@ async fn perf_granite_rows8_vs_rows16_groups4() {
     );
 }
 
-
 #[proxima::test]
 async fn perf_granite_serving_tile_height_rows8_vs_rows16_groups4() {
     let rows8_settings = ServingSettings::builder()
@@ -2242,7 +2238,6 @@ async fn perf_granite_serving_tile_height_rows8_vs_rows16_groups4() {
         true,
     );
 }
-
 
 #[proxima::test]
 async fn perf_granite_serving_legacy_tile_vs_rows8_groups4() {
@@ -2286,7 +2281,6 @@ async fn perf_granite_serving_legacy_tile_vs_rows8_groups4() {
         true,
     );
 }
-
 
 #[proxima::test]
 async fn perf_granite_rows16_shared_k_simdgroup_rows() {

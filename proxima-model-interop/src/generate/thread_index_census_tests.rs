@@ -131,9 +131,20 @@ fn every_dispatch_of_the_real_gemma4_e2b_prefill_fits_32_bits_or_takes_a_2d_form
     let parsed = parse_complete(bytes).expect("parse the real gemma4-E2B header");
     let bound = bind_checkpoint(&parsed, bytes).expect("bind the real gemma4-E2B program");
     let codecs = packed_codecs(&bound.program, &bound.weights);
-    assert!(!codecs.is_empty(), "no packed weight was attributed a codec: the census would emit dense kernels");
-    let kv_inputs = bound.program.iter().filter(|op| op.name().is_some_and(|name| name.starts_with("kv_cache"))).count();
-    println!("program ops={} kv_cache inputs={kv_inputs} layer_roots={}", bound.program.len(), bound.layer_roots.len());
+    assert!(
+        !codecs.is_empty(),
+        "no packed weight was attributed a codec: the census would emit dense kernels"
+    );
+    let kv_inputs = bound
+        .program
+        .iter()
+        .filter(|op| op.name().is_some_and(|name| name.starts_with("kv_cache")))
+        .count();
+    println!(
+        "program ops={} kv_cache inputs={kv_inputs} layer_roots={}",
+        bound.program.len(),
+        bound.layer_roots.len()
+    );
     let mut roots = vec![bound.logits_root];
     for layer in &bound.layer_roots {
         if let LayerCacheRoots::Attention((even, odd, value)) = layer {
@@ -142,9 +153,19 @@ fn every_dispatch_of_the_real_gemma4_e2b_prefill_fits_32_bits_or_takes_a_2d_form
     }
 
     for fuse_cached_attention in [true, false] {
-        let control = census(&bound.program, &roots, &codecs, 512, 0, fuse_cached_attention);
+        let control = census(
+            &bound.program,
+            &roots,
+            &codecs,
+            512,
+            0,
+            fuse_cached_attention,
+        );
         println!("census fuse={fuse_cached_attention} rows=512 cached=0 (control): {control:?}");
-        assert_eq!(control.past_u32, 0, "a 512-row prefill must not need the flat form: {control:?}");
+        assert_eq!(
+            control.past_u32, 0,
+            "a 512-row prefill must not need the flat form: {control:?}"
+        );
         assert_eq!(control.flat, 0);
 
         let prefill_rows: [u64; 4] = [1_400, 2_048, 7_895, 16_118];
@@ -152,8 +173,17 @@ fn every_dispatch_of_the_real_gemma4_e2b_prefill_fits_32_bits_or_takes_a_2d_form
             let mut previous_past_u32 = 0;
             for rows in prefill_rows {
                 let cached = if cached_extent_is_rows { rows } else { 0 };
-                let tally = census(&bound.program, &roots, &codecs, rows, cached, fuse_cached_attention);
-                println!("census fuse={fuse_cached_attention} rows={rows} cached={cached}: {tally:?}");
+                let tally = census(
+                    &bound.program,
+                    &roots,
+                    &codecs,
+                    rows,
+                    cached,
+                    fuse_cached_attention,
+                );
+                println!(
+                    "census fuse={fuse_cached_attention} rows={rows} cached={cached}: {tally:?}"
+                );
                 assert!(
                     tally.past_u32 > 0,
                     "rows={rows} cached={cached}: the census found nothing past 2^32, so it proves nothing: {tally:?}"
@@ -168,8 +198,17 @@ fn every_dispatch_of_the_real_gemma4_e2b_prefill_fits_32_bits_or_takes_a_2d_form
         }
 
         for (rows, cached) in [(512u64, 15_360u64), (512, 16_384)] {
-            let tally = census(&bound.program, &roots, &codecs, rows, cached, fuse_cached_attention);
-            println!("census fuse={fuse_cached_attention} rows={rows} cached={cached} (chunked prefill): {tally:?}");
+            let tally = census(
+                &bound.program,
+                &roots,
+                &codecs,
+                rows,
+                cached,
+                fuse_cached_attention,
+            );
+            println!(
+                "census fuse={fuse_cached_attention} rows={rows} cached={cached} (chunked prefill): {tally:?}"
+            );
             assert!(tally.flat + tally.tiles >= tally.past_u32, "{tally:?}");
         }
     }

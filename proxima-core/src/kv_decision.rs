@@ -9,13 +9,22 @@ pub const fn seal_target(cached_rows: usize, block_tokens: usize, horizon_rows: 
 
 /// Block indexes a seal call newly seals; empty when nothing new seals, and the sealed end never decreases.
 #[must_use]
-pub const fn sealed_blocks(previous_sealed_end: usize, cached_rows: usize, block_tokens: usize, horizon_rows: usize) -> core::ops::Range<usize> {
+pub const fn sealed_blocks(
+    previous_sealed_end: usize,
+    cached_rows: usize,
+    block_tokens: usize,
+    horizon_rows: usize,
+) -> core::ops::Range<usize> {
     if block_tokens == 0 {
         return 0..0;
     }
     let start = previous_sealed_end / block_tokens;
     let end = seal_target(cached_rows, block_tokens, horizon_rows) / block_tokens;
-    if end > start { start..end } else { start..start }
+    if end > start {
+        start..end
+    } else {
+        start..start
+    }
 }
 
 #[cfg(test)]

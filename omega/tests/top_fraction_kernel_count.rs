@@ -10,7 +10,12 @@ use proxima_tensor::{
 
 fn bound_lists(rows: u64) -> (Vec<BoundOp>, Vec<BoundOp>) {
     let mut program = Vec::new();
-    let scores = input_leaf(&mut program, DType::Float32, vec![Extent::Symbolic(0)], "scores");
+    let scores = input_leaf(
+        &mut program,
+        DType::Float32,
+        vec![Extent::Symbolic(0)],
+        "scores",
+    );
     let keep_count = input_leaf(&mut program, DType::Float32, Vec::new(), "keep_count");
     let mask = top_fraction_mask(&mut program, scores, keep_count, None).expect("mask lowers");
     let shapes = infer(&program, &[rows]).expect("program infers");
@@ -32,7 +37,8 @@ fn selection_kernels(bound: &[BoundOp]) -> Vec<omega::Kernel> {
     bound
         .iter()
         .map(|bound_op| {
-            emit(bound_op, &PackedOperands::new(), NumericPolicy::default()).expect("bound op emits")
+            emit(bound_op, &PackedOperands::new(), NumericPolicy::default())
+                .expect("bound op emits")
         })
         .filter(|kernel| kernel.entry.starts_with("omega_top_fraction_select_"))
         .collect()
@@ -57,7 +63,10 @@ fn one_selection_kernel_at_the_configured_row_threshold() {
     let (plain, fused) = bound_lists(rows);
     let kernels = selection_kernels(&fused);
     assert_eq!(kernels.len(), 1);
-    assert_eq!(kernels[0].entry, format!("omega_top_fraction_select_r{rows}_k0"));
+    assert_eq!(
+        kernels[0].entry,
+        format!("omega_top_fraction_select_r{rows}_k0")
+    );
     assert_eq!(kernels[0].grid.threads, 1024);
     assert_eq!(kernels[0].bindings.len(), 4);
     assert!(matches!(kernels[0].bindings[2], Binding::Output(_)));

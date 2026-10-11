@@ -45,10 +45,7 @@ pub enum EmitError {
     /// whole threadgroups; `reason` names the property of this kernel that the
     /// rewrite cannot preserve.
     #[error("node {node} cannot take the flat 2D grid form: {reason}")]
-    WideGridUnsupported {
-        node: NodeId,
-        reason: &'static str,
-    },
+    WideGridUnsupported { node: NodeId, reason: &'static str },
 
     #[error("node {node} elementwise body takes {expected} operands but the op carries {found}")]
     ArityMismatch {
@@ -147,7 +144,9 @@ pub enum EmitError {
     /// every form is a plain buffer. Rejected here rather than bound as
     /// `float*` over half-width bytes, which would read the cache as garbage
     /// without any error.
-    #[error("node {node} is a cached attention bind with a packed operand the kernel cannot read: {reason}")]
+    #[error(
+        "node {node} is a cached attention bind with a packed operand the kernel cannot read: {reason}"
+    )]
     CachedAttentionKvCodecNotSupported { node: NodeId, reason: &'static str },
 
     #[error("node {node} cannot select cached-attention MMA precision {precision}: {reason}")]
@@ -187,24 +186,25 @@ pub enum EmitError {
         reason: &'static str,
     },
 
-    #[error("node {node} cannot apply its simdgroup lane topology to {query_rows} query rows: {reason}")]
+    #[error(
+        "node {node} cannot apply its simdgroup lane topology to {query_rows} query rows: {reason}"
+    )]
     CachedAttentionSimdTopologyNotSupported {
         node: NodeId,
         query_rows: u64,
         reason: &'static str,
     },
 
-    #[error("cached-attention variant selects {selected} K/V storage but the bound operands use {bound}")]
+    #[error(
+        "cached-attention variant selects {selected} K/V storage but the bound operands use {bound}"
+    )]
     CachedAttentionVariantStorageMismatch {
         selected: &'static str,
         bound: &'static str,
     },
 
     #[error("node {node} cannot select cached-attention K reuse: {reason}")]
-    CachedAttentionKvReuseNotSupported {
-        node: NodeId,
-        reason: &'static str,
-    },
+    CachedAttentionKvReuseNotSupported { node: NodeId, reason: &'static str },
 
     /// A packed scalar codec reached an op whose renderer has no reader for it.
     #[error("node {node} reads packed codec {codec:?}, which this metal renderer does not support")]

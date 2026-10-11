@@ -166,13 +166,20 @@ fn run_bits(
     // `PROXIMA_TILED_GEMM_DISABLE` does the same for the Q8_0 and Q6_K cases,
     // whose `tiled_decode` descriptions admit them to the tiled path at that
     // width too.
-    let output = temp_env::with_vars([("PROXIMA_TILED_GEMM_Q4_0", Some("0")), ("PROXIMA_TILED_GEMM_DISABLE", Some("q8_0,q6k")), ("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE", Some("0"))], || {
-        temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", unroll_env, || {
-            let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
-                .expect("metal plans the multi-token packed matmul");
-            omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device")
-        })
-    });
+    let output = temp_env::with_vars(
+        [
+            ("PROXIMA_TILED_GEMM_Q4_0", Some("0")),
+            ("PROXIMA_TILED_GEMM_DISABLE", Some("q8_0,q6k")),
+            ("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE", Some("0")),
+        ],
+        || {
+            temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", unroll_env, || {
+                let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
+                    .expect("metal plans the multi-token packed matmul");
+                omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device")
+            })
+        },
+    );
     output.root().iter().map(|value| value.to_bits()).collect()
 }
 
@@ -197,13 +204,21 @@ fn plan_kernel_keys(
         },
         QuantizedBlock::Float32(&activation),
     ];
-    temp_env::with_vars([("PROXIMA_TILED_GEMM_Q4_0", Some("0")), ("PROXIMA_TILED_GEMM_DISABLE", Some("q8_0,q6k")), ("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE", Some("0"))], || {
-        temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", unroll_env, || {
-            let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
-                .expect("metal plans the multi-token packed matmul");
-            plan.kernel_keys().expect("plan reports its own kernel cache keys")
-        })
-    })
+    temp_env::with_vars(
+        [
+            ("PROXIMA_TILED_GEMM_Q4_0", Some("0")),
+            ("PROXIMA_TILED_GEMM_DISABLE", Some("q8_0,q6k")),
+            ("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE", Some("0")),
+        ],
+        || {
+            temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", unroll_env, || {
+                let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
+                    .expect("metal plans the multi-token packed matmul");
+                plan.kernel_keys()
+                    .expect("plan reports its own kernel cache keys")
+            })
+        },
+    )
 }
 
 /// A codec whose current generic-arm multi-row body is a fast codec body
@@ -266,25 +281,158 @@ macro_rules! unroll_ab_not_admitted_case {
     };
 }
 
-unroll_ab_case!(q4_0_tokens27_k1536_rows12288, TestCodec::Q4_0, 27, 1536, 12288, 511);
-unroll_ab_case!(q4_0_tokens600_k1536_rows12288, TestCodec::Q4_0, 600, 1536, 12288, 521);
-unroll_ab_case!(q4_0_tokens600_k12288_rows1536, TestCodec::Q4_0, 600, 12288, 1536, 523);
-unroll_ab_case!(q4_0_tokens9_k1536_rows6144_tail, TestCodec::Q4_0, 9, 1536, 6144, 541);
-unroll_ab_case!(q4_0_tokens1_k1536_rows6144_single_token, TestCodec::Q4_0, 1, 1536, 6144, 547);
+unroll_ab_case!(
+    q4_0_tokens27_k1536_rows12288,
+    TestCodec::Q4_0,
+    27,
+    1536,
+    12288,
+    511
+);
+unroll_ab_case!(
+    q4_0_tokens600_k1536_rows12288,
+    TestCodec::Q4_0,
+    600,
+    1536,
+    12288,
+    521
+);
+unroll_ab_case!(
+    q4_0_tokens600_k12288_rows1536,
+    TestCodec::Q4_0,
+    600,
+    12288,
+    1536,
+    523
+);
+unroll_ab_case!(
+    q4_0_tokens9_k1536_rows6144_tail,
+    TestCodec::Q4_0,
+    9,
+    1536,
+    6144,
+    541
+);
+unroll_ab_case!(
+    q4_0_tokens1_k1536_rows6144_single_token,
+    TestCodec::Q4_0,
+    1,
+    1536,
+    6144,
+    547
+);
 
-unroll_ab_case!(q8_0_tokens27_k1536_rows12288, TestCodec::Q8_0, 27, 1536, 12288, 557);
-unroll_ab_case!(q8_0_tokens600_k1536_rows12288, TestCodec::Q8_0, 600, 1536, 12288, 563);
-unroll_ab_case!(q8_0_tokens600_k12288_rows1536, TestCodec::Q8_0, 600, 12288, 1536, 569);
-unroll_ab_case!(q8_0_tokens9_k1536_rows6144_tail, TestCodec::Q8_0, 9, 1536, 6144, 571);
-unroll_ab_case!(q8_0_tokens1_k1536_rows6144_single_token, TestCodec::Q8_0, 1, 1536, 6144, 577);
+unroll_ab_case!(
+    q8_0_tokens27_k1536_rows12288,
+    TestCodec::Q8_0,
+    27,
+    1536,
+    12288,
+    557
+);
+unroll_ab_case!(
+    q8_0_tokens600_k1536_rows12288,
+    TestCodec::Q8_0,
+    600,
+    1536,
+    12288,
+    563
+);
+unroll_ab_case!(
+    q8_0_tokens600_k12288_rows1536,
+    TestCodec::Q8_0,
+    600,
+    12288,
+    1536,
+    569
+);
+unroll_ab_case!(
+    q8_0_tokens9_k1536_rows6144_tail,
+    TestCodec::Q8_0,
+    9,
+    1536,
+    6144,
+    571
+);
+unroll_ab_case!(
+    q8_0_tokens1_k1536_rows6144_single_token,
+    TestCodec::Q8_0,
+    1,
+    1536,
+    6144,
+    577
+);
 
-unroll_ab_not_admitted_case!(q4k_tokens27_k1536_rows12288_not_admitted, TestCodec::Q4K, 27, 1536, 12288, 587);
-unroll_ab_not_admitted_case!(q4k_tokens600_k1536_rows12288_not_admitted, TestCodec::Q4K, 600, 1536, 12288, 593);
-unroll_ab_not_admitted_case!(q4k_tokens9_k1536_rows6144_tail_not_admitted, TestCodec::Q4K, 9, 1536, 6144, 599);
-unroll_ab_case!(q4k_tokens1_k1536_rows6144_single_token, TestCodec::Q4K, 1, 1536, 6144, 601);
+unroll_ab_not_admitted_case!(
+    q4k_tokens27_k1536_rows12288_not_admitted,
+    TestCodec::Q4K,
+    27,
+    1536,
+    12288,
+    587
+);
+unroll_ab_not_admitted_case!(
+    q4k_tokens600_k1536_rows12288_not_admitted,
+    TestCodec::Q4K,
+    600,
+    1536,
+    12288,
+    593
+);
+unroll_ab_not_admitted_case!(
+    q4k_tokens9_k1536_rows6144_tail_not_admitted,
+    TestCodec::Q4K,
+    9,
+    1536,
+    6144,
+    599
+);
+unroll_ab_case!(
+    q4k_tokens1_k1536_rows6144_single_token,
+    TestCodec::Q4K,
+    1,
+    1536,
+    6144,
+    601
+);
 
-unroll_ab_case!(q6k_tokens27_k1536_rows12288, TestCodec::Q6K, 27, 1536, 12288, 607);
-unroll_ab_case!(q6k_tokens600_k1536_rows12288, TestCodec::Q6K, 600, 1536, 12288, 613);
-unroll_ab_case!(q6k_tokens600_k12288_rows1536, TestCodec::Q6K, 600, 12288, 1536, 617);
-unroll_ab_case!(q6k_tokens9_k1536_rows6144_tail, TestCodec::Q6K, 9, 1536, 6144, 619);
-unroll_ab_case!(q6k_tokens1_k1536_rows6144_single_token, TestCodec::Q6K, 1, 1536, 6144, 631);
+unroll_ab_case!(
+    q6k_tokens27_k1536_rows12288,
+    TestCodec::Q6K,
+    27,
+    1536,
+    12288,
+    607
+);
+unroll_ab_case!(
+    q6k_tokens600_k1536_rows12288,
+    TestCodec::Q6K,
+    600,
+    1536,
+    12288,
+    613
+);
+unroll_ab_case!(
+    q6k_tokens600_k12288_rows1536,
+    TestCodec::Q6K,
+    600,
+    12288,
+    1536,
+    617
+);
+unroll_ab_case!(
+    q6k_tokens9_k1536_rows6144_tail,
+    TestCodec::Q6K,
+    9,
+    1536,
+    6144,
+    619
+);
+unroll_ab_case!(
+    q6k_tokens1_k1536_rows6144_single_token,
+    TestCodec::Q6K,
+    1,
+    1536,
+    6144,
+    631
+);

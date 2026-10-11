@@ -170,7 +170,10 @@ fn metal_agrees_with_the_independent_reference_on_a_q6k_weight_against_an_interl
 
     let (program, sum) = matmul_program_strided_activation(IN_DIM as u32, OUT_DIM as u32);
     let blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q6K, bytes: &packed },
+        QuantizedBlock::Packed {
+            codec: Codec::Q6K,
+            bytes: &packed,
+        },
         QuantizedBlock::Float32(&interleaved_activation),
     ];
 

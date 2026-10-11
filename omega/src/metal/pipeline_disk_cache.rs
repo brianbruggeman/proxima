@@ -74,7 +74,10 @@ pub(super) enum ArchiveOutcome {
 #[derive(Debug, thiserror::Error)]
 enum ArchiveError {
     #[error("binary archive {operation} failed: {log}")]
-    Metal { operation: &'static str, log: String },
+    Metal {
+        operation: &'static str,
+        log: String,
+    },
     #[error("pipeline cache path {path} {operation} failed: {source}")]
     Io {
         operation: &'static str,
@@ -445,15 +448,25 @@ mod tests {
         let buffer = device
             .newBufferWithLength_options(length, MTLResourceOptions::StorageModeShared)
             .expect("device must allocate the probe output");
-        let command_buffer = queue.commandBuffer().expect("queue must hand out a command buffer");
+        let command_buffer = queue
+            .commandBuffer()
+            .expect("queue must hand out a command buffer");
         let encoder = command_buffer
             .computeCommandEncoder()
             .expect("command buffer must open a compute encoder");
         encoder.setComputePipelineState(pipeline);
         unsafe { encoder.setBuffer_offset_atIndex(Some(&buffer), 0, 0) };
         encoder.dispatchThreads_threadsPerThreadgroup(
-            MTLSize { width: PROBE_ELEMENTS, height: 1, depth: 1 },
-            MTLSize { width: PROBE_ELEMENTS, height: 1, depth: 1 },
+            MTLSize {
+                width: PROBE_ELEMENTS,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: PROBE_ELEMENTS,
+                height: 1,
+                depth: 1,
+            },
         );
         encoder.endEncoding();
         command_buffer.commit();
@@ -465,21 +478,38 @@ mod tests {
     }
 
     fn expected_probe_output() -> Vec<f32> {
-        (0..PROBE_ELEMENTS).map(|index| index as f32 * 2.0 + 1.0).collect()
+        (0..PROBE_ELEMENTS)
+            .map(|index| index as f32 * 2.0 + 1.0)
+            .collect()
     }
 
     #[test]
     fn digest_is_stable_and_changes_with_every_field() {
-        let base = ["v1", "Apple M1 Max", "Version 15.6 (Build 24G84)", "R", "entry", "source"];
+        let base = [
+            "v1",
+            "Apple M1 Max",
+            "Version 15.6 (Build 24G84)",
+            "R",
+            "entry",
+            "source",
+        ];
 
         let baseline = archive_digest(&base);
 
-        assert_eq!(baseline, archive_digest(&base), "same fields must give the same name");
+        assert_eq!(
+            baseline,
+            archive_digest(&base),
+            "same fields must give the same name"
+        );
         assert_eq!(baseline.len(), 64, "a hex sha256 is 64 characters");
         for index in 0..base.len() {
             let mut changed = base;
             changed[index] = "different";
-            assert_ne!(baseline, archive_digest(&changed), "field {index} must be part of the name");
+            assert_ne!(
+                baseline,
+                archive_digest(&changed),
+                "field {index} must be part of the name"
+            );
         }
     }
 
@@ -503,7 +533,10 @@ mod tests {
         assert_eq!(zero_budget, None);
         assert_eq!(
             explicit,
-            Some(DiskCacheLocation { directory: PathBuf::from("/var/cache/omega"), max_bytes: 4096 })
+            Some(DiskCacheLocation {
+                directory: PathBuf::from("/var/cache/omega"),
+                max_bytes: 4096
+            })
         );
         assert_eq!(
             defaulted,
@@ -513,7 +546,10 @@ mod tests {
             })
         );
         assert_eq!(homeless, None);
-        assert_eq!(homeless_explicit.map(|location| location.max_bytes), Some(4096));
+        assert_eq!(
+            homeless_explicit.map(|location| location.max_bytes),
+            Some(4096)
+        );
     }
 
     fn write_aged(directory: &Path, name: &str, bytes: usize, age_seconds: u64) -> PathBuf {
@@ -536,12 +572,19 @@ mod tests {
         let newest = write_aged(directory.path(), "ccc.metalar", 400, 100);
         let foreign = write_aged(directory.path(), "notes.txt", 5000, 900);
 
-        let removed = evict_to_budget(directory.path(), 800).expect("eviction must scan the directory");
+        let removed =
+            evict_to_budget(directory.path(), 800).expect("eviction must scan the directory");
 
         assert_eq!(removed, 1);
         assert!(!oldest.exists(), "the oldest file must go first");
-        assert!(middle.exists() && newest.exists(), "newer files fit the budget and stay");
-        assert!(foreign.exists(), "a file that is not a cache file is never removed");
+        assert!(
+            middle.exists() && newest.exists(),
+            "newer files fit the budget and stay"
+        );
+        assert!(
+            foreign.exists(),
+            "a file that is not a cache file is never removed"
+        );
     }
 
     #[test]
@@ -550,7 +593,8 @@ mod tests {
         let first = write_aged(directory.path(), "aaa.metalar", 100, 20);
         let partial = write_aged(directory.path(), "bbb.1-0.partial", 100, 10);
 
-        let removed = evict_to_budget(directory.path(), 200).expect("eviction must scan the directory");
+        let removed =
+            evict_to_budget(directory.path(), 200).expect("eviction must scan the directory");
 
         assert_eq!(removed, 0);
         assert!(first.exists() && partial.exists());
@@ -562,10 +606,14 @@ mod tests {
         let stale_partial = write_aged(directory.path(), "aaa.9-0.partial", 500, 3000);
         let published = write_aged(directory.path(), "bbb.metalar", 500, 10);
 
-        let removed = evict_to_budget(directory.path(), 600).expect("eviction must scan the directory");
+        let removed =
+            evict_to_budget(directory.path(), 600).expect("eviction must scan the directory");
 
         assert_eq!(removed, 1);
-        assert!(!stale_partial.exists(), "an abandoned partial write is the oldest and goes first");
+        assert!(
+            !stale_partial.exists(),
+            "an abandoned partial write is the oldest and goes first"
+        );
         assert!(published.exists());
     }
 
@@ -582,13 +630,18 @@ mod tests {
     fn a_compiled_pipeline_is_published_then_loaded_and_computes_the_same_bytes() {
         let (device, _queue) = device_and_queue().expect("a Metal device is required");
         let directory = tempfile::tempdir().expect("tempdir");
-        let location = DiskCacheLocation { directory: directory.path().to_path_buf(), max_bytes: 64 << 20 };
+        let location = DiskCacheLocation {
+            directory: directory.path().to_path_buf(),
+            max_bytes: 64 << 20,
+        };
         let kernel = probe_kernel(PROBE_SOURCE);
         let key = archive_key(&device, &kernel, MathMode::Relaxed);
         let function = probe_function(&device, &kernel, MathMode::Relaxed);
 
-        let (compiled, first) = archived_pipeline(&device, &function, &key, &location).expect("first compile");
-        let (loaded, second) = archived_pipeline(&device, &function, &key, &location).expect("second lookup");
+        let (compiled, first) =
+            archived_pipeline(&device, &function, &key, &location).expect("first compile");
+        let (loaded, second) =
+            archived_pipeline(&device, &function, &key, &location).expect("second lookup");
 
         assert_eq!(first, ArchiveOutcome::Stored);
         assert_eq!(second, ArchiveOutcome::Loaded);
@@ -606,7 +659,10 @@ mod tests {
     fn a_corrupt_archive_file_is_replaced_by_a_fresh_compile() {
         let (device, _queue) = device_and_queue().expect("a Metal device is required");
         let directory = tempfile::tempdir().expect("tempdir");
-        let location = DiskCacheLocation { directory: directory.path().to_path_buf(), max_bytes: 64 << 20 };
+        let location = DiskCacheLocation {
+            directory: directory.path().to_path_buf(),
+            max_bytes: 64 << 20,
+        };
         let kernel = probe_kernel(PROBE_SOURCE);
         let key = archive_key(&device, &kernel, MathMode::Relaxed);
         let function = probe_function(&device, &kernel, MathMode::Relaxed);
@@ -614,10 +670,16 @@ mod tests {
         let garbage = b"not a metal binary archive";
         fs::write(&path, garbage).expect("garbage fixture");
 
-        let (pipeline, outcome) = archived_pipeline(&device, &function, &key, &location).expect("fallback compile");
-        let (_, after) = archived_pipeline(&device, &function, &key, &location).expect("lookup after repair");
+        let (pipeline, outcome) =
+            archived_pipeline(&device, &function, &key, &location).expect("fallback compile");
+        let (_, after) =
+            archived_pipeline(&device, &function, &key, &location).expect("lookup after repair");
 
-        assert_eq!(outcome, ArchiveOutcome::Stored, "the bad file is dropped and a good one published");
+        assert_eq!(
+            outcome,
+            ArchiveOutcome::Stored,
+            "the bad file is dropped and a good one published"
+        );
         assert_eq!(after, ArchiveOutcome::Loaded);
         assert_ne!(fs::read(&path).expect("repaired file"), garbage);
         assert_eq!(run_probe(&pipeline), expected_probe_output());
@@ -627,7 +689,10 @@ mod tests {
     fn math_mode_and_source_each_name_a_separate_archive() {
         let (device, _queue) = device_and_queue().expect("a Metal device is required");
         let directory = tempfile::tempdir().expect("tempdir");
-        let location = DiskCacheLocation { directory: directory.path().to_path_buf(), max_bytes: 64 << 20 };
+        let location = DiskCacheLocation {
+            directory: directory.path().to_path_buf(),
+            max_bytes: 64 << 20,
+        };
         let relaxed_kernel = probe_kernel(PROBE_SOURCE);
         let edited_kernel = probe_kernel(&PROBE_SOURCE.replace("2.0f", "3.0f"));
         let variants = [
@@ -639,8 +704,13 @@ mod tests {
         for (kernel, math_mode) in variants {
             let key = archive_key(&device, kernel, math_mode);
             let function = probe_function(&device, kernel, math_mode);
-            let (_, outcome) = archived_pipeline(&device, &function, &key, &location).expect("compile");
-            assert_eq!(outcome, ArchiveOutcome::Stored, "a new option set must not reuse another's archive");
+            let (_, outcome) =
+                archived_pipeline(&device, &function, &key, &location).expect("compile");
+            assert_eq!(
+                outcome,
+                ArchiveOutcome::Stored,
+                "a new option set must not reuse another's archive"
+            );
         }
 
         let published = fs::read_dir(directory.path())
@@ -655,14 +725,21 @@ mod tests {
     fn an_archive_larger_than_the_budget_is_evicted_but_the_pipeline_still_runs() {
         let (device, _queue) = device_and_queue().expect("a Metal device is required");
         let directory = tempfile::tempdir().expect("tempdir");
-        let location = DiskCacheLocation { directory: directory.path().to_path_buf(), max_bytes: 1 };
+        let location = DiskCacheLocation {
+            directory: directory.path().to_path_buf(),
+            max_bytes: 1,
+        };
         let kernel = probe_kernel(PROBE_SOURCE);
         let key = archive_key(&device, &kernel, MathMode::Relaxed);
         let function = probe_function(&device, &kernel, MathMode::Relaxed);
 
-        let (pipeline, _) = archived_pipeline(&device, &function, &key, &location).expect("compile");
+        let (pipeline, _) =
+            archived_pipeline(&device, &function, &key, &location).expect("compile");
 
-        assert!(!archive_path(directory.path(), &key).exists(), "a file over the budget is evicted at once");
+        assert!(
+            !archive_path(directory.path(), &key).exists(),
+            "a file over the budget is evicted at once"
+        );
         assert_eq!(run_probe(&pipeline), expected_probe_output());
     }
 }

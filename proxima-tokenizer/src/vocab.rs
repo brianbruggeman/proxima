@@ -725,7 +725,10 @@ pub(crate) mod tests {
     #[test]
     fn gemma4_shaped_vocab_derives_sentence_piece_space_marker() {
         let vocab = tiny_gemma4_vocab();
-        assert!(!vocab.is_unigram(), "a char-level vocab is merges-driven, not unigram");
+        assert!(
+            !vocab.is_unigram(),
+            "a char-level vocab is merges-driven, not unigram"
+        );
         assert_eq!(vocab.space_marker(), SpaceMarker::SentencePiece);
     }
 

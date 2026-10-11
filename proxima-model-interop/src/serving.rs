@@ -48,14 +48,14 @@
 use alloc::format;
 use alloc::string::String;
 
-#[cfg(all(feature = "metal", target_os = "macos"))]
-use omega::{DispatchType, MathMode};
 #[cfg(all(
     feature = "metal",
     feature = "metal-attn-variants",
     target_os = "macos"
 ))]
 use omega::AttentionVariant;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use omega::{DispatchType, MathMode};
 use proxima_gguf::types::GgmlType;
 use proxima_tensor::NumericPolicy;
 
@@ -1719,7 +1719,12 @@ mod tests {
     /// per-field gate, not a blanket error at the top.
     #[test]
     fn serving_section_attention_defaults_to_the_dense_read() {
-        assert_eq!(ServingConfig::default().attention, AttentionConfig { read: ReadSpec::Dense });
+        assert_eq!(
+            ServingConfig::default().attention,
+            AttentionConfig {
+                read: ReadSpec::Dense
+            }
+        );
     }
 
     #[test]

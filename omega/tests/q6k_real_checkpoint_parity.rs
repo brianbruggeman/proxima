@@ -221,7 +221,10 @@ fn metal_matmul_on_real_output_weight_q6k_bytes_matches_the_dequantized_f32_cpu_
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Packed { codec: Codec::Q6K, bytes: sliced_weight },
+            QuantizedBlock::Packed {
+                codec: Codec::Q6K,
+                bytes: sliced_weight,
+            },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],

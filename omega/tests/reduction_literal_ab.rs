@@ -99,7 +99,10 @@ fn real_tensor_bytes(
     file_len: u64,
     name: &str,
 ) -> Option<(Vec<u8>, usize, usize)> {
-    let tensor = parsed.tensors.iter().find(|candidate| candidate.name == name)?;
+    let tensor = parsed
+        .tensors
+        .iter()
+        .find(|candidate| candidate.name == name)?;
     if tensor.ggml_type != GgmlType::Q4_0 {
         eprintln!(
             "real_tensor_bytes: {name} is {:?} in this file, not Q4_0 -- test skipped, not faked",
@@ -115,7 +118,8 @@ fn real_tensor_bytes(
     let mut buf = vec![0u8; (range.end - range.start) as usize];
     file.seek(SeekFrom::Start(range.start))
         .expect("seek to tensor data");
-    file.read_exact(&mut buf).expect("read exact tensor byte range");
+    file.read_exact(&mut buf)
+        .expect("read exact tensor byte range");
     Some((buf, in_dim, out_dim))
 }
 
@@ -182,7 +186,12 @@ fn single_axis_matmul_program(in_dim: u32, out_dim: u32) -> (Vec<Op>, NodeId) {
 /// enough -- no composed affine map is needed the way the internal bind test
 /// used one, because that test was proving the affine-map path specifically,
 /// not building a fixture for this one.
-fn multi_axis_matmul_program(kv_heads: u32, group: u32, head_dim: u32, embed: u32) -> (Vec<Op>, NodeId) {
+fn multi_axis_matmul_program(
+    kv_heads: u32,
+    group: u32,
+    head_dim: u32,
+    embed: u32,
+) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = append(
         &mut program,
@@ -283,7 +292,10 @@ fn compare_to_oracle(actual: &[f32], oracle: &[f32]) -> ErrorSummary {
 }
 
 fn differing_word_count(a: &[f32], b: &[f32]) -> usize {
-    a.iter().zip(b.iter()).filter(|(x, y)| x.to_bits() != y.to_bits()).count()
+    a.iter()
+        .zip(b.iter())
+        .filter(|(x, y)| x.to_bits() != y.to_bits())
+        .count()
 }
 
 /// Runs `program`/`sum` once under the given `PROXIMA_REDUCTION_LITERAL`
@@ -362,10 +374,7 @@ fn assert_bit_exact_and_oracle_agreement(operand: &CollisionOperand) {
         eprintln!(
             "{} policy={policy:?}: differing_words={diff_words}/{} literal_vs_oracle_max_abs={} \
              runtime_vs_oracle_max_abs={}",
-            operand.label,
-            operand.rows,
-            literal_vs_oracle.max_abs,
-            runtime_vs_oracle.max_abs,
+            operand.label, operand.rows, literal_vs_oracle.max_abs, runtime_vs_oracle.max_abs,
         );
         assert_eq!(
             diff_words, 0,
@@ -401,7 +410,11 @@ fn run_on_fresh_thread<F: FnOnce() + Send + 'static>(body: F) {
 /// each proves the miss count indirectly: `pipeline_cache_keys().len() == 2`
 /// is the direct miss-count proof, since every key only ever enters the
 /// cache on the miss that compiles it).
-fn assert_insertion_order_independent(first: &'static str, second: &'static str, build: fn(&str) -> CollisionOperand) {
+fn assert_insertion_order_independent(
+    first: &'static str,
+    second: &'static str,
+    build: fn(&str) -> CollisionOperand,
+) {
     const HITS_PER_OP: u32 = 3;
     for order in [[first, second], [second, first]] {
         run_on_fresh_thread(move || {
@@ -477,7 +490,11 @@ fn attn_output_multi_axis_operand(label: &str) -> CollisionOperand {
     let (weight_bytes, in_dim, out_dim) = real_tensor_bytes(&mut file, &parsed, file_len, label)
         .unwrap_or_else(|| panic!("{label} present and Q4_0"));
     let head_dim = in_dim / 8;
-    assert_eq!(head_dim * 8, in_dim, "{label}: in_dim must be a whole multiple of 8 (kv_heads*group)");
+    assert_eq!(
+        head_dim * 8,
+        in_dim,
+        "{label}: in_dim must be a whole multiple of 8 (kv_heads*group)"
+    );
     let rows = ROWS_TO_CHECK.min(out_dim);
     let sliced_weight = weight_bytes[..rows * (in_dim / q4_0::QK4_0) * q4_0::BLOCK_BYTES].to_vec();
     let mut lcg = Lcg(9001 + in_dim as u64);
@@ -513,8 +530,14 @@ fn q4_0_ffn_down_narrow_vs_wide_collision() {
     }
     let narrow = ffn_down_operand("blk.0.ffn_down.weight");
     let wide = ffn_down_operand("blk.15.ffn_down.weight");
-    assert_eq!(narrow.in_dim, 6144, "degenerate fixture: narrow ffn_down in_dim drifted");
-    assert_eq!(wide.in_dim, 12288, "degenerate fixture: wide ffn_down in_dim drifted");
+    assert_eq!(
+        narrow.in_dim, 6144,
+        "degenerate fixture: narrow ffn_down in_dim drifted"
+    );
+    assert_eq!(
+        wide.in_dim, 12288,
+        "degenerate fixture: wide ffn_down in_dim drifted"
+    );
     assert_bit_exact_and_oracle_agreement(&narrow);
     assert_bit_exact_and_oracle_agreement(&wide);
     assert_insertion_order_independent(
@@ -531,8 +554,14 @@ fn q4_0_attn_k_vs_proj_collision() {
     }
     let wide = ffn_down_operand("blk.0.attn_k.weight");
     let narrow = ffn_down_operand("blk.0.proj.weight");
-    assert_eq!(wide.in_dim, 1536, "degenerate fixture: attn_k in_dim drifted");
-    assert_eq!(narrow.in_dim, 256, "degenerate fixture: proj in_dim drifted");
+    assert_eq!(
+        wide.in_dim, 1536,
+        "degenerate fixture: attn_k in_dim drifted"
+    );
+    assert_eq!(
+        narrow.in_dim, 256,
+        "degenerate fixture: proj in_dim drifted"
+    );
     assert_bit_exact_and_oracle_agreement(&wide);
     assert_bit_exact_and_oracle_agreement(&narrow);
     assert_insertion_order_independent(
@@ -549,8 +578,14 @@ fn q4_0_attn_output_multi_axis_fold_collision() {
     }
     let narrow = attn_output_multi_axis_operand("blk.0.attn_output.weight");
     let wide = attn_output_multi_axis_operand("blk.4.attn_output.weight");
-    assert_eq!(narrow.in_dim, 2048, "degenerate fixture: narrow attn_output in_dim drifted");
-    assert_eq!(wide.in_dim, 4096, "degenerate fixture: wide attn_output in_dim drifted");
+    assert_eq!(
+        narrow.in_dim, 2048,
+        "degenerate fixture: narrow attn_output in_dim drifted"
+    );
+    assert_eq!(
+        wide.in_dim, 4096,
+        "degenerate fixture: wide attn_output in_dim drifted"
+    );
     assert_bit_exact_and_oracle_agreement(&narrow);
     assert_bit_exact_and_oracle_agreement(&wide);
     assert_insertion_order_independent(

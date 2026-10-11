@@ -5,7 +5,10 @@ use proxima_gguf::value::MetadataArray;
 use proxima_gguf::{GgufModel, MetadataValue, TensorPayload, parse_complete, write_complete};
 
 fn header_bytes(family: &str, floats: &[(&str, f32)]) -> Vec<u8> {
-    let mut metadata = vec![("general.architecture".to_string(), MetadataValue::String(family.into()))];
+    let mut metadata = vec![(
+        "general.architecture".to_string(),
+        MetadataValue::String(family.into()),
+    )];
     metadata.extend(
         floats
             .iter()
@@ -95,7 +98,10 @@ fn a_config_that_changes_the_layer_count_and_head_width_reshapes_the_architectur
 
     let reshaped = llama_architecture().reshaped_by(&descriptor);
 
-    assert_eq!((reshaped.block_count, reshaped.head_dim, reshaped.kv_heads), (2, 64, 8));
+    assert_eq!(
+        (reshaped.block_count, reshaped.head_dim, reshaped.kv_heads),
+        (2, 64, 8)
+    );
 }
 
 #[test]
@@ -157,8 +163,14 @@ fn header_with_window(family: &str, window: u32) -> Vec<u8> {
     let model = GgufModel {
         version: 3,
         metadata: vec![
-            ("general.architecture".to_string(), MetadataValue::String(family.into())),
-            (format!("{family}.attention.sliding_window"), MetadataValue::U32(window)),
+            (
+                "general.architecture".to_string(),
+                MetadataValue::String(family.into()),
+            ),
+            (
+                format!("{family}.attention.sliding_window"),
+                MetadataValue::U32(window),
+            ),
         ],
         tensors: Vec::new(),
     };
@@ -174,12 +186,20 @@ fn a_header_sliding_window_reaches_every_layer_of_the_descriptor() {
     let result = with_header_window(input.clone(), &parsed, "llama");
 
     assert_eq!(result.layers.len(), 32);
-    assert!(result.layers.iter().all(|layer| layer.attention.mask_window == Some(4096)));
+    assert!(
+        result
+            .layers
+            .iter()
+            .all(|layer| layer.attention.mask_window == Some(4096))
+    );
     let restored = ModelDescriptor {
         layers: input.layers.clone(),
         ..result
     };
-    assert_eq!(restored, input, "the window is the only field the header changes");
+    assert_eq!(
+        restored, input,
+        "the window is the only field the header changes"
+    );
 }
 
 #[test]
@@ -191,7 +211,10 @@ fn a_header_without_a_sliding_window_leaves_every_layer_unwindowed() {
     assert_eq!(with_header_window(input.clone(), &parsed, "llama"), input);
     let zero = header_with_window("llama", 0);
     let parsed_zero = parse_complete(&zero).expect("bytes the encoder just wrote parse");
-    assert_eq!(with_header_window(input.clone(), &parsed_zero, "llama"), input);
+    assert_eq!(
+        with_header_window(input.clone(), &parsed_zero, "llama"),
+        input
+    );
 }
 
 const HYBRID_EMBEDDING: u64 = 8;
@@ -200,19 +223,42 @@ const HYBRID_VOCAB: u64 = 16;
 fn hybrid_header(kv_heads: &[u32], layer_tensors: &[&str]) -> Vec<u8> {
     let family = "lfm2moe";
     let metadata = vec![
-        ("general.architecture".to_string(), MetadataValue::String(family.into())),
-        (format!("{family}.embedding_length"), MetadataValue::U32(HYBRID_EMBEDDING as u32)),
-        (format!("{family}.feed_forward_length"), MetadataValue::U32(32)),
-        (format!("{family}.expert_feed_forward_length"), MetadataValue::U32(12)),
-        (format!("{family}.attention.head_count"), MetadataValue::U32(2)),
+        (
+            "general.architecture".to_string(),
+            MetadataValue::String(family.into()),
+        ),
+        (
+            format!("{family}.embedding_length"),
+            MetadataValue::U32(HYBRID_EMBEDDING as u32),
+        ),
+        (
+            format!("{family}.feed_forward_length"),
+            MetadataValue::U32(32),
+        ),
+        (
+            format!("{family}.expert_feed_forward_length"),
+            MetadataValue::U32(12),
+        ),
+        (
+            format!("{family}.attention.head_count"),
+            MetadataValue::U32(2),
+        ),
         (
             format!("{family}.attention.head_count_kv"),
-            MetadataValue::Array(MetadataArray::I32(kv_heads.iter().map(|&heads| heads as i32).collect())),
+            MetadataValue::Array(MetadataArray::I32(
+                kv_heads.iter().map(|&heads| heads as i32).collect(),
+            )),
         ),
-        (format!("{family}.block_count"), MetadataValue::U32(kv_heads.len() as u32)),
+        (
+            format!("{family}.block_count"),
+            MetadataValue::U32(kv_heads.len() as u32),
+        ),
         (format!("{family}.expert_count"), MetadataValue::U32(4)),
         (format!("{family}.expert_used_count"), MetadataValue::U32(2)),
-        (format!("{family}.leading_dense_block_count"), MetadataValue::U32(1)),
+        (
+            format!("{family}.leading_dense_block_count"),
+            MetadataValue::U32(1),
+        ),
         (format!("{family}.shortconv.l_cache"), MetadataValue::U32(3)),
     ];
     let table = vec![0u8; (HYBRID_EMBEDDING * HYBRID_VOCAB * 4) as usize];
@@ -229,10 +275,18 @@ fn hybrid_header(kv_heads: &[u32], layer_tensors: &[&str]) -> Vec<u8> {
         ggml_type: GgmlType::F32,
         data: &marker,
     }));
-    write_complete(&GgufModel { version: 3, metadata, tensors }).expect("a hybrid header with marker tensors encodes")
+    write_complete(&GgufModel {
+        version: 3,
+        metadata,
+        tensors,
+    })
+    .expect("a hybrid header with marker tensors encodes")
 }
 
-fn hybrid_descriptor(kv_heads: &[u32], layer_tensors: &[&str]) -> Result<ModelDescriptor, InteropError> {
+fn hybrid_descriptor(
+    kv_heads: &[u32],
+    layer_tensors: &[&str],
+) -> Result<ModelDescriptor, InteropError> {
     let bytes = hybrid_header(kv_heads, layer_tensors);
     let parsed = parse_complete(&bytes).expect("bytes the encoder just wrote parse");
     let architecture = architecture_from_metadata(&parsed)?;
@@ -241,16 +295,37 @@ fn hybrid_descriptor(kv_heads: &[u32], layer_tensors: &[&str]) -> Result<ModelDe
 
 #[test]
 fn zero_kv_layers_with_a_conv_tensor_become_short_conv_layers_of_a_cacheless_program() {
-    let descriptor = hybrid_descriptor(&[0, 2, 0], &["blk.0.shortconv.conv.weight", "blk.1.attn_q.weight", "blk.2.shortconv.conv.weight"])
-        .expect("a hybrid header describes itself");
+    let descriptor = hybrid_descriptor(
+        &[0, 2, 0],
+        &[
+            "blk.0.shortconv.conv.weight",
+            "blk.1.attn_q.weight",
+            "blk.2.shortconv.conv.weight",
+        ],
+    )
+    .expect("a hybrid header describes itself");
 
     assert_eq!(
-        descriptor.layers.iter().map(|layer| layer.kind).collect::<Vec<_>>(),
-        vec![LayerKind::ShortConv, LayerKind::Attention, LayerKind::ShortConv]
+        descriptor
+            .layers
+            .iter()
+            .map(|layer| layer.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            LayerKind::ShortConv,
+            LayerKind::Attention,
+            LayerKind::ShortConv
+        ]
     );
     assert_eq!(descriptor.cache_strategy, CacheStrategy::Cacheless);
-    assert_eq!((descriptor.l_cache, descriptor.leading_dense_block_count), (3, 1));
-    assert_eq!((descriptor.feed_forward, descriptor.expert_feed_forward), (32, 12));
+    assert_eq!(
+        (descriptor.l_cache, descriptor.leading_dense_block_count),
+        (3, 1)
+    );
+    assert_eq!(
+        (descriptor.feed_forward, descriptor.expert_feed_forward),
+        (32, 12)
+    );
     assert_eq!(descriptor.layers[1].attention.kv_heads, 2);
 }
 
@@ -258,21 +333,41 @@ fn zero_kv_layers_with_a_conv_tensor_become_short_conv_layers_of_a_cacheless_pro
 fn a_zero_kv_layer_whose_tensors_say_attention_is_refused() {
     let outcome = hybrid_descriptor(&[0, 2], &["blk.0.attn_q.weight", "blk.1.attn_q.weight"]);
 
-    assert!(matches!(outcome, Err(InteropError::UnsupportedServingConfig(message)) if message.contains("layer 0")));
+    assert!(
+        matches!(outcome, Err(InteropError::UnsupportedServingConfig(message)) if message.contains("layer 0"))
+    );
 }
 
 #[test]
 fn a_zero_kv_layer_with_no_mixer_tensor_is_refused() {
     let outcome = hybrid_descriptor(&[0, 2], &["blk.1.attn_q.weight"]);
 
-    assert!(matches!(outcome, Err(InteropError::Tensor(proxima_tensor::TensorError::UndeterminedLayerKind { layer: 0 }))));
+    assert!(matches!(
+        outcome,
+        Err(InteropError::Tensor(
+            proxima_tensor::TensorError::UndeterminedLayerKind { layer: 0 }
+        ))
+    ));
 }
 
 #[test]
 fn attention_layers_that_disagree_on_kv_heads_are_still_refused() {
-    let outcome = hybrid_descriptor(&[0, 2, 4], &["blk.0.shortconv.conv.weight", "blk.1.attn_q.weight", "blk.2.attn_q.weight"]);
+    let outcome = hybrid_descriptor(
+        &[0, 2, 4],
+        &[
+            "blk.0.shortconv.conv.weight",
+            "blk.1.attn_q.weight",
+            "blk.2.attn_q.weight",
+        ],
+    );
 
-    assert!(matches!(outcome, Err(InteropError::HeterogeneousMetadataArray { distinct_values: 2, .. })));
+    assert!(matches!(
+        outcome,
+        Err(InteropError::HeterogeneousMetadataArray {
+            distinct_values: 2,
+            ..
+        })
+    ));
 }
 
 #[test]

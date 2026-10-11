@@ -109,10 +109,9 @@ mod harness {
             std::env::var("PROXIMA_PROMPT_FILE").expect("PROXIMA_PROMPT_FILE"),
         )
         .expect("read prompt file");
-        let small_prompt = std::fs::read_to_string(
-            std::env::var("PQ_SMALL_PROMPT").expect("PQ_SMALL_PROMPT"),
-        )
-        .expect("read small prompt");
+        let small_prompt =
+            std::fs::read_to_string(std::env::var("PQ_SMALL_PROMPT").expect("PQ_SMALL_PROMPT"))
+                .expect("read small prompt");
         let mut prefills = 0usize;
         for (index, stage) in stages.split(',').enumerate() {
             let cell = Cell::begin();
@@ -122,8 +121,12 @@ mod harness {
                     let spans: Vec<String> = (0..3)
                         .map(|_| {
                             let started = std::time::Instant::now();
-                            let span = omega::time_empty_command_buffer_gpu_ns().expect("empty command buffer");
-                            format!("gpu_ns={span:.0}/wall_ms={:.3}", started.elapsed().as_secs_f64() * 1e3)
+                            let span = omega::time_empty_command_buffer_gpu_ns()
+                                .expect("empty command buffer");
+                            format!(
+                                "gpu_ns={span:.0}/wall_ms={:.3}",
+                                started.elapsed().as_secs_f64() * 1e3
+                            )
                         })
                         .collect();
                     format!("empty_command_buffers=[{}]", spans.join(" "))
@@ -131,13 +134,20 @@ mod harness {
                 "small" => format!("generated={}", generate(&model, &small_prompt, 2)),
                 "prefill" => {
                     let letters = ['p', 'q', 'r', 's', 't', 'u'];
-                    let prompt = long_prompt.replacen("proxima", &format!("{}roxima", letters[prefills % letters.len()]), 1);
+                    let prompt = long_prompt.replacen(
+                        "proxima",
+                        &format!("{}roxima", letters[prefills % letters.len()]),
+                        1,
+                    );
                     prefills += 1;
                     format!("generated={}", generate(&model, &prompt, 1))
                 }
                 other => panic!("PQ_STAGES: unknown stage `{other}`"),
             };
-            println!("pq stage={stage} index={index} {detail} {}", cell.end(stage));
+            println!(
+                "pq stage={stage} index={index} {detail} {}",
+                cell.end(stage)
+            );
         }
         thread::sleep(Duration::from_millis(100));
         recorder.drain();

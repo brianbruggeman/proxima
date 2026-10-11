@@ -138,9 +138,7 @@ impl LoadedModel<'_> {
     /// [`crate::PromptCacheConfig`] field because that config is `Copy` and a
     /// token list is not.
     pub fn set_prewarm_suffix(&self, suffix: &[u32]) {
-        self.prompt_cache
-            .lock()
-            .set_prewarm_suffix(suffix);
+        self.prompt_cache.lock().set_prewarm_suffix(suffix);
     }
 
     /// Prefills `ids` into the prompt cache without generating, at low
@@ -202,10 +200,12 @@ impl LoadedModel<'_> {
         }
         let (_, widths) = self.declared_layer_cache_names_and_widths()?;
         let key = self.cache_key(serving_config, runtime, forced_draft_width);
-        let (found, _) = self
-            .prompt_cache
-            .lock()
-            .take_for_prewarm(ids, &key, &widths, config.min_similarity_milli);
+        let (found, _) = self.prompt_cache.lock().take_for_prewarm(
+            ids,
+            &key,
+            &widths,
+            config.min_similarity_milli,
+        );
         let entry = found.unwrap_or_else(|| CacheEntry::empty(key));
         let held = entry.state.cached_len;
         let checkpoints =
@@ -279,11 +279,7 @@ impl LoadedModel<'_> {
         key: CacheKey,
         forced_draft_width: Option<u16>,
     ) {
-        let suffix = self
-            .prompt_cache
-            .lock()
-            .prewarm_suffix()
-            .to_vec();
+        let suffix = self.prompt_cache.lock().prewarm_suffix().to_vec();
         if suffix.is_empty() {
             return;
         }

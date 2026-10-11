@@ -2402,7 +2402,11 @@ impl CapturedDispatch {
     ///
     /// [`MetalError::CompileFailed`] for a codec with no narrow cache read, a
     /// binding that is not bound, or a refused allocation.
-    pub fn with_narrowed_buffers(&self, indices: &[usize], codec: Codec) -> Result<Self, MetalError> {
+    pub fn with_narrowed_buffers(
+        &self,
+        indices: &[usize],
+        codec: Codec,
+    ) -> Result<Self, MetalError> {
         let narrow: fn(f32) -> Vec<u8> = match codec {
             Codec::Float16 => |value| f16::from_f32(value).to_le_bytes().to_vec(),
             Codec::BFloat16 => |value| half::bf16::from_f32(value).to_le_bytes().to_vec(),
@@ -2428,7 +2432,12 @@ impl CapturedDispatch {
             // SAFETY: shared-storage buffer idle between replays; `offset + count * 4 <= length`.
             let floats = unsafe {
                 core::slice::from_raw_parts(
-                    source.contents().as_ptr().cast::<u8>().add(offset).cast::<f32>(),
+                    source
+                        .contents()
+                        .as_ptr()
+                        .cast::<u8>()
+                        .add(offset)
+                        .cast::<f32>(),
                     count,
                 )
             };

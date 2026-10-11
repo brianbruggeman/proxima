@@ -1,7 +1,7 @@
-#[cfg(all(test, feature = "instrument", feature = "metal", target_os = "macos"))]
-use super::phys_footprint_bytes;
 #[cfg(all(test, unix))]
 use super::LoadedModel;
+#[cfg(all(test, feature = "instrument", feature = "metal", target_os = "macos"))]
+use super::phys_footprint_bytes;
 #[cfg(all(test, feature = "metal"))]
 use super::{BackendRuntime, InteropError};
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
@@ -16,10 +16,9 @@ use core::ops::ControlFlow;
 use super::{
     DecodeMetrics, Phase, RouterExpertCounts, RouterLogits, SsmLayerCache, TokenEvent,
     build_position_inputs, collect_future_gather_cuts, decode_until_stop_or_budget,
-    first_nonfinite_node_value, kv_extent, moe_admit_low_copy,
-    moe_monolithic_all_low_enabled, moe_pre_gather_enabled,
-    should_release_monolithic_sources, step_batch_needs_logits, visit_moe_router_boundary,
-    visit_moe_router_selections,
+    first_nonfinite_node_value, kv_extent, moe_admit_low_copy, moe_monolithic_all_low_enabled,
+    moe_pre_gather_enabled, should_release_monolithic_sources, step_batch_needs_logits,
+    visit_moe_router_boundary, visit_moe_router_selections,
 };
 #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
 use super::{
@@ -44,26 +43,25 @@ use super::PlanNumerics;
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(super) mod tests {
-    use proxima_primitives::sync::blocking::Mutex;
     #[cfg(feature = "moe-expert-prefetch")]
     use super::super::moe_expert_prefetch_requested;
     use super::{
         RouterExpertCounts, RouterLogits, SsmLayerCache, collect_future_gather_cuts,
-        first_nonfinite_node_value, kv_extent, moe_admit_low_copy,
-        moe_monolithic_all_low_enabled, moe_pre_gather_enabled,
-        should_release_monolithic_sources, step_batch_needs_logits,
+        first_nonfinite_node_value, kv_extent, moe_admit_low_copy, moe_monolithic_all_low_enabled,
+        moe_pre_gather_enabled, should_release_monolithic_sources, step_batch_needs_logits,
         visit_moe_router_boundary, visit_moe_router_selections,
     };
-    #[cfg(all(feature = "metal", target_os = "macos"))]
-    use super::{map_expert_sources_to_segment, use_metal_output_placements};
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     use super::{
         dense_attention_placed_byte_length, dense_attention_placement_supported,
         retain_moe_segment_readbacks,
     };
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use super::{map_expert_sources_to_segment, use_metal_output_placements};
     use crate::bind::Codec;
     use alloc::string::String;
     use alloc::vec::Vec;
+    use proxima_primitives::sync::blocking::Mutex;
 
     #[cfg(any(feature = "metal", feature = "metal-output-placement"))]
     use alloc::collections::BTreeMap;
@@ -303,8 +301,14 @@ pub(super) mod tests {
         }];
         let sources = BTreeMap::from([(NodeId(0), ExpertSource::new(&entries))]);
 
-        let error = map_expert_sources_to_segment("qwen35moe", 0, &source_program, &segment_program, &sources)
-            .expect_err("a source absent from the gather program must fail before Metal staging");
+        let error = map_expert_sources_to_segment(
+            "qwen35moe",
+            0,
+            &source_program,
+            &segment_program,
+            &sources,
+        )
+        .expect_err("a source absent from the gather program must fail before Metal staging");
         assert!(matches!(
             error,
             super::InteropError::PreGatherExecutionUnsupported { architecture, reason }
@@ -1374,9 +1378,19 @@ pub(super) mod tests {
             refitting_runtime.plan_refits, 2,
             "both crossings must be served by refitting, leaving exactly one plan built"
         );
-        assert_eq!(refitting_runtime.plan_hits, max_tokens - 3, "every other step reuses the cached plan");
-        assert_eq!(rebuilding_runtime.plan_misses, 3, "the rebuilding arm misses at the same steps");
-        assert_eq!(rebuilding_runtime.plan_refits, 0, "plan_refit: false never refits");
+        assert_eq!(
+            refitting_runtime.plan_hits,
+            max_tokens - 3,
+            "every other step reuses the cached plan"
+        );
+        assert_eq!(
+            rebuilding_runtime.plan_misses, 3,
+            "the rebuilding arm misses at the same steps"
+        );
+        assert_eq!(
+            rebuilding_runtime.plan_refits, 0,
+            "plan_refit: false never refits"
+        );
         assert_eq!(
             refitted.0, rebuilt.0,
             "refitting across a crossing must emit the ids a freshly built plan emits"
@@ -2531,10 +2545,10 @@ pub(super) mod memory_fit_gate_tests {
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     use omega::allocate_placed_buffer;
 
+    use super::LoadedModel;
     use crate::lowering::FfnRouting;
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     use crate::lowering::KvCacheShape;
-    use super::LoadedModel;
 
     const TRAINED_CONTEXT_LENGTH: u32 = 131_072;
 
@@ -2585,7 +2599,11 @@ pub(super) mod memory_fit_gate_tests {
             model_with(1_000_000).kv_buffer_source.is_none(),
             "the default source is the resident store, not a caller function"
         );
-        assert_eq!(REQUESTS.load(Ordering::SeqCst), 0, "the default source must not touch the counter");
+        assert_eq!(
+            REQUESTS.load(Ordering::SeqCst),
+            0,
+            "the default source must not touch the counter"
+        );
 
         let model = model_with(1_000_000).with_kv_buffer_source(counting_source);
         let counted_buffer = model.kv_buffer_source.map(|source| source(4096));
@@ -2593,7 +2611,11 @@ pub(super) mod memory_fit_gate_tests {
             counted_buffer.is_some_and(|placed| placed.is_ok()),
             "the replacement source must place 4096 bytes"
         );
-        assert_eq!(REQUESTS.load(Ordering::SeqCst), 1, "the replacement source must be the one asked");
+        assert_eq!(
+            REQUESTS.load(Ordering::SeqCst),
+            1,
+            "the replacement source must be the one asked"
+        );
     }
 
     fn model_with(dense_weight_bytes: u64) -> LoadedModel<'static> {
@@ -4545,7 +4567,9 @@ pub(super) mod memory_fit_gate_tests {
         use proxima_gguf::parse_complete;
         use proxima_tensor::bind::{BoundOp, BoundOpKind};
         use proxima_tensor::op::{Keep, Op};
-        use proxima_tensor::shape::{symbol_dependency_iteration_mask, symbol_dependency_output_masks};
+        use proxima_tensor::shape::{
+            symbol_dependency_iteration_mask, symbol_dependency_output_masks,
+        };
         use proxima_tensor::{NumericPolicy, bind_with_fusion, infer};
 
         use super::super::LoadedModel;
@@ -4577,7 +4601,10 @@ pub(super) mod memory_fit_gate_tests {
         /// epilogue operands and every `BoundOpKind` scalar (`cached_key_rows`/
         /// `new_key_rows` included) in one comparison, so this is the union
         /// the brief's four categories name, not a narrower check.
-        fn changed_positions(low: &[BoundOp], high: &[BoundOp]) -> std::collections::BTreeSet<usize> {
+        fn changed_positions(
+            low: &[BoundOp],
+            high: &[BoundOp],
+        ) -> std::collections::BTreeSet<usize> {
             low.iter()
                 .zip(high.iter())
                 .enumerate()
@@ -4610,7 +4637,9 @@ pub(super) mod memory_fit_gate_tests {
         /// never the row axis), so the row axis's own symbol already surfaces
         /// through `all_read_sources`'s ordinary operand union.
         fn aggregate(masks: &[Vec<u64>], node: proxima_tensor::op::NodeId) -> u64 {
-            masks[node.0 as usize].iter().fold(0, |mask, axis| mask | axis)
+            masks[node.0 as usize]
+                .iter()
+                .fold(0, |mask, axis| mask | axis)
         }
 
         fn refresh_mask(program: &[Op], masks: &[Vec<u64>], bound_op: &BoundOp) -> u64 {
@@ -4620,8 +4649,13 @@ pub(super) mod memory_fit_gate_tests {
             }
             let widens_past_output = matches!(
                 &bound_op.kind,
-                BoundOpKind::Reduce { keep: Keep::Reduce, .. }
-                    | BoundOpKind::RoundBatchedReduce { keep: Keep::Reduce, .. }
+                BoundOpKind::Reduce {
+                    keep: Keep::Reduce,
+                    ..
+                } | BoundOpKind::RoundBatchedReduce {
+                    keep: Keep::Reduce,
+                    ..
+                }
             );
             if widens_past_output
                 && let Some(Op::Reduce(reduce)) = program.get(bound_op.node.0 as usize)
@@ -4636,7 +4670,10 @@ pub(super) mod memory_fit_gate_tests {
         /// `kinds_sequence_identical` at this crossing means position `i`'s
         /// node is the same on both sides, confirmed by this function's own
         /// `assert_eq!` on lengths before either set is built).
-        fn kv_masked_positions(program: &[Op], bound: &[BoundOp]) -> std::collections::BTreeSet<usize> {
+        fn kv_masked_positions(
+            program: &[Op],
+            bound: &[BoundOp],
+        ) -> std::collections::BTreeSet<usize> {
             let masks = symbol_dependency_output_masks(program);
             let kv_bit = kv_bound_bits();
             bound
@@ -4684,7 +4721,9 @@ pub(super) mod memory_fit_gate_tests {
         /// process as the decisive differential above: kind name, iteration
         /// extents, and the FIRST real operand's own stride list only —
         /// no other operand, no epilogue operand, no kind-specific scalar.
-        fn shape_footprint_of(bound_op: &BoundOp) -> (&'static str, alloc::vec::Vec<u64>, alloc::vec::Vec<i64>) {
+        fn shape_footprint_of(
+            bound_op: &BoundOp,
+        ) -> (&'static str, alloc::vec::Vec<u64>, alloc::vec::Vec<i64>) {
             let strides = bound_op
                 .operands()
                 .first()
@@ -4740,7 +4779,13 @@ pub(super) mod memory_fit_gate_tests {
             let changed = changed_positions(&bound_low, &bound_high);
             let masked = kv_masked_positions(&model.program, &bound_low);
 
-            let symmetric_difference: alloc::vec::Vec<(usize, &'static str, bool, bool, alloc::vec::Vec<&'static str>)> = changed
+            let symmetric_difference: alloc::vec::Vec<(
+                usize,
+                &'static str,
+                bool,
+                bool,
+                alloc::vec::Vec<&'static str>,
+            )> = changed
                 .symmetric_difference(&masked)
                 .map(|position| {
                     let low_op = &bound_low[*position];
@@ -4799,8 +4844,10 @@ pub(super) mod memory_fit_gate_tests {
             let model =
                 LoadedModel::load(&parsed, bytes).expect("bind the real gemma4-E2B checkpoint");
 
-            let shapes_low = infer(&model.program, &symbols_at(&model, 32)).expect("infer at kv=32");
-            let shapes_high = infer(&model.program, &symbols_at(&model, 64)).expect("infer at kv=64");
+            let shapes_low =
+                infer(&model.program, &symbols_at(&model, 32)).expect("infer at kv=32");
+            let shapes_high =
+                infer(&model.program, &symbols_at(&model, 64)).expect("infer at kv=64");
             let bound_low = bind_with_fusion(
                 &model.program,
                 &shapes_low,
@@ -4827,15 +4874,18 @@ pub(super) mod memory_fit_gate_tests {
                 .map(|(index, _)| index)
                 .collect();
 
-            let footprint_missed: alloc::vec::Vec<(usize, &'static str, alloc::vec::Vec<&'static str>)> =
-                full_changed
-                    .difference(&footprint_changed)
-                    .map(|position| {
-                        let low_op = &bound_low[*position];
-                        let high_op = &bound_high[*position];
-                        (*position, low_op.kind.name(), field_diff(low_op, high_op))
-                    })
-                    .collect();
+            let footprint_missed: alloc::vec::Vec<(
+                usize,
+                &'static str,
+                alloc::vec::Vec<&'static str>,
+            )> = full_changed
+                .difference(&footprint_changed)
+                .map(|position| {
+                    let low_op = &bound_low[*position];
+                    let high_op = &bound_high[*position];
+                    (*position, low_op.kind.name(), field_diff(low_op, high_op))
+                })
+                .collect();
 
             assert!(
                 full_changed.len() >= footprint_changed.len(),
@@ -4861,7 +4911,10 @@ pub(super) mod memory_fit_gate_tests {
             refusals_by_kind: std::collections::BTreeMap<&'static str, usize>,
         }
 
-        fn account_local_refresh_at_crossing(low_kv: usize, high_kv: usize) -> Option<RefreshAccounting> {
+        fn account_local_refresh_at_crossing(
+            low_kv: usize,
+            high_kv: usize,
+        ) -> Option<RefreshAccounting> {
             use proxima_tensor::bind::{RefreshRefusal, refresh_bound_ops};
 
             let Ok(file) = std::fs::File::open(REAL_GEMMA4_E2B_GGUF_PATH) else {
@@ -4877,8 +4930,10 @@ pub(super) mod memory_fit_gate_tests {
                 LoadedModel::load(&parsed, bytes).expect("bind the real gemma4-E2B checkpoint");
 
             let outputs = [model.logits_root];
-            let shapes_low = infer(&model.program, &symbols_at(&model, low_kv as u64)).expect("infer at low kv");
-            let shapes_high = infer(&model.program, &symbols_at(&model, high_kv as u64)).expect("infer at high kv");
+            let shapes_low =
+                infer(&model.program, &symbols_at(&model, low_kv as u64)).expect("infer at low kv");
+            let shapes_high = infer(&model.program, &symbols_at(&model, high_kv as u64))
+                .expect("infer at high kv");
             let bound_low = bind_with_fusion(
                 &model.program,
                 &shapes_low,
@@ -4931,12 +4986,18 @@ pub(super) mod memory_fit_gate_tests {
                     Err(refusal) => {
                         let kind = match &refusal {
                             RefreshRefusal::MatcherFusedKind { kind, .. } => kind,
-                            RefreshRefusal::EpilogueFusionNotLocal { .. } => "epilogue_fusion_not_local",
-                            RefreshRefusal::RecomposedBodyMismatch { .. } => "recomposed_body_mismatch",
+                            RefreshRefusal::EpilogueFusionNotLocal { .. } => {
+                                "epilogue_fusion_not_local"
+                            }
+                            RefreshRefusal::RecomposedBodyMismatch { .. } => {
+                                "recomposed_body_mismatch"
+                            }
                             RefreshRefusal::OpKindMismatch { .. } => "op_kind_mismatch",
                             RefreshRefusal::ShapeError { .. } => "shape_error",
                             RefreshRefusal::PositionOutOfRange { .. } => "position_out_of_range",
-                            RefreshRefusal::RecomposedOperandsDiffer { .. } => "recomposed_operands_differ",
+                            RefreshRefusal::RecomposedOperandsDiffer { .. } => {
+                                "recomposed_operands_differ"
+                            }
                         };
                         *refusals_by_kind.entry(kind).or_insert(0) += 1;
                     }
@@ -5014,7 +5075,8 @@ pub(super) mod memory_fit_gate_tests {
                 LoadedModel::load(&parsed, bytes).expect("bind the real gemma4-E2B checkpoint");
 
             let outputs = [model.logits_root];
-            let shapes_low = infer(&model.program, &symbols_at(&model, 32)).expect("infer at kv=32");
+            let shapes_low =
+                infer(&model.program, &symbols_at(&model, 32)).expect("infer at kv=32");
             let bound_low = bind_with_fusion(
                 &model.program,
                 &shapes_low,
@@ -5031,7 +5093,8 @@ pub(super) mod memory_fit_gate_tests {
             let masked = kv_masked_positions(&model.program, &bound_low);
             let kv_bit = kv_bound_bits();
 
-            let shapes_probe = infer(&model.program, &symbols_at(&model, 64)).expect("infer at kv=64");
+            let shapes_probe =
+                infer(&model.program, &symbols_at(&model, 64)).expect("infer at kv=64");
             let whole_mask: alloc::vec::Vec<u64> = masks.clone();
             let every_position_refreshes = refresh_bound_ops(
                 &bound_low,
@@ -5045,12 +5108,20 @@ pub(super) mod memory_fit_gate_tests {
             .is_ok();
 
             const ITERATIONS: usize = 20;
-            let mut full_bind_micros: alloc::vec::Vec<u128> = alloc::vec::Vec::with_capacity(ITERATIONS);
+            let mut full_bind_micros: alloc::vec::Vec<u128> =
+                alloc::vec::Vec::with_capacity(ITERATIONS);
             for _ in 0..ITERATIONS {
-                let shapes_high = infer(&model.program, &symbols_at(&model, 64)).expect("infer at kv=64");
+                let shapes_high =
+                    infer(&model.program, &symbols_at(&model, 64)).expect("infer at kv=64");
                 let started = std::time::Instant::now();
-                let _ = bind_with_fusion(&model.program, &shapes_high, &outputs, true, NumericPolicy::bit_exact())
-                    .expect("bind at kv=64");
+                let _ = bind_with_fusion(
+                    &model.program,
+                    &shapes_high,
+                    &outputs,
+                    true,
+                    NumericPolicy::bit_exact(),
+                )
+                .expect("bind at kv=64");
                 full_bind_micros.push(started.elapsed().as_micros());
             }
             full_bind_micros.sort_unstable();
@@ -5065,9 +5136,11 @@ pub(super) mod memory_fit_gate_tests {
                 masked.len()
             );
 
-            let mut refresh_micros: alloc::vec::Vec<u128> = alloc::vec::Vec::with_capacity(ITERATIONS);
+            let mut refresh_micros: alloc::vec::Vec<u128> =
+                alloc::vec::Vec::with_capacity(ITERATIONS);
             for _ in 0..ITERATIONS {
-                let shapes_high = infer(&model.program, &symbols_at(&model, 64)).expect("infer at kv=64");
+                let shapes_high =
+                    infer(&model.program, &symbols_at(&model, 64)).expect("infer at kv=64");
                 let started = std::time::Instant::now();
                 for &position in &masked {
                     let mut single_position_masks = alloc::vec![0u64; masks.len()];
@@ -5105,16 +5178,27 @@ pub(super) mod memory_fit_gate_tests {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod block_summarizer_tests {
     use crate::PromptCacheConfig;
-    use crate::generate::chunked_prefill_tests::{config, gemma4_checkpoint, prefill_with, prompt_of};
+    use crate::generate::chunked_prefill_tests::{
+        config, gemma4_checkpoint, prefill_with, prompt_of,
+    };
     use crate::generate::{LayerCacheState, LoadedModel, ServingConfig};
 
-    fn block_row_count(k_even: &[f32], _k_odd: &[f32], _value: &[f32], even_odd_row: usize) -> Vec<f32> {
+    fn block_row_count(
+        k_even: &[f32],
+        _k_odd: &[f32],
+        _value: &[f32],
+        even_odd_row: usize,
+    ) -> Vec<f32> {
         vec![(k_even.len() / even_odd_row) as f32]
     }
 
     fn sealing_config() -> ServingConfig<'static> {
         ServingConfig {
-            prompt_cache: PromptCacheConfig { block_tokens: 8, seal_horizon_rows: 4, ..PromptCacheConfig::standard() },
+            prompt_cache: PromptCacheConfig {
+                block_tokens: 8,
+                seal_horizon_rows: 4,
+                ..PromptCacheConfig::standard()
+            },
             ..config(7)
         }
     }
@@ -5132,8 +5216,15 @@ mod block_summarizer_tests {
             })
             .partition(|cache| cache.ring_geometry().is_none());
         assert_eq!(full.len(), 1, "one full-attention layer");
-        let ring_counts = ring.iter().map(|cache| cache.block_summaries.len()).collect();
-        (full[0].sealed_end, full[0].block_summaries.clone(), ring_counts)
+        let ring_counts = ring
+            .iter()
+            .map(|cache| cache.block_summaries.len())
+            .collect();
+        (
+            full[0].sealed_end,
+            full[0].block_summaries.clone(),
+            ring_counts,
+        )
     }
 
     #[test]
@@ -5142,15 +5233,31 @@ mod block_summarizer_tests {
         let parsed = proxima_gguf::pipe::parse_complete(&bytes).expect("parses the gemma4 fixture");
         let plain = LoadedModel::load(&parsed, &bytes).expect("loads the gemma4 fixture");
         let (control_sealed_end, control_summaries, _) = full_and_ring_summaries(&plain);
-        let model = LoadedModel::load(&parsed, &bytes).expect("loads the gemma4 fixture").with_block_summarizer(block_row_count);
+        let model = LoadedModel::load(&parsed, &bytes)
+            .expect("loads the gemma4 fixture")
+            .with_block_summarizer(block_row_count);
 
         let (sealed_end, summaries, ring_counts) = full_and_ring_summaries(&model);
 
         assert_eq!(sealed_end, 32, "(40 - 4) / 8 * 8 rows seal");
-        assert_eq!(summaries, vec![vec![8.0f32]; 4], "four sealed blocks of eight rows, each record the block row count");
-        assert_eq!(ring_counts, vec![0, 0], "a ring layer never seals, so keeps no summaries");
-        assert_eq!(control_sealed_end, 32, "without a summarizer the same rows seal");
-        assert!(control_summaries.is_empty(), "without a summarizer no record is kept");
+        assert_eq!(
+            summaries,
+            vec![vec![8.0f32]; 4],
+            "four sealed blocks of eight rows, each record the block row count"
+        );
+        assert_eq!(
+            ring_counts,
+            vec![0, 0],
+            "a ring layer never seals, so keeps no summaries"
+        );
+        assert_eq!(
+            control_sealed_end, 32,
+            "without a summarizer the same rows seal"
+        );
+        assert!(
+            control_summaries.is_empty(),
+            "without a summarizer no record is kept"
+        );
     }
 
     #[test]
@@ -5159,12 +5266,24 @@ mod block_summarizer_tests {
         let parsed = proxima_gguf::pipe::parse_complete(&bytes).expect("parses the gemma4 fixture");
         let model = LoadedModel::load(&parsed, &bytes).expect("loads the gemma4 fixture");
         // the metal fit gate clamps the cache budget to the host working set left after the kv a synthetic checkpoint reserves at its default context
-        let ungated = ServingConfig { gpu_memory_fit: false, ..config(0) };
-        model.generate_with_serving_config(&prompt_of(40, '3'), 2, ungated).expect("the synthetic checkpoint generates");
-        assert!(model.prompt_cache_bytes() > 0, "the default prompt cache stored the prompt");
+        let ungated = ServingConfig {
+            gpu_memory_fit: false,
+            ..config(0)
+        };
+        model
+            .generate_with_serving_config(&prompt_of(40, '3'), 2, ungated)
+            .expect("the synthetic checkpoint generates");
+        assert!(
+            model.prompt_cache_bytes() > 0,
+            "the default prompt cache stored the prompt"
+        );
 
         let model = model.with_block_summarizer(block_row_count);
 
-        assert_eq!(model.prompt_cache_bytes(), 0, "entries stored before the summarizer carry no summaries");
+        assert_eq!(
+            model.prompt_cache_bytes(),
+            0,
+            "entries stored before the summarizer carry no summaries"
+        );
     }
 }

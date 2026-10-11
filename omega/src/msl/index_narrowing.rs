@@ -44,15 +44,24 @@ pub(super) fn index_family(resolved: &BoundOp, quantized: &[Option<Codec>]) -> O
     }
 }
 
-pub(super) fn expert_divide_is_rendered(resolved: &BoundOp, output_axes: &[u16], block: &PackedRowBlock) -> bool {
+pub(super) fn expert_divide_is_rendered(
+    resolved: &BoundOp,
+    output_axes: &[u16],
+    block: &PackedRowBlock,
+) -> bool {
     let rows = codec_rows_per_simdgroup(block.codec) as u64;
     packed_row_block_token_total(block, &resolved.extents) <= 1
         && packed_row_direct_output_axis(resolved, output_axes).is_none()
-        && packed_row_direct_grouped_axes(resolved, output_axes)
-            .is_some_and(|(_, _, _, out_axis)| resolved.extents[out_axis as usize].is_multiple_of(rows))
+        && packed_row_direct_grouped_axes(resolved, output_axes).is_some_and(
+            |(_, _, _, out_axis)| resolved.extents[out_axis as usize].is_multiple_of(rows),
+        )
 }
 
-pub(super) fn index_family_fits(resolved: &BoundOp, quantized: &[Option<Codec>], family: IndexFamily) -> bool {
+pub(super) fn index_family_fits(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    family: IndexFamily,
+) -> bool {
     match family {
         IndexFamily::Body => body_reach_fits(resolved),
         IndexFamily::ExpertPrologue => output_total_fits_u32(resolved),
@@ -61,9 +70,16 @@ pub(super) fn index_family_fits(resolved: &BoundOp, quantized: &[Option<Codec>],
 }
 
 fn layout_reach(layout: &Layout, extents: &[u64]) -> Option<u64> {
-    layout.strides.iter().zip(extents).try_fold(layout.base.unsigned_abs(), |reach, (stride, extent)| {
-        reach.checked_add(extent.saturating_sub(1).checked_mul(stride.unsigned_abs())?)
-    })
+    layout.strides.iter().zip(extents).try_fold(
+        layout.base.unsigned_abs(),
+        |reach, (stride, extent)| {
+            reach.checked_add(
+                extent
+                    .saturating_sub(1)
+                    .checked_mul(stride.unsigned_abs())?,
+            )
+        },
+    )
 }
 
 fn gathered_reach(layout: &Layout, lookup: Option<&Lookup>, extents: &[u64]) -> Option<u64> {
@@ -71,13 +87,20 @@ fn gathered_reach(layout: &Layout, lookup: Option<&Lookup>, extents: &[u64]) -> 
     let Some(lookup) = lookup else {
         return Some(direct);
     };
-    let fetched = lookup.extent.saturating_sub(1).checked_mul(lookup.element_stride.unsigned_abs())?;
+    let fetched = lookup
+        .extent
+        .saturating_sub(1)
+        .checked_mul(lookup.element_stride.unsigned_abs())?;
     let index_reach = layout_reach(&lookup.index_layout, extents)?;
     direct.checked_add(fetched)?.checked_add(index_reach)
 }
 
 pub(super) fn body_reach_fits(resolved: &BoundOp) -> bool {
-    let Some(iteration_space) = resolved.extents.iter().try_fold(1u64, |total, extent| total.checked_mul(*extent)) else {
+    let Some(iteration_space) = resolved
+        .extents
+        .iter()
+        .try_fold(1u64, |total, extent| total.checked_mul(*extent))
+    else {
         return false;
     };
     let mut reaches: Vec<Option<u64>> = resolved
@@ -85,16 +108,23 @@ pub(super) fn body_reach_fits(resolved: &BoundOp) -> bool {
         .iter()
         .map(|(_, layout, lookup)| gathered_reach(layout, lookup.as_ref(), &resolved.extents))
         .collect();
-    if let BoundOpKind::Reduce { out_layout, epilogue_operands, .. } = &resolved.kind {
+    if let BoundOpKind::Reduce {
+        out_layout,
+        epilogue_operands,
+        ..
+    } = &resolved.kind
+    {
         reaches.push(layout_reach(out_layout, &resolved.extents));
         reaches.extend(
-            epilogue_operands
-                .iter()
-                .map(|(_, layout, lookup)| gathered_reach(layout, lookup.as_ref(), &resolved.extents)),
+            epilogue_operands.iter().map(|(_, layout, lookup)| {
+                gathered_reach(layout, lookup.as_ref(), &resolved.extents)
+            }),
         );
     }
     (1..=INDEX32_REACH_LIMIT).contains(&iteration_space)
-        && reaches.iter().all(|reach| reach.is_some_and(|value| value <= INDEX32_REACH_LIMIT))
+        && reaches
+            .iter()
+            .all(|reach| reach.is_some_and(|value| value <= INDEX32_REACH_LIMIT))
 }
 
 pub(super) fn output_total_fits_u32(resolved: &BoundOp) -> bool {
@@ -103,20 +133,28 @@ pub(super) fn output_total_fits_u32(resolved: &BoundOp) -> bool {
     };
     output_axes
         .iter()
-        .try_fold(1u64, |total, axis| total.checked_mul(resolved.extents[*axis as usize]))
+        .try_fold(1u64, |total, axis| {
+            total.checked_mul(resolved.extents[*axis as usize])
+        })
         .is_some_and(|total| (1..=u64::from(u32::MAX)).contains(&total))
 }
 
 fn block_decode_reach_fits(resolved: &BoundOp, quantized: &[Option<Codec>]) -> bool {
-    resolved.operands().iter().zip(quantized).all(|((_, layout, lookup), codec)| {
-        let non_negative = layout.base >= 0
-            && layout.strides.iter().all(|stride| *stride >= 0)
-            && lookup.as_ref().is_none_or(|gather| gather.element_stride >= 0);
-        let within = codec.is_none()
-            || gathered_reach(layout, lookup.as_ref(), &resolved.extents)
-                .is_some_and(|reach| reach <= u64::from(u32::MAX));
-        non_negative && within
-    })
+    resolved
+        .operands()
+        .iter()
+        .zip(quantized)
+        .all(|((_, layout, lookup), codec)| {
+            let non_negative = layout.base >= 0
+                && layout.strides.iter().all(|stride| *stride >= 0)
+                && lookup
+                    .as_ref()
+                    .is_none_or(|gather| gather.element_stride >= 0);
+            let within = codec.is_none()
+                || gathered_reach(layout, lookup.as_ref(), &resolved.extents)
+                    .is_some_and(|reach| reach <= u64::from(u32::MAX));
+            non_negative && within
+        })
 }
 
 fn is_word_byte(byte: u8) -> bool {
@@ -130,7 +168,8 @@ pub(super) fn replace_word(text: &str, word: &str, replacement: &str) -> String 
     while let Some(found) = text[cursor..].find(word) {
         let start = cursor + found;
         let end = start + word.len();
-        let isolated = (start == 0 || !is_word_byte(bytes[start - 1])) && bytes.get(end).is_none_or(|byte| !is_word_byte(*byte));
+        let isolated = (start == 0 || !is_word_byte(bytes[start - 1]))
+            && bytes.get(end).is_none_or(|byte| !is_word_byte(*byte));
         output.push_str(&text[cursor..start]);
         output.push_str(if isolated { replacement } else { word });
         cursor = end;
@@ -149,8 +188,12 @@ fn strip_long_suffix(text: &str) -> String {
         }
         let after_number = index > 0
             && bytes[index - 1].is_ascii_digit()
-            && (digits_start == 0 || !(bytes[digits_start - 1].is_ascii_alphabetic() || bytes[digits_start - 1] == b'_'));
-        let suffix = byte == b'L' && after_number && bytes.get(index + 1).is_none_or(|next| !is_word_byte(*next));
+            && (digits_start == 0
+                || !(bytes[digits_start - 1].is_ascii_alphabetic()
+                    || bytes[digits_start - 1] == b'_'));
+        let suffix = byte == b'L'
+            && after_number
+            && bytes.get(index + 1).is_none_or(|next| !is_word_byte(*next));
         if !suffix {
             output.push(char::from(byte));
         }
@@ -193,7 +236,13 @@ fn uniform_member_at(body: &str, at: usize, members: &[String]) -> Option<usize>
     let tail = &body[at..];
     members
         .iter()
-        .find(|name| tail.starts_with(name.as_str()) && tail.as_bytes().get(name.len()).is_none_or(|byte| !is_word_byte(*byte)))
+        .find(|name| {
+            tail.starts_with(name.as_str())
+                && tail
+                    .as_bytes()
+                    .get(name.len())
+                    .is_none_or(|byte| !is_word_byte(*byte))
+        })
         .map(String::len)
 }
 
@@ -205,7 +254,9 @@ fn cast_uniform_reads(body: &str, members: &[String]) -> String {
         let starts_read = bytes[cursor] == b'u'
             && bytes.get(cursor + 1) == Some(&b'.')
             && (cursor == 0 || !is_word_byte(bytes[cursor - 1]));
-        let member_len = starts_read.then(|| uniform_member_at(body, cursor + 2, members)).flatten();
+        let member_len = starts_read
+            .then(|| uniform_member_at(body, cursor + 2, members))
+            .flatten();
         if let Some(length) = member_len {
             let mut end = cursor + 2 + length;
             while bytes.get(end) == Some(&b'[') {
@@ -276,7 +327,10 @@ fn block_decode_read(tail: &str) -> Option<(usize, String)> {
     let size_len = closing.bytes().take_while(u8::is_ascii_digit).count();
     let size = &closing[..size_len];
     let consumed = 4 + digits + 3 + divisor_len + 4 + size_len;
-    Some((consumed, format!("(long)((uint){name} / {divisor}u) * {size}")))
+    Some((
+        consumed,
+        format!("(long)((uint){name} / {divisor}u) * {size}"),
+    ))
 }
 
 pub(super) fn narrow_block_remainders(source: &str) -> String {
@@ -294,7 +348,10 @@ pub(super) fn narrow_block_remainders(source: &str) -> String {
         match parsed {
             Some(length) => {
                 let divisor = &after_name[3..3 + length];
-                output.push_str(&format!("((uint)off{} % {divisor}u)", &tail[10..10 + digits]));
+                output.push_str(&format!(
+                    "((uint)off{} % {divisor}u)",
+                    &tail[10..10 + digits]
+                ));
                 rest = &after_name[3 + length + 1..];
             }
             None => {

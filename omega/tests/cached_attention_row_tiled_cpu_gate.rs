@@ -61,11 +61,26 @@ fn all_cells() -> Vec<Cell> {
     });
     let prefill = [
         ("one kv head past the old row limit", one_kv_head, 70, 33),
-        ("one kv head window crosses the new range", one_kv_head.with_window(40), 130, 199),
-        ("one kv head window crosses, ragged tail", one_kv_head.with_window(48), 101, 1),
+        (
+            "one kv head window crosses the new range",
+            one_kv_head.with_window(40),
+            130,
+            199,
+        ),
+        (
+            "one kv head window crosses, ragged tail",
+            one_kv_head.with_window(48),
+            101,
+            1,
+        ),
         ("two groups eight rows", two_groups, 8, 33),
         ("two groups ragged rows", two_groups, 37, 100),
-        ("two groups window crosses the new range", two_groups.with_window(24), 50, 40),
+        (
+            "two groups window crosses the new range",
+            two_groups.with_window(24),
+            50,
+            40,
+        ),
     ]
     .map(|(label, geometry, rows, cached_len)| Cell {
         label,
@@ -366,7 +381,8 @@ fn the_kernel_transcription_reproduces_the_cpu_oracle_on_the_programs_own_activa
 /// the one-dispatch kernel; the CPU oracle over that op must still equal the
 /// unfused chain, so the fused op carries the right fields at any K.
 #[test]
-fn rows_under_one_fragment_of_a_two_group_head_keep_the_one_dispatch_kernel_and_the_cpu_oracle_agrees() {
+fn rows_under_one_fragment_of_a_two_group_head_keep_the_one_dispatch_kernel_and_the_cpu_oracle_agrees()
+ {
     let policy = production_numeric_policy();
     let rows = 5;
     let cached_len = 33;

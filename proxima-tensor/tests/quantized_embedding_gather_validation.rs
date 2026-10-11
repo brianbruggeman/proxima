@@ -92,7 +92,10 @@ fn quantized_embedding_gather_matches_dequantized_reference_q8_0() {
 
     assert_quantized_gather_matches_reference(
         embedding,
-        QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &table_bytes },
+        QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes: &table_bytes,
+        },
         &table_f32,
     );
 }
@@ -108,7 +111,10 @@ fn quantized_embedding_gather_matches_dequantized_reference_q4_k() {
 
     assert_quantized_gather_matches_reference(
         embedding,
-        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &table_bytes },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &table_bytes,
+        },
         &table_f32,
     );
 }

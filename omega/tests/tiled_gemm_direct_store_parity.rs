@@ -124,7 +124,12 @@ fn real_tensor_bytes(
 
 /// Same iteration-space convention as `q4_0_tiled_gemm_batched_run8_parity.rs`'s
 /// own `matmul_program`.
-fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
+fn matmul_program(
+    tokens: u32,
+    in_dim: u32,
+    out_dim: u32,
+    weight_dtype: DType,
+) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = append(
         &mut program,
@@ -175,7 +180,12 @@ fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32, weight_dtype: DType) -
 /// `"0"` (off, the restage-only path) and explicit `"1"` (on) -- and asserts
 /// the two runs are bit-for-bit identical. Returns early (no assertion) if
 /// the tensor is absent, matching this crate's other real-checkpoint tests.
-fn check_direct_store_byte_identity(tensor_name: &str, tokens: usize, rows_wanted: usize, label: &str) {
+fn check_direct_store_byte_identity(
+    tensor_name: &str,
+    tokens: usize,
+    rows_wanted: usize,
+    label: &str,
+) {
     let path = std::path::Path::new(REAL_GEMMA4_GGUF_PATH);
     let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
         eprintln!("real gguf file not found at {REAL_GEMMA4_GGUF_PATH}; test skipped");
@@ -201,7 +211,10 @@ fn check_direct_store_byte_identity(tensor_name: &str, tokens: usize, rows_wante
     let (packed_program, packed_sum) =
         matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::UInt8);
     let blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: sliced_weight },
+        QuantizedBlock::Packed {
+            codec: Codec::Q4_0,
+            bytes: sliced_weight,
+        },
         QuantizedBlock::Float32(&activation),
     ];
 
@@ -230,8 +243,16 @@ fn check_direct_store_byte_identity(tensor_name: &str, tokens: usize, rows_wante
     let off_root = direct_store_off.root();
     let on_root = direct_store_on.root();
     let element_count = tokens * rows;
-    assert_eq!(off_root.len(), element_count, "degenerate: OFF produced no output");
-    assert_eq!(on_root.len(), element_count, "degenerate: ON produced no output");
+    assert_eq!(
+        off_root.len(),
+        element_count,
+        "degenerate: OFF produced no output"
+    );
+    assert_eq!(
+        on_root.len(),
+        element_count,
+        "degenerate: ON produced no output"
+    );
 
     let mut differing = 0usize;
     let mut max_abs_diff = 0.0f32;
