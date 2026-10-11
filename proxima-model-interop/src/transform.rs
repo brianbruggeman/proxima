@@ -152,6 +152,10 @@ fn stringify_metadata_value(value: &MetadataValue) -> String {
     }
 }
 
+mod mlx_affine;
+
+pub use mlx_affine::{AffineExport, AffinePacked, AffineParams, export_affine, pack_affine};
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;

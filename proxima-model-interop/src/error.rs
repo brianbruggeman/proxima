@@ -854,4 +854,21 @@ pub enum InteropError {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     #[error("PROXIMA_DISPATCH={value:?}: expected `serial` or `concurrent`")]
     InvalidDispatchTypeOverride { value: String },
+
+    /// mlx-lm's affine mode packs 2, 3, 4, 5, 6 or 8 bits per element.
+    #[error("affine bits {bits} is not one of 2, 3, 4, 5, 6, 8")]
+    AffineBitsUnsupported { bits: u8 },
+
+    /// mlx-lm's affine mode groups 32, 64 or 128 elements per scale and bias.
+    #[error("affine group size {group_size} is not one of 32, 64, 128")]
+    AffineGroupSizeUnsupported { group_size: usize },
+
+    /// An affine pack was handed a shape or buffer that disagrees with the
+    /// row count, the group size or the bit width.
+    #[error("affine pack buffers disagree with shape {rows}x{columns}: {reason}")]
+    AffineShapeMismatch { rows: usize, columns: usize, reason: &'static str },
+
+    /// Affine scales and biases are stored in bf16, f16 or f32 only.
+    #[error("affine scales dtype {dtype:?} is not bf16, f16 or f32")]
+    AffineDTypeUnsupported { dtype: DType },
 }
