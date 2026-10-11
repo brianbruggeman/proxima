@@ -784,6 +784,7 @@ pub fn decode_request(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     fn produce_request_wire() -> Vec<u8> {
         // acks=1, timeout_ms=1500, one topic "orders" with one partition 0

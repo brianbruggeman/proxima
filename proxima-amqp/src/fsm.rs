@@ -534,6 +534,7 @@ mod tests {
         FRAME_ENVELOPE_BYTES, encode_body_frames, encode_header_frame, encode_method_frame,
     };
     use crate::wire::FieldTable;
+    use alloc::vec;
 
     fn limits() -> Limits {
         Limits {

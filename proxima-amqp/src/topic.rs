@@ -39,6 +39,7 @@ fn match_words(pattern: &[&[u8]], key: &[&[u8]]) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn literal_pattern_matches_only_itself() {

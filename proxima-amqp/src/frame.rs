@@ -81,6 +81,7 @@ pub fn encode_heartbeat_frame(out: &mut Vec<u8>) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use proxima_protocols::amqp::{Frame, parse_frame};
 
     #[test]

@@ -365,6 +365,7 @@ fn encode_field_table(table: &FieldTable) -> Vec<u8> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn scalars_round_trip() {
