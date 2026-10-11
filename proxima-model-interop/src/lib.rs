@@ -77,6 +77,8 @@ pub mod rope_scaling;
 mod serving;
 mod serving_grammar;
 #[cfg(feature = "std")]
+mod codec_policy_settings;
+#[cfg(feature = "std")]
 mod prompt_cache_settings;
 #[cfg(feature = "std")]
 mod speculative_settings;
@@ -168,6 +170,8 @@ pub use serving::{
 };
 #[cfg(feature = "std")]
 pub use proxima_core::ServingState;
+#[cfg(feature = "std")]
+pub use codec_policy_settings::{CodecPolicySettings, CodecPolicyWeights};
 #[cfg(feature = "std")]
 pub use prompt_cache_settings::PromptCacheSettings;
 #[cfg(feature = "std")]
