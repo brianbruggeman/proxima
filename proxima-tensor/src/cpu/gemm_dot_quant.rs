@@ -2287,6 +2287,71 @@ pub fn matmul_bf8_e5m2_f32(
     )
 }
 
+pub(super) const FP6_E3M2_BLOCK_BYTES: usize = proxima_gguf::quant::scaled_float::BLOCK_BYTES;
+
+pub(super) const FP6_E3M2_BLOCK_ELEMENTS: usize = proxima_gguf::quant::scaled_float::BLOCK_ELEMENTS;
+
+pub(super) fn dot_fp6_e3m2_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(FP6_E3M2_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the fp6_e3m2 block size",
+        });
+    }
+    if activation.len() != weight_row.len() / FP6_E3M2_BLOCK_BYTES * FP6_E3M2_BLOCK_ELEMENTS {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the fp6_e3m2 weight row's decoded element count",
+        });
+    }
+    let mut scratch = [0.0f32; FP6_E3M2_BLOCK_ELEMENTS];
+    weight_row
+        .as_chunks::<FP6_E3M2_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation.as_chunks::<FP6_E3M2_BLOCK_ELEMENTS>().0)
+        .try_fold(0.0f32, |acc, (block, activation_chunk)| {
+            proxima_gguf::quant::scaled_float::dequantize_block(
+                block,
+                proxima_primitives::float_layout::FloatLayout::E3M2,
+                &mut scratch,
+            )
+            .map_err(|_| TensorError::QuantizedShapeMismatch {
+                reason: "fp6_e3m2 block decode rejected the e3m2 layout",
+            })?;
+            Ok(dot_fold_fused_multiply_add(
+                &scratch,
+                activation_chunk,
+                DotFold {
+                    len: FP6_E3M2_BLOCK_ELEMENTS,
+                    init: acc,
+                    seeded: true,
+                },
+            ))
+        })
+}
+
+/// `Codec::Fp6E3M2` weight matrix (`rows` x `k`) times one `f32` activation vector: each
+/// 26-byte block is decoded by [`proxima_gguf::quant::scaled_float::dequantize_block`] (the
+/// same decode `dequantize_fp6_e3m2` uses) into a stack buffer, then folded like
+/// [`matmul_q4_0_f32`].
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] on zero rows, a weight length that is not a whole
+/// multiple of `rows` or of the block size, or an activation of the wrong length.
+pub fn matmul_fp6_e3m2_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_fp6_e3m2_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        dot_fp6_e3m2_f32,
+    )
+}
+
 pub fn matmul_bf4_e2m1_f32(
     weights: &[u8],
     rows: usize,

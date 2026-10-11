@@ -13373,3 +13373,133 @@ fn round_group_collapses_to_the_metal_argument_table_limit_and_no_further() {
         );
     }
 }
+
+const E3M2_ROWS: usize = 1024;
+const E3M2_K: usize = 512;
+const E3M2_BLOCKS_PER_ROW: usize = E3M2_K / 32;
+const E3M2_BLOCK_BYTES: usize = 26;
+const E3M2_MATMUL_BOUND: f64 = 4e-5;
+
+fn e3m2_table4_value(code: u8) -> f64 {
+    let sign = if code >> 5 == 1 { -1.0 } else { 1.0 };
+    let exponent = i32::from((code >> 2) & 0b111);
+    let mantissa = f64::from(code & 0b11) / 4.0;
+    let magnitude = if exponent == 0 {
+        mantissa * 2f64.powi(-2)
+    } else {
+        (1.0 + mantissa) * 2f64.powi(exponent - 3)
+    };
+    sign * magnitude
+}
+
+fn e3m2_code(row: usize, block: usize, element: usize) -> u8 {
+    ((row * 7 + block * 13 + element * 5 + row * element) % 64) as u8
+}
+
+fn e3m2_scale(row: usize, block: usize) -> f16 {
+    f16::from_f32(0.015625 * (1 + (row + block) % 9) as f32)
+}
+
+fn e3m2_pack_block(codes: &[u8; 32], scale: f16) -> [u8; E3M2_BLOCK_BYTES] {
+    let mut block = [0u8; E3M2_BLOCK_BYTES];
+    block[..2].copy_from_slice(&scale.to_le_bytes());
+    for (group, group_codes) in codes.chunks_exact(4).enumerate() {
+        let word = group_codes
+            .iter()
+            .enumerate()
+            .fold(0u32, |word, (slot, &code)| word | u32::from(code) << (6 * slot));
+        block[2 + group * 3..5 + group * 3].copy_from_slice(&word.to_le_bytes()[..3]);
+    }
+    block
+}
+
+fn e3m2_weight_bytes(code_of: impl Fn(usize, usize, usize) -> u8) -> Vec<u8> {
+    (0..E3M2_ROWS)
+        .flat_map(|row| (0..E3M2_BLOCKS_PER_ROW).map(move |block| (row, block)))
+        .flat_map(|(row, block)| {
+            let codes: [u8; 32] = core::array::from_fn(|element| code_of(row, block, element));
+            e3m2_pack_block(&codes, e3m2_scale(row, block))
+        })
+        .collect()
+}
+
+fn e3m2_f64_dot(weights: &[u8], row: usize, activation: &[f32]) -> (f64, f64) {
+    let row_bytes = E3M2_BLOCKS_PER_ROW * E3M2_BLOCK_BYTES;
+    weights[row * row_bytes..(row + 1) * row_bytes]
+        .chunks_exact(E3M2_BLOCK_BYTES)
+        .enumerate()
+        .flat_map(|(block_index, block)| {
+            let scale = f64::from(f16::from_le_bytes([block[0], block[1]]).to_f32());
+            let activation_block = &activation[block_index * 32..(block_index + 1) * 32];
+            (0..32).map(move |element| {
+                let bit = element * 6;
+                let high = block.get(3 + bit / 8).copied().unwrap_or(0);
+                let pair = u16::from(block[2 + bit / 8]) | u16::from(high) << 8;
+                let code = ((pair >> (bit % 8)) & 0x3f) as u8;
+                scale * e3m2_table4_value(code) * f64::from(activation_block[element])
+            })
+        })
+        .fold((0.0, 0.0), |(sum, magnitude), term| (sum + term, magnitude + term.abs()))
+}
+
+fn e3m2_worst_ratio(weights: &[u8], activation: &[f32]) -> f64 {
+    let result = matmul_fp6_e3m2_f32(weights, E3M2_ROWS, activation)
+        .expect("e3m2 matmul over whole blocks evaluates");
+    result
+        .iter()
+        .enumerate()
+        .map(|(row, &value)| {
+            let (exact, magnitude) = e3m2_f64_dot(weights, row, activation);
+            (f64::from(value) - exact).abs() / magnitude
+        })
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn scaled_e3m2_cpu_dequantize_equals_golden_times_scale_1024x512() {
+    let weights = e3m2_weight_bytes(e3m2_code);
+    let block = QuantizedBlock::Packed { codec: Codec::Fp6E3M2, bytes: &weights };
+    let dequantize = block.dequantize_fn().expect("fp6_e3m2 has a single-shot decoder");
+    let mut decoded = vec![0.0f32; E3M2_ROWS * E3M2_K];
+
+    dequantize(&weights, &mut decoded).expect("whole blocks decode");
+
+    let expected: Vec<f32> = (0..E3M2_ROWS)
+        .flat_map(|row| (0..E3M2_K).map(move |column| (row, column)))
+        .map(|(row, column)| {
+            let scale = e3m2_scale(row, column / 32).to_f32();
+            (e3m2_table4_value(e3m2_code(row, column / 32, column % 32)) as f32) * scale
+        })
+        .collect();
+    assert_eq!(decoded.len(), E3M2_ROWS * E3M2_K);
+    assert_eq!(decoded, expected);
+}
+
+#[test]
+fn scaled_e3m2_cpu_matmul_matches_f64_loop_1024x512() {
+    let weights = e3m2_weight_bytes(e3m2_code);
+    let activation = random_vec(29, E3M2_K);
+
+    let worst = e3m2_worst_ratio(&weights, &activation);
+
+    assert!(worst <= E3M2_MATMUL_BOUND, "worst relative error {worst:e} exceeds {E3M2_MATMUL_BOUND:e}");
+}
+
+#[test]
+fn scaled_e3m2_cpu_matmul_control_perturbed_weight_fails() {
+    let intact = e3m2_weight_bytes(e3m2_code);
+    let activation = random_vec(29, E3M2_K);
+    let perturbed_code = |row: usize, block: usize, element: usize| {
+        let code = e3m2_code(row, block, element);
+        if (row, block, element) == (0, 0, 1) { code ^ 0x1c } else { code }
+    };
+    let perturbed = e3m2_weight_bytes(perturbed_code);
+    assert_ne!(intact, perturbed, "the control must change a weight code");
+    let kernel_result = matmul_fp6_e3m2_f32(&perturbed, E3M2_ROWS, &activation)
+        .expect("e3m2 matmul over whole blocks evaluates");
+
+    let (exact, magnitude) = e3m2_f64_dot(&intact, 0, &activation);
+
+    let ratio = (f64::from(kernel_result[0]) - exact).abs() / magnitude;
+    assert!(ratio > E3M2_MATMUL_BOUND, "perturbation ratio {ratio:e} stayed within the bound");
+}

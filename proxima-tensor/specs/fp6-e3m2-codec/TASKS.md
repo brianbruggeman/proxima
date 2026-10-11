@@ -11,7 +11,7 @@ Each slice: one commit, one behaviour change, one validation command, one expect
 | 5 | vendor the OCP text as `proxima-gguf/src/quant/fixtures/ocp_mx_v1_0.txt` (copy of `.long_ctx_backups/mlx_fp6/ocp/ocp-mx-v1.0.txt`); E3M2 golden table tests and control | AC5 | `cargo nextest run -p proxima-gguf -E 'test(/float_layout_e3m2_golden/)'` | `4 passed` | [x] | 4 passed; 592 newline bytes asserted |
 | 6 | `Codec::Fp6E3M2` tag 32, block 26 bytes, 32 elements | AC6 | `cargo nextest run -p proxima-primitives -E 'test(/fp6_e3m2_codec/)'` | `3 passed` | [x] | 3 passed; tag 32, `Codec::FP6_E3M2_BLOCK_BYTES` 26 and `FP6_E3M2_BLOCK_ELEMENTS` 32 derived from `FloatLayout::E3M2`; capability name FP6_E3M2, bind.rs and expert_slab.rs rejects, epilogue.rs None arms, omega None or reject arms; admitted nowhere |
 | 7 | `scaled_float.rs` block quantize and dequantize generic over the layout | AC7 | `cargo nextest run -p proxima-gguf -E 'test(/scaled_e3m2_block/)'` | `3 passed` | [x] | 3 passed; rows are every 2-D Q8_0 1024x512 tensor of the granite blob; worst error 0.9990 of the h(q) bound (4 ulp f32 slack included); bit order in the scaled_float.rs module doc; adds QuantError::FieldWidthMismatch |
-| 8 | CPU `dequantize_fp6_e3m2` and `matmul_fp6_e3m2_f32` with the f64 loop oracle and control | AC8 | `cargo nextest run -p proxima-tensor -E 'test(/scaled_e3m2_cpu_/)'` | `3 passed` | [ ] | matmul tolerance 4e-5 x sum(abs(a x b)) at K = 512 |
+| 8 | CPU `dequantize_fp6_e3m2` and `matmul_fp6_e3m2_f32` with the f64 loop oracle and control | AC8 | `cargo nextest run -p proxima-tensor -E 'test(/scaled_e3m2_cpu_/)'` | `3 passed` | [x] |  3 passed; one block decode shared (`scaled_float::dequantize_block`); max ratio 8.85e-8 against bound 4e-5; `Codec::Fp6E3M2` admitted in dequantize, matmul and `block_layout`/`element_count` tables |
 | 9 | proxima-own GGUF tensor type id, `DType::Fp6E3M2`, `dtype_to_ggml` returns `None`, transform round trip and export rejection | AC9 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/fp6_e3m2_gguf_/)'` | `3 passed` | [ ] | the compiler lists the other `DType` match sites |
 | 10 | omega row-blocked arm and the decode MSL rendered from the layout constants | AC10 | `cargo nextest run -p omega --features metal -E 'test(/scaled_e3m2_render_row_blocked/) + test(/scaled_e3m2_render_decode/)'` | `3 passed` | [ ] | render only; no GPU |
 | 11 | `tiled_decode(Codec::Fp6E3M2)` description, the expert-grouped GEMM source through it, and the model-name-free render test over the 3 sources | AC11 | `cargo nextest run -p omega --features metal -E 'test(/scaled_e3m2_render_tiled/) + test(/scaled_e3m2_render_grouped/) + test(/scaled_e3m2_render_model_name_free/)'` | `3 passed` | [ ] | a staging failure here amends the SPEC risk row with the cause |
@@ -27,8 +27,8 @@ In the table above `\|` stands for a literal pipe character; the SPEC's `### com
 
 ## resume
 
-Last landed slice: 7
-Next action: slice 8 (CPU dequantize and matmul, needs 7) and slice 9 (GGUF edge, needs 6 and 7); slice 10 (omega row-blocked arm, needs 1 and 6) may run in parallel
+Last landed slice: 8
+Next action: slice 9 (GGUF edge, needs 6 and 7); slice 10 (omega row-blocked arm, needs 1 and 6) may run in parallel
 Open question, if any: none for the E3M2 definition (the OCP text, SPEC section "Definition of E3M2", gives bias 3 and no override); slice 11 answers whether the grouped GEMM can stage 3-byte groups
 
 ## struck
