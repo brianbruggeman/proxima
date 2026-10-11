@@ -126,6 +126,7 @@ mod tiled_gemm_cooperative_scan;
 mod expert_grouped_gemm;
 mod index_narrowing;
 mod wide_grid;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) use emit_and_classify::emit_inner_with_mma_selection;
 #[cfg(feature = "metal-attn-variants")]
 pub(crate) use emit_and_classify::validate_attention_variant_storage;
@@ -174,7 +175,10 @@ use cached_attention_row_tiled::render_cached_attention_row_tiled;
 // `use super::*`.
 #[cfg(test)]
 pub(crate) use cached_attention_render::emit_cached_attention_merge;
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+#[cfg(any(
+    all(test, feature = "metal-attn-split-rows"),
+    all(feature = "metal", target_os = "macos")
+))]
 pub(crate) use cached_attention_render::emit_cached_attention_merge_with_schedule;
 #[cfg(test)]
 use cached_attention_render::render_cached_attention_merge;
