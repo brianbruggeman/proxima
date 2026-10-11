@@ -16,14 +16,14 @@ use proxima_gguf::quant::dispatch::dequantize as proxima_dequantize;
 use proxima_gguf::tensor::TensorInfo;
 use proxima_gguf::types::GgmlType;
 
+type CheckResult<T> = Result<T, Box<dyn Error>>;
+
 const Q3_K_BLOCK_BYTES: usize = 110;
 const Q3_K_BLOCK_ELEMENTS: usize = 256;
 const Q5_1_BLOCK_BYTES: usize = 24;
 const Q5_1_BLOCK_ELEMENTS: usize = 32;
 
-fn parse_header(
-    file: &mut std::fs::File,
-) -> Result<proxima_gguf::pipe::ParsedGguf, Box<dyn Error>> {
+fn parse_header(file: &mut std::fs::File) -> CheckResult<proxima_gguf::pipe::ParsedGguf> {
     let mut header_buf = Vec::new();
     for cap in [4usize << 20, 16 << 20, 64 << 20, 128 << 20, 512 << 20] {
         header_buf.resize(cap, 0);
@@ -37,10 +37,7 @@ fn parse_header(
     Err("gguf metadata region did not fit in 512 MiB".into())
 }
 
-fn read_range(
-    file: &mut std::fs::File,
-    range: core::ops::Range<u64>,
-) -> Result<Vec<u8>, Box<dyn Error>> {
+fn read_range(file: &mut std::fs::File, range: core::ops::Range<u64>) -> CheckResult<Vec<u8>> {
     let mut buffer = vec![0u8; (range.end - range.start) as usize];
     file.seek(SeekFrom::Start(range.start))?;
     file.read_exact(&mut buffer)?;
@@ -149,7 +146,7 @@ fn compare_q3_k(
     parsed: &proxima_gguf::pipe::ParsedGguf,
     file_len: u64,
     tensor_name: &str,
-) -> Result<(), Box<dyn Error>> {
+) -> CheckResult<()> {
     let tensor = find_tensor(parsed, tensor_name);
     assert_eq!(
         tensor.ggml_type,
@@ -198,7 +195,7 @@ fn compare_q5_1(
     file_len: u64,
     tensor_name: &str,
     block_index: u64,
-) -> Result<(), Box<dyn Error>> {
+) -> CheckResult<()> {
     let tensor = find_tensor(parsed, tensor_name);
     assert_eq!(
         tensor.ggml_type,
@@ -238,7 +235,7 @@ fn compare_q5_1(
     Ok(())
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> CheckResult<()> {
     let gguf_path = env::var("GEMMA4_GGUF").unwrap_or_else(|_| {
         "/Users/brianbruggeman/.ollama/models/blobs/sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129"
             .to_string()
