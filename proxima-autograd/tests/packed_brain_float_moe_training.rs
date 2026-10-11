@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -170,7 +172,7 @@ fn encode_master(codec: Codec) -> Vec<u8> {
             .map(|value| proxima_gguf::quant::bf8_e5m2::encode(*value))
             .collect(),
         Codec::Bf4E2M1 => MASTER
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|pair| {
                 proxima_gguf::quant::bf4_e2m1::pack_pair(pair[0], pair[1])
                     .expect("finite master pair encodes")
@@ -402,7 +404,9 @@ fn telemetry_capture() -> (
     (pipe, recorder, state_guard)
 }
 
-fn independent_reference(codec: Codec) -> (Vec<f32>, f32, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+type IndependentReference = (Vec<f32>, f32, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
+
+fn independent_reference(codec: Codec) -> IndependentReference {
     let decoded = match codec {
         Codec::Bf8E5M2 | Codec::Bf4E2M1 => {
             [1.0, 0.0, 0.0, 1.0, 2.0, 0.0, -1.0, 0.0, 3.0, 4.0, 5.0, 6.0]

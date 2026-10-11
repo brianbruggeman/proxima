@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use proxima_autograd::adjoint::differentiate;
 use proxima_autograd::low_precision::{WeightFormat, weight_view};
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};

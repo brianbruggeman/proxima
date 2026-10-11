@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 #[path = "../examples/low_precision_moe_training_pilot.rs"]
 pub mod pilot;
 
@@ -84,7 +86,9 @@ fn packed_pilot_step_matches_scalar_reference() {
             .map(|gradient| gradient / 8.0)
             .collect();
         let scalar_coalesced: Vec<f32> = scalar_coalesced_rows
-            .chunks_exact(16)
+            .as_chunks::<16>()
+            .0
+            .iter()
             .flat_map(|row| row.iter().copied())
             .collect();
         let zeros = vec![0.0; 32];

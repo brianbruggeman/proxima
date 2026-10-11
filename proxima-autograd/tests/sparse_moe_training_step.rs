@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use proxima_autograd::adjoint::differentiate;
 use proxima_autograd::sparse::dedupe_and_sum_rows;
 use proxima_tensor::cpu::evaluate_named;
