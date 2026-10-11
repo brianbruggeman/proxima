@@ -81,7 +81,7 @@ pub fn vocab_from_tokenizer_json(
         })?;
 
     let tokens = tokens_by_id(vocab_object)?;
-    let merges = string_array(merges_array, "model.merges")?;
+    let merges = merge_rules(merges_array)?;
 
     Vocab::new(
         tokens,
@@ -181,17 +181,27 @@ fn bool_field(root: &Value, field: &'static str) -> Result<Option<bool>, Tokeniz
     }
 }
 
-fn string_array(values: &[Value], field: &'static str) -> Result<Vec<String>, TokenizerError> {
-    values
-        .iter()
-        .map(|value| {
-            value.as_str().map(String::from).ok_or_else(|| {
-                TokenizerError::MalformedHfTokenizerJson {
-                    reason: alloc::format!("{field} contains a non-string entry"),
-                }
-            })
-        })
-        .collect()
+/// `model.merges` entries in either HF spelling: the legacy `"left right"`
+/// string, or the `["left", "right"]` pair current `tokenizers` releases
+/// write (the vendored mlx-community files use the pair form). Both reach
+/// [`Vocab::new`] as the `"left right"` string it takes.
+fn merge_rules(values: &[Value]) -> Result<Vec<String>, TokenizerError> {
+    values.iter().map(merge_rule).collect()
+}
+
+fn merge_rule(value: &Value) -> Result<String, TokenizerError> {
+    match value {
+        Value::String(rule) => Ok(rule.clone()),
+        Value::Array(pair) => match pair.as_slice() {
+            [Value::String(left), Value::String(right)] => Ok(alloc::format!("{left} {right}")),
+            _ => Err(TokenizerError::MalformedHfTokenizerJson {
+                reason: String::from("model.merges pair is not exactly two strings"),
+            }),
+        },
+        _ => Err(TokenizerError::MalformedHfTokenizerJson {
+            reason: String::from("model.merges contains an entry that is neither string nor pair"),
+        }),
+    }
 }
 
 #[cfg(test)]

@@ -66,4 +66,7 @@ pub enum TokenizerError {
         "hf tokenizer.json is not valid json, or is missing model.vocab/model.merges: {reason}"
     )]
     MalformedHfTokenizerJson { reason: String },
+
+    #[error("hf tokenizer.json cannot be written from this vocab: {reason}")]
+    HfTokenizerJsonWrite { reason: String },
 }

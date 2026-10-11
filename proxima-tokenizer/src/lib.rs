@@ -54,6 +54,8 @@ pub mod error;
 pub mod gguf;
 #[cfg(feature = "hf")]
 pub mod hf;
+#[cfg(feature = "hf")]
+pub mod hf_write;
 pub mod pipe;
 pub mod pretokenize;
 pub mod sample;
