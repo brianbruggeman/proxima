@@ -404,7 +404,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
         ),
     ];
     let mut source = String::new();
-    preamble(&mut source, None);
+    preamble(&mut source);
     source.push_str(super::cached_attention_render::BF8_VECTOR_HELPER);
     source.push_str(BF16_CACHE_HELPER);
     if !half_operands {

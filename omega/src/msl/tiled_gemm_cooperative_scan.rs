@@ -3252,7 +3252,7 @@ pub(super) fn render_scan(
     let element_type = type_token(resolved.node, resolved.dtype)?;
 
     let mut source = String::new();
-    preamble(&mut source, None);
+    preamble(&mut source);
 
     source.push_str("struct Uniforms {\n");
     source.push_str("    long outer_total;\n");

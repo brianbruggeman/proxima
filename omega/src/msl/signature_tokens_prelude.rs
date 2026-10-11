@@ -930,16 +930,7 @@ inline float proxima_erf(float x) {
 }
 ";
 
-/// `tiled_decode_codec`: `Some(codec)` only from [`render_reduce`]'s own call
-/// site, and only when [`tiled_decode_codec_of`] finds `resolved` on the tiled or
-/// expert-grouped GEMM path -- the codec whose [`tiled_decode`] description the
-/// kernel's stager calls. Every other caller passes `None`. Unlike the codec
-/// decoders around it (`Q3K_UNPACK_MSL`, `Q5K_PAIR_DOT_MSL`, ...), which are
-/// cheap `static inline`s the compiler drops when unused, a description's
-/// `msl` is text only that stager calls -- splicing all of them into every
-/// kernel would grow every kernel's source (and shift pipeline-cache identity
-/// for every unrelated kernel in the crate).
-pub(super) fn preamble(source: &mut String, tiled_decode_codec: Option<Codec>) {
+pub(super) fn preamble(source: &mut String) {
     source.push_str("#include <metal_stdlib>\n");
     source.push_str("using namespace metal;\n\n");
     source.push_str(PROXIMA_ERF_FN);
@@ -1015,6 +1006,10 @@ pub(super) fn preamble(source: &mut String, tiled_decode_codec: Option<Codec>) {
     source.push('\n');
     source.push_str(BRAIN_FLOAT_SCALAR_UNPACK_MSL);
     source.push('\n');
+}
+
+/// Splices the [`tiled_decode`] description of `tiled_decode_codec` after the scaled-float decoders it calls. `Some(codec)` only from [`render_reduce`]'s own call site, and only when [`tiled_decode_codec_of`] finds the op on the tiled or expert-grouped GEMM path. Unlike the codec decoders in [`preamble`], which are cheap `static inline`s the compiler drops when unused, a description's `msl` is text only that stager calls: splicing all of them everywhere would grow every kernel's source and shift pipeline-cache identity for every unrelated kernel.
+pub(super) fn push_tiled_decode(source: &mut String, tiled_decode_codec: Option<Codec>) {
     if let Some(decode) = tiled_decode_codec.and_then(tiled_decode) {
         source.push_str(decode.msl);
         source.push('\n');
@@ -1201,7 +1196,7 @@ pub(super) fn render_iota(resolved: &BoundOp, entry: &str) -> Result<String, Emi
     let element_type = type_token(resolved.node, resolved.dtype)?;
 
     let mut source = String::new();
-    preamble(&mut source, None);
+    preamble(&mut source);
 
     source.push_str("struct Uniforms {\n");
     source.push_str("    long total_elements;\n");
@@ -1228,7 +1223,7 @@ pub(super) fn render_constant(
     let element_type = type_token(resolved.node, resolved.dtype)?;
 
     let mut source = String::new();
-    preamble(&mut source, None);
+    preamble(&mut source);
 
     source.push_str("struct Uniforms {\n");
     source.push_str("    long total_elements;\n");
@@ -1307,7 +1302,7 @@ pub(super) fn render_gated_delta_net(resolved: &BoundOp, entry: &str) -> Result<
     }
 
     let mut source = String::new();
-    preamble(&mut source, None);
+    preamble(&mut source);
     source.push_str(
         "struct Uniforms { long n_tokens; long query_key_head_stride; long query_key_dim_stride; long inv_sqrt_key_dim_bits; };\n\n",
     );
@@ -1431,7 +1426,7 @@ pub(super) fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String,
     let num_simdgroups = expert_count.div_ceil(32);
 
     let mut source = String::new();
-    preamble(&mut source, None);
+    preamble(&mut source);
     source.push_str("struct Uniforms { long unused; };\n\n");
     source.push_str(&format!(
         "kernel void {entry}(device const float* scores [[buffer(0)]], device float* route0 [[buffer(1)]], constant Uniforms& u [[buffer(2)]],\n"
