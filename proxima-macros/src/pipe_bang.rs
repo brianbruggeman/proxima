@@ -104,7 +104,7 @@ pub(crate) fn parse_bang_input(input: TokenStream) -> Result<(Expr, PipeArgs), E
 
 pub fn expand(input: TokenStream) -> Result<TokenStream, Error> {
     let (expr, args) = parse_bang_input(input)?;
-    expand_expr(expr, args, "pipe!")
+    expand_expr(expr, &args, "pipe!")
 }
 
 /// Shared by `pipe!` and `filter!`: lift a closure literal via [`build_leaf`],
@@ -112,13 +112,13 @@ pub fn expand(input: TokenStream) -> Result<TokenStream, Error> {
 /// error text (`filter!` reads better in its own errors than `pipe!` would).
 pub(crate) fn expand_expr(
     expr: Expr,
-    args: PipeArgs,
+    args: &PipeArgs,
     macro_name: &str,
 ) -> Result<TokenStream, Error> {
     match expr {
         Expr::Closure(closure) => {
             let struct_ident = Ident::new("__ProximaPipeLeaf", Span::call_site());
-            let plan = build_leaf(&struct_ident, &closure, &args)?;
+            let plan = build_leaf(&struct_ident, &closure, args)?;
             let definition = &plan.definition;
             Ok(quote! {
                 {
@@ -203,14 +203,7 @@ impl ClosureShape {
     }
 }
 
-/// Build the leaf-lift bridge for one closure literal: a fresh tuple struct
-/// named `struct_ident`, plus the tier impls its shape and `args` qualify
-/// for. Shared by `pipe!`, `filter!`, and each `fanout!`/`fanin!` arm.
-pub(crate) fn build_leaf(
-    struct_ident: &Ident,
-    closure: &ExprClosure,
-    args: &PipeArgs,
-) -> Result<LeafPlan, Error> {
+fn closure_shape(closure: &ExprClosure, args: &PipeArgs) -> Result<ClosureShape, Error> {
     let is_async = closure.asyncness.is_some();
 
     if is_async && args.send {
@@ -236,22 +229,21 @@ pub(crate) fn build_leaf(
         ));
     }
 
-    let shape = match (is_async, args.unpin) {
-        (false, _) => ClosureShape::ReadyWrapped,
-        (true, true) => {
-            return Err(Error::new_spanned(
-                closure,
-                "`unpin` cannot be applied to an async closure as-is: its body compiles to a \
-                 compiler-generated state machine, which is `!Unpin`, so it can't be polled in \
-                 place, and this bridge does not offer the `boxed` escape hatch (zero-box is a \
-                 hard constraint here). Use a plain closure instead, or hand-write an `async fn` \
-                 and lift it with `#[proxima::piped(unpin, boxed)]`.",
-            ));
-        }
-        (true, false) => ClosureShape::Passthrough,
-    };
+    match (is_async, args.unpin) {
+        (false, _) => Ok(ClosureShape::ReadyWrapped),
+        (true, true) => Err(Error::new_spanned(
+            closure,
+            "`unpin` cannot be applied to an async closure as-is: its body compiles to a \
+             compiler-generated state machine, which is `!Unpin`, so it can't be polled in \
+             place, and this bridge does not offer the `boxed` escape hatch (zero-box is a \
+             hard constraint here). Use a plain closure instead, or hand-write an `async fn` \
+             and lift it with `#[proxima::piped(unpin, boxed)]`.",
+        )),
+        (true, false) => Ok(ClosureShape::Passthrough),
+    }
+}
 
-    let (has_input, in_type) = closure_in_type(closure)?;
+fn closure_result_types(closure: &ExprClosure) -> Result<(Type, Type), Error> {
     let return_type = match &closure.output {
         ReturnType::Type(_, ty) => ty.as_ref(),
         ReturnType::Default => {
@@ -262,7 +254,61 @@ pub(crate) fn build_leaf(
             ));
         }
     };
-    let (out_type, err_type) = result_types_from_type(return_type)?;
+    result_types_from_type(return_type)
+}
+
+fn tier_impl(
+    tier: &Tier,
+    struct_ident: &Ident,
+    closure_trait: &TokenStream,
+    call_body: &TokenStream,
+    in_type: &Type,
+    out_type: &Type,
+    err_type: &Type,
+) -> TokenStream {
+    let trait_path = pipe_trait_path(&tier.trait_ident());
+    let future_bound = tier.future_bound();
+    let is_send_tier = matches!(tier, Tier::SendPipe | Tier::UnpinSendPipe);
+    // a `send` tier only exists here for the sync (ReadyWrapped)
+    // shape — the async-closure `send` combination was already
+    // refused above — so this extra bound never applies to an
+    // opaque, unnameable async-closure future.
+    let send_bound = if is_send_tier {
+        quote!(+ ::core::marker::Send + ::core::marker::Sync + 'static)
+    } else {
+        quote!()
+    };
+    quote! {
+        impl<__ProximaF> #trait_path for #struct_ident<__ProximaF>
+        where
+            __ProximaF: #closure_trait #send_bound,
+        {
+            type In = #in_type;
+            type Out = #out_type;
+            type Err = #err_type;
+
+            fn call(
+                &self,
+                input: #in_type,
+            ) -> impl ::core::future::Future<Output = ::core::result::Result<#out_type, #err_type>> #future_bound {
+                #call_body
+            }
+        }
+    }
+}
+
+/// Build the leaf-lift bridge for one closure literal: a fresh tuple struct
+/// named `struct_ident`, plus the tier impls its shape and `args` qualify
+/// for. Shared by `pipe!`, `filter!`, and each `fanout!`/`fanin!` arm.
+pub(crate) fn build_leaf(
+    struct_ident: &Ident,
+    closure: &ExprClosure,
+    args: &PipeArgs,
+) -> Result<LeafPlan, Error> {
+    let is_async = closure.asyncness.is_some();
+    let shape = closure_shape(closure, args)?;
+    let (has_input, in_type) = closure_in_type(closure)?;
+    let (out_type, err_type) = closure_result_types(closure)?;
 
     let tiers = Tier::plan(shape.climbs_to_unpin(), args.send);
 
@@ -290,35 +336,15 @@ pub(crate) fn build_leaf(
     let tier_impls: Vec<TokenStream> = tiers
         .iter()
         .map(|tier| {
-            let trait_path = pipe_trait_path(&tier.trait_ident());
-            let future_bound = tier.future_bound();
-            let is_send_tier = matches!(tier, Tier::SendPipe | Tier::UnpinSendPipe);
-            // a `send` tier only exists here for the sync (ReadyWrapped)
-            // shape — the async-closure `send` combination was already
-            // refused above — so this extra bound never applies to an
-            // opaque, unnameable async-closure future.
-            let send_bound = if is_send_tier {
-                quote!(+ ::core::marker::Send + ::core::marker::Sync + 'static)
-            } else {
-                quote!()
-            };
-            quote! {
-                impl<__ProximaF> #trait_path for #struct_ident<__ProximaF>
-                where
-                    __ProximaF: #closure_trait #send_bound,
-                {
-                    type In = #in_type;
-                    type Out = #out_type;
-                    type Err = #err_type;
-
-                    fn call(
-                        &self,
-                        input: #in_type,
-                    ) -> impl ::core::future::Future<Output = ::core::result::Result<#out_type, #err_type>> #future_bound {
-                        #call_body
-                    }
-                }
-            }
+            tier_impl(
+                tier,
+                struct_ident,
+                &closure_trait,
+                &call_body,
+                &in_type,
+                &out_type,
+                &err_type,
+            )
         })
         .collect();
 

@@ -27,7 +27,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream, Error> {
         // no closure to check the shape of — an already-built pipe value is
         // trusted the same way `PipeExt::filter` trusts any `Pred: Pipe<Out
         // = Self::In>` argument today.
-        return expand_expr(expr, args, "filter!");
+        return expand_expr(expr, &args, "filter!");
     };
 
     // build first (this also runs every other shape check — arity, async

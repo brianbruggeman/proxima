@@ -540,8 +540,7 @@ mod tests {
         let error = result.expect_err("missing #[error] should be rejected");
         assert!(
             error.to_string().contains("#[error("),
-            "error mentions #[error]: {}",
-            error
+            "error mentions #[error]: {error}"
         );
     }
 

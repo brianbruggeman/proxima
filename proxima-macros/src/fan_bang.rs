@@ -47,7 +47,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
-use syn::{Error, Expr, Ident, Token};
+use syn::{Error, Expr, ExprClosure, Ident, Token};
 
 use crate::crate_path;
 use crate::pipe_attr::{PipeArgs, pipe_path};
@@ -87,6 +87,89 @@ fn drop_safe_path() -> TokenStream {
     )
 }
 
+fn reject_async_fanin_arm(closure: &ExprClosure, kind: FanKind) -> Result<(), Error> {
+    if kind == FanKind::In && closure.asyncness.is_some() {
+        return Err(Error::new_spanned(
+            closure,
+            "fanin! arms must be plain (non-`async`) closures: FanIn's merge loop \
+             polls each source synchronously in place and requires a genuinely \
+             `Unpin`, never-suspending future. Lift an async source with \
+             `#[proxima::piped(unpin, boxed)]` on a hand-written `async fn` first \
+             and pass the resulting value in as a pass-through arm instead.",
+        ));
+    }
+    Ok(())
+}
+
+fn drop_safe_leaf_impl(struct_ident: &Ident, kind: FanKind) -> TokenStream {
+    if kind != FanKind::In {
+        return quote!();
+    }
+    let drop_safe = drop_safe_path();
+    quote! {
+        impl<__ProximaF> #drop_safe for #struct_ident<__ProximaF> {}
+    }
+}
+
+fn lift_closure_arm(
+    arm: &Expr,
+    closure: &ExprClosure,
+    index: usize,
+    kind: FanKind,
+    leaf_definitions: &mut Vec<TokenStream>,
+) -> Result<TokenStream, Error> {
+    reject_async_fanin_arm(closure, kind)?;
+    let default_args = PipeArgs {
+        send: false,
+        unpin: false,
+        boxed: false,
+        name: None,
+    };
+    let struct_ident = format_ident!("__ProximaFanLeaf{index}", span = Span::call_site());
+    let plan = build_leaf(&struct_ident, closure, &default_args)?;
+    let definition = plan.definition;
+    let extra_drop_safe = drop_safe_leaf_impl(&struct_ident, kind);
+    leaf_definitions.push(quote! {
+        #definition
+        #extra_drop_safe
+    });
+    Ok(quote!(#struct_ident(#arm)))
+}
+
+fn drop_safe_enum_impl(enum_ident: &Ident, generic_idents: &[Ident], kind: FanKind) -> TokenStream {
+    if kind != FanKind::In {
+        return quote!();
+    }
+    let drop_safe = drop_safe_path();
+    quote! {
+        impl<#(#generic_idents: #drop_safe),*> #drop_safe for #enum_ident<#(#generic_idents),*> {}
+    }
+}
+
+fn arms_value_tokens(kind: FanKind, arm_values: &[TokenStream]) -> TokenStream {
+    match kind {
+        FanKind::Out => {
+            let fan_out = pipe_path(&quote!(FanOut));
+            quote! {
+                {
+                    extern crate alloc;
+                    #fan_out::all_or_nothing(alloc::vec![#(#arm_values),*])
+                }
+            }
+        }
+        FanKind::In => {
+            let fan_in = pipe_path(&quote!(FanIn));
+            let select = pipe_path(&quote!(Select));
+            quote! {
+                #fan_in::new(
+                    [#(#arm_values),*],
+                    #select::RoundRobin,
+                )
+            }
+        }
+    }
+}
+
 fn expand(input: TokenStream, kind: FanKind) -> Result<TokenStream, Error> {
     let FanArms(arms) = Parser::parse2(FanArms::parse, input)?;
     if arms.is_empty() {
@@ -95,13 +178,6 @@ fn expand(input: TokenStream, kind: FanKind) -> Result<TokenStream, Error> {
             "expected at least one arm, e.g. `fanout!(a, b)` / `fanin!(a, b)`",
         ));
     }
-
-    let default_args = PipeArgs {
-        send: false,
-        unpin: false,
-        boxed: false,
-        name: None,
-    };
 
     let enum_ident = Ident::new("__ProximaFanArms", Span::call_site());
 
@@ -114,37 +190,10 @@ fn expand(input: TokenStream, kind: FanKind) -> Result<TokenStream, Error> {
         let generic_ident = format_ident!("__ProximaFanArm{index}", span = Span::call_site());
         let variant_ident = format_ident!("Arm{index}", span = Span::call_site());
 
-        let inner_value = match &arm {
-            Expr::Closure(closure) => {
-                if kind == FanKind::In && closure.asyncness.is_some() {
-                    return Err(Error::new_spanned(
-                        closure,
-                        "fanin! arms must be plain (non-`async`) closures: FanIn's merge loop \
-                         polls each source synchronously in place and requires a genuinely \
-                         `Unpin`, never-suspending future. Lift an async source with \
-                         `#[proxima::piped(unpin, boxed)]` on a hand-written `async fn` first \
-                         and pass the resulting value in as a pass-through arm instead.",
-                    ));
-                }
-                let struct_ident =
-                    format_ident!("__ProximaFanLeaf{index}", span = Span::call_site());
-                let plan = build_leaf(&struct_ident, closure, &default_args)?;
-                let definition = plan.definition;
-                let extra_drop_safe = if kind == FanKind::In {
-                    let drop_safe = drop_safe_path();
-                    quote! {
-                        impl<__ProximaF> #drop_safe for #struct_ident<__ProximaF> {}
-                    }
-                } else {
-                    quote!()
-                };
-                leaf_definitions.push(quote! {
-                    #definition
-                    #extra_drop_safe
-                });
-                quote!(#struct_ident(#arm))
-            }
-            _ => quote!(#arm),
+        let inner_value = if let Expr::Closure(closure) = &arm {
+            lift_closure_arm(&arm, closure, index, kind, &mut leaf_definitions)?
+        } else {
+            quote!(#arm)
         };
         let value = quote!(#enum_ident::#variant_ident(#inner_value));
 
@@ -169,36 +218,8 @@ fn expand(input: TokenStream, kind: FanKind) -> Result<TokenStream, Error> {
         &generic_idents,
         &variant_idents,
     );
-    let drop_safe_impl = if kind == FanKind::In {
-        let drop_safe = drop_safe_path();
-        quote! {
-            impl<#(#generic_idents: #drop_safe),*> #drop_safe for #enum_ident<#(#generic_idents),*> {}
-        }
-    } else {
-        quote!()
-    };
-
-    let arms_value = match kind {
-        FanKind::Out => {
-            let fan_out = pipe_path(quote!(FanOut));
-            quote! {
-                {
-                    extern crate alloc;
-                    #fan_out::all_or_nothing(alloc::vec![#(#arm_values),*])
-                }
-            }
-        }
-        FanKind::In => {
-            let fan_in = pipe_path(quote!(FanIn));
-            let select = pipe_path(quote!(Select));
-            quote! {
-                #fan_in::new(
-                    [#(#arm_values),*],
-                    #select::RoundRobin,
-                )
-            }
-        }
-    };
+    let drop_safe_impl = drop_safe_enum_impl(&enum_ident, &generic_idents, kind);
+    let arms_value = arms_value_tokens(kind, &arm_values);
 
     Ok(quote! {
         {
@@ -220,8 +241,8 @@ fn build_async_tier_impls(
     generic_idents: &[Ident],
     variant_idents: &[Ident],
 ) -> TokenStream {
-    let pipe_trait = pipe_path(quote!(Pipe));
-    let send_pipe_trait = pipe_path(quote!(SendPipe));
+    let pipe_trait = pipe_path(&quote!(Pipe));
+    let send_pipe_trait = pipe_path(&quote!(SendPipe));
     let pipe_arms = quote! {
         match self {
             #(#enum_ident::#variant_idents(inner) => #pipe_trait::call(inner, input).await,)*
@@ -292,8 +313,8 @@ fn build_unpin_tier_impls(
     generic_idents: &[Ident],
     variant_idents: &[Ident],
 ) -> TokenStream {
-    let unpin_pipe_trait = pipe_path(quote!(UnpinPipe));
-    let unpin_send_pipe_trait = pipe_path(quote!(UnpinSendPipe));
+    let unpin_pipe_trait = pipe_path(&quote!(UnpinPipe));
+    let unpin_send_pipe_trait = pipe_path(&quote!(UnpinSendPipe));
     let call_generic_idents: Vec<Ident> = generic_idents
         .iter()
         .map(|ident| format_ident!("{ident}Call"))

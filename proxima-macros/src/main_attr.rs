@@ -176,13 +176,15 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error
         ));
     }
 
-    let cores_arg = match cores {
-        Some(count) => quote!(::core::option::Option::Some(#count)),
-        None => quote!(::core::option::Option::None),
+    let cores_arg = if let Some(count) = cores {
+        quote!(::core::option::Option::Some(#count))
+    } else {
+        quote!(::core::option::Option::None)
     };
-    let affinity_arg = match &affinity {
-        Some(spec) => quote!(::core::option::Option::Some(#spec)),
-        None => quote!(::core::option::Option::None),
+    let affinity_arg = if let Some(spec) = &affinity {
+        quote!(::core::option::Option::Some(#spec))
+    } else {
+        quote!(::core::option::Option::None)
     };
 
     let run_call: TokenStream = match &runtime {
@@ -204,9 +206,10 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error
             ))
         }
         RuntimeKind::TokioMultiThread { workers } => {
-            let workers_arg = match workers {
-                Some(count) => quote!(::core::option::Option::Some(#count)),
-                None => quote!(::core::option::Option::None),
+            let workers_arg = if let Some(count) = workers {
+                quote!(::core::option::Option::Some(#count))
+            } else {
+                quote!(::core::option::Option::None)
             };
             quote!(::proxima::runtime::run_tokio(true, #workers_arg, __proxima_main_body))
         }

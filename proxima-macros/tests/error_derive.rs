@@ -51,7 +51,7 @@ fn tuple_variants_interpolate_positional_args() {
         "truncated frame at offset 42"
     );
     assert_eq!(
-        format!("{}", DecodeError::Mismatch(0xdeadbeef, 0xcafebabe)),
+        format!("{}", DecodeError::Mismatch(0xdead_beef, 0xcafe_babe)),
         "expected 0xdeadbeef got 0xcafebabe"
     );
 }
