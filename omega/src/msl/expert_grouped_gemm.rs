@@ -960,7 +960,10 @@ pub(super) const GROUPED_ROUTE_HEADER_WORDS: u64 = 1;
 
 /// Threads of each prepass threadgroup: a simdgroup per expert,
 /// `GROUPED_PREPASS_THREADS / SIMD_WIDTH` experts at a time.
-#[cfg(feature = "metal-grouped-gemm")]
+#[cfg(all(
+    feature = "metal-grouped-gemm",
+    any(test, all(feature = "metal", target_os = "macos"))
+))]
 const GROUPED_PREPASS_THREADS: u64 = 1024;
 
 /// Whether this expert-grouped block takes the compacted route: a prepass
@@ -1007,7 +1010,10 @@ pub(super) fn grouped_tile_upper_bound(tokens: u64, experts: u64) -> u64 {
 
 /// Threadgroups of each prepass dispatch: the route cut into chunks of
 /// `GROUPED_GEMM_PREPASS_ENTRIES` entries, one threadgroup per chunk, at least one.
-#[cfg(feature = "metal-grouped-gemm")]
+#[cfg(all(
+    feature = "metal-grouped-gemm",
+    any(test, all(feature = "metal", target_os = "macos"))
+))]
 pub(super) fn grouped_prepass_threadgroups(tokens: u64) -> u64 {
     tokens
         .div_ceil(crate::sized::GROUPED_GEMM_PREPASS_ENTRIES)
@@ -1018,7 +1024,10 @@ pub(super) fn grouped_prepass_threadgroups(tokens: u64) -> u64 {
 /// exclusive entry offsets, the expert-major list of flat token ids, then the
 /// count pass's partial counts (`threadgroups x experts`, row per threadgroup)
 /// that the place pass reduces. The GEMM reads only the first four regions.
-#[cfg(feature = "metal-grouped-gemm")]
+#[cfg(all(
+    feature = "metal-grouped-gemm",
+    any(test, all(feature = "metal", target_os = "macos"))
+))]
 pub(super) fn grouped_compaction_words(tokens: u64, experts: u64) -> u64 {
     GROUPED_ROUTE_HEADER_WORDS
         + 2 * experts
@@ -1283,10 +1292,7 @@ pub(crate) fn route_prepass(
     )))
 }
 
-#[cfg(all(
-    feature = "metal-grouped-gemm",
-    any(test, all(feature = "metal", target_os = "macos"))
-))]
+#[cfg(all(feature = "metal-grouped-gemm", any(test, feature = "metal-core")))]
 fn grouped_block(resolved: &BoundOp, quantized: &[Option<Codec>]) -> Option<TiledGemmBlock> {
     let BoundOpKind::Reduce {
         reduce_op,
@@ -1340,10 +1346,7 @@ pub(crate) fn route_prepass_active(_resolved: &BoundOp, _packed_operands: &Packe
 /// Two compacted grouped ops with equal keys produce byte-identical
 /// compactions, so the host runs [`route_prepass`] once for both. `None` for
 /// every op that has no prepass.
-#[cfg(all(
-    feature = "metal-grouped-gemm",
-    any(test, all(feature = "metal", target_os = "macos"))
-))]
+#[cfg(all(feature = "metal-grouped-gemm", any(test, feature = "metal-core")))]
 pub(crate) fn route_compaction_key(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
