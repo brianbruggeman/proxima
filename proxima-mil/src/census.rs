@@ -17,6 +17,7 @@ use proxima_tensor::{Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, Shapes, Ten
 
 mod view;
 
+pub(crate) use view::is_contraction;
 use view::operand_views;
 
 /// How one [`ScalarOp`] reaches MIL.

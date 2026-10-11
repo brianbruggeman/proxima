@@ -164,7 +164,7 @@ fn fill_extents(pattern: &IndexPattern, shape: &[u64], resolved: &mut [Option<u6
 /// A contraction needs a shared reduced axis and a free axis read by exactly one
 /// operand; a product whose free axes both operands share (a sum of squares) is a
 /// reduce over a multiply, which bge-small has 25 of (its layer norms).
-pub(super) fn is_contraction(reduce: &Reduce, left: &IndexMap, right: &IndexMap) -> bool {
+pub(crate) fn is_contraction(reduce: &Reduce, left: &IndexMap, right: &IndexMap) -> bool {
     let (
         IndexMap::Affine(left),
         IndexMap::Affine(right),

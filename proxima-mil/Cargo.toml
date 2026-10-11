@@ -11,11 +11,13 @@ readme.workspace = true
 
 [features]
 default = []
-alloc = ["dep:proxima-tensor", "proxima-tensor/alloc"]
+alloc = ["dep:proxima-tensor", "proxima-tensor/alloc", "dep:proxima-primitives"]
 std = ["alloc", "thiserror/std"]
 alloc-count = ["std"]
 
 [dependencies]
+half = { version = "2.7.1", default-features = false }
+proxima-primitives = { workspace = true, default-features = false, optional = true }
 proxima-tensor = { workspace = true, optional = true }
 thiserror.workspace = true
 

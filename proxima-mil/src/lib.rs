@@ -6,6 +6,8 @@
 //! tunable axis is a key of `proxima-mil.toml`, resolved by `build.rs` into
 //! [`sized`]; teaching pointer: `proxima-tensor/build.rs` and
 //! `proxima_build::sizing::SizingSource` are the pattern this mirrors.
+//! [`wire`] and [`weights`] are `core` only; [`census`] and [`writer`] need
+//! `alloc`.
 #![no_std]
 
 #[cfg(feature = "alloc")]
@@ -17,13 +19,17 @@ extern crate std;
 #[cfg(feature = "alloc")]
 pub mod census;
 pub mod sized;
+pub mod weights;
+pub mod wire;
+#[cfg(feature = "alloc")]
+pub mod writer;
 
 /// Names of the modules this build compiles, so a tier build that gates every
 /// module off reports zero names instead of passing silently.
 #[cfg(feature = "alloc")]
-pub const MODULES: [&str; 2] = ["census", "sized"];
+pub const MODULES: [&str; 5] = ["census", "wire", "weights", "writer", "sized"];
 
 /// Names of the modules this build compiles, so a tier build that gates every
 /// module off reports zero names instead of passing silently.
 #[cfg(not(feature = "alloc"))]
-pub const MODULES: [&str; 1] = ["sized"];
+pub const MODULES: [&str; 3] = ["wire", "weights", "sized"];
