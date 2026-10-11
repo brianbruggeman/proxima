@@ -1,7 +1,7 @@
 //! Generic scalar float codec over [`FloatLayout`]: `f32 <-> code` by integer field arithmetic.
 //!
 //! Teaching pointer: [`FloatLayout`] (in `proxima-primitives`) is the data; this module is the one
-//! piece of arithmetic that `bf8_e5m2` and `bf4_e2m1` each hand-code today. Round to nearest with
+//! piece of float arithmetic, and `bf16`, `bf8_e5m2` and `bf4_e2m1` are instances of it. Round to nearest with
 //! ties to the even code, no `f64`, no allocation. Layouts are at most 32 bits wide with at most
 //! 23 mantissa bits, so every intermediate fits in `u32`.
 
@@ -11,6 +11,7 @@ const F32_FRACTION_BITS: u32 = 23;
 const F32_FRACTION_MASK: u32 = 0x7f_ffff;
 const F32_BIAS: i32 = 127;
 const F32_INFINITY_BITS: u32 = 0x7f80_0000;
+const F32_QUIET_BIT: u32 = 1 << 22;
 
 const fn exponent_ones(layout: &FloatLayout) -> u32 {
     (1u32 << layout.exponent_bits) - 1
@@ -44,8 +45,12 @@ const fn overflow_code(layout: &FloatLayout) -> u32 {
     }
 }
 
-const fn quiet_nan_code(layout: &FloatLayout) -> u32 {
-    infinity_code(layout) | ((1u32 << layout.mantissa_bits) >> 1)
+const fn quiet_bit(layout: &FloatLayout) -> u32 {
+    (1u32 << layout.mantissa_bits) >> 1
+}
+
+const fn nan_payload(fraction: u32, layout: &FloatLayout) -> u32 {
+    (fraction >> (F32_FRACTION_BITS - layout.mantissa_bits as u32)) | quiet_bit(layout)
 }
 
 const fn round_shift_ties_even(value: u32, shift: u32) -> u32 {
@@ -98,13 +103,17 @@ const fn magnitude_code(abs_bits: u32, layout: &FloatLayout) -> u32 {
     }
 }
 
-const fn nan_code(layout: &FloatLayout, nan_count: &mut u64) -> u32 {
+const fn nan_code(bits: u32, layout: &FloatLayout, nan_count: &mut u64) -> u32 {
     match layout.specials {
         Specials::None => {
             *nan_count += 1;
             max_normal_code(layout)
         }
-        Specials::SaturateOnOverflow | Specials::InfinityOnOverflow => quiet_nan_code(layout),
+        Specials::SaturateOnOverflow | Specials::InfinityOnOverflow => {
+            ((bits >> 31) << sign_shift(layout))
+                | infinity_code(layout)
+                | nan_payload(bits & F32_FRACTION_MASK, layout)
+        }
     }
 }
 
@@ -113,12 +122,12 @@ const fn nan_code(layout: &FloatLayout, nan_count: &mut u64) -> u32 {
 /// Rounds to nearest, ties to the even code. Overflow clamps to the signed max normal for
 /// `Specials::None` and `SaturateOnOverflow` and becomes infinity for `InfinityOnOverflow`;
 /// values below half the minimum subnormal flush to signed zero. NaN becomes the positive max
-/// normal and increments `nan_count` for `Specials::None`; layouts with reserved encodings emit
-/// the quiet NaN code and leave the counter alone.
+/// normal and increments `nan_count` for `Specials::None`; layouts with reserved encodings keep the
+/// sign and the top payload bits of the NaN, set the quiet bit, and leave the counter alone.
 #[must_use]
 pub const fn encode_counting(value: f32, layout: FloatLayout, nan_count: &mut u64) -> u32 {
     if value.is_nan() {
-        return nan_code(&layout, nan_count);
+        return nan_code(value.to_bits(), &layout, nan_count);
     }
     let bits = value.to_bits();
     let sign = (bits >> 31) << sign_shift(&layout);
@@ -164,6 +173,7 @@ const fn finite_magnitude_bits(exponent: u32, mantissa: u32, layout: &FloatLayou
 }
 
 /// Decodes `code` from `layout` exactly; the sign bit sits at `exponent_bits + mantissa_bits`.
+/// A reserved NaN code keeps its payload, shifted to the top of the `f32` fraction, and widens quiet.
 #[must_use]
 pub const fn decode(code: u32, layout: FloatLayout) -> f32 {
     let mantissa = code & mantissa_mask(&layout);
@@ -171,7 +181,11 @@ pub const fn decode(code: u32, layout: FloatLayout) -> f32 {
     let reserved = !matches!(layout.specials, Specials::None) && exponent == exponent_ones(&layout);
     let magnitude_bits = match (reserved, mantissa) {
         (true, 0) => F32_INFINITY_BITS,
-        (true, _) => f32::NAN.to_bits() & 0x7fff_ffff,
+        (true, _) => {
+            F32_INFINITY_BITS
+                | F32_QUIET_BIT
+                | (mantissa << (F32_FRACTION_BITS - layout.mantissa_bits as u32))
+        }
         (false, _) => finite_magnitude_bits(exponent, mantissa, &layout),
     };
     let sign = (code >> sign_shift(&layout)) & 1;
