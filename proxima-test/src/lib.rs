@@ -24,6 +24,9 @@ pub use harness::*;
 #[cfg(feature = "alloc-count")]
 pub mod alloc_count;
 
+pub mod sched;
+pub use sched::SchedRecord;
+
 /// Backs `#[proxima::fixture(once)]`: a value computed once per process and
 /// shared as `&'static T`. `async_lock::OnceCell::new()` is `const`, so the
 /// cell can be a `static` with no runtime coupling — unlike
@@ -80,6 +83,7 @@ impl TestCtx {
         }
     }
 
+    #[must_use]
     pub fn cassette(&self) -> Option<&CassetteCtx> {
         self.cassette.as_ref()
     }

@@ -64,6 +64,67 @@ pub fn fixture(args: TokenStream, item: TokenStream) -> TokenStream {
 ///     assert_eq!(u32::from_le_bytes(value.to_le_bytes()), value);
 /// }
 /// ```
+///
+/// # Scheduling metadata
+///
+/// A test declares how an external runner (nextest, `cargo val`) may
+/// schedule it, where the test is written. Three independent flags:
+///
+/// - `serial` (bare flag): no other test may be in flight; nextest
+///   `threads-required = "num-test-threads"`.
+/// - `group = "<name>"`: nextest test-group semantics. At most N tests of the
+///   group run at once, each in its own process; N comes from the runner
+///   config and defaults to 1. The name follows nextest identifier rules: an
+///   `XID_Start` character, then `XID_Continue` characters or `-`, at most 64
+///   bytes, never starting with `@`.
+/// - `process` (bare flag): the tests share one process. With `group`, every
+///   test of that group shares one process, and the libtest threads inside it
+///   are capped at the group's N. Without `group`, every `process` test of the
+///   binary shares one process (an implicit per-binary group the runner names
+///   `@binary:<binary>`; the record carries the flag and an empty group name).
+///
+/// Process sharing is per test binary. Tests share a process only when they
+/// are in the SAME test binary and either (a) declare the same `group` name
+/// plus `process`, or (b) declare `process` with no group. A `group` plus
+/// `process` spanning several binaries runs as one shared process per binary,
+/// with the group's concurrency limit applied across them.
+///
+/// `serial` plus `group` is a compile error: serial already excludes every
+/// other test, so the group would add nothing. `serial` plus `process`
+/// without a group is allowed (one shared binary process that runs alone).
+/// `serial` and `process` are bare flags (`process = true` is an error), and
+/// repeating any flag is an error.
+///
+/// Every generated `#[test]` fn (each parameterized case included) also
+/// writes one fixed-size `proxima_test::SchedRecord` into a dedicated
+/// linker section (Mach-O `__DATA,__prox_test`, ELF `.proxima_test`, PE
+/// `.prxtst$m`) so a runner can read the declarations from the test binary on
+/// disk without running it. Nothing executes at test time. The record layout
+/// (a flags byte: bit 0 serial, bit 1 process, bit 2 has-group) and reader
+/// contract live on `proxima_test::sched`. The emitted `link_section` is an
+/// `unsafe(..)` attribute (edition 2024) but does not trip `unsafe_code`, so
+/// crates that `#![forbid(unsafe_code)]` still compile.
+///
+/// ```
+/// #[proxima_macros::test(serial)]
+/// async fn loads_the_real_checkpoint() { assert_eq!(1 + 1, 2); }
+///
+/// #[proxima_macros::test(group = "real-checkpoint")]
+/// #[case::small(1u32)]
+/// #[case::large(4_000_000_000u32)]
+/// async fn decodes_each_size(#[case] value: u32) { assert!(value > 0); }
+///
+/// // (a) same group + process, same binary: these two share one process
+/// #[proxima_macros::test(group = "gpu", process)]
+/// async fn gpu_first() { assert_eq!(2 * 2, 4); }
+///
+/// #[proxima_macros::test(group = "gpu", process)]
+/// async fn gpu_second() { assert_eq!(3 * 3, 9); }
+///
+/// // (b) process with no group: shares the binary's implicit group
+/// #[proxima_macros::test(process)]
+/// async fn shares_the_binary_process() { assert_eq!(1 + 2, 3); }
+/// ```
 #[proc_macro_attribute]
 pub fn test(args: TokenStream, item: TokenStream) -> TokenStream {
     test_attr::expand(args.into(), item.into())

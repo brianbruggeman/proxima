@@ -17,9 +17,11 @@ syn = { workspace = true, features = ["full"] }
 quote = { workspace = true }
 proc-macro2 = { workspace = true }
 proc-macro-crate = "3"
+unicode-ident = "1.0.24"
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports"] }
+object = { version = "0.40.0", default-features = false, features = ["read", "std"] }
 # `test-support-tokio` is the narrow forwarder for `#[proxima::test(runtime =
 # "tokio")]`'s driver — the span tests await inside the annotated fn, so they
 # need a real runtime under them.
