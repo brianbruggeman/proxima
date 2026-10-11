@@ -39,6 +39,11 @@ spin_before_park_idle = 0
 # consecutive empty parks with no inbox arrivals before dropping BUSY -> IDLE.
 # override via PRIME_REACTOR_IDLE_PARK_THRESHOLD.
 idle_park_threshold = 4
+# consecutive busy task polls before the worker advances the timer wheel and
+# runs one non-blocking reactor turn. bounds how long a self-waking task can starve
+# timers and I/O readiness; lowering it adds one clock read and one syscall per
+# interval. override via PRIME_REACTOR_EVENT_INTERVAL.
+event_interval = 61
 
 [io_uring]
 # per-direction (read/write) fixed heap buffer on every TcpStream — the
