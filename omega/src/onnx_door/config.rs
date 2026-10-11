@@ -9,6 +9,14 @@ use crate::backend::{Engine, GpuDriver};
 use crate::door::{ComputeUnits, DoorConfigError, DoorSettings, Precision};
 use crate::sized;
 
+/// Compute units a door uses when its config names none: the `proxima-mil.toml` key.
+#[cfg(feature = "mil-writer")]
+const LANE_DEFAULT_UNITS: &str = proxima_mil::sized::DEFAULT_COMPUTE_UNITS;
+
+/// Without the lane compiled in there is no Core ML device to place on.
+#[cfg(not(feature = "mil-writer"))]
+const LANE_DEFAULT_UNITS: &str = "cpu_only";
+
 /// Where and how the door runs a lowered graph.
 ///
 /// One value is both the `DoorConfig::builder()` result and the
@@ -40,9 +48,11 @@ pub struct DoorConfig {
     #[setting(default = 0)]
     #[builder(overwritable, default = 0)]
     pub max_pin_sets: usize,
-    /// `cpu_only`, `cpu_and_neural_engine` or `all`: the Core ML devices a lane may place operations on.
-    #[setting(default = "cpu_and_neural_engine")]
-    #[builder(into, overwritable, default = String::from("cpu_and_neural_engine"))]
+    /// `cpu_only`, `cpu_and_neural_engine` or `all`: the Core ML devices a lane may place operations on;
+    /// empty selects `[units].default_compute_units` of `proxima-mil.toml`, the build-time value, so the
+    /// default lives in one place (`cpu_only` when the lane is not compiled in).
+    #[setting(default = "")]
+    #[builder(into, overwritable, default = String::new())]
     pub compute_units: String,
     /// `float16` or `float32`: the interior width of a Core ML lane; the neural engine computes `float16` only.
     #[setting(default = "float16")]
@@ -155,7 +165,10 @@ impl DoorConfig {
     /// # Errors
     /// [`DoorConfigError::UnknownComputeUnits`] for any unlisted name.
     pub fn resolve_compute_units(&self) -> Result<ComputeUnits, DoorConfigError> {
-        ComputeUnits::parse(&self.compute_units)
+        match self.compute_units.as_str() {
+            "" => ComputeUnits::parse(LANE_DEFAULT_UNITS),
+            named => ComputeUnits::parse(named),
+        }
     }
 
     /// The [`Precision`] named by `precision`.
