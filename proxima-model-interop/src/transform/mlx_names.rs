@@ -81,9 +81,37 @@ pub struct MlxNames {
     /// `(leaf, hf name)` in input order, e.g. `("blk.0.attn_q.weight",
     /// "language_model.model.layers.0.self_attn.q_proj.weight")`.
     pub mapped: Vec<(String, String)>,
+    /// Leaves that are one slice of a fused HF tensor, in input order, e.g.
+    /// `blk.0.ffn_gate_exps.weight` and `blk.0.ffn_up_exps.weight`, which are
+    /// parts 0 and 1 of 2 of one `input_linear.weight`.
+    pub fused: Vec<FusedName>,
     /// Leaves with no stored tensor or no layout row, e.g.
-    /// `blk.3.ffn_gate_exps.weight`; never given an invented name.
+    /// `blk.3.mystery_gate.weight`; never given an invented name.
     pub unmapped: Vec<String>,
+}
+
+/// One leaf's slice of a fused HF tensor: part `part` of `of` equal slices of
+/// the row axis, the same relation as `TensorAlias::Part`, which the loader
+/// binds with. An exporter emits the fused tensor `hf` once, from all `of`
+/// leaves that share it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FusedName {
+    /// The GGUF leaf, e.g. `blk.0.ffn_up_exps.weight`.
+    pub leaf: String,
+    /// The fused HF tensor, e.g. `model.layers.0.block_sparse_moe.input_linear.weight`.
+    pub hf: String,
+    /// Zero-based slice index, e.g. `1`.
+    pub part: u32,
+    /// Slice count of the fused tensor, e.g. `2`.
+    pub of: u32,
+}
+
+enum Source {
+    Stored(String),
+    Literal {
+        hf: String,
+        slice: Option<(u32, u32)>,
+    },
 }
 
 fn layer_split(leaf: &str) -> Option<(&str, &str)> {
@@ -94,18 +122,50 @@ fn layer_split(leaf: &str) -> Option<(&str, &str)> {
         .then_some((index, rest))
 }
 
-fn stored_name(leaf: &str, directory: &BTreeSet<&str>, binding: &BindingProfile) -> Option<String> {
-    if directory.contains(leaf) {
-        return Some(leaf.to_string());
+fn has_layout_row(name: &str, layout: Layout) -> bool {
+    let key = layer_split(name).map_or(name, |(_, rest)| rest);
+    layout.iter().any(|(gguf, _)| *gguf == key)
+}
+
+fn alias_source(
+    alias: &TensorAlias,
+    prefix: &str,
+    directory: &BTreeSet<&str>,
+    layout: Layout,
+) -> Option<Source> {
+    match alias {
+        TensorAlias::Rename { from, .. } => {
+            let source = format!("{prefix}{from}");
+            match has_layout_row(&source, layout) {
+                true => directory
+                    .contains(source.as_str())
+                    .then_some(Source::Stored(source)),
+                false => Some(Source::Literal {
+                    hf: source,
+                    slice: None,
+                }),
+            }
+        }
+        TensorAlias::Part { from, part, of, .. } => Some(Source::Literal {
+            hf: format!("{prefix}{from}"),
+            slice: Some((*part, *of)),
+        }),
+        TensorAlias::Join { .. } => None,
+    }
+}
+
+fn resolve(
+    leaf: &str,
+    directory: &BTreeSet<&str>,
+    binding: &BindingProfile,
+    layout: Layout,
+) -> Option<Source> {
+    if directory.contains(leaf) && has_layout_row(leaf, layout) {
+        return Some(Source::Stored(leaf.to_string()));
     }
     binding
         .aliases_for(leaf)
-        .find_map(|(alias, prefix)| match alias {
-            TensorAlias::Rename { from, .. } => {
-                Some(format!("{prefix}{from}")).filter(|source| directory.contains(source.as_str()))
-            }
-            TensorAlias::Part { .. } | TensorAlias::Join { .. } => None,
-        })
+        .find_map(|(alias, prefix)| alias_source(alias, prefix, directory, layout))
 }
 
 fn hf_name(stored: &str, layout: Layout, hf_prefix: &str) -> Option<String> {
@@ -121,11 +181,43 @@ fn hf_name(stored: &str, layout: Layout, hf_prefix: &str) -> Option<String> {
     }
 }
 
+fn place(
+    names: &mut MlxNames,
+    leaf: &str,
+    source: Option<Source>,
+    layout: Layout,
+    hf_prefix: &str,
+) {
+    let leaf_name = leaf.to_string();
+    match source {
+        Some(Source::Stored(stored)) => match hf_name(&stored, layout, hf_prefix) {
+            Some(hf) => names.mapped.push((leaf_name, hf)),
+            None => names.unmapped.push(leaf_name),
+        },
+        Some(Source::Literal { hf, slice: None }) => names.mapped.push((leaf_name, hf)),
+        Some(Source::Literal {
+            hf,
+            slice: Some((part, of)),
+        }) => names.fused.push(FusedName {
+            leaf: leaf_name,
+            hf,
+            part,
+            of,
+        }),
+        None => names.unmapped.push(leaf_name),
+    }
+}
+
 /// Names `leaves` for an HF checkpoint whose tensors sit under `hf_prefix`
 /// (`"model."`, `"language_model.model."`). `directory` is the GGUF tensor
 /// directory the leaves are bound from. Composes
 /// [`BindingProfile::aliases_for`], the loader's alias lookup, in reverse; the
 /// layout rows are the loader's own HF names (`hf_bind::names`).
+///
+/// An alias whose source has a layout row names a stored GGUF tensor (a tied
+/// output). An alias whose source has none is already a literal HF name, as the
+/// routed-expert aliases are (`hf_bind::moe_stack_source`): a rename maps the
+/// leaf to it, a part alias lands in [`MlxNames::fused`].
 #[must_use]
 pub fn dense_names(
     leaves: &[&str],
@@ -136,12 +228,8 @@ pub fn dense_names(
 ) -> MlxNames {
     let stored_set: BTreeSet<&str> = directory.iter().copied().collect();
     leaves.iter().fold(MlxNames::default(), |mut names, leaf| {
-        let named = stored_name(leaf, &stored_set, binding)
-            .and_then(|stored| hf_name(&stored, layout, hf_prefix));
-        match named {
-            Some(hf) => names.mapped.push(((*leaf).to_string(), hf)),
-            None => names.unmapped.push((*leaf).to_string()),
-        }
+        let source = resolve(leaf, &stored_set, binding, layout);
+        place(&mut names, leaf, source, layout, hf_prefix);
         names
     })
 }
@@ -149,7 +237,7 @@ pub fn dense_names(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs::File;
     use std::path::Path;
 
@@ -172,8 +260,8 @@ mod tests {
             .join("plain")
     }
 
-    fn header_names(model: &str) -> BTreeSet<String> {
-        let mut found = BTreeSet::new();
+    fn header_shapes(model: &str) -> BTreeMap<String, Vec<u64>> {
+        let mut found = BTreeMap::new();
         for entry in std::fs::read_dir(reference_dir(model)).expect("reference dir exists") {
             let path = entry.expect("dir entry").path();
             let file_name = path
@@ -187,25 +275,37 @@ mod tests {
                     header
                         .as_object()
                         .unwrap()
-                        .keys()
-                        .filter(|key| *key != "__metadata__")
-                        .cloned(),
+                        .iter()
+                        .filter(|(key, _)| *key != "__metadata__")
+                        .map(|(key, entry)| {
+                            let shape = entry["shape"].as_array().unwrap();
+                            (
+                                key.clone(),
+                                shape.iter().map(|dim| dim.as_u64().unwrap()).collect(),
+                            )
+                        }),
                 );
             }
         }
         found
     }
 
-    fn gguf_directory(path: &str) -> Vec<String> {
+    fn header_names(model: &str) -> BTreeSet<String> {
+        header_shapes(model).into_keys().collect()
+    }
+
+    fn gguf_infos(path: &str) -> Vec<proxima_gguf::TensorInfo> {
         assert!(
             Path::new(path).exists(),
             "host-local gguf blob missing at {path}"
         );
         let file = File::open(path).unwrap();
         let mapping = unsafe { memmap2::Mmap::map(&file) }.unwrap();
-        parse_complete(&mapping)
-            .unwrap()
-            .tensors
+        parse_complete(&mapping).unwrap().tensors
+    }
+
+    fn gguf_directory(path: &str) -> Vec<String> {
+        gguf_infos(path)
             .into_iter()
             .map(|tensor| tensor.name)
             .collect()
@@ -262,10 +362,8 @@ mod tests {
 
     #[test]
     fn mlx_names_dense_granite_leaves_match_plain_header_with_zero_unmapped() {
-        let (named, directory) =
-            name_dense(GRANITE_GGUF, "granitemoe", STANDARD_LAYOUT, GRANITE_PREFIX);
+        let (named, _) = name_dense(GRANITE_GGUF, "granitemoe", STANDARD_LAYOUT, GRANITE_PREFIX);
         let header = header_names("granite-3.1-1b-a400m-moe");
-        let routed = |name: &str| name.contains("_exps.") || name.contains("ffn_gate_inp.");
 
         let missing: Vec<&str> = named
             .mapped
@@ -273,22 +371,12 @@ mod tests {
             .map(|(_, hf)| hf.as_str())
             .filter(|hf| !header.contains(*hf))
             .collect();
-        let expected_unmapped = directory.iter().filter(|name| routed(name)).count();
 
         assert!(
             missing.is_empty(),
             "names absent from the plain header: {missing:?}"
         );
-        assert!(
-            named.unmapped.iter().all(|leaf| routed(leaf)),
-            "a dense leaf was left unmapped: {:?}",
-            named.unmapped
-        );
-        assert_eq!(
-            named.unmapped.len(),
-            expected_unmapped,
-            "every routed-expert leaf is reported, none named"
-        );
+        assert!(named.unmapped.is_empty(), "unmapped: {:?}", named.unmapped);
         assert!(
             named
                 .mapped
@@ -356,6 +444,114 @@ mod tests {
                 .mapped
                 .iter()
                 .all(|(leaf, _)| leaf != "blk.0.mystery_gate.weight")
+        );
+    }
+
+    fn routed(name: &str) -> bool {
+        name.contains("_exps.") || name.contains("ffn_gate_inp.")
+    }
+
+    fn gguf_shape(infos: &[proxima_gguf::TensorInfo], leaf: &str) -> Vec<u64> {
+        let info = infos.iter().find(|info| info.name == leaf).unwrap();
+        info.dims.iter().rev().copied().collect()
+    }
+
+    fn moe_header_names(named: &MlxNames) -> Vec<String> {
+        let routed_mapped = named.mapped.iter().filter(|(leaf, _)| routed(leaf));
+        let fused = named.fused.iter().map(|fused| &fused.hf);
+        routed_mapped
+            .map(|(_, hf)| hf.clone())
+            .chain(fused.cloned())
+            .collect()
+    }
+
+    #[test]
+    fn mlx_names_moe_leaves_match_plain_header_names_shapes_and_fused_parts() {
+        let (named, _) = name_dense(GRANITE_GGUF, "granitemoe", STANDARD_LAYOUT, GRANITE_PREFIX);
+        let infos = gguf_infos(GRANITE_GGUF);
+        let header = header_shapes("granite-3.1-1b-a400m-moe");
+
+        let whole_mismatch: Vec<&str> = named
+            .mapped
+            .iter()
+            .filter(|(leaf, _)| routed(leaf))
+            .filter(|(leaf, hf)| header.get(hf) != Some(&gguf_shape(&infos, leaf)))
+            .map(|(leaf, _)| leaf.as_str())
+            .collect();
+        let fused_mismatch: Vec<&str> = named
+            .fused
+            .iter()
+            .filter(|fused| {
+                let mut shape = gguf_shape(&infos, &fused.leaf);
+                shape[1] *= u64::from(fused.of);
+                header.get(&fused.hf) != Some(&shape)
+            })
+            .map(|fused| fused.leaf.as_str())
+            .collect();
+
+        assert!(
+            whole_mismatch.is_empty(),
+            "shape or name differs: {whole_mismatch:?}"
+        );
+        assert!(
+            fused_mismatch.is_empty(),
+            "fused shape or name differs: {fused_mismatch:?}"
+        );
+        assert_eq!(named.fused.len(), 48, "gate and up of 24 layers");
+        let gate = named
+            .fused
+            .iter()
+            .find(|fused| fused.leaf == "blk.7.ffn_gate_exps.weight");
+        let up = named
+            .fused
+            .iter()
+            .find(|fused| fused.leaf == "blk.7.ffn_up_exps.weight");
+        let relation = gate
+            .zip(up)
+            .map(|(gate, up)| (gate.hf == up.hf, (gate.part, gate.of), (up.part, up.of)));
+        assert_eq!(relation, Some((true, (0, 2), (1, 2))));
+    }
+
+    #[test]
+    fn mlx_names_moe_every_routed_leaf_is_named_and_unmapped_is_empty() {
+        let (named, directory) =
+            name_dense(GRANITE_GGUF, "granitemoe", STANDARD_LAYOUT, GRANITE_PREFIX);
+        let routed_leaves = directory.iter().filter(|name| routed(name)).count();
+
+        let routed_named =
+            named.mapped.iter().filter(|(leaf, _)| routed(leaf)).count() + named.fused.len();
+
+        assert!(named.unmapped.is_empty(), "unmapped: {:?}", named.unmapped);
+        assert_eq!(routed_named, routed_leaves);
+        assert_eq!(routed_leaves, 96);
+    }
+
+    #[test]
+    fn mlx_names_moe_identity_control_reference_names_compare_equal_to_themselves() {
+        let (named, _) = name_dense(GRANITE_GGUF, "granitemoe", STANDARD_LAYOUT, GRANITE_PREFIX);
+        let reference = moe_header_names(&named);
+
+        let differing = reference
+            .iter()
+            .zip(reference.iter())
+            .filter(|(left, right)| left != right)
+            .count();
+
+        assert!(!reference.is_empty() && differing == 0);
+    }
+
+    #[test]
+    fn mlx_names_moe_degenerate_control_one_altered_name_is_detected() {
+        let (named, _) = name_dense(GRANITE_GGUF, "granitemoe", STANDARD_LAYOUT, GRANITE_PREFIX);
+        let header = header_names("granite-3.1-1b-a400m-moe");
+        let mut altered = moe_header_names(&named);
+        altered[3] = altered[3].replace("block_sparse_moe", "sparse_moe");
+
+        let missing = altered.iter().filter(|hf| !header.contains(*hf)).count();
+
+        assert_eq!(
+            missing, 1,
+            "exactly the altered name must fail the header comparison"
         );
     }
 
