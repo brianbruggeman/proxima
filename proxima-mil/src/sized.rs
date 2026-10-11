@@ -48,6 +48,8 @@ mod tests {
     const TOML_TEXT: &str = include_str!("../proxima-mil.toml");
     const GENERATED_TEXT: &str = include_str!(concat!(env!("OUT_DIR"), "/proxima_mil_sized.rs"));
     const BUILD_SCRIPT: &str = include_str!("../build.rs");
+    // sized.rs holds the axes; wire.rs and weights.rs hold protobuf and blob byte layouts, whose numbers are format facts that happen to equal an axis value
+    const FORMAT_LAYOUT_SOURCES: [&str; 3] = ["sized.rs", "wire.rs", "weights.rs"];
     const AXES: [(&str, &str); 6] = [
         ("ane", "graph_ceiling_mb"),
         ("shape", "pad_multiple"),
@@ -88,7 +90,11 @@ mod tests {
             .filter_map(Result::ok)
             .map(|entry| entry.path())
             .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
-            .filter(|path| path.file_name().is_some_and(|name| name != "sized.rs"))
+            .filter(|path| {
+                path.file_name().is_some_and(|name| {
+                    !FORMAT_LAYOUT_SOURCES.contains(&name.to_string_lossy().as_ref())
+                })
+            })
             .filter_map(|path| fs::read_to_string(&path).ok().map(|text| (path, text)))
             .collect()
     }

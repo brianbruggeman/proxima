@@ -4620,7 +4620,9 @@ dependencies = [
 name = "proxima-mil"
 version = "0.1.0"
 dependencies = [
+ "half",
  "proxima-build",
+ "proxima-primitives",
  "proxima-tensor",
  "temp-env",
  "thiserror 2.0.19",
