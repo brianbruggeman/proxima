@@ -677,6 +677,58 @@ required-features = ["metal", "metal-reduction-literal", "instrument"]
 name = "reduction_literal_prefill_speed_probe"
 required-features = ["metal", "metal-reduction-literal", "instrument"]
 
+[[test]]
+name = "q2k_unpack"
+required-features = ["alloc"]
+
+[[test]]
+name = "q3k_unpack"
+required-features = ["alloc"]
+
+[[test]]
+name = "q4_0_unpack"
+required-features = ["alloc"]
+
+[[test]]
+name = "q4k_unpack"
+required-features = ["alloc"]
+
+[[test]]
+name = "q5k_unpack"
+required-features = ["alloc"]
+
+[[test]]
+name = "q6k_unpack"
+required-features = ["alloc"]
+
+[[test]]
+name = "q8_0_unpack"
+required-features = ["alloc"]
+
+[[test]]
+name = "metal_compile_gate"
+required-features = ["alloc"]
+
+[[test]]
+name = "lowering_census"
+required-features = ["alloc"]
+
+[[test]]
+name = "command_buffer_plan"
+required-features = ["alloc"]
+
+[[test]]
+name = "flat_grid_compile_gate"
+required-features = ["alloc"]
+
+[[example]]
+name = "real_forward_packed_probe"
+required-features = ["alloc"]
+
+[[example]]
+name = "real_forward_emit_probe"
+required-features = ["alloc"]
+
 [dev-dependencies]
 anyhow = "1.0.104"
 conflaguration = { workspace = true, features = ["toml"] }
