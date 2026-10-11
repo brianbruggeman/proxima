@@ -203,7 +203,9 @@ pub use transform::{
     pack_affine, safetensors_to_gguf,
 };
 #[cfg(feature = "std")]
-pub use transform::{DEFAULT_PLAIN_DTYPE, PlainTensor, export_plain, export_plain_tensor};
+pub use transform::{
+    DEFAULT_PLAIN_DTYPE, PlainTensor, export_plain, export_plain_named, export_plain_tensor,
+};
 #[cfg(feature = "std")]
 pub use transform::{Layout, MlxNames, SANDWICH_NORM_LAYOUT, STANDARD_LAYOUT, dense_names};
 #[cfg(feature = "std")]

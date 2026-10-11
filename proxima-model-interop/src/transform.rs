@@ -183,6 +183,10 @@ pub use mlx_tokenizer::{TokenizerFiles, copy_tokenizer, export_tokenizer};
 mod mlx_plain;
 #[cfg(feature = "std")]
 pub use mlx_plain::{DEFAULT_PLAIN_DTYPE, PlainTensor, export_plain, export_plain_tensor};
+#[cfg(feature = "std")]
+mod mlx_plain_named;
+#[cfg(feature = "std")]
+pub use mlx_plain_named::export_plain_named;
 
 #[cfg(feature = "std")]
 mod mlx_reference;
