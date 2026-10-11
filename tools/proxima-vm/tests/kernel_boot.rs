@@ -3,9 +3,9 @@
 //! bytes and the count is asserted nonzero."
 //!
 //! Gates on a real arm64 Linux `Image` file existing at the path named by
-//! `PROXIMA_VM_KERNEL_BOOT_IMAGE` — the same "asset absent -> named
-//! UNMEASURED skip" shape `tests/dtb_dtc_differential.rs` already uses for
-//! `dtc`, since a 38 MiB kernel binary has no business living in this repo.
+//! `PROXIMA_VM_KERNEL_BOOT_IMAGE` — and the `kernel-boot` Cargo feature: with the feature on, a missing or
+//! unset image is a hard failure, never a skip; a 38 MiB kernel binary has no
+//! business living in this repo.
 //!
 //! Runs the boot from a signed subprocess (`kernel_boot_probe`), the same
 //! shape every other real-hypervisor-exit test in this crate uses
@@ -24,10 +24,12 @@ const PROBE_BINARY: &str = env!("CARGO_BIN_EXE_kernel_boot_probe");
 const ENTITLEMENTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/entitlements.plist");
 const IMAGE_PATH_VAR: &str = "PROXIMA_VM_KERNEL_BOOT_IMAGE";
 
-const HYPERVISOR_LANE: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+fn hypervisor_lane() -> bool {
+    cfg!(all(target_os = "macos", target_arch = "aarch64"))
+}
 
 /// Resolves the kernel `Image` under test, or `None` if the asset is not
-/// present on this host — the honest UNMEASURED answer, not a hard failure.
+/// present on this host — the caller turns absence into a hard failure.
 fn kernel_image_path() -> Option<String> {
     let path = env::var(IMAGE_PATH_VAR).ok()?;
     if Path::new(&path).is_file() {
@@ -110,16 +112,15 @@ fn parse_m5b_line(stderr: &str) -> (u64, u64, u64, u64, u64) {
 
 #[proxima::test]
 async fn kernel_console_output_arrives_through_the_pl011_byte_channel() {
-    if !HYPERVISOR_LANE {
-        return;
-    }
-    let Some(image_path) = kernel_image_path() else {
-        eprintln!(
-            "UNMEASURED-kernel-image-not-present: set {IMAGE_PATH_VAR} to a real arm64 Linux \
-             Image to run this boot"
-        );
-        return;
-    };
+    assert!(
+        hypervisor_lane(),
+        "kernel-boot feature requires an aarch64 macos host with Hypervisor.framework; this host cannot boot a guest"
+    );
+    let image_path = kernel_image_path().unwrap_or_else(|| {
+        panic!(
+            "{IMAGE_PATH_VAR} must name an existing arm64 Linux Image file; unset or missing file"
+        )
+    });
 
     let probe = run_signed_probe(&image_path, None);
 
@@ -148,16 +149,15 @@ async fn kernel_console_output_arrives_through_the_pl011_byte_channel() {
 /// test makes for `mmio_trap_count`.
 #[proxima::test]
 async fn pl011_trap_count_is_nonzero_for_a_kernel_that_reaches_earlycon() {
-    if !HYPERVISOR_LANE {
-        return;
-    }
-    let Some(image_path) = kernel_image_path() else {
-        eprintln!(
-            "UNMEASURED-kernel-image-not-present: set {IMAGE_PATH_VAR} to a real arm64 Linux \
-             Image to run this boot"
-        );
-        return;
-    };
+    assert!(
+        hypervisor_lane(),
+        "kernel-boot feature requires an aarch64 macos host with Hypervisor.framework; this host cannot boot a guest"
+    );
+    let image_path = kernel_image_path().unwrap_or_else(|| {
+        panic!(
+            "{IMAGE_PATH_VAR} must name an existing arm64 Linux Image file; unset or missing file"
+        )
+    });
 
     let probe = run_signed_probe(&image_path, None);
     let (_gicd, _gicr, pl011_trap_count, _virtio, _vtimer) = parse_m5b_line(&probe.stderr);

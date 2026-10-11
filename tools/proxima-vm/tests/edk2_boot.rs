@@ -1,13 +1,13 @@
 //! Standard-boot-path rung above M5's real-Linux-kernel boot
 //! (`tests/kernel_boot.rs`'s own module doc): attempts a real edk2/AAVMF
 //! `-pflash` CODE volume boot through `boot::boot_edk2_firmware`, the exact
-//! "flash at guest-physical 0, EL2h entry, DTB in `x0`" shape this crate's
+//! "flash at guest-physical 0, `EL2h` entry, DTB in `x0`" shape this crate's
 //! own edk2-boot investigation designed (`boot.rs`'s own module doc on
 //! [`boot::boot_edk2_firmware`]).
 //!
 //! Gates on a real edk2 `-pflash` CODE volume existing at the path named by
-//! `PROXIMA_VM_EDK2_FIRMWARE` — the same "asset absent -> named UNMEASURED
-//! skip" shape `tests/kernel_boot.rs`'s own `kernel_image_path` uses, since
+//! `PROXIMA_VM_EDK2_FIRMWARE` — under the `kernel-boot` Cargo feature, where a missing or unset firmware
+//! is a hard failure, since
 //! a 64 MiB firmware binary has no business living in this repo. On a host
 //! with Homebrew's `qemu` cask installed, that path is conventionally
 //! `/opt/homebrew/share/qemu/edk2-aarch64-code.fd`.
@@ -31,11 +31,13 @@ const PROBE_BINARY: &str = env!("CARGO_BIN_EXE_edk2_boot_probe");
 const ENTITLEMENTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/entitlements.plist");
 const FIRMWARE_PATH_VAR: &str = "PROXIMA_VM_EDK2_FIRMWARE";
 
-const HYPERVISOR_LANE: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+fn hypervisor_lane() -> bool {
+    cfg!(all(target_os = "macos", target_arch = "aarch64"))
+}
 
 /// Resolves the edk2 CODE flash volume under test, or `None` if the asset
-/// is not present on this host — the honest UNMEASURED answer, mirrored
-/// from `tests/kernel_boot.rs`'s own `kernel_image_path`.
+/// is not present on this host — the caller turns absence into a hard
+/// failure, mirroring `tests/kernel_boot.rs`'s own `kernel_image_path`.
 fn firmware_path() -> Option<String> {
     let path = env::var(FIRMWARE_PATH_VAR).ok()?;
     if Path::new(&path).is_file() {
@@ -90,18 +92,15 @@ fn run_signed_probe(firmware_path: &str) -> ProbeRun {
 
 #[proxima::test]
 async fn edk2_console_output_arrives_through_the_pl011_byte_channel() {
-    if !HYPERVISOR_LANE {
-        return;
-    }
-    let Some(firmware_path) = firmware_path() else {
-        eprintln!(
-            "UNMEASURED-edk2-firmware-not-present: set {FIRMWARE_PATH_VAR} to a real edk2 \
-             -pflash CODE volume (conventionally \
-             /opt/homebrew/share/qemu/edk2-aarch64-code.fd on a Homebrew qemu install) to run \
-             this boot"
-        );
-        return;
-    };
+    assert!(
+        hypervisor_lane(),
+        "kernel-boot feature requires an aarch64 macos host with Hypervisor.framework; this host cannot boot a guest"
+    );
+    let firmware_path = firmware_path().unwrap_or_else(|| {
+        panic!(
+            "{FIRMWARE_PATH_VAR} must name an existing edk2 -pflash CODE volume (e.g. /opt/homebrew/share/qemu/edk2-aarch64-code.fd); unset or missing file"
+        )
+    });
 
     let probe = run_signed_probe(&firmware_path);
     let console_text = String::from_utf8_lossy(&probe.pl011_bytes);
