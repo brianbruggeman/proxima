@@ -164,4 +164,8 @@ mod mlx;
 #[cfg(feature = "std")]
 mod mlx_names;
 #[cfg(feature = "std")]
+mod mlx_config;
+#[cfg(feature = "std")]
+pub use mlx_config::{copy_config, hf_config_bytes, sliding_pattern_hparams};
+#[cfg(feature = "std")]
 pub use mlx_names::{Layout, MlxNames, SANDWICH_NORM_LAYOUT, STANDARD_LAYOUT, dense_names};

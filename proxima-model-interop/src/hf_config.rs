@@ -117,6 +117,29 @@ pub struct HfConfig {
     pub block_multiple_of: Option<u32>,
 }
 
+/// Every top-level key [`HfConfig`] consults, in one list the MLX writer
+/// (`crate::transform`) draws its emitted keys from, so reader and writer
+/// cannot name a field differently. `num_local_experts` is the alias of
+/// `num_experts` the reader also accepts.
+pub(crate) const HF_CONFIG_KEYS: [&str; 16] = [
+    "model_type",
+    "architectures",
+    "hidden_size",
+    "num_attention_heads",
+    "num_key_value_heads",
+    "num_hidden_layers",
+    "intermediate_size",
+    "moe_intermediate_size",
+    "rms_norm_eps",
+    "rope_theta",
+    "vocab_size",
+    "head_dim",
+    "num_experts",
+    "num_local_experts",
+    "num_experts_per_tok",
+    "tie_word_embeddings",
+];
+
 fn default_rms_norm_eps() -> f32 {
     1e-5
 }
