@@ -972,7 +972,7 @@ mod tests {
     /// `tools/proxima-cli/tests/integration/pipeline_subcommand.rs`'s
     /// `CARGO_TARGET_DIR`-then-workspace-root discovery, extended with the
     /// per-target-triple artifact subdirectory a cross build produces.
-    fn guest_elf_bytes(target_triple: &str) -> Vec<u8> {
+    fn guest_elf_path(target_triple: &str) -> PathBuf {
         let target_dir = std::env::var("CARGO_TARGET_DIR").map_or_else(
             |_| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1020,82 +1020,114 @@ mod tests {
             assert!(status.success(), "cargo build for {target_triple} failed");
         }
 
-        std::fs::read(&artifact).expect("read built guest elf")
+        artifact
     }
 
-    /// Cross-checked against `llvm-readobj --program-headers` (LLVM 20, the
-    /// toolchain's own bundled `rustlib/*/bin/llvm-readobj`; `readelf` is
-    /// not installed on this host, so `llvm-readobj` is the incumbent here
-    /// per principle 14). Re-pinned 2026-08-30 against a `--release` build
-    /// through `guests/lambda`'s own manifest (see `guest_elf_bytes`): the
-    /// crate's `dev` profile no longer matches these numbers now that
-    /// `guests/lambda` is its own excluded workspace with no
-    /// `[profile.dev]` to inherit, so `--release` is the build this test
-    /// actually pins against, and a fresh `llvm-readobj --program-headers`
-    /// run against that release build is the oracle.
-    ///
-    /// ```text
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x10000, VirtualAddress: 0x0,   FileSize: 1260, MemSize: 1260, Flags: PF_R | PF_X }
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x104ec, VirtualAddress: 0x4ec, FileSize: 524,  MemSize: 524,  Flags: PF_R }
-    /// ProgramHeader { Type: PT_GNU_STACK, ... }
-    /// ```
-    ///
-    /// `parse_elf` must land on the same entry point and the same two
-    /// `PT_LOAD` segments (in the same order); the `GNU_STACK` entry must
-    /// not appear (it is not `PT_LOAD`).
+    /// One `PT_LOAD` entry as `llvm-readobj --program-headers` prints it.
+    struct ReadobjLoad {
+        virtual_address: u64,
+        file_size: u64,
+        memory_size: u64,
+        flags: u32,
+    }
+
+    fn hex_field(line: &str, key: &str) -> Option<u64> {
+        let value = line.trim().strip_prefix(key)?.split_whitespace().next()?;
+        u64::from_str_radix(value.trim_start_matches("0x").trim_end_matches(')'), 16).ok()
+    }
+
+    fn decimal_field(line: &str, key: &str) -> Option<u64> {
+        line.trim().strip_prefix(key)?.trim().parse().ok()
+    }
+
+    fn readobj_binary() -> PathBuf {
+        let output = Command::new("rustc")
+            .args(["--print", "sysroot"])
+            .output()
+            .expect("run rustc --print sysroot");
+        let rustlib = PathBuf::from(String::from_utf8(output.stdout).expect("sysroot is utf-8").trim())
+            .join("lib")
+            .join("rustlib");
+        std::fs::read_dir(&rustlib)
+            .expect("read rustlib dir")
+            .map(|entry| entry.expect("rustlib entry").path().join("bin").join("llvm-readobj"))
+            .find(|candidate| candidate.exists())
+            .expect("rustup llvm-tools: llvm-readobj under sysroot rustlib/*/bin")
+    }
+
+    /// Oracle: runs the toolchain's `llvm-readobj` on the very bytes under
+    /// test, so the expected numbers can never drift from the guest build.
+    /// Returns the entry point and the `PT_LOAD` entries in header order.
+    fn readobj_oracle(elf_path: &Path) -> (u64, Vec<ReadobjLoad>) {
+        let output = Command::new(readobj_binary())
+            .args(["--file-headers", "--program-headers"])
+            .arg(elf_path)
+            .output()
+            .expect("run llvm-readobj");
+        assert!(output.status.success(), "llvm-readobj failed on {}", elf_path.display());
+        let text = String::from_utf8(output.stdout).expect("llvm-readobj output is utf-8");
+
+        let mut entry = None;
+        let mut loads: Vec<ReadobjLoad> = Vec::new();
+        let mut in_load = false;
+        for line in text.lines() {
+            if let Some(value) = hex_field(line, "Entry:") {
+                entry = Some(value);
+            }
+            if line.trim().starts_with("Type:") {
+                in_load = line.contains("PT_LOAD");
+                if in_load {
+                    loads.push(ReadobjLoad { virtual_address: 0, file_size: 0, memory_size: 0, flags: 0 });
+                }
+            }
+            let Some(current) = loads.last_mut().filter(|_| in_load) else {
+                continue;
+            };
+            if let Some(value) = hex_field(line, "VirtualAddress:") {
+                current.virtual_address = value;
+            } else if let Some(value) = decimal_field(line, "FileSize:") {
+                current.file_size = value;
+            } else if let Some(value) = decimal_field(line, "MemSize:") {
+                current.memory_size = value;
+            } else if line.trim().starts_with("Flags [") {
+                current.flags = u32::try_from(hex_field(line, "Flags [ (").unwrap_or(0)).expect("flags fit u32");
+            }
+        }
+        (entry.expect("llvm-readobj printed Entry"), loads)
+    }
+
+    fn assert_matches_readobj(target_triple: &str) {
+        let artifact = guest_elf_path(target_triple);
+        let image = std::fs::read(&artifact).expect("read built guest elf");
+        let (expected_entry, expected) = readobj_oracle(&artifact);
+        let (entry, segments) = parse_elf::<4>(&image).expect("real guest ELF parses");
+
+        assert_eq!(entry, expected_entry);
+        assert!(!expected.is_empty(), "readobj reports at least one PT_LOAD entry");
+        assert_eq!(segments.len(), expected.len(), "parser and readobj agree on the PT_LOAD count");
+
+        for (segment, oracle) in segments.iter().zip(&expected) {
+            assert_eq!(segment.virtual_address(), oracle.virtual_address);
+            assert_eq!(segment.memory_size(), oracle.memory_size);
+            assert_eq!(u64::try_from(segment.data().len()).expect("len fits u64"), oracle.file_size);
+            assert_eq!(segment.is_readable(), oracle.flags & 0x4 != 0);
+            assert_eq!(segment.is_writable(), oracle.flags & 0x2 != 0);
+            assert_eq!(segment.is_executable(), oracle.flags & 0x1 != 0);
+        }
+        assert!(segments[0].is_executable() && !segments[0].is_writable());
+    }
+
+    /// Oracle is `llvm-readobj --program-headers` (toolchain-bundled; no
+    /// `readelf` on this host) run at test time on the guest built by
+    /// `guest_elf_path`; the guest is built from source, so its section
+    /// sizes move with the guest source and toolchain and must not be pinned.
     #[test]
     fn matches_readelf_on_the_real_aarch64_guest() {
-        let image = guest_elf_bytes("aarch64-unknown-none");
-        let (entry, segments) = parse_elf::<4>(&image).expect("real guest ELF parses");
-
-        assert_eq!(entry, 0x0);
-        assert_eq!(segments.len(), 2);
-
-        assert_eq!(segments[0].virtual_address(), 0x0000);
-        assert_eq!(segments[0].memory_size(), 1260);
-        assert_eq!(segments[0].data().len(), 1260);
-        assert!(segments[0].is_readable());
-        assert!(!segments[0].is_writable());
-        assert!(segments[0].is_executable());
-
-        assert_eq!(segments[1].virtual_address(), 0x4ec);
-        assert_eq!(segments[1].memory_size(), 524);
-        assert_eq!(segments[1].data().len(), 524);
-        assert!(segments[1].is_readable());
-        assert!(!segments[1].is_writable());
-        assert!(!segments[1].is_executable());
+        assert_matches_readobj("aarch64-unknown-none");
     }
 
-    /// Same cross-check as above, for the `x86_64-unknown-none` build.
-    /// Re-pinned 2026-08-30 alongside the aarch64 pin, same cause: the
-    /// `--release` build through `guests/lambda`'s own manifest is the
-    /// oracle now that the crate is its own excluded workspace.
-    ///
-    /// ```text
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x1000, VirtualAddress: 0x0,   FileSize: 1956, MemSize: 1956, Flags: PF_R | PF_X }
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x17a4, VirtualAddress: 0x7a4, FileSize: 524,  MemSize: 524,  Flags: PF_R }
-    /// ProgramHeader { Type: PT_GNU_STACK, ... }
-    /// ```
     #[test]
     fn matches_readelf_on_the_real_x86_64_guest() {
-        let image = guest_elf_bytes("x86_64-unknown-none");
-        let (entry, segments) = parse_elf::<4>(&image).expect("real guest ELF parses");
-
-        assert_eq!(entry, 0x0);
-        assert_eq!(segments.len(), 2);
-
-        assert_eq!(segments[0].virtual_address(), 0x0000);
-        assert_eq!(segments[0].memory_size(), 1956);
-        assert_eq!(segments[0].data().len(), 1956);
-        assert!(segments[0].is_readable());
-        assert!(!segments[0].is_writable());
-        assert!(segments[0].is_executable());
-
-        assert_eq!(segments[1].virtual_address(), 0x7a4);
-        assert_eq!(segments[1].memory_size(), 524);
-        assert_eq!(segments[1].data().len(), 524);
-        assert!(segments[1].is_readable());
-        assert!(!segments[1].is_writable());
-        assert!(!segments[1].is_executable());
+        assert_matches_readobj("x86_64-unknown-none");
     }
 }
