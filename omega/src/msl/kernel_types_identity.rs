@@ -1645,7 +1645,8 @@ pub(crate) const fn codec_from_quantized_block(block: &QuantizedBlock<'_>) -> Op
         | Codec::BFloat16
         | Codec::BFloat8
         | Codec::Bf8E5M2
-        | Codec::Bf4E2M1 => Some(*codec),
+        | Codec::Bf4E2M1
+        | Codec::Fp6E3M2 => Some(*codec),
         _ => None,
     }
 }
@@ -1669,7 +1670,7 @@ pub(crate) const fn codec_cache_token(codec: Codec) -> &'static str {
         Codec::Fp6E3M2 => "fp6_e3m2",
         // No Metal unpack kernel exists for any of these 18 -- `PackedOperands`
         // is only ever populated via `codec_from_quantized_block`
-        // (this module's own fn), which maps just the 11 codecs above, so
+        // (this module's own fn), which maps just the 15 codecs above, so
         // these arms are unreachable by construction. Exhaustive anyway:
         // `Codec` is `#[non_exhaustive]`-free and foreign here, so a new
         // variant must force a decision at every match, not slip through.
