@@ -527,25 +527,7 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    let placement_affinity = match affinity {
-        Some(spec) => {
-            <prime::config::Affinity as std::str::FromStr>::from_str(spec).map_err(|error| {
-                prime_run_dispatch_error(&format!("invalid affinity `{spec}`: {error}"))
-            })?
-        }
-        None => prime::config::Affinity::Float,
-    };
-    let visible_cores = match (cores, placement_affinity.fixed_count()) {
-        (Some(cores_count), Some(affinity_count)) if cores_count != affinity_count => {
-            return Err(prime_run_dispatch_error(&format!(
-                "cores = {cores_count} conflicts with affinity {affinity:?}, which names {affinity_count} cores"
-            )));
-        }
-        (_, Some(affinity_count)) => affinity_count,
-        (Some(cores_count), None) => cores_count,
-        (None, None) => prime::config::CoreSelection::Auto.resolve(),
-    }
-    .max(1);
+    let (visible_cores, placement_affinity) = resolve_visible_cores(cores, affinity)?;
 
     let driver_core = CoreId(visible_cores);
     let mut placement = placement_affinity.placement(visible_cores);
@@ -584,6 +566,38 @@ where
     receiver.recv().map_err(|_| {
         prime_run_dispatch_error("prime worker dropped the run_prime completion channel")
     })
+}
+
+#[cfg(all(
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-bgpool"
+))]
+fn resolve_visible_cores(
+    cores: Option<usize>,
+    affinity: Option<&str>,
+) -> Result<(usize, prime::config::Affinity), ProximaError> {
+    let placement_affinity = match affinity {
+        Some(spec) => {
+            <prime::config::Affinity as std::str::FromStr>::from_str(spec).map_err(|error| {
+                prime_run_dispatch_error(&format!("invalid affinity `{spec}`: {error}"))
+            })?
+        }
+        None => prime::config::Affinity::Float,
+    };
+    let visible_cores = match (cores, placement_affinity.fixed_count()) {
+        (Some(cores_count), Some(affinity_count)) if cores_count != affinity_count => {
+            return Err(prime_run_dispatch_error(&format!(
+                "cores = {cores_count} conflicts with affinity {affinity:?}, which names {affinity_count} cores"
+            )));
+        }
+        (_, Some(affinity_count)) => affinity_count,
+        (Some(cores_count), None) => cores_count,
+        (None, None) => prime::config::CoreSelection::Auto.resolve(),
+    }
+    .max(1);
+    Ok((visible_cores, placement_affinity))
 }
 
 #[cfg(all(
@@ -926,9 +940,10 @@ where
     ))
 }
 
-// nextest runs one test per process, so `INSTALLED_RUNTIME`'s set-once
-// `OnceLock` never leaks state between these — each test observes only the
-// runtime it booted itself.
+// `INSTALLED_RUNTIME` is set-once per process and `cargo test --lib` runs every
+// test in one process, so a test reading `installed_runtime()` observes
+// whichever sibling booted first. These assert on `resolve_visible_cores`,
+// the value `AdoptedRuntime::num_cores` is built from, which has no ambient state.
 #[cfg(all(
     test,
     feature = "runtime-prime-executor",
@@ -948,38 +963,27 @@ mod tests {
     #[test]
     fn bare_cores_and_affinity_resolve_to_all_physical_cores() {
         let expected = prime::config::CoreSelection::Auto.resolve();
-        let observed = run_with_cores(None, None, async {
-            installed_runtime()
-                .expect("run_with_cores installs a runtime ambiently")
-                .runtime
-                .num_cores()
-        })
-        .expect("run_with_cores");
+        let (observed, _) = resolve_visible_cores(None, None).expect("bare cores resolve");
         assert_eq!(observed, expected);
     }
 
     #[test]
     fn explicit_cores_overrides_the_auto_default() {
-        let observed = run_with_cores(Some(2), None, async {
-            installed_runtime()
-                .expect("run_with_cores installs a runtime ambiently")
-                .runtime
-                .num_cores()
-        })
-        .expect("run_with_cores");
+        let (observed, _) = resolve_visible_cores(Some(2), None).expect("explicit cores resolve");
         assert_eq!(observed, 2);
     }
 
     #[test]
     fn affinity_cores_list_fixes_the_count_without_an_explicit_cores_arg() {
-        let observed = run_with_cores(None, Some("4,5,6"), async {
-            installed_runtime()
-                .expect("run_with_cores installs a runtime ambiently")
-                .runtime
-                .num_cores()
-        })
-        .expect("run_with_cores");
+        let (observed, _) =
+            resolve_visible_cores(None, Some("4,5,6")).expect("affinity list resolves");
         assert_eq!(observed, 3);
+    }
+
+    #[test]
+    fn run_with_cores_returns_the_future_output_from_the_booted_runtime() {
+        let observed = run_with_cores(Some(2), None, async { 7_usize }).expect("run_with_cores");
+        assert_eq!(observed, 7);
     }
 
     #[test]
