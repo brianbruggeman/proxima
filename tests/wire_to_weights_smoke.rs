@@ -12,9 +12,10 @@
 //! exactly as `proxima-onnx/tests/real_mnist_accuracy.rs` normalizes them,
 //! and checks the served argmax against the real label.
 //!
-//! `#[ignore]`d and skips cleanly when either the real `mnist.onnx`
-//! checkout or the real MNIST idx dataset is absent — the same convention
-//! `real_mnist_accuracy.rs` uses for its own host-local fixtures.
+//! Fails, naming the missing path, when the real `mnist.onnx` or the real
+//! MNIST idx dataset is absent: `scripts/wire-to-weights-gate.sh` fetches
+//! both (sha256-pinned) and points `PROXIMA_MNIST_ONNX` / `PROXIMA_MNIST_DIR`
+//! at them; unset, the host-local checkout paths below apply.
 
 #![cfg(feature = "wire-to-weights-demo")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -22,6 +23,7 @@
 #[path = "../examples/support/wire_to_weights_pipeline.rs"]
 mod pipeline;
 
+use std::env;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -32,17 +34,27 @@ use std::time::{Duration, Instant};
 use proxima::prime::PrimeRuntime;
 use proxima::runtime::PrimeServeExt;
 
-const MODEL_PATH: &str =
+const DEFAULT_MODEL_PATH: &str =
     "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
-const DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
+const DEFAULT_DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
 const SAMPLE_COUNT: usize = 50;
 
+fn model_path() -> PathBuf {
+    env::var_os("PROXIMA_MNIST_ONNX")
+        .map_or_else(|| PathBuf::from(DEFAULT_MODEL_PATH), PathBuf::from)
+}
+
+fn dataset_dir() -> PathBuf {
+    env::var_os("PROXIMA_MNIST_DIR")
+        .map_or_else(|| PathBuf::from(DEFAULT_DATASET_DIR), PathBuf::from)
+}
+
 fn test_images_path() -> PathBuf {
-    Path::new(DATASET_DIR).join("test/t10k-images-idx3-ubyte")
+    dataset_dir().join("test/t10k-images-idx3-ubyte")
 }
 
 fn test_labels_path() -> PathBuf {
-    Path::new(DATASET_DIR).join("test/t10k-labels-idx1-ubyte")
+    dataset_dir().join("test/t10k-labels-idx1-ubyte")
 }
 
 fn dataset_present() -> bool {
@@ -171,19 +183,20 @@ fn parse_digit(body: &str) -> usize {
 }
 
 #[test]
-#[ignore = "depends on a real .onnx checkout and the real MNIST idx dataset outside this repo"]
 fn wire_to_weights_classifies_real_mnist_images_over_real_http() {
-    let model_path = Path::new(MODEL_PATH);
-    if !model_path.exists() {
-        eprintln!("skipping: no host-local mnist.onnx checkout at {MODEL_PATH}");
-        return;
-    }
-    if !dataset_present() {
-        eprintln!("skipping: no host-local MNIST idx dataset under {DATASET_DIR}");
-        return;
-    }
+    let model_path = model_path();
+    assert!(
+        model_path.exists(),
+        "mnist.onnx missing at {}; run scripts/wire-to-weights-gate.sh or set PROXIMA_MNIST_ONNX",
+        model_path.display()
+    );
+    assert!(
+        dataset_present(),
+        "MNIST idx dataset missing under {}; run scripts/wire-to-weights-gate.sh or set PROXIMA_MNIST_DIR",
+        dataset_dir().display()
+    );
 
-    let model = pipeline::load_model(model_path)
+    let model = pipeline::load_model(&model_path)
         .expect("load the real mnist.onnx checkpoint")
         .expect("checkpoint present, load_model returns Some");
     let handler = pipeline::build_handler(Arc::new(model));

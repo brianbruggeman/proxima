@@ -1,0 +1,40 @@
+name: wire-to-weights
+
+# Gate for tests/wire_to_weights_smoke.rs: it compiles to zero tests without
+# the wire-to-weights-demo feature, so only this job runs it. The script
+# fetches the sha256-pinned mnist.onnx and MNIST t10k files and asserts the
+# test count.
+
+on:
+  push:
+    branches: [main, "verify/*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  wire-to-weights-gate:
+    name: wire-to-weights-gate.sh (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - name: cache pinned fixtures
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/proxima-wire-to-weights
+          key: wire-to-weights-fixtures-5de2936b-0fa7898d-ff7bcfd4
+      - run: bash scripts/wire-to-weights-gate.sh
