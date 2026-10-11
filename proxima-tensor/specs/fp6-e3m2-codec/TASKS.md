@@ -4,7 +4,7 @@ Each slice: one commit, one behaviour change, one validation command, one expect
 
 | # | slice | discharges | validation command | expected | done | note |
 |---|---|---|---|---|---|---|
-| 1 | `FloatLayout` with derived values and the constants `E5M2`, `E2M1`, `E3M2`, `E2M3`, `BF32`, `BF16`, `BF8`, `BF4` in `proxima-primitives/src/float_layout.rs` | AC1 | `cargo nextest run -p proxima-primitives -E 'test(/float_layout_/)'` | `11 passed` | [ ] | the one new type; BF8 and BF4 are the E5M2 and E2M1 values |
+| 1 | `FloatLayout` with derived values and the constants `E5M2`, `E2M1`, `E3M2`, `E2M3`, `BF32`, `BF16`, `BF8`, `BF4` in `proxima-primitives/src/float_layout.rs` | AC1 | `cargo nextest run -p proxima-primitives -E 'test(/float_layout_/)'` | `11 passed` | [x] | the one new type; BF8 and BF4 are the E5M2 and E2M1 values; 11 passed, no_std+alloc check, clippy and doc clean |
 | 2 | generic `encode`, `encode_counting` and `decode` (u32) in `proxima-gguf/src/quant/float_layout.rs`; round to nearest even, range handling, NaN report; the new `proxima-gguf/tests/float_layout_oracles.rs` | AC2 | `cargo nextest run -p proxima-gguf -E 'test(/float_layout_midpoint/) + test(/float_layout_range/) + test(/float_layout_nan/)'` | `10 passed` | [ ] | decode lands here because the midpoint oracle needs it |
 | 3 | the BF32, BF16 and E5M2 oracle tests with their controls | AC3 | `cargo nextest run -p proxima-gguf -E 'test(/float_layout_bf32/) + test(/float_layout_bf16/) + test(/float_layout_e5m2/)'` | `9 passed` | [ ] | corpus 1,048,588 values asserted in each test; `half = 2.7.1` already at `proxima-gguf/Cargo.toml:22` |
 | 4 | `bf8_e5m2` and `bf4_e2m1` bodies become calls into the generic functions; wrapper equality tests; the contract test file untouched | AC4 | `cargo nextest run -p proxima-gguf -E 'test(/bf8_e5m2_bf4_e2m1_encoding_contract/) + test(/float_layout_wrapper/)'` | `3 passed` | [ ] | the 256-code E5M2 table stays the oracle |
@@ -27,8 +27,8 @@ In the table above `\|` stands for a literal pipe character; the SPEC's `### com
 
 ## resume
 
-Last landed slice: none
-Next action: slice 1 (slice 18 adds the Rust-only bound_relations example, no awk), `proxima-primitives/src/float_layout.rs` (read `proxima-gguf/src/quant/bf8_e5m2.rs:5-60` and `bf4_e2m1.rs:18-50` first, so slice 2's generic functions reproduce their rounding and saturation exactly)
+Last landed slice: 1
+Next action: slice 2 (slice 18 adds the Rust-only bound_relations example, no awk), `proxima-gguf/src/quant/float_layout.rs` (read `proxima-gguf/src/quant/bf8_e5m2.rs:5-60` and `bf4_e2m1.rs:18-50` first, so slice 2's generic functions reproduce their rounding and saturation exactly)
 Open question, if any: none for the E3M2 definition (the OCP text, SPEC section "Definition of E3M2", gives bias 3 and no override); slice 11 answers whether the grouped GEMM can stage 3-byte groups
 
 ## struck
