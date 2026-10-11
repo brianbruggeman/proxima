@@ -1174,7 +1174,7 @@ static inline float q5k_pair_dot(device const uchar *block, uint iq, uint ir, th
 /// the same PACKED-OPERAND mechanism ([`Codec`], `operand_read`,
 /// this preamble) as a fourth codec precisely because that mechanism is
 /// generic over block byte width and element count; the tiled-GEMM
-/// (`classify_tiled_gemm`) fast path reads it through its [`tiled_decode`]
+/// (`classify_tiled_gemm`) fast path reads it through its `tiled_decode`
 /// description ([`Q8_0_DEQUANT_HALF16_MSL`]), and every other path renders it
 /// through the per-element accessor below.
 ///
@@ -1262,7 +1262,7 @@ pub const Q8_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q8_0::QK8_0;
 /// scale/min pair (unlike `Q4_K`) and no second `min` field (unlike
 /// `Q4_1`). Same KIND-difference from the K-quant family that `Q8_0`'s
 /// own doc draws: no super-block. The tiled-GEMM (`classify_tiled_gemm`) fast
-/// path reads it through its [`tiled_decode`] description
+/// path reads it through its `tiled_decode` description
 /// ([`Q4_0_DEQUANT_HALF16_MSL`]); every other path renders it through the
 /// per-element accessor below.
 ///
@@ -1376,7 +1376,7 @@ static inline void q4_0_run8(device const uchar *block, uint index, thread float
 }
 "#;
 
-/// `Q4_0`'s entry in the tiled decode description ([`tiled_decode`]): llama.cpp's
+/// `Q4_0`'s entry in the tiled decode description (`tiled_decode`): llama.cpp's
 /// `dequantize_q4_0` (`kernels/dequantize.h`) for one 16-element chunk of a
 /// block, fused to one multiply-add per element. The 16 packed-nibble bytes are
 /// read as eight `ushort` words (a block is 18 bytes, so every block origin and
@@ -1418,7 +1418,7 @@ pub const Q4_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_0::QK4_0;
 /// [`Q8_0_UNPACK_MSL`]/[`Q4_0_UNPACK_MSL`] draw: no super-block, so this
 /// codec does not take the row-blocked (`classify_packed_row_block`) fast
 /// path; the tiled-GEMM (`classify_tiled_gemm`) fast path reads it through its
-/// [`tiled_decode`] description ([`Q5_1_DEQUANT_HALF16_MSL`]), and every other
+/// `tiled_decode` description ([`Q5_1_DEQUANT_HALF16_MSL`]), and every other
 /// path renders it through the per-element accessor below.
 ///
 /// Ports `proxima_gguf::quant::q5_1::dequantize_block` exactly (see that
@@ -1472,7 +1472,7 @@ pub const Q5_1_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_1::QK5_1;
 /// K-quant family [`Q8_0_UNPACK_MSL`]/[`Q4_0_UNPACK_MSL`] draw: no
 /// super-block, so this codec does not take the row-blocked
 /// (`classify_packed_row_block`) fast path; the tiled-GEMM
-/// (`classify_tiled_gemm`) fast path reads it through its [`tiled_decode`]
+/// (`classify_tiled_gemm`) fast path reads it through its `tiled_decode`
 /// description ([`Q5_0_DEQUANT_HALF16_MSL`]), and every other path renders it
 /// through the per-element accessor below.
 ///
@@ -1528,7 +1528,7 @@ pub const Q5_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_0::QK5_0;
 /// mixed-dtype case `type_token` never had to handle before this codec.
 /// Same non-K-quant, flat, one-element-per-block shape `Q8_0`/`Q4_0`
 /// take: never the row-blocked (`classify_packed_row_block`) path; the
-/// tiled-GEMM path reads it through its [`tiled_decode`] description
+/// tiled-GEMM path reads it through its `tiled_decode` description
 /// ([`F16_DEQUANT_HALF16_MSL`], staged as 32-element blocks), and every other
 /// path uses the generic per-element accessor.
 pub const FLOAT16_BLOCK_BYTES: usize = proxima_gguf::quant::f16::BLOCK_BYTES;
@@ -1812,7 +1812,7 @@ pub const DECODE_RUN_ELEMENTS: u64 = 16;
 /// expert-grouped GEMM's tile depth are both this value.
 pub const STAGED_K_STEP_ELEMENTS: u64 = 2 * DECODE_RUN_ELEMENTS;
 
-/// `Q8_0`'s entry in the tiled decode description ([`tiled_decode`]): llama.cpp's
+/// `Q8_0`'s entry in the tiled decode description (`tiled_decode`): llama.cpp's
 /// `dequantize_q8_0` (`kernels/dequantize.h`), sixteen signed levels scaled by the
 /// block's `d`. The levels start at byte 2 of a 34-byte block, so they are read as
 /// `packed_char4` (alignment 1), never as `char4`.
