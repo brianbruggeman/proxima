@@ -634,8 +634,8 @@ mod tests {
     // worker would still hold the *number* `original_read` after the parent
     // closes it, and a subsequent open() reusing that number would hand the
     // worker's next syscall someone else's file. This drives that exact
-    // sequence with channels (never a sleep) so it is deterministic under
-    // nextest's process-per-test isolation.
+    // sequence with channels (never a sleep), pinning the recycled number with
+    // dup2 so it is deterministic however many sibling threads hold fds.
     #[test]
     fn duped_fd_outlives_original_and_ignores_recycled_number() {
         let mut original = [0_i32; 2];
@@ -672,15 +672,17 @@ mod tests {
 
         // mirrors `*guard = None` dropping RpcChild's OwnedFd on the timeout
         // path, while the worker above is still holding its own duped copy.
-        let closed = unsafe { libc::close(original_read) };
-        assert_eq!(closed, 0, "close: {}", io::Error::last_os_error());
-
+        // dup2 swaps the number in one syscall: it is never free, so a sibling
+        // test thread cannot claim it the way it can after a close-then-pipe.
         let mut recycled = [0_i32; 2];
         let recycled_result = unsafe { libc::pipe(recycled.as_mut_ptr()) };
         assert_eq!(recycled_result, 0, "pipe: {}", io::Error::last_os_error());
+        let replaced = unsafe { libc::dup2(recycled[0], original_read) };
         assert_eq!(
-            recycled[0], original_read,
-            "test assumption violated: kernel did not recycle the freed fd number"
+            replaced,
+            original_read,
+            "dup2: {}",
+            io::Error::last_os_error()
         );
         let sentinel = b"wrong pipe";
         write_all_raw(recycled[1], sentinel).expect("write sentinel into recycled fd");
@@ -700,6 +702,7 @@ mod tests {
         );
 
         unsafe {
+            libc::close(original_read);
             libc::close(original_write);
             libc::close(recycled[0]);
             libc::close(recycled[1]);
