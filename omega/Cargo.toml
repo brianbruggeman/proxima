@@ -526,6 +526,7 @@ onnx-door = [
     "std",
     "cpu",
     "dep:proxima-onnx",
+    "dep:sha2",
     "dep:bon",
     "dep:proxima-telemetry",
     "proxima-telemetry/std",
