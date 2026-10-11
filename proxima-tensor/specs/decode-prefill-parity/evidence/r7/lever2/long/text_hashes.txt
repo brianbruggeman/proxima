@@ -1,0 +1,9 @@
+case=gemma4_e2b arm=base runs=18 distinct_text_hashes=1 hashes={"8fec363180a250e0"}
+case=gemma4_e2b arm=control runs=18 distinct_text_hashes=1 hashes={"8fec363180a250e0"}
+case=gemma4_e2b arm=tip runs=18 distinct_text_hashes=1 hashes={"8fec363180a250e0"}
+case=gemma4_e2b arms=3 text_hash_equal_across_arms_and_runs=true
+case=granite_moe arm=base runs=18 distinct_text_hashes=1 hashes={"c4625c1fb93f28b7"}
+case=granite_moe arm=control runs=18 distinct_text_hashes=1 hashes={"c4625c1fb93f28b7"}
+case=granite_moe arm=tip runs=18 distinct_text_hashes=1 hashes={"c4625c1fb93f28b7"}
+case=granite_moe arms=3 text_hash_equal_across_arms_and_runs=true
+all_cases_equal=true

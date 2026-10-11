@@ -1,0 +1,33 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.38s
+────────────
+ Nextest run ID afcbab5a-8f14-4da9-8e51-25d26fa3d165 with nextest profile: default
+    Starting 1 test across 1 binary (64 tests skipped)
+        SLOW [> 60.000s] (───) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+        SLOW [>120.000s] (───) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+        FAIL [ 120.914s] (1/1) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+  stdout ───
+
+    running 1 test
+    test llama_parity_lfm2 has been running for over 60 seconds
+    test llama_parity_lfm2 ... FAILED
+
+    failures:
+
+    failures:
+        llama_parity_lfm2
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 64 filtered out; finished in 120.90s
+
+  stderr ───
+
+    thread 'llama_parity_lfm2' (94747929) panicked at proxima-model-interop/tests/arch_data_baseline.rs:1078:5:
+    3 divergences from llama.cpp across 3 prompts:
+    MODEL lfm2 prompt "<|im_start|>user\nWhat is 2 plus 2? Answer with only the number.<|im_end|>\n<|im_start|>assistant\n": first divergent index 0; llama [124901, 207, 597, 4695, 20589, 34, 496, 2992, 355, 229, 26, 2228, 229, 26, 39, 41774, 415, 1049, 278, 1579, 2426], proxima [18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18]
+    MODEL lfm2 prompt "<|im_start|>user\nWhat is the capital of Japan? Answer with one word.<|im_end|>\n<|im_start|>assistant\n": first divergent index 0; llama [124901, 207, 597, 4695, 20589, 34, 496, 2992, 355, 278, 5205, 302, 3888, 39, 41774, 415, 734, 1858, 2426], proxima [18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18]
+    MODEL lfm2 prompt "<|im_start|>user\nSpell the word cat backwards. Answer with only the result.<|im_end|>\n<|im_start|>assistant\n": first divergent index 0; llama [124901, 207, 597, 4695, 20589, 34, 496, 7924, 464, 278, 1858, 5140, 44043, 22, 41774, 415, 1049, 278, 1224, 2426], proxima [18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [ 120.915s] 1 test run: 0 passed, 1 failed, 64 skipped
+        FAIL [ 120.914s] (1/1) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+error: test run failed

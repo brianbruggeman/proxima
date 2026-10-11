@@ -1,0 +1,13 @@
+case=gemma4_e2b arm=base runs=18 distinct_text_hashes=1 hashes={"16f789b7871d97d1"}
+case=gemma4_e2b arm=control runs=18 distinct_text_hashes=1 hashes={"16f789b7871d97d1"}
+case=gemma4_e2b arm=l2 runs=18 distinct_text_hashes=1 hashes={"16f789b7871d97d1"}
+case=gemma4_e2b arm=l2control runs=18 distinct_text_hashes=1 hashes={"16f789b7871d97d1"}
+case=gemma4_e2b arm=tip runs=18 distinct_text_hashes=1 hashes={"16f789b7871d97d1"}
+case=gemma4_e2b arms=5 text_hash_equal_across_arms_and_runs=true
+case=granite_moe arm=base runs=18 distinct_text_hashes=1 hashes={"fd64fab40cc5300b"}
+case=granite_moe arm=control runs=18 distinct_text_hashes=1 hashes={"fd64fab40cc5300b"}
+case=granite_moe arm=l2 runs=18 distinct_text_hashes=1 hashes={"fd64fab40cc5300b"}
+case=granite_moe arm=l2control runs=18 distinct_text_hashes=1 hashes={"fd64fab40cc5300b"}
+case=granite_moe arm=tip runs=18 distinct_text_hashes=1 hashes={"fd64fab40cc5300b"}
+case=granite_moe arms=5 text_hash_equal_across_arms_and_runs=true
+all_cases_equal=true

@@ -1,0 +1,14 @@
+Sun Oct 11 03:12:32 CDT 2026
+ 3:12  up 10 days, 13:16, 3 users, load averages: 17.39 13.99 11.11
+CPU usage: 75.98% user, 22.96% sys, 1.4% idle 
+CPU usage: 73.30% user, 20.91% sys, 5.77% idle 
+ %CPU COMM
+591.4 /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/cargo_target_mlx/debug/deps/tier_real_state-cc9e0ec849f4a6e6
+ 45.9 /usr/libexec/syspolicyd
+ 38.0 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+ 33.1 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+ 22.0 /usr/libexec/sysmond
+"Device Utilization %"=89
+"Device Utilization %"=0
+"Device Utilization %"=0
+       1

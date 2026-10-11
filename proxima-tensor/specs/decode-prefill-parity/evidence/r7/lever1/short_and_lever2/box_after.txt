@@ -1,0 +1,12 @@
+Sun Oct 11 03:54:59 CDT 2026
+ 3:54  up 10 days, 13:59, 3 users, load averages: 20.50 20.24 20.41
+CPU usage: 50.14% user, 18.41% sys, 31.44% idle 
+CPU usage: 73.64% user, 12.2% sys, 14.32% idle 
+ %CPU COMM
+464.6 /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/cargo_target_mlx/debug/deps/tier_real_state-cc9e0ec849f4a6e6
+ 53.0 /Users/brianbruggeman/.local/bin/user-daemon
+ 51.7 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+ 46.3 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+ 42.9 /usr/libexec/syspolicyd
+ 38.6 /Applications/iTerm.app/Contents/MacOS/iTerm2
+ 26.3 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectService.xpc/Contents/MacOS/XprotectService

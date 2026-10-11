@@ -1,0 +1,36 @@
+2026-10-11T08:55:03Z LAUNCH decode_arms proxima arm=granite_moe.base process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l1
+2026-10-11T08:55:09Z EXIT decode_arms proxima arm=granite_moe.base process=0 status=exit status: 0
+2026-10-11T08:55:09Z LAUNCH decode_arms proxima arm=granite_moe.tip process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l2
+2026-10-11T08:55:15Z EXIT decode_arms proxima arm=granite_moe.tip process=0 status=exit status: 0
+2026-10-11T08:55:15Z LAUNCH decode_arms proxima arm=granite_moe.control process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l2
+2026-10-11T08:55:22Z EXIT decode_arms proxima arm=granite_moe.control process=0 status=exit status: 0
+2026-10-11T08:55:22Z LAUNCH decode_arms proxima arm=gemma4_e2b.base process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l1
+2026-10-11T08:55:36Z EXIT decode_arms proxima arm=gemma4_e2b.base process=0 status=exit status: 0
+2026-10-11T08:55:36Z LAUNCH decode_arms proxima arm=gemma4_e2b.tip process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l2
+2026-10-11T08:55:51Z EXIT decode_arms proxima arm=gemma4_e2b.tip process=0 status=exit status: 0
+2026-10-11T08:55:51Z LAUNCH decode_arms proxima arm=gemma4_e2b.control process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l2
+2026-10-11T08:56:07Z EXIT decode_arms proxima arm=gemma4_e2b.control process=0 status=exit status: 0
+2026-10-11T08:56:07Z LAUNCH decode_arms proxima arm=granite_moe.tip process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l2
+2026-10-11T08:56:14Z EXIT decode_arms proxima arm=granite_moe.tip process=1 status=exit status: 0
+2026-10-11T08:56:14Z LAUNCH decode_arms proxima arm=granite_moe.control process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l2
+2026-10-11T08:56:22Z EXIT decode_arms proxima arm=granite_moe.control process=1 status=exit status: 0
+2026-10-11T08:56:22Z LAUNCH decode_arms proxima arm=granite_moe.base process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l1
+2026-10-11T08:56:31Z EXIT decode_arms proxima arm=granite_moe.base process=1 status=exit status: 0
+2026-10-11T08:56:31Z LAUNCH decode_arms proxima arm=gemma4_e2b.tip process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l2
+2026-10-11T08:56:46Z EXIT decode_arms proxima arm=gemma4_e2b.tip process=1 status=exit status: 0
+2026-10-11T08:56:46Z LAUNCH decode_arms proxima arm=gemma4_e2b.control process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l2
+2026-10-11T08:57:01Z EXIT decode_arms proxima arm=gemma4_e2b.control process=1 status=exit status: 0
+2026-10-11T08:57:01Z LAUNCH decode_arms proxima arm=gemma4_e2b.base process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l1
+2026-10-11T08:57:16Z EXIT decode_arms proxima arm=gemma4_e2b.base process=1 status=exit status: 0
+2026-10-11T08:57:16Z LAUNCH decode_arms proxima arm=granite_moe.control process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l2
+2026-10-11T08:57:23Z EXIT decode_arms proxima arm=granite_moe.control process=2 status=exit status: 0
+2026-10-11T08:57:23Z LAUNCH decode_arms proxima arm=granite_moe.base process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l1
+2026-10-11T08:57:29Z EXIT decode_arms proxima arm=granite_moe.base process=2 status=exit status: 0
+2026-10-11T08:57:29Z LAUNCH decode_arms proxima arm=granite_moe.tip process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l2
+2026-10-11T08:57:37Z EXIT decode_arms proxima arm=granite_moe.tip process=2 status=exit status: 0
+2026-10-11T08:57:37Z LAUNCH decode_arms proxima arm=gemma4_e2b.control process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l2
+2026-10-11T08:57:53Z EXIT decode_arms proxima arm=gemma4_e2b.control process=2 status=exit status: 0
+2026-10-11T08:57:53Z LAUNCH decode_arms proxima arm=gemma4_e2b.base process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l1
+2026-10-11T08:58:08Z EXIT decode_arms proxima arm=gemma4_e2b.base process=2 status=exit status: 0
+2026-10-11T08:58:08Z LAUNCH decode_arms proxima arm=gemma4_e2b.tip process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r7/bin/decode_gbps_baseline_l2
+2026-10-11T08:58:22Z EXIT decode_arms proxima arm=gemma4_e2b.tip process=2 status=exit status: 0

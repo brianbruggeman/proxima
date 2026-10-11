@@ -1,0 +1,21 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+────────────
+ Nextest run ID 1df20e75-4d46-4ec4-bc69-364bfc5fcc84 with nextest profile: default
+    Starting 12 tests across 1 binary (53 tests skipped)
+        PASS [  10.318s] ( 1/12) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_gemma4_e2b
+        PASS [  10.595s] ( 2/12) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_openchat
+        PASS [  82.366s] ( 3/12) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_openchat
+        PASS [  16.328s] ( 4/12) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen2
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen3
+        PASS [  71.282s] ( 5/12) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen3
+        PASS [  26.804s] ( 6/12) proxima-model-interop::arch_data_baseline llama_parity_gemma4_26b
+        PASS [   9.720s] ( 7/12) proxima-model-interop::arch_data_baseline llama_parity_gemma4_e2b
+        PASS [   5.062s] ( 8/12) proxima-model-interop::arch_data_baseline llama_parity_granite_moe
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+        PASS [ 111.859s] ( 9/12) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+        PASS [  22.361s] (10/12) proxima-model-interop::arch_data_baseline llama_parity_openchat
+        PASS [   6.404s] (11/12) proxima-model-interop::arch_data_baseline llama_parity_qwen2
+        PASS [  21.225s] (12/12) proxima-model-interop::arch_data_baseline llama_parity_qwen3
+────────────
+     Summary [ 394.327s] 12 tests run: 12 passed (3 slow), 53 skipped

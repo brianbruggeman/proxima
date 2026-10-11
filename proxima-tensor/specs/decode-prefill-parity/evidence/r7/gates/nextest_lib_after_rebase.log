@@ -1,0 +1,166 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
+────────────
+ Nextest run ID 0d541191-d8e7-4609-8bbd-06ef8f48c2a3 with nextest profile: default
+    Starting 160 tests across 1 binary (647 tests skipped)
+        PASS [   0.011s] (  1/160) proxima-model-interop generate::device_kv::tests::a_cache_that_misses_positions_is_not_adopted
+        PASS [   0.245s] (  2/160) proxima-model-interop generate::device_kv::tests::a_half_width_cache_round_trips_binary16_exact_rows_in_half_the_bytes
+        PASS [   0.256s] (  3/160) proxima-model-interop generate::device_kv::tests::a_full_layer_round_trips_through_the_device_unchanged
+        PASS [   0.279s] (  4/160) proxima-model-interop generate::device_kv::tests::a_half_width_step_reads_the_cache_and_writes_its_rows_to_staging
+        PASS [   0.279s] (  5/160) proxima-model-interop generate::device_kv::tests::a_prefill_written_into_an_empty_adoption_flushes_back_as_host_rows
+        PASS [   0.011s] (  6/160) proxima-model-interop generate::device_kv::tests::a_quantized_device_cache_is_refused_at_adoption
+        PASS [   0.248s] (  7/160) proxima-model-interop generate::device_kv::tests::a_sliding_layer_holds_a_whole_prefill_longer_than_its_window_and_keeps_its_ring
+        PASS [   0.259s] (  8/160) proxima-model-interop generate::device_kv::tests::a_ring_round_trips_through_the_device_with_its_rewind_slack_rows
+        PASS [   0.264s] (  9/160) proxima-model-interop generate::device_kv::tests::adopt_takes_every_buffer_from_the_given_source
+        PASS [   0.265s] ( 10/160) proxima-model-interop generate::device_kv::tests::a_sliding_layer_keeps_its_whole_ring_across_every_compaction
+        PASS [   0.262s] ( 11/160) proxima-model-interop generate::device_kv::tests::an_f32_step_places_its_rows_straight_in_the_cache_and_commits_nothing
+        PASS [   0.262s] ( 12/160) proxima-model-interop generate::device_kv::tests::buffers_one_generation_gives_back_serve_the_next_and_are_zeroed_past_its_rows
+        PASS [   0.011s] ( 13/160) proxima-model-interop generate::device_kv::tests::card_05_bf16_device_declines_unsupported_codec
+        PASS [   0.214s] ( 14/160) proxima-model-interop generate::device_kv::tests::card_08_bf8_device_adopts_appends_and_flushes_rows
+        PASS [   0.225s] ( 15/160) proxima-model-interop generate::device_kv::tests::card_05_bf16_device_adopts_appends_and_flushes_rows
+        PASS [   0.011s] ( 16/160) proxima-model-interop generate::device_kv::tests::card_08_bf8_device_declines_gguf_quantized_cache_type
+        PASS [   0.009s] ( 17/160) proxima-model-interop generate::device_kv::tests::leaf_nodes_resolve_by_declared_name_in_one_pass
+        PASS [   0.252s] ( 18/160) proxima-model-interop generate::device_kv::tests::seeding_zeroes_every_row_past_the_kept_ones_whatever_the_buffer_held
+        PASS [   0.273s] ( 19/160) proxima-model-interop generate::device_kv::tests::committing_a_step_rounds_the_staged_f32_rows_into_the_half_cache_at_the_output_row
+        PASS [   0.011s] ( 20/160) proxima-model-interop generate::prompt_cache::tests::a_checkpoint_exactly_at_the_prefix_is_used_whole
+        PASS [   0.011s] ( 21/160) proxima-model-interop generate::prompt_cache::tests::a_lift_that_finds_nothing_leaves_the_path_a_rewind
+        PASS [   0.010s] ( 22/160) proxima-model-interop generate::prompt_cache::tests::a_lifted_run_turns_the_request_into_a_shift_that_counts_the_moved_tokens_as_reused
+        PASS [   0.010s] ( 23/160) proxima-model-interop generate::prompt_cache::tests::a_prefix_before_every_checkpoint_is_a_miss_that_keeps_the_entry
+        PASS [   0.010s] ( 24/160) proxima-model-interop generate::prompt_cache::tests::a_prompt_sharing_no_first_token_reports_no_common_prefix
+        PASS [   0.010s] ( 25/160) proxima-model-interop generate::prompt_cache::tests::a_prewarm_lookup_leaves_the_last_requests_report_alone
+        PASS [   0.009s] ( 26/160) proxima-model-interop generate::prompt_cache::tests::a_recurrent_layer_blocks_any_rewind_but_not_an_extension
+        PASS [   0.009s] ( 27/160) proxima-model-interop generate::prompt_cache::tests::a_refused_rewind_keeps_the_entry_cached
+        PASS [   0.011s] ( 28/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_derived_input_misses::ring_write_offset
+        PASS [   0.011s] ( 29/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_derived_input_misses::cpu_versus_metal_route
+        PASS [   0.011s] ( 30/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_derived_input_misses::rope_yarn_scaling
+        PASS [   0.011s] ( 31/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_derived_input_misses::speculative_ring_slack
+        PASS [   0.011s] ( 32/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_row_affecting_config_field_misses::exact_activations
+        PASS [   0.011s] ( 33/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_row_affecting_config_field_misses::cached_attention_fusion
+        PASS [   0.011s] ( 34/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_row_affecting_config_field_misses::gdn_prefill_backend
+        PASS [   0.011s] ( 35/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_row_affecting_config_field_misses::gated_delta_net_fusion
+        PASS [   0.010s] ( 36/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_row_affecting_config_field_misses::moe_layer_window
+        PASS [   0.011s] ( 37/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_row_affecting_config_field_misses::moe_monolithic_all_low
+        PASS [   0.011s] ( 38/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_row_affecting_config_field_misses::moe_monolithic_high_mmap
+        PASS [   0.010s] ( 39/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_row_affecting_config_field_misses::moe_pre_gather
+        PASS [   0.011s] ( 40/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_row_affecting_config_field_misses::moe_topk_fusion
+        PASS [   0.011s] ( 41/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_row_affecting_config_field_misses::numeric_policy_bit_exact
+        PASS [   0.011s] ( 42/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_row_affecting_config_field_misses::qwen35moe_residency_budget
+        PASS [   0.011s] ( 43/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_row_affecting_config_field_misses::numeric_policy_fast
+        PASS [   0.011s] ( 44/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_in_a_row_affecting_config_field_misses::rope_linear_scaling
+        PASS [   0.011s] ( 45/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_only_in_a_row_independent_field_shares_the_entry::command_buffer_chunks
+        PASS [   0.011s] ( 46/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_only_in_a_row_independent_field_shares_the_entry::context_length_resolution
+        PASS [   0.011s] ( 47/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_only_in_a_row_independent_field_shares_the_entry::kv_bucket_tokens
+        PASS [   0.010s] ( 48/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_only_in_a_row_independent_field_shares_the_entry::prompt_cache_policy
+        PASS [   0.011s] ( 49/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_only_in_a_row_independent_field_shares_the_entry::resident_kv_bytes
+        PASS [   0.011s] ( 50/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_only_in_a_row_independent_field_shares_the_entry::sampling_temperature_and_seed
+        PASS [   0.011s] ( 51/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_only_in_a_row_independent_field_shares_the_entry::resident_prefill_plan_bytes
+        PASS [   0.010s] ( 52/160) proxima-model-interop generate::prompt_cache::tests::a_request_extending_prewarmed_rows_reports_the_rows_the_prewarm_paid_for
+        PASS [   0.011s] ( 53/160) proxima-model-interop generate::prompt_cache::tests::a_request_differing_only_in_a_row_independent_field_shares_the_entry::ubatch_and_batch_widths
+        PASS [   0.009s] ( 54/160) proxima-model-interop generate::prompt_cache::tests::a_request_that_stops_at_the_shared_answer_has_no_follow_up_hit
+        PASS [   0.010s] ( 55/160) proxima-model-interop generate::prompt_cache::tests::a_request_reusing_a_branch_reports_the_rows_it_took_past_the_answer
+        PASS [   0.010s] ( 56/160) proxima-model-interop generate::prompt_cache::tests::a_request_under_another_metal_math_mode_misses
+        PASS [   0.010s] ( 57/160) proxima-model-interop generate::prompt_cache::tests::a_rewind_before_the_prewarmed_rows_reports_no_hit
+        PASS [   0.010s] ( 58/160) proxima-model-interop generate::prompt_cache::tests::a_rewind_into_prewarmed_rows_counts_only_the_rows_it_kept
+        PASS [   0.010s] ( 59/160) proxima-model-interop generate::prompt_cache::tests::a_rewind_inside_the_slack_drops_only_the_checkpoints_past_the_target
+        PASS [   0.009s] ( 60/160) proxima-model-interop generate::prompt_cache::tests::a_state_larger_than_the_byte_budget_is_not_stored
+        PASS [   0.010s] ( 61/160) proxima-model-interop generate::prompt_cache::tests::a_rewind_past_the_slack_restores_the_nearest_checkpoint_at_or_before_the_prefix
+        PASS [   0.009s] ( 62/160) proxima-model-interop generate::prompt_cache::tests::an_empty_cache_reports_empty_and_prefills_the_whole_prompt
+        PASS [   0.010s] ( 63/160) proxima-model-interop generate::prompt_cache::tests::a_zero_threshold_reproduces_the_unconditional_longest_prefix_reuse
+        PASS [   0.010s] ( 64/160) proxima-model-interop generate::prompt_cache::tests::an_empty_cache_reports_empty_not_config_mismatch
+        PASS [   0.011s] ( 65/160) proxima-model-interop generate::prompt_cache::tests::an_entry_is_reusable_only_above_the_similarity_threshold::exactly_at_the_threshold_is_refused
+        PASS [   0.010s] ( 66/160) proxima-model-interop generate::prompt_cache::tests::an_entry_is_reusable_only_above_the_similarity_threshold::five_tokens_of_a_long_prompt_is_refused
+        PASS [   0.009s] ( 67/160) proxima-model-interop generate::prompt_cache::tests::an_entry_is_reusable_only_above_the_similarity_threshold::half_the_prompt_under_a_high_threshold_is_refused
+        PASS [   0.011s] ( 68/160) proxima-model-interop generate::prompt_cache::tests::an_entry_is_reusable_only_above_the_similarity_threshold::no_overlap_is_refused_at_any_threshold
+        PASS [   0.011s] ( 69/160) proxima-model-interop generate::prompt_cache::tests::an_entry_is_reusable_only_above_the_similarity_threshold::one_token_past_the_threshold_is_taken
+        PASS [   0.010s] ( 70/160) proxima-model-interop generate::prompt_cache::tests::an_entry_taken_by_one_party_is_not_offered_to_another_until_stored_back
+        PASS [   0.011s] ( 71/160) proxima-model-interop generate::prompt_cache::tests::an_entry_is_reusable_only_above_the_similarity_threshold::zero_threshold_takes_any_overlap
+        PASS [   0.010s] ( 72/160) proxima-model-interop generate::prompt_cache::tests::an_extension_is_reused_whatever_its_share_of_the_prompt
+        PASS [   0.009s] ( 73/160) proxima-model-interop generate::prompt_cache::tests::an_extension_keeps_every_checkpoint
+        PASS [   0.010s] ( 74/160) proxima-model-interop generate::prompt_cache::tests::an_identical_prompt_leaves_one_token_to_prefill
+        PASS [   0.010s] ( 75/160) proxima-model-interop generate::prompt_cache::tests::an_unrelated_prompt_sharing_a_header_misses_and_leaves_the_long_entry_intact
+        PASS [   0.010s] ( 76/160) proxima-model-interop generate::prompt_cache::tests::checkpoint_bytes_count_against_the_entry_and_the_budget
+        PASS [   0.010s] ( 77/160) proxima-model-interop generate::prompt_cache::tests::checkpoints_past_the_cap_evict_the_oldest_but_the_first
+        PASS [   0.010s] ( 78/160) proxima-model-interop generate::prompt_cache::tests::eviction_rules_choose_which_entry_a_full_cache_gives_up
+        PASS [   0.010s] ( 79/160) proxima-model-interop generate::prompt_cache::tests::entries_under_two_configs_coexist_and_each_serves_its_own
+        PASS [   0.010s] ( 80/160) proxima-model-interop generate::prompt_cache::tests::eviction_rules_setter_requires_oldest_last
+        PASS [   0.010s] ( 81/160) proxima-model-interop generate::prompt_cache::tests::eviction_rules_default_reproduces_branch_then_oldest
+        PASS [   0.010s] ( 82/160) proxima-model-interop generate::prompt_cache::tests::extension_of_the_stored_sequence_takes_the_entry_and_prefills_only_the_new_tokens
+        PASS [   0.008s] ( 83/160) proxima-model-interop generate::prompt_cache::tests::prefix_state_byte_len_counts_block_summaries
+        PASS [   0.008s] ( 84/160) proxima-model-interop generate::prompt_cache::tests::prewarmed_ranges_that_touch_join_and_ranges_that_do_not_replace
+        PASS [   0.008s] ( 85/160) proxima-model-interop generate::prompt_cache::tests::rewind_beyond_ring_slack_is_refused_and_leaves_the_state_untouched
+        PASS [   0.009s] ( 86/160) proxima-model-interop generate::prompt_cache::tests::rewind_of_a_ring_that_never_wrapped_always_fits
+        PASS [   0.009s] ( 87/160) proxima-model-interop generate::prompt_cache::tests::rewind_within_ring_slack_truncates_the_full_layer_and_keeps_the_ring
+        PASS [   0.013s] ( 88/160) proxima-model-interop generate::prompt_cache::tests::ring_rewind_check_matches_the_rows_the_ring_actually_holds
+        PASS [   0.009s] ( 89/160) proxima-model-interop generate::prompt_cache::tests::rows_a_restore_replaced_are_never_read_by_a_later_rewind
+        PASS [   0.087s] ( 90/160) proxima-model-interop generate::prompt_cache::tests::ten_thousand_stores_evictions_and_takes_keep_the_index_equal_to_the_scan
+        PASS [   0.768s] ( 91/160) proxima-model-interop generate::prompt_cache::tests::longest_common_prefix_equals_a_naive_scan_over_10000_generated_pairs
+        PASS [   0.009s] ( 92/160) proxima-model-interop generate::prompt_cache::tests::the_bloom_candidates_name_the_prompt_blocks_an_earlier_entry_holds_after_its_prefix_diverged
+        PASS [   0.008s] ( 93/160) proxima-model-interop generate::prompt_cache::tests::the_byte_budget_evicts_older_entries_to_fit_a_newer_one
+        PASS [   0.076s] ( 94/160) proxima-model-interop generate::prompt_cache::tests::the_default_bloom_filter_has_no_false_negatives_and_a_low_false_positive_rate
+        PASS [   0.009s] ( 95/160) proxima-model-interop generate::prompt_cache::tests::the_least_recently_used_entry_is_evicted_past_max_entries
+        PASS [   0.008s] ( 96/160) proxima-model-interop generate::prompt_cache::tests::the_most_similar_eligible_entry_serves_the_request
+        PASS [   0.008s] ( 97/160) proxima-model-interop generate::prompt_cache::tests::the_rows_after_a_restore_are_reported_stale_to_a_rewind_without_checkpoints
+        PASS [   0.009s] ( 98/160) proxima-model-interop generate::prompt_cache::tests::tier_demote_discards_a_cold_entry_when_it_leaves_the_cache
+        PASS [   0.009s] ( 99/160) proxima-model-interop generate::prompt_cache::tests::tier_demote_drops_an_entry_the_tier_refuses
+        PASS [   0.009s] (100/160) proxima-model-interop generate::prompt_cache::tests::tier_demote_evicted_entry_is_kept_cold_and_handed_to_the_tier
+        PASS [   0.008s] (101/160) proxima-model-interop generate::prompt_cache::tests::tier_demote_trims_cold_entries_past_the_tier_byte_budget
+        PASS [   0.008s] (102/160) proxima-model-interop generate::prompt_cache::tests::tier_demote_trims_cold_entries_past_the_tier_limit
+        PASS [   0.009s] (103/160) proxima-model-interop generate::prompt_cache::tests::tier_demote_trims_cold_entries_when_the_hot_limit_shrinks
+        PASS [   0.008s] (104/160) proxima-model-interop generate::prompt_cache::tests::tier_failure_restore_error_leaves_a_hit_alone
+        PASS [   0.008s] (105/160) proxima-model-interop generate::prompt_cache::tests::tier_failure_restore_error_names_the_miss
+        PASS [   0.008s] (106/160) proxima-model-interop generate::prompt_cache::tests::tier_label_leaves_other_outcomes_alone
+        PASS [   0.008s] (107/160) proxima-model-interop generate::prompt_cache::tests::tier_label_names_the_tier_for_a_restored_hit
+        PASS [   0.009s] (108/160) proxima-model-interop generate::prompt_cache::tests::tier_restore_answers_false_when_no_cold_entry_matches
+        PASS [   0.009s] (109/160) proxima-model-interop generate::prompt_cache::tests::tier_restore_cold_entry_is_served_after_reading_outside_the_lock
+        PASS [   0.009s] (110/160) proxima-model-interop generate::prompt_cache::tests::tier_restore_drops_a_cold_entry_whose_tier_read_fails
+        PASS [   0.009s] (111/160) proxima-model-interop generate::prompt_cache::tests::tier_restore_keeps_nothing_when_another_request_restored_the_entry_first
+        PASS [   0.009s] (112/160) proxima-model-interop generate::prompt_cache::tests::tier_restore_prefers_the_longer_prefix_between_cold_and_hot
+        PASS [   0.009s] (113/160) proxima-model-interop generate::prompt_cache::tests::two_alternating_conversations_each_keep_their_own_entry
+        PASS [   0.008s] (114/160) proxima-model-interop generate::prompt_cache::tests::unused_branches_are_evicted_before_entries_a_request_produced
+        PASS [   0.009s] (115/160) proxima-model-interop generate::prompt_cache::tests::without_a_lift_the_same_request_is_a_plain_rewind
+        PASS [   0.009s] (116/160) proxima-model-interop generate::prompt_cache_key::tests::cache_key_ignores_the_assemble_list
+        PASS [   0.008s] (117/160) proxima-model-interop generate::prompt_cache_key::tests::cache_key_separates_read_specs
+        PASS [   0.009s] (118/160) proxima-model-interop generate::resident_plans::tests::a_longer_prompt_evicts_the_resident_prompt_plan_before_it_is_built
+        PASS [   0.009s] (119/160) proxima-model-interop generate::resident_plans::tests::a_narrow_verify_plan_leaves_the_prompt_plan_resident
+        PASS [   0.009s] (120/160) proxima-model-interop generate::resident_plans::tests::a_plan_with_no_recorded_use_is_evicted_before_any_tracked_plan
+        PASS [   1.018s] (121/160) proxima-model-interop generate::prompt_cache::tests::the_block_index_picks_the_entry_and_prefix_the_old_scan_picked_over_10000_cases
+        PASS [   0.220s] (122/160) proxima-model-interop generate::resident_plans::tests::a_request_binds_the_smallest_kept_buffer_that_holds_it
+        PASS [   0.009s] (123/160) proxima-model-interop generate::resident_plans::tests::a_stale_key_in_the_order_is_dropped_and_never_chosen
+        PASS [   0.009s] (124/160) proxima-model-interop generate::resident_plans::tests::a_zero_budget_evicts_everything_which_is_the_behaviour_before_residency
+        PASS [   0.235s] (125/160) proxima-model-interop generate::resident_plans::tests::a_request_larger_than_every_kept_buffer_binds_nothing
+        PASS [   0.009s] (126/160) proxima-model-interop generate::resident_plans::tests::an_empty_resident_set_is_not_stored
+        PASS [   0.202s] (127/160) proxima-model-interop generate::resident_plans::tests::a_zero_budget_keeps_nothing_between_generations
+        PASS [   0.009s] (128/160) proxima-model-interop generate::resident_plans::tests::eviction_keeps_the_plan_in_use_even_when_it_alone_exceeds_the_budget
+        PASS [   0.009s] (129/160) proxima-model-interop generate::resident_plans::tests::eviction_removes_the_least_recently_used_plan_first
+        PASS [   0.008s] (130/160) proxima-model-interop generate::resident_plans::tests::identity_distinguishes_the_two_prefill_programs
+        PASS [   0.009s] (131/160) proxima-model-interop generate::resident_plans::tests::identity_separates_plans_bound_to_an_f32_cache_from_those_bound_to_an_f16_one
+        PASS [   0.008s] (132/160) proxima-model-interop generate::resident_plans::tests::make_room_with_a_zero_budget_clears_the_store
+        PASS [   0.009s] (133/160) proxima-model-interop generate::resident_plans::tests::plans_that_fit_the_budget_are_all_kept
+        PASS [   0.008s] (134/160) proxima-model-interop generate::resident_plans::tests::room_for_a_plan_in_an_empty_store_is_free
+        PASS [   0.008s] (135/160) proxima-model-interop generate::resident_plans::tests::touching_a_key_makes_it_the_most_recent_without_duplicating_it
+        PASS [   0.186s] (136/160) proxima-model-interop generate::resident_plans::tests::buffers_handed_back_past_the_budget_free_the_oldest_first
+        PASS [   6.266s] (137/160) proxima-model-interop generate::resident_plans_real_model_tests::a_prompt_of_another_length_leaves_the_first_prompt_plan_resident
+        PASS [   7.561s] (138/160) proxima-model-interop generate::resident_plans_real_model_tests::a_changed_dispatch_type_does_not_resume_the_resident_plan
+        PASS [   6.133s] (139/160) proxima-model-interop generate::resident_plans_real_model_tests::a_runtime_built_with_new_keeps_every_plan_call_local
+        PASS [   5.723s] (140/160) proxima-model-interop generate::resident_plans_real_model_tests::a_second_generation_on_the_same_model_builds_no_plan
+        PASS [   5.623s] (141/160) proxima-model-interop generate::resident_plans_real_model_tests::a_zero_prefill_budget_rebuilds_the_prompt_plan_and_keeps_only_the_decode_plan
+        PASS [   5.094s] (142/160) proxima-model-interop generate::resident_plans_real_model_tests::dropping_the_model_frees_the_plans_it_left_resident
+        PASS [   0.206s] (143/160) proxima-model-interop generate::tests_all::memory_fit_gate_tests::with_kv_buffer_source_replaces_the_default_source
+        PASS [   0.009s] (144/160) proxima-model-interop prompt_cache_settings::tests::a_zero_byte_budget_from_the_environment_turns_the_cache_off
+        PASS [   0.009s] (145/160) proxima-model-interop prompt_cache_settings::tests::default_settings_lower_to_the_standard_config
+        PASS [   0.010s] (146/160) proxima-model-interop prompt_cache_settings::tests::prompt_cache_builder_matches_toml_and_env_loaders
+        PASS [   0.008s] (147/160) proxima-model-interop prompt_cache_settings::tests::seal_horizon_defaults_to_256_rows
+        PASS [   0.010s] (148/160) proxima-model-interop prompt_cache_settings::tests::serving_scalars_prompt_cache_block_tokens_is_optional
+        PASS [   0.009s] (149/160) proxima-model-interop serving_settings::tests::serving_scalars_admission_level_round_trips
+        PASS [   0.009s] (150/160) proxima-model-interop serving_settings::tests::serving_scalars_dispatch_type_lowers_and_round_trips
+        PASS [   0.009s] (151/160) proxima-model-interop serving_settings::tests::serving_scalars_expert_residency_level_round_trips
+        PASS [   0.012s] (152/160) proxima-model-interop serving_settings::tests::serving_scalars_first_fifteen_lower_and_round_trip
+        PASS [   0.010s] (153/160) proxima-model-interop serving_settings::tests::serving_scalars_phase_level_round_trips
+        PASS [   0.009s] (154/160) proxima-model-interop serving_settings::tests::serving_scalars_runtime_switches_lower_and_round_trip
+        PASS [   0.009s] (155/160) proxima-model-interop serving_settings::tests::serving_scalars_sampling_and_policy_lower_and_round_trip
+        PASS [   0.010s] (156/160) proxima-model-interop serving_settings::tests::serving_scalars_speculative_and_prompt_cache_round_trip
+        PASS [   0.009s] (157/160) proxima-model-interop serving_settings::tests::serving_scalars_weight_precision_and_fallbacks_lower_and_round_trip
+        PASS [   0.009s] (158/160) proxima-model-interop serving_settings::tests::serving_section_cache_type_round_trips_json
+        PASS [   0.009s] (159/160) proxima-model-interop serving_settings::tests::unset_batch_sizes_lower_to_the_serving_config_defaults_from_every_surface
+        PASS [   5.717s] (160/160) proxima-model-interop generate::resident_plans_real_model_tests::weights_stay_bound_across_generations
+────────────
+     Summary [  27.489s] 160 tests run: 160 passed, 647 skipped

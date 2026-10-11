@@ -1,0 +1,45 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+────────────
+ Nextest run ID 27dba7b6-5779-4e78-9f1d-fc32d0a85a9a with nextest profile: default
+    Starting 12 tests across 1 binary (53 tests skipped)
+        PASS [  10.893s] ( 1/12) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_gemma4_e2b
+        PASS [  11.732s] ( 2/12) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_openchat
+        PASS [  83.480s] ( 3/12) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_openchat
+        PASS [  16.897s] ( 4/12) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen2
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen3
+        PASS [  70.678s] ( 5/12) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen3
+        PASS [  30.225s] ( 6/12) proxima-model-interop::arch_data_baseline llama_parity_gemma4_26b
+        PASS [   9.312s] ( 7/12) proxima-model-interop::arch_data_baseline llama_parity_gemma4_e2b
+        PASS [   5.001s] ( 8/12) proxima-model-interop::arch_data_baseline llama_parity_granite_moe
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+        FAIL [ 114.327s] ( 9/12) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+  stdout ───
+
+    running 1 test
+    test llama_parity_lfm2 has been running for over 60 seconds
+    test llama_parity_lfm2 ... FAILED
+
+    failures:
+
+    failures:
+        llama_parity_lfm2
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 64 filtered out; finished in 114.31s
+
+  stderr ───
+
+    thread 'llama_parity_lfm2' (94640948) panicked at proxima-model-interop/tests/arch_data_baseline.rs:1078:5:
+    3 divergences from llama.cpp across 3 prompts:
+    MODEL lfm2 prompt "<|im_start|>user\nWhat is 2 plus 2? Answer with only the number.<|im_end|>\n<|im_start|>assistant\n": first divergent index 0; llama [124901, 207, 597, 4695, 20589, 34, 496, 2992, 355, 229, 26, 2228, 229, 26, 39, 41774, 415, 1049, 278, 1579, 2426], proxima [18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18]
+    MODEL lfm2 prompt "<|im_start|>user\nWhat is the capital of Japan? Answer with one word.<|im_end|>\n<|im_start|>assistant\n": first divergent index 0; llama [124901, 207, 597, 4695, 20589, 34, 496, 2992, 355, 278, 5205, 302, 3888, 39, 41774, 415, 734, 1858, 2426], proxima [18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18]
+    MODEL lfm2 prompt "<|im_start|>user\nSpell the word cat backwards. Answer with only the result.<|im_end|>\n<|im_start|>assistant\n": first divergent index 0; llama [124901, 207, 597, 4695, 20589, 34, 496, 7924, 464, 278, 1858, 5140, 44043, 22, 41774, 415, 1049, 278, 1224, 2426], proxima [18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [  21.682s] (10/12) proxima-model-interop::arch_data_baseline llama_parity_openchat
+        PASS [   6.844s] (11/12) proxima-model-interop::arch_data_baseline llama_parity_qwen2
+        PASS [  21.337s] (12/12) proxima-model-interop::arch_data_baseline llama_parity_qwen3
+────────────
+     Summary [ 402.417s] 12 tests run: 11 passed (2 slow), 1 failed, 53 skipped
+        FAIL [ 114.327s] ( 9/12) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+error: test run failed

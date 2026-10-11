@@ -1,0 +1,12 @@
+Sun Oct 11 03:58:22 CDT 2026
+ 3:58  up 10 days, 14:02, 3 users, load averages: 23.52 22.61 21.42
+CPU usage: 60.22% user, 17.40% sys, 22.37% idle 
+CPU usage: 84.8% user, 9.94% sys, 5.96% idle 
+ %CPU COMM
+459.5 /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/cargo_target_mlx/debug/deps/tier_real_state-cc9e0ec849f4a6e6
+ 95.4 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ 95.1 /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/cargo_target_mlx/debug/deps/proxima_model_interop-d85a6ce902fd50f4
+ 95.1 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ 50.7 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+ 41.5 /usr/libexec/syspolicyd
+ 38.2 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
