@@ -119,6 +119,14 @@ pub struct BootTrapStatistics {
     /// exists to distinguish from the "unexpected arm exception class 0x1"
     /// failure this same trap used to produce before that arm existed.
     pub wfi_wfe_trap_count: u64,
+    /// Count of `hv_vcpu_set_pending_interrupt(IRQ, true)` calls: one per
+    /// `hv_vcpu_run` entry where the ICC model still held a pending interrupt.
+    pub irq_assert_count: u64,
+    /// Count of trapped `WFI`s that actually waited on the vtimer deadline
+    /// (a subset of `wfi_wfe_trap_count`).
+    pub wfi_wait_count: u64,
+    /// Count of guest `ICC_EOIR1_EL1` writes that retired the vtimer's INTID 27.
+    pub timer_eoi_count: u64,
     /// `true` only when this run both asked for EL2 entry (a nonzero
     /// `boot_cpsr` whose low nibble names EL2h/EL2t — only
     /// [`boot_edk2_firmware`] ever does) AND this host's own HVF actually
@@ -303,6 +311,9 @@ pub fn boot_linux_kernel(
             vtimer_activation_count_out: *mut u64,
             wfi_wfe_trap_count_out: *mut u64,
             entered_el2_out: *mut u64,
+            irq_assert_count_out: *mut u64,
+            wfi_wait_count_out: *mut u64,
+            timer_eoi_count_out: *mut u64,
             error_buffer: *mut c_char,
             error_capacity: usize,
         ) -> i32;
@@ -350,6 +361,9 @@ pub fn boot_linux_kernel(
     let mut vtimer_activation_count: u64 = 0;
     let mut wfi_wfe_trap_count: u64 = 0;
     let mut entered_el2: u64 = 0;
+    let mut irq_assert_count: u64 = 0;
+    let mut wfi_wait_count: u64 = 0;
+    let mut timer_eoi_count: u64 = 0;
     let mut error_buffer = [0_i8; ERROR_CAPACITY];
 
     let status = unsafe {
@@ -399,6 +413,9 @@ pub fn boot_linux_kernel(
             &raw mut vtimer_activation_count,
             &raw mut wfi_wfe_trap_count,
             &raw mut entered_el2,
+            &raw mut irq_assert_count,
+            &raw mut wfi_wait_count,
+            &raw mut timer_eoi_count,
             error_buffer.as_mut_ptr(),
             error_buffer.len(),
         )
@@ -421,6 +438,9 @@ pub fn boot_linux_kernel(
         virtio_trap_count,
         vtimer_activation_count,
         wfi_wfe_trap_count,
+        irq_assert_count,
+        wfi_wait_count,
+        timer_eoi_count,
         entered_el2: entered_el2 != 0,
     };
     // the hypervisor loop's own outcome travels as the INNER `Result` (this
@@ -633,6 +653,9 @@ pub fn boot_edk2_firmware(
             vtimer_activation_count_out: *mut u64,
             wfi_wfe_trap_count_out: *mut u64,
             entered_el2_out: *mut u64,
+            irq_assert_count_out: *mut u64,
+            wfi_wait_count_out: *mut u64,
+            timer_eoi_count_out: *mut u64,
             error_buffer: *mut c_char,
             error_capacity: usize,
         ) -> i32;
@@ -671,6 +694,9 @@ pub fn boot_edk2_firmware(
     let mut vtimer_activation_count: u64 = 0;
     let mut wfi_wfe_trap_count: u64 = 0;
     let mut entered_el2: u64 = 0;
+    let mut irq_assert_count: u64 = 0;
+    let mut wfi_wait_count: u64 = 0;
+    let mut timer_eoi_count: u64 = 0;
     let mut error_buffer = [0_i8; ERROR_CAPACITY];
 
     let status = unsafe {
@@ -731,6 +757,9 @@ pub fn boot_edk2_firmware(
             &raw mut vtimer_activation_count,
             &raw mut wfi_wfe_trap_count,
             &raw mut entered_el2,
+            &raw mut irq_assert_count,
+            &raw mut wfi_wait_count,
+            &raw mut timer_eoi_count,
             error_buffer.as_mut_ptr(),
             error_buffer.len(),
         )
@@ -746,6 +775,9 @@ pub fn boot_edk2_firmware(
         virtio_trap_count,
         vtimer_activation_count,
         wfi_wfe_trap_count,
+        irq_assert_count,
+        wfi_wait_count,
+        timer_eoi_count,
         entered_el2: entered_el2 != 0,
     };
     let loop_outcome = if status == 0 {
