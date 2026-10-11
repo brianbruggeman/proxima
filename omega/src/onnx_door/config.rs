@@ -4,6 +4,7 @@ use proxima_tensor::NumericPolicy;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{BackendError, Engine, GpuDriver};
+use crate::sized;
 
 /// Why a [`DoorConfig`] string did not name a compiled-in value.
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +43,12 @@ pub struct DoorConfig {
     #[setting(default = "bit_exact")]
     #[builder(into, overwritable, default = String::from("bit_exact"))]
     pub numeric_policy: String,
+    /// Pin sets the door keeps a plan for before it drops the least recently
+    /// used one; 0 selects `[onnx_door].max_pin_sets` of `omega-runtime.toml`,
+    /// the build-time value, so the number lives in one place.
+    #[setting(default = 0)]
+    #[builder(overwritable, default = 0)]
+    pub max_pin_sets: usize,
 }
 
 impl Default for DoorConfig {
@@ -58,6 +65,7 @@ impl DoorConfig {
             .engine(config.engine.as_str())
             .gpu_driver(config.gpu_driver.as_str())
             .numeric_policy(config.numeric_policy.as_str())
+            .max_pin_sets(config.max_pin_sets)
     }
 
     /// Defaults overlaid by `OMEGA_ONNX_DOOR_*` variables.
@@ -114,6 +122,16 @@ impl DoorConfig {
             other => Err(DoorConfigError::UnknownNumericPolicy {
                 name: other.to_owned(),
             }),
+        }
+    }
+
+    /// The pin-set cap: `max_pin_sets`, or the build-time
+    /// `[onnx_door].max_pin_sets` when it is 0.
+    #[must_use]
+    pub const fn resolve_max_pin_sets(&self) -> usize {
+        match self.max_pin_sets {
+            0 => sized::ONNX_DOOR_MAX_PIN_SETS,
+            count => count,
         }
     }
 }

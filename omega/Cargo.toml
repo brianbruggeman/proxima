@@ -522,7 +522,15 @@ metal-horizontal-merge = ["metal"]
 metal-moe-mul-mat-id = ["metal", "proxima-tensor/metal-moe-mul-mat-id"]
 # the ONNX door (`onnx_door`): one pipe over parse, validate, lower, plan, execute.
 # default-off so a build that never reads ONNX compiles neither the parser nor the builder derive.
-onnx-door = ["std", "cpu", "dep:proxima-onnx", "dep:bon"]
+onnx-door = [
+    "std",
+    "cpu",
+    "dep:proxima-onnx",
+    "dep:bon",
+    "dep:proxima-telemetry",
+    "proxima-telemetry/std",
+    "proxima-telemetry/emit",
+]
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }

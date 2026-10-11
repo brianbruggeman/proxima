@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use proxima_onnx::census::{Census, census};
-use proxima_onnx::lower::{Lowered, lower_graph_pinned};
+use proxima_onnx::lower::Lowered;
 use proxima_onnx::messages::{DimensionValue, GraphProto, ModelProto, TypeValue};
 use proxima_onnx::pipe::parse_complete;
 use proxima_tensor::{Evaluated, NodeId, QuantizedBlock};
@@ -66,7 +66,7 @@ impl<'bytes> DoorStage<'bytes> {
     pub fn advance(self, door: &OnnxDoor, batch: &DoorBatch) -> Result<Self, DoorError> {
         match self {
             Self::Parsed { model } => validate(model, batch),
-            Self::Validated { graph, .. } => lower(&graph, batch),
+            Self::Validated { graph, .. } => lower(&graph, door, batch),
             Self::Lowered { lowered } => plan(lowered, door, batch),
             Self::Planned { lowered, plan } => execute(lowered, plan, batch),
             Self::Executed { lowered, plan, .. } => Ok(Self::Planned { lowered, plan }),
@@ -118,6 +118,7 @@ fn unpinned_dimensions(graph: &GraphProto<'_>, pins: &BTreeMap<String, u64>) -> 
 
 fn lower<'bytes>(
     graph: &GraphProto<'bytes>,
+    door: &OnnxDoor,
     batch: &DoorBatch,
 ) -> Result<DoorStage<'bytes>, DoorError> {
     let pins: BTreeMap<&str, u64> = batch
@@ -125,7 +126,11 @@ fn lower<'bytes>(
         .iter()
         .map(|(name, extent)| (name.as_str(), *extent))
         .collect();
-    let lowered = lower_graph_pinned(graph, &pins).map_err(DoorError::Lower)?;
+    let lowered = door
+        .cache
+        .borrow_mut()
+        .lower(graph, &pins)
+        .map_err(DoorError::Lower)?;
     Ok(DoorStage::Lowered { lowered })
 }
 
@@ -146,6 +151,7 @@ fn plan<'bytes>(
         door.numeric_policy,
     )
     .map_err(DoorError::Plan)?;
+    door.cache.borrow_mut().record_plan();
     Ok(DoorStage::Planned { lowered, plan })
 }
 

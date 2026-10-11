@@ -771,6 +771,14 @@ fn emit_sizing_consts() {
         "pub const SELECTION_TOP_FRACTION_MIN_ROWS: u64 = {selection_top_fraction_min_rows};\n"
     ));
 
+    let onnx_door_max_pin_sets = require_nonzero(
+        "onnx_door.max_pin_sets",
+        resolve_int(&root, "onnx_door", "max_pin_sets"),
+    );
+    out.push_str(&format!(
+        "pub const ONNX_DOOR_MAX_PIN_SETS: usize = {onnx_door_max_pin_sets};\n"
+    ));
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
     let out_path = out_dir.join("omega_sized.rs");
     fs::write(&out_path, out).unwrap_or_else(|err| panic!("write {}: {err}", out_path.display()));

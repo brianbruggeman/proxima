@@ -14,7 +14,8 @@ use std::collections::BTreeMap;
 
 use omega::backend::{BackendError, Engine, GpuDriver};
 use omega::onnx_door::{
-    DoorBatch, DoorConfig, DoorError, DoorOutput, DoorStage, OnnxDoor, StageKind, ValidationError,
+    DoorBatch, DoorConfig, DoorError, DoorOutput, DoorStage, DoorStats, OnnxDoor, StageKind,
+    ValidationError,
 };
 use proxima_onnx::messages::{
     AttributeProto, Dimension, DimensionValue, GraphProto, ModelProto, NodeProto, TensorProto,
@@ -406,17 +407,20 @@ fn onnx_door_contract_config_builder_equals_conflaguration_loader() {
         "OMEGA_ONNX_DOOR_ENGINE",
         "OMEGA_ONNX_DOOR_GPU_DRIVER",
         "OMEGA_ONNX_DOOR_NUMERIC_POLICY",
+        "OMEGA_ONNX_DOOR_MAX_PIN_SETS",
     ];
     let unset: Vec<(&str, Option<&str>)> = names.iter().map(|name| (*name, None)).collect();
     let set = vec![
         (names[0], Some("gpu")),
         (names[1], Some("metal")),
         (names[2], Some("llama_relaxed")),
+        (names[3], Some("2")),
     ];
     let built = DoorConfig::builder()
         .engine("gpu")
         .gpu_driver("metal")
         .numeric_policy("llama_relaxed")
+        .max_pin_sets(2)
         .build();
 
     let defaults = temp_env::with_vars(unset, DoorConfig::from_env).expect("empty env loads");
@@ -437,6 +441,115 @@ fn onnx_door_contract_config_builder_equals_conflaguration_loader() {
         loaded.resolve_numeric_policy().expect("relaxed"),
         NumericPolicy::llama_relaxed()
     );
+    assert_eq!(loaded.resolve_max_pin_sets(), 2);
+    assert_eq!(
+        defaults.resolve_max_pin_sets(),
+        omega::sized::ONNX_DOOR_MAX_PIN_SETS
+    );
     assert_eq!(tweaked.engine, loaded.engine);
     assert_eq!(tweaked.numeric_policy, "fast");
+}
+
+const AFFINE_WEIGHTS: [f32; 12] = [
+    1.0, 0.0, -1.0, 2.0, 0.0, 1.0, 1.0, -1.0, 2.0, -1.0, 0.0, 1.0,
+];
+const AFFINE_BIAS: [f32; 4] = [0.5, -0.5, 0.0, 1.0];
+const AFFINE_ROWS: [[f32; 3]; 2] = [[1.0, 2.0, 3.0], [0.0, 1.0, -1.0]];
+const AFFINE_RELU: [[f32; 4]; 2] = [[7.5, 0.0, 1.0, 4.0], [0.0, 1.5, 1.0, 0.0]];
+
+fn affine_relu_over_symbolic_batch_bytes() -> Vec<u8> {
+    let weight_bytes = float_bytes(&AFFINE_WEIGHTS);
+    let bias_bytes = float_bytes(&AFFINE_BIAS);
+    encode(GraphProto {
+        node: vec![
+            node("Gemm", &["x", "W", "b"], "h"),
+            node("Relu", &["h"], "y"),
+        ],
+        name: "affine_relu",
+        initializer: vec![
+            weights("W", &[3, 4], &weight_bytes),
+            weights("b", &[4], &bias_bytes),
+        ],
+        input: vec![float_input("x", vec![symbolic("batch_size"), fixed(3)])],
+        output: vec![untyped_output("y")],
+        ..GraphProto::default()
+    })
+}
+
+fn affine_batch(rows: usize) -> DoorBatch {
+    let inputs = (0..rows).flat_map(|row| AFFINE_ROWS[row % 2]).collect();
+    DoorBatch {
+        pins: BTreeMap::from([("batch_size".to_owned(), rows as u64)]),
+        inputs: vec![("x".to_owned(), inputs)],
+    }
+}
+
+fn affine_expected(rows: usize) -> Vec<f32> {
+    (0..rows).flat_map(|row| AFFINE_RELU[row % 2]).collect()
+}
+
+async fn run_affine(door: &OnnxDoor, rows: usize) -> DoorStats {
+    let output = door
+        .call(affine_batch(rows))
+        .await
+        .expect("the affine graph runs at this batch size");
+    let (values, shape) = output.get("y").expect("y is a declared graph output");
+    assert_eq!(shape, &[rows as u64, 4]);
+    assert_eq!(values, affine_expected(rows).as_slice());
+    door.stats()
+}
+
+#[proxima::test]
+async fn onnx_door_plan_cache_second_call_same_pins_runs_zero_lowerings_and_zero_plans() {
+    let door = cpu_door(affine_relu_over_symbolic_batch_bytes());
+
+    let first = run_affine(&door, 2).await;
+    let second = run_affine(&door, 2).await;
+
+    assert_eq!((first.lowerings, first.plans, first.parses), (1, 1, 1));
+    assert_eq!(second, first);
+}
+
+#[proxima::test]
+async fn onnx_door_plan_cache_new_pins_run_exactly_one_lowering_and_one_plan() {
+    let door = cpu_door(affine_relu_over_symbolic_batch_bytes());
+
+    let first = run_affine(&door, 2).await;
+    let second = run_affine(&door, 3).await;
+
+    assert_eq!(second.lowerings - first.lowerings, 1);
+    assert_eq!(second.plans - first.plans, 1);
+    assert_eq!(second.parses - first.parses, 1);
+}
+
+#[proxima::test]
+async fn onnx_door_plan_cache_initializers_decode_once_across_three_pin_sets() {
+    let door = cpu_door(affine_relu_over_symbolic_batch_bytes());
+
+    run_affine(&door, 1).await;
+    run_affine(&door, 2).await;
+    let stats = run_affine(&door, 3).await;
+
+    let weight_bytes = (AFFINE_WEIGHTS.len() + AFFINE_BIAS.len()) * size_of::<f32>();
+    assert_eq!(stats.lowerings, 3);
+    assert_eq!(stats.decodes, 1);
+    assert_eq!(stats.decoded_bytes, weight_bytes as u64);
+}
+
+#[proxima::test]
+async fn onnx_door_plan_cache_exceeding_max_pin_sets_evicts_the_oldest_and_counts_one_eviction() {
+    let config = DoorConfig::builder().max_pin_sets(2).build();
+    let door = OnnxDoor::from_bytes(affine_relu_over_symbolic_batch_bytes(), &config)
+        .expect("the names resolve");
+
+    run_affine(&door, 1).await;
+    run_affine(&door, 2).await;
+    let third = run_affine(&door, 3).await;
+    let reused = run_affine(&door, 2).await;
+    let recreated = run_affine(&door, 1).await;
+
+    assert_eq!(third.evictions, 1);
+    assert_eq!(reused.lowerings, third.lowerings);
+    assert_eq!(recreated.lowerings, third.lowerings + 1);
+    assert_eq!(recreated.evictions, 2);
 }

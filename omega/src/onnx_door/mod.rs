@@ -14,13 +14,17 @@
 //!
 //! Calling `parse_complete`, `lower_graph_pinned`, `plan_named` and
 //! `execute_plan_named` by hand works, and `examples/wire_to_weights.rs` does.
-//! The door adds three things that hand-wrapping does not give:
+//! The door adds four things that hand-wrapping does not give:
 //!
 //! - one error type, [`DoorError`], with a variant per stage, where the
 //!   hand-wrapped caller holds a different error type per call;
 //! - validation before lowering: every unlowerable op type and every unpinned
 //!   symbolic dimension is reported in one [`ValidationError`], where
 //!   `lower_graph_pinned` stops at the first node it cannot lower;
+//! - plan reuse: the lowering and the plan of each pin set are kept, up to
+//!   `max_pin_sets` of them, and the weights are decoded once for all pin sets,
+//!   where a hand-wrapped caller re-lowers and re-plans on every call and
+//!   owns its own cache; [`OnnxDoor::stats`] counts the work done;
 //! - composition: `OnnxDoor` is a [`Pipe`], so `tokenizer.and_then(door)`
 //!   ([`proxima_primitives::pipe::PipeExt::and_then`]) chains it behind any pipe whose output is a
 //!   [`DoorBatch`].
@@ -32,20 +36,26 @@
 //!
 //! std, behind the `onnx-door` feature: it plans through [`crate::backend`]
 //! and configures through `conflaguration`. The future is not `Send` because
-//! [`Plan`](crate::backend::Plan) is `!Sync`, which is why this is a
+//! [`Plan`] is `!Sync`, which is why this is a
 //! [`Pipe`] and not a `SendPipe`.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::time::Instant;
 
+use proxima_onnx::lower::Lowered;
 use proxima_primitives::pipe::Pipe;
 use proxima_tensor::{Evaluated, NodeId, NumericPolicy};
 
-use crate::backend::{Engine, GpuDriver};
+use crate::backend::{Engine, GpuDriver, Plan};
 
+mod cache;
 mod config;
 mod error;
 mod stage;
 
+pub use cache::DoorStats;
+use cache::PlanCache;
 pub use config::{DoorConfig, DoorConfigBuilder, DoorConfigError, door_config_builder};
 pub use error::{DoorError, StageKind, ValidationError};
 pub use stage::DoorStage;
@@ -91,6 +101,7 @@ pub struct OnnxDoor {
     engine: Engine,
     gpu_driver: Option<GpuDriver>,
     numeric_policy: NumericPolicy,
+    cache: RefCell<PlanCache>,
 }
 
 impl OnnxDoor {
@@ -108,24 +119,53 @@ impl OnnxDoor {
             engine: config.resolve_engine()?,
             gpu_driver: config.resolve_gpu_driver()?,
             numeric_policy: config.resolve_numeric_policy()?,
+            cache: RefCell::new(PlanCache::new(config.resolve_max_pin_sets())),
         })
     }
 
+    /// What the door has parsed, decoded, lowered, planned and evicted so far.
+    #[must_use]
+    pub fn stats(&self) -> DoorStats {
+        self.cache.borrow().stats()
+    }
+
     fn run(&self, batch: &DoorBatch) -> Result<DoorOutput, DoorError> {
-        let mut stage = DoorStage::start(&self.bytes)?;
+        let mut stage = self.first_stage(batch)?;
         loop {
             stage = match stage {
                 DoorStage::Executed {
-                    lowered, evaluated, ..
-                } => {
-                    return Ok(DoorOutput {
-                        evaluated,
-                        outputs: lowered.graph_outputs,
-                    });
-                }
+                    lowered,
+                    plan,
+                    evaluated,
+                } => return Ok(self.retain(batch, lowered, plan, evaluated)),
                 other => other.advance(self, batch)?,
             };
         }
+    }
+
+    fn first_stage(&self, batch: &DoorBatch) -> Result<DoorStage<'_>, DoorError> {
+        let cached = self.cache.borrow_mut().take(&batch.pins);
+        if let Some((lowered, plan)) = cached {
+            return Ok(DoorStage::Planned { lowered, plan });
+        }
+        let started = Instant::now();
+        let parsed = DoorStage::start(&self.bytes)?;
+        self.cache.borrow_mut().record_parse(started.elapsed());
+        Ok(parsed)
+    }
+
+    fn retain(
+        &self,
+        batch: &DoorBatch,
+        lowered: Lowered,
+        plan: Plan,
+        evaluated: Evaluated,
+    ) -> DoorOutput {
+        let outputs = lowered.graph_outputs.clone();
+        self.cache
+            .borrow_mut()
+            .store(batch.pins.clone(), lowered, plan);
+        DoorOutput { evaluated, outputs }
     }
 }
 

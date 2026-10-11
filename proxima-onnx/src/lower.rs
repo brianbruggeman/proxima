@@ -246,6 +246,31 @@ pub fn lower_graph_pinned(
     graph: &GraphProto<'_>,
     pins: &BTreeMap<&str, u64>,
 ) -> Result<Lowered, LowerError> {
+    let decoded = decode_initializers(graph)?;
+    lower_graph_pinned_decoded(graph, pins, &decoded)
+}
+
+/// Every initializer of `graph` decoded to f32, by name: the per-weight work
+/// [`lower_graph_pinned`] repeats on each call. A caller lowering one graph at
+/// several pinned shapes decodes once here and passes the result to
+/// [`lower_graph_pinned_decoded`] for each shape.
+pub fn decode_initializers(
+    graph: &GraphProto<'_>,
+) -> Result<BTreeMap<String, Vec<f32>>, LowerError> {
+    graph
+        .initializer
+        .iter()
+        .map(|tensor| Ok((tensor.name.to_string(), decode_numeric_tensor(tensor)?)))
+        .collect()
+}
+
+/// [`lower_graph_pinned`] over initializers [`decode_initializers`] already
+/// decoded from the same `graph`.
+pub fn lower_graph_pinned_decoded(
+    graph: &GraphProto<'_>,
+    pins: &BTreeMap<&str, u64>,
+    decoded: &BTreeMap<String, Vec<f32>>,
+) -> Result<Lowered, LowerError> {
     let mut program: Vec<Op> = Vec::new();
     let mut values: BTreeMap<String, Value> = BTreeMap::new();
 
@@ -284,7 +309,12 @@ pub fn lower_graph_pinned(
     };
     for tensor in &graph.initializer {
         let shape = tensor_shape(tensor);
-        let data = decode_numeric_tensor(tensor)?;
+        let data = decoded.get(tensor.name).cloned().ok_or_else(|| {
+            LowerError::UndecodableInitializer {
+                name: tensor.name.to_string(),
+                data_type: tensor.data_type,
+            }
+        })?;
         fold.initializer_data
             .insert(tensor.name.to_string(), data.clone());
         if shape_only_names.contains(tensor.name) {
