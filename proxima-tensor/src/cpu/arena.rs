@@ -1390,7 +1390,7 @@ pub(super) fn checkout_arena(
     symbols: &[u64],
     outputs: &[NodeId],
     named: &[(&str, &[f32])],
-) -> Result<StaticArena, TensorError> {
+) -> Result<CachedArena, TensorError> {
     {
         let mut cache = lock_arena_cache();
         #[cfg(feature = "instrument")]
@@ -1404,7 +1404,7 @@ pub(super) fn checkout_arena(
         ));
         if let Some(index) = found {
             ARENA_CACHE_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
-            return Ok(cache.remove(index).arena);
+            return Ok(cache.remove(index));
         }
     }
     ARENA_CACHE_BUILDS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
@@ -1418,32 +1418,31 @@ pub(super) fn checkout_arena(
         })
         .copied()
         .collect();
-    build_static_arena_with_constants(program, symbols, outputs, &constant_inputs)
-}
-
-/// Returns `arena` to [`ARENA_CACHE`] for the next [`checkout_arena`] call
-/// against the same `(program, symbols, outputs)` key. Never called after a
-/// failed bind/run: an arena `run_resolved_nodes_in_arena` errored out of
-/// partway through may hold a `take()`n slot that was never restored, and
-/// re-offering that arena for reuse would turn one call's failure into every
-/// later call's — dropping it and rebuilding fresh on the next miss is the
-/// safe, self-healing choice (see [`checkout_arena`]'s own callers).
-pub(super) fn checkin_arena(
-    program: &[Op],
-    symbols: &[u64],
-    outputs: &[NodeId],
-    arena: StaticArena,
-) {
-    let mut cache = lock_arena_cache();
-    if cache.len() >= ARENA_CACHE_CAPACITY {
-        cache.remove(0);
-    }
-    cache.push(CachedArena {
+    let arena = build_static_arena_with_constants(program, symbols, outputs, &constant_inputs)?;
+    Ok(CachedArena {
         program: program.to_vec(),
         symbols: symbols.to_vec(),
         outputs: outputs.to_vec(),
         arena,
-    });
+    })
+}
+
+/// Returns a checked-out [`CachedArena`] to [`ARENA_CACHE`] for the next
+/// [`checkout_arena`] call against the same `(program, symbols, outputs)`
+/// key. The entry carries its own key from checkout to here, so a hit moves
+/// the cloned `program`/`symbols`/`outputs` straight back instead of
+/// re-cloning them every call. Never called after a failed bind/run: an
+/// arena `run_resolved_nodes_in_arena` errored out of partway through may
+/// hold a `take()`n slot that was never restored, and re-offering that arena
+/// for reuse would turn one call's failure into every later call's —
+/// dropping it and rebuilding fresh on the next miss is the safe,
+/// self-healing choice (see [`checkout_arena`]'s own callers).
+pub(super) fn checkin_arena(entry: CachedArena) {
+    let mut cache = lock_arena_cache();
+    if cache.len() >= ARENA_CACHE_CAPACITY {
+        cache.remove(0);
+    }
+    cache.push(entry);
 }
 
 /// [`evaluate_named`]'s own body: binds `named` into a cached
@@ -1476,9 +1475,10 @@ pub(super) fn evaluate_named_via_arena(
         outputs.to_vec()
     };
 
-    let mut arena = checkout_arena(program, symbols, &effective_outputs, named)?;
-    let run = bind_named_inputs_into_arena(&mut arena, named, true)
-        .and_then(|()| run_resolved_nodes_in_arena(&mut arena));
+    let mut entry = checkout_arena(program, symbols, &effective_outputs, named)?;
+    let arena = &mut entry.arena;
+    let run = bind_named_inputs_into_arena(arena, named, true)
+        .and_then(|()| run_resolved_nodes_in_arena(arena));
     match run {
         Ok(()) => {
             let results = arena
@@ -1494,7 +1494,7 @@ pub(super) fn evaluate_named_via_arena(
                 })
                 .collect();
             let evaluated = Evaluated::from_parts(arena.root, results, None);
-            checkin_arena(program, symbols, &effective_outputs, arena);
+            checkin_arena(entry);
             Ok(evaluated)
         }
         Err(error) => Err(error),

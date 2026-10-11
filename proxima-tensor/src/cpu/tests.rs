@@ -3631,6 +3631,52 @@ fn evaluate_named_with_arena_matches_evaluate_named_over_two_calls() {
     );
 }
 
+/// Three consecutive [`evaluate_named`] calls on one `(program, symbols,
+/// outputs)` key build the arena once and serve the other two from
+/// `ARENA_CACHE` -- `arena_cache_totals` is the engagement counter, and the
+/// third call's different inputs prove the hit re-binds data rather than
+/// replaying the first call's result.
+#[test]
+fn evaluate_named_builds_one_arena_and_hits_the_cache_on_repeat_calls() {
+    let (program, sum) = named_add_program();
+    arena_cache_reset();
+
+    let first = evaluate_named(
+        &program,
+        &[],
+        &[("a", &[1.0; 4]), ("b", &[10.0; 4])],
+        &[sum],
+    )
+    .expect("first call builds the arena");
+    let second = evaluate_named(
+        &program,
+        &[],
+        &[("a", &[1.0; 4]), ("b", &[10.0; 4])],
+        &[sum],
+    )
+    .expect("second call hits the cached arena");
+    let third = evaluate_named(&program, &[], &[("a", &[5.0; 4]), ("b", &[7.0; 4])], &[sum])
+        .expect("third call hits the cached arena with new inputs");
+
+    assert_eq!(
+        arena_cache_totals(),
+        (1, 2),
+        "(builds, hits) over three calls"
+    );
+    assert_eq!(
+        first.get(sum).map(|(data, _)| data.to_vec()),
+        Some(vec![11.0; 4])
+    );
+    assert_eq!(
+        second.get(sum).map(|(data, _)| data.to_vec()),
+        Some(vec![11.0; 4])
+    );
+    assert_eq!(
+        third.get(sum).map(|(data, _)| data.to_vec()),
+        Some(vec![12.0; 4])
+    );
+}
+
 /// [`matmul_program`], but both leaves are NAMED -- `checkout_arena`'s
 /// own derivation (every genuine `Op::Input` name in `named` is a
 /// `constant_inputs` candidate) only has anything to find when the
