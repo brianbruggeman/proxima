@@ -1,3 +1,8 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration-test helpers sit outside #[test] fns, where allow-*-in-tests does not reach"
+)]
 //! Integration test: record a synthetic WebSocket session, replay it through
 //! `WsReplayUpstream` as a genuine upgrade, and prove:
 //!   1. the 101 response recomputes Sec-WebSocket-Accept from the replaying
@@ -7,7 +12,6 @@
 //! Spans the recording format base (BinFormat/BinSource) + the `replay`
 //! feature (WsReplayUpstream) + proxima-pipe (upgrade machinery), no network.
 // unwrap/expect are workspace-denied; tests are the sanctioned exception.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(feature = "replay")]
 
 use std::pin::Pin;

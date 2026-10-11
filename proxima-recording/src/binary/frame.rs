@@ -123,7 +123,6 @@ pub fn decode_block(inner: &[u8]) -> Result<Vec<RecordingEvent>, ProximaError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::event::{FrameMetadata, HttpEvent, InteractionId, ProtocolEvent};

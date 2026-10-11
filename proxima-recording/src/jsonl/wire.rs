@@ -349,7 +349,6 @@ fn hex_decode_32(text: &str) -> Result<[u8; 32], ProximaError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::event::HttpEvent;

@@ -218,7 +218,6 @@ impl SendPipe for ReplayLog {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(crate) mod test_support {
     use super::*;
     use crate::event::{FrameMetadata, HttpEvent, InteractionId, ProtocolEvent};
@@ -273,7 +272,6 @@ pub(crate) mod test_support {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::test_support::{append_then_replay, drain, sample_events};
     use super::*;
