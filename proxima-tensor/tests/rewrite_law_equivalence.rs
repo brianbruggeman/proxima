@@ -19,7 +19,8 @@
 use proptest::prelude::*;
 use proxima_tensor::bind::{self, BoundOpKind};
 use proxima_tensor::cpu::{
-    self, build_static_arena, evaluate, evaluate_named, evaluate_named_with_arena,
+    self, QuantizedBlock, build_static_arena, evaluate, evaluate_named, evaluate_named_with_arena,
+    evaluate_quantized_named,
 };
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp, append,
@@ -858,5 +859,100 @@ proptest! {
 fn law4_same_input_widening_is_proposed_not_landed() {
     unreachable!(
         "law 4 has no landed instance -- see docs/rewrite-algebra.md, this test is a documentation stub only"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Retirement schedule in the cached arena plan. The packed loop
+// (`evaluate_quantized_named`) is the oracle: the arena loop must report
+// the same `peak_live_buffers` and produce the same bits for a program whose
+// execution-time fusion plan fires, because the fire positions are what
+// move a buffer's retirement.
+// ---------------------------------------------------------------------
+
+fn packed_reference(
+    program: &[Op],
+    root: NodeId,
+    named: &[(&str, &[f32])],
+) -> proxima_tensor::Evaluated {
+    let blocks: Vec<(&str, QuantizedBlock)> = named
+        .iter()
+        .map(|(name, values)| (*name, QuantizedBlock::Float32(values)))
+        .collect();
+    evaluate_quantized_named(program, &[], &blocks, &[root])
+        .expect("packed loop evaluates the program")
+}
+
+fn assert_arena_matches_packed(program: &[Op], root: NodeId, named: &[(&str, &[f32])]) {
+    let packed = packed_reference(program, root, named);
+    let mut owned = build_static_arena(program, &[], &[root]).expect("arena builds");
+    for call in 0..3 {
+        let arena = evaluate_named_with_arena(&mut owned, named).expect("owned arena evaluates");
+        assert_eq!(
+            arena
+                .root()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            packed
+                .root()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "owned arena call {call} must match the packed loop bit for bit"
+        );
+        assert_eq!(arena.peak_live_buffers(), packed.peak_live_buffers());
+    }
+    let cached = evaluate_named(program, &[], named, &[root]).expect("cached arena evaluates");
+    assert_eq!(cached.peak_live_buffers(), packed.peak_live_buffers());
+}
+
+#[test]
+fn evaluate_retirement_clip_epilogue_arena_matches_the_packed_loop() {
+    let _toggle_guard = EPILOGUE_TOGGLE_LOCK
+        .lock()
+        .expect("epilogue toggle lock is never poisoned");
+    let (program, root) = clip_epilogue_program(6, 9, 11);
+    let lhs: Vec<f32> = (0..54).map(|index| (index as f32 * 0.0137).sin()).collect();
+    let rhs: Vec<f32> = (0..99).map(|index| (index as f32 * 0.0271).cos()).collect();
+    let bias: Vec<f32> = (0..11)
+        .map(|index| (index as f32 * 0.043).sin() * 5.0 - 1.0)
+        .collect();
+    let named: [(&str, &[f32]); 3] = [("lhs", &lhs), ("rhs", &rhs), ("bias", &bias)];
+
+    cpu::epilogue_fuse_reset();
+    cpu::set_epilogue_fuse_enabled(true);
+    assert_arena_matches_packed(&program, root, &named);
+    let (hits, _elements, _nanos) = cpu::epilogue_fuse_totals();
+    assert!(
+        hits > 0,
+        "the clip epilogue never fired, so no fire position was exercised"
+    );
+}
+
+#[test]
+fn evaluate_retirement_layer_norm_cluster_arena_matches_the_packed_loop() {
+    let _toggle_guard = EPILOGUE_TOGGLE_LOCK
+        .lock()
+        .expect("epilogue toggle lock is never poisoned");
+    let (program, root) = layer_norm_cluster_program(5, 24);
+    let x: Vec<f32> = (0..120)
+        .map(|index| (index as f32 * 0.019).sin() * 3.0)
+        .collect();
+    let gamma: Vec<f32> = (0..24)
+        .map(|index| 1.0 + (index as f32 * 0.037).cos() * 0.3)
+        .collect();
+    let beta: Vec<f32> = (0..24)
+        .map(|index| (index as f32 * 0.011).sin() * 0.2)
+        .collect();
+    let named: [(&str, &[f32]); 3] = [("x", &x), ("gamma", &gamma), ("beta", &beta)];
+
+    cpu::layer_norm_cluster_reset();
+    cpu::set_epilogue_fuse_enabled(true);
+    assert_arena_matches_packed(&program, root, &named);
+    let (hits, _elements, _nanos) = cpu::layer_norm_cluster_totals();
+    assert!(
+        hits > 0,
+        "the layer-norm cluster never fired, so no deferred retirement was exercised"
     );
 }

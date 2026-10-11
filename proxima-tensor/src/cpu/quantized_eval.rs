@@ -327,6 +327,30 @@ pub(super) fn layer_norm_cluster_operand_nodes(
     ])
 }
 
+/// Every node a fused layer-norm cluster still reads at its `fire_position`,
+/// keyed to the latest position it must survive to. The fused tail reads `x`
+/// AND all four tail operand slots straight out of the buffer table, so
+/// keying on `x_node` alone would let `gamma`/`beta`/`reciprocal_n`/`epsilon`
+/// retire at their own pre-fusion last use, before the deferred read.
+pub(super) fn layer_norm_cluster_keepalive(
+    resolved: &[BoundOp],
+    layer_norm_cluster_plan: &BTreeMap<NodeId, LayerNormClusterPlan>,
+) -> BTreeMap<NodeId, usize> {
+    let mut keepalive: BTreeMap<NodeId, usize> = BTreeMap::new();
+    for cluster in layer_norm_cluster_plan.values() {
+        let Some(nodes) = layer_norm_cluster_operand_nodes(resolved, cluster) else {
+            continue;
+        };
+        for node in nodes {
+            keepalive
+                .entry(node)
+                .and_modify(|existing| *existing = (*existing).max(cluster.fire_position))
+                .or_insert(cluster.fire_position);
+        }
+    }
+    keepalive
+}
+
 // `expert_sources` is this slice's own addition, pushing this shared body
 // one argument past clippy's default threshold; every one of its five
 // public callers already threads its own six/seven positional arguments
@@ -544,26 +568,8 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
     // where the deferred retirement actually fires -- two views of one
     // fact, not two sources of truth (built from each other, one line
     // down).
-    let layer_norm_cluster_keepalive: BTreeMap<NodeId, usize> = {
-        let mut keepalive: BTreeMap<NodeId, usize> = BTreeMap::new();
-        for cluster in layer_norm_cluster_plan.values() {
-            // the fused tail at `fire_position` reads `x` AND all four tail
-            // operand slots straight out of `buffers` -- keying this map on
-            // `x_node` alone left `gamma`/`beta`/`reciprocal_n`/`epsilon`
-            // free to retire at their own pre-fusion last use, before the
-            // deferred read (ROW 204 follow-up, node 6540).
-            let Some(nodes) = layer_norm_cluster_operand_nodes(&resolved, cluster) else {
-                continue;
-            };
-            for node in nodes {
-                keepalive
-                    .entry(node)
-                    .and_modify(|existing| *existing = (*existing).max(cluster.fire_position))
-                    .or_insert(cluster.fire_position);
-            }
-        }
-        keepalive
-    };
+    let layer_norm_cluster_keepalive =
+        layer_norm_cluster_keepalive(&resolved, &layer_norm_cluster_plan);
     let layer_norm_cluster_retire_at: BTreeMap<usize, Vec<NodeId>> = {
         let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
         for (&node, &keep_until) in &layer_norm_cluster_keepalive {

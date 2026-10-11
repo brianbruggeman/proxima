@@ -903,6 +903,31 @@ pub(super) fn fusion_schedule(
     (skip, epilogue_fire_at, cluster_fire_at)
 }
 
+/// `node_retirement`'s schedule with every layer-norm-cluster operand retired
+/// at the cluster's `fire_position`, where the fused tail reads it, instead of
+/// at its pre-fusion last use. A node whose last reader is an executed op
+/// past the fire position keeps that later slot. One list per `resolved`
+/// position, the same positions `evaluate_quantized_with_scratch` retires at.
+pub(super) fn retirement_schedule(
+    resolved: &[BoundOp],
+    outputs: &[NodeId],
+    layer_norm_cluster_plan: &BTreeMap<NodeId, LayerNormClusterPlan>,
+    fused_away: &BTreeSet<NodeId>,
+) -> Vec<Vec<NodeId>> {
+    let mut retires = node_retirement(resolved, outputs);
+    for (node, keep_until) in layer_norm_cluster_keepalive(resolved, layer_norm_cluster_plan) {
+        let Some(position) = retires.iter().position(|nodes| nodes.contains(&node)) else {
+            continue;
+        };
+        let reader_executes = !fused_away.contains(&resolved[position].node);
+        if position < keep_until || (position > keep_until && !reader_executes) {
+            retires[position].retain(|retired| *retired != node);
+            retires[keep_until].push(node);
+        }
+    }
+    retires
+}
+
 pub(super) static REWRITE_DEPTH1_FIRES: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
 pub(super) static REWRITE_DEPTH2_FIRES: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
 
@@ -1204,10 +1229,11 @@ pub fn evaluate_named_with_arena_masked(
             continue;
         }
         let node_index = computed.node.0 as usize;
-        let mut output = arena.buffers[node_index].take().ok_or(TensorError::NotLowerable {
-            node: computed.node,
-            reason: "static arena has no pre-sized slot for this resolved node -- build_static_arena did not size it",
-        })?;
+        let mut output = output_buffer(
+            &mut arena.buffers[node_index],
+            &mut arena.free_buffers,
+            node_output_len(computed),
+        );
         run_node_into(
             computed,
             &arena.buffers,
