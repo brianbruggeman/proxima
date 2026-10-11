@@ -4650,6 +4650,7 @@ dependencies = [
  "prime",
  "proptest",
  "proxima",
+ "proxima-autograd",
  "proxima-core",
  "proxima-gguf",
  "proxima-primitives",
