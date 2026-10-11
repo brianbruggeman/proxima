@@ -126,6 +126,7 @@ mod tiled_gemm_cooperative_scan;
 mod expert_grouped_gemm;
 mod index_narrowing;
 mod wide_grid;
+mod scaled_float_render;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) use emit_and_classify::emit_inner_with_mma_selection;
 #[cfg(feature = "metal-attn-variants")]
@@ -197,6 +198,7 @@ use index_narrowing::*;
 ))]
 pub(crate) use expert_grouped_gemm::{route_compaction_key, route_prepass, route_prepass_active};
 use packed_row_blocked_ggml::*;
+use scaled_float_render::*;
 use selection_render::render_top_fraction_select;
 use tiled_gemm_cooperative_scan::*;
 #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
@@ -235,6 +237,9 @@ mod index_narrowing_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(crate) mod tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod scaled_e3m2_render_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod twin_elementwise_tests;

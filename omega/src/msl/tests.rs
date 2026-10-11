@@ -348,7 +348,7 @@ fn elementwise_tanh_op(extent: u32) -> BoundOp {
     .expect("one bound emitted")
 }
 
-fn matmul_op(m: u32, k: u32, n: u32) -> BoundOp {
+pub(super) fn matmul_op(m: u32, k: u32, n: u32) -> BoundOp {
     let mut program = Vec::new();
     let lhs = append(
         &mut program,

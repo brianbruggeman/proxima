@@ -2892,9 +2892,13 @@ pub(super) fn classify_packed_row_block(
 /// codec forces a decision here instead of slipping through.
 const fn row_block_extent_multiple(codec: Codec) -> Option<usize> {
     match codec {
-        Codec::Q3K | Codec::Q4K | Codec::Q5K | Codec::Q6K | Codec::Q8_0 | Codec::Q4_0 => {
-            Some(Q4K_BLOCK_ELEMENTS)
-        }
+        Codec::Q3K
+        | Codec::Q4K
+        | Codec::Q5K
+        | Codec::Q6K
+        | Codec::Q8_0
+        | Codec::Q4_0
+        | Codec::Fp6E3M2 => Some(Q4K_BLOCK_ELEMENTS),
         Codec::Q2K
         | Codec::Q5_1
         | Codec::Q5_0
@@ -2920,8 +2924,7 @@ const fn row_block_extent_multiple(codec: Codec) -> Option<usize> {
         | Codec::Q2_0
         | Codec::BFloat8
         | Codec::Bf8E5M2
-        | Codec::Bf4E2M1
-        | Codec::Fp6E3M2 => None,
+        | Codec::Bf4E2M1 => None,
     }
 }
 

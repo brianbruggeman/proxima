@@ -15,6 +15,7 @@ pub(super) fn render_elementwise(
 
     let mut source = String::new();
     preamble(&mut source, None);
+    push_scaled_float_decoders(&mut source, quantized);
 
     source.push_str("struct Uniforms {\n");
     source.push_str("    long total_elements;\n");
@@ -398,6 +399,7 @@ pub(super) fn render_reduce(
             output_axes,
         ),
     );
+    push_scaled_float_decoders(&mut source, quantized);
 
     source.push_str("struct Uniforms {\n");
     source.push_str("    long output_total;\n");
@@ -2414,6 +2416,9 @@ pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
     // single-row arm above), so it needs its own, distinct marker text.
     "q4_0_element(in",
     "q8_0_element(in",
+    "scaled_e3m2_super_element(blk",
+    "scaled_e3m2_quad_dot(blk",
+    "scaled_e3m2_element(in",
     // `push_q4_0_native_body` (`metal-q4_0-native`, on in `metal`) decodes the
     // nibbles inline with the fixed masks and calls no helper by name, so none
     // of the markers above reach it; this word-mask accumulation is unique to it.

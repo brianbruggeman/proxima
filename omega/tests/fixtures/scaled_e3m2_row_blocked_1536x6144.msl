@@ -1,0 +1,117 @@
+static inline float scaled_e3m2_field(uint field) {
+    const int bias = 3;
+    uint exponent = (field & 0x1cu) >> 2u;
+    uint mantissa = field & 0x03u;
+    uint sign = (field & 0x20u) << 26u;
+    uint normal_bits = sign | ((uint)((int)exponent + 127 - bias) << 23u) | (mantissa << 21u);
+    float subnormal = as_type<float>(sign | as_type<uint>((float)mantissa * 6.25e-2f));
+    return exponent == 0u ? subnormal : as_type<float>(normal_bits);
+}
+
+static inline uint scaled_e3m2_group(device const uchar *group) {
+    return ((uint)group[0] << 0u) | ((uint)group[1] << 8u) | ((uint)group[2] << 16u);
+}
+
+static inline float scaled_e3m2_element(device const uchar *block, uint index) {
+    ushort scale_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    float scale = (float)as_type<half>(scale_bits);
+    uint word = scaled_e3m2_group(block + 2u + (index / 4u) * 3u);
+    uint field = (word >> ((index % 4u) * 6u)) & 0x3fu;
+    return scaled_e3m2_field(field) * scale;
+}
+
+static inline float scaled_e3m2_super_element(device const uchar *superblock, uint index) {
+    return scaled_e3m2_element(superblock + (index / 32u) * 26u, index % 32u);
+}
+
+static inline float scaled_e3m2_quad_dot(device const uchar *superblock, uint slot, thread const float *acts) {
+    device const uchar *block = superblock + (slot / 32u) * 26u;
+    ushort scale_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    float scale = (float)as_type<half>(scale_bits);
+    device const uchar *payload = block + 2;
+    float result = 0.0f;
+    for (uint group = 0u; group < 8u; ++group) {
+        uint word = scaled_e3m2_group(payload + group * 3u);
+        thread const float *run = acts + group * 4u;
+        result += scaled_e3m2_field((word >> 0u) & 0x3fu) * run[0];
+        result += scaled_e3m2_field((word >> 6u) & 0x3fu) * run[1];
+        result += scaled_e3m2_field((word >> 12u) & 0x3fu) * run[2];
+        result += scaled_e3m2_field((word >> 18u) & 0x3fu) * run[3];
+    }
+    return result * scale;
+}
+
+struct Uniforms {
+    long output_total;
+    long reduction_total;
+    long output_extents[2];
+    long reduction_extents[1];
+    long operand_base[2];
+    long operand_strides[2][3];
+    long out_base;
+    long out_strides[3];
+};
+
+kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
+    device const uchar* in0 [[buffer(0)]],
+    device const float* in1 [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant Uniforms& u [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    long output_index = (long)gid / 32;
+    uint lane = gid % 32u;
+    long group_first = output_index * 4;
+    float sumf[4];
+    for (int q = 0; q < 4; ++q) { sumf[q] = 0.0f; }
+    long weight_base[4];
+    long other_base[4];
+    long coord_q_cache[4][3];
+    long weight_row_stride = u.operand_strides[0][0];
+    long other_row_stride = u.operand_strides[1][0];
+    for (int q = 0; q < 4; ++q) {
+        long flat = group_first + q;
+        for (int d = 0; d < 3; ++d) { coord_q_cache[q][d] = 0; }
+        coord_q_cache[q][0] = flat;
+        weight_base[q] = u.operand_base[0] + flat * weight_row_stride;
+        other_base[q] = u.operand_base[1] + flat * other_row_stride;
+    }
+    long other_stride = u.operand_strides[1][2];
+    uint ix = (uint)lane / 8u;
+    uint it = (uint)lane % 8u;
+    uint slot = it * 32u;
+    float acts[32];
+    int super_blocks = (int)u.reduction_total / 256;
+    int ib_first = (int)ix;
+    int ib_step = 4;
+    long blk_step = (long)ib_step * 208;
+    device const uchar *blk_ptr[4];
+    for (int q = 0; q < 4; ++q) {
+        blk_ptr[q] = in0 + ((long)((int)weight_base[q] / 256) + (long)ib_first) * 208;
+    }
+    long acts_step = (long)ib_step * 256;
+    device const float *acts_row = in1 + other_base[0] + (long)ib_first * 256 + (long)slot;
+    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {
+        for (int j = 0; j < 32; ++j) {
+            acts[j] = acts_row[j];
+        }
+        for (int q = 0; q < 4; ++q) {
+            device const uchar *blk = blk_ptr[q];
+            sumf[q] = sumf[q] + scaled_e3m2_quad_dot(blk, slot, acts);
+        }
+        for (int q = 0; q < 4; ++q) { blk_ptr[q] += blk_step; }
+        acts_row += acts_step;
+    }
+    float reduced_row0 = simd_sum(sumf[0]);
+    float reduced_row1 = simd_sum(sumf[1]);
+    float reduced_row2 = simd_sum(sumf[2]);
+    float reduced_row3 = simd_sum(sumf[3]);
+    if (lane < 4u) {
+        float reduced = (lane == 0u ? reduced_row0 : (lane == 1u ? reduced_row1 : (lane == 2u ? reduced_row2 : reduced_row3)));
+        long flat = group_first + (long)lane;
+        if (flat < u.output_total) {
+            long out_offset = u.out_base + flat * u.out_strides[0];
+            out[out_offset] = reduced;
+        }
+    }
+}
