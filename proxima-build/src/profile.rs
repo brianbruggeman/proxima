@@ -64,7 +64,7 @@ pub struct Profile {
     #[setting(default = true)]
     pub std: bool,
 
-    /// Executor selection (string-typed for conflaguration's FromEnvStr
+    /// Executor selection (string-typed for conflaguration's `FromEnvStr`
     /// bound; use [`Profile::executor_kind`] for typed access). Validated
     /// against alloc / std axes.
     #[setting(default = "tokio")]
@@ -192,7 +192,7 @@ pub enum QuicImpl {
     /// [`Self::Native`].
     Quinn,
     /// Greenfield proxima-quic-proto + proxima-quic. Runtime-agnostic;
-    /// no tokio in production paths; tier-1 capable (no_std + alloc);
+    /// no tokio in production paths; tier-1 capable (`no_std` + alloc);
     /// composes aws-lc-rs + rustls (or inline TLS spike fallback).
     Native,
     /// QUIC disabled. Equivalent to `quic_enabled=false`.
@@ -312,135 +312,156 @@ impl Default for Profile {
 
 impl Profile {
     /// Typed view of the [`Self::executor`] string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AxisParseError`] when the string is not a known value for this axis.
     pub fn executor_kind(&self) -> core::result::Result<Executor, AxisParseError> {
         self.executor.parse()
     }
 
     /// Typed view of the [`Self::reactor`] string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AxisParseError`] when the string is not a known value for this axis.
     pub fn reactor_kind(&self) -> core::result::Result<Reactor, AxisParseError> {
         self.reactor.parse()
     }
 
     /// Typed view of the [`Self::tls`] string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AxisParseError`] when the string is not a known value for this axis.
     pub fn tls_backend(&self) -> core::result::Result<TlsBackend, AxisParseError> {
         self.tls.parse()
     }
 
     /// Typed view of the [`Self::timer`] string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AxisParseError`] when the string is not a known value for this axis.
     pub fn timer_kind(&self) -> core::result::Result<Timer, AxisParseError> {
         self.timer.parse()
     }
 
     /// Typed view of the [`Self::quic_impl`] string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AxisParseError`] when the string is not a known value for this axis.
     pub fn quic_impl_kind(&self) -> core::result::Result<QuicImpl, AxisParseError> {
         self.quic_impl.parse()
     }
 
     /// Typed view of the [`Self::h3_impl`] string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AxisParseError`] when the string is not a known value for this axis.
     pub fn h3_impl_kind(&self) -> core::result::Result<H3Impl, AxisParseError> {
         self.h3_impl.parse()
     }
 }
 
-impl conflaguration::Validate for Profile {
-    fn validate(&self) -> conflaguration::Result<()> {
-        let mut errors = Vec::new();
+type Findings = Vec<ValidationMessage>;
 
-        let executor = match self.executor_kind() {
-            Ok(value) => Some(value),
-            Err(err) => {
-                errors.push(ValidationMessage::new("executor", err.to_string()));
-                None
-            }
-        };
-        let reactor = match self.reactor_kind() {
-            Ok(value) => Some(value),
-            Err(err) => {
-                errors.push(ValidationMessage::new("reactor", err.to_string()));
-                None
-            }
-        };
-        let tls = match self.tls_backend() {
-            Ok(value) => Some(value),
-            Err(err) => {
-                errors.push(ValidationMessage::new("tls", err.to_string()));
-                None
-            }
-        };
-        let timer = match self.timer_kind() {
-            Ok(value) => Some(value),
-            Err(err) => {
-                errors.push(ValidationMessage::new("timer", err.to_string()));
-                None
-            }
-        };
-        let quic_impl = match self.quic_impl_kind() {
-            Ok(value) => Some(value),
-            Err(err) => {
-                errors.push(ValidationMessage::new("quic_impl", err.to_string()));
-                None
-            }
-        };
-        let h3_impl = match self.h3_impl_kind() {
-            Ok(value) => Some(value),
-            Err(err) => {
-                errors.push(ValidationMessage::new("h3_impl", err.to_string()));
-                None
-            }
-        };
+fn record_axis<T>(
+    axis: &str,
+    parsed: Result<T, AxisParseError>,
+    findings: &mut Findings,
+) -> Option<T> {
+    match parsed {
+        Ok(value) => Some(value),
+        Err(err) => {
+            findings.push(ValidationMessage::new(axis, err.to_string()));
+            None
+        }
+    }
+}
 
+struct ParsedAxes {
+    executor: Option<Executor>,
+    reactor: Option<Reactor>,
+    tls: Option<TlsBackend>,
+    timer: Option<Timer>,
+    quic_impl: Option<QuicImpl>,
+    h3_impl: Option<H3Impl>,
+}
+
+impl ParsedAxes {
+    fn parse(profile: &Profile, findings: &mut Findings) -> Self {
+        Self {
+            executor: record_axis("executor", profile.executor_kind(), findings),
+            reactor: record_axis("reactor", profile.reactor_kind(), findings),
+            tls: record_axis("tls", profile.tls_backend(), findings),
+            timer: record_axis("timer", profile.timer_kind(), findings),
+            quic_impl: record_axis("quic_impl", profile.quic_impl_kind(), findings),
+            h3_impl: record_axis("h3_impl", profile.h3_impl_kind(), findings),
+        }
+    }
+}
+
+impl Profile {
+    fn check_tls_tier(&self, axes: &ParsedAxes, findings: &mut Findings) {
         if self.std && !self.alloc {
-            errors.push(ValidationMessage::new(
+            findings.push(ValidationMessage::new(
                 "std",
                 "std implies alloc; cannot have std=true with alloc=false",
             ));
         }
 
-        if matches!(tls, Some(TlsBackend::Rustls)) && !(self.std && self.alloc) {
-            errors.push(ValidationMessage::new(
+        if matches!(axes.tls, Some(TlsBackend::Rustls)) && !(self.std && self.alloc) {
+            findings.push(ValidationMessage::new(
                 "tls",
                 "tls=rustls requires std=true and alloc=true",
             ));
         }
 
-        if matches!(tls, Some(TlsBackend::EmbeddedTls)) && !self.alloc {
-            errors.push(ValidationMessage::new(
+        if matches!(axes.tls, Some(TlsBackend::EmbeddedTls)) && !self.alloc {
+            findings.push(ValidationMessage::new(
                 "tls",
                 "tls=embedded-tls requires alloc=true",
             ));
         }
+    }
 
+    fn check_quic_enabled(&self, axes: &ParsedAxes, findings: &mut Findings) {
         if self.quic_enabled {
-            if !matches!(tls, Some(TlsBackend::Rustls)) {
-                errors.push(ValidationMessage::new(
+            if !matches!(axes.tls, Some(TlsBackend::Rustls)) {
+                findings.push(ValidationMessage::new(
                     "quic_enabled",
                     "quic requires tls=rustls (rustls is the only TLS path in v1)",
                 ));
             }
-            if matches!(quic_impl, Some(QuicImpl::None)) {
-                errors.push(ValidationMessage::new(
+            if matches!(axes.quic_impl, Some(QuicImpl::None)) {
+                findings.push(ValidationMessage::new(
                     "quic_enabled",
                     "quic_enabled=true requires quic_impl != none",
                 ));
             }
-        } else if !matches!(quic_impl, Some(QuicImpl::None) | None) {
-            errors.push(ValidationMessage::new(
+        } else if !matches!(axes.quic_impl, Some(QuicImpl::None) | None) {
+            findings.push(ValidationMessage::new(
                 "quic_impl",
                 "quic_impl must be 'none' when quic_enabled=false",
             ));
         }
+    }
 
-        match quic_impl {
+    fn check_quic_impl(&self, axes: &ParsedAxes, findings: &mut Findings) {
+        match axes.quic_impl {
             Some(QuicImpl::Quinn) => {
                 // legacy path — quinn requires the full tokio + rustls + std + alloc stack
-                if self.quic_enabled && !matches!(executor, Some(Executor::Tokio)) {
-                    errors.push(ValidationMessage::new(
+                if self.quic_enabled && !matches!(axes.executor, Some(Executor::Tokio)) {
+                    findings.push(ValidationMessage::new(
                         "quic_impl",
                         "quic_impl=quinn requires executor=tokio (legacy quinn is tokio-coupled)",
                     ));
                 }
                 if self.quic_enabled && !(self.std && self.alloc) {
-                    errors.push(ValidationMessage::new(
+                    findings.push(ValidationMessage::new(
                         "quic_impl",
                         "quic_impl=quinn requires std=true and alloc=true",
                     ));
@@ -451,7 +472,7 @@ impl conflaguration::Validate for Profile {
                 // executor=tokio allowed only via the tokio-compat feature (not enforced
                 // at profile-axis level — that's a Cargo feature gate).
                 if self.quic_enabled && !(self.std && self.alloc) {
-                    errors.push(ValidationMessage::new(
+                    findings.push(ValidationMessage::new(
                         "quic_impl",
                         "quic_impl=native requires std=true and alloc=true at the facade tier",
                     ));
@@ -461,12 +482,14 @@ impl conflaguration::Validate for Profile {
             }
             Some(QuicImpl::None) | None => {}
         }
+    }
 
-        match h3_impl {
+    fn check_h3_impl(&self, axes: &ParsedAxes, findings: &mut Findings) {
+        match axes.h3_impl {
             Some(H3Impl::H3Quinn) => {
                 // legacy path — h3-quinn requires quic_impl=quinn
-                if self.quic_enabled && !matches!(quic_impl, Some(QuicImpl::Quinn)) {
-                    errors.push(ValidationMessage::new(
+                if self.quic_enabled && !matches!(axes.quic_impl, Some(QuicImpl::Quinn)) {
+                    findings.push(ValidationMessage::new(
                         "h3_impl",
                         "h3_impl=h3-quinn requires quic_impl=quinn",
                     ));
@@ -474,8 +497,8 @@ impl conflaguration::Validate for Profile {
             }
             Some(H3Impl::Native) => {
                 // native h3 requires native QUIC
-                if !matches!(quic_impl, Some(QuicImpl::Native)) {
-                    errors.push(ValidationMessage::new(
+                if !matches!(axes.quic_impl, Some(QuicImpl::Native)) {
+                    findings.push(ValidationMessage::new(
                         "h3_impl",
                         "h3_impl=native requires quic_impl=native",
                     ));
@@ -483,104 +506,128 @@ impl conflaguration::Validate for Profile {
             }
             Some(H3Impl::None) | None => {}
         }
+    }
 
-        if matches!(executor, Some(Executor::Embassy)) {
+    fn check_executor(&self, axes: &ParsedAxes, findings: &mut Findings) {
+        if matches!(axes.executor, Some(Executor::Embassy)) {
             if self.std {
-                errors.push(ValidationMessage::new(
+                findings.push(ValidationMessage::new(
                     "executor",
                     "executor=embassy requires std=false",
                 ));
             }
             if !self.alloc {
-                errors.push(ValidationMessage::new(
+                findings.push(ValidationMessage::new(
                     "executor",
                     "executor=embassy requires alloc=true",
                 ));
             }
         }
 
-        if matches!(executor, Some(Executor::StaticPrime)) && self.alloc {
-            errors.push(ValidationMessage::new(
+        if matches!(axes.executor, Some(Executor::StaticPrime)) && self.alloc {
+            findings.push(ValidationMessage::new(
                 "executor",
                 "executor=static-prime requires alloc=false",
             ));
         }
 
-        if matches!(executor, Some(Executor::Tokio)) && !self.std {
-            errors.push(ValidationMessage::new(
+        if matches!(axes.executor, Some(Executor::Tokio)) && !self.std {
+            findings.push(ValidationMessage::new(
                 "executor",
                 "executor=tokio requires std=true",
             ));
         }
+    }
 
+    fn check_reactor(&self, axes: &ParsedAxes, findings: &mut Findings) {
         if matches!(
-            reactor,
+            axes.reactor,
             Some(Reactor::TokioEpoll | Reactor::IoUring | Reactor::Wasi)
         ) && !self.std
         {
-            errors.push(ValidationMessage::new(
+            findings.push(ValidationMessage::new(
                 "reactor",
                 "reactor=tokio-epoll, io-uring, and wasi require std=true",
             ));
         }
 
-        if matches!(reactor, Some(Reactor::EmbassyNet))
-            && !matches!(executor, Some(Executor::Embassy))
+        if matches!(axes.reactor, Some(Reactor::EmbassyNet))
+            && !matches!(axes.executor, Some(Executor::Embassy))
         {
-            errors.push(ValidationMessage::new(
+            findings.push(ValidationMessage::new(
                 "reactor",
                 "reactor=embassy-net requires executor=embassy",
             ));
         }
+    }
 
-        match &timer {
+    fn check_timer(&self, axes: &ParsedAxes, findings: &mut Findings) {
+        match &axes.timer {
             Some(Timer::StdThread) if !self.std => {
-                errors.push(ValidationMessage::new(
+                findings.push(ValidationMessage::new(
                     "timer",
                     "timer=std-thread requires std=true",
                 ));
             }
             Some(Timer::PrimeWheel) => {
-                if !matches!(executor, Some(Executor::Prime | Executor::StaticPrime)) {
-                    errors.push(ValidationMessage::new(
+                if !matches!(axes.executor, Some(Executor::Prime | Executor::StaticPrime)) {
+                    findings.push(ValidationMessage::new(
                         "timer",
                         "timer=prime-wheel requires executor=prime or executor=static-prime",
                     ));
                 }
                 if !self.alloc {
-                    errors.push(ValidationMessage::new(
+                    findings.push(ValidationMessage::new(
                         "timer",
                         "timer=prime-wheel requires alloc=true",
                     ));
                 }
             }
-            Some(Timer::EmbassyTime) if !matches!(executor, Some(Executor::Embassy)) => {
-                errors.push(ValidationMessage::new(
+            Some(Timer::EmbassyTime) if !matches!(axes.executor, Some(Executor::Embassy)) => {
+                findings.push(ValidationMessage::new(
                     "timer",
                     "timer=embassy-time requires executor=embassy",
                 ));
             }
             Some(Timer::Mock) if !self.alloc => {
-                errors.push(ValidationMessage::new(
+                findings.push(ValidationMessage::new(
                     "timer",
                     "timer=mock requires alloc=true",
                 ));
             }
             Some(Timer::Custom(path)) if path.is_empty() => {
-                errors.push(ValidationMessage::new(
+                findings.push(ValidationMessage::new(
                     "timer",
                     "custom timer path must be non-empty",
                 ));
             }
             _ => {}
         }
+    }
 
+    fn check_schema(&self, findings: &mut Findings) {
         if self.schema != 1 {
-            errors.push(ValidationMessage::new(
+            findings.push(ValidationMessage::new(
                 "schema",
                 "only schema=1 is supported by this proxima-build",
             ));
         }
+    }
+}
+
+impl conflaguration::Validate for Profile {
+    fn validate(&self) -> conflaguration::Result<()> {
+        let mut errors = Vec::new();
+        let axes = ParsedAxes::parse(self, &mut errors);
+
+        self.check_tls_tier(&axes, &mut errors);
+        self.check_quic_enabled(&axes, &mut errors);
+        self.check_quic_impl(&axes, &mut errors);
+        self.check_h3_impl(&axes, &mut errors);
+        self.check_executor(&axes, &mut errors);
+        self.check_reactor(&axes, &mut errors);
+        self.check_timer(&axes, &mut errors);
+        self.check_schema(&mut errors);
 
         if errors.is_empty() {
             Ok(())

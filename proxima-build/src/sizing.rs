@@ -300,7 +300,11 @@ impl SizingSource {
 /// Requires `value` to be a positive integer, returning it as `usize`.
 /// Panics with a build.rs-appropriate message otherwise — the shared shape
 /// every consumer's own `require_*` cross-axis rule builds on.
-#[allow(clippy::expect_used)]
+///
+/// # Panics
+///
+/// Panics when `value` is negative, does not fit in `usize`, or is zero.
+#[must_use]
 pub fn require_nonzero(name: &str, value: i64) -> usize {
     let value = usize::try_from(value)
         .unwrap_or_else(|_| panic!("{name} must be a non-negative integer; got {value}"));
@@ -309,7 +313,11 @@ pub fn require_nonzero(name: &str, value: i64) -> usize {
 }
 
 /// Like [`require_nonzero`], but `0` is a legal, documented sentinel value.
-#[allow(clippy::expect_used)]
+///
+/// # Panics
+///
+/// Panics when `value` is negative or does not fit in `usize`.
+#[must_use]
 pub fn require_nonneg(name: &str, value: i64) -> usize {
     usize::try_from(value)
         .unwrap_or_else(|_| panic!("{name} must be a non-negative integer; got {value}"))
@@ -386,7 +394,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "axis must be non-zero")]
     fn require_nonzero_rejects_zero() {
-        require_nonzero("axis", 0);
+        let _ = require_nonzero("axis", 0);
     }
 
     #[test]
