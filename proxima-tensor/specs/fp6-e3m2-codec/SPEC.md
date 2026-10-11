@@ -13,9 +13,9 @@ On granite 3.1 1b moe (Q8_0 experts, 8.5 bits per weight, 34 bytes per 32 weight
 
 e3m2 is refuted as a serving default if, on granite, any of these observations holds:
 
-- the `ms_per_token` bound line of `fp6` vs `shipped` has `delta + limit >= 0` on either prompt, so AC18 prints fewer than 4. Here `delta` is the fp6 median minus the shipped median and `limit` is `max(MAD kept, 2% of base)`, both printed by `decode_arms` (`print_bounds`, `proxima-model-interop/examples/decode_arms.rs:465-481`, `bound_line` at `:508`);
+- the `ms_per_token` bound line of `fp6` vs `shipped` has `delta + limit >= 0` on either prompt, so AC18 prints fewer than 4 holding relations. Here `delta` is the fp6 median minus the shipped median and `limit` is `max(MAD kept, 2% of base)`, both printed by `decode_arms` (`print_bounds`, `proxima-model-interop/examples/decode_arms.rs:465-481`, `bound_line` at `:508`);
 - the token-agreement example prints `within=false` for either cell (AC16): `shipped_match - fp6_match > floor(0.02 x N)`, which is more than 4 positions of 224 for granite and more than 3 positions of 164 for E2B;
-- the granite `peak_gpu_bytes` bound line has `delta` above -250,000,000 on either prompt (AC18 prints fewer than 4). The saving derives from the owner's figure of 1.28 GB of Q8_0 expert bytes: `1,280,000,000 x (34 - 26) / 34 = 301,176,470` bytes saved, which is above the bound; AC13 measures the real figure from the converted file.
+- the granite `peak_gpu_bytes` bound line has `delta` above -250,000,000 on either prompt (AC18 prints fewer than 4 holding relations). The saving derives from the owner's figure of 1.28 GB of Q8_0 expert bytes: `1,280,000,000 x (34 - 26) / 34 = 301,176,470` bytes saved, which is above the bound; AC13 measures the real figure from the converted file.
 
 Any one refutes e3m2 as a serving default. The codec stays in the tree, selectable by config and default off, as a measured negative with its numbers; the refuting AC output is recorded, never edited.
 
@@ -71,6 +71,7 @@ omega/src/msl/kernel_types_identity.rs        tiled_decode(Codec::Fp6E3M2) -> So
 omega/src/msl/packed_row_blocked_ggml.rs      Codec::Fp6E3M2 arm (the Q4_0 arm at :665 is the shape)
 proxima-model-interop/examples/convert_codec.rs         (new)
 proxima-model-interop/examples/codec_token_agreement.rs (new)
+proxima-model-interop/examples/bound_relations.rs (new) parses saved decode_arms bound lines (decode_arms.rs:500,524) and evaluates the refutation relations; Rust only, no awk or shell logic
 ```
 
 Block byte layout (R7): bytes 0 to 1 are the f16 scale `absmax / 28.0` (28.0 is E3M2's max normal); bytes 2 to 25 are the payload. Weight `j` of a group of 4 occupies bits `6j .. 6j+6` of the little-endian 24-bit word formed by that group's 3 bytes.
@@ -154,7 +155,7 @@ mkdir -p $OUT/bin
 | AC15 | R15 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/codec_policy/)'` | `3 passed`: `codec_policy_default_is_shipped`, `codec_policy_env_toml_builder_agree`, `codec_policy_unknown_codec_name_rejected` |
 | AC16 | R16 | command block AC16 | `6` (granite: 3 cases x 32 + 1 x 128 = 224 positions, `allowed_gap = floor(0.02 x 224) = 4`; E2B: 3 + 32 + 1 + 128 = 164 positions, `allowed_gap = floor(0.02 x 164) = 3`; free-running greedy generation, position `i` matches when the generated id equals `generated_ids[i]`, no teacher forcing; `gap = shipped_match - fp6_match`; the E2B cell is Q4_0-sourced and reported as such; GPU, behind gpu.lock) |
 | AC17 | R17 | command block AC17 | `44` (4 cells x the 11 metrics `print_bounds` emits at `decode_arms.rs:465-481`; the `shipped` arm is the same binary on the shipped checkpoint, the `fp6` arm overrides `PROXIMA_DECODE_MODEL_GGUF`; GPU, behind gpu.lock, box load checked before the run) |
-| AC18 | R18 | command block AC18 | `4` (refutation AC: a count below 4 is the refutation outcome, recorded not edited; `delta` and `limit` are fields 7 and 8 of the `bound_line` and `memory_bound_line` formats at `decode_arms.rs:500,524`) |
+| AC18 | R18 | command block AC18 (exactly one line matching `^relations: [0-9] of 4 hold$` is printed after the 4 relation lines) | `relations: 4 of 4 hold` (refutation AC: a lower N is the refutation outcome, recorded not edited; the new example prints one line per relation with its parsed `delta` and `limit`, then the summary line; the four relations are `ms_per_token` `delta + limit < 0` and `peak_gpu_bytes` `delta <= -250000000`, each on the 1k and hippo prompts; `delta` and `limit` are fields 7 and 8 of the `bound_line` and `memory_bound_line` formats at `decode_arms.rs:500,524`) |
 
 ### command blocks
 
@@ -168,7 +169,7 @@ cargo run --release -p proxima-model-interop --example codec_token_agreement -- 
 # AC17
 { cargo run --release -p proxima-model-interop --example decode_arms -- --prompt-file $BENCH/prompt1k.txt --log $OUT/launches_granite_1k.log --processes 3 --runs 5 --new-tokens 128 --model $GRANITE --arm shipped=$BIN --arm fp6=$BIN --arm-env fp6:PROXIMA_DECODE_MODEL_GGUF=$OUT/granite-fp6.gguf | tee $OUT/bench_granite_1k.out; cargo run --release -p proxima-model-interop --example decode_arms -- --prompt-file $BENCH/prompt_short_hippo.txt --log $OUT/launches_granite_hippo.log --processes 3 --runs 5 --new-tokens 128 --model $GRANITE --arm shipped=$BIN --arm fp6=$BIN --arm-env fp6:PROXIMA_DECODE_MODEL_GGUF=$OUT/granite-fp6.gguf | tee $OUT/bench_granite_hippo.out; cargo run --release -p proxima-model-interop --example decode_arms -- --prompt-file $BENCH/prompt1k.txt --log $OUT/launches_e2b_1k.log --processes 3 --runs 5 --new-tokens 128 --model $E2B --arm shipped=$BIN --arm fp6=$BIN --arm-env fp6:PROXIMA_DECODE_MODEL_GGUF=$OUT/e2b-fp6.gguf | tee $OUT/bench_e2b_1k.out; cargo run --release -p proxima-model-interop --example decode_arms -- --prompt-file $BENCH/prompt_short_hippo.txt --log $OUT/launches_e2b_hippo.log --processes 3 --runs 5 --new-tokens 128 --model $E2B --arm shipped=$BIN --arm fp6=$BIN --arm-env fp6:PROXIMA_DECODE_MODEL_GGUF=$OUT/e2b-fp6.gguf | tee $OUT/bench_e2b_hippo.out; } | grep -c -E "$PATTERN11"
 # AC18
-awk '/^bound metric=peak_gpu_bytes arm=fp6 vs=shipped /{split($7,delta,"=");if(delta[2]<=-250000000)count++} /^bound metric=ms_per_token arm=fp6 vs=shipped /{split($7,delta,"=");split($8,limit,"=");if(delta[2]+limit[2]<0)count++} END{print count+0}' $OUT/bench_granite_1k.out $OUT/bench_granite_hippo.out
+cargo run --release -p proxima-model-interop --example bound_relations -- --input $OUT/bench_granite_1k.out --input $OUT/bench_granite_hippo.out --arm fp6 --vs shipped --min-gpu-saving 250000000
 ```
 
 ## out of scope
