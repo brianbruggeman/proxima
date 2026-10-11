@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized] target(s) in 0.20s
+     Running `/tmp/cargo_target/release/granite-cold-quantize /private/tmp/proxima-granite4-micro-bf16-hf /private/tmp/granite4-cold-e2m2-tensor-scaled e2m2-tensor-scaled 32768`
+repository=ibm-granite/granite-4.0-micro-base revision=98e1d641451818f6c8e6b17c1c359b5b4ac495d0
+format=e2m2 scale_mode=tensor_maximum tensors=322
+source_bytes_processed=6805672960
+source_bytes_scanned=6805672960
+output_bytes_written=2126772800
+manifest=/private/tmp/granite4-cold-e2m2-tensor-scaled/manifest.json

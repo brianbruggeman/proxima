@@ -1,0 +1,7 @@
+    Finished `release` profile [optimized] target(s) in 0.24s
+     Running `/tmp/cargo_target/release/granite-cold-quantize /private/tmp/proxima-granite4-micro-bf16-hf /private/tmp/granite4-cold-e2m2-release e2m2 32768`
+repository=ibm-granite/granite-4.0-micro-base revision=98e1d641451818f6c8e6b17c1c359b5b4ac495d0
+format=e2m2 tensors=322
+source_bytes_processed=6805672960
+output_bytes_written=2126772800
+manifest=/private/tmp/granite4-cold-e2m2-release/manifest.json

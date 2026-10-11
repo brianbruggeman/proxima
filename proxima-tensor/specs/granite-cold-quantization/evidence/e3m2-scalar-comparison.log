@@ -1,0 +1,3 @@
+    Finished `release` profile [optimized] target(s) in 0.44s
+     Running `/tmp/cargo_target/release/granite-cold-quantize compare /private/tmp/proxima-granite4-micro-bf16-hf /private/tmp/granite4-cold-e3m2-release proxima-tensor/specs/granite-cold-quantization/evidence/e3m2-scalar-comparison.json`
+format=e3m2 tensors=322 values=3402836480 changed_values=3402209120 saturated_values=22 zeroed_nonzero_values=3221113464 max_abs_error=32 report=proxima-tensor/specs/granite-cold-quantization/evidence/e3m2-scalar-comparison.json

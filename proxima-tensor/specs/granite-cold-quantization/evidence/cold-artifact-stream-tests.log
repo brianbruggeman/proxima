@@ -1,0 +1,38 @@
+   Compiling proxima-build v0.1.0 (/private/tmp/proxima-granite-main/proxima-build)
+   Compiling proxima-core v0.1.0 (/private/tmp/proxima-granite-main/proxima-core)
+   Compiling proxima-primitives v0.1.0 (/private/tmp/proxima-granite-main/proxima-primitives)
+   Compiling proxima-config v0.1.0 (/private/tmp/proxima-granite-main/proxima-config)
+   Compiling proxima-runtime v0.1.0 (/private/tmp/proxima-granite-main/proxima-runtime)
+   Compiling proxima-telemetry v0.1.0 (/private/tmp/proxima-granite-main/proxima-telemetry)
+   Compiling proxima-macros v0.1.0 (/private/tmp/proxima-granite-main/proxima-macros)
+   Compiling proxima-clock v0.1.0 (/private/tmp/proxima-granite-main/proxima-clock)
+   Compiling prime v0.1.0 (/private/tmp/proxima-granite-main/prime)
+   Compiling proxima-protocols v0.1.0 (/private/tmp/proxima-granite-main/proxima-protocols)
+   Compiling proxima-net v0.1.0 (/private/tmp/proxima-granite-main/proxima-net)
+   Compiling proxima-codec v0.1.0 (/private/tmp/proxima-granite-main/proxima-codec)
+   Compiling proxima-listen v0.1.0 (/private/tmp/proxima-granite-main/proxima-listen)
+   Compiling proxima-gguf v0.1.0 (/private/tmp/proxima-granite-main/proxima-gguf)
+   Compiling proxima-tls v0.1.0 (/private/tmp/proxima-granite-main/proxima-tls)
+   Compiling proxima-process v0.1.0 (/private/tmp/proxima-granite-main/proxima-process)
+   Compiling proxima-tensor v0.1.0 (/private/tmp/proxima-granite-main/proxima-tensor)
+   Compiling proxima-http v0.1.0 (/private/tmp/proxima-granite-main/proxima-http)
+   Compiling proxima-patterns v0.1.0 (/private/tmp/proxima-granite-main/proxima-patterns)
+   Compiling proxima-auth v0.1.0 (/private/tmp/proxima-granite-main/proxima-auth)
+   Compiling proxima-quic v0.1.0 (/private/tmp/proxima-granite-main/proxima-quic)
+   Compiling proxima-recording v0.1.0 (/private/tmp/proxima-granite-main/proxima-recording)
+   Compiling proxima-tokenizer v0.1.0 (/private/tmp/proxima-granite-main/proxima-tokenizer)
+   Compiling proxima-test v0.1.0 (/private/tmp/proxima-granite-main/proxima-test)
+   Compiling proxima v0.1.0 (/private/tmp/proxima-granite-main)
+   Compiling proxima-safetensors v0.1.0 (/private/tmp/proxima-granite-main/proxima-safetensors)
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-granite-main/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7m 28s
+     Running unittests src/lib.rs (/tmp/cargo_target/debug/deps/proxima_model_interop-d85a6ce902fd50f4)
+
+running 4 tests
+test cold_artifact::tests::cold_artifact_format_names_are_explicit ... ok
+test cold_artifact::tests::shard_paths_reject_parent_and_absolute_components ... ok
+test cold_artifact::tests::conversion_rejects_output_inside_the_source_checkpoint ... ok
+test cold_artifact::tests::converts_real_safetensors_wire_bytes_into_hashed_packed_artifact ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 573 filtered out; finished in 0.05s
+

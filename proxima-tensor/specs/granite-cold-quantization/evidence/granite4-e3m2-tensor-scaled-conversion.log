@@ -1,0 +1,21 @@
+   Compiling proxima-core v0.1.0 (/private/tmp/proxima-granite-main/proxima-core)
+   Compiling proxima-config v0.1.0 (/private/tmp/proxima-granite-main/proxima-config)
+   Compiling proxima-runtime v0.1.0 (/private/tmp/proxima-granite-main/proxima-runtime)
+   Compiling proxima-primitives v0.1.0 (/private/tmp/proxima-granite-main/proxima-primitives)
+   Compiling proxima-clock v0.1.0 (/private/tmp/proxima-granite-main/proxima-clock)
+   Compiling proxima-telemetry v0.1.0 (/private/tmp/proxima-granite-main/proxima-telemetry)
+   Compiling proxima-gguf v0.1.0 (/private/tmp/proxima-granite-main/proxima-gguf)
+   Compiling prime v0.1.0 (/private/tmp/proxima-granite-main/prime)
+   Compiling proxima-tensor v0.1.0 (/private/tmp/proxima-granite-main/proxima-tensor)
+   Compiling proxima-codec v0.1.0 (/private/tmp/proxima-granite-main/proxima-codec)
+   Compiling proxima-safetensors v0.1.0 (/private/tmp/proxima-granite-main/proxima-safetensors)
+   Compiling proxima-tokenizer v0.1.0 (/private/tmp/proxima-granite-main/proxima-tokenizer)
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-granite-main/proxima-model-interop)
+    Finished `release` profile [optimized] target(s) in 58.76s
+     Running `/tmp/cargo_target/release/granite-cold-quantize /private/tmp/proxima-granite4-micro-bf16-hf /private/tmp/granite4-cold-e3m2-tensor-scaled e3m2-tensor-scaled 32768`
+repository=ibm-granite/granite-4.0-micro-base revision=98e1d641451818f6c8e6b17c1c359b5b4ac495d0
+format=e3m2 scale_mode=tensor_maximum tensors=322
+source_bytes_processed=6805672960
+source_bytes_scanned=6805672960
+output_bytes_written=2552127360
+manifest=/private/tmp/granite4-cold-e3m2-tensor-scaled/manifest.json

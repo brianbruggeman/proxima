@@ -1,0 +1,32 @@
+Analysis of sampling proxima_gguf-3b0030e3499c8341 (pid 25438) every 1 millisecond
+Process:         proxima_gguf-3b0030e3499c8341 [25438]
+Path:            /private/tmp/*/proxima_gguf-3b0030e3499c8341
+Load Address:    0x1002ac000
+Identifier:      proxima_gguf-3b0030e3499c8341
+Version:         ???
+Code Type:       ARM64
+Parent Process:  cargo [25427]
+Target Type:     live task
+
+Date/Time:       2026-10-10 18:34:19.405 -0500
+Launch Time:     2026-10-10 18:34:09.503 -0500
+OS Version:      macOS 15.8 (24H20)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         96K
+Physical footprint (peak):  96K
+Idle exit:                  untracked
+----
+
+Call graph:
+    799 Thread_89071854: Main Thread   DispatchQueue_<multiple>
+      799 _dyld_start  (in dyld) + 0  [0x100b9c7c0]
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        _dyld_start  (in dyld)        799
+
+Binary images description not available
+

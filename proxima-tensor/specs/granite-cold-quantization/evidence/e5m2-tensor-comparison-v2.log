@@ -1,0 +1,4 @@
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-granite-main/proxima-model-interop)
+    Finished `release` profile [optimized] target(s) in 18.80s
+     Running `/tmp/cargo_target/release/granite-cold-quantize compare /private/tmp/proxima-granite4-micro-bf16-hf /private/tmp/granite4-cold-e5m2-release proxima-tensor/specs/granite-cold-quantization/evidence/e5m2-tensor-comparison-v2.json`
+format=e5m2 tensors=322 values=3402836480 changed_values=3296186812 saturated_values=0 zeroed_nonzero_values=1618641 max_abs_error=4 report=proxima-tensor/specs/granite-cold-quantization/evidence/e5m2-tensor-comparison-v2.json

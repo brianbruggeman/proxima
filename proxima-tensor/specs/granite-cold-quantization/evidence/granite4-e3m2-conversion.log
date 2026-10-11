@@ -1,0 +1,8 @@
+    Blocking waiting for file lock on build directory
+   Compiling proxima-gguf v0.1.0 (/private/tmp/proxima-granite-main/proxima-gguf)
+   Compiling proxima-tensor v0.1.0 (/private/tmp/proxima-granite-main/proxima-tensor)
+   Compiling proxima-safetensors v0.1.0 (/private/tmp/proxima-granite-main/proxima-safetensors)
+   Compiling proxima-tokenizer v0.1.0 (/private/tmp/proxima-granite-main/proxima-tokenizer)
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-granite-main/proxima-model-interop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 25s
+     Running `/tmp/cargo_target/debug/granite-cold-quantize /private/tmp/proxima-granite4-micro-bf16-hf /private/tmp/granite4-cold-e3m2 e3m2 32768`

@@ -1,0 +1,10 @@
+   Compiling proxima-gguf v0.1.0 (/private/tmp/proxima-granite-main/proxima-gguf)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.54s
+     Running unittests src/lib.rs (/tmp/cargo_target/debug/deps/proxima_gguf-3b0030e3499c8341)
+
+running 2 tests
+test quant::cold_float::tests::bf16_tensor_conversion_rejects_partial_input_and_wrong_output_size ... ok
+test quant::cold_float::tests::bf16_tensor_bytes_convert_to_each_packed_cold_float_format ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 210 filtered out; finished in 0.00s
+
