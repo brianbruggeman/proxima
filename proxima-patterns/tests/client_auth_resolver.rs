@@ -30,8 +30,8 @@ impl SendPipe for Capture {
             .get_str("authorization")
             .map(str::to_string);
         async move {
-            *calls.lock().expect("capture call count") += 1;
-            *seen.lock().expect("capture header") = value;
+            increment(&calls)?;
+            *seen.lock().map_err(poisoned)? = value;
             Ok(Response::new(200))
         }
     }
@@ -55,18 +55,23 @@ impl SendPipe for CountingResolver {
         let calls = self.calls.clone();
         let credential = self.credential.clone();
         async move {
-            *calls.lock().expect("resolver call count") += 1;
+            increment(&calls)?;
             credential.ok_or_else(|| ProximaError::Upstream("resolver failed".into()))
         }
     }
 }
 
-fn request() -> Request<Bytes> {
-    Request::builder()
-        .method("GET")
-        .path("/")
-        .build()
-        .expect("request")
+fn poisoned<Guard>(err: std::sync::PoisonError<Guard>) -> ProximaError {
+    ProximaError::Upstream(format!("test fixture mutex poisoned: {err}"))
+}
+
+fn increment(counter: &Mutex<usize>) -> Result<(), ProximaError> {
+    *counter.lock().map_err(poisoned)? += 1;
+    Ok(())
+}
+
+fn request() -> Result<Request<Bytes>, ProximaError> {
+    Request::builder().method("GET").path("/").build()
 }
 
 #[test]
@@ -90,7 +95,8 @@ fn resolver_backed_client_auth_injects_ephemeral_credential() {
         .into_resolver_pipe(inner, resolver)
         .expect("build resolver-backed auth");
 
-    futures::executor::block_on(async { pipe.call(request()).await.expect("call") });
+    let first_request = request().expect("build request");
+    futures::executor::block_on(async { pipe.call(first_request).await.expect("call") });
 
     assert_eq!(*calls.lock().expect("resolver call count"), 1);
     assert_eq!(*inner_calls.lock().expect("inner call count"), 1);
@@ -120,7 +126,8 @@ fn resolver_backed_client_auth_failure_does_not_dispatch_or_serialize_secret() {
         .into_resolver_pipe(inner, resolver)
         .expect("build resolver-backed auth");
 
-    let outcome = futures::executor::block_on(async { pipe.call(request()).await });
+    let failing_request = request().expect("build request");
+    let outcome = futures::executor::block_on(async { pipe.call(failing_request).await });
 
     assert!(outcome.is_err());
     let diagnostic = format!("{outcome:?}");
