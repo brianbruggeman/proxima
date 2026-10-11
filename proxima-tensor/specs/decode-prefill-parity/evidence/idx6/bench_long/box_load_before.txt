@@ -1,0 +1,11 @@
+23437 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BA
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+ 0:12  up 10 days, 10:16, 3 users, load averages: 9.76 11.88 12.87
+  PID  %CPU COMM
+17029  53.0 /Users/brianbruggeman/.local/bin/user-daemon
+  542  44.0 /usr/libexec/syspolicyd
+  476  28.9 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+54533  18.6 /Applications/iTerm.app/Contents/MacOS/iTerm2
+"Device Utilization %"=0
+"Device Utilization %"=94
+"Device Utilization %"=0

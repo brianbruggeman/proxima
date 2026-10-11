@@ -1,0 +1,40 @@
+            if (tgid == 0u) {
+                route_compaction[0] = running;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint scan_expert = sgitg; scan_expert < experts; scan_expert += sgcount) {
+            uint placed = 0u;
+            for (long scan_base = chunk_begin; scan_base < chunk_end; scan_base += 32l) {
+                long entry_token = scan_base + (long)tiisg;
+                bool live = entry_token < chunk_end;
+                long fetched0 = live ? (long)gather_idx0[u.gather_index_base[0] + entry_token * u.gather_index_strides[0][0]] : (long)-1;
+                fetched0 = live ? max((long)0, min(fetched0, u.gather_extent[0] - 1)) : (long)-1;
+                uint hit = (fetched0 == (long)scan_expert) ? 1u : 0u;
+                uint rank = simd_prefix_exclusive_sum(hit);
+                if (hit != 0u) { route_compaction[list_base + expert_base_tg[scan_expert] + placed + rank] = (uint)entry_token; }
+                placed += simd_sum(hit);
+            }
+        }
+    }
+
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.019s] ( 5/18) omega msl::index_narrowing_tests::a_block_read_that_is_not_an_offset_decode_is_left_alone
+        PASS [   0.019s] ( 6/18) omega msl::index_narrowing_tests::a_q6_k_embedding_table_past_u32_keeps_the_64_bit_block_decode
+        PASS [   0.019s] ( 7/18) omega msl::index_narrowing_tests::a_gathered_f32_lookup_renders_its_offsets_and_fault_check_in_32_bit
+        PASS [   0.019s] ( 8/18) omega msl::index_narrowing_tests::norm_rows::a_hidden_width_norm_row_renders_its_index_arithmetic_in_32_bit_under_the_c32_key
+        PASS [   0.021s] ( 9/18) omega msl::index_narrowing_tests::a_routed_q8_0_expert_projection_divides_its_flat_row_in_unsigned_32_bit
+        PASS [   0.023s] (10/18) omega msl::index_narrowing_tests::norm_rows::a_norm_row_one_past_the_reach_limit_keeps_the_64_bit_body_and_drops_the_key_bit
+        PASS [   0.013s] (11/18) omega msl::index_narrowing_tests::the_body_pass_wraps_nested_uniform_reads_and_drops_the_64_bit_literal_suffix
+        PASS [   0.012s] (12/18) omega msl::index_narrowing_tests::the_captured_gathered_embedding_decodes_its_block_index_in_unsigned_32_bit
+        PASS [   0.012s] (13/18) omega msl::index_narrowing_tests::the_captured_hidden_width_norm_narrows_to_the_recorded_32_bit_kernel
+        PASS [   0.015s] (14/18) omega msl::index_narrowing_tests::the_captured_f32_embedding_lookup_narrows_to_the_recorded_32_bit_kernel
+        PASS [   0.014s] (15/18) omega msl::index_narrowing_tests::the_captured_granite_expert_projection_narrows_only_its_two_prologue_divides
+        PASS [   0.014s] (16/18) omega msl::index_narrowing_tests::the_uniform_struct_keeps_its_64_bit_fields_when_the_body_narrows
+        PASS [   0.016s] (17/18) omega msl::index_narrowing_tests::the_captured_granite_combine_fold_narrows_to_the_recorded_32_bit_kernel
+        PASS [   0.016s] (18/18) omega msl::index_narrowing_tests::the_coordinate_override_set_to_zero_restores_every_family_to_the_64_bit_form
+────────────
+     Summary [   0.040s] 18 tests run: 17 passed, 1 failed, 915 skipped
+        FAIL [   0.018s] ( 4/18) omega msl::index_narrowing_tests::a_routed_expert_projection_with_outputs_past_u32_keeps_the_64_bit_divides
+error: test run failed

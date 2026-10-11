@@ -1,0 +1,40 @@
+        PASS [   0.311s] (943/972) omega::tiled_gemm_grid2d_parity q4_0_grid2d_matches_flattened_gid_with_a_partial_edge_tile
+        PASS [   0.226s] (944/972) omega::tiled_gemm_mm_layout_parity q4_0_dynamic_threadgroup_memory_matches_the_declared_array_on_the_row_major_layout
+        PASS [   0.310s] (945/972) omega::tiled_gemm_mm_layout_parity q4_0_dynamic_threadgroup_memory_matches_the_declared_array_at_the_gemma4_prefill_width
+        PASS [   0.267s] (946/972) omega::tiled_gemm_mm_layout_parity q4_0_dynamic_threadgroup_memory_matches_the_declared_array_with_partial_tiles
+        PASS [   0.271s] (947/972) omega::tiled_gemm_mm_layout_parity q4_0_mm_layout_matches_row_major_at_the_gemma4_prefill_width
+        PASS [   0.318s] (948/972) omega::tiled_gemm_mm_layout_parity q4_0_mm_layout_matches_row_major_combined_with_direct_store
+        PASS [   0.333s] (949/972) omega::tiled_gemm_mm_layout_parity q4_0_mm_layout_matches_row_major_at_the_gemma4_prefill_width_with_the_direct_store_default
+        PASS [   0.118s] (950/972) omega::tiled_gemm_mm_layout_parity q4k_mm_layout_matches_row_major_with_a_full_tile_grid
+        PASS [   0.263s] (951/972) omega::tiled_gemm_mm_layout_parity q4_0_mm_layout_matches_row_major_with_a_full_tile_grid
+        PASS [   0.264s] (952/972) omega::tiled_gemm_mm_layout_parity q4_0_mm_layout_matches_row_major_with_a_partial_feature_tile
+        PASS [   0.231s] (953/972) omega::tiled_gemm_mm_layout_parity q4_0_mm_layout_matches_row_major_with_a_partial_token_tile
+        PASS [   0.350s] (954/972) omega::tiled_gemm_mm_layout_parity q4_0_mm_layout_matches_row_major_on_the_generic_activation_read
+        PASS [   0.277s] (955/972) omega::tiled_gemm_mm_layout_parity q4k_dynamic_threadgroup_memory_matches_the_declared_array_with_partial_tiles
+        PASS [   0.229s] (956/972) omega::tiled_gemm_staging_switches_parity attn_q_all_staging_switches_match_the_f32_oracle_at_a_boundary_token_count
+        PASS [   0.235s] (957/972) omega::tiled_gemm_mm_layout_parity q4k_mm_layout_matches_row_major_with_partial_tiles
+        PASS [   0.247s] (958/972) omega::tiled_gemm_staging_switches_parity attn_q_all_staging_switches_match_the_f32_oracle_at_min_tokens
+        PASS [   0.215s] (959/972) omega::tiled_gemm_wide_weight_stage_parity q4k_wide_weight_stage_matches_default_path_with_a_partial_edge_tile
+        PASS [   0.295s] (960/972) omega::tiled_gemm_wide_weight_stage_parity q4_0_wide_weight_stage_matches_default_path_combined_with_direct_store
+        PASS [   0.310s] (961/972) omega::tiled_gemm_wide_weight_stage_parity q4_0_wide_weight_stage_matches_default_path_at_a_fully_interior_shape
+        PASS [   0.353s] (962/972) omega::tiled_gemm_staging_switches_parity attn_q_all_staging_switches_match_the_f32_oracle_at_prefill_token_count
+        PASS [   0.315s] (963/972) omega::tiled_gemm_staging_switches_parity ffn_gate_all_staging_switches_match_the_f32_oracle_at_a_boundary_token_count
+        PASS [   0.302s] (964/972) omega::tiled_gemm_wide_weight_stage_parity q4_0_wide_weight_stage_matches_default_path_with_a_partial_edge_tile
+        PASS [   0.142s] (965/972) omega::wide_cooperative_reduce_key_collision cooperative_reduce_extents_never_share_a_pipeline_cache_entry
+        PASS [   0.308s] (966/972) omega::tiled_gemm_wide_weight_stage_parity q4k_wide_weight_stage_matches_default_path_at_a_fully_interior_shape
+        PASS [   0.309s] (967/972) omega::training_step_parity a_training_step_runs_on_metal_at_cpu_parity
+        PASS [   0.123s] (968/972) omega::wide_cooperative_reduce_ragged wide_cooperative_reduce_multiply_holds_parity_on_ragged_extents
+        PASS [   0.127s] (969/972) omega::wide_cooperative_reduce_ragged wide_cooperative_reduce_maximum_holds_parity_on_ragged_extents
+        PASS [   0.329s] (970/972) omega::training_step_parity ten_training_steps_rebind_state_and_the_loss_drops_on_metal
+        PASS [   0.174s] (971/972) omega::wide_cooperative_reduce_ragged wide_cooperative_reduce_add_holds_parity_on_ragged_extents
+        PASS [   0.163s] (972/972) omega::wide_cooperative_reduce_ragged wide_cooperative_reduce_minimum_holds_parity_on_ragged_extents
+────────────
+     Summary [  66.428s] 972 tests run: 965 passed, 7 failed, 22 skipped
+        FAIL [   0.013s] (176/972) omega msl::attn_rows_tests::the_float_setting_multiplies_float_fragments_and_names_no_half_type
+        FAIL [   0.013s] (180/972) omega msl::attn_rows_tests::the_half_setting_narrows_the_operands_and_keeps_scores_accumulators_and_softmax_float
+        FAIL [   0.014s] (185/972) omega msl::attn_rows_tests::the_kernel_source_carries_the_tile_decode_the_band_and_the_interleaved_store
+        FAIL [   0.012s] (190/972) omega msl::attn_rows_tests::the_row_tiled_kernel_stages_the_query_tile_once_and_keeps_its_four_barriers
+        FAIL [   0.012s] (191/972) omega msl::attn_rows_tests::the_row_tiled_softmax_is_one_online_pass_per_vector_with_one_max_and_one_sum_reduction
+        FAIL [   0.017s] (198/972) omega msl::attn_rows_tests::the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads
+        FAIL [   0.017s] (701/972) omega::packed_row_blocked_s1_byte_identity single_activation_row_q4k_matvec_emits_byte_identical_msl_to_the_pre_fold_body
+error: test run failed

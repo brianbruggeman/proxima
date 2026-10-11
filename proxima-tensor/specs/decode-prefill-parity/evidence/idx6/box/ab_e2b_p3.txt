@@ -1,0 +1,9 @@
+2026-10-11T04:35:06Z
+23:35  up 10 days,  9:39, 3 users, load averages: 12.40 19.14 16.67
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+  PID  %CPU COMM
+17029  79.4 /Users/brianbruggeman/.local/bin/user-daemon
+  476  46.3 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  542  21.1 /usr/libexec/syspolicyd
+  888   4.8 /usr/libexec/sysmond
+"Device Utilization %"=95

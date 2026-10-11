@@ -1,0 +1,330 @@
+ab capture excludes 0 unreplayable dispatches of 653
+ab capture: step=23 dispatches=653 groups=47
+ab describe sha=082447b59d795711 extents=[1, 1, 512] count=3 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi3_fused_identity_o3__multiply_s0_o2__add_s1_o1__square_root_s2__reciprocal_s3__multiply_s4_o0
+ab describe   binding=0 buffer=0x111a20000 offset=23040 length=1056256 head=[5.452704, 0.31613958, 1.574285, 5.686325]
+ab describe   binding=1 buffer=0x111a20000 offset=23040 length=1056256 head=[5.452704, 0.31613958, 1.574285, 5.686325]
+ab describe   binding=2 buffer=0x111a20000 offset=23040 length=1056256 head=[5.452704, 0.31613958, 1.574285, 5.686325]
+ab describe   binding=3 buffer=0x111b40c00 offset=0 length=4 head=[1e-6]
+ab describe   binding=4 buffer=0x1015b2200 offset=0 length=4 head=[0.001953125]
+ab describe   binding=5 buffer=0x107a88000 offset=2033664 length=2228224 head=[-0.49765947, 1.2857013, 0.25775248, -1.0785267]
+ab describe   uniform_i64=[1, 512, 1, 1, 512, 0, 0, 512, 512, 1, 512, 512, 1, 0, 1, 1, 0, 0, 0, 0, 512, 512, 1, 1, 0, 0, 0, 0, 0, 512, 512, 1] grid_threads=128 threadgroup_width=Some(128)
+ab describe sha=1538b29d937a65fc extents=[1, 512, 512] count=1 entry=omega_reduce_r3_o2_n4_fused_greater_o0_o1__greater_o2_o3__multiply_s0_s1_add_zero
+ab describe   binding=0 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=1 buffer=0x111d3a100 offset=0 length=4 head=[-3.4028235e38]
+ab describe   binding=2 buffer=0x111d3a200 offset=0 length=4 head=[3.4028235e38]
+ab describe   binding=3 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=4 buffer=0x111a20000 offset=1048832 length=1056256 head=[512.0, 512.0, 512.0, 512.0]
+ab describe   uniform_i64=[512, 512, 1, 512, 512, 0, 0, 0, 0, 262144, 512, 1, 0, 0, 0, 0, 0, 0, 262144, 512, 1, 0, 512, 1, 0] grid_threads=65536 threadgroup_width=Some(128)
+ab describe sha=1d83c82f8d3e8b8a extents=[1, 512] count=1 entry=omega_reduce_r2_o1_n1_identity_maximum_negative_infinity
+ab describe   binding=0 buffer=0x111a20000 offset=1048832 length=1056256 head=[512.0, 512.0, 512.0, 512.0]
+ab describe   binding=1 buffer=0x111a20000 offset=1055744 length=1056256 head=[27.054304, 0.0, 0.0, 0.0]
+ab describe   uniform_i64=[1, 512, 1, 512, 0, 512, 1, 0, 1, 0] grid_threads=128 threadgroup_width=Some(128)
+ab describe sha=1e9537b6874ad5da extents=[1, 6144, 1536] count=15 entry=omega_reduce_r3_o2_n2_multiply_add_zero
+ab describe   binding=0 buffer=0x300000000 offset=2304396064 length=3349528576 head=[]
+ab describe   binding=1 buffer=0x111a20000 offset=24832 length=1056256 head=[5.873828, -1.3080356, 8.271282, 14.928149]
+ab describe   binding=2 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   uniform_i64=[1536, 6144, 1, 1536, 6144, 0, 0, 0, 1, 6144, 6144, 1, 0, 0, 1536, 0, 1] grid_threads=12288 threadgroup_width=Some(64)
+ab describe sha=1e9537b6874ad5da extents=[1, 12288, 1536] count=20 entry=omega_reduce_r3_o2_n2_multiply_add_zero
+ab describe   binding=0 buffer=0x300000000 offset=2621628672 length=3349528576 head=[]
+ab describe   binding=1 buffer=0x111a20000 offset=49408 length=1056256 head=[2.946211, 2.659211, -1.4434047, 9.65004]
+ab describe   binding=2 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   uniform_i64=[1536, 12288, 1, 1536, 12288, 0, 0, 0, 1, 12288, 12288, 1, 0, 0, 1536, 0, 1] grid_threads=12288 threadgroup_width=Some(64)
+ab describe sha=1e9e68170e758423 extents=[1, 35, 256] count=1 entry=omega_elementwise_r3_n1_identity
+ab describe   binding=0 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=1 buffer=0x111a20000 offset=72192 length=1056256 head=[11.659735, -1.4184616, -2.1238859, -7.149333]
+ab describe   uniform_i64=[8960, 1, 35, 256, 0, 8960, 256, 1] grid_threads=8960 threadgroup_width=None
+ab describe sha=1e9e68170e758423 extents=[1, 512, 512] count=1 entry=omega_elementwise_r3_n1_identity
+ab describe   binding=0 buffer=0x1115c8000 offset=0 length=1048576 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=1 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   uniform_i64=[262144, 1, 512, 512, 0, 262144, 512, 1] grid_threads=262144 threadgroup_width=None
+ab describe sha=246d0d2ba418d085 extents=[1, 512, 512] count=1 entry=omega_reduce_r3_o2_n1_identity_maximum_negative_infinity
+ab describe   binding=0 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=1 buffer=0x111a20000 offset=1048832 length=1056256 head=[512.0, 512.0, 512.0, 512.0]
+ab describe   uniform_i64=[512, 512, 1, 512, 512, 0, 262144, 512, 1, 0, 512, 1, 0] grid_threads=65536 threadgroup_width=Some(128)
+ab describe sha=250732cff73f5ae9 extents=[1, 512] count=1 entry=omega_reduce_r2_o1_n1_identity_minimum_positive_infinity
+ab describe   binding=0 buffer=0x111a20000 offset=1048832 length=1056256 head=[512.0, 512.0, 512.0, 512.0]
+ab describe   binding=1 buffer=0x111d3a000 offset=0 length=4 head=[236764.0]
+ab describe   uniform_i64=[1, 512, 1, 512, 0, 512, 1, 0, 1, 0] grid_threads=128 threadgroup_width=Some(128)
+ab describe sha=2546b8e3122c324d extents=[1, 1536] count=1 entry=omega_elementwise_r2_n1_identity_g1
+ab describe   binding=0 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=1 buffer=0x1015b1900 offset=0 length=4 head=[0.0]
+ab describe   binding=2 buffer=0x111a20000 offset=6400 length=1056256 head=[-1.4566066, 10.334943, 9.700696, 5.3423247]
+ab describe   uniform_i64=[1536, 1, 1536, 0, 0, 1, 0, 1, 0, 1536, 1] grid_threads=1536 threadgroup_width=None
+ab describe sha=2db0eae895032d0f extents=[1, 1, 256] count=12 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_s0_o3__add_s1_o2__square_root_s2__reciprocal_s3__multiply_s4_o1__multiply_s5_o0
+ab describe   binding=0 buffer=0x111a20000 offset=14848 length=1056256 head=[2.0164073, -2.9977674, 7.4592953, 13.98935]
+ab describe   binding=1 buffer=0x111a20000 offset=14848 length=1056256 head=[2.0164073, -2.9977674, 7.4592953, 13.98935]
+ab describe   binding=2 buffer=0x300000000 offset=2300627744 length=3349528576 head=[]
+ab describe   binding=3 buffer=0x111a20000 offset=14848 length=1056256 head=[2.0164073, -2.9977674, 7.4592953, 13.98935]
+ab describe   binding=4 buffer=0x111b40c00 offset=0 length=4 head=[1e-6]
+ab describe   binding=5 buffer=0x1015b2100 offset=0 length=4 head=[0.00390625]
+ab describe   binding=6 buffer=0x111a20000 offset=16128 length=1056256 head=[4.1764636, 2.7825904, -4.3845716, -6.7702656]
+ab describe   uniform_i64=[1, 256, 1, 1, 256, 0, 0, 256, 256, 1, 256, 256, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 256, 256, 1, 1, 0, 0, 0, 0, 0, 256, 256, 1] grid_threads=64 threadgroup_width=Some(64)
+ab describe sha=2db0eae895032d0f extents=[1, 8, 256] count=28 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_s0_o3__add_s1_o2__square_root_s2__reciprocal_s3__multiply_s4_o1__multiply_s5_o0
+ab describe   binding=0 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=1 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=2 buffer=0x300000000 offset=2304173856 length=3349528576 head=[]
+ab describe   binding=3 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=4 buffer=0x111b40c00 offset=0 length=4 head=[1e-6]
+ab describe   binding=5 buffer=0x1015b2100 offset=0 length=4 head=[0.00390625]
+ab describe   binding=6 buffer=0x111a20000 offset=8448 length=1056256 head=[9.279115, 0.44775036, 4.873838, -2.444217]
+ab describe   uniform_i64=[8, 256, 1, 8, 256, 0, 0, 2048, 256, 1, 2048, 256, 1, 0, 8, 1, 0, 0, 0, 0, 0, 0, 0, 1, 2048, 256, 1, 1, 0, 0, 0, 0, 0, 2048, 256, 1] grid_threads=512 threadgroup_width=Some(64)
+ab describe sha=341760c8f24da71e extents=[1, 1, 512] count=3 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_s0_o3__add_s1_o2__square_root_s2__reciprocal_s3__multiply_s4_o1__multiply_s5_o0
+ab describe   binding=0 buffer=0x111a20000 offset=23040 length=1056256 head=[5.452704, 0.31613958, 1.574285, 5.686325]
+ab describe   binding=1 buffer=0x111a20000 offset=23040 length=1056256 head=[5.452704, 0.31613958, 1.574285, 5.686325]
+ab describe   binding=2 buffer=0x300000000 offset=2382375840 length=3349528576 head=[]
+ab describe   binding=3 buffer=0x111a20000 offset=23040 length=1056256 head=[5.452704, 0.31613958, 1.574285, 5.686325]
+ab describe   binding=4 buffer=0x111b40c00 offset=0 length=4 head=[1e-6]
+ab describe   binding=5 buffer=0x1015b2200 offset=0 length=4 head=[0.001953125]
+ab describe   binding=6 buffer=0x111a20000 offset=25344 length=1056256 head=[-1.4459664, -3.3613324, 11.4642725, 4.247047]
+ab describe   uniform_i64=[1, 512, 1, 1, 512, 0, 0, 512, 512, 1, 512, 512, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 512, 512, 1, 1, 0, 0, 0, 0, 0, 512, 512, 1] grid_threads=128 threadgroup_width=Some(128)
+ab describe sha=341760c8f24da71e extents=[1, 8, 512] count=7 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_s0_o3__add_s1_o2__square_root_s2__reciprocal_s3__multiply_s4_o1__multiply_s5_o0
+ab describe   binding=0 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=1 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=2 buffer=0x300000000 offset=2389461920 length=3349528576 head=[]
+ab describe   binding=3 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=4 buffer=0x111b40c00 offset=0 length=4 head=[1e-6]
+ab describe   binding=5 buffer=0x1015b2200 offset=0 length=4 head=[0.001953125]
+ab describe   binding=6 buffer=0x111a20000 offset=16640 length=1056256 head=[-3.236135, -2.7173455, -0.6556426, 4.411356]
+ab describe   uniform_i64=[8, 512, 1, 8, 512, 0, 0, 4096, 512, 1, 4096, 512, 1, 0, 8, 1, 0, 0, 0, 0, 0, 0, 0, 1, 4096, 512, 1, 1, 0, 0, 0, 0, 0, 4096, 512, 1] grid_threads=1024 threadgroup_width=Some(128)
+ab describe sha=3e45a325e1e689fb extents=[1, 1, 8, 256] count=28 entry=omega_cached_attention_q1_h1_g8_d256_s3f800000_ln511_up0_x4_e1_k1_ds
+ab describe   binding=0 buffer=0x111a20000 offset=16896 length=1056256 head=[3.520407, 1.1058381, 11.157674, 13.145689]
+ab describe   binding=1 buffer=0x111a20000 offset=21248 length=1056256 head=[10.126677, 12.868799, 5.0026584, 5.4887]
+ab describe   binding=2 buffer=0x102800000 offset=246272 length=557056 head=[-0.6299011, -0.09386335, -0.097878896, 0.06605576]
+ab describe   binding=3 buffer=0x103128000 offset=246272 length=557056 head=[0.16075924, -0.08444789, 0.07569575, -0.2185242]
+ab describe   binding=4 buffer=0x102800000 offset=508416 length=557056 head=[0.5664649, -0.23199253, 0.17672676, -0.17130785]
+ab describe   binding=5 buffer=0x103128000 offset=508416 length=557056 head=[-0.07111219, 0.07621226, -0.02653623, -0.14975072]
+ab describe   binding=6 buffer=0x103e00000 offset=492544 length=1114112 head=[0.86098665, 1.42691, 0.2291316, -1.4098846]
+ab describe   binding=7 buffer=0x103e00000 offset=1016832 length=1114112 head=[-1.015061, -0.32596028, -0.96902823, -0.5275828]
+ab describe   binding=8 buffer=0x1015b1800 offset=0 length=4 head=[512.0]
+ab describe   binding=9 buffer=0x111b94000 offset=0 length=264192 head=[0.21235651, 3.1132834, -1.051683, -1.2112356]
+ab describe   uniform_i64=[8, 4, 17] grid_threads=17408 threadgroup_width=Some(128)
+ab describe sha=472d37ba875849e9 extents=[1, 8, 256, 1536] count=28 entry=omega_reduce_r4_o3_n2_multiply_add_zero
+ab describe   binding=0 buffer=0x300000000 offset=2302404384 length=3349528576 head=[]
+ab describe   binding=1 buffer=0x111a20000 offset=8448 length=1056256 head=[9.279115, 0.44775036, 4.873838, -2.444217]
+ab describe   binding=2 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   uniform_i64=[2048, 1536, 1, 8, 256, 1536, 0, 0, 0, 393216, 1536, 1, 1536, 0, 0, 1, 0, 2048, 256, 1, 0] grid_threads=16384 threadgroup_width=Some(64)
+ab describe sha=472d37ba875849e9 extents=[1, 8, 512, 1536] count=7 entry=omega_reduce_r4_o3_n2_multiply_add_zero
+ab describe   binding=0 buffer=0x300000000 offset=2385922976 length=3349528576 head=[]
+ab describe   binding=1 buffer=0x111a20000 offset=16640 length=1056256 head=[-3.236135, -2.7173455, -0.6556426, 4.411356]
+ab describe   binding=2 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   uniform_i64=[4096, 1536, 1, 8, 512, 1536, 0, 0, 0, 786432, 1536, 1, 1536, 0, 0, 1, 0, 4096, 512, 1, 0] grid_threads=32768 threadgroup_width=Some(64)
+ab describe sha=4e8ddd2d2064a11f extents=[1, 1536] count=35 entry=omega_reduce_r2_o1_n2_multiply_add_zero_epi6_fused_identity_o6__multiply_s0_o4__add_s1_o3__square_root_s2__reciprocal_s3__multiply_s4_o2__multiply_s5_o1__add_s6_o0__multiply_s7_o5
+ab describe   binding=0 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=1 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=2 buffer=0x111a20000 offset=6400 length=1056256 head=[-1.4566066, 10.334943, 9.700696, 5.3423247]
+ab describe   binding=3 buffer=0x300000000 offset=2320560960 length=3349528576 head=[]
+ab describe   binding=4 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=5 buffer=0x111b40c00 offset=0 length=4 head=[1e-6]
+ab describe   binding=6 buffer=0x1015b1b00 offset=0 length=4 head=[0.0006510417]
+ab describe   binding=7 buffer=0x300000000 offset=2320548640 length=3349528576 head=[]
+ab describe   binding=8 buffer=0x111a20000 offset=16896 length=1056256 head=[3.520407, 1.1058381, 11.157674, 13.145689]
+ab describe   uniform_i64=[1, 1536, 1, 1536, 0, 0, 1536, 1, 1536, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1536, 1, 0, 1, 1536, 1, 0, 0, 0, 0, 0, 0, 1536, 1] grid_threads=256 threadgroup_width=Some(256)
+ab describe sha=5ec9cb62d6511751 extents=[1, 1536] count=1 entry=omega_elementwise_r2_n2_fused_identity_o0__multiply_s0_o1_g10
+ab describe   binding=0 buffer=0x300000000 offset=1970105120 length=3349528576 head=[]
+ab describe   binding=1 buffer=0x1015b1a00 offset=0 length=4 head=[39.191837]
+ab describe   binding=2 buffer=0x111b37600 offset=0 length=4 head=[5909.0]
+ab describe   binding=3 buffer=0x111a20000 offset=144384 length=1056256 head=[-1.3899584, 1.9996597, -2.8844326, 0.8268974]
+ab describe   uniform_i64=[1536, 1, 1536, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1536, 262144] grid_threads=1536 threadgroup_width=None
+ab describe sha=5ec9cb62d6511751 extents=[1, 8960] count=1 entry=omega_elementwise_r2_n2_fused_identity_o0__multiply_s0_o1_g10
+ab describe   binding=0 buffer=0x300000000 offset=43345696 length=3349528576 head=[]
+ab describe   binding=1 buffer=0x1015b1d00 offset=0 length=4 head=[16.0]
+ab describe   binding=2 buffer=0x111b37600 offset=0 length=4 head=[5909.0]
+ab describe   binding=3 buffer=0x111a20000 offset=36096 length=1056256 head=[1.509945, 5.938763, 6.3688774, 1.9475214]
+ab describe   uniform_i64=[8960, 1, 8960, 0, 0, 0, 1, 0, 0, 0, 1, 0, 8960, 262144] grid_threads=8960 threadgroup_width=None
+ab describe sha=61c90d1b5f81669d extents=[1, 1, 8, 512] count=7 entry=omega_cached_attention_q1_h1_g8_d512_s3f800000_ln9223372036854775808_up0_x4_e1_k1_ds
+ab describe   binding=0 buffer=0x111a20000 offset=33280 length=1056256 head=[-6.570302, 7.65049, -5.4026546, 5.9090395]
+ab describe   binding=1 buffer=0x111a20000 offset=41728 length=1056256 head=[-0.6527554, -3.1775515, 14.216334, -0.49273667]
+ab describe   binding=2 buffer=0x107868000 offset=0 length=1114112 head=[-0.0042592166, -6.4318556e-5, 0.0007715364, 0.00499618]
+ab describe   binding=3 buffer=0x107978000 offset=0 length=1114112 head=[0.013711618, -0.0041130693, -0.0031569193, 0.002695211]
+ab describe   binding=4 buffer=0x107868000 offset=1016832 length=1114112 head=[-0.07781492, -0.059046928, 0.05480034, -0.04774351]
+ab describe   binding=5 buffer=0x107978000 offset=1016832 length=1114112 head=[-0.05736869, 0.0076212524, -0.010496649, -0.047877554]
+ab describe   binding=6 buffer=0x107a88000 offset=0 length=2228224 head=[-0.15292768, 0.23411489, 0.653154, -0.32652783]
+ab describe   binding=7 buffer=0x107a88000 offset=2033664 length=2228224 head=[-0.49765947, 1.2857013, 0.25775248, -1.0785267]
+ab describe   binding=8 buffer=0x111b4a200 offset=0 length=4 head=[993.0]
+ab describe   binding=9 buffer=0x112e3c000 offset=0 length=526336 head=[0.34266758, 0.50144714, -0.5750487, 0.68136644]
+ab describe   uniform_i64=[8, 4, 32] grid_threads=32768 threadgroup_width=Some(128)
+ab describe sha=75290f3908524f59 extents=[1, 1, 8, 256, 1536] count=28 entry=omega_reduce_r5_o2_n2_multiply_add_zero
+ab describe   binding=0 buffer=0x300000000 offset=2300634912 length=3349528576 head=[]
+ab describe   binding=1 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=2 buffer=0x111a20000 offset=8448 length=1056256 head=[9.279115, 0.44775036, 4.873838, -2.444217]
+ab describe   uniform_i64=[1536, 2048, 1, 1536, 1, 8, 256, 0, 0, 0, 2048, 256, 1, 2048, 2048, 2048, 256, 1, 0, 0, 1536, 0, 0, 0, 1] grid_threads=12288 threadgroup_width=Some(64)
+ab describe sha=75290f3908524f59 extents=[1, 1, 8, 512, 1536] count=7 entry=omega_reduce_r5_o2_n2_multiply_add_zero
+ab describe   binding=0 buffer=0x300000000 offset=2382384032 length=3349528576 head=[]
+ab describe   binding=1 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=2 buffer=0x111a20000 offset=16640 length=1056256 head=[-3.236135, -2.7173455, -0.6556426, 4.411356]
+ab describe   uniform_i64=[1536, 4096, 1, 1536, 1, 8, 512, 0, 0, 0, 4096, 512, 1, 4096, 4096, 4096, 512, 1, 0, 0, 1536, 0, 0, 0, 1] grid_threads=12288 threadgroup_width=Some(64)
+ab describe sha=90c72f24786e97a2 extents=[1, 1, 8, 512] count=7 entry=omega_cached_attention_q1_h1_g8_d512_s3f800000_ln9223372036854775808_up0_x4_e1_k1_ds_merge
+ab describe   binding=0 buffer=0x112e3c000 offset=0 length=526336 head=[0.34266758, 0.50144714, -0.5750487, 0.68136644]
+ab describe   binding=1 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   uniform_i64=[8, 32] grid_threads=8192 threadgroup_width=Some(1024)
+ab describe sha=9455e154066f868c extents=[1, 1536] count=70 entry=omega_reduce_r2_o1_n2_multiply_add_zero_epi5_fused_identity_o5__multiply_s0_o4__add_s1_o3__square_root_s2__reciprocal_s3__multiply_s4_o2__multiply_s5_o1__add_s6_o0
+ab describe   binding=0 buffer=0x111a20000 offset=8448 length=1056256 head=[9.279115, 0.44775036, 4.873838, -2.444217]
+ab describe   binding=1 buffer=0x111a20000 offset=8448 length=1056256 head=[9.279115, 0.44775036, 4.873838, -2.444217]
+ab describe   binding=2 buffer=0x111a20000 offset=144384 length=1056256 head=[-1.3899584, 1.9996597, -2.8844326, 0.8268974]
+ab describe   binding=3 buffer=0x300000000 offset=2320548672 length=3349528576 head=[]
+ab describe   binding=4 buffer=0x111a20000 offset=8448 length=1056256 head=[9.279115, 0.44775036, 4.873838, -2.444217]
+ab describe   binding=5 buffer=0x111b40c00 offset=0 length=4 head=[1e-6]
+ab describe   binding=6 buffer=0x1015b1b00 offset=0 length=4 head=[0.0006510417]
+ab describe   binding=7 buffer=0x111a20000 offset=49664 length=1056256 head=[8.257314, -2.6155996, 0.5328796, 1.166287]
+ab describe   uniform_i64=[1, 1536, 1, 1536, 0, 0, 1536, 1, 1536, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1536, 1, 0, 1, 1536, 1, 0, 0, 0, 0, 1536, 1] grid_threads=256 threadgroup_width=Some(256)
+ab describe sha=a869f1c89e467837 extents=[1, 512, 512] count=1 entry=omega_reduce_r3_o2_n5_fused_equal_o0_o1__add_o2_o3__select_s0_s1_o4_minimum_positive_infinity
+ab describe   binding=0 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=1 buffer=0x111a20000 offset=1055744 length=1056256 head=[27.054304, 0.0, 0.0, 0.0]
+ab describe   binding=2 buffer=0x111a20000 offset=1051136 length=1056256 head=[0.0, 1.0, 2.0, 3.0]
+ab describe   binding=3 buffer=0x111a20000 offset=1053440 length=1056256 head=[0.0, 512.0, 1024.0, 1536.0]
+ab describe   binding=4 buffer=0x111d39f00 offset=0 length=4 head=[262144.0]
+ab describe   binding=5 buffer=0x111a20000 offset=1048832 length=1056256 head=[512.0, 512.0, 512.0, 512.0]
+ab describe   uniform_i64=[512, 512, 1, 512, 512, 0, 0, 0, 0, 0, 262144, 512, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 512, 1, 0] grid_threads=65536 threadgroup_width=Some(128)
+ab describe sha=a8782303484f0bea extents=[1, 35, 256] count=1 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi6_fused_identity_o6__identity_o0__multiply_s0_o4__add_s2_o3__square_root_s3__reciprocal_s4__multiply_s5_o2__multiply_s6_o1__add_s1_s7__multiply_s8_o5
+ab describe   binding=0 buffer=0x111a20000 offset=72192 length=1056256 head=[11.659735, -1.4184616, -2.1238859, -7.149333]
+ab describe   binding=1 buffer=0x111a20000 offset=72192 length=1056256 head=[11.659735, -1.4184616, -2.1238859, -7.149333]
+ab describe   binding=2 buffer=0x111a20000 offset=36096 length=1056256 head=[1.509945, 5.938763, 6.3688774, 1.9475214]
+ab describe   binding=3 buffer=0x300000000 offset=43344672 length=3349528576 head=[]
+ab describe   binding=4 buffer=0x111a20000 offset=72192 length=1056256 head=[11.659735, -1.4184616, -2.1238859, -7.149333]
+ab describe   binding=5 buffer=0x111b40c00 offset=0 length=4 head=[1e-6]
+ab describe   binding=6 buffer=0x1015b1f00 offset=0 length=4 head=[0.00390625]
+ab describe   binding=7 buffer=0x1015b2000 offset=0 length=4 head=[0.70710677]
+ab describe   binding=8 buffer=0x111a20000 offset=108288 length=1056256 head=[-6.048824, -4.3340054, 0.37428713, 9.992773]
+ab describe   uniform_i64=[35, 256, 1, 35, 256, 0, 0, 8960, 256, 1, 8960, 256, 1, 0, 35, 1, 0, 0, 0, 0, 0, 0, 0, 8960, 256, 1, 0, 0, 1, 8960, 256, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 8960, 256, 1] grid_threads=2240 threadgroup_width=Some(64)
+ab describe sha=b0d991f9fd66f7c1 extents=[512] count=1 entry=omega_elementwise_r1_n2_multiply
+ab describe   binding=0 buffer=0x111a20000 offset=1048832 length=1056256 head=[512.0, 512.0, 512.0, 512.0]
+ab describe   binding=1 buffer=0x111d39e00 offset=0 length=4 head=[512.0]
+ab describe   binding=2 buffer=0x111a20000 offset=1053440 length=1056256 head=[0.0, 512.0, 1024.0, 1536.0]
+ab describe   uniform_i64=[512, 512, 0, 0, 1, 0] grid_threads=512 threadgroup_width=None
+ab describe sha=b43dd1ec0056d1d2 extents=[1, 512] count=1 entry=omega_reduce_r2_o1_n1_identity_add_zero
+ab describe   binding=0 buffer=0x111a20000 offset=1048832 length=1056256 head=[512.0, 512.0, 512.0, 512.0]
+ab describe   binding=1 buffer=0x111d3a300 offset=0 length=4 head=[262144.0]
+ab describe   uniform_i64=[1, 512, 1, 512, 0, 512, 1, 0, 1, 0] grid_threads=128 threadgroup_width=Some(128)
+ab describe sha=bb074b46ac58a20d extents=[1, 256, 1536] count=35 entry=omega_reduce_r3_o2_n2_multiply_add_zero
+ab describe   binding=0 buffer=0x111a20000 offset=12800 length=1056256 head=[4.444685, 8.245458, -1.2956244, -6.691046]
+ab describe   binding=1 buffer=0x300000000 offset=2320567104 length=3349528576 head=[]
+ab describe   binding=2 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   uniform_i64=[1536, 256, 1, 1536, 256, 0, 0, 256, 1, 0, 0, 1, 256, 0, 1536, 0, 1] grid_threads=12288 threadgroup_width=Some(64)
+ab describe sha=bb074b46ac58a20d extents=[1, 1536, 6144] count=15 entry=omega_reduce_r3_o2_n2_multiply_add_zero
+ab describe   binding=0 buffer=0x111a20000 offset=56064 length=1056256 head=[2.4507003, 8.496411, 3.9177322, 6.515475]
+ab describe   binding=1 buffer=0x300000000 offset=2309704480 length=3349528576 head=[]
+ab describe   binding=2 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   uniform_i64=[6144, 1536, 1, 6144, 1536, 0, 0, 1536, 1, 0, 0, 1, 1536, 0, 6144, 0, 1] grid_threads=49152 threadgroup_width=Some(64)
+ab describe sha=bb074b46ac58a20d extents=[1, 1536, 12288] count=20 entry=omega_reduce_r3_o2_n2_multiply_add_zero
+ab describe   binding=0 buffer=0x111a20000 offset=144384 length=1056256 head=[-1.3899584, 1.9996597, -2.8844326, 0.8268974]
+ab describe   binding=1 buffer=0x300000000 offset=2632245504 length=3349528576 head=[]
+ab describe   binding=2 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   uniform_i64=[12288, 1536, 1, 12288, 1536, 0, 0, 1536, 1, 0, 0, 1, 1536, 0, 12288, 0, 1] grid_threads=98304 threadgroup_width=Some(64)
+ab describe sha=bba01eaf8ddc5e25 extents=[1, 1536] count=71 entry=omega_reduce_r2_o1_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_s0_o3__add_s1_o2__square_root_s2__reciprocal_s3__multiply_s4_o1__multiply_s5_o0
+ab describe   binding=0 buffer=0x111a20000 offset=144384 length=1056256 head=[-1.3899584, 1.9996597, -2.8844326, 0.8268974]
+ab describe   binding=1 buffer=0x111a20000 offset=144384 length=1056256 head=[-1.3899584, 1.9996597, -2.8844326, 0.8268974]
+ab describe   binding=2 buffer=0x300000000 offset=2300628768 length=3349528576 head=[]
+ab describe   binding=3 buffer=0x111a20000 offset=144384 length=1056256 head=[-1.3899584, 1.9996597, -2.8844326, 0.8268974]
+ab describe   binding=4 buffer=0x111b40c00 offset=0 length=4 head=[1e-6]
+ab describe   binding=5 buffer=0x1015b1b00 offset=0 length=4 head=[0.0006510417]
+ab describe   binding=6 buffer=0x111a20000 offset=8448 length=1056256 head=[9.279115, 0.44775036, 4.873838, -2.444217]
+ab describe   uniform_i64=[1, 1536, 1, 1536, 0, 0, 1536, 1, 1536, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1536, 1, 0, 0, 0, 0, 1536, 1] grid_threads=256 threadgroup_width=Some(256)
+ab describe sha=bc57572aa4117aa8 extents=[1, 1536, 6144] count=15 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi9_fused_identity_o9__multiply_o5_o6__multiply_s1_o4__multiply_s2_o3__add_s3_o2__multiply_s4_o1__tanh_s5__add_s6_o0__multiply_o7_o8__multiply_s7_s8__multiply_s0_s9
+ab describe   binding=0 buffer=0x111a20000 offset=56064 length=1056256 head=[2.4507003, 8.496411, 3.9177322, 6.515475]
+ab describe   binding=1 buffer=0x300000000 offset=2315019040 length=3349528576 head=[]
+ab describe   binding=2 buffer=0x1015b1c00 offset=0 length=4 head=[1.0]
+ab describe   binding=3 buffer=0x1015b2500 offset=0 length=4 head=[0.7978846]
+ab describe   binding=4 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=5 buffer=0x1015b2400 offset=0 length=4 head=[0.044715]
+ab describe   binding=6 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=7 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=8 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=9 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=10 buffer=0x1015b2300 offset=0 length=4 head=[0.5]
+ab describe   binding=11 buffer=0x111a20000 offset=24832 length=1056256 head=[5.873828, -1.3080356, 8.271282, 14.928149]
+ab describe   uniform_i64=[6144, 1536, 1, 6144, 1536, 0, 0, 1536, 1, 0, 0, 1, 1536, 0, 6144, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6144, 1, 0, 0, 6144, 1, 6144, 1, 6144, 1, 6144, 1, 0, 0] grid_threads=49152 threadgroup_width=Some(64)
+ab describe sha=bc57572aa4117aa8 extents=[1, 1536, 12288] count=20 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi9_fused_identity_o9__multiply_o5_o6__multiply_s1_o4__multiply_s2_o3__add_s3_o2__multiply_s4_o1__tanh_s5__add_s6_o0__multiply_o7_o8__multiply_s7_s8__multiply_s0_s9
+ab describe   binding=0 buffer=0x111a20000 offset=144384 length=1056256 head=[-1.3899584, 1.9996597, -2.8844326, 0.8268974]
+ab describe   binding=1 buffer=0x300000000 offset=2642868480 length=3349528576 head=[]
+ab describe   binding=2 buffer=0x1015b1c00 offset=0 length=4 head=[1.0]
+ab describe   binding=3 buffer=0x111d32700 offset=0 length=4 head=[0.7978846]
+ab describe   binding=4 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=5 buffer=0x111d32600 offset=0 length=4 head=[0.044715]
+ab describe   binding=6 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=7 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=8 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=9 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   binding=10 buffer=0x111d32500 offset=0 length=4 head=[0.5]
+ab describe   binding=11 buffer=0x111a20000 offset=49408 length=1056256 head=[2.946211, 2.659211, -1.4434047, 9.65004]
+ab describe   uniform_i64=[12288, 1536, 1, 12288, 1536, 0, 0, 1536, 1, 0, 0, 1, 1536, 0, 12288, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12288, 1, 0, 0, 12288, 1, 12288, 1, 12288, 1, 12288, 1, 0, 0] grid_threads=98304 threadgroup_width=Some(64)
+ab describe sha=c7081f69b4e01579 extents=[1, 1, 128] count=12 entry=omega_elementwise_twin_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_fused_multiply_o0_o3__multiply_o2_o1__subtract_s0_s1
+ab describe   binding=0 buffer=0x1015b1000 offset=0 length=512 head=[0.96722764, 0.9090473, 0.62645525, -0.6178171]
+ab describe   binding=1 buffer=0x111a20000 offset=16128 length=1056256 head=[4.1764636, 2.7825904, -4.3845716, -6.7702656]
+ab describe   binding=2 buffer=0x1015b1200 offset=0 length=512 head=[0.25391084, 0.41669288, -0.7794574, 0.7863218]
+ab describe   binding=3 buffer=0x111a20000 offset=16128 length=1056256 head=[4.1764636, 2.7825904, -4.3845716, -6.7702656]
+ab describe   binding=4 buffer=0x103128000 offset=508416 length=557056 head=[-0.07111219, 0.07621226, -0.02653623, -0.14975072]
+ab describe   binding=6 buffer=0x102800000 offset=508416 length=557056 head=[0.5664649, -0.23199253, 0.17672676, -0.17130785]
+ab describe   uniform_i64=[128, 1, 1, 128, 0, 128, 0, 0, 128, 0, 1, 256, 256, 1, 128, 0, 1, 256, 256, 1] grid_threads=128 threadgroup_width=None
+ab describe sha=c7081f69b4e01579 extents=[1, 1, 256] count=3 entry=omega_elementwise_twin_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_fused_multiply_o0_o3__multiply_o2_o1__subtract_s0_s1
+ab describe   binding=0 buffer=0x1015b1400 offset=0 length=1024 head=[0.96722764, -0.0756895, 0.6902272, -0.86966145]
+ab describe   binding=1 buffer=0x111a20000 offset=25344 length=1056256 head=[-1.4459664, -3.3613324, 11.4642725, 4.247047]
+ab describe   binding=2 buffer=0x111b82900 offset=0 length=1024 head=[0.25391084, -0.9971314, -0.7235927, 0.49364865]
+ab describe   binding=3 buffer=0x111a20000 offset=25344 length=1056256 head=[-1.4459664, -3.3613324, 11.4642725, 4.247047]
+ab describe   binding=4 buffer=0x107978000 offset=1016832 length=1114112 head=[-0.05736869, 0.0076212524, -0.010496649, -0.047877554]
+ab describe   binding=6 buffer=0x107868000 offset=1016832 length=1114112 head=[-0.07781492, -0.059046928, 0.05480034, -0.04774351]
+ab describe   uniform_i64=[256, 1, 1, 256, 0, 256, 0, 0, 256, 0, 1, 512, 512, 1, 256, 0, 1, 512, 512, 1] grid_threads=256 threadgroup_width=None
+ab describe sha=d3cd141198f4aa4f extents=[1, 1, 256, 1536] count=24 entry=omega_reduce_r4_o3_n2_multiply_add_zero
+ab describe   binding=0 buffer=0x300000000 offset=2300406560 length=3349528576 head=[]
+ab describe   binding=1 buffer=0x111a20000 offset=8448 length=1056256 head=[9.279115, 0.44775036, 4.873838, -2.444217]
+ab describe   binding=2 buffer=0x111a20000 offset=14848 length=1056256 head=[2.0164073, -2.9977674, 7.4592953, 13.98935]
+ab describe   uniform_i64=[256, 1536, 1, 1, 256, 1536, 0, 0, 0, 393216, 1536, 1, 1536, 0, 0, 1, 0, 256, 256, 1, 0] grid_threads=2048 threadgroup_width=Some(64)
+ab describe sha=d3cd141198f4aa4f extents=[1, 1, 512, 1536] count=6 entry=omega_reduce_r4_o3_n2_multiply_add_zero
+ab describe   binding=0 buffer=0x300000000 offset=2381933472 length=3349528576 head=[]
+ab describe   binding=1 buffer=0x111a20000 offset=16640 length=1056256 head=[-3.236135, -2.7173455, -0.6556426, 4.411356]
+ab describe   binding=2 buffer=0x111a20000 offset=23040 length=1056256 head=[5.452704, 0.31613958, 1.574285, 5.686325]
+ab describe   uniform_i64=[512, 1536, 1, 1, 512, 1536, 0, 0, 0, 786432, 1536, 1, 1536, 0, 0, 1, 0, 512, 512, 1, 0] grid_threads=4096 threadgroup_width=Some(64)
+ab describe sha=dbbd52de4f2ab6f7 extents=[1, 1536, 256] count=35 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi5_fused_identity_o5__identity_o0__multiply_s0_s0__multiply_s0_s2__multiply_s3_o3__add_s0_s4__multiply_s5_o2__tanh_s6__add_s7_o1__multiply_s0_o4__multiply_s8_s9__multiply_s1_s10
+ab describe   binding=0 buffer=0x111a20000 offset=6400 length=1056256 head=[-1.4566066, 10.334943, 9.700696, 5.3423247]
+ab describe   binding=1 buffer=0x300000000 offset=2320327456 length=3349528576 head=[]
+ab describe   binding=2 buffer=0x111a20000 offset=108288 length=1056256 head=[-6.048824, -4.3340054, 0.37428713, 9.992773]
+ab describe   binding=3 buffer=0x1015b1c00 offset=0 length=4 head=[1.0]
+ab describe   binding=4 buffer=0x1015b2800 offset=0 length=4 head=[0.7978846]
+ab describe   binding=5 buffer=0x1015b2700 offset=0 length=4 head=[0.044715]
+ab describe   binding=6 buffer=0x1015b2600 offset=0 length=4 head=[0.5]
+ab describe   binding=7 buffer=0x111a20000 offset=12800 length=1056256 head=[4.444685, 8.245458, -1.2956244, -6.691046]
+ab describe   uniform_i64=[256, 1536, 1, 256, 1536, 0, 0, 1536, 1, 0, 0, 1, 1536, 0, 256, 0, 1, 0, 0, 0, 0, 0, 8960, 1, 0, 0, 0, 0, 0, 0, 0, 0] grid_threads=2048 threadgroup_width=Some(64)
+ab describe sha=ddac74cedd8d4169 extents=[1, 1536, 8960] count=1 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi1_fused_identity_o1__multiply_s0_o0
+ab describe   binding=0 buffer=0x111a20000 offset=144384 length=1056256 head=[-1.3899584, 1.9996597, -2.8844326, 0.8268974]
+ab describe   binding=1 buffer=0x300000000 offset=15819552 length=3349528576 head=[]
+ab describe   binding=2 buffer=0x1015b1e00 offset=0 length=4 head=[0.025515517]
+ab describe   binding=3 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   uniform_i64=[8960, 1536, 1, 8960, 1536, 0, 0, 1536, 1, 0, 0, 1, 1536, 0, 8960, 0, 1, 0, 0, 0] grid_threads=2293760 threadgroup_width=Some(256)
+ab describe sha=df362c2dabf6a112 extents=[1, 1, 8, 256] count=28 entry=omega_cached_attention_q1_h1_g8_d256_s3f800000_ln511_up0_x4_e1_k1_ds_merge
+ab describe   binding=0 buffer=0x111b94000 offset=0 length=264192 head=[0.21235651, 3.1132834, -1.051683, -1.2112356]
+ab describe   binding=1 buffer=0x111a20000 offset=0 length=1056256 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   uniform_i64=[8, 17] grid_threads=8192 threadgroup_width=Some(1024)
+ab describe sha=e5382c4dcb2d15cd extents=[1, 1, 256] count=12 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi3_fused_identity_o3__multiply_s0_o2__add_s1_o1__square_root_s2__reciprocal_s3__multiply_s4_o0
+ab describe   binding=0 buffer=0x111a20000 offset=14848 length=1056256 head=[2.0164073, -2.9977674, 7.4592953, 13.98935]
+ab describe   binding=1 buffer=0x111a20000 offset=14848 length=1056256 head=[2.0164073, -2.9977674, 7.4592953, 13.98935]
+ab describe   binding=2 buffer=0x111a20000 offset=14848 length=1056256 head=[2.0164073, -2.9977674, 7.4592953, 13.98935]
+ab describe   binding=3 buffer=0x111b40c00 offset=0 length=4 head=[1e-6]
+ab describe   binding=4 buffer=0x1015b2100 offset=0 length=4 head=[0.00390625]
+ab describe   binding=5 buffer=0x103e00000 offset=1016832 length=1114112 head=[-1.015061, -0.32596028, -0.96902823, -0.5275828]
+ab describe   uniform_i64=[1, 256, 1, 1, 256, 0, 0, 256, 256, 1, 256, 256, 1, 0, 1, 1, 0, 0, 0, 0, 256, 256, 1, 1, 0, 0, 0, 0, 0, 256, 256, 1] grid_threads=64 threadgroup_width=Some(64)
+ab describe sha=e95858e3d93b76d0 extents=[1, 8, 128] count=28 entry=omega_elementwise_twin_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_fused_multiply_o0_o3__multiply_o2_o1__add_s0_s1
+ab describe   binding=0 buffer=0x1015b1000 offset=0 length=512 head=[0.96722764, 0.9090473, 0.62645525, -0.6178171]
+ab describe   binding=1 buffer=0x111a20000 offset=8448 length=1056256 head=[9.279115, 0.44775036, 4.873838, -2.444217]
+ab describe   binding=2 buffer=0x1015b1200 offset=0 length=512 head=[0.25391084, 0.41669288, -0.7794574, 0.7863218]
+ab describe   binding=3 buffer=0x111a20000 offset=8448 length=1056256 head=[9.279115, 0.44775036, 4.873838, -2.444217]
+ab describe   binding=4 buffer=0x111a20000 offset=16896 length=1056256 head=[3.520407, 1.1058381, 11.157674, 13.145689]
+ab describe   binding=6 buffer=0x111a20000 offset=21248 length=1056256 head=[10.126677, 12.868799, 5.0026584, 5.4887]
+ab describe   uniform_i64=[1024, 1, 8, 128, 0, 0, 0, 128, 128, 0, 1, 2048, 256, 1, 128, 0, 1, 2048, 256, 1] grid_threads=1024 threadgroup_width=None
+ab describe sha=e95858e3d93b76d0 extents=[1, 8, 256] count=7 entry=omega_elementwise_twin_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_fused_multiply_o0_o3__multiply_o2_o1__add_s0_s1
+ab describe   binding=0 buffer=0x1015b1400 offset=0 length=1024 head=[0.96722764, -0.0756895, 0.6902272, -0.86966145]
+ab describe   binding=1 buffer=0x111a20000 offset=16640 length=1056256 head=[-3.236135, -2.7173455, -0.6556426, 4.411356]
+ab describe   binding=2 buffer=0x111b82900 offset=0 length=1024 head=[0.25391084, -0.9971314, -0.7235927, 0.49364865]
+ab describe   binding=3 buffer=0x111a20000 offset=16640 length=1056256 head=[-3.236135, -2.7173455, -0.6556426, 4.411356]
+ab describe   binding=4 buffer=0x111a20000 offset=33280 length=1056256 head=[-6.570302, 7.65049, -5.4026546, 5.9090395]
+ab describe   binding=6 buffer=0x111a20000 offset=41728 length=1056256 head=[-0.6527554, -3.1775515, 14.216334, -0.49273667]
+ab describe   uniform_i64=[2048, 1, 8, 256, 0, 0, 0, 256, 256, 0, 1, 4096, 512, 1, 256, 0, 1, 4096, 512, 1] grid_threads=2048 threadgroup_width=None
+ab describe sha=ea1f084ac28a8e06 extents=[512] count=2 entry=omega_iota_r1
+ab describe   binding=0 buffer=0x111a20000 offset=1048832 length=1056256 head=[512.0, 512.0, 512.0, 512.0]
+ab describe   uniform_i64=[512] grid_threads=512 threadgroup_width=None
+ab describe sha=fc0d2223a974e455 extents=[1, 1536, 262144] count=1 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi2_fused_identity_o2__divide_s0_o1__tanh_s1__multiply_s2_o0
+ab describe   binding=0 buffer=0x111a20000 offset=6400 length=1056256 head=[-1.4566066, 10.334943, 9.700696, 5.3423247]
+ab describe   binding=1 buffer=0x300000000 offset=1970105120 length=3349528576 head=[]
+ab describe   binding=2 buffer=0x111d39d00 offset=0 length=4 head=[30.0]
+ab describe   binding=3 buffer=0x111d39d00 offset=0 length=4 head=[30.0]
+ab describe   binding=4 buffer=0x1115c8000 offset=0 length=1048576 head=[-5.7816477, 6.06802, 6.037148, -4.885517]
+ab describe   uniform_i64=[262144, 1536, 1, 262144, 1536, 0, 0, 1536, 1, 0, 0, 1, 1536, 0, 262144, 0, 1, 0, 0, 0, 0, 0, 0] grid_threads=4194304 threadgroup_width=Some(64)
+ab cell label=process wall_ms=3459.036 cpu_ms=2258.549 cpu_pct=65.3 rss_peak_mb=3440.8 footprint_mb=109.3 gpu_alloc_mb=3246.7 load_before=15.12 load_after=14.31

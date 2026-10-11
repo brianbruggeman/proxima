@@ -1,0 +1,18 @@
+2026-10-11T04:41:39Z
+23:41  up 10 days,  9:45, 3 users, load averages: 17.67 18.44 16.87
+25375 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null 
+sleep 2; echo started' < /dev/null && pwd -P >| /tmp/claude-3cdf-cwd
+25376 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build --release -p proxima-model-in
+29797 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+29822 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name proxima_telemetry --ed
+30154 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+30160 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name rcgen --edition=2021 /
+30216 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/
+30217 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name rustls --edition=2021 
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+  PID  %CPU COMM
+29822  98.7 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+30160  97.8 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+17029  70.9 /Users/brianbruggeman/.local/bin/user-daemon
+  476  34.6 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+"Device Utilization %"=80

@@ -1,0 +1,14 @@
+25801 /bin/zsh -c source /Users/brianbruggeman/.claude/shell-snapshots/snapshot-zsh-1791456416367-pmt9sz.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BA
+41084 /usr/bin/time -l /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/pf7/bin/decode_gbps_baseline_tip2_instr
+41085 /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/pf7/bin/decode_gbps_baseline_tip2_instr
+41135 /Users/brianbruggeman/.wakatime/wakatime-cli --entity ◐ cargo-val Windows completed-read seam --entity-type app --category coding --plugin iTerm2/3.6.11-3
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+ 0:16  up 10 days, 10:20, 3 users, load averages: 15.44 12.62 12.73
+  PID  %CPU COMM
+17029  62.7 /Users/brianbruggeman/.local/bin/user-daemon
+  476  40.8 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+54533  35.2 /Applications/iTerm.app/Contents/MacOS/iTerm2
+41085  34.6 /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/pf7/bin/decode_gbps_baseline_tip2_instr
+"Device Utilization %"=94
+"Device Utilization %"=0
+"Device Utilization %"=0

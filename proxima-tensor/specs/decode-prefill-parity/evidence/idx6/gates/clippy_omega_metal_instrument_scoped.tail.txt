@@ -1,0 +1,40 @@
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+    --> omega/src/metal/execute_and_hazards.rs:2096:21
+     |
+2096 |         let cache = allocate_placed_buffer(16).expect("allocates BF16 cache bytes");
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+    --> omega/src/metal/execute_and_hazards.rs:2115:22
+     |
+2115 |         let buffer = allocate_placed_buffer(16).expect("allocates BF8 fixture bytes");
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+    --> omega/src/metal/execute_and_hazards.rs:2157:23
+     |
+2157 |         let staging = allocate_placed_buffer(16).expect("allocates f32 staging bytes");
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+    --> omega/src/metal/execute_and_hazards.rs:2158:21
+     |
+2158 |         let cache = allocate_placed_buffer(8).expect("allocates BF8 cache bytes");
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#expect_used
+
+error: could not compile `omega` (lib test) due to 6 previous errors

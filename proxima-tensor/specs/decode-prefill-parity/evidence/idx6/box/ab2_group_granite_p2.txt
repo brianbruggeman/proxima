@@ -1,0 +1,9 @@
+2026-10-11T04:40:39Z
+23:40  up 10 days,  9:44, 3 users, load averages: 19.24 18.96 16.95
+42443 /Users/brianbruggeman/.cargo/bin/sccache
+  PID  %CPU COMM
+17029  62.9 /Users/brianbruggeman/.local/bin/user-daemon
+  476  42.6 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+54647  10.4 claude
+  762   7.9 /Applications/Firefox.app/Contents/MacOS/firefox
+"Device Utilization %"=95

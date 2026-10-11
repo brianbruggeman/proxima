@@ -1,0 +1,17 @@
+2026-10-11T05:47:46Z
+ 0:47  up 10 days, 10:51, 3 users, load averages: 4.53 9.86 16.25
+waitfree() { for i in $(seq 1 30); do [ -d $LOCK ] || return 0; sleep 60; done; echo LOCK_TIMEOUT; return 1; }
+waitfree && cargo nextest run -p omega --features metal,instrument --cargo-profile gate --no-fail-fast > $L/g5_omega_ins
+waitfree && cargo nextest run -p omega --features metal,metal-attn-variants --cargo-profile gate --no-fail-fast > $L/g5_
+waitfree && cargo nextest run -p omega --features metal,metal-buffer-pool,metal-moe-mul-mat-id,moe-topk-fusion,top-fract
+waitfree && cargo nextest run -p omega --features metal,metal-q4k-split-k --cargo-profile gate --no-fail-fast > $L/g5_om
+abrun() { cell=$1; p=$2; shift 2; d=$X/raw/cellB/$cell; mkdir -p $d; box_sample $d/box_before_p$p.txt; env -i HOME=$HOME
+begin_cell 900 240 || exit 1
+for p in 1 2 3; do abrun b3 $p; done
+abrun b1ref_b32 1 AB_ROUNDS=3 AB_REFERENCE=209d743dffeea538.b32
+rmdir $BL/gpu.lock 2>&1 | tail -1; ls $X/raw/cellB/b3 | head -3' < /dev/null && pwd -P >| /tmp/claude-5a59-cwd
+  PID  %CPU COMM
+17029  60.2 /Users/brianbruggeman/.local/bin/user-daemon
+  542  55.6 /usr/libexec/syspolicyd
+  476  27.7 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+"Device Utilization %"=95
