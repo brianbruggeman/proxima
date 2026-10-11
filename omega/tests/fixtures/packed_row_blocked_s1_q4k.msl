@@ -848,6 +848,31 @@ static inline float bf16_element(device const uchar *block, uint index) {
     return as_type<float>(bits);
 }
 
+
+static inline float bf8_e5m2_element(device const uchar *payload, uint index) {
+    (void)index;
+    uchar encoded = payload[0];
+    float sign = (encoded & 0x80u) == 0u ? 1.0f : -1.0f;
+    uint exponent = (uint)((encoded >> 2u) & 0x1fu);
+    uint fraction = (uint)(encoded & 0x03u);
+    if (exponent == 0u) {
+        return sign * (float)fraction * 0.0000152587890625f;
+    }
+    return sign * (1.0f + (float)fraction * 0.25f) * exp2((float)exponent - 15.0f);
+}
+
+static inline float bf4_e2m1_element(device const uchar *payload, uint index) {
+    uchar packed = payload[0];
+    uchar encoded = (index & 1u) == 0u ? (packed & 0x0fu) : (packed >> 4u);
+    float sign = (encoded & 0x08u) == 0u ? 1.0f : -1.0f;
+    uint exponent = (uint)((encoded >> 1u) & 0x03u);
+    uint fraction = (uint)(encoded & 0x01u);
+    if (exponent == 0u) {
+        return sign * (float)fraction * 0.5f;
+    }
+    return sign * (1.0f + (float)fraction * 0.5f) * exp2((float)exponent - 1.0f);
+}
+
 struct Uniforms {
     long output_total;
     long reduction_total;

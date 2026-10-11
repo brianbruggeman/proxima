@@ -490,8 +490,8 @@ fn the_kernel_source_carries_the_tile_decode_the_band_and_the_interleaved_store(
                     "long new_blocks = (last_split && mma_end > new_start) ? (mma_end - new_start + block - 1L) / block : 0L;",
                     "long tail_steps = (last_split && new_end > total_aligned && new_first < total_rows) ? 1L : 0L;",
                     "long slice = ((((band + splits - 1L) / splits) + split_keys - 1L) / split_keys) * split_keys;",
-                    "simdgroup_multiply_accumulate(scores[group][vector_block], query_even[step_index], key_even_tile[group][step_index], scores[group][vector_block]);",
-                    "simdgroup_multiply_accumulate(scores[group][vector_block], query_odd[step_index], key_odd_tile[group][step_index], scores[group][vector_block]);",
+                    "simdgroup_multiply_accumulate(scores[group][vector_slot], query_even[step_index], key_even_tile[group][step_index], scores[group][vector_slot]);",
+                    "simdgroup_multiply_accumulate(scores[group][vector_slot], query_odd[step_index], key_odd_tile[group][step_index], scores[group][vector_slot]);",
                     "(key - live - query_row) >= cached_lower",
                     "relative <= new_upper && relative >= cached_lower",
                     "accumulated[slot][vector_block].thread_elements()[0] *= row_scale;",
@@ -1030,9 +1030,10 @@ fn the_row_tiled_softmax_is_one_online_pass_per_vector_with_one_max_and_one_sum_
     ] {
         assert!(source.contains(required), "missing `{required}`");
     }
-    assert!(
-        !source.contains("vectors_per_simdgroup"),
-        "the vector loop is not unrolled by turn: the unrolled form measured 122 us slower per op at the prompt shape"
+    assert_eq!(
+        source.matches("vectors_per_simdgroup").count(),
+        source.matches("score_vectors_per_simdgroup").count(),
+        "the softmax vector loop is not unrolled by turn (the unrolled form measured 122 us slower per op at the prompt shape); the only per-simdgroup vector count is the score and weight register extent"
     );
 }
 
@@ -1050,10 +1051,25 @@ fn the_row_tiled_kernel_stages_the_query_tile_once_and_keeps_its_four_barriers()
     ] {
         assert!(source.contains(required), "missing `{required}`");
     }
+    assert!(
+        source.contains(
+            "constexpr bool shared_k = false; constexpr bool shared_v = false; constexpr bool query_parallel_rows = false; constexpr bool prefetch_next_block = false;"
+        ),
+        "the default sizing renders the shared-K, shared-V and prefetch variants off"
+    );
     assert_eq!(
         source.matches("threadgroup_barrier(").count(),
-        4,
-        "one after the setup and the staging, three per key block"
+        9,
+        "four live barriers plus five that sit in the shared-K, shared-V and prefetch variants"
+    );
+    let live_barriers = source
+        .lines()
+        .filter(|line| line.trim_start().starts_with("threadgroup_barrier("))
+        .filter(|line| line.len() - line.trim_start().len() <= 8)
+        .count();
+    assert_eq!(
+        live_barriers, 4,
+        "one after the setup and the staging, three per key block, outside every variant branch"
     );
     let setup_end = source
         .find("threadgroup_barrier(")
@@ -1502,8 +1518,8 @@ fn the_float_setting_multiplies_float_fragments_and_names_no_half_type() {
         let op = attention_rows_op(9, groups, head_dim, 512, 971, SLIDING_LOWER);
         let source = rendered_with_operands(&op, false);
         for declaration in [
-            "simdgroup_float8x8 key_even_tile[key_tiles_per_group][depth_unroll];",
-            "simdgroup_float8x8 key_odd_tile[key_tiles_per_group][depth_unroll];",
+            "simdgroup_float8x8 key_even_tile[key_tiles_per_simdgroup][depth_unroll];",
+            "simdgroup_float8x8 key_odd_tile[key_tiles_per_simdgroup][depth_unroll];",
             "simdgroup_float8x8 query_even[depth_unroll];",
             "simdgroup_float8x8 weights[tile_blocks];",
             "simdgroup_float8x8 value = value_float;",
@@ -1525,8 +1541,8 @@ fn the_half_setting_narrows_the_operands_and_keeps_scores_accumulators_and_softm
         let op = attention_rows_op(9, groups, head_dim, 512, 971, SLIDING_LOWER);
         let source = rendered_with_operands(&op, true);
         for declaration in [
-            "simdgroup_half8x8 key_even_tile[key_tiles_per_group][depth_unroll];",
-            "simdgroup_half8x8 key_odd_tile[key_tiles_per_group][depth_unroll];",
+            "simdgroup_half8x8 key_even_tile[key_tiles_per_simdgroup][depth_unroll];",
+            "simdgroup_half8x8 key_odd_tile[key_tiles_per_simdgroup][depth_unroll];",
             "simdgroup_half8x8 query_even[depth_unroll];",
             "simdgroup_half8x8 query_odd[depth_unroll];",
             "simdgroup_half8x8 weights[tile_blocks];",
@@ -1543,7 +1559,7 @@ fn the_half_setting_narrows_the_operands_and_keeps_scores_accumulators_and_softm
         }
         assert!(
             source
-                .contains("simdgroup_multiply_accumulate(scores[group][vector_block], query_even")
+                .contains("simdgroup_multiply_accumulate(scores[group][vector_slot], query_even")
         );
         assert!(source.contains("simdgroup_multiply_accumulate(accumulated[slot][vector_block], weights[vector_block], value"));
     }
@@ -1571,7 +1587,16 @@ fn the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads(
                 "threadgroup half shared_value",
                 "threadgroup float shared_value",
             )
+            .replace(
+                "threadgroup half prefetched_key_",
+                "threadgroup float prefetched_key_",
+            )
+            .replace(
+                "threadgroup half prefetched_value",
+                "threadgroup float prefetched_value",
+            )
             .replace("omega_load_shared_half", "omega_load_shared_float")
+            .replace("omega_load_prefetched_half", "omega_load_shared_float")
             .replace("simdgroup_half8x8", "simdgroup_float8x8")
             .replace("narrow_fragment(value_float)", "value_float")
             .replace("simdgroup_half8x8 key_", "simdgroup_float8x8 key_")
