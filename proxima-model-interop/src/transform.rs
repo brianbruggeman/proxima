@@ -169,3 +169,8 @@ mod mlx_config;
 pub use mlx_config::{copy_config, hf_config_bytes, sliding_pattern_hparams};
 #[cfg(feature = "std")]
 pub use mlx_names::{Layout, MlxNames, SANDWICH_NORM_LAYOUT, STANDARD_LAYOUT, dense_names};
+
+#[cfg(feature = "std")]
+mod mlx_plain;
+#[cfg(feature = "std")]
+pub use mlx_plain::{DEFAULT_PLAIN_DTYPE, PlainTensor, export_plain, export_plain_tensor};
