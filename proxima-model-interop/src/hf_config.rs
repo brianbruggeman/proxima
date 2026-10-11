@@ -121,6 +121,7 @@ pub struct HfConfig {
 /// (`crate::transform`) draws its emitted keys from, so reader and writer
 /// cannot name a field differently. `num_local_experts` is the alias of
 /// `num_experts` the reader also accepts.
+#[cfg(feature = "std")]
 pub(crate) const HF_CONFIG_KEYS: [&str; 16] = [
     "model_type",
     "architectures",
