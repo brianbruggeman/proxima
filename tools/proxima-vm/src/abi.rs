@@ -124,6 +124,8 @@ pub fn decode_hypercall(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    use alloc::string::ToString;
+
     use super::*;
 
     /// `ChildRequest::Read { handle: 0, max_bytes: 256, offset: 0 }`,
