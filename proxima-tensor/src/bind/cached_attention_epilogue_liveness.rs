@@ -660,10 +660,11 @@ pub(super) fn reads_reduce_output_identically(
 /// axis in `output_axes` keeps its own stride at its real position, every
 /// OTHER axis (the reduce's own reduced axis, among others) gets stride `0`
 /// — a genuine broadcast, since the fold's OWN result never varied along
-/// that axis in the first place. A no-op in the common case
-/// (`layout.strides.len() == full_rank` already) because a PLAIN, non-
-/// broadcast prior epilogue's own operands are already recorded at the same
-/// rank the fold's `extents` always carries.
+/// that axis in the first place. A no-op when
+/// `layout.strides.len() == full_rank` already. Only a BROADCAST epilogue
+/// walks `full_rank` coordinates; a PLAIN one walks `output_axes`'s own
+/// coordinates, so [`compose_reduce_epilogue`] extends an inner operand only
+/// for a consumer that spans `full_rank`.
 #[cfg(feature = "reduce-epilogue-fusion")]
 pub(super) fn broadcast_extend_operand(
     layout: &Layout,
@@ -692,14 +693,16 @@ pub(super) fn broadcast_extend_operand(
 /// "no epilogue" convention, or a real prior epilogue on a SECOND round —
 /// see [`reduce_epilogue_fusion`]'s own doc for why RMSNorm needs both).
 /// `full_rank` is the FUSED op's own `extents.len()` (always `source`'s own
-/// pre-reduction rank, per [`BoundOp::extents`]'s own doc); every inner
-/// operand is broadcast-extended to it via [`broadcast_extend_operand`] so a
-/// broadcast-reduce round (`consumer`'s own extents equal to `full_rank`,
-/// e.g. RMSNorm's `[s, d]`) and a plain round (`consumer`'s own extents equal
-/// to `output_axes`'s smaller projected shape) compose identically: both
-/// [`Layout`]s an executor reads are already expressed in the SAME
-/// coordinate space `consumer` itself walks, so [`crate::cpu::apply_body`]
-/// never needs to know which round produced them.
+/// pre-reduction rank, per [`BoundOp::extents`]'s own doc). A broadcast-
+/// reduce round (`consumer`'s own extents equal to `full_rank`, e.g.
+/// RMSNorm's `[s, d]`) walks `full_rank` coordinates, so every inner operand
+/// is broadcast-extended to it via [`broadcast_extend_operand`]. A plain
+/// round (`consumer`'s own extents equal to `output_axes`'s smaller
+/// projected shape) walks `output_axes`'s coordinates, so the inner operands
+/// stay in the coordinate space they were recorded in. Either way every
+/// [`Layout`] an executor reads is expressed in the SAME coordinate space
+/// `consumer` itself walks, so [`crate::cpu::apply_body`] never needs to know
+/// which round produced them.
 #[cfg(feature = "reduce-epilogue-fusion")]
 pub(super) fn compose_reduce_epilogue(
     output_axes: &[u16],
@@ -749,12 +752,14 @@ pub(super) fn compose_reduce_epilogue(
     let inner_remap: Vec<u16> = (0..inner_epilogue_operands.len())
         .map(|index| (outer_len + index) as u16)
         .collect();
+    let walks_full_rank = consumer.extents.len() == full_rank;
     for (node, layout, gather) in inner_epilogue_operands {
-        new_operands.push((
-            *node,
-            broadcast_extend_operand(layout, output_axes, full_rank),
-            gather.clone(),
-        ));
+        let inner_layout = if walks_full_rank {
+            broadcast_extend_operand(layout, output_axes, full_rank)
+        } else {
+            layout.clone()
+        };
+        new_operands.push((*node, inner_layout, gather.clone()));
     }
     let raw_fold_slot = new_operands.len() as u16;
     let inner_step_count = inner_epilogue_body.steps.len() as u16;
