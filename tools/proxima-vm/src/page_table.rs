@@ -347,6 +347,9 @@ fn walk_x86_64(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use alloc::vec;
+    use alloc::vec::Vec;
+
     use proptest::prelude::*;
 
     use super::*;

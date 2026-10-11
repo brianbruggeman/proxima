@@ -804,13 +804,16 @@ mod tests {
     /// Postcard variant discriminant for `ChildRequest::Read` — matches
     /// `guests/lambda/src/main.rs`'s constant of the same name, reused as
     /// the hypercall verb.
+    #[cfg(feature = "std")]
     const READ_VERB: u16 = 0x00;
 
     /// Postcard variant discriminant for `ChildRequest::Close` (source
     /// order: Read=0, Write=1, Open=2, Close=3, Stat=4 —
     /// `proxima-protocols/src/process/protocol.rs:72-77`).
+    #[cfg(feature = "std")]
     const CLOSE_VERB: u16 = 0x03;
 
+    #[cfg(feature = "std")]
     const FFI_RESPONSE_CAPACITY: usize = 256;
 
     /// Drives one hypercall through [`proxima_vm_dispatch_hypercall`]
@@ -818,6 +821,7 @@ mod tests {
     /// nonzero offset (exercising the pointer arithmetic, not just
     /// `pointer == 0`, per `src/abi.rs`'s own test convention), and
     /// returns the raw response bytes the trampoline wrote back.
+    #[cfg(feature = "std")]
     fn dispatch_one(dispatcher: &FfiRecordingDispatcher, verb: u16, payload: &[u8]) -> Vec<u8> {
         let pointer = 4_usize;
         let mut guest_memory = alloc::vec![0xaa_u8; pointer + payload.len()];
@@ -854,6 +858,7 @@ mod tests {
     /// bytes proves the response side actually carries the host's
     /// configured answer through the channel, not some fixed echo baked
     /// into the trampoline.
+    #[cfg(feature = "std")]
     #[test]
     fn two_distinct_child_request_verbs_are_recorded_in_call_order() {
         let configured = ChildResponse::Read(ReadResponse {
@@ -888,6 +893,7 @@ mod tests {
         assert_eq!(close_response, expected_bytes);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn two_differently_canned_responses_produce_different_emitted_bytes_for_the_same_request() {
         let read_request = ChildRequest::Read {

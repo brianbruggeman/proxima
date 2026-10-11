@@ -16,7 +16,6 @@
 //! emitting protocol traffic) lives in [`dispatch`].
 
 #![cfg_attr(not(feature = "std"), no_std)]
-#[cfg(feature = "alloc")]
 extern crate alloc;
 
 pub mod abi;
@@ -103,8 +102,8 @@ impl SendPipe for ScratchVm {
     all(target_os = "macos", target_arch = "aarch64")
 ))]
 mod platform {
-    use std::ffi::CStr;
-    use std::os::raw::c_char;
+    use alloc::vec;
+    use core::ffi::{CStr, c_char};
 
     use bytes::Bytes;
     use proxima_core::ProximaError;

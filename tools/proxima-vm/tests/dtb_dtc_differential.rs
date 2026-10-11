@@ -11,6 +11,7 @@
 //! recording UNMEASURED-dtc-not-installed and skipping is the honest
 //! answer on a host without the devicetree compiler, not a hard failure.
 
+#![cfg(feature = "alloc")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::process::Command;
