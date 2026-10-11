@@ -1,0 +1,27 @@
+   Compiling proxima-core v0.1.0 (/private/tmp/proxima-granite-main/proxima-core)
+   Compiling idna v1.1.0
+   Compiling parking_lot_core v0.9.12
+   Compiling url v2.5.8
+   Compiling proxima-primitives v0.1.0 (/private/tmp/proxima-granite-main/proxima-primitives)
+   Compiling proxima-config v0.1.0 (/private/tmp/proxima-granite-main/proxima-config)
+   Compiling parking_lot v0.12.5
+   Compiling proxima-runtime v0.1.0 (/private/tmp/proxima-granite-main/proxima-runtime)
+   Compiling dashmap v6.2.1
+   Compiling proxima-clock v0.1.0 (/private/tmp/proxima-granite-main/proxima-clock)
+   Compiling proxima-telemetry v0.1.0 (/private/tmp/proxima-granite-main/proxima-telemetry)
+   Compiling num_cpus v1.17.0
+   Compiling prime v0.1.0 (/private/tmp/proxima-granite-main/prime)
+   Compiling core_affinity v0.8.3
+   Compiling proxima-gguf v0.1.0 (/private/tmp/proxima-granite-main/proxima-gguf)
+   Compiling socket2 v0.5.10
+   Compiling proxima-tensor v0.1.0 (/private/tmp/proxima-granite-main/proxima-tensor)
+   Compiling proxima-codec v0.1.0 (/private/tmp/proxima-granite-main/proxima-codec)
+   Compiling cpufeatures v0.2.17
+   Compiling rustix v1.1.4
+   Compiling sha2 v0.10.9
+   Compiling proxima-safetensors v0.1.0 (/private/tmp/proxima-granite-main/proxima-safetensors)
+   Compiling proxima-tokenizer v0.1.0 (/private/tmp/proxima-granite-main/proxima-tokenizer)
+   Compiling memmap2 v0.9.11
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-granite-main/proxima-model-interop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4m 07s
+     Running `/tmp/cargo_target/debug/granite-cold-quantize /private/tmp/proxima-granite4-micro-bf16-hf /private/tmp/granite4-cold-e5m2 e5m2 32768`

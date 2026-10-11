@@ -1,0 +1,16 @@
+   Compiling proxima-gguf v0.1.0 (/private/tmp/proxima-granite-main/proxima-gguf)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.80s
+     Running unittests src/lib.rs (/tmp/cargo_target/debug/deps/proxima_gguf-3b0030e3499c8341)
+
+running 8 tests
+test quant::fp5_e2m2::tests::e2m2_midpoint_ties_select_the_even_codeword ... ok
+test quant::fp5_e2m2::tests::e2m2_golden_values_and_rounding_ties_are_explicit ... ok
+test quant::fp5_e2m2::tests::every_e2m2_codeword_decodes_and_reencodes_identically ... ok
+test quant::fp6_e3m2::tests::e3m2_golden_values_and_rounding_ties_are_explicit ... ok
+test quant::fp6_e3m2::tests::e3m2_midpoint_ties_select_the_even_codeword ... ok
+test quant::fp5_e2m2::tests::e2m2_packing_crosses_byte_boundaries_lsb_first ... ok
+test quant::fp6_e3m2::tests::every_e3m2_codeword_decodes_and_reencodes_identically ... ok
+test quant::fp6_e3m2::tests::e3m2_packing_crosses_byte_boundaries_lsb_first ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 209 filtered out; finished in 0.00s
+

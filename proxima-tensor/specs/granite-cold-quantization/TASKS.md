@@ -1,0 +1,17 @@
+# granite-cold-quantization -- slices
+
+Each slice changes one behavior and retains its command output and payload artifacts.
+
+| # | slice | discharges | validation command | expected | done | note |
+|---|---|---|---|---|---|---|
+| 1 | Add the native Proxima command that streams the pinned Granite 4 safetensors into packed tensor artifacts with hashes | AC1 | `RUSTC_WRAPPER= CARGO_BUILD_JOBS=1 nice -n 10 cargo run --release -p proxima-model-interop --features std --bin granite-cold-quantize -- /private/tmp/proxima-granite4-micro-bf16-hf /private/tmp/granite4-cold-e5m2-release e5m2 32768` | all indexed tensors and source/output hashes appear in the Proxima manifest | [x] | `evidence/granite4-e5m2-conversion-release.log`: pinned `ibm-granite/granite-4.0-micro-base` revision `98e1d641451818f6c8e6b17c1c359b5b4ac495d0`, 322 tensors, 6,805,672,960 payload bytes read, 3,402,836,480 bytes written. |
+| 2 | Add explicit E3M2/E2M2 codecs and caller-buffer packed conversion | AC2 | `RUSTC_WRAPPER= CARGO_BUILD_JOBS=1 nice -n 10 cargo test -p proxima-gguf --lib quant::fp -- --nocapture` | golden codes, codeword round trips, midpoint ties, and packed boundaries pass | [x] | `evidence/fp-codec-binary-search-tests.log`: 8 selected tests passed; `evidence/quant-codecs-packed-fast-path-tests.log`: 156 quant tests passed, 2 ignored. E3M2/E2M2 lookup changed from exhaustive codeword scans to binary search; aligned E5M2 writes one output byte per element, and packed writes use at most two byte operations per element. |
+| 3 | Convert every indexed source tensor to all three formats and audit emitted payloads | AC3 | Run the release CLI serially with `e5m2`, `e3m2`, and `e2m2`; then `bash proxima-tensor/specs/granite-cold-quantization/evidence/verify-converted-output-hashes.sh` | each output has 322 tensor records and every file hash/length matches its manifest; pinned source artifact hashes match | [x] | `evidence/granite4-{e5m2,e3m2,e2m2}-conversion-release.log` retain commands/output. `evidence/converted-artifact-integrity-audit.log`: all three formats each report 322 matching tensor-file hashes and lengths; all 10 source artifact hashes match. Output bytes: E5M2 3,402,836,480; E3M2 2,552,127,360; E2M2 2,126,772,800. |
+| 4 | Add per-tensor maximum scaling and compare reconstructed tensor payloads in scalar and scaled modes | AC4 | Six serial `granite-cold-quantize compare` invocations, recorded in `cards/02-tensor-scale-comparison.md` | each report retains 322 tensor rows, raw pairs, changed/zeroed/saturated counts, and max-error source/reconstruction values | [x] | Three scalar and three `tensor_maximum` JSON reports plus logs are retained under `evidence/`; conversion manifests persist one scale per tensor in scaled mode. |
+| 5 | Audit converted output files and pinned source artifacts | AC5 | `bash proxima-tensor/specs/granite-cold-quantization/evidence/verify-converted-output-hashes.sh` | every tensor file hash and byte length matches its manifest, and every pinned source hash matches | [x] | `evidence/converted-artifact-integrity-audit.log` records 322 matching tensors for each of six format/mode artifacts and 10 matching source artifacts. |
+
+## resume
+
+Last completed slice: 5 (native conversion, tensor reconstruction comparisons, and integrity audit)
+Active slice: none in this tensor-conversion card
+Pinned input: Granite 4 Micro base, BF16 safetensors, revision `98e1d641451818f6c8e6b17c1c359b5b4ac495d0`

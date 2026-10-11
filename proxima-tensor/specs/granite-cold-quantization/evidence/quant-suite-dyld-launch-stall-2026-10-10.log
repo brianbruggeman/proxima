@@ -1,0 +1,6 @@
+command=RUSTC_WRAPPER= CARGO_BUILD_JOBS=1 nice -n 10 cargo test -p proxima-gguf --lib quant:: -- --nocapture
+result=compiled test binary launched but emitted no test-list or test-body output
+observation=sample of pid 25438 after 10 seconds showed Main Thread only in _dyld_start; lsof showed only the executable and /usr/lib/dyld open
+binary=file reports Mach-O 64-bit arm64; otool lists /usr/lib/libiconv.2.dylib and /usr/lib/libSystem.B.dylib
+duration=38 seconds before this supplemental run was interrupted; no test result is claimed
+existing-suite-evidence=fp-codec-binary-search-tests.log records 8 selected tests passed; quant-codecs-packed-fast-path-tests.log records 156 quant tests passed and 2 ignored

@@ -1,0 +1,12 @@
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-granite-main/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.70s
+     Running unittests src/lib.rs (/tmp/cargo_target/debug/deps/proxima_model_interop-d85a6ce902fd50f4)
+
+running 4 tests
+test cold_artifact::tests::cold_artifact_format_names_are_explicit ... ok
+test cold_artifact::tests::conversion_rejects_output_inside_the_source_checkpoint ... ok
+test cold_artifact::tests::shard_paths_reject_parent_and_absolute_components ... ok
+test cold_artifact::tests::converts_real_safetensors_wire_bytes_into_hashed_packed_artifact ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 573 filtered out; finished in 0.06s
+

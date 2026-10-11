@@ -1,0 +1,11 @@
+source=ibm-granite/granite-4.0-micro-base revision=98e1d641451818f6c8e6b17c1c359b5b4ac495d0
+hardware=local Mac; serial runs; release granite-cold-quantize binary; conversion only (cargo compilation excluded)
+source_tensors=322 source_payload_bytes=6805672960 chunk_elements=32768
+format=e5m2 mode=none real_seconds=57.84 user_seconds=53.16 sys_seconds=1.69
+format=e3m2 mode=none real_seconds=128.21 user_seconds=123.74 sys_seconds=1.74
+format=e2m2 mode=none real_seconds=107.79 user_seconds=102.80 sys_seconds=1.91
+format=e5m2 mode=tensor_maximum real_seconds=63.44 user_seconds=57.93 sys_seconds=2.53
+format=e3m2 mode=tensor_maximum real_seconds=199.91 user_seconds=193.01 sys_seconds=2.68
+format=e2m2 mode=tensor_maximum real_seconds=202.02 user_seconds=188.96 sys_seconds=2.93
+measurement_command=/usr/bin/time -p /tmp/cargo_target/release/granite-cold-quantize /private/tmp/proxima-granite4-micro-bf16-hf <output-dir> <format> 32768
+note=the initial cargo run for e5m2 took 77.05 seconds including 18.70 seconds of release compilation; the retained 57.84-second reading is the direct quantizer conversion only

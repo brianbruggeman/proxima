@@ -1,0 +1,12 @@
+   Compiling proxima-gguf v0.1.0 (/private/tmp/proxima-granite-main/proxima-gguf)
+   Compiling proxima-tensor v0.1.0 (/private/tmp/proxima-granite-main/proxima-tensor)
+   Compiling proxima-safetensors v0.1.0 (/private/tmp/proxima-granite-main/proxima-safetensors)
+   Compiling proxima-tokenizer v0.1.0 (/private/tmp/proxima-granite-main/proxima-tokenizer)
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-granite-main/proxima-model-interop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 59.05s
+     Running `/tmp/cargo_target/debug/granite-cold-quantize /private/tmp/proxima-granite4-micro-bf16-hf /private/tmp/granite4-cold-e5m2-v2 e5m2 32768`
+repository=ibm-granite/granite-4.0-micro-base revision=98e1d641451818f6c8e6b17c1c359b5b4ac495d0
+format=e5m2 tensors=322
+source_bytes_processed=6805672960
+output_bytes_written=3402836480
+manifest=/private/tmp/granite4-cold-e5m2-v2/manifest.json
