@@ -13,6 +13,7 @@ use proxima_tensor::NumericPolicy;
 use serde::{Deserialize, Serialize};
 
 use crate::RopeScaling;
+use crate::codec_policy_settings::CodecPolicySettings;
 use crate::prompt_cache_settings::PromptCacheSettings;
 use crate::serving::{
     ContextLength, DEFAULT_BATCH_SIZE, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH,
@@ -385,6 +386,9 @@ pub struct ServingSettings {
     #[setting(nested, override_prefix = "PROXIMA_PROMPT_CACHE")]
     #[builder(default = PromptCacheSettings::builder().build())]
     pub prompt_cache: PromptCacheSettings,
+    #[setting(nested, override_prefix = "PROXIMA_CODEC_POLICY")]
+    #[builder(default)]
+    pub codec_policy: CodecPolicySettings,
 }
 
 impl Default for ServingSettings {
@@ -508,10 +512,11 @@ mod round_trip {
 
     use super::ServingSettings;
 
-    const SECTION_PREFIXES: [&str; 3] = [
+    const SECTION_PREFIXES: [&str; 4] = [
         "PROXIMA_SERVING_",
         "PROXIMA_SPECULATIVE_",
         "PROXIMA_PROMPT_CACHE_",
+        "PROXIMA_CODEC_POLICY_",
     ];
 
     fn cleared_section_env() -> Vec<(String, Option<String>)> {
