@@ -85,8 +85,7 @@ fn round_trip_preserves_every_tensor_byte_and_documents_metadata_loss() {
 
     let safetensors_bytes =
         proxima_safetensors::write_complete(&safetensors_model).expect("writes safetensors");
-    let reparsed_manifest =
-        parse_safetensors(&safetensors_bytes).expect("parses safetensors back");
+    let reparsed_manifest = parse_safetensors(&safetensors_bytes).expect("parses safetensors back");
     assert_eq!(reparsed_manifest.tensors.len(), 2);
 
     let roundtrip_gguf = safetensors_to_gguf(&safetensors_model).expect("safetensors -> gguf");
@@ -180,4 +179,101 @@ fn bool_dtype_tensor_errors_instead_of_silently_dropping_or_corrupting() {
         outcome,
         Err(InteropError::UnrepresentableDType { .. })
     ));
+}
+
+fn transformed_shapes_of(tensor_dims: &[u64], element_bytes: usize) -> (Vec<u64>, Vec<u64>) {
+    let element_count: u64 = tensor_dims.iter().product();
+    let data = pattern_bytes(element_count as usize * element_bytes);
+    let model = GgufModel {
+        version: 3,
+        metadata: Vec::new(),
+        tensors: vec![GgufTensorPayload {
+            name: "blk.0.attn_k.weight".to_string(),
+            dims: dims(tensor_dims),
+            ggml_type: GgmlType::F32,
+            data: data.as_slice(),
+        }],
+    };
+    let bytes = write_complete(&model).expect("writes gguf");
+    let parsed = parse_complete(&bytes).expect("parses gguf");
+    let safetensors = gguf_to_safetensors(&parsed, &bytes).expect("gguf -> safetensors");
+    let roundtrip = safetensors_to_gguf(&safetensors).expect("safetensors -> gguf");
+    (
+        safetensors.tensors[0].shape.clone(),
+        roundtrip.tensors[0].dims.iter().copied().collect(),
+    )
+}
+
+#[test]
+fn transform_shapes_follow_hf_row_major_reverses_ggml_dims() {
+    let (shape, _) = transformed_shapes_of(&[1024, 512, 32], 4);
+
+    assert_eq!(shape, vec![32, 512, 1024]);
+}
+
+#[test]
+fn transform_shapes_follow_hf_row_major_round_trip_returns_ggml_dims() {
+    let (_, roundtrip_dims) = transformed_shapes_of(&[1024, 512, 32], 4);
+
+    assert_eq!(roundtrip_dims, vec![1024, 512, 32]);
+}
+
+#[cfg(feature = "std")]
+mod granite_header {
+    use std::fs::File;
+    use std::path::Path;
+
+    use serde_json::Value;
+
+    use super::*;
+
+    const GRANITE_GGUF: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
+    const HEADER_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/mlx-reference/granite-3.1-1b-a400m-moe/plain/header.json"
+    );
+
+    fn header_k_proj_shape() -> Vec<u64> {
+        let header: Value =
+            serde_json::from_slice(&std::fs::read(HEADER_PATH).expect("reads vendored header"))
+                .expect("header is json");
+        header["model.layers.0.self_attn.k_proj.weight"]["shape"]
+            .as_array()
+            .expect("header carries k_proj shape")
+            .iter()
+            .map(|dim| dim.as_u64().expect("dim is an integer"))
+            .collect()
+    }
+
+    fn granite_attn_k_dims() -> Vec<u64> {
+        assert!(
+            Path::new(GRANITE_GGUF).exists(),
+            "host-local gguf blob missing at {GRANITE_GGUF}"
+        );
+        let file = File::open(GRANITE_GGUF).expect("opens granite blob");
+        let mapping = unsafe { memmap2::Mmap::map(&file) }.expect("maps granite blob");
+        let parsed = parse_complete(&mapping).expect("parses granite blob");
+        let tensor = parsed
+            .tensors
+            .iter()
+            .find(|tensor| tensor.name == "blk.0.attn_k.weight")
+            .expect("granite carries blk.0.attn_k.weight");
+        tensor.dims.iter().copied().collect()
+    }
+
+    #[test]
+    fn transform_shapes_follow_hf_row_major_matches_vendored_granite_header() {
+        let ggml_dims = granite_attn_k_dims();
+
+        let (shape, _) = transformed_shapes_of(&ggml_dims, 4);
+
+        assert_eq!(shape, header_k_proj_shape());
+    }
+
+    #[test]
+    fn transform_shapes_follow_hf_row_major_control_ggml_order_differs_from_header() {
+        let ggml_dims = granite_attn_k_dims();
+
+        assert_ne!(ggml_dims, header_k_proj_shape());
+    }
 }
