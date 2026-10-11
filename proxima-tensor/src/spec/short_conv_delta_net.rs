@@ -789,6 +789,39 @@ fn project_short_conv_branch(
     )
 }
 
+/// Splits the checkpoint's fused `blk.N.shortconv.in_proj.weight` into the
+/// `B`, `C` and `x` projections [`append_short_conv_mixer`] and its cached
+/// siblings contract against, in the checkpoint's own order (`B` first, `C`
+/// second, `x` third along the output axis).
+///
+/// `in_proj` is declared `[3 * embedding, embedding]` and bound as stored:
+/// row `output` holds the weights that produce channel `output`, column
+/// `input` multiplies input channel `input`. The mixer contracts the FIRST
+/// axis of a projection (`dg->sdg` reduces `d`), so each returned view is the
+/// transpose of its row band: `view[input][output] =
+/// in_proj[offset + output][input]`. Reading the band untransposed contracts
+/// the output axis against the activations instead and every logit the model
+/// produces is wrong from the first token.
+pub(super) fn fused_short_conv_projections(
+    program: &mut Vec<Op>,
+    in_proj: NodeId,
+    embedding: u32,
+) -> Result<(NodeId, NodeId, NodeId), TensorError> {
+    let band = |program: &mut Vec<Op>, offset: u32| {
+        let map = alloc::format!("g+{offset}@{embedding},d->dg");
+        elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Identity,
+            &[(in_proj, map.as_str())],
+        )
+    };
+    let b_proj = band(program, 0)?;
+    let c_proj = band(program, embedding)?;
+    let x_proj = band(program, embedding * 2)?;
+    Ok((b_proj, c_proj, x_proj))
+}
+
 /// One token's worth of the gated-DeltaNet recurrence Qwen3.5's linear
 /// attention (SSM) layers run -- llama.cpp's own reference,
 /// `llm_build_delta_net_base::build_delta_net_autoregressive`
