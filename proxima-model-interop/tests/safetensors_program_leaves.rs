@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::collections::BTreeMap;
 use std::vec;
 use std::vec::Vec;
@@ -126,7 +128,7 @@ fn program_for(weight: &str, norm: &str, alias: &str, token: &str) -> (Vec<Op>, 
 
 fn safetensors_fixture() -> Vec<u8> {
     for padding_length in 0..4 {
-        let tensors = vec![
+        let tensors = [
             (
                 "matrix.f32",
                 DType::Float32,
@@ -284,7 +286,7 @@ fn architecture_matrix_safetensors_program_leaves() {
             data_start,
             &program,
             &binding,
-            &[token_name.clone()],
+            std::slice::from_ref(&token_name),
         )
         .expect("program leaves bind from manifest/profile data");
         let program_weight_names = [&matrix_name, &norm_name, &alias_name];

@@ -1076,6 +1076,7 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod matrix_lfm_bind;
 
 #[cfg(test)]

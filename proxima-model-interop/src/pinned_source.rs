@@ -162,6 +162,7 @@ fn lowercase_hex(value: &str, length: usize) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     extern crate std;
 
