@@ -4611,6 +4611,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxima-mil"
+version = "0.1.0"
+dependencies = [
+ "proxima-build",
+ "temp-env",
+ "thiserror 2.0.19",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "proxima-mlir"
 version = "0.1.0"
 dependencies = [
