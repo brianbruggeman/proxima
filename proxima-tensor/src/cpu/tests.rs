@@ -13642,7 +13642,7 @@ fn e3m2_scale(row: usize, block: usize) -> f16 {
 fn e3m2_pack_block(codes: &[u8; 32], scale: f16) -> [u8; E3M2_BLOCK_BYTES] {
     let mut block = [0u8; E3M2_BLOCK_BYTES];
     block[..2].copy_from_slice(&scale.to_le_bytes());
-    for (group, group_codes) in codes.chunks_exact(4).enumerate() {
+    for (group, group_codes) in codes.as_chunks::<4>().0.iter().enumerate() {
         let word = group_codes
             .iter()
             .enumerate()
@@ -13667,7 +13667,7 @@ fn e3m2_weight_bytes(code_of: impl Fn(usize, usize, usize) -> u8) -> Vec<u8> {
 fn e3m2_f64_dot(weights: &[u8], row: usize, activation: &[f32]) -> (f64, f64) {
     let row_bytes = E3M2_BLOCKS_PER_ROW * E3M2_BLOCK_BYTES;
     weights[row * row_bytes..(row + 1) * row_bytes]
-        .chunks_exact(E3M2_BLOCK_BYTES)
+        .as_chunks::<E3M2_BLOCK_BYTES>().0.iter()
         .enumerate()
         .flat_map(|(block_index, block)| {
             let scale = f64::from(f16::from_le_bytes([block[0], block[1]]).to_f32());
