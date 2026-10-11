@@ -729,6 +729,10 @@ required-features = ["alloc"]
 name = "real_forward_emit_probe"
 required-features = ["alloc"]
 
+[[example]]
+name = "door_walkthrough"
+required-features = ["onnx-door", "mil-writer"]
+
 [dev-dependencies]
 anyhow = "1.0.104"
 conflaguration = { workspace = true, features = ["toml"] }

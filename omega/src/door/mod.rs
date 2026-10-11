@@ -55,6 +55,8 @@ mod cache;
 mod error;
 mod reader;
 mod settings;
+#[cfg(feature = "mil-writer")]
+mod sink_mil;
 mod stage;
 mod writer;
 
@@ -63,6 +65,8 @@ use cache::PlanCache;
 pub use error::{DoorError, StageKind};
 pub use reader::{Pins, Reader, ReaderWork};
 pub use settings::{ComputeUnits, DoorConfigError, DoorSettings, Precision};
+#[cfg(feature = "mil-writer")]
+pub use sink_mil::MilSink;
 pub use stage::DoorStage;
 pub use writer::{NoSink, Writer};
 
