@@ -22,12 +22,14 @@
 //! by the checkpoint), and [`crate::generate::LoadedModel`] (the only
 //! caller either bind function needs to serve) is itself `std`-only.
 //!
-//! Mixture-of-experts HF checkpoints are NOT bound here --
-//! [`InteropError::HfMoeWeightsUnsupported`] names the gap rather than
-//! guessing at Mixtral's or Qwen's per-expert tensor-naming convention
-//! against zero real on-disk evidence (the only MoE-shaped checkpoint on
-//! this host is MLX's packed `weight`/`scales`/`biases` layout, explicitly
-//! out of scope for this crate).
+//! Mixture-of-experts HF checkpoints bind only where a binding profile names
+//! the stored tensors: `bind_safetensors_program_leaves` reads a routed
+//! stack's source from the profile (`profiles/binding/granitemoe.toml`, names
+//! taken from the vendored IBM header) and decodes it to the program's
+//! `[experts, in, out]` leaf. A profile that names none, and the dense
+//! `bind_all_weights_from_safetensors`, refuse with
+//! [`InteropError::HfMoeWeightsUnsupported`] rather than guessing at a
+//! naming convention.
 
 use alloc::collections::BTreeSet;
 use alloc::format;
@@ -42,7 +44,7 @@ use proxima_tensor::op::{Extent, Op};
 use crate::Codec;
 use crate::bind::{
     BoundWeights, ModelHparams, aligned_f32_view, dequantize, reinterpret_f32,
-    transpose_out_in_to_in_out,
+    transpose_expert_stack, transpose_out_in_to_in_out,
 };
 use crate::bind_leaves::{Role, consumers_of, role_of};
 use crate::error::InteropError;
@@ -116,6 +118,12 @@ pub struct SafetensorsTensorView<'manifest, 'file> {
 
 /// Resolve program leaves through `binding`, validate their source layout and
 /// byte ranges, and return borrowed checkpoint views. Runtime inputs are skipped.
+///
+/// A routed expert stack cannot be a borrowed view (a fused gate and up
+/// tensor is cut per expert), so it is refused here: with
+/// [`InteropError::HfMoeWeightsUnsupported`] when `binding` names no source for
+/// it, otherwise as an unsupported gathered role. [`bind_safetensors_program_leaves`]
+/// binds the stacks.
 pub fn bind_safetensors_program_views<'manifest, 'file>(
     manifest: &'manifest Manifest,
     file_bytes: &'file [u8],
@@ -124,7 +132,44 @@ pub fn bind_safetensors_program_views<'manifest, 'file>(
     binding: &BindingProfile,
     runtime_inputs: &[String],
 ) -> Result<Vec<SafetensorsTensorView<'manifest, 'file>>, InteropError> {
+    let (views, stacks) = collect_program_views(
+        manifest,
+        file_bytes,
+        data_start,
+        program,
+        binding,
+        runtime_inputs,
+    )?;
+    match stacks.first() {
+        None => Ok(views),
+        Some((leaf, shape)) => {
+            moe_stack_source(manifest, binding, leaf, shape)?;
+            Err(InteropError::SafetensorsBindingUnsupported {
+                leaf: leaf.clone(),
+                feature: "gathered role".into(),
+            })
+        }
+    }
+}
+
+type ExpertStackLeaf = (String, Vec<Extent>);
+
+fn collect_program_views<'manifest, 'file>(
+    manifest: &'manifest Manifest,
+    file_bytes: &'file [u8],
+    data_start: u64,
+    program: &[Op],
+    binding: &BindingProfile,
+    runtime_inputs: &[String],
+) -> Result<
+    (
+        Vec<SafetensorsTensorView<'manifest, 'file>>,
+        Vec<ExpertStackLeaf>,
+    ),
+    InteropError,
+> {
     refuse_mlx_quantized_header(manifest)?;
+    let mut stacks = Vec::new();
     let consumers = consumers_of(program);
     let runtime_inputs: BTreeSet<&str> = runtime_inputs.iter().map(String::as_str).collect();
     let mut bound = BTreeSet::new();
@@ -145,16 +190,20 @@ pub fn bind_safetensors_program_views<'manifest, 'file>(
         }
         let role = role_of(program, &consumers, index, leaf, shape)?;
         if role == Role::Gathered {
-            return Err(InteropError::SafetensorsBindingUnsupported {
-                leaf: leaf.clone(),
-                feature: "gathered role".into(),
-            });
+            if routed_expert_count(leaf, shape).is_none() {
+                return Err(InteropError::SafetensorsBindingUnsupported {
+                    leaf: leaf.clone(),
+                    feature: "gathered role".into(),
+                });
+            }
+            stacks.push((leaf.clone(), shape.clone()));
+            continue;
         }
         if !ranges_validated {
             validate_safetensors_data_ranges(manifest, file_bytes, data_start)?;
             ranges_validated = true;
         }
-        let entry = safetensors_source(manifest, binding, leaf)?;
+        let entry = safetensors_source(manifest, binding, leaf, shape)?;
         views.push(validated_view(
             file_bytes, data_start, leaf, shape, role, entry,
         )?);
@@ -189,7 +238,7 @@ pub fn bind_safetensors_program_views<'manifest, 'file>(
             )?);
         }
     }
-    Ok(views)
+    Ok((views, stacks))
 }
 
 /// Binds safetensors by walking the same lowered program leaves as the GGUF
@@ -208,7 +257,7 @@ pub fn bind_safetensors_program_leaves<'file>(
 ) -> Result<BoundWeights<'file>, InteropError> {
     let mut weights = BoundWeights::new(&[]);
     weights.resident_bytes = file_bytes.len();
-    let views = bind_safetensors_program_views(
+    let (views, stacks) = collect_program_views(
         manifest,
         file_bytes,
         data_start,
@@ -226,7 +275,123 @@ pub fn bind_safetensors_program_leaves<'file>(
             &mut weights,
         )?;
     }
+    for (leaf, shape) in &stacks {
+        bind_safetensors_expert_stack(
+            manifest,
+            file_bytes,
+            data_start,
+            binding,
+            leaf,
+            shape,
+            &mut weights,
+        )?;
+    }
     Ok(weights)
+}
+
+/// The routed-MoE arm. A routed leaf is a stacked expert projection
+/// (`blk.N.ffn_{gate,up,down}_exps.weight`) or the router
+/// (`blk.N.ffn_gate_inp.weight`); the expert count is read off its program
+/// shape (`[experts, in, out]` for a stack, `[in, experts]` for the router).
+fn routed_expert_count(leaf: &str, shape: &[Extent]) -> Option<u32> {
+    let static_count = |extent: Option<&Extent>| match extent {
+        Some(Extent::Static(count)) => Some(*count),
+        _ => None,
+    };
+    if leaf.ends_with("_exps.weight") {
+        static_count(shape.first())
+    } else if leaf.ends_with("ffn_gate_inp.weight") {
+        static_count(shape.last())
+    } else {
+        None
+    }
+}
+
+/// `(stored name, part, of)` of the first alias of `binding` whose source the
+/// checkpoint's `manifest` stores, for a routed leaf: a rename is part 0 of 1,
+/// a part alias cuts `part` of `of` row groups. A profile none of whose
+/// sources the checkpoint stores (every dense profile) refuses with
+/// [`InteropError::HfMoeWeightsUnsupported`] rather than guessing at a name.
+fn moe_stack_source(
+    manifest: &Manifest,
+    binding: &BindingProfile,
+    leaf: &str,
+    shape: &[Extent],
+) -> Result<(String, u32, u32), InteropError> {
+    binding
+        .aliases_for(leaf)
+        .find_map(|(alias, prefix)| {
+            let (from, part, of) = match alias {
+                TensorAlias::Part { from, part, of, .. } => (from, *part, *of),
+                TensorAlias::Rename { from, .. } => (from, 0, 1),
+                TensorAlias::Join { .. } => return None,
+            };
+            let name = format!("{prefix}{from}");
+            manifest.tensor(&name).map(|_| (name, part, of))
+        })
+        .ok_or_else(|| InteropError::HfMoeWeightsUnsupported {
+            expert_count: routed_expert_count(leaf, shape).unwrap_or(0),
+        })
+}
+
+/// Cuts `part` of `of` equal row groups out of every expert of a decoded
+/// `[experts, rows, in]` stack, giving `[experts, rows / of, in]`.
+fn expert_row_part(
+    decoded: &[f32],
+    experts: usize,
+    rows: usize,
+    input: usize,
+    part: usize,
+    of: usize,
+) -> Vec<f32> {
+    let part_len = rows / of * input;
+    (0..experts)
+        .flat_map(|expert| {
+            let start = expert * rows * input + part * part_len;
+            decoded[start..start + part_len].iter().copied()
+        })
+        .collect()
+}
+
+fn bind_safetensors_expert_stack<'file>(
+    manifest: &Manifest,
+    file_bytes: &'file [u8],
+    data_start: u64,
+    binding: &BindingProfile,
+    leaf: &str,
+    shape: &[Extent],
+    weights: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    let (name, part, of) = moe_stack_source(manifest, binding, leaf, shape)?;
+    let [
+        Extent::Static(experts),
+        Extent::Static(input),
+        Extent::Static(output),
+    ] = shape
+    else {
+        return Err(InteropError::SafetensorsBindingUnsupported {
+            leaf: leaf.into(),
+            feature: "expert stack extents".into(),
+        });
+    };
+    let entry = find_entry(manifest, &name)?;
+    let (experts, input, output) = (*experts as usize, *input as usize, *output as usize);
+    let rows = output * of as usize;
+    let expected = [experts as u64, rows as u64, input as u64];
+    if of == 0 || part >= of || entry.shape != expected {
+        return Err(InteropError::SafetensorsAxesMismatch {
+            leaf: leaf.into(),
+            tensor: name,
+            leaf_axes: expected.to_vec(),
+            tensor_axes: entry.shape.clone(),
+        });
+    }
+    let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &name)?;
+    let cut = expert_row_part(&decoded, experts, rows, input, part as usize, of as usize);
+    let stacked = transpose_expert_stack(&cut, leaf, experts, output, input)?;
+    weights.resident_bytes += stacked.len() * core::mem::size_of::<f32>();
+    weights.owned.push((leaf.into(), stacked));
+    Ok(())
 }
 
 fn validate_safetensors_data_ranges(
@@ -274,6 +439,7 @@ fn safetensors_source<'manifest>(
     manifest: &'manifest Manifest,
     binding: &BindingProfile,
     leaf: &str,
+    shape: &[Extent],
 ) -> Result<&'manifest proxima_safetensors::TensorEntry, InteropError> {
     if let Some(entry) = manifest.tensor(leaf) {
         return Ok(entry);
@@ -300,7 +466,10 @@ fn safetensors_source<'manifest>(
             }
         }
     }
-    Err(InteropError::UnknownTensor { name: leaf.into() })
+    Err(match routed_expert_count(leaf, shape) {
+        Some(expert_count) => InteropError::HfMoeWeightsUnsupported { expert_count },
+        None => InteropError::UnknownTensor { name: leaf.into() },
+    })
 }
 
 fn validated_view<'manifest, 'file>(
@@ -1084,6 +1253,9 @@ pub use mlx_refusal::{refuse_mlx_quantized, refuse_mlx_quantized_header};
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod matrix_lfm_bind;
+
+#[cfg(test)]
+mod granitemoe_binding;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

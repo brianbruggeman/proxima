@@ -25,6 +25,7 @@ const FAMILY_BINDINGS: &[(&str, &str)] = &[
     ("qwen35moe", include_str!("binding/qwen35moe.toml")),
     ("lfm2", include_str!("binding/lfm2.toml")),
     ("lfm2moe", include_str!("binding/lfm2.toml")),
+    ("granitemoe", include_str!("binding/granitemoe.toml")),
 ];
 
 /// One way a program leaf is satisfied by tensors the directory names
@@ -144,7 +145,7 @@ mod tests {
 
     #[test]
     fn every_embedded_binding_file_parses() {
-        assert_eq!(FAMILY_BINDINGS.len(), 5, "one row per embedded family string");
+        assert_eq!(FAMILY_BINDINGS.len(), 6, "one row per embedded family string");
         for (family, _) in FAMILY_BINDINGS {
             binding_profile(family).unwrap_or_else(|error| panic!("{family}: {error}"));
         }
