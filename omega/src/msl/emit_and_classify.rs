@@ -2826,11 +2826,11 @@ pub enum PackedRowBlockRejection {
     /// `metal-gathered-packed-row` has been enabled and measured.
     GatheredOperand,
     /// The packed operand's codec is not in the codec table of the path that
-    /// asked: [`row_block_extent_multiple`] for the row-blocked kernel (the
+    /// asked: `row_block_extent_multiple` for the row-blocked kernel (the
     /// K-quant family plus [`Codec::Q8_0`]/[`Codec::Q4_0`], whose eight
     /// contiguous 32-element blocks span exactly one 256-element super-block, see
     /// [`Q8_0_SUPER_ELEMENT_MSL`]/[`Q4_0_SUPER_ELEMENT_MSL`]), or the
-    /// [`tiled_decode`] descriptions for the tiled and expert-grouped GEMM. Every
+    /// `tiled_decode` descriptions for the tiled and expert-grouped GEMM. Every
     /// other codec always takes the fully generic per-element path. Checked by
     /// WHITELISTING the admitted variants rather than blacklisting one codec by
     /// `==` -- an equality check against one codec silently admits any OTHER
@@ -2851,7 +2851,7 @@ pub enum PackedRowBlockRejection {
     NonUnitWeightStride { stride: i64 },
     /// The flattened extent across every reduce dim is not a whole
     /// multiple of the codec table's block: [`Q4K_BLOCK_ELEMENTS`] for the
-    /// row-blocked kernel, the codec's [`tiled_decode`] block for the tiled
+    /// row-blocked kernel, the codec's `tiled_decode` block for the tiled
     /// and expert-grouped GEMM.
     ExtentNotBlockMultiple { extent: u64 },
 }
@@ -3154,7 +3154,7 @@ pub enum TiledGemmRejection {
     /// `PROXIMA_TILED_GEMM_Q4_0=0` keeps `Q4_0` on the row-blocked kernel, and
     /// `PROXIMA_TILED_GEMM_DISABLE` names any codec to keep off, the same-binary
     /// A/B controls `tiled_gemm_q4_0_override` and `tiled_gemm_codec_disabled`
-    /// document. A codec with no [`tiled_decode`] description is rejected
+    /// document. A codec with no `tiled_decode` description is rejected
     /// earlier, as `NotPackedRowBlock(NotKQuantCodec)`.
     CodecSwitchedOff { codec: Codec },
     /// `reduce_op`/`init` are not the plain `Add`-from-`Zero` shape

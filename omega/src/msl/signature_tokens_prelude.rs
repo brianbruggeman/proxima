@@ -2262,7 +2262,7 @@ impl AttentionRowSchedule {
 /// the renderer, `grid_threads`, `entry_name`, the threadgroup width, the
 /// uniforms packer -- matches on this value instead, so a new form is a
 /// compile error at every site rather than an out-of-bounds read at one.
-/// Compose with [`cached_attention_merge_needed`], [`splits_for`] and
+/// Compose with `cached_attention_merge_needed`, `splits_for` and
 /// [`context_chunks_for`], which answer the per-form sizing questions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CachedAttentionForm {
