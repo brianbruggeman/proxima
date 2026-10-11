@@ -757,7 +757,7 @@ pub(super) fn render_cached_attention_merge(
                 head_dim: *head_dim,
             });
         }
-        source.push_str(&interleaved_merge_body(entry, element_type, *head_dim));
+        source.push_str(&interleaved_merge_body(entry, element_type, *head_dim, decode_index_tokens(&resolved.kind)));
         return Ok(source);
     }
     source.push_str(&format!(
@@ -791,10 +791,60 @@ pub(super) fn render_cached_attention_merge(
 /// `(row, dim4, split)` sits at float4 index `(row * head_dim/4 + dim4) *
 /// splits + split`, which the lane-contiguous read here coalesces.
 #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
-fn interleaved_merge_body(entry: &str, element_type: &str, head_dim: u64) -> String {
+fn interleaved_merge_body(entry: &str, element_type: &str, head_dim: u64, (index, lit): (&str, &str)) -> String {
     format!(
-        "kernel void {entry}(device const float* in0 [[buffer(0)]], device {element_type}* out [[buffer(1)]], constant Uniforms& u [[buffer(2)]], uint tg [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]], ushort simdgroup_count [[simdgroups_per_threadgroup]]) {{\n    if ((long)tg >= u.total_elements) {{ return; }}\n    constexpr long head_dim = {head_dim};\n    long splits = u.splits;\n    device const float* stats = in0 + u.total_elements * head_dim * splits;\n    bool live = (long)lane < splits;\n    float own_max = live ? stats[((long)tg * splits + (long)lane) * 2L] : -INFINITY;\n    float own_sum = live ? stats[((long)tg * splits + (long)lane) * 2L + 1L] : 0.0f;\n    float global_max = simd_max(own_max);\n    float weight = (own_max == -INFINITY) ? 0.0f : exp(own_max - global_max);\n    float total = simd_sum(own_sum * weight);\n    float inverse = (total == 0.0f) ? 0.0f : 1.0f / total;\n    device const float4* partial4 = (device const float4*)in0 + (long)tg * (head_dim / 4L) * splits;\n    device {element_type}* out_row = out + (long)tg * head_dim;\n    for (long dim4 = (long)simdgroup_slot; dim4 < head_dim / 4L; dim4 += (long)simdgroup_count) {{\n        float4 summed = simd_sum(live ? partial4[dim4 * splits + (long)lane] * weight : float4(0.0f));\n        if (lane == 0) {{\n            out_row[dim4 * 4L] = ({element_type})(summed.x * inverse);\n            out_row[dim4 * 4L + 1L] = ({element_type})(summed.y * inverse);\n            out_row[dim4 * 4L + 2L] = ({element_type})(summed.z * inverse);\n            out_row[dim4 * 4L + 3L] = ({element_type})(summed.w * inverse);\n        }}\n    }}\n}}\n"
+        "kernel void {entry}(device const float* in0 [[buffer(0)]], device {element_type}* out [[buffer(1)]], constant Uniforms& u [[buffer(2)]], uint tg [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]], ushort simdgroup_count [[simdgroups_per_threadgroup]]) {{\n    if (({index})tg >= ({index})u.total_elements) {{ return; }}\n    constexpr {index} head_dim = {head_dim};\n    {index} splits = ({index})u.splits;\n    device const float* stats = in0 + ({index})u.total_elements * head_dim * splits;\n    bool live = ({index})lane < splits;\n    float own_max = live ? stats[(({index})tg * splits + ({index})lane) * 2{lit}] : -INFINITY;\n    float own_sum = live ? stats[(({index})tg * splits + ({index})lane) * 2{lit} + 1{lit}] : 0.0f;\n    float global_max = simd_max(own_max);\n    float weight = (own_max == -INFINITY) ? 0.0f : exp(own_max - global_max);\n    float total = simd_sum(own_sum * weight);\n    float inverse = (total == 0.0f) ? 0.0f : 1.0f / total;\n    device const float4* partial4 = (device const float4*)in0 + ({index})tg * (head_dim / 4{lit}) * splits;\n    device {element_type}* out_row = out + ({index})tg * head_dim;\n    for ({index} dim4 = ({index})simdgroup_slot; dim4 < head_dim / 4{lit}; dim4 += ({index})simdgroup_count) {{\n        float4 summed = simd_sum(live ? partial4[dim4 * splits + ({index})lane] * weight : float4(0.0f));\n        if (lane == 0) {{\n            out_row[dim4 * 4{lit}] = ({element_type})(summed.x * inverse);\n            out_row[dim4 * 4{lit} + 1{lit}] = ({element_type})(summed.y * inverse);\n            out_row[dim4 * 4{lit} + 2{lit}] = ({element_type})(summed.z * inverse);\n            out_row[dim4 * 4{lit} + 3{lit}] = ({element_type})(summed.w * inverse);\n        }}\n    }}\n}}\n"
     )
+}
+
+/// The integer type and literal suffix the decode split partial and merge
+/// kernels do their index arithmetic in: `("int", "")` when
+/// [`crate::sized::ATTENTION_DECODE_INDEX_BITS`] (`omega-runtime.toml`'s
+/// `[attention_decode].index_bits`) is 32 and every element offset the pair
+/// can form fits in 31 bits, `("long", "L")` otherwise. The offsets are
+/// bounded by the cache extent (`(cached + new) keys * kv_heads * head_dim`,
+/// the V plane's last row) and by the scratch the splits write
+/// (`query_rows * kv_heads * query_groups * (head_dim + 2) * splits_max`);
+/// the compiled capacity is the sum of `cached_key_rows` and `new_key_rows`,
+/// so the text changes with the kv capacity bucket only where 32 bits would
+/// overflow.
+#[cfg(any(
+    test,
+    feature = "metal-attn-split-decode",
+    all(feature = "metal", target_os = "macos")
+))]
+#[must_use]
+pub(super) fn decode_index_tokens(kind: &BoundOpKind) -> (&'static str, &'static str) {
+    const WIDE: (&str, &str) = ("long", "L");
+    let BoundOpKind::CachedAttention {
+        query_rows,
+        cached_key_rows,
+        new_key_rows,
+        kv_heads,
+        query_groups,
+        head_dim,
+        ..
+    } = kind
+    else {
+        return WIDE;
+    };
+    if crate::sized::ATTENTION_DECODE_INDEX_BITS != 32 {
+        return WIDE;
+    }
+    let cache_extent = cached_key_rows
+        .saturating_add(*new_key_rows)
+        .saturating_mul(*kv_heads)
+        .saturating_mul(*head_dim);
+    let scratch_extent = query_rows
+        .saturating_mul(*kv_heads)
+        .saturating_mul(*query_groups)
+        .saturating_mul(head_dim.saturating_add(2))
+        .saturating_mul(crate::sized::ATTENTION_SPLIT_MAX);
+    if cache_extent.max(scratch_extent) <= u64::from(i32::MAX.unsigned_abs()) {
+        ("int", "")
+    } else {
+        WIDE
+    }
 }
 
 /// Whether the split writers and the merge kernel use llama.cpp's interleaved

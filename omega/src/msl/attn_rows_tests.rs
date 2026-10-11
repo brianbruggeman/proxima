@@ -613,11 +613,11 @@ fn a_launch_past_u32_threads_takes_the_flat_form_through_the_one_grid_decision()
 fn the_decode_split_baseline_bakes_the_new_key_count() {
     let op = attention_rows_op(9, 8, 256, 512, 5, SLIDING_LOWER);
     let source = render_cached_attention_decode_split(&op, "entry", None).expect("renders");
-    assert!(source.contains("constexpr long new_key_rows = 5;"));
+    assert!(source.contains("constexpr int new_key_rows = 5;"));
 
     let decode = attention_op(9, 8, 256, 512, 1, SLIDING_LOWER);
     let source = render_cached_attention_decode_split(&decode, "entry", None).expect("renders");
-    assert!(source.contains("constexpr long new_key_rows = 1;"));
+    assert!(source.contains("constexpr int new_key_rows = 1;"));
 }
 
 #[test]

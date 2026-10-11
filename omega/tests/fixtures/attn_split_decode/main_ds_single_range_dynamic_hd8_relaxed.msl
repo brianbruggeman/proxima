@@ -124,26 +124,26 @@ kernel void omega_cached_attention_q1_h1_g1_d8_s3f800000_ln9223372036854775808_u
 struct Uniforms { long total_elements; long splits; };
 
 kernel void omega_cached_attention_q1_h1_g1_d8_s3f800000_ln9223372036854775808_udyn_x4_b32_qh0_merge(device const float* in0 [[buffer(0)]], device float* out [[buffer(1)]], constant Uniforms& u [[buffer(2)]], uint tg [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]], ushort simdgroup_count [[simdgroups_per_threadgroup]]) {
-    if ((long)tg >= u.total_elements) { return; }
-    constexpr long head_dim = 8;
-    long splits = u.splits;
-    device const float* stats = in0 + u.total_elements * head_dim * splits;
-    bool live = (long)lane < splits;
-    float own_max = live ? stats[((long)tg * splits + (long)lane) * 2L] : -INFINITY;
-    float own_sum = live ? stats[((long)tg * splits + (long)lane) * 2L + 1L] : 0.0f;
+    if ((int)tg >= (int)u.total_elements) { return; }
+    constexpr int head_dim = 8;
+    int splits = (int)u.splits;
+    device const float* stats = in0 + (int)u.total_elements * head_dim * splits;
+    bool live = (int)lane < splits;
+    float own_max = live ? stats[((int)tg * splits + (int)lane) * 2] : -INFINITY;
+    float own_sum = live ? stats[((int)tg * splits + (int)lane) * 2 + 1] : 0.0f;
     float global_max = simd_max(own_max);
     float weight = (own_max == -INFINITY) ? 0.0f : exp(own_max - global_max);
     float total = simd_sum(own_sum * weight);
     float inverse = (total == 0.0f) ? 0.0f : 1.0f / total;
-    device const float4* partial4 = (device const float4*)in0 + (long)tg * (head_dim / 4L) * splits;
-    device float* out_row = out + (long)tg * head_dim;
-    for (long dim4 = (long)simdgroup_slot; dim4 < head_dim / 4L; dim4 += (long)simdgroup_count) {
-        float4 summed = simd_sum(live ? partial4[dim4 * splits + (long)lane] * weight : float4(0.0f));
+    device const float4* partial4 = (device const float4*)in0 + (int)tg * (head_dim / 4) * splits;
+    device float* out_row = out + (int)tg * head_dim;
+    for (int dim4 = (int)simdgroup_slot; dim4 < head_dim / 4; dim4 += (int)simdgroup_count) {
+        float4 summed = simd_sum(live ? partial4[dim4 * splits + (int)lane] * weight : float4(0.0f));
         if (lane == 0) {
-            out_row[dim4 * 4L] = (float)(summed.x * inverse);
-            out_row[dim4 * 4L + 1L] = (float)(summed.y * inverse);
-            out_row[dim4 * 4L + 2L] = (float)(summed.z * inverse);
-            out_row[dim4 * 4L + 3L] = (float)(summed.w * inverse);
+            out_row[dim4 * 4] = (float)(summed.x * inverse);
+            out_row[dim4 * 4 + 1] = (float)(summed.y * inverse);
+            out_row[dim4 * 4 + 2] = (float)(summed.z * inverse);
+            out_row[dim4 * 4 + 3] = (float)(summed.w * inverse);
         }
     }
 }
