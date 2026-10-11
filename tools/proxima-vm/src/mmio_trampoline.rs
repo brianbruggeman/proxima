@@ -525,3 +525,19 @@ pub unsafe extern "C" fn proxima_vm_icc_set_vtimer_pending(icc_transport: *mut c
     let icc = unsafe { &mut *icc_transport.cast::<IccCpuInterface>() };
     icc.set_pending(intid);
 }
+
+/// Whether `icc_transport`'s interrupt is currently signalling an IRQ
+/// ([`IccCpuInterface::irq_asserted`]) — nonzero when it is. The HVF exit loop
+/// asks this before every `hv_vcpu_run` because HVF clears the asserted line
+/// whenever a run returns (`hv_vcpu_set_pending_interrupt`'s SDK doc).
+///
+/// # Safety
+///
+/// `icc_transport` must be a valid, live pointer to an [`IccCpuInterface`]
+/// for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxima_vm_icc_irq_asserted(icc_transport: *const c_void) -> u8 {
+    // SAFETY: forwarded verbatim from this function's own safety contract.
+    let icc = unsafe { &*icc_transport.cast::<IccCpuInterface>() };
+    u8::from(icc.irq_asserted())
+}

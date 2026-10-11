@@ -1483,6 +1483,20 @@ impl IccCpuInterface {
         self.pending_interrupt = InterruptState::Pending(intid);
     }
 
+    /// Whether this interface is signalling an IRQ to the vCPU right now: an
+    /// INTID is `InterruptState::Pending` (recorded by [`Self::set_pending`],
+    /// not yet acknowledged through `ICC_IAR1_EL1`) and group 1 is enabled
+    /// (`ICC_IGRPEN1_EL1.Enable`, ARM IHI 0069 -- a disabled group never
+    /// signals). A level, not an edge: `hv_vcpu_set_pending_interrupt`'s own
+    /// SDK doc says HVF clears the asserted line after every `hv_vcpu_run`
+    /// return, so the exit loop re-asserts it before every run for as long as
+    /// this stays true, until the guest's own IAR read moves the INTID to
+    /// `InterruptState::Active`.
+    #[must_use]
+    pub fn irq_asserted(&self) -> bool {
+        self.group1_enabled && matches!(self.pending_interrupt, InterruptState::Pending(_))
+    }
+
     /// Apply one register access, returning the effect the caller must
     /// carry out. Mirrors [`GicDistributor::apply`]'s single match over the
     /// whole register map — every register here is a fixed value at a fixed
@@ -2765,6 +2779,38 @@ mod icc_tests {
             IccEffect::ReadValue(ICC_IAR1_SPURIOUS),
             "nothing pending or active after a full cycle"
         );
+    }
+
+    /// The level the HVF exit loop re-asserts before every `hv_vcpu_run`
+    /// (HVF drops the line each time a run returns): asserted only while the
+    /// vtimer INTID is pending AND group 1 is enabled, and it falls the
+    /// moment the guest's `ICC_IAR1_EL1` read acknowledges it. Sequence taken
+    /// from the measured boot: `ICC_IGRPEN1_EL1` write 1, vtimer exit
+    /// (`set_pending(27)`), `ICC_IAR1_EL1` read returning 0x1b.
+    #[test]
+    fn irq_is_asserted_only_while_vtimer_intid_is_pending_with_group1_enabled() {
+        const VTIMER_INTID: u32 = 27;
+        let mut icc = IccCpuInterface::new();
+        icc.set_pending(VTIMER_INTID);
+        assert!(
+            !icc.irq_asserted(),
+            "a pending intid is not signalled while group 1 is disabled"
+        );
+
+        icc.apply(write(3, 0, 12, 12, 7, 1))
+            .expect("icc_igrpen1_el1 write is legal");
+        assert!(icc.irq_asserted(), "pending + group 1 enabled signals the irq");
+
+        icc.apply(read(3, 0, 12, 12, 0))
+            .expect("icc_iar1_el1 is modeled");
+        assert!(
+            !icc.irq_asserted(),
+            "the iar1 acknowledge moves pending to active, dropping the level"
+        );
+
+        icc.apply(write(3, 0, 12, 12, 1, u64::from(VTIMER_INTID)))
+            .expect("icc_eoir1_el1 write is legal");
+        assert!(!icc.irq_asserted(), "idle after eoir1");
     }
 
     #[test]
