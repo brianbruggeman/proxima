@@ -2,7 +2,7 @@ checkpoint=gemma4_e2b
 architecture=gemma4
 kv_layout=SlidingRing
 bind.ops=5667
-bind.ops_sha256=289de46eb2e4cd6662f64274df2dae26104138d86016ad22c673d938df2e29aa
+bind.ops_sha256=bbfda871db79a71a8f05674025ac27d1c66bb21a16b8d065100725ae337adc7c
 bind.logits_root=NodeId(5666)
 bind.hidden_root=None
 bind.residual_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
@@ -10,7 +10,7 @@ bind.layer_roots=35 sha256=262cdfa82767555265377cf13c0a27544a73eeb59ec17e1f38100
 bind.router_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
 bind.single_position_step=false
 verify.ops=5665
-verify.ops_sha256=c8078f4ba6e6dc4bf7a40849e1f500a7a4978f2ba994150c5e9cc1d6a40ee0b3
+verify.ops_sha256=cf5d76d422ba25b674d0c6890499e94b18d7261e443a87e4496a44bfc58ce7d2
 verify.logits_root=NodeId(5664)
 verify.hidden_root=None
 verify.residual_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
