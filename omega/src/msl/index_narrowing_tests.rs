@@ -1,6 +1,8 @@
 use alloc::collections::BTreeMap;
 
-use super::tests::{embedding_lookup_op, gathered_matmul_op};
+use super::tests::embedding_lookup_op;
+#[cfg(feature = "metal-grouped-gemm")]
+use super::tests::gathered_matmul_op;
 use super::*;
 
 const NORM_BASE: &str = include_str!("../../tests/fixtures/index32/norm_epilogue_1536.base.msl");
@@ -185,6 +187,7 @@ fn a_q6_k_embedding_table_past_u32_keeps_the_64_bit_block_decode() {
     assert!(!cache_key(&bound, &packed).contains("_c32"));
 }
 
+#[cfg(feature = "metal-grouped-gemm")]
 #[test]
 fn a_routed_q8_0_expert_projection_divides_its_flat_row_in_unsigned_32_bit() {
     let bound = gathered_matmul_op(8, 32, 512, 1024);
@@ -197,6 +200,7 @@ fn a_routed_q8_0_expert_projection_divides_its_flat_row_in_unsigned_32_bit() {
     assert!(cache_key(&bound, &packed).contains("_c32"));
 }
 
+#[cfg(feature = "metal-grouped-gemm")]
 #[test]
 fn a_routed_expert_projection_one_row_group_inside_u32_still_narrows() {
     let bound = gathered_matmul_op(63, 2, 67_108_864, 1024);
@@ -208,6 +212,7 @@ fn a_routed_expert_projection_one_row_group_inside_u32_still_narrows() {
     assert!(cache_key(&bound, &packed).contains("_c32"));
 }
 
+#[cfg(feature = "metal-grouped-gemm")]
 #[test]
 fn a_routed_expert_projection_with_outputs_past_u32_keeps_the_64_bit_divides() {
     let bound = gathered_matmul_op(64, 2, 67_108_864, 1024);
@@ -220,6 +225,7 @@ fn a_routed_expert_projection_with_outputs_past_u32_keeps_the_64_bit_divides() {
     assert!(!cache_key(&bound, &packed).contains("_c32"));
 }
 
+#[cfg(feature = "metal-grouped-gemm")]
 #[test]
 fn the_coordinate_override_set_to_zero_restores_every_family_to_the_64_bit_form() {
     let lookup = embedding_lookup_op(50_000, 8, 4);
