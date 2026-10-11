@@ -2153,7 +2153,13 @@ pub(crate) const fn tiled_decode(codec: Codec) -> Option<TiledDecode> {
         | Codec::Q1_0
         | Codec::Q2_0
         | Codec::BFloat8 => None,
-        Codec::Bf8E5M2 | Codec::Bf4E2M1 | Codec::Fp6E3M2 => None,
+        Codec::Fp6E3M2 => Some(TiledDecode::new(
+            FP6_E3M2_ELEMENTS,
+            FP6_E3M2_BYTES,
+            "scaled_e3m2_decode",
+            SCALED_E3M2_DECODE_MSL,
+        )),
+        Codec::Bf8E5M2 | Codec::Bf4E2M1 => None,
     }
 }
 
