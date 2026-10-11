@@ -502,12 +502,38 @@ impl<'file> ExpertSlab<'file> {
             });
         }
         let per_expert_bytes = stack.len() / expert_count;
-        let experts = stack
-            .chunks_exact(per_expert_bytes)
-            .map(|chunk| {
+        let chunks: Vec<&'file [u8]> = stack.chunks_exact(per_expert_bytes).collect();
+        self.bind_layer_experts(layer, weight_node, codec, &chunks, out_dim, in_dim)
+    }
+
+    /// Registers layer `layer`'s experts under `weight_node` from one byte
+    /// range per expert, each ALIASED (`ExpertBytes::Borrowed`) and never
+    /// copied. [`Self::bind_layer_stack`] cuts one contiguous stack into these;
+    /// a checkpoint that stores several projections fused per expert (an HF
+    /// `input_linear.weight` holding gate then up rows) hands the ranges of
+    /// its own file directly, so no stack is ever assembled.
+    ///
+    /// # Errors
+    /// [`InteropError::ExpertSlabIndexOutOfRange`] if `experts` is empty.
+    pub fn bind_layer_experts(
+        &mut self,
+        layer: usize,
+        weight_node: NodeId,
+        codec: Codec,
+        experts: &[&'file [u8]],
+        out_dim: u32,
+        in_dim: u32,
+    ) -> Result<(), InteropError> {
+        if experts.is_empty() {
+            return Err(InteropError::ExpertSlabIndexOutOfRange { layer, expert: 0 });
+        }
+        let experts = experts
+            .iter()
+            .copied()
+            .map(|range| {
                 Some(ExpertCopy {
                     codec,
-                    bytes: ExpertBytes::Borrowed(chunk),
+                    bytes: ExpertBytes::Borrowed(range),
                     out_dim,
                     in_dim,
                     epoch: 0,

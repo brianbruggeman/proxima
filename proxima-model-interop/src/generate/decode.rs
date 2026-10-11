@@ -1471,6 +1471,12 @@ impl<'file> LoadedModel<'file> {
                     .iter()
                     .map(|(name, _, _)| name.as_str()),
             )
+            .chain(
+                self.weights
+                    .expert_ranges
+                    .iter()
+                    .map(|(name, _, _)| name.as_str()),
+            )
             .collect()
     }
 

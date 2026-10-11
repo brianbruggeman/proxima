@@ -61,7 +61,10 @@ fn granitemoe_binding_profile_is_registered_and_is_not_the_default() {
     let granite = binding_profile("granitemoe").expect("granitemoe parses");
     let default = binding_profile("llama").expect("defaults parse");
 
-    assert_eq!(granite.aliases.len(), default.aliases.len() + 24 * 4);
+    assert_eq!(
+        granite.aliases.len(),
+        default.aliases.len() + 24 * 4 + 3 + 24 * 6
+    );
     assert_ne!(
         first_alias(&granite, "blk.0.ffn_gate_exps.weight"),
         first_alias(&default, "blk.0.ffn_gate_exps.weight")
@@ -186,5 +189,84 @@ fn granitemoe_binding_dense_profile_refuses_moe_leaves() {
             0,
             2
         )
+    );
+}
+
+const DENSE_LEAF_SUFFIXES: [&str; 6] = [
+    "attn_norm.weight",
+    "attn_q.weight",
+    "attn_k.weight",
+    "attn_v.weight",
+    "attn_output.weight",
+    "ffn_norm.weight",
+];
+
+fn dense_leaves() -> Vec<String> {
+    let global = ["token_embd.weight", "output_norm.weight", "output.weight"];
+    let layered = (0..24).flat_map(|layer| {
+        DENSE_LEAF_SUFFIXES
+            .iter()
+            .map(move |suffix| format!("blk.{layer}.{suffix}"))
+    });
+    global
+        .iter()
+        .map(ToString::to_string)
+        .chain(layered)
+        .collect()
+}
+
+fn stored_source(binding: &BindingProfile, leaf: &str) -> String {
+    let (alias, prefix) = binding
+        .aliases_for(leaf)
+        .next()
+        .unwrap_or_else(|| panic!("no alias for {leaf}"));
+    match alias {
+        TensorAlias::Rename { from, .. } => format!("{prefix}{from}"),
+        other => panic!("{leaf} is not a plain rename: {other:?}"),
+    }
+}
+
+#[test]
+fn granitemoe_dense_aliases_name_only_tensors_the_vendored_header_stores() {
+    let binding = binding_profile("granitemoe").expect("granitemoe parses");
+    let stored = header_names();
+
+    let missing: Vec<String> = dense_leaves()
+        .into_iter()
+        .map(|leaf| stored_source(&binding, &leaf))
+        .filter(|source| !stored.contains(source))
+        .collect();
+
+    assert_eq!(missing, Vec::<String>::new());
+}
+
+#[test]
+fn granitemoe_dense_aliases_cover_every_dense_tensor_of_the_vendored_header() {
+    let binding = binding_profile("granitemoe").expect("granitemoe parses");
+    let sources: BTreeSet<String> = dense_leaves()
+        .iter()
+        .map(|leaf| stored_source(&binding, leaf))
+        .collect();
+
+    let uncovered: Vec<String> = header_names()
+        .into_iter()
+        .filter(|name| name != "__metadata__" && !name.contains("block_sparse_moe"))
+        .filter(|name| !sources.contains(name))
+        .collect();
+
+    assert_eq!(uncovered, Vec::<String>::new());
+}
+
+#[test]
+fn granitemoe_dense_aliases_tie_the_output_projection_to_the_embedding_table() {
+    let binding = binding_profile("granitemoe").expect("granitemoe parses");
+
+    assert_eq!(
+        stored_source(&binding, "output.weight"),
+        "model.embed_tokens.weight"
+    );
+    assert_eq!(
+        stored_source(&binding, "token_embd.weight"),
+        "model.embed_tokens.weight"
     );
 }

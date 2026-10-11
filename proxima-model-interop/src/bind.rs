@@ -986,6 +986,7 @@ pub struct BoundWeights<'file> {
         proxima_tensor::cpu::QuantizedBlock<'file>,
     )>,
     pub(crate) packed_owned: Vec<(alloc::string::String, Vec<u8>, Codec)>,
+    pub(crate) expert_ranges: Vec<(alloc::string::String, Vec<&'file [u8]>, Codec)>,
     pub(crate) precision: &'file [crate::serving::WeightPrecisionRule<'file>],
 }
 
@@ -1006,6 +1007,7 @@ impl<'file> BoundWeights<'file> {
             owned: Vec::new(),
             packed: Vec::new(),
             packed_owned: Vec::new(),
+            expert_ranges: Vec::new(),
             precision: weight_precision,
         }
     }
@@ -1050,6 +1052,19 @@ impl<'file> BoundWeights<'file> {
     #[must_use]
     pub fn packed_owned(&self) -> &[(alloc::string::String, Vec<u8>, Codec)] {
         &self.packed_owned
+    }
+
+    /// Every routed expert projection stored as one fused checkpoint tensor
+    /// (an HF `input_linear.weight` holding gate and up per expert), bound as
+    /// one borrowed byte range per expert straight out of `file_bytes`.
+    /// `build_expert_slab` hands each range to the
+    /// [`crate::expert_slab::ExpertSlab`] as that expert's own bytes, so the
+    /// gathered reduce reads the file in place: no stack is assembled, which
+    /// is why these cannot live in [`Self::packed`] (one contiguous block per
+    /// leaf) or [`Self::packed_owned`] (a copy).
+    #[must_use]
+    pub fn expert_ranges(&self) -> &[(alloc::string::String, Vec<&'file [u8]>, Codec)] {
+        &self.expert_ranges
     }
 }
 
@@ -2260,6 +2275,34 @@ fn quantized_block_as_owned_bytes(
     }
 }
 
+/// One byte range per expert of a routed projection, with their codec: the
+/// borrowed per-expert ranges a fused checkpoint tensor was bound as
+/// ([`BoundWeights::expert_ranges`]), else `weights.packed`'s whole stack cut
+/// into `expert_count` equal runs. `None` when the leaf is bound as neither,
+/// or the stack is not a whole multiple of `expert_count`.
+#[cfg(feature = "std")]
+fn expert_chunks<'file>(
+    weights: &BoundWeights<'file>,
+    name: &str,
+    expert_count: usize,
+) -> Option<(Codec, Vec<&'file [u8]>)> {
+    if let Some((_, ranges, codec)) = weights
+        .expert_ranges
+        .iter()
+        .find(|(candidate, _, _)| candidate == name)
+    {
+        return Some((*codec, ranges.clone()));
+    }
+    let (bytes, codec) = weights
+        .packed
+        .iter()
+        .find(|(candidate, _)| candidate == name)
+        .and_then(|(_, block)| quantized_block_as_owned_bytes(*block))?;
+    let per_expert = bytes.len().checked_div(expert_count)?;
+    (per_expert > 0 && bytes.len().is_multiple_of(expert_count))
+        .then(|| (codec, bytes.chunks_exact(per_expert).collect()))
+}
+
 /// Builds this checkpoint's [`crate::expert_slab::ExpertSlab`] straight off
 /// `weights.packed` and `program`'s own [`Op::Input`] nodes -- the
 /// zero-copy-native-stacked-tensor case [`bind_moe_stacked_experts`]'s own
@@ -2314,11 +2357,8 @@ pub(crate) fn build_expert_slab<'file>(
             ),
         ] {
             let name = alloc::format!("blk.{layer}.{projection}_exps.weight");
-            let Some((bytes, codec)) = weights
-                .packed
-                .iter()
-                .find(|(candidate, _)| *candidate == name)
-                .and_then(|(_, block)| quantized_block_as_owned_bytes(*block))
+            let Some((codec, experts)) =
+                expert_chunks(weights, &name, architecture.expert_count as usize)
             else {
                 continue;
             };
@@ -2332,15 +2372,7 @@ pub(crate) fn build_expert_slab<'file>(
             let site = layer as usize * crate::expert_slab::ExpertProjection::ALL.len()
                 + projection_kind.index();
             if slab
-                .bind_layer_stack(
-                    site,
-                    weight_node,
-                    codec,
-                    bytes,
-                    architecture.expert_count as usize,
-                    out_dim,
-                    in_dim,
-                )
+                .bind_layer_experts(site, weight_node, codec, &experts, out_dim, in_dim)
                 .is_ok()
             {
                 #[cfg(feature = "instrument")]
@@ -2569,6 +2601,7 @@ mod moe_memory_shape {
             owned: Vec::new(),
             packed: Vec::new(),
             packed_owned: Vec::new(),
+            expert_ranges: Vec::new(),
             precision: &[],
         }
     }
@@ -3001,6 +3034,7 @@ mod real_qwen3moe_file {
             owned: Vec::new(),
             packed: Vec::new(),
             packed_owned: Vec::new(),
+            expert_ranges: Vec::new(),
             precision: &[],
         };
         for (projection, out_dim, in_dim) in [
@@ -3150,6 +3184,7 @@ mod real_qwen3moe_file {
                 owned: Vec::new(),
                 packed: Vec::new(),
                 packed_owned: Vec::new(),
+                expert_ranges: Vec::new(),
                 precision: &[],
             };
             bind_moe_expert_weights(

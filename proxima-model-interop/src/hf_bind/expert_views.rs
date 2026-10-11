@@ -4,8 +4,10 @@ use std::collections::BTreeMap;
 
 use proxima_primitives::pipe::sans_io::Outcome;
 use proxima_safetensors::{SafetensorsModel, SafetensorsParser, TensorPayload, write_complete};
+use proxima_tensor::NodeId;
 
 use super::*;
+use crate::expert_slab::ExpertSlab;
 use crate::profiles::binding_profile;
 
 const EXPERTS: usize = 2;
@@ -104,14 +106,21 @@ fn bind<'file>(checkpoint: &'file Checkpoint, leaf: &str, rows: usize) -> BoundW
     weights
 }
 
-fn owned_bf16(weights: &BoundWeights<'_>, leaf: &str) -> Vec<f32> {
-    let (_, bytes, codec) = weights
-        .packed_owned
+fn part_ranges<'file>(weights: &BoundWeights<'file>, leaf: &str) -> Vec<&'file [u8]> {
+    let (_, ranges, codec) = weights
+        .expert_ranges
         .iter()
         .find(|(name, _, _)| name == leaf)
-        .expect("fused part binds as packed owned bytes");
+        .expect("fused part binds as per-expert file ranges");
     assert_eq!(*codec, Codec::BFloat16);
-    bf16_values(bytes)
+    ranges.clone()
+}
+
+fn part_values(weights: &BoundWeights<'_>, leaf: &str) -> Vec<f32> {
+    part_ranges(weights, leaf)
+        .into_iter()
+        .flat_map(bf16_values)
+        .collect()
 }
 
 fn expert_rows(values: &[f32], expert: usize) -> &[f32] {
@@ -124,8 +133,8 @@ fn hf_expert_stack_gate_and_up_are_row_parts_of_each_expert_in_out_in_order() {
 
     let gate = bind(&checkpoint, "blk.0.ffn_gate_exps.weight", OUTPUT);
     let up = bind(&checkpoint, "blk.0.ffn_up_exps.weight", OUTPUT);
-    let gate_values = owned_bf16(&gate, "blk.0.ffn_gate_exps.weight");
-    let up_values = owned_bf16(&up, "blk.0.ffn_up_exps.weight");
+    let gate_values = part_values(&gate, "blk.0.ffn_gate_exps.weight");
+    let up_values = part_values(&up, "blk.0.ffn_up_exps.weight");
 
     assert_eq!(expert_rows(&gate_values, 0), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     assert_eq!(
@@ -141,6 +150,10 @@ fn hf_expert_stack_gate_and_up_are_row_parts_of_each_expert_in_out_in_order() {
         [19.0, 20.0, 21.0, 22.0, 23.0, 24.0]
     );
     assert!(gate.owned.is_empty() && up.owned.is_empty(), "no f32 copy");
+    assert!(
+        gate.packed_owned.is_empty() && up.packed_owned.is_empty(),
+        "no byte copy"
+    );
 }
 
 #[test]
@@ -148,7 +161,7 @@ fn hf_expert_stack_is_not_the_transposed_in_out_layout() {
     let checkpoint = checkpoint(DType::BFloat16, bf16_bytes);
 
     let gate = bind(&checkpoint, "blk.0.ffn_gate_exps.weight", OUTPUT);
-    let gate_values = owned_bf16(&gate, "blk.0.ffn_gate_exps.weight");
+    let gate_values = part_values(&gate, "blk.0.ffn_gate_exps.weight");
 
     let transposed_control = [1.0, 4.0, 2.0, 5.0, 3.0, 6.0];
     assert_ne!(expert_rows(&gate_values, 0), transposed_control);
@@ -186,4 +199,67 @@ fn hf_expert_stack_f32_checkpoint_keeps_the_in_out_transposed_decode() {
         [1.0, 4.0, 2.0, 5.0, 3.0, 6.0],
         "the gather kernel rejects a Float32 block, so f32 stays [in, out]"
     );
+}
+
+#[test]
+fn hf_expert_stack_fused_parts_borrow_the_mapped_bytes_without_a_copy() {
+    let checkpoint = checkpoint(DType::BFloat16, bf16_bytes);
+
+    let up = bind(&checkpoint, "blk.0.ffn_up_exps.weight", OUTPUT);
+
+    let ranges = part_ranges(&up, "blk.0.ffn_up_exps.weight");
+    let mapped = checkpoint.file.as_ptr_range();
+    assert_eq!(ranges.len(), EXPERTS);
+    assert!(
+        ranges
+            .iter()
+            .all(|range| mapped.contains(&range.as_ptr()) && range.len() == OUTPUT * INPUT * 2),
+        "each expert's up rows alias the file buffer"
+    );
+}
+
+#[test]
+fn hf_expert_stack_fused_parts_fill_the_expert_slab_in_place() {
+    let checkpoint = checkpoint(DType::BFloat16, bf16_bytes);
+    let gate = bind(&checkpoint, "blk.0.ffn_gate_exps.weight", OUTPUT);
+    let ranges = part_ranges(&gate, "blk.0.ffn_gate_exps.weight");
+    let mut slab = ExpertSlab::new();
+
+    slab.bind_layer_experts(
+        0,
+        NodeId(3),
+        Codec::BFloat16,
+        &ranges,
+        OUTPUT as u32,
+        INPUT as u32,
+    )
+    .expect("per-expert ranges bind");
+
+    let mut scratch = Vec::new();
+    let sources = slab
+        .sources_for_step(&mut scratch)
+        .expect("a complete layer snapshots");
+    let entries = sources[&NodeId(3)].entries();
+    let mapped = checkpoint.file.as_ptr_range();
+    assert_eq!(entries.len(), EXPERTS);
+    assert!(entries.iter().all(|entry| {
+        let bytes = entry.block.packed_bytes().expect("a packed entry");
+        mapped.contains(&bytes.as_ptr())
+    }));
+    assert_eq!(slab.memory().owned_bytes, 0);
+}
+
+#[test]
+fn hf_expert_stack_empty_range_list_is_refused_by_the_slab() {
+    let mut slab = ExpertSlab::new();
+
+    let refused = slab.bind_layer_experts(0, NodeId(3), Codec::BFloat16, &[], 2, 3);
+
+    assert!(matches!(
+        refused,
+        Err(InteropError::ExpertSlabIndexOutOfRange {
+            layer: 0,
+            expert: 0
+        })
+    ));
 }

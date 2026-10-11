@@ -99,6 +99,7 @@ fn raw_packed_f32_matmul_weight_matches_an_independent_hand_computed_matmul() {
         owned: Vec::new(),
         packed: Vec::new(),
         packed_owned: Vec::new(),
+        expert_ranges: Vec::new(),
         precision: &[],
     };
     bind_matmul_weight_as(
@@ -363,6 +364,7 @@ fn q8_0_matmul_weight_binds_packed_and_matches_a_dequantized_oracle() {
         owned: Vec::new(),
         packed: Vec::new(),
         packed_owned: Vec::new(),
+        expert_ranges: Vec::new(),
         precision: &[],
     };
     bind_matmul_weight_as(
@@ -495,6 +497,7 @@ fn q8_0_matmul_weight_packed_path_is_sensitive_to_a_corrupted_byte() {
         owned: Vec::new(),
         packed: Vec::new(),
         packed_owned: Vec::new(),
+        expert_ranges: Vec::new(),
         precision: &[],
     };
     bind_matmul_weight_as(
@@ -1203,6 +1206,7 @@ fn weight_precision_rule_recodes_q4_k_to_q8_0_within_q8_0_error_bound() {
         owned: Vec::new(),
         packed: Vec::new(),
         packed_owned: Vec::new(),
+        expert_ranges: Vec::new(),
         precision: &rules,
     };
     bind_dense_as(
@@ -1309,6 +1313,7 @@ fn weight_precision_rule_recodes_to_f32_bit_identical_to_direct_dequant() {
         owned: Vec::new(),
         packed: Vec::new(),
         packed_owned: Vec::new(),
+        expert_ranges: Vec::new(),
         precision: &rules,
     };
     bind_dense_as(
@@ -1366,6 +1371,7 @@ fn weight_precision_rule_to_unencodable_target_names_the_typed_error() {
         owned: Vec::new(),
         packed: Vec::new(),
         packed_owned: Vec::new(),
+        expert_ranges: Vec::new(),
         precision: &rules,
     };
     let error = bind_dense_as(
@@ -1417,6 +1423,7 @@ fn no_matching_weight_precision_rule_is_byte_identical_to_the_no_rule_path() {
         owned: Vec::new(),
         packed: Vec::new(),
         packed_owned: Vec::new(),
+        expert_ranges: Vec::new(),
         precision: &non_matching_rules,
     };
     bind_dense_as(
@@ -1433,6 +1440,7 @@ fn no_matching_weight_precision_rule_is_byte_identical_to_the_no_rule_path() {
         owned: Vec::new(),
         packed: Vec::new(),
         packed_owned: Vec::new(),
+        expert_ranges: Vec::new(),
         precision: &[],
     };
     bind_dense_as(
@@ -1495,6 +1503,7 @@ fn sequential_weight_precision_rebinds_produce_distinct_names_and_leave_the_firs
         owned: Vec::new(),
         packed: Vec::new(),
         packed_owned: Vec::new(),
+        expert_ranges: Vec::new(),
         precision: &first_rules,
     };
     bind_dense_as(

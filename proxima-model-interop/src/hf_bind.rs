@@ -27,7 +27,7 @@
 //! stack's source from the profile (`profiles/binding/granitemoe.toml`, names
 //! taken from the vendored IBM header) and binds it as
 //! [`crate::bind::bind_moe_stacked_experts`] binds a GGUF stack: a bf16/f16 stack is packed, a whole tensor borrowed from
-//! the file and a fused part gathered once into packed owned bytes, never `f32`;
+//! the file and a fused part borrowed as one file range per expert, never `f32`;
 //! only an `F32` checkpoint decodes to the program's `[experts, in, out]` leaf. A
 //! profile that names none, and the dense
 //! `bind_all_weights_from_safetensors`, refuse with
@@ -116,7 +116,9 @@ pub struct SafetensorsTensorView<'manifest, 'file> {
     /// Bytes borrowed from the caller's file buffer.
     pub bytes: &'file [u8],
     role: Role,
-    program_axes: Vec<u64>,
+    /// Axes the lowered program declares for the leaf, e.g. `[1024, 16, 64]` for an
+    /// attention query over a stored `[1024, 1024]` matrix.
+    pub program_axes: Vec<u64>,
 }
 
 /// Resolve program leaves through `binding`, validate their source layout and
@@ -379,10 +381,10 @@ fn expert_stack_codec(dtype: DType) -> Option<Codec> {
 /// whole tensor (`of == 1`, `output_linear`) is borrowed straight out of
 /// `file_bytes` as [`QuantizedBlock::Packed`], no copy and no transpose. A
 /// fused part (`input_linear` -> gate, up) interleaves the parts per expert,
-/// so a contiguous `[experts, out, in]` block needs its row runs gathered
-/// once into [`BoundWeights::packed_owned`]: still the stored 2-byte element,
-/// never `f32`, and never transposed. A `Float32` checkpoint decodes and
-/// transposes as before.
+/// but each expert's part is itself one contiguous run of the file, so it is
+/// bound as one borrowed range per expert in [`BoundWeights::expert_ranges`]:
+/// still the stored 2-byte element, never `f32`, never transposed, never
+/// copied. A `Float32` checkpoint decodes and transposes as before.
 fn bind_safetensors_expert_stack<'file>(
     manifest: &Manifest,
     file_bytes: &'file [u8],
@@ -463,10 +465,15 @@ fn bind_packed_expert_stack<'file>(
             .push((leaf.into(), QuantizedBlock::Packed { codec, bytes }));
         return Ok(());
     }
-    let row_bytes = input * PACKED_ELEMENT_BYTES;
-    let cut = expert_row_part(bytes, experts, rows, row_bytes, part as usize, of as usize);
-    weights.resident_bytes += cut.len();
-    weights.packed_owned.push((leaf.into(), cut, codec));
+    let expert_bytes = rows * input * PACKED_ELEMENT_BYTES;
+    let part_bytes = expert_bytes / of as usize;
+    let ranges = (0..experts)
+        .map(|expert| {
+            let start = expert * expert_bytes + part as usize * part_bytes;
+            &bytes[start..start + part_bytes]
+        })
+        .collect();
+    weights.expert_ranges.push((leaf.into(), ranges, codec));
     Ok(())
 }
 
@@ -568,12 +575,7 @@ fn validated_view<'manifest, 'file>(
     }
     let axes_match = match role {
         Role::Native => entry.shape == program_axes,
-        Role::InOut => {
-            entry.shape.len() == 2
-                && program_axes.len() == 2
-                && entry.shape[0] == program_axes[1]
-                && entry.shape[1] == program_axes[0]
-        }
+        Role::InOut => inout_view_matches(&entry.shape, &program_axes),
         Role::Gathered => false,
     };
     if !axes_match {
@@ -623,6 +625,21 @@ fn validated_view<'manifest, 'file>(
     })
 }
 
+/// An `[out, in]` file tensor viewed as the program's `[in axes.., out axes..]`
+/// leaf: some split of the leaf's axes has the trailing product equal to the
+/// file's rows and the leading product equal to its columns. A rank-3 attention
+/// weight `[1024, 16, 64]` over a stored `[1024, 1024]` splits after axis 0;
+/// a rank-2 leaf splits after axis 0 too, which is the plain transpose check.
+fn inout_view_matches(stored: &[u64], program_axes: &[u64]) -> bool {
+    let [rows, columns] = stored else {
+        return false;
+    };
+    (1..program_axes.len()).any(|split| {
+        program_axes[split..].iter().product::<u64>() == *rows
+            && program_axes[..split].iter().product::<u64>() == *columns
+    })
+}
+
 fn bind_safetensors_leaf<'file>(
     manifest: &Manifest,
     file_bytes: &'file [u8],
@@ -633,7 +650,6 @@ fn bind_safetensors_leaf<'file>(
 ) -> Result<(), InteropError> {
     let leaf = view.leaf.as_str();
     let role = view.role;
-    let program_axes = &view.program_axes;
     let bytes = view.bytes;
     let dtype = view.dtype;
     if binding.decodes_to_f32(leaf) {
@@ -642,8 +658,8 @@ fn bind_safetensors_leaf<'file>(
             transpose_out_in_to_in_out(
                 &decoded,
                 leaf,
-                program_axes[1] as usize,
-                program_axes[0] as usize,
+                view.shape[0] as usize,
+                view.shape[1] as usize,
             )?
         } else {
             decoded
@@ -655,8 +671,8 @@ fn bind_safetensors_leaf<'file>(
         let output = transpose_out_in_to_in_out(
             &decoded,
             leaf,
-            program_axes[1] as usize,
-            program_axes[0] as usize,
+            view.shape[0] as usize,
+            view.shape[1] as usize,
         )?;
         weights.resident_bytes += output.len() * core::mem::size_of::<f32>();
         weights.owned.push((leaf.into(), output));
@@ -1175,6 +1191,7 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
         owned: Vec::new(),
         packed: Vec::new(),
         packed_owned: Vec::new(),
+        expert_ranges: Vec::new(),
         precision: &[],
     };
 
@@ -1335,6 +1352,8 @@ mod granitemoe_binding;
 
 #[cfg(test)]
 mod expert_views;
+#[cfg(test)]
+mod inout_views;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1735,6 +1754,7 @@ mod tests {
             owned: Vec::new(),
             packed: Vec::new(),
             packed_owned: Vec::new(),
+            expert_ranges: Vec::new(),
             precision: &[],
         };
         hf_bind_dense(
@@ -1909,6 +1929,7 @@ mod tests {
                     owned: Vec::new(),
                     packed: Vec::new(),
                     packed_owned: Vec::new(),
+                    expert_ranges: Vec::new(),
                     precision: &[],
                 },
             );
@@ -2005,6 +2026,7 @@ mod tests {
             owned: Vec::new(),
             packed: Vec::new(),
             packed_owned: Vec::new(),
+            expert_ranges: Vec::new(),
             precision: &[],
         };
         hf_bind_matmul_weight(
