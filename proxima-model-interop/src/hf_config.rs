@@ -174,7 +174,6 @@ pub fn parse_hf_config(bytes: &[u8]) -> Result<HfConfig, InteropError> {
 ///
 /// Returns [`InteropError::MalformedHfConfig`] when an LFM2 layer schedule is
 /// incomplete, contains an unsupported mixer, or requires a missing cache width.
-#[must_use]
 pub fn architecture_from_hf_config(config: &HfConfig) -> Result<ModelHparams, InteropError> {
     let configured_kv_heads = config
         .num_key_value_heads
