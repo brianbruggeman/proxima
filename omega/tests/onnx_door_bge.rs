@@ -308,6 +308,7 @@ fn tract_record_degenerate_control_cosine_a_b_altered_by_1e_3_fails() -> Result<
 }
 
 const CPU_TOLERANCE: f32 = 1e-5;
+const METAL_TOLERANCE: f32 = 1e-3;
 const OUTPUT_NAME: &str = "last_hidden_state";
 const UNIT_NORM_TOLERANCE: f32 = 1e-6;
 
@@ -317,9 +318,34 @@ enum MaskPolicy {
     PadPositionsUnmasked,
 }
 
-fn cpu_door() -> Result<OnnxDoor> {
-    OnnxDoor::from_bytes(bge::read_model()?, &DoorConfig::default())
-        .map_err(|error| anyhow!("cpu door config: {error}"))
+#[derive(Clone, Copy)]
+enum Target {
+    Cpu,
+    Metal,
+}
+
+impl Target {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Metal => "metal",
+        }
+    }
+
+    fn config(self) -> DoorConfig {
+        match self {
+            Self::Cpu => DoorConfig::default(),
+            Self::Metal => DoorConfig::builder()
+                .engine("gpu")
+                .gpu_driver("metal")
+                .build(),
+        }
+    }
+}
+
+fn build_door(target: Target) -> Result<OnnxDoor> {
+    OnnxDoor::from_bytes(bge::read_model()?, &target.config())
+        .map_err(|error| anyhow!("{} door config: {error}", target.label()))
 }
 
 fn door_batch(batch: &RecordBatch, policy: MaskPolicy) -> DoorBatch {
@@ -367,8 +393,12 @@ async fn door_cls_rows(
     bge::cls_rows(values, rows)
 }
 
-async fn door_cls_for_cell(cell: &str, policy: MaskPolicy) -> Result<Vec<Vec<f32>>> {
-    let door = cpu_door()?;
+async fn door_cls_for_cell(
+    target: Target,
+    cell: &str,
+    policy: MaskPolicy,
+) -> Result<Vec<Vec<f32>>> {
+    let door = build_door(target)?;
     let mut rows = Vec::new();
     for batch in &bge::read_record(cell)?.batches {
         rows.extend(door_cls_rows(&door, batch, policy).await?);
@@ -384,9 +414,12 @@ fn recorded_embeddings(cell: &str) -> Result<Vec<Vec<f32>>> {
     Ok(normalized(&record_rows(cell)?))
 }
 
-fn report_differences(cell: &str, differences: &[f32]) {
+fn report_differences(target: Target, cell: &str, differences: &[f32]) {
     for (sentence, difference) in differences.iter().enumerate() {
-        println!("bge_cpu_parity cell={cell} sentence={sentence} max_abs={difference:e}");
+        println!(
+            "bge_{}_parity cell={cell} sentence={sentence} max_abs={difference:e}",
+            target.label()
+        );
     }
 }
 
@@ -406,30 +439,19 @@ fn ensure_within(cell: &str, differences: &[f32], tolerance: f32) -> Result<()> 
     Ok(())
 }
 
-async fn parity_against_tract(cell: &str) -> Result<()> {
-    let actual = normalized(&door_cls_for_cell(cell, MaskPolicy::Recorded).await?);
-    let differences = bge::sentence_differences(&actual, &recorded_embeddings(cell)?)?;
+async fn parity_against_tract(target: Target, cell: &str, tolerance: f32) -> Result<()> {
+    let rows = door_cls_for_cell(target, cell, MaskPolicy::Recorded).await?;
+    let differences = bge::sentence_differences(&normalized(&rows), &recorded_embeddings(cell)?)?;
     ensure!(
         differences.len() == CORPUS_ROWS,
         "{} sentences compared",
         differences.len()
     );
-    report_differences(cell, &differences);
-    ensure_within(cell, &differences, CPU_TOLERANCE)
+    report_differences(target, cell, &differences);
+    ensure_within(cell, &differences, tolerance)
 }
 
-#[proxima::test]
-async fn bge_cpu_parity_b1_all_64_sentences_within_1e_5_of_tract() -> Result<()> {
-    parity_against_tract("b1").await
-}
-
-#[proxima::test]
-async fn bge_cpu_parity_b32_all_64_sentences_within_1e_5_of_tract() -> Result<()> {
-    parity_against_tract("b32").await
-}
-
-#[test]
-fn bge_cpu_parity_identity_control_tract_record_compared_with_itself_passes() -> Result<()> {
+fn identity_control(tolerance: f32) -> Result<()> {
     for cell in ["b1", "b32"] {
         let record = recorded_embeddings(cell)?;
 
@@ -440,48 +462,47 @@ fn bge_cpu_parity_identity_control_tract_record_compared_with_itself_passes() ->
             "{cell} compared {} rows",
             differences.len()
         );
-        ensure_within(cell, &differences, CPU_TOLERANCE)?;
+        ensure_within(cell, &differences, tolerance)?;
     }
     Ok(())
 }
 
-#[test]
-fn bge_cpu_parity_degenerate_control_one_element_altered_by_1e_3_fails() -> Result<()> {
+fn degenerate_control(alteration: f32, tolerance: f32) -> Result<()> {
     let record = recorded_embeddings("b1")?;
     let mut altered = record.clone();
-    altered[17][200] += 1e-3;
+    altered[17][200] += alteration;
 
     let differences = bge::sentence_differences(&altered, &record)?;
 
     ensure!(
-        ensure_within("b1", &differences, CPU_TOLERANCE).is_err(),
-        "an element altered by 1e-3 stayed within {CPU_TOLERANCE:e}"
+        ensure_within("b1", &differences, tolerance).is_err(),
+        "an element altered by {alteration:e} stayed within {tolerance:e}"
     );
     Ok(())
 }
 
-#[proxima::test]
-async fn bge_cpu_parity_mask_leak_control_pad_positions_unmasked_exceed_the_tolerance() -> Result<()>
-{
-    let leaked = normalized(&door_cls_for_cell("b32", MaskPolicy::PadPositionsUnmasked).await?);
+async fn mask_leak_control(target: Target, tolerance: f32) -> Result<()> {
+    let rows = door_cls_for_cell(target, "b32", MaskPolicy::PadPositionsUnmasked).await?;
 
-    let differences = bge::sentence_differences(&leaked, &recorded_embeddings("b32")?)?;
+    let differences = bge::sentence_differences(&normalized(&rows), &recorded_embeddings("b32")?)?;
 
     let exceeding = differences
         .iter()
-        .filter(|difference| **difference > CPU_TOLERANCE)
+        .filter(|difference| **difference > tolerance)
         .count();
-    println!("bge_cpu_parity mask_leak sentences_exceeding={exceeding}");
+    println!(
+        "bge_{}_parity mask_leak sentences_exceeding={exceeding}",
+        target.label()
+    );
     ensure!(
         exceeding >= 1,
-        "unmasked pad positions left every sentence within {CPU_TOLERANCE:e}"
+        "unmasked pad positions left every sentence within {tolerance:e}"
     );
     Ok(())
 }
 
-#[proxima::test]
-async fn bge_cpu_parity_outputs_are_finite_and_unit_norm() -> Result<()> {
-    let raw = door_cls_for_cell("b32", MaskPolicy::Recorded).await?;
+async fn finite_unit_norm_check(target: Target) -> Result<()> {
+    let raw = door_cls_for_cell(target, "b32", MaskPolicy::Recorded).await?;
 
     ensure!(
         raw.iter().flatten().all(|value| value.is_finite()),
@@ -494,5 +515,133 @@ async fn bge_cpu_parity_outputs_are_finite_and_unit_norm() -> Result<()> {
             "sentence {sentence} norm deviates from 1 by {deviation:e}"
         );
     }
+    Ok(())
+}
+
+#[proxima::test]
+async fn bge_cpu_parity_b1_all_64_sentences_within_1e_5_of_tract() -> Result<()> {
+    parity_against_tract(Target::Cpu, "b1", CPU_TOLERANCE).await
+}
+
+#[proxima::test]
+async fn bge_cpu_parity_b32_all_64_sentences_within_1e_5_of_tract() -> Result<()> {
+    parity_against_tract(Target::Cpu, "b32", CPU_TOLERANCE).await
+}
+
+#[test]
+fn bge_cpu_parity_identity_control_tract_record_compared_with_itself_passes() -> Result<()> {
+    identity_control(CPU_TOLERANCE)
+}
+
+#[test]
+fn bge_cpu_parity_degenerate_control_one_element_altered_by_1e_3_fails() -> Result<()> {
+    degenerate_control(1e-3, CPU_TOLERANCE)
+}
+
+#[proxima::test]
+async fn bge_cpu_parity_mask_leak_control_pad_positions_unmasked_exceed_the_tolerance() -> Result<()>
+{
+    mask_leak_control(Target::Cpu, CPU_TOLERANCE).await
+}
+
+#[proxima::test]
+async fn bge_cpu_parity_outputs_are_finite_and_unit_norm() -> Result<()> {
+    finite_unit_norm_check(Target::Cpu).await
+}
+
+#[cfg(feature = "metal")]
+#[proxima::test]
+async fn bge_metal_parity_b1_all_64_sentences_within_1e_3_of_tract() -> Result<()> {
+    parity_against_tract(Target::Metal, "b1", METAL_TOLERANCE).await
+}
+
+#[cfg(feature = "metal")]
+#[proxima::test]
+async fn bge_metal_parity_b32_all_64_sentences_within_1e_3_of_tract() -> Result<()> {
+    parity_against_tract(Target::Metal, "b32", METAL_TOLERANCE).await
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn bge_metal_parity_identity_control_tract_record_compared_with_itself_passes() -> Result<()> {
+    identity_control(METAL_TOLERANCE)
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn bge_metal_parity_degenerate_control_one_element_altered_by_1e_2_fails() -> Result<()> {
+    degenerate_control(1e-2, METAL_TOLERANCE)
+}
+
+#[cfg(feature = "metal")]
+#[proxima::test]
+async fn bge_metal_parity_mask_leak_control_pad_positions_unmasked_exceed_the_tolerance()
+-> Result<()> {
+    mask_leak_control(Target::Metal, METAL_TOLERANCE).await
+}
+
+#[cfg(feature = "metal")]
+#[proxima::test]
+async fn bge_metal_parity_outputs_are_finite_and_unit_norm() -> Result<()> {
+    finite_unit_norm_check(Target::Metal).await
+}
+
+#[cfg(feature = "metal")]
+struct DeviceRun {
+    allocated_bytes: u64,
+    decoded_bytes: u64,
+    nocopy_bytes: u64,
+    copied_bytes: u64,
+}
+
+#[cfg(feature = "metal")]
+async fn device_run_of_first_b1_sentence(target: Target) -> Result<DeviceRun> {
+    let record = bge::read_record("b1")?;
+    let batch = record.batches.first().context("b1 record has no batch")?;
+    let allocated_before = omega::metal::current_allocated_size().unwrap_or(0);
+    let nocopy_before = omega::metal::BLOCK_NOCOPY_BOUND_BYTES.get();
+    let copied_before = omega::metal::BLOCK_COPIED_BYTES.get();
+    let door = build_door(target)?;
+
+    door_cls_rows(&door, batch, MaskPolicy::Recorded).await?;
+
+    Ok(DeviceRun {
+        allocated_bytes: omega::metal::current_allocated_size()
+            .unwrap_or(0)
+            .saturating_sub(allocated_before),
+        decoded_bytes: door.stats().decoded_bytes,
+        nocopy_bytes: omega::metal::BLOCK_NOCOPY_BOUND_BYTES.get() - nocopy_before,
+        copied_bytes: omega::metal::BLOCK_COPIED_BYTES.get() - copied_before,
+    })
+}
+
+#[cfg(feature = "metal")]
+#[proxima::test]
+async fn bge_metal_parity_gpu_ran_control_metal_binds_every_decoded_byte_and_cpu_binds_none()
+-> Result<()> {
+    let cpu = device_run_of_first_b1_sentence(Target::Cpu).await?;
+    let metal = device_run_of_first_b1_sentence(Target::Metal).await?;
+
+    for (label, run) in [("cpu", &cpu), ("metal", &metal)] {
+        println!(
+            "bge_metal_parity gpu_ran {label} allocated={} decoded={} nocopy_bytes={} copied_bytes={}",
+            run.allocated_bytes, run.decoded_bytes, run.nocopy_bytes, run.copied_bytes
+        );
+    }
+    ensure!(
+        cpu.nocopy_bytes + cpu.copied_bytes == 0,
+        "the cpu door bound {} bytes to metal buffers",
+        cpu.nocopy_bytes + cpu.copied_bytes
+    );
+    ensure!(
+        metal.nocopy_bytes + metal.copied_bytes >= metal.decoded_bytes,
+        "metal bound {} bytes, below the {} decoded initializer bytes",
+        metal.nocopy_bytes + metal.copied_bytes,
+        metal.decoded_bytes
+    );
+    ensure!(
+        metal.allocated_bytes > 0,
+        "metal reports no allocated bytes"
+    );
     Ok(())
 }
