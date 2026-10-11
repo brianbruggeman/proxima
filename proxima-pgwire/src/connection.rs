@@ -3551,6 +3551,7 @@ mod tests {
     // Shed path renders a real ErrorResponse (57P03, cannot_connect_now)
     // instead of dispatching to the engine, and that the connection stays
     // alive afterward (ReadyForQuery follows, ready for the next query).
+    #[cfg(feature = "listen")]
     #[proxima::test(runtime = "tokio")]
     async fn simple_query_is_shed_with_a_57p03_error_while_admission_is_quiescing() {
         let session = session_after_startup();
