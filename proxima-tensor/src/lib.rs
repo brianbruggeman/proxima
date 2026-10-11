@@ -220,6 +220,8 @@ pub mod instrument;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod live;
 #[cfg(any(feature = "std", feature = "alloc"))]
+pub mod lowered;
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub mod map;
 // pure over `NumericPolicy`/`NumericRewrite`/`TensorError` -- no alloc, no
 // std -- so it lives ungated at the same `alloc`+ tier `error` needs for the
@@ -282,6 +284,8 @@ pub use dtype::DType;
 pub use error::TensorError;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use live::annotate;
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub use lowered::Lowered;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use map::{AxisIndex, AxisTerm, IndexMap, IndexPattern, affine, projection};
 #[cfg(any(feature = "std", feature = "alloc"))]

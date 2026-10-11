@@ -3,21 +3,9 @@ use conflaguration::Settings;
 use proxima_tensor::NumericPolicy;
 use serde::{Deserialize, Serialize};
 
-use crate::backend::{BackendError, Engine, GpuDriver};
+use crate::backend::{Engine, GpuDriver};
+use crate::door::{DoorConfigError, DoorSettings};
 use crate::sized;
-
-/// Why a [`DoorConfig`] string did not name a compiled-in value.
-#[derive(Debug, thiserror::Error)]
-pub enum DoorConfigError {
-    #[error("engine: {0}")]
-    Engine(#[source] BackendError),
-
-    #[error("unknown gpu driver `{name}`; known drivers: auto, metal, wgpu")]
-    UnknownGpuDriver { name: String },
-
-    #[error("unknown numeric policy `{name}`; known policies: bit_exact, llama_relaxed, fast")]
-    UnknownNumericPolicy { name: String },
-}
 
 /// Where and how the door runs a lowered graph.
 ///
@@ -123,6 +111,19 @@ impl DoorConfig {
                 name: other.to_owned(),
             }),
         }
+    }
+
+    /// Every field resolved to the typed values the one generic door takes.
+    ///
+    /// # Errors
+    /// The first [`DoorConfigError`] any field raises.
+    pub fn settings(&self) -> Result<DoorSettings, DoorConfigError> {
+        Ok(DoorSettings {
+            engine: self.resolve_engine()?,
+            gpu_driver: self.resolve_gpu_driver()?,
+            numeric_policy: self.resolve_numeric_policy()?,
+            max_pin_sets: self.resolve_max_pin_sets(),
+        })
     }
 
     /// The pin-set cap: `max_pin_sets`, or the build-time

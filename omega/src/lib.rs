@@ -48,6 +48,8 @@ pub mod config;
 pub mod cuda;
 #[cfg(feature = "cuda-driver")]
 pub mod cuda_driver;
+#[cfg(feature = "door")]
+pub mod door;
 #[cfg(feature = "alloc")]
 mod epilogue;
 pub mod error;
