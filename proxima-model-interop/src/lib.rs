@@ -194,3 +194,5 @@ pub use transform::{
 };
 #[cfg(feature = "std")]
 pub use transform::{Layout, MlxNames, SANDWICH_NORM_LAYOUT, STANDARD_LAYOUT, dense_names};
+#[cfg(feature = "std")]
+pub use transform::{copy_config, hf_config_bytes, sliding_pattern_hparams};

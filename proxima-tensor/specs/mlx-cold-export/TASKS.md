@@ -19,7 +19,7 @@ Dependencies: 1 none; 2 none (creates `mlx_names.rs`, vendors `plain/`); 3 on 2;
 | 4 | MoE leaf names in `mlx_names.rs` vs the vendored plain header | AC4 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mlx_names_moe/)'` | `4 passed` | [ ] |  |
 | 5 | `export_plain`: bf16/f16/f32 casts and Q8_0/Q4_0 dequantization through `proxima_gguf::quant::dispatch::dequantize` | AC5 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mlx_plain_/)'` | `10 passed` | [ ] | hand-derived block oracles |
 | 6 | `pack_affine`, `export_affine`, `AffineParams` (bits, group size, default, float fallback) | AC6 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mlx_affine_/)'` | `21 passed` | [x] | affine packing lives in `transform/mlx_affine.rs` (not `mlx.rs`); oracle transcribed from mlx 06eb7483 `quantized.cpp` 65-93, 99-160, 1165-1233; `tests/support/trial.rs` moved to a `#[path]` mod in its one user so the `capability_matrix` target builds under `-D warnings` |
-| 7 | `transform/mlx_config.rs` (new): HF config writer, `quantization` keys, `UnknownFamilyConfig`, config copy | AC7 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mlx_config_/)'` | `13 passed` | [ ] |  |
+| 7 | `transform/mlx_config.rs` (new): HF config writer, `quantization` keys, `UnknownFamilyConfig`, config copy | AC7 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mlx_config_/)'` | `13 passed` | [x] | e2b input is `sliding_pattern_hparams` (architecture_from_metadata fails on the gemma4 `feed_forward_length` array); keys drawn from `HF_CONFIG_KEYS` in hf_config.rs; gemma4 also nests `text_config`; quantization is `Option<(bits, group_size)>` until slice 6 lands `AffineParams` |
 | 8 | `proxima-tokenizer/src/hf_write.rs` (new): `tokenizer.json` and `tokenizer_config.json` writer from `Vocab`, feature `hf`; agreement with the vendored plain files | AC8 | `cargo nextest run -p proxima-tokenizer --features hf,gguf -E 'test(/hf_write/)'` | `14 passed` | [x] | Vocab::merge_pairs added; reader now accepts merges as ["l","r"] pairs (vendored files use them; string form failed); writer emits null normalizer/pre_tokenizer/post_processor/decoder and model = type+vocab+merges, config = bos/eos/unk strings + add_bos/eos_token only; granite added_tokens ids 49152-49154 lie beyond model.vocab so a Vocab cannot hold them; reader ignores added_tokens so tests restore token types; R9 encode-equality is where the dropped pipeline blocks show |
 | 9 | interop tokenizer export from GGUF metadata and copy for HF sources; encode of the fixture prompt; enable feature `hf` on the interop's tokenizer dependency with `cargo add` | AC9 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mlx_tokenizer_/)'` | `14 passed` | [ ] | external ids: `granite_moe/llama_ids.json` and `gemma4_e2b/llama_ids.json` |
 | 10 | round trip on both models | AC10 | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/mlx_round_trip/)'` | `4 passed` | [ ] | GPU; behind gpu.lock |
@@ -30,8 +30,8 @@ Dependencies: 1 none; 2 none (creates `mlx_names.rs`, vendors `plain/`); 3 on 2;
 
 ## resume
 
-Last landed slice: 1, 2, 6, 8 and 14
-Next action: slice 7
+Last landed slice: 1, 2, 6, 7, 8 and 14
+Next action: slice 3 (granitemoe binding), then 4, 5, 9 to 13
 Open question, if any: whether the stacked-expert leaves as `expert_slab` binds them have one HF counterpart each (slice 3 answers it; a leaf with no counterpart is reported)
 
 ## struck

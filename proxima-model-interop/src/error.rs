@@ -460,6 +460,12 @@ pub enum InteropError {
     #[error("malformed hf config.json: {reason}")]
     MalformedHfConfig { reason: String },
 
+    /// The MLX `config.json` writer has no field layout for `family`, the
+    /// checkpoint's `general.architecture`; writing one by guess would emit a
+    /// config the loader reads as another model.
+    #[error("no mlx config.json layout for family {family:?}")]
+    UnknownFamilyConfig { family: String },
+
     /// `crate::hf_bind`'s weight binder found a safetensors tensor whose
     /// declared [`DType`] this crate has no decoder for -- only
     /// `Float32`/`Float16`/`BFloat16` dense weights are supported (an
