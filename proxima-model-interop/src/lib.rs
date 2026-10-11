@@ -143,8 +143,9 @@ pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
 #[cfg(feature = "std")]
 pub use lowering::{
     BoundProgram, FfnRouting, KvCacheShape, KvLayout, StepInput, StepState, bind_checkpoint,
-    bind_checkpoint_with_kv_layout, bind_speculative_verify, bind_symbols, header_descriptor,
-    kv_layers, rope_freq_factors, sliding_rope_inputs, step_state, symbols, trained_context_length,
+    bind_checkpoint_with_kv_layout, bind_hf_checkpoint, bind_speculative_verify, bind_symbols,
+    header_descriptor, kv_layers, rope_freq_factors, sliding_rope_inputs, step_state, symbols,
+    trained_context_length,
 };
 #[cfg(feature = "std")]
 pub use prompt_cache_settings::PromptCacheSettings;
