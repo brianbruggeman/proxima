@@ -1,0 +1,82 @@
+name: proxima-vm
+
+# Gate for tools/proxima-vm. scripts/proxima-vm-gate.sh builds the no_std+alloc
+# floor and the std set, runs nextest with an asserted nonzero count, clippy,
+# rustdoc and the doctest baseline. elf.rs tests need rustup llvm-tools
+# (llvm-readobj in the sysroot) and build guests/lambda for both guest triples.
+
+on:
+  push:
+    branches: [main, "verify/*"]
+    paths:
+      - "tools/proxima-vm/**"
+      - "proxima-core/**"
+      - "proxima-net/**"
+      - "proxima-primitives/**"
+      - "proxima-process/**"
+      - "proxima-protocols/**"
+      - "scripts/proxima-vm-gate.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/proxima-vm.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "tools/proxima-vm/**"
+      - "proxima-core/**"
+      - "proxima-net/**"
+      - "proxima-primitives/**"
+      - "proxima-process/**"
+      - "proxima-protocols/**"
+      - "scripts/proxima-vm-gate.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/proxima-vm.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: proxima-vm-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  proxima-vm-gate:
+    name: proxima-vm-gate.sh (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, llvm-tools
+          targets: aarch64-unknown-none, x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            tools/proxima-vm/guests/lambda
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - name: grant the runner user access to /dev/kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - run: bash scripts/proxima-vm-gate.sh
+      - name: vm_registry (root crate), nonzero count asserted
+        run: |
+          status=0
+          cargo nextest run --locked -p proxima --features vm -E 'binary(vm_registry)' --no-fail-fast > vm_registry.log 2>&1 || status=$?
+          cat vm_registry.log
+          if [ "${status}" -ne 0 ]; then
+            echo "ERROR: vm_registry nextest exited ${status} (failures above)" >&2
+            exit "${status}"
+          fi
+          ran="$(grep -oE '[0-9]+ tests? run:' vm_registry.log | grep -oE '[0-9]+' | tail -1)"
+          if [ -z "${ran}" ] || [ "${ran}" -eq 0 ]; then
+            echo "ERROR: vm_registry ran zero tests -- an empty run is not a pass" >&2
+            exit 1
+          fi
+          echo "vm_registry tests run: ${ran}"
