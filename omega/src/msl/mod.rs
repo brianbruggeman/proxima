@@ -157,6 +157,8 @@ pub use signature_tokens_prelude::{
 // since nothing else ever names it through `msl`'s namespace.
 #[cfg(feature = "metal-attn-split-decode")]
 use cached_attention_decode_split::render_cached_attention_decode_split;
+#[cfg(all(test, feature = "metal-attn-split-decode"))]
+use cached_attention_decode_split::index_literal;
 #[cfg(test)]
 use cached_attention_render::render_cached_attention;
 use cached_attention_render::{

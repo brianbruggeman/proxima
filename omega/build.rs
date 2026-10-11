@@ -114,6 +114,16 @@ fn require_within_u32(name: &str, value: usize) -> usize {
     value
 }
 
+/// `[attention_decode].index_bits` picks the integer width of the decode
+/// split kernels' index arithmetic: the two widths Metal has (`int`, `long`).
+fn require_index_bits(name: &str, value: i64) -> i64 {
+    assert!(
+        value == 32 || value == 64,
+        "{name} must be 32 or 64; got {value}"
+    );
+    value
+}
+
 /// [`crate::sized::PACKED_ROW_BLOCK_SIMDGROUPS`]'s cross-axis rule: a power
 /// of two (so `simdgroups * SIMD_WIDTH` is always a clean multiple of
 /// `SIMD_WIDTH`, the invariant `msl.rs`'s row-blocked kernel body's
@@ -604,6 +614,13 @@ fn emit_sizing_consts() {
     );
     out.push_str(&format!(
         "pub const ATTENTION_DECODE_SIMDGROUPS_MAX: u64 = {attention_decode_simdgroups_max};\n"
+    ));
+    let attention_decode_index_bits = require_index_bits(
+        "attention_decode.index_bits",
+        resolve_int(&root, "attention_decode", "index_bits"),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_DECODE_INDEX_BITS: u64 = {attention_decode_index_bits};\n"
     ));
 
     let attention_rows_keys_per_block = require_multiple_of_thirty_two(

@@ -1,4 +1,4 @@
-use super::cached_attention_render::BF8_VECTOR_HELPER;
+use super::cached_attention_render::{BF8_VECTOR_HELPER, decode_index_tokens};
 use super::*;
 
 /// The split-KV partial for [`CachedAttentionForm::TwoRangeDecodeSplit`]: one
@@ -54,11 +54,9 @@ pub(super) fn render_cached_attention_decode_split(
     };
     validate_attention_split_limit(resolved.node, crate::sized::ATTENTION_SPLIT_MAX)?;
     let element_type = type_token(resolved.node, resolved.dtype)?;
-    let cached_lower = if *cached_lower_inclusive == i64::MIN {
-        "-9223372036854775807L".to_string()
-    } else {
-        format!("{cached_lower_inclusive}L")
-    };
+    let (index_type, literal_suffix) = decode_index_tokens(&resolved.kind);
+    let cached_lower = index_literal(*cached_lower_inclusive, index_type, literal_suffix);
+    let new_upper = index_literal(*new_upper_inclusive, index_type, literal_suffix);
     let (cached_kv_type, kv_pointers, key_load, value_load) = match cached_kv_codec {
         None => (element_type, PLAIN_KV_POINTERS, PLAIN_KEY_LOAD, PLAIN_VALUE_LOAD),
         Some(Codec::Float16) => ("half", HALF_KV_POINTERS, HALF_KEY_LOAD, HALF_VALUE_LOAD),
@@ -83,7 +81,9 @@ pub(super) fn render_cached_attention_decode_split(
         ("@HEAD_DIM@", head_dim.to_string()),
         ("@SCALE@", msl_literal(*scale)),
         ("@CACHED_LOWER@", cached_lower),
-        ("@NEW_UPPER@", format!("{new_upper_inclusive}L")),
+        ("@NEW_UPPER@", new_upper),
+        ("@INDEX@", index_type.to_string()),
+        ("@L@", literal_suffix.to_string()),
         ("@NEW_KEY_ROWS@", new_key_rows.to_string()),
         ("@CAP@", decode_simdgroup_cap(*head_dim).to_string()),
         ("@LANES_PER_KEY@", decode_lanes_per_key().to_string()),
@@ -106,6 +106,17 @@ pub(super) fn render_cached_attention_decode_split(
     }
     source.push_str(&body);
     Ok(source)
+}
+
+/// `value` as a literal of the kernel's index type: `i64::MIN`, the
+/// "no lower bound" sentinel, becomes the most negative value that survives
+/// negation, and a 32-bit kernel clamps to the `int` range.
+pub(super) fn index_literal(value: i64, index_type: &str, literal_suffix: &str) -> String {
+    let (lowest, highest) = match index_type {
+        "int" => (-i64::from(i32::MAX), i64::from(i32::MAX)),
+        _ => (-i64::MAX, i64::MAX),
+    };
+    format!("{}{literal_suffix}", value.clamp(lowest, highest))
 }
 
 const PLAIN_KV_POINTERS: &str = "device const @T@4* kr4 = (device const @T@4*)((cached ? in2 : in4) + kbase);
@@ -160,27 +171,27 @@ const DECODE_SPLIT_KERNEL: &str =r#"struct Uniforms { long total_elements; long 
 #define OMEGA_UNROLL _Pragma("clang loop unroll(full)")
 
 kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [[buffer(1)]], device const @KV@* in2 [[buffer(2)]], device const @KV@* in3 [[buffer(3)]], device const @T@* in4 [[buffer(4)]], device const @T@* in5 [[buffer(5)]], device const @KV@* in6 [[buffer(6)]], device const @T@* in7 [[buffer(7)]], device const @T@* in8 [[buffer(8)]], device @T@* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
-    long splits = u.splits;
-    if ((long)tgid >= u.total_elements * splits) { return; }
-    constexpr long kv_heads = @KV_HEADS@; constexpr long query_groups = @QUERY_GROUPS@; constexpr long head_dim = @HEAD_DIM@; constexpr float scale = @SCALE@; constexpr long cached_lower = @CACHED_LOWER@; constexpr long new_upper = @NEW_UPPER@; constexpr long new_key_rows = @NEW_KEY_ROWS@; constexpr long cap = @CAP@;
+    @INDEX@ splits = (@INDEX@)u.splits;
+    if ((@INDEX@)tgid >= (@INDEX@)u.total_elements * splits) { return; }
+    constexpr @INDEX@ kv_heads = @KV_HEADS@; constexpr @INDEX@ query_groups = @QUERY_GROUPS@; constexpr @INDEX@ head_dim = @HEAD_DIM@; constexpr float scale = @SCALE@; constexpr @INDEX@ cached_lower = @CACHED_LOWER@; constexpr @INDEX@ new_upper = @NEW_UPPER@; constexpr @INDEX@ new_key_rows = @NEW_KEY_ROWS@; constexpr @INDEX@ cap = @CAP@;
     constexpr short lanes_per_key = @LANES_PER_KEY@; constexpr short keys_in_flight = 32 / lanes_per_key; constexpr short batch = @KEYS_PER_BATCH@;
     constexpr short plane_vectors = head_dim / 8; constexpr short row_vectors = head_dim / 4;
     constexpr short plane_slots = (plane_vectors + lanes_per_key - 1) / lanes_per_key; constexpr short row_slots = (row_vectors + lanes_per_key - 1) / lanes_per_key;
-    long cached_key_rows = (long)in8[0];
-    long chunks = u.context_chunks;
-    long chunk = (long)simdgroup_slot;
-    long split = (long)tgid % splits;
-    long query_head = ((long)tgid / splits) % (kv_heads * query_groups);
-    long query_row = (long)tgid / (splits * kv_heads * query_groups);
-    long kv_head = query_head / query_groups;
-    long query_index = query_row * (kv_heads * query_groups) + query_head;
-    long qbase = query_index * (head_dim / 2);
-    long last_key = cached_key_rows + new_key_rows - 1L;
-    long first_key = max(0L, cached_key_rows + cached_lower + query_row);
-    long band = last_key + 1L - first_key;
-    long slice_len = (band + splits - 1L) / splits;
-    long lo = first_key + split * slice_len;
-    long hi = min(lo + slice_len, last_key + 1L);
+    @INDEX@ cached_key_rows = (@INDEX@)in8[0];
+    @INDEX@ chunks = (@INDEX@)u.context_chunks;
+    @INDEX@ chunk = (@INDEX@)simdgroup_slot;
+    @INDEX@ split = (@INDEX@)tgid % splits;
+    @INDEX@ query_head = ((@INDEX@)tgid / splits) % (kv_heads * query_groups);
+    @INDEX@ query_row = (@INDEX@)tgid / (splits * kv_heads * query_groups);
+    @INDEX@ kv_head = query_head / query_groups;
+    @INDEX@ query_index = query_row * (kv_heads * query_groups) + query_head;
+    @INDEX@ qbase = query_index * (head_dim / 2);
+    @INDEX@ last_key = cached_key_rows + new_key_rows - 1@L@;
+    @INDEX@ first_key = max(0@L@, cached_key_rows + cached_lower + query_row);
+    @INDEX@ band = last_key + 1@L@ - first_key;
+    @INDEX@ slice_len = (band + splits - 1@L@) / splits;
+    @INDEX@ lo = first_key + split * slice_len;
+    @INDEX@ hi = min(lo + slice_len, last_key + 1@L@);
     threadgroup float shared_m[cap]; threadgroup float shared_l[cap]; threadgroup float4 shared_o[cap * row_vectors];
     short ty = (short)(lane / lanes_per_key); short tx = (short)(lane % lanes_per_key);
     float maximum = -INFINITY; float sum = 0.0f;
@@ -195,23 +206,23 @@ kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [
             query_real[slot] = float4(0.0f); query_imag[slot] = float4(0.0f);
             if (index < plane_vectors) { query_real[slot] = float4(qr4[index]); query_imag[slot] = float4(qi4[index]); }
         }
-        long slice_start = lo + chunk;
-        long num_local_keys = (slice_start < hi) ? ((hi - 1L - slice_start) / chunks) + 1L : 0L;
-        for (long batch_start = 0L; batch_start < num_local_keys; batch_start += (long)batch * (long)keys_in_flight) {
+        @INDEX@ slice_start = lo + chunk;
+        @INDEX@ num_local_keys = (slice_start < hi) ? ((hi - 1@L@ - slice_start) / chunks) + 1@L@ : 0@L@;
+        for (@INDEX@ batch_start = 0@L@; batch_start < num_local_keys; batch_start += (@INDEX@)batch * (@INDEX@)keys_in_flight) {
             float4 key_real[batch][plane_slots]; float4 key_imag[batch][plane_slots]; float4 value_row[batch][row_slots];
             bool valid[batch];
             OMEGA_UNROLL for (short step = 0; step < batch; step++) {
-                long local_index = batch_start + (long)step * (long)keys_in_flight + (long)ty;
-                long key = slice_start + local_index * chunks;
-                bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;
+                @INDEX@ local_index = batch_start + (@INDEX@)step * (@INDEX@)keys_in_flight + (@INDEX@)ty;
+                @INDEX@ key = slice_start + local_index * chunks;
+                bool cached = key < cached_key_rows; @INDEX@ new_index = key - cached_key_rows;
                 bool live = local_index < num_local_keys;
                 if (live) {
-                    long relative = (cached ? key - cached_key_rows : new_index) - query_row;
+                    @INDEX@ relative = (cached ? key - cached_key_rows : new_index) - query_row;
                     if (cached && relative < cached_lower) { live = false; }
                     if (!cached && relative > new_upper) { live = false; }
                 }
                 valid[step] = live;
-                long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);
+                @INDEX@ kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);
                 @KV_POINTERS@
                 OMEGA_UNROLL for (short slot = 0; slot < plane_slots; slot++) {
                     short index = tx + slot * lanes_per_key;
@@ -269,27 +280,27 @@ kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (chunk == 0L) {
+    if (chunk == 0@L@) {
         float merged_max = -INFINITY;
-        for (long c = 0; c < chunks; c++) { merged_max = max(merged_max, shared_m[c]); }
+        for (@INDEX@ c = 0; c < chunks; c++) { merged_max = max(merged_max, shared_m[c]); }
         float chunk_scale[cap];
         float merged_sum = 0.0f;
-        OMEGA_UNROLL for (long c = 0; c < cap; c++) {
+        OMEGA_UNROLL for (@INDEX@ c = 0; c < cap; c++) {
             bool live_chunk = c < chunks && shared_m[c] != -INFINITY;
             chunk_scale[c] = live_chunk ? exp(shared_m[c] - merged_max) : 0.0f;
             merged_sum += live_chunk ? shared_l[c] * chunk_scale[c] : 0.0f;
         }
         device float* attn_scratch = (device float*)out;
-        long value_base = query_index * row_vectors;
-        long stats_index = u.total_elements * head_dim * splits + (query_index * splits + split) * 2L;
-        if (splits != 1L && lane == 0) { attn_scratch[stats_index] = merged_max; attn_scratch[stats_index + 1L] = merged_sum; }
+        @INDEX@ value_base = query_index * row_vectors;
+        @INDEX@ stats_index = (@INDEX@)u.total_elements * head_dim * splits + (query_index * splits + split) * 2@L@;
+        if (splits != 1@L@ && lane == 0) { attn_scratch[stats_index] = merged_max; attn_scratch[stats_index + 1@L@] = merged_sum; }
         if (ty == 0) {
             OMEGA_UNROLL for (short slot = 0; slot < row_slots; slot++) {
                 short index = tx + slot * lanes_per_key;
                 if (index < row_vectors) {
                     float4 merged = float4(0.0f);
-                    OMEGA_UNROLL for (long c = 0; c < cap; c++) { merged += (c < chunks) ? shared_o[c * row_vectors + index] * chunk_scale[c] : float4(0.0f); }
-                    if (splits == 1L) {
+                    OMEGA_UNROLL for (@INDEX@ c = 0; c < cap; c++) { merged += (c < chunks) ? shared_o[c * row_vectors + index] * chunk_scale[c] : float4(0.0f); }
+                    if (splits == 1@L@) {
                         ((device @T@4*)(out + query_index * head_dim))[index] = @T@4(merged_sum == 0.0f ? float4(0.0f) : merged / merged_sum);
                     } else {
                         ((device float4*)attn_scratch)[(value_base + index) * splits + split] = merged;

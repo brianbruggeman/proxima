@@ -310,6 +310,58 @@ mod decode_split {
         }
     }
 
+    fn kernel_bodies(op: &BoundOp) -> [(&'static str, String); 2] {
+        let partial = emit(op, &PackedOperands::new(), NumericPolicy::llama_relaxed())
+            .expect("the decode split kernel emits")
+            .source;
+        let merge = render_cached_attention_merge(op, "entry").expect("the merge kernel renders");
+        [("partial", partial), ("merge", merge)].map(|(label, source)| {
+            let entry = source.find("kernel void ").expect("a kernel entry");
+            (label, source[entry..].to_string())
+        })
+    }
+
+    #[test]
+    fn the_partial_and_merge_index_in_32_bits_while_every_offset_fits() {
+        assert_default_sizing();
+        assert_eq!(crate::sized::ATTENTION_DECODE_INDEX_BITS, 32);
+        for cached_key_rows in [32_u64, 2048] {
+            let op = attention_op(9, 8, 256, cached_key_rows, 1, i64::MIN);
+            for (label, body) in kernel_bodies(&op) {
+                assert!(!body.contains("long "), "{label} at {cached_key_rows}: a 64-bit declaration");
+                assert!(!body.contains("(long)"), "{label} at {cached_key_rows}: a 64-bit cast");
+                assert!(!body.contains("1L"), "{label} at {cached_key_rows}: a 64-bit literal");
+            }
+        }
+        let op = attention_op(9, 8, 256, 2048, 1, i64::MIN);
+        let [(_, partial), (_, merge)] = kernel_bodies(&op);
+        assert!(partial.contains("constexpr int cached_lower = -2147483647;"));
+        assert!(partial.contains("int splits = (int)u.splits;"));
+        assert!(merge.contains("int splits = (int)u.splits;"));
+        assert!(merge.contains("stats = in0 + (int)u.total_elements * head_dim * splits;"));
+    }
+
+    #[test]
+    fn a_cache_whose_offsets_overflow_31_bits_keeps_the_64_bit_form() {
+        assert_default_sizing();
+        let op = attention_op(9, 8, 256, 1 << 24, 1, i64::MIN);
+        for (label, body) in kernel_bodies(&op) {
+            assert!(body.contains("long splits = (long)u.splits;"), "{label}: 64-bit splits");
+            assert!(!body.contains("int splits"), "{label}: no 32-bit splits");
+        }
+        let [(_, partial), _] = kernel_bodies(&op);
+        assert!(partial.contains("constexpr long cached_lower = -9223372036854775807L;"));
+    }
+
+    #[test]
+    fn the_index_literal_clamps_to_the_kernel_index_type() {
+        assert_eq!(index_literal(i64::MIN, "int", ""), "-2147483647");
+        assert_eq!(index_literal(i64::MAX, "int", ""), "2147483647");
+        assert_eq!(index_literal(-511, "int", ""), "-511");
+        assert_eq!(index_literal(i64::MIN, "long", "L"), "-9223372036854775807L");
+        assert_eq!(index_literal(0, "long", "L"), "0L");
+    }
+
     #[test]
     fn the_partial_kernel_source_carries_the_split_grid_and_the_interleaved_store() {
         assert_default_sizing();
@@ -326,17 +378,17 @@ mod decode_split {
                     for required in [
                         "uint tgid [[threadgroup_position_in_grid]]",
                         "ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]",
-                        "long split = (long)tgid % splits;",
-                        "long query_head = ((long)tgid / splits) % (kv_heads * query_groups);",
-                        "long first_key = max(0L, cached_key_rows + cached_lower + query_row);",
-                        "long slice_len = (band + splits - 1L) / splits;",
-                        "long hi = min(lo + slice_len, last_key + 1L);",
-                        "if (splits == 1L) {",
-                        "long stats_index = u.total_elements * head_dim * splits + (query_index * splits + split) * 2L;",
+                        "int split = (int)tgid % splits;",
+                        "int query_head = ((int)tgid / splits) % (kv_heads * query_groups);",
+                        "int first_key = max(0, cached_key_rows + cached_lower + query_row);",
+                        "int slice_len = (band + splits - 1) / splits;",
+                        "int hi = min(lo + slice_len, last_key + 1);",
+                        "if (splits == 1) {",
+                        "int stats_index = (int)u.total_elements * head_dim * splits + (query_index * splits + split) * 2;",
                         "((device float4*)attn_scratch)[(value_base + index) * splits + split] = merged;",
                         "constexpr short lanes_per_key = 32;",
                         "constexpr short batch = 1;",
-                        "long cached_key_rows = (long)in8[0];",
+                        "int cached_key_rows = (int)in8[0];",
                     ] {
                         assert!(
                             kernel.source.contains(required),
@@ -427,8 +479,8 @@ mod decode_split {
             "ushort simdgroup_count [[simdgroups_per_threadgroup]]",
             "float global_max = simd_max(own_max);",
             "float total = simd_sum(own_sum * weight);",
-            "float4 summed = simd_sum(live ? partial4[dim4 * splits + (long)lane] * weight : float4(0.0f));",
-            "device const float* stats = in0 + u.total_elements * head_dim * splits;",
+            "float4 summed = simd_sum(live ? partial4[dim4 * splits + (int)lane] * weight : float4(0.0f));",
+            "device const float* stats = in0 + (int)u.total_elements * head_dim * splits;",
         ] {
             assert!(
                 merge.source.contains(required),
@@ -438,7 +490,7 @@ mod decode_split {
         assert!(
             !merge
                 .source
-                .contains("for (long split = 0; split < splits; split++)"),
+                .contains("for (int split = 0; split < splits; split++)"),
             "the per-dimension serial walk over splits is what this kernel replaces"
         );
     }

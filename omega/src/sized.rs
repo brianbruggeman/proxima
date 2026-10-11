@@ -70,10 +70,12 @@
 //!   (`crate::msl::decode_splits_for`), read only under
 //!   `metal-attn-split-decode`; see `omega-runtime.toml`'s `[attention_splits]`.
 //! - `ATTENTION_DECODE_KEYS_IN_FLIGHT`/`ATTENTION_DECODE_KEYS_PER_BATCH`/
-//!   `ATTENTION_DECODE_KEYS_PER_SIMDGROUP`/`ATTENTION_DECODE_SIMDGROUPS_MAX`
-//!   (always compiled) -- the decode split kernel's lane layout, load batch
-//!   and simdgroup count (`crate::msl::decode_lanes_per_key`,
-//!   `decode_keys_per_batch`, `decode_chunks_for`, `decode_simdgroup_cap`),
+//!   `ATTENTION_DECODE_KEYS_PER_SIMDGROUP`/`ATTENTION_DECODE_SIMDGROUPS_MAX`/
+//!   `ATTENTION_DECODE_INDEX_BITS`
+//!   (always compiled) -- the decode split kernel's lane layout, load batch,
+//!   simdgroup count and index arithmetic width (`crate::msl::decode_lanes_per_key`,
+//!   `decode_keys_per_batch`, `decode_chunks_for`, `decode_simdgroup_cap`,
+//!   `decode_index_width`),
 //!   read only under `metal-attn-split-decode`; see `omega-runtime.toml`'s
 //!   `[attention_decode]`.
 //! - `ATTENTION_ROWS_KEYS_PER_BLOCK`/`ATTENTION_ROWS_KEYS_PER_SPLIT`/

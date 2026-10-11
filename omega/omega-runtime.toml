@@ -491,6 +491,15 @@ keys_per_simdgroup = 8
 # `[cached_attention].threadgroup_memory_bytes`. must be a power of two <= 32.
 # override via OMEGA_ATTENTION_DECODE_SIMDGROUPS_MAX.
 simdgroups_max = 4
+# width of the integer arithmetic the decode split partial and merge kernels use
+# for key positions, element offsets and split and chunk counts. 32 keeps it in
+# the GPU's native 32-bit integer unit; the 64-bit `long` form lowers every
+# divide, modulo and multiply to multi-instruction sequences (measured in the
+# decode attention phase cell of decode-prefill-parity/SPEC.md). a kernel whose
+# largest element offset (cache capacity * kv_heads * head_dim) or scratch
+# extent does not fit in 31 bits renders the 64-bit form whatever this says.
+# must be 32 or 64. override via OMEGA_ATTENTION_DECODE_INDEX_BITS.
+index_bits = 32
 
 [attention_rows]
 # row-tiled cached attention (`msl::CachedAttentionForm::TwoRangeRowTiled`, K > 1 query rows,
