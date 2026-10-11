@@ -148,7 +148,10 @@ fn codec_marker(codec: Codec) -> &'static str {
         | Codec::Mxfp4
         | Codec::Nvfp4
         | Codec::Q1_0
-        | Codec::Q2_0 => {
+        | Codec::Q2_0
+        | Codec::BFloat8
+        | Codec::Bf8E5M2
+        | Codec::Bf4E2M1 => {
             unreachable!("WEIGHT_FAMILIES never assigns a non-K-quant codec")
         }
     }
