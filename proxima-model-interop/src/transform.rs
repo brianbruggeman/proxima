@@ -169,6 +169,8 @@ mod mlx_config;
 #[cfg(feature = "std")]
 mod mlx_names;
 #[cfg(feature = "std")]
+mod mlx_config_fields;
+#[cfg(feature = "std")]
 mod mlx_tokenizer;
 #[cfg(feature = "std")]
 pub use mlx_config::{copy_config, hf_config_bytes, sliding_pattern_hparams};

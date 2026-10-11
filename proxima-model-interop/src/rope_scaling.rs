@@ -259,7 +259,7 @@ fn yarn_correction_range(
 }
 
 #[cfg(feature = "std")]
-fn optional_f32(parsed: &ParsedGguf, key: &str) -> Option<f32> {
+pub(crate) fn optional_f32(parsed: &ParsedGguf, key: &str) -> Option<f32> {
     match parsed.metadata_value(key) {
         Some(MetadataValue::F32(value)) => Some(*value),
         Some(MetadataValue::F64(value)) => Some(round_to_f32(*value)),
