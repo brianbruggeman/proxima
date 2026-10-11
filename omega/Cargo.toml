@@ -520,6 +520,9 @@ metal-horizontal-merge = ["metal"]
 # `GroupedGateUp` regression (docs/discipline.md ROW 543-545) came from.
 # Default-off: no default-path caller.
 metal-moe-mul-mat-id = ["metal", "proxima-tensor/metal-moe-mul-mat-id"]
+# the ONNX door (`onnx_door`): one pipe over parse, validate, lower, plan, execute.
+# default-off so a build that never reads ONNX compiles neither the parser nor the builder derive.
+onnx-door = ["std", "cpu", "dep:proxima-onnx", "dep:bon"]
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
@@ -554,6 +557,8 @@ proxima-primitives = { version = "0.1.0", path = "../proxima-primitives", defaul
 sha2 = { workspace = true, optional = true }
 proxima-tensor = { version = "0.1.0", path = "../proxima-tensor", default-features = false, features = ["alloc"] }
 const_format = { version = "0.2.36", default-features = false }
+bon = { workspace = true, optional = true, features = ["experimental-overwritable"] }
+proxima-onnx = { version = "0.1.0", path = "../proxima-onnx", features = ["std"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # objc2: the message-send runtime (Retained<T>, extern_methods!) every Metal
