@@ -9,9 +9,8 @@
 //!
 //! Gates on BOTH a real arm64 Linux `Image` (`PROXIMA_VM_KERNEL_BOOT_IMAGE`,
 //! `tests/kernel_boot.rs`'s own env var) AND an initramfs `cpio` archive
-//! (`PROXIMA_VM_INITRAMFS`) existing on this host — the same "asset absent
-//! -> named UNMEASURED skip" shape every asset-gated test in this crate
-//! uses, since neither a 38 MiB kernel binary nor a built initramfs has any
+//! (`PROXIMA_VM_INITRAMFS`) existing on this host — under the `kernel-boot` Cargo feature, where a missing or unset asset is a
+//! hard failure, since neither a 38 MiB kernel binary nor a built initramfs has any
 //! business living in this repo.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -25,7 +24,9 @@ const ENTITLEMENTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/entitlements.pl
 const IMAGE_PATH_VAR: &str = "PROXIMA_VM_KERNEL_BOOT_IMAGE";
 const INITRAMFS_PATH_VAR: &str = "PROXIMA_VM_INITRAMFS";
 
-const HYPERVISOR_LANE: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+fn hypervisor_lane() -> bool {
+    cfg!(all(target_os = "macos", target_arch = "aarch64"))
+}
 
 /// PID 1's own liveness marker (this file's module doc names it), written
 /// by the static `/init` this initramfs carries before it does anything
@@ -33,7 +34,7 @@ const HYPERVISOR_LANE: bool = cfg!(all(target_os = "macos", target_arch = "aarch
 const INIT_ALIVE_MARKER: &str = "PROXIMA-INIT-ALIVE";
 
 /// Resolves one required asset path, or `None` if it is not present on this
-/// host — the honest UNMEASURED answer, mirrored from
+/// host — the caller turns absence into a hard failure, mirrored from
 /// `tests/kernel_boot.rs`'s own `kernel_image_path`.
 fn asset_path(env_var: &str) -> Option<String> {
     let path = env::var(env_var).ok()?;
@@ -87,23 +88,20 @@ fn run_signed_probe(image_path: &str, initramfs_path: &str) -> ProbeRun {
 
 #[proxima::test]
 async fn init_alive_marker_arrives_through_the_pl011_byte_channel() {
-    if !HYPERVISOR_LANE {
-        return;
-    }
-    let Some(image_path) = asset_path(IMAGE_PATH_VAR) else {
-        eprintln!(
-            "UNMEASURED-kernel-image-not-present: set {IMAGE_PATH_VAR} to a real arm64 Linux \
-             Image to run this boot"
-        );
-        return;
-    };
-    let Some(initramfs_path) = asset_path(INITRAMFS_PATH_VAR) else {
-        eprintln!(
-            "UNMEASURED-initramfs-not-present: set {INITRAMFS_PATH_VAR} to a built initramfs \
-             cpio archive to run this boot"
-        );
-        return;
-    };
+    assert!(
+        hypervisor_lane(),
+        "kernel-boot feature requires an aarch64 macos host with Hypervisor.framework; this host cannot boot a guest"
+    );
+    let image_path = asset_path(IMAGE_PATH_VAR).unwrap_or_else(|| {
+        panic!(
+            "{IMAGE_PATH_VAR} must name an existing arm64 Linux Image file; unset or missing file"
+        )
+    });
+    let initramfs_path = asset_path(INITRAMFS_PATH_VAR).unwrap_or_else(|| {
+        panic!(
+            "{INITRAMFS_PATH_VAR} must name an existing newc cpio initramfs archive; unset or missing file"
+        )
+    });
 
     let probe = run_signed_probe(&image_path, &initramfs_path);
     let console_text = String::from_utf8_lossy(&probe.pl011_bytes);

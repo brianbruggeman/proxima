@@ -30,6 +30,9 @@ proxima-tensor = ["dep:proxima-tensor"]
 # should never pay for, the same reasoning `wire-to-weights-demo`
 # (root `Cargo.toml`) already applies to the same two crates.
 restore-probe-demo = ["std", "proxima-onnx", "proxima-tensor"]
+# Opt-in real-VM boot tests (kernel_boot, kernel_boot_userspace, edk2_boot):
+# with it on, an unset asset env var is a hard failure, never a silent pass.
+kernel-boot = ["std"]
 
 [dependencies]
 arrayvec.workspace = true
@@ -95,6 +98,18 @@ required-features = ["std"]
 [[bin]]
 name = "restore_to_inference_probe"
 required-features = ["restore-probe-demo"]
+
+[[test]]
+name = "kernel_boot"
+required-features = ["std", "kernel-boot"]
+
+[[test]]
+name = "kernel_boot_userspace"
+required-features = ["std", "kernel-boot"]
+
+[[test]]
+name = "edk2_boot"
+required-features = ["std", "kernel-boot"]
 
 [[bench]]
 name = "bench_elf"
