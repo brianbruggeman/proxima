@@ -37,6 +37,7 @@ pub mod q6_k;
 pub mod q8_0;
 pub mod q8_1;
 pub mod q8_k;
+pub mod scaled_float;
 pub mod tables;
 
 use thiserror::Error;
@@ -71,6 +72,12 @@ pub enum QuantError {
     },
     #[error("output slice has {found} elements, expected {expected}")]
     OutputSizeMismatch { found: usize, expected: usize },
+    #[error("{codec} fields are {expected} bits, layout is {found} bits wide")]
+    FieldWidthMismatch {
+        codec: &'static str,
+        found: u32,
+        expected: u32,
+    },
 }
 
 /// Real-tensor fixture shared by every codec's `#[cfg(test)]` module (P9:
