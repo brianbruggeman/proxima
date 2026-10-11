@@ -212,7 +212,25 @@ impl Differentiated {
 
 /// See this module's own doc for the rule per [`Op`] form.
 pub fn differentiate(program: &[Op], loss: NodeId) -> Result<Differentiated, AutogradError> {
-    differentiate_core(program, loss, None)
+    differentiate_bound(program, loss, &[])
+}
+
+/// [`differentiate`] over a program whose [`proxima_tensor::op::Extent::Symbolic`]
+/// extents are bound by `symbols` (index = symbol id), the same slice
+/// [`shape::infer`] and `cpu::evaluate_named` take. The adjoint program keeps
+/// the symbolic extents; `symbols` only fixes the shapes the transform reads.
+///
+/// # Errors
+///
+/// Same as [`differentiate`]; an unbound symbol surfaces as
+/// [`AutogradError::ShapeInference`].
+#[must_use = "Result must be checked"]
+pub fn differentiate_bound(
+    program: &[Op],
+    loss: NodeId,
+    symbols: &[u64],
+) -> Result<Differentiated, AutogradError> {
+    differentiate_core(program, loss, None, symbols)
 }
 
 /// [`differentiate`], scoped to the [`Op::Input`] nodes named in `wanted`.
@@ -250,21 +268,38 @@ pub fn differentiate_wanted(
     loss: NodeId,
     wanted: &[NodeId],
 ) -> Result<Differentiated, AutogradError> {
+    differentiate_wanted_bound(program, loss, wanted, &[])
+}
+
+/// [`differentiate_wanted`] over a program bound by `symbols`, as
+/// [`differentiate_bound`] is to [`differentiate`].
+///
+/// # Errors
+///
+/// Same as [`differentiate_bound`].
+#[must_use = "Result must be checked"]
+pub fn differentiate_wanted_bound(
+    program: &[Op],
+    loss: NodeId,
+    wanted: &[NodeId],
+    symbols: &[u64],
+) -> Result<Differentiated, AutogradError> {
     let wanted: BTreeSet<NodeId> = wanted.iter().copied().collect();
-    differentiate_core(program, loss, Some(&wanted))
+    differentiate_core(program, loss, Some(&wanted), symbols)
 }
 
 fn differentiate_core(
     program: &[Op],
     loss: NodeId,
     wanted: Option<&BTreeSet<NodeId>>,
+    symbols: &[u64],
 ) -> Result<Differentiated, AutogradError> {
     let loss_index = loss.0 as usize;
     if loss_index >= program.len() {
         return Err(AutogradError::UnknownLoss(loss));
     }
 
-    let shapes = shape::infer(program, &[])?;
+    let shapes = shape::infer(program, symbols)?;
     let loss_rank = shapes.of(loss).len();
     if loss_rank != 0 {
         return Err(AutogradError::LossNotScalar {
@@ -754,7 +789,13 @@ fn route_contribution(
     match operand_map {
         IndexMap::Affine(pattern) => {
             let operand_rank = shapes.of(*operand_node).len() as u16;
-            let routed = if expr::is_pure_projection(pattern) {
+            let projected = expr::is_pure_projection(pattern);
+            let routed_rank = if projected {
+                pattern.axes.len() as u16
+            } else {
+                operand_rank
+            };
+            let routed = if projected {
                 expr::reduce(
                     program,
                     dtype,
@@ -782,7 +823,7 @@ fn route_contribution(
                 program,
                 grad_of,
                 dtype,
-                operand_rank,
+                routed_rank,
                 operand_node.0 as usize,
                 routed,
             );
