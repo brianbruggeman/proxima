@@ -36,6 +36,25 @@ async fn explicit_tokio_passes() {
     assert_eq!(40 + 2, 42);
 }
 
+// scheduling metadata: `serial` (nothing else in flight), `group` (nextest
+// test-group, one process per test) and `process` (tests of one binary share a
+// process) are read from the test binary by an
+// external runner; see proxima-macros/tests/sched_records.rs for the reader.
+#[proxima::test(serial)]
+async fn serial_declares_exclusive_scheduling() {
+    assert_eq!(1 + 1, 2);
+}
+
+#[proxima::test(group = "smoke-shared-resource")]
+async fn group_declares_mutual_exclusion_by_name() {
+    assert_eq!(3 * 3, 9);
+}
+
+#[proxima::test(process)]
+async fn process_shares_one_process_per_binary() {
+    assert_eq!(5 * 5, 25);
+}
+
 // rstest #[case] parity with terse case::desc naming -> sized::small / sized::large.
 #[proxima::test]
 #[case::small(1)]
