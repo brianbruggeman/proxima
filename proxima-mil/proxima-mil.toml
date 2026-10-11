@@ -1,0 +1,25 @@
+# build-time sizing for proxima-mil, read by build.rs and emitted as consts into
+# OUT_DIR/proxima_mil_sized.rs. every key can be overridden per build by a
+# `PROXIMA_MIL_<SECTION>_<KEY>` env var (uppercased); each override consulted
+# emits its own `cargo:rerun-if-env-changed` line.
+
+[ane]
+# largest single graph in megabytes the Neural Engine is expected to accept. 1024 is the community figure of
+# docs/bench-campaigns/2026-10-08-ane-lane/plan.md card 1.3, not a measurement; the graphs bench replaces it.
+graph_ceiling_mb = 1024
+
+[shape]
+# sequence lengths are padded up to a multiple of this so one static-shape program serves a range of inputs.
+pad_multiple = 16
+# longest padded sequence a program is emitted for; longer inputs are refused rather than split.
+max_sequence = 64
+
+[package]
+# Core ML specification version written into Model.proto; 7 is the first version carrying mlProgram with the CoreML6 opset.
+specification_version = 7
+# MIL opset named by the program's function; chooses the operator set the compiler accepts.
+opset = "CoreML6"
+
+[units]
+# compute units a door uses when its config names none: cpu_only, cpu_and_neural_engine or all.
+default_compute_units = "cpu_and_neural_engine"
