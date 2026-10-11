@@ -501,40 +501,8 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
         layer_norm_cluster_plan.clear();
     }
     record_rewrite_engine_fires(&rewrite_fires);
-    let epilogue_fuse_skip: BTreeSet<NodeId> = epilogue_fuse_plan
-        .values()
-        .map(|(index, ..)| resolved[*index].node)
-        .chain(
-            layer_norm_cluster_plan
-                .values()
-                .flat_map(|cluster| cluster.skip),
-        )
-        .collect();
-    let epilogue_fuse_fire_at: BTreeMap<usize, Vec<NodeId>> = {
-        let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
-        for (reduce_node, (_, fire_position, ..)) in &epilogue_fuse_plan {
-            // superseded by a cluster upgrade -- that fires via
-            // `layer_norm_cluster_fire_at` instead, never both.
-            if layer_norm_cluster_plan.contains_key(reduce_node) {
-                continue;
-            }
-            grouped
-                .entry(*fire_position)
-                .or_default()
-                .push(*reduce_node);
-        }
-        grouped
-    };
-    let layer_norm_cluster_fire_at: BTreeMap<usize, Vec<NodeId>> = {
-        let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
-        for (reduce_node, cluster) in &layer_norm_cluster_plan {
-            grouped
-                .entry(cluster.fire_position)
-                .or_default()
-                .push(*reduce_node);
-        }
-        grouped
-    };
+    let (epilogue_fuse_skip, epilogue_fuse_fire_at, layer_norm_cluster_fire_at) =
+        fusion_schedule(&resolved, &epilogue_fuse_plan, &layer_norm_cluster_plan);
     // `docs/discipline.md` ROW 204: `node_retirement`'s own schedule (built
     // above, before this plan existed) frees `x` at `E2`'s real original
     // position -- often EARLIER than a cluster's own `fire_position`, since

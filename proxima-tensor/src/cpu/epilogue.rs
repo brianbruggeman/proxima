@@ -860,6 +860,49 @@ pub(super) fn run_rewrite_worklist(
     (single_hop, cluster, fires)
 }
 
+pub(super) type FireAt = BTreeMap<usize, Vec<NodeId>>;
+/// What a fusion plan implies for the execution loop, derived once from
+/// `resolved`'s own structure: the nodes whose own compute is skipped because
+/// a fused kernel fills their buffer, then each plan grouped by its
+/// `fire_position` so a loop asks "does anything fire here" in O(1). The one
+/// derivation both `build_static_arena_with_constants` (the f32 arena) and
+/// `evaluate_quantized_with_scratch_impl_with_fusion` consume -- the two
+/// loops differ in buffer ownership, not in what the plan means.
+pub(super) fn fusion_schedule(
+    resolved: &[BoundOp],
+    epilogue_fuse_plan: &SingleHopEpiloguePlan,
+    layer_norm_cluster_plan: &BTreeMap<NodeId, LayerNormClusterPlan>,
+) -> (BTreeSet<NodeId>, FireAt, FireAt) {
+    let skip: BTreeSet<NodeId> = epilogue_fuse_plan
+        .values()
+        .map(|(index, ..)| resolved[*index].node)
+        .chain(
+            layer_norm_cluster_plan
+                .values()
+                .flat_map(|cluster| cluster.skip),
+        )
+        .collect();
+    let mut epilogue_fire_at: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
+    for (reduce_node, (_, fire_position, ..)) in epilogue_fuse_plan {
+        // superseded by a cluster upgrade -- that fires via the cluster map instead, never both.
+        if layer_norm_cluster_plan.contains_key(reduce_node) {
+            continue;
+        }
+        epilogue_fire_at
+            .entry(*fire_position)
+            .or_default()
+            .push(*reduce_node);
+    }
+    let mut cluster_fire_at: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
+    for (reduce_node, cluster) in layer_norm_cluster_plan {
+        cluster_fire_at
+            .entry(cluster.fire_position)
+            .or_default()
+            .push(*reduce_node);
+    }
+    (skip, epilogue_fire_at, cluster_fire_at)
+}
+
 pub(super) static REWRITE_DEPTH1_FIRES: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
 pub(super) static REWRITE_DEPTH2_FIRES: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
 
