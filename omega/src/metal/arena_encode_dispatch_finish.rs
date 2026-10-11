@@ -1525,7 +1525,7 @@ fn capture_dispatch(
                 route_prepass_grid: captured_prepass.as_ref().map(|prepass| prepass.grid),
                 route_prepass_max_threads: captured_prepass
                     .as_ref()
-                    .map(|prepass| prepass.pipeline.maxTotalThreadsPerThreadgroup() as usize),
+                    .map(|prepass| prepass.pipeline.maxTotalThreadsPerThreadgroup()),
                 uniform_bytes,
                 pipeline: pipeline.clone(),
                 buffers: live_buffers,

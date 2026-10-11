@@ -340,6 +340,10 @@ pub(super) fn compile_pipeline(
 /// it and compile. See this module's `ROW 92`/`ROW 93` discipline-log entries
 /// for the measured cost `emit` paid on every call, hit or miss, before this
 /// split existed.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the cache key, both numeric settings and both attention selections arrive pre-resolved from each caller, which already holds them as separate values"
+)]
 pub(super) fn pipeline_for(
     device: &ProtocolObject<dyn MTLDevice>,
     bound: &BoundOp,
