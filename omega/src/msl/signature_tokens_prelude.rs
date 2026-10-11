@@ -2158,6 +2158,7 @@ impl AttentionRowSchedule {
         }
     }
 
+    #[cfg(feature = "metal-attn-variants")]
     const fn simdgroup_count(self) -> AttentionSimdgroupCountSelection {
         self.simdgroup_count
     }
