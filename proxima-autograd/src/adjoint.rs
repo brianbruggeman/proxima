@@ -71,11 +71,16 @@
 //!   with [`AutogradError::ReduceOverGatherUnsupported`] rather than
 //!   silently building a backward program shape.rs would only reject later,
 //!   at evaluation time, with no adjoint-specific diagnosis.
-//! - **A non-pure-projection operand map** (a convolution-style window,
-//!   multi-term or non-unit-coefficient) cannot be reused as a backward
-//!   `Reduce`'s `out_map` — `proxima-tensor/src/shape.rs:437-453` rejects
-//!   any such `out_map` — so it is rejected here too, named precisely
-//!   rather than attempted.
+//! - **A non-pure-projection operand map** (a head-group merge `2*i1 + i2`, a
+//!   rope interleave `2*i2 + 1`, a convolution window: multi-term or
+//!   non-unit-coefficient) cannot be reused as a backward `Reduce`'s `out_map`
+//!   — `proxima-tensor/src/shape.rs:437-453` rejects any such `out_map` — so
+//!   `crate::affine_scatter` composes the scatter-add along the map from
+//!   `Iota`/`Equal`/`Multiply` and a pure-projection `Reduce(Add)`; a pure
+//!   projection keeps the direct `Reduce(Add)`. An `Elementwise` operand map
+//!   that cannot be lowered that way (an axis leaving the operand's extent)
+//!   and a `Reduce::in_map` of this kind are rejected with
+//!   [`AutogradError::NonProjectionOperandMap`].
 
 use alloc::collections::BTreeSet;
 use alloc::vec;
@@ -88,6 +93,7 @@ use proxima_tensor::map::IndexMap;
 use proxima_tensor::op::{Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 use proxima_tensor::shape::{self, Shapes};
 
+use crate::affine_scatter;
 use crate::error::AutogradError;
 use crate::expr;
 
@@ -745,22 +751,31 @@ fn route_contribution(
 
     match operand_map {
         IndexMap::Affine(pattern) => {
-            if !expr::is_pure_projection(pattern) {
-                return Err(AutogradError::NonProjectionOperandMap {
+            let operand_rank = shapes.of(*operand_node).len() as u16;
+            let routed = if expr::is_pure_projection(pattern) {
+                expr::reduce(
+                    program,
+                    dtype,
+                    ScalarOp::Add,
+                    ReduceInit::Zero,
+                    contribution,
+                    expr::identity(iter_rank),
+                    IndexMap::Affine(pattern.clone()),
+                )
+            } else {
+                affine_scatter::scatter_add_along_map(
+                    program,
+                    dtype,
+                    contribution,
+                    pattern,
+                    shapes.of(consumer),
+                    shapes.of(*operand_node),
+                )
+                .ok_or(AutogradError::NonProjectionOperandMap {
                     node: consumer,
                     operand: *operand_node,
-                });
-            }
-            let operand_rank = shapes.of(*operand_node).len() as u16;
-            let routed = expr::reduce(
-                program,
-                dtype,
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                contribution,
-                expr::identity(iter_rank),
-                IndexMap::Affine(pattern.clone()),
-            );
+                })?
+            };
             accumulate(
                 program,
                 grad_of,

@@ -5,7 +5,7 @@ Each slice: one commit, one behaviour change, one validation command, one expect
 | # | slice | discharges | validation command | expected | done | note |
 |---|---|---|---|---|---|---|
 | 1 | feature `qat` on `proxima-model-interop` (`cargo add proxima-autograd --optional`), shared module `examples/qat/mod.rs`, example `qat_census` over the granite config at 1 and 24 layers and its `--control int32_input` mode | AC1 | command block AC1 | `3` | [ ] | 2026-10-11 AC printed 1 of 3: control only; 1 layer 785/508 nodes, 6 refusals; 24 layers 15965/10352, 144 refusals, all Elementwise(Multiply) NonProjectionOperandMap at the kv-head merge and rope interleave maps; see slice 1a |
-| 1a | autograd differentiates affine multi-term operand maps as a generic scatter-add rule (kv-head merge and rope interleave are instances, not special cases) | AC1a | `cargo nextest run -p proxima-autograd -E 'test(/adjoint_affine_map_/)'` | `5 passed` | [ ] | the census then prints `census` for both cells (AC1 returns 3); the scatter-add is a Reduce whose output map is not a pure projection, which `proxima-tensor/src/shape.rs:563` rejects in v1, so this slice may need the shape rule widened in the same commit |
+| 1a | autograd differentiates affine multi-term operand maps as a generic scatter-add rule (kv-head merge and rope interleave are instances, not special cases) | AC1a | `cargo nextest run -p proxima-autograd -E 'test(/adjoint_affine_map_/)'` | `5 passed` | [x] |  2026-10-11 5 passed; census 1 layer 922 nodes 645 adjoint, 24 layers 19253 nodes 13640 adjoint, 0 refusals, 0 metal_reject (was 6 and 144 refusals); AC1 counts 3 against the example's `bfloat16_input` control. No shape rule widened: the scatter-add is Iota-Equal masks times the gradient into a Reduce with a pure-projection output map (`proxima-autograd/src/affine_scatter.rs`), dense cost iteration size times operand extent per irregular axis |
 | 1b | `differentiate` accepts symbol bindings and differentiates every input (the `eps` rank-1 zero-axis read included) | AC1b | `cargo nextest run -p proxima-autograd -E 'test(/adjoint_symbols_/)'` | `4 passed` | [ ] | granite is differentiated as built, not rewritten to constants |
 | 2 | gate: the float-layout-dtype spec is complete (its slice 19); the masters, activations and accumulators run through that path | AC2 | command block AC2 (the float-layout-dtype AC19 command unchanged) | `234` | [ ] | behind gpu.lock; adds no code here; nothing in this spec proceeds to slice 3 until this prints 234; the f32-buffer interim and a bf16-only path are both struck |
 | 3 | example `qat_step_bench`: 64 steps, 1 layer and 24 layers, 3 processes each, fake-quant off, masters and activations in the BF16 layout, accumulation f32, Adam via `adam_step` | AC3 | command block AC3 | `8` | [ ] | behind gpu.lock, TIMING; this number replaces the derivation and is the only training ms per step the spec reports (bf16 masters and activations, f32 accumulation); the output file and the `box_before` files are kept under `$OUT` |
@@ -31,8 +31,8 @@ In the table above `\|` stands for a literal pipe character; the SPEC's `### com
 
 ## resume
 
-Last landed slice: none (slice 1 code landed, row unticked: AC1 printed 1 of 3)
-Next action: slice 1a (the generic adjoint rule for affine multi-term operand maps, `proxima-autograd/src/error.rs:52`), then 1b; slice 2 waits on float-layout-dtype slice 19; slice 20 lands before slice 11
+Last landed slice: 1a (slice 1 code landed, row unticked: AC1 printed 1 of 3 before 1a, 3 after)
+Next action: slice 1b; slice 2 waits on float-layout-dtype slice 19; slice 20 lands before slice 11
 Open question, if any: none; the 0.05 nats gap and the 0.001 identity bound are pre-registered with status plausible
 
 ## struck

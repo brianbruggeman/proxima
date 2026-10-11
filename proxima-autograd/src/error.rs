@@ -41,13 +41,17 @@ pub enum AutogradError {
     #[error("node {node} elementwise-computes {body:?}, which has no local adjoint rule here")]
     UnsupportedElementwiseBody { node: NodeId, body: ScalarOp },
 
+    /// An `Elementwise` operand map is differentiated by `crate::affine_scatter`
+    /// unless an axis leaves the operand's extent or names an iteration axis
+    /// the node does not have; a `Reduce::in_map` with a multi-term or
+    /// non-unit-coefficient axis is always refused here.
     #[error(
         "node {node} operand {operand} is read through an affine map with a \
-         non-unit coefficient or more than one term per axis (a convolution-style \
-         window) -- reusing that map as a Reduce out_map is rejected by \
-         proxima-tensor/src/shape.rs:437-453 (\"reduce output maps must be pure \
-         projections in v1\"), so this adjoint is not lowerable in this crate's \
-         algebra today"
+         non-unit coefficient or more than one term per axis that has no adjoint \
+         here: a Reduce in_map of that form, or an Elementwise map whose axis \
+         leaves the operand's extent -- proxima-tensor/src/shape.rs:437-453 \
+         rejects a non-projection Reduce out_map, so only the Elementwise \
+         scatter-add composition in crate::affine_scatter applies"
     )]
     NonProjectionOperandMap { node: NodeId, operand: NodeId },
 

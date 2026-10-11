@@ -4,13 +4,12 @@
 //! `proxima-onnx/src/lower.rs`'s `window_materialize` builds for forward-only
 //! inference.
 //!
-//! [`crate::adjoint::differentiate`] rejects a convolution-style window
-//! operand map outright: `crate::expr::is_pure_projection` requires every
-//! axis to be exactly one unit-coefficient term, and `window_axis`'s
-//! `stride*out + dilation*kernel` axis is two terms, so routing a gradient
-//! through it raises [`crate::error::AutogradError::NonProjectionOperandMap`]
-//! (`adjoint.rs:454-457`) or, on a `Reduce`'s own `in_map`, the same check at
-//! `adjoint.rs:502-505`.
+//! [`crate::adjoint::differentiate`] differentiates an `Elementwise` read
+//! through a window operand map (`stride*out + dilation*kernel`, two terms in
+//! one axis) by the same mask composition this module builds forward
+//! (`crate::affine_scatter`), but a window on a `Reduce`'s own `in_map` still
+//! raises [`crate::error::AutogradError::NonProjectionOperandMap`]; this
+//! module avoids both by never putting a window in an operand map.
 //!
 //! # Why a mask-composed window, not a `IndexMap::Computed` gather
 //!
