@@ -6393,10 +6393,13 @@ pub(super) mod attention_scratch_len_tests {
 
     use proxima_tensor::{BoundOpKind, DType, Layout, NodeId, NumericPolicy};
 
+    #[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
     use crate::msl::AttentionRowSchedule;
 
+    use super::{BoundOp, cached_attention_scratch_len};
+    #[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
     use super::{
-        BoundOp, cached_attention_scratch_len, cached_attention_scratch_len_with_schedule,
+        cached_attention_scratch_len_with_schedule,
         pack_cached_attention_merge_uniforms_with_schedule, pack_uniforms_with_schedule,
     };
     #[cfg(feature = "metal-attn-split-rows")]
@@ -6442,6 +6445,7 @@ pub(super) mod attention_scratch_len_tests {
         }
     }
 
+    #[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
     fn row_tiled_capacity_bound(
         query_rows: u64,
         cached_key_rows: u64,

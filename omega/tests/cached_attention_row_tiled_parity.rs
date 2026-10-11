@@ -30,6 +30,7 @@
 #![cfg(all(
     feature = "metal",
     feature = "metal-attn-split-rows",
+    feature = "metal-attn-variants",
     target_os = "macos"
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
