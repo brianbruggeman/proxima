@@ -1045,12 +1045,22 @@ mod tests {
             .args(["--print", "sysroot"])
             .output()
             .expect("run rustc --print sysroot");
-        let rustlib = PathBuf::from(String::from_utf8(output.stdout).expect("sysroot is utf-8").trim())
-            .join("lib")
-            .join("rustlib");
+        let rustlib = PathBuf::from(
+            String::from_utf8(output.stdout)
+                .expect("sysroot is utf-8")
+                .trim(),
+        )
+        .join("lib")
+        .join("rustlib");
         std::fs::read_dir(&rustlib)
             .expect("read rustlib dir")
-            .map(|entry| entry.expect("rustlib entry").path().join("bin").join("llvm-readobj"))
+            .map(|entry| {
+                entry
+                    .expect("rustlib entry")
+                    .path()
+                    .join("bin")
+                    .join("llvm-readobj")
+            })
             .find(|candidate| candidate.exists())
             .expect("rustup llvm-tools: llvm-readobj under sysroot rustlib/*/bin")
     }
@@ -1064,7 +1074,11 @@ mod tests {
             .arg(elf_path)
             .output()
             .expect("run llvm-readobj");
-        assert!(output.status.success(), "llvm-readobj failed on {}", elf_path.display());
+        assert!(
+            output.status.success(),
+            "llvm-readobj failed on {}",
+            elf_path.display()
+        );
         let text = String::from_utf8(output.stdout).expect("llvm-readobj output is utf-8");
 
         let mut entry = None;
@@ -1077,7 +1091,12 @@ mod tests {
             if line.trim().starts_with("Type:") {
                 in_load = line.contains("PT_LOAD");
                 if in_load {
-                    loads.push(ReadobjLoad { virtual_address: 0, file_size: 0, memory_size: 0, flags: 0 });
+                    loads.push(ReadobjLoad {
+                        virtual_address: 0,
+                        file_size: 0,
+                        memory_size: 0,
+                        flags: 0,
+                    });
                 }
             }
             let Some(current) = loads.last_mut().filter(|_| in_load) else {
@@ -1090,7 +1109,8 @@ mod tests {
             } else if let Some(value) = decimal_field(line, "MemSize:") {
                 current.memory_size = value;
             } else if line.trim().starts_with("Flags [") {
-                current.flags = u32::try_from(hex_field(line, "Flags [ (").unwrap_or(0)).expect("flags fit u32");
+                current.flags = u32::try_from(hex_field(line, "Flags [ (").unwrap_or(0))
+                    .expect("flags fit u32");
             }
         }
         (entry.expect("llvm-readobj printed Entry"), loads)
@@ -1103,13 +1123,23 @@ mod tests {
         let (entry, segments) = parse_elf::<4>(&image).expect("real guest ELF parses");
 
         assert_eq!(entry, expected_entry);
-        assert!(!expected.is_empty(), "readobj reports at least one PT_LOAD entry");
-        assert_eq!(segments.len(), expected.len(), "parser and readobj agree on the PT_LOAD count");
+        assert!(
+            !expected.is_empty(),
+            "readobj reports at least one PT_LOAD entry"
+        );
+        assert_eq!(
+            segments.len(),
+            expected.len(),
+            "parser and readobj agree on the PT_LOAD count"
+        );
 
         for (segment, oracle) in segments.iter().zip(&expected) {
             assert_eq!(segment.virtual_address(), oracle.virtual_address);
             assert_eq!(segment.memory_size(), oracle.memory_size);
-            assert_eq!(u64::try_from(segment.data().len()).expect("len fits u64"), oracle.file_size);
+            assert_eq!(
+                u64::try_from(segment.data().len()).expect("len fits u64"),
+                oracle.file_size
+            );
             assert_eq!(segment.is_readable(), oracle.flags & 0x4 != 0);
             assert_eq!(segment.is_writable(), oracle.flags & 0x2 != 0);
             assert_eq!(segment.is_executable(), oracle.flags & 0x1 != 0);

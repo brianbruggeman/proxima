@@ -2799,7 +2799,10 @@ mod icc_tests {
 
         icc.apply(write(3, 0, 12, 12, 7, 1))
             .expect("icc_igrpen1_el1 write is legal");
-        assert!(icc.irq_asserted(), "pending + group 1 enabled signals the irq");
+        assert!(
+            icc.irq_asserted(),
+            "pending + group 1 enabled signals the irq"
+        );
 
         icc.apply(read(3, 0, 12, 12, 0))
             .expect("icc_iar1_el1 is modeled");
