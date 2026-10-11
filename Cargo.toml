@@ -24,6 +24,7 @@ members = [
     "proxima-listen",
     "proxima-macros",
     "proxima-memcached",
+    "proxima-mlir",
     "proxima-model-interop",
     "proxima-mqtt",
     "proxima-onnx",

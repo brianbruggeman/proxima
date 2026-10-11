@@ -1,0 +1,23 @@
+[package]
+name = "proxima-mlir"
+description = "Text-only MLIR interchange for the proxima tensor algebra: Linalg export and torch and StableHLO import over sans-IO pipes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = []
+alloc = []
+std = ["alloc"]
+
+[dependencies]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+thiserror = { workspace = true, features = ["std"] }
