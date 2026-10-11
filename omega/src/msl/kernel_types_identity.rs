@@ -1743,18 +1743,21 @@ pub(crate) const fn codec_block_bytes(codec: Codec) -> usize {
 /// when it advances one row's block pointer across the `Q4K_BLOCK_ELEMENTS`
 /// (256)-wide addressing span that arm's `weight_base[q] / Q4K_BLOCK_ELEMENTS`
 /// division assumes. Equal to [`codec_block_bytes`] for every K-quant codec,
-/// whose own block already IS that 256-element super-block. [`Codec::Q8_0`]
-/// and [`Codec::Q4_0`] are flat 32-element blocks, so their step is eight
-/// real blocks' worth of bytes -- see [`Q8_0_SUPER_ELEMENT_MSL`]/
+/// whose own block already IS that 256-element super-block. [`Codec::Q8_0`],
+/// [`Codec::Q4_0`] and [`Codec::Fp6E3M2`] are flat 32-element blocks, so their
+/// step is eight real blocks' worth of bytes -- see [`Q8_0_SUPER_ELEMENT_MSL`]/
 /// [`Q4_0_SUPER_ELEMENT_MSL`]'s own docs for why eight contiguous blocks
 /// span exactly the same 256 elements. No other codec reaches this function
 /// (`classify_packed_row_block` whitelists only
-/// `Q3_K`/`Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`/`Q4_0`), so the fallback arm is exactly
+/// `Q3_K`/`Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`/`Q4_0`/`Fp6E3M2`), so the fallback arm is exactly
 /// [`codec_block_bytes`], never invented for a codec this path never sees.
 pub(crate) const fn codec_row_block_step_bytes(codec: Codec) -> usize {
     match codec {
         Codec::Q8_0 => Q8_0_BLOCK_BYTES * (Q4K_BLOCK_ELEMENTS / Q8_0_BLOCK_ELEMENTS),
         Codec::Q4_0 => Q4_0_BLOCK_BYTES * (Q4K_BLOCK_ELEMENTS / Q4_0_BLOCK_ELEMENTS),
+        Codec::Fp6E3M2 => {
+            Codec::FP6_E3M2_BLOCK_BYTES * (Q4K_BLOCK_ELEMENTS / Codec::FP6_E3M2_BLOCK_ELEMENTS)
+        }
         _ => codec_block_bytes(codec),
     }
 }

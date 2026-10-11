@@ -13,7 +13,7 @@ Each slice: one commit, one behaviour change, one validation command, one expect
 | 7 | `scaled_float.rs` block quantize and dequantize generic over the layout | AC7 | `cargo nextest run -p proxima-gguf -E 'test(/scaled_e3m2_block/)'` | `3 passed` | [x] | 3 passed; rows are every 2-D Q8_0 1024x512 tensor of the granite blob; worst error 0.9990 of the h(q) bound (4 ulp f32 slack included); bit order in the scaled_float.rs module doc; adds QuantError::FieldWidthMismatch |
 | 8 | CPU `dequantize_fp6_e3m2` and `matmul_fp6_e3m2_f32` with the f64 loop oracle and control | AC8 | `cargo nextest run -p proxima-tensor -E 'test(/scaled_e3m2_cpu_/)'` | `3 passed` | [x] |  3 passed; one block decode shared (`scaled_float::dequantize_block`); max ratio 8.85e-8 against bound 4e-5; `Codec::Fp6E3M2` admitted in dequantize, matmul and `block_layout`/`element_count` tables |
 | 9 | proxima-own GGUF tensor type id, `DType::Fp6E3M2`, `dtype_to_ggml` returns `None`, transform round trip and export rejection | AC9 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/fp6_e3m2_gguf_/)'` | `3 passed` | [ ] | the compiler lists the other `DType` match sites |
-| 10 | omega row-blocked arm and the decode MSL rendered from the layout constants | AC10 | `cargo nextest run -p omega --features metal -E 'test(/scaled_e3m2_render_row_blocked/) + test(/scaled_e3m2_render_decode/)'` | `3 passed` | [ ] | render only; no GPU |
+| 10 | omega row-blocked arm and the decode MSL rendered from the layout constants | AC10 | `cargo nextest run -p omega --features metal -E 'test(/scaled_e3m2_render_row_blocked/) + test(/scaled_e3m2_render_decode/)'` | `3 passed` | [x] | 3 passed; Fp6E3M2 renders in the single-row and multi-row row-blocked bodies from FloatLayout::E3M2 (scaled_float_render.rs); the two snapshots are byte-equal because extents are runtime uniforms; 32-bit rule is the shared row-blocked prologue (diff vs the Q8_0 kernel is the block step and the dot call only); xcrun metal -c compiles the render; render only, no GPU |
 | 11 | `tiled_decode(Codec::Fp6E3M2)` description, the expert-grouped GEMM source through it, and the model-name-free render test over the 3 sources | AC11 | `cargo nextest run -p omega --features metal -E 'test(/scaled_e3m2_render_tiled/) + test(/scaled_e3m2_render_grouped/) + test(/scaled_e3m2_render_model_name_free/)'` | `3 passed` | [ ] | a staging failure here amends the SPEC risk row with the cause |
 | 12 | Metal parity of the e3m2 matvec against the f64 loop | AC12 | `cargo nextest run -p omega --features metal --test scaled_e3m2_parity` | `5 passed` | [ ] | behind gpu.lock |
 | 13 | `convert_codec` in `proxima-model-interop/src/convert.rs`: policy selection, four source dtypes, writer reload, real-checkpoint count and saving | AC13 | `PROXIMA_ARCH_GRANITE_MOE_GGUF=$GRANITE cargo nextest run --release -p proxima-model-interop --features std -E 'test(/convert_codec_selection/) + test(/convert_codec_source_/) + test(/convert_codec_checkpoint_/)'` | `7 passed` | [ ] | writes about 3 GB under `$OUT`; box load checked |
@@ -27,8 +27,8 @@ In the table above `\|` stands for a literal pipe character; the SPEC's `### com
 
 ## resume
 
-Last landed slice: 1 to 8 and 15
-Next action: slice 9 (GGUF edge, needs 6 and 7); slice 10 (omega row-blocked arm, needs 1 and 6) may run in parallel
+Last landed slice: 1 to 8, 10 and 15
+Next action: slice 9 (GGUF edge, writing); slice 11 (tiled decode admission, needs 10); slice 13 (convert_codec) needs 7 and 9
 Open question, if any: none for the E3M2 definition (the OCP text, SPEC section "Definition of E3M2", gives bias 3 and no override); slice 11 answers whether the grouped GEMM can stage 3-byte groups
 
 ## struck

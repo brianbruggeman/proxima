@@ -692,6 +692,22 @@ pub(super) fn push_packed_row_blocked_body(
                     source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
                     source.push_str("            }\n");
                 }
+                Codec::Fp6E3M2
+                    if is_plain_product_reduce(resolved, reduce_op, weight, other)
+                        && resolved.dtype == DType::Float32 =>
+                {
+                    source.push_str(
+                        "            sumf[q] = sumf[q] + scaled_e3m2_quad_dot(blk, slot, acts);\n",
+                    );
+                }
+                Codec::Fp6E3M2 => push_super_element_fallback(
+                    source,
+                    resolved,
+                    reduce_op,
+                    block,
+                    element_type,
+                    "scaled_e3m2_super_element",
+                ),
                 Codec::Q5_1 => {
                     return Err(EmitError::NonKQuantCodec {
                         node: resolved.node,
@@ -722,7 +738,7 @@ pub(super) fn push_packed_row_blocked_body(
                         codec: "bfloat8",
                     });
                 }
-                Codec::Bf8E5M2 | Codec::Bf4E2M1 | Codec::Fp6E3M2 => {
+                Codec::Bf8E5M2 | Codec::Bf4E2M1 => {
                     return Err(EmitError::NonKQuantCodec {
                         node: resolved.node,
                         codec: "brain-float scalar",
@@ -1692,4 +1708,31 @@ pub(super) fn push_q6k_ggml_port_body(
 fn push_full_unroll(source: &mut String) {
     source.push_str(FULL_UNROLL);
     source.push('\n');
+}
+
+/// The per-element row-blocked loop for a flat 32-element-block codec when the reduce is
+/// not a plain product: the same text the `Q8_0`/`Q4_0` fallback arms emit, with the
+/// codec's `(superblock, index)` accessor named by `element_fn`.
+fn push_super_element_fallback(
+    source: &mut String,
+    resolved: &BoundOp,
+    reduce_op: ScalarOp,
+    block: &PackedRowBlock,
+    element_type: &str,
+    element_fn: &str,
+) {
+    let (weight, other) = (block.weight, block.other);
+    let elements = codec_block_elements(block.codec);
+    let scratch_len = resolved.operands().len().max(1);
+    source.push_str(&format!("            for (int e = 0; e < {elements}; ++e) {{\n"));
+    source.push_str(&format!("                {element_type} scratch[{scratch_len}];\n"));
+    source.push_str(&format!(
+        "                scratch[{weight}] = {element_fn}(blk, slot + (uint)e);\n"
+    ));
+    source.push_str(&format!("                scratch[{other}] = acts[e];\n"));
+    let value_expr = push_body_steps(source, resolved.element_body(), "                ", element_type);
+    source.push_str(&format!("                {element_type} value = {value_expr};\n"));
+    let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
+    source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
+    source.push_str("            }\n");
 }

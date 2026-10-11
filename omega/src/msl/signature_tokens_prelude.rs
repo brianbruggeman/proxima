@@ -1082,6 +1082,9 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> 
         Some(Codec::Bf4E2M1) => {
             format!("bf4_e2m1_element(in{index} + ({offset} / 2), (uint)({offset} % 2))")
         }
+        Some(Codec::Fp6E3M2) => format!(
+            "scaled_e3m2_element(in{index} + ({offset} / {FP6_E3M2_ELEMENTS}) * {FP6_E3M2_BYTES}, (uint)({offset} % {FP6_E3M2_ELEMENTS}))"
+        ),
         // No Metal unpack kernel exists for any of these 18 -- `PackedOperands`
         // is only ever populated via `codec_from_quantized_block`, which
         // maps just the 11 codecs above, so this arm is unreachable by
@@ -1106,8 +1109,7 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> 
             | Codec::Nvfp4
             | Codec::Q1_0
             | Codec::Q2_0
-            | Codec::BFloat8
-            | Codec::Fp6E3M2,
+            | Codec::BFloat8,
         ) => format!("in{index}[{offset}]"),
     }
 }
@@ -1163,6 +1165,7 @@ fn codec_element_fn_name(codec: Codec) -> &'static str {
         Codec::BFloat16 => "bf16_element",
         Codec::Bf8E5M2 => "bf8_e5m2_element",
         Codec::Bf4E2M1 => "bf4_e2m1_element",
+        Codec::Fp6E3M2 => "scaled_e3m2_element",
         Codec::Float16
         | Codec::Q4_1
         | Codec::Q8_1
@@ -1182,8 +1185,7 @@ fn codec_element_fn_name(codec: Codec) -> &'static str {
         | Codec::Nvfp4
         | Codec::Q1_0
         | Codec::Q2_0
-        | Codec::BFloat8
-        | Codec::Fp6E3M2 => "unreachable_element_fn",
+        | Codec::BFloat8 => "unreachable_element_fn",
     }
 }
 
