@@ -56,6 +56,33 @@ The pre-registered p99 condition holds in these six cells: Groups4 p99 is lower 
 
 I split the 972-token paired deltas by alternating arm order directly from each report's 1,000 raw `rounds` records. The `[legacy, simdgroups4]` and `[simdgroups4, legacy]` halves had positive counts 116/500 vs 137/500 in run1, 67/500 vs 65/500 in run2, and 66/500 vs 76/500 in run3. Their respective median deltas were −30,583/−26,917 ns, −46,667/−47,625 ns, and −45,000/−42,375 ns. This split does not expose a large order-linked difference in these summaries; it does not identify why the 972-token cells still have positive paired rounds. Complete order and sample arrays remain in the reports.
 
+### Additional raw-round inspection: chronological windows
+
+To check whether selected-slower rounds cluster over a run, I grouped each report's 972-token `rounds` by consecutive 100-round windows and computed, from the paired `selected_minus_legacy_ns` values, the positive-delta count and the median delta. The command was:
+
+```sh
+for run in 1 2 3; do
+  jq -r 'def median: sort as $values | if length % 2 == 1 then $values[(length/2|floor)] else (($values[(length/2|floor)-1] + $values[(length/2|floor)])/2) end; .shapes[1].rounds | group_by(.round / 100 | floor)[] | [((.[0].round / 100 | floor) * 100), (length), ([.[] | select(.selected_minus_legacy_ns > 0)] | length), ([.[] | .selected_minus_legacy_ns] | median), ([.[] | select(.arm_order[0] == "legacy" and .selected_minus_legacy_ns > 0)] | length), ([.[] | select(.arm_order[0] == "simdgroups4" and .selected_minus_legacy_ns > 0)] | length)] | @tsv' "evidence/card25-groups4-run${run}-report.json"
+done
+```
+
+The following values are for actual 972-token Granite prompts, Groups4-minus-Legacy GPU timestamp deltas, 1,000 paired rounds per process. Each cell lists `selected-slower count / median delta ns / positive count with Legacy first / positive count with Groups4 first`:
+
+| Rounds | Run 1 | Run 2 | Run 3 |
+|---:|---:|---:|---:|
+| 0–99 | 30 / −30,667 / 14 / 16 | 13 / −48,125 / 7 / 6 | 15 / −47,771 / 7 / 8 |
+| 100–199 | 28 / −25,375 / 12 / 16 | 10 / −50,313 / 6 / 4 | 20 / −39,167 / 11 / 9 |
+| 200–299 | 19 / −29,583 / 13 / 6 | 17 / −40,480 / 10 / 7 | 13 / −50,104 / 5 / 8 |
+| 300–399 | 22 / −27,396 / 8 / 14 | 12 / −49,250 / 6 / 6 | 14 / −41,167 / 4 / 10 |
+| 400–499 | 22 / −28,687 / 13 / 9 | 15 / −47,354 / 9 / 6 | 13 / −49,354 / 5 / 8 |
+| 500–599 | 28 / −26,146 / 9 / 19 | 9 / −51,583 / 4 / 5 | 16 / −36,021 / 8 / 8 |
+| 600–699 | 28 / −32,750 / 13 / 15 | 14 / −40,292 / 4 / 10 | 13 / −41,437 / 8 / 5 |
+| 700–799 | 23 / −28,375 / 9 / 14 | 13 / −46,396 / 6 / 7 | 17 / −44,000 / 7 / 10 |
+| 800–899 | 30 / −29,604 / 15 / 15 | 14 / −50,229 / 10 / 4 | 14 / −38,188 / 6 / 8 |
+| 900–999 | 23 / −25,083 / 10 / 13 | 15 / −46,146 / 5 / 10 | 7 / −47,979 / 5 / 2 |
+
+In this 100-round grouping, all thirty window medians are negative, while every window contains some positive paired deltas (7–30 per window). Positive counts are distributed across both arm orders. This rules out a large, sustained 100-round interval where the selected arm's median reverses, for these three processes; it does not explain individual positive rounds or establish which GPU mechanism produced the distributions. The underlying individual observations remain in `evidence/card25-groups4-run{1,2,3}-report.json`.
+
 Selected source SHA is `637d62efe5ffb3c07f0df1b406cd5a4171c337a73177b80e3737b4eecbcd956f`; Legacy source SHA is `b85db41a81b3503641fbdb453cff0b7dd32e442085614eef5ab20fe1b1e0ba5d`. Groups4's captured launch uses threadgroup width 128, 32,768 total grid threads at 256 tokens and 124,928 at 972 tokens; pipeline `(max_threads, tg_static_bytes, exec_width)=(576,9600,32)`. Legacy uses width 64, 16,384/62,464 total grid threads, and `(448,9600,32)`. The MSL changes `simdgroups` from 2 to 4 and derives two depth/key fragments per group rather than four. These are dispatch/source differences; the Mac exposes timestamp counters only, so the timing mechanism remains unexplained.
 
 Report SHA256: run1 `ed2bce4ff5d8bc9ceea8fe5baf57069a2cc3faafba69970e9d82d4dfb7cfc11f`, run2 `fd9585749a812492e398831b35cda07a7c3ae06313e894801b7d715d4052b77d`, run3 `1d47df1cf790ef40462bbc81611369a08821653205b444c73b389b3ebc8410e0`. Logs, reports, build output, and checker output are retained in `evidence/card25-*`.
