@@ -53,15 +53,22 @@ pub fn export_plain(
     parsed
         .tensors
         .iter()
-        .map(|tensor| {
-            let range = parsed.tensor_data_range(tensor, file_bytes.len() as u64)?;
-            export_plain_tensor(
-                tensor,
-                &file_bytes[range.start as usize..range.end as usize],
-                dtype,
-            )
-        })
+        .map(|tensor| export_plain_leaf(parsed, file_bytes, tensor, dtype))
         .collect()
+}
+
+pub(super) fn export_plain_leaf(
+    parsed: &ParsedGguf,
+    file_bytes: &[u8],
+    tensor: &TensorInfo,
+    dtype: DType,
+) -> Result<PlainTensor, InteropError> {
+    let range = parsed.tensor_data_range(tensor, file_bytes.len() as u64)?;
+    export_plain_tensor(
+        tensor,
+        &file_bytes[range.start as usize..range.end as usize],
+        dtype,
+    )
 }
 
 /// One tensor of [`export_plain`]; `data` is exactly the tensor's bytes.
