@@ -4332,6 +4332,7 @@ pub(super) fn read_back(
         | DType::Int128
         | DType::UInt128
         | DType::BFloat8
+        | DType::Fp6E3M2
         | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }.into()),
     }
 }

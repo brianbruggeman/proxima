@@ -146,7 +146,18 @@ pub enum GgmlType {
     /// K-quant family.
     Q1_0,
     Q2_0,
+    /// Proxima-own: 32 weights as one f16 absmax scale plus 32 six-bit E3M2 codes,
+    /// 26 bytes per block. Its wire id sits outside ggml's enum range, so a ggml
+    /// consumer rejects the file instead of misreading the blocks; it is not in
+    /// [`Self::CURRENT`].
+    Fp6E3M2,
 }
+
+/// First wire id reserved for proxima-own tensor types, far above any id ggml
+/// will reach. An own type's id is this base plus its `Codec::tag`.
+pub const PROXIMA_OWN_WIRE_BASE: i32 = 0x1_0000;
+
+const FP6_E3M2_WIRE: i32 = PROXIMA_OWN_WIRE_BASE + 32;
 
 /// Per-type block shape: `block_elements` values are packed into
 /// `block_bytes` bytes. Contiguous (non-quantized) types have
@@ -261,6 +272,7 @@ impl GgmlType {
             Self::Nvfp4 => "nvfp4",
             Self::Q1_0 => "q1_0",
             Self::Q2_0 => "q2_0",
+            Self::Fp6E3M2 => "fp6_e3m2",
         }
     }
 
@@ -306,6 +318,7 @@ impl GgmlType {
             40 => Self::Nvfp4,
             41 => Self::Q1_0,
             42 => Self::Q2_0,
+            FP6_E3M2_WIRE => Self::Fp6E3M2,
             _ => return None,
         };
         Some(value)
@@ -353,6 +366,7 @@ impl GgmlType {
             Self::Nvfp4 => 40,
             Self::Q1_0 => 41,
             Self::Q2_0 => 42,
+            Self::Fp6E3M2 => FP6_E3M2_WIRE,
         }
     }
 
@@ -401,6 +415,7 @@ impl GgmlType {
             Self::Nvfp4 => layout(64, 36),
             Self::Q1_0 => layout(128, 18),
             Self::Q2_0 => layout(64, 18),
+            Self::Fp6E3M2 => layout(32, 26),
         }
     }
 }
@@ -434,6 +449,14 @@ mod tests {
                 GgmlType::from_wire(raw).unwrap_or_else(|| panic!("raw={raw} should decode"));
             assert_eq!(decoded.to_wire(), raw, "raw={raw}");
         }
+    }
+
+    #[test]
+    fn proxima_own_fp6_e3m2_wire_id_is_outside_ggml_and_round_trips() {
+        let wire = GgmlType::Fp6E3M2.to_wire();
+        assert!(wire >= PROXIMA_OWN_WIRE_BASE);
+        assert_eq!(GgmlType::from_wire(wire), Some(GgmlType::Fp6E3M2));
+        assert!(!GgmlType::CURRENT.contains(&GgmlType::Fp6E3M2));
     }
 
     #[test]

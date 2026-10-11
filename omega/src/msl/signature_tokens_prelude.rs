@@ -323,6 +323,7 @@ pub(super) fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, Emi
         | DType::Int128
         | DType::UInt128
         | DType::BFloat8
+        | DType::Fp6E3M2
         | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }),
     }
 }

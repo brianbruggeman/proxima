@@ -28,6 +28,9 @@ pub enum DType {
     UInt128,
     BFloat16,
     BFloat8,
+    /// 6-bit E3M2 codes under a per-block scale; a block, not an element, is the
+    /// addressable unit, so `size_bytes` is the whole-byte floor of one code.
+    Fp6E3M2,
     Float16,
     Float32,
     Float64,
@@ -37,7 +40,7 @@ impl DType {
     #[must_use]
     pub const fn size_bytes(self) -> usize {
         match self {
-            Self::Bool | Self::Int8 | Self::UInt8 | Self::BFloat8 => 1,
+            Self::Bool | Self::Int8 | Self::UInt8 | Self::BFloat8 | Self::Fp6E3M2 => 1,
             Self::Int16 | Self::UInt16 | Self::BFloat16 | Self::Float16 => 2,
             Self::Int32 | Self::UInt32 | Self::Float32 => 4,
             Self::Int64 | Self::UInt64 | Self::Float64 => 8,
@@ -49,7 +52,12 @@ impl DType {
     pub const fn is_float(self) -> bool {
         matches!(
             self,
-            Self::BFloat16 | Self::BFloat8 | Self::Float16 | Self::Float32 | Self::Float64
+            Self::BFloat16
+                | Self::BFloat8
+                | Self::Fp6E3M2
+                | Self::Float16
+                | Self::Float32
+                | Self::Float64
         )
     }
 
