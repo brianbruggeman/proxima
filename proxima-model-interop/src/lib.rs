@@ -188,8 +188,9 @@ pub use serving_settings::AttentionTileHeightSetting;
 pub use source::{CheckpointMapping, CheckpointSourceError};
 pub use task::{ModelTask, TaskProfile, classify_task};
 pub use transform::{
-    MLX_INDEX_FILE_NAME, MLX_MAX_SHARD_BYTES, MLX_SINGLE_SHARD_FILE_NAME, MlxExport, MlxShard,
-    gguf_to_safetensors, safetensors_to_gguf,
+    AffineExport, AffinePacked, AffineParams, MLX_INDEX_FILE_NAME, MLX_MAX_SHARD_BYTES,
+    MLX_SINGLE_SHARD_FILE_NAME, MlxExport, MlxShard, export_affine, gguf_to_safetensors, pack_affine,
+    safetensors_to_gguf,
 };
 #[cfg(feature = "std")]
 pub use transform::{Layout, MlxNames, SANDWICH_NORM_LAYOUT, STANDARD_LAYOUT, dense_names};

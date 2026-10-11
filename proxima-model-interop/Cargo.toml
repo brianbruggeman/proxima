@@ -330,6 +330,7 @@ conflaguration = { workspace = true, optional = true }
 # only used by `generate.rs`, which is `#[cfg(feature = "std")]`-gated —
 # optional so the alloc-only floor never links it.
 fastrand = { workspace = true, optional = true }
+half = { version = "2.7.1", default-features = false }
 libc = { workspace = true, optional = true }
 md-5 = { version = "0.11.0", optional = true }
 memmap2 = { version = "0.9.11", optional = true }
