@@ -1772,7 +1772,9 @@ fn card_17_query_parallelism_assigns_each_granite_query_block_once() {
         },
     )
     .expect("the captured shape admits simdgroup row ownership");
-    let tile_blocks = (8_u64 / 8) * 2;
+    let tile_rows = 8_u64;
+    let query_groups = 2_u64;
+    let tile_blocks = tile_rows / 8 * query_groups;
     let simdgroups = row_tiled_simdgroups(64);
     let mut coverage = vec![0_u8; 1000 * 8 * 2];
     for kv_head in 0..8_u64 {
