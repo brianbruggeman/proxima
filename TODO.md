@@ -223,14 +223,14 @@ dispatch floor.
   GPU experts: none found. That is the open cell the ANE cards measure.
 - Cards: `docs/bench-campaigns/2026-10-08-ane-lane/plan.md`.
 
-### LiteRT (owner, 2026-10-08; from memory, unverified)
+### LiteRT (sourced 2026-10-11, see census)
 Google's on-device runtime (the TensorFlow Lite rebrand; LiteRT Next API;
-LiteRT-LM for LLMs). A compiled-model lane like CoreML and QNN: flatbuffer
+LiteRT-LM for LLMs ([`.litertlm`](https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/03d3979f8d6091a8357b122ac8148c231c01f362/schema/core/litertlm_header_schema.fbs))). A compiled-model lane like CoreML and QNN: flatbuffer
 models, acceleration by delegate (GPU, CoreML, vendor NPU paths compiled
 ahead of time per SoC). Not a kernel lane, so not something omega runs on.
 Three possible relations, none started: (1) a backend lane on Android, the
 public route to Qualcomm and MediaTek NPUs without the vendor SDKs; (2) a
-`.tflite` codec in the any-to-any format goal, after GGUF and safetensors;
+[`.tflite`](https://raw.githubusercontent.com/google-ai-edge/LiteRT/aeae743070b3be22533261e4fa5bd3342631f8ee/tflite/converter/schema/schema.fbs) codec in the any-to-any format goal, after GGUF and safetensors;
 (3) an incumbent (LiteRT-LM phone decode numbers) for an Android build. On a
 Mac it adds nothing CoreML does not. Verify the current API surface and the
 NPU delegate list before any card.
@@ -266,6 +266,9 @@ Owner: "from a gguf or from a onnx or any other format - the point here is inter
 | cuda, wgpu | hardware out | builds; narrower | CUDA C / WGSL text emission compiled by the vendor toolchain; bf8/bf4/fp6 typed-rejected; no parity run on this box |
 | CoreML / ANE | hardware out | none; census + cards | floor 0.27 ms per predict; CPU predictor 81 us beats it; top-k/gather/scatter unsupported on the M1 ANE; cards 0.1, 1.1, 5.1 filled (`docs/bench-campaigns/2026-10-08-ane-lane/plan.md`) |
 | Hexagon (fastrpc, hexagon-mlir, QNN), AMD XDNA, LiteRT | hardware out | none; census only | `docs/research/npu-lanes-census-2026-10-08.md` |
+| AMD XDNA (xclbin via MLIR-AIE; ONNX in) | hardware out | none; census only | incumbent: `onnxruntime` with `VitisAIExecutionProvider` (Ryzen AI) and XRT; sourced in census "Additional lanes (sourced 2026-10-11)" |
+| Rockchip RKNN (.rknn; Turing RK1) | hardware out | none; census only | incumbent: `rknn_benchmark` on `librknnrt` (C API `rknn_api.h`); no open `.rknn` schema in the rknn-toolkit2 repo; census "Additional lanes (sourced 2026-10-11)" |
+| NVIDIA TensorRT engine (Jetson) | hardware out | none; census only | incumbent: `trtexec` (parses ONNX, builds a plan file, prints a performance summary); census "Additional lanes (sourced 2026-10-11)" |
 | LLVM IR | hardware out | none | omega has no llvm/inkwell/cranelift dependency; an LLVM lane would be the same shape as the MSL/WGSL/CUDA emitters (text out, vendor toolchain compiles) and would reach CPU via llc and Hexagon via the lowering end hexagon-mlir already uses ("LLVM-IR with runtime calls") |
 | MLIR (Linalg / StableHLO) | both | none; card above | export counts unrepresentable ops first; import counts unmapped ops first |
 
