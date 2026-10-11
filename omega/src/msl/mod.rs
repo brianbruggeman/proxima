@@ -186,16 +186,18 @@ use cached_attention_render::render_cached_attention_merge;
 use cached_softmax_weights_render::render_cached_softmax_weights;
 pub(crate) use elementwise_reduce_core::*;
 #[cfg(any(
-    feature = "metal-grouped-gemm",
+    all(test, feature = "metal-grouped-gemm"),
     all(feature = "metal", target_os = "macos")
 ))]
 pub(crate) use expert_grouped_gemm::ROUTE_COMPACTION_MISMATCH_FAULT;
+#[cfg(any(test, feature = "metal-core"))]
+pub(crate) use expert_grouped_gemm::route_compaction_key;
 use expert_grouped_gemm::*;
 #[cfg(any(
     all(test, feature = "metal-grouped-gemm"),
     all(feature = "metal", target_os = "macos")
 ))]
-pub(crate) use expert_grouped_gemm::{route_compaction_key, route_prepass, route_prepass_active};
+pub(crate) use expert_grouped_gemm::{route_prepass, route_prepass_active};
 use index_narrowing::*;
 use packed_row_blocked_ggml::*;
 use scaled_float_render::*;
