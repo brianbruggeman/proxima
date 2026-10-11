@@ -25,8 +25,11 @@
 //! Mixture-of-experts HF checkpoints bind only where a binding profile names
 //! the stored tensors: `bind_safetensors_program_leaves` reads a routed
 //! stack's source from the profile (`profiles/binding/granitemoe.toml`, names
-//! taken from the vendored IBM header) and decodes it to the program's
-//! `[experts, in, out]` leaf. A profile that names none, and the dense
+//! taken from the vendored IBM header) and binds it as
+//! [`crate::bind::bind_moe_stacked_experts`] binds a GGUF stack: a bf16/f16 stack is packed, a whole tensor borrowed from
+//! the file and a fused part gathered once into packed owned bytes, never `f32`;
+//! only an `F32` checkpoint decodes to the program's `[experts, in, out]` leaf. A
+//! profile that names none, and the dense
 //! `bind_all_weights_from_safetensors`, refuse with
 //! [`InteropError::HfMoeWeightsUnsupported`] rather than guessing at a
 //! naming convention.
@@ -335,24 +338,51 @@ fn moe_stack_source(
 }
 
 /// Cuts `part` of `of` equal row groups out of every expert of a decoded
-/// `[experts, rows, in]` stack, giving `[experts, rows / of, in]`.
-fn expert_row_part(
-    decoded: &[f32],
+/// `[experts, rows, width]` stack, giving `[experts, rows / of, width]`.
+/// `width` counts elements of `T` per row, so bytes cut the same way by
+/// passing the row's byte width; each expert's run is one contiguous
+/// `extend_from_slice`.
+fn expert_row_part<T: Copy>(
+    stack: &[T],
     experts: usize,
     rows: usize,
-    input: usize,
+    width: usize,
     part: usize,
     of: usize,
-) -> Vec<f32> {
-    let part_len = rows / of * input;
-    (0..experts)
-        .flat_map(|expert| {
-            let start = expert * rows * input + part * part_len;
-            decoded[start..start + part_len].iter().copied()
-        })
-        .collect()
+) -> Vec<T> {
+    let part_len = rows / of * width;
+    let mut cut = Vec::with_capacity(experts * part_len);
+    for expert in 0..experts {
+        let start = expert * rows * width + part * part_len;
+        cut.extend_from_slice(&stack[start..start + part_len]);
+    }
+    cut
 }
 
+/// The packed [`Codec`] a stored element type binds as, `None` for the one
+/// dtype the gathered kernel rejects (`run_reduce_quantized` refuses a
+/// `Float32` weight block), which keeps the dequantize-and-transpose path
+/// [`crate::bind::bind_moe_stacked_experts`] keeps for the same reason.
+fn expert_stack_codec(dtype: DType) -> Option<Codec> {
+    match dtype {
+        DType::BFloat16 => Some(Codec::BFloat16),
+        DType::Float16 => Some(Codec::Float16),
+        _ => None,
+    }
+}
+
+/// Binds one routed `[experts, in, out]` leaf the way
+/// [`crate::bind::bind_moe_stacked_experts`] binds the same leaf from GGUF.
+///
+/// HF stores a stack as `[experts, out, in]`, `in` contiguous -- the physical
+/// layout the gather kernel slices `expert * per_expert_bytes` out of -- so a
+/// whole tensor (`of == 1`, `output_linear`) is borrowed straight out of
+/// `file_bytes` as [`QuantizedBlock::Packed`], no copy and no transpose. A
+/// fused part (`input_linear` -> gate, up) interleaves the parts per expert,
+/// so a contiguous `[experts, out, in]` block needs its row runs gathered
+/// once into [`BoundWeights::packed_owned`]: still the stored 2-byte element,
+/// never `f32`, and never transposed. A `Float32` checkpoint decodes and
+/// transposes as before.
 fn bind_safetensors_expert_stack<'file>(
     manifest: &Manifest,
     file_bytes: &'file [u8],
@@ -386,11 +416,50 @@ fn bind_safetensors_expert_stack<'file>(
             tensor_axes: entry.shape.clone(),
         });
     }
-    let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &name)?;
-    let cut = expert_row_part(&decoded, experts, rows, input, part as usize, of as usize);
-    let stacked = transpose_expert_stack(&cut, leaf, experts, output, input)?;
-    weights.resident_bytes += stacked.len() * core::mem::size_of::<f32>();
-    weights.owned.push((leaf.into(), stacked));
+    match expert_stack_codec(entry.dtype) {
+        Some(codec) => {
+            let bytes = tensor_bytes(file_bytes, data_start, entry)?;
+            bind_packed_expert_stack(bytes, leaf, codec, [experts, rows, input], (part, of), weights)
+        }
+        None => {
+            let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &name)?;
+            let cut = expert_row_part(&decoded, experts, rows, input, part as usize, of as usize);
+            let stacked = transpose_expert_stack(&cut, leaf, experts, output, input)?;
+            weights.resident_bytes += stacked.len() * core::mem::size_of::<f32>();
+            weights.owned.push((leaf.into(), stacked));
+            Ok(())
+        }
+    }
+}
+
+const PACKED_ELEMENT_BYTES: usize = 2;
+
+fn bind_packed_expert_stack<'file>(
+    bytes: &'file [u8],
+    leaf: &str,
+    codec: Codec,
+    [experts, rows, input]: [usize; 3],
+    (part, of): (u32, u32),
+    weights: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    let expected = experts * rows * input * PACKED_ELEMENT_BYTES;
+    if bytes.len() != expected {
+        return Err(InteropError::SafetensorsByteLengthMismatch {
+            tensor: leaf.into(),
+            expected: expected as u64,
+            actual: bytes.len() as u64,
+        });
+    }
+    if of == 1 {
+        weights
+            .packed
+            .push((leaf.into(), QuantizedBlock::Packed { codec, bytes }));
+        return Ok(());
+    }
+    let row_bytes = input * PACKED_ELEMENT_BYTES;
+    let cut = expert_row_part(bytes, experts, rows, row_bytes, part as usize, of as usize);
+    weights.resident_bytes += cut.len();
+    weights.packed_owned.push((leaf.into(), cut, codec));
     Ok(())
 }
 
@@ -1257,6 +1326,8 @@ mod matrix_lfm_bind;
 #[cfg(test)]
 mod granitemoe_binding;
 
+#[cfg(test)]
+mod expert_views;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
