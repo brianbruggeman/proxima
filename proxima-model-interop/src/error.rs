@@ -907,7 +907,7 @@ pub enum InteropError {
     AffineDTypeUnsupported { dtype: DType },
 
     /// A conversion policy named a target codec that has no block encoder in
-    /// [`crate::convert_codec`].
+    /// `convert_codec` (the `std` feature).
     #[error("conversion to codec {codec:?} is not supported")]
     ConversionTargetUnsupported { codec: Codec },
 
