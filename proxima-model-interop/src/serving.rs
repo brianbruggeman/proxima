@@ -1133,7 +1133,7 @@ pub struct ServingConfig<'model> {
     /// call site yet (ROW 587's own residual).
     pub overlap_transfer_compute: bool,
     /// Not an upstream serving flag -- whether a caller that has just loaded a
-    /// model runs [`crate::generate::LoadedModel::warm_resident_buffers`], which
+    /// model runs `crate::generate::LoadedModel::warm_resident_buffers`, which
     /// declares the checkpoint mapping and every resident buffer to the driver in
     /// one waited command buffer so the first prefill does not pay the driver's
     /// first-reference cost. `true` (this field's default) pays it at load; `false`

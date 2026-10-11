@@ -49,7 +49,7 @@ pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelHpara
 /// The dense checkpoint's whole pre-lowering program as one config:
 /// [`gqa_descriptor_from_shape`] over the family profile
 /// `general.architecture` names, the header's own scales layered on top, and
-/// the logits row count the checkpoint's task needs. [`build_forward`] over
+/// the logits row count the checkpoint's task needs. `build_forward` over
 /// the result is the entire lowering; serialize the descriptor and a restored
 /// copy lowers to the same program.
 ///

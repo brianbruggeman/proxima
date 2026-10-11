@@ -2453,7 +2453,7 @@ impl<'file> LoadedModel<'file> {
         self
     }
 
-    /// The seal hook's summary slot, [`LayerCache::summarize_sealed`] in `residency_caches.rs`: every sealed block of a full-attention layer is folded to one record by `summarizer`, a plain `fn` the caller supplies. Entries stored in the prompt cache before it are dropped because their sealed blocks carry no summaries; a model built without it keeps none.
+    /// The seal hook's summary slot, `LayerCache::summarize_sealed` in `residency_caches.rs`: every sealed block of a full-attention layer is folded to one record by `summarizer`, a plain `fn` the caller supplies. Entries stored in the prompt cache before it are dropped because their sealed blocks carry no summaries; a model built without it keeps none.
     #[must_use]
     pub fn with_block_summarizer(mut self, summarizer: BlockSummarizer) -> Self {
         self.clear_prompt_cache();
@@ -2461,7 +2461,7 @@ impl<'file> LoadedModel<'file> {
         self
     }
 
-    /// The placement hook of the device kv, [`DeviceKv::adopt`] in `device_kv.rs`: replaces where its buffers come from. Compose it with [`omega::allocate_placed_buffer_over`] to put the kv in memory you own; the default, [`omega::allocate_placed_buffer`], reproduces today's allocation.
+    /// The placement hook of the device kv, `DeviceKv::adopt` in `device_kv.rs`: replaces where its buffers come from. Compose it with [`omega::allocate_placed_buffer_over`] to put the kv in memory you own; the default, [`omega::allocate_placed_buffer`], reproduces today's allocation.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     #[must_use]
     pub fn with_kv_buffer_source(mut self, source: fn(usize) -> Result<omega::PlacedBuffer, omega::MetalError>) -> Self {

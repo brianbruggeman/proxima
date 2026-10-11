@@ -289,7 +289,7 @@ fn lower_and_bind<'file>(
 ///
 /// # Errors
 ///
-/// Whatever [`lower_and_bind`]/[`build_forward`]/
+/// Whatever `lower_and_bind`/[`build_forward`]/
 /// evaluating the program can fail with, plus
 /// [`InteropError::MissingEvaluatedNode`] if the evaluator's output is
 /// missing the logits root or one of `extra_node_ids` -- an
