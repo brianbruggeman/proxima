@@ -30,3 +30,5 @@ shard (`N` is the little-endian u64 in bytes 0..8), saved as the JSON object onl
 - tensor: `model.layers.0.self_attn.k_proj.weight`, BF16, shape `[512, 1024]`, 1048576 bytes,
   file `model.layers.0.self_attn.k_proj.weight.bf16.bin`, taken from `model.safetensors` at absolute bytes
   201428760..=202477335 (`data_offsets` [201402368, 202450944] plus 8 plus the 26384-byte header)
+
+The gemma4-e2b `plain/tokenizer.json` is stored minified (`jq -c`, same JSON value) to keep it under the repository's largest tracked file; the upstream file is pretty-printed at 32 MB.
