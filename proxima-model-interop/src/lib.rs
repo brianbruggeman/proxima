@@ -67,6 +67,8 @@ pub mod sliding_pattern;
 // an unreachable module under `warnings = "deny"`.
 #[cfg(feature = "std")]
 mod codec_policy_settings;
+#[cfg(feature = "std")]
+pub mod convert;
 #[cfg(any(test, all(feature = "std", feature = "metal", target_os = "macos")))]
 mod memory_fit;
 #[cfg(feature = "std")]
@@ -105,6 +107,8 @@ pub use bind::{ModelHparams, SlidingRope, architecture_from_metadata, gguf_tenso
 pub use bind_leaves::bind_program_leaves;
 #[cfg(feature = "std")]
 pub use codec_policy_settings::{CodecPolicySettings, CodecPolicyWeights};
+#[cfg(feature = "std")]
+pub use convert::{convert_codec, policy_selects};
 #[cfg(feature = "std")]
 pub use dense::descriptor_from_gguf as dense_descriptor_from_gguf;
 pub use dtype::{dtype_to_ggml, ggml_to_dtype};

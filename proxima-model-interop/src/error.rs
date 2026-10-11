@@ -890,4 +890,20 @@ pub enum InteropError {
     /// Affine scales and biases are stored in bf16, f16 or f32 only.
     #[error("affine scales dtype {dtype:?} is not bf16, f16 or f32")]
     AffineDTypeUnsupported { dtype: DType },
+
+    /// A conversion policy named a target codec that has no block encoder in
+    /// [`crate::convert_codec`].
+    #[error("conversion to codec {codec:?} is not supported")]
+    ConversionTargetUnsupported { codec: Codec },
+
+    /// A tensor selected for block conversion has a first dimension that is not a whole
+    /// number of blocks, so its rows cannot be re-encoded without padding.
+    #[error(
+        "tensor {tensor:?} has {row_elements} elements per row, not a positive multiple of the {block_elements}-element block"
+    )]
+    RowNotBlockMultiple {
+        tensor: String,
+        row_elements: u64,
+        block_elements: usize,
+    },
 }
