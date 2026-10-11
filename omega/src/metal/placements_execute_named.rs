@@ -81,6 +81,34 @@ fn watch_command_buffer(buffer: &ProtocolObject<dyn MTLCommandBuffer>, chunk: us
     }
 }
 
+/// Queue toggles for the commit-to-scheduled attribution, all read once per
+/// process and off by default. `PROXIMA_PRECOMMIT_WAIT=1` waits for the
+/// previously committed chunk of this step before each commit (the chunk then
+/// reaches an idle queue instead of one with work in flight);
+/// `PROXIMA_PRECOMMIT_PING=1` commits and waits on an empty command buffer
+/// immediately before the first commit of the step (an idle GPU is addressed
+/// right before the chunk reaches it). The time they take lands between a
+/// chunk's `encode` end and its `commit` start in the phase events.
+#[cfg(feature = "instrument")]
+fn precommit_toggles(
+    queue: &ProtocolObject<dyn MTLCommandQueue>,
+    committed: &[Retained<ProtocolObject<dyn MTLCommandBuffer>>],
+) {
+    let previous = committed.len().checked_sub(2).and_then(|index| committed.get(index));
+    if env_flags::precommit_wait()
+        && let Some(previous) = previous
+    {
+        previous.waitUntilCompleted();
+    }
+    if env_flags::precommit_ping()
+        && previous.is_none()
+        && let Some(empty) = queue.commandBuffer()
+    {
+        empty.commit();
+        empty.waitUntilCompleted();
+    }
+}
+
 /// One `step_host_timeline` event per placed execution, on the same
 /// `mach_absolute_time` base as `GPUStartTime`/`GPUEndTime`, so the host
 /// time `evaluate` spends outside the GPU span splits into named parts:
@@ -782,6 +810,10 @@ pub(super) fn execute_plan_with_placements_inner(
             log: "command queue refused to hand out a command buffer".to_string(),
         })?;
     chunk_label_sequence += 1;
+    #[cfg(feature = "instrument")]
+    if env_flags::enqueue_early() {
+        command_buffer.enqueue();
+    }
     // `Concurrent` lets independent dispatches (e.g. Q/K/V from one normed
     // input) overlap instead of draining the pipeline between every op --
     // see [`DispatchType`]'s own doc for why that requires [`HazardTracker`]
@@ -974,6 +1006,10 @@ pub(super) fn execute_plan_with_placements_inner(
                         log: "command queue refused to hand out a command buffer".to_string(),
                     })?;
             chunk_label_sequence += 1;
+            #[cfg(feature = "instrument")]
+            if env_flags::enqueue_early() {
+                new_command_buffer.enqueue();
+            }
             let new_encoder = EncoderGuard::new(
                 new_command_buffer
                     .computeCommandEncoderWithDispatchType(dispatch_type.as_mtl())
@@ -1008,6 +1044,8 @@ pub(super) fn execute_plan_with_placements_inner(
             watch_command_buffer(&closing_command_buffer, capture_chunk_index);
             #[cfg(feature = "instrument")]
             chunk_command_buffers.push(closing_command_buffer.clone());
+            #[cfg(feature = "instrument")]
+            precommit_toggles(&queue, &chunk_command_buffers);
             // Same clock-correlation argument as the single-buffer
             // `gpu_exec_started`/`commit_call_start_s` pair below: a tick
             // read immediately before `commit()`, converted through the
@@ -1769,6 +1807,8 @@ pub(super) fn execute_plan_with_placements_inner(
 
     #[cfg(feature = "instrument")]
     watch_command_buffer(&command_buffer, capture_chunk_index);
+    #[cfg(feature = "instrument")]
+    precommit_toggles(&queue, &chunk_command_buffers);
     #[cfg(feature = "instrument")]
     let gpu_exec_started = read_ticks();
     #[cfg(feature = "instrument")]

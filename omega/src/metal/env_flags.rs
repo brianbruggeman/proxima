@@ -58,6 +58,24 @@ pub(super) fn boundaries_prefill() -> bool {
 }
 
 #[cfg(feature = "instrument")]
+pub(super) fn precommit_wait() -> bool {
+    static CELL: OnceLock<bool> = OnceLock::new();
+    *CELL.get_or_init(|| is_one("PROXIMA_PRECOMMIT_WAIT"))
+}
+
+#[cfg(feature = "instrument")]
+pub(super) fn precommit_ping() -> bool {
+    static CELL: OnceLock<bool> = OnceLock::new();
+    *CELL.get_or_init(|| is_one("PROXIMA_PRECOMMIT_PING"))
+}
+
+#[cfg(feature = "instrument")]
+pub(super) fn enqueue_early() -> bool {
+    static CELL: OnceLock<bool> = OnceLock::new();
+    *CELL.get_or_init(|| is_one("PROXIMA_COMMAND_BUFFER_ENQUEUE_EARLY"))
+}
+
+#[cfg(feature = "instrument")]
 pub(super) fn head_sentinel_fill() -> bool {
     static CELL: OnceLock<bool> = OnceLock::new();
     *CELL.get_or_init(|| is_present("PROXIMA_HEAD_SENTINEL_FILL"))
