@@ -246,3 +246,27 @@ Recorded so the position is in the tree, not only in session memory. Status: no 
   2. Import: MLIR (torch-mlir / StableHLO) -> omega IR, so a PyTorch graph lowers through omega's existing codec and residency machinery. First measurement: how many ops of a torch-mlir dump of the same two models map onto omega's op set with no new op.
 - Non-goals until a measurement says otherwise: no MLIR (LLVM) dependency in the core crates; textual emission and parsing only; no dialect registration.
 - Unsourced: whether hexagon-mlir or MLIR-AIE accept Linalg text at the level omega would emit (their user guides were read for the lane census, not for this question).
+
+## Interop doors: any format in, any hardware out (owner frame, 2026-10-11)
+
+Owner: "from a gguf or from a onnx or any other format - the point here is interop and also GENERIC and proxima pipes with fsm." One generic IR (proxima-tensor's algebra, lowered by omega) with many doors; every door is a proxima pipe over that IR with an FSM for its stages, measured by the same oracles (recorded llama ids for tokens, vendored reference bytes for formats); no format- or vendor-specific code outside its pipe. State at `f82e9ab2`:
+
+| door | direction | state | note |
+|---|---|---|---|
+| GGUF | in | landed | the primary reader; e3m2 blocks ride under a proxima-own type id (65568) that ggml consumers reject |
+| HF safetensors | in | landed, interim | dense leaves; granite MoE stacks bound as views (down) and one bf16 copy per expert (gate/up); peak RSS 3.24 GB vs 26 MB for the lazily mapped GGUF, zero-copy fused binding in the expert slab still owed; dense HF alias set and rank-3 weights owed for the round trip |
+| MLX plain (bf16/f16/f32) | in | via the HF path | same gaps as HF |
+| MLX affine quantized | in | refused by design | `MlxQuantizedNotLoadable`; native affine-with-bias blocks are a kernel codec, a separate spec |
+| ONNX | in | none | carries a computation graph, not named tensors (`proxima-model-interop/src/lib.rs:14`); same problem class as the MLIR import direction above: graph -> omega IR, measured by ops mapped with no new op |
+| GGUF | out | landed | writer used by the e3m2 round trip |
+| HF safetensors | out | landed | shapes HF row-major since `0fb46a31` |
+| MLX plain and affine 4-bit directories | out | landed, bytes only | shards + index + `config.json` (every GGUF-derivable key) + tokenizer files; never yet loaded by mlx-lm (installed in a venv on this box; the integration check for MLX slice 13) |
+| Metal | hardware out | landed | every codec including the e3m2 render (row-blocked, tiled, grouped) |
+| CPU | hardware out | landed | Rust arms per codec |
+| cuda, wgpu | hardware out | builds; narrower | CUDA C / WGSL text emission compiled by the vendor toolchain; bf8/bf4/fp6 typed-rejected; no parity run on this box |
+| CoreML / ANE | hardware out | none; census + cards | floor 0.27 ms per predict; CPU predictor 81 us beats it; top-k/gather/scatter unsupported on the M1 ANE; cards 0.1, 1.1, 5.1 filled (`docs/bench-campaigns/2026-10-08-ane-lane/plan.md`) |
+| Hexagon (fastrpc, hexagon-mlir, QNN), AMD XDNA, LiteRT | hardware out | none; census only | `docs/research/npu-lanes-census-2026-10-08.md` |
+| LLVM IR | hardware out | none | omega has no llvm/inkwell/cranelift dependency; an LLVM lane would be the same shape as the MSL/WGSL/CUDA emitters (text out, vendor toolchain compiles) and would reach CPU via llc and Hexagon via the lowering end hexagon-mlir already uses ("LLVM-IR with runtime calls") |
+| MLIR (Linalg / StableHLO) | both | none; card above | export counts unrepresentable ops first; import counts unmapped ops first |
+
+Pipe/FSM shape today: the transforms are sans-IO functions (`In = ParsedGguf -> Out = MlxExport`, and the inverse), composed by callers; they are not yet expressed as proxima pipes with an FSM over the stages (parse, bind, transform, pack, assemble, write). That expression is the next structural slice for the formats layer and is what makes a new door a config composition rather than a new crate.
