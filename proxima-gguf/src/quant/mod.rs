@@ -16,9 +16,12 @@
 pub mod bf16;
 pub mod bf4_e2m1;
 pub mod bf8_e5m2;
+pub mod cold_float;
 pub mod dispatch;
 pub mod f16;
 pub mod float_layout;
+pub mod fp5_e2m2;
+pub mod fp6_e3m2;
 pub mod iq2_xs;
 pub mod iq3_xxs;
 pub mod iq4_nl;
