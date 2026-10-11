@@ -112,6 +112,10 @@ fn emit_sizing_consts(out_dir: &std::path::Path) {
         "reactor.idle_park_threshold",
         resolve_int(&root, "reactor", "idle_park_threshold"),
     );
+    let reactor_event_interval = require_nonzero(
+        "reactor.event_interval",
+        resolve_int(&root, "reactor", "event_interval"),
+    );
     let io_uring_buf_size = require_nonzero(
         "io_uring.buf_size",
         resolve_int(&root, "io_uring", "buf_size"),
@@ -231,6 +235,7 @@ fn emit_sizing_consts(out_dir: &std::path::Path) {
          pub const REACTOR_SPIN_BEFORE_PARK_BUSY: u32 = {reactor_spin_before_park_busy};\n\
          pub const REACTOR_SPIN_BEFORE_PARK_IDLE: u32 = {reactor_spin_before_park_idle};\n\
          pub const REACTOR_IDLE_PARK_THRESHOLD: u32 = {reactor_idle_park_threshold};\n\
+         pub const REACTOR_EVENT_INTERVAL: u32 = {reactor_event_interval};\n\
          pub const IO_URING_BUF_SIZE: usize = {io_uring_buf_size};\n\
          pub const BG_POOL_DEFAULT_THREADS: usize = {bg_pool_default_threads};\n\
          pub const PROXIMA_QUIC_MAX_CONCURRENT_BIDI_STREAMS: usize = {quic_max_bidi};\n\
