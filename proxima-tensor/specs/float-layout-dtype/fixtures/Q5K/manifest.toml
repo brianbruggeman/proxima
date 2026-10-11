@@ -1,0 +1,6 @@
+codec = "Q5K"
+elements = 4096
+source = "encoder"
+origin = "example encoder over sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80 tensor blk.0.attn_q.weight byte_offset 110508064 dequantized by the Q8_0 incumbent"
+blocks_sha256 = "0e62c9097264763014c029967bdc67f136e32d4d64f11729c033f86e3b16acfd"
+decoded_f32_sha256 = "d0eddb7f90b830fe91234f8d6e56f867bd4af74a49c081efade4137b4cd08560"

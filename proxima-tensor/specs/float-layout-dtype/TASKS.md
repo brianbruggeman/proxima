@@ -6,7 +6,7 @@ Dependencies inside this spec: 1 has none; 2 needs 1; 3 needs 1; 4 needs 2 and 3
 
 | # | slice | discharges | validation command | expected | done | note |
 |---|---|---|---|---|---|---|
-| 1 | feature `float-layout-dtype` on the four crates (`Cargo.toml` features by hand, no dependency edit), example `layout_census` (syn-based, skips `#[cfg(test)]`), example `layout_record` writing the incumbent decoder fixtures with their sha256 under `proxima-tensor/specs/float-layout-dtype/fixtures/` | AC1 | command block AC1 | `39` | [ ] | the recorder must run before any decoder is replaced; fixtures are vendored, never regenerated from new code; a codec with no source prints `unavailable` and is listed in the SPEC as unexplained |
+| 1 | feature `float-layout-dtype` on the four crates (`Cargo.toml` features by hand, no dependency edit), example `layout_census` (syn-based, skips `#[cfg(test)]`), example `layout_record` writing the incumbent decoder fixtures with their sha256 under `proxima-tensor/specs/float-layout-dtype/fixtures/` | AC1 | command block AC1 | `39` | [x] | AC1 prints 39 (5 census, 1 control, 23 recorded, 10 unavailable); 19 of the 23 recorded fixtures are example-encoder blocks over real granite attn_q rows because the two checkpoints hold only F16, Q4_0, Q6_K, Q8_0 (src: fixtures/<Codec>/manifest.toml); the recorder must run before any decoder is replaced; fixtures are vendored, never regenerated from new code; a codec with no source prints `unavailable` and is listed in the SPEC as unexplained |
 | 2 | `DType` float variant carrying a `FloatLayout`, named constants, bit widths from fields, serde spellings kept | AC2 | `cargo nextest run -p proxima-tensor --features float-layout-dtype -E 'test(/float_layout_dtype_/)'` | `12 passed` | [ ] | the `dtype.rs:8-13` doc lines are struck in this commit with the SPEC's reason |
 | 3 | `bf16.rs` reduced to the BF16 instance of `float_layout::{encode,decode}`; f64-reference and `half` oracles | AC3 | `cargo nextest run -p proxima-gguf -E 'test(/float_layout_codec_/)'` | `29 passed` | [ ] | |
 | 4 | the one MSL emitter over a layout (load and store), hardware type by fields, replacing the four per-width decoders in the feature-on build | AC4 | `cargo nextest run -p omega --features metal,float-layout-dtype -E 'test(/float_layout_msl_/)'` | `12 passed` | [ ] | behind gpu.lock; the compile test uses the Metal compiler on this box |
@@ -30,8 +30,8 @@ In the table above `\|` stands for a literal pipe character; the SPEC's `### com
 
 ## resume
 
-Last landed slice: none
-Next action: slice 1 (add the feature by hand in the four `Cargo.toml` files, write `layout_census` and `layout_record`, run the recorder before anything is replaced)
+Last landed slice: 1 (feature on four crates, layout_census, layout_record, 33 fixture dirs)
+Next action: slice 2 (DType float variant carrying a FloatLayout), or slice 3 (bf16.rs as the BF16 instance of float_layout); both need only slice 1
 Open question, if any: none; the sign-field name `sign` with `Absent | Magnitude | TwosComplement` is a proposal in the owner's vocabulary (sign, mantissa, exponent) and is renamed in slice 12 if the owner prefers another
 
 ## struck

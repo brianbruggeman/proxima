@@ -1,0 +1,6 @@
+codec = "Iq2Xs"
+elements = 4096
+source = "encoder"
+origin = "example encoder over sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80 tensor blk.0.attn_q.weight byte_offset 110508064 dequantized by the Q8_0 incumbent"
+blocks_sha256 = "af598a9ba6499a835e0eaedfc6b82a55c805d2e26ac79601c32a328573c302eb"
+decoded_f32_sha256 = "8fc77ba308c5b51aa55893fabf742812c4c599e1997602ce063470283bb426e6"

@@ -1,0 +1,25 @@
+use proxima_tensor::DType;
+
+pub fn element_bytes(dtype: DType) -> usize {
+    match dtype {
+        DType::Float32 | DType::BFloat16 => 4,
+        DType::Int8 => 1,
+        _ => 8,
+    }
+}
+
+pub fn probe_dtypes() -> Vec<DType> {
+    let widest = DType::Float64;
+    vec![widest, DType::Int32, DType::Float16, DType::Fp6E3M2][1..].to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_only_sites_are_not_counted() {
+        assert_eq!(element_bytes(DType::Float16), 8);
+        assert!(matches!(DType::Float32, DType::Float32));
+    }
+}

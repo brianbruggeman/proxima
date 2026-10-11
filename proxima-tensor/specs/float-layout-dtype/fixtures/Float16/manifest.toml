@@ -1,0 +1,6 @@
+codec = "Float16"
+elements = 4096
+source = "checkpoint"
+origin = "sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd tensor per_layer_model_proj.weight byte_offset 15819552"
+blocks_sha256 = "bb067fc8b4a4767a3b7dc5d3dcb0f65724a437b3ae3399ecc8c8b60e29645564"
+decoded_f32_sha256 = "a0d948044eafd8823cbe406f01be2f52746212e1c1fdc07f19ce222381924814"

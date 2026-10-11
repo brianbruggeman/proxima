@@ -25,6 +25,7 @@ default = ["std", "config", "q4k-int8-dot", "q5k-int8-dot", "q6k-int8-dot"]
 # (~1.03x combined noise, i.e. a tie, not a regression).
 std = ["alloc", "thiserror/std", "tensor-bgpool", "tensor-cohort", "cohort-staged-graph", "dep:libc"]
 alloc = []
+float-layout-dtype = ["proxima-gguf/float-layout-dtype"]
 # Cached-attention graph rewrite. Default-off in this crate's own `default`
 # (no checkpoint/differential harness lives here), but ROW 282 folds it into
 # `metal`'s default shape one level up (`omega`, `proxima-model-interop`) now
@@ -295,12 +296,14 @@ workspace = true
 [dev-dependencies]
 criterion = { workspace = true }
 libc.workspace = true
+proc-macro2.workspace = true
 proptest.workspace = true
 proxima = { workspace = true, features = ["test-support"] }
 # self-reference: pulls in `test_support` (feature-gated, see [features]
 # above) for this crate's own examples/tests/benches without exposing it to
 # a normal build.
 proxima-tensor = { path = ".", features = ["test-support"] }
+syn = { workspace = true, features = ["full", "visit", "parsing"] }
 temp-env.workspace = true
 tempfile.workspace = true
 toml.workspace = true

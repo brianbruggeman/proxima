@@ -1,0 +1,6 @@
+codec = "BFloat8"
+elements = 4096
+source = "encoder"
+origin = "example encoder over sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80 tensor blk.0.attn_q.weight byte_offset 110508064 dequantized by the Q8_0 incumbent"
+blocks_sha256 = "9d2bc99f4a19842dbcb520a01417cd107efca6333cd0394e6d97c22ccc037a3e"
+decoded_f32_sha256 = "af523abbaf5df868ddd448062b74fa1e75a3edd9bea3d89045b0dd8dc88e4324"
