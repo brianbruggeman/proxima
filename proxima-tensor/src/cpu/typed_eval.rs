@@ -524,6 +524,12 @@ pub(super) fn typed_program_plan(program: &[Op]) -> Result<TypedPlan, TensorErro
                 reason: "the typed evaluator does not support Bool yet",
             });
         }
+        if dtype == DType::Fp6E3M2 {
+            return Err(TensorError::NotLowerable {
+                node,
+                reason: "fp6 e3m2 is a block codec and has no typed scalar element",
+            });
+        }
         if dtype == DType::BFloat8 && matches!(expr, Op::Reduce(_)) {
             return Err(TensorError::NotLowerable {
                 node,
@@ -626,7 +632,7 @@ pub(super) fn evaluate_uniform_typed(
         DType::Float32 => dispatch!(f32, Float32),
         DType::Float64 => dispatch!(f64, Float64),
         DType::BFloat8 => dispatch!(BFloat8, BFloat8),
-        DType::Bool => unreachable!("typed_program_plan already rejected this dtype"),
+        DType::Bool | DType::Fp6E3M2 => unreachable!("typed_program_plan already rejected this dtype"),
     })
 }
 

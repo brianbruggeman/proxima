@@ -73,7 +73,7 @@ pub fn dtype_to_wire(dtype: DType) -> Option<&'static str> {
         DType::Float16 => Some("F16"),
         DType::Float32 => Some("F32"),
         DType::Float64 => Some("F64"),
-        DType::BFloat8 | DType::Int128 | DType::UInt128 => None,
+        DType::BFloat8 | DType::Fp6E3M2 | DType::Int128 | DType::UInt128 => None,
     }
 }
 

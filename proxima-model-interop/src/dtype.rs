@@ -43,6 +43,7 @@ pub fn dtype_to_ggml(dtype: DType) -> Option<GgmlType> {
         DType::Float64 => Some(GgmlType::F64),
         DType::Bool
         | DType::BFloat8
+        | DType::Fp6E3M2
         | DType::UInt8
         | DType::UInt16
         | DType::UInt32
