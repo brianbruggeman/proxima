@@ -513,6 +513,12 @@ pub enum InteropError {
     )]
     MlxQuantizedNotLoadable { tensor: String },
 
+    /// The plain MLX export found leaves with no stored tensor and no layout
+    /// row (`crate::export_plain_named`), e.g. `blk.3.mystery_gate.weight`;
+    /// none is given an invented Hugging Face name.
+    #[error("leaves {leaves} have no stored tensor and no layout row for an mlx export")]
+    MlxUnmappedLeaves { leaves: String },
+
     /// `crate::short_conv::short_conv_architecture_from_metadata`'s (`std`-gated) `key` (e.g.
     /// `lfm2moe.attention.head_count_kv`) is a per-layer array whose
     /// nonzero entries (the real attention layers' own kv head count)
