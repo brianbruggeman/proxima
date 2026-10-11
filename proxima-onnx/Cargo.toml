@@ -151,3 +151,7 @@ required-features = ["bge-eval-diag"]
 [[example]]
 name = "bge_batch_seal"
 required-features = ["epilogue-profile-diag"]
+
+[[example]]
+name = "onnx_census"
+required-features = ["std"]

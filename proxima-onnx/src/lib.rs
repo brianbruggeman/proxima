@@ -58,6 +58,7 @@
 
 extern crate alloc;
 
+pub mod census;
 #[cfg(feature = "std")]
 pub mod config;
 pub mod decode;
