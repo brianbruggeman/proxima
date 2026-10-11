@@ -257,7 +257,7 @@ Owner: "from a gguf or from a onnx or any other format - the point here is inter
 | HF safetensors | in | landed, interim | dense leaves; granite MoE stacks bound as views (down) and one bf16 copy per expert (gate/up); peak RSS 3.24 GB vs 26 MB for the lazily mapped GGUF, zero-copy fused binding in the expert slab still owed; dense HF alias set and rank-3 weights owed for the round trip |
 | MLX plain (bf16/f16/f32) | in | via the HF path | same gaps as HF |
 | MLX affine quantized | in | refused by design | `MlxQuantizedNotLoadable`; native affine-with-bias blocks are a kernel codec, a separate spec |
-| ONNX | in | none | carries a computation graph, not named tensors (`proxima-model-interop/src/lib.rs:14`); same problem class as the MLIR import direction above: graph -> omega IR, measured by ops mapped with no new op |
+| ONNX | in | landed (`proxima-onnx`) | sans-IO `ModelProto` protobuf parser (`proxima-onnx/src/parser.rs`, `pipe.rs:23 parse_complete`) and `lower_graph` (`proxima-onnx/src/lower.rs:227`) to `proxima_tensor::Op`, 48 ops per `proxima-onnx/docs/op_coverage.md`; Metal parity test `omega/tests/onnx_metal_parity.rs`; fuzz `fuzz/src/bin/fuzz_onnx.rs`; no ONNX writer; the interop crate's weight transforms exclude it (`proxima-model-interop/src/lib.rs:14`) because it is a graph door, not a tensor door |
 | GGUF | out | landed | writer used by the e3m2 round trip |
 | HF safetensors | out | landed | shapes HF row-major since `0fb46a31` |
 | MLX plain and affine 4-bit directories | out | landed, bytes only | shards + index + `config.json` (every GGUF-derivable key) + tokenizer files; never yet loaded by mlx-lm (installed in a venv on this box; the integration check for MLX slice 13) |
