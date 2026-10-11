@@ -574,7 +574,7 @@ fn validated_view<'manifest, 'file>(
         program_axes.push(u64::from(*axis));
     }
     let axes_match = match role {
-        Role::Native => entry.shape == program_axes,
+        Role::Native => native_view_matches(&entry.shape, &program_axes),
         Role::InOut => inout_view_matches(&entry.shape, &program_axes),
         Role::Gathered => false,
     };
@@ -638,6 +638,13 @@ fn inout_view_matches(stored: &[u64], program_axes: &[u64]) -> bool {
         program_axes[split..].iter().product::<u64>() == *rows
             && program_axes[..split].iter().product::<u64>() == *columns
     })
+}
+
+/// A stored tensor viewed as a program leaf of the same axes, or a one-element
+/// `[1]` tensor viewed as the program's rank-0 scalar (gemma4's
+/// `layer_scalar` is `[1]` in the file, GGUF `layer_output_scale.weight` the same).
+fn native_view_matches(stored: &[u64], program_axes: &[u64]) -> bool {
+    stored == program_axes || (program_axes.is_empty() && stored == [1])
 }
 
 fn bind_safetensors_leaf<'file>(
@@ -1340,6 +1347,10 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
 }
 
 mod mlx_refusal;
+
+mod shards;
+
+pub use shards::{HfShard, bind_safetensors_shards};
 
 pub use mlx_refusal::{refuse_mlx_quantized, refuse_mlx_quantized_header};
 
@@ -2170,5 +2181,22 @@ mod tests {
             ),
             "expected HfMoeWeightsUnsupported{{expert_count: 8}}, got {error:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod native_views {
+    use super::native_view_matches;
+
+    #[test]
+    fn a_one_element_tensor_stands_in_for_a_rank_zero_scalar_leaf() {
+        assert!(native_view_matches(&[1], &[]));
+    }
+
+    #[test]
+    fn equal_axes_match_and_a_wider_tensor_does_not_stand_in_for_a_scalar() {
+        assert!(native_view_matches(&[256, 1536], &[256, 1536]));
+        assert!(!native_view_matches(&[2], &[]));
+        assert!(!native_view_matches(&[1536], &[256, 1536]));
     }
 }
