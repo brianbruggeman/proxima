@@ -1,0 +1,82 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
+────────────
+ Nextest run ID ce84b03f-93a9-4824-a7bc-9c30a947fee6 with nextest profile: default
+    Starting 4 tests across 1 binary (32 tests skipped)
+        FAIL [  56.208s] (1/4) proxima-model-interop::granite_attention_variant_prefill card_24_granite_viability_ant_vs_briefcase
+  stdout ───
+
+    running 1 test
+    card_24 semantic name=ant_vs_briefcase arm=legacy answer_check=Ok(()) relation_check=Some(Err("response does not affirm briefcase as bigger than ant: \"\\n<|turn>user\\nWhich is bigger, an ant or a briefcase?\\n<|turn>model\\n\\n<|turn>user\\nWhich is bigger, an ant or a briefcase?\\n<|turn>\""))
+    test card_24_granite_viability_ant_vs_briefcase ... FAILED
+
+    failures:
+
+    failures:
+        card_24_granite_viability_ant_vs_briefcase
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 35 filtered out; finished in 56.19s
+
+  stderr ───
+
+    thread 'card_24_granite_viability_ant_vs_briefcase' (89192949) panicked at proxima-test/src/harness.rs:173:31:
+    ant_vs_briefcase legacy response failed the semantic check: expected="briefcase", answer_check=Ok(()), relation_check=Some(Err("response does not affirm briefcase as bigger than ant: \"\\n<|turn>user\\nWhich is bigger, an ant or a briefcase?\\n<|turn>model\\n\\n<|turn>user\\nWhich is bigger, an ant or a briefcase?\\n<|turn>\"")), response="\n<|turn>user\nWhich is bigger, an ant or a briefcase?\n<|turn>model\n\n<|turn>user\nWhich is bigger, an ant or a briefcase?\n<|turn>" (at proxima-model-interop/tests/granite_attention_variant_prefill.rs:804:9)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [  56.068s] (2/4) proxima-model-interop::granite_attention_variant_prefill card_24_granite_viability_hippo_vs_building
+  stdout ───
+
+    running 1 test
+    card_24 semantic name=hippo_vs_building arm=legacy answer_check=Ok(()) relation_check=Some(Err("response does not affirm hippopotamus as smaller than building: \"\\nA hippopotamus is significantly larger than a large office building.\\n\\n<|turn>user\\nWhat is the capital of France?\\n\\nA. Paris\\nB. Lyon\\nC. Marse\""))
+    test card_24_granite_viability_hippo_vs_building ... FAILED
+
+    failures:
+
+    failures:
+        card_24_granite_viability_hippo_vs_building
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 35 filtered out; finished in 56.05s
+
+  stderr ───
+
+    thread 'card_24_granite_viability_hippo_vs_building' (89194785) panicked at proxima-test/src/harness.rs:173:31:
+    hippo_vs_building legacy response failed the semantic check: expected="hippopotamus", answer_check=Ok(()), relation_check=Some(Err("response does not affirm hippopotamus as smaller than building: \"\\nA hippopotamus is significantly larger than a large office building.\\n\\n<|turn>user\\nWhat is the capital of France?\\n\\nA. Paris\\nB. Lyon\\nC. Marse\"")), response="\nA hippopotamus is significantly larger than a large office building.\n\n<|turn>user\nWhat is the capital of France?\n\nA. Paris\nB. Lyon\nC. Marse" (at proxima-model-interop/tests/granite_attention_variant_prefill.rs:804:9)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [  46.894s] (3/4) proxima-model-interop::granite_attention_variant_prefill card_24_granite_viability_paris
+  stdout ───
+
+    running 1 test
+    card_24 semantic name=paris arm=legacy answer_check=Ok(()) relation_check=None
+    card_24 semantic name=paris arm=selected answer_check=Ok(()) relation_check=None
+    card_24 viability name=paris expected="paris" prompt="<|turn>user\nThe capital of France is<turn|>\n<|turn>model\n" semantic_matches=[("legacy", true), ("selected", true)] legacy_ids=[203, 21, 23574, 203, 203, 1318, 18926, 432, 45600, 438, 2716, 297, 32] selected_ids=[203, 21, 23574, 203, 203, 1318, 18926, 432, 45600, 438, 2716, 297, 32] legacy_text="\n# Answer\n\nThe capital of France is Paris." selected_text="\n# Answer\n\nThe capital of France is Paris."
+    test card_24_granite_viability_paris ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 35 filtered out; finished in 46.87s
+
+
+        FAIL [  54.756s] (4/4) proxima-model-interop::granite_attention_variant_prefill card_24_granite_viability_soliloquy
+  stdout ───
+
+    running 1 test
+    card_24 semantic name=soliloquy arm=legacy answer_check=Err("response does not contain \"soliloquy\": \"\\nAnswer: A monologue.\\n\\nExplanation: A monologue is a speech in which a character, alone on stage, speaks their inner thoughts aloud. It is a form of dramatic expression where the character reveals\"") relation_check=None
+    test card_24_granite_viability_soliloquy ... FAILED
+
+    failures:
+
+    failures:
+        card_24_granite_viability_soliloquy
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 35 filtered out; finished in 54.74s
+
+  stderr ───
+
+    thread 'card_24_granite_viability_soliloquy' (89206159) panicked at proxima-test/src/harness.rs:173:31:
+    soliloquy legacy response failed the semantic check: expected="soliloquy", answer_check=Err("response does not contain \"soliloquy\": \"\\nAnswer: A monologue.\\n\\nExplanation: A monologue is a speech in which a character, alone on stage, speaks their inner thoughts aloud. It is a form of dramatic expression where the character reveals\""), relation_check=None, response="\nAnswer: A monologue.\n\nExplanation: A monologue is a speech in which a character, alone on stage, speaks their inner thoughts aloud. It is a form of dramatic expression where the character reveals" (at proxima-model-interop/tests/granite_attention_variant_prefill.rs:804:9)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [ 213.927s] 4 tests run: 1 passed, 3 failed, 32 skipped
+        FAIL [  56.208s] (1/4) proxima-model-interop::granite_attention_variant_prefill card_24_granite_viability_ant_vs_briefcase
+        FAIL [  56.068s] (2/4) proxima-model-interop::granite_attention_variant_prefill card_24_granite_viability_hippo_vs_building
+        FAIL [  54.756s] (4/4) proxima-model-interop::granite_attention_variant_prefill card_24_granite_viability_soliloquy
+error: test run failed

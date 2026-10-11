@@ -800,6 +800,12 @@ fn run_granite_viability_case(check: ViabilityCheck) {
             "card_24 semantic name={} arm={} answer_check={:?} relation_check={:?}",
             check.name, arm, answer_check, relation_check
         );
+        assert!(
+            matched,
+            "{} {arm} response failed the semantic check: expected={:?}, answer_check={answer_check:?}, relation_check={relation_check:?}, response={response:?}",
+            check.name,
+            check.expected_answer,
+        );
     }
     println!(
         "card_24 viability name={} expected={:?} prompt={:?} semantic_matches={semantic_matches:?} legacy_ids={legacy_ids:?} selected_ids={selected_ids:?} legacy_text={legacy_text:?} selected_text={selected_text:?}",
