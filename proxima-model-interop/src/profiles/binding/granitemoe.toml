@@ -1,0 +1,575 @@
+[[alias]]
+kind = "part"
+leaf = "blk.0.ffn_gate_exps.weight"
+from = "model.layers.0.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.0.ffn_up_exps.weight"
+from = "model.layers.0.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.0.ffn_down_exps.weight"
+from = "model.layers.0.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.0.ffn_gate_inp.weight"
+from = "model.layers.0.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.1.ffn_gate_exps.weight"
+from = "model.layers.1.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.1.ffn_up_exps.weight"
+from = "model.layers.1.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.1.ffn_down_exps.weight"
+from = "model.layers.1.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.1.ffn_gate_inp.weight"
+from = "model.layers.1.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.2.ffn_gate_exps.weight"
+from = "model.layers.2.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.2.ffn_up_exps.weight"
+from = "model.layers.2.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.2.ffn_down_exps.weight"
+from = "model.layers.2.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.2.ffn_gate_inp.weight"
+from = "model.layers.2.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.3.ffn_gate_exps.weight"
+from = "model.layers.3.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.3.ffn_up_exps.weight"
+from = "model.layers.3.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.3.ffn_down_exps.weight"
+from = "model.layers.3.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.3.ffn_gate_inp.weight"
+from = "model.layers.3.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.4.ffn_gate_exps.weight"
+from = "model.layers.4.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.4.ffn_up_exps.weight"
+from = "model.layers.4.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.4.ffn_down_exps.weight"
+from = "model.layers.4.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.4.ffn_gate_inp.weight"
+from = "model.layers.4.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.5.ffn_gate_exps.weight"
+from = "model.layers.5.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.5.ffn_up_exps.weight"
+from = "model.layers.5.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.5.ffn_down_exps.weight"
+from = "model.layers.5.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.5.ffn_gate_inp.weight"
+from = "model.layers.5.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.6.ffn_gate_exps.weight"
+from = "model.layers.6.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.6.ffn_up_exps.weight"
+from = "model.layers.6.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.6.ffn_down_exps.weight"
+from = "model.layers.6.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.6.ffn_gate_inp.weight"
+from = "model.layers.6.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.7.ffn_gate_exps.weight"
+from = "model.layers.7.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.7.ffn_up_exps.weight"
+from = "model.layers.7.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.7.ffn_down_exps.weight"
+from = "model.layers.7.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.7.ffn_gate_inp.weight"
+from = "model.layers.7.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.8.ffn_gate_exps.weight"
+from = "model.layers.8.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.8.ffn_up_exps.weight"
+from = "model.layers.8.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.8.ffn_down_exps.weight"
+from = "model.layers.8.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.8.ffn_gate_inp.weight"
+from = "model.layers.8.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.9.ffn_gate_exps.weight"
+from = "model.layers.9.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.9.ffn_up_exps.weight"
+from = "model.layers.9.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.9.ffn_down_exps.weight"
+from = "model.layers.9.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.9.ffn_gate_inp.weight"
+from = "model.layers.9.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.10.ffn_gate_exps.weight"
+from = "model.layers.10.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.10.ffn_up_exps.weight"
+from = "model.layers.10.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.10.ffn_down_exps.weight"
+from = "model.layers.10.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.10.ffn_gate_inp.weight"
+from = "model.layers.10.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.11.ffn_gate_exps.weight"
+from = "model.layers.11.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.11.ffn_up_exps.weight"
+from = "model.layers.11.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.11.ffn_down_exps.weight"
+from = "model.layers.11.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.11.ffn_gate_inp.weight"
+from = "model.layers.11.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.12.ffn_gate_exps.weight"
+from = "model.layers.12.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.12.ffn_up_exps.weight"
+from = "model.layers.12.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.12.ffn_down_exps.weight"
+from = "model.layers.12.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.12.ffn_gate_inp.weight"
+from = "model.layers.12.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.13.ffn_gate_exps.weight"
+from = "model.layers.13.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.13.ffn_up_exps.weight"
+from = "model.layers.13.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.13.ffn_down_exps.weight"
+from = "model.layers.13.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.13.ffn_gate_inp.weight"
+from = "model.layers.13.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.14.ffn_gate_exps.weight"
+from = "model.layers.14.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.14.ffn_up_exps.weight"
+from = "model.layers.14.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.14.ffn_down_exps.weight"
+from = "model.layers.14.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.14.ffn_gate_inp.weight"
+from = "model.layers.14.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.15.ffn_gate_exps.weight"
+from = "model.layers.15.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.15.ffn_up_exps.weight"
+from = "model.layers.15.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.15.ffn_down_exps.weight"
+from = "model.layers.15.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.15.ffn_gate_inp.weight"
+from = "model.layers.15.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.16.ffn_gate_exps.weight"
+from = "model.layers.16.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.16.ffn_up_exps.weight"
+from = "model.layers.16.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.16.ffn_down_exps.weight"
+from = "model.layers.16.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.16.ffn_gate_inp.weight"
+from = "model.layers.16.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.17.ffn_gate_exps.weight"
+from = "model.layers.17.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.17.ffn_up_exps.weight"
+from = "model.layers.17.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.17.ffn_down_exps.weight"
+from = "model.layers.17.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.17.ffn_gate_inp.weight"
+from = "model.layers.17.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.18.ffn_gate_exps.weight"
+from = "model.layers.18.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.18.ffn_up_exps.weight"
+from = "model.layers.18.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.18.ffn_down_exps.weight"
+from = "model.layers.18.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.18.ffn_gate_inp.weight"
+from = "model.layers.18.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.19.ffn_gate_exps.weight"
+from = "model.layers.19.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.19.ffn_up_exps.weight"
+from = "model.layers.19.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.19.ffn_down_exps.weight"
+from = "model.layers.19.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.19.ffn_gate_inp.weight"
+from = "model.layers.19.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.20.ffn_gate_exps.weight"
+from = "model.layers.20.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.20.ffn_up_exps.weight"
+from = "model.layers.20.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.20.ffn_down_exps.weight"
+from = "model.layers.20.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.20.ffn_gate_inp.weight"
+from = "model.layers.20.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.21.ffn_gate_exps.weight"
+from = "model.layers.21.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.21.ffn_up_exps.weight"
+from = "model.layers.21.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.21.ffn_down_exps.weight"
+from = "model.layers.21.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.21.ffn_gate_inp.weight"
+from = "model.layers.21.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.22.ffn_gate_exps.weight"
+from = "model.layers.22.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.22.ffn_up_exps.weight"
+from = "model.layers.22.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.22.ffn_down_exps.weight"
+from = "model.layers.22.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.22.ffn_gate_inp.weight"
+from = "model.layers.22.block_sparse_moe.router.layer.weight"
+
+[[alias]]
+kind = "part"
+leaf = "blk.23.ffn_gate_exps.weight"
+from = "model.layers.23.block_sparse_moe.input_linear.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "blk.23.ffn_up_exps.weight"
+from = "model.layers.23.block_sparse_moe.input_linear.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "rename"
+leaf = "blk.23.ffn_down_exps.weight"
+from = "model.layers.23.block_sparse_moe.output_linear.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "blk.23.ffn_gate_inp.weight"
+from = "model.layers.23.block_sparse_moe.router.layer.weight"

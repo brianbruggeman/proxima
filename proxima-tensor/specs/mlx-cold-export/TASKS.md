@@ -15,7 +15,7 @@ Dependencies: 1 none; 2 none (creates `mlx_names.rs`, vendors `plain/`); 3 on 2;
 |---|---|---|---|---|---|---|
 | 1 | `transform/mlx.rs` (new): `MlxExport`, shard cut, names, `__metadata__ format mlx`, index file; `mod` lines beside `mod tests;` in `transform.rs` | AC1 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mlx_shard_/)'` | `12 passed` | [x] | sans-IO assembly; `format` and `proxima_format_version` are distinct keys so `write_complete` accepts `format: mlx`; cap cut mirrors make_shards (new shard when running total + next tensor exceeds cap) |
 | 2 | `transform/mlx_names.rs` (new): dense leaf to HF name through `BindingProfile::aliases_for` and the unmapped list; vendors the `plain/` reference files into `tests/fixtures/mlx-reference/granite-3.1-1b-a400m-moe/` and `tests/fixtures/mlx-reference/gemma4-e2b/` with a README naming upstream repos and shas | AC2 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mlx_names_dense/)'` | `5 passed` | [x] | dense names via aliases_for in reverse; layouts are data (STANDARD_LAYOUT, SANDWICH_NORM_LAYOUT), HF prefix a parameter; gemma4 reference is mlx-community/gemma-4-E2B-it-qat-bf16, granite is ibm-granite (no mlx-community conversion exists); gemma tokenizer.json is 32 MB, the repo has no LFS policy |
-| 3 | `src/profiles/binding/granitemoe.toml` registered in the `binding.rs` table and the MoE arm of `hf_bind` | AC3 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/granitemoe_binding_/)'` | `5 passed` | [ ] | not `src/profiles/granitemoe.toml`; read `expert_slab.rs` and `expert_sidecar.rs` first |
+| 3 | `src/profiles/binding/granitemoe.toml` registered in the `binding.rs` table and the MoE arm of `hf_bind` | AC3 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/granitemoe_binding_/)'` | `5 passed` | [x] | names read from the vendored header (input_linear.weight [32,1024,1024] fused gate+up, output_linear.weight [32,1024,512], router.layer.weight [32,1024]), all three confirmed; 24 literal per-layer aliases x4 as lfm2.toml does; MoE arm = routed_expert_count, moe_stack_source (alias whose source the manifest stores, else HfMoeWeightsUnsupported), bind_safetensors_expert_stack (decode, cut part, transpose to [experts,in,out]); every stacked leaf has one HF counterpart (gate and up share one) |
 | 4 | MoE leaf names in `mlx_names.rs` vs the vendored plain header | AC4 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mlx_names_moe/)'` | `4 passed` | [ ] |  |
 | 5 | `export_plain`: bf16/f16/f32 casts and Q8_0/Q4_0 dequantization through `proxima_gguf::quant::dispatch::dequantize` | AC5 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mlx_plain_/)'` | `10 passed` | [ ] | hand-derived block oracles |
 | 6 | `pack_affine`, `export_affine`, `AffineParams` (bits, group size, default, float fallback) | AC6 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mlx_affine_/)'` | `21 passed` | [x] | affine packing lives in `transform/mlx_affine.rs` (not `mlx.rs`); oracle transcribed from mlx 06eb7483 `quantized.cpp` 65-93, 99-160, 1165-1233; `tests/support/trial.rs` moved to a `#[path]` mod in its one user so the `capability_matrix` target builds under `-D warnings` |
@@ -30,9 +30,9 @@ Dependencies: 1 none; 2 none (creates `mlx_names.rs`, vendors `plain/`); 3 on 2;
 
 ## resume
 
-Last landed slice: 1, 2, 6, 7, 8 and 14
-Next action: slice 3 (granitemoe binding), then 4, 5, 9 to 13
-Open question, if any: whether the stacked-expert leaves as `expert_slab` binds them have one HF counterpart each (slice 3 answers it; a leaf with no counterpart is reported)
+Last landed slice: 1, 2, 3, 6, 7, 8 and 14
+Next action: slice 4, 5, then 9 to 13
+Open question, if any: none for slice 3 (each stacked-expert leaf has one HF counterpart; gate and up are parts 0 and 1 of 2 of one fused tensor)
 
 ## struck
 
