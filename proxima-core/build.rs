@@ -41,7 +41,8 @@ fn emit_batch_sizing(out_dir: &Path, manifest_dir: &str) {
     );
 
     let out_path = out_dir.join("proxima_core_sized.rs");
-    fs::write(&out_path, generated).unwrap_or_else(|err| panic!("write {out_path:?}: {err}"));
+    fs::write(&out_path, generated)
+        .unwrap_or_else(|err| panic!("write {}: {err}", out_path.display()));
 }
 
 // folded in from the former proxima-time crate's own build.rs — binds
