@@ -1,4 +1,5 @@
 #![cfg(feature = "std")]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod support;
 #[path = "support/trial.rs"]
