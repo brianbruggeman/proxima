@@ -11,7 +11,7 @@ Dependencies: 1 none; 2 none (after 1 only for the `SUPPORTED_OPS` equality test
 | # | slice | discharges | validation command | expected | done | note |
 |---|---|---|---|---|---|---|
 | 1 | `proxima-onnx/src/census.rs` (new), `SUPPORTED_OPS` beside `lower_node`, `examples/onnx_census.rs`, `render_census` | AC1 | `cargo nextest run -p proxima-onnx --features std -E 'test(/onnx_census_/)'` | `8 passed` | [ ] | the two real-file cases need `BGE_MODEL_PATH` fetched first (slice 6 fetches it; until then fetch with `curl -fL` from `https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/onnx/model.onnx` into the path AC1 names) |
-| 2 | `LayerNormalization`, `Gelu`, `Squeeze`, `Expand` as compositions of the existing algebra; regenerate `docs/op_coverage.md` with `examples/generate_op_coverage_doc.rs` | AC2 | `cargo nextest run -p proxima-onnx --features std -E 'test(/onnx_lower_extra_/) + binary(op_coverage_doc_drift)'` | `13 passed` | [ ] | formulas read from onnx `Operators.md` and the worked examples hand-derived in the test; `Expand` may land as a broadcast view (`Value.view`) |
+| 2 | `LayerNormalization`, `Gelu`, `Squeeze`, `Expand` as compositions of the existing algebra; regenerate `docs/op_coverage.md` with `examples/generate_op_coverage_doc.rs` | AC2 | `cargo nextest run -p proxima-onnx --features std -E 'test(/onnx_lower_extra_/) + binary(op_coverage_doc_drift)'` | `13 passed` | [x] | formulas read from onnx `Operators.md`, worked examples hand-derived in `proxima-onnx/tests/onnx_lower_extra.rs`; arms live in `proxima-onnx/src/lower/extra.rs`; `Expand` = broadcast read times an all-ones `Op::Constant` of the target shape (a lone broadcast operand leaves the widened axes unpinned); `Squeeze` edits `Value.view` for virtual axes and emits one `Identity` with a degenerate-axis read otherwise; `Squeeze`/`Expand` second inputs join `Reshape`'s shape-only initializer set (`takes_constant_operand`); `operand_pattern` now keeps a broadcast real axis of a viewed operand (it dropped it, producing a rank-mismatched pattern); `LayerNormalization` rejects the optional `Mean`/`InvStdDev` outputs and a viewed input with a typed error; 12 new tests + `op_coverage_doc_drift` = 13, doc regenerated to 52 ops |
 | 3 | `omega` feature `onnx-door`: `cargo add proxima-onnx --optional`, `cargo add bon --optional`; `DoorStage`, `DoorError`, `DoorConfig`, `OnnxDoor` for CPU through `plan_named`/`execute_plan_named`; census inside the validate stage | AC3, AC14 | `cargo nextest run -p omega --features onnx-door,cpu -E 'test(/onnx_door_contract_/)'` | `12 passed` | [ ] | AC14 is re-run in the same commit because this slice edits `Cargo.toml`; Metal plan failure case is the compiled-out driver case so the slice stays CPU-only |
 | 4 | `cache.rs`: pin-set keyed plans, shared initializer decode, `max_pin_sets` in `omega-runtime.toml`, eviction counter | AC5 | `cargo nextest run -p omega --features onnx-door,cpu -E 'test(/onnx_door_plan_cache_/)'` | `4 passed` | [ ] | prints parse ms and decoded bytes per pin set so the two unmeasured risks in SPEC.md get numbers |
 | 5 | `examples/onnx_door_walkthrough.rs` | AC4 | `cargo run -p omega --features onnx-door,cpu --example onnx_door_walkthrough \| grep -c '^transition '` | `10` | [ ] | principle 11 teaching surface |
@@ -29,8 +29,8 @@ Dependencies: 1 none; 2 none (after 1 only for the `SUPPORTED_OPS` equality test
 
 ## resume
 
-Last landed slice: none
-Next action: slice 1 (census), slice 2, slice 6 in parallel; slice 3 after slice 1
+Last landed slice: 2 (LayerNormalization, Gelu, Squeeze, Expand)
+Next action: slice 1 (census), slice 6 in parallel; slice 3 after slice 1; Unsqueeze reads only the `axes` attribute, so an opset 13 axes-input Unsqueeze lowers as a silent no-op (lower.rs lower_unsqueeze)
 Open question, if any: none
 
 ## struck

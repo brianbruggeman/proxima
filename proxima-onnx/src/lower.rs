@@ -55,6 +55,8 @@ use crate::messages::{
     AttributeProto, DimensionValue, GraphProto, NodeProto, TensorProto, TypeValue, ValueInfoProto,
 };
 
+mod extra;
+
 /// Everything that can go wrong lowering a parsed ONNX graph into a
 /// [`proxima_tensor::Op`] program. Distinct from
 /// [`crate::error::OnnxError`], which is about malformed protobuf bytes --
@@ -260,12 +262,12 @@ pub fn lower_graph_pinned(
     let shape_only_names: alloc::collections::BTreeSet<&str> = graph
         .node
         .iter()
-        .filter(|node| node.op_type == "Reshape")
+        .filter(|node| takes_constant_operand(node, 1))
         .filter_map(|node| node.input.get(1).copied())
         .filter(|&name| {
             let used_elsewhere = graph.node.iter().any(|node| {
                 node.input.iter().enumerate().any(|(index, &input_name)| {
-                    input_name == name && !(node.op_type == "Reshape" && index == 1)
+                    input_name == name && !takes_constant_operand(node, index)
                 })
             });
             let is_graph_output = graph.output.iter().any(|output| output.name == name);
@@ -462,6 +464,13 @@ pub fn lower_graph_pinned_cached<'cache>(
     }
 }
 
+/// Whether `node` reads its input at `index` only as a lower-time constant
+/// (`Reshape`'s target shape, `Squeeze`'s axes, `Expand`'s target shape), so
+/// an initializer used nowhere else needs no live `Op::Input` leaf.
+fn takes_constant_operand(node: &NodeProto<'_>, index: usize) -> bool {
+    index == 1 && matches!(node.op_type, "Reshape" | "Squeeze" | "Expand")
+}
+
 fn lower_node(
     program: &mut Vec<Op>,
     values: &mut BTreeMap<String, Value>,
@@ -529,6 +538,10 @@ fn lower_node(
         "Pow" => lower_pow(program, values, fold, node),
         "Slice" => lower_slice(program, values, fold, node),
         "Dropout" => lower_dropout(program, values, fold, node),
+        "LayerNormalization" => extra::lower_layer_normalization(program, values, node),
+        "Gelu" => extra::lower_gelu(program, values, node),
+        "Squeeze" => extra::lower_squeeze(program, values, fold, node),
+        "Expand" => extra::lower_expand(program, values, fold, node),
         other => Err(LowerError::UnsupportedOp {
             name: node.name.to_string(),
             op_type: other.to_string(),
@@ -754,23 +767,15 @@ fn operand_pattern(value: &Value, out_shape: &[u64]) -> IndexPattern {
         return logical;
     };
 
-    let mut by_real_axis: alloc::collections::BTreeMap<u16, u16> =
+    let mut by_real_axis: alloc::collections::BTreeMap<u16, AxisIndex> =
         alloc::collections::BTreeMap::new();
     for (logical_axis, axis_index) in logical.axes.iter().enumerate() {
         let Some(real_axis) = view[logical_axis] else {
             continue;
         };
-        if let [term] = axis_index.terms.as_slice() {
-            by_real_axis.insert(real_axis, term.axis);
-        }
+        by_real_axis.insert(real_axis, axis_index.clone());
     }
-    let axes = (0..by_real_axis.len() as u16)
-        .map(|real_axis| AxisIndex {
-            terms: core::iter::once(AxisTerm::projection(by_real_axis[&real_axis])).collect(),
-            offset: 0,
-            len: None,
-        })
-        .collect();
+    let axes = by_real_axis.into_values().collect();
     IndexPattern {
         iter_rank: out_rank,
         axes,
