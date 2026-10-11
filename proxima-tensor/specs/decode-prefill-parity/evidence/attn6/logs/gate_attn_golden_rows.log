@@ -1,0 +1,36 @@
+    Finished `gate` profile [optimized] target(s) in 0.30s
+────────────
+ Nextest run ID 67b80018-ab3d-4b83-aa81-5842d40cb55a with nextest profile: default
+    Starting 30 tests across 107 binaries (867 tests skipped)
+        PASS [   0.010s] ( 1/30) omega msl::attn_rows_tests::simdgroups_follow_the_reference_head_dim_rule_and_never_fall_below_two
+        PASS [   0.010s] ( 2/30) omega msl::attn_rows_tests::rows_per_threadgroup_follows_the_reuse_registers_memory_and_occupancy_budgets
+        PASS [   0.010s] ( 3/30) omega msl::attn_rows_tests::row_tiled_splits_matches_the_grid_table
+        PASS [   0.011s] ( 4/30) omega msl::attn_rows_tests::eight_kv_head_chunks_split_the_keys_until_the_target_threadgroups_are_filled
+        PASS [   0.011s] ( 5/30) omega msl::attn_rows_tests::a_partly_packed_or_misplaced_codec_is_declined_on_the_decode_split
+        PASS [   0.012s] ( 6/30) omega msl::attn_rows_tests::a_float16_cached_kv_makes_the_decode_split_read_half_pointers_for_the_cached_triple_only
+        PASS [   0.013s] ( 7/30) omega msl::attn_rows_tests::the_declared_arrays_stay_inside_the_budget_at_every_admitted_shape
+        PASS [   0.013s] ( 8/30) omega msl::attn_rows_tests::a_launch_past_u32_threads_takes_the_flat_form_through_the_one_grid_decision
+        PASS [   0.018s] ( 9/30) omega msl::attn_rows_tests::shapes_the_tile_cannot_serve_stay_on_the_one_dispatch_form
+        PASS [   0.010s] (10/30) omega msl::attn_rows_tests::the_decode_split_baseline_bakes_the_new_key_count
+        PASS [   0.011s] (11/30) omega msl::attn_rows_tests::the_float_setting_multiplies_float_fragments_and_names_no_half_type
+        PASS [   0.011s] (12/30) omega msl::attn_rows_tests::the_default_sizing_renders_the_float_setting
+        PASS [   0.011s] (13/30) omega msl::attn_rows_tests::the_half_setting_narrows_the_operands_and_keeps_scores_accumulators_and_softmax_float
+        PASS [   0.011s] (14/30) omega msl::attn_rows_tests::the_k_row_softmax_weights_kernel_folds_the_new_range_in_key_order
+        PASS [   0.010s] (15/30) omega msl::attn_rows_tests::the_k_row_softmax_weights_kernel_rejects_a_layout_not_collapsed_to_the_row_axes
+        PASS [   0.010s] (16/30) omega msl::attn_rows_tests::the_one_row_softmax_weights_kernel_is_unchanged_with_the_rows_feature_on
+        PASS [   0.010s] (17/30) omega msl::attn_rows_tests::the_query_tile_is_staged_only_while_it_fits_the_threadgroup_budget_and_the_staged_byte_cap
+        PASS [   0.011s] (18/30) omega msl::attn_rows_tests::the_partial_dispatches_one_threadgroup_per_kv_head_row_tile_and_split
+        PASS [   0.010s] (19/30) omega msl::attn_rows_tests::the_row_count_the_policy_and_the_head_group_choose_the_form
+        PASS [   0.009s] (20/30) omega msl::attn_rows_tests::the_row_tiled_kernel_declines_a_half_precision_op
+        PASS [   0.020s] (21/30) omega msl::attn_rows_tests::the_kernel_source_carries_the_tile_decode_the_band_and_the_interleaved_store
+        PASS [   0.010s] (22/30) omega msl::attn_rows_tests::the_row_tiled_form_declines_a_float16_cached_kv_instead_of_reading_it_as_f32
+        PASS [   0.013s] (23/30) omega msl::attn_rows_tests::the_row_tiled_kernel_stages_the_query_tile_once_and_keeps_its_four_barriers
+        PASS [   0.011s] (24/30) omega msl::attn_rows_tests::the_row_tiled_softmax_is_one_online_pass_per_vector_with_one_max_and_one_sum_reduction
+        PASS [   0.008s] (25/30) omega msl::attn_rows_tests::the_staged_byte_cap_at_the_threadgroup_budget_reproduces_the_fit_only_rule
+        PASS [   0.009s] (26/30) omega msl::attn_rows_tests::the_runtime_toml_pins_the_staged_query_byte_cap_default
+        PASS [   0.009s] (27/30) omega msl::attn_rows_tests::the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads
+        PASS [   0.010s] (28/30) omega msl::attn_rows_tests::the_split_binds_scratch_and_the_merge_runs_one_threadgroup_per_row_and_head
+        PASS [   0.128s] (29/30) omega msl::attn_rows_tests::the_new_range_visits_every_key_a_row_of_the_tile_can_see_exactly_once
+        PASS [   0.171s] (30/30) omega msl::attn_rows_tests::every_cached_and_new_key_is_scored_by_exactly_one_split
+────────────
+     Summary [   0.175s] 30 tests run: 30 passed, 867 skipped

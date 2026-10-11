@@ -1,0 +1,158 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Finished `gate` profile [optimized] target(s) in 1.82s
+────────────
+ Nextest run ID 15fc11df-958b-45e3-a492-bce97393d422 with nextest profile: default
+    Starting 151 tests across 1 binary (1 test skipped)
+        PASS [   0.011s] (  1/151) omega backend::tests::from_env_with_a_known_name_resolves_to_its_variant
+        PASS [   0.011s] (  2/151) omega backend::tests::requesting_metal_without_the_feature_errors_naming_it
+        PASS [   0.012s] (  3/151) omega backend::tests::gpu_expert_source_gate_rejects_a_nonempty_substitution_table
+        PASS [   0.012s] (  4/151) omega backend::tests::from_env_unset_falls_back_to_the_compiled_default
+        PASS [   0.013s] (  5/151) omega backend::tests::requesting_cpu_without_the_feature_errors_naming_it
+        PASS [   0.014s] (  6/151) omega backend::tests::every_engine_name_round_trips_through_from_str
+        PASS [   0.015s] (  7/151) omega backend::tests::an_unknown_engine_name_lists_the_known_ones
+        PASS [   0.015s] (  8/151) omega config::tests::an_environment_with_no_omega_variables_loads_the_default_policy
+        PASS [   0.015s] (  9/151) omega backend::tests::requesting_gpu_with_no_compiled_driver_never_falls_back_to_cpu
+        PASS [   0.016s] ( 10/151) omega backend::tests::from_env_with_an_unknown_name_errors_without_falling_back
+        PASS [   0.009s] ( 11/151) omega grid::tests::a_product_that_fits_is_returned_exactly
+        PASS [   0.012s] ( 12/151) omega grid::tests::an_empty_product_is_one_thread
+        PASS [   0.010s] ( 13/151) omega msl::attn_split_tests::the_form_classifier_reads_the_operand_count_and_the_row_discriminator
+        PASS [   0.014s] ( 14/151) omega config::tests::the_pipeline_cache_knobs_come_from_omega_variables
+        PASS [   0.012s] ( 15/151) omega msl::attn_split_tests::a_twelve_operand_single_range_op_is_named_as_the_dynamic_form
+        PASS [   0.011s] ( 16/151) omega msl::attn_split_tests::split_limit_accepts_the_simd_width_and_rejects_more_with_a_typed_error
+        PASS [   0.014s] ( 17/151) omega grid::tests::a_product_that_wraps_u64_is_a_named_error_not_a_truncated_count
+        PASS [   0.012s] ( 18/151) omega msl::attn_split_tests::golden_identity::attention_sources_match_the_recorded_main_goldens
+        PASS [   0.014s] ( 19/151) omega msl::attn_split_tests::the_scalar_kernel_bounds_the_new_range_by_the_window_only_when_the_window_cuts_it
+        PASS [   0.014s] ( 20/151) omega msl::cooperative_fold_tests::bit_exact_policy_keeps_the_serial_fold_and_never_batches
+        PASS [   0.010s] ( 21/151) omega msl::cooperative_fold_tests::cooperative_fold_issues_every_slot_load_before_the_first_fold
+        PASS [   0.011s] ( 22/151) omega msl::serial_fold_index32_tests::a_two_axis_reduction_narrows_its_inner_divmod_and_hands_the_outer_axis_the_remainder
+        PASS [   0.010s] ( 23/151) omega msl::serial_fold_index32_tests::the_coordinate_override_set_to_zero_restores_the_64_bit_decode
+        PASS [   0.012s] ( 24/151) omega msl::serial_fold_index32_tests::prefill_combine_fold_decodes_outputs_in_32_bit_and_drops_the_sole_axis_divmod
+        PASS [   0.013s] ( 25/151) omega msl::serial_fold_index32_tests::an_iteration_space_past_u32_keeps_the_64_bit_decode
+        PASS [   0.013s] ( 26/151) omega msl::serial_fold_index32_tests::the_narrow_decode_is_part_of_the_pipeline_identity
+        PASS [   0.012s] ( 27/151) omega msl::tests::a_gather_free_op_names_and_binds_exactly_as_before_gather_existed
+        PASS [   0.010s] ( 28/151) omega msl::tests::a_gather_op_emits_an_indices_binding_and_the_fetch_uniforms
+        PASS [   0.011s] ( 29/151) omega msl::tests::a_gather_kernel_binds_and_declares_the_fault_buffer
+        PASS [   0.013s] ( 30/151) omega msl::tests::a_keep_scan_over_zero_axes_is_rejected
+        PASS [   0.011s] ( 31/151) omega msl::tests::a_route_that_moves_along_a_reduced_axis_renders_the_serial_body_fetching_per_step::decode_step
+        PASS [   0.012s] ( 32/151) omega msl::tests::a_large_elementwise_grid_decodes_its_thread_index_without_an_integer_divide
+        PASS [   0.009s] ( 33/151) omega msl::tests::an_arity_mismatched_op_is_rejected
+        PASS [   0.010s] ( 34/151) omega msl::tests::a_small_elementwise_grid_keeps_the_integer_decode
+        PASS [   0.012s] ( 35/151) omega msl::tests::a_route_that_moves_along_a_reduced_axis_renders_the_serial_body_fetching_per_step::prefill_chunk
+        PASS [   0.012s] ( 36/151) omega msl::tests::a_select_reduction_body_is_rejected
+        PASS [   0.010s] ( 37/151) omega msl::tests::block_staged_attention_rejects_a_head_dim_not_a_multiple_of_eight
+        PASS [   0.012s] ( 38/151) omega msl::tests::block_staged_v_accumulate_falls_back_to_scalar_when_head_dim_not_32_aligned
+        PASS [   0.011s] ( 39/151) omega msl::tests::block_staged_v_accumulate_uses_float4_and_a_cross_ty_reduce_when_aligned
+        PASS [   0.011s] ( 40/151) omega msl::tests::block_width_above_one_renders_the_block_staged_body_under_llama_relaxed
+        PASS [   0.011s] ( 41/151) omega msl::tests::block_width_one_renders_the_strictly_sequential_body_never_the_block_staged_one
+        PASS [   0.011s] ( 42/151) omega msl::tests::cached_attention_at_one_chunk_never_emits_context_chunk_machinery
+        PASS [   0.011s] ( 43/151) omega msl::tests::cached_attention_two_dispatch_form_is_inert_under_bit_exact
+        PASS [   0.011s] ( 44/151) omega msl::tests::cached_attention_emits_one_online_softmax_dispatch
+        PASS [   0.011s] ( 45/151) omega msl::tests::context_chunk_merge_is_gated_by_numeric_policy_for_a_real_64_key_context
+        PASS [   0.011s] ( 46/151) omega msl::tests::cooperative_identity_token_rejects_a_non_cooperative_reduce_op
+        PASS [   0.012s] ( 47/151) omega msl::tests::coord_index32_single_token_shape_is_admitted_with_same_narrowing
+        PASS [   0.009s] ( 48/151) omega msl::tests::cumsum_op_emits_a_scan_kernel_with_one_thread_per_line
+        PASS [   0.010s] ( 49/151) omega msl::tests::distinct_dtype_on_the_same_shape_yields_distinct_cache_keys_and_source
+        PASS [   0.011s] ( 50/151) omega msl::tests::dense_layout_accepts_contiguous_and_rejects_broadcast
+        PASS [   0.010s] ( 51/151) omega msl::tests::distinct_output_axis_set_at_the_same_output_rank_yields_distinct_cache_keys_and_source
+        PASS [   0.010s] ( 52/151) omega msl::tests::distinct_packed_codec_on_the_same_shape_yields_distinct_cache_keys_and_source
+        PASS [   0.010s] ( 53/151) omega msl::tests::distinct_output_rank_at_same_total_rank_yields_distinct_cache_keys_and_source
+        PASS [   0.009s] ( 54/151) omega msl::tests::dynamic_cached_attention_kernel_identity_is_stable_across_kv_capacity_buckets
+        PASS [   0.010s] ( 55/151) omega msl::tests::effective_context_chunk_cap_clamps_below_the_threadgroup_budget_for_qwen35_shape
+        PASS [   0.010s] ( 56/151) omega msl::tests::effective_context_chunk_cap_holds_the_compiled_cap_for_the_openchat_shape
+        PASS [   0.010s] ( 57/151) omega msl::tests::elementwise_broadcast_decodes_omitted_axes_before_selected_axes
+        PASS [   0.010s] ( 58/151) omega msl::tests::elementwise_outermost_modulo_elision_changes_the_kernel_cache_key
+        PASS [   0.010s] ( 59/151) omega msl::tests::elementwise_op_emits_one_input_one_output_and_a_matching_grid
+        PASS [   0.009s] ( 60/151) omega msl::tests::epilogue_operand_reuse::a_cooperative_fold_keeps_its_duplicate_operand_load
+        PASS [   0.010s] ( 61/151) omega msl::tests::elementwise_unit_leading_axis_is_never_decoded
+        PASS [   0.010s] ( 62/151) omega msl::tests::emit_is_deterministic_byte_equal
+        PASS [   0.010s] ( 63/151) omega msl::tests::epilogue_operand_reuse::a_fused_epilogue_finishes_each_row_of_the_simdgroup_on_its_own_lane
+        PASS [   0.056s] ( 64/151) omega msl::serial_fold_index32_tests::the_narrow_unflatten_equals_the_wide_one_across_the_captured_output_space
+        PASS [   0.011s] ( 65/151) omega msl::tests::epilogue_operand_reuse::a_plain_matvec_finishes_each_row_of_the_simdgroup_on_its_own_lane
+        PASS [   0.010s] ( 66/151) omega msl::tests::epilogue_operand_reuse::a_repeated_epilogue_operand_is_loaded_from_device_memory_once
+        PASS [   0.008s] ( 67/151) omega msl::tests::epilogue_operand_reuse::a_round_batched_reduce_carries_its_epilogue_repeats_in_its_identity
+        PASS [   0.010s] ( 68/151) omega msl::tests::epilogue_operand_reuse::aliases_map_every_mention_of_one_tensor_to_its_first
+        PASS [   0.011s] ( 69/151) omega msl::tests::epilogue_operand_reuse::distinct_epilogue_operands_each_keep_their_own_load
+        PASS [   0.010s] ( 70/151) omega msl::tests::epilogue_operand_reuse::the_repeat_pattern_is_part_of_the_pipeline_identity
+        PASS [   0.009s] ( 71/151) omega msl::tests::epilogue_operand_reuse::the_same_source_at_a_different_layout_is_not_an_alias
+        PASS [   0.010s] ( 72/151) omega msl::tests::expert_codec_declared_once_when_both_substitution_markers_fire
+        PASS [   0.011s] ( 73/151) omega msl::tests::every_axis_that_changes_emitted_source_also_changes_kernel_cache_key
+        PASS [   0.011s] ( 74/151) omega msl::tests::expert_source_emission_appends_payload_and_descriptor_bindings
+        PASS [   0.011s] ( 75/151) omega msl::tests::expert_source_uses_descriptor_codec_instead_of_checkpoint_codec
+        PASS [   0.009s] ( 76/151) omega msl::tests::flat_grid_form::a_composite_threadgroup_count_above_u32_max_splits_across_both_axes
+        PASS [   0.010s] ( 77/151) omega msl::tests::flat_grid_form::a_flat_launch_is_re_cut_for_a_pipeline_that_cannot_run_the_pinned_width
+        PASS [   0.009s] ( 78/151) omega msl::tests::flat_grid_form::a_pinned_width_that_does_not_divide_the_grid_is_refused_for_a_kernel_that_reads_it
+        PASS [   0.010s] ( 79/151) omega msl::tests::flat_grid_form::a_pinned_threadgroup_width_that_does_not_divide_the_grid_launches_one_simdgroup_wide
+        PASS [   0.009s] ( 80/151) omega msl::tests::flat_grid_form::cached_attention_with_grouped_queries_is_refused_when_its_width_does_not_divide_the_grid
+        PASS [   0.011s] ( 81/151) omega msl::tests::flat_grid_form::a_threadgroup_count_with_no_divisor_to_spill_into_y_is_rejected
+        PASS [   0.010s] ( 82/151) omega msl::tests::flat_grid_form::the_rectangle_never_launches_a_threadgroup_the_grid_does_not_need
+        PASS [   0.010s] ( 83/151) omega msl::tests::flattened_selected_axis_gathered_q4k_matmul_is_not_row_blocked_without_feature
+        PASS [   0.010s] ( 84/151) omega msl::tests::forty_key_plan_uses_the_per_query_head_grid_with_no_merge_under_either_policy
+        PASS [   0.009s] ( 85/151) omega msl::tests::fused_matmul_op_emits_two_inputs_a_reduction_loop_and_a_row_by_col_grid
+        PASS [   0.009s] ( 86/151) omega msl::tests::half_precision_codec_never_takes_the_row_blocked_path_even_at_a_256_extent::float16
+        PASS [   0.013s] ( 87/151) omega msl::tests::forty_keys_stays_one_split_under_bit_exact_but_splits_under_llama_relaxed
+        PASS [   0.009s] ( 88/151) omega msl::tests::half_precision_codec_never_takes_the_row_blocked_path_even_at_a_256_extent::bfloat16
+        PASS [   0.010s] ( 89/151) omega msl::tests::long_contexts_split_across_more_than_one_threadgroup_under_llama_relaxed
+        PASS [   0.008s] ( 90/151) omega msl::tests::long_contexts_stay_one_split_under_bit_exact
+        PASS [   0.009s] ( 91/151) omega msl::tests::one_token_gathered_q4k_matmul_uses_row_blocked_gather_body
+        PASS [   0.009s] ( 92/151) omega msl::tests::merge_kernel_emits_the_online_softmax_combine
+        PASS [   0.008s] ( 93/151) omega msl::tests::packed_row_activation_cap_is_the_smallest_power_of_two_holding_the_tokens_up_to_the_group
+        PASS [   0.009s] ( 94/151) omega msl::tests::output_axis_order_at_the_same_axis_set_yields_distinct_cache_keys_and_source
+        PASS [   0.009s] ( 95/151) omega msl::tests::packed_row_nsg2_off_leaves_the_threadgroup_width_unchanged
+        PASS [   0.011s] ( 96/151) omega msl::tests::per_query_head_grid_narrows_threadgroup_width_without_changing_total_threads
+        PASS [   0.009s] ( 97/151) omega msl::tests::preamble_contains_mixed_expert_codec_selector
+        PASS [   0.009s] ( 98/151) omega msl::tests::push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel
+        PASS [   0.009s] ( 99/151) omega msl::tests::push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel
+        PASS [   0.009s] (100/151) omega msl::tests::push_packed_row_blocked_body_rejects_a_non_k_quant_codec
+        PASS [   0.009s] (101/151) omega msl::tests::push_tiled_gemm_body_is_disabled_without_the_metal_tiled_gemm_feature
+        PASS [   0.008s] (102/151) omega msl::tests::q4_0_codec_takes_the_row_blocked_path_at_a_256_extent
+        PASS [   0.011s] (103/151) omega msl::tests::q4_0_codec_falls_back_to_per_element_for_a_non_plain_product_reduce
+        PASS [   0.009s] (104/151) omega msl::tests::q4k_row_blocked_matmul_uses_paired_nibble_decode
+        PASS [   0.009s] (105/151) omega msl::tests::q4k_row_blocked_non_add_reduce_keeps_the_per_element_path
+        PASS [   0.009s] (106/151) omega msl::tests::q5k_row_blocked_matmul_uses_paired_nibble_decode
+        PASS [   0.009s] (107/151) omega msl::tests::q6k_row_blocked_matmul_uses_paired_nibble_decode
+        PASS [   0.009s] (108/151) omega msl::tests::q6k_single_token_matvec_folds_the_configured_rows_per_simdgroup
+        PASS [   0.008s] (109/151) omega msl::tests::rank_select_entry_and_grid_follow_rows_and_keep_flag
+        PASS [   0.008s] (110/151) omega msl::tests::rank_select_render_declares_four_passes
+        PASS [   0.008s] (111/151) omega msl::tests::rank_select_render_emits_kernel_entry_bindings_and_grid
+        PASS [   0.009s] (112/151) omega msl::tests::reduce_routes_on_reduced_axis_length_against_min_len::at_threshold_2
+        PASS [   0.009s] (113/151) omega msl::tests::reduce_routes_on_reduced_axis_length_against_min_len::attended_34
+        PASS [   0.008s] (114/151) omega msl::tests::reduce_routes_on_reduced_axis_length_against_min_len::sum_squares_4096
+        PASS [   0.009s] (115/151) omega msl::tests::reduce_routes_on_reduced_axis_length_against_min_len::unit_axis
+        PASS [   0.010s] (116/151) omega msl::tests::reduce_routes_on_reduced_axis_length_against_min_len::score_even_odd_64
+        PASS [   0.008s] (117/151) omega msl::tests::reduction_literal_default_is_none_and_key_carries_no_rl_token
+        PASS [   0.008s] (118/151) omega msl::tests::render_cached_attention_never_declares_past_the_threadgroup_budget
+        PASS [   0.008s] (119/151) omega msl::tests::render_cached_attention_omits_the_merge_block_under_bit_exact_policy
+        PASS [   0.008s] (120/151) omega msl::tests::render_cached_attention_rejects_an_elementwise_bound_op
+        PASS [   0.008s] (121/151) omega msl::tests::render_reduce_rejects_a_broadcast_reduce_epilogue
+        PASS [   0.009s] (122/151) omega msl::tests::render_reduce_rejects_an_elementwise_bound_op
+        PASS [   0.009s] (123/151) omega msl::tests::render_scan_rejects_an_elementwise_bound_op
+        PASS [   0.010s] (124/151) omega msl::tests::routed_q4k_reduce_uses_cooperative_gather_fetch
+        PASS [   0.009s] (125/151) omega msl::tests::same_structure_different_extents_share_one_cache_key
+        PASS [   0.008s] (126/151) omega msl::tests::same_structure_different_extents_yield_identical_source_but_different_grid
+        PASS [   0.008s] (127/151) omega msl::tests::short_folds_route_on_output_count_and_length_together::at_length_threshold_stays_cooperative
+        PASS [   0.009s] (128/151) omega msl::tests::short_folds_route_on_output_count_and_length_together::at_output_threshold
+        PASS [   0.009s] (129/151) omega msl::tests::short_folds_route_on_output_count_and_length_together::long_fold_stays_cooperative_at_1m_outputs
+        PASS [   0.008s] (130/151) omega msl::tests::short_folds_route_on_output_count_and_length_together::one_below_output_threshold
+        PASS [   0.010s] (131/151) omega msl::tests::short_folds_route_on_output_count_and_length_together::decode_combine_1k_outputs_len_8
+        PASS [   0.009s] (132/151) omega msl::tests::short_folds_route_on_output_count_and_length_together::prefill_combine_1m_outputs_len_8
+        PASS [   0.009s] (133/151) omega msl::tests::simd_combine_fn_rejects_a_non_cooperative_reduce_op
+        PASS [   0.008s] (134/151) omega msl::tests::softmax_runtime_rows_default_off_is_byte_identical_to_the_literal_bound_emit
+        PASS [   0.009s] (135/151) omega msl::tests::softmax_runtime_rows_on_changes_only_the_bound_and_the_name
+        PASS [   0.009s] (136/151) omega msl::tests::split_kernel_emits_the_slice_formula_and_scratch_index
+        PASS [   0.009s] (137/151) omega msl::tests::split_count_never_exceeds_the_compiled_maximum
+        PASS [   0.010s] (138/151) omega msl::tests::splits_for_has_a_knee_at_the_scaled_divisor_threshold
+        PASS [   0.010s] (139/151) omega msl::tests::the_reciprocal_decode_is_part_of_the_pipeline_identity
+        PASS [   0.010s] (140/151) omega msl::tests::uniform_expert_source_retains_packed_row_decoder
+        PASS [   0.010s] (141/151) omega msl::tests::tiled_gemm_never_triggers_without_the_metal_tiled_gemm_feature
+        PASS [   0.011s] (142/151) omega msl::twin_elementwise_tests::a_plain_elementwise_kernel_declares_no_extra_output
+        PASS [   0.009s] (143/151) omega msl::twin_elementwise_tests::the_second_output_is_bound_right_past_the_kernels_own_bindings::adjacent_pairs
+        PASS [   0.010s] (144/151) omega msl::twin_elementwise_tests::one_kernel_reads_each_operand_once_and_stores_two_outputs::adjacent_pairs
+        PASS [   0.011s] (145/151) omega msl::twin_elementwise_tests::one_kernel_reads_each_operand_once_and_stores_two_outputs::split_half
+        PASS [   0.009s] (146/151) omega sized::tests::selection_min_rows_is_the_toml_value
+        PASS [   0.009s] (147/151) omega msl::twin_elementwise_tests::the_twin_entry_name_differs_from_both_plain_halves_it_replaces
+        PASS [   0.010s] (148/151) omega msl::twin_elementwise_tests::the_second_output_is_bound_right_past_the_kernels_own_bindings::split_half
+        PASS [   0.090s] (149/151) omega msl::tests::flat_grid_form::the_cached_attention_merge_kernel_past_the_thread_index_takes_the_flat_form_and_compiles
+        PASS [   0.095s] (150/151) omega msl::tests::flat_grid_form::cached_attention_with_grouped_queries_past_the_thread_index_launches_its_pinned_width_and_compiles
+        PASS [   0.138s] (151/151) omega msl::tests::the_reciprocal_decode_equals_integer_division_for_every_numerator_up_to_its_ceiling
+────────────
+     Summary [   0.295s] 151 tests run: 151 passed, 1 skipped

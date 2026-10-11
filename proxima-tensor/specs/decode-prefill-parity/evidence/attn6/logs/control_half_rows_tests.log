@@ -1,0 +1,78 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Finished `gate` profile [optimized] target(s) in 11.55s
+────────────
+ Nextest run ID be297095-84fc-43dc-a551-a0fcb3f060e9 with nextest profile: default
+    Starting 30 tests across 107 binaries (867 tests skipped)
+        PASS [   0.022s] ( 1/30) omega msl::attn_rows_tests::simdgroups_follow_the_reference_head_dim_rule_and_never_fall_below_two
+        FAIL [   0.022s] ( 2/30) omega msl::attn_rows_tests::eight_kv_head_chunks_split_the_keys_until_the_target_threadgroups_are_filled
+  stdout ───
+
+    running 1 test
+    test msl::attn_rows_tests::eight_kv_head_chunks_split_the_keys_until_the_target_threadgroups_are_filled ... FAILED
+
+    failures:
+
+    failures:
+        msl::attn_rows_tests::eight_kv_head_chunks_split_the_keys_until_the_target_threadgroups_are_filled
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 481 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'msl::attn_rows_tests::eight_kv_head_chunks_split_the_keys_until_the_target_threadgroups_are_filled' (81231281) panicked at omega/src/msl/attn_rows_tests.rs:21:5:
+    assertion failed: !crate::sized::ATTENTION_ROWS_MMA_HALF
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 9 tests still running
+        FAIL [   0.024s] ( 3/30) omega msl::attn_rows_tests::rows_per_threadgroup_follows_the_reuse_registers_memory_and_occupancy_budgets
+  stdout ───
+
+    running 1 test
+    test msl::attn_rows_tests::rows_per_threadgroup_follows_the_reuse_registers_memory_and_occupancy_budgets ... FAILED
+
+    failures:
+
+    failures:
+        msl::attn_rows_tests::rows_per_threadgroup_follows_the_reuse_registers_memory_and_occupancy_budgets
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 481 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'msl::attn_rows_tests::rows_per_threadgroup_follows_the_reuse_registers_memory_and_occupancy_budgets' (81231286) panicked at omega/src/msl/attn_rows_tests.rs:21:5:
+    assertion failed: !crate::sized::ATTENTION_ROWS_MMA_HALF
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.025s] ( 4/30) omega msl::attn_rows_tests::a_launch_past_u32_threads_takes_the_flat_form_through_the_one_grid_decision
+        PASS [   0.026s] ( 5/30) omega msl::attn_rows_tests::a_float16_cached_kv_makes_the_decode_split_read_half_pointers_for_the_cached_triple_only
+        PASS [   0.027s] ( 6/30) omega msl::attn_rows_tests::shapes_the_tile_cannot_serve_stay_on_the_one_dispatch_form
+        PASS [   0.027s] ( 7/30) omega msl::attn_rows_tests::a_partly_packed_or_misplaced_codec_is_declined_on_the_decode_split
+        PASS [   0.028s] ( 8/30) omega msl::attn_rows_tests::the_declared_arrays_stay_inside_the_budget_at_every_admitted_shape
+        FAIL [   0.030s] ( 9/30) omega msl::attn_rows_tests::row_tiled_splits_matches_the_grid_table
+  stdout ───
+
+    running 1 test
+    test msl::attn_rows_tests::row_tiled_splits_matches_the_grid_table ... FAILED
+
+    failures:
+
+    failures:
+        msl::attn_rows_tests::row_tiled_splits_matches_the_grid_table
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 481 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'msl::attn_rows_tests::row_tiled_splits_matches_the_grid_table' (81231293) panicked at omega/src/msl/attn_rows_tests.rs:21:5:
+    assertion failed: !crate::sized::ATTENTION_ROWS_MMA_HALF
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.011s] (10/30) omega msl::attn_rows_tests::the_decode_split_baseline_bakes_the_new_key_count
+        PASS [   0.185s] (11/30) omega msl::attn_rows_tests::every_cached_and_new_key_is_scored_by_exactly_one_split
+────────────
+     Summary [   0.194s] 11/30 tests run: 8 passed, 3 failed, 867 skipped
+        FAIL [   0.022s] ( 2/30) omega msl::attn_rows_tests::eight_kv_head_chunks_split_the_keys_until_the_target_threadgroups_are_filled
+        FAIL [   0.024s] ( 3/30) omega msl::attn_rows_tests::rows_per_threadgroup_follows_the_reuse_registers_memory_and_occupancy_budgets
+        FAIL [   0.030s] ( 9/30) omega msl::attn_rows_tests::row_tiled_splits_matches_the_grid_table
+warning: 19/30 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

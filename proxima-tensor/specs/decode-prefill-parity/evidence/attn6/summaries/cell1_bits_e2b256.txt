@@ -1,0 +1,4 @@
+ab bits threads=62208 extents=[971, 1, 8, 256] arm=base elements=1988608 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits threads=62208 extents=[971, 1, 8, 256] arm=both elements=1988608 differing=1045269 max_ulp=996093 max_abs=4.7683716e-6 max_abs_over_largest=3.5125154e-7
+ab bits threads=62208 extents=[971, 1, 8, 256] arm=kpb64 elements=1988608 differing=1045269 max_ulp=996093 max_abs=4.7683716e-6 max_abs_over_largest=3.5125154e-7
+ab bits threads=62208 extents=[971, 1, 8, 256] arm=msg4 elements=1988608 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0

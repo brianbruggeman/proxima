@@ -1,0 +1,89 @@
+    Finished `gate` profile [optimized] target(s) in 0.22s
+────────────
+ Nextest run ID ee9d3d5e-4cdc-475a-9863-8c5c78a857f1 with nextest profile: default
+    Starting 83 tests across 107 binaries (814 tests skipped)
+        PASS [   0.009s] ( 1/83) omega metal::arena_encode_dispatch_finish::attention_scratch_len_tests::decode_split_positions_keep_their_own_scratch
+        PASS [   0.010s] ( 2/83) omega msl::attn_rows_tests::a_float16_cached_kv_makes_the_decode_split_read_half_pointers_for_the_cached_triple_only
+        PASS [   0.010s] ( 3/83) omega msl::attn_rows_tests::eight_kv_head_chunks_split_the_keys_until_the_target_threadgroups_are_filled
+        PASS [   0.010s] ( 4/83) omega msl::attn_rows_tests::a_launch_past_u32_threads_takes_the_flat_form_through_the_one_grid_decision
+        PASS [   0.010s] ( 5/83) omega metal::arena_encode_dispatch_finish::attention_scratch_len_tests::the_row_tiled_positions_of_a_plan_share_one_scratch_sized_at_the_widest
+        PASS [   0.011s] ( 6/83) omega metal::arena_encode_dispatch_finish::attention_scratch_len_tests::decode_dispatch_still_reserves_the_compiled_split_maximum
+        PASS [   0.011s] ( 7/83) omega msl::attn_rows_tests::a_partly_packed_or_misplaced_codec_is_declined_on_the_decode_split
+        PASS [   0.011s] ( 8/83) omega metal::arena_encode_dispatch_finish::attention_scratch_len_tests::row_tiled_scratch_is_sized_by_the_forms_own_split_count
+        PASS [   0.012s] ( 9/83) omega metal::arena_encode_dispatch_finish::attention_scratch_len_tests::prefill_dispatch_sizes_scratch_by_the_real_split_count_not_the_compiled_max
+        PASS [   0.011s] (10/83) omega msl::attn_rows_tests::row_tiled_splits_matches_the_grid_table
+        PASS [   0.010s] (11/83) omega msl::attn_rows_tests::shapes_the_tile_cannot_serve_stay_on_the_one_dispatch_form
+        PASS [   0.009s] (12/83) omega msl::attn_rows_tests::the_default_sizing_renders_the_float_setting
+        PASS [   0.011s] (13/83) omega msl::attn_rows_tests::rows_per_threadgroup_follows_the_reuse_registers_memory_and_occupancy_budgets
+        PASS [   0.010s] (14/83) omega msl::attn_rows_tests::the_decode_split_baseline_bakes_the_new_key_count
+        PASS [   0.011s] (15/83) omega msl::attn_rows_tests::simdgroups_follow_the_reference_head_dim_rule_and_never_fall_below_two
+        PASS [   0.010s] (16/83) omega msl::attn_rows_tests::the_float_setting_multiplies_float_fragments_and_names_no_half_type
+        PASS [   0.011s] (17/83) omega msl::attn_rows_tests::the_half_setting_narrows_the_operands_and_keeps_scores_accumulators_and_softmax_float
+        PASS [   0.012s] (18/83) omega msl::attn_rows_tests::the_declared_arrays_stay_inside_the_budget_at_every_admitted_shape
+        PASS [   0.009s] (19/83) omega msl::attn_rows_tests::the_k_row_softmax_weights_kernel_rejects_a_layout_not_collapsed_to_the_row_axes
+        PASS [   0.009s] (20/83) omega msl::attn_rows_tests::the_partial_dispatches_one_threadgroup_per_kv_head_row_tile_and_split
+        PASS [   0.011s] (21/83) omega msl::attn_rows_tests::the_k_row_softmax_weights_kernel_folds_the_new_range_in_key_order
+        PASS [   0.011s] (22/83) omega msl::attn_rows_tests::the_one_row_softmax_weights_kernel_is_unchanged_with_the_rows_feature_on
+        PASS [   0.011s] (23/83) omega msl::attn_rows_tests::the_query_tile_is_staged_only_while_it_fits_the_threadgroup_budget_and_the_staged_byte_cap
+        PASS [   0.011s] (24/83) omega msl::attn_rows_tests::the_row_count_the_policy_and_the_head_group_choose_the_form
+        PASS [   0.011s] (25/83) omega msl::attn_rows_tests::the_row_tiled_form_declines_a_float16_cached_kv_instead_of_reading_it_as_f32
+        PASS [   0.016s] (26/83) omega msl::attn_rows_tests::the_kernel_source_carries_the_tile_decode_the_band_and_the_interleaved_store
+        PASS [   0.010s] (27/83) omega msl::attn_rows_tests::the_row_tiled_kernel_declines_a_half_precision_op
+        PASS [   0.010s] (28/83) omega msl::attn_rows_tests::the_row_tiled_kernel_stages_the_query_tile_once_and_keeps_its_four_barriers
+        PASS [   0.009s] (29/83) omega msl::attn_rows_tests::the_runtime_toml_pins_the_staged_query_byte_cap_default
+        PASS [   0.009s] (30/83) omega msl::attn_rows_tests::the_staged_byte_cap_at_the_threadgroup_budget_reproduces_the_fit_only_rule
+        PASS [   0.010s] (31/83) omega msl::attn_rows_tests::the_split_binds_scratch_and_the_merge_runs_one_threadgroup_per_row_and_head
+        PASS [   0.011s] (32/83) omega msl::attn_rows_tests::the_row_tiled_softmax_is_one_online_pass_per_vector_with_one_max_and_one_sum_reduction
+        PASS [   0.011s] (33/83) omega msl::attn_rows_tests::the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads
+        PASS [   0.009s] (34/83) omega msl::attn_split_tests::a_twelve_operand_single_range_op_is_named_as_the_dynamic_form
+        PASS [   0.011s] (35/83) omega msl::attn_split_tests::decode_split::shapes_and_policies_the_split_cannot_serve_stay_one_dispatch
+        PASS [   0.011s] (36/83) omega msl::attn_split_tests::decode_split::the_merge_is_llamas_reduce_eight_groups_of_a_full_simdgroup_per_split
+        PASS [   0.010s] (37/83) omega msl::attn_split_tests::decode_split::the_partial_dispatches_one_threadgroup_per_head_and_split
+        PASS [   0.010s] (38/83) omega msl::attn_split_tests::decode_split::the_merge_rejects_a_head_dim_that_is_not_a_whole_float4_lane_set
+        PASS [   0.011s] (39/83) omega msl::attn_split_tests::decode_split::the_single_range_writer_stores_the_same_interleaved_layout
+        PASS [   0.010s] (40/83) omega msl::attn_split_tests::decode_split::the_split_and_chunk_counts_follow_the_bucket_capacity
+        PASS [   0.014s] (41/83) omega msl::attn_split_tests::decode_split::the_simdgroup_walk_visits_every_key_of_a_split_exactly_once
+        PASS [   0.016s] (42/83) omega msl::attn_split_tests::decode_split::the_partial_kernel_source_carries_the_split_grid_and_the_interleaved_store
+        PASS [   0.010s] (43/83) omega msl::attn_split_tests::decode_split::the_split_binds_scratch_and_a_merge_follows_above_one_split
+        PASS [   0.010s] (44/83) omega msl::attn_split_tests::decode_split::the_split_merge_algebra_matches_single_pass_on_the_four_key_fixture
+        PASS [   0.011s] (45/83) omega msl::attn_split_tests::decode_split::the_split_partial_and_the_interleaved_merge_past_u32_threads_launch_flat_with_a_widened_source
+        PASS [   0.010s] (46/83) omega msl::attn_split_tests::split_limit_accepts_the_simd_width_and_rejects_more_with_a_typed_error
+        PASS [   0.011s] (47/83) omega msl::attn_split_tests::the_form_classifier_reads_the_operand_count_and_the_row_discriminator
+        PASS [   0.016s] (48/83) omega msl::attn_split_tests::decode_split::the_split_slices_partition_the_live_band_exactly_once
+        PASS [   0.010s] (49/83) omega msl::attn_split_tests::the_scalar_kernel_bounds_the_new_range_by_the_window_only_when_the_window_cuts_it
+        PASS [   0.014s] (50/83) omega msl::attn_split_tests::golden_identity::attention_sources_match_the_recorded_main_goldens
+        PASS [   0.011s] (51/83) omega msl::tests::block_staged_attention_rejects_a_head_dim_not_a_multiple_of_eight
+        PASS [   0.011s] (52/83) omega msl::tests::cached_attention_at_one_chunk_never_emits_context_chunk_machinery
+        PASS [   0.013s] (53/83) omega msl::tests::cached_attention_emits_one_online_softmax_dispatch
+        PASS [   0.011s] (54/83) omega msl::tests::cached_attention_two_dispatch_form_is_inert_under_bit_exact
+        PASS [   0.010s] (55/83) omega msl::tests::dynamic_cached_attention_kernel_identity_is_stable_across_kv_capacity_buckets
+        PASS [   0.010s] (56/83) omega msl::tests::flat_grid_form::cached_attention_with_grouped_queries_is_refused_when_its_width_does_not_divide_the_grid
+        PASS [   0.010s] (57/83) omega msl::tests::render_cached_attention_never_declares_past_the_threadgroup_budget
+        PASS [   0.010s] (58/83) omega msl::tests::render_cached_attention_omits_the_merge_block_under_bit_exact_policy
+        PASS [   0.012s] (59/83) omega msl::tests::render_cached_attention_rejects_an_elementwise_bound_op
+        PASS [   0.013s] (60/83) omega::attn_multi_axis_tiled_gemm_parity metal_decode_shaped_attention_matmul_stays_on_the_row_blocked_vector_path
+        PASS [   0.062s] (61/83) omega msl::tests::flat_grid_form::the_cached_attention_merge_kernel_past_the_thread_index_takes_the_flat_form_and_compiles
+        PASS [   0.066s] (62/83) omega msl::tests::flat_grid_form::cached_attention_with_grouped_queries_past_the_thread_index_launches_its_pinned_width_and_compiles
+        PASS [   0.143s] (63/83) omega msl::attn_rows_tests::the_new_range_visits_every_key_a_row_of_the_tile_can_see_exactly_once
+        PASS [   0.178s] (64/83) omega msl::attn_rows_tests::every_cached_and_new_key_is_scored_by_exactly_one_split
+        PASS [   0.155s] (65/83) omega::packed_row_attn_output_shape_parity q4_0_attention_output_k2048_rows6_masks_the_lanes_past_the_last_row
+        PASS [   0.159s] (66/83) omega::packed_row_attn_output_shape_parity q4_0_attention_output_k2048_rows4_fills_exactly_one_simdgroup
+        PASS [   0.209s] (67/83) omega::metal_parity attention_block_spec_parity_matches_within_epsilon
+        PASS [   0.203s] (68/83) omega::packed_row_attn_output_shape_parity q4_0_attention_output_k2048_rows1536_every_lane_writes_its_own_row
+        PASS [   0.218s] (69/83) omega::metal_real_forward fused_cached_attention_root_agrees_between_cpu_and_metal
+        PASS [   0.214s] (70/83) omega::q4_0_real_checkpoint_parity metal_multi_token27_on_real_attn_k_q4_0_bytes_matches_f32_cpu
+        PASS [   0.238s] (71/83) omega::q4_0_real_checkpoint_parity metal_matmul_on_real_attn_k_q4_0_bytes_matches_the_dequantized_f32_cpu_path
+        PASS [   0.125s] (72/83) omega::q4k_ggml_port_parity ggml_port_matches_dequantized_f32_cpu_on_real_attn_q_weight
+        PASS [   0.140s] (73/83) omega::q4k_real_checkpoint_parity metal_matmul_on_real_attn_q_q4k_bytes_matches_the_dequantized_f32_cpu_path
+        PASS [   0.172s] (74/83) omega::q8_0_real_checkpoint_parity metal_matmul_on_real_attn_k_q8_0_bytes_matches_the_dequantized_f32_cpu_path
+        PASS [   0.301s] (75/83) omega::q4_0_real_checkpoint_parity metal_multi_token600_on_real_attn_k_q4_0_bytes_matches_f32_cpu
+        PASS [   0.233s] (76/83) omega::tiled_gemm_staging_switches_parity attn_q_all_staging_switches_match_the_f32_oracle_at_a_boundary_token_count
+        PASS [   0.223s] (77/83) omega::tiled_gemm_staging_switches_parity attn_q_all_staging_switches_match_the_f32_oracle_at_min_tokens
+        PASS [   0.206s] (78/83) omega::tiled_gemm_staging_switches_parity attn_q_all_staging_switches_match_the_f32_oracle_at_prefill_token_count
+        PASS [   0.459s] (79/83) omega::q4_0_tiled_gemm_batched_run8_parity attn_q_projection_batched_run8_matches_row_blocked_and_f32_oracle_with_a_fused_epilogue
+        PASS [   0.461s] (80/83) omega::q4_0_tiled_gemm_batched_run8_parity attn_q_projection_batched_run8_matches_row_blocked_and_f32_oracle
+        PASS [   2.145s] (81/83) omega::cached_attention_row_tiled_cpu_gate the_verify_program_binds_row_tiled_attention_and_the_cpu_oracle_agrees_with_the_unfused_chain
+        PASS [   5.052s] (82/83) omega::coord_index32_ab attention_shape_608x8x128_bit_exact
+        PASS [   9.803s] (83/83) omega::coord_index32_ab attention_shape_608x8x256_bit_exact
+────────────
+     Summary [   9.888s] 83 tests run: 83 passed, 814 skipped
