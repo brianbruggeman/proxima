@@ -1,0 +1,12 @@
+Sun Oct 11 03:28:29 CDT 2026
+ 3:28  up 10 days, 13:32, 3 users, load averages: 9.43 10.25 11.42
+CPU usage: 23.5% user, 22.76% sys, 54.17% idle 
+CPU usage: 20.42% user, 15.52% sys, 64.4% idle 
+ %CPU COMM
+ 55.3 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+ 55.3 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+ 54.2 /usr/libexec/syspolicyd
+ 36.8 /Users/brianbruggeman/.local/bin/user-daemon
+ 22.3 /Applications/iTerm.app/Contents/MacOS/iTerm2
+ 21.7 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ 19.2 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc

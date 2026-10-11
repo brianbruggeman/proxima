@@ -1,0 +1,23 @@
+tools (rustc -O --edition 2024 <file>.rs): tools/kv_adopt_records.rs, tools/text_hashes.rs
+builds (release, CARGO_TARGET_DIR=.long_ctx_backups/cargo_target_r7, -j2):
+  base:   cargo build --release -p proxima-model-interop --features std,metal --example decode_gbps_baseline --example decode_arms   (origin/main 097e9736 unmodified)
+  l1:     the same command on the lever-1 tree (perf(interop): keep device kv buffers resident across generations)
+  l1_instr: cargo build --release -p proxima-model-interop --features std,metal,instrument --example decode_gbps_baseline   (lever-1 tree; events kv_adopt_buffer, kv_adopt_seed, resident_plans_held)
+  l2:     the same plain command on the lever-2 tree (lever 1 plus command_buffer.prefill_chunks = 4)
+binaries and their sha256: .long_ctx_backups/r7/bin/ (decode_gbps_baseline_{base,l1,l1_instr,l2}, decode_arms_{base,l1}); bin_sha256.txt beside this file
+gpu lock: mkdir .long_ctx_backups/gpu.lock before every timed run and every Metal suite, rmdir after, trap 'rmdir; exit 1' TERM INT
+attribution (one process, 6 generations x 24 new tokens, 1000-token prompt1k verbatim incl. trailing newline, granite blob sha256-cd60b3e8...):
+  env -i HOME PATH=/usr/bin:/bin PROXIMA_RESIDENT_KV_BYTES=<0 | 536870912> PROXIMA_DECODE_MODEL_GGUF=<granite blob> PROXIMA_SPECULATIVE_TYPES=none PROXIMA_PROMPT=<prompt1k> PROXIMA_MAX_TOKENS=24 PROXIMA_RUNS=6 \
+    PROXIMA_TELEMETRY_FILE=<dir>/telemetry.log RUST_LOG=proxima_model_interop=info,proxima_model_interop::generate::decode=debug,proxima_model_interop::generate::device_kv=debug,proxima_model_interop::generate::resident_plans=debug \
+    /usr/bin/time -l decode_gbps_baseline_l1_instr ;  3 processes per condition, order alloc p1, reuse p1, alloc p2, reuse p2, alloc p3, reuse p3
+  kv_adopt_records <p1/telemetry.log> <p2/telemetry.log> <p3/telemetry.log>
+lever bench (decode_arms; Ollama neither quit nor started: --ignore-ollama; 3 processes x (1 warmup + 5 timed), arm order rotates per process, base/tip/control, tip and control are the same binary):
+  decode_arms_l1 --prompt-file <prompt1k.txt | prompt_short_hippo.txt> --log <dir>/launches.log --processes 3 --runs 5 --new-tokens 128 --ignore-ollama \
+    --case granite_moe=<granite blob> --case gemma4_e2b=<E2B blob> --arm base=<base binary> --arm tip=<tip binary> --arm control=<tip binary>
+  text_hashes <dir>/launches.raw.*.err
+gates:
+  cargo nextest run -p proxima-model-interop --features std,metal --lib -E 'test(~device_kv) or test(~resident_plans) or test(~serving_settings) or test(~prompt_cache) or test(~kv_buffer_source)'
+  cargo nextest run -p proxima-model-interop --features std,metal --test arch_data_baseline -E 'test(/llama_parity/)' --no-fail-fast
+  cargo nextest run -p omega --features metal --cargo-profile gate --no-fail-fast
+  cargo clippy -p omega --features metal,instrument --no-deps -- -D warnings ; cargo clippy -p proxima-model-interop --features std,metal,instrument --no-deps --lib --examples -- -D warnings
+CI: none of these cells runs in CI (Metal timing and Metal suites); each row re-proves on this box only. Raw child stderr (text, token ids), telemetry logs and binaries stay in .long_ctx_backups/r7/.

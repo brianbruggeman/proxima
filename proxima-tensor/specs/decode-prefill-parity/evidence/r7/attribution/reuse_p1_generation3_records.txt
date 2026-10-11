@@ -1,0 +1,97 @@
+kv_adopt_buffer layer=0 buffer=k_even bytes=1114112 acquire_ns=1041
+kv_adopt_buffer layer=0 buffer=k_odd bytes=1114112 acquire_ns=375
+kv_adopt_buffer layer=0 buffer=v bytes=2228224 acquire_ns=291
+kv_adopt_seed layer=0 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=48541
+kv_adopt_buffer layer=1 buffer=k_even bytes=1114112 acquire_ns=375
+kv_adopt_buffer layer=1 buffer=k_odd bytes=1114112 acquire_ns=333
+kv_adopt_buffer layer=1 buffer=v bytes=2228224 acquire_ns=250
+kv_adopt_seed layer=1 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40208
+kv_adopt_buffer layer=2 buffer=k_even bytes=1114112 acquire_ns=291
+kv_adopt_buffer layer=2 buffer=k_odd bytes=1114112 acquire_ns=250
+kv_adopt_buffer layer=2 buffer=v bytes=2228224 acquire_ns=250
+kv_adopt_seed layer=2 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40208
+kv_adopt_buffer layer=3 buffer=k_even bytes=1114112 acquire_ns=291
+kv_adopt_buffer layer=3 buffer=k_odd bytes=1114112 acquire_ns=250
+kv_adopt_buffer layer=3 buffer=v bytes=2228224 acquire_ns=208
+kv_adopt_seed layer=3 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40333
+kv_adopt_buffer layer=4 buffer=k_even bytes=1114112 acquire_ns=291
+kv_adopt_buffer layer=4 buffer=k_odd bytes=1114112 acquire_ns=291
+kv_adopt_buffer layer=4 buffer=v bytes=2228224 acquire_ns=166
+kv_adopt_seed layer=4 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40500
+kv_adopt_buffer layer=5 buffer=k_even bytes=1114112 acquire_ns=250
+kv_adopt_buffer layer=5 buffer=k_odd bytes=1114112 acquire_ns=250
+kv_adopt_buffer layer=5 buffer=v bytes=2228224 acquire_ns=208
+kv_adopt_seed layer=5 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40083
+kv_adopt_buffer layer=6 buffer=k_even bytes=1114112 acquire_ns=250
+kv_adopt_buffer layer=6 buffer=k_odd bytes=1114112 acquire_ns=208
+kv_adopt_buffer layer=6 buffer=v bytes=2228224 acquire_ns=208
+kv_adopt_seed layer=6 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40416
+kv_adopt_buffer layer=7 buffer=k_even bytes=1114112 acquire_ns=250
+kv_adopt_buffer layer=7 buffer=k_odd bytes=1114112 acquire_ns=208
+kv_adopt_buffer layer=7 buffer=v bytes=2228224 acquire_ns=166
+kv_adopt_seed layer=7 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40291
+kv_adopt_buffer layer=8 buffer=k_even bytes=1114112 acquire_ns=250
+kv_adopt_buffer layer=8 buffer=k_odd bytes=1114112 acquire_ns=208
+kv_adopt_buffer layer=8 buffer=v bytes=2228224 acquire_ns=166
+kv_adopt_seed layer=8 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40458
+kv_adopt_buffer layer=9 buffer=k_even bytes=1114112 acquire_ns=208
+kv_adopt_buffer layer=9 buffer=k_odd bytes=1114112 acquire_ns=208
+kv_adopt_buffer layer=9 buffer=v bytes=2228224 acquire_ns=166
+kv_adopt_seed layer=9 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40000
+kv_adopt_buffer layer=10 buffer=k_even bytes=1114112 acquire_ns=208
+kv_adopt_buffer layer=10 buffer=k_odd bytes=1114112 acquire_ns=208
+kv_adopt_buffer layer=10 buffer=v bytes=2228224 acquire_ns=125
+kv_adopt_seed layer=10 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40208
+kv_adopt_buffer layer=11 buffer=k_even bytes=1114112 acquire_ns=166
+kv_adopt_buffer layer=11 buffer=k_odd bytes=1114112 acquire_ns=166
+kv_adopt_buffer layer=11 buffer=v bytes=2228224 acquire_ns=166
+kv_adopt_seed layer=11 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40250
+kv_adopt_buffer layer=12 buffer=k_even bytes=1114112 acquire_ns=166
+kv_adopt_buffer layer=12 buffer=k_odd bytes=1114112 acquire_ns=166
+kv_adopt_buffer layer=12 buffer=v bytes=2228224 acquire_ns=125
+kv_adopt_seed layer=12 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=39958
+kv_adopt_buffer layer=13 buffer=k_even bytes=1114112 acquire_ns=166
+kv_adopt_buffer layer=13 buffer=k_odd bytes=1114112 acquire_ns=166
+kv_adopt_buffer layer=13 buffer=v bytes=2228224 acquire_ns=125
+kv_adopt_seed layer=13 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=39958
+kv_adopt_buffer layer=14 buffer=k_even bytes=1114112 acquire_ns=166
+kv_adopt_buffer layer=14 buffer=k_odd bytes=1114112 acquire_ns=125
+kv_adopt_buffer layer=14 buffer=v bytes=2228224 acquire_ns=125
+kv_adopt_seed layer=14 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40333
+kv_adopt_buffer layer=15 buffer=k_even bytes=1114112 acquire_ns=166
+kv_adopt_buffer layer=15 buffer=k_odd bytes=1114112 acquire_ns=125
+kv_adopt_buffer layer=15 buffer=v bytes=2228224 acquire_ns=83
+kv_adopt_seed layer=15 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40041
+kv_adopt_buffer layer=16 buffer=k_even bytes=1114112 acquire_ns=166
+kv_adopt_buffer layer=16 buffer=k_odd bytes=1114112 acquire_ns=125
+kv_adopt_buffer layer=16 buffer=v bytes=2228224 acquire_ns=125
+kv_adopt_seed layer=16 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40291
+kv_adopt_buffer layer=17 buffer=k_even bytes=1114112 acquire_ns=125
+kv_adopt_buffer layer=17 buffer=k_odd bytes=1114112 acquire_ns=125
+kv_adopt_buffer layer=17 buffer=v bytes=2228224 acquire_ns=83
+kv_adopt_seed layer=17 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40041
+kv_adopt_buffer layer=18 buffer=k_even bytes=1114112 acquire_ns=83
+kv_adopt_buffer layer=18 buffer=k_odd bytes=1114112 acquire_ns=125
+kv_adopt_buffer layer=18 buffer=v bytes=2228224 acquire_ns=41
+kv_adopt_seed layer=18 kept_rows=0 zero_bytes=4456448 write_ns=41 zero_ns=40291
+kv_adopt_buffer layer=19 buffer=k_even bytes=1114112 acquire_ns=125
+kv_adopt_buffer layer=19 buffer=k_odd bytes=1114112 acquire_ns=83
+kv_adopt_buffer layer=19 buffer=v bytes=2228224 acquire_ns=83
+kv_adopt_seed layer=19 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40291
+kv_adopt_buffer layer=20 buffer=k_even bytes=1114112 acquire_ns=83
+kv_adopt_buffer layer=20 buffer=k_odd bytes=1114112 acquire_ns=83
+kv_adopt_buffer layer=20 buffer=v bytes=2228224 acquire_ns=41
+kv_adopt_seed layer=20 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40208
+kv_adopt_buffer layer=21 buffer=k_even bytes=1114112 acquire_ns=83
+kv_adopt_buffer layer=21 buffer=k_odd bytes=1114112 acquire_ns=83
+kv_adopt_buffer layer=21 buffer=v bytes=2228224 acquire_ns=41
+kv_adopt_seed layer=21 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40791
+kv_adopt_buffer layer=22 buffer=k_even bytes=1114112 acquire_ns=83
+kv_adopt_buffer layer=22 buffer=k_odd bytes=1114112 acquire_ns=83
+kv_adopt_buffer layer=22 buffer=v bytes=2228224 acquire_ns=41
+kv_adopt_seed layer=22 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=40708
+kv_adopt_buffer layer=23 buffer=k_even bytes=1114112 acquire_ns=41
+kv_adopt_buffer layer=23 buffer=k_odd bytes=1114112 acquire_ns=41
+kv_adopt_buffer layer=23 buffer=v bytes=2228224 acquire_ns=41
+kv_adopt_seed layer=23 kept_rows=0 zero_bytes=4456448 write_ns=0 zero_ns=100375
+named_blocks_phase step=0 phase=device_kv_adopt buffers_bound=72 buffers_allocated=0 ms=1.064166

@@ -1,0 +1,14 @@
+Sun Oct 11 03:12:57 CDT 2026
+ 3:12  up 10 days, 13:17, 3 users, load averages: 19.43 14.77 11.47
+CPU usage: 63.19% user, 35.29% sys, 1.51% idle 
+CPU usage: 66.98% user, 31.53% sys, 1.48% idle 
+ %CPU COMM
+475.7 /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/cargo_target_mlx/debug/deps/tier_real_state-cc9e0ec849f4a6e6
+ 58.7 /usr/libexec/syspolicyd
+ 41.1 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ 22.8 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ 22.7 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+"Device Utilization %"=89
+"Device Utilization %"=0
+"Device Utilization %"=0
+      10
