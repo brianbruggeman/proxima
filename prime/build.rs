@@ -100,6 +100,10 @@ fn emit_sizing_consts(out_dir: &std::path::Path) {
     // be 0 (see prime-runtime.toml doc), so require_usize (not
     // require_nonzero) — the only hard constraint is "parses as a
     // non-negative integer."
+    let reactor_event_batch = require_nonzero(
+        "reactor.event_batch",
+        get_int(&root, "reactor", "event_batch"),
+    );
     let reactor_spin_before_park_busy = require_usize(
         "reactor.spin_before_park_busy",
         resolve_int(&root, "reactor", "spin_before_park_busy"),
@@ -232,6 +236,7 @@ fn emit_sizing_consts(out_dir: &std::path::Path) {
          pub const TASK_SLAB_INITIAL_CAP: usize = {task_slab_initial_cap};\n\
          pub const RUN_QUEUE_CAPACITY: usize = {run_queue_capacity};\n\
          pub const REACTOR_SLAB_INITIAL_CAP: usize = {reactor_slab_initial_cap};\n\
+         pub const REACTOR_EVENT_BATCH: usize = {reactor_event_batch};\n\
          pub const REACTOR_SPIN_BEFORE_PARK_BUSY: u32 = {reactor_spin_before_park_busy};\n\
          pub const REACTOR_SPIN_BEFORE_PARK_IDLE: u32 = {reactor_spin_before_park_idle};\n\
          pub const REACTOR_IDLE_PARK_THRESHOLD: u32 = {reactor_idle_park_threshold};\n\
