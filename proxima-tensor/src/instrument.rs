@@ -800,21 +800,18 @@ pub fn reset_worker_cpu() {
     totals.clear();
 }
 
-/// This process's cumulative minor-fault count (`getrusage`'s `ru_minflt`)
-/// at the moment of the call — monotonic for the process lifetime, so a
-/// caller diffs two readings to get the fault count over an interval.
-/// Used to test whether a measured wall-time change is first-touch page-in
-/// (mmap demand paging) rather than compute: a forward pass that walks a
-/// weight mapping for the first time pays one minor fault per page touched.
+/// This process's cumulative minor-fault count at the moment of the call —
+/// monotonic for the process lifetime, so a caller diffs two readings to get
+/// the fault count over an interval. Used to test whether a measured
+/// wall-time change is first-touch page-in (mmap demand paging) rather than
+/// compute: a forward pass that walks a weight mapping for the first time
+/// pays one minor fault per page touched. Reads
+/// [`crate::process_usage::minor_faults`]; `0` where the read fails.
 /// Unix-only: Windows reports total page faults, which is a different metric.
 #[must_use]
 #[cfg(unix)]
 pub fn ru_minflt() -> u64 {
-    let mut usage: libc::rusage = unsafe { core::mem::zeroed() };
-    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
-        return 0;
-    }
-    usage.ru_minflt as u64
+    crate::process_usage::minor_faults().unwrap_or(0)
 }
 
 // `matmul_rows_threaded`'s own dispatch-overhead breakdown (`cpu.rs`) --

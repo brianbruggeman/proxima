@@ -1,4 +1,4 @@
-//! Whole-process resource counters for tests, examples and benches: the peak
+//! Whole-process resource counters for library, tests, examples and benches: the peak
 //! resident set and the user/system CPU the process has spent so far.
 //!
 //! Unix reads `getrusage(RUSAGE_SELF)`; Windows reads the peak working set
@@ -47,6 +47,36 @@ fn rusage_self() -> Result<libc::rusage, io::Error> {
     }
     // SAFETY: `getrusage` returned 0, so it filled the struct.
     Ok(unsafe { usage.assume_init() })
+}
+
+/// Cumulative minor page faults this process has taken, so a difference across
+/// one region is the first-touch page-in that region paid. Unix only: Windows
+/// counts every page fault, a different metric.
+#[cfg(unix)]
+pub fn minor_faults() -> Result<u64, io::Error> {
+    Ok(rusage_self()?.ru_minflt as u64)
+}
+
+/// Resident set and physical footprint of this process right now, in bytes
+/// (`proc_pid_rusage`): the current values, not the peaks. Footprint is what
+/// `footprint(1)` and Activity Monitor's memory column read.
+#[cfg(target_os = "macos")]
+pub fn resident_and_footprint_bytes() -> Result<(u64, u64), io::Error> {
+    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+    // SAFETY: `RUSAGE_INFO_V2` fills a `rusage_info_v2`; the C signature takes the struct's address cast to `rusage_info_t *`.
+    let status = unsafe {
+        libc::proc_pid_rusage(
+            std::process::id() as libc::c_int,
+            libc::RUSAGE_INFO_V2,
+            info.as_mut_ptr().cast(),
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the call returned 0, so the struct is filled.
+    let info = unsafe { info.assume_init() };
+    Ok((info.ri_resident_size, info.ri_phys_footprint))
 }
 
 /// Peak resident set of this process so far, in bytes.

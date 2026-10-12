@@ -72,6 +72,8 @@ use proxima_telemetry::export::Exporter;
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use proxima_telemetry::recorder::Recorder;
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+use proxima_tensor::process_usage;
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use proxima_tokenizer::vocab::Vocab;
 
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
@@ -677,38 +679,20 @@ fn summarize_gpu_samples(mut samples: Vec<f64>) -> Option<GpuUtilizationSummary>
 // resource sampling (RSS, CPU%)
 // ---------------------------------------------------------------------
 
-/// Darwin reports `ru_maxrss` in bytes; Linux reports KiB
-// (`examples/gguf_generate.rs::print_peak_rss` -- same convention).
+/// Peak resident set of this process, normalised to bytes on both platforms
+/// by `process_usage::peak_rss_bytes`; `0` where the read fails.
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn peak_rss_bytes() -> u64 {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
-    // SAFETY: `getrusage` initializes the caller-owned structure on success.
-    let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    if result != 0 {
-        return 0;
-    }
-    // SAFETY: `result == 0` means `getrusage` filled `usage` above.
-    let usage = unsafe { usage.assume_init() };
-    let scale = if cfg!(target_os = "macos") { 1 } else { 1024 };
-    usage.ru_maxrss as u64 * scale
+    process_usage::peak_rss_bytes().unwrap_or(0)
 }
 
-/// User + system CPU seconds consumed by this process so far
-/// (`getrusage`'s own `ru_utime`/`ru_stime`), for a before/after delta a
-/// caller divides by wall-clock seconds to get CPU%.
+/// User + system CPU seconds consumed by this process so far, for a
+/// before/after delta a caller divides by wall-clock seconds to get CPU%.
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn cpu_seconds() -> f64 {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
-    // SAFETY: same contract as `peak_rss_bytes`.
-    let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    if result != 0 {
-        return 0.0;
-    }
-    // SAFETY: `result == 0` means `getrusage` filled `usage` above.
-    let usage = unsafe { usage.assume_init() };
-    let user = usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 / 1_000_000.0;
-    let system = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 / 1_000_000.0;
-    user + system
+    process_usage::process_cpu_ms()
+        .map(|(user_ms, system_ms)| (user_ms + system_ms) / 1000.0)
+        .unwrap_or(0.0)
 }
 
 // ---------------------------------------------------------------------

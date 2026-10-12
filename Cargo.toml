@@ -500,6 +500,7 @@ omega = { path = "omega", features = ["metal", "instrument"] }
 # accessor to the in-flight generate.rs surface.
 proxima-tokenizer = { path = "proxima-tokenizer", default-features = false, features = ["gguf"] }
 libtest-mimic = "0.8.2"
+proxima-tensor = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true

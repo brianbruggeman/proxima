@@ -67,6 +67,7 @@ use proxima_model_interop::Phase;
 use proxima_model_interop::ServingConfig;
 use proxima_model_interop::SpeculativeSettings;
 use proxima_model_interop::TokenEvent;
+use proxima_tensor::process_usage;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Settings)]
 #[settings(prefix = "PROXIMA")]
@@ -246,25 +247,11 @@ fn print_decode_latency(token_elapsed_ms: &[u64]) {
     println!("decode_tokens_per_sec = {decode_tokens_per_second:.3}");
 }
 
-#[cfg(unix)]
 fn print_peak_rss() {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
-    // SAFETY: `getrusage` initializes the caller-owned structure on success.
-    let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    if result == 0 {
-        // Darwin reports bytes; Linux reports KiB.
-        // SAFETY: a successful `getrusage` call initialized `usage`.
-        let bytes = unsafe { usage.assume_init().ru_maxrss as u64 }
-            * if cfg!(target_os = "macos") { 1 } else { 1024 };
-        println!("peak_rss_bytes = {bytes}");
-    } else {
-        println!("peak_rss_bytes = unavailable");
+    match process_usage::peak_rss_bytes() {
+        Ok(bytes) => println!("peak_rss_bytes = {bytes}"),
+        Err(error) => println!("peak_rss_bytes = unavailable ({error})"),
     }
-}
-
-#[cfg(not(unix))]
-fn print_peak_rss() {
-    println!("peak_rss_bytes = unavailable");
 }
 
 fn print_architecture_metadata(parsed: &proxima_gguf::pipe::ParsedGguf) {

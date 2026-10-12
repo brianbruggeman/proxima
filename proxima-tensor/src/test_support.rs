@@ -5,9 +5,6 @@
 //! see it without any extra `--features` flag, and a plain `cargo build`
 //! never does.
 
-#[cfg(feature = "std")]
-pub mod process_usage;
-
 /// Deterministic pseudo-random source for reproducible float inputs across
 /// tests, examples, and benches — not cryptographic, never seeded from
 /// entropy. Was copy-pasted verbatim into 7 separate files before this
