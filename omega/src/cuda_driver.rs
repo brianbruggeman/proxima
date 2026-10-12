@@ -120,7 +120,7 @@ pub struct CudaDriver {
     context: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     // synchronous ffi callers share these short cache mutations; compilation and dispatch happen outside the guard.
-    modules: Arc<Mutex<BTreeMap<String, CachedCudaModule>>>,
+    modules: Arc<Mutex<BTreeMap<String, Vec<CachedCudaModule>>>>,
     resident_buffers: Arc<Mutex<ResidentBuffers>>,
     kernel_compilations: Arc<AtomicU64>,
 }
@@ -129,6 +129,7 @@ pub struct CudaDriver {
 struct CachedCudaModule {
     source: String,
     module: Arc<CudaModule>,
+    functions: BTreeMap<String, CudaFunction>,
 }
 
 /// Persistent f32 storage for a graph's named inputs and intermediate nodes.
@@ -221,34 +222,67 @@ impl CudaDriver {
     }
 
     fn function_for(&self, kernel: &CudaKernel) -> Result<CudaFunction, CudaDriverError> {
+        self.cached_function(&kernel.entry, &kernel.entry, &kernel.source, || {
+            // nvrtc has the same panic-on-missing-library loader contract.
+            if !unsafe { nvrtc_sys::is_culib_present() } {
+                return Err(CudaDriverError::Nvrtc("nvrtc library unavailable".into()));
+            }
+            let ptx = compile_cuda_source(&kernel.source)
+                .map_err(|error| CudaDriverError::Nvrtc(error.to_string()))?;
+            Ok(self.context.load_module(ptx)?)
+        })
+    }
+
+    /// Looks a function up by `(cache_key, source)`, so distinct sources that
+    /// share one entry name coexist instead of evicting each other, and keeps
+    /// the loaded handle so a repeat launch does no module or function load.
+    fn cached_function(
+        &self,
+        cache_key: &str,
+        entry: &str,
+        source: &str,
+        build_module: impl FnOnce() -> Result<Arc<CudaModule>, CudaDriverError>,
+    ) -> Result<CudaFunction, CudaDriverError> {
         let cached = self
             .modules
             .lock()
-            .get(&kernel.entry)
-            .filter(|cached| cached.source == kernel.source)
-            .map(|cached| cached.module.clone());
+            .get(cache_key)
+            .and_then(|slot| slot.iter().find(|cached| cached.source == source))
+            .map(|cached| (cached.module.clone(), cached.functions.get(entry).cloned()));
         let module = match cached {
-            Some(module) => module,
+            Some((_, Some(function))) => return Ok(function),
+            Some((module, None)) => module,
             None => {
-                // nvrtc has the same panic-on-missing-library loader contract.
-                if !unsafe { nvrtc_sys::is_culib_present() } {
-                    return Err(CudaDriverError::Nvrtc("nvrtc library unavailable".into()));
-                }
-                let ptx = compile_cuda_source(&kernel.source)
-                    .map_err(|error| CudaDriverError::Nvrtc(error.to_string()))?;
-                let module = self.context.load_module(ptx)?;
-                self.modules.lock().insert(
-                    kernel.entry.clone(),
-                    CachedCudaModule {
-                        source: kernel.source.clone(),
-                        module: module.clone(),
-                    },
-                );
+                let module = build_module()?;
                 self.kernel_compilations.fetch_add(1, Ordering::Relaxed);
                 module
             }
         };
-        Ok(module.load_function(&kernel.entry)?)
+        let function = module.load_function(entry)?;
+        self.store_function(cache_key, source, entry, module, function.clone());
+        Ok(function)
+    }
+
+    fn store_function(
+        &self,
+        cache_key: &str,
+        source: &str,
+        entry: &str,
+        module: Arc<CudaModule>,
+        function: CudaFunction,
+    ) {
+        let mut modules = self.modules.lock();
+        let slot = modules.entry(cache_key.to_owned()).or_default();
+        match slot.iter_mut().find(|cached| cached.source == source) {
+            Some(cached) => {
+                cached.functions.insert(entry.to_owned(), function);
+            }
+            None => slot.push(CachedCudaModule {
+                source: source.to_owned(),
+                module,
+                functions: BTreeMap::from([(entry.to_owned(), function)]),
+            }),
+        }
     }
 
     /// Loads a precompiled PTX module and returns one of its entry points.
@@ -264,28 +298,9 @@ impl CudaDriver {
         ptx_source: &str,
     ) -> Result<CudaFunction, CudaDriverError> {
         let cache_key = format!("ptx:{module_key}");
-        let cached = self
-            .modules
-            .lock()
-            .get(&cache_key)
-            .filter(|cached| cached.source == ptx_source)
-            .map(|cached| cached.module.clone());
-        let module = match cached {
-            Some(module) => module,
-            None => {
-                let module = self.context.load_module(Ptx::from_src(ptx_source))?;
-                self.modules.lock().insert(
-                    cache_key,
-                    CachedCudaModule {
-                        source: ptx_source.to_owned(),
-                        module: module.clone(),
-                    },
-                );
-                self.kernel_compilations.fetch_add(1, Ordering::Relaxed);
-                module
-            }
-        };
-        Ok(module.load_function(entry)?)
+        self.cached_function(&cache_key, entry, ptx_source, || {
+            Ok(self.context.load_module(Ptx::from_src(ptx_source))?)
+        })
     }
 
     /// Resolves a dense/reduction graph into a persistent CUDA plan.
@@ -1681,7 +1696,11 @@ fn launch_blocks(grid: &CudaGridSpec) -> Result<u32, CudaDriverError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CudaDriverError, launch_blocks, packed_bytes, packed_codec, validate_cuda_dtype};
+    use super::{
+        CudaDriver, CudaDriverError, CudaFunction, LaunchConfig, PRECOMPILED_ADD_ONE_PTX,
+        PushKernelArg, add_one_kernel, launch_blocks, packed_bytes, packed_codec,
+        validate_cuda_dtype,
+    };
     use crate::cuda::CudaGridSpec;
     use crate::msl::Codec;
     use proxima_tensor::{BoundOp, BoundOpKind, DType, NodeId, QuantizedBlock};
@@ -1793,6 +1812,122 @@ mod tests {
                 })
             ),
             "integer output must be rejected"
+        );
+    }
+
+    const ALTERNATIONS: u64 = 8;
+    const INPUT: [f32; 3] = [1.0, 2.0, 3.0];
+
+    fn add_two_kernel() -> crate::cuda::CudaKernel {
+        let mut kernel = add_one_kernel(NodeId(0), NodeId(1), INPUT.len());
+        kernel.source = kernel.source.replace("+ 1.0f", "+ 2.0f");
+        kernel
+    }
+
+    fn run_ptx(driver: &CudaDriver, function: &CudaFunction) -> Vec<f32> {
+        let device_input = driver.stream.clone_htod(&INPUT).expect("upload input");
+        let mut device_output = driver
+            .stream
+            .alloc_zeros::<f32>(INPUT.len())
+            .expect("alloc output");
+        let device_uniforms = driver
+            .stream
+            .clone_htod(&3u32.to_ne_bytes())
+            .expect("upload uniforms");
+        let mut args = driver.stream.launch_builder(function);
+        args.arg(&device_input);
+        args.arg(&mut device_output);
+        args.arg(&device_uniforms);
+        let config = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { args.launch(config) }.expect("ptx launch");
+        driver.stream.synchronize().expect("ptx sync");
+        driver
+            .stream
+            .clone_dtoh(&device_output)
+            .expect("ptx readback")
+    }
+
+    #[test]
+    fn nvrtc_sources_sharing_an_entry_name_compile_once_each_and_keep_their_own_function() {
+        let driver =
+            CudaDriver::new(0).expect("a cuda device is required for the module cache gate");
+        let add_one = add_one_kernel(NodeId(0), NodeId(1), INPUT.len());
+        let add_two = add_two_kernel();
+        assert_eq!(
+            add_one.entry, add_two.entry,
+            "the gate needs a shared entry name"
+        );
+        assert_ne!(
+            add_one.source, add_two.source,
+            "the gate needs distinct sources"
+        );
+        let uniforms = 3i32.to_ne_bytes();
+
+        for _ in 0..ALTERNATIONS {
+            let first = driver
+                .launch_f32(&add_one, &[&INPUT], &uniforms)
+                .expect("add_one launch");
+            let second = driver
+                .launch_f32(&add_two, &[&INPUT], &uniforms)
+                .expect("add_two launch");
+
+            assert_eq!(
+                first,
+                [2.0, 3.0, 4.0],
+                "an entry-name hit returned the wrong source's function"
+            );
+            assert_eq!(
+                second,
+                [3.0, 4.0, 5.0],
+                "an entry-name hit returned the wrong source's function"
+            );
+        }
+
+        assert_eq!(
+            driver.kernel_compilations(),
+            2,
+            "one compile per distinct source, not per alternation"
+        );
+    }
+
+    #[test]
+    fn precompiled_ptx_sources_sharing_a_module_key_load_once_each_and_keep_their_own_function() {
+        let driver =
+            CudaDriver::new(0).expect("a cuda device is required for the module cache gate");
+        let add_two_ptx = PRECOMPILED_ADD_ONE_PTX.replace("0f3F800000", "0f40000000");
+        assert_ne!(
+            add_two_ptx, PRECOMPILED_ADD_ONE_PTX,
+            "the gate needs distinct sources"
+        );
+
+        for _ in 0..ALTERNATIONS {
+            let first = driver
+                .precompiled_function("smoke_add_one", "proxima_add_one", PRECOMPILED_ADD_ONE_PTX)
+                .expect("add_one ptx");
+            let second = driver
+                .precompiled_function("smoke_add_one", "proxima_add_one", &add_two_ptx)
+                .expect("add_two ptx");
+
+            assert_eq!(
+                run_ptx(&driver, &first),
+                [2.0, 3.0, 4.0],
+                "an entry-name hit returned the wrong module's function"
+            );
+            assert_eq!(
+                run_ptx(&driver, &second),
+                [3.0, 4.0, 5.0],
+                "an entry-name hit returned the wrong module's function"
+            );
+        }
+
+        assert_eq!(
+            driver.kernel_compilations(),
+            2,
+            "one load per distinct ptx source, not per alternation"
         );
     }
 }
