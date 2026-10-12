@@ -12,7 +12,7 @@ restated: 2026-10-12 against `decode-as-data` R5, R6, R11 (readouts plus a draft
 (`git grep -ciE 'dspark|markov' -- proxima-model-interop/src proxima-gguf/src proxima-tensor/src` lists
 only the llama type name in `serving.rs` and `speculative_settings.rs`); DSpark is dispatched through the
 same llama.cpp struct as DFlash, `common_speculative_impl_draft_dflash`, constructed with
-`type = COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK` (`common/speculative.cpp:2654-2656`), so this sub-spec adds
+`type = COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK` (`common/speculative.cpp:2654-2658`), so this sub-spec adds
 DSpark's two deltas over `speculative-draft-dflash` -- a semi-autoregressive Markov head that conditions
 each in-block token on the previous in-block token's identity, and an optional per-token confidence head
 that truncates the draft -- as extra head readout roots on the DFlash draft descriptor
@@ -31,11 +31,11 @@ metadata flag, and this sub-spec is struck.
 
 | id | requirement | testable in isolation |
 |---|---|---|
-| R1 | a GGUF whose `general.architecture` is `dflash` and which contains tensor `markov_w1.weight` classifies as the DSpark speculation type, and one without it as the DFlash type, equal to `common_speculative_types_from_gguf` (`common/speculative.cpp:2289-2303`) | yes |
-| R2 | the draft descriptor resolves `markov_w1.weight`, `markov_w2.weight`, the optional `markov_w2.scale`, and the optional `conf_proj.weight`/`conf_proj.bias` (`src/llama-arch.cpp:699-701`, `gguf-py/gguf/constants.py:1204-1207,1989-1991`) | yes |
-| R3 | the metadata keys `dflash.sample_from_anchor` and `dflash.has_confidence_head` (`common/speculative.cpp:987,1002`; written by `gguf_writer.py:1040,1043`) are read into the descriptor | yes |
+| R1 | a GGUF whose `general.architecture` is `dflash` and which contains tensor `markov_w1.weight` classifies as the DSpark speculation type, and one without it as the DFlash type, equal to `common_speculative_types_from_gguf` (`common/speculative.cpp:2273-2308`) | yes |
+| R2 | the draft descriptor resolves `markov_w1.weight`, `markov_w2.weight`, the optional `markov_w2.scale`, and the optional `conf_proj.weight`/`conf_proj.bias` (`src/llama-arch.cpp:699-701`, `gguf-py/gguf/constants.py:1204-1207,1989-1991`; the optional `scale` and `bias` suffixes are created at `src/models/dflash.cpp:130,132-133`) | yes |
+| R3 | the metadata keys `dflash.sample_from_anchor` and `dflash.has_confidence_head` (`common/speculative.cpp:987,1002`; written by `gguf-py/gguf/gguf_writer.py:1040-1041,1043-1044`) are read into the descriptor | yes |
 | R4 | the Markov bias `markov_w2 @ markov_w1[prev_token]` (lora_mm form, with the optional int8 scale) is computed per block position and added to that position's raw logits before sampling, equal to `build_dspark_markov_head` (`src/models/dflash.cpp:295-406`) for the same block and previous-token sequence | yes |
-| R5 | when `has_confidence_head` is true and `p_min > 0.0`, the per-position confidence `sigmoid(conf_proj . [feat(i); markov_w1[prev(i)]] + bias)` truncates the draft at the first position where it is below `p_min`, equal to the DSpark branch of the draft loop (`common/speculative.cpp:1267-1294`) | yes |
+| R5 | when `has_confidence_head` is true and `p_min > 0.0`, the per-position confidence `sigmoid(conf_proj . [feat(i); markov_w1[prev(i)]] + bias)` truncates the draft at the first position where it is below `p_min`, equal to the formula in `build_dspark_markov_head` (`src/models/dflash.cpp:367-381`) and the `p_min` threshold check in the DSpark branch of the draft loop (`common/speculative.cpp:1267-1295`) | yes |
 | R6 | when `p_min > 0.0` and `has_confidence_head` is false, drafting returns a typed error equivalent to llama.cpp's `std::runtime_error("DSpark draft has no confidence head...")` (`common/speculative.cpp:1005`) instead of panicking or sampling unconditionally | yes |
 | R7 | the block layout follows `sample_from_anchor` read from GGUF metadata, never hardcoded: true samples a full `block_size` tokens from position 0 (anchor-first, `common/speculative.cpp:1016,1205,1271`); false samples `block_size - 1` tokens from positions 1..block_size-1, the bonus-anchor layout of commit `9cd719af2` | yes |
 | R8 | the Markov bias (R4) and confidence gate (R5) are load-bearing: across a 200-block real-GGUF corpus at least one drafted token differs between "computed" and "skipped" -- the measurable form of the refutation condition | yes |
@@ -54,7 +54,7 @@ second class. Its row in the `decode-as-data` table is the DFlash row: "masked b
 | block | sample-and-match on the target | prefix".
 
 - **descriptor (R2/R3)**: the Markov tensors and the two metadata keys are fields on the draft
-  `ModelDescriptor` (`proxima-tensor/src/spec/descriptor.rs:130`) the DFlash sub-spec already extends,
+  `ModelDescriptor` (`proxima-tensor/src/spec/descriptor.rs:130-296`) the DFlash sub-spec already extends,
   populated at load only when `markov_w1.weight` exists (`src/models/dflash.cpp:124-135`). The
   confidence head is optional (`TENSOR_NOT_REQUIRED`, `src/models/dflash.cpp:132-133`). Plain borrowed
   tensor views, box-free, no new trait.
@@ -64,7 +64,7 @@ second class. Its row in the `decode-as-data` table is the DFlash row: "masked b
   gate (R5) before returning the draft. `sample_from_anchor` (R7) selects the loop's start index and
   length and is read once at bind time, never per call.
 - **classification (R1)** is a pure function over parsed metadata and tensor names, on the auto-detect
-  path DFlash and MTP already share (`common_speculative_types_from_gguf`, `common/speculative.cpp:2280-2306`):
+  path DFlash and MTP already share (`common_speculative_types_from_gguf`, `common/speculative.cpp:2273-2308`):
   dflash architecture without `markov_w1.weight` is DFlash, with it is DSpark.
 - **fixture generator (R12)**: a C++ harness compiled against llama.cpp `f1ea20621`, calling the same
   graph builder and draft-loop branch.
@@ -73,7 +73,7 @@ second class. Its row in the `decode-as-data` table is the DFlash row: "masked b
 
 | decision | chosen | why not the alternative |
 |---|---|---|
-| DSpark as descriptor data on DFlash's draft | extra head roots plus two metadata reads | a second program duplicates DFlash's KV injection and block batching (principle 1); llama.cpp itself dispatches DSpark through the identical struct (`common/speculative.cpp:2654-2656`) |
+| DSpark as descriptor data on DFlash's draft | extra head roots plus two metadata reads | a second program duplicates DFlash's KV injection and block batching (principle 1); llama.cpp itself dispatches DSpark through the identical struct (`common/speculative.cpp:2654-2658`) |
 | confidence-gate failure mode | typed error | llama.cpp hard-fails with `runtime_error` (`common/speculative.cpp:1005`) rather than silently sampling unconditionally (principles 14, 15) |
 | `sample_from_anchor` source | GGUF metadata only, read once at bind | llama.cpp never exposes it as a CLI override (`common/speculative.cpp:987-989`); a flag would let proxima diverge from the incumbent's per-model contract |
 | oracle | llama.cpp `f1ea20621`'s `build_dspark_markov_head` and the DSpark draft-loop branch, through a compiled harness and `llama-speculative-simple` | re-deriving the formulas from reading the C++ is principle 14's "from memory" failure |
@@ -110,7 +110,7 @@ Fixtures live under `proxima-model-interop/tests/fixtures/llama-dspark/fixtures/
 - DFlash's own correctness (block layout input, tap, injection, conv, DFlash1 and DFlash2 decode) -- owned by `speculative-draft-dflash`; this sub-spec adds only the Markov and confidence delta on top of it
 - non-vanilla Markov head types (`markov_head_type != "vanilla"`) -- every landed backbone (Gemma4, Qwen3.6, DeepSeekV4, LFM2, BailingMoE3, Nemotron3.5) ships vanilla; a non-vanilla head is a new upstream feature not in `f1ea20621`
 - speculators-format checkpoint conversion (d2t remap, reduced draft vocab expansion) -- llama.cpp's `conversion/qwen.py` concern; proxima consumes the already-converted GGUF
-- DFlash2's lattice selector (`is_dflash2`) -- a DFlash-only path DSpark never takes (`common/speculative.cpp:1237-1238` gates it on `is_dflash2`, mutually exclusive with the DSpark branch at `:1267`)
+- DFlash2's lattice selector (`is_dflash2`) -- a DFlash-only path DSpark never takes (`common/speculative.cpp:1237-1238` gates it on `is_dflash2`, mutually exclusive with the DSpark branch at `:1267-1295`)
 - the readout list (`decode-as-data` R5, slice 3) and the DFlash descriptor and loop -- owned by those specs; this sub-spec consumes them
 
 ## risks
@@ -123,6 +123,6 @@ Fixtures live under `proxima-model-interop/tests/fixtures/llama-dspark/fixtures/
 
 ## context
 
-- proxima: `proxima-tensor/src/spec/descriptor.rs:130` (`ModelDescriptor`), `proxima-model-interop/src/lowering.rs:118-141` (`BoundProgram`), `proxima-model-interop/src/speculative_settings.rs:36` (`SpeculativeTypeName`), `proxima-model-interop/src/serving.rs:205` (`SpeculativeType`), `proxima-gguf/src/parser.rs`, `proxima-gguf/src/value.rs`, `proxima-model-interop/examples/speculative_decode_parity.rs`, `proxima-model-interop/examples/data/speculative_corpus.jsonl`, `proxima-tensor/specs/decode-as-data/SPEC.md`, `proxima-tensor/specs/speculative-draft-dflash/SPEC.md`, `proxima-tensor/specs/speculative-decode-llama-parity/SPEC.md`
-- llama.cpp `f1ea20621` at `~/repos/others/llama.cpp`: `common/speculative.cpp` (dispatch table `:39`, enum-to-name `:2236`, struct `:922-1330`, `is_dspark` field `:948`, ctor `:963`, confidence-head-required check `:999-1006`, `n_draft_max` `:1016`, block-token count `:1205`, DSpark draft-loop branch `:1267-1294`, GGUF auto-detect `:2280-2306`, block-draft output sizing `:2486-2498`, factory dispatch `:2629,2654-2656`), `common/common.h` (enum `:173-186`), `src/llama-arch.h:706-708`, `src/llama-arch.cpp:699-701,989-992`, `src/models/dflash.cpp` (tensor creation `:124-135`, `build_dspark_markov_head` `:295-406`, call sites `:846-847,1025-1026`), `gguf-py/gguf/constants.py:1204-1207,1989-1991,5263-5265`, `gguf-py/gguf/gguf_writer.py:1040,1043`, `examples/speculative-simple/speculative-simple.cpp:355`, `examples/gguf/gguf.cpp`
+- proxima: `proxima-tensor/src/spec/descriptor.rs:130-296` (`ModelDescriptor`), `proxima-model-interop/src/lowering.rs:118-189` (`BoundProgram`), `proxima-model-interop/src/speculative_settings.rs:36-59` (`SpeculativeTypeName`), `proxima-model-interop/src/serving.rs:205-217` (`SpeculativeType`), `proxima-gguf/src/parser.rs`, `proxima-gguf/src/value.rs`, `proxima-model-interop/examples/speculative_decode_parity.rs`, `proxima-model-interop/examples/data/speculative_corpus.jsonl`, `proxima-tensor/specs/decode-as-data/SPEC.md`, `proxima-tensor/specs/speculative-draft-dflash/SPEC.md`, `proxima-tensor/specs/speculative-decode-llama-parity/SPEC.md`
+- llama.cpp `f1ea20621` at `~/repos/others/llama.cpp`: `common/speculative.cpp` (dispatch table `:39`, enum-to-name `:2236`, struct `:923-1329`, `is_dspark` field `:948`, ctor `:963`, confidence-head-required check `:999-1007`, `n_draft_max` `:1016`, block-token count `:1205`, DSpark draft-loop branch `:1267-1295`, GGUF auto-detect `:2273-2308`, block-draft output sizing `:2486-2501`, factory dispatch `:2629,2654-2658`), `common/common.h` (enum `:173-186`), `src/llama-arch.h:706-708`, `src/llama-arch.cpp:699-701,989-992`, `src/models/dflash.cpp` (tensor creation `:124-135`, `build_dspark_markov_head` `:295-406`, call sites `:846-847,1025-1026`), `gguf-py/gguf/constants.py:1204-1207,1989-1991,5263-5265`, `gguf-py/gguf/gguf_writer.py:1040-1041,1043-1044`, `examples/speculative-simple/speculative-simple.cpp:355`, `examples/gguf/gguf.cpp`
 - upstream history, most to least load-bearing: `84075273c` (DSpark's original landing), `9cd719af2` (speculators-format checkpoints, `bonus_anchor` to `sample_from_anchor`, verified `gemma4-26b-a4b-dspark` acceptance numbers), `ca3d5a3e1` (Nemotron3.5, optional confidence head, `markov_w2_s` scale tensor), `0d0bfcd4f` (backend sampling for dflash and dspark), `f65e568fd` (GGUF metadata auto-detect), `633733d0a` (Gemma4 DSpark draft backbone), `2115b73d8`/`07822bddf`/`d646c9d15` (BailingMoE3/LFM2/DeepSeek-V4 backbone support, confirming DSpark is backbone-agnostic on the draft side)
