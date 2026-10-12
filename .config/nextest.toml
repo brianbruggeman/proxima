@@ -90,6 +90,11 @@ test-group = 'real-checkpoint'
 filter = 'package(omega) and binary(onnx_door_bge) and test(/bge_.*_parity_/)'
 test-group = 'real-checkpoint'
 
+# the mnist cells run a thousand door calls each, one of them on the GPU; they serialise with the other real-checkpoint tests so no two Metal cells share the device.
+[[profile.default.overrides]]
+filter = 'package(omega) and binary(onnx_door_generic) and test(/onnx_door_generic_mnist_/)'
+test-group = 'real-checkpoint'
+
 # per-slice architecture-as-data gate: everything in the package except the tests that bind, decode or
 # hold the cache of the large checkpoints (gemma4 26b, openchat, qwen2, qwen3, qwen35, qwen35moe) and
 # every lfm2 test. the digests and descriptor round trips of every checkpoint stay in. the excluded
