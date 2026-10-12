@@ -232,6 +232,19 @@ pub mod map;
 pub mod numeric;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod op;
+/// representation boundary at which completed recurrent states are contrasted.
+///
+/// the mode is allocation free so serving configuration can retain it without
+/// enabling the std graph builder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LoopCdMode {
+    #[default]
+    Disabled,
+    FixedLogits,
+    AdaptiveLogits,
+    FixedHidden,
+}
+
 pub mod physical;
 // pure over `&[Op]`/`NodeId`/`shape::infer`, so it lives at the same tier as
 // both — see the module's own doc for what it produces and why no new type
