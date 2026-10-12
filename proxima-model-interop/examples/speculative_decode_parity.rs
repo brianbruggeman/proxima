@@ -19,7 +19,12 @@
 //! prompt checks nonempty token equality and reports whether drafting occurred.
 //! Captured telemetry is reported separately;
 //! `--telemetry-file` additionally checks each request's draft/accept totals
-//! against the returned counters.
+//! against the returned counters. `--arm-verify` loads through
+//! `LoadedModel::load_with_descriptor` with the header descriptor's
+//! `speculative_verify` set, which is how a recurrent-hybrid checkpoint (whose
+//! family profile leaves verify off) is probed. `--forced-draft-width N` has
+//! the ON run draft exactly N repeats of each sampled token instead of asking
+//! a drafter, so every step verifies N+1 rows and rolls back on a mismatch.
 
 use core::ops::ControlFlow;
 use std::env;
@@ -32,8 +37,8 @@ use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{
-    GPU_LAYERS_ALL, LoadedModel, ServingConfig, SpeculativeConfig, SpeculativeDecodeStats,
-    SpeculativeType, SpeculativeTypeSet,
+    GPU_LAYERS_ALL, KvLayout, LoadedModel, ServingConfig, SpeculativeConfig,
+    SpeculativeDecodeStats, SpeculativeType, SpeculativeTypeSet, header_descriptor,
 };
 use proxima_telemetry::emit::{EnvFilter, global};
 use proxima_telemetry::export::Exporter;
@@ -41,6 +46,7 @@ use proxima_telemetry::log::{LogBody, LogRecord};
 use proxima_telemetry::pipes::{InMemoryPipe, into_telemetry_handle};
 use proxima_telemetry::recorder::Recorder;
 use proxima_telemetry::tag::{ScalarValue, Tag};
+use proxima_tensor::spec::ModelDescriptor;
 
 /// Installs the process-default recorder, fanned to a file sink (the
 /// `decode.rs` `speculative_verify` line is human-readable there too) and an
@@ -135,9 +141,10 @@ fn run_pair(
     max_tokens: usize,
     off_serving_config: ServingConfig,
     on_serving_config: ServingConfig,
-    capture: &InMemoryPipe,
-    recorder: &Recorder,
+    telemetry: (&InMemoryPipe, &Recorder),
+    forced_draft_width: Option<u16>,
 ) -> PairResult {
+    let (capture, recorder) = telemetry;
     let off_started = Instant::now();
     let (off_ids, _off_text, _off_eos) = model
         .generate_with_serving_config(prompt, max_tokens, off_serving_config)
@@ -180,7 +187,7 @@ fn run_pair(
             on_serving_config,
             &mut on_token,
             &mut on_stats,
-            None,
+            forced_draft_width,
         )
         .unwrap_or_else(|error| panic!("decode with speculation on: {error}"));
     let on_elapsed_ms = on_started.elapsed().as_secs_f64() * 1000.0;
@@ -475,6 +482,18 @@ fn main() {
     print_lever_config();
     let raw_args: Vec<String> = env::args().skip(1).collect();
     let seed_mismatch_control = raw_args.iter().any(|arg| arg == "--seed-mismatch-control");
+    let arm_verify = raw_args.iter().any(|arg| arg == "--arm-verify");
+    let forced_width_flag_index = raw_args
+        .iter()
+        .position(|arg| arg == "--forced-draft-width");
+    let forced_draft_width = forced_width_flag_index
+        .and_then(|flag_index| raw_args.get(flag_index + 1))
+        .map(|value| {
+            value
+                .parse::<u16>()
+                .unwrap_or_else(|error| panic!("--forced-draft-width {value}: {error}"))
+        });
+    let forced_width_value_index = forced_width_flag_index.map(|flag_index| flag_index + 1);
     let gpu_layers_flag_index = raw_args.iter().position(|arg| arg == "--gpu-layers");
     let gpu_layers = gpu_layers_flag_index
         .and_then(|flag_index| raw_args.get(flag_index + 1))
@@ -503,6 +522,9 @@ fn main() {
         .enumerate()
         .filter(move |(index, arg)| {
             arg != "--seed-mismatch-control"
+                && arg != "--arm-verify"
+                && Some(*index) != forced_width_flag_index
+                && Some(*index) != forced_width_value_index
                 && Some(*index) != gpu_layers_flag_index
                 && Some(*index) != gpu_layers_value_index
                 && Some(*index) != drafter_flag_index
@@ -540,8 +562,18 @@ fn main() {
         .unwrap_or_else(|error| panic!("map model {model_path}: {error}"));
     let parsed =
         parse_complete(&bytes).unwrap_or_else(|error| panic!("parse model {model_path}: {error}"));
-    let model = LoadedModel::load(&parsed, &bytes)
-        .unwrap_or_else(|error| panic!("load model {model_path}: {error}"));
+    let model = if arm_verify {
+        let decode = header_descriptor(&parsed, KvLayout::Full)
+            .unwrap_or_else(|error| panic!("read header of {model_path}: {error}"));
+        let armed = ModelDescriptor {
+            speculative_verify: true,
+            ..decode
+        };
+        LoadedModel::load_with_descriptor(&parsed, &bytes, &armed)
+    } else {
+        LoadedModel::load(&parsed, &bytes)
+    }
+    .unwrap_or_else(|error| panic!("load model {model_path}: {error}"));
 
     let base_config = ServingConfig {
         gpu_layers,
@@ -611,8 +643,8 @@ fn main() {
         max_tokens,
         greedy_config,
         greedy_config.with_speculative(speculative_on),
-        &capture,
-        &recorder,
+        (&capture, &recorder),
+        forced_draft_width,
     );
     let greedy_ok = report_pair(
         "greedy",
@@ -641,8 +673,8 @@ fn main() {
         max_tokens,
         sampled_config,
         sampled_on_config,
-        &capture,
-        &recorder,
+        (&capture, &recorder),
+        forced_draft_width,
     );
     let sampled_ok = report_pair(
         "sampled",

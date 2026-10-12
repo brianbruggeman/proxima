@@ -2665,6 +2665,7 @@ pub(super) mod memory_fit_gate_tests {
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range: None,
             speculative_verify_program: None,
+            recurrent_speculative_verify: None,
             expert_slab: Mutex::new(crate::expert_slab::ExpertSlab::new()),
             expert_sidecar: None,
             prompt_cache: Mutex::new(crate::generate::PromptCache::new()),
@@ -4268,6 +4269,7 @@ pub(super) mod memory_fit_gate_tests {
                     proxima_tensor::spec::LayerCacheRoots::Ssm {
                         qkv_mixed,
                         state_out,
+                        ..
                     } => {
                         production_outputs.push(*qkv_mixed);
                         production_outputs.push(*state_out);

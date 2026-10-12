@@ -5,6 +5,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use arrayvec::ArrayVec;
 
+use proxima_gguf::quant::q8_0;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_gguf::{GgmlType, GgufModel, TensorPayload, write_complete};
 use proxima_tensor::test_support::Lcg;
@@ -36,9 +37,9 @@ const DEPENDENT_REDUCTIONS_PER_LAYER: usize = 14;
 const UNIT_ROUNDOFF: f64 = 1.0 / 16_777_216.0;
 
 pub(super) struct TensorSpec {
-    name: String,
-    dims: Vec<u64>,
-    values: Vec<f32>,
+    pub(super) name: String,
+    pub(super) dims: Vec<u64>,
+    pub(super) values: Vec<f32>,
 }
 
 pub(super) fn spec(name: &str, dims: &[u64], scale: f32, offset: f32, rng: &mut Lcg) -> TensorSpec {
@@ -61,14 +62,33 @@ pub(super) fn tokens() -> MetadataValue {
 }
 
 pub(super) fn encode(metadata: Vec<(String, MetadataValue)>, specs: &[TensorSpec]) -> Vec<u8> {
-    let payloads: Vec<Vec<u8>> = specs
+    encode_with(metadata, specs, |_| false)
+}
+
+/// `encode` with the tensors `quantize` selects stored as `Q8_0` blocks, the
+/// codec the real recurrent checkpoints ship their matrices in; the rest stay
+/// `F32`. A selected tensor's innermost dimension must hold whole blocks.
+pub(super) fn encode_with(
+    metadata: Vec<(String, MetadataValue)>,
+    specs: &[TensorSpec],
+    quantize: impl Fn(&TensorSpec) -> bool,
+) -> Vec<u8> {
+    let payloads: Vec<(GgmlType, Vec<u8>)> = specs
         .iter()
         .map(|tensor| {
-            tensor
-                .values
-                .iter()
-                .flat_map(|value| value.to_le_bytes())
-                .collect()
+            if !quantize(tensor) {
+                let bytes = tensor
+                    .values
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect();
+                return (GgmlType::F32, bytes);
+            }
+            let mut bytes =
+                alloc::vec![0u8; (tensor.values.len() / q8_0::QK8_0) * q8_0::BLOCK_BYTES];
+            q8_0::quantize(&tensor.values, &mut bytes)
+                .expect("the synthetic tensor holds whole q8_0 blocks");
+            (GgmlType::Q8_0, bytes)
         })
         .collect();
     let model = GgufModel {
@@ -77,10 +97,10 @@ pub(super) fn encode(metadata: Vec<(String, MetadataValue)>, specs: &[TensorSpec
         tensors: specs
             .iter()
             .zip(&payloads)
-            .map(|(tensor, data)| TensorPayload {
+            .map(|(tensor, (ggml_type, data))| TensorPayload {
                 name: tensor.name.clone(),
                 dims: tensor.dims.iter().copied().collect::<ArrayVec<u64, 4>>(),
-                ggml_type: GgmlType::F32,
+                ggml_type: *ggml_type,
                 data,
             })
             .collect(),

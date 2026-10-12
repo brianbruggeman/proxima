@@ -14,7 +14,7 @@ use crate::error::InteropError;
 use crate::hf_bind::HfShard;
 use crate::lowering::{
     BoundProgram, KvLayout, bind_checkpoint_with_kv_layout, bind_hf_checkpoint,
-    bind_speculative_verify,
+    bind_speculative_verify, recurrent_speculative_verify,
 };
 
 pub(super) enum WeightSource<'shards, 'file> {
@@ -58,6 +58,18 @@ impl<'file> WeightSource<'_, 'file> {
     ) -> Result<Option<BoundProgram<'file>>, InteropError> {
         match self {
             Self::Gguf => bind_speculative_verify(parsed, file_bytes, kv_layout, descriptor),
+            Self::Directory { .. } => Ok(None),
+        }
+    }
+
+    pub(super) fn recurrent_speculative_verify(
+        &self,
+        parsed: &ParsedGguf,
+        kv_layout: KvLayout,
+        descriptor: Option<&ModelDescriptor>,
+    ) -> Result<Option<ModelDescriptor>, InteropError> {
+        match self {
+            Self::Gguf => recurrent_speculative_verify(parsed, kv_layout, descriptor),
             Self::Directory { .. } => Ok(None),
         }
     }

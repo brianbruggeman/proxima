@@ -979,6 +979,12 @@ pub struct LoadedModel<'file> {
     /// `None` unless the descriptor arms verify -- built once, at load time,
     /// never per step, since the program itself never changes.
     pub(super) speculative_verify_program: Option<(Vec<Op>, NodeId, Vec<LayerCacheRoots>)>,
+    /// The decode descriptor of a recurrent target that arms verify
+    /// ([`crate::lowering::recurrent_speculative_verify`]): a recurrent layer
+    /// unrolls its scan per position, so its verify program is lowered per
+    /// drafted width from [`ModelDescriptor::verify_at_width`] when the decode
+    /// loop first meets that width, never at load time.
+    pub(super) recurrent_speculative_verify: Option<ModelDescriptor>,
     /// The same `file_bytes` slice [`Self::load`]/[`Self::load_inner`]
     /// registered with `omega::backend::register_checkpoint_mapping` (GGUF
     /// checkpoints only -- [`Self::load_from_safetensors`] never registers
@@ -1289,7 +1295,6 @@ pub(super) struct SingleRangeProgram {
 /// [`CachedLayerRoots`] does not carry (see that field's own doc). O(program
 /// length) per call, paid `block_count * 3` times, once at
 /// [`LoadedModel::load`] time, never per decode step.
-#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 pub(super) fn find_input_node(program: &[Op], name: &str) -> Result<NodeId, InteropError> {
     program
         .iter()

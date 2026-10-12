@@ -3086,7 +3086,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
 /// kept as its own variant rather than folded into `DenseAttention` so that
 /// caller's cache-threading loop, and its `LayerCache`, are unaffected by
 /// this checkpoint's own partial-rotary gap.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum LayerCacheRoots {
     Attention(CachedLayerRoots),
     DenseAttention(DenseAttentionRoots),
@@ -3094,9 +3094,14 @@ pub enum LayerCacheRoots {
     ShortConv {
         state_out: NodeId,
     },
+    /// `per_position_state_out[row]` is the recurrence state after the
+    /// `row`-th new position; a width-pinned verify program keeps every one so
+    /// a partly accepted draft resumes from the last accepted row. A
+    /// single-position program holds exactly `state_out`.
     Ssm {
         qkv_mixed: NodeId,
         state_out: NodeId,
+        per_position_state_out: Vec<NodeId>,
     },
     /// the E2B checkpoint's cross-layer shared-KV layer
     /// (`KeySourceKind::SharedFromLayer`/`ValueSourceKind::SharedFromLayer`,
