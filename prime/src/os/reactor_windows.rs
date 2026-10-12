@@ -14,6 +14,7 @@ struct SourceSlot {
     read_waker: Option<Waker>,
     write_waker: Option<Waker>,
     read_ready_epoch: u32,
+    write_ready_epoch: u32,
     read_armed: bool,
     write_armed: bool,
     next_free: Option<u32>,
@@ -87,6 +88,7 @@ impl Reactor {
             read_waker: None,
             write_waker: None,
             read_ready_epoch: 0,
+            write_ready_epoch: 0,
             read_armed: interest.wants_read(),
             write_armed: interest.wants_write(),
             next_free: None,
@@ -221,6 +223,13 @@ impl Reactor {
             .map(|slot| slot.read_ready_epoch)
     }
 
+    pub fn write_ready_epoch(&self, key: SourceKey) -> Option<u32> {
+        self.slab
+            .get(key.index as usize)
+            .filter(|slot| slot.generation == key.generation && slot.generation != 0)
+            .map(|slot| slot.write_ready_epoch)
+    }
+
     pub fn turn(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
         self.drain_cancellations()?;
         self.events.clear();
@@ -250,6 +259,7 @@ impl Reactor {
             }
             if event.writable && slot.write_armed {
                 slot.write_armed = false;
+                slot.write_ready_epoch = slot.write_ready_epoch.wrapping_add(1);
                 if let Some(waker) = &slot.write_waker {
                     waker.wake_by_ref();
                 }

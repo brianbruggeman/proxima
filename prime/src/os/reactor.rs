@@ -554,6 +554,12 @@ mod kqueue {
             (slot.generation == key.generation).then_some(slot.read_ready_epoch)
         }
 
+        #[inline]
+        pub fn write_ready_epoch(&self, key: SourceKey) -> Option<u32> {
+            let slot = self.slab.get(key.index as usize)?;
+            (slot.generation == key.generation).then_some(slot.write_ready_epoch)
+        }
+
         pub fn turn(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
             self.drain_cancellations()?;
             let timespec = timeout.map(|duration| libc::timespec {
@@ -1016,6 +1022,12 @@ mod epoll {
         pub fn read_ready_epoch(&self, key: SourceKey) -> Option<u32> {
             let slot = self.slab.get(key.index as usize)?;
             (slot.generation == key.generation).then_some(slot.read_ready_epoch)
+        }
+
+        #[inline]
+        pub fn write_ready_epoch(&self, key: SourceKey) -> Option<u32> {
+            let slot = self.slab.get(key.index as usize)?;
+            (slot.generation == key.generation).then_some(slot.write_ready_epoch)
         }
 
         pub fn turn(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
