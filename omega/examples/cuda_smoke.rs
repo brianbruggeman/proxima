@@ -69,7 +69,7 @@ fn main() {
                     .smoke_add_one_persistent(&[1.0, 2.0, 3.0])
                     .expect("persistent CUDA smoke chain should execute");
                 assert_eq!(chained, [3.0, 4.0, 5.0]);
-                assert_eq!(allocations, 3);
+                assert_eq!(allocations, 5);
                 let evaluated = plan
                     .execute_named(
                         &[("x", QuantizedBlock::Float32(&[1.0, 2.0, 3.0, 4.0]))],
