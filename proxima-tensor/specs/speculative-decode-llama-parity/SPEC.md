@@ -8,8 +8,8 @@ created: 2026-09-28
 
 proxima's speculative decode covers 1 of llama.cpp's 10 speculation types (upstream
 `f1ea20621`, `common/common.h:173-186`), runs only on gemma4
-(`Architecture::speculative_verify_program` returns `Ok(None)` for every other arch,
-`proxima-model-interop/src/architecture.rs:292-309`), is reachable only through an env
+(`bind_speculative_verify` returns `Ok(None)` for every descriptor without `speculative_verify`, which only the gemma4 profile sets, `proxima-model-interop/src/profiles/gemma4.toml:5`,
+`proxima-model-interop/src/lowering.rs:490-502`), is reachable only through an env
 var (`decode.rs` `PROXIMA_SPECULATIVE_DECODE`), and drafted 0 tokens on a 64-token prose
 prompt -- so for a caller of `LoadedModel::generate_with_serving_config`, speculative
 decode is measured as absent; this spec makes every llama.cpp speculation type available
@@ -155,5 +155,5 @@ Two pure halves plus one loop seam, all sans-IO:
 
 ## context
 
-- proxima: `proxima-tokenizer/src/draft/` (`mod.rs`, `ngram_simple.rs`), `proxima-tokenizer/src/sample.rs`, `proxima-model-interop/src/generate/decode.rs` (draft ~3033, verify ~4962), `proxima-model-interop/src/architecture.rs:292-309`, `proxima-model-interop/src/gemma4/bind.rs:1105-1110`, `proxima-model-interop/src/generate/residency_caches.rs` (`LayerCache::truncate`), `proxima-model-interop/examples/speculative_decode_parity.rs`
+- proxima: `proxima-tokenizer/src/draft/` (`mod.rs`, `ngram_simple.rs`), `proxima-tokenizer/src/sample.rs`, `proxima-model-interop/src/generate/decode.rs` (draft ~3033, verify ~4962), `proxima-model-interop/src/lowering.rs:490-502` (`bind_speculative_verify`), `proxima-model-interop/src/profiles/gemma4.toml:5` (`speculative_verify = true`), `proxima-model-interop/src/generate/residency_caches.rs` (`LayerCache::truncate`), `proxima-model-interop/examples/speculative_decode_parity.rs`
 - llama.cpp `f1ea20621` at `~/repos/others/llama.cpp`: `common/speculative.cpp` (impls at 179, 455, 923, 1331, 1750, 1795, 1849, 2024), `common/ngram-map.cpp`, `common/ngram-mod.cpp`, `common/ngram-cache.cpp`, `common/sampling.cpp` (`common_sampler_sample_and_accept_n`), `tools/server/server-context.cpp:3885-3900`, `common/common.h:173-186`, `:355-364`
