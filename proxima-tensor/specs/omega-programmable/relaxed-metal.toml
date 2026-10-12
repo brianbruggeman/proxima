@@ -1,0 +1,17 @@
+engine = "gpu"
+gpu_driver = "metal"
+allow_fusion = true
+exact_activations = true
+
+[numeric]
+contraction = true
+reassociation = true
+nan_assumptions = false
+signed_zero = false
+approx_functions = false
+epilogue_sources = false
+
+[constraints]
+
+[selection]
+mode = "configured"

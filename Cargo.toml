@@ -501,6 +501,7 @@ omega = { path = "omega", features = ["metal", "instrument"] }
 proxima-tokenizer = { path = "proxima-tokenizer", default-features = false, features = ["gguf"] }
 libtest-mimic = "0.8.2"
 proxima-tensor = { workspace = true, features = ["std"] }
+serde_json = { version = "1.0.151", default-features = false, features = ["alloc", "float_roundtrip"] }
 
 [lints]
 workspace = true

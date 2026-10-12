@@ -1,0 +1,9 @@
+{
+  "source": "proxima-tensor/specs/ouro-llama-oracle/results/llama-v1/llama.jsonl:1",
+  "checkpoint_revision": "574fa66cb8bf5abdc979642d01cf2b79b16bfab1",
+  "checkpoint_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+  "cases": [
+    {"id":"france","prefix_ids":[504,3575,282,4649,314],"text":"The capital of France is"},
+    {"id":"ball","prefix_ids":[6340,260,5307,5054,30,533,451,1977,260,3985,314,4461,284,260,4405,314,2382,30,378,2380,282,260,4405,314],"text":"Read the facts carefully. In this story the box is blue and the ball is red. The color of the ball is"}
+  ]
+}
