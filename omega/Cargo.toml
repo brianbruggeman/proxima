@@ -739,6 +739,7 @@ conflaguration = { workspace = true, features = ["toml"] }
 criterion.workspace = true
 half = { version = "2.7.1", default-features = false }
 moe_test_json = { version = "1.0.151", package = "serde_json", default-features = false, features = ["alloc"] }
+naga = { version = "30.0.1", features = ["wgsl-in"] }
 proxima = { workspace = true, features = ["test-support", "test-support-tokio"] }
 proxima-autograd = { path = "../proxima-autograd" }
 proxima-gguf = { path = "../proxima-gguf", features = ["std"] }

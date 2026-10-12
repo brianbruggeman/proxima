@@ -399,10 +399,25 @@ fn cooperative_identity_token(node: NodeId, op: ScalarOp) -> Result<&'static str
     }
 }
 
+#[cfg(not(feature = "float-layout-dtype"))]
 fn type_token(node: NodeId, dtype: DType, caps: WgslCaps) -> Result<&'static str, EmitError> {
     match dtype {
         DType::Float32 | DType::BFloat16 => Ok("f32"),
         DType::Float16 if caps.shader_f16 => Ok("f16"),
+        other => Err(EmitError::UnsupportedDType { node, dtype: other }),
+    }
+}
+
+/// `f16` where the layout's fields equal binary16's and the adapter offers `shader-f16`, `f32` for
+/// every other layout (buffers speak `array<f32>`; the layout codec narrows at the host boundary).
+#[cfg(feature = "float-layout-dtype")]
+fn type_token(node: NodeId, dtype: DType, caps: WgslCaps) -> Result<&'static str, EmitError> {
+    match dtype {
+        DType::Float(layout) => match crate::msl::layout_render::hardware_type(&layout) {
+            Some("half") if caps.shader_f16 => Ok("f16"),
+            Some("half") => Err(EmitError::UnsupportedDType { node, dtype }),
+            _ => Ok("f32"),
+        },
         other => Err(EmitError::UnsupportedDType { node, dtype: other }),
     }
 }
