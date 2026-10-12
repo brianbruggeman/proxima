@@ -937,6 +937,130 @@ fn matmul_runs_on_wgpu_at_cpu_parity_whichever_reduce_path_the_adapter_takes() {
     );
 }
 
+/// ROW (this session): a real Qwen3-0.6B lm_head/logits reduce
+/// (`output_axes` product == 151936, the checkpoint's own vocab size) hit
+/// `wgpu error: ... dispatch group size dimension ([151936, 1, 1]) must be
+/// less or equal to 65535` -- `crate::wgpu_driver::execute_plan`'s dispatch
+/// was a flat `dispatch_workgroups(workgroups, 1, 1)` with no split, and
+/// every `Keep::Reduce` cooperative kernel dispatches exactly one workgroup
+/// per output element (`crate::wgsl::emit_wgsl`'s cooperative-width thread
+/// count is `grid_threads(resolved)` multiplied by the subgroup width, so
+/// dividing back out always yields one workgroup per output element), so
+/// ANY matmul/reduce with more than `max_compute_workgroups_per_dimension`
+/// output elements hit this, not only a real vocab projection. `m=70_000`
+/// here reproduces the SAME output-count-driven overflow at a fraction of
+/// the memory (`k=4`, so `lhs`/`rhs` together are under 1.2 MB) -- the
+/// point is the OUTPUT count crossing the device limit, not the reduction
+/// width.
+///
+/// This is the regression gate for the fix, not just the symptom: it
+/// exercises `crate::wgpu_driver::dispatch_grid`'s `(x, y)` split AND
+/// `crate::wgsl::kernel_signature`/`cooperative_kernel_signature`'s
+/// `workgroup_id`/`num_workgroups`-based index reconstruction TOGETHER,
+/// through the real device, against the CPU oracle -- a caller who fixes
+/// the dispatch split alone (or the shader alone) leaves the two sides
+/// disagreeing about which flat index a given `(workgroup_id.x,
+/// workgroup_id.y)` pair means, which surfaces here as a wrong VALUE per
+/// output row, not a crash, exactly the silent-corruption risk that made a
+/// live one-sided patch the wrong call in the first place.
+#[test]
+fn matmul_output_above_the_workgroup_dimension_limit_still_matches_cpu() {
+    let (m, k, n) = (70_000usize, 4usize, 1usize);
+    let (program, _root) = {
+        let mut program = Vec::new();
+        let lhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(m as u32), Extent::Static(k as u32)],
+                name: Some("lhs".into()),
+            },
+        );
+        let rhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(k as u32), Extent::Static(n as u32)],
+                name: Some("rhs".into()),
+            },
+        );
+        let root = append_matmul(&mut program, lhs, rhs, m as u32, k as u32, n as u32);
+        (program, root)
+    };
+
+    let lhs = random_vec(59, m * k);
+    let rhs = random_vec(61, k * n);
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("lhs", QuantizedBlock::Float32(&lhs)),
+        ("rhs", QuantizedBlock::Float32(&rhs)),
+    ];
+
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("cpu plans the oversized-output matmul");
+    let cpu = execute_plan_named(&mut cpu_plan, &named).expect("cpu runs the oversized-output matmul");
+
+    let mut wgpu_plan = omega::wgpu_driver::plan_named(&program, &[], &named, &[])
+        .expect("omega::wgpu_driver plans the oversized-output matmul directly");
+    let limit = wgpu_plan.limits().max_compute_workgroups_per_dimension;
+    assert!(
+        (m * n) as u32 > limit,
+        "test fixture must exceed the device's own dispatch limit to be a real regression \
+         gate: m*n={} limit={limit}",
+        m * n
+    );
+    let path = match wgpu_plan.caps().subgroup_size {
+        Some(width) => format!("cooperative (subgroup width {width})"),
+        None => "serial (no fixed-width subgroup reported)".to_string(),
+    };
+    eprintln!("wgpu reduce path taken: {path}, output_elements={} limit={limit}", m * n);
+    let wgpu = omega::wgpu_driver::execute_plan_named(&mut wgpu_plan, &named)
+        .expect("omega::wgpu_driver runs the oversized-output matmul on a real device");
+
+    let expected = cpu.root();
+    let actual = wgpu.root();
+    assert_eq!(actual.len(), m * n);
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0f32;
+    let mut first_mismatch: Option<(usize, f32, f32)> = None;
+    for (index, (&got, &want)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            got.is_finite(),
+            "wgpu oversized-output matmul ({path}) produced a non-finite value at row {index}: {got}"
+        );
+        let diff = (got - want).abs();
+        if diff > max_diff {
+            max_diff = diff;
+        }
+        if first_mismatch.is_none() && diff > 1e-3 {
+            first_mismatch = Some((index, got, want));
+        }
+    }
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude.max(f32::MIN_POSITIVE);
+    eprintln!(
+        "wgpu oversized-output matmul parity ({path}): max_diff={max_diff} relative={relative} \
+         first_mismatch={first_mismatch:?}"
+    );
+    assert!(
+        relative < 1e-4,
+        "wgpu oversized-output matmul ({path}) disagrees with the cpu oracle: relative={relative} \
+         max_diff={max_diff} first_mismatch={first_mismatch:?} -- a dispatch/shader index \
+         mismatch reads exactly like this: right shape, wrong per-row values"
+    );
+}
+
 /// `support::real_forward_fixture` — the same full cached-attention
 /// transformer forward `backend_parity.rs::the_wrapper_agrees_with_itself_across_cpu_and_metal`
 /// runs against Metal — now run against the portable wgpu backend through
