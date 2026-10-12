@@ -104,9 +104,12 @@ def main() -> int:
                 captured_commands += 1
             if "--precommit" in command:
                 precommit_checks += 1
-            if re.search(r"\s--finalize(?:\s|$)", command) or (card_id == "00a" and "--verify-closed" in command):
+            if re.search(r"\s--finalize(?:\s|$)", command) or (card_id == "00a" and "--verify-closed" in command) or (card_id == "00a1" and "--run-closure" in command):
                 finalizers += 1
-        if commands and ("--precommit" not in commands[1] or ("--verify-closed" not in commands[2] if card_id == "00a" else "--finalize" not in commands[2])):
+        terminal_reader_present = len(commands) > 2 and ("--verify-closed" in commands[2] if card_id == "00a" else
+                                   "--run-closure" in commands[2] if card_id == "00a1" else
+                                   "--finalize" in commands[2])
+        if commands and ("--precommit" not in commands[1] or not terminal_reader_present):
             errors.append(f"{path}: AC2 must be captured precommit and AC3 must run its terminal postpush reader")
         if len(rows) == 3 and "elapsed_seconds<=1800" not in acceptance_text:
             errors.append(f"{path}: AC3 must assert captured card elapsed time <= 30 minutes")
