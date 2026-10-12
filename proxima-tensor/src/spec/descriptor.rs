@@ -296,20 +296,41 @@ pub struct ModelDescriptor {
 }
 
 impl ModelDescriptor {
-    /// The descriptor of the verify program: this one with every new row's
-    /// logits kept. `None` unless [`Self::speculative_verify`] is set, the
-    /// program samples a last row (a pooled-embedding program has no draft to
-    /// check), and every layer rewinds by truncating its cache
-    /// ([`LayerKind::Attention`]; a state-space or short-conv layer carries
-    /// state a rejected draft would have to undo).
+    /// The descriptor of the verify program for a symbolic row count: this one
+    /// with every new row's logits kept. `None` unless
+    /// [`Self::verify_at_width`] arms it and no layer is recurrent -- a
+    /// recurrent layer unrolls its scan per position, so its verify program
+    /// needs the width and comes from [`Self::verify_at_width`] instead.
     #[must_use]
     pub fn verify(&self) -> Option<Self> {
+        let recurrent = self.layers.iter().any(|layer| layer.kind == LayerKind::Gdn);
+        self.verify_at_width(1).filter(|_| !recurrent)
+    }
+
+    /// The descriptor of the verify program for exactly `width` new rows (the
+    /// sampled token plus its drafts): this one with every new row's logits
+    /// kept, and a recurrent layer's position axis pinned to `width`. `None`
+    /// unless [`Self::speculative_verify`] is set, the program samples a last
+    /// row (a pooled-embedding program has no draft to check), `width` is
+    /// positive, and every layer can undo a rejected draft: an
+    /// [`LayerKind::Attention`] layer by truncating its cache, a
+    /// [`LayerKind::Gdn`] layer by resuming from the per-row state its program
+    /// keeps ([`LayerCacheRoots::Ssm`]'s `per_position_state_out`). A
+    /// short-convolution layer carries state with no such row.
+    #[must_use]
+    pub fn verify_at_width(&self, width: u32) -> Option<Self> {
         let rewinds = self
             .layers
             .iter()
-            .all(|layer| layer.kind == LayerKind::Attention);
-        (self.speculative_verify && self.last_row_only && rewinds).then(|| Self {
+            .all(|layer| matches!(layer.kind, LayerKind::Attention | LayerKind::Gdn));
+        let recurrent = self.layers.iter().any(|layer| layer.kind == LayerKind::Gdn);
+        (self.speculative_verify && self.last_row_only && rewinds && width > 0).then(|| Self {
             last_row_only: false,
+            prefill_width: if recurrent {
+                Some(width)
+            } else {
+                self.prefill_width
+            },
             ..self.clone()
         })
     }
@@ -329,9 +350,9 @@ impl conflaguration::Validate for ModelDescriptor {
         require(self.query_heads > 0, "query_heads", "must be positive");
         require(self.block_count > 0, "block_count", "must be positive");
         require(
-            !self.speculative_verify || self.verify().is_some() || !self.last_row_only,
+            !self.speculative_verify || self.verify_at_width(1).is_some() || !self.last_row_only,
             "speculative_verify",
-            "needs layers that rewind by truncating their cache",
+            "needs layers that rewind by truncating their cache or resuming a recurrent state",
         );
         require(
             self.layers.len() == self.block_count as usize,

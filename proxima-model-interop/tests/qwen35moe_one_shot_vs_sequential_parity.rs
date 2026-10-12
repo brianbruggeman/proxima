@@ -410,6 +410,7 @@ fn run_sequential() -> ParitySample {
                 LayerCacheRoots::Ssm {
                     qkv_mixed,
                     state_out,
+                    ..
                 } => {
                     outputs.push(*qkv_mixed);
                     outputs.push(*state_out);
@@ -455,6 +456,7 @@ fn run_sequential() -> ParitySample {
                     LayerCacheRoots::Ssm {
                         qkv_mixed,
                         state_out,
+                        ..
                     },
                     LayerCache::Ssm {
                         conv_history,

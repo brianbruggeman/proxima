@@ -267,6 +267,8 @@ mod prompt_cache_key;
 mod prompt_cache_real_model_tests;
 #[cfg(test)]
 mod recurrent_checkpoint_fixture;
+#[cfg(test)]
+mod recurrent_verify_tests;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 mod resident_plans;
 #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]

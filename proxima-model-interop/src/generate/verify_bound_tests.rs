@@ -35,8 +35,8 @@ const SHIPPED: [(&str, Outcome); 13] = [
     ("qwen3", Outcome::Bound),
     ("qwen3moe", Outcome::Bound),
     ("qwen3_moe", Outcome::Bound),
-    ("qwen35", Outcome::Refused),
-    ("qwen35moe", Outcome::Refused),
+    ("qwen35", Outcome::Bound),
+    ("qwen35moe", Outcome::Bound),
     ("lfm2", Outcome::Refused),
     ("lfm2moe", Outcome::Refused),
 ];
@@ -89,7 +89,7 @@ fn armed(descriptor: ModelDescriptor) -> ModelDescriptor {
 
 fn assert_bound(family: &str, decode: &ModelDescriptor) {
     let verify = decode
-        .verify()
+        .verify_at_width(VERIFY_WIDTH as u32)
         .unwrap_or_else(|| panic!("{family} arms a verify descriptor"));
     let forward = build_forward(&verify)
         .unwrap_or_else(|error| panic!("{family} lowers its verify program: {error:?}"));
@@ -103,7 +103,11 @@ fn assert_bound(family: &str, decode: &ModelDescriptor) {
 }
 
 fn assert_refused(family: &str, decode: &ModelDescriptor) {
-    assert_eq!(decode.verify(), None, "{family} has no verify descriptor");
+    assert_eq!(
+        decode.verify_at_width(VERIFY_WIDTH as u32),
+        None,
+        "{family} has no verify descriptor"
+    );
     let refusal = decode
         .validate()
         .expect_err("a layer that cannot rewind by truncation cannot be armed for verify");

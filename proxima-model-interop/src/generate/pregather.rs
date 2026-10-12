@@ -1174,7 +1174,7 @@ impl<'file> LoadedModel<'file> {
                         Some(input_nodes),
                         Some(buffers),
                     ) = (
-                        self.layer_roots[layer],
+                        &self.layer_roots[layer],
                         placement.input_nodes[layer],
                         placement.buffers[layer].as_ref(),
                     )
@@ -2801,6 +2801,8 @@ impl<'file> LoadedModel<'file> {
         let speculative_verify_program = source
             .speculative_verify(parsed, file_bytes, kv_layout, descriptor)?
             .map(|verify| (verify.program, verify.logits_root, verify.layer_roots));
+        let recurrent_speculative_verify =
+            source.recurrent_speculative_verify(parsed, kv_layout, descriptor)?;
         let checkpoint_bytes = source.checkpoint_bytes(file_bytes);
         let vocab = match vocab {
             Some(vocab) => vocab,
@@ -2869,6 +2871,7 @@ impl<'file> LoadedModel<'file> {
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
             speculative_verify_program,
+            recurrent_speculative_verify,
             checkpoint_mapping: file_bytes,
         }
         .validated()
@@ -3013,6 +3016,7 @@ impl<'file> LoadedModel<'file> {
             // maps to the sliding-pattern schedule source -- never eligible (same reasoning as
             // `Self::load`'s dense-path `None` above).
             speculative_verify_program: None,
+            recurrent_speculative_verify: None,
             checkpoint_mapping: file_bytes,
         }
         .validated()

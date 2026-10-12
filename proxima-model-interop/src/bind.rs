@@ -46,7 +46,7 @@ use proxima_gguf::tensor::TensorInfo;
 use proxima_gguf::types::GgmlType;
 #[cfg(feature = "std")]
 use proxima_tensor::op::Op;
-use proxima_tensor::spec::{ModelDescriptor, RecurrenceConfig};
+use proxima_tensor::spec::{ModelDescriptor, RecurrenceConfig, RopePairing};
 
 use crate::error::InteropError;
 #[cfg(feature = "std")]
@@ -505,7 +505,8 @@ impl ModelHparams {
     }
 
     /// This architecture with the shape fields `descriptor` carries read off
-    /// the config instead of the header. The per-head width and KV-head count
+    /// the config instead of the header. The rotated width (a partial-rotary hybrid
+    /// rotates fewer channels than the head holds) and KV-head count
     /// follow the config only when every layer agrees; a non-uniform schedule
     /// keeps the header's values, since one number cannot stand for it.
     #[must_use]
@@ -526,7 +527,10 @@ impl ModelHparams {
             feed_forward: descriptor.feed_forward,
             query_heads: descriptor.query_heads,
             kv_heads: uniform.map_or(self.kv_heads, |attention| attention.kv_heads),
-            head_dim: uniform.map_or(self.head_dim, |attention| attention.head_dim),
+            head_dim: uniform.map_or(self.head_dim, |attention| match attention.rope_pairing {
+                RopePairing::SplitHalf { pairs } => pairs * 2,
+                RopePairing::Interleaved => attention.head_dim,
+            }),
             block_count: descriptor.block_count,
             expert_count: descriptor.expert_count,
             expert_used_count: descriptor.expert_used_count,

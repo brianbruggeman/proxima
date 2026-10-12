@@ -460,6 +460,33 @@ pub fn bind_speculative_verify<'file>(
         .transpose()
 }
 
+/// The recurrent counterpart of [`bind_speculative_verify`]: the decode
+/// descriptor in force (`config`, or the header's own when `None`) when it
+/// holds a recurrent layer and arms verify ([`ModelDescriptor::verify_at_width`]).
+/// A recurrent layer's verify program is lowered per drafted width, so what the
+/// load site keeps is the descriptor itself and the decode loop lowers
+/// `verify_at_width(draft + 1)` once per width it meets; the weights are the
+/// decode program's own, since only the position extents differ. `None` for an
+/// all-attention descriptor, whose single program [`bind_speculative_verify`]
+/// binds.
+///
+/// # Errors
+///
+/// The header reader refuses the header.
+pub fn recurrent_speculative_verify(
+    parsed: &ParsedGguf,
+    layout: KvLayout,
+    config: Option<&ModelDescriptor>,
+) -> Result<Option<ModelDescriptor>, InteropError> {
+    let (header_descriptor, _) = header(parsed, layout)?;
+    let decode = config.unwrap_or(&header_descriptor);
+    let recurrent = decode
+        .layers
+        .iter()
+        .any(|layer| layer.kind == LayerKind::Gdn);
+    Ok((recurrent && decode.verify_at_width(1).is_some()).then(|| decode.clone()))
+}
+
 /// The per-decode-step scratch shape a recurrent layer needs sized ahead of
 /// the first step, re-derived off `parsed`'s own header (the same source the
 /// header reader reads) rather than threaded through [`BoundProgram`]. `None`

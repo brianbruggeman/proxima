@@ -20170,6 +20170,43 @@ mod verify_descriptor {
     }
 
     #[test]
+    fn a_recurrent_descriptor_pins_its_verify_program_to_the_drafted_width() {
+        let mut hybrid = armed(CacheStrategy::Cached, CacheMask::Padded);
+        hybrid.layers[0].kind = LayerKind::Gdn;
+
+        let verify = hybrid
+            .verify_at_width(3)
+            .expect("an armed recurrent descriptor lowers a verify program at a width");
+
+        assert_eq!(verify.prefill_width, Some(3));
+        assert!(!verify.last_row_only);
+        assert_eq!(
+            hybrid.verify(),
+            None,
+            "a symbolic row count would sum the scan across positions"
+        );
+        assert_eq!(hybrid.verify_at_width(0), None);
+    }
+
+    #[test]
+    fn an_attention_descriptor_ignores_the_width_it_is_asked_for() {
+        let decode = armed(CacheStrategy::Cached, CacheMask::Bounded);
+
+        assert_eq!(decode.verify_at_width(5), decode.verify());
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn validation_accepts_arming_verify_over_a_recurrent_layer() {
+        use conflaguration::Validate;
+
+        let mut hybrid = armed(CacheStrategy::Cached, CacheMask::Padded);
+        hybrid.layers[0].kind = LayerKind::Gdn;
+
+        assert!(hybrid.validate().is_ok());
+    }
+
+    #[test]
     fn a_descriptor_with_a_short_conv_layer_has_no_verify_program() {
         let mut hybrid = armed(CacheStrategy::Cached, CacheMask::Padded);
         hybrid.layers[0].kind = LayerKind::ShortConv;
@@ -21322,8 +21359,8 @@ mod recurrent_shared {
     }
 
     fn attention_roots(built: &ForwardProgram, layer: usize) -> CachedLayerRoots {
-        match built.layer_roots[layer] {
-            LayerCacheRoots::Attention(roots) => roots,
+        match &built.layer_roots[layer] {
+            LayerCacheRoots::Attention(roots) => *roots,
             other => panic!("logical layer {layer} owns a cache, got {other:?}"),
         }
     }
@@ -22011,6 +22048,237 @@ mod recurrent_shared {
         refuse(
             "recurrence on the bounded engine",
             with(&|descriptor| descriptor.cache_mask = CacheMask::Bounded),
+        );
+    }
+}
+
+mod mixer_over_packed_projection {
+    use super::*;
+    use crate::cpu::{QuantizedBlock, evaluate_quantized_named};
+    use crate::test_support::Lcg;
+    use proxima_gguf::quant::q8_0;
+
+    const EMBEDDING: usize = 32;
+    const STATE: u32 = 4;
+    const KV_HEADS: u32 = 1;
+    const GROUP: u32 = 2;
+    const HEAD_V_DIM: u32 = 16;
+    const CONVOLUTION: u32 = 3;
+    const POSITIONS: usize = 3;
+    const KEY_DIM: u32 = STATE * KV_HEADS;
+    const INNER: usize = (KV_HEADS * GROUP * HEAD_V_DIM) as usize;
+    const QKV: u32 = 2 * KEY_DIM + INNER as u32;
+
+    fn leaf(program: &mut Vec<Op>, shape: &[u32], name: &str) -> NodeId {
+        input_leaf(
+            program,
+            DType::Float32,
+            shape.iter().map(|extent| Extent::Static(*extent)).collect(),
+            name,
+        )
+    }
+
+    fn mixer(width: Option<u32>) -> (Vec<Op>, NodeId, SsmMixerTaps) {
+        let mut program = Vec::new();
+        let rows = width.map_or(Extent::Symbolic(0), Extent::Static);
+        let x = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![rows, Extent::Static(EMBEDDING as u32)],
+            "x",
+        );
+        let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+        let eps = input_leaf(&mut program, DType::Float32, alloc::vec![rows], "eps");
+        let head_eps = leaf(&mut program, &[KV_HEADS, GROUP], "head_eps");
+        let one = scalar_constant(&mut program, 1.0);
+        let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / (STATE as f32).sqrt());
+        let inv_head_v_dim = scalar_constant(&mut program, 1.0 / HEAD_V_DIM as f32);
+        let attn_norm_weight = leaf(&mut program, &[EMBEDDING as u32], "attn_norm_weight");
+        let wqkv = leaf(&mut program, &[EMBEDDING as u32, QKV], "wqkv");
+        let wqkv_gate = leaf(&mut program, &[EMBEDDING as u32, INNER as u32], "wqkv_gate");
+        let conv_weight = leaf(&mut program, &[QKV, CONVOLUTION], "conv_weight");
+        let conv_history = leaf(&mut program, &[CONVOLUTION - 1, QKV], "conv_history_in");
+        let heads = KV_HEADS * GROUP;
+        let ssm_beta = leaf(&mut program, &[EMBEDDING as u32, heads], "ssm_beta");
+        let ssm_alpha = leaf(&mut program, &[EMBEDDING as u32, heads], "ssm_alpha");
+        let ssm_dt_bias = leaf(&mut program, &[heads], "ssm_dt_bias");
+        let ssm_a = leaf(&mut program, &[heads], "ssm_a");
+        let ssm_norm_weight = leaf(&mut program, &[HEAD_V_DIM], "ssm_norm_weight");
+        let ssm_out = leaf(&mut program, &[INNER as u32, EMBEDDING as u32], "ssm_out");
+        let state_in = leaf(
+            &mut program,
+            &[STATE, HEAD_V_DIM, KV_HEADS, GROUP],
+            "state_in",
+        );
+        let (mixer_out, taps) = append_delta_net_mixer_with_taps(
+            &mut program,
+            x,
+            inv_dim,
+            eps,
+            head_eps,
+            one,
+            inv_sqrt_key_dim,
+            inv_head_v_dim,
+            Some(attn_norm_weight),
+            wqkv,
+            wqkv_gate,
+            conv_weight,
+            conv_history,
+            ssm_beta,
+            ssm_alpha,
+            ssm_dt_bias,
+            ssm_a,
+            ssm_norm_weight,
+            ssm_out,
+            state_in,
+            KEY_DIM,
+            INNER as u32,
+            KV_HEADS,
+            GROUP,
+            CONVOLUTION,
+            GdnOutputGate::Silu,
+            width,
+        )
+        .expect("the mixer lowers");
+        (program, mixer_out, taps)
+    }
+
+    fn shared_weights() -> Vec<(&'static str, Vec<f32>)> {
+        let mut lcg = Lcg(0x0bad_cafe);
+        let mut make = |name: &'static str, count: usize, scale: f32, offset: f32| {
+            let data: Vec<f32> = (0..count)
+                .map(|_| offset + scale * lcg.next_unit())
+                .collect();
+            (name, data)
+        };
+        let heads = (KV_HEADS * GROUP) as usize;
+        alloc::vec![
+            make("attn_norm_weight", EMBEDDING, 0.1, 1.0),
+            make("wqkv", EMBEDDING * QKV as usize, 0.25, 0.0),
+            make("wqkv_gate", EMBEDDING * INNER, 0.25, 0.0),
+            make("conv_weight", (QKV * CONVOLUTION) as usize, 0.25, 0.0),
+            make("ssm_beta", EMBEDDING * heads, 0.25, 0.0),
+            make("ssm_alpha", EMBEDDING * heads, 0.25, 0.0),
+            make("ssm_dt_bias", heads, 0.1, 0.1),
+            make("ssm_a", heads, 0.1, -0.5),
+            make("ssm_norm_weight", HEAD_V_DIM as usize, 0.1, 1.0),
+            make("head_eps", heads, 0.0, 1.0e-6),
+        ]
+    }
+
+    struct Step {
+        mixer_out: Vec<f32>,
+        qkv_mixed: Vec<f32>,
+        state_out: Vec<f32>,
+    }
+
+    fn step(
+        width: Option<u32>,
+        x: &[f32],
+        history: &[f32],
+        state: &[f32],
+        out_weight: QuantizedBlock<'_>,
+    ) -> Step {
+        let rows = x.len() / EMBEDDING;
+        let (program, mixer_out, taps) = mixer(width);
+        let weights = shared_weights();
+        let eps = alloc::vec![1.0e-6_f32; rows];
+        let mut named: Vec<(&str, QuantizedBlock<'_>)> = weights
+            .iter()
+            .map(|(name, data)| (*name, QuantizedBlock::Float32(data.as_slice())))
+            .collect();
+        named.extend([
+            ("x", QuantizedBlock::Float32(x)),
+            ("eps", QuantizedBlock::Float32(&eps)),
+            ("conv_history_in", QuantizedBlock::Float32(history)),
+            ("state_in", QuantizedBlock::Float32(state)),
+            ("ssm_out", out_weight),
+        ]);
+        let evaluated = evaluate_quantized_named(
+            &program,
+            &[rows as u64],
+            &named,
+            &[mixer_out, taps.qkv_mixed, taps.state_out],
+        )
+        .expect("the mixer evaluates");
+        let read = |node: NodeId| evaluated.get(node).expect("requested node").0.to_vec();
+        Step {
+            mixer_out: read(mixer_out),
+            qkv_mixed: read(taps.qkv_mixed),
+            state_out: read(taps.state_out),
+        }
+    }
+
+    fn pinned_and_sequential(
+        out_weight: &dyn Fn() -> QuantizedBlock<'static>,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let mut lcg = Lcg(7);
+        let x: Vec<f32> = (0..POSITIONS * EMBEDDING)
+            .map(|_| lcg.next_unit())
+            .collect();
+        let history_len = ((CONVOLUTION - 1) * QKV) as usize;
+        let mut history = alloc::vec![0.0_f32; history_len];
+        let mut state = alloc::vec![0.0_f32; (STATE * HEAD_V_DIM * KV_HEADS * GROUP) as usize];
+        let pinned = step(Some(POSITIONS as u32), &x, &history, &state, out_weight());
+        let mut sequential = Vec::new();
+        for position in 0..POSITIONS {
+            let rows = &x[position * EMBEDDING..(position + 1) * EMBEDDING];
+            let single = step(None, rows, &history, &state, out_weight());
+            sequential.extend_from_slice(&single.mixer_out);
+            history.extend_from_slice(&single.qkv_mixed);
+            history.drain(..history.len() - history_len);
+            state = single.state_out;
+        }
+        (pinned.mixer_out, sequential)
+    }
+
+    fn worst(left: &[f32], right: &[f32]) -> f32 {
+        assert_eq!(left.len(), right.len());
+        left.iter()
+            .zip(right)
+            .map(|(found, expected)| (found - expected).abs())
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn a_pinned_width_mixer_matches_repeated_steps_over_a_packed_output_projection() {
+        let mut lcg = Lcg(0x51ed_270b);
+        let packed_rows: Vec<f32> = (0..EMBEDDING * INNER)
+            .map(|_| lcg.next_unit() * 0.25)
+            .collect();
+        let mut bytes = alloc::vec![0u8; (packed_rows.len() / q8_0::QK8_0) * q8_0::BLOCK_BYTES];
+        q8_0::quantize(&packed_rows, &mut bytes).expect("whole q8_0 blocks");
+        let mut dequantized = alloc::vec![0.0_f32; packed_rows.len()];
+        q8_0::dequantize(&bytes, &mut dequantized).expect("the packed bytes dequantize");
+        let mut program_order = alloc::vec![0.0_f32; packed_rows.len()];
+        for row in 0..EMBEDDING {
+            for column in 0..INNER {
+                program_order[column * EMBEDDING + row] = dequantized[row * INNER + column];
+            }
+        }
+        let packed: &'static [u8] = alloc::vec::Vec::leak(bytes);
+        let program_order: &'static [f32] = alloc::vec::Vec::leak(program_order);
+
+        let (packed_pinned, packed_sequential) =
+            pinned_and_sequential(&|| QuantizedBlock::Packed {
+                codec: Codec::Q8_0,
+                bytes: packed,
+            });
+        let (f32_pinned, f32_sequential) =
+            pinned_and_sequential(&|| QuantizedBlock::Float32(program_order));
+
+        assert!(worst(&f32_pinned, &f32_sequential) < 1.0e-5, "f32 control");
+        assert!(
+            worst(&packed_sequential, &f32_sequential) < 1.0e-5,
+            "packed single-position steps read the same matrix as the dequantized f32"
+        );
+        assert!(
+            worst(&packed_pinned, &f32_pinned) < 1.0e-5,
+            "packed pinned width reads the same matrix as the dequantized f32"
+        );
+        assert!(
+            worst(&packed_pinned, &packed_sequential) < 1.0e-5,
+            "packed pinned width equals repeated packed steps"
         );
     }
 }

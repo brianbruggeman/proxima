@@ -229,6 +229,7 @@ pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
                 "quantized operand selected for materialization"
             );
         }
+        let row_shape = row_shape.or_else(|| lone_operand_row_shape(computed, shapes.of(operand)));
         materialize_quantized_weight_output(
             operand,
             shapes,
@@ -238,6 +239,26 @@ pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
         )?;
     }
     Ok(())
+}
+
+/// A single-operand elementwise read of a packed weight -- the reshape a
+/// builder's broadcast-multiply-by-ones leaves behind once the planner folds the
+/// multiply away -- hands [`packed_operand_row_shape`] no second operand to find
+/// the contraction axes from. Such a weight is declared contraction axis first,
+/// `[k, rows]` (every matmul projection's convention), while its packed bytes are
+/// `rows` runs of `k` contiguous elements, so it materializes transposed. The
+/// reduce that would read it directly takes the packed fast path and never
+/// reaches here, which is why a one-position program does not show the defect and
+/// a multi-position one, whose reshape no longer folds into the reduce, does.
+fn lone_operand_row_shape(computed: &BoundOp, declared: &[u64]) -> Option<(usize, usize)> {
+    let lone = matches!(computed.kind, BoundOpKind::Elementwise { .. })
+        && matches!(computed.operands(), [(_, _, None)]);
+    match declared {
+        [contraction, rows] if lone && *contraction > 1 && *rows > 1 => {
+            Some((*rows as usize, *contraction as usize))
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn non_primary_operand_reads<'resolved>(

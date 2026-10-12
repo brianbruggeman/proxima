@@ -30,7 +30,7 @@ of this spec (R4-R7, R13) is struck.
 | R1 | verify is sample-and-match: each verify row selects its token through the exact per-step selection the non-speculative path uses (override, penalties window, `sample_next_token`, shared rng); speculative output is byte-identical to non-speculative output for any ServingConfig and seed | yes |
 | R2 | every embedded family profile (`profiles::FAMILY_PROFILES`) either lowers a verify program through `ModelDescriptor::verify()` or is refused by a typed `speculative_verify` validation error; restated 2026-10-12 because 2935ab55 deleted the `Architecture` trait | yes |
 | R3a | rejected drafts are rolled back in attention KV via `LayerCache::truncate` | yes |
-| R3b | rejected drafts are rolled back in recurrent/SSM state via snapshot-restore of the pre-verify state | yes |
+| R3b | rejected drafts are rolled back in recurrent/SSM state: the pre-verify state is the snapshot (a verify step never advances it) and the readout advances each recurrent layer only through the accepted rows, from the per-row state the width-pinned verify program keeps | yes |
 | R4 | `ngram-simple` drafter, token-identical to `common_ngram_simple_draft` (`common/ngram-map.cpp:49`) | yes |
 | R5 | `ngram-map-k` drafter, token-identical to `common_ngram_map_begin/draft/accept` with `key_only = true` | yes |
 | R13 | `ngram-map-k4v` drafter, token-identical to the same functions with `key_only = false` | yes |

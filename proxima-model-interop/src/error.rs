@@ -349,6 +349,20 @@ pub enum InteropError {
         vocab: usize,
     },
 
+    /// A recurrent layer's verify program evaluated to a shape that cannot
+    /// resume a partly accepted draft: it must keep one state root per new
+    /// position and a `qkv_mixed` whose element count divides evenly by them.
+    #[cfg(feature = "std")]
+    #[error(
+        "recurrent layer {layer} kept {state_roots} state root(s) and {qkv_elements} qkv element(s) for {positions} position(s)"
+    )]
+    SpeculativeStateShape {
+        layer: usize,
+        positions: usize,
+        state_roots: usize,
+        qkv_elements: usize,
+    },
+
     /// [`crate::generate::LoadedModel`]'s decode loop asked
     /// [`omega::backend`] to plan or execute a forward step and the backend
     /// itself refused -- an unrecognized/uncompiled backend name, or a
@@ -362,7 +376,7 @@ pub enum InteropError {
     /// none -- would mean `crate::generate::build_single_range_program`'s
     /// own `kv_cache.{layer}.*` naming has drifted out of sync with
     /// [`proxima_tensor::spec::gqa_single_range_cached_forward_program`]'s.
-    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    #[cfg(feature = "std")]
     #[error("single-range program has no input node named {0:?}")]
     UnboundInputName(String),
 

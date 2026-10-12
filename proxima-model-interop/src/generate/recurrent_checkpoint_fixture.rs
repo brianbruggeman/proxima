@@ -7,24 +7,37 @@ use alloc::vec::Vec;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_tensor::test_support::Lcg;
 
-use super::chunked_prefill_tests::{encode, key, spec, tokens};
+use super::chunked_prefill_tests::{TensorSpec, encode_with, key, spec, tokens};
 
-const EMBEDDING: u64 = 8;
-const FEED_FORWARD: u64 = 16;
+const EMBEDDING: u64 = 64;
+const FEED_FORWARD: u64 = 32;
 pub(super) const VOCAB: u64 = 257;
-const HEAD_DIM: u64 = 8;
-const QUERY_HEADS: u64 = 2;
-const INNER: u64 = 4;
+pub(super) const HEAD_DIM: u64 = 16;
+pub(super) const QUERY_HEADS: u64 = 2;
+const INNER: u64 = 96;
 const STATE: u64 = 2;
 const RANK: u64 = 2;
 const CONVOLUTION: u64 = 3;
 const EXPERTS: u64 = 2;
+pub(super) const LAYERS: u64 = 3;
 
 pub(super) fn recurrent_checkpoint(routed: bool) -> Vec<u8> {
     recurrent_checkpoint_with_eos(routed, None)
 }
 
 pub(super) fn recurrent_checkpoint_with_eos(routed: bool, eos: Option<u32>) -> Vec<u8> {
+    recurrent_checkpoint_shaped(routed, eos, 1, CONVOLUTION, false, (QUERY_HEADS, 1))
+}
+
+pub(super) fn recurrent_checkpoint_shaped(
+    routed: bool,
+    eos: Option<u32>,
+    key_heads: u64,
+    convolution: u64,
+    quantized: bool,
+    attention_heads: (u64, u64),
+) -> Vec<u8> {
+    let (query_heads, kv_heads) = attention_heads;
     let family = if routed { "qwen35moe" } else { "qwen35" };
     let mut random = Lcg(0x6a09_e667_f3bc_c909);
     let mut tensors = alloc::vec![
@@ -38,7 +51,7 @@ pub(super) fn recurrent_checkpoint_with_eos(routed: bool, eos: Option<u32>) -> V
         spec("output_norm.weight", &[EMBEDDING], 0.1, 1.0, &mut random),
         spec("output.weight", &[EMBEDDING, VOCAB], 0.25, 0.0, &mut random),
     ];
-    for layer in 0..2 {
+    for layer in 0..LAYERS {
         let name = |suffix: &str| alloc::format!("blk.{layer}.{suffix}");
         tensors.extend([
             spec(
@@ -56,11 +69,11 @@ pub(super) fn recurrent_checkpoint_with_eos(routed: bool, eos: Option<u32>) -> V
                 &mut random,
             ),
         ]);
-        if layer == 0 {
+        if layer % 2 == 0 {
             tensors.extend([
                 spec(
                     &name("attn_qkv.weight"),
-                    &[EMBEDDING, 2 * STATE + INNER],
+                    &[EMBEDDING, 2 * STATE * key_heads + INNER],
                     0.25,
                     0.0,
                     &mut random,
@@ -74,7 +87,7 @@ pub(super) fn recurrent_checkpoint_with_eos(routed: bool, eos: Option<u32>) -> V
                 ),
                 spec(
                     &name("ssm_conv1d.weight"),
-                    &[CONVOLUTION, 2 * STATE + INNER],
+                    &[convolution, 2 * STATE * key_heads + INNER],
                     0.25,
                     0.0,
                     &mut random,
@@ -114,28 +127,28 @@ pub(super) fn recurrent_checkpoint_with_eos(routed: bool, eos: Option<u32>) -> V
             tensors.extend([
                 spec(
                     &name("attn_q.weight"),
-                    &[EMBEDDING, QUERY_HEADS * HEAD_DIM * 2],
+                    &[EMBEDDING, query_heads * HEAD_DIM * 2],
                     0.25,
                     0.0,
                     &mut random,
                 ),
                 spec(
                     &name("attn_k.weight"),
-                    &[EMBEDDING, HEAD_DIM],
+                    &[EMBEDDING, kv_heads * HEAD_DIM],
                     0.25,
                     0.0,
                     &mut random,
                 ),
                 spec(
                     &name("attn_v.weight"),
-                    &[EMBEDDING, HEAD_DIM],
+                    &[EMBEDDING, kv_heads * HEAD_DIM],
                     0.25,
                     0.0,
                     &mut random,
                 ),
                 spec(
                     &name("attn_output.weight"),
-                    &[QUERY_HEADS * HEAD_DIM, EMBEDDING],
+                    &[query_heads * HEAD_DIM, EMBEDDING],
                     0.25,
                     0.0,
                     &mut random,
@@ -262,17 +275,17 @@ pub(super) fn recurrent_checkpoint_with_eos(routed: bool, eos: Option<u32>) -> V
     for (suffix, value) in [
         ("embedding_length", EMBEDDING),
         ("feed_forward_length", FEED_FORWARD),
-        ("block_count", 2),
+        ("block_count", LAYERS),
         ("context_length", 32),
         ("full_attention_interval", 2),
-        ("attention.head_count", QUERY_HEADS),
-        ("attention.head_count_kv", 1),
+        ("attention.head_count", query_heads),
+        ("attention.head_count_kv", kv_heads),
         ("attention.key_length", HEAD_DIM),
         ("attention.value_length", HEAD_DIM),
-        ("rope.dimension_count", 4),
-        ("ssm.conv_kernel", CONVOLUTION),
+        ("rope.dimension_count", HEAD_DIM / 2),
+        ("ssm.conv_kernel", convolution),
         ("ssm.state_size", STATE),
-        ("ssm.group_count", 1),
+        ("ssm.group_count", key_heads),
         ("ssm.time_step_rank", RANK),
         ("ssm.inner_size", INNER),
         ("expert_count", EXPERTS),
@@ -285,5 +298,14 @@ pub(super) fn recurrent_checkpoint_with_eos(routed: bool, eos: Option<u32>) -> V
             MetadataValue::U32(value as u32),
         ));
     }
-    encode(metadata, &tensors)
+    encode_with(metadata, &tensors, |tensor| {
+        quantized && holds_q8_0_blocks(tensor)
+    })
+}
+
+fn holds_q8_0_blocks(tensor: &TensorSpec) -> bool {
+    let matrix = tensor.name.ends_with(".weight")
+        && !tensor.name.contains("norm")
+        && !tensor.name.contains("conv1d");
+    matrix && tensor.dims.len() > 1 && tensor.dims[0].is_multiple_of(32)
 }

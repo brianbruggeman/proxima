@@ -4,6 +4,18 @@ use proxima_core::{ServingFsmError, ServingState};
 
 use super::drafter::{DrafterSet, draft_limit_for_step};
 use super::*;
+
+/// A verify step's evaluation kept past its readout: the nodes evaluated, how
+/// many positions the program ran, how many the caches advanced by, and per
+/// recurrent layer its index, `qkv_mixed` root, per-row state roots and the
+/// convolution history from before the step.
+type RetainedVerify = (
+    Evaluated,
+    usize,
+    usize,
+    Vec<(usize, NodeId, Vec<NodeId>, Vec<f32>)>,
+);
+
 /// The request-level `draft_n`/`draft_n_accepted` event: llama-server's own
 /// per-request field names (`tools/server/server-common.cpp:96-101`'s
 /// `if (n_draft_tokens > 0) { base["draft_n"] = ...; }`) plus each
@@ -3720,9 +3732,17 @@ impl<'file> LoadedModel<'file> {
         // A ring cache carried in from a call that ran without speculation
         // has no slack to rewind into ([`rings_cover_speculation`]), so
         // speculation stays off for that call rather than rewinding inexactly.
+        // A recurrent or dense-attention state placed on the device between
+        // steps has no host copy to resume a partly accepted draft from.
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let recurrent_state_is_placed = ssm_state_buffers.iter().any(Option::is_some)
+            || dense_attention_buffers.iter().any(Option::is_some);
+        #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+        let recurrent_state_is_placed = false;
         let speculative_enabled =
             (!drafter_set.is_empty() || model_proposer.is_some() || forced_draft_width.is_some())
-                && rings_cover_speculation(&layer_caches, draft_limit);
+                && rings_cover_speculation(&layer_caches, draft_limit)
+                && !(self.recurrent_speculative_verify.is_some() && recurrent_state_is_placed);
         if speculative_enabled && serving_config.kv_cache_key_quant == GgmlType::F16 {
             return Err(InteropError::UnsupportedServingConfig(String::from(
                 "kv_cache_key_quant=f16 with speculative decoding: a verify step attends several \
@@ -3738,6 +3758,10 @@ only the single-row decode kernel reads the half-width device cache",
         // allocation across the whole decode, per each drafter's own doc on
         // the reuse contract.
         let mut speculative_draft: Vec<u32> = Vec::new();
+        let mut recurrent_verify_programs: BTreeMap<usize, ForwardProgram> = BTreeMap::new();
+        // the last verify step's evaluation, kept by ownership so a stop inside
+        // its accepted span can resume each recurrent layer from an earlier row
+        let mut retained_verify: Option<RetainedVerify> = None;
         let mut validated_programs: BTreeSet<usize> = BTreeSet::new();
         // the two-layer cache checksum walks whole caches every step; only the diag knob pays for it
         #[cfg(feature = "instrument")]
@@ -3872,7 +3896,8 @@ only the single-row decode kernel reads the half-width device cache",
                 if let Some(sampled) = decoding_from
                     && speculative_enabled
                     && cached_len > 0
-                    && self.speculative_verify_program.is_some()
+                    && (self.speculative_verify_program.is_some()
+                        || self.recurrent_speculative_verify.is_some())
                 {
                     // `forced_draft_width` (this function's own doc)
                     // bypasses every real drafter: `speculative_bench`'s
@@ -3920,6 +3945,24 @@ only the single-row decode kernel reads the half-width device cache",
                     }
                     _ => Vec::new(),
                 };
+                if speculative_step
+                    && let Some(decode_descriptor) = self.recurrent_speculative_verify.as_ref()
+                    && let alloc::collections::btree_map::Entry::Vacant(entry) =
+                        recurrent_verify_programs.entry(speculative_ids.len())
+                {
+                    let verify = decode_descriptor
+                        .verify_at_width(speculative_ids.len() as u32)
+                        .ok_or_else(|| {
+                            InteropError::UnsupportedServingConfig(alloc::format!(
+                                "the recurrent descriptor stopped arming verify at width {}",
+                                speculative_ids.len()
+                            ))
+                        })?;
+                    entry.insert(build_forward(&verify)?);
+                }
+                let recurrent_verify = recurrent_verify_programs
+                    .get(&speculative_ids.len())
+                    .filter(|_| speculative_step);
                 if speculative_step {
                     state = state.enter_verify(speculative_draft.clone())?;
                 }
@@ -4030,7 +4073,9 @@ only the single-row decode kernel reads the half-width device cache",
                     // (every new position's own row, not just the last).
                     #[allow(clippy::expect_used)]
                     let (active_program, active_layer_roots, active_single_position_step) =
-                        if speculative_step {
+                        if let Some(forward) = recurrent_verify {
+                            (&forward.program, &forward.layer_roots, false)
+                        } else if speculative_step {
                             let (program, _logits_root, layer_roots) = self
                                 .speculative_verify_program
                                 .as_ref()
@@ -4052,7 +4097,9 @@ only the single-row decode kernel reads the half-width device cache",
                             (&self.program, &self.layer_roots, self.single_position_step)
                         };
                     #[allow(clippy::expect_used)]
-                    let active_logits_root = if speculative_step {
+                    let active_logits_root = if let Some(forward) = recurrent_verify {
+                        forward.logits
+                    } else if speculative_step {
                         self.speculative_verify_program
                             .as_ref()
                             .expect("speculative_step only set true when this is Some")
@@ -4522,8 +4569,17 @@ did not hold every cached position)",
                             LayerCacheRoots::Ssm {
                                 qkv_mixed,
                                 state_out,
+                                per_position_state_out,
                             } => {
                                 roots.push(*qkv_mixed);
+                                if speculative_step {
+                                    roots.extend(
+                                        per_position_state_out
+                                            .iter()
+                                            .filter(|node| *node != state_out)
+                                            .copied(),
+                                    );
+                                }
                                 #[cfg(all(
                                     feature = "metal-output-placement",
                                     target_os = "macos"
@@ -4837,7 +4893,8 @@ did not hold every cached position)",
                         serving_config.moe_pre_gather,
                         self.ffn_routing == FfnRouting::Routed,
                     ) && !monolithic_high_mmap_requested
-                        && !one_evaluation_prefill;
+                        && !one_evaluation_prefill
+                        && recurrent_verify.is_none();
                     #[cfg(feature = "metal")]
                     let monolithic_all_low = moe_monolithic_all_low_enabled(
                         pre_gather,
@@ -4863,6 +4920,23 @@ did not hold every cached position)",
                     )> = Vec::new();
                     let expert_sources =
                         expert_slab_guard.sources_for_step(&mut expert_entries_scratch)?;
+                    // the slab keys its sources by the decode program's nodes; a
+                    // verify program numbers the same weight leaves differently
+                    let expert_sources = if recurrent_verify.is_some() {
+                        expert_sources
+                            .into_iter()
+                            .map(|(node, source)| {
+                                let name = self
+                                    .program
+                                    .get(node.0 as usize)
+                                    .and_then(Op::name)
+                                    .ok_or(InteropError::MissingEvaluatedNode { node })?;
+                                Ok((find_input_node(active_program, name)?, source))
+                            })
+                            .collect::<Result<BTreeMap<_, _>, InteropError>>()?
+                    } else {
+                        expert_sources
+                    };
                     #[cfg(feature = "metal")]
                     let mut all_low_expert_scratch = Vec::new();
                     #[cfg(feature = "metal")]
@@ -5917,9 +5991,15 @@ did not hold every cached position)",
                                 LayerCacheRoots::Ssm {
                                     qkv_mixed,
                                     state_out,
+                                    ..
                                 },
                                 LayerCacheState::Ssm(cache),
                             ) => {
+                                // a verify step advances the recurrent state only
+                                // once the accepted row is known, from its readout
+                                if speculative_step {
+                                    continue;
+                                }
                                 let (qkv_mixed_data, _) = evaluated.get(*qkv_mixed).ok_or(
                                     InteropError::MissingEvaluatedNode { node: *qkv_mixed },
                                 )?;
@@ -6188,6 +6268,80 @@ did not hold every cached position)",
                             row_caches,
                         )?;
                         speculative_stats.record_state(&settled);
+                        // A recurrent target's caches advanced by exactly the
+                        // forwarded rows (`emitted.len()`: the sampled token and
+                        // every accepted draft). A dense-attention layer keeps
+                        // the rows its append wrote up to there; a recurrent
+                        // layer, left untouched until now, takes that many
+                        // `qkv_mixed` rows and the state its program kept after
+                        // the last of them.
+                        if recurrent_verify.is_some() {
+                            let keep_positions = cached_len_before_step + emitted.len();
+                            let mut resumes = Vec::new();
+                            for (layer, widths) in layer_row_widths.iter().enumerate() {
+                                match (widths, &mut layer_caches[layer], &active_layer_roots[layer])
+                                {
+                                    (
+                                        LayerPadRowWidths::DenseAttention {
+                                            even_odd_row,
+                                            pass_row,
+                                            v_row,
+                                        },
+                                        LayerCacheState::DenseAttention(cache),
+                                        _,
+                                    ) => {
+                                        cache.k_first.truncate(keep_positions * even_odd_row);
+                                        cache.k_second.truncate(keep_positions * even_odd_row);
+                                        cache.k_pass.truncate(keep_positions * pass_row);
+                                        cache.v.truncate(keep_positions * v_row);
+                                    }
+                                    (
+                                        LayerPadRowWidths::Ssm {
+                                            conv_history_len, ..
+                                        },
+                                        LayerCacheState::Ssm(cache),
+                                        LayerCacheRoots::Ssm {
+                                            qkv_mixed,
+                                            per_position_state_out,
+                                            ..
+                                        },
+                                    ) => {
+                                        let (qkv_data, _) = evaluated.get(*qkv_mixed).ok_or(
+                                            InteropError::MissingEvaluatedNode { node: *qkv_mixed },
+                                        )?;
+                                        if per_position_state_out.len() != new_count
+                                            || !qkv_data.len().is_multiple_of(new_count)
+                                        {
+                                            return Err(InteropError::SpeculativeStateShape {
+                                                layer,
+                                                positions: new_count,
+                                                state_roots: per_position_state_out.len(),
+                                                qkv_elements: qkv_data.len(),
+                                            });
+                                        }
+                                        let state_root = per_position_state_out[emitted.len() - 1];
+                                        let (state_data, _) = evaluated.get(state_root).ok_or(
+                                            InteropError::MissingEvaluatedNode { node: state_root },
+                                        )?;
+                                        resumes.push((
+                                            layer,
+                                            *qkv_mixed,
+                                            per_position_state_out.clone(),
+                                            cache.conv_history.clone(),
+                                        ));
+                                        let retained_elements =
+                                            emitted.len() * (qkv_data.len() / new_count);
+                                        cache.advance(
+                                            &qkv_data[..retained_elements],
+                                            state_data,
+                                            *conv_history_len,
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            retained_verify = Some((evaluated, emitted.len(), new_count, resumes));
+                        }
                         // The append loop above wrote `new_count` positions'
                         // worth of K/V for every layer; a rollback keeps only
                         // the rows its snapshot names (`LayerCache::truncate`'s
@@ -6706,15 +6860,54 @@ did not hold every cached position)",
         let cached_len = settled_len - undelivered;
         if undelivered > 0 {
             for (widths, state) in layer_row_widths.iter().zip(&mut layer_caches) {
-                if let (
-                    LayerPadRowWidths::Attention {
-                        even_odd_row,
-                        v_row,
-                    },
-                    LayerCacheState::Attention(cache),
-                ) = (widths, state)
-                {
-                    cache.try_truncate(cached_len, *even_odd_row, *v_row)?;
+                match (widths, state) {
+                    (
+                        LayerPadRowWidths::Attention {
+                            even_odd_row,
+                            v_row,
+                        },
+                        LayerCacheState::Attention(cache),
+                    ) => cache.try_truncate(cached_len, *even_odd_row, *v_row)?,
+                    (
+                        LayerPadRowWidths::DenseAttention {
+                            even_odd_row,
+                            pass_row,
+                            v_row,
+                        },
+                        LayerCacheState::DenseAttention(cache),
+                    ) => {
+                        cache.k_first.truncate(cached_len * even_odd_row);
+                        cache.k_second.truncate(cached_len * even_odd_row);
+                        cache.k_pass.truncate(cached_len * pass_row);
+                        cache.v.truncate(cached_len * v_row);
+                    }
+                    _ => {}
+                }
+            }
+            if let Some((evaluated, forwarded, positions, resumes)) = retained_verify.take() {
+                let kept = forwarded - undelivered;
+                for (layer, qkv_root, state_roots, history) in resumes {
+                    if let (
+                        LayerPadRowWidths::Ssm {
+                            conv_history_len, ..
+                        },
+                        LayerCacheState::Ssm(cache),
+                    ) = (&layer_row_widths[layer], &mut layer_caches[layer])
+                    {
+                        let state_root = state_roots[kept - 1];
+                        let (state_data, _) = evaluated
+                            .get(state_root)
+                            .ok_or(InteropError::MissingEvaluatedNode { node: state_root })?;
+                        let (qkv_data, _) = evaluated
+                            .get(qkv_root)
+                            .ok_or(InteropError::MissingEvaluatedNode { node: qkv_root })?;
+                        cache.conv_history = history;
+                        cache.advance(
+                            &qkv_data[..kept * (qkv_data.len() / positions)],
+                            state_data,
+                            *conv_history_len,
+                        );
+                    }
                 }
             }
         }

@@ -137,14 +137,14 @@ pub(super) fn hybrid_dense_forward(
     let ssm_group = ssm_dt_rank / ssm_n_group;
     let ssm_key_dim = ssm_d_state * ssm_n_group;
 
+    let x_extent = match descriptor.prefill_width {
+        Some(width) => Extent::Static(width),
+        None => Extent::Symbolic(0),
+    };
+
     let mut program = Vec::new();
 
-    let ids = input_leaf(
-        &mut program,
-        DType::Int32,
-        alloc::vec![Extent::Symbolic(0)],
-        "ids",
-    );
+    let ids = input_leaf(&mut program, DType::Int32, alloc::vec![x_extent], "ids");
     let table = input_leaf(
         &mut program,
         DType::Float32,
@@ -154,7 +154,7 @@ pub(super) fn hybrid_dense_forward(
     let mut x = embedding_lookup(&mut program, table, ids);
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
-    let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+    let eps = input_leaf(&mut program, DType::Float32, alloc::vec![x_extent], "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let one = ones;
     // `head_dim` here is `rope.dimension_count` -- this checkpoint's
@@ -171,13 +171,13 @@ pub(super) fn hybrid_dense_forward(
     let cos_new = input_leaf(
         &mut program,
         DType::Float32,
-        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
+        alloc::vec![x_extent, Extent::Static(pairs)],
         "rope_cos",
     );
     let sin_new = input_leaf(
         &mut program,
         DType::Float32,
-        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
+        alloc::vec![x_extent, Extent::Static(pairs)],
         "rope_sin",
     );
     let group_ones = op::append(
@@ -560,7 +560,7 @@ pub(super) fn hybrid_dense_forward(
                 &alloc::format!("ssm_cache.{layer}.state"),
             );
 
-            let (mixer_out, qkv_mixed, state_out) = append_delta_net_mixer(
+            let (mixer_out, taps) = append_delta_net_mixer_with_taps_and_layout(
                 &mut program,
                 x,
                 inv_dim,
@@ -587,6 +587,8 @@ pub(super) fn hybrid_dense_forward(
                 ssm_group,
                 ssm_d_conv,
                 GdnOutputGate::Silu,
+                descriptor.v_head_reordered,
+                descriptor.prefill_width,
             )?;
 
             // Unlike `append_gqa_cached_layer` (bundles FFN internally),
@@ -677,8 +679,9 @@ pub(super) fn hybrid_dense_forward(
             (
                 x_after_ffn,
                 LayerCacheRoots::Ssm {
-                    qkv_mixed,
-                    state_out,
+                    qkv_mixed: taps.qkv_mixed,
+                    state_out: taps.state_out,
+                    per_position_state_out: taps.per_position_state_out,
                 },
             )
         };
@@ -1526,6 +1529,7 @@ pub(super) fn hybrid_routed_forward(
                 layer_roots.push(LayerCacheRoots::Ssm {
                     qkv_mixed: taps.qkv_mixed,
                     state_out: taps.state_out,
+                    per_position_state_out: taps.per_position_state_out.clone(),
                 });
                 let ssm_out_result = taps.ssm_out_result;
                 (mixer_out, Some(taps), None, ssm_out_result)
