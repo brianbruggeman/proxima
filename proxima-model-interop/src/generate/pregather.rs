@@ -2974,6 +2974,8 @@ mod gemma4_single_range_exclusion_tests;
 pub(crate) enum LogitsSink<'sink> {
     Discard,
     Collect(&'sink mut Vec<Vec<f32>>),
+    /// the newest row only: a draft model reads one row of logits per evaluation.
+    Last(&'sink mut Vec<f32>),
     /// `real_openchat_file::decode_text_is_deterministic_across_repeated_runs`'s
     /// own sink: that test is `#[cfg(feature = "metal")]`, so this variant
     /// carries the same gate (plus `test`) rather than sitting dead in a

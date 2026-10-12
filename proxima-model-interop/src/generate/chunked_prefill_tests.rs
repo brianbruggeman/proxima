@@ -246,6 +246,14 @@ pub(super) fn gemma4_checkpoint() -> Vec<u8> {
 }
 
 pub(super) fn dense_checkpoint() -> Vec<u8> {
+    dense_checkpoint_with_experts(false)
+}
+
+pub(super) fn dense_moe_checkpoint() -> Vec<u8> {
+    dense_checkpoint_with_experts(true)
+}
+
+fn dense_checkpoint_with_experts(routed: bool) -> Vec<u8> {
     let mut rng = Lcg(0x2545_f491_4f6c_dd1d);
     let projection = EMBEDDING;
     let mut specs = alloc::vec![
@@ -286,30 +294,65 @@ pub(super) fn dense_checkpoint() -> Vec<u8> {
                 0.0,
                 &mut rng,
             ),
-            spec(
-                &name("ffn_gate.weight"),
-                &[EMBEDDING, FEED_FORWARD],
-                0.25,
-                0.0,
-                &mut rng,
-            ),
-            spec(
-                &name("ffn_up.weight"),
-                &[EMBEDDING, FEED_FORWARD],
-                0.25,
-                0.0,
-                &mut rng,
-            ),
-            spec(
-                &name("ffn_down.weight"),
-                &[FEED_FORWARD, EMBEDDING],
-                0.25,
-                0.0,
-                &mut rng,
-            ),
         ]);
+        if routed {
+            specs.extend([
+                spec(
+                    &name("ffn_gate_inp.weight"),
+                    &[EMBEDDING, 2],
+                    0.25,
+                    0.0,
+                    &mut rng,
+                ),
+                spec(
+                    &name("ffn_gate_exps.weight"),
+                    &[EMBEDDING, FEED_FORWARD, 2],
+                    0.25,
+                    0.0,
+                    &mut rng,
+                ),
+                spec(
+                    &name("ffn_up_exps.weight"),
+                    &[EMBEDDING, FEED_FORWARD, 2],
+                    0.25,
+                    0.0,
+                    &mut rng,
+                ),
+                spec(
+                    &name("ffn_down_exps.weight"),
+                    &[FEED_FORWARD, EMBEDDING, 2],
+                    0.25,
+                    0.0,
+                    &mut rng,
+                ),
+            ]);
+        } else {
+            specs.extend([
+                spec(
+                    &name("ffn_gate.weight"),
+                    &[EMBEDDING, FEED_FORWARD],
+                    0.25,
+                    0.0,
+                    &mut rng,
+                ),
+                spec(
+                    &name("ffn_up.weight"),
+                    &[EMBEDDING, FEED_FORWARD],
+                    0.25,
+                    0.0,
+                    &mut rng,
+                ),
+                spec(
+                    &name("ffn_down.weight"),
+                    &[FEED_FORWARD, EMBEDDING],
+                    0.25,
+                    0.0,
+                    &mut rng,
+                ),
+            ]);
+        }
     }
-    let metadata = alloc::vec![
+    let mut metadata = alloc::vec![
         key(
             "general.architecture",
             MetadataValue::String("llama".to_string())
@@ -335,6 +378,12 @@ pub(super) fn dense_checkpoint() -> Vec<u8> {
             MetadataValue::Array(MetadataArray::String(Vec::new()))
         ),
     ];
+    if routed {
+        metadata.extend([
+            key("llama.expert_count", MetadataValue::U32(2)),
+            key("llama.expert_used_count", MetadataValue::U32(1)),
+        ]);
+    }
     encode(metadata, &specs)
 }
 
