@@ -21918,7 +21918,7 @@ mod recurrent_shared {
 
         assert_eq!(restored, descriptor);
         assert!(written.contains("iterations = 4"), "{written}");
-        assert!(written.contains("mode = \"AdaptiveLogits\""), "{written}");
+        assert!(written.contains("mode = \"adaptive_logits\""), "{written}");
     }
 
     #[test]

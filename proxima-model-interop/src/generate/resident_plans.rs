@@ -122,6 +122,8 @@ impl PlanIdentity {
             // bounds admission and the memory fit only
             context_length: _,
             rope_scaling: _,
+            // graph-bound at load and admitted per call: one model, one identity
+            recurrent: _,
             parallel_sequences: _,
             kv_cache_key_quant,
             // equal to the key type for every admitted config

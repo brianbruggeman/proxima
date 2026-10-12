@@ -62,6 +62,7 @@ use proxima_gguf::types::GgmlType;
 use proxima_tensor::NumericPolicy;
 
 use crate::error::InteropError;
+use crate::recurrent_config::RecurrentConfig;
 use crate::rope_scaling::RopeScaling;
 use crate::serving_grammar::{AssembleStep, ReadSpec};
 
@@ -786,6 +787,10 @@ pub struct ServingConfig<'model> {
     /// `Some` (e.g. `Some(RopeScaling::yarn(4.0, 32_768))` to run qwen3-8b at
     /// 131072); `None` keeps whatever the checkpoint declares.
     pub rope_scaling: Option<RopeScaling>,
+    /// Graph-bound recurrence and LoopCD policy. A model resolves its own at
+    /// load; a call whose policy names a different graph is refused before any
+    /// plan or cache work ([`RecurrentConfig::matches_model`]).
+    pub recurrent: RecurrentConfig,
     /// Optional configured Omega planner/executor policy for GPU serving.
     #[cfg(feature = "metal")]
     pub omega_runtime: Option<&'model RuntimeConfig>,
@@ -1231,6 +1236,13 @@ impl<'model> ServingConfig<'model> {
         self.omega_runtime = Some(omega_runtime);
         self
     }
+
+    /// Selects the graph-bound recurrent policy this call runs under.
+    #[must_use]
+    pub const fn with_recurrent(mut self, recurrent: RecurrentConfig) -> Self {
+        self.recurrent = recurrent;
+        self
+    }
 }
 
 impl Default for ServingConfig<'static> {
@@ -1255,6 +1267,7 @@ impl Default for ServingConfig<'static> {
             model_path: DEFAULT_MODEL_PATH,
             context_length: ContextLength::Native,
             rope_scaling: None,
+            recurrent: RecurrentConfig::neutral(),
             #[cfg(feature = "metal")]
             omega_runtime: None,
             parallel_sequences: 1,
@@ -1555,7 +1568,10 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
         .speculative
         .speculative_types
         .contains(SpeculativeType::DraftSimple)
-        && config.speculative.draft_model_path.is_none_or(str::is_empty)
+        && config
+            .speculative
+            .draft_model_path
+            .is_none_or(str::is_empty)
     {
         return Err(InteropError::UnsupportedServingConfig(
             "speculative.speculative_types=draft-simple requires speculative.draft_model_path"
@@ -1766,6 +1782,7 @@ mod tests {
             model_path: DEFAULT_MODEL_PATH,
             context_length: ContextLength::Native,
             rope_scaling: None,
+            recurrent: RecurrentConfig::neutral(),
             #[cfg(feature = "metal")]
             omega_runtime: None,
             parallel_sequences: 1,
@@ -1953,6 +1970,7 @@ mod tests {
             model_path: DEFAULT_MODEL_PATH,
             context_length: ContextLength::Native,
             rope_scaling: None,
+            recurrent: RecurrentConfig::neutral(),
             #[cfg(feature = "metal")]
             omega_runtime: None,
             parallel_sequences: 1,
@@ -2085,6 +2103,7 @@ mod tests {
             model_path: DEFAULT_MODEL_PATH,
             context_length: ContextLength::Native,
             rope_scaling: None,
+            recurrent: RecurrentConfig::neutral(),
             #[cfg(feature = "metal")]
             omega_runtime: None,
             parallel_sequences: 1,
@@ -2190,6 +2209,7 @@ mod tests {
             model_path: DEFAULT_MODEL_PATH,
             context_length: ContextLength::Native,
             rope_scaling: None,
+            recurrent: RecurrentConfig::neutral(),
             #[cfg(feature = "metal")]
             omega_runtime: None,
             parallel_sequences: 1,
@@ -2285,6 +2305,7 @@ mod tests {
             model_path: DEFAULT_MODEL_PATH,
             context_length: ContextLength::Native,
             rope_scaling: None,
+            recurrent: RecurrentConfig::neutral(),
             #[cfg(feature = "metal")]
             omega_runtime: None,
             parallel_sequences: 1,

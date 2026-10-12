@@ -11,6 +11,21 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum InteropError {
+    /// A recurrent graph declared a different number of cache-owning layers
+    /// from the resolved logical schedule.
+    #[error("recurrent graph produced {found} cache roots, expected {expected}")]
+    RecurrentCacheRootsCountMismatch { found: usize, expected: usize },
+
+    /// A recurrent model selection is internally inconsistent before graph
+    /// construction or serving admission.
+    #[error("invalid recurrent configuration: {reason}")]
+    InvalidRecurrentConfig { reason: &'static str },
+
+    /// A recurrent option reached a model that only runs the neutral,
+    /// ordinary forward.
+    #[error("model {family:?} does not support recurrent configuration")]
+    UnsupportedRecurrentConfig { family: String },
+
     /// `tensor`'s `GgmlType` has no safetensors dtype counterpart — either
     /// it's block-quantized (packs multiple elements per scale/bias, which
     /// a flat typed array can't express without dequantizing) or otherwise
@@ -299,6 +314,18 @@ pub enum InteropError {
     #[cfg(feature = "std")]
     #[error("evaluator output is missing node {node:?}")]
     MissingEvaluatedNode { node: proxima_tensor::op::NodeId },
+
+    #[cfg(feature = "std")]
+    #[error("a forward request must contain at least one token")]
+    EmptyForwardTokens,
+
+    #[cfg(feature = "std")]
+    #[error("forward token {token} at position {position} is outside vocabulary size {vocab}")]
+    InvalidForwardToken {
+        position: usize,
+        token: u32,
+        vocab: usize,
+    },
 
     /// [`crate::generate::LoadedModel`]'s greedy pick step ran against an
     /// empty logits slice.

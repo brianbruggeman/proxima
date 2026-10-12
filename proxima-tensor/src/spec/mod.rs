@@ -97,13 +97,13 @@ use hybrid_forward::{hybrid_dense_forward, hybrid_routed_forward};
 pub use primitives::*;
 #[cfg(feature = "config")]
 pub use program_spec::*;
-pub use scheduled_cached::*;
-pub use short_conv_delta_net::*;
-pub use single_range_moe_cached::*;
 use recurrent_readout::{
     append_adaptive_loopcd_strength, append_loopcd_contrast, append_loopcd_contrast_node,
     share_recurrent_weights,
 };
+pub use scheduled_cached::*;
+pub use short_conv_delta_net::*;
+pub use single_range_moe_cached::*;
 use two_block_attention::{
     append_cached_block_scores, append_local_block_and_combine, group_queries,
 };

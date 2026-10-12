@@ -1573,6 +1573,7 @@ impl LoadedModel<'_> {
         speculative_stats: Option<&mut SpeculativeDecodeStats>,
         forced_draft_width: Option<u16>,
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
+        self.admit_recurrent(serving_config)?;
         let pending = self.prewarm_gate.enter_request();
         let config = serving_config.prompt_cache;
         let cacheable = config.is_enabled()

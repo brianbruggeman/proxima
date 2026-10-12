@@ -30,6 +30,7 @@ use crate::bind_leaves::{bind_missing_leaves, bind_program_leaves};
 use crate::error::InteropError;
 use crate::hf_bind::{HfShard, bind_safetensors_shards};
 use crate::profiles::{binding_profile, family_profile};
+use crate::recurrent_config::RecurrentConfig;
 use crate::recurrent_routed_interval::MoeLayerDiagnostics;
 
 /// Names for every `Extent::Symbolic` slot the decode loop itself binds
@@ -181,6 +182,10 @@ pub struct BoundProgram<'file> {
     /// caller that contrasts or inspects completed passes asks for them as
     /// extra outputs.
     pub readouts: Option<RecurrentReadoutRoots>,
+    /// The recurrence and LoopCD policy this program was lowered under,
+    /// resolved: iterations are `Some` exactly when the descriptor recurs.
+    /// Neutral for an ordinary program. A serving call is admitted against it.
+    pub recurrent: RecurrentConfig,
 }
 
 /// [`crate::recurrent_interval::SsmShape`]'s own fixed sizes -- see that type's
@@ -346,6 +351,19 @@ fn bind_descriptor<'file>(
     Ok(bound_program(weights, architecture, forward, descriptor))
 }
 
+/// The policy `descriptor` lowers under, in the shape serving admission
+/// compares: neutral when the descriptor does not recur.
+fn resolved_recurrence(descriptor: &ModelDescriptor) -> RecurrentConfig {
+    RecurrentConfig {
+        iterations: descriptor
+            .recurrence
+            .map(|recurrence| recurrence.iterations),
+        mode: descriptor.loopcd.mode,
+        strength: descriptor.loopcd.strength,
+        reference_iteration: descriptor.loopcd.reference_iteration,
+    }
+}
+
 fn bound_program<'file>(
     weights: BoundWeights<'file>,
     architecture: ModelHparams,
@@ -354,7 +372,7 @@ fn bound_program<'file>(
 ) -> BoundProgram<'file> {
     BoundProgram {
         weights,
-        architecture,
+        architecture: architecture.logical(descriptor.recurrence),
         program: forward.program,
         logits_root: forward.logits,
         hidden_root: forward.hidden,
@@ -373,6 +391,7 @@ fn bound_program<'file>(
             .iter()
             .any(|layer| layer.kind == LayerKind::Gdn),
         readouts: forward.readouts,
+        recurrent: resolved_recurrence(descriptor),
     }
 }
 
@@ -581,7 +600,10 @@ impl<'file> BoundProgram<'file> {
             &mut self.weights,
         )?;
         Ok(Self {
-            architecture: self.architecture.reshaped_by(descriptor),
+            architecture: self
+                .architecture
+                .reshaped_by(descriptor)
+                .logical(descriptor.recurrence),
             program,
             logits_root: logits,
             hidden_root: self.hidden_root.and(hidden),
@@ -603,6 +625,7 @@ impl<'file> BoundProgram<'file> {
             },
             moe_layer_diagnostics: layer_diagnostics,
             readouts,
+            recurrent: resolved_recurrence(descriptor),
             ..self
         })
     }

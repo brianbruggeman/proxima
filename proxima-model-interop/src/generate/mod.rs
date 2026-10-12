@@ -194,6 +194,7 @@ use proxima_tensor::spec::{DuplicateHeadPosition, gqa_single_range_cached_forwar
 
 use crate::bind::{BoundWeights, Codec, ModelHparams, metadata_str};
 use crate::error::InteropError;
+use crate::recurrent_config::RecurrentConfig;
 use crate::hf_bind::{HfShard, bind_all_weights_from_safetensors};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use crate::lowering::KvCacheShape;
@@ -279,6 +280,8 @@ mod tests_all;
 mod thread_index_census_tests;
 #[cfg(test)]
 mod verify_bound_tests;
+#[cfg(test)]
+mod forward_from_ids_tests;
 mod warm_buffers;
 use decode::*;
 use draft_model::ModelProposer;
