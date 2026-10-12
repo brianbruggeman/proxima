@@ -16,7 +16,7 @@ commit, delete artifacts, change model weights, or run competing GPU jobs.
 - Performance oracle: llama.cpp Ouro revision
   `1550360e089185632c2036c908411b05fafa1119`, native harness
   `/private/tmp/proxima-ourollama-oracle-build/ouro_llama_oracle`.
-- Model: `/private/tmp/proxima-loopcd-models/ouro-1.4b`, revision
+- Model: `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/models/ouro-1.4b`, revision
   `574fa66cb8bf5abdc979642d01cf2b79b16bfab1`.
 - GGUF: `/private/tmp/ouro-llama-converted-v1/ouro-bf16.gguf`.
 - Before-change Proxima evidence:

@@ -306,9 +306,7 @@ impl<'checkpoint> Model<'checkpoint> {
         let roots = *loaded
             .recurrent_readout_roots()
             .ok_or_else(|| io::Error::other("recurrent readout roots absent"))?;
-        let logits_root = loaded
-            .logits_root()
-            .ok_or_else(|| io::Error::other("generation root absent"))?;
+        let logits_root = loaded.logits_root();
         let head_root = roots
             .terminal_logits
             .ok_or_else(|| io::Error::other("terminal head absent"))?;

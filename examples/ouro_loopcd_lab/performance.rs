@@ -128,9 +128,7 @@ pub(super) fn cached(arguments: &Arguments) -> io::Result<()> {
     {
         let prefix: Vec<u32> =
             serde_json::from_value(case["prefix_ids"].clone()).map_err(io::Error::other)?;
-        let root = loaded
-            .logits_root()
-            .ok_or_else(|| io::Error::other("cached generation root absent"))?;
+        let root = loaded.logits_root();
         let diagnostic = loaded
             .forward_node_values_from_ids(&prefix, &[root], &config)
             .map_err(io::Error::other)?;

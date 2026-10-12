@@ -28,7 +28,7 @@ use proxima_tensor::partition::partition_between_with_mapping_ancestor_closed;
 #[cfg(all(feature = "proxima-tensor", target_os = "macos"))]
 use proxima_tensor::shape;
 #[cfg(all(feature = "proxima-tensor", target_os = "macos"))]
-use proxima_tensor::spec::build_forward_with_readouts;
+use proxima_tensor::spec::build_forward;
 #[cfg(all(feature = "proxima-tensor", target_os = "macos"))]
 use proxima_tensor::{LoopCdMode, NodeId, Op};
 #[cfg(all(feature = "proxima-tensor", target_os = "macos"))]
@@ -541,11 +541,11 @@ mod diagnostic {
         descriptor.loopcd.mode = LoopCdMode::AdaptiveLogits;
         descriptor.loopcd.strength = MAX_STRENGTH;
         descriptor.loopcd.reference_iteration = 1;
-        let built = build_forward_with_readouts(&descriptor, true).map_err(io::Error::other)?;
+        let built = build_forward(&descriptor).map_err(io::Error::other)?;
         let mut zero_cap_descriptor = descriptor.clone();
         zero_cap_descriptor.loopcd.strength = 0.0;
         let zero_cap_built =
-            build_forward_with_readouts(&zero_cap_descriptor, true).map_err(io::Error::other)?;
+            build_forward(&zero_cap_descriptor).map_err(io::Error::other)?;
         let readouts = built
             .readouts
             .ok_or_else(|| invalid_data("adaptive graph has no readout roots"))?;
@@ -610,7 +610,7 @@ mod diagnostic {
             let prefix_length = case.prefix_ids.len() as u64;
             let symbols = [prefix_length, prefix_length, 0];
             let (segment, cuts, mapping) = partition_between_with_mapping_ancestor_closed(
-                &built.forward.0,
+                &built.program,
                 &symbols,
                 Some(terminal),
                 strength,
@@ -640,7 +640,7 @@ mod diagnostic {
             }
             let (zero_cap_segment, zero_cap_cuts, zero_cap_mapping) =
                 partition_between_with_mapping_ancestor_closed(
-                    &zero_cap_built.forward.0,
+                    &zero_cap_built.program,
                     &symbols,
                     Some(zero_cap_terminal_original),
                     zero_cap_strength_original,
@@ -708,10 +708,10 @@ mod diagnostic {
             let record = records
                 .last_mut()
                 .ok_or_else(|| invalid_data("case record was not appended"))?;
-            let cap_operation = &zero_cap_built.forward.0[zero_cap_strength_original.0 as usize];
+            let cap_operation = &zero_cap_built.program[zero_cap_strength_original.0 as usize];
             let cap_dependencies = cap_operation.dependencies();
             let cap_constant = cap_dependencies.iter().find_map(|node| {
-                match zero_cap_built.forward.0.get(node.0 as usize) {
+                match zero_cap_built.program.get(node.0 as usize) {
                     Some(Op::Constant { value, .. }) => Some((node, value)),
                     _ => None,
                 }
@@ -729,7 +729,7 @@ mod diagnostic {
                 "strength_node_original": zero_cap_strength_original.0,
                 "strength_operation": format!("{cap_operation:?}"),
                 "cap_constant_original_node": cap_node.0,
-                "cap_constant_operation": format!("{:?}", zero_cap_built.forward.0[cap_node.0 as usize]),
+                "cap_constant_operation": format!("{:?}", zero_cap_built.program[cap_node.0 as usize]),
                 "cpu_strength": one_value(&zero_cap_values[1])?,
             });
         }

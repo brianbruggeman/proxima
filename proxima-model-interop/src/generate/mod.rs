@@ -289,6 +289,8 @@ mod tests_all;
 mod thread_index_census_tests;
 #[cfg(test)]
 mod verify_bound_tests;
+#[cfg(test)]
+mod recurrent_hf_tests;
 mod warm_buffers;
 use decode::*;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]

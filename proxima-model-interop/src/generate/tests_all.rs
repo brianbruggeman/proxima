@@ -2620,14 +2620,18 @@ pub(super) mod memory_fit_gate_tests {
 
     fn model_with(dense_weight_bytes: u64) -> LoadedModel<'static> {
         LoadedModel {
-            weights: BoundWeights {
-                resident_bytes: 0,
-                owned: Vec::new(),
-                packed: Vec::new(),
-                packed_owned: Vec::new(),
-                expert_ranges: Vec::new(),
-                precision: &[],
-            },
+            weights: crate::generate::Arc::new(crate::generate::SharedWeights::new(
+                BoundWeights {
+                    resident_bytes: 0,
+                    owned: Vec::new(),
+                    packed: Vec::new(),
+                    packed_owned: Vec::new(),
+                    expert_ranges: Vec::new(),
+                    precision: &[],
+                },
+                &[],
+            )),
+            safetensors_descriptor: None,
             architecture: tiny_architecture(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             kv_cache_shape: KvCacheShape::Uniform,
