@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used)]
 use core::future::Future;
 use core::task::{Context, Poll, Waker};
 
