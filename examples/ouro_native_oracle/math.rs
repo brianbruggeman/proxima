@@ -100,6 +100,21 @@ pub fn linear(
             "linear input or physical out/in weight dimensions differ",
         ));
     }
+    let mut output = accelerated_product(input, weights, positions, input_width, output_width)?;
+    for value in &mut output {
+        *value = mode.round(*value)?;
+    }
+    Ok(output)
+}
+
+#[cfg(target_os = "macos")]
+fn accelerated_product(
+    input: &[f32],
+    weights: &[f32],
+    positions: usize,
+    input_width: usize,
+    output_width: usize,
+) -> io::Result<Vec<f32>> {
     let rows = i32::try_from(positions).map_err(io::Error::other)?;
     let columns = i32::try_from(output_width).map_err(io::Error::other)?;
     let reduction = i32::try_from(input_width).map_err(io::Error::other)?;
@@ -109,7 +124,6 @@ pub fn linear(
             .checked_mul(output_width)
             .ok_or_else(|| io::Error::other("output shape overflow"))?
     ];
-    #[cfg(target_os = "macos")]
     unsafe {
         // validated extents and a fresh output make these row-major buffers non-aliasing.
         cblas_sgemm(
@@ -129,15 +143,18 @@ pub fn linear(
             columns,
         );
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (rows, columns, reduction);
-        return Err(io::Error::other("oracle requires native macos Accelerate"));
-    }
-    for value in &mut output {
-        *value = mode.round(*value)?;
-    }
     Ok(output)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn accelerated_product(
+    _input: &[f32],
+    _weights: &[f32],
+    _positions: usize,
+    _input_width: usize,
+    _output_width: usize,
+) -> io::Result<Vec<f32>> {
+    Err(io::Error::other("oracle requires native macos Accelerate"))
 }
 
 pub fn norm(input: &[f32], scale: &[f32], epsilon: f32, mode: Mode) -> io::Result<Vec<f32>> {
