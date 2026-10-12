@@ -211,3 +211,51 @@ pub fn sentence_differences(actual: &[Vec<f32>], expected: &[Vec<f32>]) -> Resul
 pub fn norm(row: &[f32]) -> f32 {
     row.iter().map(|value| value * value).sum::<f32>().sqrt()
 }
+
+pub struct TimingPass {
+    pub cell: String,
+    pub phase: String,
+    pub load_before: f64,
+}
+
+pub struct Timing {
+    pub header: Value,
+    pub passes: Vec<TimingPass>,
+}
+
+pub fn read_timing() -> Result<Timing> {
+    let text = String::from_utf8(read_fixture("tract_timing.jsonl")?)?;
+    let mut lines = text.lines();
+    let header = moe_test_json::from_str(lines.next().context("timing record is empty")?)?;
+    let passes = lines.map(parse_pass).collect::<Result<_>>()?;
+    Ok(Timing { header, passes })
+}
+
+fn parse_pass(line: &str) -> Result<TimingPass> {
+    let value: Value = moe_test_json::from_str(line)?;
+    let text = |key: &str| {
+        value[key]
+            .as_str()
+            .map(str::to_owned)
+            .with_context(|| format!("pass has no {key}"))
+    };
+    Ok(TimingPass {
+        cell: text("cell")?,
+        phase: text("phase")?,
+        load_before: value["load_before"]
+            .as_f64()
+            .context("pass has no load_before")?,
+    })
+}
+
+pub fn passes_in(timing: &Timing, cell: &str, phase: &str) -> usize {
+    timing
+        .passes
+        .iter()
+        .filter(|pass| pass.cell == cell && pass.phase == phase)
+        .count()
+}
+
+pub fn all_started_at_or_below(passes: &[TimingPass], limit: f64) -> bool {
+    passes.iter().all(|pass| pass.load_before <= limit)
+}
