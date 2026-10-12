@@ -1,0 +1,913 @@
+//! GPU-vs-CPU parity gate for the PTX-native CUDA driver
+//! (`omega::cuda_driver`, reached through `omega::backend` exactly the way
+//! `wgpu_parity.rs` reaches wgpu), run through the SAME
+//! `plan_named`/`execute_plan_named` wrapper.
+//!
+//! Needs a real NVIDIA device and NVRTC on `LD_LIBRARY_PATH` -- see
+//! `omega::cuda_driver`'s module doc for both requirements. Every test here
+//! mirrors a `wgpu_parity.rs` case one-for-one so the two portable GPU
+//! drivers can never silently drift on what "parity" means.
+
+#![cfg(all(feature = "cpu", feature = "cuda-backend"))]
+// every expect below runs against data this test just built or a real
+// device call; a failure there IS the test failing, not a case to recover.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+mod support;
+use support::{as_named_blocks, real_forward_fixture};
+
+use omega::backend::{BackendError, Engine, GpuDriver, execute_plan_named, plan_named};
+use proxima_tensor::NumericPolicy;
+use proxima_tensor::test_support::Lcg;
+use proxima_tensor::{
+    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append,
+    map, projection,
+};
+
+const BATCH: u32 = 4;
+const IN_FEATURES: u32 = 8;
+const HIDDEN: u32 = 16;
+const OUT_FEATURES: u32 = 8;
+
+fn random_vec(seed: u64, count: usize) -> Vec<f32> {
+    let mut lcg = Lcg(seed);
+    (0..count).map(|_| lcg.next_unit()).collect()
+}
+
+/// `m`/`k`/`n` name the matmul shape for callers' readability; the
+/// projections below encode it structurally, so the function itself never
+/// reads them.
+fn append_matmul(
+    program: &mut Vec<Op>,
+    lhs: NodeId,
+    rhs: NodeId,
+    _m: u32,
+    _k: u32,
+    _n: u32,
+) -> NodeId {
+    let product = append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+            ],
+            name: None,
+        },
+    );
+    append(
+        program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some("matmul".into()),
+        }),
+    )
+}
+
+fn elementwise_tanh_program(extent: u32) -> Vec<Op> {
+    let mut program = Vec::new();
+    let source = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(extent)],
+            name: Some("x".into()),
+        },
+    );
+    append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Tanh,
+            operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
+            name: None,
+        },
+    );
+    program
+}
+
+#[test]
+fn elementwise_tanh_runs_on_cuda_at_cpu_parity() {
+    let program = elementwise_tanh_program(97);
+    let x = random_vec(5, 97);
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![("x", QuantizedBlock::Float32(&x))];
+
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::default())
+        .expect("omega::backend plans the elementwise chain on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named)
+        .expect("omega::backend runs the elementwise chain on cpu");
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the elementwise chain on cuda");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend runs the elementwise chain on a real cuda device");
+
+    let expected = cpu.root();
+    let actual = cuda.root();
+    assert_eq!(actual.len(), expected.len());
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(got.is_finite(), "cuda produced a non-finite value: {got}");
+        max_diff = max_diff.max((got - want).abs());
+    }
+    eprintln!("cuda elementwise tanh parity: max_diff={max_diff}");
+    assert!(
+        max_diff < 1e-5,
+        "cuda and cpu disagree on tanh: max_diff={max_diff}"
+    );
+}
+
+fn sum_reduce_program(rows: u32, cols: u32) -> Vec<Op> {
+    let mut program = Vec::new();
+    let source = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(rows), Extent::Static(cols)],
+            name: Some("x".into()),
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: source,
+            in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+            out_map: IndexMap::Affine(map::projection(2, &[0])),
+            keep: Keep::Reduce,
+            name: Some("row_sum".into()),
+        }),
+    );
+    program
+}
+
+#[test]
+fn reduce_add_runs_on_cuda_at_cpu_parity_via_the_cooperative_warp_shuffle_path() {
+    let (rows, cols) = (13usize, 200usize);
+    let program = sum_reduce_program(rows as u32, cols as u32);
+    let x = random_vec(7, rows * cols);
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![("x", QuantizedBlock::Float32(&x))];
+
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::default())
+        .expect("omega::backend plans the row sum on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named)
+        .expect("omega::backend runs the row sum on cpu");
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the row sum on cuda");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend runs the row sum on a real cuda device");
+
+    let expected = cpu.root();
+    let actual = cuda.root();
+    assert_eq!(actual.len(), rows);
+    assert_eq!(actual.len(), expected.len());
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(got.is_finite(), "cuda produced a non-finite value: {got}");
+        max_diff = max_diff.max((got - want).abs() / want.abs().max(1e-6));
+    }
+    eprintln!("cuda reduce parity: max_relative_diff={max_diff}");
+    assert!(
+        max_diff < 1e-4,
+        "cuda's warp-shuffle reduce disagrees with the cpu oracle: max_relative_diff={max_diff}"
+    );
+}
+
+fn cumsum_program(rows: u32, cols: u32) -> Vec<Op> {
+    let mut program = Vec::new();
+    let source = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(rows), Extent::Static(cols)],
+            name: Some("x".into()),
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: source,
+            in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+            out_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+            keep: Keep::Scan,
+            name: Some("cumsum".into()),
+        }),
+    );
+    program
+}
+
+#[test]
+fn scan_cumsum_runs_on_cuda_at_cpu_parity() {
+    let (rows, cols) = (5usize, 41usize);
+    let program = cumsum_program(rows as u32, cols as u32);
+    let x = random_vec(11, rows * cols);
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![("x", QuantizedBlock::Float32(&x))];
+
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::default())
+        .expect("omega::backend plans the cumsum on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named)
+        .expect("omega::backend runs the cumsum on cpu");
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the cumsum on cuda");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend runs the cumsum on a real cuda device");
+
+    let expected = cpu.root();
+    let actual = cuda.root();
+    assert_eq!(actual.len(), rows * cols);
+    assert_eq!(actual.len(), expected.len());
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(got.is_finite(), "cuda produced a non-finite value: {got}");
+        max_diff = max_diff.max((got - want).abs());
+    }
+    eprintln!("cuda scan parity: max_diff={max_diff}");
+    assert!(
+        max_diff < 1e-3,
+        "cuda's serial scan disagrees with the cpu oracle: max_diff={max_diff}"
+    );
+}
+
+/// `matmul(x, w1) -> erf -> matmul(_, w2) -> tanh -> cumsum(last axis)` --
+/// the same fixture `wgpu_parity.rs::two_layer_mlp_fixture` runs, exercising
+/// every kernel shape cuda.rs's v1 op set covers in one program.
+fn two_layer_mlp_fixture() -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let x = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(BATCH), Extent::Static(IN_FEATURES)],
+            name: Some("x".into()),
+        },
+    );
+    let w1 = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(IN_FEATURES), Extent::Static(HIDDEN)],
+            name: Some("w1".into()),
+        },
+    );
+    let hidden = append_matmul(&mut program, x, w1, BATCH, IN_FEATURES, HIDDEN);
+    let hidden_act = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Erf,
+            operands: vec![(hidden, IndexMap::Affine(map::projection(2, &[0, 1])))],
+            name: None,
+        },
+    );
+    let w2 = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(HIDDEN), Extent::Static(OUT_FEATURES)],
+            name: Some("w2".into()),
+        },
+    );
+    let output = append_matmul(&mut program, hidden_act, w2, BATCH, HIDDEN, OUT_FEATURES);
+    let output_act = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Tanh,
+            operands: vec![(output, IndexMap::Affine(map::projection(2, &[0, 1])))],
+            name: None,
+        },
+    );
+    let cumsum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: output_act,
+            in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+            out_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+            keep: Keep::Scan,
+            name: None,
+        }),
+    );
+    (program, cumsum)
+}
+
+#[test]
+fn the_two_layer_mlp_runs_on_cuda_at_cpu_parity() {
+    let (program, _root) = two_layer_mlp_fixture();
+
+    let x = random_vec(1, (BATCH * IN_FEATURES) as usize);
+    let w1 = random_vec(2, (IN_FEATURES * HIDDEN) as usize);
+    let w2 = random_vec(3, (HIDDEN * OUT_FEATURES) as usize);
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("x", QuantizedBlock::Float32(&x)),
+        ("w1", QuantizedBlock::Float32(&w1)),
+        ("w2", QuantizedBlock::Float32(&w2)),
+    ];
+
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::default())
+        .expect("omega::backend plans the mlp on cpu");
+    let cpu =
+        execute_plan_named(&mut cpu_plan, &named).expect("omega::backend runs the mlp on cpu");
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the mlp on cuda");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend runs the mlp on a real cuda device");
+
+    let expected = cpu.root();
+    let actual = cuda.root();
+    assert_eq!(
+        actual.len(),
+        (BATCH * OUT_FEATURES) as usize,
+        "degenerate gate: the cumsum output must be one row per batch element"
+    );
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(
+            got.is_finite(),
+            "cuda, via the wrapper, produced a non-finite value: {got}"
+        );
+        max_diff = max_diff.max((got - want).abs());
+    }
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude.max(f32::MIN_POSITIVE);
+    eprintln!(
+        "cuda mlp parity: max_diff={max_diff} max_magnitude={max_magnitude} relative={relative}"
+    );
+    assert!(
+        relative < 1e-4,
+        "omega::backend's cpu and cuda arms disagree on the mlp: relative={relative} max_diff={max_diff}"
+    );
+}
+
+/// `table[ids[s], d]` over iteration space `(s, d)` -- the same program shape
+/// `wgpu_parity.rs::embedding_lookup_program` runs against wgpu, now
+/// exercising `cuda.rs`'s gather bindings (`Indices`/`Fault`) through the
+/// PTX-native cuda driver.
+fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Op> {
+    use proxima_tensor::{AxisIndex, AxisTerm, IndexPattern};
+
+    let mut program = Vec::new();
+    let table = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(vocab), Extent::Static(dim)],
+            name: Some("table".into()),
+        },
+    );
+    let ids = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Int32,
+            shape: vec![Extent::Static(seq)],
+            name: Some("ids".into()),
+        },
+    );
+    let gathered_map = IndexMap::Computed {
+        indices: ids,
+        index_map: projection(2, &[0]),
+        base: IndexPattern {
+            iter_rank: 2,
+            axes: vec![
+                AxisIndex::default(),
+                AxisIndex {
+                    terms: vec![AxisTerm::projection(1)].into(),
+                    offset: 0,
+                    len: None,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: vec![(table, gathered_map)],
+            name: None,
+        },
+    );
+    program
+}
+
+#[test]
+fn embedding_lookup_runs_on_cuda_at_cpu_parity_for_integer_valued_inputs() {
+    let (vocab, dim, seq) = (256usize, 8usize, 4usize);
+    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
+    let table_data: Vec<f32> = (0..vocab * dim).map(|value| (value % 97) as f32).collect();
+    let ids_data = [3.0f32, 255.0, 12.0, 0.0];
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("table", QuantizedBlock::Float32(&table_data)),
+        ("ids", QuantizedBlock::Float32(&ids_data)),
+    ];
+
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::default())
+        .expect("omega::backend plans the gather on cpu");
+    let cpu =
+        execute_plan_named(&mut cpu_plan, &named).expect("omega::backend runs the gather on cpu");
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the gather on cuda");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend runs the gather on a real cuda device");
+
+    let expected = cpu.root();
+    let actual = cuda.root();
+    assert_eq!(actual.len(), expected.len());
+    let max_diff = actual
+        .iter()
+        .zip(expected.iter())
+        .map(|(&got, &want)| (got - want).abs())
+        .fold(0.0f32, f32::max);
+    eprintln!("cuda gather parity: max_diff={max_diff}");
+    assert_eq!(
+        max_diff, 0.0,
+        "gathering integer-valued table rows must round-trip exactly (max abs diff was {max_diff})"
+    );
+}
+
+#[test]
+fn an_out_of_range_gather_index_faults_on_cuda_the_same_way_it_faults_on_cpu() {
+    let (vocab, dim, seq) = (16usize, 4usize, 2usize);
+    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
+    let table_data: Vec<f32> = (0..vocab * dim).map(|value| value as f32).collect();
+    let ids_data = [0.0f32, 999.0];
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("table", QuantizedBlock::Float32(&table_data)),
+        ("ids", QuantizedBlock::Float32(&ids_data)),
+    ];
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the gather on cuda");
+    let error = execute_plan_named(&mut cuda_plan, &named)
+        .expect_err("an out-of-range gather index must fault, not clamp silently");
+    assert!(
+        matches!(error, omega::backend::BackendError::Cuda(omega::CudaError::Tensor(
+            proxima_tensor::TensorError::GatherIndexOutOfRange { extent, .. }
+        )) if extent == vocab as u64),
+        "expected a GatherIndexOutOfRange fault against extent {vocab}, got {error:?}"
+    );
+}
+
+/// `weight[rows, k] * activation[k, 1]` summed over `k` -- the same program
+/// shape `wgpu_parity.rs::packed_matmul_program` runs against a packed wgpu
+/// weight, now exercising `cuda.rs`'s packed-operand codec table through the
+/// PTX-native cuda driver.
+fn packed_matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: weight_dtype,
+            shape: vec![Extent::Static(rows), Extent::Static(k)],
+            name: Some("weight".into()),
+        },
+    );
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(k), Extent::Static(1)],
+            name: Some("activation".into()),
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (weight, IndexMap::Affine(projection(3, &[0, 2]))),
+                (activation, IndexMap::Affine(projection(3, &[2, 1]))),
+            ],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some("packed_matmul".into()),
+        }),
+    );
+    (program, sum)
+}
+
+/// Runs `weight (packed as `block_of`) x activation` on cuda and against a
+/// dequantized-`f32` CPU oracle, asserting relative parity within
+/// `tolerance` -- one gate shape shared by every `#[test]` below so the five
+/// codecs cannot drift on how the claim is checked. `quantize`/`dequantize`
+/// are `proxima_gguf::quant::<codec>::{quantize, dequantize}`, the same real
+/// codec `cuda.rs`'s unpack functions are checked against.
+#[allow(clippy::too_many_arguments)]
+fn assert_packed_codec_parity(
+    codec_name: &str,
+    block_bytes: usize,
+    block_elements: usize,
+    quantize: fn(&[f32], &mut [u8]) -> Result<(), proxima_gguf::quant::QuantError>,
+    dequantize: fn(&[u8], &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError>,
+    to_block: fn(&[u8]) -> QuantizedBlock<'_>,
+    tolerance: f32,
+) {
+    let rows: u32 = 3;
+    let blocks_per_row = 2usize;
+    let k = (block_elements * blocks_per_row) as u32;
+
+    let activation: Vec<f32> = random_vec(31, k as usize)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+    let weight_f32: Vec<f32> = random_vec(37, rows as usize * k as usize)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+
+    let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * block_bytes];
+    for (row_f32, row_blocks) in weight_f32
+        .chunks_exact(k as usize)
+        .zip(weight_blocks.chunks_exact_mut(blocks_per_row * block_bytes))
+    {
+        quantize(row_f32, row_blocks)
+            .expect("row length is a whole multiple of the codec's block width");
+    }
+    let mut dequantized: Vec<f32> = vec![0.0; rows as usize * k as usize];
+    for (row_blocks, row_f32) in weight_blocks
+        .chunks_exact(blocks_per_row * block_bytes)
+        .zip(dequantized.chunks_exact_mut(k as usize))
+    {
+        dequantize(row_blocks, row_f32).expect("a whole number of packed blocks");
+    }
+
+    let (packed_program, packed_sum) = packed_matmul_program(rows, k, DType::UInt8);
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("weight", to_block(&weight_blocks)),
+        ("activation", QuantizedBlock::Float32(&activation)),
+    ];
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &packed_program,
+        &[],
+        &named,
+        &[packed_sum],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the packed matmul on cuda");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend runs the packed matmul on a real cuda device");
+
+    let (f32_program, f32_sum) = packed_matmul_program(rows, k, DType::Float32);
+    let f32_named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("weight", QuantizedBlock::Float32(&dequantized)),
+        ("activation", QuantizedBlock::Float32(&activation)),
+    ];
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &f32_program,
+        &[],
+        &f32_named,
+        &[f32_sum],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the dequantized oracle on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &f32_named)
+        .expect("omega::backend runs the dequantized oracle on cpu");
+
+    let actual = cuda.root();
+    let expected = cpu.root();
+    assert_eq!(
+        actual.len(),
+        rows as usize,
+        "degenerate gate: no outputs compared"
+    );
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(
+            got.is_finite(),
+            "cuda {codec_name} matmul produced a non-finite value: {got}"
+        );
+        max_diff = max_diff.max((got - want).abs());
+    }
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude.max(f32::MIN_POSITIVE);
+    eprintln!(
+        "cuda packed-{codec_name} parity: rows={rows} k={k} max_diff={max_diff} relative={relative}"
+    );
+    assert!(
+        relative < tolerance,
+        "cuda packed-{codec_name} unpack disagrees with the dequantized reference: relative={relative} max_diff={max_diff}"
+    );
+}
+
+#[test]
+fn packed_q4k_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    assert_packed_codec_parity(
+        "q4_k",
+        BLOCK_BYTES,
+        QK_K,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Q4K(bytes),
+        1e-5,
+    );
+}
+
+#[test]
+fn packed_q5k_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
+    use proxima_gguf::quant::q5_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    assert_packed_codec_parity(
+        "q5_k",
+        BLOCK_BYTES,
+        QK_K,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Q5K(bytes),
+        1e-5,
+    );
+}
+
+#[test]
+fn packed_q6k_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
+    use proxima_gguf::quant::q6_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    assert_packed_codec_parity(
+        "q6_k",
+        BLOCK_BYTES,
+        QK_K,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Q6K(bytes),
+        1e-5,
+    );
+}
+
+#[test]
+fn packed_q8_0_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
+    use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, dequantize, quantize};
+    assert_packed_codec_parity(
+        "q8_0",
+        BLOCK_BYTES,
+        QK8_0,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Q8_0(bytes),
+        1e-5,
+    );
+}
+
+#[test]
+fn packed_q4_0_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
+    use proxima_gguf::quant::q4_0::{BLOCK_BYTES, QK4_0, dequantize, quantize};
+    assert_packed_codec_parity(
+        "q4_0",
+        BLOCK_BYTES,
+        QK4_0,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Q4_0(bytes),
+        1e-5,
+    );
+}
+
+/// `cuda.rs`'s `kernel_signature` declares the OUTPUT pointer itself as
+/// `__half*` for a `DType::Float16` op (unlike `crate::wgsl`, which always
+/// casts an f16 compute result back to an `array<f32>` storage write) -- see
+/// `omega::cuda_driver`'s module doc. v1 does not allocate/read back that
+/// narrower buffer, so this proves the documented rejection actually fires
+/// rather than silently misreading a `__half`-packed buffer as `f32`.
+fn f16_dtype_reduce_program(m: u32, k: u32, n: u32) -> Vec<Op> {
+    let mut program = Vec::new();
+    let lhs = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(m), Extent::Static(k)],
+            name: Some("lhs".into()),
+        },
+    );
+    let rhs = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(k), Extent::Static(n)],
+            name: Some("rhs".into()),
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float16,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+            ],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float16,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some("f16_matmul".into()),
+        }),
+    );
+    program
+}
+
+#[test]
+fn a_float16_dtyped_op_names_its_rejection_on_cuda_instead_of_misreading_a_half_buffer() {
+    let (m, k, n) = (5usize, 7usize, 3usize);
+    let program = f16_dtype_reduce_program(m as u32, k as u32, n as u32);
+    let lhs = random_vec(51, m * k);
+    let rhs = random_vec(53, k * n);
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("lhs", QuantizedBlock::Float32(&lhs)),
+        ("rhs", QuantizedBlock::Float32(&rhs)),
+    ];
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the f16 matmul on cuda");
+    let error = execute_plan_named(&mut cuda_plan, &named)
+        .expect_err("a Float16-dtyped op must be rejected, not misread through an f32 buffer");
+    assert!(
+        matches!(
+            error,
+            BackendError::Cuda(omega::CudaError::Emit(omega::EmitError::UnsupportedDType {
+                dtype: DType::Float16,
+                ..
+            }))
+        ),
+        "expected UnsupportedDType naming Float16, got {error:?}"
+    );
+}
+
+/// `support::real_forward_fixture` -- the same full cached-attention
+/// transformer forward `wgpu_parity.rs::the_full_mistral_cached_forward_runs_on_wgpu_at_cpu_parity`
+/// runs against wgpu, now run against the PTX-native cuda driver through the
+/// same `omega::backend` wrapper. `cuda_driver::plan`'s own
+/// `fuse_cached_attention: false` (mirroring `wgpu_driver::plan`) means this
+/// fixture's attention ops lower to plain elementwise/reduce nodes long
+/// before `emit_cuda` ever sees them, so `BoundOpKind::CachedAttention`'s
+/// `CudaUnsupportedOpKind` rejection is never reached by this test.
+#[test]
+fn the_full_mistral_cached_forward_runs_on_cuda_at_cpu_parity() {
+    const VOCAB: usize = 64;
+
+    let (program, symbols, roots, owned) = real_forward_fixture();
+    let named = as_named_blocks(&owned);
+
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the real forward on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named)
+        .expect("omega::backend runs the real forward on cpu");
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the real forward on cuda");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend runs the real forward on a real cuda device");
+
+    let expected = cpu.root();
+    let actual = cuda.root();
+    assert_eq!(
+        actual.len(),
+        VOCAB,
+        "degenerate gate: logits must be one row of the vocabulary"
+    );
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(
+            got.is_finite(),
+            "cuda, via the wrapper, produced a non-finite logit: {got}"
+        );
+        max_diff = max_diff.max((got - want).abs());
+    }
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude.max(f32::MIN_POSITIVE);
+    eprintln!(
+        "cuda real forward parity: max_diff={max_diff} max_magnitude={max_magnitude} relative={relative}"
+    );
+    assert!(
+        relative < 1e-4,
+        "omega::backend's cpu and cuda arms disagree on the real forward: relative={relative} max_diff={max_diff}"
+    );
+}
