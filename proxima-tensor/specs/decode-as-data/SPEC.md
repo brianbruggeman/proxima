@@ -373,10 +373,11 @@ targets. Each one runs 3 vendored prompts.
     `general.architecture` strings (for example `gemma4-assistant`) appear in them only as
     GGUF-key values read at load, which is data and not a type, so the pattern matches
     type names and not those strings.
-  - Control: the same pattern over `proxima-tensor/specs/decode-as-data/SPEC.md`, which
-    names those types in its problem statement, prints 7 (measured 2026-10-12); the
-    previous pattern, which also matched the string `gemma4-assistant`, printed 41 over
-    the four sub-specs on 2026-10-04.
+  - Control: the same pattern over the same four files as they were at 0ac67c63, before they
+    were restated, `git grep -nE 'Architecture|Eagle3Arch|DflashArch|DflashDraftProgram' 0ac67c63 -- <the same four paths> | wc -l`,
+    prints 25 (measured 2026-10-12). The previous pattern, which also matched the string
+    `gemma4-assistant`, prints 41 over the four files at 0ac67c63 by the same form of
+    command (measured 2026-10-12).
 
 - **AC12, oracle (R13).**
   - Command: `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/prefill_one_path_llama_parity_/)'`.
