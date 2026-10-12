@@ -1,12 +1,12 @@
 //! windows completion port owned by prime.
 //!
-//! `polling`'s `Poller` reinterprets every dequeued `lpOverlapped` as its own packet, so
-//! foreign overlapped I/O (named pipes, files) cannot complete on a port it owns. This type
-//! owns the port instead and hands the raw entries to the reactor, which identifies each
-//! completion by its key and `OVERLAPPED` address.
+//! the reactor owns its port directly so foreign overlapped I/O (named pipes, files) can
+//! complete on it beside AFD socket polls and wake packets; each dequeued entry is identified
+//! by its completion key and `OVERLAPPED` address.
 
 use std::io;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle};
+use std::sync::Arc;
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
@@ -18,8 +18,11 @@ use windows_sys::Win32::System::IO::{
 };
 use windows_sys::Win32::System::Threading::INFINITE;
 
+/// completion key of a wake packet posted by [`post_to`]; no I/O source holds it.
+pub(crate) const WAKE_KEY: usize = usize::MAX;
+
 pub(crate) struct CompletionPort {
-    handle: OwnedHandle,
+    handle: Arc<OwnedHandle>,
     // one setup allocation sized by the reactor event batch; the kernel writes into it
     entries: Box<[OVERLAPPED_ENTRY]>,
 }
@@ -37,7 +40,7 @@ impl CompletionPort {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: `raw` is a valid handle this call just created and nothing else owns.
-        let handle = unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) };
+        let handle = Arc::new(unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) });
         let entries = vec![OVERLAPPED_ENTRY::default(); capacity as usize].into_boxed_slice();
         Ok(Self { handle, entries })
     }
@@ -53,13 +56,9 @@ impl CompletionPort {
         }
     }
 
-    pub(crate) fn post(&self, key: usize) -> io::Result<()> {
-        // SAFETY: the port handle is valid; a null OVERLAPPED is the documented wake packet.
-        let posted = unsafe { PostQueuedCompletionStatus(self.raw(), 0, key, std::ptr::null()) };
-        match posted {
-            0 => Err(io::Error::last_os_error()),
-            _ => Ok(()),
-        }
+    /// the port handle shared with wake handles that outlive the reactor.
+    pub(crate) fn shared_handle(&self) -> Arc<OwnedHandle> {
+        Arc::clone(&self.handle)
     }
 
     pub(crate) fn dequeue(
@@ -95,6 +94,18 @@ impl CompletionPort {
 
     fn raw(&self) -> HANDLE {
         self.handle.as_raw_handle() as HANDLE
+    }
+}
+
+/// queue a wake packet with a null `OVERLAPPED` on `port` from any thread.
+pub(crate) fn post_to(port: &OwnedHandle, key: usize) -> io::Result<()> {
+    // SAFETY: the port handle is valid for the call; a null OVERLAPPED is the documented wake packet.
+    let posted = unsafe {
+        PostQueuedCompletionStatus(port.as_raw_handle() as HANDLE, 0, key, std::ptr::null())
+    };
+    match posted {
+        0 => Err(io::Error::last_os_error()),
+        _ => Ok(()),
     }
 }
 
@@ -189,7 +200,7 @@ mod tests {
     fn posted_keys_dequeue_in_one_batch() {
         let mut port = CompletionPort::new(sized::REACTOR_EVENT_BATCH).expect("port creation");
         for key in 0..5usize {
-            port.post(key).expect("post a wake packet");
+            post_to(&port.handle, key).expect("post a wake packet");
         }
 
         let entries = port.dequeue(Some(Duration::from_secs(5))).expect("dequeue");
