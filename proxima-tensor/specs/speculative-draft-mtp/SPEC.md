@@ -100,7 +100,7 @@ roots on the target program (nextn block) | chain | sample-and-match | prefix".
 `$QWEN` = `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-mtp/qwen-mtp.gguf`, the single-GGUF MTP fixture (qwen35 or qwen35moe checkpoint); slice 1a places the file (or a symlink) at exactly this path
 `$GEMMA_MTP` = `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-mtp/gemma4-e2b-assistant.gguf`, the sidecar GGUF size-matched to `$GEMMA_TGT` (E2B); slice 1b places the file at exactly this path
 `$GEMMA_TGT` = `/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd` (proxima's local gemma4-E2B target, already verified to load)
-`$LLAMA_SPEC_SIMPLE` = `/Users/brianbruggeman/repos/others/llama.cpp/build/bin/llama-speculative-simple`, an absolute binary path (no `cd`); it registers `--spec-type` and `--model-draft` for `LLAMA_EXAMPLE_SPECULATIVE` (`common/arg.cpp:4246`) and prints `n_drafted = N` and `n_accept = N` (`examples/speculative-simple/speculative-simple.cpp:355-356`)
+`$LLAMA_SPEC_SIMPLE` = `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/llama-f1ea20621/bin/llama-speculative-simple`, an absolute binary path (no `cd`) built from llama.cpp `f1ea20621` by slice 0b (the checkout's prebuilt `build/bin` predates the source and registers no `--spec-type`); once built it registers `--spec-type` and `--model-draft` for `LLAMA_EXAMPLE_SPECULATIVE` (`common/arg.cpp:4246`) and prints `n_drafted = N` and `n_accept = N` (`examples/speculative-simple/speculative-simple.cpp:355-356`)
 
 | id | discharges | command | expected |
 |---|---|---|---|
