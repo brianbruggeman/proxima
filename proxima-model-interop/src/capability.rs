@@ -488,8 +488,8 @@ mod quant_format_tests {
     fn all_codecs_covers_every_codec_variant_exactly_once() {
         assert_eq!(
             ALL_CODECS.len(),
-            32,
-            "proxima_primitives::Codec carries 32 variants today"
+            33,
+            "proxima_primitives::Codec carries 33 variants today"
         );
     }
 
