@@ -1415,7 +1415,7 @@ fn prefill_one_evaluation_requested(serving_config: &ServingConfig) -> bool {
 /// drafts consumes `rng` exactly `n` times, in exactly the order plain
 /// decode would have. That is what makes speculative decode bit-identical to
 /// plain decode for any [`SamplingConfig`], not only plain argmax.
-fn select_decoded_token(
+pub(super) fn select_decoded_token(
     step: usize,
     logits_row: &[f32],
     token_history: &[u32],
@@ -6614,12 +6614,12 @@ did not hold every cached position)",
                         // fold, so the default (unset) path pays neither cost.
                         #[cfg(feature = "instrument")]
                         let (scan_ticks, debug_ticks) = if logits_diag_enabled {
-                            let (argmax_token, argmax_logit) = last_position
-                                .iter()
+                            let argmax_token =
+                                proxima_tokenizer::greedy_pick(last_position).unwrap_or(0) as usize;
+                            let argmax_logit = last_position
+                                .get(argmax_token)
                                 .copied()
-                                .enumerate()
-                                .max_by(|left, right| left.1.total_cmp(&right.1))
-                                .unwrap_or((0, f32::NEG_INFINITY));
+                                .unwrap_or(f32::NEG_INFINITY);
                             let scan_ticks = elapsed_ticks(argmax_started);
                             let debug_started = read_ticks();
                             debug!(
