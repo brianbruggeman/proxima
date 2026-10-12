@@ -468,9 +468,11 @@ impl ServingSettings {
                 target_os = "macos"
             ))]
             attention_variant: {
-                let mut variant = AttentionVariant::default();
-                variant.simdgroup_count = self.attention_simdgroup_count;
-                variant.tile_height = self.attention_tile_height.as_tile_height();
+                let variant = AttentionVariant {
+                    simdgroup_count: self.attention_simdgroup_count,
+                    tile_height: self.attention_tile_height.as_tile_height(),
+                    ..AttentionVariant::default()
+                };
                 if variant.simdgroup_count == AttentionSimdgroupCount::Legacy
                     && variant.tile_height == AttentionTileHeight::Legacy
                 {
