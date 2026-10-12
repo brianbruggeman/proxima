@@ -10,8 +10,13 @@ use syn::visit::{self, Visit};
 const FLOAT_VARIANTS: [&str; 6] = [
     "BFloat16", "BFloat8", "Fp6E3M2", "Float16", "Float32", "Float64",
 ];
+// Float64 is not a pattern site: it stays a named variant because it is wider than the 32-bit bound
+// of the generic codec (SPEC decisions table), so matching it is not matching a layout by name.
+const LAYOUT_VARIANTS: [&str; 5] = ["BFloat16", "BFloat8", "Fp6E3M2", "Float16", "Float32"];
 const CONTROL_SOURCE: &str =
     include_str!("../specs/float-layout-dtype/fixtures/census_control.rs.txt");
+// code gated on `cfg(not(feature = "float-layout-dtype"))` is the legacy build slice 19 deletes, so
+// like test code it is outside the census; the feature-on tree is what survives the flip.
 const MODULE_ROOT_STEMS: [&str; 3] = ["mod", "lib", "main"];
 
 #[derive(Debug, thiserror::Error)]
@@ -78,13 +83,30 @@ fn is_test_gated(attributes: &[syn::Attribute]) -> bool {
     })
 }
 
+fn is_legacy_gated(attributes: &[syn::Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        let is_cfg = attribute.path().is_ident("cfg");
+        match (&attribute.meta, is_cfg) {
+            (syn::Meta::List(list), true) => {
+                let tokens = list.tokens.to_string();
+                tokens.starts_with("not") && tokens.contains("\"float-layout-dtype\"")
+            }
+            _ => false,
+        }
+    })
+}
+
+fn is_skipped(attributes: &[syn::Attribute]) -> bool {
+    is_test_gated(attributes) || is_legacy_gated(attributes)
+}
+
 fn names_dtype(self_type: &syn::Type) -> bool {
     matches!(self_type, syn::Type::Path(path)
         if path.path.segments.last().is_some_and(|segment| segment.ident == "DType"))
 }
 
 impl Classifier {
-    fn names_float_variant(&self, path: &syn::Path) -> bool {
+    fn names_float_variant(&self, path: &syn::Path, variants: &[&str]) -> bool {
         let names: Vec<String> = path
             .segments
             .iter()
@@ -92,7 +114,7 @@ impl Classifier {
             .collect();
         match names.as_slice() {
             [.., owner, variant] => {
-                FLOAT_VARIANTS.contains(&variant.as_str())
+                variants.contains(&variant.as_str())
                     && (owner == "DType" || (owner == "Self" && self.inside_dtype_impl))
             }
             _ => false,
@@ -158,7 +180,7 @@ impl Classifier {
 
 impl<'ast> Visit<'ast> for Classifier {
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        if !is_test_gated(&node.attrs) {
+        if !is_skipped(&node.attrs) {
             return visit::visit_item_mod(self, node);
         }
         if node.content.is_none() {
@@ -167,19 +189,19 @@ impl<'ast> Visit<'ast> for Classifier {
     }
 
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        if !is_test_gated(&node.attrs) {
+        if !is_skipped(&node.attrs) {
             visit::visit_item_fn(self, node);
         }
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        if !is_test_gated(&node.attrs) {
+        if !is_skipped(&node.attrs) {
             visit::visit_impl_item_fn(self, node);
         }
     }
 
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
-        if is_test_gated(&node.attrs) {
+        if is_skipped(&node.attrs) {
             return;
         }
         let outer = self.inside_dtype_impl;
@@ -191,14 +213,17 @@ impl<'ast> Visit<'ast> for Classifier {
     fn visit_pat(&mut self, node: &'ast syn::Pat) {
         match node {
             syn::Pat::Path(path) => {
-                self.sites.pattern += usize::from(self.names_float_variant(&path.path));
+                self.sites.pattern +=
+                    usize::from(self.names_float_variant(&path.path, &LAYOUT_VARIANTS));
             }
             syn::Pat::TupleStruct(pattern) => {
-                self.sites.pattern += usize::from(self.names_float_variant(&pattern.path));
+                self.sites.pattern +=
+                    usize::from(self.names_float_variant(&pattern.path, &LAYOUT_VARIANTS));
                 visit::visit_pat(self, node);
             }
             syn::Pat::Struct(pattern) => {
-                self.sites.pattern += usize::from(self.names_float_variant(&pattern.path));
+                self.sites.pattern +=
+                    usize::from(self.names_float_variant(&pattern.path, &LAYOUT_VARIANTS));
                 visit::visit_pat(self, node);
             }
             _ => visit::visit_pat(self, node),
@@ -206,7 +231,7 @@ impl<'ast> Visit<'ast> for Classifier {
     }
 
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        self.sites.expression += usize::from(self.names_float_variant(&node.path));
+        self.sites.expression += usize::from(self.names_float_variant(&node.path, &FLOAT_VARIANTS));
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
@@ -236,7 +261,7 @@ fn analyze_source(path: &Path, source: &str) -> Result<FileReport, CensusError> 
         path: path.to_path_buf(),
         sites: classifier.sites,
         skipped_modules: classifier.skipped_modules,
-        test_only: is_test_gated(&file.attrs),
+        test_only: is_skipped(&file.attrs),
     })
 }
 
@@ -312,6 +337,18 @@ fn analyze_crate(root: &Path, name: &str) -> Result<(usize, Sites), CensusError>
             pattern: total.pattern + report.sites.pattern,
             expression: total.expression + report.sites.expression,
         });
+    if std::env::var_os("LAYOUT_CENSUS_FILES").is_some() {
+        counted
+            .iter()
+            .filter(|report| report.sites.pattern > 0)
+            .for_each(|report| {
+                println!(
+                    "site_file path={} pattern_sites={}",
+                    report.path.display(),
+                    report.sites.pattern
+                );
+            });
+    }
     Ok((counted.len(), sites))
 }
 

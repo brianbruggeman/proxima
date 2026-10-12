@@ -381,13 +381,11 @@ fn expert_stack_codec(dtype: DType) -> Option<Codec> {
     let DType::Float(layout) = dtype else {
         return None;
     };
-    [Codec::BFloat16, Codec::Float16]
-        .into_iter()
-        .find(|codec| {
-            codec
-                .layout()
-                .is_some_and(|candidate| candidate.same_format(&layout))
-        })
+    [Codec::BFloat16, Codec::Float16].into_iter().find(|codec| {
+        codec
+            .layout()
+            .is_some_and(|candidate| candidate.same_format(&layout))
+    })
 }
 
 /// Binds one routed `[experts, in, out]` leaf the way
@@ -751,24 +749,27 @@ pub(crate) fn safetensors_tensor_as_packed_block<'file>(
 ) -> Result<QuantizedBlock<'file>, InteropError> {
     let entry = find_entry(manifest, name)?;
     let bytes = tensor_bytes(file_bytes, data_start, entry)?;
-    match entry.dtype {
-        DType::Float32 => aligned_f32_view(bytes)
+    if entry.dtype == DType::Float32 {
+        aligned_f32_view(bytes)
             .map(QuantizedBlock::Float32)
             .ok_or_else(|| InteropError::MisalignedFloat32Tensor {
                 tensor: entry.name.clone(),
-            }),
-        DType::Float16 => Ok(QuantizedBlock::Packed {
+            })
+    } else if entry.dtype == DType::Float16 {
+        Ok(QuantizedBlock::Packed {
             codec: Codec::Float16,
             bytes,
-        }),
-        DType::BFloat16 => Ok(QuantizedBlock::Packed {
+        })
+    } else if entry.dtype == DType::BFloat16 {
+        Ok(QuantizedBlock::Packed {
             codec: Codec::BFloat16,
             bytes,
-        }),
-        other => Err(InteropError::UndecodableSafetensorsDType {
+        })
+    } else {
+        Err(InteropError::UndecodableSafetensorsDType {
             tensor: entry.name.clone(),
-            dtype: other,
-        }),
+            dtype: entry.dtype,
+        })
     }
 }
 
@@ -793,14 +794,17 @@ pub(crate) fn safetensors_tensor_as_f32(
     let entry = find_entry(manifest, name)?;
     let bytes = tensor_bytes(file_bytes, data_start, entry)?;
     let element_count = entry.shape.iter().product::<u64>() as usize;
-    match entry.dtype {
-        DType::Float32 => Ok(reinterpret_f32(bytes)),
-        DType::Float16 => dequantize(bytes, element_count, proxima_gguf::quant::f16::dequantize),
-        DType::BFloat16 => dequantize(bytes, element_count, proxima_gguf::quant::bf16::dequantize),
-        other => Err(InteropError::UndecodableSafetensorsDType {
+    if entry.dtype == DType::Float32 {
+        Ok(reinterpret_f32(bytes))
+    } else if entry.dtype == DType::Float16 {
+        dequantize(bytes, element_count, proxima_gguf::quant::f16::dequantize)
+    } else if entry.dtype == DType::BFloat16 {
+        dequantize(bytes, element_count, proxima_gguf::quant::bf16::dequantize)
+    } else {
+        Err(InteropError::UndecodableSafetensorsDType {
             tensor: entry.name.clone(),
-            dtype: other,
-        }),
+            dtype: entry.dtype,
+        })
     }
 }
 

@@ -616,6 +616,18 @@ pub(super) fn evaluate_uniform_typed(
                 .collect()
         }};
     }
+    if dtype == DType::Float16 {
+        return Ok(dispatch!(f16, Float16));
+    }
+    if dtype == DType::BFloat16 {
+        return Ok(dispatch!(bf16, BFloat16));
+    }
+    if dtype == DType::Float32 {
+        return Ok(dispatch!(f32, Float32));
+    }
+    if dtype == DType::BFloat8 {
+        return Ok(dispatch!(BFloat8, BFloat8));
+    }
     Ok(match dtype {
         DType::Int8 => dispatch!(i8, Int8),
         DType::UInt8 => dispatch!(u8, UInt8),
@@ -627,23 +639,15 @@ pub(super) fn evaluate_uniform_typed(
         DType::UInt64 => dispatch!(u64, UInt64),
         DType::Int128 => dispatch!(i128, Int128),
         DType::UInt128 => dispatch!(u128, UInt128),
-        DType::Float16 => dispatch!(f16, Float16),
-        DType::BFloat16 => dispatch!(bf16, BFloat16),
-        DType::Float32 => dispatch!(f32, Float32),
         DType::Float64 => dispatch!(f64, Float64),
-        DType::BFloat8 => dispatch!(BFloat8, BFloat8),
-        DType::Bool | DType::Fp6E3M2 => {
-            unreachable!("typed_program_plan already rejected this dtype")
-        }
-        #[cfg(feature = "float-layout-dtype")]
-        DType::Float(_) => {
+        _ => {
             let position = program
                 .iter()
                 .position(|expr| expr.dtype() == dtype)
                 .unwrap_or_default();
             return Err(TensorError::NotLowerable {
                 node: NodeId(position as u32),
-                reason: "this float layout has no typed scalar element",
+                reason: "this dtype has no typed scalar element",
             });
         }
     })
@@ -686,24 +690,24 @@ pub(super) fn evaluate_widened_typed(
         .into_iter()
         .map(|(node, shape, data)| (node, shape, TypedBuffer::UInt32(data)))
         .collect()),
-        (DType::Float16, DType::Float32) => Ok(run_widened_program::<f16, f32>(
-            program, symbols, blocks, outputs,
-        )?
-        .into_iter()
-        .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))
-        .collect()),
-        (DType::BFloat16, DType::Float32) => Ok(run_widened_program::<bf16, f32>(
-            program, symbols, blocks, outputs,
-        )?
-        .into_iter()
-        .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))
-        .collect()),
-        (DType::BFloat8, DType::Float32) => Ok(run_widened_program::<BFloat8, f32>(
-            program, symbols, blocks, outputs,
-        )?
-        .into_iter()
-        .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))
-        .collect()),
+        _ if operand == DType::Float16 && accumulator == DType::Float32 => Ok(
+            run_widened_program::<f16, f32>(program, symbols, blocks, outputs)?
+                .into_iter()
+                .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))
+                .collect(),
+        ),
+        _ if operand == DType::BFloat16 && accumulator == DType::Float32 => Ok(
+            run_widened_program::<bf16, f32>(program, symbols, blocks, outputs)?
+                .into_iter()
+                .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))
+                .collect(),
+        ),
+        _ if operand == DType::BFloat8 && accumulator == DType::Float32 => Ok(
+            run_widened_program::<BFloat8, f32>(program, symbols, blocks, outputs)?
+                .into_iter()
+                .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))
+                .collect(),
+        ),
         _ => Err(TensorError::NotLowerable {
             node: NodeId(0),
             reason: "the typed evaluator does not ship a mixed-precision reduce pair for this \

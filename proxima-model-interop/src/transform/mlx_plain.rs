@@ -121,17 +121,20 @@ fn decode_row(kind: GgmlType, row: &[u8], scratch: &mut [f32]) -> Result<(), Int
 }
 
 fn cast_row(dtype: DType, values: &[f32], out: &mut Vec<u8>) -> Option<()> {
-    match dtype {
-        DType::BFloat16 => values
+    if dtype == DType::BFloat16 {
+        values
             .iter()
-            .for_each(|&value| out.extend_from_slice(&bf16::from_f32(value).to_le_bytes())),
-        DType::Float16 => values
+            .for_each(|&value| out.extend_from_slice(&bf16::from_f32(value).to_le_bytes()));
+    } else if dtype == DType::Float16 {
+        values
             .iter()
-            .for_each(|&value| out.extend_from_slice(&f16::from_f32(value).to_le_bytes())),
-        DType::Float32 => values
+            .for_each(|&value| out.extend_from_slice(&f16::from_f32(value).to_le_bytes()));
+    } else if dtype == DType::Float32 {
+        values
             .iter()
-            .for_each(|&value| out.extend_from_slice(&value.to_le_bytes())),
-        _ => return None,
+            .for_each(|&value| out.extend_from_slice(&value.to_le_bytes()));
+    } else {
+        return None;
     }
     Some(())
 }

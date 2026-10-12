@@ -40,13 +40,25 @@ impl From<DType> for DTypeSpelling {
             DType::Int128 => Self::Int128,
             DType::UInt128 => Self::UInt128,
             DType::Float64 => Self::Float64,
-            DType::BFloat16 => Self::BFloat16,
-            DType::BFloat8 => Self::BFloat8,
-            DType::Fp6E3M2 => Self::Fp6E3M2,
-            DType::Float16 => Self::Float16,
-            DType::Float32 => Self::Float32,
-            DType::Float(layout) => Self::Float(layout),
+            DType::Float(layout) => Self::former_spelling(layout),
         }
+    }
+}
+
+impl DTypeSpelling {
+    /// The spelling a layout kept from when it was a variant, by comparing the whole layout; any
+    /// other layout is spelled by its fields.
+    fn former_spelling(layout: FloatLayout) -> Self {
+        [
+            (FloatLayout::BF32, Self::Float32),
+            (FloatLayout::F16, Self::Float16),
+            (FloatLayout::BF16, Self::BFloat16),
+            (FloatLayout::E5M2_SATURATING, Self::BFloat8),
+            (FloatLayout::E3M2, Self::Fp6E3M2),
+        ]
+        .into_iter()
+        .find_map(|(named, spelling)| (named == layout).then_some(spelling))
+        .unwrap_or(Self::Float(layout))
     }
 }
 

@@ -510,15 +510,15 @@ pub fn convert_checkpoint_with_scale(
                 &mut source_bytes_processed,
             )?;
             data_cursor = tensor.data_offsets.0;
-            let (source_element_bytes, source_dtype) = match tensor.dtype {
-                DType::BFloat16 => (2_usize, "BF16"),
-                DType::Float32 => (4_usize, "F32"),
-                dtype => {
-                    return Err(ColdArtifactError::UnsupportedDtype {
-                        tensor: tensor.name,
-                        dtype,
-                    });
-                }
+            let (source_element_bytes, source_dtype) = if tensor.dtype == DType::BFloat16 {
+                (2_usize, "BF16")
+            } else if tensor.dtype == DType::Float32 {
+                (4_usize, "F32")
+            } else {
+                return Err(ColdArtifactError::UnsupportedDtype {
+                    tensor: tensor.name,
+                    dtype: tensor.dtype,
+                });
             };
             let element_count = tensor_element_count(&tensor)?;
             let source_bytes = element_count
@@ -563,7 +563,8 @@ pub fn convert_checkpoint_with_scale(
             let mut tensor_output_bytes = 0_u64;
             let mut remaining_elements = element_count;
             while remaining_elements > 0 {
-                let elements_this_chunk = remaining_elements.min(value_buffer.len() as u64) as usize;
+                let elements_this_chunk =
+                    remaining_elements.min(value_buffer.len() as u64) as usize;
                 let bytes_this_chunk = elements_this_chunk * source_element_bytes;
                 let input_chunk = &mut input_buffer[..bytes_this_chunk];
                 shard_file.read_exact(input_chunk)?;
@@ -574,26 +575,22 @@ pub fn convert_checkpoint_with_scale(
                 tensor_source_bytes += bytes_this_chunk as u64;
 
                 let values_this_chunk = &mut value_buffer[..elements_this_chunk];
-                match tensor.dtype {
-                    DType::BFloat16 => {
-                        proxima_gguf::quant::bf16::dequantize(input_chunk, values_this_chunk)?;
+                if tensor.dtype == DType::BFloat16 {
+                    proxima_gguf::quant::bf16::dequantize(input_chunk, values_this_chunk)?;
+                } else if tensor.dtype == DType::Float32 {
+                    for (chunk, value) in input_chunk
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(values_this_chunk.iter_mut())
+                    {
+                        *value = f32::from_le_bytes(*chunk);
                     }
-                    DType::Float32 => {
-                        for (chunk, value) in input_chunk
-                            .as_chunks::<4>()
-                            .0
-                            .iter()
-                            .zip(values_this_chunk.iter_mut())
-                        {
-                            *value = f32::from_le_bytes(*chunk);
-                        }
-                    }
-                    _ => {
-                        return Err(ColdArtifactError::UnsupportedDtype {
-                            tensor: tensor.name,
-                            dtype: tensor.dtype,
-                        });
-                    }
+                } else {
+                    return Err(ColdArtifactError::UnsupportedDtype {
+                        tensor: tensor.name,
+                        dtype: tensor.dtype,
+                    });
                 }
                 if scale_mode == ColdScaleMode::TensorMaximum {
                     values_this_chunk
@@ -697,19 +694,17 @@ fn measure_tensor_scale(
         let input_chunk = &mut input_buffer[..source_bytes];
         shard_file.read_exact(input_chunk)?;
         let values = &mut value_buffer[..elements];
-        match tensor.dtype {
-            DType::BFloat16 => proxima_gguf::quant::bf16::dequantize(input_chunk, values)?,
-            DType::Float32 => {
-                for (bytes, value) in input_chunk.as_chunks::<4>().0.iter().zip(values.iter_mut()) {
-                    *value = f32::from_le_bytes(*bytes);
-                }
+        if tensor.dtype == DType::BFloat16 {
+            proxima_gguf::quant::bf16::dequantize(input_chunk, values)?;
+        } else if tensor.dtype == DType::Float32 {
+            for (bytes, value) in input_chunk.as_chunks::<4>().0.iter().zip(values.iter_mut()) {
+                *value = f32::from_le_bytes(*bytes);
             }
-            dtype => {
-                return Err(ColdArtifactError::UnsupportedDtype {
-                    tensor: tensor.name.clone(),
-                    dtype,
-                });
-            }
+        } else {
+            return Err(ColdArtifactError::UnsupportedDtype {
+                tensor: tensor.name.clone(),
+                dtype: tensor.dtype,
+            });
         }
         if values.iter().any(|value| !value.is_finite()) {
             return Err(ColdArtifactError::InvalidTensorLength {
