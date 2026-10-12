@@ -1,0 +1,53 @@
+   Compiling omega v0.1.0 (/private/tmp/proxima-omega-unified-config/omega)
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-omega-unified-config/proxima-model-interop)
+   Compiling proxima v0.1.0 (/private/tmp/proxima-omega-unified-config)
+    Finished `release` profile [optimized] target(s) in 1m 01s
+     Running `/private/tmp/proxima-omega-e2e-enabled-target/release/examples/ouro_loopcd_lab --performance --backend metal --samples 5 --omega-config proxima-tensor/specs/omega-programmable/relaxed-metal.toml --output proxima-tensor/specs/omega-programmable/results/ouro-configured`
+completed performance warmup france baseline4
+completed performance warmup france fixed-logits-0.5
+completed performance warmup france adaptive-logits-cap-1
+completed performance warmup france fixed-hidden-0.5
+completed performance sample france baseline4 1
+completed performance sample france fixed-logits-0.5 1
+completed performance sample france adaptive-logits-cap-1 1
+completed performance sample france fixed-hidden-0.5 1
+completed performance sample france fixed-logits-0.5 2
+completed performance sample france adaptive-logits-cap-1 2
+completed performance sample france fixed-hidden-0.5 2
+completed performance sample france baseline4 2
+completed performance sample france adaptive-logits-cap-1 3
+completed performance sample france fixed-hidden-0.5 3
+completed performance sample france baseline4 3
+completed performance sample france fixed-logits-0.5 3
+completed performance sample france fixed-hidden-0.5 4
+completed performance sample france baseline4 4
+completed performance sample france fixed-logits-0.5 4
+completed performance sample france adaptive-logits-cap-1 4
+completed performance sample france baseline4 5
+completed performance sample france fixed-logits-0.5 5
+completed performance sample france adaptive-logits-cap-1 5
+completed performance sample france fixed-hidden-0.5 5
+completed performance warmup ball baseline4
+completed performance warmup ball fixed-logits-0.5
+completed performance warmup ball adaptive-logits-cap-1
+completed performance warmup ball fixed-hidden-0.5
+completed performance sample ball baseline4 1
+completed performance sample ball fixed-logits-0.5 1
+completed performance sample ball adaptive-logits-cap-1 1
+completed performance sample ball fixed-hidden-0.5 1
+completed performance sample ball fixed-logits-0.5 2
+completed performance sample ball adaptive-logits-cap-1 2
+completed performance sample ball fixed-hidden-0.5 2
+completed performance sample ball baseline4 2
+completed performance sample ball adaptive-logits-cap-1 3
+completed performance sample ball fixed-hidden-0.5 3
+completed performance sample ball baseline4 3
+completed performance sample ball fixed-logits-0.5 3
+completed performance sample ball fixed-hidden-0.5 4
+completed performance sample ball baseline4 4
+completed performance sample ball fixed-logits-0.5 4
+completed performance sample ball adaptive-logits-cap-1 4
+completed performance sample ball baseline4 5
+completed performance sample ball fixed-logits-0.5 5
+completed performance sample ball adaptive-logits-cap-1 5
+completed performance sample ball fixed-hidden-0.5 5

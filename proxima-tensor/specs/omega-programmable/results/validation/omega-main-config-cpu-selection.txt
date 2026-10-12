@@ -1,0 +1,306 @@
+info: experimental features enabled: wrapper-scripts
+   Compiling proxima-core v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-core)
+   Compiling proxima-primitives v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-primitives)
+   Compiling proxima-telemetry v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-telemetry)
+   Compiling proxima-protocols v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-protocols)
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-tensor)
+   Compiling proxima-listen v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-listen)
+   Compiling proxima-patterns v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-patterns)
+   Compiling proxima-process v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-process)
+   Compiling proxima-http v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-http)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/omega)
+   Compiling proxima-config v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-config)
+   Compiling proxima-runtime v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-runtime)
+   Compiling proxima-codec v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-codec)
+   Compiling proxima-clock v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-clock)
+   Compiling proxima-gguf v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-gguf)
+   Compiling proxima-tls v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-tls)
+   Compiling proxima-tokenizer v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-tokenizer)
+   Compiling prime v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/prime)
+   Compiling proxima-recording v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-recording)
+   Compiling proxima-net v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-net)
+   Compiling proxima-test v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-test)
+   Compiling proxima-quic v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-quic)
+   Compiling proxima v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima)
+   Compiling proxima-onnx v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-onnx)
+   Compiling proxima-autograd v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-autograd)
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-safetensors)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.60s
+────────────
+ Nextest run ID 691fd2ee-9e96-461b-9255-aa55d2708ee9 with nextest profile: default
+    Starting 34 tests across 1 binary (120 tests skipped)
+       START [         ] ( 1/34) omega backend::programmable_tests::config_cpu_budget_admits_literal_envelope
+
+running 1 test
+test backend::programmable_tests::config_cpu_budget_admits_literal_envelope ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.011s] ( 1/34) omega backend::programmable_tests::config_cpu_budget_admits_literal_envelope
+       START [         ] ( 2/34) omega backend::programmable_tests::config_cpu_budget_rejects_device_only_constraint
+
+running 1 test
+test backend::programmable_tests::config_cpu_budget_rejects_device_only_constraint ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.010s] ( 2/34) omega backend::programmable_tests::config_cpu_budget_rejects_device_only_constraint
+       START [         ] ( 3/34) omega backend::programmable_tests::config_cpu_budget_rejects_one_byte_below_envelope
+
+running 1 test
+test backend::programmable_tests::config_cpu_budget_rejects_one_byte_below_envelope ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.009s] ( 3/34) omega backend::programmable_tests::config_cpu_budget_rejects_one_byte_below_envelope
+       START [         ] ( 4/34) omega backend::programmable_tests::config_cpu_budget_rejects_unbounded_specialized_workspace
+
+running 1 test
+test backend::programmable_tests::config_cpu_budget_rejects_unbounded_specialized_workspace ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.012s] ( 4/34) omega backend::programmable_tests::config_cpu_budget_rejects_unbounded_specialized_workspace
+       START [         ] ( 5/34) omega backend::programmable_tests::config_cpu_budget_trims_retained_capacity_before_repeat
+
+running 1 test
+test backend::programmable_tests::config_cpu_budget_trims_retained_capacity_before_repeat ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.014s] ( 5/34) omega backend::programmable_tests::config_cpu_budget_trims_retained_capacity_before_repeat
+       START [         ] ( 6/34) omega backend::programmable_tests::config_plan_changed_input_codec_fails_before_mutation
+
+running 1 test
+test backend::programmable_tests::config_plan_changed_input_codec_fails_before_mutation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.014s] ( 6/34) omega backend::programmable_tests::config_plan_changed_input_codec_fails_before_mutation
+       START [         ] ( 7/34) omega backend::programmable_tests::config_plan_cpu_exact_flag_reaches_evaluator
+
+running 1 test
+test backend::programmable_tests::config_plan_cpu_exact_flag_reaches_evaluator ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.012s] ( 7/34) omega backend::programmable_tests::config_plan_cpu_exact_flag_reaches_evaluator
+       START [         ] ( 8/34) omega backend::programmable_tests::config_plan_cpu_executes_named_two_outputs
+
+running 1 test
+test backend::programmable_tests::config_plan_cpu_executes_named_two_outputs ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.010s] ( 8/34) omega backend::programmable_tests::config_plan_cpu_executes_named_two_outputs
+       START [         ] ( 9/34) omega backend::programmable_tests::config_plan_cpu_reuses_same_shape_with_fresh_data
+
+running 1 test
+test backend::programmable_tests::config_plan_cpu_reuses_same_shape_with_fresh_data ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.011s] ( 9/34) omega backend::programmable_tests::config_plan_cpu_reuses_same_shape_with_fresh_data
+       START [         ] (10/34) omega backend::programmable_tests::config_plan_device_single_cap_checks_reused_capacity
+
+running 1 test
+test backend::programmable_tests::config_plan_device_single_cap_checks_reused_capacity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (10/34) omega backend::programmable_tests::config_plan_device_single_cap_checks_reused_capacity
+       START [         ] (11/34) omega backend::programmable_tests::config_plan_explicit_unavailable_driver_does_not_fallback
+
+running 1 test
+test backend::programmable_tests::config_plan_explicit_unavailable_driver_does_not_fallback ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (11/34) omega backend::programmable_tests::config_plan_explicit_unavailable_driver_does_not_fallback
+       START [         ] (12/34) omega backend::programmable_tests::config_plan_fusion_false_keeps_chain_nodes
+
+running 1 test
+test backend::programmable_tests::config_plan_fusion_false_keeps_chain_nodes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (12/34) omega backend::programmable_tests::config_plan_fusion_false_keeps_chain_nodes
+       START [         ] (13/34) omega backend::programmable_tests::config_plan_npu_ane_vulkan_names_are_rejected
+
+running 1 test
+test backend::programmable_tests::config_plan_npu_ane_vulkan_names_are_rejected ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (13/34) omega backend::programmable_tests::config_plan_npu_ane_vulkan_names_are_rejected
+       START [         ] (14/34) omega backend::programmable_tests::config_plan_numeric_bits_reach_cpu_binder
+
+running 1 test
+test backend::programmable_tests::config_plan_numeric_bits_reach_cpu_binder ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (14/34) omega backend::programmable_tests::config_plan_numeric_bits_reach_cpu_binder
+       START [         ] (15/34) omega backend::programmable_tests::config_plan_output_negative_control_detects_wrong_vector
+
+running 1 test
+test backend::programmable_tests::config_plan_output_negative_control_detects_wrong_vector ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (15/34) omega backend::programmable_tests::config_plan_output_negative_control_detects_wrong_vector
+       START [         ] (16/34) omega backend::programmable_tests::config_plan_resource_replacement_counts_overlap
+
+running 1 test
+test backend::programmable_tests::config_plan_resource_replacement_counts_overlap ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (16/34) omega backend::programmable_tests::config_plan_resource_replacement_counts_overlap
+       START [         ] (17/34) omega backend::programmable_tests::config_plan_resource_sum_checks_overflow
+
+running 1 test
+test backend::programmable_tests::config_plan_resource_sum_checks_overflow ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (17/34) omega backend::programmable_tests::config_plan_resource_sum_checks_overflow
+       START [         ] (18/34) omega backend::programmable_tests::config_selection_configured_executes_no_trials
+
+running 1 test
+cpu_selection_raw=[CandidateMeasurement { engine: Cpu, driver: None, device_identity: "cpu", cold_plan_ns: Some(26208), warmup_ns: [219625], execution_ns: [104667, 106417, 42417, 38000, 36167], execution_sum_ns: Some(327668), selected: true, rejection: None, host_tensor_reserved_bytes: None, device_buffer_reserved_bytes: None, largest_device_buffer_bytes: None, resolved_op_count: 2, kernel_identities: ["2:Elementwise { body: ComposedBody { steps: [BodyStep { op: Add, args: [Operand(0), Operand(1)] }] }, operands: [(NodeId(0), Layout { base: 0, strides: [1] }, None), (NodeId(1), Layout { base: 0, strides: [1] }, None)] }", "3:Elementwise { body: ComposedBody { steps: [BodyStep { op: Negate, args: [Operand(0)] }] }, operands: [(NodeId(2), Layout { base: 0, strides: [1] }, None)] }"] }]
+test backend::programmable_tests::config_selection_configured_executes_no_trials ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.011s] (18/34) omega backend::programmable_tests::config_selection_configured_executes_no_trials
+       START [         ] (19/34) omega backend::programmable_tests::config_selection_mean_uses_raw_sample_order
+
+running 1 test
+test backend::programmable_tests::config_selection_mean_uses_raw_sample_order ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (19/34) omega backend::programmable_tests::config_selection_mean_uses_raw_sample_order
+       START [         ] (20/34) omega backend::programmable_tests::config_selection_rejections_are_retained_and_empty_set_errors
+
+running 1 test
+test backend::programmable_tests::config_selection_rejections_are_retained_and_empty_set_errors ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (20/34) omega backend::programmable_tests::config_selection_rejections_are_retained_and_empty_set_errors
+       START [         ] (21/34) omega backend::programmable_tests::config_selection_stable_order_deduplicates_configured
+
+running 1 test
+test backend::programmable_tests::config_selection_stable_order_deduplicates_configured ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (21/34) omega backend::programmable_tests::config_selection_stable_order_deduplicates_configured
+       START [         ] (22/34) omega backend::programmable_tests::config_selection_tie_uses_stable_order
+
+running 1 test
+test backend::programmable_tests::config_selection_tie_uses_stable_order ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (22/34) omega backend::programmable_tests::config_selection_tie_uses_stable_order
+       START [         ] (23/34) omega config::config_tests::runtime_config_builder_matches_serde_config
+
+running 1 test
+test config::config_tests::runtime_config_builder_matches_serde_config ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (23/34) omega config::config_tests::runtime_config_builder_matches_serde_config
+       START [         ] (24/34) omega config::config_tests::runtime_config_defaults_preserve_legacy_values
+
+running 1 test
+test config::config_tests::runtime_config_defaults_preserve_legacy_values ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.011s] (24/34) omega config::config_tests::runtime_config_defaults_preserve_legacy_values
+       START [         ] (25/34) omega config::config_tests::runtime_config_defaults_track_sized_floor
+
+running 1 test
+test config::config_tests::runtime_config_defaults_track_sized_floor ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (25/34) omega config::config_tests::runtime_config_defaults_track_sized_floor
+       START [         ] (26/34) omega config::config_tests::runtime_config_layer_order_is_source_then_explicit_override
+
+running 1 test
+test config::config_tests::runtime_config_layer_order_is_source_then_explicit_override ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (26/34) omega config::config_tests::runtime_config_layer_order_is_source_then_explicit_override
+       START [         ] (27/34) omega config::config_tests::runtime_config_legacy_toml_deserializes
+
+running 1 test
+test config::config_tests::runtime_config_legacy_toml_deserializes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (27/34) omega config::config_tests::runtime_config_legacy_toml_deserializes
+       START [         ] (28/34) omega config::config_tests::runtime_config_nested_env_overrides_nested_defaults
+
+running 1 test
+test config::config_tests::runtime_config_nested_env_overrides_nested_defaults ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (28/34) omega config::config_tests::runtime_config_nested_env_overrides_nested_defaults
+       START [         ] (29/34) omega config::config_tests::runtime_config_numeric_permissions_round_trip_independently
+
+running 1 test
+test config::config_tests::runtime_config_numeric_permissions_round_trip_independently ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (29/34) omega config::config_tests::runtime_config_numeric_permissions_round_trip_independently
+       START [         ] (30/34) omega config::config_tests::runtime_config_rejects_unknown_engine
+
+running 1 test
+test config::config_tests::runtime_config_rejects_unknown_engine ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (30/34) omega config::config_tests::runtime_config_rejects_unknown_engine
+       START [         ] (31/34) omega config::config_tests::runtime_config_rejects_unknown_gpu_driver
+
+running 1 test
+test config::config_tests::runtime_config_rejects_unknown_gpu_driver ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (31/34) omega config::config_tests::runtime_config_rejects_unknown_gpu_driver
+       START [         ] (32/34) omega config::config_tests::runtime_config_rejects_zero_resource_ceiling
+
+running 1 test
+test config::config_tests::runtime_config_rejects_zero_resource_ceiling ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (32/34) omega config::config_tests::runtime_config_rejects_zero_resource_ceiling
+       START [         ] (33/34) omega config::config_tests::runtime_config_requires_measurement_samples
+
+running 1 test
+test config::config_tests::runtime_config_requires_measurement_samples ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (33/34) omega config::config_tests::runtime_config_requires_measurement_samples
+       START [         ] (34/34) omega config::config_tests::runtime_config_settings_uses_omega_legacy_prefix
+
+running 1 test
+test config::config_tests::runtime_config_settings_uses_omega_legacy_prefix ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (34/34) omega config::config_tests::runtime_config_settings_uses_omega_legacy_prefix
+────────────
+     Summary [   0.349s] 34 tests run: 34 passed, 120 skipped

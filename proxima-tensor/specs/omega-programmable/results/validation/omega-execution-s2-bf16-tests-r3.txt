@@ -1,0 +1,16 @@
+info: experimental features enabled: wrapper-scripts
+   Compiling proxima-tensor v0.1.0 (/private/tmp/proxima-omega-execution-worker/proxima-tensor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.35s
+────────────
+ Nextest run ID 730e7eeb-f151-4b40-b411-47ae3a54c7b5 with nextest profile: default
+    Starting 8 tests across 1 binary (681 tests skipped)
+        PASS [   0.012s] (1/8) proxima-tensor bind::programmable_tests::programmable_binding_oracle_self_control
+        PASS [   0.012s] (2/8) proxima-tensor bind::programmable_tests::programmable_binding_oracle_corrupt_control
+        PASS [   0.016s] (3/8) proxima-tensor bind::programmable_tests::programmable_binding_fused_chain
+        PASS [   0.016s] (4/8) proxima-tensor bind::programmable_tests::programmable_binding_unreachable_branch
+        PASS [   0.016s] (5/8) proxima-tensor bind::programmable_tests::programmable_binding_signed_zero_permission
+        PASS [   0.016s] (6/8) proxima-tensor bind::programmable_tests::programmable_binding_unfused_chain
+        PASS [   0.016s] (7/8) proxima-tensor bind::programmable_tests::programmable_binding_requested_intermediate
+        PASS [   0.016s] (8/8) proxima-tensor bind::programmable_tests::programmable_binding_unfused_projection
+────────────
+     Summary [   0.018s] 8 tests run: 8 passed, 681 skipped

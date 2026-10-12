@@ -1,0 +1,29 @@
+   Compiling proxima-core v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-core)
+   Compiling proxima-primitives v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-primitives)
+   Compiling proxima-telemetry v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-telemetry)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/omega)
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-tensor)
+    Checking proxima-runtime v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-runtime)
+    Checking proxima-config v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-config)
+    Checking proxima-clock v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-clock)
+    Checking proxima-gguf v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-gguf)
+    Checking prime v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/prime)
+error: irrefutable `if let` pattern
+   --> omega/src/backend.rs:494:16
+    |
+494 |               if let Err(error) = plan_configured_candidate(
+    |  ________________^
+495 | |                 config,
+496 | |                 configured_engine,
+497 | |                 driver,
+...   |
+501 | |                 outputs,
+502 | |             ) {
+    | |_____________^
+    |
+    = note: this pattern will always match, so the `if let` is useless
+    = help: consider replacing the `if let` with a `let`
+    = note: `-D irrefutable-let-patterns` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(irrefutable_let_patterns)]`
+
+error: could not compile `omega` (lib) due to 1 previous error

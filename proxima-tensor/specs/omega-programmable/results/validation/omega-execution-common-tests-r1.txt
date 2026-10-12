@@ -1,0 +1,34 @@
+info: experimental features enabled: wrapper-scripts
+   Compiling proxima-tensor v0.1.0 (/private/tmp/proxima-omega-execution-worker/proxima-tensor)
+   Compiling proxima-safetensors v0.1.0 (/private/tmp/proxima-omega-execution-worker/proxima-safetensors)
+   Compiling proxima-autograd v0.1.0 (/private/tmp/proxima-omega-execution-worker/proxima-autograd)
+   Compiling proxima-onnx v0.1.0 (/private/tmp/proxima-omega-execution-worker/proxima-onnx)
+   Compiling omega v0.1.0 (/private/tmp/proxima-omega-execution-worker/omega)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.19s
+────────────
+ Nextest run ID 5402e10c-a02b-41fd-a640-27d608895522 with nextest profile: default
+    Starting 22 tests across 1 binary (276 tests skipped)
+        PASS [   0.014s] ( 1/22) omega backend::programmable_tests::config_cpu_budget_rejects_unbounded_specialized_workspace
+        PASS [   0.014s] ( 2/22) omega backend::programmable_tests::config_cpu_budget_rejects_one_byte_below_envelope
+        PASS [   0.014s] ( 3/22) omega backend::programmable_tests::config_plan_changed_input_codec_fails_before_mutation
+        PASS [   0.015s] ( 4/22) omega backend::programmable_tests::config_cpu_budget_trims_retained_capacity_before_repeat
+        PASS [   0.015s] ( 5/22) omega backend::programmable_tests::config_cpu_budget_admits_literal_envelope
+        PASS [   0.015s] ( 6/22) omega backend::programmable_tests::config_cpu_budget_rejects_device_only_constraint
+        PASS [   0.015s] ( 7/22) omega backend::programmable_tests::config_plan_device_single_cap_checks_reused_capacity
+        PASS [   0.015s] ( 8/22) omega backend::programmable_tests::config_plan_cpu_executes_named_two_outputs
+        PASS [   0.015s] ( 9/22) omega backend::programmable_tests::config_plan_cpu_exact_flag_reaches_evaluator
+        PASS [   0.015s] (10/22) omega backend::programmable_tests::config_plan_cpu_reuses_same_shape_with_fresh_data
+        PASS [   0.010s] (11/22) omega backend::programmable_tests::config_plan_output_negative_control_detects_wrong_vector
+        PASS [   0.012s] (12/22) omega backend::programmable_tests::config_plan_explicit_unavailable_driver_does_not_fallback
+        PASS [   0.012s] (13/22) omega backend::programmable_tests::config_plan_fusion_false_keeps_chain_nodes
+        PASS [   0.012s] (14/22) omega backend::programmable_tests::config_plan_resource_replacement_counts_overlap
+        PASS [   0.012s] (15/22) omega backend::programmable_tests::config_plan_numeric_bits_reach_cpu_binder
+        PASS [   0.011s] (16/22) omega backend::programmable_tests::config_selection_rejections_are_retained_and_empty_set_errors
+        PASS [   0.012s] (17/22) omega backend::programmable_tests::config_plan_npu_ane_vulkan_names_are_rejected
+        PASS [   0.012s] (18/22) omega backend::programmable_tests::config_selection_configured_executes_no_trials
+        PASS [   0.012s] (19/22) omega backend::programmable_tests::config_selection_mean_uses_raw_sample_order
+        PASS [   0.012s] (20/22) omega backend::programmable_tests::config_plan_resource_sum_checks_overflow
+        PASS [   0.009s] (21/22) omega backend::programmable_tests::config_selection_tie_uses_stable_order
+        PASS [   0.010s] (22/22) omega backend::programmable_tests::config_selection_stable_order_deduplicates_configured
+────────────
+     Summary [   0.036s] 22 tests run: 22 passed, 276 skipped

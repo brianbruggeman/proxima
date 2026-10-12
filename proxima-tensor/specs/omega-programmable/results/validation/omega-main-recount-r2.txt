@@ -1,0 +1,5 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/omega)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-model-interop)
+   Compiling proxima v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.67s
+     Running `/private/tmp/proxima-omega-recount-check-target/debug/examples/omega_programmable_recount /private/tmp/proxima-omega-unified-config/proxima-tensor/specs/omega-programmable/results/ouro-configured-control /private/tmp/proxima-omega-unified-config/proxima-tensor/specs/omega-programmable/results/ouro-configured /Users/brianbruggeman/repos/slot-0/proxima/proxima-tensor/specs/ouro-llama-oracle/results/llama-v1/llama.jsonl /private/tmp/proxima-omega-unified-config/proxima-tensor/specs/omega-programmable/results/recount`

@@ -1,0 +1,16 @@
+info: experimental features enabled: wrapper-scripts
+   Compiling omega v0.1.0 (/private/tmp/proxima-omega-config-worker/omega)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.13s
+────────────
+ Nextest run ID 55f1252f-47d2-47d5-be14-483b6abd5571 with nextest profile: default
+    Starting 1 test across 1 binary (271 tests skipped)
+       START [         ] (1/1) omega msl::tests::programmable_tiled_float_storage_feature_off_declines
+
+running 1 test
+test msl::tests::programmable_tiled_float_storage_feature_off_declines ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 271 filtered out; finished in 0.00s
+
+        PASS [   0.015s] (1/1) omega msl::tests::programmable_tiled_float_storage_feature_off_declines
+────────────
+     Summary [   0.017s] 1 test run: 1 passed, 271 skipped

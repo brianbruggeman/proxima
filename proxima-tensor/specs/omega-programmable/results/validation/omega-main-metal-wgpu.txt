@@ -1,0 +1,119 @@
+info: experimental features enabled: wrapper-scripts
+warning: ignoring --test-threads because --no-capture is specified
+   Compiling proxima-core v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-core)
+   Compiling proxima-primitives v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-primitives)
+   Compiling proxima-telemetry v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-telemetry)
+   Compiling prime v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/prime)
+   Compiling proxima-protocols v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-protocols)
+   Compiling objc2-metal v0.3.2
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-tensor)
+   Compiling proxima-listen v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-listen)
+   Compiling proxima-http v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-http)
+   Compiling proxima-patterns v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-patterns)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/omega)
+   Compiling proxima-config v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-config)
+   Compiling proxima-runtime v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-runtime)
+   Compiling proxima-codec v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-codec)
+   Compiling objc2-quartz-core v0.3.2
+   Compiling proxima-clock v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-clock)
+   Compiling proxima-gguf v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-gguf)
+   Compiling proxima-tls v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-tls)
+   Compiling proxima-process v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-process)
+   Compiling raw-window-metal v1.1.0
+   Compiling wgpu-hal v30.0.1
+   Compiling proxima-tokenizer v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-tokenizer)
+   Compiling proxima-recording v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-recording)
+   Compiling wgpu-core-deps-apple v30.0.1
+   Compiling wgpu-core v30.0.1
+   Compiling proxima-net v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-net)
+   Compiling proxima-test v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-test)
+   Compiling proxima-quic v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-quic)
+   Compiling proxima v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima)
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-safetensors)
+   Compiling proxima-onnx v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-onnx)
+   Compiling proxima-autograd v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-autograd)
+   Compiling wgpu v30.0.1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.60s
+────────────
+ Nextest run ID 761095b5-294b-4805-9949-d77c81f39b54 with nextest profile: default
+    Starting 8 tests across 1 binary (340 tests skipped)
+       START [         ] (1/8) omega backend::programmable_tests::config_metal_affine_matmul_named_program
+
+running 1 test
+test backend::programmable_tests::config_metal_affine_matmul_named_program ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 347 filtered out; finished in 0.36s
+
+        PASS [   0.384s] (1/8) omega backend::programmable_tests::config_metal_affine_matmul_named_program
+       START [         ] (2/8) omega backend::programmable_tests::config_metal_cap_failure_precedes_upload_and_dispatch
+
+running 1 test
+metal_refusal_stages_before=MetalStageTotals { prepare_calls: 0, prepare_ticks: 0, emit_calls: 0, emit_ticks: 0, pipeline_hits: 0, pipeline_misses: 0, pipeline_compile_ticks: 0, block_upload_calls: 0, block_upload_ticks: 0, block_offered_bytes: 0, block_copied_bytes: 0, block_nocopy_bound_bytes: 0, block_offset_bound_bytes: 0, op_setup_calls: 0, op_setup_ticks: 0, pipeline_lookup_calls: 0, pipeline_lookup_ticks: 0, encode_dispatch_calls: 0, encode_dispatch_ticks: 0, physical_dispatch_calls: 0, gpu_exec_calls: 0, gpu_exec_ticks: 0, readback_calls: 0, readback_ticks: 0, readback_bytes: 0, nocopy_uploads: 0, copying_uploads: 0, nocopy_reuses: 0, resident_uploads: 0, resident_reuses: 0, mapping_offset_uploads: 0, mapping_rebound_blocks: 0, expert_mapping_candidate_uploads: 0, expert_mapping_missed_uploads: 0, output_buffer_allocations: 0, output_buffer_allocated_bytes: 0, plan_uniform_writes: 0, barriers_emitted: 0, barriers_raw: 0, barriers_waw: 0, barriers_war: 0, barriers_waw_war_arena_recycled: 0, barriers_waw_war_persistent: 0, expert_source_cache_hits: 0, expert_source_cache_misses: 0, expert_source_cache_cold_misses: 0, expert_source_cache_replacement_misses: 0, expert_source_buffer_reuses: 0, expert_source_reuse_copy_bytes: 0, expert_source_reuse_copy_ticks: 0, plan_handoff_reuses: 0, expert_source_cache_entries: 0, nocopy_cache_entries: 0, retire_scan_calls: 0, retire_scan_ticks: 0, expert_buffers_lookup_calls: 0, expert_buffers_lookup_ticks: 0, placement_resolve_calls: 0, placement_resolve_ticks: 0, loop_head_calls: 0, loop_head_ticks: 0, encoder_finish_ticks: 0, pre_encode_calls: 0, pre_encode_ticks: 0, prepare_infer_ticks: 0, prepare_validate_ticks: 0, prepare_bind_ticks: 0, prepare_optimize_ticks: 0, prepare_retire_ticks: 0, build_plan_uniforms_ticks: 0, resolve_steps_ticks: 0, uniform_buffer_allocations: 0 } after=MetalStageTotals { prepare_calls: 0, prepare_ticks: 0, emit_calls: 0, emit_ticks: 0, pipeline_hits: 0, pipeline_misses: 0, pipeline_compile_ticks: 0, block_upload_calls: 0, block_upload_ticks: 0, block_offered_bytes: 0, block_copied_bytes: 0, block_nocopy_bound_bytes: 0, block_offset_bound_bytes: 0, op_setup_calls: 0, op_setup_ticks: 0, pipeline_lookup_calls: 0, pipeline_lookup_ticks: 0, encode_dispatch_calls: 0, encode_dispatch_ticks: 0, physical_dispatch_calls: 0, gpu_exec_calls: 0, gpu_exec_ticks: 0, readback_calls: 0, readback_ticks: 0, readback_bytes: 0, nocopy_uploads: 0, copying_uploads: 0, nocopy_reuses: 0, resident_uploads: 0, resident_reuses: 0, mapping_offset_uploads: 0, mapping_rebound_blocks: 0, expert_mapping_candidate_uploads: 0, expert_mapping_missed_uploads: 0, output_buffer_allocations: 0, output_buffer_allocated_bytes: 0, plan_uniform_writes: 0, barriers_emitted: 0, barriers_raw: 0, barriers_waw: 0, barriers_war: 0, barriers_waw_war_arena_recycled: 0, barriers_waw_war_persistent: 0, expert_source_cache_hits: 0, expert_source_cache_misses: 0, expert_source_cache_cold_misses: 0, expert_source_cache_replacement_misses: 0, expert_source_buffer_reuses: 0, expert_source_reuse_copy_bytes: 0, expert_source_reuse_copy_ticks: 0, plan_handoff_reuses: 0, expert_source_cache_entries: 0, nocopy_cache_entries: 0, retire_scan_calls: 0, retire_scan_ticks: 0, expert_buffers_lookup_calls: 0, expert_buffers_lookup_ticks: 0, placement_resolve_calls: 0, placement_resolve_ticks: 0, loop_head_calls: 0, loop_head_ticks: 0, encoder_finish_ticks: 0, pre_encode_calls: 0, pre_encode_ticks: 0, prepare_infer_ticks: 692, prepare_validate_ticks: 731, prepare_bind_ticks: 2819, prepare_optimize_ticks: 1047, prepare_retire_ticks: 223, build_plan_uniforms_ticks: 0, resolve_steps_ticks: 0, uniform_buffer_allocations: 0 }
+test backend::programmable_tests::config_metal_cap_failure_precedes_upload_and_dispatch ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 347 filtered out; finished in 0.23s
+
+        PASS [   0.243s] (2/8) omega backend::programmable_tests::config_metal_cap_failure_precedes_upload_and_dispatch
+       START [         ] (3/8) omega backend::programmable_tests::config_metal_named_program_and_repeat
+
+running 1 test
+heterogeneous_selection_raw=[CandidateMeasurement { engine: Gpu, driver: Some(Metal), device_identity: "Apple M1 Max", cold_plan_ns: Some(137083), warmup_ns: [366500], execution_ns: [353459, 368208, 354333, 352041, 323750], execution_sum_ns: Some(1751791), selected: false, rejection: None, host_tensor_reserved_bytes: Some(32), device_buffer_reserved_bytes: Some(144), largest_device_buffer_bytes: Some(48), resolved_op_count: 2, kernel_identities: ["omega_elementwise_r1_n2_add_wideS_eanc_d1100S", "omega_elementwise_r1_n1_negate_wideS_eanc_d100S"] }, CandidateMeasurement { engine: Cpu, driver: None, device_identity: "cpu", cold_plan_ns: Some(43417), warmup_ns: [218000], execution_ns: [61000, 57042, 55584, 54916, 54375], execution_sum_ns: Some(282917), selected: true, rejection: None, host_tensor_reserved_bytes: Some(56), device_buffer_reserved_bytes: None, largest_device_buffer_bytes: None, resolved_op_count: 2, kernel_identities: ["2:Elementwise { body: ComposedBody { steps: [BodyStep { op: Add, args: [Operand(0), Operand(1)] }] }, operands: [(NodeId(0), Layout { base: 0, strides: [1] }, None), (NodeId(1), Layout { base: 0, strides: [1] }, None)] }", "3:Elementwise { body: ComposedBody { steps: [BodyStep { op: Negate, args: [Operand(0)] }] }, operands: [(NodeId(2), Layout { base: 0, strides: [1] }, None)] }"] }, CandidateMeasurement { engine: Gpu, driver: Some(Wgpu), device_identity: "Apple M1 Max:Metal:IntegratedGpu", cold_plan_ns: Some(110004458), warmup_ns: [2964666], execution_ns: [1169833, 1057500, 1040542, 1027959, 1012875], execution_sum_ns: Some(5308709), selected: false, rejection: None, host_tensor_reserved_bytes: Some(48), device_buffer_reserved_bytes: Some(208), largest_device_buffer_bytes: Some(24), resolved_op_count: 2, kernel_identities: ["omega_wgsl_elementwise_r1_n2_add_wide\nfn proxima_erf(x: f32) -> f32 {\n    let sign: f32 = select(1.0, -1.0, x < 0.0);\n    let magnitude: f32 = abs(x);\n    let t: f32 = 1.0 / fma(0.3275911, magnitude, 1.0);\n    let poly: f32 = t * fma(fma(fma(fma(1.061405429, t, -1.453152027), t, 1.421413741), t, -0.284496736), t, 0.254829592);\n    return sign * fma(poly, -exp(-magnitude * magnitude), 1.0);\n}\n\nstruct Uniforms {\n    total_elements: i32,\n    extents: array<i32, 1>,\n    operand_base: array<i32, 2>,\n    operand_strides: array<array<i32, 1>, 2>,\n};\n\n@group(0) @binding(0) var<storage, read> in0: array<f32>;\n@group(0) @binding(1) var<storage, read> in1: array<f32>;\n@group(0) @binding(2) var<storage, read_write> out: array<f32>;\n@group(0) @binding(3) var<storage, read> u: Uniforms;\n\n@compute @workgroup_size(64)\nfn omega_wgsl_elementwise_r1_n2_add_wide(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(num_workgroups) num_workgroups: vec3<u32>) {\n    let gid: i32 = i32(global_id.x + global_id.y * num_workgroups.x * 64u);\n    if (gid >= u.total_elements) { return; }\n    var coord: array<i32, 1>;\n    var remaining: i32 = gid;\n    coord[0] = remaining % u.extents[0]; remaining = remaining / u.extents[0];\n    var off0: i32 = u.operand_base[0];\n    off0 += coord[0] * u.operand_strides[0][0];\n    var off1: i32 = u.operand_base[1];\n    off1 += coord[0] * u.operand_strides[1][0];\n    var scratch: array<f32, 2>;\n    scratch[0] = in0[off0];\n    scratch[1] = in1[off1];\n    let step0: f32 = (scratch[0] + scratch[1]);\n    out[gid] = step0;\n}\n", "omega_wgsl_elementwise_r1_n1_negate_wide\nfn proxima_erf(x: f32) -> f32 {\n    let sign: f32 = select(1.0, -1.0, x < 0.0);\n    let magnitude: f32 = abs(x);\n    let t: f32 = 1.0 / fma(0.3275911, magnitude, 1.0);\n    let poly: f32 = t * fma(fma(fma(fma(1.061405429, t, -1.453152027), t, 1.421413741), t, -0.284496736), t, 0.254829592);\n    return sign * fma(poly, -exp(-magnitude * magnitude), 1.0);\n}\n\nstruct Uniforms {\n    total_elements: i32,\n    extents: array<i32, 1>,\n    operand_base: array<i32, 1>,\n    operand_strides: array<array<i32, 1>, 1>,\n};\n\n@group(0) @binding(0) var<storage, read> in0: array<f32>;\n@group(0) @binding(1) var<storage, read_write> out: array<f32>;\n@group(0) @binding(2) var<storage, read> u: Uniforms;\n\n@compute @workgroup_size(64)\nfn omega_wgsl_elementwise_r1_n1_negate_wide(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(num_workgroups) num_workgroups: vec3<u32>) {\n    let gid: i32 = i32(global_id.x + global_id.y * num_workgroups.x * 64u);\n    if (gid >= u.total_elements) { return; }\n    var coord: array<i32, 1>;\n    var remaining: i32 = gid;\n    coord[0] = remaining % u.extents[0]; remaining = remaining / u.extents[0];\n    var off0: i32 = u.operand_base[0];\n    off0 += coord[0] * u.operand_strides[0][0];\n    var scratch: array<f32, 1>;\n    scratch[0] = in0[off0];\n    let step0: f32 = (-scratch[0]);\n    out[gid] = step0;\n}\n"] }]
+test backend::programmable_tests::config_metal_named_program_and_repeat ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 347 filtered out; finished in 0.37s
+
+        PASS [   0.380s] (3/8) omega backend::programmable_tests::config_metal_named_program_and_repeat
+       START [         ] (4/8) omega backend::programmable_tests::config_metal_same_shape_execution_resource_census
+
+running 1 test
+metal_resource_rows=[("input", NodeId(0), 4872764000, 16), ("input", NodeId(1), 4872765920, 16), ("output", NodeId(2), 4872777648, 16), ("uniform", NodeId(2), 4872778528, 48), ("output", NodeId(3), 4872780160, 16), ("uniform", NodeId(3), 4872780528, 32)]
+metal_resource_rows=[("input", NodeId(0), 4871718880, 16), ("input", NodeId(1), 4871717680, 16), ("output", NodeId(2), 4871722928, 16), ("uniform", NodeId(2), 4872778528, 48), ("output", NodeId(3), 4871723296, 16), ("uniform", NodeId(3), 4872780528, 32)]
+test backend::programmable_tests::config_metal_same_shape_execution_resource_census ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 347 filtered out; finished in 0.24s
+
+        PASS [   0.253s] (4/8) omega backend::programmable_tests::config_metal_same_shape_execution_resource_census
+       START [         ] (5/8) omega backend::programmable_tests::config_wgpu_affine_matmul_named_program
+
+running 1 test
+test backend::programmable_tests::config_wgpu_affine_matmul_named_program ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 347 filtered out; finished in 0.28s
+
+        PASS [   0.290s] (5/8) omega backend::programmable_tests::config_wgpu_affine_matmul_named_program
+       START [         ] (6/8) omega backend::programmable_tests::config_wgpu_cap_failure_precedes_upload_and_dispatch
+
+running 1 test
+wgpu_preflight_refusal=ResourceLimit { backend: "wgpu", field: "max_device_buffer_bytes", requested: 208, limit: 207 }
+wgpu_refusal_allocation_upload_dispatch_submit=(0, 0, 0, 0)
+wgpu_preflight_refusal=ResourceLimit { backend: "wgpu", field: "max_single_device_buffer_bytes", requested: 24, limit: 23 }
+wgpu_refusal_allocation_upload_dispatch_submit=(0, 0, 0, 0)
+wgpu_preflight_refusal=ResourceLimit { backend: "wgpu", field: "max_host_tensor_bytes", requested: 48, limit: 47 }
+wgpu_refusal_allocation_upload_dispatch_submit=(0, 0, 0, 0)
+test backend::programmable_tests::config_wgpu_cap_failure_precedes_upload_and_dispatch ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 347 filtered out; finished in 0.22s
+
+        PASS [   0.228s] (6/8) omega backend::programmable_tests::config_wgpu_cap_failure_precedes_upload_and_dispatch
+       START [         ] (7/8) omega backend::programmable_tests::config_wgpu_named_program_and_repeat
+
+running 1 test
+test backend::programmable_tests::config_wgpu_named_program_and_repeat ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 347 filtered out; finished in 0.21s
+
+        PASS [   0.221s] (7/8) omega backend::programmable_tests::config_wgpu_named_program_and_repeat
+       START [         ] (8/8) omega backend::programmable_tests::config_wgpu_same_shape_execution_resource_census
+
+running 1 test
+wgpu_device=Apple M1 Max:Metal:IntegratedGpu resource_rows=[("input", NodeId(0), 1, 16), ("input", NodeId(1), 2, 16), ("output", NodeId(2), 3, 16), ("output", NodeId(3), 4, 16), ("uniform", NodeId(2), 5, 24), ("uniform", NodeId(3), 6, 16), ("upload", NodeId(0), 7, 16), ("upload", NodeId(1), 8, 16), ("upload", NodeId(2), 9, 24), ("upload", NodeId(3), 10, 16), ("readback", NodeId(2), 11, 16), ("readback", NodeId(3), 12, 16)]
+wgpu_admitted_allocation_upload_dispatch_submit=(12, 4, 2, 1)
+wgpu_device=Apple M1 Max:Metal:IntegratedGpu resource_rows=[("input", NodeId(0), 1, 16), ("input", NodeId(1), 2, 16), ("output", NodeId(2), 3, 16), ("output", NodeId(3), 4, 16), ("uniform", NodeId(2), 5, 24), ("uniform", NodeId(3), 6, 16), ("upload", NodeId(0), 7, 16), ("upload", NodeId(1), 8, 16), ("upload", NodeId(2), 9, 24), ("upload", NodeId(3), 10, 16), ("readback", NodeId(2), 11, 16), ("readback", NodeId(3), 12, 16)]
+wgpu_admitted_allocation_upload_dispatch_submit=(8, 4, 2, 1)
+test backend::programmable_tests::config_wgpu_same_shape_execution_resource_census ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 347 filtered out; finished in 0.21s
+
+        PASS [   0.223s] (8/8) omega backend::programmable_tests::config_wgpu_same_shape_execution_resource_census
+────────────
+     Summary [   2.226s] 8 tests run: 8 passed, 340 skipped

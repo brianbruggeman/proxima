@@ -1,0 +1,40 @@
+ADMIT — measurement amendment audit (2026-10-03)
+
+Scope: the current measurement-only edits to SPEC.md, TASKS.md,
+WORK-PACKET-EVIDENCE.md, and WORK-PACKET-TILED.md in
+/private/tmp/proxima-omega-unified-config/proxima-tensor/specs/omega-programmable.
+The normative R1–R11 text at SPEC.md:45–55 is unchanged from the prior audit.
+
+Mechanical checks
+
+- Requirements: 11 rows, R1 through R11, SPEC.md:43–55.
+- Acceptance criteria: 14 rows (AC1–AC10b, including AC3b/c/d),
+  SPEC.md:92–107. Each names a runnable command and counted expectation.
+- Slices: 14 rows (S1–S8 with S3b/c/d, S4b, S5b/c), TASKS.md:9–24;
+  each row maps one AC to a command.
+- AC4/AC5 explicitly enable `metal-tiled-gemm` and expect 8 enabled tests
+  and 1 disabled control; SPEC.md:100–101, TASKS.md:17–18, tiled packet
+  lines 151–162.
+- AC6 explicitly enables `metal-tiled-gemm`; its eight test outcomes are
+  2 CPU vectors + 4 Metal vectors + 1 oracle self-check + 1 corruption check;
+  SPEC.md:102.
+- AC9 has paired enabled/disabled gate commands, both with the same
+  `proxima-tensor,omega/metal-tiled-gemm` features, relaxed config, threshold
+  override, samples, backend, and inputs; only the float-storage switch and
+  output directory differ. Each arm expects 40 timed records, 8 warmups, and
+  8 CoV rows; SPEC.md:105, TASKS.md:22, evidence packet lines 94–104.
+- AC10/AC10b use the same explicit features, threshold, shapes, and sample
+  counts; only gate and output directory differ. Each expects 15 records,
+  3 warmups, and 3 CoV rows; SPEC.md:106–107, TASKS.md:20–21, evidence
+  packet lines 70–90.
+- The packet states no measurements have yet been run; tiled packet lines
+  177–180. These criteria are specifications, not reported outcomes.
+- `DENSE_TILED_MIN_TOKENS` is an `Option<u64>` whose availability follows
+  `metal-tiled-gemm`; `DENSE_FLOAT_STORAGE_ENABLED` is emitted from the
+  resolved sizing input. This separates dependency-feature availability from
+  the runtime build gate for the example's provenance; worker source
+  `omega/src/sized.rs:98–106` and `omega/build.rs:550–558`.
+
+No count mismatch or missing explicit feature was found in the audited
+amendments. This admission covers specification consistency only; it does not
+assert that any command has run or that measured outcomes satisfy the criteria.

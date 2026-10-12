@@ -1,0 +1,20 @@
+SPEC/TASKS/EVIDENCE packet audit v3
+
+Status: ADMIT for measurement-only amendments reviewed before measurement execution.
+
+Opened artifacts and observations:
+- `SPEC.md:45-55`: R1-R11 are still present; R6 covers permission-gated float lowering, R8 compile-off, R10 measurement evidence, and R11 alloc/std tiers.
+- `SPEC.md:68-78`: build gate uses existing sizing loader and exact `OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE` override; driver boundary still names existing CPU/Metal/wgpu/CUDA and excludes fictitious NPU/ANE.
+- `SPEC.md:92-107`: AC1-AC10b have executable commands and expected counts. AC4/AC5 require 8/1 tiled tests. AC10 and AC10b each require 3 shapes x 5 samples = 15 raw timing rows, 3 warmups, and 3 CoV rows.
+- `SPEC.md:109-114`: AC6 has 8 regular execution-vector tests and no ignored test; both microbench arms set threshold to 1 while stating production default 160.
+- `TASKS.md:11-24`: 14 slice rows map to AC1-AC10b; S4/S4b commands and counts map to AC4/AC5; S5b/S5c commands set identical threshold and differ only in float-storage gate; task order preserves S1 before S4 and S5 before measurements.
+- `WORK-PACKET-EVIDENCE.md:70-90`: microbench requires rows 1, 5, 24, actual checkpoint extents, five measured samples after a separately recorded warmup, synchronization, raw durations, and CoV using sample SD. This supports the 15+3+3 counts in AC10/AC10b.
+- `WORK-PACKET-TILED.md` (entire packet): the compile gate, supported codec set, numeric permissions, exact eight enabled/one disabled test inventory, and count-bearing nextest commands agree with AC4/AC5. The packet states no measurements have yet run.
+
+Count audit:
+- Requirements: 11; source R1-R11 retained.
+- Acceptance criteria: 14 rows (AC1, AC2, AC3, AC3b, AC3c, AC3d, AC4, AC5, AC6, AC7, AC8, AC9, AC10, AC10b); each names a command and expected count or oracle.
+- Task slices: 14 rows; every row names one AC and an exact command.
+- Measurement arms: enabled 15 timing + 3 warmup + 3 CoV rows; disabled 15 + 3 + 3. Both run three activation-row shapes at the same threshold of 1 and use the same explicit relaxed-metal config.
+
+No measurement command was run during this audit. No source R1-R11 was changed by this audit.

@@ -1,0 +1,40 @@
+VERDICT: REFUSE
+gates: G1 pass, G2 FAIL, G3 pass, G4 FAIL, G5 FAIL, G6 pass, G7 pass
+counts: R 10 / discharged 10 | AC 13 / orphaned 0 | slices 6 / unvalidated 4 | paths 14 / dangling 0
+
+G2 — SPEC.md:52
+> | R8 | Experimental float-storage lowering compiles out by default; core binding/emission retains its alloc tier and runtime I/O stays std-only. |
+
+The default-off compile gate, alloc-tier compilation contract, and std-only runtime I/O contract can fail independently; they are combined in one requirement.
+
+G4 — SPEC.md:95
+> | AC3 | R3,R4 | `cargo nextest run -p omega --lib -E 'test(config_plan_)'` | 12 tests; literal resource/planning records and controls in execution packet |
+
+This correctness/output criterion includes literal CPU outputs and driver planning tests (WORK-PACKET-EXECUTION.md:162-173), but the named group has only a deliberately corrupted-output negative control and no positive literal output passed through the same comparator with an expected pass. The independent oracle check required by G4 is absent for this AC.
+
+G4 — SPEC.md:98
+> | AC3d | R3,R4 | `cargo nextest run -p omega --lib -E 'test(config_metal_)'` | 4 real Metal tests; literal vectors and physical buffer rows, zero silent CPU fallback |
+
+The Metal test group names literal output vectors (WORK-PACKET-EXECUTION.md:191-198), but specifies no positive literal-oracle self-check through the same comparator with an expected pass. The required degenerate control can reject a corruption, but does not establish the positive comparator control for this AC.
+
+G5 — TASKS.md:11
+> | S1 config | Luna; config packet plus numeric Settings derive and existing sizing files | admission | AC1,AC8 | `cargo nextest run -p omega --lib -E 'test(runtime_config_)'` |
+
+The validation command runs AC1 only; it does not run AC8, which is also assigned to S1.
+
+G5 — TASKS.md:13
+> | S3 configured execution/resources/selection | Sol; execution packet, existing backend driver prepare/allocation paths | S1,S2 | AC3,AC3b,AC3c,AC3d,AC8 | `cargo nextest run -p omega --lib -E 'test(config_plan_)'` |
+
+The validation command runs AC3 only; it does not run AC3b, AC3c, AC3d, or AC8, which are also assigned to S3.
+
+G5 — TASKS.md:14
+> | S4 tiled storage/policy | Luna; tiled packet, including existing identity and grid consumers | S1 sizing gate | AC4,AC5,AC7 | `env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=1 cargo test -p omega --lib programmable_tiled_ -- --nocapture` |
+
+The validation command runs the enabled configuration (AC4) only; it does not run AC5's feature-off configuration or AC7's alloc-tier compile check.
+
+G5 — TASKS.md:15
+> | S5 real execution and microbench | Luna; omega/tests/programmable_execution_vectors.rs | S3,S4 | AC6,AC10 | `env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=1 cargo test -p omega --test programmable_execution_vectors -- --nocapture` |
+
+The validation command runs the regular execution-vector tests (AC6) only; it does not select/run AC10's explicitly ignored microbenchmark.
+
+Context path check: the 13 relative paths in SPEC.md:129-141 exist under `/private/tmp/proxima-omega-unified-config`; the absolute path at SPEC.md:142 exists at its stated location. Paths checked: 14, dangling: 0.
