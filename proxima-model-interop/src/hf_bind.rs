@@ -365,12 +365,29 @@ fn expert_row_part<T: Copy>(
 /// dtype the gathered kernel rejects (`run_reduce_quantized` refuses a
 /// `Float32` weight block), which keeps the dequantize-and-transpose path
 /// [`crate::bind::bind_moe_stacked_experts`] keeps for the same reason.
+#[cfg(not(feature = "float-layout-dtype"))]
 fn expert_stack_codec(dtype: DType) -> Option<Codec> {
     match dtype {
         DType::BFloat16 => Some(Codec::BFloat16),
         DType::Float16 => Some(Codec::Float16),
         _ => None,
     }
+}
+
+/// Selects the codec whose layout fields equal the stored element type's, among the two the
+/// gathered kernel serves; every other layout keeps the dequantize-and-transpose path.
+#[cfg(feature = "float-layout-dtype")]
+fn expert_stack_codec(dtype: DType) -> Option<Codec> {
+    let DType::Float(layout) = dtype else {
+        return None;
+    };
+    [Codec::BFloat16, Codec::Float16]
+        .into_iter()
+        .find(|codec| {
+            codec
+                .layout()
+                .is_some_and(|candidate| candidate.same_format(&layout))
+        })
 }
 
 /// Binds one routed `[experts, in, out]` leaf the way
@@ -1370,9 +1387,46 @@ mod inout_views;
 mod tests {
     use alloc::vec;
 
+    #[cfg(feature = "float-layout-dtype")]
+    use proxima_primitives::float_layout::{FloatLayout, Specials};
     use proxima_safetensors::{SafetensorsModel, TensorPayload, write_complete};
 
     use super::*;
+
+    #[cfg(feature = "float-layout-dtype")]
+    #[test]
+    fn float_layout_packed_hf_bind_maps_dtype_to_codec_by_fields() {
+        let binary16_by_fields = FloatLayout {
+            exponent_bits: 5,
+            mantissa_bits: 10,
+            specials: Specials::InfinityOnOverflow,
+            bias_override: Some(15),
+        };
+        let brain16_by_fields = FloatLayout {
+            exponent_bits: 8,
+            mantissa_bits: 7,
+            specials: Specials::InfinityOnOverflow,
+            bias_override: None,
+        };
+        let unnamed = FloatLayout {
+            exponent_bits: 4,
+            mantissa_bits: 3,
+            specials: Specials::None,
+            bias_override: None,
+        };
+
+        assert_eq!(
+            expert_stack_codec(DType::Float(binary16_by_fields)),
+            Some(Codec::Float16)
+        );
+        assert_eq!(
+            expert_stack_codec(DType::Float(brain16_by_fields)),
+            Some(Codec::BFloat16)
+        );
+        assert_eq!(expert_stack_codec(DType::Float(FloatLayout::BF32)), None);
+        assert_eq!(expert_stack_codec(DType::Float(unnamed)), None);
+        assert_eq!(expert_stack_codec(DType::Int32), None);
+    }
 
     fn f32_bytes(values: &[f32]) -> Vec<u8> {
         values
