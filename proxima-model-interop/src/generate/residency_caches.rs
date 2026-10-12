@@ -100,7 +100,7 @@ impl LogitsSink<'_> {
                 buffer.clear();
                 buffer.extend_from_slice(logits);
             }
-            #[cfg(all(test, feature = "metal"))]
+            #[cfg(all(test, feature = "metal", feature = "std", unix))]
             Self::SumBarriers(total) => **total += _barriers_step,
         }
     }
