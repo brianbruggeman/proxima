@@ -18,6 +18,7 @@ for the design discipline behind it see [`principles.md`](principles.md).
 - [App lifecycle and Server handle](#app-lifecycle-and-server-handle)
 - [round-trip property](#round-trip-property)
 - [plugin extension](#plugin-extension)
+- [omega tensor execution](#omega-tensor-execution)
 
 ---
 
@@ -342,3 +343,110 @@ support automatically. Built-ins (Auth, RateLimit, Retry, Transform,
 Isolate, Validate, Diff, Tee, HttpUpstream, KvUpstream, ProcessRpc,
 SynthUpstream, ReplayUpstream, etc.) ship registered in the default
 factory registry.
+
+## omega tensor execution
+
+`omega::config::RuntimeConfig` derives `conflaguration::Settings`. Resolve it
+once with `RuntimeConfig::from_file`, `RuntimeConfig::from_env`, or
+`RuntimeConfig::builder().with_engine("cpu").build()`. File and environment
+builder methods apply their fields in sequence; later sources override earlier
+values, and subsequent fluent setters override those sources. Unknown file
+fields and invalid values are errors.
+
+The source order is generated build floor, configuration file, `OMEGA_*`
+environment values, then explicit fluent overrides. The builder expresses that
+order directly:
+
+```rust
+let runtime = omega::config::RuntimeConfig::builder()
+    .from_file("omega-runtime.toml")?
+    .from_env()?
+    .with_cpu_workers(4)
+    .with_parallel_sequences(3)
+    .with_max_in_flight(2)
+    .with_max_device_bytes(Some(64))
+    .build()?;
+```
+
+`cpu_workers`, `independent_ops`, `parallel_sequences`, and `max_in_flight`
+must be positive. Their `OMEGA_RUNTIME_*` build-time values (set in
+`omega/omega-runtime.toml`) generate the defaults; the runtime fields seed from
+those constants and can be overridden by `OMEGA_CPU_WORKERS`,
+`OMEGA_INDEPENDENT_OPS`, `OMEGA_PARALLEL_SEQUENCES`, and `OMEGA_MAX_IN_FLIGHT`.
+The optional `max_device_bytes` is a hard per-plan residency ceiling and is
+independent of numeric permission. The on-disk Metal pipeline cache is
+configured here too: `pipeline_cache`, `pipeline_cache_dir` and
+`pipeline_cache_max_bytes`.
+
+Strategy requests live beside the existing `NumericPolicy` without granting
+permission to change arithmetic: `decode_kernel`, `fusion`, `residency`,
+`batching`, `speculation`, `weight_conversion` and the `moe_grouping` flag are
+all serialized fields of the config. A mandatory strategy that the selected
+owner or driver cannot provide must return its typed capability error instead
+of silently selecting a different strategy.
+
+Pass the config to `omega::backend::plan_named_with_config` alongside the
+existing tensor `Op` program, symbol values, named `QuantizedBlock` bindings and
+requested `NodeId` outputs. It returns the existing reusable `Plan` plus
+candidate records. `execute_plan_named` then executes that plan against fresh
+input bytes. A changed input count or codec requires a newly prepared plan. The
+public planner's rustdoc carries a runnable example.
+
+```toml
+engine = "gpu"
+gpu_driver = "metal"
+allow_fusion = true
+exact_activations = true
+
+[numeric]
+contraction = true
+reassociation = true
+
+[selection]
+mode = "configured"
+```
+
+The remaining numeric permissions default to false. Fusion permission never
+grants a numerical rewrite on its own. Dense Metal matrix accumulation requires
+both contraction and reassociation. `[experimental] dense_float_storage` in
+`omega/omega-runtime.toml` (build override
+`OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE`, default 0) is a build-time switch for
+BF16/F16 tile input decoding under Cargo feature `metal-tiled-gemm`; leave it
+off: with it set to 1, the Metal cases in
+`omega/tests/programmable_execution_vectors.rs` do not select the dense tiled
+kernel on this tree. Build geometry stays in `omega/omega-runtime.toml`.
+Runtime settings are std-only; the binder and emitter retain their alloc tier.
+
+`selection.mode = "minimum_measured_wall_time"` times compiled, available
+backend candidates with the same program and policy. Optional `warmup_runs`
+and `measurement_runs` override the generated defaults. The report retains
+each raw synchronized duration, cold planning time, rejection and selected
+candidate. Configured mode does no trials and rejects explicit trial counts.
+Reuse the returned plan to amortize planning; selection does not install a
+global timing cache or promise a globally optimal schedule.
+
+`[constraints]` accepts positive `max_host_tensor_bytes`,
+`max_device_buffer_bytes`, and `max_single_device_buffer_bytes`. A CPU plan owns
+no device buffers, so the two device fields are rejected for `engine = "cpu"`
+with a typed `UnsupportedConstraint`. Metal's bounded path accepts Float32
+payloads only and rejects resident or externally retained buffers, specialized
+or gathered operations, and expert or diagnostic execution before allocating;
+its unbounded configured path keeps the existing placement executor. The
+fields bound owned tensor and workspace payload reachable from the plan and the
+current call; they are not process RSS or whole-device limits.
+
+`engine` is `cpu` or `gpu`, and `gpu_driver` is `auto`, `metal`, `wgpu` or
+`cuda`. Driver selection never silently falls back to CPU; a driver whose Cargo
+feature is not compiled returns a typed error.
+
+Model serving reaches the same planner through `ServingConfig::omega_runtime`
+(`ServingConfig::with_omega_runtime`) on builds with the `metal` feature. Pass a
+borrowed resolved `RuntimeConfig`; its engine (`cpu` for `gpu_layers = 0`,
+`gpu` for `GPU_LAYERS_ALL`), numeric policy and exact-activation setting must
+agree with the serving configuration, and `selection.mode` must be
+`configured`. The per-request `BackendRuntime` owns a clone of the config and
+its plans, plan refit is disabled while a config is present, and a changed
+`allow_fusion` or `gpu_driver` changes the prompt-cache key. Externally placed
+execution is rejected before it runs. `MathMode::for_numeric_policy` selects the
+widest Metal math mode the resolved numeric permissions allow; a bit-exact
+policy selects `Safe`. Serving rejects `parallel_sequences` other than one.
