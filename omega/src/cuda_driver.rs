@@ -1344,9 +1344,12 @@ impl CudaPlan {
                         output_len,
                     )
                 };
-                launch.map_err(|error| CudaDriverError::Execute {
-                    node: bound.node,
-                    error: error.to_string(),
+                launch.map_err(|error| match error {
+                    typed @ CudaDriverError::GatherIndexOutOfRange { .. } => typed,
+                    other => CudaDriverError::Execute {
+                        node: bound.node,
+                        error: other.to_string(),
+                    },
                 })?;
                 if let Some(started) = node_started {
                     timing_rows.push((bound.node, started.elapsed().as_micros(), output_len));
