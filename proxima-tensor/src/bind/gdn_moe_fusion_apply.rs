@@ -999,7 +999,7 @@ pub(super) fn match_moe_topk(
     consumers: &BTreeMap<NodeId, Vec<NodeId>>,
 ) -> Option<MoeTopKMatch> {
     let route_dtype = program.get(route0.0 as usize)?.dtype();
-    if !matches!(route_dtype, DType::Int32 | DType::Float32) {
+    if route_dtype != DType::Int32 && route_dtype != DType::Float32 {
         return None;
     }
     let candidate0 = moe_reduce_operand(

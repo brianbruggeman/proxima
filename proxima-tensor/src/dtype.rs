@@ -98,14 +98,31 @@ impl core::fmt::Debug for DType {
             Self::Int128 => "Int128",
             Self::UInt128 => "UInt128",
             Self::Float64 => "Float64",
-            Self::Float32 => "Float32",
-            Self::Float16 => "Float16",
-            Self::BFloat16 => "BFloat16",
-            Self::BFloat8 => "BFloat8",
-            Self::Fp6E3M2 => "Fp6E3M2",
-            Self::Float(layout) => return formatter.debug_tuple("Float").field(&layout).finish(),
+            Self::Float(layout) => {
+                return match Self::former_name(layout) {
+                    Some(former) => formatter.write_str(former),
+                    None => formatter.debug_tuple("Float").field(&layout).finish(),
+                };
+            }
         };
         formatter.write_str(name)
+    }
+}
+
+#[cfg(feature = "float-layout-dtype")]
+impl DType {
+    /// The name a layout carried as a variant before it became a constant of [`Float`](Self::Float),
+    /// by comparing the whole layout, never matching on a name.
+    pub(crate) fn former_name(layout: FloatLayout) -> Option<&'static str> {
+        [
+            (FloatLayout::BF32, "Float32"),
+            (FloatLayout::F16, "Float16"),
+            (FloatLayout::BF16, "BFloat16"),
+            (FloatLayout::E5M2_SATURATING, "BFloat8"),
+            (FloatLayout::E3M2, "Fp6E3M2"),
+        ]
+        .into_iter()
+        .find_map(|(named, name)| (named == layout).then_some(name))
     }
 }
 

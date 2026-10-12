@@ -250,20 +250,23 @@ pub fn pack_affine(
 }
 
 fn float_bytes(values: &[f32], dtype: DType) -> Result<Vec<u8>, InteropError> {
-    match dtype {
-        DType::BFloat16 => Ok(values
+    if dtype == DType::BFloat16 {
+        Ok(values
             .iter()
             .flat_map(|value| bf16::from_f32(*value).to_le_bytes())
-            .collect()),
-        DType::Float16 => Ok(values
+            .collect())
+    } else if dtype == DType::Float16 {
+        Ok(values
             .iter()
             .flat_map(|value| f16::from_f32(*value).to_le_bytes())
-            .collect()),
-        DType::Float32 => Ok(values
+            .collect())
+    } else if dtype == DType::Float32 {
+        Ok(values
             .iter()
             .flat_map(|value| value.to_le_bytes())
-            .collect()),
-        other => Err(InteropError::AffineDTypeUnsupported { dtype: other }),
+            .collect())
+    } else {
+        Err(InteropError::AffineDTypeUnsupported { dtype })
     }
 }
 
