@@ -16,14 +16,15 @@
 mod support;
 use support::{as_named_blocks, qwen3_gqa_qk_norm_forward_fixture, real_forward_fixture};
 
+use omega::Codec;
 use omega::backend::{BackendError, Engine, GpuDriver, execute_plan_named, plan_named};
 use proxima_tensor::NumericPolicy;
-use proxima_tensor::test_support::Lcg;
-use proxima_tensor::spec::qwen3_cached_forward_program;
 use proxima_tensor::infer;
+use proxima_tensor::spec::qk_norm_cached_forward_program;
+use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append,
-    map, projection,
+    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
+    append, map, projection,
 };
 
 const BATCH: u32 = 4;
@@ -102,8 +103,16 @@ fn elementwise_tanh_runs_on_cuda_at_cpu_parity() {
     let x = random_vec(5, 97);
     let named: Vec<(&str, QuantizedBlock<'_>)> = vec![("x", QuantizedBlock::Float32(&x))];
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::default())
-        .expect("omega::backend plans the elementwise chain on cpu");
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the elementwise chain on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
         .expect("omega::backend runs the elementwise chain on cpu");
 
@@ -168,10 +177,18 @@ fn reduce_add_runs_on_cuda_at_cpu_parity_via_the_cooperative_warp_shuffle_path()
     let x = random_vec(7, rows * cols);
     let named: Vec<(&str, QuantizedBlock<'_>)> = vec![("x", QuantizedBlock::Float32(&x))];
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::default())
-        .expect("omega::backend plans the row sum on cpu");
-    let cpu = execute_plan_named(&mut cpu_plan, &named)
-        .expect("omega::backend runs the row sum on cpu");
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the row sum on cpu");
+    let cpu =
+        execute_plan_named(&mut cpu_plan, &named).expect("omega::backend runs the row sum on cpu");
 
     let mut cuda_plan = plan_named(
         Engine::Gpu,
@@ -235,10 +252,18 @@ fn scan_cumsum_runs_on_cuda_at_cpu_parity() {
     let x = random_vec(11, rows * cols);
     let named: Vec<(&str, QuantizedBlock<'_>)> = vec![("x", QuantizedBlock::Float32(&x))];
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::default())
-        .expect("omega::backend plans the cumsum on cpu");
-    let cpu = execute_plan_named(&mut cpu_plan, &named)
-        .expect("omega::backend runs the cumsum on cpu");
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the cumsum on cpu");
+    let cpu =
+        execute_plan_named(&mut cpu_plan, &named).expect("omega::backend runs the cumsum on cpu");
 
     let mut cuda_plan = plan_named(
         Engine::Gpu,
@@ -347,8 +372,16 @@ fn the_two_layer_mlp_runs_on_cuda_at_cpu_parity() {
         ("w2", QuantizedBlock::Float32(&w2)),
     ];
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::default())
-        .expect("omega::backend plans the mlp on cpu");
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the mlp on cpu");
     let cpu =
         execute_plan_named(&mut cpu_plan, &named).expect("omega::backend runs the mlp on cpu");
 
@@ -459,8 +492,16 @@ fn embedding_lookup_runs_on_cuda_at_cpu_parity_for_integer_valued_inputs() {
         ("ids", QuantizedBlock::Float32(&ids_data)),
     ];
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::default())
-        .expect("omega::backend plans the gather on cpu");
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the gather on cpu");
     let cpu =
         execute_plan_named(&mut cpu_plan, &named).expect("omega::backend runs the gather on cpu");
 
@@ -516,10 +557,14 @@ fn an_out_of_range_gather_index_faults_on_cuda_the_same_way_it_faults_on_cpu() {
     let error = execute_plan_named(&mut cuda_plan, &named)
         .expect_err("an out-of-range gather index must fault, not clamp silently");
     assert!(
-        matches!(error, omega::backend::BackendError::Cuda(omega::CudaError::Tensor(
-            proxima_tensor::TensorError::GatherIndexOutOfRange { extent, .. }
-        )) if extent == vocab as u64),
-        "expected a GatherIndexOutOfRange fault against extent {vocab}, got {error:?}"
+        matches!(
+            error,
+            omega::backend::BackendError::Cuda(omega::CudaDriverError::GatherIndexOutOfRange {
+                index: 999,
+                ..
+            })
+        ),
+        "expected a GatherIndexOutOfRange fault at index 999, got {error:?}"
     );
 }
 
@@ -694,7 +739,10 @@ fn packed_q4k_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
         QK_K,
         quantize,
         dequantize,
-        |bytes| QuantizedBlock::Q4K(bytes),
+        |bytes| QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes,
+        },
         1e-5,
     );
 }
@@ -708,7 +756,10 @@ fn packed_q5k_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
         QK_K,
         quantize,
         dequantize,
-        |bytes| QuantizedBlock::Q5K(bytes),
+        |bytes| QuantizedBlock::Packed {
+            codec: Codec::Q5K,
+            bytes,
+        },
         1e-5,
     );
 }
@@ -722,7 +773,10 @@ fn packed_q6k_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
         QK_K,
         quantize,
         dequantize,
-        |bytes| QuantizedBlock::Q6K(bytes),
+        |bytes| QuantizedBlock::Packed {
+            codec: Codec::Q6K,
+            bytes,
+        },
         1e-5,
     );
 }
@@ -736,7 +790,10 @@ fn packed_q8_0_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
         QK8_0,
         quantize,
         dequantize,
-        |bytes| QuantizedBlock::Q8_0(bytes),
+        |bytes| QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes,
+        },
         1e-5,
     );
 }
@@ -750,7 +807,10 @@ fn packed_q4_0_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
         QK4_0,
         quantize,
         dequantize,
-        |bytes| QuantizedBlock::Q4_0(bytes),
+        |bytes| QuantizedBlock::Packed {
+            codec: Codec::Q4_0,
+            bytes,
+        },
         1e-5,
     );
 }
@@ -833,12 +893,12 @@ fn a_float16_dtyped_op_names_its_rejection_on_cuda_instead_of_misreading_a_half_
     assert!(
         matches!(
             error,
-            BackendError::Cuda(omega::CudaError::Emit(omega::EmitError::UnsupportedDType {
+            BackendError::Cuda(omega::CudaDriverError::UnsupportedDtype {
                 dtype: DType::Float16,
                 ..
-            }))
+            })
         ),
-        "expected UnsupportedDType naming Float16, got {error:?}"
+        "expected UnsupportedDtype naming Float16, got {error:?}"
     );
 }
 
@@ -989,13 +1049,12 @@ fn the_qwen3_gqa_qk_norm_forward_runs_on_cuda_at_cpu_parity() {
 /// `reduction_total > WARP_SIZE` combined with the per-head (not per-row)
 /// axis topology real Qwen3 checkpoints use (`query_heads`/`kv_heads` as
 /// EXTRA, non-reduced axes alongside the reduced `head_dim`). Built directly
-/// from `qwen3_cached_forward_program` (bypassing `support`'s fixed-width
+/// from `qk_norm_cached_forward_program` (bypassing `support`'s fixed-width
 /// fixture) at `HEAD_DIM = 64`, matching a real checkpoint's own per-head
 /// width, so a bug that only appears once a lane strides through the
 /// reduction more than once cannot hide behind the narrower fixture.
 #[test]
 fn the_qwen3_gqa_qk_norm_forward_runs_on_cuda_at_cpu_parity_with_head_dim_wider_than_a_warp() {
-
     const VOCAB: u32 = 64;
     const EMBEDDING: u32 = 256;
     const FEED_FORWARD: u32 = 512;
@@ -1004,7 +1063,7 @@ fn the_qwen3_gqa_qk_norm_forward_runs_on_cuda_at_cpu_parity_with_head_dim_wider_
     const HEAD_DIM: u32 = 64;
     const LAYERS: u32 = 2;
 
-    let (program, logits_root, cache_roots) = qwen3_cached_forward_program(
+    let (program, logits_root, cache_roots) = qk_norm_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,
@@ -1023,8 +1082,8 @@ fn the_qwen3_gqa_qk_norm_forward_runs_on_cuda_at_cpu_parity_with_head_dim_wider_
     }
 
     let symbols = vec![1u64, 0u64];
-    let shapes = infer(&program, &symbols)
-        .expect("the wide-head-dim qwen3 gqa+qk_norm forward infers");
+    let shapes =
+        infer(&program, &symbols).expect("the wide-head-dim qwen3 gqa+qk_norm forward infers");
 
     let mut owned: Vec<(String, Vec<f32>)> = Vec::new();
     for (position, op) in program.iter().enumerate() {
@@ -1105,7 +1164,6 @@ fn the_qwen3_gqa_qk_norm_forward_runs_on_cuda_at_cpu_parity_with_head_dim_wider_
 
 #[test]
 fn the_qwen3_multi_token_prefill_runs_on_cuda_at_cpu_parity() {
-
     const VOCAB: u32 = 64;
     const EMBEDDING: u32 = 256;
     const FEED_FORWARD: u32 = 512;
@@ -1115,7 +1173,7 @@ fn the_qwen3_multi_token_prefill_runs_on_cuda_at_cpu_parity() {
     const LAYERS: u32 = 2;
     const NEW_COUNT: u64 = 5;
 
-    let (program, logits_root, cache_roots) = qwen3_cached_forward_program(
+    let (program, logits_root, cache_roots) = qk_norm_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,
@@ -1134,8 +1192,7 @@ fn the_qwen3_multi_token_prefill_runs_on_cuda_at_cpu_parity() {
     }
 
     let symbols = vec![NEW_COUNT, 0u64];
-    let shapes = infer(&program, &symbols)
-        .expect("the multi-token prefill qwen3 program infers");
+    let shapes = infer(&program, &symbols).expect("the multi-token prefill qwen3 program infers");
 
     let mut owned: Vec<(String, Vec<f32>)> = Vec::new();
     for (position, op) in program.iter().enumerate() {
@@ -1150,7 +1207,9 @@ fn the_qwen3_multi_token_prefill_runs_on_cuda_at_cpu_parity() {
             .clone()
             .expect("every block input in this program is named");
         let data = if name == "ids" {
-            (0..count).map(|index| (index % VOCAB as usize) as f32).collect()
+            (0..count)
+                .map(|index| (index % VOCAB as usize) as f32)
+                .collect()
         } else if name == "eps" {
             vec![1e-5f32; count]
         } else if name == "cached_len" {
@@ -1216,7 +1275,6 @@ fn the_qwen3_multi_token_prefill_runs_on_cuda_at_cpu_parity() {
 
 #[test]
 fn the_qwen3_real_scale_forward_runs_on_cuda_at_cpu_parity() {
-
     const VOCAB: u32 = 151936;
     const EMBEDDING: u32 = 1024;
     const FEED_FORWARD: u32 = 3072;
@@ -1226,7 +1284,7 @@ fn the_qwen3_real_scale_forward_runs_on_cuda_at_cpu_parity() {
     const LAYERS: u32 = 28;
     const NEW_COUNT: u64 = 5;
 
-    let (program, logits_root, cache_roots) = qwen3_cached_forward_program(
+    let (program, logits_root, cache_roots) = qk_norm_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,
@@ -1245,8 +1303,7 @@ fn the_qwen3_real_scale_forward_runs_on_cuda_at_cpu_parity() {
     }
 
     let symbols = vec![NEW_COUNT, 0u64];
-    let shapes = infer(&program, &symbols)
-        .expect("the real-scale qwen3 program infers");
+    let shapes = infer(&program, &symbols).expect("the real-scale qwen3 program infers");
 
     let mut owned: Vec<(String, Vec<f32>)> = Vec::new();
     for (position, op) in program.iter().enumerate() {
@@ -1261,7 +1318,9 @@ fn the_qwen3_real_scale_forward_runs_on_cuda_at_cpu_parity() {
             .clone()
             .expect("every block input in this program is named");
         let data = if name == "ids" {
-            (0..count).map(|index| (index % VOCAB as usize) as f32).collect()
+            (0..count)
+                .map(|index| (index % VOCAB as usize) as f32)
+                .collect()
         } else if name == "eps" {
             vec![1e-6f32; count]
         } else if name == "cached_len" {
