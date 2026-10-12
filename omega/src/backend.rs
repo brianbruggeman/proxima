@@ -560,7 +560,7 @@ fn candidate_is_better(candidate: &CandidateMeasurement, incumbent: &CandidateMe
         && candidate.execution_sum_ns < incumbent.execution_sum_ns
 }
 
-#[cfg(any(feature = "wgpu-backend", feature = "cuda-driver"))]
+#[cfg(any(test, feature = "wgpu-backend", feature = "cuda-driver"))]
 pub(crate) fn checked_resource_sum(values: impl IntoIterator<Item = u64>) -> Option<u64> {
     values.into_iter().try_fold(0_u64, u64::checked_add)
 }
@@ -1825,6 +1825,11 @@ pub fn execute_plan_named_metal_op_timed_with_expert_sources(
         Plan::Cuda(_) => Err(BackendError::NotImplemented { backend: "cuda" }),
     }
 }
+
+#[cfg(all(test, feature = "cpu"))]
+// hand-built fixtures: an expect failure IS the test failing, same as `mod tests` below.
+#[allow(clippy::expect_used)]
+mod programmable_tests;
 
 #[cfg(test)]
 // test fixtures below are hand-built to succeed; an expect/unwrap failure IS
