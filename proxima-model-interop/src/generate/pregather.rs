@@ -2410,14 +2410,19 @@ impl<'file> LoadedModel<'file> {
         self.program.len()
     }
 
-    /// Every [`NodeId`] the program needs to evaluate `through`, inclusive.
-    /// `self.program` is a flat, topologically-ordered slice (`op::append`'s
-    /// own doc: "the last element is the root", by construction backwards-
-    /// only), so the prefix `0..=through.0` is exactly that set -- no graph
-    /// walk required.
+    /// Every computed [`NodeId`] the program needs to evaluate `through`,
+    /// inclusive. `self.program` is a flat, topologically-ordered slice
+    /// (`op::append`'s own doc: "the last element is the root", by
+    /// construction backwards-only), so the prefix `0..=through.0` is exactly
+    /// that set -- no graph walk required. `Op::Input` leaves are bound data,
+    /// not computed values, and a device backend holds a quantized one as raw
+    /// bytes it cannot read back as `f32`, so they are left out.
     #[must_use]
     pub fn computed_node_ids_through(&self, through: NodeId) -> Vec<NodeId> {
-        (0..=through.0).map(NodeId).collect()
+        (0..=through.0)
+            .map(NodeId)
+            .filter(|node| self.program[node.0 as usize].kind() != "input")
+            .collect()
     }
 
     /// This node's op kind (`Op::kind`), for diagnostics that print a

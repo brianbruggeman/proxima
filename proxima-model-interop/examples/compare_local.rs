@@ -32,6 +32,18 @@ fn main() {
     if env::var_os("PROXIMA_DISABLE_CPU_FUSION").is_some() {
         proxima_tensor::cpu::set_epilogue_fuse_enabled(false);
     }
+    if let Ok(list) = env::var("PROXIMA_DESCRIBE_NODES") {
+        for node in list.split(',').filter_map(|value| value.parse::<u32>().ok()) {
+            let node = proxima_tensor::NodeId(node);
+            println!(
+                "{{\"describe_node\":{},\"kind\":{:?},\"dependencies\":{:?},\"description\":{:?}}}",
+                node.0,
+                model.node_kind(node),
+                model.node_dependencies(node),
+                model.node_description(node)
+            );
+        }
+    }
     let layer_roots = model.layer_residual_roots().to_vec();
     if !layer_roots.is_empty() {
         let requested_roots = if env::var_os("PROXIMA_COMPARE_LAYER").is_some()
@@ -73,6 +85,17 @@ fn main() {
                 .iter()
                 .zip(cpu_layers.iter().zip(&gpu_layers))
             {
+                if cpu_node.is_empty() {
+                    if sweep {
+                        println!(
+                            "{{\"sweep_node\":{},\"kind\":{:?},\"skipped\":\"cpu_fused_interior\",\"gpu_elements\":{}}}",
+                            node_id.0,
+                            model.node_kind(*node_id),
+                            gpu_node.len()
+                        );
+                    }
+                    continue;
+                }
                 if cpu_node.len() != gpu_node.len() {
                     panic!(
                         "node {} output length differs: {} vs {}",
@@ -81,19 +104,16 @@ fn main() {
                         gpu_node.len()
                     );
                 }
-                if cpu_node.is_empty() {
-                    continue;
-                }
                 let (max_abs, max_index) = cpu_node
                     .iter()
                     .zip(gpu_node)
                     .enumerate()
-                    .map(|(index, (left, right))| (f64::from((left - right).abs()), index))
+                    .map(|(index, (left, right))| (scaled_difference(*left, *right), index))
                     .max_by(|left, right| left.0.total_cmp(&right.0))
                     .expect("nonempty intermediate");
                 if sweep {
                     println!(
-                        "{{\"sweep_node\":{},\"kind\":{:?},\"elements\":{},\"max_abs\":{max_abs},\"max_index\":{max_index}}}",
+                        "{{\"sweep_node\":{},\"kind\":{:?},\"elements\":{},\"max_scaled\":{max_abs},\"max_index\":{max_index}}}",
                         node_id.0,
                         model.node_kind(*node_id),
                         cpu_node.len()
@@ -113,7 +133,7 @@ fn main() {
             }
             match first_bad {
                 Some((node, max_abs, max_index, cpu_value, gpu_value, elements)) => println!(
-                    "{{\"first_divergent_node\":{node},\"kind\":{:?},\"name\":{:?},\"description\":{:?},\"dependencies\":{:?},\"elements\":{elements},\"max_abs\":{max_abs},\"max_index\":{max_index},\"cpu\":{cpu_value},\"gpu\":{gpu_value}}}",
+                    "{{\"first_divergent_node\":{node},\"kind\":{:?},\"name\":{:?},\"description\":{:?},\"dependencies\":{:?},\"elements\":{elements},\"max_scaled\":{max_abs},\"max_index\":{max_index},\"cpu\":{cpu_value},\"gpu\":{gpu_value}}}",
                     model.node_kind(proxima_tensor::NodeId(node)),
                     model.node_name(proxima_tensor::NodeId(node)),
                     model.node_description(proxima_tensor::NodeId(node)),
@@ -142,7 +162,7 @@ fn main() {
                             .iter()
                             .zip(gpu_target)
                             .enumerate()
-                            .map(|(index, (left, right))| (f64::from((left - right).abs()), index))
+                            .map(|(index, (left, right))| (abs_difference(*left, *right), index))
                             .max_by(|left, right| left.0.total_cmp(&right.0))
                             .expect("nonempty target after explicit empty check");
                         println!(
@@ -182,12 +202,23 @@ fn main() {
                             {
                                 let cpu_dep = &cpu_layers[dep_index];
                                 let gpu_dep = &gpu_layers[dep_index];
+                                if cpu_dep.is_empty() {
+                                    println!(
+                                        "{{\"dependency_node\":{},\"kind\":{:?},\"cpu_fused_interior\":true,\"gpu_elements\":{},\"gpu_head\":{:?},\"description\":{:?}}}",
+                                        dependency.0,
+                                        model.node_kind(dependency),
+                                        gpu_dep.len(),
+                                        &gpu_dep[..gpu_dep.len().min(48)],
+                                        model.node_description(dependency)
+                                    );
+                                    continue;
+                                }
                                 let (dep_max_abs, dep_max_index) = cpu_dep
                                     .iter()
                                     .zip(gpu_dep)
                                     .enumerate()
                                     .map(|(index, (left, right))| {
-                                        (f64::from((left - right).abs()), index)
+                                        (abs_difference(*left, *right), index)
                                     })
                                     .max_by(|left, right| left.0.total_cmp(&right.0))
                                     .expect("reduction dependency is nonempty");
@@ -246,7 +277,7 @@ fn main() {
                     .iter()
                     .zip(gpu_layer)
                     .enumerate()
-                    .map(|(index, (left, right))| (f64::from((left - right).abs()), index))
+                    .map(|(index, (left, right))| (abs_difference(*left, *right), index))
                     .max_by(|left, right| left.0.total_cmp(&right.0))
                     .expect("nonempty layer residual");
                 println!(
@@ -268,7 +299,7 @@ fn main() {
         .iter()
         .zip(&gpu)
         .enumerate()
-        .map(|(index, (left, right))| (f64::from((left - right).abs()), index))
+        .map(|(index, (left, right))| (abs_difference(*left, *right), index))
         .max_by(|left, right| left.0.total_cmp(&right.0))
         .expect("nonempty logits");
     let cpu_top = cpu
@@ -1014,4 +1045,25 @@ fn max_abs_and_index(left: &[f32], right: &[f32]) -> (f32, usize) {
         .map(|(index, (left, right))| ((left - right).abs(), index))
         .max_by(|left, right| left.0.total_cmp(&right.0))
         .expect("nonempty reciprocal comparison")
+}
+
+/// `|left - right|` where equal values, including a pair of `-inf` causal-mask entries, differ by
+/// zero, and an unequal pair involving `inf` or `NaN` differs by `inf` instead of `NaN`.
+fn abs_difference(left: f32, right: f32) -> f64 {
+    if left == right {
+        return 0.0;
+    }
+    let difference = f64::from((left - right).abs());
+    if difference.is_nan() { f64::INFINITY } else { difference }
+}
+
+/// `|left - right| / max(1, |left|, |right|)`: an absolute bar below magnitude 1 and a relative bar
+/// above it, so a few f32 ulps on a 6494.15-sized attention score are not read as divergence.
+/// Any unequal pair involving `inf` or `NaN` is infinitely far apart.
+fn scaled_difference(left: f32, right: f32) -> f64 {
+    let difference = abs_difference(left, right);
+    if !difference.is_finite() {
+        return difference;
+    }
+    difference / f64::from(left.abs().max(right.abs()).max(1.0))
 }
