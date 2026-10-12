@@ -21,12 +21,10 @@ mod mil_support;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use door_support::two_layer_mlp_bytes;
-use mil_support::{operator_sequence, protoc_decode};
+use mil_support::{operator_sequence, protoc_decode, protoc_encode};
 use omega::coreml::compile::{CompileError, Compiled, Compiler, operator_counts, package_sha256};
 use omega::door::{Pins, Reader};
 use omega::onnx_door::OnnxReader;
@@ -45,28 +43,6 @@ fn probe_text() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/coreml-lane/mil_ops_probe.pbtxt");
     fs::read_to_string(&path).expect("the probe fixture is vendored")
-}
-
-fn protoc_encode(text: &str) -> Vec<u8> {
-    let proto_directory =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/coreml-lane/proto/coreml");
-    let mut child = Command::new("protoc")
-        .arg("--encode=CoreML.Specification.Model")
-        .arg(format!("-I{}", proto_directory.display()))
-        .arg("Model.proto")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("the protoc binary starts");
-    child
-        .stdin
-        .take()
-        .expect("stdin is piped")
-        .write_all(text.as_bytes())
-        .expect("protoc reads the probe text");
-    let output = child.wait_with_output().expect("protoc finishes");
-    assert!(output.status.success(), "protoc refused the probe text");
-    output.stdout
 }
 
 fn write_package(

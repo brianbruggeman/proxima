@@ -1,0 +1,16 @@
+specificationVersion: 7
+description {
+  input { name: "a" type { multiArrayType { shape: 2 shape: 4 dataType: FLOAT32 } } }
+  output { name: "v_cumsum" type { multiArrayType { shape: 2 shape: 4 dataType: FLOAT32 } } }
+}
+mlProgram {
+  version: 1
+  functions { key: "main" value {
+    inputs { name: "a" type { tensorType { dataType: FLOAT32 rank: 2 dimensions { constant { size: 2 } } dimensions { constant { size: 4 } } } } }
+    opset: "CoreML6"
+    block_specializations { key: "CoreML6" value {
+      outputs: "v_cumsum"
+      operations { type: "cumsum" inputs { key: "x" value { arguments { name: "a" } } } inputs { key: "axis" value { arguments { value { type { tensorType { dataType: INT32 rank: 0 } } immediateValue { tensor { ints { values: 1 } } } } } } } inputs { key: "exclusive" value { arguments { value { type { tensorType { dataType: BOOL rank: 0 } } immediateValue { tensor { bools { values: false } } } } } } } outputs { name: "v_cumsum" type { tensorType { dataType: FLOAT32 rank: 2 dimensions { constant { size: 2 } } dimensions { constant { size: 4 } } } } } }
+    } }
+  } }
+}

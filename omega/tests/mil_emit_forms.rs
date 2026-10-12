@@ -12,6 +12,8 @@
 #[allow(dead_code)]
 #[path = "support/bge.rs"]
 mod bge;
+// the helper module serves several binaries and each uses part of it.
+#[allow(dead_code)]
 mod mil_support;
 
 use mil_support::{operator_sequence, protoc_decode};

@@ -13,8 +13,8 @@ const CACHE_RELATIVE_PATH: &str = ".cache/proxima/coreml-lane";
 
 /// Why a package did not become a compiled model.
 ///
-/// `Rejected` carries the compiler's own diagnostic verbatim, the text the
-/// typed refusals of the Verify stage are parsed from.
+/// `UnknownOperator` and `MissingParam` are the two refusals parsed from the
+/// compiler's own diagnostic; `Rejected` carries any other diagnostic verbatim.
 #[derive(Debug, thiserror::Error)]
 pub enum CompileError {
     #[error("xcrun could not find {TOOL_NAME}: {message}")]
@@ -34,6 +34,12 @@ pub enum CompileError {
         #[source]
         source: io::Error,
     },
+
+    #[error("mil operator `{operator}` is unknown to the compiler")]
+    UnknownOperator { operator: String },
+
+    #[error("mil operator `{operator}` is missing its required param `{param}`")]
+    MissingParam { operator: String, param: String },
 
     #[error("{TOOL_NAME} exited with {status}: {message}")]
     Rejected { status: String, message: String },
@@ -240,10 +246,7 @@ fn run_compiler(tool: &Path, package: &Path, output_dir: &Path) -> Result<(), Co
         })?;
     match output.status.success() {
         true => Ok(()),
-        false => Err(CompileError::Rejected {
-            status: output.status.to_string(),
-            message: diagnostic(&output),
-        }),
+        false => Err(refusal(&output.status.to_string(), diagnostic(&output))),
     }
 }
 
@@ -286,4 +289,34 @@ fn remove_tree(path: &Path) -> Result<(), CompileError> {
         }),
         _ => Ok(()),
     }
+}
+
+fn refusal(status: &str, message: String) -> CompileError {
+    typed_refusal(&message).unwrap_or_else(|| CompileError::Rejected {
+        status: status.to_owned(),
+        message,
+    })
+}
+
+fn typed_refusal(message: &str) -> Option<CompileError> {
+    let host = text_between(message, "in operation of type ", ':');
+    match (
+        text_between(message, "Unknown operator '", '\''),
+        text_between(message, "Required param '", '\''),
+        host,
+    ) {
+        (Some(operator), _, _) => Some(CompileError::UnknownOperator {
+            operator: operator.to_owned(),
+        }),
+        (None, Some(param), Some(operator)) => Some(CompileError::MissingParam {
+            operator: operator.to_owned(),
+            param: param.to_owned(),
+        }),
+        _ => None,
+    }
+}
+
+fn text_between<'a>(message: &'a str, start: &str, end: char) -> Option<&'a str> {
+    let (_, rest) = message.split_once(start)?;
+    rest.split_once(end).map(|(found, _)| found)
 }

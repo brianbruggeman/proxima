@@ -43,3 +43,24 @@ pub fn operator_sequence(text: &str) -> Vec<String> {
         .map(str::to_owned)
         .collect()
 }
+
+/// The `Model.proto` bytes `protoc --encode` writes for a text-format model.
+pub fn protoc_encode(text: &str) -> Vec<u8> {
+    let mut child = Command::new("protoc")
+        .arg("--encode=CoreML.Specification.Model")
+        .arg(format!("-I{}", proto_directory().display()))
+        .arg("Model.proto")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("the protoc binary starts");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(text.as_bytes())
+        .expect("protoc reads the text model");
+    let output = child.wait_with_output().expect("protoc finishes");
+    assert!(output.status.success(), "protoc refused the text model");
+    output.stdout
+}

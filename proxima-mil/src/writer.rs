@@ -10,7 +10,7 @@
 //! those directly to emit one node ([`emit_node`]) or measure a program
 //! ([`measure`]) without building a package.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::future::{Future, ready};
@@ -89,9 +89,9 @@ pub enum MilError {
     /// A buffer was too small or a weight source was malformed.
     #[error("wire: {0}")]
     Wire(#[from] WireError),
-    /// The census refused the node: MIL has no form for it.
-    #[error("{0}")]
-    NoMilForm(#[from] NoMilForm),
+    /// The census refused these nodes: MIL has no form for any of them.
+    #[error("{}", describe_offenders(.offenders))]
+    NoMilForm { offenders: Vec<NoMilForm> },
     /// The census maps the node but the writer does not yet emit that form.
     #[error("node {node} has a mil form the writer does not emit: {form}")]
     NotEmitted { node: NodeId, form: &'static str },
@@ -122,6 +122,14 @@ pub enum MilError {
     /// A package file the compiler reads is empty.
     #[error("package file {path} is empty")]
     EmptyPackageFile { path: &'static str },
+}
+
+fn describe_offenders(offenders: &[NoMilForm]) -> String {
+    offenders
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// One weight tensor as the source holds it, e.g. an ONNX initializer.
