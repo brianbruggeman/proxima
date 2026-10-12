@@ -666,3 +666,19 @@ max_threadgroups_x = 65535
 # used pin set is dropped and counted. Overridable per-build via
 # `OMEGA_ONNX_DOOR_MAX_PIN_SETS`.
 max_pin_sets = 4
+
+[runtime]
+# Build-time defaults for the optional cold-planning measurement mode. Runtime
+# overrides remain in `RuntimeConfig`; the alloc floor reads these constants.
+cpu_workers = 1
+independent_ops = 1
+parallel_sequences = 1
+max_in_flight = 1
+warmup_runs = 1
+measurement_runs = 5
+
+[experimental]
+# Default-off compile gate for native Float16/BFloat16 dense tiled lowering.
+# Set OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=1 only for an explicitly enabled
+# experimental build.
+dense_float_storage = 0

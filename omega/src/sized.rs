@@ -88,6 +88,14 @@
 //!   `row_tiled_splits`), read only under `metal-attn-split-rows`; see
 //!   `omega-runtime.toml`'s `[attention_rows]`.
 //! - `SELECTION_TOP_FRACTION_MIN_ROWS` (always compiled) -- the row count at which the rank-count top-fraction expression lowers to one selection kernel; see `omega-runtime.toml`'s `[selection]`.
+//! - [`RUNTIME_WARMUP_RUNS`] and [`RUNTIME_MEASUREMENT_RUNS`] — build-time
+//!   fallback counts for measured candidate selection. `std` runtime config
+//!   overrides these values; the alloc tier has only these generated constants.
+//! - [`RUNTIME_CPU_WORKERS`], [`RUNTIME_INDEPENDENT_OPS`],
+//!   [`RUNTIME_PARALLEL_SEQUENCES`] and [`RUNTIME_MAX_IN_FLIGHT`] — generated
+//!   resource floors shared by runtime configuration and alloc-tier callers.
+//! - `omega_dense_float_storage` — build-time cfg emitted only when
+//!   `[experimental].dense_float_storage` resolves to 1.
 //! - `CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES` (always compiled) —
 //!   Metal's per-threadgroup `threadgroup` memory ceiling; `crate::msl::
 //!   effective_context_chunk_cap` clamps `ATTENTION_CONTEXT_CHUNK_CAP`
@@ -103,6 +111,14 @@
 //! which stays alloc-tier.
 
 include!(concat!(env!("OUT_DIR"), "/omega_sized.rs"));
+
+/// compile-time tiled threshold when the tiled gemm feature exists.
+#[cfg(feature = "metal-tiled-gemm")]
+pub const DENSE_TILED_MIN_TOKENS: Option<u64> = Some(TILED_GEMM_MIN_TOKENS);
+
+/// `none` records that this build has no tiled threshold.
+#[cfg(not(feature = "metal-tiled-gemm"))]
+pub const DENSE_TILED_MIN_TOKENS: Option<u64> = None;
 
 /// Every lane of one Apple GPU SIMD-group -- fixed at 32 on every Apple
 /// Silicon/A-series GPU family this crate targets. Not read from the
