@@ -28,7 +28,7 @@ of this spec (R4-R7, R13) is struck.
 | id | requirement | testable in isolation |
 |---|---|---|
 | R1 | verify is sample-and-match: each verify row selects its token through the exact per-step selection the non-speculative path uses (override, penalties window, `sample_next_token`, shared rng); speculative output is byte-identical to non-speculative output for any ServingConfig and seed | yes |
-| R2 | every `Architecture` impl in proxima-model-interop returns `Some` from `speculative_verify_program` | yes |
+| R2 | every embedded family profile (`profiles::FAMILY_PROFILES`) either lowers a verify program through `ModelDescriptor::verify()` or is refused by a typed `speculative_verify` validation error; restated 2026-10-12 because 2935ab55 deleted the `Architecture` trait | yes |
 | R3a | rejected drafts are rolled back in attention KV via `LayerCache::truncate` | yes |
 | R3b | rejected drafts are rolled back in recurrent/SSM state via snapshot-restore of the pre-verify state | yes |
 | R4 | `ngram-simple` drafter, token-identical to `common_ngram_simple_draft` (`common/ngram-map.cpp:49`) | yes |

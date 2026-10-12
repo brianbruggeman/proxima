@@ -264,6 +264,8 @@ mod prompt_cache_chunk_shift_real_model_tests;
 mod prompt_cache_key;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod prompt_cache_real_model_tests;
+#[cfg(test)]
+mod recurrent_checkpoint_fixture;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 mod resident_plans;
 #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
@@ -275,6 +277,8 @@ mod speculative_default_on_tests;
 mod tests_all;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod thread_index_census_tests;
+#[cfg(test)]
+mod verify_bound_tests;
 mod warm_buffers;
 use decode::*;
 use draft_model::ModelProposer;

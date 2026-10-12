@@ -35,13 +35,13 @@ const MAX_REDUCTION: usize = 512;
 const DEPENDENT_REDUCTIONS_PER_LAYER: usize = 14;
 const UNIT_ROUNDOFF: f64 = 1.0 / 16_777_216.0;
 
-struct TensorSpec {
+pub(super) struct TensorSpec {
     name: String,
     dims: Vec<u64>,
     values: Vec<f32>,
 }
 
-fn spec(name: &str, dims: &[u64], scale: f32, offset: f32, rng: &mut Lcg) -> TensorSpec {
+pub(super) fn spec(name: &str, dims: &[u64], scale: f32, offset: f32, rng: &mut Lcg) -> TensorSpec {
     let count: u64 = dims.iter().product();
     TensorSpec {
         name: name.to_string(),
@@ -52,7 +52,7 @@ fn spec(name: &str, dims: &[u64], scale: f32, offset: f32, rng: &mut Lcg) -> Ten
     }
 }
 
-fn tokens() -> MetadataValue {
+pub(super) fn tokens() -> MetadataValue {
     let mut names: Vec<String> = (0..=255u8)
         .map(|byte| alloc::format!("<0x{byte:02X}>"))
         .collect();
@@ -60,7 +60,7 @@ fn tokens() -> MetadataValue {
     MetadataValue::Array(MetadataArray::String(names))
 }
 
-fn encode(metadata: Vec<(String, MetadataValue)>, specs: &[TensorSpec]) -> Vec<u8> {
+pub(super) fn encode(metadata: Vec<(String, MetadataValue)>, specs: &[TensorSpec]) -> Vec<u8> {
     let payloads: Vec<Vec<u8>> = specs
         .iter()
         .map(|tensor| {
@@ -88,7 +88,7 @@ fn encode(metadata: Vec<(String, MetadataValue)>, specs: &[TensorSpec]) -> Vec<u
     write_complete(&model).expect("the synthetic checkpoint encodes")
 }
 
-fn key(name: &str, value: MetadataValue) -> (String, MetadataValue) {
+pub(super) fn key(name: &str, value: MetadataValue) -> (String, MetadataValue) {
     (name.to_string(), value)
 }
 
