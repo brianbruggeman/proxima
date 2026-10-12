@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "float-layout-dtype")]
+use proxima_primitives::float_layout::FloatLayout;
 
 pub(super) const SELECTION_THREADGROUP_WIDTH: u64 = 1024;
 
@@ -325,6 +327,8 @@ pub(super) fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, Emi
         | DType::BFloat8
         | DType::Fp6E3M2
         | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }),
+        #[cfg(feature = "float-layout-dtype")]
+        DType::Float(_) => Err(EmitError::UnsupportedDType { node, dtype }),
     }
 }
 
@@ -1002,10 +1006,30 @@ pub(super) fn preamble(source: &mut String) {
     source.push('\n');
     source.push_str(Q5_0_UNPACK_MSL);
     source.push('\n');
+    push_flat_float_accessors(source);
+}
+
+#[cfg(not(feature = "float-layout-dtype"))]
+fn push_flat_float_accessors(source: &mut String) {
     source.push_str(BF16_UNPACK_MSL);
     source.push('\n');
     source.push_str(BRAIN_FLOAT_SCALAR_UNPACK_MSL);
     source.push('\n');
+}
+
+#[cfg(feature = "float-layout-dtype")]
+fn push_flat_float_accessors(source: &mut String) {
+    let accessors = [
+        (FloatLayout::BF16, "bf16_element"),
+        (FloatLayout::E5M2_SATURATING, "bf8_e5m2_element"),
+        (FloatLayout::E2M1, "bf4_e2m1_element"),
+    ];
+    for (layout, name) in accessors {
+        if let Some(accessor) = layout_render::layout_unpack_msl(layout, name) {
+            source.push_str(&accessor);
+            source.push('\n');
+        }
+    }
 }
 
 /// Splices the [`tiled_decode`] description of `tiled_decode_codec` after the scaled-float decoders it calls. `Some(codec)` only from [`render_reduce`]'s own call site, and only when [`tiled_decode_codec_of`] finds the op on the tiled or expert-grouped GEMM path. Unlike the codec decoders in [`preamble`], which are cheap `static inline`s the compiler drops when unused, a description's `msl` is text only that stager calls: splicing all of them everywhere would grow every kernel's source and shift pipeline-cache identity for every unrelated kernel.

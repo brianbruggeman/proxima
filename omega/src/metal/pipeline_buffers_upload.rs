@@ -1331,6 +1331,8 @@ pub(super) fn upload_block(
         | DType::BFloat8
         | DType::Fp6E3M2
         | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }.into()),
+        #[cfg(feature = "float-layout-dtype")]
+        DType::Float(_) => Err(EmitError::UnsupportedDType { node, dtype }.into()),
     }
 }
 
