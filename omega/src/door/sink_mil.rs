@@ -31,8 +31,9 @@ impl Writer for MilSink {
 
     fn emit(&self, lowered: &Lowered) -> Result<Self::Emitted, MilError> {
         output_name(lowered)?;
-        if let Some(refused) = census(&lowered.program, &[])?.refused.first() {
-            return Err(MilError::NoMilForm(*refused));
+        let offenders = census(&lowered.program, &[])?.refused;
+        if !offenders.is_empty() {
+            return Err(MilError::NoMilForm { offenders });
         }
         let shapes = infer(&lowered.program, &[])?;
         Ok((shapes, little_endian_weights(lowered)))

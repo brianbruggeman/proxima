@@ -1,5 +1,7 @@
 //! A plain reduction to the MIL `reduce_*` operators over the axes the output drops.
 
+use alloc::vec;
+
 use proxima_tensor::{NodeId, Reduce};
 
 use super::message::{
@@ -17,8 +19,10 @@ pub(super) fn emit(
     reduce: &Reduce,
     encoder: &mut Encoder<'_>,
 ) -> Result<(), MilError> {
-    let operator = reduce_operator(reduce.body, reduce.init)
-        .map_err(|reason| MilError::NoMilForm(crate::census::NoMilForm { node, reason }))?;
+    let operator =
+        reduce_operator(reduce.body, reduce.init).map_err(|reason| MilError::NoMilForm {
+            offenders: vec![crate::census::NoMilForm { node, reason }],
+        })?;
     let kind = kind_of(node, reduce.dtype)?;
     let site = Site {
         host: node,

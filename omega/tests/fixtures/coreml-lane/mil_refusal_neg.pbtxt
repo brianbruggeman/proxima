@@ -1,0 +1,16 @@
+specificationVersion: 7
+description {
+  input { name: "a" type { multiArrayType { shape: 2 shape: 4 dataType: FLOAT32 } } }
+  output { name: "v_neg" type { multiArrayType { shape: 2 shape: 4 dataType: FLOAT32 } } }
+}
+mlProgram {
+  version: 1
+  functions { key: "main" value {
+    inputs { name: "a" type { tensorType { dataType: FLOAT32 rank: 2 dimensions { constant { size: 2 } } dimensions { constant { size: 4 } } } } }
+    opset: "CoreML6"
+    block_specializations { key: "CoreML6" value {
+      outputs: "v_neg"
+      operations { type: "neg" inputs { key: "x" value { arguments { name: "a" } } } outputs { name: "v_neg" type { tensorType { dataType: FLOAT32 rank: 2 dimensions { constant { size: 2 } } dimensions { constant { size: 4 } } } } } }
+    } }
+  } }
+}

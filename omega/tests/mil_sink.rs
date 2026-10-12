@@ -138,9 +138,11 @@ fn mil_sink_emit_refuses_a_scan_body_mil_has_no_operator_for() {
 
     let error = error_of(MilSink.emit(&lowered));
 
-    let MilError::NoMilForm(refused) = error else {
+    let MilError::NoMilForm { offenders } = error else {
         panic!("expected a typed refusal, got {error:?}");
     };
+    let refused = offenders[0];
+    assert_eq!(offenders.len(), 1);
     assert_eq!(refused.node, NodeId(1));
     assert!(
         matches!(refused.reason, Refusal::ScanBody { .. }),
