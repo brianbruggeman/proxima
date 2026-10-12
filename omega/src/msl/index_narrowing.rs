@@ -9,7 +9,11 @@ pub(super) enum IndexFamily {
     BlockDecode,
 }
 
-pub(super) fn index_family(resolved: &BoundOp, quantized: &[Option<Codec>]) -> Option<IndexFamily> {
+pub(super) fn index_family(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+) -> Option<IndexFamily> {
     match &resolved.kind {
         BoundOpKind::Reduce {
             reduce_op,
@@ -19,7 +23,7 @@ pub(super) fn index_family(resolved: &BoundOp, quantized: &[Option<Codec>]) -> O
             ..
         } => {
             if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
-                || dense_batched_gemm_block(resolved, quantized, *reduce_op, *init, output_axes)
+                || dense_batched_gemm_block(resolved, quantized, numeric_policy, *reduce_op, *init, output_axes)
                     .is_some()
             {
                 return None;

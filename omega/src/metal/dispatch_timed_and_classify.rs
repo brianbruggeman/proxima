@@ -981,6 +981,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
             crate::msl::debug_tiled_gemm_classification(
                 bound,
                 &crate::identity::operand_codecs(bound, packed_operands),
+                plan.numeric_policy,
                 *reduce_op,
                 *init,
                 output_axes,

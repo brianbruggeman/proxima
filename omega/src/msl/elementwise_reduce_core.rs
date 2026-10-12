@@ -449,7 +449,15 @@ pub(super) fn render_reduce(
     let include_threadgroup_width = cfg!(feature = "metal-q4k-split-k")
         && packed_row_block(resolved, quantized).is_some()
         && tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_none()
-        && dense_batched_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_none();
+        && dense_batched_gemm_block(
+            resolved,
+            quantized,
+            numeric_policy,
+            *reduce_op,
+            *init,
+            output_axes,
+        )
+        .is_none();
     kernel_signature(
         &mut source,
         quantized,
@@ -478,6 +486,7 @@ pub(super) fn render_reduce(
             &reduce_dims,
             rank,
             quantized,
+            numeric_policy,
             element_type,
             epilogue_body,
             epilogue_operands,
