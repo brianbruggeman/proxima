@@ -1,6 +1,6 @@
 # speculative-draft-mtp
 
-status: draft
+status: audited
 owner: brian bruggeman
 created: 2026-09-28
 restated: 2026-10-12 against `decode-as-data` R5, R6, R11 (readouts plus a draft descriptor)
