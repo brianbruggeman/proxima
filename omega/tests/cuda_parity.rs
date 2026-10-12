@@ -8,7 +8,7 @@
 //! mirrors a `wgpu_parity.rs` case one-for-one so the two portable GPU
 //! drivers can never silently drift on what "parity" means.
 
-#![cfg(all(feature = "cpu", feature = "cuda-backend"))]
+#![cfg(all(feature = "cpu", feature = "cuda-driver"))]
 // every expect below runs against data this test just built or a real
 // device call; a failure there IS the test failing, not a case to recover.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
