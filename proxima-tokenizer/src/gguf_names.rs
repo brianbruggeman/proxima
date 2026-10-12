@@ -11,10 +11,12 @@ use crate::pretokenize::PreType;
 
 /// `tokenizer.ggml.model` of a scores-driven SentencePiece vocab
 /// (`LLAMA_VOCAB_TYPE_SPM`): no merges, one unigram score per token.
+#[cfg(feature = "gguf")]
 pub(crate) const MODEL_UNIGRAM: &str = "llama";
 
 /// `tokenizer.ggml.model` of a merges-driven byte-level BPE vocab
 /// (`LLAMA_VOCAB_TYPE_BPE`).
+#[cfg(feature = "gguf")]
 pub(crate) const MODEL_BYTE_LEVEL_BPE: &str = "gpt2";
 
 impl PreType {
