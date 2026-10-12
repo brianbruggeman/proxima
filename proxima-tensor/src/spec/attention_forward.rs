@@ -29,7 +29,7 @@ pub enum ValueSource {
 pub enum KeySource {
     Projected {
         wk: NodeId,
-        k_norm_weight: NodeId,
+        k_norm_weight: Option<NodeId>,
     },
     Shared {
         rotated_even: NodeId,
@@ -509,6 +509,18 @@ pub struct LayerAttentionConfig {
     /// other architecture this crate serves) sets this `false`, reproducing
     /// the prior raw-`V` behaviour byte-for-byte; Gemma 4 sets it `true`.
     pub value_norm: bool,
+    /// Per-head RMSNorm on `Q` and `K` between projection and RoPE, with the
+    /// learned `blk.{layer}.attn_q_norm.weight` / `attn_k_norm.weight` leaves.
+    /// `false` rotates the raw projections and declares neither leaf: a unit
+    /// gamma still normalizes, so absence cannot be spelled as a weight. Absent
+    /// in a config file means `true`, the behaviour every schedule had before
+    /// the choice was data.
+    #[serde(default = "default_qk_norm")]
+    pub qk_norm: bool,
+}
+
+pub(super) const fn default_qk_norm() -> bool {
+    true
 }
 
 /// One block's complete per-layer choice -- [`scheduled_forward_program_with_experts`]
@@ -659,7 +671,7 @@ pub fn append_attention_mixer(
     neg_infinity: NodeId,
     group: u32,
     attn_norm_weight: NodeId,
-    q_norm_weight: NodeId,
+    q_norm_weight: Option<NodeId>,
     wq: NodeId,
     key_source: KeySource,
     value_source: ValueSource,
@@ -688,7 +700,10 @@ pub fn append_attention_mixer(
     // [`Lfm2MoeAttention.q_layernorm`]'s own placement
     // (`modeling_lfm2_moe.py:331`): normalizes right after the head
     // reshape, BEFORE `apply_rotary_pos_emb` -- never after.
-    let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, "h")?;
+    let q = match q_norm_weight {
+        Some(gamma) => rmsnorm_per_head(program, q_raw, gamma, inv_head_dim, eps, "h")?,
+        None => q_raw,
+    };
 
     // `k_raw` (the un-normed, un-roped local `K` projection) is `Some` only
     // when this layer actually owns a `K` projection -- `ValueSource::SharedWithKey`
@@ -712,7 +727,10 @@ pub fn append_attention_mixer(
                 "sudi->sudi",
                 "sud->sudi",
             )?;
-            let k = rmsnorm_per_head(program, k_raw, k_norm_weight, inv_head_dim, eps, "u")?;
+            let k = match k_norm_weight {
+                Some(gamma) => rmsnorm_per_head(program, k_raw, gamma, inv_head_dim, eps, "u")?,
+                None => k_raw,
+            };
             let (rotated_even, rotated_odd) =
                 fused_rope_pair(program, k, 'u', cos, sin, rope_pairing)?;
             (rotated_even, rotated_odd, Some(k_raw))
@@ -2022,12 +2040,14 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                             ],
                             &alloc::format!("blk.{layer}.attn_k.weight"),
                         );
-                        let k_norm_weight = input_leaf(
-                            &mut program,
-                            DType::Float32,
-                            alloc::vec![Extent::Static(head_dim)],
-                            &alloc::format!("blk.{layer}.attn_k_norm.weight"),
-                        );
+                        let k_norm_weight = config.qk_norm.then(|| {
+                            input_leaf(
+                                &mut program,
+                                DType::Float32,
+                                alloc::vec![Extent::Static(head_dim)],
+                                &alloc::format!("blk.{layer}.attn_k_norm.weight"),
+                            )
+                        });
                         KeySource::Projected { wk, k_norm_weight }
                     }
                     KeySourceKind::SharedFromLayer(source) => {
@@ -2079,12 +2099,14 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                     ],
                     &alloc::format!("blk.{layer}.attn_output.weight"),
                 );
-                let q_norm_weight = input_leaf(
-                    &mut program,
-                    DType::Float32,
-                    alloc::vec![Extent::Static(head_dim)],
-                    &alloc::format!("blk.{layer}.attn_q_norm.weight"),
-                );
+                let q_norm_weight = config.qk_norm.then(|| {
+                    input_leaf(
+                        &mut program,
+                        DType::Float32,
+                        alloc::vec![Extent::Static(head_dim)],
+                        &alloc::format!("blk.{layer}.attn_q_norm.weight"),
+                    )
+                });
                 let mixer_output = append_attention_mixer(
                     &mut program,
                     x,
@@ -3206,6 +3228,7 @@ pub fn recurrent_interval_forward_program_with_last_row(
         },
         score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(attn_head_dim),
         value_norm: false,
+        qk_norm: true,
     };
     let layers = (0..block_count)
         .map(|layer| LayerSchedule {

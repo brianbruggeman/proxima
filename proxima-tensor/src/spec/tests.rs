@@ -6546,6 +6546,7 @@ fn architecture_matrix_mixed_cached_conv_roots() {
         rope_pairing: RopePairing::SplitHalf { pairs: 1 },
         score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(2),
         value_norm: false,
+        qk_norm: true,
     };
     let schedule = alloc::vec![
         LayerSchedule {
@@ -9423,6 +9424,7 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
                 rope_pairing: RopePairing::Interleaved,
                 score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
                 value_norm: false,
+                qk_norm: true,
             },
             ffn: LayerFfnConfig::exclusive(),
         })
@@ -9466,6 +9468,7 @@ async fn lfm2_forward_program_rejects_a_layer_schedule_length_mismatch() {
         rope_pairing: RopePairing::Interleaved,
         score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
         value_norm: false,
+        qk_norm: true,
     };
     let schedule = [
         LayerSchedule {
@@ -14027,11 +14030,11 @@ mod gemma4_synthetic_parity {
             neg_infinity,
             GROUP as u32,
             attn_norm,
-            q_norm,
+            Some(q_norm),
             wq,
             KeySource::Projected {
                 wk,
-                k_norm_weight: k_norm,
+                k_norm_weight: Some(k_norm),
             },
             value_source,
             wo,
@@ -14326,6 +14329,7 @@ mod gemma4_synthetic_parity {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 },
                 ffn: ffn_config,
             },
@@ -14346,6 +14350,7 @@ mod gemma4_synthetic_parity {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 },
                 ffn: ffn_config,
             },
@@ -14710,6 +14715,7 @@ mod gemma4_synthetic_parity {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 },
                 ffn: ffn_config,
             },
@@ -14730,6 +14736,7 @@ mod gemma4_synthetic_parity {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 },
                 ffn: ffn_config,
             },
@@ -15027,6 +15034,7 @@ mod gemma4_synthetic_parity {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 },
                 ffn: ffn_config,
             },
@@ -15047,6 +15055,7 @@ mod gemma4_synthetic_parity {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 },
                 ffn: ffn_config,
             },
@@ -15257,6 +15266,7 @@ mod gemma4_synthetic_parity {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 },
                 ffn: LayerFfnConfig::exclusive(),
             },
@@ -15277,6 +15287,7 @@ mod gemma4_synthetic_parity {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 },
                 ffn: LayerFfnConfig::exclusive(),
             },
@@ -15505,6 +15516,7 @@ mod gemma4_synthetic_parity {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 };
             alloc::vec![
                 LayerSchedule {
@@ -15942,6 +15954,7 @@ mod gemma4_synthetic_parity {
             },
             score_scale: AttentionScoreScale::Unscaled,
             value_norm: true,
+            qk_norm: true,
         };
         let full_donor_attention = LayerAttentionConfig {
             head_dim: HEAD_DIM as u32,
@@ -15958,6 +15971,7 @@ mod gemma4_synthetic_parity {
             },
             score_scale: AttentionScoreScale::Unscaled,
             value_norm: true,
+            qk_norm: true,
         };
         let shared_attention = LayerAttentionConfig {
             head_dim: HEAD_DIM as u32,
@@ -15978,6 +15992,7 @@ mod gemma4_synthetic_parity {
             // double-apply (mirrors `sliding_pattern_descriptor_from_gguf`'s own doc in
             // `proxima-model-interop`).
             value_norm: false,
+            qk_norm: true,
         };
         let schedule = alloc::vec![
             LayerSchedule {
@@ -16348,6 +16363,7 @@ mod gemma4_synthetic_parity {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 },
                 ffn: ffn_config,
             },
@@ -16368,6 +16384,7 @@ mod gemma4_synthetic_parity {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 },
                 ffn: ffn_config,
             },
@@ -16780,6 +16797,7 @@ mod gemma4_synthetic_parity {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 },
                 ffn: ffn_config,
             },
@@ -16800,6 +16818,7 @@ mod gemma4_synthetic_parity {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 },
                 ffn: ffn_config,
             },
@@ -17097,6 +17116,7 @@ mod gemma4_synthetic_parity {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 },
                 ffn: ffn_config,
             },
@@ -17117,6 +17137,7 @@ mod gemma4_synthetic_parity {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 },
                 ffn: ffn_config,
             },
@@ -17532,6 +17553,7 @@ mod gemma4_synthetic_parity {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: matches!(source, KeySourceKind::ProjectedK),
+                    qk_norm: true,
                 }
             };
         let window = Some(SWA_WINDOW as u32);
@@ -17798,6 +17820,7 @@ mod gemma4_synthetic_parity {
                 },
                 score_scale: AttentionScoreScale::Unscaled,
                 value_norm: true,
+                qk_norm: true,
             },
             ffn: ffn_config,
         };
@@ -18792,11 +18815,11 @@ mod gemma4_synthetic_parity {
                 neg_infinity,
                 GROUP as u32,
                 attn_norm,
-                q_norm,
+                Some(q_norm),
                 wq,
                 KeySource::Projected {
                     wk: wk_x,
-                    k_norm_weight: k_norm_x,
+                    k_norm_weight: Some(k_norm_x),
                 },
                 ValueSource::Projected(wv_x),
                 wo,
@@ -18824,7 +18847,7 @@ mod gemma4_synthetic_parity {
                 neg_infinity,
                 GROUP as u32,
                 attn_norm,
-                q_norm,
+                Some(q_norm),
                 wq,
                 KeySource::Shared {
                     rotated_even: source.rotated_k_even,
@@ -18861,11 +18884,11 @@ mod gemma4_synthetic_parity {
                 neg_infinity,
                 GROUP as u32,
                 attn_norm,
-                q_norm,
+                Some(q_norm),
                 wq,
                 KeySource::Projected {
                     wk: wk_z,
-                    k_norm_weight: k_norm_z,
+                    k_norm_weight: Some(k_norm_z),
                 },
                 ValueSource::Projected(wv_z),
                 wo,
@@ -19080,6 +19103,7 @@ mod head_repeats {
             rope_pairing: RopePairing::Interleaved,
             score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(4),
             value_norm: false,
+            qk_norm: true,
         };
         let layers = (0..2)
             .map(|_| LayerSchedule {
@@ -20428,7 +20452,7 @@ mod hybrid_dense_descriptor {
     const ROTARY_DIM: u32 = 4;
     const ATTN_HEAD_DIM: u32 = 8;
 
-    fn descriptor(kinds: &[LayerKind]) -> ModelDescriptor {
+    pub(super) fn descriptor(kinds: &[LayerKind]) -> ModelDescriptor {
         let attention = LayerAttentionConfig {
             head_dim: ATTN_HEAD_DIM,
             kv_heads: 1,
@@ -20444,6 +20468,7 @@ mod hybrid_dense_descriptor {
             },
             score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(ATTN_HEAD_DIM),
             value_norm: false,
+            qk_norm: true,
         };
         let layers = kinds
             .iter()
@@ -20722,6 +20747,7 @@ mod hybrid_routed_descriptor {
             rope_pairing: RopePairing::SplitHalf { pairs: 1 },
             score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(4),
             value_norm: false,
+            qk_norm: true,
         };
         let ffn = LayerFfnConfig {
             combination: FfnCombination::RoutedWithSharedExpert,
@@ -20916,6 +20942,175 @@ mod hybrid_routed_descriptor {
         attention_only.cache_mask = CacheMask::Padded;
 
         let outcome = build_forward(&attention_only);
+
+        assert!(
+            matches!(outcome, Err(TensorError::UnsupportedInBuilder { .. })),
+            "{outcome:?}"
+        );
+    }
+}
+
+mod layer_qk_norm {
+    use super::head_repeats::descriptor as sized_descriptor;
+    use super::*;
+    use crate::cpu::evaluate_named;
+    use crate::shape::infer;
+
+    fn tiny_descriptor(
+        cache_strategy: CacheStrategy,
+        cache_mask: CacheMask,
+        qk_norm: bool,
+    ) -> ModelDescriptor {
+        let mut descriptor = sized_descriptor(cache_strategy, cache_mask, 1);
+        descriptor.vocab = 2;
+        descriptor.embedding = 2;
+        descriptor.feed_forward = 2;
+        descriptor.query_heads = 1;
+        descriptor.block_count = 1;
+        descriptor.leading_dense_block_count = 1;
+        descriptor.embedding_scale = None;
+        descriptor.logit_softcap = None;
+        descriptor.last_row_only = true;
+        descriptor.layers.truncate(1);
+        let attention = &mut descriptor.layers[0].attention;
+        attention.head_dim = 2;
+        attention.kv_heads = 1;
+        attention.rope_pairing = RopePairing::SplitHalf { pairs: 1 };
+        attention.qk_norm = qk_norm;
+        descriptor
+    }
+
+    fn input_names(program: &[Op]) -> Vec<&str> {
+        program
+            .iter()
+            .filter_map(|operation| match operation {
+                Op::Input {
+                    name: Some(name), ..
+                } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn norm_leaves(program: &[Op]) -> Vec<&str> {
+        input_names(program)
+            .into_iter()
+            .filter(|name| name.contains("attn_q_norm") || name.contains("attn_k_norm"))
+            .collect()
+    }
+
+    fn first_key_coordinate(descriptor: &ModelDescriptor) -> f32 {
+        let built = build_forward(descriptor).expect("tiny two-range descriptor lowers");
+        let LayerCacheRoots::Attention((key_even, _, _)) = built.layer_roots[0] else {
+            panic!("the single layer owns a cache");
+        };
+        let symbols = [1, 2];
+        let shapes = infer(&built.program, &symbols).expect("tiny graph shapes");
+        let mut owned = Vec::new();
+        for (index, operation) in built.program.iter().enumerate() {
+            let Op::Input {
+                name: Some(name), ..
+            } = operation
+            else {
+                continue;
+            };
+            let count = shapes.of(NodeId(index as u32)).iter().product::<u64>() as usize;
+            let values = match name.as_str() {
+                "ids" | "lm_head_row" | "cached_len" => vec![0.0; count],
+                "eps" | "rope_cos" => vec![1.0; count],
+                "token_embd.weight" => vec![3.0, 4.0, 0.0, 5.0],
+                "output.weight" => vec![1.0, 0.0, 0.0, 1.0],
+                _ if name.ends_with("norm.weight") => vec![1.0; count],
+                _ if name.ends_with("attn_k.weight") || name.ends_with("attn_v.weight") => {
+                    vec![1.0, 0.0, 0.0, 1.0]
+                }
+                _ => vec![0.0; count],
+            };
+            owned.push((name.as_str(), values));
+        }
+        let named: Vec<_> = owned
+            .iter()
+            .map(|(name, values)| (*name, values.as_slice()))
+            .collect();
+        let evaluated = evaluate_named(&built.program, &symbols, &named, &[key_even])
+            .expect("tiny graph evaluates");
+        evaluated.get(key_even).expect("key rows requested").0[0]
+    }
+
+    #[test]
+    fn a_layer_without_qk_norm_declares_neither_norm_leaf() {
+        for (strategy, mask) in [
+            (CacheStrategy::Cacheless, CacheMask::Padded),
+            (CacheStrategy::Cached, CacheMask::Padded),
+        ] {
+            let with_norm = build_forward(&tiny_descriptor(strategy, mask, true)).expect("lowers");
+            let without = build_forward(&tiny_descriptor(strategy, mask, false)).expect("lowers");
+
+            assert_eq!(
+                norm_leaves(&with_norm.program),
+                ["blk.0.attn_k_norm.weight", "blk.0.attn_q_norm.weight"],
+                "{strategy:?}/{mask:?} with norm"
+            );
+            assert!(
+                norm_leaves(&without.program).is_empty(),
+                "{strategy:?}/{mask:?} without norm"
+            );
+            assert!(without.program.len() < with_norm.program.len());
+        }
+    }
+
+    #[test]
+    fn raw_projected_key_reaches_rope_when_qk_norm_is_off() {
+        let raw = first_key_coordinate(&tiny_descriptor(
+            CacheStrategy::Cached,
+            CacheMask::Padded,
+            false,
+        ));
+        let normalized = first_key_coordinate(&tiny_descriptor(
+            CacheStrategy::Cached,
+            CacheMask::Padded,
+            true,
+        ));
+
+        let attn_norm_scale = (2.0f32 / 27.0).sqrt();
+        let head_norm_scale = (2.0f32 / 52.0).sqrt();
+        assert!(
+            (raw - 3.0 * attn_norm_scale).abs() < 1.0e-6,
+            "raw key {raw} must be the attn-normed projection"
+        );
+        assert!(
+            (normalized - 3.0 * head_norm_scale).abs() < 1.0e-6,
+            "gamma-one head norm {normalized} still normalizes"
+        );
+    }
+
+    #[test]
+    fn a_config_without_qk_norm_keeps_the_norm_on() {
+        let config = tiny_descriptor(CacheStrategy::Cached, CacheMask::Padded, false).layers[0]
+            .attention
+            .clone();
+        let written = toml::to_string(&config).expect("layer attention serializes");
+        let legacy = written.replace("qk_norm = false\n", "");
+
+        let restored: LayerAttentionConfig =
+            toml::from_str(&legacy).expect("a layer without qk_norm parses");
+
+        assert!(written.contains("qk_norm = false"), "{written}");
+        assert!(!legacy.contains("qk_norm"), "{legacy}");
+        assert!(
+            restored.qk_norm,
+            "absent means the behaviour every schedule had before the field"
+        );
+    }
+
+    #[test]
+    fn a_hybrid_engine_refuses_attention_without_qk_norm() {
+        let mut hybrid = hybrid_dense_descriptor::descriptor(&[LayerKind::Gdn, LayerKind::Attention]);
+        for layer in &mut hybrid.layers {
+            layer.attention.qk_norm = false;
+        }
+
+        let outcome = build_forward(&hybrid);
 
         assert!(
             matches!(outcome, Err(TensorError::UnsupportedInBuilder { .. })),

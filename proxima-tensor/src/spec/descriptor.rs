@@ -130,15 +130,13 @@ pub struct ModelDescriptor {
     /// [`CacheStrategy::Cacheless`], the same "unused when the arm never reads
     /// it" precedent as [`Self::qk_norm`].
     pub sliding_kv_ring: bool,
-    /// Qwen3-style per-head QK-norm, consulted ONLY by
-    /// [`CacheMask::Bounded`]'s arm
+    /// Qwen3-style per-head QK-norm for [`CacheMask::Bounded`]'s arm
     /// (`gqa_cached_forward_program_with_experts_and_layer_taps`'s own
-    /// `qk_norm` parameter) -- inert, safe at any value, under
-    /// [`CacheStrategy::Cacheless`]/[`CacheMask::Padded`], same
-    /// "unused when the arm never reads it" precedent [`Self::l_cache`]'s
-    /// own doc already set. A model-global flag, not a per-layer
-    /// [`LayerAttentionConfig`] field, because that builder's own signature
-    /// takes it as one flat `bool` applied uniformly to every layer.
+    /// `qk_norm` parameter, one flat `bool` for every layer). The scheduled
+    /// engines ([`CacheStrategy::Cacheless`], [`CacheMask::Padded`]) read each
+    /// layer's [`LayerAttentionConfig::qk_norm`] instead, and `Bounded` ignores
+    /// that per-layer field, the same "unused when the arm never reads it"
+    /// precedent as [`Self::l_cache`].
     pub qk_norm: bool,
     /// `attn_{q,k,v}.bias` presence, consulted ONLY by
     /// [`CacheMask::Bounded`]'s arm -- same inertness and
@@ -318,6 +316,11 @@ pub struct FamilyProfile {
     /// Per-kv-head value RMSNorm without a learned scale
     /// ([`LayerAttentionConfig::value_norm`]) on layers that own their `V`.
     pub value_norm: bool,
+    /// Per-head RMSNorm on `Q` and `K` before RoPE ([`LayerAttentionConfig::qk_norm`]).
+    /// A family whose attention projects Q and K straight into RoPE sets it
+    /// `false`; absent means `true`.
+    #[serde(default = "super::attention_forward::default_qk_norm")]
+    pub qk_norm: bool,
     /// How this family pairs RoPE channels, per llama.cpp's
     /// `llama_model_rope_type` (`src/llama-model.cpp`): NEOX/MROPE/IMROPE
     /// families are [`RopeLayout::SplitHalf`], NORM families are
@@ -510,6 +513,7 @@ pub fn gqa_descriptor_from_shape(
         rope_pairing: profile.rope_pairing(head_dim),
         score_scale: profile.score_scale(head_dim),
         value_norm: profile.value_norm,
+        qk_norm,
     };
 
     let layers: Vec<LayerSchedule> = (0..block_count)

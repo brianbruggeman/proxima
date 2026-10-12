@@ -89,6 +89,7 @@ fn gemma4_program(
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 }
             } else {
                 LayerAttentionConfig {
@@ -106,6 +107,7 @@ fn gemma4_program(
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 }
             };
             LayerSchedule {

@@ -32,6 +32,11 @@ fn hybrid_attention<'schedule>(
         builder,
         "attention that is not gated",
     )?;
+    refuse_when(
+        !first.attention.qk_norm,
+        builder,
+        "attention without q/k norm",
+    )?;
     Ok(&first.attention)
 }
 
