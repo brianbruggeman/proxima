@@ -727,6 +727,7 @@ pub(super) fn hybrid_dense_forward(
         hidden: None,
         duplicate_head_roots: Vec::new(),
         layer_diagnostics: Vec::new(),
+        readouts: None,
     })
 }
 
@@ -1678,5 +1679,6 @@ pub(super) fn hybrid_routed_forward(
         hidden: Some(normed_final),
         duplicate_head_roots: Vec::new(),
         layer_diagnostics,
+        readouts: None,
     })
 }

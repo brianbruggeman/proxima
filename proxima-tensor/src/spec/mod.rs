@@ -82,7 +82,9 @@ mod hybrid_forward;
 mod layer_runs;
 #[cfg(feature = "config")]
 mod program_spec;
+mod recurrent_readout;
 mod two_block_attention;
+pub use crate::LoopCdMode;
 pub use crate::op::{SLIDING_CACHED_LEN_INPUT, SLIDING_KV_SYMBOL};
 pub use attention_forward::*;
 pub use descriptor::*;
@@ -98,6 +100,10 @@ pub use program_spec::*;
 pub use scheduled_cached::*;
 pub use short_conv_delta_net::*;
 pub use single_range_moe_cached::*;
+use recurrent_readout::{
+    append_adaptive_loopcd_strength, append_loopcd_contrast, append_loopcd_contrast_node,
+    share_recurrent_weights,
+};
 use two_block_attention::{
     append_cached_block_scores, append_local_block_and_combine, group_queries,
 };

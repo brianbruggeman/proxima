@@ -3278,6 +3278,8 @@ pub fn recurrent_interval_forward_program_with_last_row(
         expert_shared_feed_forward: 0,
         prefill_width: None,
         gated_attention: true,
+        recurrence: None,
+        loopcd: LoopCdConfig::default(),
     };
     let ForwardProgram {
         program,

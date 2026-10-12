@@ -238,7 +238,7 @@ pub mod op;
 ///
 /// the mode is allocation free so serving configuration can retain it without
 /// enabling the std graph builder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
 pub enum LoopCdMode {
     #[default]
     Disabled,

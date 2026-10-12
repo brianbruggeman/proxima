@@ -21,7 +21,8 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
-    ForwardProgram, LayerCacheRoots, LayerKind, ModelDescriptor, ScheduleSource, build_forward,
+    ForwardProgram, LayerCacheRoots, LayerKind, ModelDescriptor, RecurrentReadoutRoots,
+    ScheduleSource, build_forward,
 };
 
 use crate::bind::{BoundWeights, ModelHparams, bind_native_f32, metadata_str};
@@ -174,6 +175,12 @@ pub struct BoundProgram<'file> {
     /// `bind_symbols` refuses `new_count > 1` here rather than silently
     /// returning a wrong forward pass.
     pub single_position_step: bool,
+    /// [`proxima_tensor::spec::ForwardProgram::readouts`]: the completed-pass
+    /// roots of a recurrent program, `None` for every program without
+    /// [`ModelDescriptor::recurrence`]. Ordinary serving never reads them; a
+    /// caller that contrasts or inspects completed passes asks for them as
+    /// extra outputs.
+    pub readouts: Option<RecurrentReadoutRoots>,
 }
 
 /// [`crate::recurrent_interval::SsmShape`]'s own fixed sizes -- see that type's
@@ -365,6 +372,7 @@ fn bound_program<'file>(
             .layers
             .iter()
             .any(|layer| layer.kind == LayerKind::Gdn),
+        readouts: forward.readouts,
     }
 }
 
@@ -563,6 +571,7 @@ impl<'file> BoundProgram<'file> {
             hidden,
             duplicate_head_roots,
             layer_diagnostics,
+            readouts,
         } = build_forward(descriptor)?;
         bind_missing_leaves(
             parsed,
@@ -593,6 +602,7 @@ impl<'file> BoundProgram<'file> {
                     .collect()
             },
             moe_layer_diagnostics: layer_diagnostics,
+            readouts,
             ..self
         })
     }
