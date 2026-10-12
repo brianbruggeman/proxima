@@ -44,6 +44,10 @@
 
 extern crate alloc;
 
+#[cfg(all(test, not(feature = "std")))]
+#[macro_use]
+extern crate std;
+
 pub mod bpe;
 pub mod byte_level;
 #[cfg(feature = "std")]

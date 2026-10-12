@@ -552,9 +552,11 @@ mod tests {
 
     use super::{
         SamplingConfig, apply_min_p, apply_repetition_penalty, apply_top_k, apply_top_p,
-        greedy_fast_path, greedy_pick, greedy_top_k_probability, penalize,
-        repetition_penalty_active, sample_general, sample_next_token,
+        greedy_fast_path, greedy_pick, greedy_top_k_probability, sample_general, sample_next_token,
     };
+
+    #[cfg(feature = "std")]
+    use super::{penalize, repetition_penalty_active};
 
     #[test]
     fn empty_logits_pick_nothing() {
@@ -1271,6 +1273,7 @@ mod tests {
     /// The pre-rewrite `greedy_fast_path` body, kept only for this timing
     /// comparison: an O(vocab * recent) per-id scan of `recent_tokens`
     /// instead of [`recent_token_counts`]'s O(recent log recent) dedup.
+    #[cfg(feature = "std")]
     fn greedy_fast_path_reference(
         logits: &[f32],
         recent_tokens: &[u32],
