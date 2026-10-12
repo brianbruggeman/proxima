@@ -2426,6 +2426,13 @@ pub(crate) struct BackendRuntime {
     /// actually built.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub(crate) plan_refits: usize,
+    /// Resident weight blocks new plans resolved from the process-global
+    /// caches instead of uploading, summed over this runtime's steps.
+    /// `instrument` builds drain `omega::metal::PLAN_HANDOFF_REUSES` into each
+    /// step's stage totals, so the drained deltas accumulate here for a caller
+    /// that reads the count after the run.
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    pub(crate) plan_handoff_reuses: u64,
     /// `ServingConfig::plan_refit`, read once at construction.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub(super) plan_refit: bool,
@@ -2517,6 +2524,8 @@ impl BackendRuntime {
             plan_misses: 0,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             plan_refits: 0,
+            #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+            plan_handoff_reuses: 0,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             plan_refit: config.plan_refit,
             exact_activations: config.exact_activations,
