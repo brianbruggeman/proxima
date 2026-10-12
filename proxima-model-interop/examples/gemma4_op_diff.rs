@@ -61,8 +61,10 @@ fn read_dump(path: &str) -> BTreeMap<String, Vec<Dumped>> {
         }
         let count: usize = dims.iter().product();
         let values = bytes[cursor..cursor + count * 4]
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("f32")))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect();
         cursor += count * 4;
         tensors.entry(name).or_default().push(Dumped { dims, values });
@@ -339,7 +341,7 @@ fn main() {
 
 fn run(values: &BTreeMap<String, String>) {
     if values.contains_key("--other-full-dump") {
-        return llama_against_llama(&values);
+        return llama_against_llama(values);
     }
     if let Some(labels) = values.get("--print-llama") {
         return print_llama(&values["--llama-full-dump"], labels);
