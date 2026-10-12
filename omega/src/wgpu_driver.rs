@@ -1415,7 +1415,7 @@ mod tests {
                 name: None,
             },
         );
-        append(
+        let tanh = append(
             &mut program,
             Op::Elementwise {
                 dtype: DType::Float32,
@@ -1428,7 +1428,7 @@ mod tests {
         let bound = bind(
             &program,
             &shapes,
-            &[],
+            &[tanh],
             proxima_tensor::NumericPolicy::default(),
         )
         .expect("bind succeeds");
