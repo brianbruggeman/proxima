@@ -1279,7 +1279,7 @@ pub fn mark_resident(plan: &mut Plan, resident_names: &std::collections::BTreeSe
         #[cfg(feature = "wgpu-backend")]
         Plan::Wgpu(_) => {}
         #[cfg(feature = "cuda-driver")]
-        Plan::Cuda(_) => {}
+        Plan::Cuda(cuda_plan) => cuda_plan.mark_resident(resident_names),
         // `Plan` is uninhabited with every backend feature off; `*plan {}`
         // is the never-pattern proof of that rather than a runtime `todo!`.
         #[cfg(not(any(
@@ -1526,7 +1526,19 @@ pub fn release_resident_names<'name>(names: impl IntoIterator<Item = &'name str>
 }
 
 #[cfg(not(all(feature = "metal", target_os = "macos")))]
-pub fn release_resident_names<'name>(_names: impl IntoIterator<Item = &'name str>) {}
+#[cfg_attr(
+    not(feature = "cuda-driver"),
+    allow(
+        unused_variables,
+        reason = "only the cuda arm below reads this in this build"
+    )
+)]
+pub fn release_resident_names<'name>(names: impl IntoIterator<Item = &'name str>) {
+    #[cfg(feature = "cuda-driver")]
+    if let Some(Ok(driver)) = CUDA_DRIVER.get() {
+        driver.release_resident_names(names);
+    }
+}
 
 /// Unregisters the checkpoint mapping [`register_checkpoint_mapping`]
 /// installed for `bytes` -- see [`metal::unregister_checkpoint_mapping`]'s
@@ -1767,9 +1779,11 @@ fn plan_named_cuda(
 }
 
 #[cfg(feature = "cuda-driver")]
+static CUDA_DRIVER: OnceLock<Result<CudaDriver, String>> = OnceLock::new();
+
+#[cfg(feature = "cuda-driver")]
 fn cuda_driver() -> Result<&'static CudaDriver, BackendError> {
-    static DRIVER: OnceLock<Result<CudaDriver, String>> = OnceLock::new();
-    let driver = match DRIVER
+    let driver = match CUDA_DRIVER
         .get_or_init(|| crate::cuda_driver::CudaDriver::new(0).map_err(|error| error.to_string()))
     {
         Ok(driver) => driver,

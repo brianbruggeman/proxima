@@ -1735,3 +1735,154 @@ mod moe_topk {
         assert_moe_routing_parity("40 experts", &logits, 4, 40, 6);
     }
 }
+
+mod resident_weights {
+    use std::collections::BTreeSet;
+
+    use omega::{Codec, CudaDriver, CudaPlan};
+    use proxima_gguf::quant::q4_0::{BLOCK_BYTES, QK4_0, quantize};
+    use proxima_tensor::{NumericPolicy, QuantizedBlock};
+
+    use super::{DType, packed_matmul_program, random_vec};
+
+    const ROWS: u32 = 3;
+    const BLOCKS_PER_ROW: usize = 2;
+    const K: usize = QK4_0 * BLOCKS_PER_ROW;
+
+    fn q4_0_weight(seed: u64) -> Vec<u8> {
+        let row_len = std::hint::black_box(K);
+        let row_bytes = BLOCKS_PER_ROW * BLOCK_BYTES;
+        let values: Vec<f32> = random_vec(seed, ROWS as usize * row_len)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+        let mut blocks = vec![0u8; ROWS as usize * row_bytes];
+        for (row_values, row_blocks) in values
+            .chunks_exact(row_len)
+            .zip(blocks.chunks_exact_mut(row_bytes))
+        {
+            quantize(row_values, row_blocks).expect("row is whole q4_0 blocks");
+        }
+        blocks
+    }
+
+    fn named_inputs<'a>(
+        weight: &'a [u8],
+        activation: &'a [f32],
+    ) -> Vec<(&'static str, QuantizedBlock<'a>)> {
+        vec![
+            (
+                "weight",
+                QuantizedBlock::Packed {
+                    codec: Codec::Q4_0,
+                    bytes: weight,
+                },
+            ),
+            ("activation", QuantizedBlock::Float32(activation)),
+        ]
+    }
+
+    fn fresh_resident_plan(driver: &CudaDriver, weight: &[u8], activation: &[f32]) -> CudaPlan {
+        let (program, sum) = packed_matmul_program(ROWS, K as u32, DType::UInt8);
+        let named = named_inputs(weight, activation);
+        let mut plan = driver
+            .plan(&program, &[], &[sum], NumericPolicy::default(), &named)
+            .expect("cuda driver plans the packed matmul");
+        plan.mark_resident(&BTreeSet::from(["weight"]));
+        plan
+    }
+
+    fn run_call(driver: &CudaDriver, weight: &[u8], activation: &[f32]) -> (Vec<f32>, u64) {
+        let before = driver.packed_upload_bytes();
+        let mut plan = fresh_resident_plan(driver, weight, activation);
+        let named = named_inputs(weight, activation);
+        let output = plan
+            .execute_named(&named, None)
+            .expect("cuda runs the packed matmul")
+            .root()
+            .to_vec();
+        (output, driver.packed_upload_bytes() - before)
+    }
+
+    #[test]
+    fn a_resident_weight_uploads_once_across_generate_calls_and_decode_steps() {
+        let driver = CudaDriver::new(0).expect("a real cuda device");
+        let weight = q4_0_weight(37);
+
+        let uploads: Vec<u64> = (0..5)
+            .map(|step| run_call(&driver, &weight, &random_vec(31 + step, K)).1)
+            .collect();
+
+        assert_eq!(
+            uploads[0],
+            weight.len() as u64,
+            "call 1 uploads the full weight set"
+        );
+        assert_eq!(
+            &uploads[1..],
+            &[0, 0, 0, 0],
+            "call 2 and each decode step upload 0 weight bytes"
+        );
+    }
+
+    #[test]
+    fn a_resident_weight_gives_the_same_output_as_a_cold_upload() {
+        let driver = CudaDriver::new(0).expect("a real cuda device");
+        let weight = q4_0_weight(37);
+        let activation = random_vec(31, K);
+
+        let (cold, _) = run_call(&driver, &weight, &activation);
+        let (warm, warm_upload) = run_call(&driver, &weight, &activation);
+
+        assert_eq!(
+            warm_upload, 0,
+            "degenerate gate: the warm call must hit the cache"
+        );
+        assert_eq!(
+            cold.len(),
+            ROWS as usize,
+            "degenerate gate: no outputs compared"
+        );
+        assert_eq!(
+            cold, warm,
+            "a cached device buffer must compute the same bytes"
+        );
+    }
+
+    #[test]
+    fn a_changed_weight_source_is_reuploaded_and_never_served_stale() {
+        let driver = CudaDriver::new(0).expect("a real cuda device");
+        let original = q4_0_weight(37);
+        let changed = q4_0_weight(41);
+        let activation = random_vec(31, K);
+
+        let (original_output, _) = run_call(&driver, &original, &activation);
+        let (changed_output, changed_upload) = run_call(&driver, &changed, &activation);
+        let (original_again, original_upload) = run_call(&driver, &original, &activation);
+
+        assert_eq!(
+            changed_upload,
+            changed.len() as u64,
+            "a new source must upload"
+        );
+        assert_ne!(
+            original_output, changed_output,
+            "degenerate gate: the two weights must differ"
+        );
+        assert_eq!(original_upload, 0, "the original source is still cached");
+        assert_eq!(original_output, original_again);
+    }
+
+    #[test]
+    fn releasing_a_weight_name_evicts_its_device_buffer() {
+        let driver = CudaDriver::new(0).expect("a real cuda device");
+        let weight = q4_0_weight(37);
+        let activation = random_vec(31, K);
+
+        let _ = run_call(&driver, &weight, &activation);
+        driver.release_resident_names(["weight"]);
+        let (_, upload_after_release) = run_call(&driver, &weight, &activation);
+
+        assert_eq!(upload_after_release, weight.len() as u64);
+    }
+}
