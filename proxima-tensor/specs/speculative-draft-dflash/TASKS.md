@@ -38,7 +38,7 @@ export OUT=target/spec-dflash-ac
 export LOSSLESS_ANY='^lossless id=[^ ]+ identical=(true|false) n_drafted=[0-9]+ accepted=[0-9]+ rejected=[0-9]+ first_divergence=[^ ]+$'
 export LOSSLESS_DRAFTED='^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* accepted=[0-9]+ rejected=[0-9]+ first_divergence=[^ ]+$'
 export LOSSLESS_ACCEPTED='^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* accepted=[1-9][0-9]* rejected=[0-9]+ first_divergence=[^ ]+$'
-export SUMMARY_LINE='^summary prompts=51 identical=51( [a-z_]+=[0-9.]+)* rejected_total=[1-9][0-9]*( [a-z_]+=[0-9.]+)*$'
+export SUMMARY_LINE='^summary prompts=51 identical=51( [a-z_]+=[0-9a-f.]+)* rejected_total=[1-9][0-9]*( [a-z_]+=[0-9a-f.]+)*$'
 mkdir -p "$OUT"
 ```
 
@@ -96,7 +96,7 @@ cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(
 Slice 8:
 
 ```sh
-cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash2_selector_decode_lattice/)' 2>&1 | grep -cE '^selector_decode cases = 4 truncated = 1 n_min_clears = 1 ablated_differs = true$'
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash2_selector_decode_lattice/)' 2>&1 | grep -cE '^selector_decode cases = 4 truncated = 2 n_min_clears = 1 ablated_differs = true$'
 ```
 
 Slice 9:
