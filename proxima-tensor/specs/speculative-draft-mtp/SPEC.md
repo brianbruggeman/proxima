@@ -1,169 +1,151 @@
 # speculative-draft-mtp
 
-status: audited
+status: draft
 owner: brian bruggeman
 created: 2026-09-28
+restated: 2026-10-12 against `decode-as-data` R5, R6, R11 (readouts plus a draft descriptor)
 
 ## problem
 
 proxima-model-interop has zero support for llama.cpp's `draft-mtp` speculation type
-(`common_speculative_impl_draft_mtp`, `common/speculative.cpp:1331`) -- no NextN/MTP
-tensor names in its GGUF binds (`git grep -c nextn proxima-gguf/src proxima-model-interop/src`
-= 0), no hidden-state capability method analogous to `llama_get_embeddings_nextn`
-(`src/llama-ext.h:105`), no registered `Architecture` for the GGUF arch string
-`gemma4-assistant` (`src/llama-arch.cpp:60`), and no local GGUF fixture carries an MTP
-head (checked: the gemma4-E2B blob used by the parent spec, the batiai gemma4-26b blob,
-and the qwen3.6-35b-a3b blob all show 0 occurrences of `nextn.eh_proj` in their tensor
-directories) -- so this sub-spec makes `draft-mtp` drafting available, token-identical to
-llama.cpp's own `--spec-type draft-mtp` on the same GGUF(s), for every architecture
-proxima currently binds that ships or pairs with an MTP head: qwen35, qwen35moe (single
-GGUF, trailing trained layers), and gemma4 via its `gemma4-assistant` sidecar (two GGUFs,
-shared KV and shared embedding weights) -- discharging parent spec R11a in full, not a
-qwen-only slice of it.
+(`common_speculative_impl_draft_mtp`, `common/speculative.cpp:1331`) -- no NextN/MTP tensor names in
+its GGUF binds, no hidden-state readout analogous to `llama_get_embeddings_nextn`
+(`src/llama-ext.h:105`), no descriptor for the assistant sidecar family (the GGUF whose
+`general.architecture` value is the `LLM_ARCH_GEMMA4_ASSISTANT` name, `src/llama-arch.cpp:60`), and
+no local GGUF fixture carries an MTP head (the gemma4-E2B blob used by the parent spec, the batiai
+gemma4-26b blob and the qwen3.6-35b-a3b blob all show 0 occurrences of `nextn.eh_proj` in their
+tensor directories), so this sub-spec makes `draft-mtp` drafting available as ServingConfig data --
+MTP head roots as extra readouts on the target's `ModelDescriptor` (`decode-as-data` R5) for the
+single-GGUF family (qwen35, qwen35moe), and a second `ModelDescriptor` driving its own `ServingState`
+(`decode-as-data` R6) for the two-GGUF sidecar family -- with the drafted tokens token-identical to
+llama.cpp `f1ea20621`'s own `--spec-type draft-mtp` on the same GGUF(s), discharging parent spec R11a
+in full and adding no technique-named type (`decode-as-data` AC9, R11).
 
 ## refutation condition
 
-Written before evidence: if, after slice 1 obtains real MTP-head GGUFs, the qwen35 MTP
-forward graph (`src/models/qwen35.cpp:485-644`) or the gemma4-assistant graph
-(`src/models/gemma4-assistant.cpp:84-196`) cannot be reproduced token-identically from
-proxima's existing binds within a bounded, nameable set of new capability methods (i.e.
-each needs a materially different runtime concept proxima has no hook for and cannot be
-given one), this sub-spec's architecture section is wrong and must be redone against the
-actual graph shape, not patched.
+Written before evidence: if, after slice 1 obtains real MTP-head GGUFs, the qwen35 MTP forward graph
+(`src/models/qwen35.cpp:485-644`) or the sidecar graph (`src/models/gemma4-assis*.cpp:84-196`)
+cannot be reproduced token-identically from `ModelDescriptor` fields, a readout list and `Op::Input`
+leaves -- i.e. either needs a graph concept (a new `Op`, or a family-keyed branch in the loop) that
+the descriptor cannot carry as data -- this sub-spec's architecture section is wrong and must be
+redone against the actual graph shape, not patched.
 
 ## requirements
 
 | id | requirement | testable in isolation |
 |---|---|---|
-| R1 | `mtp_head_present(&ParsedGguf) -> bool` reproduces `common_speculative_types_from_gguf`'s non-dflash branch (`common/speculative.cpp:2273-2301`): true iff `general.architecture != "dflash"` and tensor `blk.<block_count-1>.nextn.eh_proj.weight` exists -- positively identifies the single-GGUF trailing-layer family (qwen35, qwen35moe, step35, deepseek, ...); does NOT positively identify a `gemma4-assistant` sidecar (R9 names why) | yes |
-| R2 | qwen35 gains `Architecture::speculative_draft_mtp_program`, building the single-block MTP graph token-identical to `llama_model_qwen35::graph_mtp::graph_mtp` (`src/models/qwen35.cpp:485-644`): hnorm(h_prev) concat enorm(embed(token)) -> eh_proj -> one attention+FFN block (QK-norm, sigmoid-gated attention output, RoPE-multi, SwiGLU FFN) -> head_norm -> shared_head_head or fallback lm_head | yes |
-| R3 | qwen35moe gains the same capability, token-identical to its own `graph_mtp` equivalent in `src/models/qwen35moe.cpp` (MoE FFN in place of qwen35's dense FFN; read from source before implementation, not inferred from R2's shape) | yes |
-| R4 | draft loop reproduces `common_speculative_impl_draft_mtp::draft` (`common/speculative.cpp:1584-1731`) for the non-chained, non-shared-memory case (qwen35/qwen35moe are neither `chain_heads` nor `is_mem_shared`, per `is_mem_shared = llama_get_ctx_other(ctx_dft) == ctx_tgt` at `:1420` evaluating false for them -- `ctx_other` is only ever propagated into `cparams` for `LLM_ARCH_GEMMA4_ASSISTANT`/`LLM_ARCH_EAGLE3`/`LLM_ARCH_DFLASH`, `src/llama-context.cpp:146-162`): top-k=10 draft sampler, per-step `p_min` confidence early exit, growing-KV token append at `pos0 + i + 1`, cross-call `pending_h` carryover for the first token of the next `process()` batch | yes |
-| R5 | `accept()` hidden-state rollback reproduces `common/speculative.cpp:1733-1747`: `pending_h` is overwritten from `verify_h[min(n_accepted, n_rows-1)]`, composing with the parent spec's R3a/R3b KV rollback | yes |
-| R6 | `process()` reproduces the catch-up decode at `common/speculative.cpp:1475-1582` for the non-shared case (guarded by `if (!is_mem_shared)` at `:1508`): pairs each prompt/accepted token with the target's `h_nextn` row shifted right by one position, decodes through the MTP block once per prefill batch, and caches the last row in `pending_h` for the next `draft()` call | yes |
-| R7 | `ServingConfig`'s speculative section (parent R9) accepts `draft-mtp` as a `Drafter` enum variant that routes to R2/R3 (single-GGUF) or R9/R10 (sidecar) via R1's detection plus an explicit sidecar-path config field, with no ambiguity about which family a given config selects | yes |
-| R8 | oracle: llama.cpp `f1ea20621` run with the real inference-time flag `--spec-type draft-mtp` (`common/arg.cpp:4243-4249`, registered for `LLAMA_EXAMPLE_SPECULATIVE`/`SERVER`/`CLI` -- **not** `--mtp`, which is `.set_examples({LLAMA_EXAMPLE_DOWNLOAD})`-only at `common/arg.cpp:3081-3086` and exists solely to tell the model-download planner to also fetch an MTP sidecar, never selecting the type at inference), with `--model-draft`/`-md` (`common/arg.cpp:532-539`) pointing at the sidecar GGUF for the gemma4-assistant case and omitted for qwen35/qwen35moe (`common_speculative_init_result`'s `else if (spec_mtp)` branch reuses `model_tgt` for `ctx_dft` when no `-md` is given, `common/speculative.cpp:2557-2564`), is byte-for-byte the reference; parity is measured the same sample-and-match way as parent R1 |
-| R9 | proxima registers a new `Architecture`, `name() == "gemma4-assistant"` matching the GGUF `general.architecture` string (`src/llama-arch.cpp:60`), bound from a *second* GGUF file (the sidecar): tensors `nextn.pre_projection`/`nextn.post_projection` (global, not per-block -- `src/models/gemma4-assistant.cpp:39-56`) plus `n_layer_nextn` full transformer layers with their own `attn_norm`/`wq`/`wo`/ffn weights (`:56-95`, distinct from qwen35's single eh_proj block), width-validated the way the ctor does (`n_embd == llama_model_n_embd_out(ctx_tgt)`, `common/speculative.cpp:1376-1378`, mirrored by the GGUF-load-time throw at `src/models/gemma4-assistant.cpp:29-31`) | yes |
-| R10 | gemma4-assistant's forward graph is token-identical to `llama_model_gemma4_assistant::graph::graph` (`src/models/gemma4-assistant.cpp:84-196`): reads the **target's own** `tok_embd` tensor directly (`GGML_ASSERT(cparams.ctx_other != nullptr); model_other->tok_embd`, `:107-110`) to embed the drafted token, concatenates it with the incoming hidden state, projects through `nextn_proj_pre`, runs `n_layer_nextn` attention+FFN blocks whose attention reads the **target's shared KV memory** (`build_attn_inp_kv_iswa()`, `mem_other` wiring at `src/llama-context.cpp:393`), and projects through `nextn_proj_post` to `t_h_nextn` -- this is cross-program weight AND state sharing, a capability proxima's `Architecture`/`BoundProgram`/`LayerCache` trio has never needed before (named explicitly, not assumed solved) | yes |
-| R11 | gemma4-assistant's draft loop reproduces the `is_mem_shared` branches: `process()`'s catch-up-decode skip (`:1507-1508`, "if kv is shared with target (e.g Gemma4), then we can skip this catch-up decode"), and `draft()`'s same-position-for-every-draft-token append (`common_speculative_impl_draft_mtp::draft`'s `else if (is_mem_shared)` branch, `:1697-1706`, "with shared memory (e.g. Gemma4 assistants) we use the same position for all draft tokens") | yes |
+| R1 | `mtp_head_present(&ParsedGguf) -> bool` reproduces `common_speculative_types_from_gguf`'s non-dflash branch (`common/speculative.cpp:2273-2301`): true iff the `general.architecture` metadata value is not `dflash` and tensor `blk.<block_count-1>.nextn.eh_proj.weight` exists. It positively identifies the single-GGUF trailing-layer family (qwen35, qwen35moe, step35, deepseek, ...) and does NOT positively identify the sidecar family (R9 names why) | yes |
+| R2 | the qwen35 profile (`proxima-model-interop/src/profiles/qwen35.toml`) declares the NextN block as data, and `build_forward` lowers it as extra head readout roots, token-identical to `llama_model_qwen35::graph_mtp` (`src/models/qwen35.cpp:485-644`): hnorm(h_prev) concat enorm(embed(token)) -> eh_proj -> one attention+FFN block (QK-norm, sigmoid-gated attention output, RoPE-multi, SwiGLU FFN) -> head_norm -> shared head or fallback lm_head. `h_prev` enters as an `Op::Input` leaf next to the token id | yes |
+| R3 | the qwen35moe profile declares the same NextN block with a routed-expert FFN, token-identical to its own `graph_mtp` in `src/models/qwen35moe.cpp` (read from source before implementation, not inferred from R2's shape) | yes |
+| R4 | the propose pipe reproduces `common_speculative_impl_draft_mtp::draft` (`common/speculative.cpp:1584-1731`) for the non-chained, non-shared-memory case (`is_mem_shared = llama_get_ctx_other(ctx_dft) == ctx_tgt` at `:1420` is false for qwen35/qwen35moe, because `ctx_other` is only propagated into `cparams` for the GEMMA4_ASSISTANT/EAGLE3/DFLASH archs, `src/llama-context.cpp:146-162`): top-k=10 draft sampler, per-step `p_min` confidence early exit, growing-KV token append at `pos0 + i + 1`, cross-call `pending_h` carryover for the first token of the next `process()` batch; the accept stage overwrites `pending_h` from `verify_h[min(n_accepted, n_rows-1)]` (`common/speculative.cpp:1733-1747`), composing with the parent spec's R3a/R3b KV rollback (`decode-as-data` commit pipe, prefix-truncate case); and the catch-up decode (`common/speculative.cpp:1475-1582`, guarded by `if (!is_mem_shared)` at `:1508`) pairs each prompt/accepted token with the target's `h_nextn` tap row shifted right by one position, decoded through the NextN readout roots once per prefill batch, caching the last row in `pending_h` for the next propose call | yes |
+| R7 | `ServingConfig`'s speculative section (parent R9) accepts the llama type name `draft-mtp` as configuration data (the existing `SpeculativeTypeName::DraftMtp`, `proxima-model-interop/src/speculative_settings.rs:36`) and routes it by data: R1's detection selects the readout-on-target path, and an explicit sidecar-path field selects the second-descriptor path | yes |
+| R8 | for the same target (and sidecar, when one is configured), prompt and seed, proxima's generated token ids with `draft-mtp` enabled equal the ids llama.cpp `f1ea20621`'s `llama-speculative-simple` generated and the slice vendored under `proxima-model-interop/tests/fixtures/llama-mtp/`, run with the inference-time flag `--spec-type draft-mtp` (`common/arg.cpp:4243-4249`, registered for `LLAMA_EXAMPLE_SPECULATIVE`/`SERVER`/`CLI`; NOT `--mtp`, which is download-only at `common/arg.cpp:3081-3086`), with `--model-draft`/`-md` (`common/arg.cpp:532-539`) pointing at the sidecar GGUF for the sidecar case and omitted for qwen35/qwen35moe (the `else if (spec_mtp)` branch reuses `model_tgt` for `ctx_dft` when no `-md` is given, `common/speculative.cpp:2557-2564`), for 3 seeds per family; every vendored oracle run must itself have drafted (its recorded `n_drafted` >= 1, which `llama-speculative-simple` prints at `examples/speculative-simple/speculative-simple.cpp:355`), so an oracle that silently drafted nothing cannot pass; parity is measured the same sample-and-match way as parent R1 | yes |
+| R9 | the sidecar family is a second `ModelDescriptor` built from GGUF-key reads (the `general.architecture` value equal to the name at `src/llama-arch.cpp:60`, `block_count`, `n_layer_nextn`), bound from the sidecar GGUF: tensors `nextn.pre_projection`/`nextn.post_projection` (global, not per-block, `src/models/gemma4-assis*.cpp:39-56`) plus `n_layer_nextn` full transformer layers with their own norm/attention/FFN weights (`:56-95`), width-validated the way the ctor does (`n_embd == llama_model_n_embd_out(ctx_tgt)`, `common/speculative.cpp:1376-1378`, mirrored by the load-time throw at `src/models/gemma4-assis*.cpp:29-31`) with a typed error, not a panic. No Rust type carries the family's name | yes |
+| R10 | the sidecar descriptor's forward is token-identical to `llama_model_gemma4_assistant::graph::graph` (`src/models/gemma4-assis*.cpp:84-196`): it reads the target's own `tok_embd` (`GGML_ASSERT(cparams.ctx_other != nullptr); model_other->tok_embd`, `:107-110`) to embed the drafted token, concatenates it with the incoming hidden state, projects through `nextn_proj_pre`, runs `n_layer_nextn` attention+FFN blocks whose attention reads the target's shared KV (`build_attn_inp_kv_iswa()`, `mem_other` wiring at `src/llama-context.cpp:393`), and projects through `nextn_proj_post` to `t_h_nextn`. The cross-descriptor weight and state sharing is expressed as descriptor data (embedding source and KV source name the target's), resolved when the draft `ServingState` is constructed -- a capability the descriptor and `ServingState` have not needed before, named here rather than assumed solved | yes |
+| R11 | the sidecar's propose pipe reproduces the `is_mem_shared` branches: the catch-up-decode skip (`common/speculative.cpp:1507-1508`, "if kv is shared with target (e.g Gemma4), then we can skip this catch-up decode") and the same-position-for-every-draft-token append (`:1697-1706`, "with shared memory (e.g. Gemma4 assistants) we use the same position for all draft tokens") | yes |
+| R12 | the oracle comparator is itself validated: the comparator fed llama's own fixture on both sides passes, and fed one flipped id returns a mismatch | yes |
+| R13 | a `draft-mtp` configuration that selects both the readout-on-target path and a sidecar path, or neither, is rejected with a typed validation error rather than silently picking one | yes |
 
 ## architecture
 
-Two families sharing one draft-loop shape and one capability-method pattern (the parent
-spec's precedent, `proxima-model-interop/src/architecture.rs:292-309`):
+Nothing here is a new type. MTP is a readout list on a descriptor (single-GGUF family) or a second
+descriptor with its own `ServingState` (sidecar family), driven through the four pipes of
+`decode-as-data` (propose, shape, accept, commit). Its row in that spec's table is "extra readout
+roots on the target program (nextn block) | chain | sample-and-match | prefix".
 
-- **detection** (R1) lives in `proxima-model-interop/src/architecture.rs` or
-  `proxima-gguf` (whichever already owns tensor-name lookup by convention -- read
-  `ParsedGguf::tensor_data_range`'s neighbors before choosing) as a free function over
-  `&ParsedGguf`, not a method on `Architecture` -- detection needs no bound weights. It
-  only ever returns `true` for the single-GGUF family; gemma4-assistant identification
-  (R9) is a direct `general.architecture == "gemma4-assistant"` string match instead,
-  because its own tensors are named `nextn.pre_projection`/`nextn.post_projection`
-  (global), never `blk.N.nextn.eh_proj.weight` (per-block) -- the two families need two
-  distinct detection paths, not one generalized one, and conflating them would silently
-  misclassify either.
-- **single-GGUF MTP forward program** (R2/R3) is a new `Architecture` capability method,
-  `speculative_draft_mtp_program`, mirroring `speculative_verify_program`'s shape:
-  default `Ok(None)`, overridden by qwen35 and qwen35moe. Its `BoundProgram` differs from
-  the normal decode program in inputs (takes the *previous hidden state* `h_prev` as an
-  extra tensor input alongside the token id, matching `llm_graph_input_embd_h` at
-  `src/models/qwen35.cpp:504-514`) and in weights (reads `layer.nextn.*` instead of the
-  trunk's per-layer weights, at block index `n_layer()`, one past the trunk's last real
-  layer -- `src/models/qwen35.cpp:496-497`).
-- **hidden-state exposure**: R6's catch-up decode needs the *target* model's `h_nextn`
-  row per prefill position, the proxima analogue of `llama_get_embeddings_nextn_ith`
-  (`src/llama-ext.h:108`). This does not exist on proxima's `BoundProgram` today (grep
-  confirms zero `logits_root`-adjacent hidden-state output); it is this sub-spec's own
-  parse/bind gap, named here rather than assumed solved by the parent spec.
-- **sidecar MTP program** (R9/R10) is a second, structurally different capability: a
-  *second, independently loaded* GGUF whose `Architecture` impl needs read access to two
-  things the first program owns -- the target's `tok_embd` weight tensor and the target's
-  live per-layer KV state. Proxima's `Architecture`/`BoundProgram` trait pair has no
-  concept of "a program bound against another program's already-loaded tensors and
-  cache" -- every existing capability method (`bind`, `speculative_verify_program`)
-  builds a self-contained `BoundProgram` from its own file's weights. This is the gap R9
-  and R10 name rather than paper over: the shape is likely a new field on `BoundProgram`
-  (a borrowed handle to the target's `LayerCache` plus a borrowed reference to its
-  `tok_embd` tensor) threaded through a `speculative_draft_mtp_sidecar_program(&self,
-  parsed, file_bytes, target: &BoundProgram)` -- a signature, not a settled design; the
-  settled design is TASKS.md slice work, not this spec.
-- **draft loop** (R4/R5/R6 for single-GGUF; R11 for sidecar) is a new `Drafter` enum
-  variant, `DraftMtp`, added to the parent spec's closed `enum Drafter` -- box-free,
-  matches the parent's dispatch pattern. The sidecar case's `is_mem_shared` behaviour
-  (same KV position for every draft token, no catch-up decode) is a match arm inside the
-  same variant's implementation, gated on which forward program (R2/R3 vs R9/R10) the
-  loaded config selected -- not a second `Drafter` variant, because the accept/rollback
-  shape (R5) is identical across both.
+- **detection (R1)** is a free function over `&ParsedGguf`, not a method on a type: detection needs
+  no bound weights. It returns `true` only for the single-GGUF family. Sidecar identification (R9) is
+  a direct read of the `general.architecture` metadata value, because the sidecar's own tensors are
+  named `nextn.pre_projection`/`nextn.post_projection` (global), never `blk.N.nextn.eh_proj.weight`
+  (per-block). Two data reads, not one generalized one: conflating them would silently misclassify
+  either. It lives beside the existing tensor-name lookup (`proxima-model-interop/src/bind.rs:298`
+  `find_tensor`, `proxima-gguf/src/parser.rs`); slice 6 decides which crate by reading their
+  neighbors first.
+- **NextN readout (R2/R3)**: the family profile TOML declares the NextN block (one layer at index
+  `n_layer`, one past the trunk's last real layer, `src/models/qwen35.cpp:496-497`, plus `eh_proj`,
+  `enorm`, `hnorm`, head norm, shared head). `build_forward` (`proxima-tensor/src/spec/descriptor.rs:863`)
+  lowers it as head roots in the readout list (`decode-as-data` R5). The graph takes the previous
+  hidden state as an `Op::Input` leaf (`proxima-tensor/src/op.rs:201`), matching
+  `llm_graph_input_embd_h` (`src/models/qwen35.cpp:504-514`). No new `Op` variant.
+- **hidden-state tap (R4)**: the target's `h_nextn` row per prefill position is a hidden-state tap
+  readout at the final layer (`decode-as-data` R5, "hidden-state taps at named layers"), the
+  analogue of `llama_get_embeddings_nextn_ith` (`src/llama-ext.h:108`). Main exposes only
+  `BoundProgram::hidden_root` and `residual_roots` (`proxima-model-interop/src/lowering.rs:137,141`),
+  last-row consumers; the all-positions tap is the readout list, `decode-as-data` slice 3, a
+  prerequisite named in TASKS slice 0.
+- **sidecar descriptor (R9/R10)** is a second `ModelDescriptor` (`proxima-tensor/src/spec/descriptor.rs:130`)
+  loaded by the same path as the existing draft-model support (`proxima-model-interop/src/generate/draft_model.rs:174`,
+  `load_draft`) and driven by its own `ServingState` instance. What is new is only that its
+  embedding table and its attention KV are the target's: descriptor fields naming the source,
+  resolved at construction into a borrowed read-only handle to the target state. The shape (field
+  names, how the draft `ServingState` aliases the target's cache layers) is the design slice's
+  output (TASKS slice 5), a signature there, not a settled design here.
+- **draft loop (R4 single-GGUF, R11 sidecar)** is the propose pipe configured by the
+  `draft-mtp` config value; accept is sample-and-match; commit is prefix truncate. The sidecar's
+  `is_mem_shared` behaviour (same KV position for every draft token, no catch-up decode) is a branch
+  on the descriptor's KV-source field in the propose pipe, not a second pipe, because the accept and
+  rollback shape (R4) is identical across both.
 
 ### decisions
 
 | decision | chosen | why not the alternative |
 |---|---|---|
-| both families in one sub-spec | qwen35/qwen35moe (R2-R6) and gemma4-assistant (R9-R11) are both required here | the parent spec's R11a says an audited sub-spec exists for draft-mtp and draft correctness is that sub-spec's requirement -- gemma4 is proxima's primary architecture, so a sub-spec that produces different drafts than llama.cpp for gemma4 specifically fails R11a's own test, not just this sub-spec's |
-| MTP program is a capability method, not a name check | `speculative_draft_mtp_program` (single-GGUF), a distinct sidecar-shaped method (R9/R10) | parent spec's own precedent (`architecture.rs:292-309`'s doc comment explicitly rejects `name() == "gemma4"` checks) |
-| detection is two paths, not one | R1 (tensor-name sniff) for single-GGUF, direct arch-string match for sidecar | gemma4-assistant's tensors are never named `nextn.eh_proj`; a single detector that tried to cover both would either miss gemma4-assistant or need a arch-string special case bolted onto a tensor-shape check, which is what a second path already is, done honestly |
-| sidecar's target-tensor/target-KV access is a named new capability, not assumed away | `BoundProgram` gains a borrowed-handle shape (exact type TBD in TASKS.md) | principle 15: a hidden prerequisite discovered mid-spec is part of the same body of work, not a footnote; principle 1 (RISC reuse) says look for an existing primitive first, but grep confirms none exists -- this is a genuine gap, not an unexamined one |
+| both families in one sub-spec | single-GGUF (R2-R4) and sidecar (R9-R11) both required here | parent R11a requires an audited draft-mtp sub-spec and gemma4 is proxima's primary family, so a sub-spec that produces different drafts than llama.cpp for gemma4 fails R11a's own test |
+| MTP as readouts plus descriptor | NextN roots in the readout list; sidecar as a second descriptor | `decode-as-data` R5/R6/R11 supersede a per-family capability method; a name check (`general.architecture` equality in code) is the forbidden shape, a key read feeding a profile is the allowed one |
+| detection is two data reads, not one | R1 tensor-name read for single-GGUF, direct `general.architecture` value read for sidecar | the sidecar's tensors are never named `nextn.eh_proj`; one detector covering both would miss the sidecar or bolt a string special case onto a shape check |
+| sidecar sharing is descriptor data | embedding source and KV source fields on the draft descriptor | a bespoke program type holding a target handle would be a per-family type (`decode-as-data` R6); the sharing is a property of the descriptor, resolved when the `ServingState` is built (principle 15: a hidden prerequisite found mid-spec is part of the same work, not a footnote) |
 
 ## acceptance criteria
 
-`$QWEN` = the single-GGUF MTP fixture slice 1 obtains (qwen35 or qwen35moe checkpoint)
-`$GEMMA_TGT` = `/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd` (proxima's existing local gemma4-E2B target, already verified to load)
-`$GEMMA_MTP` = the gemma4-assistant sidecar GGUF slice 1b obtains, size-matched to `$GEMMA_TGT` (E2B)
-`$LLAMA_SPEC` = `cd /Users/brianbruggeman/repos/others/llama.cpp && ./build/bin/llama-cli --spec-type draft-mtp -no-cnv` (model/draft
-flags and `-n` are appended before the trailing `-p <prompt>`, never after it -- `-p`/`--prompt`
-takes exactly one value argument, `common/arg.cpp:1767`, so anything placed after `-p` in a
-command line is consumed as, or trails, the prompt text rather than being parsed as its own flag)
+`$QWEN` = `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-mtp/qwen-mtp.gguf`, the single-GGUF MTP fixture (qwen35 or qwen35moe checkpoint); slice 1a places the file (or a symlink) at exactly this path
+`$GEMMA_MTP` = `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-mtp/gemma4-e2b-assistant.gguf`, the sidecar GGUF size-matched to `$GEMMA_TGT` (E2B); slice 1b places the file at exactly this path
+`$GEMMA_TGT` = `/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd` (proxima's local gemma4-E2B target, already verified to load)
+`$LLAMA_SPEC_SIMPLE` = `/Users/brianbruggeman/repos/others/llama.cpp/build/bin/llama-speculative-simple`, an absolute binary path (no `cd`); it registers `--spec-type` and `--model-draft` for `LLAMA_EXAMPLE_SPECULATIVE` (`common/arg.cpp:4246`) and prints `n_drafted = N` and `n_accept = N` (`examples/speculative-simple/speculative-simple.cpp:355-356`)
 
 | id | discharges | command | expected |
 |---|---|---|---|
-| AC1a | R1 | `strings -a "$QWEN" \| grep -c 'nextn.eh_proj'` | count ≥ 1 |
-| AC1b | R9 | `strings -a "$GEMMA_MTP" \| grep -c 'nextn.pre_projection'` | count ≥ 1 (gemma4-assistant's own tensor name, not `eh_proj` -- R1's architecture note) |
-| AC2a | R8 | `$LLAMA_SPEC --model "$QWEN" -p "test" -n 8` | exit 0; stderr's speculative-decode summary reports `n_drafted > 0` |
-| AC2b | R8 | `$LLAMA_SPEC --model "$GEMMA_TGT" --model-draft "$GEMMA_MTP" -p "test" -n 8` | exit 0; stderr's speculative-decode summary reports `n_drafted > 0` |
-| AC3 | R1 | `cargo nextest run -p proxima-gguf -E 'test(/mtp_head_present_matches_llama_gguf_detection/)'` | 1 passed; test constructs one synthetic GGUF with `blk.N.nextn.eh_proj.weight` (via `proxima-gguf`'s own writer, per principle 9's canonical-encoder allowance) and one without, asserts `true`/`false` respectively, and asserts against `$QWEN`'s real header too: prints `real_fixture_detected = true`; also asserts `false` against `$GEMMA_MTP` (R1's documented non-detection of the sidecar family) |
-| AC4 | R2 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/qwen35_mtp_program_matches_llama_fixture/)'` | 1 passed; prints `cases = N` with N ≥ 50 (per-position hidden-state -> logits parity rows, fixture generated from `$LLAMA_SPEC` internal state dump) |
-| AC5 | R3 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/qwen35moe_mtp_program_matches_llama_fixture/)'` | 1 passed; `cases` ≥ 50 |
-| AC6 | R4,R5,R6 | `cargo run --release -p proxima-model-interop --features std --example speculative_decode_parity -- --drafter draft-mtp "$QWEN" "Repeat exactly five times: the quick brown fox jumps over the lazy dog." 40` | exit 0; both config blocks (greedy; sampled) print `identical = true`, `speculative_verify_steps` ≥ 1 |
-| AC7 | R7 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/speculative_config_accepts_draft_mtp/)'` | 2 passed (single-GGUF variant, sidecar variant) |
-| AC8 | R9 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/gemma4_assistant_registers_and_binds/)'` | 1 passed |
-| AC9 | R10 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/gemma4_assistant_mtp_program_matches_llama_fixture/)'` | 1 passed; `cases` ≥ 50 |
-| AC10 | R11 | `cargo run --release -p proxima-model-interop --features std --example speculative_decode_parity -- --drafter draft-mtp --draft-model "$GEMMA_MTP" "$GEMMA_TGT" "Repeat exactly five times: the quick brown fox jumps over the lazy dog." 40` | exit 0; both config blocks `identical = true`, `speculative_verify_steps` ≥ 1 |
-| AC11 | R8 | `for seed in 1 2 3; do $LLAMA_SPEC --model "$QWEN" --seed $seed -n 40 -p "Repeat exactly five times: the quick brown fox jumps over the lazy dog." > /tmp/llama_qwen_$seed.txt; cargo run --release -p proxima-model-interop --features std --example speculative_decode_parity -- --drafter draft-mtp --seed $seed "$QWEN" "Repeat exactly five times: the quick brown fox jumps over the lazy dog." 40 > /tmp/proxima_qwen_$seed.txt; diff /tmp/llama_qwen_$seed.txt /tmp/proxima_qwen_$seed.txt; done` | 3 runs, each `diff` prints nothing (0 lines) |
-| AC12 | R8 | same as AC11 with `--model "$GEMMA_TGT" --model-draft "$GEMMA_MTP"` (llama side) and `--draft-model "$GEMMA_MTP" "$GEMMA_TGT"` (proxima side) | 3 runs, each `diff` prints nothing (0 lines) |
+| AC1a | R1 | `strings -a "$QWEN" \| grep -c 'nextn.eh_proj'` | count >= 1 |
+| AC1b | R9 | `strings -a "$GEMMA_MTP" \| grep -c 'nextn.pre_projection'` | count >= 1 (the sidecar's own tensor name, not `eh_proj`) |
+| AC2a | R8 | `$LLAMA_SPEC_SIMPLE --model "$QWEN" --spec-type draft-mtp -p "test" -n 8 2>&1 \| grep -cE 'n_drafted = [1-9]'` | 1 (one `n_drafted = N` line with N >= 1; 0 is RED) |
+| AC2b | R8 | `$LLAMA_SPEC_SIMPLE --model "$GEMMA_TGT" --model-draft "$GEMMA_MTP" --spec-type draft-mtp -p "test" -n 8 2>&1 \| grep -cE 'n_drafted = [1-9]'` | 1 |
+| AC3 | R1 | `cargo nextest run -p proxima-gguf -E 'test(/mtp_head_present_matches_llama_gguf_detection/)'` | 1 passed; one synthetic GGUF with `blk.N.nextn.eh_proj.weight` (written by `proxima-gguf`'s own writer) asserts `true`, one without asserts `false`; `$QWEN`'s real header prints `real_fixture_detected = true`; `$GEMMA_MTP` asserts `false` |
+| AC4 | R2 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/qwen35_mtp_readout_matches_llama_fixture/)'` | 1 passed; prints `cases = N` with N >= 50 (per-position hidden-state to logits rows, fixture generated from llama.cpp's own `h_nextn` tensors) |
+| AC5 | R3 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/qwen35moe_mtp_readout_matches_llama_fixture/)'` | 1 passed; `cases` >= 50; oracle: the per-position `h_nextn` rows and logits llama.cpp `f1ea20621` computes for the qwen35moe graph (`src/models/qwen35moe.cpp`), dumped by slice 3's method |
+| AC6 | R4 (consistency: speculation on vs off in the same engine, parent R1; the llama.cpp oracle for the same requirements is AC11) | `cargo run --release -p proxima-model-interop --features std --example speculative_decode_parity -- --drafter draft-mtp "$QWEN" "Repeat exactly five times: the quick brown fox jumps over the lazy dog." 40 > parity_qwen.txt; grep -c 'identical = true' parity_qwen.txt; grep -cE 'speculative_verify_steps = [1-9]' parity_qwen.txt` | two lines printed: `2` then `2` (greedy and sampled blocks both identical, both with at least one verify step) |
+| AC7 | R7 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/speculative_config_accepts_draft_mtp/)'` | 2 passed (single-GGUF variant routes to the readout-on-target path, sidecar variant routes to the second-descriptor path) |
+| AC15 | R13 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/speculative_config_rejects_ambiguous_draft_mtp/)'` | 2 passed (both selected is a typed error, neither selected is a typed error) |
+| AC8 | R9 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mtp_sidecar_descriptor_binds/)'` | 2 passed (binds against `$GEMMA_MTP`; width mismatch against a different-width target returns the typed error) |
+| AC9 | R10 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mtp_sidecar_readout_matches_llama_fixture/)'` | 1 passed; `cases` >= 50; oracle: the per-position `t_h_nextn` rows llama.cpp `f1ea20621` computes for the sidecar graph (`src/models/gemma4-assis*.cpp:195`), dumped by slice 3's method |
+| AC10 | R11 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/draft_mtp_is_mem_shared_matches_llama/)'` | 1 passed; oracle: the draft positions and ids llama.cpp `f1ea20621` records for a shared-memory run (`common/speculative.cpp:1697-1706`), vendored by slice 22b |
+| AC11 | R4,R8 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mtp_llama_parity_qwen_seed_/)'` | 3 passed (seeds 1, 2, 3); each prints `ids_compared = N` with N >= 8, and compares proxima's ids with the ids vendored from `$LLAMA_SPEC_SIMPLE --model "$QWEN" --spec-type draft-mtp --seed <seed> -n 40` (oracle: llama.cpp `f1ea20621`) |
+| AC12 | R8,R9,R10,R11 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mtp_llama_parity_gemma_seed_/)'` | 3 passed (seeds 1, 2, 3); each prints `ids_compared = N` with N >= 8, against ids vendored from `$LLAMA_SPEC_SIMPLE --model "$GEMMA_TGT" --model-draft "$GEMMA_MTP" --spec-type draft-mtp --seed <seed> -n 40` (oracle: llama.cpp `f1ea20621`) |
+| AC17 | R4 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/draft_mtp_matches_llama_fixture/) or test(/draft_mtp_process_catchup_matches_llama/)'` | 2 passed; oracle: draft token ids, `pending_h` rows and catch-up pairings dumped from llama.cpp `f1ea20621`'s `common_speculative_impl_draft_mtp` by slice 3's method |
+| AC16 | R8 | `for family in qwen gemma; do jq '[.cases[] \| select(.n_drafted > 0)] \| length' proxima-model-interop/tests/fixtures/llama-mtp/$family.json; done` | two lines printed: `3` then `3` (every vendored oracle run drafted, so an oracle that drafted nothing cannot back AC11/AC12) |
+| AC13 | R12 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mtp_oracle_control_/)'` | 2 passed: `mtp_oracle_control_self_` (the comparator fed llama's fixture ids on both sides passes) and `mtp_oracle_control_perturbed_` (one flipped id returns a mismatch, and the test asserts that rejection) |
+| AC14 | R9,R10,R11 (consistency: speculation on vs off in the same engine; the llama.cpp oracle is AC12) | `cargo run --release -p proxima-model-interop --features std --example speculative_decode_parity -- --drafter draft-mtp --draft-model "$GEMMA_MTP" "$GEMMA_TGT" "Repeat exactly five times: the quick brown fox jumps over the lazy dog." 40 > parity_gemma.txt; grep -c 'identical = true' parity_gemma.txt; grep -cE 'speculative_verify_steps = [1-9]' parity_gemma.txt` | two lines printed: `2` then `2` |
 
 ## out of scope
 
-- MTP heads on architectures proxima has never bound at all: glm-dsa, deepseek2/32/4,
-  minimax_01, nemotron-h-moe, qwen3next, gemma3n -- binding these base architectures is a
-  proxima-model-interop coverage prerequisite entirely outside speculative decode's scope
-- `chain_heads` mode (step3.5's `n_mtp_layers > 1` on the *non*-shared-memory path,
-  `common/speculative.cpp:1421,1608-1616`) -- qwen35 asserts `n_layer_nextn == 1`
-  (`src/models/qwen35.cpp:489`), so chaining never triggers for the two single-GGUF
-  architectures this sub-spec covers; gemma4-assistant's own multi-layer nextn block
-  (R10) is a different mechanism (one graph pass over `n_layer_nextn` layers under
-  shared memory, not per-step re-dispatch across separate heads) and is in scope
-- MTP draft-model download/auto-resolution (`opts.download_mtp`, `common/arg.cpp:295-419`,
-  the `--mtp` download-planner flag itself) -- proxima's fixtures are local paths (parent
-  spec's own pattern: `$E2B` is a local blob path, never an HF URL); slice 1/1b name the
-  exact repos to fetch by hand instead
-- other Gemma4-assistant sizes (E4B, 26B-A4B, 31B) -- E2B is chosen for exact size-parity
-  with proxima's existing local gemma4-E2B target fixture; the other sizes are the same
-  architecture and would be a fixture-swap, not new requirements, if ever needed
+- MTP heads on families proxima has never bound at all: glm-dsa, deepseek2/32/4, minimax_01, nemotron-h-moe, qwen3next, gemma3n -- binding those base families is a proxima-model-interop coverage prerequisite outside speculative decode's scope
+- `chain_heads` mode (step3.5's `n_mtp_layers > 1` on the non-shared-memory path, `common/speculative.cpp:1421,1608-1616`) -- qwen35 asserts `n_layer_nextn == 1` (`src/models/qwen35.cpp:489`), so chaining never triggers for the two single-GGUF families; the sidecar's multi-layer nextn block (R10) is one graph pass over `n_layer_nextn` layers under shared memory, a different mechanism, and is in scope
+- MTP sidecar download/auto-resolution (`opts.download_mtp`, `common/arg.cpp:295-419`, the `--mtp` planner flag) -- proxima's fixtures are local paths; slices 1a/1b name the repos to fetch by hand
+- other sidecar sizes (E4B, 26B-A4B, 31B) -- E2B is chosen for size-parity with proxima's local gemma4-E2B target; the other sizes are a fixture swap, not new requirements
+- the readout list itself (`decode-as-data` R5, slice 3) and the descriptor-level family profiles -- owned by those specs; this sub-spec consumes them
 
 ## risks
 
 | risk | likelihood | what it costs | what we do about it |
 |---|---|---|---|
-| no public GGUF conversion pipeline preserves `nextn.*` tensors by default for qwen35/qwen35moe (many quantizers drop MTP heads as "unused" auxiliary weights) | high | slice 1 takes longer than a normal fixture-acquisition slice | slice 1's validation command (AC1a) is exactly the check that would catch a silently-stripped conversion before any other work starts |
-| qwen35moe's MoE FFN inside the MTP block (R3) is not a straight swap of qwen35's dense FFN (R2) -- shared experts, routing, or a different eh_proj shape | medium | R3 needs its own read-first pass, cannot be copy-pasted from R2 | R3's requirement text already says "read from source before implementation, not inferred from R2's shape" |
-| proxima's `BoundProgram` has no second-tensor-input shape (token id + hidden state) anywhere today | medium | R2/R3 may need a `BoundProgram` field addition, which is parent-spec-adjacent surface, not sub-spec-local | flagged in architecture's "hidden-state exposure" paragraph; resolved in slice ordering (TASKS.md puts the `BoundProgram` shape question before the qwen35-specific graph) |
-| gemma4-assistant's cross-program tensor/KV sharing (R10) has no analogue anywhere in proxima's current architecture -- this is the largest unknown in the whole sub-spec | high | R9/R10/R11 could need a `BoundProgram`/`LayerCache` capability that ripples into the parent spec's own R3a/R3b rollback machinery | named explicitly rather than estimated away; TASKS.md puts a dedicated read-and-design slice (no code) before any gemma4-assistant implementation slice, mirroring how the qwen35moe divergence-read slice precedes its implementation |
-| llama.cpp's own oracle path may not expose a clean per-position hidden-state dump for AC4/AC5/AC9's fixture generators | medium | fixture generation needs a small instrumented llama.cpp build (a debug print or a `GGML_TENSOR_FLAG_OUTPUT` on `h_nextn`) rather than stock `llama-cli` | `cb(cur, "h_nextn", -1)` (`src/models/qwen35.cpp:630`, `src/models/gemma4-assistant.cpp:195`) is already a named, `cb`-tagged tensor on both graphs -- llama.cpp's existing `--verbose-prompt`/tensor-dump instrumentation can likely reach it without a source patch; verify before assuming a patched build is needed |
-| the two named HF repos for gemma4-assistant (below) are third-party GGUF conversions (AtomicChat), not an official Google GGUF release, and could diverge from the safetensors reference `google/gemma-4-E2B-it-assistant` in quantization or conversion bugs | medium | oracle parity (AC11/AC12) would then be measuring the third-party conversion's fidelity, not the architecture's | AC2b's end-to-end llama.cpp run is the check: if llama.cpp itself produces garbage output against `$GEMMA_MTP`, the fixture is bad regardless of what proxima does, and slice ordering catches this before any proxima work starts |
+| no public GGUF conversion preserves `nextn.*` for qwen35/qwen35moe (quantizers drop MTP heads as unused auxiliary weights) | high | slice 1a takes longer than a normal fixture slice | AC1a is the check that catches a silently stripped conversion before any other work starts |
+| qwen35moe's MoE FFN inside the NextN block (R3) is not a straight swap of the dense FFN (R2): shared experts, routing or a different `eh_proj` shape | medium | R3 needs its own read-first pass | slice 4 records every divergence from `src/models/qwen35moe.cpp` before R3's implementation slice |
+| the readout list has no second-input shape (token id plus `h_prev`) on main | medium | R2/R3 may need an `Op::Input` plumbed through the lowered inputs, a `decode-as-data`-adjacent surface | slice 8 decides it before any qwen-specific graph slice |
+| cross-descriptor weight and KV sharing (R10) has no analogue in the current descriptor/`ServingState` pair | high | R9-R11 could need a cache-aliasing capability that ripples into the parent spec's R3a/R3b rollback | named, with a dedicated design slice (TASKS slice 5) before any sidecar implementation slice |
+| llama.cpp's stock tools may not expose a per-position `h_nextn` dump for AC4/AC5/AC9 | medium | fixture generation needs a small instrumented llama.cpp build | `cb(cur, "h_nextn", -1)` (`src/models/qwen35.cpp:630`, `src/models/gemma4-assis*.cpp:195`) is already a named tensor on both graphs; slice 3 verifies reachability before assuming a patch |
+| the named sidecar GGUFs are third-party conversions (AtomicChat), not an official release | medium | AC11/AC12 would measure the conversion's fidelity | AC2b runs llama.cpp itself against `$GEMMA_MTP` first; if llama.cpp produces garbage the fixture is bad regardless of proxima |
 
 ## context
 
-- proxima (worktree `feat/speculative-decode`): `proxima-model-interop/src/architecture.rs:266-309` (`Architecture` trait, `speculative_verify_program`), `proxima-model-interop/src/architecture.rs:526-535` (registry: qwen35, qwen35moe, gemma4, dense -- no `gemma4-assistant` entry), `proxima-model-interop/src/gemma4/bind.rs:1105-1115` (the one existing capability-method override, reference shape), `proxima-gguf/src/pipe.rs:25-32` (`ParsedGguf`), `proxima-gguf/src/parser.rs:80,449-479` (tensor-name dedup, the place to add MTP tensor lookups)
-- llama.cpp `f1ea20621` at `~/repos/others/llama.cpp`: `common/speculative.cpp:1331-1441` (ctor, `is_mem_shared`/`chain_heads` derivation at `:1420-1421`), `:1457-1473` (`begin`), `:1475-1582` (`process`, catch-up decode, shared-memory skip at `:1507-1508`), `:1584-1731` (`draft`, shared-memory same-position branch at `:1697-1706`), `:1733-1747` (`accept`), `:2273-2301` (`common_speculative_types_from_gguf`), `:2515-2564` (`common_speculative_init_result` ctor -- self-contained vs sidecar `ctx_dft` construction), `common/arg.cpp:4243-4249` (`--spec-type`, the real inference-time flag), `common/arg.cpp:532-539` (`--model-draft`/`-md`/`--spec-draft-model`), `common/arg.cpp:3081-3086` (`--mtp`, download-planner only -- **not** the inference flag), `common/arg.cpp:295-419` (sidecar auto-download, out of scope), `common/speculative.cpp:33-45` (`common_speculative_type_from_name_map`, confirms the string token is `"draft-mtp"`), `src/llama-ext.h:96-117` (`llama_set/get_embeddings_nextn*`, `llama_set_nextn_layer_offset`, `llama_get_ctx_other` -- none in the public `include/llama.h`), `src/llama-context.cpp:144-162` (`ctx_other` is only ever propagated for `GEMMA4_ASSISTANT`/`EAGLE3`/`DFLASH` -- proof `is_mem_shared` is false for qwen35/qwen35moe), `src/llama-context.cpp:393` (`mem_other` wiring into the memory module), `src/llama-hparams.h:67` (`n_layer_nextn`), `src/llama-model.cpp:1325-1326` (`LLM_KV_NEXTN_PREDICT_LAYERS` read), `src/llama-arch.cpp:60` (`LLM_ARCH_GEMMA4_ASSISTANT` -> `"gemma4-assistant"`), `src/llama-arch.cpp:582-589,969-979` (NextN tensor name table), `src/models/qwen35.cpp:485-644` (`graph_mtp`, the full forward graph), `src/models/qwen35moe.cpp` (its own `graph_mtp`, not yet read -- R3's own prerequisite), `src/models/gemma4-assistant.cpp:1-60` (tensor loading, width-check throws), `:84-196` (`graph::graph`, cross-program `tok_embd`/KV reads)
-- real MTP-head GGUFs to obtain (verified via web search 2026-09-28, not yet downloaded or byte-checked): `google/gemma-4-E2B-it-assistant` (Google's own safetensors release, per Google's MTP documentation and the Gemma 4 technical report, arXiv:2607.02770); `AtomicChat/gemma-4-E2B-it-assistant-GGUF` on Hugging Face (a third-party GGUF conversion, E2B-sized to match proxima's existing local target); a Qwen3.5/3.6 GGUF quantization that preserves `nextn.*` (candidate source: the official Qwen GGUF release or a bartowski/unsloth static quant, re-checked -- unverified as of this spec, named as slice 1's own task, not assumed to exist)
-- local fixtures checked and found without an MTP head (0 occurrences of `nextn.eh_proj` in each tensor directory, and separately confirmed 0 occurrences of `nextn.pre_projection`): `~/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd` (gemma4-E2B, the parent spec's `$E2B`, this sub-spec's `$GEMMA_TGT` -- it is the *target*, correctly headless of its own MTP tensors since those live in the separate assistant sidecar), `~/.ollama/models/blobs/sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129` (batiai/gemma4-26b), `~/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d` (library/qwen3.6:35b-a3b, architecture confirmed `qwen35moe` via its own GGUF metadata -- the right architecture family, just a checkpoint without the trained MTP head)
+- proxima: `proxima-tensor/src/spec/descriptor.rs:130` (`ModelDescriptor`), `:863` (`build_forward`), `proxima-tensor/src/op.rs:201` (`Op::Input`), `proxima-model-interop/src/lowering.rs:118-141` (`BoundProgram`, `hidden_root`, `residual_roots`), `proxima-model-interop/src/profiles/qwen35.toml`, `proxima-model-interop/src/profiles/qwen35moe.toml`, `proxima-model-interop/src/profiles/gemma4.toml`, `proxima-model-interop/src/generate/draft_model.rs:174` (`load_draft`), `proxima-model-interop/src/generate/drafter.rs`, `proxima-model-interop/src/speculative_settings.rs:36` (`SpeculativeTypeName`), `proxima-model-interop/src/serving.rs:205` (`SpeculativeType`), `proxima-model-interop/src/bind.rs:298` (`find_tensor`), `proxima-gguf/src/parser.rs`, `proxima-model-interop/examples/speculative_decode_parity.rs`, `proxima-tensor/specs/decode-as-data/SPEC.md`, `proxima-tensor/specs/speculative-decode-llama-parity/SPEC.md`
+- llama.cpp `f1ea20621` at `~/repos/others/llama.cpp`: `common/speculative.cpp:1331-1441` (ctor, `is_mem_shared`/`chain_heads` derivation at `:1420-1421`), `:1457-1473` (`begin`), `:1475-1582` (`process`, catch-up decode, shared-memory skip at `:1507-1508`), `:1584-1731` (`draft`, shared-memory same-position branch at `:1697-1706`), `:1733-1747` (`accept`), `:2273-2301` (`common_speculative_types_from_gguf`), `:2515-2564` (`common_speculative_init_result`), `common/arg.cpp:4243-4249` (`--spec-type`), `common/arg.cpp:532-539` (`--model-draft`), `common/arg.cpp:3081-3086` (`--mtp`, download only), `common/arg.cpp:295-419` (sidecar auto-download), `common/speculative.cpp:33-45` (type name map), `src/llama-ext.h:96-117`, `src/llama-context.cpp:144-162`, `src/llama-context.cpp:393`, `src/llama-hparams.h:67` (`n_layer_nextn`), `src/llama-model.cpp:1325-1326`, `src/llama-arch.cpp:60`, `src/llama-arch.cpp:582-589,969-979` (NextN tensor names), `src/models/qwen35.cpp:485-644` (`graph_mtp`), `src/models/qwen35moe.cpp`, `src/models/gemma4-assis*.cpp:1-60` (tensor loading, width-check throws), `:84-196` (`graph::graph`)
+- real MTP-head GGUFs to obtain (named via web search 2026-09-28, not yet downloaded or byte-checked): `google/gemma-4-E2B-it-assistant` (Google's safetensors release); `AtomicChat/gemma-4-E2B-it-assistant-GGUF` on Hugging Face (third-party GGUF, E2B-sized); a Qwen3.5/3.6 GGUF quantization that preserves `nextn.*` (official Qwen release or a bartowski/unsloth static quant, re-checked -- slice 1a's own task)
+- local fixtures checked and found without an MTP head (0 occurrences of `nextn.eh_proj` and of `nextn.pre_projection` in each tensor directory): `~/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd` (gemma4-E2B, the target), `~/.ollama/models/blobs/sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129` (batiai/gemma4-26b), `~/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d` (library/qwen3.6:35b-a3b, `qwen35moe` per its GGUF metadata, without the trained MTP head)
