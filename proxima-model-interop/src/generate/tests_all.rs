@@ -2,7 +2,7 @@
 use super::LoadedModel;
 #[cfg(all(test, feature = "instrument", feature = "metal", target_os = "macos"))]
 use super::phys_footprint_bytes;
-#[cfg(all(test, feature = "metal"))]
+#[cfg(all(test, feature = "gpu"))]
 use super::{BackendRuntime, InteropError};
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 use super::{
@@ -63,7 +63,7 @@ pub(super) mod tests {
     use alloc::vec::Vec;
     use proxima_primitives::sync::blocking::Mutex;
 
-    #[cfg(any(feature = "metal", feature = "metal-output-placement"))]
+    #[cfg(any(feature = "gpu", feature = "metal-output-placement"))]
     use alloc::collections::BTreeMap;
 
     #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -318,7 +318,7 @@ pub(super) mod tests {
         ));
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn full_plan_cache_distinguishes_output_roots_at_the_same_shape() {
         let mut cache = BTreeMap::new();
@@ -361,7 +361,7 @@ pub(super) mod tests {
         assert_eq!(misses, 2);
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn full_plan_cache_separates_plans_by_the_epilogue_sources_switch() {
         let mut cache = BTreeMap::new();
@@ -408,7 +408,7 @@ pub(super) mod tests {
         assert_eq!(segment_cache.len(), 2);
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn segment_plan_cache_distinguishes_kv_bucket_extent() {
         let mut cache = BTreeMap::new();
@@ -2800,9 +2800,9 @@ pub(super) mod memory_fit_gate_tests {
         use core::ffi::c_void;
         use std::os::fd::AsFd;
 
-        #[cfg(all(feature = "metal", feature = "instrument"))]
+        #[cfg(all(feature = "gpu", feature = "instrument"))]
         use proxima_telemetry::export::Exporter;
-        #[cfg(all(feature = "metal", feature = "instrument"))]
+        #[cfg(all(feature = "gpu", feature = "instrument"))]
         use proxima_telemetry::recorder::Recorder;
 
         use super::super::{
@@ -3220,13 +3220,13 @@ pub(super) mod memory_fit_gate_tests {
         /// it before this test's own final drain runs, while
         /// `drained_total` survives whichever side (pump or caller) drains
         /// any given batch.
-        #[cfg(all(feature = "metal", feature = "instrument"))]
+        #[cfg(all(feature = "gpu", feature = "instrument"))]
         struct TelemetryProbe {
             recorder: std::sync::Arc<Recorder>,
             drained_total: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         }
 
-        #[cfg(all(feature = "metal", feature = "instrument"))]
+        #[cfg(all(feature = "gpu", feature = "instrument"))]
         impl TelemetryProbe {
             fn drain_and_total(&self) -> usize {
                 let final_pass = self.recorder.drain();
@@ -3241,7 +3241,7 @@ pub(super) mod memory_fit_gate_tests {
         /// console recorder at `debug` so a `--nocapture` run of
         /// [`prefill_step_zero_op_profile`] shows every `op_profile_top`/
         /// `op_profile_bucket` line this test's own deliverable is.
-        #[cfg(all(feature = "metal", feature = "instrument"))]
+        #[cfg(all(feature = "gpu", feature = "instrument"))]
         fn install_stdout_telemetry() -> TelemetryProbe {
             proxima_telemetry::emit::global::install(proxima_telemetry::emit::EnvFilter::parse(
                 "debug",
@@ -3284,7 +3284,7 @@ pub(super) mod memory_fit_gate_tests {
         /// `op_profile_bucket`/`op_profile_codec`/`op_profile_variant`
         /// lines ARE the deliverable, exactly like `bind.rs`'s
         /// `profiles_one_real_decode_step_by_per_op_gpu_time`.
-        #[cfg(all(feature = "metal", feature = "instrument"))]
+        #[cfg(all(feature = "gpu", feature = "instrument"))]
         #[test]
         #[ignore = "depends on a host-local qwen3 gguf checkout outside this repo, and a real Metal device"]
         fn prefill_step_zero_op_profile() {

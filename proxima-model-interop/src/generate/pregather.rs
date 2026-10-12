@@ -597,16 +597,16 @@ impl<'file> LoadedModel<'file> {
             position_offset,
             layer_window,
             marker: _,
-            #[cfg(feature = "metal")]
+            #[cfg(feature = "gpu")]
             sidecar,
-            #[cfg(feature = "metal")]
+            #[cfg(feature = "gpu")]
             all_low_expert_scratch,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             ssm_placement,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             dense_attention_placement,
         } = context;
-        #[cfg(not(feature = "metal"))]
+        #[cfg(not(feature = "gpu"))]
         let _ = layer_window;
         let mut carried: BTreeMap<NodeId, (Vec<u64>, Vec<f32>)> = BTreeMap::new();
         let mut results: BTreeMap<NodeId, (Vec<u64>, Vec<f32>)> = BTreeMap::new();
@@ -641,7 +641,7 @@ impl<'file> LoadedModel<'file> {
                 carried.insert(NodeId(index as u32), (Vec::new(), vec![*value]));
             }
         }
-        #[cfg(feature = "metal")]
+        #[cfg(feature = "gpu")]
         let pair_window_enabled = layer_window == 2
             && plan
                 .layers
@@ -657,7 +657,7 @@ impl<'file> LoadedModel<'file> {
             // router result. Build one union before the gather snapshot so
             // no row reads an unselected descriptor.
             let segments = &plan.layers[layer];
-            #[cfg(feature = "metal")]
+            #[cfg(feature = "gpu")]
             if pair_window_enabled
                 && layer.is_multiple_of(2)
                 && layer + 1 < self.moe_layer_diagnostics.len()
@@ -1551,12 +1551,12 @@ impl<'file> LoadedModel<'file> {
                     } else {
                         None
                     };
-                    #[cfg(feature = "metal")]
+                    #[cfg(feature = "gpu")]
                     let sidecar_mapping = self
                         .expert_sidecar
                         .as_ref()
                         .map(crate::expert_sidecar::MappedExpertSidecar::mapping_bytes);
-                    #[cfg(not(feature = "metal"))]
+                    #[cfg(not(feature = "gpu"))]
                     let sidecar_mapping = None;
                     let mut expert_entries_scratch = Vec::with_capacity(3);
                     let expert_sources = expert_slab.sources_for_layer_with_sidecar(
@@ -2767,7 +2767,7 @@ impl<'file> LoadedModel<'file> {
         // `omega::metal::register_checkpoint_mapping`'s own doc. `omega` is
         // an optional dependency gated behind the `metal` feature, so this
         // registration is a no-op (compiled out) when that feature is off.
-        #[cfg(feature = "metal")]
+        #[cfg(feature = "gpu")]
         omega::backend::register_checkpoint_mapping(file_bytes);
         // `crate::memory_fit`'s own load-time gate needs these three sums
         // long after `parsed` has gone out of scope -- computed once, here,

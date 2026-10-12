@@ -1376,7 +1376,7 @@ fn write_attn_read_source_vectors(
 /// `fnv1a64` of `logits`' raw bit patterns -- lets a `metal-fuse-attn-decode`
 /// build and a feature-off build be compared step-for-step on the same
 /// prompt without diffing the full f32 buffer by hand.
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 fn logits_bits_hash(logits: &[f32]) -> u64 {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -2600,7 +2600,7 @@ impl<'file> LoadedModel<'file> {
         &self,
         serving_config: &ServingConfig<'config>,
     ) -> Result<ServingConfig<'config>, InteropError> {
-        #[cfg(feature = "metal")]
+        #[cfg(feature = "gpu")]
         validate_omega_runtime_config(serving_config)?;
         let mut effective_serving_config = *serving_config;
         self.apply_command_buffer_chunks_default(&mut effective_serving_config);
@@ -2916,7 +2916,7 @@ impl<'file> LoadedModel<'file> {
             serving_config
         };
         let mut runtime = self.backend_runtime(&serving_config);
-        #[cfg(feature = "metal")]
+        #[cfg(feature = "gpu")]
         if std::env::var_os("PROXIMA_WARMUP_BEFORE_GENERATE").is_some() {
             let mut warmup_callback = |_event: TokenEvent<'_>| ControlFlow::Continue(());
             runtime.retain_monolithic_prefill_sources = true;
@@ -3261,7 +3261,7 @@ impl<'file> LoadedModel<'file> {
         let mut local_speculative_stats = SpeculativeDecodeStats::default();
         let speculative_stats = speculative_stats.unwrap_or(&mut local_speculative_stats);
         let initial_speculative_stats = *speculative_stats;
-        #[cfg(feature = "metal")]
+        #[cfg(feature = "gpu")]
         validate_omega_runtime_config(serving_config)?;
         let mut resolved_serving_config = *serving_config;
         self.apply_context_resolution(&mut resolved_serving_config)?;
@@ -3379,21 +3379,21 @@ impl<'file> LoadedModel<'file> {
         // derivation [`Self::forward_node_values_on_backend`] calls, so
         // cache leaf names are never hard-coded twice.
         let (cache_names, layer_row_widths) = self.declared_layer_cache_names_and_widths()?;
-        #[cfg(feature = "metal")]
+        #[cfg(feature = "gpu")]
         let moe_pre_gather_requested = moe_pre_gather_enabled(
             serving_config.moe_pre_gather,
             self.ffn_routing == FfnRouting::Routed,
         );
-        #[cfg(feature = "metal")]
+        #[cfg(feature = "gpu")]
         let monolithic_high_mmap_requested = moe_pre_gather_requested
             && runtime.uses_gpu()
             && serving_config.moe_monolithic_high_mmap;
-        #[cfg(not(feature = "metal"))]
+        #[cfg(not(feature = "gpu"))]
         let monolithic_high_mmap_requested = false;
         #[cfg(all(feature = "metal", target_os = "macos"))]
         let monolithic_all_low_requested =
             self.monolithic_all_low_requested(serving_config, runtime);
-        #[cfg(feature = "metal")]
+        #[cfg(feature = "gpu")]
         if moe_pre_gather_requested && !monolithic_high_mmap_requested {
             // A whole-checkpoint MTLBuffer makes mmap look cheap while still
             // charging every expert byte to Metal's working set.  Routed
@@ -4944,14 +4944,14 @@ did not hold every cached position)",
                     ) && !monolithic_high_mmap_requested
                         && !one_evaluation_prefill
                         && recurrent_verify.is_none();
-                    #[cfg(feature = "metal")]
+                    #[cfg(feature = "gpu")]
                     let monolithic_all_low = moe_monolithic_all_low_enabled(
                         pre_gather,
                         runtime.uses_gpu(),
                         serving_config.moe_monolithic_all_low,
                         step,
                     );
-                    #[cfg(not(feature = "metal"))]
+                    #[cfg(not(feature = "gpu"))]
                     let monolithic_all_low = false;
                     if pre_gather {
                         expert_slab_guard.clear_selected_experts_for_step();
@@ -4986,11 +4986,11 @@ did not hold every cached position)",
                     } else {
                         expert_sources
                     };
-                    #[cfg(feature = "metal")]
+                    #[cfg(feature = "gpu")]
                     let mut all_low_expert_scratch = Vec::new();
-                    #[cfg(feature = "metal")]
+                    #[cfg(feature = "gpu")]
                     let mut layer_window_expert_scratch = Vec::new();
-                    #[cfg(feature = "metal")]
+                    #[cfg(feature = "gpu")]
                     let all_low_expert_sources = if monolithic_all_low {
                         let sidecar = self.expert_sidecar.as_ref().ok_or_else(|| {
                             InteropError::PreGatherExecutionUnsupported {
@@ -5055,7 +5055,7 @@ did not hold every cached position)",
                     // checkpoint stack. The explicit monolithic all-low arm
                     // is the only exception, and its byte-preserving and
                     // memory-limit guards run immediately above.
-                    #[cfg(feature = "metal")]
+                    #[cfg(feature = "gpu")]
                     let expert_source_substitutions = if monolithic_all_low {
                         all_low_expert_sources.as_ref()
                     } else if runtime.uses_gpu() {
@@ -5063,7 +5063,7 @@ did not hold every cached position)",
                     } else {
                         Some(&expert_sources)
                     };
-                    #[cfg(not(feature = "metal"))]
+                    #[cfg(not(feature = "gpu"))]
                     let expert_source_substitutions = Some(&expert_sources);
 
                     let current_sources = RefCell::new(CurrentExpertSources::new());
@@ -5283,9 +5283,9 @@ did not hold every cached position)",
                                 position_offset: cached_len,
                                 layer_window: serving_config.moe_layer_window,
                                 marker: PhantomData,
-                                #[cfg(feature = "metal")]
+                                #[cfg(feature = "gpu")]
                                 sidecar: self.expert_sidecar.as_ref(),
-                                #[cfg(feature = "metal")]
+                                #[cfg(feature = "gpu")]
                                 all_low_expert_scratch: &mut layer_window_expert_scratch,
                                 #[cfg(all(
                                     feature = "metal-output-placement",
@@ -5405,9 +5405,9 @@ did not hold every cached position)",
                                 position_offset: cached_len,
                                 layer_window: serving_config.moe_layer_window,
                                 marker: PhantomData,
-                                #[cfg(feature = "metal")]
+                                #[cfg(feature = "gpu")]
                                 sidecar: self.expert_sidecar.as_ref(),
-                                #[cfg(feature = "metal")]
+                                #[cfg(feature = "gpu")]
                                 all_low_expert_scratch: &mut layer_window_expert_scratch,
                             },
                             &mut before_moe_gather,
@@ -6448,7 +6448,7 @@ did not hold every cached position)",
                         // directly).
                         #[cfg(feature = "instrument")]
                         let fetch_started = read_ticks();
-                        #[cfg(any(feature = "instrument", feature = "metal"))]
+                        #[cfg(any(feature = "instrument", feature = "gpu"))]
                         let logits_diag_enabled = std::env::var_os("PROXIMA_LOGITS_DIAG").is_some();
                         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                         let greedy_device_token: Option<u32> = match (greedy_step, &greedy_program)
@@ -6669,7 +6669,7 @@ did not hold every cached position)",
                         let pre_logits_ticks = elapsed_ticks(pre_logits_started);
                         #[cfg(feature = "instrument")]
                         let logits_hash_started = read_ticks();
-                        #[cfg(feature = "metal")]
+                        #[cfg(feature = "gpu")]
                         if logits_diag_enabled {
                             debug!(
                                 step = step as u64,
@@ -7507,7 +7507,7 @@ did not hold every cached position)",
                 logits_sink.observe(last_position, barriers_step);
                 // attribution slice (2026-09-22, OWNER_BRIEF_dominant_cost): same
                 // PROXIMA_LOGITS_DIAG gate as the batch decode path's logits_hash.
-                #[cfg(feature = "metal")]
+                #[cfg(feature = "gpu")]
                 if std::env::var_os("PROXIMA_LOGITS_DIAG").is_some() {
                     debug!(
                         step = _step as u64,
@@ -7754,7 +7754,7 @@ did not hold every cached position)",
             });
         }
         let mut serving_config = *serving_config;
-        #[cfg(feature = "metal")]
+        #[cfg(feature = "gpu")]
         validate_omega_runtime_config(&serving_config)?;
         self.apply_context_resolution(&mut serving_config)?;
         let mut runtime = BackendRuntime::new(&serving_config);
@@ -8028,7 +8028,7 @@ pub(super) fn moe_admit_low_copy(source: Codec, target: Codec) -> bool {
     source == target
 }
 
-#[cfg(any(test, feature = "metal"))]
+#[cfg(any(test, feature = "gpu"))]
 pub(super) fn moe_monolithic_all_low_enabled(
     pre_gather: bool,
     uses_gpu: bool,

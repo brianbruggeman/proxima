@@ -69,7 +69,7 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_primitives::pipe::Pipe;
 use proxima_primitives::sync::blocking::Mutex;
 #[cfg(any(
-    not(feature = "metal"),
+    not(feature = "gpu"),
     all(feature = "instrument", target_os = "macos")
 ))]
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch_and_experts;
@@ -107,7 +107,7 @@ use omega::backend::execute_plan_named_metal_op_timed;
 use omega::backend::execute_plan_named_metal_op_timed_with_expert_sources;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use omega::backend::mark_plan_time_constants_resident;
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 use omega::backend::{
     Engine, Plan, clear_expert_source_cache, execute_plan_named_with_expert_sources, mark_resident,
     plan_named, plan_named_exact, release_resident_names, unregister_checkpoint_mapping,
@@ -203,7 +203,7 @@ use crate::lowering::{
 };
 use crate::profiles::family_profile;
 use crate::rope_scaling::{RopeScaling, f32_from_u32};
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 use crate::serving::GPU_LAYERS_ALL;
 use crate::serving::apply_serving_config;
 use crate::serving::{

@@ -132,12 +132,8 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # itself dropped from a 5404.5us to a 1046.9us median (`omega/tests/
 # moe_topk_bare_dispatch_timing.rs`).
 metal = [
-    "dep:omega",
-    "dep:libc",
-    "std",
-    "dep:proxima-telemetry",
-    "proxima-telemetry/std",
-    "proxima-telemetry/emit",
+    "gpu",
+    "omega/metal",
     "metal-output-placement",
     "metal-wide-cooperative-reduce",
     "kv-capacity-bucket",
@@ -171,10 +167,14 @@ metal-horizontal-merge = ["metal", "omega/metal-horizontal-merge"]
 # wgpu at adapter discovery time.  Keeping this as an explicit feature makes
 # the hardware boundary visible instead of silently turning a CPU build into
 # a GPU build.
-vulkan = ["metal", "omega?/wgpu-backend"]
+vulkan = ["gpu", "omega/wgpu-backend"]
+# Backend-neutral GPU serving surface: the omega::backend entry points (Engine::Gpu,
+# plan/execute, residency, expert sources) that every GPU driver sits behind. `metal`,
+# `cuda` and `vulkan` each add their own omega driver on top.
+gpu = ["dep:omega", "dep:libc", "std", "dep:proxima-telemetry", "proxima-telemetry/std", "proxima-telemetry/emit"]
 # CUDA serving uses the same backend-agnostic model path as Vulkan, but
 # selects omega's cudarc/NVRTC driver when no wgpu driver is requested.
-cuda = ["metal", "omega?/cuda-driver"]
+cuda = ["gpu", "omega/cuda-driver"]
 # cached-attention physical step for the real serving/decode harness; folded
 # into `metal`'s default shape per ROW 282 but kept individually selectable
 # so a caller can build without `metal` and still exercise the fused path on
@@ -337,7 +337,7 @@ half = { version = "2.7.1", default-features = false }
 libc = { workspace = true, optional = true }
 md-5 = { version = "0.11.0", optional = true }
 memmap2 = { version = "0.9.11", optional = true }
-omega = { version = "0.1.0", path = "../omega", default-features = false, features = ["metal", "cpu"], optional = true }
+omega = { version = "0.1.0", path = "../omega", default-features = false, features = ["cpu"], optional = true }
 prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool"], optional = true }
 proxima-autograd = { version = "0.1.0", path = "../proxima-autograd", optional = true }
 proxima-core = { workspace = true, features = ["alloc"], optional = true }
@@ -399,8 +399,8 @@ required-features = ["std"]
 # entry for the identical reason.
 ## No `required-features`: the GGML-matrix section builds and runs at the
 ## crate's default feature set; only the quantized-packed-format section
-## (gated `#[cfg(feature = "metal")]` inside the example itself) needs
-## `--features metal`, matching `src/capability.rs::quant_format`'s own gate.
+## (gated `#[cfg(feature = "gpu")]` inside the example itself) needs
+## `--features gpu`, matching `src/capability.rs::quant_format`'s own gate.
 [[example]]
 name = "generate_compatibility_doc"
 
