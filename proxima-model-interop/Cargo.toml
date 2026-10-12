@@ -732,6 +732,11 @@ required-features = ["std"]
 name = "codec_token_agreement"
 required-features = ["std"]
 
+# int-N noise and Q8_0 identity controls for codec_token_agreement; also measures relative RMS between checkpoints.
+[[example]]
+name = "requantize_noise"
+required-features = ["std"]
+
 [[example]]
 name = "qat_census"
 required-features = ["std", "metal", "qat"]
