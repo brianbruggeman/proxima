@@ -15,6 +15,9 @@ pub mod child;
 #[cfg(all(windows, test, feature = "runtime-prime-reactor"))]
 mod iocp;
 
+#[cfg(all(windows, test, feature = "runtime-prime-reactor"))]
+mod afd;
+
 #[cfg(feature = "runtime-prime-bgpool")]
 pub mod background;
 
