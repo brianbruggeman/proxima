@@ -7,6 +7,8 @@
 //! `GgmlType` counterpart since ggml never defined them.
 
 use proxima_gguf::GgmlType;
+#[cfg(feature = "float-layout-dtype")]
+use proxima_primitives::float_layout::FloatLayout;
 use proxima_tensor::DType;
 
 /// `None` for any block-quantized or otherwise non-scalar `GgmlType` —
@@ -30,6 +32,7 @@ pub fn ggml_to_dtype(ggml_type: GgmlType) -> Option<DType> {
 
 /// `None` for `Bool` and the unsigned-integer/128-bit `DType`s — ggml has
 /// no wire type for any of them.
+#[cfg(not(feature = "float-layout-dtype"))]
 #[must_use]
 pub fn dtype_to_ggml(dtype: DType) -> Option<GgmlType> {
     match dtype {
@@ -44,6 +47,34 @@ pub fn dtype_to_ggml(dtype: DType) -> Option<GgmlType> {
         DType::Bool
         | DType::BFloat8
         | DType::Fp6E3M2
+        | DType::UInt8
+        | DType::UInt16
+        | DType::UInt32
+        | DType::UInt64
+        | DType::Int128
+        | DType::UInt128 => None,
+    }
+}
+
+/// The wire type of a float layout is the ggml scalar whose fields equal it; any other layout
+/// (bf8, bf4, fp6, a layout nobody named) has no ggml scalar and travels as a proxima codec.
+#[cfg(feature = "float-layout-dtype")]
+#[must_use]
+pub fn dtype_to_ggml(dtype: DType) -> Option<GgmlType> {
+    match dtype {
+        DType::Float(layout) => [
+            (FloatLayout::BF32, GgmlType::F32),
+            (FloatLayout::F16, GgmlType::F16),
+            (FloatLayout::BF16, GgmlType::Bf16),
+        ]
+        .into_iter()
+        .find_map(|(scalar, wire)| (scalar == layout).then_some(wire)),
+        DType::Int8 => Some(GgmlType::I8),
+        DType::Int16 => Some(GgmlType::I16),
+        DType::Int32 => Some(GgmlType::I32),
+        DType::Int64 => Some(GgmlType::I64),
+        DType::Float64 => Some(GgmlType::F64),
+        DType::Bool
         | DType::UInt8
         | DType::UInt16
         | DType::UInt32
