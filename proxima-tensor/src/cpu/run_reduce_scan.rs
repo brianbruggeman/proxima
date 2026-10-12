@@ -1241,6 +1241,20 @@ pub(super) fn run_reduce<B: Deref<Target = [f32]>>(
     // unchanged. The width path wins the tie against the dot path below,
     // the ordering every ROW 3/10 measurement was taken under.
     let fast_path = body_shape_is_affine_fast_path(resolved, &shape, &strides);
+    let reduction_step_strides: Vec<Vec<i64>> = if fast_path {
+        reduction_dims
+            .iter()
+            .map(|&dim| {
+                resolved
+                    .operands()
+                    .iter()
+                    .map(|(_, view, _)| view.stride(dim))
+                    .collect()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let reduction_fast_path = !fast_path
         && !reduction_dims.is_empty()
         && body_shape_is_affine_fast_path(resolved, &shape, &reduction_strides);
@@ -1975,12 +1989,14 @@ pub(super) fn run_reduce<B: Deref<Target = [f32]>>(
                     }
                 }
             } else {
-                for reduction_flat in 0..reduction_total {
-                    unflatten_into(
-                        reduction_flat,
-                        &reduction_extents,
-                        &mut reduction_coordinate,
-                    );
+                // `Layout::offset_of` is linear in the coordinate, so on the
+                // gather-free width path the reduction odometer advances
+                // `running` by one stride per step instead of re-deriving every
+                // operand's offset from a fresh coordinate (measured: that
+                // re-derivation was 83% of `run_reduce`'s samples on a
+                // `[128,128,16,2]` delta-net state fold whose width is 2).
+                if fast_path {
+                    reduction_coordinate.fill(0);
                     merge_coordinates_into(
                         leading_output_axes,
                         &leading_coordinate,
@@ -1989,6 +2005,23 @@ pub(super) fn run_reduce<B: Deref<Target = [f32]>>(
                         &mut full_coordinate,
                     );
                     fill_running_offsets(resolved, &full_coordinate, &mut running);
+                }
+                for reduction_flat in 0..reduction_total {
+                    if !fast_path {
+                        unflatten_into(
+                            reduction_flat,
+                            &reduction_extents,
+                            &mut reduction_coordinate,
+                        );
+                        merge_coordinates_into(
+                            leading_output_axes,
+                            &leading_coordinate,
+                            &reduction_dims,
+                            &reduction_coordinate,
+                            &mut full_coordinate,
+                        );
+                        fill_running_offsets(resolved, &full_coordinate, &mut running);
+                    }
 
                     if fast_path {
                         reduce_width_fast(
@@ -2010,6 +2043,12 @@ pub(super) fn run_reduce<B: Deref<Target = [f32]>>(
                             }
                         }
                         seeded = true;
+                        advance_reduction_offsets(
+                            &mut reduction_coordinate,
+                            &reduction_extents,
+                            &reduction_step_strides,
+                            &mut running,
+                        );
                         continue;
                     }
 
@@ -2091,6 +2130,33 @@ pub(super) fn run_reduce<B: Deref<Target = [f32]>>(
         }
     }
     Ok(())
+}
+
+/// Steps the reduction odometer one position and moves every operand's
+/// `running` offset by the matching per-dim stride, carrying into the next
+/// outer reduction dim on wrap -- the incremental form of
+/// `unflatten_into` + `fill_running_offsets` for operands whose offset is
+/// linear in the coordinate. `operand_strides[dim][operand]` is that
+/// operand's stride along reduction dim `dim`.
+pub(super) fn advance_reduction_offsets(
+    coordinate: &mut [u64],
+    extents: &[u64],
+    operand_strides: &[Vec<i64>],
+    running: &mut [i64],
+) {
+    for dim in (0..extents.len()).rev() {
+        coordinate[dim] += 1;
+        for (offset, stride) in running.iter_mut().zip(&operand_strides[dim]) {
+            *offset += stride;
+        }
+        if coordinate[dim] < extents[dim] {
+            return;
+        }
+        for (offset, stride) in running.iter_mut().zip(&operand_strides[dim]) {
+            *offset -= stride * extents[dim] as i64;
+        }
+        coordinate[dim] = 0;
+    }
 }
 
 pub(super) fn run_scan<B: Deref<Target = [f32]>>(

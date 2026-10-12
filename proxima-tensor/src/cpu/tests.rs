@@ -14238,3 +14238,42 @@ fn scaled_e3m2_cpu_matmul_control_perturbed_weight_fails() {
         "perturbation ratio {ratio:e} stayed within the bound"
     );
 }
+
+/// Three operands reduced over a `[4, 5]` extent pair (a multi-dim fold, so
+/// the odometer must carry): the offset the
+/// incremental odometer maintains at every flat reduction index equals the
+/// base plus each unflattened coordinate times its stride, which is what
+/// `Layout::offset_of` computes -- including a negative stride and a zero (broadcast) stride, the two
+/// strides a naive "advance by one" would get wrong on wrap.
+#[test]
+fn advance_reduction_offsets_matches_offset_of_at_every_flat_index() {
+    let reduction_extents = [4u64, 5];
+    let operand_strides: Vec<Vec<i64>> = vec![vec![40, 0, 7], vec![1, -3, 0]];
+    let mut running = [100i64, 250, 9];
+    let origin = running;
+    let mut coordinate = [0u64; 2];
+
+    for flat in 0..20u64 {
+        let mut expected = [0u64; 2];
+        unflatten_into(flat, &reduction_extents, &mut expected);
+        assert_eq!(coordinate, expected, "odometer coordinate at flat={flat}");
+        for operand in 0..3 {
+            let wanted = origin[operand]
+                + operand_strides[0][operand] * expected[0] as i64
+                + operand_strides[1][operand] * expected[1] as i64;
+            assert_eq!(
+                running[operand], wanted,
+                "operand {operand} offset at flat={flat}"
+            );
+        }
+        advance_reduction_offsets(
+            &mut coordinate,
+            &reduction_extents,
+            &operand_strides,
+            &mut running,
+        );
+    }
+
+    assert_eq!(coordinate, [0, 0], "a full sweep wraps back to the origin");
+    assert_eq!(running, origin, "a full sweep restores every offset");
+}
