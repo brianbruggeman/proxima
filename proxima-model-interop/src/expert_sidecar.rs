@@ -181,9 +181,9 @@ impl MappedExpertWindow {
         #[cfg(not(unix))]
         {
             let _ = capacity;
-            return Err(InteropError::ExpertWindowUnavailable {
+            Err(InteropError::ExpertWindowUnavailable {
                 reason: String::from("mapped expert windows require unix mmap"),
-            });
+            })
         }
         #[cfg(unix)]
         {

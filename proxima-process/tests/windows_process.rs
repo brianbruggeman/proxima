@@ -1,4 +1,5 @@
 #![cfg(all(windows, feature = "std"))]
+#![allow(clippy::expect_used)]
 
 use std::env;
 use std::ffi::{CString, OsString};
