@@ -46,8 +46,8 @@ draft graph itself, and the descriptor design (R3, R6) must be redone, not tuned
 | R3 | the draft program takes the masked-block input `[id_last, <mask> * (block_size-1)]` as the row layout the host shape pipe produces | yes |
 | R4 | the target's lowered program emits the `target_layer_ids` layers' input hidden states for every new position as a tap readout (`decode-as-data` R5), gathered into the `[n_chunk, n_embd_enc]` shape the draft consumes (mirrors `llama_set_embeddings_layer_inp`/`llama_get_embeddings_layer_inp`, `src/llama-ext.h:111,115`, and the gather loop at `common/speculative.cpp:1145-1156`) | yes |
 | R5 | the fused encoder path (post `662a0b012`): target features reach the draft's embd-input decode in one decode call per chunk, never through a separate encode-then-reupload step | yes |
-| R6 | DFlash1 (non-selector) block decode: top-k=10 sampler per masked position, `p_min` early stop, greedy token ids equal llama.cpp's own draft output given the same injected features and RNG state (`common/speculative.cpp:1291-1316`) | yes |
-| R7 | DFlash2 (selector) block decode: the output is read as a `[block, selector_top_k]` lattice, a greedy predecessor-argmax chain with softmax `p_min` truncation, deterministic given the lattice and without resampling (`common/speculative.cpp:1235-1259`, gated by `llama_model_dflash_selector_top_k(model) > 0`) | yes |
+| R6 | DFlash1 (non-selector) block decode: top-k=10 sampler per masked position, `p_min` early stop, greedy token ids equal llama.cpp's own draft output given the same injected features and RNG state (`common/speculative.cpp:1295-1318`) | yes |
+| R7 | DFlash2 (selector) block decode: the output is read as a `[block, selector_top_k]` lattice, a greedy predecessor-argmax chain with softmax `p_min` truncation, deterministic given the lattice and without resampling (`common/speculative.cpp:1237-1265`, gated by `llama_model_dflash_selector_top_k(model) > 0`) | yes |
 | R8 | the accept stage adds no dflash-specific rollback state: llama.cpp's `accept()` is a no-op (`common/speculative.cpp:1327-1328`), so only the parent spec's R3a attention-KV truncate runs | yes |
 | R9 | `ServingConfig`'s speculative section (parent R9) carries the `draft-dflash` sub-config `block_size` (0 = read from GGUF metadata), `n_max`, `n_min`, `p_min`, `backend_sampling`, with defaults equal to llama.cpp's `common_params_speculative_draft` (`common/common.h:327-334`) and the `--spec-draft-n-max`/`--spec-draft-p-min`/`--spec-draft-backend-sampling` flags (`common/arg.cpp:4137,4194,4201`) | yes |
 | R10 | for the same target, draft, prompt and seed, proxima's generated token ids with `draft-dflash` enabled equal the ids llama.cpp `f1ea20621`'s `llama-speculative-simple` generates with `--spec-type draft-dflash --model-draft`, for 3 seeds | yes, gated by the refutation condition |
@@ -84,7 +84,7 @@ the four pipes of `decode-as-data` (propose, shape, accept, commit). Its row in 
   draft-model path (`proxima-model-interop/src/generate/draft_model.rs:174`, `load_draft`) is the
   precedent this follows, not that file's enum.
 - **block decode (R6/R7)**: DFlash1's top-k sampler and DFlash2's lattice chain are two propose
-  configurations selected by `selector_top_k > 0` (`common/speculative.cpp:1235` versus `:1291`),
+  configurations selected by `selector_top_k > 0` (`common/speculative.cpp:1237` versus `:1295`),
   two branches because they are mutually exclusive per model and produce tokens through different
   math (argmax over a lattice versus top-k sampling); one function behind a boolean would hide the
   branch.
