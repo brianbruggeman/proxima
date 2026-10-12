@@ -84,7 +84,8 @@ impl From<DriverError> for CudaDriverError {
     }
 }
 
-type ResidentBuffers = BTreeMap<NodeId, ((usize, usize), CudaGraphBuffer)>;
+// keyed by the caller's (address, length) so a fresh plan or arena finds the weight another plan uploaded; the name only drives eviction.
+type ResidentBuffers = BTreeMap<(usize, usize), (String, CudaGraphBuffer)>;
 
 fn cuda_float_bytes(extents: &[u64]) -> Result<u64, CudaDriverError> {
     extents.iter().try_fold(4_u64, |bytes, extent| {
@@ -123,6 +124,7 @@ pub struct CudaDriver {
     modules: Arc<Mutex<BTreeMap<String, Vec<CachedCudaModule>>>>,
     resident_buffers: Arc<Mutex<ResidentBuffers>>,
     kernel_compilations: Arc<AtomicU64>,
+    packed_upload_bytes: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -146,7 +148,8 @@ pub struct CudaF32Arena {
 #[derive(Debug, Clone)]
 enum CudaGraphBuffer {
     F32(CudaSlice<f32>),
-    Bytes(CudaSlice<u8>),
+    // shared with the driver's resident cache, so a clone is a refcount bump rather than a device copy.
+    Bytes(Arc<CudaSlice<u8>>),
 }
 
 /// A reusable CUDA graph for the currently connected dense/reduction CUDA ABI.
@@ -166,6 +169,8 @@ pub struct CudaPlan {
     outputs: Vec<NodeId>,
     arena: CudaF32Arena,
     packed_operands: PackedOperands,
+    // sorted; boxed slice keeps CudaPlan under clippy's large_enum_variant gap against the cpu plan
+    resident_nodes: Box<[NodeId]>,
 }
 
 impl CudaF32Arena {
@@ -197,6 +202,7 @@ impl CudaDriver {
             modules: Arc::new(Mutex::new(BTreeMap::new())),
             resident_buffers: Arc::new(Mutex::new(BTreeMap::new())),
             kernel_compilations: Arc::new(AtomicU64::new(0)),
+            packed_upload_bytes: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -212,6 +218,23 @@ impl CudaDriver {
     #[must_use]
     pub fn kernel_compilations(&self) -> u64 {
         self.kernel_compilations.load(Ordering::Relaxed)
+    }
+
+    /// Host-to-device bytes of packed weights uploaded by this driver. A
+    /// weight marked resident adds to it once per loaded model, never again.
+    #[must_use]
+    pub fn packed_upload_bytes(&self) -> u64 {
+        self.packed_upload_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Evicts the device buffers cached for these resident weight names, so a
+    /// dropped model frees its device memory and its address range cannot
+    /// alias a later mapping.
+    pub fn release_resident_names<'name>(&self, names: impl IntoIterator<Item = &'name str>) {
+        let released: BTreeSet<&str> = names.into_iter().collect();
+        self.resident_buffers
+            .lock()
+            .retain(|_, (name, _)| !released.contains(name.as_str()));
     }
 
     /// Returns the CUDA driver's current `(free_bytes, total_bytes)` view.
@@ -439,6 +462,7 @@ impl CudaDriver {
             outputs: outputs.to_vec(),
             arena: self.new_arena(),
             packed_operands,
+            resident_nodes: Box::default(),
         };
         if config.is_some() {
             plan.validate_resources(&blocks, None)?;
@@ -475,14 +499,20 @@ impl CudaDriver {
         node: NodeId,
         values: &[u8],
     ) -> Result<(), CudaDriverError> {
-        if let Some(CudaGraphBuffer::Bytes(buffer)) = arena.buffers.get_mut(&node)
-            && buffer.len() == values.len()
+        self.packed_upload_bytes
+            .fetch_add(values.len() as u64, Ordering::Relaxed);
+        // a buffer shared with the resident cache is never overwritten in place
+        if let Some(CudaGraphBuffer::Bytes(shared)) = arena.buffers.get_mut(&node)
+            && shared.len() == values.len()
+            && let Some(buffer) = Arc::get_mut(shared)
         {
             self.stream.memcpy_htod(values, buffer)?;
             return Ok(());
         }
         let buffer = self.stream.clone_htod(values)?;
-        arena.buffers.insert(node, CudaGraphBuffer::Bytes(buffer));
+        arena
+            .buffers
+            .insert(node, CudaGraphBuffer::Bytes(Arc::new(buffer)));
         arena.allocations += 1;
         Ok(())
     }
@@ -827,7 +857,7 @@ impl CudaDriver {
             match binding {
                 Binding::Input(node) | Binding::Indices(node) => match arena.buffers.get(node) {
                     Some(CudaGraphBuffer::F32(input)) => args.arg(input),
-                    Some(CudaGraphBuffer::Bytes(input)) => args.arg(input),
+                    Some(CudaGraphBuffer::Bytes(input)) => args.arg(input.as_ref()),
                     None => {
                         arena
                             .buffers
@@ -1105,7 +1135,8 @@ impl CudaPlan {
         {
             return Ok(());
         }
-        if resident_names.is_some_and(|names| !names.is_empty()) {
+        if resident_names.is_some_and(|names| !names.is_empty()) || !self.resident_nodes.is_empty()
+        {
             return Err(CudaDriverError::UnsupportedConstraint {
                 field: "constraints",
                 reason: "shared resident cache has no per-plan reservation owner",
@@ -1218,6 +1249,27 @@ impl CudaPlan {
             self.driver.context.name()?
         ))
     }
+
+    /// Marks the inputs named in `resident_names` as immutable for the life of
+    /// their source bytes, so any plan on this driver reuses the device buffer
+    /// another plan uploaded for the same (address, length). Same contract as
+    /// the Metal plan's `mark_resident`: a scan over the block-input nodes, not
+    /// a device operation.
+    pub fn mark_resident(&mut self, resident_names: &BTreeSet<&str>) {
+        let mut marked: Vec<NodeId> = self
+            .block_nodes
+            .iter()
+            .filter(|node| {
+                self.program[node.0 as usize]
+                    .name()
+                    .is_some_and(|name| resident_names.contains(name))
+            })
+            .copied()
+            .collect();
+        marked.sort_unstable();
+        self.resident_nodes = marked.into_boxed_slice();
+    }
+
     /// Executes the planned graph with name-resolved inputs and returns the
     /// requested outputs. Packed bytes stay on device in the persistent arena.
     pub fn execute_named(
@@ -1250,18 +1302,21 @@ impl CudaPlan {
                 _ => "",
             };
             let source = (block_address(block), block_length(block));
-            let resident = resident_names.is_some_and(|names| names.contains(name));
+            let resident = self.resident_nodes.binary_search(&node).is_ok()
+                || resident_names.is_some_and(|names| names.contains(name));
             if resident && self.arena.resident_sources.get(&node) == Some(&source) {
                 resident_hits += 1;
                 continue;
             }
             if resident {
+                let packed =
+                    !matches!(block, QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_));
                 let cached = self
                     .driver
                     .resident_buffers
                     .lock()
-                    .get(&node)
-                    .filter(|(cached_source, _)| *cached_source == source)
+                    .get(&source)
+                    .filter(|(_, buffer)| matches!(buffer, CudaGraphBuffer::Bytes(_)) == packed)
                     .map(|(_, buffer)| buffer.clone());
                 if let Some(buffer) = cached {
                     self.arena.buffers.insert(node, buffer);
@@ -1306,7 +1361,7 @@ impl CudaPlan {
                     self.driver
                         .resident_buffers
                         .lock()
-                        .insert(node, (source, buffer));
+                        .insert(source, (name.to_owned(), buffer));
                 }
             } else {
                 self.arena.resident_sources.remove(&node);
