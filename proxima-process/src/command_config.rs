@@ -139,6 +139,14 @@ pub struct CommandConfig {
     #[builder(default)]
     pub controlling_tty: bool,
 
+    /// If `true`, child calls `setsid()` so it leads a process group of its
+    /// own and `Child::kill_process_group` reaches its descendants. Claims no
+    /// controlling terminal, unlike `controlling_tty`.
+    #[setting(default)]
+    #[serde(default)]
+    #[builder(default)]
+    pub process_group: bool,
+
     /// Dispatch chain the spawned child's `extra_fd[7]` traffic
     /// (and any libc-interpose hits) is routed through. Default
     /// is [`DispatchChoice::Empty`] — synthesises empty responses
@@ -305,7 +313,7 @@ impl CommandConfig {
         Ok(command)
     }
 
-    /// `umask` + `controlling_tty` materialised into the runtime
+    /// `umask` + `controlling_tty` + `process_group` materialised into the runtime
     /// [`SpawnOptions`](super::spawn::SpawnOptions) shape. `dispatch_fd` stays `None` here —
     /// the dispatch socket is allocated by `spawn_and_dispatch`,
     /// not by config.
@@ -314,7 +322,7 @@ impl CommandConfig {
         super::spawn::SpawnOptions {
             dispatch_fd: None,
             controlling_tty: self.controlling_tty,
-            process_group: false,
+            process_group: self.process_group,
             umask: self.umask,
         }
     }
@@ -345,6 +353,9 @@ impl CommandConfig {
             .stderr(Stdio::from(self.stderr));
         if self.controlling_tty {
             command.controlling_tty(true);
+        }
+        if self.process_group {
+            command.process_group(true);
         }
         if let Some(mask) = self.umask {
             command.umask(mask);
@@ -414,6 +425,7 @@ impl CommandDescriptor {
             // if they care.
             umask: None,
             controlling_tty: false,
+            process_group: false,
             dispatch: DispatchChoice::default(),
             libc_shim: false,
         }
@@ -441,6 +453,7 @@ impl super::command::Command {
         let descriptor = self.to_descriptor()?;
         let mut config = descriptor.to_config();
         config.controlling_tty = self.is_controlling_tty();
+        config.process_group = self.is_process_group();
         config.umask = self.get_umask();
         config.libc_shim = self.is_libc_shim();
         config.inherit_parent_env = self.inherits_parent_env();
@@ -639,6 +652,13 @@ impl CommandConfigLayered {
     }
 
     #[must_use]
+    pub fn with_process_group(mut self, value: bool) -> Self {
+        self.inner.process_group = value;
+        self.touched.insert("process_group".to_string());
+        self
+    }
+
+    #[must_use]
     pub fn build(self) -> CommandConfig {
         self.inner
     }
@@ -740,6 +760,12 @@ fn command_env_partial() -> Result<Value, conflaguration::Error> {
         "controlling_tty",
         &["PROXIMA_PROCESS_CONTROLLING_TTY"],
         &resolved.controlling_tty,
+    )?;
+    insert_if_env_set(
+        &mut partial,
+        "process_group",
+        &["PROXIMA_PROCESS_PROCESS_GROUP"],
+        &resolved.process_group,
     )?;
     insert_if_env_set(
         &mut partial,
@@ -998,6 +1024,7 @@ mod tests {
                 .from_env()
                 .expect("from_env")
                 .with_controlling_tty(true)
+                .with_process_group(true)
                 .build();
             assert_eq!(config.program, "/bin/from-env", "env layer");
             assert_eq!(
@@ -1007,6 +1034,7 @@ mod tests {
             );
             assert!(!config.inherit_parent_env, "file layer");
             assert!(config.controlling_tty, "with_* layer");
+            assert!(config.process_group, "with_* layer");
             assert!(
                 config.umask.is_none(),
                 "untouched — falls through to the default"
@@ -1220,6 +1248,7 @@ errno = 13
             .env(Env::from_iter([("LANG", "C")]))
             .inherit_parent_env(false)
             .libc_shim(true)
+            .process_group(true)
             .build();
         let from_config = config.clone().into_std_command().expect("config → command");
 
@@ -1229,6 +1258,7 @@ errno = 13
             .program("/bin/echo")
             .args(alloc::vec![std::ffi::OsString::from("hello")])
             .libc_shim(true)
+            .process_group(true)
             .build();
         let mut from_builder = from_builder;
         from_builder.env_from(Env::from_iter([("LANG", "C")]));
@@ -1240,16 +1270,66 @@ errno = 13
         );
         assert_eq!(from_config.env_snapshot(), from_builder.env_snapshot());
         assert_eq!(from_config.is_libc_shim(), from_builder.is_libc_shim());
+        assert!(from_config.is_process_group());
+        assert_eq!(
+            from_config.is_process_group(),
+            from_builder.is_process_group()
+        );
     }
 
     #[test]
     fn parity_command_to_config_round_trip_preserves_additive_flags() {
         let mut cmd = super::super::command::Command::new("/bin/true");
-        cmd.controlling_tty(true).umask(0o022).libc_shim();
+        cmd.controlling_tty(true)
+            .process_group(true)
+            .umask(0o022)
+            .libc_shim();
         let restored = cmd.to_config().expect("to_config");
         assert!(restored.controlling_tty);
+        assert!(restored.process_group);
         assert_eq!(restored.umask, Some(0o022));
         assert!(restored.libc_shim);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_reaches_spawn_options_from_config_and_command() {
+        let config = CommandConfig::builder()
+            .program("/bin/true".to_string())
+            .process_group(true)
+            .build();
+        assert!(config.spawn_options().process_group);
+
+        let mut command = super::super::command::Command::new("/bin/true");
+        assert!(!command.is_process_group());
+        command.process_group(true);
+        assert!(command.is_process_group());
+        assert!(!CommandConfig::default().spawn_options().process_group);
+    }
+
+    #[test]
+    fn process_group_round_trips_through_serde_and_env() {
+        let config = CommandConfig::builder()
+            .program("/bin/true".to_string())
+            .process_group(true)
+            .build();
+        let json = serde_json::to_string(&config).expect("serialize");
+        let restored: CommandConfig = serde_json::from_str(&json).expect("deserialize");
+        assert!(restored.process_group);
+
+        temp_env::with_vars(
+            [
+                ("PROXIMA_PROCESS_PROGRAM", Some("/bin/true")),
+                ("PROXIMA_PROCESS_PROCESS_GROUP", Some("true")),
+            ],
+            || {
+                let layered = CommandConfig::layered()
+                    .from_env()
+                    .expect("from_env")
+                    .build();
+                assert!(layered.process_group, "env layer");
+            },
+        );
     }
 
     #[test]
