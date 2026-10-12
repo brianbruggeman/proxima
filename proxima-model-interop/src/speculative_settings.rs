@@ -278,6 +278,11 @@ pub struct SpeculativeSettings {
     #[builder(default = 0.0)]
     pub p_min: f32,
 
+    /// GGUF checkpoint path used by the `draft-simple` speculative model.
+    #[serde(default)]
+    #[setting(default)]
+    pub draft_model_path: Option<String>,
+
     /// llama.cpp's `ngram_simple.size_n`.
     #[setting(default = 12)]
     #[builder(default = 12)]
@@ -357,6 +362,7 @@ impl SpeculativeSettings {
             n_max: self.n_max,
             n_min: self.n_min,
             p_min: self.p_min,
+            draft_model_path: self.draft_model_path.as_deref(),
             ngram_simple: NgramMapParams {
                 size_n: self.ngram_simple_size_n,
                 size_m: self.ngram_simple_size_m,
@@ -480,6 +486,7 @@ mod tests {
                 ("PROXIMA_SPECULATIVE_N_MAX", None::<&str>),
                 ("PROXIMA_SPECULATIVE_N_MIN", None::<&str>),
                 ("PROXIMA_SPECULATIVE_P_MIN", None::<&str>),
+                ("PROXIMA_SPECULATIVE_DRAFT_MODEL_PATH", None::<&str>),
                 ("PROXIMA_SPECULATIVE_NGRAM_SIMPLE_SIZE_N", None::<&str>),
                 ("PROXIMA_SPECULATIVE_NGRAM_SIMPLE_SIZE_M", None::<&str>),
                 ("PROXIMA_SPECULATIVE_NGRAM_SIMPLE_MIN_HITS", None::<&str>),
@@ -520,11 +527,12 @@ mod tests {
         );
     }
 
-    const SPECULATIVE_ENV_KEYS: [&str; 16] = [
+    const SPECULATIVE_ENV_KEYS: [&str; 17] = [
         "PROXIMA_SPECULATIVE_TYPES",
         "PROXIMA_SPECULATIVE_N_MAX",
         "PROXIMA_SPECULATIVE_N_MIN",
         "PROXIMA_SPECULATIVE_P_MIN",
+        "PROXIMA_SPECULATIVE_DRAFT_MODEL_PATH",
         "PROXIMA_SPECULATIVE_NGRAM_SIMPLE_SIZE_N",
         "PROXIMA_SPECULATIVE_NGRAM_SIMPLE_SIZE_M",
         "PROXIMA_SPECULATIVE_NGRAM_SIMPLE_MIN_HITS",
@@ -550,6 +558,33 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn draft_model_path_builder_and_environment_lower_to_borrowed_config() {
+        let via_builder = SpeculativeSettings::builder()
+            .draft_model_path(String::from("/models/draft.gguf"))
+            .build();
+        assert_eq!(
+            via_builder.as_speculative_config().draft_model_path,
+            Some("/models/draft.gguf")
+        );
+
+        let environment = SPECULATIVE_ENV_KEYS
+            .into_iter()
+            .map(|key| {
+                if key == "PROXIMA_SPECULATIVE_DRAFT_MODEL_PATH" {
+                    (key, Some("/models/draft.gguf"))
+                } else {
+                    (key, None)
+                }
+            })
+            .collect::<Vec<_>>();
+        temp_env::with_vars(environment, || {
+            let via_env = SpeculativeSettings::from_env()
+                .unwrap_or_else(|error| panic!("from_env failed: {error}"));
+            assert_eq!(via_env, via_builder);
+        });
     }
 
     fn toml_with_types(types: &str) -> NamedTempFile {
