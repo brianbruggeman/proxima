@@ -191,13 +191,7 @@ pub(super) fn run_node_into_with_round_sink<B: Deref<Target = [f32]> + Sync>(
         BoundOpKind::Elementwise { .. } => {
             #[cfg(feature = "instrument")]
             instrument::record_op_kind(instrument::OpKind::Elementwise);
-            let gather_block = quantized_gather_operand(resolved).and_then(|(source, lookup)| {
-                quantized_weights
-                    .and_then(|weights| weights.get(&source))
-                    .filter(|block| quantized_gather_row_is_aligned(&lookup, block))
-                    .map(|block| (lookup, block))
-            });
-            match gather_block {
+            match packed_gather_read(resolved, quantized_weights) {
                 Some((lookup, block)) => {
                     if let Some(source) = expert_sources.and_then(|sources| {
                         quantized_gather_operand(resolved)
@@ -1947,19 +1941,61 @@ pub(super) fn quantized_gather_operand(resolved: &BoundOp) -> Option<(NodeId, bi
     let [(source, layout, Some(lookup))] = resolved.operands() else {
         return None;
     };
-    let [_, columns] = resolved.extents.as_slice() else {
+    let [_, slab_extents @ ..] = resolved.extents.as_slice() else {
         return None;
     };
-    if layout.base != 0
-        || layout.strides.as_slice() != [0, 1]
+    let slab_width: u64 = slab_extents.iter().product();
+    if slab_extents.is_empty()
+        || layout.base != 0
+        || !is_row_major_slab(&layout.strides, slab_extents)
         || lookup.element_stride <= 0
-        || *columns != lookup.element_stride as u64
-        || lookup.index_layout.strides.len() != 2
-        || lookup.index_layout.strides[1] != 0
+        || slab_width != lookup.element_stride as u64
+        || lookup.index_layout.strides.len() != resolved.extents.len()
+        || lookup.index_layout.strides[1..]
+            .iter()
+            .any(|stride| *stride != 0)
     {
         return None;
     }
     Some((*source, lookup.clone()))
+}
+
+/// Whether `strides` walks one outer index per contiguous, row-major slab of
+/// `slab_extents`: a zero outer stride (the lookup, not the layout, picks
+/// the slab) followed by the row-major strides of the trailing extents. A
+/// 2-D embedding table is the one-trailing-axis case; an expert stack
+/// gathered into `[tokens, out, in]` is the two-trailing-axis case.
+fn is_row_major_slab(strides: &[i64], slab_extents: &[u64]) -> bool {
+    let Some((outer_stride, slab_strides)) = strides.split_first() else {
+        return false;
+    };
+    let mut expected = 1i64;
+    let row_major = slab_extents
+        .iter()
+        .rev()
+        .zip(slab_strides.iter().rev())
+        .all(|(extent, stride)| {
+            let matches = *stride == expected;
+            expected = expected.saturating_mul(*extent as i64);
+            matches
+        });
+    *outer_stride == 0 && slab_strides.len() == slab_extents.len() && row_major
+}
+
+/// The one definition of "this consumer reads its operand straight out of
+/// packed bytes": a [`quantized_gather_operand`] shape whose source is a
+/// packed weight in `quantized_weights` and whose row width lands on the
+/// codec's block boundary. [`run_node_into`] dispatches on it and
+/// [`non_primary_operand_reads`] excludes exactly these consumers from the
+/// operands that must be materialized as f32, so the executor that runs and
+/// the buffers that exist can never disagree.
+pub(super) fn packed_gather_read<'weights, 'block>(
+    resolved: &BoundOp,
+    quantized_weights: Option<&'weights BTreeMap<NodeId, QuantizedBlock<'block>>>,
+) -> Option<(bind::Lookup, &'weights QuantizedBlock<'block>)> {
+    let (source, lookup) = quantized_gather_operand(resolved)?;
+    let block = quantized_weights?.get(&source)?;
+    quantized_gather_row_is_aligned(&lookup, block).then_some((lookup, block))
 }
 
 pub(super) fn quantized_gather_row_is_aligned(

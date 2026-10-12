@@ -11573,7 +11573,6 @@ fn reduce_epilogue_only_quantized_weight_is_materialized_before_evaluation() {
         core::slice::from_ref(&resolved),
         &shapes,
         &quantized_weights,
-        None,
         &mut buffers,
     )
     .expect("the widened scan dequantizes a Reduce epilogue's own quantized operand");
@@ -13841,7 +13840,6 @@ async fn packed_gather_preserves_scaled_rows(#[case] count: u32) {
         &resolved,
         &shapes,
         &weights,
-        None,
         &mut buffers,
     )
     .expect("direct row gathering needs no full table");
@@ -13855,7 +13853,6 @@ async fn packed_gather_preserves_scaled_rows(#[case] count: u32) {
         &unfenced,
         &shapes,
         &weights,
-        None,
         &mut buffers,
     )
     .expect("the unfenced control expands the table");
@@ -14001,7 +13998,6 @@ fn packed_gather_preserves_noncanonical_layout_fallback() {
         slice::from_ref(&bound),
         &shapes,
         &weights,
-        None,
         &mut buffers,
     )
     .expect("a strided consumer retains its full-table fallback");
@@ -14049,6 +14045,265 @@ fn packed_gather_preserves_unaligned_row_fallback() {
         result.get(scaled).expect("the scaled row is returned").0,
         expected
     );
+}
+
+fn q8_0_rows(values: &[f32]) -> Vec<u8> {
+    use proxima_gguf::quant::q8_0::{BLOCK_BYTES, quantize};
+
+    let mut bytes = vec![0u8; values.len() / 32 * BLOCK_BYTES];
+    for (row, row_bytes) in values
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .zip(bytes.as_chunks_mut::<BLOCK_BYTES>().0)
+    {
+        quantize(row, row_bytes).expect("a 32-wide row is exactly one Q8_0 block");
+    }
+    bytes
+}
+
+fn q8_0_decoded(bytes: &[u8], elements: usize) -> Vec<f32> {
+    let mut decoded = vec![0.0f32; elements];
+    proxima_gguf::quant::q8_0::dequantize(bytes, &mut decoded)
+        .expect("the encoder's own bytes decode");
+    decoded
+}
+
+fn expert_slab_gather_program(experts: u32, out_dim: u32, in_dim: u32) -> (Vec<Op>, [NodeId; 3]) {
+    let mut program = Vec::new();
+    let stack = block(
+        &mut program,
+        DType::UInt8,
+        &[
+            Extent::Static(experts),
+            Extent::Static(out_dim),
+            Extent::Static(in_dim),
+        ],
+    );
+    let route = f32_block(&mut program, &[Extent::Static(1)]);
+    let slab_pattern = |axis: u16| map::AxisIndex {
+        terms: core::iter::once(AxisTerm::projection(axis)).collect(),
+        offset: 0,
+        len: None,
+    };
+    let gather_map = IndexMap::Computed {
+        indices: route,
+        index_map: map::projection(3, &[0]),
+        base: map::IndexPattern {
+            iter_rank: 3,
+            axes: alloc::vec![map::AxisIndex::default(), slab_pattern(1), slab_pattern(2)],
+        },
+        gathered_dim: 0,
+    };
+    let selected = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: alloc::vec![(stack, gather_map)],
+            name: None,
+        },
+    );
+    (program, [stack, route, selected])
+}
+
+/// The expert-stack gather `[tokens, out, in]` is the rank-3 case of the
+/// packed row gather: the classifier that routes a consumer to the packed
+/// executor and the scan that decides which operands need an f32 buffer
+/// must agree on it, or the stack is neither read packed nor materialized
+/// and the node fails with `operand buffer missing at evaluation time`.
+#[test]
+fn packed_gather_expert_slab_is_one_definition_for_dispatch_and_materialization() {
+    let (program, [stack, route, selected]) = expert_slab_gather_program(2, 4, 8);
+    let expert_values: Vec<f32> = random_vec(41, 2 * 32);
+    let stack_bytes = q8_0_rows(&expert_values);
+    let packed = QuantizedBlock::Packed {
+        codec: Codec::Q8_0,
+        bytes: &stack_bytes,
+    };
+    let weights = BTreeMap::from([(stack, packed)]);
+    let shapes = shape::infer(&program, &[]).expect("the slab graph has concrete shapes");
+    let resolved = bind::bind(&program, &shapes, &[selected], NumericPolicy::bit_exact())
+        .expect("the slab gather binds");
+    let gather_op = resolved
+        .iter()
+        .find(|bound| bound.node == selected)
+        .expect("the slab gather is its own operation");
+
+    assert_eq!(gather_op.extents.as_slice(), [1, 4, 8]);
+    assert!(
+        quantized_gather_operand(gather_op).is_some(),
+        "a row-major slab gather is the packed gather shape"
+    );
+    assert!(packed_gather_read(gather_op, Some(&weights)).is_some());
+
+    let mut buffers: Vec<Option<Cow<'_, [f32]>>> = vec![None; program.len()];
+    buffers[route.0 as usize] = Some(Cow::Borrowed(&[1.0]));
+    materialize_quantized_weights_read_by_non_primary_operands(
+        #[cfg(feature = "instrument")]
+        &program,
+        &resolved,
+        &shapes,
+        &weights,
+        &mut buffers,
+    )
+    .expect("a direct slab gather needs no full stack");
+    assert!(buffers[stack.0 as usize].is_none());
+
+    let mut output = vec![0.0f32; 32];
+    run_node_into(
+        gather_op,
+        &buffers,
+        Some(&weights),
+        None,
+        None,
+        false,
+        &mut output,
+    )
+    .expect("the packed executor reads the routed expert straight from the stack");
+    assert_eq!(output, q8_0_decoded(&stack_bytes, 64)[32..64]);
+}
+
+#[test]
+fn packed_gather_expert_slab_with_strided_layout_is_materialized() {
+    let (program, [stack, _, selected]) = expert_slab_gather_program(2, 4, 8);
+    let stack_bytes = q8_0_rows(&random_vec(43, 2 * 32));
+    let weights = BTreeMap::from([(
+        stack,
+        QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes: &stack_bytes,
+        },
+    )]);
+    let shapes = shape::infer(&program, &[]).expect("the slab graph has concrete shapes");
+    let resolved = bind::bind(&program, &shapes, &[selected], NumericPolicy::bit_exact())
+        .expect("the slab gather binds");
+    let mut bound = resolved
+        .into_iter()
+        .find(|bound| bound.node == selected)
+        .expect("the slab gather is bound");
+    if let BoundOpKind::Elementwise { operands, .. } = &mut bound.kind {
+        operands[0].1.strides[2] = 2;
+    }
+
+    assert!(packed_gather_read(&bound, Some(&weights)).is_none());
+    let mut buffers: Vec<Option<Cow<'_, [f32]>>> = vec![None; program.len()];
+    materialize_quantized_weights_read_by_non_primary_operands(
+        #[cfg(feature = "instrument")]
+        &program,
+        slice::from_ref(&bound),
+        &shapes,
+        &weights,
+        &mut buffers,
+    )
+    .expect("a strided slab consumer reads a dequantized stack");
+    assert_eq!(
+        buffers[stack.0 as usize].as_deref().map(<[f32]>::len),
+        Some(64)
+    );
+}
+
+/// A packed weight declared contraction-axis first (`[k, n]`) over bytes
+/// that are physically `n` rows of `k`: its non-primary elementwise reader
+/// gets a row shape, and the arena plan must dequantize it transposed.
+#[test]
+fn arena_materializes_a_transposed_packed_operand_by_row_shape() {
+    const K: usize = 32;
+    const N: usize = 3;
+    let mut program = Vec::new();
+    let weight = block(
+        &mut program,
+        DType::UInt8,
+        &[Extent::Static(K as u32), Extent::Static(N as u32)],
+    );
+    let activation = f32_block(&mut program, &[Extent::Static(K as u32)]);
+    let product = append_elementwise(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(weight, "kn->kn"), (activation, "k->kn")],
+    )
+    .expect("the transposed product builds");
+    let sum = crate::spec::reduce(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        "kn->kn",
+        "n->kn",
+    )
+    .expect("the contraction over k builds");
+    for (op, name) in program.iter_mut().zip(["weight", "activation"]) {
+        if let Op::Input { name: slot, .. } = op {
+            *slot = Some(String::from(name));
+        }
+    }
+
+    let rows: Vec<f32> = random_vec(53, N * K)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+    let weight_bytes = q8_0_rows(&rows);
+    let decoded = q8_0_decoded(&weight_bytes, N * K);
+    let x: Vec<f32> = random_vec(59, K);
+
+    let shapes = shape::infer(&program, &[]).expect("the transposed graph infers");
+    let resolved = bind::bind(
+        &program,
+        &shapes,
+        &[product, sum],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("the transposed graph binds");
+    let weights = BTreeMap::from([(
+        weight,
+        QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes: &weight_bytes,
+        },
+    )]);
+    let reads: Vec<_> = non_primary_operand_reads(&resolved, &weights)
+        .filter(|(computed, operand, _)| computed.node == product && *operand == weight)
+        .map(|(_, _, row_shape)| row_shape)
+        .collect();
+    assert_eq!(
+        reads,
+        [Some((N, K))],
+        "the product reads the weight through a transposing row shape"
+    );
+
+    let named = [
+        (
+            "weight",
+            QuantizedBlock::Packed {
+                codec: Codec::Q8_0,
+                bytes: &weight_bytes,
+            },
+        ),
+        ("activation", QuantizedBlock::Float32(&x)),
+    ];
+    let evaluated = evaluate_named_operands(&program, &[], &named, &[product, sum])
+        .expect("the arena evaluates the transposed packed operand");
+
+    let mut expected_product = vec![0.0f32; K * N];
+    let mut expected_sum = vec![0.0f32; N];
+    for contraction in 0..K {
+        for row in 0..N {
+            let value = x[contraction] * decoded[row * K + contraction];
+            expected_product[contraction * N + row] = value;
+            expected_sum[row] += value;
+        }
+    }
+    let (actual_product, _) = evaluated.get(product).expect("the product is returned");
+    let (actual_sum, _) = evaluated.get(sum).expect("the sum is returned");
+    assert_eq!(actual_product, expected_product);
+    for (actual, expected) in actual_sum.iter().zip(&expected_sum) {
+        assert!(
+            (actual - expected).abs() <= 1e-4,
+            "contraction {actual} vs scalar {expected}"
+        );
+    }
 }
 
 /// The collapsed dispatch binds the fold's 2 operands, its 1 gather index
