@@ -10468,7 +10468,6 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps(
 #[proxima::test]
 #[case::baseline(false, true, GdnOutputGate::Silu, 4u32)]
 #[case::v_head_reordered_m4(true, true, GdnOutputGate::Silu, 4u32)]
-#[case::v_head_reordered_m13(true, true, GdnOutputGate::Silu, 13u32)]
 #[case::no_attn_norm_m4(false, false, GdnOutputGate::Silu, 4u32)]
 #[case::sigmoid_gate_m4(false, true, GdnOutputGate::Sigmoid, 4u32)]
 #[case::production_args_m13(true, true, GdnOutputGate::Silu, 13u32)]
