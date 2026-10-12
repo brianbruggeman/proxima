@@ -219,6 +219,14 @@ required-features = [
 ]
 
 [[test]]
+name = "child_exit"
+required-features = [
+    "runtime-prime-executor",
+    "runtime-prime-reactor",
+    "runtime-prime-inbox-alloc",
+]
+
+[[test]]
 name = "prime_wheel_linkage"
 required-features = [
     "runtime-prime-executor",
