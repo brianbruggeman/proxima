@@ -4213,7 +4213,35 @@ pub struct SpeculativeTypeStats {
     pub accepted: u64,
 }
 
+impl SpeculativeTypeStats {
+    fn since(self, initial: Self) -> Self {
+        Self {
+            drafted: self.drafted.saturating_sub(initial.drafted),
+            accepted: self.accepted.saturating_sub(initial.accepted),
+        }
+    }
+}
+
 impl SpeculativeDecodeStats {
+    /// The counts accrued after `initial` was copied out of this same
+    /// accumulator: one request's own totals when the caller reuses one
+    /// `SpeculativeDecodeStats` across requests.
+    pub(super) fn since(&self, initial: &Self) -> Self {
+        Self {
+            verify_steps: self.verify_steps.saturating_sub(initial.verify_steps),
+            drafted_total: self.drafted_total.saturating_sub(initial.drafted_total),
+            accepted_total: self.accepted_total.saturating_sub(initial.accepted_total),
+            per_type: core::array::from_fn(|index| {
+                self.per_type[index].since(initial.per_type[index])
+            }),
+            draft_simple: self.draft_simple.since(initial.draft_simple),
+            prefill_steps: self.prefill_steps.saturating_sub(initial.prefill_steps),
+            decode_steps: self.decode_steps.saturating_sub(initial.decode_steps),
+            accept_steps: self.accept_steps.saturating_sub(initial.accept_steps),
+            rollback_steps: self.rollback_steps.saturating_sub(initial.rollback_steps),
+        }
+    }
+
     /// Counts the serving-machine state one decode step is about to evaluate
     /// (`Prefill`, `Decode`) or just settled into (`Accept`, `Rollback`); a
     /// `Verify` evaluation is counted by [`Self::record_verify_step`] and
