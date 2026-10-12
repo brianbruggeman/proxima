@@ -3,17 +3,31 @@
 //! The gate lives in [`Readiness`](super::readiness::Readiness): kqueue
 //! `EVFILT_PROC` on macOS ([`Readiness::process_exit`](super::readiness::Readiness::process_exit)),
 //! a pidfd on Linux ([`open_pidfd`] then [`Readiness::new`](super::readiness::Readiness::new)).
+//! On Windows the gate is [`Readiness::signaled`](super::readiness::Readiness::signaled) over
+//! the process handle and the read step is `exit_status`.
 //! A caller composes `gate.and_then(reap)`; these functions are the reap step and
 //! never park. Statuses are `std::process::ExitStatus`, so signals and core dumps
 //! survive in the raw wait status.
 
 use std::io;
+#[cfg(unix)]
 use std::num::NonZeroI32;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, BorrowedHandle};
+#[cfg(windows)]
+use std::os::windows::process::ExitStatusExt;
 use std::process::ExitStatus;
 
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{HANDLE, STILL_ACTIVE, WAIT_OBJECT_0};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+
+#[cfg(unix)]
 /// Reaps `pid` if it has exited, without blocking.
 ///
 /// # Errors
@@ -113,4 +127,29 @@ pub fn try_reap_pidfd(pidfd: BorrowedFd<'_>) -> io::Result<Option<ExitStatus>> {
         _ => status & 0x7f,
     };
     Ok(Some(ExitStatus::from_raw(raw_status)))
+}
+
+/// Reads the exit code of `process` once its handle has signaled.
+///
+/// The gate is [`Readiness::signaled`](super::readiness::Readiness::signaled) over the
+/// process handle; a caller composes `gate.and_then(exit_status)`. This is one bounded
+/// `GetExitCodeProcess` call and never parks. The code travels as a
+/// `std::process::ExitStatus`, so `status.code()` is the child's own code.
+///
+/// # Errors
+/// The raw `GetExitCodeProcess` error, or `WouldBlock` when `process` has not exited.
+#[cfg(windows)]
+pub fn exit_status(process: BorrowedHandle<'_>) -> io::Result<ExitStatus> {
+    let raw = process.as_raw_handle() as HANDLE;
+    let mut code = 0u32;
+    // SAFETY: `code` is a valid out-pointer and `raw` is borrowed for the call.
+    if unsafe { GetExitCodeProcess(raw, &mut code) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // an exit code of 259 is indistinguishable from a live process until the handle is waited on
+    // SAFETY: a zero timeout polls the handle's signaled state and never parks.
+    if code == STILL_ACTIVE as u32 && unsafe { WaitForSingleObject(raw, 0) } != WAIT_OBJECT_0 {
+        return Err(io::Error::from(io::ErrorKind::WouldBlock));
+    }
+    Ok(ExitStatus::from_raw(code))
 }

@@ -5,7 +5,9 @@
 //! by its completion key and `OVERLAPPED` address.
 
 use std::io;
-use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle};
+use std::os::windows::io::{
+    AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle,
+};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -54,6 +56,10 @@ impl CompletionPort {
             true => Err(io::Error::last_os_error()),
             false => Ok(()),
         }
+    }
+
+    pub(crate) fn as_handle(&self) -> BorrowedHandle<'_> {
+        self.handle.as_handle()
     }
 
     /// the port handle shared with wake handles that outlive the reactor.
@@ -121,8 +127,6 @@ fn timeout_millis(timeout: Option<Duration>) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use std::os::windows::io::AsHandle;
-
     use windows_sys::Win32::Foundation::{ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, GENERIC_WRITE};
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_FLAG_OVERLAPPED, OPEN_EXISTING, PIPE_ACCESS_INBOUND, ReadFile, WriteFile,

@@ -28,8 +28,11 @@ use std::num::NonZeroI32;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(windows)]
-use std::os::windows::io::AsSocket;
+use std::os::windows::io::{AsHandle, AsSocket, OwnedHandle};
 use std::task::Context;
+
+#[cfg(windows)]
+use windows_sys::Win32::System::IO::OVERLAPPED_ENTRY;
 
 use super::core_shard::with_current_reactor;
 use super::reactor::{Interest, OwnedSource, Reactor, SourceKey, Wakeup};
@@ -54,6 +57,11 @@ enum Registration {
     #[cfg(unix)]
     Descriptor(RawSource),
     Owned(OwnedSource),
+    // the reactor slot takes the duplicate at registration and closes it on deregistration
+    #[cfg(windows)]
+    Completion(Option<OwnedHandle>),
+    #[cfg(windows)]
+    Signaled(Option<OwnedHandle>),
     #[cfg(target_os = "macos")]
     Process(NonZeroI32),
     Spent,
@@ -120,6 +128,52 @@ impl Readiness {
             Registration::Owned(socket.as_socket().try_clone_to_owned()?),
             Interest::Write,
         ))
+    }
+
+    /// Gate over overlapped I/O completions on `source` (a named pipe or file opened with
+    /// `FILE_FLAG_OVERLAPPED`).
+    ///
+    /// The gate duplicates `source`, associates the duplicate with the worker's completion
+    /// port at the first [`Readiness::poll`], and keeps it until deregistration, so closing the
+    /// caller's handle early cannot leave the port with a dead handle. Start the overlapped
+    /// operation, poll the gate, and on [`ReadyState::Retry`] read the finished operation with
+    /// [`Readiness::take_completion`]. Sockets use [`Readiness::new`] instead; this is the
+    /// file-handle sibling of the same epoch handshake.
+    ///
+    /// # Errors
+    /// Returns the `DuplicateHandle` error.
+    #[cfg(windows)]
+    pub fn completion(source: &impl AsHandle) -> io::Result<Self> {
+        Ok(Self::with_registration(
+            Registration::Completion(Some(source.as_handle().try_clone_to_owned()?)),
+            Interest::Read,
+        ))
+    }
+
+    /// Gate that opens once the waitable `source` (a process, event, or thread handle) signals.
+    ///
+    /// The kernel queues one wait completion packet on the worker's port: no thread pool and
+    /// no thread-pool wait registration. A source already signaled when the gate registers opens
+    /// it at once, so the first [`Readiness::poll`] returns [`ReadyState::Retry`] and the caller
+    /// reads the result, for a process [`child::exit_status`](super::child::exit_status).
+    /// The gate opens once; it does not re-arm.
+    ///
+    /// # Errors
+    /// Returns the `DuplicateHandle` error.
+    #[cfg(windows)]
+    pub fn signaled(source: &impl AsHandle) -> io::Result<Self> {
+        Ok(Self::with_registration(
+            Registration::Signaled(Some(source.as_handle().try_clone_to_owned()?)),
+            Interest::Read,
+        ))
+    }
+
+    /// The last completion entry the reactor delivered for a [`Readiness::completion`] gate;
+    /// `dwNumberOfBytesTransferred` is the finished operation's byte count.
+    #[cfg(windows)]
+    pub fn take_completion(&mut self) -> Option<OVERLAPPED_ENTRY> {
+        let key = self.source?;
+        with_current_reactor(|reactor| reactor.take_completion(key)).flatten()
     }
 
     fn with_registration(registration: Registration, interest: Interest) -> Self {
@@ -202,8 +256,8 @@ impl Readiness {
         }
     }
 
-    fn register(&self, reactor: &mut Reactor) -> io::Result<SourceKey> {
-        match &self.registration {
+    fn register(&mut self, reactor: &mut Reactor) -> io::Result<SourceKey> {
+        match &mut self.registration {
             Registration::Owned(socket) => {
                 #[cfg(unix)]
                 let source = socket.as_raw_fd();
@@ -211,6 +265,10 @@ impl Readiness {
                 let source = socket;
                 reactor.register(source, self.interest)
             }
+            #[cfg(windows)]
+            Registration::Completion(handle) => reactor.register_completion(taken(handle)?),
+            #[cfg(windows)]
+            Registration::Signaled(handle) => reactor.register_signaled(taken(handle)?),
             #[cfg(target_os = "macos")]
             Registration::Process(pid) => reactor.register_process_exit(*pid),
             #[cfg(unix)]
@@ -238,6 +296,8 @@ impl Drop for Readiness {
         }
         match registration {
             Registration::Owned(socket) => owner.release_source(key, socket),
+            #[cfg(windows)]
+            Registration::Completion(_) | Registration::Signaled(_) => owner.release_handle(key),
             #[cfg(target_os = "macos")]
             Registration::Process(_) => owner.release_process_exit(key),
             #[cfg(unix)]
@@ -245,6 +305,11 @@ impl Drop for Readiness {
             Registration::Spent => {}
         }
     }
+}
+
+#[cfg(windows)]
+fn taken(handle: &mut Option<OwnedHandle>) -> io::Result<OwnedHandle> {
+    handle.take().ok_or_else(|| io::Error::other("readiness source missing"))
 }
 
 fn stale_registration() -> io::Error {

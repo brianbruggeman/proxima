@@ -1,4 +1,6 @@
-use std::os::windows::io::{AsRawSocket, AsSocket, OwnedSocket};
+use std::os::windows::io::{
+    AsHandle, AsRawSocket, AsSocket, BorrowedHandle, OwnedHandle, OwnedSocket,
+};
 
 use windows_sys::Win32::System::IO::{OVERLAPPED, OVERLAPPED_ENTRY};
 
@@ -8,12 +10,42 @@ use super::{
 use crate::core::sized;
 use crate::os::afd::{Afd, AfdOutcome, AfdSlot};
 use crate::os::iocp::{CompletionPort, WAKE_KEY};
+use crate::os::waitpacket;
 
 const AFD_KEY: usize = WAKE_KEY - 1;
 const SHUTDOWN_DRAIN: Duration = Duration::from_millis(50);
 
+// a handle slot's completion key is generation << INDEX_BITS | index, so a packet queued for a closed
+// registration never matches the slot that later reuses its index. 32-bit targets split the word
+// 16/16, which caps the slab at SLAB_CAP handle-capable slots and compares a 16-bit generation.
+#[cfg(target_pointer_width = "64")]
+const INDEX_BITS: u32 = 32;
+#[cfg(not(target_pointer_width = "64"))]
+const INDEX_BITS: u32 = 16;
+const INDEX_MASK: usize = (1 << INDEX_BITS) - 1;
+const SLAB_CAP: usize = INDEX_MASK - 1;
+
+fn pack_key(key: SourceKey) -> usize {
+    ((key.generation as usize) << INDEX_BITS) | key.index as usize
+}
+
+/// what a non-socket slot owns until deregistration; sockets use `socket` and `poll` instead.
+enum Handle {
+    None,
+    Completion {
+        handle: OwnedHandle,
+        last: Option<OVERLAPPED_ENTRY>,
+    },
+    Signaled {
+        target: OwnedHandle,
+        packet: OwnedHandle,
+        armed: bool,
+    },
+}
+
 struct SourceSlot {
     socket: Option<OwnedSocket>,
+    handle: Handle,
     // boxed: the kernel writes the poll in place, so its address must survive slab growth
     poll: Option<Box<AfdSlot>>,
     polled: Option<Interest>,
@@ -32,6 +64,15 @@ impl SourceSlot {
         Self {
             socket: Some(socket),
             poll: Some(Box::new(AfdSlot::new())),
+            ..Self::with_handle(Handle::None, generation, interest)
+        }
+    }
+
+    fn with_handle(handle: Handle, generation: u32, interest: Interest) -> Self {
+        Self {
+            socket: None,
+            handle,
+            poll: None,
             polled: None,
             generation,
             read_waker: None,
@@ -49,12 +90,44 @@ impl SourceSlot {
     }
 
     fn vacate(&mut self) {
+        self.cancel_wait();
         self.socket = None;
+        self.handle = Handle::None;
         self.generation = 0;
         self.read_waker = None;
         self.write_waker = None;
         self.read_armed = false;
         self.write_armed = false;
+    }
+
+    /// a queued wait packet would otherwise reach whichever slot reuses this index.
+    fn cancel_wait(&mut self) {
+        if let Handle::Signaled { packet, armed, .. } = &mut self.handle {
+            let _ = waitpacket::cancel(packet.as_handle());
+            *armed = false;
+        }
+    }
+
+    fn bound_handle(&self) -> Option<BorrowedHandle<'_>> {
+        match &self.handle {
+            Handle::None => None,
+            Handle::Completion { handle, .. } => Some(handle.as_handle()),
+            Handle::Signaled { target, .. } => Some(target.as_handle()),
+        }
+    }
+
+    fn complete_handle(&mut self, entry: &OVERLAPPED_ENTRY) -> usize {
+        match &mut self.handle {
+            Handle::None => 0,
+            Handle::Completion { last, .. } => {
+                *last = Some(*entry);
+                self.fire_read(true)
+            }
+            Handle::Signaled { armed, .. } => match std::mem::take(armed) {
+                true => self.fire_read(true),
+                false => 0,
+            },
+        }
     }
 
     fn owns(&self, overlapped: *mut OVERLAPPED) -> bool {
@@ -140,19 +213,16 @@ impl Sources {
             .ok_or_else(stale_source)
     }
 
-    fn insert(
-        &mut self,
-        socket: OwnedSocket,
-        interest: Interest,
-        generation: u32,
-    ) -> io::Result<SourceKey> {
+    fn insert(&mut self, slot: SourceSlot) -> io::Result<SourceKey> {
+        let generation = slot.generation;
         let index = match self.free_head {
             Some(index) => index,
             None => u32::try_from(self.slab.len())
-                .map_err(|_| io::Error::other("reactor source capacity exhausted"))?,
+                .ok()
+                .filter(|index| (*index as usize) < SLAB_CAP)
+                .ok_or_else(|| io::Error::other("reactor source capacity exhausted"))?,
         };
         let key = SourceKey { index, generation };
-        let slot = SourceSlot::new(socket, generation, interest);
         match self.free_head {
             Some(_) => {
                 let reused = &mut self.slab[index as usize];
@@ -173,6 +243,9 @@ impl Sources {
     /// that is too narrow is cancelled and its completion re-issues the wider one.
     fn sync_poll(&mut self, index: usize) -> io::Result<()> {
         let slot = self.slab.get_mut(index).ok_or_else(stale_source)?;
+        if slot.socket.is_none() {
+            return Ok(());
+        }
         let Some(wanted) = interest_of(slot.read_armed, slot.write_armed) else {
             return Ok(());
         };
@@ -204,8 +277,23 @@ impl Sources {
     fn complete(&mut self, entry: &OVERLAPPED_ENTRY) -> usize {
         match entry.lpCompletionKey {
             AFD_KEY => self.complete_poll(entry.lpOverlapped),
-            _ => 0,
+            WAKE_KEY => 0,
+            _ => self.complete_handle(entry),
         }
+    }
+
+    fn complete_handle(&mut self, entry: &OVERLAPPED_ENTRY) -> usize {
+        let (index, generation) = (
+            entry.lpCompletionKey & INDEX_MASK,
+            entry.lpCompletionKey >> INDEX_BITS,
+        );
+        self.slab
+            .get_mut(index)
+            .filter(|slot| {
+                slot.generation != 0
+                    && slot.generation as usize & (usize::MAX >> INDEX_BITS) == generation
+            })
+            .map_or(0, |slot| slot.complete_handle(entry))
     }
 
     fn complete_poll(&mut self, overlapped: *mut OVERLAPPED) -> usize {
@@ -318,10 +406,91 @@ impl Reactor {
 
     pub fn register(&mut self, source: impl AsSocket, interest: Interest) -> io::Result<SourceKey> {
         let socket = source.as_socket().try_clone_to_owned()?;
+        let generation = self.take_generation();
+        self.sources
+            .insert(SourceSlot::new(socket, generation, interest))
+    }
+
+    /// the slot keeps the duplicate until deregistration; completions of overlapped I/O on it
+    /// land on this reactor's port and the latest one is read back with [`Self::take_completion`].
+    pub(crate) fn register_completion(&mut self, handle: OwnedHandle) -> io::Result<SourceKey> {
+        let generation = self.take_generation();
+        let handle = Handle::Completion { handle, last: None };
+        let key =
+            self.sources
+                .insert(SourceSlot::with_handle(handle, generation, Interest::Read))?;
+        let associated = self.sources.live(key).and_then(SourceSlot::bound_handle);
+        let outcome = match associated {
+            Some(bound) => self.port.associate(bound, pack_key(key)),
+            None => Err(stale_source()),
+        };
+        self.vacate_on_error(key, outcome)
+    }
+
+    /// the gate opens once `handle` signals; an already-signaled handle opens it at registration.
+    pub(crate) fn register_signaled(&mut self, handle: OwnedHandle) -> io::Result<SourceKey> {
+        let generation = self.take_generation();
+        let packet = waitpacket::create()?;
+        let handle = Handle::Signaled {
+            target: handle,
+            packet,
+            armed: false,
+        };
+        let key =
+            self.sources
+                .insert(SourceSlot::with_handle(handle, generation, Interest::Read))?;
+        let outcome = self.arm_wait(key);
+        self.vacate_on_error(key, outcome)
+    }
+
+    fn arm_wait(&mut self, key: SourceKey) -> io::Result<()> {
+        let slot = self.sources.live_mut(key)?;
+        let Handle::Signaled {
+            target,
+            packet,
+            armed,
+        } = &mut slot.handle
+        else {
+            return Err(stale_source());
+        };
+        let already_signaled = waitpacket::associate(
+            packet.as_handle(),
+            self.port.as_handle(),
+            target.as_handle(),
+            pack_key(key),
+        )?;
+        *armed = !already_signaled;
+        if already_signaled {
+            slot.fire_read(true);
+        }
+        Ok(())
+    }
+
+    fn vacate_on_error(
+        &mut self,
+        key: SourceKey,
+        outcome: io::Result<()>,
+    ) -> io::Result<SourceKey> {
+        match outcome {
+            Ok(()) => Ok(key),
+            Err(error) => {
+                let _ = self.sources.deregister(key);
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn take_completion(&mut self, key: SourceKey) -> Option<OVERLAPPED_ENTRY> {
+        match &mut self.sources.live_mut(key).ok()?.handle {
+            Handle::Completion { last, .. } => last.take(),
+            _ => None,
+        }
+    }
+
+    fn take_generation(&mut self) -> u32 {
         let generation = self.next_generation;
-        let key = self.sources.insert(socket, interest, generation)?;
         self.next_generation = generation.wrapping_add(1).max(1);
-        Ok(key)
+        generation
     }
 
     pub fn reregister(&mut self, key: SourceKey, interest: Interest) -> io::Result<()> {

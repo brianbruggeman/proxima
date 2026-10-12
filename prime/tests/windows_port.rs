@@ -1319,3 +1319,375 @@ fn readiness_owner_collision() -> Result<(), Failure> {
         .context("join second readiness owner")?;
     Ok(())
 }
+
+#[cfg(windows)]
+mod windows_gates {
+    use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+    use std::process::{Command, Stdio};
+
+    use prime::os::child::exit_status;
+    use prime::os::readiness::ReadyState;
+    use windows_sys::Win32::Foundation::{
+        ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_OVERLAPPED, OPEN_EXISTING, PIPE_ACCESS_INBOUND, ReadFile, WriteFile,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+    use windows_sys::Win32::System::Pipes::{
+        ConnectNamedPipe, CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_WAIT,
+    };
+    use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent};
+
+    use super::*;
+
+    const PAYLOAD: &[u8] = b"cargo-val";
+    const CHILDREN: usize = 64;
+
+    struct Inflight {
+        overlapped: Box<OVERLAPPED>,
+        buffer: [u8; 32],
+    }
+
+    impl Inflight {
+        fn new() -> Self {
+            Self {
+                overlapped: Box::new(OVERLAPPED::default()),
+                buffer: [0; 32],
+            }
+        }
+    }
+
+    // the kernel owns both fields until the completion is dequeued; only this task touches them
+    unsafe impl Send for Inflight {}
+
+    fn on_worker<Body>(body: Body) -> Result<(), Failure>
+    where
+        Body: Future<Output = Result<(), Failure>> + Send + 'static,
+    {
+        let handle = worker()?;
+        let (completed, result) = mpsc::channel();
+        handle
+            .dispatch_send_inline(async move {
+                drop(completed.send(body.await));
+            })
+            .context("dispatch gate body")?;
+        result.recv_timeout(GUARD).context("gate body finished")??;
+        handle.shutdown_and_join().context("join gate worker")
+    }
+
+    async fn arm(gate: &mut Readiness) -> Result<ReadyState, Failure> {
+        poll_fn(|context| Poll::Ready(gate.poll(context).context("poll gate"))).await
+    }
+
+    async fn opened(gate: &mut Readiness) -> Result<(), Failure> {
+        poll_fn(|context| match gate.poll(context) {
+            Ok(ReadyState::Retry) => Poll::Ready(Ok(())),
+            Ok(ReadyState::Parked) => Poll::Pending,
+            Ok(ReadyState::OffWorker) => Poll::Ready(Err("gate polled off worker".to_string())),
+            Err(error) => Poll::Ready(Err(format!("poll gate: {error}"))),
+        })
+        .await
+    }
+
+    async fn exit_code(
+        gate: &mut Readiness,
+        process: &std::process::Child,
+    ) -> Result<Option<i32>, Failure> {
+        loop {
+            match exit_status(process.as_handle()) {
+                Ok(status) => return Ok(status.code()),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => opened(gate).await?,
+                Err(error) => return Err(format!("read exit status: {error}")),
+            }
+        }
+    }
+
+    fn turn_once() -> Result<usize, Failure> {
+        core_shard::with_current_reactor(|reactor| reactor.turn(Some(GUARD)))
+            .context("turn on worker")?
+            .context("turn reactor")
+    }
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn overlapped_pipe_pair(name: &str) -> Result<(OwnedHandle, OwnedHandle), Failure> {
+        let name = wide(name);
+        // SAFETY: `name` is a nul-terminated wide string that outlives the call.
+        let server = unsafe {
+            CreateNamedPipeW(
+                name.as_ptr(),
+                PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
+                PIPE_TYPE_BYTE | PIPE_WAIT,
+                1,
+                4096,
+                4096,
+                0,
+                std::ptr::null(),
+            )
+        };
+        if server == INVALID_HANDLE_VALUE {
+            return Err(format!(
+                "create server pipe: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: `server` is a fresh valid handle nothing else owns.
+        let server = unsafe { OwnedHandle::from_raw_handle(server as RawHandle) };
+        // SAFETY: same wide-string contract; no security attributes or template file.
+        let client = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_WRITE,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        if client == INVALID_HANDLE_VALUE {
+            return Err(format!("open client pipe: {}", io::Error::last_os_error()));
+        }
+        // SAFETY: `client` is a fresh valid handle nothing else owns.
+        let client = unsafe { OwnedHandle::from_raw_handle(client as RawHandle) };
+        // SAFETY: the client already opened the pipe, so this returns without blocking.
+        let connected =
+            unsafe { ConnectNamedPipe(server.as_raw_handle() as HANDLE, std::ptr::null_mut()) };
+        let error = io::Error::last_os_error();
+        if connected == 0 && error.raw_os_error() != Some(ERROR_PIPE_CONNECTED as i32) {
+            return Err(format!("connect pipe: {error}"));
+        }
+        Ok((server, client))
+    }
+
+    fn start_read(server: &OwnedHandle, inflight: &mut Inflight) -> Result<(), Failure> {
+        // SAFETY: the buffer and OVERLAPPED stay boxed in `inflight` until the completion is dequeued.
+        let started = unsafe {
+            ReadFile(
+                server.as_raw_handle() as HANDLE,
+                inflight.buffer.as_mut_ptr(),
+                inflight.buffer.len() as u32,
+                std::ptr::null_mut(),
+                &mut *inflight.overlapped,
+            )
+        };
+        let pending = io::Error::last_os_error();
+        match started != 0 || pending.raw_os_error() == Some(ERROR_IO_PENDING as i32) {
+            true => Ok(()),
+            false => Err(format!("start overlapped read: {pending}")),
+        }
+    }
+
+    fn write_payload(client: &OwnedHandle) -> Result<(), Failure> {
+        let mut written = 0u32;
+        // SAFETY: the payload is valid for its length and the client handle is synchronous.
+        let wrote = unsafe {
+            WriteFile(
+                client.as_raw_handle() as HANDLE,
+                PAYLOAD.as_ptr(),
+                PAYLOAD.len() as u32,
+                &mut written,
+                std::ptr::null_mut(),
+            )
+        };
+        match wrote != 0 {
+            true => Ok(()),
+            false => Err(format!("write payload: {}", io::Error::last_os_error())),
+        }
+    }
+
+    fn spawn_exit_seven() -> Result<std::process::Child, Failure> {
+        Command::new("cmd")
+            .args(["/c", "exit", "7"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("spawn cmd /c exit 7")
+    }
+
+    fn thread_count() -> Result<usize, Failure> {
+        // SAFETY: a thread snapshot takes no pointers; the result is checked below.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(format!("thread snapshot: {}", io::Error::last_os_error()));
+        }
+        // SAFETY: the snapshot handle is fresh and owned here.
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot as RawHandle) };
+        let mut entry = THREADENTRY32 {
+            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+            ..THREADENTRY32::default()
+        };
+        let mut count = 0;
+        // SAFETY: `entry.dwSize` is set and the snapshot outlives both calls.
+        let mut more = unsafe { Thread32First(snapshot.as_raw_handle() as HANDLE, &mut entry) };
+        while more != 0 {
+            count += usize::from(entry.th32OwnerProcessID == std::process::id());
+            // SAFETY: same entry and snapshot as above.
+            more = unsafe { Thread32Next(snapshot.as_raw_handle() as HANDLE, &mut entry) };
+        }
+        Ok(count)
+    }
+
+    #[test]
+    fn windows_pipe_completion_gate_wakes_task() -> Result<(), Failure> {
+        let name = format!(r"\\.\pipe\prime-gate-{}", std::process::id());
+        let (server, client) = overlapped_pipe_pair(&name)?;
+
+        on_worker(async move {
+            let mut gate = Readiness::completion(&server).context("completion gate")?;
+            let mut inflight = Inflight::new();
+            arm(&mut gate).await?;
+            start_read(&server, &mut inflight)?;
+            write_payload(&client)?;
+            opened(&mut gate).await?;
+            let entry = gate.take_completion().context("completion entry")?;
+            assert_eq!(entry.dwNumberOfBytesTransferred, PAYLOAD.len() as u32);
+            assert!(std::ptr::eq(entry.lpOverlapped, &*inflight.overlapped));
+            assert_eq!(&inflight.buffer[..PAYLOAD.len()], PAYLOAD);
+            assert!(gate.take_completion().is_none(), "entry is taken once");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn windows_stale_completion_never_opens_a_reused_slot() -> Result<(), Failure> {
+        let name = |role: &str| format!(r"\\.\pipe\prime-stale-{role}-{}", std::process::id());
+        let (stale_server, stale_client) = overlapped_pipe_pair(&name("old"))?;
+        let (live_server, live_client) = overlapped_pipe_pair(&name("new"))?;
+
+        on_worker(async move {
+            let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut stale_read = Inflight::new();
+            let mut live_read = Inflight::new();
+            let mut old_gate = Readiness::completion(&stale_server).context("old gate")?;
+            arm(&mut old_gate).await?;
+            start_read(&stale_server, &mut stale_read)?;
+            drop(old_gate);
+
+            let mut new_gate = Readiness::completion(&live_server).context("new gate")?;
+            let first = new_gate
+                .poll(&TaskContext::from_waker(&waker))
+                .context("register new gate")?;
+            write_payload(&stale_client)?;
+            let stale_fired = turn_once()?;
+            let after_stale = new_gate
+                .poll(&TaskContext::from_waker(&waker))
+                .context("poll after stale")?;
+            let wakes_after_stale = wakes.0.load(Ordering::SeqCst);
+
+            start_read(&live_server, &mut live_read)?;
+            write_payload(&live_client)?;
+            let live_fired = turn_once()?;
+            let after_live = new_gate
+                .poll(&TaskContext::from_waker(&waker))
+                .context("poll after live")?;
+            let entry = new_gate
+                .take_completion()
+                .context("live completion entry")?;
+
+            assert_eq!(first, ReadyState::Retry);
+            assert_eq!(stale_fired, 0, "a stale packet fires nothing");
+            assert_eq!(after_stale, ReadyState::Parked);
+            assert_eq!(
+                wakes_after_stale, 0,
+                "a stale packet never wakes the new gate"
+            );
+            assert_eq!(live_fired, 1);
+            assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+            assert_eq!(after_live, ReadyState::Retry);
+            assert_eq!(entry.dwNumberOfBytesTransferred, PAYLOAD.len() as u32);
+            assert!(std::ptr::eq(entry.lpOverlapped, &*live_read.overlapped));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn windows_process_exit_gate_reports_code_7() -> Result<(), Failure> {
+        on_worker(async move {
+            let mut process = spawn_exit_seven()?;
+            let mut gate = Readiness::signaled(&process).context("process gate")?;
+            arm(&mut gate).await?;
+
+            let code = exit_code(&mut gate, &process).await?;
+
+            process.wait().context("reap cmd")?;
+            assert_eq!(code, Some(7));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn windows_exit_gate_preopens_when_already_signaled() -> Result<(), Failure> {
+        on_worker(async move {
+            let mut process = spawn_exit_seven()?;
+            process.wait().context("wait for cmd before gating")?;
+            let mut gate = Readiness::signaled(&process).context("process gate")?;
+
+            let first = arm(&mut gate).await?;
+            let status = exit_status(process.as_handle()).context("exit status")?;
+            let second = arm(&mut gate).await?;
+
+            assert_eq!(first, ReadyState::Retry);
+            assert_eq!(status.code(), Some(7));
+            assert_eq!(
+                second,
+                ReadyState::Parked,
+                "the gate opened once and is spent"
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn windows_exit_gates_create_no_threads() -> Result<(), Failure> {
+        on_worker(async move {
+            let before = thread_count()?;
+            let mut codes = Vec::with_capacity(CHILDREN);
+            for _ in 0..CHILDREN {
+                let mut process = spawn_exit_seven()?;
+                let mut gate = Readiness::signaled(&process).context("process gate")?;
+                arm(&mut gate).await?;
+                codes.push(exit_code(&mut gate, &process).await?);
+                process.wait().context("reap cmd")?;
+            }
+            let after = thread_count()?;
+
+            println!("thread delta {}", after.abs_diff(before));
+            assert_eq!(codes, vec![Some(7); CHILDREN]);
+            assert_eq!(after, before, "wait packets add no threads");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn windows_event_gate_opens_after_set_event() -> Result<(), Failure> {
+        // SAFETY: a manual-reset, unsignaled, unnamed event takes no pointers.
+        let raw = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+        if raw.is_null() {
+            return Err(format!("create event: {}", io::Error::last_os_error()));
+        }
+        // SAFETY: the event handle is fresh and owned here.
+        let event = unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) };
+
+        on_worker(async move {
+            let mut gate = Readiness::signaled(&event).context("event gate")?;
+            let armed = arm(&mut gate).await?;
+            // SAFETY: the event handle is valid for the call.
+            let set = unsafe { SetEvent(event.as_raw_handle() as HANDLE) };
+            assert_ne!(set, 0, "set event: {}", io::Error::last_os_error());
+
+            opened(&mut gate).await?;
+
+            assert_eq!(armed, ReadyState::Retry);
+            Ok(())
+        })
+    }
+}

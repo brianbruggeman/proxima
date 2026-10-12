@@ -8,7 +8,7 @@ pub mod thread_identity;
 #[cfg(feature = "runtime-prime-reactor")]
 pub mod reactor;
 
-#[cfg(all(unix, feature = "runtime-prime-reactor"))]
+#[cfg(all(any(unix, windows), feature = "runtime-prime-reactor"))]
 pub mod child;
 
 #[cfg(all(windows, feature = "runtime-prime-reactor"))]
@@ -16,6 +16,9 @@ mod iocp;
 
 #[cfg(all(windows, feature = "runtime-prime-reactor"))]
 mod afd;
+
+#[cfg(all(windows, feature = "runtime-prime-reactor"))]
+mod waitpacket;
 
 #[cfg(feature = "runtime-prime-bgpool")]
 pub mod background;
