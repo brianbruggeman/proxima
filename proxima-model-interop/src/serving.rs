@@ -420,6 +420,8 @@ pub struct SpeculativeConfig<'model> {
     /// llama.cpp's `common_params_speculative_draft::p_min` (`common/common.h:332`):
     /// minimum greedy-acceptance probability.
     pub p_min: f32,
+    /// Checkpoint path for `draft-simple`'s independent GGUF model.
+    pub draft_model_path: Option<&'model str>,
     pub ngram_simple: NgramMapParams,
     pub ngram_map_k: NgramMapParams,
     pub ngram_map_k4v: NgramMapParams,
@@ -445,6 +447,7 @@ impl SpeculativeConfig<'static> {
             n_max: 3,
             n_min: 0,
             p_min: 0.0,
+            draft_model_path: None,
             ngram_simple: NgramMapParams {
                 size_n: 12,
                 size_m: 48,
