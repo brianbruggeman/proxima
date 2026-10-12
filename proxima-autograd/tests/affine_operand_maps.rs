@@ -39,6 +39,7 @@ use proxima_tensor::cpu::evaluate_named;
 use proxima_tensor::dtype::DType;
 use proxima_tensor::map::{self, AxisTerm, IndexMap, IndexPattern};
 use proxima_tensor::op::{self, Extent, NodeId, Op, Reduce, ReduceInit, ScalarOp};
+use proxima_tensor::shape::infer;
 
 struct Case {
     name: &'static str,
@@ -263,24 +264,24 @@ fn compare_to_loop(name: &str, analytic: &[f32], expected: &[f64]) -> Result<(),
 }
 
 fn compare_to_central_difference(
-    case: &Case,
+    name: &str,
+    program: &[Op],
+    loss: NodeId,
     analytic: &[f32],
     operand: &[f32],
     weight: &[f32],
 ) -> Result<(), String> {
-    let (program, loss) = squared_product_loss(case);
     let step = 1e-2_f32;
     for (index, got) in analytic.iter().enumerate() {
         let (mut up, mut down) = (operand.to_vec(), operand.to_vec());
         up[index] += step;
         down[index] -= step;
-        let numeric = (loss_value(&program, loss, &up, weight)
-            - loss_value(&program, loss, &down, weight))
+        let numeric = (loss_value(program, loss, &up, weight)
+            - loss_value(program, loss, &down, weight))
             / (2.0 * step);
         if (got - numeric).abs() > 1e-2 + 1e-2 * numeric.abs() {
             return Err(format!(
-                "{} x[{index}]: adjoint {got} vs central difference {numeric}",
-                case.name
+                "{name} x[{index}]: adjoint {got} vs central difference {numeric}"
             ));
         }
     }
@@ -296,7 +297,8 @@ fn check_case(case: &Case) -> Result<(), String> {
         return Err(format!("{}: the oracle gradient is all zero", case.name));
     }
     compare_to_loop(case.name, &analytic, &expected)?;
-    compare_to_central_difference(case, &analytic, &operand, &weight)
+    let (program, loss) = squared_product_loss(case);
+    compare_to_central_difference(case.name, &program, loss, &analytic, &operand, &weight)
 }
 
 #[proxima::test]
@@ -329,7 +331,11 @@ async fn adjoint_affine_map_control_zeroed_scatter_fails_the_oracle() {
     let zeroed = vec![0.0_f32; operand.len()];
 
     assert!(compare_to_loop(case.name, &zeroed, &expected).is_err());
-    assert!(compare_to_central_difference(&case, &zeroed, &operand, &weight).is_err());
+    let (program, loss) = squared_product_loss(&case);
+    assert!(
+        compare_to_central_difference(case.name, &program, loss, &zeroed, &operand, &weight)
+            .is_err()
+    );
 }
 
 #[proxima::test]
@@ -453,8 +459,388 @@ async fn a_gather_with_a_non_projection_index_map_is_still_refused() {
     );
 }
 
+struct ReduceCase {
+    case: Case,
+    kept: Vec<u16>,
+    body: ScalarOp,
+    init: ReduceInit,
+}
+
+fn strided_diagonal(iteration: &[u32]) -> Case {
+    let rank = u16::try_from(iteration.len()).unwrap();
+    let (outer, inner) = (rank - 2, rank - 1);
+    let last = 2 * (iteration[usize::from(outer)] - 1) + iteration[usize::from(inner)];
+    let mut terms: Vec<[AxisTerm; 1]> =
+        (0..rank).map(|axis| [AxisTerm::projection(axis)]).collect();
+    let mut axes: Vec<(&[AxisTerm], i32)> = terms.iter_mut().map(|term| (&term[..], 0)).collect();
+    let diagonal = [AxisTerm::scaled(outer, 2), AxisTerm::projection(inner)];
+    axes.push((&diagonal, 0));
+    let mut operand = iteration.to_vec();
+    operand.push(last);
+    Case {
+        name: "strided_diagonal",
+        iteration: iteration.to_vec(),
+        operand,
+        pattern: map::affine(rank, &axes),
+    }
+}
+
+fn pair_diagonal(body: ScalarOp, init: ReduceInit) -> ReduceCase {
+    ReduceCase {
+        case: strided_diagonal(&[3, 2]),
+        kept: vec![0],
+        body,
+        init,
+    }
+}
+
+fn batched_diagonal(body: ScalarOp, init: ReduceInit) -> ReduceCase {
+    ReduceCase {
+        case: strided_diagonal(&[2, 3, 2]),
+        kept: vec![0, 1],
+        body,
+        init,
+    }
+}
+
+fn kept_shape(reduce_case: &ReduceCase) -> Vec<u32> {
+    reduce_case
+        .kept
+        .iter()
+        .map(|axis| reduce_case.case.iteration[usize::from(*axis)])
+        .collect()
+}
+
+fn squared_reduce_loss(reduce_case: &ReduceCase) -> (Vec<Op>, NodeId) {
+    let case = &reduce_case.case;
+    let kept_rank = u16::try_from(reduce_case.kept.len()).unwrap();
+    let mut program = Vec::new();
+    let operand = input(&mut program, "x", &case.operand);
+    let weight = input(&mut program, "w", &kept_shape(reduce_case));
+    let reduced = op::append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: reduce_case.body,
+            init: reduce_case.init,
+            operand,
+            in_map: IndexMap::Affine(case.pattern.clone()),
+            out_map: IndexMap::Affine(map::projection(
+                u16::try_from(case.iteration.len()).unwrap(),
+                &reduce_case.kept,
+            )),
+            keep: op::Keep::Reduce,
+            name: None,
+        }),
+    );
+    let product = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![
+            (reduced, identity(kept_rank)),
+            (weight, identity(kept_rank)),
+        ],
+    );
+    let squared = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![
+            (product, identity(kept_rank)),
+            (product, identity(kept_rank)),
+        ],
+    );
+    let loss = sum_to_scalar(&mut program, squared, kept_rank);
+    (program, loss)
+}
+
+fn reduce_groups(reduce_case: &ReduceCase) -> Vec<Vec<usize>> {
+    let case = &reduce_case.case;
+    let kept = kept_shape(reduce_case);
+    let mut groups = vec![Vec::new(); element_count(&kept)];
+    for flat in 0..element_count(&case.iteration) {
+        let point = unravel(flat, &case.iteration);
+        let kept_point: Vec<usize> = reduce_case
+            .kept
+            .iter()
+            .map(|axis| point[usize::from(*axis)])
+            .collect();
+        groups[ravel(&kept_point, &kept)].push(operand_flat_index(case, &point));
+    }
+    groups
+}
+
+fn fold(body: ScalarOp, values: &[f64]) -> f64 {
+    match body {
+        ScalarOp::Add => values.iter().sum(),
+        ScalarOp::Maximum => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        ScalarOp::Multiply => values.iter().product(),
+        other => panic!("no f64 fold for {other:?}"),
+    }
+}
+
+fn f64_loop_reduce_gradient(reduce_case: &ReduceCase, operand: &[f32], weight: &[f32]) -> Vec<f64> {
+    let mut gradient = vec![0.0_f64; operand.len()];
+    for (group, weight_value) in reduce_groups(reduce_case).iter().zip(weight) {
+        let values: Vec<f64> = group
+            .iter()
+            .map(|index| f64::from(operand[*index]))
+            .collect();
+        let reduced = fold(reduce_case.body, &values);
+        let upstream = 2.0 * reduced * f64::from(*weight_value).powi(2);
+        for (position, index) in group.iter().enumerate() {
+            let local = match reduce_case.body {
+                ScalarOp::Add => 1.0,
+                ScalarOp::Maximum => f64::from(u8::from(values[position] == reduced)),
+                _ => values
+                    .iter()
+                    .enumerate()
+                    .filter(|(other, _)| *other != position)
+                    .map(|(_, value)| value)
+                    .product(),
+            };
+            gradient[*index] += upstream * local;
+        }
+    }
+    gradient
+}
+
+fn positive_operand(count: usize) -> Vec<f32> {
+    pseudo_random(7, count)
+        .iter()
+        .map(|value| value + 1.0)
+        .collect()
+}
+
+fn check_reduce_case(reduce_case: &ReduceCase) -> Result<(), String> {
+    let case = &reduce_case.case;
+    let (program, loss) = squared_reduce_loss(reduce_case);
+    let differentiated = differentiate(&program, loss).map_err(|error| format!("{error:?}"))?;
+    let gradient_node = differentiated
+        .gradient_of_named("x")
+        .ok_or("x feeds the loss")?;
+    let operand = positive_operand(element_count(&case.operand));
+    let weight = pseudo_random(11, element_count(&kept_shape(reduce_case)));
+    let evaluated = evaluate_named(
+        &differentiated.program,
+        &[],
+        &[("x", &operand), ("w", &weight)],
+        &[gradient_node],
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    let analytic = evaluated
+        .get(gradient_node)
+        .ok_or("gradient evaluated")?
+        .0
+        .to_vec();
+    let expected = f64_loop_reduce_gradient(reduce_case, &operand, &weight);
+    if expected.iter().all(|value| *value == 0.0) {
+        return Err(format!("{}: the oracle gradient is all zero", case.name));
+    }
+    compare_to_loop(case.name, &analytic, &expected)?;
+    compare_to_central_difference(case.name, &program, loss, &analytic, &operand, &weight)
+}
+
 #[proxima::test]
-async fn a_reduce_over_a_multi_term_in_map_is_still_refused() {
+#[case::diagonal_read_summed_over_the_inner_axis(pair_diagonal(ScalarOp::Add, ReduceInit::Zero))]
+#[case::diagonal_read_with_a_batch_axis_kept(batched_diagonal(ScalarOp::Add, ReduceInit::Zero))]
+async fn adjoint_affine_map_reduce_add_equals_f64_loop_and_central_difference(
+    #[case] reduce_case: ReduceCase,
+) {
+    check_reduce_case(&reduce_case).expect("diagonal Reduce(Add)");
+}
+
+#[proxima::test]
+async fn adjoint_affine_map_reduce_maximum_equals_f64_loop_and_central_difference() {
+    check_reduce_case(&batched_diagonal(
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+    ))
+    .expect("diagonal Reduce(Maximum)");
+}
+
+#[proxima::test]
+async fn adjoint_affine_map_reduce_multiply_equals_f64_loop_and_central_difference() {
+    check_reduce_case(&batched_diagonal(ScalarOp::Multiply, ReduceInit::One))
+        .expect("diagonal Reduce(Multiply)");
+}
+
+#[proxima::test]
+async fn a_reduce_over_a_projection_in_map_adds_no_mask() {
+    let rank = 2_u16;
+    let mut program = Vec::new();
+    let operand = input(&mut program, "x", &[4, 3]);
+    let summed = op::append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand,
+            in_map: IndexMap::Affine(map::projection(rank, &[1, 0])),
+            out_map: IndexMap::Affine(map::projection(rank, &[0])),
+            keep: op::Keep::Reduce,
+            name: None,
+        }),
+    );
+    let loss = sum_to_scalar(&mut program, summed, 1);
+
+    let differentiated = differentiate(&program, loss).expect("projection Reduce differentiates");
+
+    assert_eq!(iota_count(&differentiated.program), 0);
+}
+
+#[proxima::test]
+async fn a_reduce_over_a_strided_diagonal_in_map_routes_through_one_mask_for_its_one_irregular_axis()
+ {
+    let reduce_case = pair_diagonal(ScalarOp::Add, ReduceInit::Zero);
+    let (program, loss) = squared_reduce_loss(&reduce_case);
+
+    let differentiated = differentiate(&program, loss).expect("diagonal Reduce differentiates");
+
+    assert_eq!(
+        iota_count(&differentiated.program[program.len()..]),
+        3,
+        "one position Iota, one iteration-axis Iota per term (2) for the one irregular axis"
+    );
+}
+
+#[proxima::test]
+async fn a_reduce_over_a_gather_in_map_is_still_refused() {
+    let mut program = Vec::new();
+    let table = input(&mut program, "table", &[8, 4]);
+    let ids = op::append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Int32,
+            shape: vec![Extent::Static(6)],
+            name: Some("ids".into()),
+        },
+    );
+    let gathered = IndexMap::Computed {
+        indices: ids,
+        index_map: map::affine(2, &[(&[AxisTerm::projection(0)], 0)]),
+        base: map::affine(2, &[(&[], 0), (&[AxisTerm::projection(1)], 0)]),
+        gathered_dim: 0,
+    };
+    let summed = op::append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: table,
+            in_map: gathered,
+            out_map: IndexMap::Affine(map::projection(2, &[1])),
+            keep: op::Keep::Reduce,
+            name: None,
+        }),
+    );
+    let loss = sum_to_scalar(&mut program, summed, 1);
+
+    let refused = differentiate(&program, loss)
+        .err()
+        .expect("gather in_map is refused");
+
+    assert!(
+        matches!(refused, AutogradError::ReduceOverGatherUnsupported { .. }),
+        "got {refused:?}"
+    );
+}
+
+#[proxima::test]
+async fn adjoint_affine_map_reduce_scatter_with_a_strided_diagonal_in_map_equals_f64_loop() {
+    let mut program = Vec::new();
+    let operand = input(&mut program, "x", &[3, 2, 6]);
+    let destination = op::append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Int32,
+            shape: vec![Extent::Static(3), Extent::Static(2)],
+            name: Some("idx".into()),
+        },
+    );
+    let scattered = op::append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand,
+            in_map: IndexMap::Affine(strided_diagonal(&[3, 2]).pattern),
+            out_map: IndexMap::scatter(destination, map::projection(2, &[0, 1]), 2, &[], 0, 4),
+            keep: op::Keep::Reduce,
+            name: None,
+        }),
+    );
+    let weight = input(&mut program, "w", &[4]);
+    let product = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(scattered, identity(1)), (weight, identity(1))],
+    );
+    let squared = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(product, identity(1)), (product, identity(1))],
+    );
+    let loss = sum_to_scalar(&mut program, squared, 1);
+    let operand_values = positive_operand(36);
+    let weight_values = pseudo_random(11, 4);
+    let indices = [2.0_f32, 0.0, 2.0, 1.0, 3.0, 0.0];
+
+    let differentiated = differentiate(&program, loss).expect("diagonal scatter differentiates");
+    let gradient_node = differentiated
+        .gradient_of_named("x")
+        .expect("x feeds the loss");
+    let evaluated = evaluate_named(
+        &differentiated.program,
+        &[],
+        &[
+            ("x", &operand_values),
+            ("idx", &indices),
+            ("w", &weight_values),
+        ],
+        &[gradient_node],
+    )
+    .expect("adjoint program evaluates");
+
+    let case = strided_diagonal(&[3, 2]);
+    let mut sums = [0.0_f64; 4];
+    let reads: Vec<(usize, usize)> = (0..6)
+        .map(|flat| {
+            let point = unravel(flat, &case.iteration);
+            (operand_flat_index(&case, &point), indices[flat] as usize)
+        })
+        .collect();
+    for (read, target) in &reads {
+        sums[*target] += f64::from(operand_values[*read]);
+    }
+    let mut expected = vec![0.0_f64; operand_values.len()];
+    for (read, target) in &reads {
+        expected[*read] = 2.0 * sums[*target] * f64::from(weight_values[*target]).powi(2);
+    }
+    let analytic = evaluated
+        .get(gradient_node)
+        .expect("gradient evaluated")
+        .0
+        .to_vec();
+    compare_to_loop("scatter_diagonal", &analytic, &expected).expect("scatter adjoint");
+}
+
+#[proxima::test]
+async fn adjoint_affine_map_reduce_control_zeroed_scatter_fails_the_oracle() {
+    let reduce_case = batched_diagonal(ScalarOp::Add, ReduceInit::Zero);
+    let operand = positive_operand(element_count(&reduce_case.case.operand));
+    let weight = pseudo_random(11, element_count(&kept_shape(&reduce_case)));
+    let expected = f64_loop_reduce_gradient(&reduce_case, &operand, &weight);
+
+    let zeroed = vec![0.0_f32; operand.len()];
+
+    assert!(compare_to_loop(reduce_case.case.name, &zeroed, &expected).is_err());
+}
+
+#[proxima::test]
+async fn a_reduce_over_a_tiled_in_map_differentiates_to_a_program_that_infers() {
     let mut program = Vec::new();
     let operand = input(&mut program, "x", &[6]);
     let mut tiled = map::affine(
@@ -477,12 +863,11 @@ async fn a_reduce_over_a_multi_term_in_map_is_still_refused() {
     );
     let loss = sum_to_scalar(&mut program, windowed, 1);
 
-    let refused = differentiate(&program, loss)
-        .err()
-        .expect("windowed reduce is refused");
+    let differentiated = differentiate(&program, loss).expect("tiled Reduce differentiates");
 
-    assert!(
-        matches!(refused, AutogradError::NonProjectionOperandMap { .. }),
-        "got {refused:?}"
-    );
+    let shapes = infer(&differentiated.program, &[]).expect("adjoint program infers");
+    let gradient = differentiated
+        .gradient_of_named("x")
+        .expect("x feeds the loss");
+    assert_eq!(shapes.of(gradient), &[6]);
 }

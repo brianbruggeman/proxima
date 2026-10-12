@@ -124,26 +124,53 @@ pub(crate) fn broadcast_anchor(
     )
 }
 
-/// Reconstructs the full iteration-space extents an already-validated
-/// `Reduce`'s `in_map` (a [`is_pure_projection`] pattern) established —
-/// the same per-axis resolution `proxima-tensor/src/shape.rs`'s
-/// `unify_iteration_space` performs forward, read back from `shapes`
-/// instead of recomputed, since the forward program already proved it
-/// resolves (this crate's `differentiate` calls `shape::infer` before
-/// touching any node).
-pub(crate) fn iter_extents(
+/// The iteration-space extents of `reduce` (the node `node`), for any affine
+/// `in_map`: an axis with a declared `len` fixes its unit-coefficient term
+/// (`AxisIndex::len_target_axis`) and, when `len` is the tile width, the outer
+/// axis of the split (`AxisIndex::split_outer_axis`); a unit single-term axis
+/// reads the operand's own extent; an axis still open is read from the
+/// kept output axes of `out_map`. `None` when an axis stays unresolved or a
+/// `len` is symbolic.
+pub(crate) fn reduce_iteration_extents(
     shapes: &proxima_tensor::shape::Shapes,
-    operand: NodeId,
-    pattern: &IndexPattern,
-) -> Vec<u64> {
-    let operand_shape = shapes.of(operand);
-    let mut extents = alloc::vec![0u64; pattern.iter_rank as usize];
+    node: NodeId,
+    reduce: &Reduce,
+) -> Option<Vec<u64>> {
+    let pattern = reduce.in_map.affine();
+    let operand_shape = shapes.of(reduce.operand);
+    let mut resolved: Vec<Option<u64>> = alloc::vec![None; usize::from(pattern.iter_rank)];
     for (axis_index, axis) in pattern.axes.iter().enumerate() {
-        if let [term] = axis.terms.as_slice() {
-            extents[term.axis as usize] = operand_shape[axis_index];
+        let operand_extent = *operand_shape.get(axis_index)?;
+        if let Some(Extent::Static(width)) = &axis.len {
+            let width = *width;
+            resolved[usize::from(axis.len_target_axis()?)] = Some(u64::from(width));
+            if let Some((outer, tile)) = axis.split_outer_axis()
+                && u64::from(tile.unsigned_abs()) == u64::from(width)
+                && operand_extent % u64::from(width) == 0
+            {
+                resolved[usize::from(outer)].get_or_insert(operand_extent / u64::from(width));
+            }
+        } else if axis.len.is_some() {
+            return None;
+        } else if let [term] = axis.terms.as_slice()
+            && term.coeff == 1
+            && axis.offset == 0
+        {
+            resolved[usize::from(term.axis)] = Some(operand_extent);
         }
     }
-    extents
+    if let IndexMap::Affine(out_pattern) = &reduce.out_map {
+        let node_shape = shapes.of(node);
+        for (axis_index, axis) in out_pattern.axes.iter().enumerate() {
+            if let [term] = axis.terms.as_slice()
+                && term.coeff == 1
+                && let Some(slot) = resolved.get_mut(usize::from(term.axis))
+            {
+                *slot = slot.or(node_shape.get(axis_index).copied());
+            }
+        }
+    }
+    resolved.into_iter().collect()
 }
 
 /// One `Op::Reduce`, built directly rather than through `spec.rs`'s
