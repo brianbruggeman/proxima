@@ -1,5 +1,5 @@
 //! per-core readiness reactor: kqueue on macOS, epoll on Linux, and
-//! polling's IOCP socket backend on Windows.
+//! a completion port with AFD socket polls on Windows.
 //!
 //! design: single-thread-owned (`!Send`). source slab keyed by `SourceKey`
 //! (slab index + generation); each slot stores read/write wakers inline.
@@ -20,6 +20,8 @@ use std::os::fd::RawFd;
 pub type RawSource = RawFd;
 #[cfg(windows)]
 pub type RawSource = std::os::windows::io::RawSocket;
+#[cfg(windows)]
+use std::os::windows::io::OwnedHandle;
 use std::sync::Arc;
 use std::sync::atomic::{self, AtomicBool, Ordering};
 use std::task::Waker;
@@ -27,6 +29,8 @@ use std::time::Duration;
 
 use crossbeam_queue::SegQueue;
 
+#[cfg(windows)]
+use super::iocp;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::super::core::sized;
 #[cfg(unix)]
@@ -55,7 +59,7 @@ struct WakeupInner {
     alive: AtomicBool,
     cancellations: SegQueue<(SourceKey, Option<OwnedSource>)>,
     #[cfg(windows)]
-    poller: Arc<polling::Poller>,
+    port: Arc<OwnedHandle>,
     #[cfg(target_os = "macos")]
     kq: RawFd,
     #[cfg(target_os = "macos")]
@@ -144,7 +148,7 @@ impl Wakeup {
 
     #[cfg(windows)]
     fn fire_syscall(&self) {
-        let _ = self.inner.poller.notify();
+        let _ = iocp::post_to(&self.inner.port, iocp::WAKE_KEY);
     }
 
     #[cfg(target_os = "macos")]
