@@ -14203,6 +14203,38 @@ fn packed_gather_expert_slab_with_strided_layout_is_materialized() {
     );
 }
 
+/// A raw expert stack named in `outputs` is an ordinary requested weight: it
+/// is dequantized to its declared dtype whether or not an `ExpertSource`
+/// backs the node, and equals `q8_0::dequantize` of the same bytes.
+#[test]
+fn requested_expert_stack_output_is_dequantized_through_an_expert_source() {
+    let (program, [stack, route, _selected]) = expert_slab_gather_program(2, 4, 8);
+    let stack_bytes = q8_0_rows(&random_vec(61, 2 * 32));
+    let packed = QuantizedBlock::Packed {
+        codec: Codec::Q8_0,
+        bytes: &stack_bytes,
+    };
+    let entries = expert_entries_from_stack(packed, 2, 4, 8, 0)
+        .expect("a block-aligned contiguous stack slices evenly");
+    let sources = BTreeMap::from([(stack, ExpertSource::new(&entries))]);
+    let blocks = [packed, QuantizedBlock::Float32(&[1.0])];
+    assert_eq!(block_node_ids(&program), [stack, route]);
+
+    let evaluated = evaluate_quantized_with_scratch_and_experts(
+        &program,
+        &[],
+        &blocks,
+        &[stack],
+        &mut Vec::new(),
+        &mut None,
+        Some(&sources),
+    )
+    .expect("a requested expert stack is materialized, not left without a buffer");
+
+    let (values, _) = evaluated.get(stack).expect("the stack was requested");
+    assert_eq!(values, q8_0_decoded(&stack_bytes, 64));
+}
+
 /// A packed weight declared contraction-axis first (`[k, n]`) over bytes
 /// that are physically `n` rows of `k`: its non-primary elementwise reader
 /// gets a row shape, and the arena plan must dequantize it transposed.
