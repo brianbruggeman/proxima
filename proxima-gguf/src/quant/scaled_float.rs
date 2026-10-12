@@ -307,4 +307,105 @@ mod tests {
             "flipping the sign of element 0 must break the bound"
         );
     }
+
+    const OCP_E3M2_BIAS: i32 = 3;
+    const OCP_E3M2_MAGNITUDE_CODES: u32 = 32;
+    const BLOCK_STRIDE: usize = 16;
+
+    fn ocp_table4_magnitude(code: u32) -> f32 {
+        let exponent = (code >> 2) as i32;
+        let mantissa = (code & 3) as f32;
+        if exponent == 0 {
+            libm::exp2f((1 - OCP_E3M2_BIAS) as f32) * (mantissa / 4.0)
+        } else {
+            libm::exp2f((exponent - OCP_E3M2_BIAS) as f32) * (1.0 + mantissa / 4.0)
+        }
+    }
+
+    fn ocp_nearest_code(ratio: f32) -> u32 {
+        let sign = u32::from(ratio.is_sign_negative()) << 5;
+        let target = ratio.abs();
+        let magnitude = (0..OCP_E3M2_MAGNITUDE_CODES).fold(0u32, |best, code| {
+            let distance = (ocp_table4_magnitude(code) - target).abs();
+            let best_distance = (ocp_table4_magnitude(best) - target).abs();
+            if distance < best_distance || (distance == best_distance && code % 2 == 0) {
+                code
+            } else {
+                best
+            }
+        });
+        sign | magnitude
+    }
+
+    fn payload_field(payload: &[u8], element: usize) -> u32 {
+        (0..FIELD_BITS as usize).fold(0u32, |field, bit| {
+            let position = element * FIELD_BITS as usize + bit;
+            let value = (payload[position / 8] >> (position % 8)) & 1;
+            field | u32::from(value) << bit
+        })
+    }
+
+    fn mismatched_codes(source: &[f32; BLOCK_ELEMENTS], block: &[u8; BLOCK_BYTES]) -> usize {
+        let scale = half::f16::from_f32(
+            source.iter().fold(0.0f32, |peak, value| peak.max(value.abs())) / MAX_NORMAL_RATIO,
+        )
+        .to_f32();
+        assert_eq!(
+            block[..SCALE_BYTES],
+            half::f16::from_f32(scale).to_le_bytes(),
+            "block scale must be f16(absmax / 28)"
+        );
+        (0..BLOCK_ELEMENTS)
+            .filter(|&element| {
+                let expected = if scale == 0.0 {
+                    0
+                } else {
+                    ocp_nearest_code(source[element] / scale)
+                };
+                payload_field(&block[SCALE_BYTES..], element) != expected
+            })
+            .count()
+    }
+
+    #[test]
+    fn scaled_e3m2_codes_match_independent_ocp_table4_encode_on_granite_rows() {
+        let rows = granite_q8_0_rows_1024x512();
+
+        let (blocks, mismatches) = rows
+            .as_chunks::<BLOCK_ELEMENTS>()
+            .0
+            .iter()
+            .step_by(BLOCK_STRIDE)
+            .fold((0usize, 0usize), |(blocks, mismatches), source| {
+                (blocks + 1, mismatches + mismatched_codes(source, &quantized(source)))
+            });
+
+        debug!(
+            blocks,
+            mismatches, "quant.scaled_float codes versus independent ocp table 4 encode"
+        );
+        assert!(blocks > 0, "the stride must sample at least one block");
+        assert_eq!(mismatches, 0, "codes differing from the OCP table 4 nearest-even encode");
+    }
+
+    #[test]
+    fn scaled_e3m2_independent_ocp_encode_control_flipped_code_is_detected() {
+        let rows = granite_q8_0_rows_1024x512();
+        let source = rows
+            .as_chunks::<BLOCK_ELEMENTS>()
+            .0
+            .iter()
+            .find(|source| source[0].abs() > 0.0)
+            .expect("a block with a non-zero first weight");
+        let mut block = quantized(source);
+        assert_eq!(mismatched_codes(source, &block), 0, "unperturbed block agrees");
+
+        block[SCALE_BYTES] ^= 1 << (FIELD_BITS - 2);
+
+        assert_eq!(
+            mismatched_codes(source, &block),
+            1,
+            "flipping one exponent bit of element 0 must register as one mismatch"
+        );
+    }
 }
