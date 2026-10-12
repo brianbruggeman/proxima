@@ -7,7 +7,7 @@ Every validation command is literal, in the commands section below, one fenced b
 
 | # | slice | discharges | expected | done | note |
 |---|---|---|---|---|---|
-| 0 | prerequisites owned by sibling specs: the `build_forward` readout list (`decode-as-data` slice 3), the lossless harness (`speculative-draft-eagle3` slice 1) and the DFlash block decode (`speculative-draft-dflash` slice 7). This sub-spec consumes them and does not re-implement them | prerequisite, no AC (the three commands check sibling slices: the second is the ACL5 test set, which belongs to ACL5's own slice in the lossless harness spec) | three lines: `1`, `3`, `1` | [ ] | fails until those slices land |
+| 0 | prerequisites owned by sibling specs: the `build_forward` readout list (`decode-as-data` slice 3), the lossless harness (`speculative-draft-eagle3` slice 1) and the DFlash block decode (`speculative-draft-dflash` slice 7). This sub-spec consumes them and does not re-implement them | AC19 (the three commands check sibling slices: the readout tests, the ACL5 controls in the lossless harness, and the DFlash block decode) | three lines: `1`, `3`, `1` | [ ] | fails until those slices land |
 | 1 | classify DSpark versus DFlash from tensor presence (R1) | AC1 | 1 | [ ] | depends on the DFlash sub-spec's GGUF-side reads of the shared dflash keys existing first |
 | 2 | descriptor resolves the Markov and confidence tensors (R2) | AC2 | 3 | [ ] | |
 | 3 | descriptor reads `dflash.sample_from_anchor` and `dflash.has_confidence_head` (R3) | AC3 (R3, R3a) | 1 | [ ] | |
