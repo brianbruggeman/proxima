@@ -1403,6 +1403,7 @@ struct ArmResult {
     token_elapsed_ms: Vec<u64>,
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn sweep_ms_per_evaluation(arm: &ArmResult, draft_width: usize, full_steps: usize) -> Option<f64> {
     let supported = if draft_width == 0 {
         arm.verify_steps == 0 && arm.drafted_total == 0 && arm.accepted_total == 0
@@ -1414,6 +1415,7 @@ fn sweep_ms_per_evaluation(arm: &ArmResult, draft_width: usize, full_steps: usiz
         .flatten()
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn sweep_has_full_width_steps(arm: &ArmResult, draft_width: usize, full_steps: usize) -> bool {
     // a one-token suffix can verify at step zero; a longer suffix prefills.
     // forced widths never exceed the cap, so equality proves no batch shrank.
