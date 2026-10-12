@@ -1,0 +1,19 @@
+#include <metal_stdlib>
+using namespace metal;
+struct Uniforms { long total_elements; long splits; };
+kernel void omega_cached_attention_h8_g2_d64_s3c800000_ln9223372036854775808_up0_r8_n2_b64_rt(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const float* in2 [[buffer(2)]], device const float* in3 [[buffer(3)]], device const float* in4 [[buffer(4)]], device const float* in5 [[buffer(5)]], device const float* in6 [[buffer(6)]], device const float* in7 [[buffer(7)]], device const float* in8 [[buffer(8)]], device float* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
+    simdgroup_float8x8 left_wide; simdgroup_float8x8 right_wide;
+    simdgroup_load(left_wide, in0, 8); simdgroup_load(right_wide, in1, 8);
+    simdgroup_half8x8 left; simdgroup_half8x8 right;
+    left.thread_elements()[0] = half(left_wide.thread_elements()[0]); left.thread_elements()[1] = half(left_wide.thread_elements()[1]);
+    right.thread_elements()[0] = half(right_wide.thread_elements()[0]); right.thread_elements()[1] = half(right_wide.thread_elements()[1]);
+    simdgroup_float8x8 a0 = make_filled_simdgroup_matrix<float, 8, 8>(0); simdgroup_float8x8 a1 = a0; simdgroup_float8x8 a2 = a0; simdgroup_float8x8 a3 = a0; simdgroup_float8x8 a4 = a0; simdgroup_float8x8 a5 = a0; simdgroup_float8x8 a6 = a0; simdgroup_float8x8 a7 = a0; simdgroup_float8x8 a8 = a0; simdgroup_float8x8 a9 = a0; simdgroup_float8x8 a10 = a0; simdgroup_float8x8 a11 = a0; simdgroup_float8x8 a12 = a0; simdgroup_float8x8 a13 = a0; simdgroup_float8x8 a14 = a0; simdgroup_float8x8 a15 = a0;
+    #pragma clang loop unroll(disable)
+    for (int step = 0; step < 512; step++) {
+         simdgroup_multiply_accumulate(a0, left, right, a0); simdgroup_multiply_accumulate(a1, left, right, a1); simdgroup_multiply_accumulate(a2, left, right, a2); simdgroup_multiply_accumulate(a3, left, right, a3); simdgroup_multiply_accumulate(a4, left, right, a4); simdgroup_multiply_accumulate(a5, left, right, a5); simdgroup_multiply_accumulate(a6, left, right, a6); simdgroup_multiply_accumulate(a7, left, right, a7); simdgroup_multiply_accumulate(a8, left, right, a8); simdgroup_multiply_accumulate(a9, left, right, a9); simdgroup_multiply_accumulate(a10, left, right, a10); simdgroup_multiply_accumulate(a11, left, right, a11); simdgroup_multiply_accumulate(a12, left, right, a12); simdgroup_multiply_accumulate(a13, left, right, a13); simdgroup_multiply_accumulate(a14, left, right, a14); simdgroup_multiply_accumulate(a15, left, right, a15);
+    }
+    simdgroup_float8x8 stored;
+    stored.thread_elements()[0] = 0.0f  + float(a0.thread_elements()[0]) + float(a1.thread_elements()[0]) + float(a2.thread_elements()[0]) + float(a3.thread_elements()[0]) + float(a4.thread_elements()[0]) + float(a5.thread_elements()[0]) + float(a6.thread_elements()[0]) + float(a7.thread_elements()[0]) + float(a8.thread_elements()[0]) + float(a9.thread_elements()[0]) + float(a10.thread_elements()[0]) + float(a11.thread_elements()[0]) + float(a12.thread_elements()[0]) + float(a13.thread_elements()[0]) + float(a14.thread_elements()[0]) + float(a15.thread_elements()[0]);
+    stored.thread_elements()[1] = 0.0f  + float(a0.thread_elements()[1]) + float(a1.thread_elements()[1]) + float(a2.thread_elements()[1]) + float(a3.thread_elements()[1]) + float(a4.thread_elements()[1]) + float(a5.thread_elements()[1]) + float(a6.thread_elements()[1]) + float(a7.thread_elements()[1]) + float(a8.thread_elements()[1]) + float(a9.thread_elements()[1]) + float(a10.thread_elements()[1]) + float(a11.thread_elements()[1]) + float(a12.thread_elements()[1]) + float(a13.thread_elements()[1]) + float(a14.thread_elements()[1]) + float(a15.thread_elements()[1]);
+    simdgroup_store(stored, out + ((long)tgid * 2 + simdgroup_slot) * 64, 8);
+}

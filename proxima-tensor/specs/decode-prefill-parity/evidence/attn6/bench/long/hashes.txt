@@ -1,0 +1,8 @@
+long gemma4_e2b base   18 text_hash=8fec363180a250e0  prompt_tokens=prompt_token_count=970  distinct_token_id_lists=1
+long gemma4_e2b tip   18 text_hash=8fec363180a250e0  prompt_tokens=prompt_token_count=970  distinct_token_id_lists=1
+long gemma4_e2b control   18 text_hash=8fec363180a250e0  prompt_tokens=prompt_token_count=970  distinct_token_id_lists=1
+long gemma4_e2b half   18 text_hash=8fec363180a250e0  prompt_tokens=prompt_token_count=970  distinct_token_id_lists=1
+long granite_moe base   18 text_hash=c4625c1fb93f28b7  prompt_tokens=prompt_token_count=1000  distinct_token_id_lists=1
+long granite_moe tip   18 text_hash=c4625c1fb93f28b7  prompt_tokens=prompt_token_count=1000  distinct_token_id_lists=1
+long granite_moe control   18 text_hash=c4625c1fb93f28b7  prompt_tokens=prompt_token_count=1000  distinct_token_id_lists=1
+long granite_moe half   18 text_hash=c4625c1fb93f28b7  prompt_tokens=prompt_token_count=1000  distinct_token_id_lists=1

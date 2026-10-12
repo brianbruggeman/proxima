@@ -1,0 +1,49 @@
+how each arm file is built (one file per arm, named <base sha16>.<tag>.metal in the AB_VARIANT_DIR; the file is the define lines below followed by half_master*.metal)
+
+half_master.metal (granite), half_master_d256.metal, half_master_d512.metal = the base emitted source of that shape plus the edits in half_master_vs_base.*.diff
+(typedef/macro block before `struct Uniforms`, the kernel signature types for in2..in7, and the load / multiply-accumulate call sites).
+
+cell 2 arms (defines; unlisted defines are 0; .f16 = comma list of binding indices narrowed to half by the replay, CapturedDispatch::with_f16_buffers):
+  f32mma             (none)
+  qk_cvt             MMA_QK_HALF=1
+  pv_cvt             MMA_PV_HALF=1
+  both_cvt           MMA_QK_HALF=1 MMA_PV_HALF=1
+  qk_f16             MMA_QK_HALF=1 K_STORE_HALF=1                          .f16 = 2,3,4,5
+  pv_f16             MMA_PV_HALF=1 V_STORE_HALF=1                          .f16 = 6,7
+  both_f16           MMA_QK_HALF=1 MMA_PV_HALF=1 K_STORE_HALF=1 V_STORE_HALF=1   .f16 = 2,3,4,5,6,7
+  f16store_f32mma    K_STORE_HALF=1 V_STORE_HALF=1                         .f16 = 2,3,4,5,6,7
+  qk_off             QK_MMA_OFF=1     (each Q.K^T multiply-accumulate replaced by two adds of the operand elements into the accumulator elements; output is wrong by design)
+  pv_off             PV_MMA_OFF=1     (same for P.V)
+  both_off           QK_MMA_OFF=1 PV_MMA_OFF=1
+
+mechanism probes (probe/, define lists; outputs are wrong by design, only the time is read):
+  ctrl                      (none)
+  exp_off                   EXP_OFF=1 (the two exp() calls of the online softmax become the identity)
+  reduce_off                REDUCE_OFF=1 (simd_max and simd_sum become the identity)
+  softmax_off               EXP_OFF=1 REDUCE_OFF=1
+  barrier_off               BARRIER_OFF=1 (the three threadgroup barriers inside the key-block loop removed; the one before the loop stays)
+  mma_off                   QK_MMA_OFF=1 PV_MMA_OFF=1
+  softmax_mma_off           EXP_OFF=1 REDUCE_OFF=1 QK_MMA_OFF=1 PV_MMA_OFF=1
+  softmax_mma_barrier_off   the four above plus BARRIER_OFF=1
+
+mechanism probes (probe2/):
+  ctrl                      (none)
+  key_loads_off             KEY_LOAD_OFF=1 (load_key returns a filled fragment; no read of the K planes)
+  value_loads_off          VALUE_LOAD_OFF=1
+  query_loads_off          QUERY_LOAD_OFF=1 (staged and device query loads)
+  all_loads_off            KEY_LOAD_OFF=1 VALUE_LOAD_OFF=1 QUERY_LOAD_OFF=1
+  alloff                    EXP_OFF REDUCE_OFF BARRIER_OFF QK_MMA_OFF PV_MMA_OFF = 1
+  alloff_key_loads_off      alloff plus KEY_LOAD_OFF=1
+  alloff_all_loads_off      alloff plus the three load defines
+
+cell 1 arms: the emitter's own output for [attention_rows] min_simdgroups = 4 (msg4), keys_per_block = 64 (kpb64) and both, built with
+OMEGA_ATTENTION_ROWS_MIN_SIMDGROUPS / OMEGA_ATTENTION_ROWS_KEYS_PER_BLOCK at build time, entry name rewritten to the production entry name; cell1.*.diff are the differences from the production source
+(an empty diff = the setting renders the production kernel for that shape).
+
+emit_half arm (cell2emit/): the source the emitter renders with OMEGA_ATTENTION_ROWS_MMA_PRECISION=half (emitter_half_vs_emitter_float.granite.diff is its whole difference from the float rendering).
+
+standalone multiply-accumulate rate kernels (variants/mma_rate/, replacing the granite attention kernel body; same entry, same 1000 threadgroups x 64 threads; no memory traffic in the loop; the output is the sum of the accumulators):
+  mma_rate.*   8 independent accumulator chains x 1024 steps   (mma_f32: float operands, float accumulate; mma_h_f32: half operands, float accumulate; mma_h_h: half operands, half accumulate)
+  mma_rate2.*  c4 (4 chains x 2048), c16 (16 x 512), c32 (32 x 256); _f32 float/float, _hf half operands with float accumulate
+  mma_rate3.*  c32_f32, c32_hf, c32_hh (half operands and half accumulate)
+  every arm issues 2000 simdgroups x 8192 multiply-accumulates x 1024 FLOP = 16.777 GFLOP

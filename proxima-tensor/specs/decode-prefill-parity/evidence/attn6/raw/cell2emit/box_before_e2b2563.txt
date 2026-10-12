@@ -1,0 +1,11 @@
+"Device Utilization %"=97
+"Device Utilization %"=0
+"Device Utilization %"=0
+18:21  up 8 days,  4:25, 3 users, load averages: 3.75 4.91 4.81
+65631 /Users/brianbruggeman/.cargo/bin/sccache
+  PID COMM              %CPU
+70140 /System/Library/  78.3
+17029 /Users/brianbrug  75.8
+54533 /Applications/iT  16.8
+  888 /usr/libexec/sys   6.0
+54647 claude             3.9

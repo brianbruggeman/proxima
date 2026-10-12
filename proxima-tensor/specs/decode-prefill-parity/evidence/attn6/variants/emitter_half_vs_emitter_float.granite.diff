@@ -1,0 +1,23 @@
+852,855d851
+< inline simdgroup_half8x8 narrow_fragment(simdgroup_float8x8 wide) { simdgroup_half8x8 narrowed; narrowed.thread_elements()[0] = half(wide.thread_elements()[0]); narrowed.thread_elements()[1] = half(wide.thread_elements()[1]); return narrowed; }
+< inline void simdgroup_load(thread simdgroup_half8x8& destination, device const float* source, ulong stride, ulong2 origin, bool transposed) { simdgroup_float8x8 loaded; simdgroup_load(loaded, source, stride, origin, transposed); destination = narrow_fragment(loaded); }
+< inline void simdgroup_load(thread simdgroup_half8x8& destination, device const float* source, ulong stride) { simdgroup_float8x8 loaded; simdgroup_load(loaded, source, stride); destination = narrow_fragment(loaded); }
+< inline void simdgroup_load(thread simdgroup_half8x8& destination, threadgroup const float* source, ulong stride) { simdgroup_float8x8 loaded; simdgroup_load(loaded, source, stride); destination = narrow_fragment(loaded); }
+857d852
+< 
+949c944
+<                 simdgroup_half8x8 key_even_tile[key_tiles_per_group][depth_unroll]; simdgroup_half8x8 key_odd_tile[key_tiles_per_group][depth_unroll];
+---
+>                 simdgroup_float8x8 key_even_tile[key_tiles_per_group][depth_unroll]; simdgroup_float8x8 key_odd_tile[key_tiles_per_group][depth_unroll];
+963c958
+<                     simdgroup_half8x8 query_even[depth_unroll]; simdgroup_half8x8 query_odd[depth_unroll];
+---
+>                     simdgroup_float8x8 query_even[depth_unroll]; simdgroup_float8x8 query_odd[depth_unroll];
+1068c1063
+<                 simdgroup_half8x8 weights[tile_blocks];
+---
+>                 simdgroup_float8x8 weights[tile_blocks];
+1072c1067
+<                     simdgroup_half8x8 value;
+---
+>                     simdgroup_float8x8 value;

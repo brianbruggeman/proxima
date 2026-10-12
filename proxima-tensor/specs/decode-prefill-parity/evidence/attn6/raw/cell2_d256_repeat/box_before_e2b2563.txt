@@ -1,0 +1,10 @@
+"Device Utilization %"=97
+"Device Utilization %"=0
+"Device Utilization %"=0
+18:48  up 8 days,  4:52, 3 users, load averages: 4.33 4.12 5.10
+  PID COMM              %CPU
+70140 /System/Library/  58.9
+17029 /Users/brianbrug  58.6
+54533 /Applications/iT  40.6
+78004 /Users/brianbrug   6.7
+54647 claude             6.1
