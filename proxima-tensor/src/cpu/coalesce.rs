@@ -1,24 +1,7 @@
 use super::*;
 use crate::bind::{Layout, Lookup};
 use crate::sized::MAX_INLINE_RANK;
-use core::cell::Cell;
 use smallvec::SmallVec;
-
-std::thread_local! {
-    /// Per-thread switch for [`coalesce_dims`], defaulting to on. Thread-local
-    /// so a degenerate-control test or a paired bench can run the uncoalesced
-    /// arm without racing every other test sharing the process; the dispatch
-    /// that consults it (`run_reduce`, `run_elementwise_dispatch`) runs on
-    /// the calling thread.
-    static DIM_COALESCING_ENABLED: Cell<bool> = const { Cell::new(true) };
-}
-
-/// Bench/test-only escape valve for the switch above. Not part of the taught
-/// public surface: a caller composing tensor programs never needs it.
-#[doc(hidden)]
-pub fn set_dim_coalescing_enabled(enabled: bool) {
-    DIM_COALESCING_ENABLED.set(enabled);
-}
 
 /// One run of adjacent iteration axes that address memory as a single axis,
 /// plus the stride each layout (operands first, output layout last) sees on
@@ -64,7 +47,7 @@ enum AxisClass {
 /// the caller's `BoundOp` is untouched, so bind-level consumers and the
 /// post-fold epilogue keep their original axes.
 pub(super) fn coalesce_dims(resolved: &BoundOp) -> Option<BoundOp> {
-    if !DIM_COALESCING_ENABLED.get() || resolved.extents.len() < 2 {
+    if resolved.extents.len() < 2 {
         return None;
     }
     if resolved.extents.contains(&0) {

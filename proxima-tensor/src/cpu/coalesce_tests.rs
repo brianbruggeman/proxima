@@ -327,11 +327,19 @@ fn run_executor(case: &Case) -> Vec<f32> {
     output
 }
 
-fn with_coalescing<T>(enabled: bool, body: impl FnOnce() -> T) -> T {
-    set_dim_coalescing_enabled(enabled);
-    let result = body();
-    set_dim_coalescing_enabled(true);
-    result
+fn run_executor_uncoalesced(case: &Case) -> Vec<f32> {
+    let mut output = vec![0.0f32; case.output_len];
+    match &case.op.kind {
+        BoundOpKind::Elementwise { .. } => {
+            run_elementwise_dispatch_planned(&case.op, &case.buffers, None, &mut output)
+                .expect("generated elementwise op runs uncoalesced");
+        }
+        _ => {
+            run_reduce_planned(&case.op, &case.buffers, &mut output, None)
+                .expect("generated reduce op runs uncoalesced");
+        }
+    }
+    output
 }
 
 fn assert_same(actual: &[f32], expected: &[f32], integers: bool, label: &str) {
@@ -376,18 +384,18 @@ proptest! {
     }
 
     #[test]
-    fn with_coalescing_forced_off_elementwise_still_matches_the_scalar_reference(seed in any::<u64>()) {
+    fn uncoalesced_elementwise_still_matches_the_scalar_reference(seed in any::<u64>()) {
         let case = elementwise_case(seed, true);
         let expected = reference_elementwise(&case);
-        let actual = with_coalescing(false, || run_executor(&case));
+        let actual = run_executor_uncoalesced(&case);
         assert_same(&actual, &expected, true, "uncoalesced integer elementwise");
     }
 
     #[test]
-    fn with_coalescing_forced_off_reduce_still_matches_the_scalar_reference(seed in any::<u64>()) {
+    fn uncoalesced_reduce_still_matches_the_scalar_reference(seed in any::<u64>()) {
         let case = reduce_case(seed, true);
         let expected = reference_reduce(&case);
-        let actual = with_coalescing(false, || run_executor(&case));
+        let actual = run_executor_uncoalesced(&case);
         assert_same(&actual, &expected, true, "uncoalesced integer reduce");
     }
 
@@ -515,15 +523,6 @@ fn a_gathered_operand_is_never_coalesced() {
     assert!(coalesce_dims(&op).is_none());
 }
 
-#[test]
-fn coalescing_forced_off_returns_no_rewrite() {
-    let op = plain_elementwise(vec![4, 3, 2], &[&[6, 2, 1]]);
-
-    let merged = with_coalescing(false, || coalesce_dims(&op));
-
-    assert!(merged.is_none());
-}
-
 /// `[m, n, k]` matmul fold (`out[m, n] += a[m, k] * b[k, n]`), the iteration
 /// order `neon_tile_full_output`'s `matmul_program` binds.
 fn mnk_matmul_fold(m: u64, n: u64, k: u64) -> BoundOp {
@@ -600,6 +599,22 @@ fn a_trailing_unit_kept_axis_still_merges_into_the_row() {
     assert_eq!(merged.extents, vec![3, 4]);
 }
 
+#[test]
+fn a_unit_row_matmul_fold_runs_identically_coalesced_and_not() {
+    let mut lcg = Lcg(0x6d31_0001);
+    let case = Case {
+        op: mnk_matmul_fold(1, 24, 8),
+        buffers: vec![
+            Some(operand_values(&mut lcg, 8, true)),
+            Some(operand_values(&mut lcg, 8 * 24, true)),
+        ],
+        output_len: 24,
+    };
+    let expected = reference_reduce(&case);
+
+    assert_same(&run_executor(&case), &expected, true, "coalesced unit-row fold");
+    assert_same(&run_executor_uncoalesced(&case), &expected, true, "uncoalesced unit-row fold");
+}
 
 fn delta_net_state_fold() -> BoundOp {
     let state = layout(0, &[64, 16, 2, 1]);
@@ -697,7 +712,7 @@ fn the_delta_net_state_fold_runs_identically_coalesced_and_not() {
     let expected = reference_reduce(&case);
 
     let coalesced = run_executor(&case);
-    let uncoalesced = with_coalescing(false, || run_executor(&case));
+    let uncoalesced = run_executor_uncoalesced(&case);
 
     assert_same(&coalesced, &expected, true, "coalesced state fold");
     assert_same(&uncoalesced, &expected, true, "uncoalesced state fold");
@@ -708,7 +723,7 @@ proptest! {
     fn generic_body_reduce_matches_the_scalar_reference_bit_exact_on_integers(seed in any::<u64>()) {
         let case = reduce_case_with(seed, true, Some(true));
         let expected = reference_reduce(&case);
-        let uncoalesced = with_coalescing(false, || run_executor(&case));
+        let uncoalesced = run_executor_uncoalesced(&case);
         assert_same(&uncoalesced, &expected, true, "generic reduce without coalescing");
         assert_same(&run_executor(&case), &expected, true, "generic reduce with coalescing");
     }
@@ -717,7 +732,7 @@ proptest! {
     fn generic_body_reduce_matches_the_scalar_reference_within_tolerance_on_floats(seed in any::<u64>()) {
         let case = reduce_case_with(seed, false, Some(true));
         let expected = reference_reduce(&case);
-        let uncoalesced = with_coalescing(false, || run_executor(&case));
+        let uncoalesced = run_executor_uncoalesced(&case);
         assert_same(&uncoalesced, &expected, false, "generic reduce without coalescing");
         assert_same(&run_executor(&case), &expected, false, "generic reduce with coalescing");
     }
