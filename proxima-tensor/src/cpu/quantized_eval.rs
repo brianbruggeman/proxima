@@ -609,9 +609,6 @@ fn evaluate_quantized_with_policy(
     // in `resolved` reads it as a plain operand), so it needs this second,
     // direct pass over the request itself.
     for &output in &effective_outputs {
-        if expert_sources.is_some_and(|sources| sources.contains_key(&output)) {
-            continue;
-        }
         materialize_quantized_weight_output(
             output,
             &shapes,
