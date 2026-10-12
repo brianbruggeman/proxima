@@ -69,7 +69,7 @@ pub mod vocab;
 pub use draft::{NgramSimpleConfig, Verified, ngram_simple_draft, verify_greedy};
 pub use error::TokenizerError;
 pub use pipe::{decode, drain_lossy_utf8, encode, encode_with_bos_eos};
-pub use sample::{SamplingConfig, greedy_pick, sample_next_token};
+pub use sample::{SamplingConfig, greedy_pick, greedy_top_k_probability, sample_next_token};
 pub use vocab::{TokenType, Vocab};
 
 #[cfg(test)]
