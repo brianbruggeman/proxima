@@ -748,3 +748,7 @@ required-features = ["std", "metal"]
 [[example]]
 name = "llama_answer_oracle"
 required-features = ["std", "metal"]
+
+[[example]]
+name = "speculative_acceptance_corpus"
+required-features = ["std", "metal"]
