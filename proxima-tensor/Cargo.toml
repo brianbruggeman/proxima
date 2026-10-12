@@ -396,7 +396,7 @@ required-features = ["test-support", "q4k-int8-dot"]
 libc = { workspace = true, optional = true }
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61", default-features = false, features = ["Win32_Foundation", "Win32_System_Performance", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", default-features = false, features = ["Win32_Foundation", "Win32_System_Performance", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 [build-dependencies]
 proxima-build.workspace = true

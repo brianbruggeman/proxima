@@ -17,7 +17,7 @@ use proxima_tensor::cpu::{
 use proxima_tensor::dtype::DType;
 use proxima_tensor::map::{self, AxisIndex, AxisTerm, IndexMap, IndexPattern};
 use proxima_tensor::op::{self, Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
-use proxima_tensor::test_support::Lcg;
+use proxima_tensor::test_support::{Lcg, process_usage};
 
 #[cfg(feature = "instrument")]
 #[global_allocator]
@@ -822,18 +822,7 @@ pub fn run_optimizer(
 }
 
 pub fn peak_rss_bytes() -> Result<u64, io::Error> {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
-    // getrusage initializes the complete output struct on success.
-    let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    if result != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let usage = unsafe { usage.assume_init() };
-    #[cfg(target_os = "macos")]
-    let bytes = usage.ru_maxrss as u64;
-    #[cfg(not(target_os = "macos"))]
-    let bytes = (usage.ru_maxrss as u64).saturating_mul(1024);
-    Ok(bytes)
+    process_usage::peak_rss_bytes()
 }
 
 pub fn run_arm(
