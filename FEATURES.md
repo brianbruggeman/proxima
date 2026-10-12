@@ -152,8 +152,8 @@ Pluggable cross-thread CPU-bound work backend.
 | Generic TCP stream | `listeners::tokio_stream` | `tcp` |
 | Generic Unix domain socket | `listeners::tokio_stream` | `unix` |
 | Generic UDP packet | `listeners::tokio_packet` | `udp` |
-| AF_XDP / XDP (skeleton) | `listeners::xdp_packet` | `xdp` |
-| DPDK (skeleton) | `listeners::dpdk_packet`, `listeners::dpdk_stream` | `dpdk` |
+| AF_XDP / XDP packet + stream (IPv4; IPv6 send returns Unsupported) | `proxima_net::xdp::{XdpPacketListener, XdpStreamListener}` | `xdp` |
+| DPDK packet + stream (IPv4; IPv6 send returns Unsupported) | `proxima_net::dpdk::{DpdkPacketListener, DpdkStreamListener}` | `dpdk` |
 
 ### HTTP listener (`listeners::http`)
 - Own connection state machine (`h1_connection.rs`) using `httparse` for head, custom body decoder for chunked + Content-Length, response writer for chunked + CL framing
@@ -449,6 +449,13 @@ Multiple sources, autodetect:
 - Tier-1 (no_std + alloc) floor: everything but `JsonCodec` and the registry,
   proven on `thumbv7m-none-eabi` by `scripts/thumbv7m-cliff-gate.sh`
 
+### Omega runtime config (`omega::config::RuntimeConfig`)
+- `RuntimeConfig` derives `conflaguration::Settings`; `from_file`, `from_env` and `builder()` layer in call order, unknown fields and invalid values are errors — [shipped; 29 `runtime_config_` lib tests]
+- `plan_named_with_config` returns a reusable `Plan` plus candidate records; `selection.mode` is `configured` or `minimum_measured_wall_time` with raw synchronized samples — [shipped; 12 `config_plan_` and 5 `config_selection_` lib tests, 1 doctest]
+- `[constraints]` byte ceilings (`max_host_tensor_bytes`, `max_device_buffer_bytes`, `max_single_device_buffer_bytes`) enforced by the CPU and Metal payload owners — [shipped; 5 `config_cpu_budget_` and 4 `config_metal_` lib tests]; wgpu and CUDA accounting have no dedicated count here
+- `ServingConfig::omega_runtime` routes `proxima-model-interop` serving plans through `plan_named_with_config` (configured selection only, placements rejected, config in the prompt-cache key) — [shipped; 3 `configured_runtime_` lib tests under `std,metal`]
+- `[experimental] dense_float_storage` BF16/F16 tile input decoding (feature `metal-tiled-gemm`) — [experimental, off by default; `programmable_vector_metal_bf16` fails with the switch on]
+
 ---
 
 ## Control plane
@@ -645,8 +652,8 @@ Telemetry core primitives (`ring`, `id`, `level`, `tag`, `trace`, `metric`, `log
 | `io-uring` | Linux-only: tokio_uring listener + HTTPS upstream over uring + webpki-roots |
 | `websocket` | WebSocket listener (`async-tungstenite`) |
 | `quic` | QUIC listener (`quinn` + `rustls`); native sans-IO QUIC is `quic-native` (part of default `http3`) |
-| `xdp` | AF_XDP packet listener (skeleton — returns Unsupported today) |
-| `dpdk` | DPDK packet/stream listener (skeleton — Stage 11) |
+| `xdp` | AF_XDP packet + stream listeners over the sans-IO `TcpStack`; loads its own redirect BPF program, XSK fd on the Prime reactor. IPv4 only; no recorded bench (needs a bound NIC) |
+| `dpdk` | DPDK packet + stream listeners over the sans-IO `TcpStack`; EAL init, mempool, 32-frame RX bursts, inline ARP/ICMP. IPv4 only; no recorded bench (needs a bound NIC) |
 | `rayon` | `RayonBackgroundPool` for cross-thread CPU work |
 | `histogram` | HDR-histogram instrument (`Histogram<f64>`); default on (dep weight justified by the instrument shape) |
 | `otlp-http` | `OtlpHttpPipe` OTLP/HTTP protobuf exporter (pulls `prost`) |
