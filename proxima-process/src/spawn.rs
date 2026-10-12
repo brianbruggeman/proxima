@@ -334,8 +334,8 @@ pub fn spawn(command: &CommandDescriptor, options: SpawnOptions) -> Result<Child
 /// they must use [`spawn`] through a single-threaded boundary.
 #[cfg(target_os = "linux")]
 pub fn spawn_external(command: &CommandDescriptor, options: SpawnOptions) -> Result<Child, ProximaError> {
-    if options.dispatch_fd.is_some() || options.controlling_tty || options.umask.is_some() {
-        return Err(ProximaError::Body("posix_spawn external route does not support dispatch fd, controlling tty, or umask".to_owned()));
+    if options.dispatch_fd.is_some() || options.controlling_tty || options.process_group || options.umask.is_some() {
+        return Err(ProximaError::Body("posix_spawn external route does not support dispatch fd, controlling tty, process group, or umask".to_owned()));
     }
     spawn_posix(command)
 }
@@ -396,7 +396,7 @@ fn spawn_posix(command: &CommandDescriptor) -> Result<Child, ProximaError> {
         return Err(posix_spawn_error("file-actions destroy", destroyed));
     }
 
-    Ok(parent_after_fork(pid, piped_pairs))
+    Ok(parent_after_fork(pid, piped_pairs, false))
 }
 
 #[cfg(target_os = "linux")]
@@ -810,6 +810,20 @@ mod tests {
         for worker in workers {
             worker.join().expect("concurrent child worker");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn posix_spawn_refuses_a_requested_process_group() {
+        let command = CommandDescriptor::new(cstr("/bin/echo"));
+        let options = SpawnOptions {
+            process_group: true,
+            ..SpawnOptions::default()
+        };
+
+        let refused = spawn_external(&command, options);
+
+        assert!(refused.is_err());
     }
 
     #[test]
