@@ -4332,9 +4332,7 @@ pub enum DenseBatchedGemmRejection {
 /// already zero for a broadcast operand) directly, so no axis-count limit
 /// or contiguity requirement applies to this group at all.
 pub(super) struct DenseBatchedGemmBlock {
-    #[cfg(feature = "metal-tiled-gemm")]
     pub(super) weight: usize,
-    #[cfg(feature = "metal-tiled-gemm")]
     pub(super) other: usize,
     #[cfg(feature = "metal-tiled-gemm")]
     pub(super) weight_codec: Option<Codec>,
