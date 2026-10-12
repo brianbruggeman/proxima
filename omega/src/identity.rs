@@ -240,18 +240,15 @@ pub(crate) struct MetalOnlyExtras {
     /// folds no new token and every emitted byte stays identical to before
     /// this field existed.
     pub reduction_literal: Option<u64>,
-    /// `PROXIMA_TILED_GEMM_DENSE`'s `(feature_axis, token_axis,
-    /// batch_axes)` -- the three literals
-    /// [`crate::msl::push_dense_batched_gemm_body`] bakes into its source
-    /// text (mirrors [`Self::packed_row_block_direct_axis`]'s own doc: two
-    /// bindings sharing every other axis here but disagreeing on which axis
-    /// plays which role render different addressing source and must never
-    /// share a cache entry). `None` for every op
+    /// dense tiled source roles: feature axis, token axis, batch axes, weight
+    /// operand index and activation operand index. The renderer bakes all five
+    /// into addressing source, so operand-order changes must not share a cache
+    /// entry even when codecs and axes are otherwise equal. `None` for every op
     /// [`crate::msl::dense_batched_gemm_block`] does not admit. Default ON
     /// (unset admits; only explicit `"0"` disables), so the UNSET-env default
     /// now folds this token; the explicit-`"0"` default is what stays
     /// byte-identical to before this field existed.
-    pub dense_batched_gemm_axes: Option<(u16, u16, Vec<u16>)>,
+    pub dense_batched_gemm_axes: Option<(u16, u16, Vec<u16>, usize, usize)>,
     /// `PROXIMA_TILED_GEMM_WIDE_ACT_LOAD`: `true` when
     /// [`crate::msl::push_tiled_gemm_body`] renders the vectorized
     /// `float4` activation-tile load for this op. Default ON (unset renders
@@ -911,7 +908,9 @@ mod gated {
             identity.push_str("_rl");
             identity.push_str(&literal.to_string());
         }
-        if let Some((feature_axis, token_axis, batch_axes)) = metal.dense_batched_gemm_axes {
+        if let Some((feature_axis, token_axis, batch_axes, weight_operand, other_operand)) =
+            metal.dense_batched_gemm_axes
+        {
             identity.push_str("_dbg");
             identity.push_str(&feature_axis.to_string());
             identity.push('_');
@@ -920,6 +919,10 @@ mod gated {
                 identity.push('_');
                 identity.push_str(&axis.to_string());
             }
+            identity.push_str("_w");
+            identity.push_str(&weight_operand.to_string());
+            identity.push_str("_o");
+            identity.push_str(&other_operand.to_string());
         }
         if metal.tiled_gemm_wide_act_load {
             identity.push_str("_wal");

@@ -1696,6 +1696,8 @@ pub(super) fn metal_specialization(
                         *block.feature_axes.last().unwrap_or(&0),
                         *block.token_axes.last().unwrap_or(&0),
                         block.batch_axes,
+                        block.weight,
+                        block.other,
                     )
                 }),
             _ => None,
@@ -4442,54 +4444,25 @@ pub(super) fn classify_dense_batched_gemm(
         if !epilogue_broadcast_axes.is_empty() {
             return Err(DenseBatchedGemmRejection::BroadcastEpilogueNotSupported);
         }
-        let weight = 0usize;
-        let other = 1usize;
-        let weight_layout = &resolved.operands()[weight].1;
-        let other_layout = &resolved.operands()[other].1;
-        // Every axis EXCLUSIVELY owned by one operand is a CANDIDATE row
-        // (weight-owned) or column (other-owned) axis; anything neither
-        // owns exclusively (both real strides -- a genuine no-broadcast
-        // batch -- or both zero, a degenerate axis) is collected separately.
-        // Unlike `classify_tiled_gemm`'s packed-weight counterpart, this
-        // does NOT fold every exclusively-owned axis into one flat
-        // multi-axis group: this repo's own root cause is that
-        // the sliding-pattern family's GQA head axis (`heads`) shares ownership with the real
-        // token axis (`query`, both other-owned -- K/V broadcast over both)
-        // but is NOT contiguous with it in the op's own output layout (`kv`
-        // sits between them in memory). Folding both into one `token_axes`
-        // group and requiring `axes_fold_contiguously` against `out_layout`
-        // reproduces that exact rejection. Instead: route every candidate
-        // BEYOND the first (in `output_axes` order) into `batch_axes`,
-        // where `push_dense_batched_gemm_body` addresses it independently
-        // via the z-grid rather than a flat stride.
-        //
-        // A degenerate (extent-1) axis is NOT special-cased into
-        // `batch_axes` before the ownership match -- an earlier version of
-        // this function did exactly that, and the real 510-token prefill's
-        // own admission census caught the defect: at a decode-shaped call
-        // (`query` extent `1`), that shortcut reclassified the REAL token
-        // axis (`query`) as a batch axis purely because its extent happened
-        // to be `1`, letting `heads` (extent `8`, unaffected) become the
-        // sole `owned_by_other` candidate and therefore the token axis --
-        // `token_extent` then read `heads`'s extent instead of `query`'s,
-        // sailing straight past `TILED_GEMM_MIN_TOKENS` and admitting a
-        // single-new-token decode matmul to the tiled path. Ownership is
-        // now decided FIRST, unconditionally; extent only ever matters for
-        // the genuinely-ambiguous `(true, true)` (both broadcast) case
-        // below, where degenerate-only axes are still safe to fold into
-        // `batch_axes` (contributing a factor of `1`, offset always `0`)
-        // and a non-degenerate one is a real defect (output varies, neither
-        // operand does) this op's own element body cannot produce.
-        let mut owned_by_weight: Vec<u16> = Vec::new();
-        let mut owned_by_other: Vec<u16> = Vec::new();
+        let mut exclusive_axes: Vec<(u16, usize)> = Vec::new();
         let mut batch_axes: Vec<u16> = Vec::new();
+        let operands = resolved.operands();
+        // Matrix roles follow output ownership, not expression operand order:
+        // the final exclusively-owned result axis is the feature axis (its
+        // owner is the weight operand) and the first exclusively-owned axis
+        // from the other operand is tokens. Taking the first token candidate
+        // in declaration order is a fixed per-node choice, so a decode-shaped
+        // call (`query` extent 1) never flips `heads` into the token role.
+        // Ownership is decided before extent: a degenerate axis only joins
+        // the batch grid when neither operand strides it. Shared axes and
+        // additional exclusive axes are addressed independently by that grid.
         for &axis in output_axes {
             match (
-                weight_layout.stride(axis) == 0,
-                other_layout.stride(axis) == 0,
+                operands[0].1.stride(axis) == 0,
+                operands[1].1.stride(axis) == 0,
             ) {
-                (false, true) => owned_by_weight.push(axis),
-                (true, false) => owned_by_other.push(axis),
+                (false, true) => exclusive_axes.push((axis, 0)),
+                (true, false) => exclusive_axes.push((axis, 1)),
                 (false, false) => batch_axes.push(axis),
                 (true, true) => {
                     if resolved.extents[axis as usize] != 1 {
@@ -4499,47 +4472,22 @@ pub(super) fn classify_dense_batched_gemm(
                 }
             }
         }
-        if owned_by_weight.is_empty() || owned_by_other.is_empty() {
+        let Some(&(feature_axis, weight)) = exclusive_axes.last() else {
             return Err(DenseBatchedGemmRejection::AxisOwnershipAmbiguous);
-        }
-        // NOT a largest-extent tie-break: `owned_by_weight`/`owned_by_other`
-        // are already in `output_axes` ITERATION order (the loop above
-        // pushes each axis as it walks `output_axes`), so `[0]` is the
-        // structurally-first candidate -- fixed for a given node's shape,
-        // independent of the CONCRETE extents any one call binds. This
-        // landing's own admission census on the real 510-token prefill
-        // caught a real defect in an earlier extent-based tie-break: the
-        // SAME node (id 1084) classified `heads`(extent 8) as the token
-        // axis at a decode-shaped call (`query` extent 1, losing the
-        // extent comparison to `heads`) and `query` as the token axis at a
-        // prefill-shaped call (`query` extent 19+, winning it) -- two
-        // different structural treatments of the identical logical
-        // operation, and worse, the decode-shaped call's `token_extent`
-        // became `heads`'s extent (8), exactly meeting `TILED_GEMM_MIN_
-        // TOKENS` and admitting a single-new-token decode matmul to the
-        // tiled path -- the precise shape `attn_multi_axis_tiled_gemm_
-        // parity.rs`'s own `metal_decode_shaped_attention_matmul_stays_on_
-        // the_row_blocked_vector_path` test asserts must NEVER tile. Taking
-        // the first candidate in declaration order instead is a fixed
-        // per-node choice: `query` is declared before `heads` in every
-        // real sliding-pattern attention product (a real captured attention
-        // dump), so this both fixes the flip-flop and keeps the decode
-        // gate's own `token_extent < TILED_GEMM_MIN_TOKENS` check honest
-        // (a real `query` extent of `1` correctly declines, every call).
-        let feature_axis = owned_by_weight[0];
-        let token_axis = owned_by_other[0];
+        };
+        let other = 1 - weight;
+        let Some(&(token_axis, _)) = exclusive_axes.iter().find(|(_, owner)| *owner == other)
+        else {
+            return Err(DenseBatchedGemmRejection::AxisOwnershipAmbiguous);
+        };
         batch_axes.extend(
-            owned_by_weight
+            exclusive_axes
                 .iter()
-                .copied()
-                .filter(|&axis| axis != feature_axis),
+                .map(|(axis, _)| *axis)
+                .filter(|&axis| axis != feature_axis && axis != token_axis),
         );
-        batch_axes.extend(
-            owned_by_other
-                .iter()
-                .copied()
-                .filter(|&axis| axis != token_axis),
-        );
+        let weight_layout = &operands[weight].1;
+        let other_layout = &operands[other].1;
         batch_axes.sort_unstable();
         let feature_axes = alloc::vec![feature_axis];
         let token_axes = alloc::vec![token_axis];
