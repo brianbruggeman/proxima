@@ -429,6 +429,11 @@ fn main() {
             |value| parse_drafter_flag(value),
         );
     let drafter_value_index = drafter_flag_index.map(|flag_index| flag_index + 1);
+    let draft_model_flag_index = raw_args.iter().position(|arg| arg == "--draft-model");
+    let draft_model_path = draft_model_flag_index
+        .and_then(|flag_index| raw_args.get(flag_index + 1))
+        .cloned();
+    let draft_model_value_index = draft_model_flag_index.map(|flag_index| flag_index + 1);
     let telemetry_file_flag_index = raw_args.iter().position(|arg| arg == "--telemetry-file");
     let telemetry_file_flag = telemetry_file_flag_index
         .and_then(|flag_index| raw_args.get(flag_index + 1))
@@ -443,6 +448,8 @@ fn main() {
                 && Some(*index) != gpu_layers_value_index
                 && Some(*index) != drafter_flag_index
                 && Some(*index) != drafter_value_index
+                && Some(*index) != draft_model_flag_index
+                && Some(*index) != draft_model_value_index
                 && Some(*index) != telemetry_file_flag_index
                 && Some(*index) != telemetry_file_value_index
         })
@@ -530,6 +537,7 @@ fn main() {
 
     let speculative_on = SpeculativeConfig {
         speculative_types: drafter_types,
+        draft_model_path: draft_model_path.as_deref(),
         ..SpeculativeConfig::none()
     };
 
