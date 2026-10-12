@@ -154,6 +154,12 @@ impl Codec {
             Codec::Q8_1 => Some(BlockLayout::Q8_1),
             Codec::Q1_0 => Some(BlockLayout::Q1_0),
             Codec::Q2_0 => Some(BlockLayout::Q2_0),
+            Codec::Q2K => Some(BlockLayout::Q2_K),
+            Codec::Q3K => Some(BlockLayout::Q3_K),
+            Codec::Q4K => Some(BlockLayout::Q4_K),
+            Codec::Q5K => Some(BlockLayout::Q5_K),
+            Codec::Q6K => Some(BlockLayout::Q6_K),
+            Codec::Q8K => Some(BlockLayout::Q8_K),
             _ => None,
         }
     }

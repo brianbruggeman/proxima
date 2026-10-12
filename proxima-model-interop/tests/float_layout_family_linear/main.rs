@@ -7,97 +7,16 @@
 //! the llama-ids agreement of a model whose linear weights were re-encoded into the family.
 
 mod agreement;
+mod fixtures;
 #[path = "../float_layout_parity/gpu.rs"]
 mod gpu;
+mod linear_targets;
 mod reencode;
 
-use std::path::PathBuf;
-
-use omega::msl::layout_render::block_unpack_msl;
-use proxima_gguf::quant::block_layout;
 use proxima_primitives::Codec;
-use proxima_primitives::block_layout::BlockLayout;
 use proxima_primitives::float_layout::FloatLayout;
 
-use gpu::{Gpu, read_words};
-
-const FIXTURE_ELEMENTS: usize = 4096;
-
-struct Recorded {
-    blocks: Vec<u8>,
-    decoded: Vec<f32>,
-}
-
-fn fixture_directory(codec: Codec) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../proxima-tensor/specs/float-layout-dtype/fixtures")
-        .join(format!("{codec:?}"))
-}
-
-fn recorded(codec: Codec) -> Recorded {
-    let directory = fixture_directory(codec);
-    let blocks = std::fs::read(directory.join("blocks.bin"))
-        .unwrap_or_else(|error| panic!("fixture blocks for {codec:?}: {error}"));
-    let decoded = std::fs::read(directory.join("decoded_f32.bin"))
-        .unwrap_or_else(|error| panic!("fixture decode for {codec:?}: {error}"))
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|bytes| f32::from_le_bytes(*bytes))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        decoded.len(),
-        FIXTURE_ELEMENTS,
-        "{codec:?} fixture element count"
-    );
-    Recorded { blocks, decoded }
-}
-
-fn layout_of(codec: Codec) -> BlockLayout {
-    codec
-        .block_layout()
-        .unwrap_or_else(|| panic!("{codec:?} is in the linear family"))
-}
-
-fn mismatches(expected: &[f32], observed: &[f32]) -> usize {
-    assert_eq!(
-        expected.len(),
-        observed.len(),
-        "compared sequences differ in length"
-    );
-    expected
-        .iter()
-        .zip(observed)
-        .filter(|(want, got)| want.to_bits() != got.to_bits())
-        .count()
-}
-
-fn cpu_decode(layout: &BlockLayout, blocks: &[u8]) -> Vec<f32> {
-    let mut output = vec![0.0f32; FIXTURE_ELEMENTS];
-    block_layout::dequantize(layout, blocks, &mut output).expect("whole blocks decode");
-    output
-}
-
-fn metal_decode(layout: &BlockLayout, blocks: &[u8]) -> Vec<f32> {
-    let (elements, block_bytes) = (layout.elements, layout.block_bytes);
-    let source = format!(
-        "#include <metal_stdlib>\nusing namespace metal;\n{}
-kernel void probe(device const uchar *blocks [[buffer(0)]], device float *out [[buffer(1)]], uint gid [[thread_position_in_grid]]) {{
-    device const uchar *block = blocks + (gid / {elements}u) * {block_bytes}u;
-    out[gid] = probe_block(block, gid % {elements}u);
-}}
-",
-        block_unpack_msl(layout, "probe_block")
-    );
-    let bytes = Gpu::open().run(
-        &source,
-        "probe",
-        &[blocks],
-        FIXTURE_ELEMENTS * 4,
-        FIXTURE_ELEMENTS,
-    );
-    read_words(&bytes).into_iter().map(f32::from_bits).collect()
-}
+use fixtures::{FIXTURE_ELEMENTS, cpu_decode, layout_of, metal_decode, mismatches, recorded};
 
 #[proxima::test]
 #[case::q8_0(Codec::Q8_0)]
@@ -146,14 +65,22 @@ fn float_layout_family_linear_control_wrong_scale_layout_differs() {
 
 #[test]
 fn float_layout_family_linear_llama_agreement_granite() {
-    let rate = agreement::run("PROXIMA_ARCH_GRANITE_MOE_GGUF", "granite_moe");
+    let rate = agreement::run(
+        "PROXIMA_ARCH_GRANITE_MOE_GGUF",
+        "granite_moe",
+        linear_targets::linear_target,
+    );
 
     assert!(rate >= 0.95, "agreement rate {rate:.4} is below 0.95");
 }
 
 #[test]
 fn float_layout_family_linear_llama_agreement_gemma4_e2b() {
-    let rate = agreement::run("PROXIMA_ARCH_GEMMA4_E2B_GGUF", "gemma4_e2b");
+    let rate = agreement::run(
+        "PROXIMA_ARCH_GEMMA4_E2B_GGUF",
+        "gemma4_e2b",
+        linear_targets::linear_target,
+    );
 
     assert!(rate >= 0.95, "agreement rate {rate:.4} is below 0.95");
 }
@@ -191,7 +118,7 @@ fn fit_encoder_round_trips_within_half_a_step() {
             .chunks_exact(usize::from(layout.elements))
             .zip(blocks.chunks_exact_mut(usize::from(layout.block_bytes)))
         {
-            reencode::encode_block(&layout, chunk, None, block);
+            linear_targets::encode_block(&layout, chunk, None, block);
         }
 
         let decoded = cpu_decode(&layout, &blocks);

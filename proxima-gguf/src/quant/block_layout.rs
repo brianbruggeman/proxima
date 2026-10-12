@@ -1,46 +1,69 @@
 //! The one CPU block walker: decodes any [`BlockLayout`] by reading its planes, assembling each
-//! element code, and applying `(multiplier * code - bias) * scale + min`.
+//! element code, and applying
+//! `(multiplier * code - bias) * scale * sub_scale + min_multiplier * (min * sub_min)`.
 //!
 //! Teaching pointer: `proxima_primitives::block_layout::BlockLayout` is the data, the integer
-//! path of [`super::float_layout`] turns a code into its number, and the f16 scale and min decode
-//! through the same codec. The per-codec decoders (`q4_0.rs`, `q5_1.rs`, ...) are the incumbents
-//! this walker is checked against bit for bit.
+//! path of [`super::float_layout`] turns a code into its number, and the scales and mins decode
+//! through the same codec. The per-codec decoders (`q4_0.rs`, `q5_1.rs`, `q4_k.rs`, ...) are the
+//! incumbents this walker is checked against bit for bit.
+//!
+//! Cost: per block the scale, min and every sub-block scale and min are decoded once; per element
+//! the planes advance as odometers (one stride added, no division), so the walk is linear with a
+//! small constant.
 
-use proxima_primitives::block_layout::{BlockLayout, Plane, PlaneOrder};
+use proxima_primitives::block_layout::{BlockLayout, Coded, Field, Plane};
 
 use crate::quant::QuantError;
 use crate::quant::float_layout::decode;
 
 const CODEC: &str = "block_layout";
+const MAX_SUB_BLOCKS: usize = 32;
 
-fn plane_bits(plane: &Plane, index: usize, elements: usize, block: &[u8]) -> u32 {
-    let offset = usize::from(plane.byte_offset);
+fn bits_at(plane: &Plane, address: usize, block: &[u8]) -> u32 {
     let mask = (1u32 << plane.bits) - 1;
-    match plane.order {
-        PlaneOrder::Contiguous => {
-            let bit = index * usize::from(plane.bits);
-            u32::from(block[offset + bit / 8] >> (bit % 8)) & mask
-        }
-        PlaneOrder::NibbleSplit => {
-            let half = elements / 2;
-            let shift = if index >= half { 4 } else { 0 };
-            u32::from(block[offset + index % half] >> shift) & mask
+    u32::from(block[address / 8] >> (address % 8)) & mask
+}
+
+fn code_value(coded: &Coded, index: usize, block: &[u8]) -> f32 {
+    let low = bits_at(&coded.low, coded.low.address(index), block);
+    let raw = coded.high.map_or(low, |high| {
+        low | (bits_at(&high, high.address(index), block) << coded.low.bits)
+    });
+    decode(raw, coded.code)
+}
+
+fn field_value(field: &Field, block: &[u8]) -> f32 {
+    let offset = usize::from(field.byte_offset);
+    let bytes = usize::from(field.layout.width()) / 8;
+    let code = (0..bytes).fold(0u32, |code, byte| {
+        code | (u32::from(block[offset + byte]) << (8 * byte))
+    });
+    decode(code, field.layout)
+}
+
+fn sub_value(coded: &Coded, sub_block: usize, block: &[u8]) -> f32 {
+    code_value(coded, sub_block, block) - f32::from(coded.bias)
+}
+
+struct SubTerms {
+    scales: [f32; MAX_SUB_BLOCKS],
+    mins: [f32; MAX_SUB_BLOCKS],
+}
+
+fn sub_terms(layout: &BlockLayout, scale: f32, min: Option<f32>, block: &[u8]) -> SubTerms {
+    let mut terms = SubTerms {
+        scales: [scale; MAX_SUB_BLOCKS],
+        mins: [min.unwrap_or(0.0); MAX_SUB_BLOCKS],
+    };
+    if let Some(sub) = &layout.sub {
+        for sub_block in 0..usize::from(sub.count).min(MAX_SUB_BLOCKS) {
+            terms.scales[sub_block] = scale * sub_value(&sub.scale, sub_block, block);
+            if let (Some(offset), Some(coded)) = (min, &sub.min) {
+                terms.mins[sub_block] = offset * sub_value(coded, sub_block, block);
+            }
         }
     }
-}
-
-fn code_at(layout: &BlockLayout, index: usize, block: &[u8]) -> u32 {
-    let elements = usize::from(layout.elements);
-    let low = plane_bits(&layout.low, index, elements, block);
-    layout.high.map_or(low, |high| {
-        low | (plane_bits(&high, index, elements, block) << layout.low.bits)
-    })
-}
-
-fn field_value(field: &proxima_primitives::block_layout::Field, block: &[u8]) -> f32 {
-    let offset = usize::from(field.byte_offset);
-    let code = u32::from(block[offset]) | (u32::from(block[offset + 1]) << 8);
-    decode(code, field.layout)
+    terms
 }
 
 /// Decodes one block. `block` must be `layout.block_bytes` bytes and `output` `layout.elements`
@@ -48,10 +71,29 @@ fn field_value(field: &proxima_primitives::block_layout::Field, block: &[u8]) ->
 pub fn dequantize_block(layout: &BlockLayout, block: &[u8], output: &mut [f32]) {
     let scale = field_value(&layout.scale, block);
     let min = layout.min.map(|field| field_value(&field, block));
+    let terms = sub_terms(layout, scale, min, block);
+    let span = layout.sub.map_or(usize::from(layout.elements), |sub| {
+        usize::from(layout.elements / sub.count)
+    });
+    let element = &layout.element;
+    let mut low = element.low.cursor();
+    let mut high = element.high.map(|plane| (plane, plane.cursor()));
+    let (multiplier, bias) = (f32::from(layout.multiplier), f32::from(element.bias));
+    let min_multiplier = f32::from(layout.min_multiplier);
     for (index, out) in output.iter_mut().enumerate() {
-        let level = decode(code_at(layout, index, block), layout.code);
-        let value = (level * f32::from(layout.multiplier) - f32::from(layout.bias)) * scale;
-        *out = min.map_or(value, |offset| value + offset);
+        let mut raw = bits_at(&element.low, low.address(), block);
+        low.advance();
+        if let Some((plane, cursor)) = high.as_mut() {
+            raw |= bits_at(plane, cursor.address(), block) << element.low.bits;
+            cursor.advance();
+        }
+        let sub_block = index / span;
+        let value = (decode(raw, element.code) * multiplier - bias) * terms.scales[sub_block];
+        *out = if min.is_some() {
+            value + min_multiplier * terms.mins[sub_block]
+        } else {
+            value
+        };
     }
 }
 
@@ -60,11 +102,7 @@ pub fn dequantize_block(layout: &BlockLayout, block: &[u8], output: &mut [f32]) 
 /// # Errors
 /// [`QuantError::InputNotBlockMultiple`] if `data` is not a whole number of blocks;
 /// [`QuantError::OutputSizeMismatch`] if `output` is not exactly the decoded element count.
-pub fn dequantize(
-    layout: &BlockLayout,
-    data: &[u8],
-    output: &mut [f32],
-) -> Result<(), QuantError> {
+pub fn dequantize(layout: &BlockLayout, data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
     let block_bytes = usize::from(layout.block_bytes);
     if block_bytes == 0 || !data.len().is_multiple_of(block_bytes) {
         return Err(QuantError::InputNotBlockMultiple {
@@ -81,7 +119,10 @@ pub fn dequantize(
             expected,
         });
     }
-    for (block, out) in data.chunks_exact(block_bytes).zip(output.chunks_exact_mut(elements)) {
+    for (block, out) in data
+        .chunks_exact(block_bytes)
+        .zip(output.chunks_exact_mut(elements))
+    {
         dequantize_block(layout, block, out);
     }
     Ok(())

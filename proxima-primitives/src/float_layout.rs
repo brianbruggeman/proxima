@@ -80,8 +80,10 @@ impl FloatLayout {
     pub const UINT32: Self = Self::integer(32, SignEncoding::Absent);
     pub const UINT1: Self = Self::integer(1, SignEncoding::Absent);
     pub const UINT2: Self = Self::integer(2, SignEncoding::Absent);
+    pub const UINT3: Self = Self::integer(3, SignEncoding::Absent);
     pub const UINT4: Self = Self::integer(4, SignEncoding::Absent);
     pub const UINT5: Self = Self::integer(5, SignEncoding::Absent);
+    pub const UINT6: Self = Self::integer(6, SignEncoding::Absent);
     /// Sign-magnitude eight bits: range -127..=127 with a negative zero.
     pub const SIGN_MAGNITUDE_INT8: Self = Self::integer(8, SignEncoding::Magnitude);
 
