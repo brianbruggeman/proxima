@@ -18,7 +18,7 @@ use mil_support::{operator_sequence, protoc_decode};
 use omega::door::{Pins, Reader};
 use omega::onnx_door::OnnxReader;
 use proxima_mil::weights::SourceDType;
-use proxima_mil::writer::{MilPackage, MilRequest, MilWriter, WeightView};
+use proxima_mil::writer::{MilError, MilPackage, MilRequest, MilWriter, WeightView};
 use proxima_tensor::{
     AxisTerm, DType, Extent, IndexMap, NodeId, Op, ScalarOp, affine, append, infer, projection,
 };
@@ -151,5 +151,62 @@ fn mil_emit_bge_small_pinned_batch1_seq16_has_96_matmul_39_gather_and_12_head_me
     assert_eq!(
         u32::from_le_bytes(package.weights[0..4].try_into().expect("four bytes")) as usize,
         weights.len()
+    );
+}
+
+fn add_of_broadcast_operand(operand_rows: u32) -> Vec<Op> {
+    let mut program = vec![
+        input(DType::Float32, &[3, 4], "left"),
+        input(DType::Float32, &[operand_rows, 4], "right"),
+    ];
+    append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            operands: vec![
+                (NodeId(0), IndexMap::Affine(projection(2, &[0, 1]))),
+                (
+                    NodeId(1),
+                    IndexMap::Affine(affine(2, &[(&[], 0), (&[AxisTerm::projection(1)], 0)])),
+                ),
+            ],
+            name: None,
+        },
+    );
+    program
+}
+
+#[test]
+fn mil_emit_operand_of_extent_one_on_an_unread_axis_broadcasts_without_a_view() {
+    let program = add_of_broadcast_operand(1);
+
+    let sequence = operators(&write(&program, &[], "sum"));
+
+    assert_eq!(sequence, ["cast", "cast", "add", "cast"]);
+}
+
+#[test]
+fn mil_emit_operand_with_a_constant_index_into_a_longer_axis_is_not_emitted() {
+    let program = add_of_broadcast_operand(2);
+    let shapes = infer(&program, &[]).expect("the program has shapes");
+    let request = MilRequest {
+        program: &program,
+        shapes: &shapes,
+        weights: &[],
+        output: "sum",
+    };
+
+    let verdict = MilWriter::new().write(&request);
+
+    assert!(
+        matches!(
+            verdict,
+            Err(MilError::NotEmitted {
+                node: NodeId(2),
+                ..
+            })
+        ),
+        "{verdict:?}"
     );
 }

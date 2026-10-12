@@ -2,7 +2,7 @@
 //! operations that bring an operand's tensor to the layout its `IndexPattern`
 //! reads, emitted from the same classification the census tallies.
 
-use proxima_tensor::{IndexMap, IndexPattern, NodeId};
+use proxima_tensor::{AxisIndex, AxisTerm, IndexMap, IndexPattern, NodeId};
 
 use super::message::{
     Immediate, Kind, Name, begin_operation, input_immediate, input_name, operation_output,
@@ -12,6 +12,39 @@ use crate::wire::Encoder;
 
 /// Marks the operand axis a gather consumes; no iteration axis has this number.
 const GATHERED: u16 = u16::MAX;
+
+/// Whether an operand axis of extent 1 that reads no iteration axis is a
+/// broadcast, which only an elementwise operand may be: a reduction or a gather
+/// index that repeated it would change its result, not just its layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Broadcast {
+    Allowed,
+    Refused,
+}
+
+fn window_axis(node: NodeId, term: &AxisTerm, index: &AxisIndex) -> Result<u16, MilError> {
+    match term.coeff == 1 && index.len.is_none() && index.offset >= 0 {
+        true => Ok(term.axis),
+        false => Err(not_emitted(
+            node,
+            "strided, bounded or negative operand window",
+        )),
+    }
+}
+
+/// The `ordinal`-th iteration axis no term of `pattern` reads: the axis a
+/// broadcast operand axis stands in for, since the operand has extent 1 there.
+fn unread_axis(node: NodeId, pattern: &IndexPattern, ordinal: usize) -> Result<u16, MilError> {
+    (0..pattern.iter_rank)
+        .filter(|axis| {
+            pattern
+                .axes
+                .iter()
+                .all(|index| index.terms.iter().all(|term| term.axis != *axis))
+        })
+        .nth(ordinal)
+        .ok_or_else(|| not_emitted(node, "more broadcast axes than unread iteration axes"))
+}
 
 /// Longest rank a view is planned for; ranks above it are refused, not truncated.
 pub(super) const RANK_CAPACITY: usize = 8;
@@ -112,7 +145,18 @@ impl Current {
         operand: NodeId,
         pattern: &IndexPattern,
     ) -> Result<Self, MilError> {
-        Self::read_skipping(context, site, operand, pattern, None)
+        Self::read_skipping(context, site, operand, pattern, None, Broadcast::Refused)
+    }
+
+    /// As [`Current::read`], where an axis of extent 1 that reads no iteration
+    /// axis is a broadcast axis MIL's elementwise operators expand by themselves.
+    fn read_broadcasting(
+        context: &Context<'_>,
+        site: &Site,
+        operand: NodeId,
+        pattern: &IndexPattern,
+    ) -> Result<Self, MilError> {
+        Self::read_skipping(context, site, operand, pattern, None, Broadcast::Allowed)
     }
 
     /// As [`Current::read`], with the axis at `skipped` left to a gather.
@@ -122,30 +166,34 @@ impl Current {
         operand: NodeId,
         pattern: &IndexPattern,
         skipped: Option<usize>,
+        broadcast: Broadcast,
     ) -> Result<Self, MilError> {
         let host = site.host;
         let dims = Stack::from_slice(host, context.shapes.of(operand))?;
         let mut axes = Stack::new();
         let mut offsets = Stack::new();
+        let mut bare = 0;
         for (position, index) in pattern.axes.iter().enumerate() {
             if skipped == Some(position) {
                 axes.push(host, GATHERED)?;
                 offsets.push(host, 0)?;
                 continue;
             }
-            let [term] = index.terms.as_slice() else {
-                return Err(not_emitted(
-                    host,
-                    "operand axis that is not one iteration axis",
-                ));
+            let extent = dims.as_slice().get(position).copied();
+            let axis = match (index.terms.as_slice(), broadcast, extent) {
+                ([], Broadcast::Allowed, Some(1)) if index.offset == 0 => {
+                    bare += 1;
+                    unread_axis(host, pattern, bare - 1)?
+                }
+                ([term], _, _) => window_axis(host, term, index)?,
+                _ => {
+                    return Err(not_emitted(
+                        host,
+                        "operand axis that is not one iteration axis",
+                    ));
+                }
             };
-            if term.coeff != 1 || index.len.is_some() || index.offset < 0 {
-                return Err(not_emitted(
-                    host,
-                    "strided, bounded or negative operand window",
-                ));
-            }
-            axes.push(host, term.axis)?;
+            axes.push(host, axis)?;
             offsets.push(host, i64::from(index.offset))?;
         }
         if axes.as_slice().len() != dims.as_slice().len() {
@@ -363,7 +411,7 @@ pub(super) fn read_map(
     map: &IndexMap,
 ) -> Result<Current, MilError> {
     match map {
-        IndexMap::Affine(pattern) => Current::read(context, site, operand, pattern),
+        IndexMap::Affine(pattern) => Current::read_broadcasting(context, site, operand, pattern),
         IndexMap::Computed {
             indices,
             index_map,
@@ -389,7 +437,8 @@ fn gather(
     axis: usize,
 ) -> Result<Current, MilError> {
     let host = site.host;
-    let source = Current::read_skipping(context, site, operand, base, Some(axis))?;
+    let source =
+        Current::read_skipping(context, site, operand, base, Some(axis), Broadcast::Refused)?;
     let positions = Current::read(context, site, indices, index_map)?;
     if source.has_offsets() || positions.has_offsets() {
         return Err(not_emitted(host, "gather over an offset window"));

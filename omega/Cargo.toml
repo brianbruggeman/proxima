@@ -534,6 +534,8 @@ door = [
 onnx-door = ["door", "dep:proxima-onnx", "dep:sha2", "dep:bon"]
 # the MIL writer lane (`proxima-mil`): the sans-IO census, encoder and package assembler the door's Emit and Package stages plug in.
 mil-writer = ["door", "dep:proxima-mil"]
+# the Core ML edge (`coreml`): compiles the written package with `xcrun coremlcompiler` and caches the result by package sha256; macOS only.
+coreml-lane = ["mil-writer", "dep:sha2"]
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
