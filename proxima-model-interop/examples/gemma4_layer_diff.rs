@@ -148,7 +148,25 @@ fn main() {
         .collect();
     let rendered = serde_json::to_string_pretty(&records).expect("render");
     std::fs::write(required("--out"), &rendered).expect("write out");
-    println!("{rendered}");
+    records
+        .iter()
+        .for_each(|record| println!("{}", summary_line(record)));
+}
+
+fn summary_line(record: &Value) -> String {
+    let maximum = |key: &str| {
+        record[key]
+            .as_array()
+            .map(|cells| cells.iter().filter_map(Value::as_f64).fold(0.0, f64::max))
+    };
+    format!(
+        "{:<24} node {:>6} sum_rel_diff {:>12.3e} max_row_corner_abs_diff {:>12.3e} max_row_llama_scale {:>10.3e}",
+        record["label"].as_str().unwrap_or("?"),
+        record["node"],
+        record["sum_rel_diff"].as_f64().unwrap_or(f64::NAN),
+        maximum("row_corner_max_abs_diff").unwrap_or(f64::NAN),
+        maximum("row_corner_llama_scale").unwrap_or(f64::NAN),
+    )
 }
 
 fn layer_output_nodes(model: &LoadedModel) -> Vec<(u32, String)> {
