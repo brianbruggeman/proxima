@@ -635,6 +635,17 @@ pub(super) fn evaluate_uniform_typed(
         DType::Bool | DType::Fp6E3M2 => {
             unreachable!("typed_program_plan already rejected this dtype")
         }
+        #[cfg(feature = "float-layout-dtype")]
+        DType::Float(_) => {
+            let position = program
+                .iter()
+                .position(|expr| expr.dtype() == dtype)
+                .unwrap_or_default();
+            return Err(TensorError::NotLowerable {
+                node: NodeId(position as u32),
+                reason: "this float layout has no typed scalar element",
+            });
+        }
     })
 }
 
