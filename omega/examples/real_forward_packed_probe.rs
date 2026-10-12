@@ -236,7 +236,10 @@ fn main() {
         // format string); `q4k_element(in` is the generic body's per-element
         // read (`push_cooperative_reduce_body`'s own `"q4k_element(in{index}
         // + ..."` format string).
-        let took_row_blocked = kernel.source.contains("q4k_run8(blk");
+        // the ggml-port body (default under `metal`) inlines the nibble decode and never names `q4k_run8`
+        let took_row_blocked = ["q4k_run8(blk", "acc1_0"]
+            .iter()
+            .any(|marker| kernel.source.contains(marker));
         let took_generic_scalar = kernel.source.contains("q4k_element(in");
         if took_row_blocked {
             row_blocked += 1;
