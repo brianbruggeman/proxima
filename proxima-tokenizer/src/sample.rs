@@ -218,17 +218,61 @@ fn apply_top_k(candidates: &mut Vec<(u32, f32)>, top_k: i32) {
     candidates.sort_unstable_by(candidate_total_order);
 }
 
-fn softmax_probabilities(candidates: &[(u32, f32)]) -> Vec<f32> {
-    let max_logit = candidates
+fn softmax_max_logit(candidates: &[(u32, f32)]) -> f32 {
+    candidates
         .iter()
         .map(|candidate| candidate.1)
-        .fold(f32::NEG_INFINITY, f32::max);
+        .fold(f32::NEG_INFINITY, f32::max)
+}
+
+fn softmax_probabilities(candidates: &[(u32, f32)]) -> Vec<f32> {
+    let max_logit = softmax_max_logit(candidates);
     let exponentiated: Vec<f32> = candidates
         .iter()
         .map(|candidate| libm::expf(candidate.1 - max_logit))
         .collect();
     let sum: f32 = exponentiated.iter().sum();
     exponentiated.into_iter().map(|value| value / sum).collect()
+}
+
+/// Returns the highest-probability token and its probability after top-k
+/// truncation and softmax normalization. Calling with `top_k = 10` provides
+/// the llama `draft-simple` top-10 candidate probability used for acceptance.
+/// Candidate logits and then probabilities are stored in `scratch`; this
+/// helper does not allocate a separate probability vector.
+#[must_use]
+pub fn greedy_top_k_probability(
+    logits: &[f32],
+    top_k: i32,
+    scratch: &mut Vec<(u32, f32)>,
+) -> Option<(u32, f32)> {
+    scratch.clear();
+    scratch.extend(
+        logits
+            .iter()
+            .enumerate()
+            .map(|(index, &logit)| (index as u32, logit)),
+    );
+    if scratch.is_empty() {
+        return None;
+    }
+
+    apply_top_k(scratch, top_k);
+    let max_logit = softmax_max_logit(scratch);
+    for candidate in scratch.iter_mut() {
+        candidate.1 = libm::expf(candidate.1 - max_logit);
+    }
+    let sum: f32 = scratch.iter().map(|candidate| candidate.1).sum();
+    for candidate in scratch.iter_mut() {
+        candidate.1 /= sum;
+    }
+
+    scratch
+        .iter()
+        .fold(None, |best, &(token, probability)| match best {
+            Some((_, best_probability)) if probability <= best_probability => best,
+            _ => Some((token, probability)),
+        })
 }
 
 fn apply_top_p(candidates: &mut Vec<(u32, f32)>, top_p: f32) {
@@ -508,8 +552,8 @@ mod tests {
 
     use super::{
         SamplingConfig, apply_min_p, apply_repetition_penalty, apply_top_k, apply_top_p,
-        greedy_fast_path, greedy_pick, penalize, repetition_penalty_active, sample_general,
-        sample_next_token,
+        greedy_fast_path, greedy_pick, greedy_top_k_probability, penalize,
+        repetition_penalty_active, sample_general, sample_next_token,
     };
 
     #[test]
@@ -547,6 +591,45 @@ mod tests {
         let mut candidates = vec![(0u32, 1.0f32), (1, 5.0), (2, 3.0), (3, 2.0)];
         apply_top_k(&mut candidates, 2);
         assert_eq!(candidates, vec![(1, 5.0), (2, 3.0)]);
+    }
+
+    /// Paper: `[0, ln(2), ln(3), ln(4)]` with `k=2` keeps id 3 and id 2.
+    /// Their shifted exponentials are `1` and `3/4`, totaling `7/4`; id 3
+    /// therefore has probability `4/7` after normalization over retained
+    /// candidates. This is the same truncation/normalization operation used
+    /// by llama `draft-simple`; the fixture uses k=2 for hand calculation.
+    #[test]
+    fn greedy_top_k_probability_normalizes_only_the_top_k_candidates() {
+        let logits = [0.0, libm::logf(2.0), libm::logf(3.0), libm::logf(4.0)];
+        let mut scratch = Vec::new();
+
+        let selected = greedy_top_k_probability(&logits, 2, &mut scratch);
+
+        let (token, probability) = selected.expect("selects a retained token");
+        assert_eq!(token, 3);
+        assert!((probability - (4.0 / 7.0)).abs() < 1e-6);
+        assert_eq!(scratch.len(), 2);
+    }
+
+    /// Paper: `[0, 4, 4, 1]` with `k=2` keeps tied ids 1 and 2 in that
+    /// order; equal softmax weights are 1/2, and the first tie wins.
+    #[test]
+    fn greedy_top_k_probability_ties_choose_the_lowest_token_id() {
+        let logits = [0.0, 4.0, 4.0, 1.0];
+        let mut scratch = Vec::new();
+
+        let selected = greedy_top_k_probability(&logits, 2, &mut scratch);
+
+        assert_eq!(selected, Some((1, 0.5)));
+        assert_eq!(scratch, vec![(1, 0.5), (2, 0.5)]);
+    }
+
+    #[test]
+    fn greedy_top_k_probability_returns_none_for_empty_logits() {
+        let mut scratch = Vec::new();
+
+        assert_eq!(greedy_top_k_probability(&[], 10, &mut scratch), None);
+        assert!(scratch.is_empty());
     }
 
     /// `k <= 0` is upstream's own "use vocab size" convention
