@@ -851,9 +851,19 @@ pub(super) fn bind_plain(
     outputs: &[NodeId],
     numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, TensorError> {
+    bind_plain_with_fusion(program, shapes, outputs, numeric_policy, true)
+}
+
+pub(super) fn bind_plain_with_fusion(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
+    allow_fusion: bool,
+) -> Result<Vec<BoundOp>, TensorError> {
     let retires = live::annotate(program, outputs);
     let reachable = live::reachable(program, outputs);
-    let building = BoundOpBuilder::new(retires, numeric_policy);
+    let building = BoundOpBuilder::new(retires, numeric_policy).with_fusion(allow_fusion);
     let mut built = Vec::new();
     let mut ready = ReadyBatch::new();
     for (position, expr) in program.iter().enumerate() {

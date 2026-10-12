@@ -12,6 +12,11 @@ use crate::op::{NodeId, ScalarOp};
 /// [`cpu::evaluate`](crate::cpu::evaluate) walk it without re-checking.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TensorError {
+    #[error("host tensor reservation {requested} bytes exceeds limit {limit} bytes")]
+    HostTensorLimit { requested: u64, limit: u64 },
+
+    #[error("node {node} host tensor reservation overflows")]
+    HostTensorSizeOverflow { node: NodeId },
     #[error("node {0} references node {1}, which is not defined yet")]
     NodeOutOfRange(NodeId, NodeId),
 

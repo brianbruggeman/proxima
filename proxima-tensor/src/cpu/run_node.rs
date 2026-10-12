@@ -2173,7 +2173,7 @@ pub(super) fn dequantize_row(
         unreachable!("integer index blocks never enter quantized dot")
     }
     // Row-level decode only reaches codecs with a `dequantize` arm below --
-    // `Q4_0`/`Q5_0`/`Float16`/`BFloat16` do have a `QuantizedBlock::block_layout`
+    // `Q4_0`/`Q5_0` do have a `QuantizedBlock::block_layout`
     // entry, but no per-row dequantize path here, so they stay excluded
     // rather than silently decoding through the shared table.
     if matches!(
@@ -2185,14 +2185,6 @@ pub(super) fn dequantize_row(
             }
             | QuantizedBlock::Packed {
                 codec: Codec::Q5_0,
-                bytes: _
-            }
-            | QuantizedBlock::Packed {
-                codec: Codec::Float16,
-                bytes: _
-            }
-            | QuantizedBlock::Packed {
-                codec: Codec::BFloat16,
                 bytes: _
             }
     ) {
