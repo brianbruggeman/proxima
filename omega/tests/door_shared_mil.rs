@@ -10,6 +10,8 @@
 mod door_support;
 #[path = "door_support/walkthrough.rs"]
 mod walkthrough;
+#[path = "door_support/walkthrough_mil.rs"]
+mod walkthrough_mil;
 
 use std::fmt::Debug;
 
@@ -113,7 +115,7 @@ fn door_shared_mil_instance_enters_parse_validate_lower_emit_package_verify_in_o
 #[test]
 fn door_shared_walkthrough_lines_are_10_for_the_onnx_instance_and_16_for_the_mil_instance() {
     let onnx = walkthrough::onnx_lines().expect("the onnx walkthrough runs");
-    let mil = walkthrough::mil_lines().expect("the mil walkthrough runs");
+    let mil = walkthrough_mil::mil_lines().expect("the mil walkthrough runs");
 
     assert_eq!(onnx.len(), 10);
     assert_eq!(

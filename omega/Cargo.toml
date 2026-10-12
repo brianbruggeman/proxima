@@ -733,6 +733,10 @@ required-features = ["alloc"]
 name = "door_walkthrough"
 required-features = ["onnx-door", "mil-writer"]
 
+[[example]]
+name = "onnx_door_walkthrough"
+required-features = ["onnx-door"]
+
 [dev-dependencies]
 anyhow = "1.0.104"
 conflaguration = { workspace = true, features = ["toml"] }
