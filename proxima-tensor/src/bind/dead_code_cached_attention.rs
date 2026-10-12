@@ -31,6 +31,7 @@ use super::*;
 /// one operand of a `Multiply`-then-`Add` fold -- see
 /// `proxima-model-interop::bind_matmul_weight`'s own doc).
 pub fn correct_packed_matmul_layouts(resolved: &mut [BoundOp], packed_operands: &BTreeSet<NodeId>) {
+    correct_materialized_packed_matmul_layouts(resolved, packed_operands);
     for bound in resolved.iter_mut() {
         let extents = bound.extents.clone();
         let BoundOpKind::Reduce {
@@ -44,6 +45,55 @@ pub fn correct_packed_matmul_layouts(resolved: &mut [BoundOp], packed_operands: 
         for (node, layout, _lookup) in operands.iter_mut() {
             if packed_operands.contains(node) {
                 *layout = native_packed_layout(&extents, output_axes.as_slice(), layout);
+            }
+        }
+    }
+}
+
+/// Preserve native packed addressing when a product materializes before its fold.
+pub fn correct_materialized_packed_matmul_layouts(
+    resolved: &mut [BoundOp],
+    packed_operands: &BTreeSet<NodeId>,
+) {
+    let contractions: BTreeMap<_, _> = resolved
+        .iter()
+        .filter_map(|bound| {
+            let BoundOpKind::Reduce {
+                element_body: body,
+                operands,
+                output_axes,
+                ..
+            } = &bound.kind
+            else {
+                return None;
+            };
+            let [(producer, layout, None)] = operands.as_slice() else {
+                return None;
+            };
+            if body.steps.len() != 1
+                || body.steps[0].op != ScalarOp::Identity
+                || body.steps[0].args.as_slice() != [StepArg::Operand(0)]
+                || layout.base != 0
+                || layout.strides.as_slice() != row_major_strides(&bound.extents)
+            {
+                return None;
+            }
+            Some((*producer, (bound.extents.clone(), output_axes.clone())))
+        })
+        .collect();
+    for bound in resolved {
+        let Some((extents, output_axes)) = contractions.get(&bound.node) else {
+            continue;
+        };
+        if bound.extents != *extents {
+            continue;
+        }
+        let BoundOpKind::Elementwise { operands, .. } = &mut bound.kind else {
+            continue;
+        };
+        for (node, layout, _) in operands {
+            if packed_operands.contains(node) {
+                *layout = native_packed_layout(extents, output_axes, layout);
             }
         }
     }

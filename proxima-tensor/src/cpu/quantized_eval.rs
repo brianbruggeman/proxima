@@ -407,6 +407,63 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
     fuse_cached_attention: bool,
 ) -> Result<Evaluated, TensorError> {
+    evaluate_quantized_with_policy(
+        (program, symbols, blocks, outputs),
+        (free_buffers, validated_weight_nodes),
+        expert_sources,
+        (
+            exact_activations,
+            fuse_cached_attention,
+            true,
+            NumericPolicy::bit_exact(),
+            None,
+        ),
+    )
+}
+
+#[cfg(feature = "config")]
+/// Execute named inputs with [`TensorExecutionConfig`] and caller-owned scratch.
+/// The tensor ceiling is checked before payload allocation on every call;
+/// operations without a bounded workspace return [`TensorError::NotLowerable`].
+pub fn evaluate_quantized_named_with_config<'block>(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'block>)],
+    outputs: &[NodeId],
+    scratch: (&mut Vec<Vec<f32>>, &mut Option<BTreeSet<NodeId>>),
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+    config: &TensorExecutionConfig,
+) -> Result<Evaluated, TensorError> {
+    let blocks = resolve_named_blocks_with_experts(program, named, expert_sources)?;
+    evaluate_quantized_with_policy(
+        (program, symbols, &blocks, outputs),
+        scratch,
+        expert_sources,
+        (
+            config.exact_activations,
+            true,
+            config.allow_fusion,
+            config.numeric,
+            config.max_host_tensor_bytes,
+        ),
+    )
+}
+
+fn evaluate_quantized_with_policy(
+    inputs: (&[Op], &[u64], &[QuantizedBlock<'_>], &[NodeId]),
+    scratch: (&mut Vec<Vec<f32>>, &mut Option<BTreeSet<NodeId>>),
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+    options: (bool, bool, bool, NumericPolicy, Option<u64>),
+) -> Result<Evaluated, TensorError> {
+    let (program, symbols, blocks, outputs) = inputs;
+    let (free_buffers, validated_weight_nodes) = scratch;
+    let (
+        exact_activations,
+        fuse_cached_attention,
+        allow_fusion,
+        numeric_policy,
+        max_host_tensor_bytes,
+    ) = options;
     // brackets the portion of evaluate_quantized that is neither the
     // per-node loop below nor run_node_into itself -- shape::infer,
     // bind::bind, node_retirement, and the buffers table setup all run
@@ -418,6 +475,22 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
     #[cfg(feature = "instrument")]
     let setup_alloc_guard = instrument::AllocSiteGuard::enter(instrument::AllocSite::Prepare);
     let shapes = shape::infer(program, symbols)?;
+    if let Some(limit) = max_host_tensor_bytes {
+        if expert_sources.is_some_and(|sources| !sources.is_empty()) {
+            return Err(TensorError::NotLowerable {
+                node: NodeId(0),
+                reason: "host tensor budget has no expert workspace bound",
+            });
+        }
+        validate_host_tensor_budget(
+            program,
+            &shapes,
+            blocks,
+            outputs,
+            free_buffers,
+            (numeric_policy, allow_fusion, limit),
+        )?;
+    }
     let block_nodes = block_node_ids(program);
     if blocks.len() != block_nodes.len() {
         return Err(TensorError::InputCountMismatch {
@@ -487,13 +560,36 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
 
     let planning_outputs =
         quantized_gather_planning_outputs(program, &quantized_weights, &effective_outputs);
-    let resolved = bind::bind_with_fusion(
-        program,
-        &shapes,
-        &planning_outputs,
-        fuse_cached_attention,
-        NumericPolicy::bit_exact(),
-    )?;
+    let mut resolved = if allow_fusion {
+        bind::bind_with_fusion(
+            program,
+            &shapes,
+            &planning_outputs,
+            fuse_cached_attention,
+            numeric_policy,
+        )?
+    } else {
+        bind::bind_unfused(program, &shapes, &planning_outputs, numeric_policy)?
+    };
+    bind::correct_materialized_packed_matmul_layouts(&mut resolved, &quantized_weight_nodes);
+    let dense_packed_nodes: BTreeSet<NodeId> = quantized_weights
+        .iter()
+        .filter_map(|(node, block)| {
+            (matches!(
+                block,
+                QuantizedBlock::Packed {
+                    codec: Codec::Float16 | Codec::BFloat16,
+                    ..
+                }
+            ) && is_quantized_matmul_operand(program, *node))
+            .then_some(*node)
+        })
+        .collect();
+    bind::correct_packed_matmul_layouts(&mut resolved, &dense_packed_nodes);
+    for node in dense_packed_nodes {
+        materialize_quantized_weight_output(node, &shapes, &quantized_weights, None, &mut buffers)?;
+        quantized_weights.remove(&node);
+    }
     // standalone diagnostic operations and reduce epilogues read f32 buffers;
     // direct packed gathers and reduction folds retain their packed operands.
     materialize_quantized_weights_read_by_non_primary_operands(
@@ -543,12 +639,16 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
     // the SAME plan by its own `fire_position` value, so the main loop can
     // ask "does anything fire here" in O(1) per position instead of
     // scanning the whole plan every iteration.
-    let (mut epilogue_fuse_plan, mut layer_norm_cluster_plan, rewrite_fires) = run_rewrite_worklist(
-        &resolved,
-        program.len(),
-        &effective_outputs,
-        &quantized_weights,
-    );
+    let (mut epilogue_fuse_plan, mut layer_norm_cluster_plan, rewrite_fires) = if allow_fusion {
+        run_rewrite_worklist(
+            &resolved,
+            program.len(),
+            &effective_outputs,
+            &quantized_weights,
+        )
+    } else {
+        (BTreeMap::new(), BTreeMap::new(), Vec::new())
+    };
     #[cfg(feature = "std")]
     if std::env::var_os("PROXIMA_DISABLE_LAYER_NORM_CLUSTER").is_some() {
         layer_norm_cluster_plan.clear();
@@ -630,7 +730,11 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
     // to build; every one of the six signatures between here and
     // `matmul_rows_threaded` falls back to the `nest_pool` dispatch path in
     // that case, unchanged.
-    let session = nest_cohort().and_then(|cohort| cohort.enter().ok());
+    let session = max_host_tensor_bytes
+        .is_none()
+        .then(nest_cohort)
+        .flatten()
+        .and_then(|cohort| cohort.enter().ok());
     // `docs/discipline.md` ROW 140's own cache: scoped to this ONE
     // `evaluate_quantized_with_scratch` call (one decode/prefill step),
     // never carried across steps -- a later step's `activation_node` slot
@@ -995,6 +1099,286 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
         peak_live_bytes as u64,
     );
     Ok(result)
+}
+
+#[cfg(feature = "config")]
+/// Reserve owned float payload plus conservative sequential float workspace.
+/// Borrowed inputs and shape/index metadata are excluded. Pool capacity is
+/// included so callers can preflight a reused plan before its next execution.
+pub fn cpu_tensor_reserved_bytes(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+    free_buffers: &[Vec<f32>],
+    config: &TensorExecutionConfig,
+) -> Result<u64, TensorError> {
+    let shapes = shape::infer(program, symbols)?;
+    let blocks = resolve_named_blocks(program, named)?;
+    let root = program.len().checked_sub(1).ok_or(TensorError::Empty)?;
+    let effective_outputs = if outputs.is_empty() {
+        vec![NodeId(root as u32)]
+    } else {
+        outputs.to_vec()
+    };
+    let resolved = if config.allow_fusion {
+        bind::bind_with_fusion(program, &shapes, &effective_outputs, true, config.numeric)?
+    } else {
+        bind::bind_unfused(program, &shapes, &effective_outputs, config.numeric)?
+    };
+    cpu_tensor_envelope(
+        program,
+        &shapes,
+        &blocks,
+        &effective_outputs,
+        &resolved,
+        free_buffers,
+    )
+}
+
+fn validate_host_tensor_budget(
+    program: &[Op],
+    shapes: &shape::Shapes,
+    blocks: &[QuantizedBlock<'_>],
+    outputs: &[NodeId],
+    free_buffers: &mut Vec<Vec<f32>>,
+    policy: (NumericPolicy, bool, u64),
+) -> Result<(), TensorError> {
+    let (numeric_policy, allow_fusion, limit) = policy;
+    let root = program.len().checked_sub(1).ok_or(TensorError::Empty)?;
+    let effective_outputs = if outputs.is_empty() {
+        vec![NodeId(root as u32)]
+    } else {
+        outputs.to_vec()
+    };
+    for output in &effective_outputs {
+        if output.0 as usize >= program.len() {
+            return Err(TensorError::UnknownOutput(*output));
+        }
+    }
+    let resolved = if allow_fusion {
+        bind::bind_with_fusion(program, shapes, &effective_outputs, true, numeric_policy)?
+    } else {
+        bind::bind_unfused(program, shapes, &effective_outputs, numeric_policy)?
+    };
+    let minimum = cpu_tensor_envelope(program, shapes, blocks, &effective_outputs, &resolved, &[])?;
+    if minimum > limit {
+        return Err(TensorError::HostTensorLimit {
+            requested: minimum,
+            limit,
+        });
+    }
+    while cpu_tensor_envelope(
+        program,
+        shapes,
+        blocks,
+        &effective_outputs,
+        &resolved,
+        free_buffers,
+    )? > limit
+    {
+        let largest = free_buffers
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, buffer)| buffer.capacity())
+            .map(|(position, _)| position);
+        let Some(position) = largest else {
+            break;
+        };
+        free_buffers.swap_remove(position);
+    }
+    Ok(())
+}
+
+fn checked_float_bytes(elements: u64, node: NodeId) -> Result<u64, TensorError> {
+    elements
+        .checked_mul(size_of::<f32>() as u64)
+        .ok_or(TensorError::HostTensorSizeOverflow { node })
+}
+
+fn checked_tensor_elements(extents: &[u64], node: NodeId) -> Result<u64, TensorError> {
+    extents.iter().try_fold(1_u64, |count, extent| {
+        count
+            .checked_mul(*extent)
+            .ok_or(TensorError::HostTensorSizeOverflow { node })
+    })
+}
+
+fn checked_tensor_add(left: u64, right: u64, node: NodeId) -> Result<u64, TensorError> {
+    left.checked_add(right)
+        .ok_or(TensorError::HostTensorSizeOverflow { node })
+}
+
+fn cpu_tensor_envelope(
+    program: &[Op],
+    shapes: &shape::Shapes,
+    blocks: &[QuantizedBlock<'_>],
+    outputs: &[NodeId],
+    resolved: &[BoundOp],
+    free_buffers: &[Vec<f32>],
+) -> Result<u64, TensorError> {
+    let inputs = block_node_ids(program);
+    if inputs.len() != blocks.len() {
+        return Err(TensorError::InputCountMismatch {
+            expected: inputs.len(),
+            found: blocks.len(),
+        });
+    }
+    for (node, block) in inputs.iter().zip(blocks) {
+        let QuantizedBlock::Float32(values) = block else {
+            return Err(TensorError::NotLowerable {
+                node: *node,
+                reason: "host tensor budget has no packed or converted input workspace bound",
+            });
+        };
+        let expected = checked_tensor_elements(shapes.of(*node), *node)?;
+        if values.len() as u64 != expected {
+            return Err(TensorError::InputSizeMismatch {
+                node: *node,
+                expected: usize::try_from(expected)
+                    .map_err(|_| TensorError::HostTensorSizeOverflow { node: *node })?,
+                found: values.len(),
+            });
+        }
+    }
+    let mut owned_bytes = 0_u64;
+    let mut maximum_workspace = 0_u64;
+    for bound in resolved {
+        let distinct_reduce_sources = matches!(&bound.kind, BoundOpKind::Reduce { .. })
+            && bound.operands().first().is_some_and(|(first_node, _, _)| {
+                bound
+                    .operands()
+                    .iter()
+                    .any(|(node, _, _)| node != first_node)
+            });
+        if distinct_reduce_sources {
+            return Err(TensorError::NotLowerable {
+                node: bound.node,
+                reason: "host tensor budget has no accelerated gemm workspace bound",
+            });
+        }
+        if bound.dtype != DType::Float32
+            || bound
+                .operands()
+                .iter()
+                .any(|(_, _, lookup)| lookup.is_some())
+        {
+            return Err(TensorError::NotLowerable {
+                node: bound.node,
+                reason: "host tensor budget has no non-float32 or gathered workspace bound",
+            });
+        }
+        let output_elements = checked_tensor_elements(shapes.of(bound.node), bound.node)?;
+        let materialized_elements = match &bound.kind {
+            BoundOpKind::Reduce {
+                keep: Keep::Reduce,
+                output_axes,
+                out_scatter: None,
+                epilogue_broadcast_axes,
+                ..
+            } if epilogue_broadcast_axes.is_empty() => {
+                output_axes.iter().try_fold(1_u64, |count, axis| {
+                    count
+                        .checked_mul(bound.extents[*axis as usize])
+                        .ok_or(TensorError::HostTensorSizeOverflow { node: bound.node })
+                })?
+            }
+            _ => checked_tensor_elements(&bound.extents, bound.node)?,
+        };
+        let elements = output_elements.max(materialized_elements);
+        owned_bytes = checked_tensor_add(
+            owned_bytes,
+            checked_float_bytes(elements, bound.node)?,
+            bound.node,
+        )?;
+        let operands = bound.operands().len() as u64;
+        let steps = bound.element_body().steps.len() as u64;
+        let workspace = match &bound.kind {
+            BoundOpKind::Elementwise { .. } => {
+                let width = elements.min(GENERIC_WIDTH_TILE as u64).max(1);
+                checked_tensor_add(
+                    operands,
+                    steps
+                        .checked_mul(width)
+                        .ok_or(TensorError::HostTensorSizeOverflow { node: bound.node })?,
+                    bound.node,
+                )?
+            }
+            BoundOpKind::Reduce {
+                output_axes,
+                out_scatter,
+                epilogue_body,
+                epilogue_operands,
+                keep,
+                ..
+            } => {
+                if out_scatter.is_some()
+                    || epilogue_operands
+                        .iter()
+                        .any(|(_, _, lookup)| lookup.is_some())
+                {
+                    return Err(TensorError::NotLowerable {
+                        node: bound.node,
+                        reason: "host tensor budget has no scattered epilogue workspace bound",
+                    });
+                }
+                let width = if *keep == Keep::Reduce {
+                    resolve_reduce_axis_shape(bound, output_axes).width as u64
+                } else {
+                    0
+                };
+                let main = checked_tensor_add(
+                    checked_tensor_add(operands, steps, bound.node)?,
+                    width,
+                    bound.node,
+                )?;
+                let epilogue = if epilogue_operands.is_empty()
+                    && epilogue_body.steps.len() == 1
+                    && epilogue_body.steps[0].op == ScalarOp::Identity
+                {
+                    0
+                } else {
+                    checked_tensor_add(
+                        epilogue_operands.len() as u64 + 1,
+                        epilogue_body.steps.len() as u64,
+                        bound.node,
+                    )?
+                };
+                checked_tensor_add(main, epilogue, bound.node)?
+            }
+            BoundOpKind::Iota | BoundOpKind::Constant { .. } => 0,
+            _ => {
+                return Err(TensorError::NotLowerable {
+                    node: bound.node,
+                    reason: "host tensor budget has no specialized operation workspace bound",
+                });
+            }
+        };
+        maximum_workspace = maximum_workspace.max(checked_float_bytes(workspace, bound.node)?);
+    }
+    for (position, output) in outputs.iter().enumerate() {
+        if output.0 as usize >= program.len() {
+            return Err(TensorError::UnknownOutput(*output));
+        }
+        if matches!(program[output.0 as usize], Op::Input { .. })
+            || outputs[..position].contains(output)
+        {
+            let elements = checked_tensor_elements(shapes.of(*output), *output)?;
+            owned_bytes = checked_tensor_add(
+                owned_bytes,
+                checked_float_bytes(elements, *output)?,
+                *output,
+            )?;
+        }
+    }
+    for buffer in free_buffers {
+        owned_bytes = checked_tensor_add(
+            owned_bytes,
+            checked_float_bytes(buffer.capacity() as u64, NodeId(0))?,
+            NodeId(0),
+        )?;
+    }
+    checked_tensor_add(owned_bytes, maximum_workspace, NodeId(0))
 }
 
 /// [`evaluate_quantized`]'s counterpart for binding by name instead of

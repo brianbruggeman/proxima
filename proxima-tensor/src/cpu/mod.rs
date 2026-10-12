@@ -126,6 +126,7 @@ use core::arch::x86_64::{
 };
 use core::cell::RefCell;
 use core::future::Future;
+use core::mem::size_of;
 use core::num::NonZeroUsize;
 use core::ops::Deref;
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
@@ -186,6 +187,8 @@ use crate::bind::{
     self, BoundOp, BoundOpKind, ComposedBody, ReadyBatch, StepArg, block_node_ids,
     dead_resolved_nodes, index_node_ids, node_retirement, push_indices_node,
 };
+#[cfg(feature = "config")]
+use crate::config::TensorExecutionConfig;
 use crate::convert::{Convert, SimdConvert};
 use crate::dtype::DType;
 use crate::error::TensorError;

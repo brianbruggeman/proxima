@@ -2,6 +2,17 @@ use super::*;
 #[cfg(feature = "std")]
 use std::env;
 
+/// Bind reachable operations through [`BoundOpBuilder`] without graph fusion.
+/// Requested output IDs and numeric identity permission checks remain intact.
+pub fn bind_unfused(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
+) -> Result<Vec<BoundOp>, TensorError> {
+    bind_plain_with_fusion(program, shapes, outputs, numeric_policy, false)
+}
+
 pub fn bind(
     program: &[Op],
     shapes: &Shapes,

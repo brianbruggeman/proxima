@@ -126,6 +126,9 @@ pub use types_layout_boundop::*;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;
 
+#[cfg(all(test, feature = "config"))]
+mod programmable_tests;
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod dead_resolved_tests;

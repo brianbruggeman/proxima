@@ -44,6 +44,7 @@ pub struct BoundOpBuilder {
     /// `max(x,-inf)`/`min(x,+inf)` ([`NumericRewrite::IdentityEliminationNanAssumption`])
     /// identity eliminations fire, on top of the always-on `x*1` case.
     pub(super) numeric_policy: NumericPolicy,
+    pub(super) allow_fusion: bool,
 }
 
 impl BoundOpBuilder {
@@ -59,7 +60,16 @@ impl BoundOpBuilder {
             packed_mapping_subtree: RefCell::new(Vec::new()),
             constant_value: RefCell::new(Vec::new()),
             numeric_policy,
+            allow_fusion: true,
         }
+    }
+
+    /// Control composition of held nodes; disabled nodes materialize separately.
+    /// Numeric rewrites still require the builder's [`NumericPolicy`] permissions.
+    #[must_use]
+    pub fn with_fusion(mut self, allow_fusion: bool) -> Self {
+        self.allow_fusion = allow_fusion;
+        self
     }
 
     /// Judge one expression: hold an elementwise op, or emit whatever is now
@@ -209,15 +219,23 @@ impl BoundOpBuilder {
                         operands: operands.clone(),
                     },
                 );
+                if !self.allow_fusion {
+                    self.materialize_if_held(node, shapes, emitted)?;
+                }
             }
             Op::Reduce(reduce) => {
-                let window_elimination = eliminate_masked_window_reduce(
-                    reduce,
-                    &self.held,
-                    &self.is_iota.borrow(),
-                    &self.constant_value.borrow(),
-                    shapes,
-                );
+                let window_elimination = self
+                    .allow_fusion
+                    .then(|| {
+                        eliminate_masked_window_reduce(
+                            reduce,
+                            &self.held,
+                            &self.is_iota.borrow(),
+                            &self.constant_value.borrow(),
+                            shapes,
+                        )
+                    })
+                    .flatten();
                 #[cfg(feature = "instrument")]
                 instrument::record_window_reduce_attempt(window_elimination.is_some());
                 if let Some((source_node, source_map)) = window_elimination {
