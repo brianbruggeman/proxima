@@ -1,0 +1,30 @@
+   Compiling omega v0.1.0 (/private/tmp/proxima-model-matrix/omega)
+   Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-model-matrix/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 32.33s
+────────────
+ Nextest run ID 5004ff30-f242-48ef-9806-a8e787be45c1 with nextest profile: default
+    Starting 1 test across 1 binary (20 tests skipped)
+        FAIL [  50.805s] (1/1) proxima-model-interop::granite_attention_variant_prefill perf_probe_granite_f16_kv_against_f32_kv
+  stdout ───
+
+    running 1 test
+    test perf_probe_granite_f16_kv_against_f32_kv ... FAILED
+
+    failures:
+
+    failures:
+        perf_probe_granite_f16_kv_against_f32_kv
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 50.78s
+
+  stderr ───
+
+    thread 'perf_probe_granite_f16_kv_against_f32_kv' (87241095) panicked at proxima-test/src/harness.rs:173:31:
+    Granite prefill and one-token forward run: UnsupportedServingConfig("kv_cache_key_quant=f16 with speculative decoding: a verify step attends several query rows against the cached range through the row-tiled kernel, which reads an f32 cache; only the single-row decode kernel reads the half-width device cache") (at proxima-model-interop/tests/granite_attention_variant_prefill.rs:274:10)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [  50.806s] 1 test run: 0 passed, 1 failed, 20 skipped
+        FAIL [  50.805s] (1/1) proxima-model-interop::granite_attention_variant_prefill perf_probe_granite_f16_kv_against_f32_kv
+error: test run failed

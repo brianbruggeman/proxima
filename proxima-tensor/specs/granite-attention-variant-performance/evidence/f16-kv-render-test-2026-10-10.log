@@ -1,0 +1,16 @@
+   Compiling omega v0.1.0 (/private/tmp/proxima-model-matrix/omega)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.83s
+────────────
+ Nextest run ID dc54c392-ee35-46fe-809e-7dbba36b6771 with nextest profile: default
+    Starting 1 test across 1 binary (505 tests skipped)
+        PASS [   0.020s] (1/1) omega msl::attn_rows_tests::card_20_dispatch_matrix_exposes_legacy_and_seven_one_factor_flips
+  stdout ───
+
+    running 1 test
+    test msl::attn_rows_tests::card_20_dispatch_matrix_exposes_legacy_and_seven_one_factor_flips ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 505 filtered out; finished in 0.01s
+
+
+────────────
+     Summary [   0.023s] 1 test run: 1 passed, 505 skipped
