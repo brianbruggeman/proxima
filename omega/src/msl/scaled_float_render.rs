@@ -5,12 +5,6 @@ use super::*;
 
 pub(super) const FP6_E3M2_ELEMENTS: usize = Codec::FP6_E3M2_BLOCK_ELEMENTS;
 pub(super) const FP6_E3M2_BYTES: usize = Codec::FP6_E3M2_BLOCK_BYTES;
-#[cfg(not(feature = "float-layout-dtype"))]
-const F32_MANTISSA_BITS: u32 = 23;
-#[cfg(not(feature = "float-layout-dtype"))]
-const F32_SIGN_BIT: u32 = 31;
-#[cfg(not(feature = "float-layout-dtype"))]
-const F32_EXPONENT_BIAS: i32 = 127;
 const FIELDS_PER_GROUP: u32 = 4;
 const BYTES_PER_GROUP: u32 = FIELDS_PER_GROUP * FloatLayout::E3M2.width() as u32 / 8;
 const SCALE_BYTES: usize =
@@ -38,35 +32,8 @@ pub(super) fn scaled_e3m2_unpack_msl(layout: FloatLayout) -> String {
     .concat()
 }
 
-#[cfg(feature = "float-layout-dtype")]
 fn scaled_e3m2_field_msl(layout: FloatLayout) -> String {
     super::layout_render::layout_load_msl(layout, "scaled_e3m2_field")
-}
-
-#[cfg(not(feature = "float-layout-dtype"))]
-fn scaled_e3m2_field_msl(layout: FloatLayout) -> String {
-    let width = u32::from(layout.width());
-    let mantissa_bits = u32::from(layout.mantissa_bits);
-    let exponent_mask = ((1u32 << layout.exponent_bits) - 1) << mantissa_bits;
-    let mantissa_mask = (1u32 << mantissa_bits) - 1;
-    let sign_mask = 1u32 << (width - 1);
-    let sign_shift = F32_SIGN_BIT - (width - 1);
-    let mantissa_shift = F32_MANTISSA_BITS - mantissa_bits;
-    let bias = layout.bias();
-    let subnormal_step = layout.min_subnormal();
-    format!(
-        "
-static inline float scaled_e3m2_field(uint field) {{
-    const int bias = {bias};
-    uint exponent = (field & {exponent_mask:#04x}u) >> {mantissa_bits}u;
-    uint mantissa = field & {mantissa_mask:#04x}u;
-    uint sign = (field & {sign_mask:#04x}u) << {sign_shift}u;
-    uint normal_bits = sign | ((uint)((int)exponent + {F32_EXPONENT_BIAS} - bias) << {F32_MANTISSA_BITS}u) | (mantissa << {mantissa_shift}u);
-    float subnormal = as_type<float>(sign | as_type<uint>((float)mantissa * {subnormal_step:e}f));
-    return exponent == 0u ? subnormal : as_type<float>(normal_bits);
-}}
-"
-    )
 }
 
 fn scaled_e3m2_group_msl() -> String {

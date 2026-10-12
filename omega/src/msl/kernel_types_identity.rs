@@ -1540,64 +1540,14 @@ pub const FLOAT16_BLOCK_ELEMENTS: usize = proxima_gguf::quant::f16::QK_F16;
 
 /// `BFloat16`: unlike `Float16`/[`FLOAT16_BLOCK_BYTES`], MSL has no
 /// native `bfloat` storage type on this driver's baseline toolchain, so a
-/// `BFloat16` weight DOES need an unpack function -- [`BF16_UNPACK_MSL`]'s
-/// widen-by-shift, not a bit-packed dequantize. `bfloat16` is the top 16
-/// bits of an `f32` (1 sign + 8 exponent + 7 mantissa, IEEE binary32's
-/// exponent width exactly), so reconstructing the `f32` is `bits << 16`
-/// reinterpreted, no rounding or lookup table involved.
+/// `BFloat16` weight is read through the accessor `layout_render` emits for
+/// `FloatLayout::BF16`: its fields equal Metal's `bfloat`, so the widen is the
+/// hardware conversion, with no rounding or lookup table involved.
 pub const BFLOAT16_BLOCK_BYTES: usize = proxima_gguf::quant::bf16::BLOCK_BYTES;
 
 /// Same one-element-per-block shape as [`FLOAT16_BLOCK_ELEMENTS`]. Read
 /// from `proxima_gguf::quant::bf16::QK_BF16`.
 pub const BFLOAT16_BLOCK_ELEMENTS: usize = proxima_gguf::quant::bf16::QK_BF16;
-
-/// Widens one `bfloat16` element (2 little-endian bytes, the top half of an
-/// `f32`) to `float` by shifting it into the high 16 bits of a 32-bit word
-/// and reinterpreting -- the exact inverse of truncating an `f32`'s mantissa
-/// to 7 bits, no rounding needed since every bit already present is kept
-/// unchanged. `index` is threaded for the same call shape every other
-/// `*_element` accessor takes (`operand_read`'s block-offset arithmetic
-/// already folds a `BFloat16` weight's element index into the pointer, so
-/// this function always reads at `index == 0`), even though a flat
-/// one-element block never uses it for addressing.
-pub const BF16_UNPACK_MSL: &str = r#"
-// element `index` (always 0 -- BFloat16 has no super-block) of one BFloat16
-// block: the top 16 bits of the f32 this pair of bytes came from,
-// reconstructed by shifting them back into place.
-static inline float bf16_element(device const uchar *block, uint index) {
-    (void)index;
-    uint bits = ((uint)block[0] | ((uint)block[1] << 8)) << 16u;
-    return as_type<float>(bits);
-}
-"#;
-
-/// MSL decoders for scalar brain-float payloads; BF4 stores the first value
-/// in the low nibble and the second in the high nibble.
-pub const BRAIN_FLOAT_SCALAR_UNPACK_MSL: &str = r#"
-static inline float bf8_e5m2_element(device const uchar *payload, uint index) {
-    (void)index;
-    uchar encoded = payload[0];
-    float sign = (encoded & 0x80u) == 0u ? 1.0f : -1.0f;
-    uint exponent = (uint)((encoded >> 2u) & 0x1fu);
-    uint fraction = (uint)(encoded & 0x03u);
-    if (exponent == 0u) {
-        return sign * (float)fraction * 0.0000152587890625f;
-    }
-    return sign * (1.0f + (float)fraction * 0.25f) * exp2((float)exponent - 15.0f);
-}
-
-static inline float bf4_e2m1_element(device const uchar *payload, uint index) {
-    uchar packed = payload[0];
-    uchar encoded = (index & 1u) == 0u ? (packed & 0x0fu) : (packed >> 4u);
-    float sign = (encoded & 0x08u) == 0u ? 1.0f : -1.0f;
-    uint exponent = (uint)((encoded >> 1u) & 0x03u);
-    uint fraction = (uint)(encoded & 0x01u);
-    if (exponent == 0u) {
-        return sign * (float)fraction * 0.5f;
-    }
-    return sign * (1.0f + (float)fraction * 0.5f) * exp2((float)exponent - 1.0f);
-}
-"#;
 
 /// The [`Codec`] a raw [`QuantizedBlock`] carries, if any — the one place
 /// every driver (`cuda_driver::packed_codec`, `wgpu_driver::

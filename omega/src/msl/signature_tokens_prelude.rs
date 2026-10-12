@@ -1,5 +1,4 @@
 use super::*;
-#[cfg(feature = "float-layout-dtype")]
 use proxima_primitives::float_layout::FloatLayout;
 
 pub(super) const SELECTION_THREADGROUP_WIDTH: u64 = 1024;
@@ -1037,15 +1036,6 @@ pub(super) fn preamble(source: &mut String) {
     push_flat_float_accessors(source);
 }
 
-#[cfg(not(feature = "float-layout-dtype"))]
-fn push_flat_float_accessors(source: &mut String) {
-    source.push_str(BF16_UNPACK_MSL);
-    source.push('\n');
-    source.push_str(BRAIN_FLOAT_SCALAR_UNPACK_MSL);
-    source.push('\n');
-}
-
-#[cfg(feature = "float-layout-dtype")]
 fn push_flat_float_accessors(source: &mut String) {
     let accessors = [
         (FloatLayout::BF16, "bf16_element"),

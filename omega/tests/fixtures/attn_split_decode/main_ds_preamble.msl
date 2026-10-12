@@ -839,37 +839,86 @@ static inline float q5_0_element(device const uchar *block, uint index) {
 }
 
 
-// element `index` (always 0 -- BFloat16 has no super-block) of one BFloat16
-// block: the top 16 bits of the f32 this pair of bytes came from,
-// reconstructed by shifting them back into place.
-static inline float bf16_element(device const uchar *block, uint index) {
-    (void)index;
-    uint bits = ((uint)block[0] | ((uint)block[1] << 8)) << 16u;
-    return as_type<float>(bits);
+static inline float bf16_element_value(uint code) {
+    return (float)as_type<bfloat>((ushort)code);
+}
+
+static inline float bf16_element(device const uchar *payload, uint index) {
+    uint offset = index * 2u;
+    uint code = ((uint)payload[offset + 0u] << 0u) | ((uint)payload[offset + 1u] << 8u);
+    return bf16_element_value(code);
 }
 
 
-static inline float bf8_e5m2_element(device const uchar *payload, uint index) {
-    (void)index;
-    uchar encoded = payload[0];
-    float sign = (encoded & 0x80u) == 0u ? 1.0f : -1.0f;
-    uint exponent = (uint)((encoded >> 2u) & 0x1fu);
-    uint fraction = (uint)(encoded & 0x03u);
-    if (exponent == 0u) {
-        return sign * (float)fraction * 0.0000152587890625f;
+static inline uint bf8_e5m2_element_value_scaled_bits(uint significand, int scale) {
+    if (significand == 0u) {
+        return 0u;
     }
-    return sign * (1.0f + (float)fraction * 0.25f) * exp2((float)exponent - 15.0f);
+    int lead = 31 - (int)clz(significand);
+    int biased = lead + scale + 127;
+    if (biased >= 255) {
+        return 0x7f800000u;
+    }
+    if (biased >= 1) {
+        return ((uint)biased << 23u) | ((significand << (uint)(23 - lead)) & 0x7fffffu);
+    }
+    int shift = scale + 149;
+    if (shift >= 0) {
+        return significand << (uint)shift;
+    }
+    return -shift >= 32 ? 0u : significand >> (uint)(-shift);
+}
+
+static inline float bf8_e5m2_element_value(uint code) {
+    uint mantissa = code & 0x3u;
+    uint exponent = (code >> 2u) & 0x1fu;
+    uint sign = ((code >> 7u) & 1u) << 31u;
+    if (exponent == 0x1fu) {
+        return as_type<float>(sign | 0x7f800000u | (mantissa == 0u ? 0u : (0x400000u | (mantissa << 21u))));
+    }
+    uint significand = exponent == 0u ? mantissa : (0x4u | mantissa);
+    int scale = exponent == 0u ? (1 - (15) - 2) : ((int)exponent - (15) - 2);
+    return as_type<float>(sign | bf8_e5m2_element_value_scaled_bits(significand, scale));
+}
+
+static inline float bf8_e5m2_element(device const uchar *payload, uint index) {
+    uint offset = index * 1u;
+    uint code = ((uint)payload[offset + 0u] << 0u);
+    return bf8_e5m2_element_value(code);
+}
+
+
+static inline uint bf4_e2m1_element_value_scaled_bits(uint significand, int scale) {
+    if (significand == 0u) {
+        return 0u;
+    }
+    int lead = 31 - (int)clz(significand);
+    int biased = lead + scale + 127;
+    if (biased >= 255) {
+        return 0x7f800000u;
+    }
+    if (biased >= 1) {
+        return ((uint)biased << 23u) | ((significand << (uint)(23 - lead)) & 0x7fffffu);
+    }
+    int shift = scale + 149;
+    if (shift >= 0) {
+        return significand << (uint)shift;
+    }
+    return -shift >= 32 ? 0u : significand >> (uint)(-shift);
+}
+
+static inline float bf4_e2m1_element_value(uint code) {
+    uint mantissa = code & 0x1u;
+    uint exponent = (code >> 1u) & 0x3u;
+    uint sign = ((code >> 3u) & 1u) << 31u;
+    uint significand = exponent == 0u ? mantissa : (0x2u | mantissa);
+    int scale = exponent == 0u ? (1 - (1) - 1) : ((int)exponent - (1) - 1);
+    return as_type<float>(sign | bf4_e2m1_element_value_scaled_bits(significand, scale));
 }
 
 static inline float bf4_e2m1_element(device const uchar *payload, uint index) {
-    uchar packed = payload[0];
-    uchar encoded = (index & 1u) == 0u ? (packed & 0x0fu) : (packed >> 4u);
-    float sign = (encoded & 0x08u) == 0u ? 1.0f : -1.0f;
-    uint exponent = (uint)((encoded >> 1u) & 0x03u);
-    uint fraction = (uint)(encoded & 0x01u);
-    if (exponent == 0u) {
-        return sign * (float)fraction * 0.5f;
-    }
-    return sign * (1.0f + (float)fraction * 0.5f) * exp2((float)exponent - 1.0f);
+    uint bit = index * 4u;
+    uint code = ((uint)payload[bit / 8u] >> (bit % 8u)) & 0xfu;
+    return bf4_e2m1_element_value(code);
 }
 

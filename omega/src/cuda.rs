@@ -2264,7 +2264,7 @@ pub const BFLOAT16_BLOCK_ELEMENTS: usize = proxima_gguf::quant::bf16::QK_BF16;
 
 /// Widens one `bfloat16` element to `float` by shifting it into the high 16
 /// bits of a 32-bit word and reinterpreting — ports
-/// `crate::msl::BF16_UNPACK_MSL`'s `bf16_element` exactly. CUDA's own
+/// `crate::msl::layout_render`'s `bf16_element` exactly. CUDA's own
 /// `__nv_bfloat16` (`<cuda_bf16.h>`) is a native storage type on modern
 /// architectures, but this crate targets no minimum compute capability yet,
 /// so it stays on the same portable widen-by-shift every `sm_` generation
