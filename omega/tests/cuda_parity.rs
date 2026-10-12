@@ -1102,3 +1102,287 @@ fn the_qwen3_gqa_qk_norm_forward_runs_on_cuda_at_cpu_parity_with_head_dim_wider_
         "omega::backend's cpu and cuda arms disagree on the wide-head-dim qk-norm forward: relative={relative} max_diff={max_diff}"
     );
 }
+
+#[test]
+fn the_qwen3_multi_token_prefill_runs_on_cuda_at_cpu_parity() {
+
+    const VOCAB: u32 = 64;
+    const EMBEDDING: u32 = 256;
+    const FEED_FORWARD: u32 = 512;
+    const QUERY_HEADS: u32 = 4;
+    const KV_HEADS: u32 = 2;
+    const HEAD_DIM: u32 = 64;
+    const LAYERS: u32 = 2;
+    const NEW_COUNT: u64 = 5;
+
+    let (program, logits_root, cache_roots) = qwen3_cached_forward_program(
+        VOCAB,
+        EMBEDDING,
+        FEED_FORWARD,
+        QUERY_HEADS,
+        KV_HEADS,
+        HEAD_DIM,
+        LAYERS,
+    )
+    .expect("the multi-token prefill qwen3 program builds");
+
+    let mut roots = vec![logits_root];
+    for (even, odd, value) in &cache_roots {
+        roots.push(*even);
+        roots.push(*odd);
+        roots.push(*value);
+    }
+
+    let symbols = vec![NEW_COUNT, 0u64];
+    let shapes = infer(&program, &symbols)
+        .expect("the multi-token prefill qwen3 program infers");
+
+    let mut owned: Vec<(String, Vec<f32>)> = Vec::new();
+    for (position, op) in program.iter().enumerate() {
+        let Op::Input { name, .. } = op else { continue };
+        let node = NodeId(position as u32);
+        let count: usize = shapes
+            .of(node)
+            .iter()
+            .map(|extent| *extent as usize)
+            .product();
+        let name = name
+            .clone()
+            .expect("every block input in this program is named");
+        let data = if name == "ids" {
+            (0..count).map(|index| (index % VOCAB as usize) as f32).collect()
+        } else if name == "eps" {
+            vec![1e-5f32; count]
+        } else if name == "cached_len" {
+            vec![0.0f32]
+        } else {
+            random_vec(position as u64 + 1, count)
+        };
+        owned.push((name, data));
+    }
+    let named = as_named_blocks(&owned);
+
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the multi-token prefill on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named)
+        .expect("omega::backend runs the multi-token prefill on cpu");
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the multi-token prefill on cuda");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend runs the multi-token prefill on a real cuda device");
+
+    let expected = cpu.root();
+    let actual = cuda.root();
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(
+            got.is_finite(),
+            "cuda, via the wrapper, produced a non-finite value: {got}"
+        );
+        max_diff = max_diff.max((got - want).abs());
+    }
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude.max(f32::MIN_POSITIVE);
+    eprintln!(
+        "cuda multi-token prefill parity: max_diff={max_diff} max_magnitude={max_magnitude} relative={relative}"
+    );
+    assert!(
+        relative < 1e-4,
+        "omega::backend's cpu and cuda arms disagree on the multi-token prefill: relative={relative} max_diff={max_diff}"
+    );
+}
+
+#[test]
+fn the_qwen3_real_scale_forward_runs_on_cuda_at_cpu_parity() {
+
+    const VOCAB: u32 = 151936;
+    const EMBEDDING: u32 = 1024;
+    const FEED_FORWARD: u32 = 3072;
+    const QUERY_HEADS: u32 = 16;
+    const KV_HEADS: u32 = 8;
+    const HEAD_DIM: u32 = 128;
+    const LAYERS: u32 = 28;
+    const NEW_COUNT: u64 = 5;
+
+    let (program, logits_root, cache_roots) = qwen3_cached_forward_program(
+        VOCAB,
+        EMBEDDING,
+        FEED_FORWARD,
+        QUERY_HEADS,
+        KV_HEADS,
+        HEAD_DIM,
+        LAYERS,
+    )
+    .expect("the real-scale qwen3 program builds");
+
+    let mut roots = vec![logits_root];
+    for (even, odd, value) in &cache_roots {
+        roots.push(*even);
+        roots.push(*odd);
+        roots.push(*value);
+    }
+
+    let symbols = vec![NEW_COUNT, 0u64];
+    let shapes = infer(&program, &symbols)
+        .expect("the real-scale qwen3 program infers");
+
+    let mut owned: Vec<(String, Vec<f32>)> = Vec::new();
+    for (position, op) in program.iter().enumerate() {
+        let Op::Input { name, .. } = op else { continue };
+        let node = NodeId(position as u32);
+        let count: usize = shapes
+            .of(node)
+            .iter()
+            .map(|extent| *extent as usize)
+            .product();
+        let name = name
+            .clone()
+            .expect("every block input in this program is named");
+        let data = if name == "ids" {
+            (0..count).map(|index| (index % VOCAB as usize) as f32).collect()
+        } else if name == "eps" {
+            vec![1e-6f32; count]
+        } else if name == "cached_len" {
+            vec![0.0f32]
+        } else {
+            random_vec(position as u64 + 1, count)
+        };
+        owned.push((name, data));
+    }
+    let named = as_named_blocks(&owned);
+
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the real-scale forward on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named)
+        .expect("omega::backend runs the real-scale forward on cpu");
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the real-scale forward on cuda");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend runs the real-scale forward on a real cuda device");
+
+    let expected = cpu.root();
+    let actual = cuda.root();
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0f32;
+    let mut worst_index = 0usize;
+    for (index, (&got, &want)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            got.is_finite(),
+            "cuda, via the wrapper, produced a non-finite value at index {index}: {got}"
+        );
+        if (got - want).abs() > max_diff {
+            max_diff = (got - want).abs();
+            worst_index = index;
+        }
+    }
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude.max(f32::MIN_POSITIVE);
+    eprintln!(
+        "cuda real-scale forward parity: max_diff={max_diff} max_magnitude={max_magnitude} relative={relative} worst_index={worst_index} cpu_at_worst={} cuda_at_worst={}",
+        expected[worst_index], actual[worst_index]
+    );
+    assert!(
+        relative < 1e-4,
+        "omega::backend's cpu and cuda arms disagree on the real-scale forward: relative={relative} max_diff={max_diff}"
+    );
+}
+
+#[test]
+fn the_qwen3_gqa_qk_norm_decode_step_after_a_prefill_runs_on_cuda_at_cpu_parity() {
+    let (program, symbols, roots, owned) = qwen3_gqa_qk_norm_forward_fixture(1, 5);
+    let named = as_named_blocks(&owned);
+
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the post-prefill decode step on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named)
+        .expect("omega::backend runs the post-prefill decode step on cpu");
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the post-prefill decode step on cuda");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend runs the post-prefill decode step on a real cuda device");
+
+    let expected = cpu.root();
+    let actual = cuda.root();
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(
+            got.is_finite(),
+            "cuda, via the wrapper, produced a non-finite value: {got}"
+        );
+        max_diff = max_diff.max((got - want).abs());
+    }
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude.max(f32::MIN_POSITIVE);
+    eprintln!(
+        "cuda post-prefill decode step parity: max_diff={max_diff} max_magnitude={max_magnitude} relative={relative}"
+    );
+    assert!(
+        relative < 1e-4,
+        "omega::backend's cpu and cuda arms disagree on the post-prefill decode step: relative={relative} max_diff={max_diff}"
+    );
+}
