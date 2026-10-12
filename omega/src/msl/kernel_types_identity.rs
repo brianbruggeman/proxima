@@ -1612,10 +1612,9 @@ static inline float bf4_e2m1_element(device const uchar *payload, uint index) {
 /// so far (see `proxima_tensor::cpu`). Free function, not an inherent
 /// method: `Codec` is `proxima_primitives::Codec`, foreign to this crate
 /// (guiding-principles §20 rules out a blanket impl / newtype to host one).
-// arm-only-used: every real caller (`cuda_driver::packed_codec`,
-// `wgpu_driver::packed_operands_of`, `metal::device_buffers_arena_plan::
+// arm-only-used: every real caller (`wgpu_driver::packed_operands_of`, `metal::device_buffers_arena_plan::
 // packed_operands_of`, this doc's own list) lives behind a driver feature
-// that is off in a default x86_64 build (`cuda-driver`/`wgpu-backend` are
+// that is off in a default x86_64 build (`wgpu-backend` is
 // non-default; `metal` additionally requires `target_os = "macos"`) --
 // without this the function is genuinely dead there, not merely unused in
 // one crate's tests.
@@ -1623,7 +1622,6 @@ static inline float bf4_e2m1_element(device const uchar *payload, uint index) {
     feature = "std",
     any(
         all(feature = "metal", target_os = "macos"),
-        feature = "cuda-driver",
         feature = "wgpu-backend"
     )
 ))]
