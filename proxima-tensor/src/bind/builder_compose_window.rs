@@ -624,6 +624,14 @@ pub(super) fn build_elementwise_op(
 ) -> BoundOp {
     let extents = shapes.of(node).to_vec();
     let (composed_body, built_operands) = compose(shapes, held, body, operands, constants);
+    #[cfg(feature = "instrument")]
+    debug!(
+        node = node.0,
+        extents = ?extents,
+        steps = ?composed_body.steps,
+        operands = ?built_operands,
+        "composed elementwise bound op"
+    );
     BoundOp {
         node,
         dtype,
