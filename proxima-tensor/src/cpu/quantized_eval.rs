@@ -210,15 +210,11 @@ pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
     resolved: &[BoundOp],
     shapes: &shape::Shapes,
     quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
-    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
     buffers: &mut [Option<Cow<'_, [f32]>>],
 ) -> Result<(), TensorError> {
     for (computed, operand, row_shape) in non_primary_operand_reads(resolved, quantized_weights) {
         #[cfg(not(feature = "instrument"))]
         let _ = computed;
-        if expert_sources.is_some_and(|sources| sources.contains_key(&operand)) {
-            continue;
-        }
         #[cfg(feature = "instrument")]
         if buffers[operand.0 as usize].is_none() && quantized_weights.contains_key(&operand) {
             debug!(
@@ -229,7 +225,7 @@ pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
                 consumer_name = ?program.get(computed.node.0 as usize).and_then(Op::name),
                 consumer_kind = ?computed.kind,
                 consumer_extents = ?computed.extents,
-                direct_quantized_gather = quantized_gather_operand(computed).is_some(),
+                direct_quantized_gather = packed_gather_read(computed, Some(quantized_weights)).is_some(),
                 "quantized operand selected for materialization"
             );
         }
@@ -250,13 +246,7 @@ pub(super) fn non_primary_operand_reads<'resolved>(
 ) -> impl Iterator<Item = (&'resolved BoundOp, NodeId, Option<(usize, usize)>)> {
     resolved
         .iter()
-        .filter(|computed| {
-            !quantized_gather_operand(computed).is_some_and(|(source, lookup)| {
-                quantized_weights
-                    .get(&source)
-                    .is_some_and(|block| quantized_gather_row_is_aligned(&lookup, block))
-            })
-        })
+        .filter(|computed| packed_gather_read(computed, Some(quantized_weights)).is_none())
         .flat_map(|computed| {
             let sources: &[(NodeId, bind::Layout, Option<bind::Lookup>)] = match &computed.kind {
                 BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. } => {
@@ -512,7 +502,6 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
         &resolved,
         &shapes,
         &quantized_weights,
-        expert_sources,
         &mut buffers,
     )?;
     // The weight's own `NodeId` can ALSO be named directly in
