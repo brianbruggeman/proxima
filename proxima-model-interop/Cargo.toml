@@ -689,6 +689,11 @@ required-features = ["metal", "instrument"]
 [target.'cfg(not(target_os = "windows"))'.dev-dependencies]
 sha2 = { version = "0.10.9", default-features = false, features = ["asm"] }
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSString", "NSError", "NSObject"] }
+objc2-metal = { version = "0.3.2", default-features = false, features = ["MTLDevice", "MTLLibrary", "MTLBuffer", "MTLResource", "MTLAllocation", "MTLCommandQueue", "MTLCommandBuffer", "MTLCommandEncoder", "MTLComputeCommandEncoder", "MTLComputePipeline", "MTLTypes"] }
+
 # Loads the hand-written granite config, expands `repeat` and `pattern`, and lowers it with
 # `build_forward` -- the descriptor loader (conflaguration, toml) is `std`-gated.
 [[example]]
