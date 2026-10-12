@@ -21,6 +21,7 @@ use super::mlx_config_fields::{
     FamilyFields, GEMMA_FLOATS, GEMMA_INTS, GRANITE_FLOATS, GRANITE_INTS, KeyTable, gemma_fields,
     granite_fields, table_fields, tied_embeddings,
 };
+use super::mlx_conventions::QuantizedConventions;
 use super::mlx_names::{Layout, SANDWICH_NORM_LAYOUT, STANDARD_LAYOUT};
 use crate::bind::{ModelHparams, architecture_from_metadata, metadata_str};
 use crate::error::InteropError;
@@ -44,10 +45,34 @@ struct FamilyLayout {
     computed: FamilyFields,
     tensor_layout: Layout,
     tensor_prefix: &'static str,
+    quantized: QuantizedConventions,
     hparams: HparamsReader,
 }
 
 type HparamsReader = fn(&ParsedGguf) -> Result<ModelHparams, InteropError>;
+
+type FamilyExport = (Layout, &'static str, QuantizedConventions, ModelHparams);
+
+/// mlx-lm `granitemoe.py`: `sanitize` splits `input_linear` into
+/// `switch_mlp.gate_proj` and `switch_mlp.up_proj` and renames `output_linear`
+/// to `switch_mlp.down_proj` before it quantizes, and `quant_predicate` gives
+/// `router.layer` 8 bits.
+pub(super) const GRANITE_QUANTIZED: QuantizedConventions = QuantizedConventions {
+    renames: &[
+        (
+            "block_sparse_moe.input_linear",
+            &[
+                "block_sparse_moe.switch_mlp.gate_proj",
+                "block_sparse_moe.switch_mlp.up_proj",
+            ],
+        ),
+        (
+            "block_sparse_moe.output_linear",
+            &["block_sparse_moe.switch_mlp.down_proj"],
+        ),
+    ],
+    bits: &[("block_sparse_moe.router.layer", 8)],
+};
 
 const FAMILIES: [FamilyLayout; 2] = [
     FamilyLayout {
@@ -61,6 +86,7 @@ const FAMILIES: [FamilyLayout; 2] = [
         computed: granite_fields,
         tensor_layout: STANDARD_LAYOUT,
         tensor_prefix: "model.",
+        quantized: GRANITE_QUANTIZED,
         hparams: architecture_from_metadata,
     },
     FamilyLayout {
@@ -74,6 +100,7 @@ const FAMILIES: [FamilyLayout; 2] = [
         computed: gemma_fields,
         tensor_layout: SANDWICH_NORM_LAYOUT,
         tensor_prefix: "language_model.model.",
+        quantized: QuantizedConventions::NONE,
         hparams: gemma_hparams,
     },
 ];
@@ -96,6 +123,24 @@ pub fn hf_config_bytes(
     metadata: &ParsedGguf,
     quantization: Option<(u8, u32)>,
 ) -> Result<Vec<u8>, InteropError> {
+    hf_config_bytes_with_overrides(hparams, metadata, quantization, &[])
+}
+
+/// [`hf_config_bytes`] for an export whose modules are not all quantized at
+/// the same width: each `(module path, bits)` of `overrides` adds a
+/// `quantization.<module path>` entry at the export's group size, which is the
+/// per-module form mlx-lm's loader reads.
+///
+/// # Errors
+///
+/// As [`hf_config_bytes`].
+#[must_use = "the config bytes are the export's config.json"]
+pub fn hf_config_bytes_with_overrides(
+    hparams: &ModelHparams,
+    metadata: &ParsedGguf,
+    quantization: Option<(u8, u32)>,
+    overrides: &[(String, u8)],
+) -> Result<Vec<u8>, InteropError> {
     let layout = family_layout(&hparams.family)?;
     let fields = text_fields(hparams, metadata, layout)?;
     let mut root = root_fields(&fields, layout)?;
@@ -105,7 +150,15 @@ pub fn hf_config_bytes(
         root.insert(name.into(), Value::Object(nested));
     }
     if let Some((bits, group_size)) = quantization {
-        let block = json!({"group_size": group_size, "bits": bits, "mode": "affine"});
+        let mut block = json!({"group_size": group_size, "bits": bits, "mode": "affine"});
+        if let Some(entries) = block.as_object_mut() {
+            overrides.iter().for_each(|(module, module_bits)| {
+                entries.insert(
+                    module.clone(),
+                    json!({"group_size": group_size, "bits": module_bits}),
+                );
+            });
+        }
         root.insert("quantization".into(), block.clone());
         root.insert("quantization_config".into(), block);
     }
@@ -150,19 +203,23 @@ pub fn copy_config(source: &[u8]) -> Result<Vec<u8>, InteropError> {
 }
 
 /// The tensor naming and hyperparameters an MLX export of `parsed` needs:
-/// the name layout, the HF prefix of the decoder tensors, and the
-/// [`ModelHparams`] the family reads from its GGUF.
+/// the name layout, the HF prefix of the decoder tensors, the
+/// [`QuantizedConventions`] of the family and the [`ModelHparams`] its reader
+/// builds from the GGUF.
 ///
 /// # Errors
 ///
 /// [`InteropError::UnknownFamilyConfig`] for a family with no layout here;
 /// the metadata errors of the family's reader.
-pub(super) fn family_export(
-    parsed: &ParsedGguf,
-) -> Result<(Layout, &'static str, ModelHparams), InteropError> {
+pub(super) fn family_export(parsed: &ParsedGguf) -> Result<FamilyExport, InteropError> {
     let layout = family_layout(metadata_str(parsed, "general.architecture")?)?;
     let hparams = (layout.hparams)(parsed)?;
-    Ok((layout.tensor_layout, layout.tensor_prefix, hparams))
+    Ok((
+        layout.tensor_layout,
+        layout.tensor_prefix,
+        layout.quantized,
+        hparams,
+    ))
 }
 
 fn gemma_hparams(parsed: &ParsedGguf) -> Result<ModelHparams, InteropError> {

@@ -169,11 +169,17 @@ mod mlx_config;
 #[cfg(feature = "std")]
 mod mlx_config_fields;
 #[cfg(feature = "std")]
+mod mlx_conventions;
+#[cfg(feature = "std")]
+pub use mlx_conventions::QuantizedConventions;
+#[cfg(feature = "std")]
 mod mlx_names;
 #[cfg(feature = "std")]
 mod mlx_tokenizer;
 #[cfg(feature = "std")]
-pub use mlx_config::{copy_config, hf_config_bytes, sliding_pattern_hparams};
+pub use mlx_config::{
+    copy_config, hf_config_bytes, hf_config_bytes_with_overrides, sliding_pattern_hparams,
+};
 #[cfg(feature = "std")]
 pub use mlx_names::{Layout, MlxNames, SANDWICH_NORM_LAYOUT, STANDARD_LAYOUT, dense_names};
 #[cfg(feature = "std")]

@@ -3,7 +3,7 @@
 //!
 //! [`mlx_directory_files`] is the sans-IO half: it composes
 //! [`super::export_plain_named`] or [`super::export_affine_named`],
-//! [`super::MlxExport::assemble`], [`super::hf_config_bytes`] and
+//! [`super::MlxExport::assemble`], [`super::hf_config_bytes_with_overrides`] and
 //! [`super::export_tokenizer`] and returns `(file name, bytes)` pairs.
 //! [`export_mlx_directory`] is the filesystem edge the CLI calls; compose the
 //! pure half directly when the caller owns the destination.
@@ -21,7 +21,7 @@ use proxima_tensor::DType;
 
 use super::mlx::{MLX_INDEX_FILE_NAME, MLX_MAX_SHARD_BYTES, MlxExport};
 use super::mlx_affine::AffineParams;
-use super::mlx_config::{family_export, hf_config_bytes};
+use super::mlx_config::{family_export, hf_config_bytes_with_overrides};
 use super::mlx_packed_named::export_affine_named;
 use super::mlx_plain::PlainTensor;
 use super::mlx_plain_named::export_plain_named;
@@ -47,20 +47,30 @@ pub fn mlx_directory_files(
     quantization: Option<AffineParams>,
     dtype: DType,
 ) -> Result<Vec<(String, Vec<u8>)>, InteropError> {
-    let (layout, hf_prefix, hparams) = family_export(parsed)?;
+    let (layout, hf_prefix, conventions, hparams) = family_export(parsed)?;
     let binding = binding_profile(&hparams.family)?;
     let tensors = match quantization {
         Some(params) => export_affine_named(
-            parsed, file_bytes, params, dtype, &binding, layout, hf_prefix,
+            parsed,
+            file_bytes,
+            params,
+            dtype,
+            &binding,
+            layout,
+            hf_prefix,
+            conventions,
         )?,
         None => export_plain_named(parsed, file_bytes, dtype, &binding, layout, hf_prefix)?,
     };
+    let overrides = quantization.map_or_else(Vec::new, |params| {
+        conventions.overrides(tensors.iter().map(|tensor| tensor.name.as_str()), params)
+    });
     let mut files = weight_files(&tensors)?;
     drop(tensors);
     let marker = quantization.map(config_marker).transpose()?;
     files.push((
         CONFIG_FILE_NAME.to_string(),
-        hf_config_bytes(&hparams, parsed, marker)?,
+        hf_config_bytes_with_overrides(&hparams, parsed, marker, &overrides)?,
     ));
     let tokenizer = export_tokenizer(parsed)?;
     files.push((TOKENIZER_FILE_NAME.to_string(), tokenizer.tokenizer_json));

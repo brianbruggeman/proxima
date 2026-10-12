@@ -30,7 +30,6 @@ const EXPECTED_FILES: [&str; 4] = [
 ];
 const E2B_TOWER_PREFIXES: [&str; 4] =
     ["audio_tower", "embed_audio", "embed_vision", "vision_tower"];
-const FUSED_HALF_SUFFIX: &str = "ffn_up_exps.weight";
 const EXTRA_LEAF: &str = "rope_freqs.weight";
 
 struct Model {
@@ -132,20 +131,31 @@ fn written_files(directory: &Path) -> BTreeSet<String> {
         .filter(|name| name != DONE_MARKER)
         .collect()
 }
-
-fn header_names(path: &Path) -> Vec<String> {
+fn header_object(path: &Path) -> serde_json::Map<String, Value> {
     let mut file = File::open(path).expect("open safetensors");
     let mut length = [0u8; 8];
     file.read_exact(&mut length).expect("read header length");
     let mut header = vec![0u8; usize::try_from(u64::from_le_bytes(length)).expect("header fits")];
     file.read_exact(&mut header).expect("read header");
     let parsed: Value = serde_json::from_slice(&header).expect("header is json");
-    let object = parsed.as_object().expect("header is an object");
-    object
+    parsed.as_object().expect("header is an object").clone()
+}
+
+fn header_names(path: &Path) -> Vec<String> {
+    header_object(path)
         .keys()
         .filter(|name| *name != "__metadata__")
         .cloned()
         .collect()
+}
+
+fn last_dimension(path: &Path, tensor: &str) -> u64 {
+    let header = header_object(path);
+    let shape = header[tensor]["shape"].as_array().expect("tensor shape");
+    shape
+        .last()
+        .and_then(Value::as_u64)
+        .expect("last dimension")
 }
 
 fn exported_names(model: &Model) -> Vec<String> {
@@ -180,12 +190,8 @@ fn gguf_names(model: &Model) -> (u64, Vec<String>) {
 fn expected_leaf_count(model: &Model) -> usize {
     let (declared, names) = gguf_names(model);
     assert_eq!(declared, names.len() as u64, "tensor_count vs directory");
-    let absorbed = names
-        .iter()
-        .filter(|name| name.ends_with(FUSED_HALF_SUFFIX))
-        .count();
     let extra = names.iter().filter(|name| *name == EXTRA_LEAF).count();
-    names.len() - absorbed - extra
+    names.len() - extra
 }
 
 fn reference_names(model: &Model) -> Vec<String> {
@@ -236,8 +242,7 @@ fn mlx_cli_export_e2b_writes_exactly_config_weights_and_two_tokenizer_files() {
 }
 
 #[test]
-fn mlx_cli_export_granite_float_tensors_plus_quantized_leaves_equal_gguf_tensors_less_fused_halves()
-{
+fn mlx_cli_export_granite_float_tensors_plus_quantized_leaves_equal_gguf_tensors() {
     assert_leaves_equal_gguf_directory(&GRANITE);
 }
 
@@ -287,4 +292,65 @@ fn mlx_cli_export_reference_degenerate_control_header_missing_one_tensor_disagre
     reference.pop();
     let exported = exported_names(&GRANITE);
     assert!(agrees(exported.len(), reference.len()).is_err());
+}
+
+const SWITCH_MLP_PROJECTIONS: [&str; 3] = ["gate_proj", "up_proj", "down_proj"];
+const ROUTER_MODULE: &str = "block_sparse_moe.router.layer";
+
+fn config_of(directory: &Path) -> Value {
+    let bytes = read(directory.join("config.json")).expect("read config.json");
+    serde_json::from_slice(&bytes).expect("config is json")
+}
+
+#[test]
+fn mlx_cli_export_granite_names_the_experts_as_mlx_lm_switch_mlp_projections() {
+    let names = exported_names(&GRANITE);
+
+    let missing: Vec<String> = (0..24)
+        .flat_map(|layer| {
+            SWITCH_MLP_PROJECTIONS.map(|projection| {
+                format!("model.layers.{layer}.block_sparse_moe.switch_mlp.{projection}.scales")
+            })
+        })
+        .filter(|name| !names.contains(name))
+        .collect();
+
+    assert_eq!(missing, Vec::<String>::new());
+    assert!(
+        names
+            .iter()
+            .all(|name| !name.contains("input_linear") && !name.contains("output_linear"))
+    );
+}
+
+#[test]
+fn mlx_cli_export_granite_router_is_8_bit_in_the_weights_and_in_the_config() {
+    let directory = exported_directory(&GRANITE);
+    let weights = directory.join("model.safetensors");
+    let router = format!("model.layers.0.{ROUTER_MODULE}");
+
+    let packed_words = last_dimension(&weights, &format!("{router}.weight"));
+    let groups = last_dimension(&weights, &format!("{router}.scales"));
+    let config = config_of(&directory);
+
+    assert_eq!((packed_words, groups), (1024 * 8 / 32, 1024 / 64));
+    let entries = (0..24)
+        .map(|layer| &config["quantization"][format!("model.layers.{layer}.{ROUTER_MODULE}")])
+        .filter(|entry| entry["bits"] == 8 && entry["group_size"] == 64)
+        .count();
+    assert_eq!(entries, 24);
+}
+
+#[test]
+fn mlx_cli_export_e2b_config_carries_no_per_module_quantization_entries() {
+    let config = config_of(&exported_directory(&E2B));
+
+    let modules = config["quantization"]
+        .as_object()
+        .expect("quantization block")
+        .values()
+        .filter(|value| value.is_object())
+        .count();
+
+    assert_eq!(modules, 0);
 }

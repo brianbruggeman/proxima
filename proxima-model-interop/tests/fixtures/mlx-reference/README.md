@@ -51,14 +51,15 @@ found by search (`granite-3.2-8b-instruct-preview-4bit`, `granite-3.3-*-4bit`, `
 `granite-4.0-tiny-preview-4bit`, `granite-4.0-h-*-4bit`) are dense, hybrid-mamba or `granitemoehybrid` models, not `granitemoe`.
 Every granite `affine4` row is therefore self-referential and says nothing about mlx-lm's output. What the files are:
 
-- `header.json` (65986 bytes) is derived from the vendored `plain/header.json` by one `jq` program: for each tensor whose name
-  ends in `.weight`, with at least two dimensions and a last dimension divisible by 64, replace it with `weight` (U32, last dim
-  `x 4 / 32`), `scales` and `biases` (BF16, last dim `/ 64`); other tensors are copied; names sorted; offsets assigned
-  contiguously; `__metadata__` `{"format":"mlx"}`. The rule and shapes are transcribed from mlx's `quantize`, not from this crate's output
-- `config.json` is `plain/config.json` plus `quantization` and `quantization_config` `{group_size 64, bits 4, mode affine}`
+- `header.json` is written by `cargo run -p proxima-model-interop --features std --example mlx_granite_affine_header -- <this directory>` from the vendored
+  `plain/header.json`: `sanitize` of the installed mlx-lm `granitemoe.py` splits `input_linear` into `switch_mlp.gate_proj` and `switch_mlp.up_proj` along
+  the row axis and renames `output_linear` to `switch_mlp.down_proj`; then each `.weight` with at least two dimensions and a last dimension divisible by 64
+  becomes `weight` (U32, last dim `x bits / 32`), `scales` and `biases` (BF16, last dim `/ 64`), other tensors are copied; names sorted; offsets assigned
+  contiguously; `__metadata__` `{"format":"mlx"}`. The rule is transcribed from mlx-lm and mlx `quantize`, not from this crate's output
+- `config.json` is `plain/config.json` plus `quantization` and `quantization_config` `{group_size 64, bits 4, mode affine}` and, in both blocks, one `{group_size 64, bits 8}` entry per layer for `model.layers.N.block_sparse_moe.router.layer`
 - `model.layers.0.self_attn.k_proj.{weight.u32,scales.bf16,biases.bf16}.bin` are the output of this crate's `export_affine` at (4, 64) over
   `plain/model.layers.0.self_attn.k_proj.weight.bf16.bin` read as exact f32; shapes `[512, 128]`, `[512, 16]`, `[512, 16]`, 262144, 16384 and 16384 bytes.
   They are the crate agreeing with itself, so a slice 12 comparison on these rows is an identity check and only the gemma rows are external
-- mlx-lm's `granitemoe.py` (main, fetched 2026-10-11) renames the fused expert stacks on load to
-  `block_sparse_moe.switch_mlp.{gate_proj,up_proj,down_proj}` and quantizes `router.layer`, `self_attn.o_proj` and `mlp.down_proj` at 8 bits
-  (`quant_predicate`); this header keeps the IBM names and a uniform 4 bits, as the export does
+- mlx-lm's `granitemoe.py` quantizes `router.layer` at 8 bits (`quant_predicate`) and the rest at the export's width; the installed copy under
+  `~/.venvs/mlx` was read 2026-10-12 and carries no `o_proj` or `down_proj` rule. The export and this header now share that layout, and `config.json` lists the
+  routers per module as the loader reads them
