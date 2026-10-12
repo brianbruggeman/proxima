@@ -44,6 +44,8 @@ pub mod command_buffer_plan;
 pub mod backend;
 #[cfg(feature = "std")]
 pub mod config;
+#[cfg(all(feature = "coreml-lane", target_os = "macos"))]
+pub mod coreml;
 #[cfg(feature = "cuda")]
 pub mod cuda;
 #[cfg(feature = "cuda-driver")]
