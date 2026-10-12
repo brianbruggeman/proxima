@@ -2,7 +2,9 @@ use alloc::collections::BTreeMap;
 
 use proxima_primitives::float_layout::FloatLayout;
 
-use super::tests::{TILED_ADMITTED_TOKENS, gathered_matmul_op, matmul_op, tiled_gemm_op};
+#[cfg(feature = "metal-tiled-gemm")]
+use super::tests::{TILED_ADMITTED_TOKENS, gathered_matmul_op, tiled_gemm_op};
+use super::tests::matmul_op;
 use super::*;
 
 const ROW_BLOCKED_1024X512: &str =
@@ -107,14 +109,19 @@ fn scaled_e3m2_render_decode_carries_bias_3_and_field_masks() {
     assert_ne!(source, rebiased);
 }
 
+#[cfg(feature = "metal-tiled-gemm")]
 const GROUPED_EXPERTS: u32 = 8;
+#[cfg(feature = "metal-tiled-gemm")]
 const GROUPED_ROWS: u32 = 192;
+#[cfg(feature = "metal-tiled-gemm")]
 const GROUPED_REDUCTION: u32 = 512;
 
+#[cfg(feature = "metal-tiled-gemm")]
 fn tiled_source() -> String {
     e3m2_kernel_source(&tiled_gemm_op(TILED_ADMITTED_TOKENS, 512, 192))
 }
 
+#[cfg(feature = "metal-tiled-gemm")]
 fn grouped_source() -> String {
     e3m2_kernel_source(&gathered_matmul_op(
         300,
@@ -124,10 +131,12 @@ fn grouped_source() -> String {
     ))
 }
 
+#[cfg(feature = "metal-tiled-gemm")]
 fn e3m2_decode_description() -> TiledDecode {
     tiled_decode(Codec::Fp6E3M2).expect("the e3m2 codec has a tiled decode description")
 }
 
+#[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn scaled_e3m2_render_tiled_decode_elements_32_bytes_26() {
     let decode = e3m2_decode_description();
@@ -143,6 +152,7 @@ fn scaled_e3m2_render_tiled_decode_elements_32_bytes_26() {
     assert!(source.contains(decode.msl));
 }
 
+#[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn scaled_e3m2_render_grouped_gemm_source_uses_the_tiled_decode() {
     let decode = e3m2_decode_description();
@@ -159,6 +169,7 @@ fn scaled_e3m2_render_grouped_gemm_source_uses_the_tiled_decode() {
     assert!(source.contains(&format!("+= 1u * {};", decode.block_bytes)));
 }
 
+#[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn scaled_e3m2_render_model_name_free() {
     let sources = [
