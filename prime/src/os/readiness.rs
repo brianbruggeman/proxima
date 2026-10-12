@@ -116,9 +116,7 @@ impl Readiness {
             let key = match self.source {
                 Some(existing) => existing,
                 None => {
-                    let registered = reactor
-                        .register(fd, Interest::Read)
-                        .map_err(|err| registration_failed(errno_of(&err)))?;
+                    let registered = reactor.register(fd, Interest::Read)?;
                     self.source = Some(registered);
                     self.owner = Some(reactor.wakeup());
                     registered
@@ -127,11 +125,9 @@ impl Readiness {
             #[cfg(windows)]
             reactor.rearm(key, Interest::Read)?;
             if !reactor.register_read_waker_ref(key, context.waker()) {
-                return Err(registration_failed(-1));
+                return Err(stale_registration());
             }
-            reactor
-                .read_ready_epoch(key)
-                .ok_or_else(|| registration_failed(-1))
+            reactor.read_ready_epoch(key).ok_or_else(stale_registration)
         });
         let Some(epoch_result) = outcome else {
             if self.owner.is_some() {
@@ -173,14 +169,8 @@ impl Drop for Readiness {
     }
 }
 
-fn errno_of(error: &io::Error) -> i32 {
-    error.raw_os_error().unwrap_or(-1)
-}
-
-fn registration_failed(errno: i32) -> io::Error {
-    io::Error::other(format!(
-        "reactor read-readiness registration failed (errno {errno})"
-    ))
+fn stale_registration() -> io::Error {
+    io::Error::from(io::ErrorKind::NotFound)
 }
 
 #[cfg(test)]
@@ -204,5 +194,31 @@ mod tests {
             .expect("polling off-worker never fails");
 
         assert_eq!(outcome, ReadyState::OffWorker);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registration_error_keeps_raw_errno() {
+        use super::super::core_shard::launch_with_lanes;
+        use proxima_runtime::CoreId;
+        use std::sync::mpsc;
+
+        let (sender, receiver) = mpsc::channel();
+        let handle = launch_with_lanes(CoreId(0), None, 2, 16).expect("launch worker");
+        handle
+            .dispatch_send(Box::pin(async move {
+                let mut readiness = Readiness::new(-1);
+                let outcome =
+                    std::future::poll_fn(|context| std::task::Poll::Ready(readiness.poll(context)))
+                        .await;
+                let errno = outcome.err().and_then(|error| error.raw_os_error());
+                sender.send(errno).expect("report errno to test thread");
+            }))
+            .expect("dispatch probe to worker");
+
+        let errno = receiver.recv().expect("worker reports registration result");
+
+        assert_eq!(errno, Some(libc::EBADF));
+        handle.shutdown_and_join().expect("shutdown worker");
     }
 }

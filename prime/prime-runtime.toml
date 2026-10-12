@@ -22,6 +22,9 @@ run_queue_capacity = 1024
 
 [reactor]
 slab_initial_cap = 256
+# kernel events dequeued per reactor turn (kevent/epoll_wait/GetQueuedCompletionStatusEx batch);
+# raising it wakes more sources per syscall at event_batch * sizeof(event) resident bytes.
+event_batch = 256
 # worker drive's spin-then-park policy (core_shard.rs worker_main): how many
 # `consumer.try_recv()` spin iterations to run before committing to a
 # `reactor.turn` syscall (kevent/epoll_wait) when the executor is idle.

@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::os::windows::io::{AsSocket, OwnedSocket};
 
 use polling::{Event, Events, Poller};
@@ -5,6 +6,7 @@ use polling::{Event, Events, Poller};
 use super::{
     Arc, AtomicBool, Duration, Interest, Ordering, SourceKey, Waker, Wakeup, WakeupInner, io,
 };
+use crate::core::sized;
 
 struct SourceSlot {
     socket: Option<OwnedSocket>,
@@ -14,6 +16,7 @@ struct SourceSlot {
     read_ready_epoch: u32,
     read_armed: bool,
     write_armed: bool,
+    next_free: Option<u32>,
 }
 
 /// owns the source slab; `polling` supplies IOCP waiting and notification.
@@ -21,7 +24,7 @@ pub struct Reactor {
     poller: Arc<Poller>,
     events: Events,
     slab: Vec<SourceSlot>,
-    free: Vec<u32>,
+    free_head: Option<u32>,
     next_generation: u32,
     live_sources: usize,
     pub(super) wakeup: Wakeup,
@@ -40,9 +43,11 @@ impl Reactor {
         };
         Ok(Self {
             poller,
-            events: Events::new(),
-            slab: Vec::new(),
-            free: Vec::new(),
+            events: Events::with_capacity(
+                NonZeroUsize::new(sized::REACTOR_EVENT_BATCH).unwrap_or(NonZeroUsize::MIN),
+            ),
+            slab: Vec::with_capacity(sized::REACTOR_SLAB_INITIAL_CAP),
+            free_head: None,
             next_generation: 1,
             live_sources: 0,
             wakeup,
@@ -69,8 +74,8 @@ impl Reactor {
 
     pub fn register(&mut self, source: impl AsSocket, interest: Interest) -> io::Result<SourceKey> {
         let socket = source.as_socket().try_clone_to_owned()?;
-        let index = match self.free.last() {
-            Some(index) => *index,
+        let index = match self.free_head {
+            Some(index) => index,
             None => u32::try_from(self.slab.len())
                 .map_err(|_| io::Error::other("reactor source capacity exhausted"))?,
         };
@@ -84,6 +89,7 @@ impl Reactor {
             read_ready_epoch: 0,
             read_armed: interest.wants_read(),
             write_armed: interest.wants_write(),
+            next_free: None,
         };
         // safety: the slab owns the duplicate until deletion completes.
         unsafe {
@@ -91,8 +97,10 @@ impl Reactor {
                 .add(&socket, event_for(key, slot.read_armed, slot.write_armed)?)?
         };
         slot.socket = Some(socket);
-        if self.free.pop().is_some() {
-            self.slab[index as usize] = slot;
+        if self.free_head.is_some() {
+            let reused = &mut self.slab[index as usize];
+            self.free_head = reused.next_free;
+            *reused = slot;
         } else {
             self.slab.push(slot);
         }
@@ -157,7 +165,7 @@ impl Reactor {
         slot.write_waker = None;
         slot.read_armed = false;
         slot.write_armed = false;
-        self.free.push(key.index);
+        slot.next_free = self.free_head.replace(key.index);
         self.live_sources -= 1;
         Ok(())
     }

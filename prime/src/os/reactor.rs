@@ -24,6 +24,9 @@ use std::task::Waker;
 use std::time::Duration;
 
 use crossbeam_queue::SegQueue;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use super::super::core::sized;
 #[cfg(unix)]
 pub(crate) type OwnedSource = std::os::fd::OwnedFd;
 #[cfg(windows)]
@@ -97,10 +100,18 @@ impl Wakeup {
         }
     }
 
+    #[cfg(all(
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-inbox-alloc"
+    ))]
     pub(crate) fn same_owner(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
+    #[cfg(all(
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-inbox-alloc"
+    ))]
     pub(crate) fn release_source(&self, key: SourceKey, socket: OwnedSource) {
         if !self.inner.alive.load(Ordering::Acquire) {
             return;
@@ -195,6 +206,7 @@ struct SourceSlot {
     write_waker: Option<Waker>,
     read_ready_epoch: u32,
     write_ready_epoch: u32,
+    next_free: Option<u32>,
 }
 
 /// Bump the generation counter, skipping 0 (the dead sentinel).
@@ -219,7 +231,7 @@ mod kqueue {
 
     pub struct Reactor {
         kq: RawFd,
-        slab: Vec<SourceSlot>,
+        pub(super) slab: Vec<SourceSlot>,
         free_head: Option<u32>,
         next_generation: u32,
         events_buf: Vec<libc::kevent>,
@@ -266,10 +278,13 @@ mod kqueue {
             };
             Ok(Self {
                 kq,
-                slab: Vec::new(),
+                slab: Vec::with_capacity(sized::REACTOR_SLAB_INITIAL_CAP),
                 free_head: None,
                 next_generation: 1,
-                events_buf: vec![unsafe { MaybeUninit::zeroed().assume_init() }; 256],
+                events_buf: vec![
+                    unsafe { MaybeUninit::zeroed().assume_init() };
+                    sized::REACTOR_EVENT_BATCH
+                ],
                 live_sources: 0,
                 wakeup,
             })
@@ -305,9 +320,10 @@ mod kqueue {
         pub fn register(&mut self, fd: RawFd, interest: Interest) -> io::Result<SourceKey> {
             let generation = self.next_generation;
             self.next_generation = super::bump_generation(self.next_generation);
-            let index = match self.free_head.take() {
+            let index = match self.free_head {
                 Some(free) => {
                     let slot = &mut self.slab[free as usize];
+                    self.free_head = slot.next_free.take();
                     debug_assert!(slot.generation == 0, "free slot held a live source");
                     slot.fd = fd;
                     slot.interest = interest;
@@ -329,6 +345,8 @@ mod kqueue {
                         write_waker: None,
                         read_ready_epoch: 0,
                         write_ready_epoch: 0,
+
+                        next_free: None,
                     });
                     raw as u32
                 }
@@ -399,8 +417,9 @@ mod kqueue {
                 slot.write_waker = None;
                 slot.read_ready_epoch = 0;
                 slot.write_ready_epoch = 0;
+                slot.next_free = self.free_head.replace(key.index);
             }
-            self.free_head = Some(key.index);
+
             self.live_sources = self.live_sources.saturating_sub(1);
             Ok(())
         }
@@ -652,7 +671,7 @@ mod epoll {
     pub struct Reactor {
         epfd: RawFd,
         eventfd: RawFd,
-        slab: Vec<SourceSlot>,
+        pub(super) slab: Vec<SourceSlot>,
         free_head: Option<u32>,
         next_generation: u32,
         events_buf: Vec<libc::epoll_event>,
@@ -697,10 +716,13 @@ mod epoll {
             Ok(Self {
                 epfd,
                 eventfd,
-                slab: Vec::new(),
+                slab: Vec::with_capacity(sized::REACTOR_SLAB_INITIAL_CAP),
                 free_head: None,
                 next_generation: 1,
-                events_buf: vec![libc::epoll_event { events: 0, u64: 0 }; 256],
+                events_buf: vec![
+                    libc::epoll_event { events: 0, u64: 0 };
+                    sized::REACTOR_EVENT_BATCH
+                ],
                 live_sources: 0,
                 wakeup,
             })
@@ -739,9 +761,10 @@ mod epoll {
         pub fn register(&mut self, fd: RawFd, interest: Interest) -> io::Result<SourceKey> {
             let generation = self.next_generation;
             self.next_generation = super::bump_generation(self.next_generation);
-            let index = match self.free_head.take() {
+            let index = match self.free_head {
                 Some(free) => {
                     let slot = &mut self.slab[free as usize];
+                    self.free_head = slot.next_free.take();
                     debug_assert!(slot.generation == 0, "free slot held a live source");
                     slot.fd = fd;
                     slot.interest = interest;
@@ -763,6 +786,8 @@ mod epoll {
                         write_waker: None,
                         read_ready_epoch: 0,
                         write_ready_epoch: 0,
+
+                        next_free: None,
                     });
                     raw as u32
                 }
@@ -838,7 +863,7 @@ mod epoll {
             slot.write_waker = None;
             slot.read_ready_epoch = 0;
             slot.write_ready_epoch = 0;
-            self.free_head = Some(key.index);
+            slot.next_free = self.free_head.replace(key.index);
             self.live_sources = self.live_sources.saturating_sub(1);
             Ok(())
         }
@@ -1050,6 +1075,10 @@ pub use windows::Reactor;
 compile_error!("runtime-prime-reactor requires macOS, Linux, or Windows");
 
 impl Reactor {
+    #[cfg(all(
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-inbox-alloc"
+    ))]
     pub(crate) fn owns(&self, owner: &Wakeup) -> bool {
         self.wakeup.same_owner(owner)
     }
@@ -1113,6 +1142,33 @@ mod tests {
 
     fn set_nonblocking(stream: &std::os::unix::net::UnixStream) {
         stream.set_nonblocking(true).expect("nonblocking");
+    }
+
+    #[test]
+    fn free_list_reuses_every_slot_after_ten_thousand_churns() {
+        let mut reactor = Reactor::new().expect("reactor");
+        let pairs = [socketpair(), socketpair(), socketpair()];
+
+        for _ in 0..10_000 {
+            let keys: Vec<SourceKey> = pairs
+                .iter()
+                .map(|(left, _)| {
+                    reactor
+                        .register(left.as_raw_fd(), Interest::Read)
+                        .expect("register")
+                })
+                .collect();
+            for key in keys {
+                reactor.deregister(key).expect("deregister");
+            }
+        }
+
+        assert_eq!(
+            reactor.slab.len(),
+            3,
+            "churn must reuse freed slots, not grow the slab"
+        );
+        assert_eq!(reactor.live_sources(), 0);
     }
 
     #[test]
