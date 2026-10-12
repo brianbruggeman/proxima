@@ -878,7 +878,7 @@ fn a_float16_dtyped_op_names_its_rejection_on_cuda_instead_of_misreading_a_half_
         ("rhs", QuantizedBlock::Float32(&rhs)),
     ];
 
-    let mut cuda_plan = plan_named(
+    let error = plan_named(
         Engine::Gpu,
         Some(GpuDriver::Cuda),
         &program,
@@ -887,9 +887,8 @@ fn a_float16_dtyped_op_names_its_rejection_on_cuda_instead_of_misreading_a_half_
         &[],
         NumericPolicy::default(),
     )
-    .expect("omega::backend plans the f16 matmul on cuda");
-    let error = execute_plan_named(&mut cuda_plan, &named)
-        .expect_err("a Float16-dtyped op must be rejected, not misread through an f32 buffer");
+    .err()
+    .expect("a Float16-dtyped op must be rejected at plan time, not misread through an f32 buffer");
     assert!(
         matches!(
             error,
