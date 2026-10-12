@@ -151,6 +151,8 @@ impl PlanIdentity {
             frequency_penalty: _,
             presence_penalty: _,
             seed: _,
+            // placed plans refuse a configured runtime, so none is built under one
+            omega_runtime: _,
             // the plan key's own second field
             kv_bucket_tokens: _,
             math_mode,

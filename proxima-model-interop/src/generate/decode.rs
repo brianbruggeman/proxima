@@ -2540,6 +2540,8 @@ impl<'file> LoadedModel<'file> {
         &self,
         serving_config: &ServingConfig<'config>,
     ) -> Result<ServingConfig<'config>, InteropError> {
+        #[cfg(feature = "metal")]
+        validate_omega_runtime_config(serving_config)?;
         let mut effective_serving_config = *serving_config;
         self.apply_command_buffer_chunks_default(&mut effective_serving_config);
         #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -3199,6 +3201,8 @@ impl<'file> LoadedModel<'file> {
         let mut local_speculative_stats = SpeculativeDecodeStats::default();
         let speculative_stats = speculative_stats.unwrap_or(&mut local_speculative_stats);
         let initial_speculative_stats = *speculative_stats;
+        #[cfg(feature = "metal")]
+        validate_omega_runtime_config(serving_config)?;
         let mut resolved_serving_config = *serving_config;
         self.apply_context_resolution(&mut resolved_serving_config)?;
         let serving_config = &resolved_serving_config;
@@ -7461,6 +7465,8 @@ did not hold every cached position)",
             #[cfg(all(feature = "metal", target_os = "macos"))]
             omega::MathMode::default(),
         );
+        #[cfg(feature = "metal")]
+        validate_omega_runtime_config(&serving_config)?;
         self.apply_context_resolution(&mut serving_config)?;
         let mut runtime = BackendRuntime::new(&serving_config);
 
