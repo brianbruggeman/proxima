@@ -245,8 +245,8 @@ use crate::error::EmitError;
 #[cfg(feature = "instrument")]
 use crate::msl::diagnose_packed_row_block;
 use crate::msl::{
-    gather_count, kernel_cache_key, kernel_cache_key_for_grid, kernel_dispatch_shape,
-    kernel_dispatch_shape_with_schedule, reduction_dims,
+    device_scalar_token, gather_count, kernel_cache_key, kernel_cache_key_for_grid,
+    kernel_dispatch_shape, kernel_dispatch_shape_with_schedule, reduction_dims,
 };
 #[cfg(feature = "metal-plan-stable-buffers")]
 use crate::sized::ARENA_TRANSIENT_CAP;
@@ -523,6 +523,9 @@ pub fn pack_uniforms_for(
     prepare_uniforms_pack::pack_uniforms(bound, numeric_policy)
 }
 
+#[cfg(all(test, feature = "float-layout-dtype"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod layout_admission_tests;
 #[cfg(test)]
 mod command_buffer_failed_label_tests {
     use super::label_or_unlabeled;

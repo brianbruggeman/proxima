@@ -1213,8 +1213,8 @@ pub(super) fn execute_plan_with_placements_inner(
                         .iter()
                         .map(|(node, layout, _lookup)| format!("{}:{:?}", node.0, layout.strides))
                         .collect();
-                    let output_len =
-                        bound_output_len(dump_bound).max(1) * dump_bound.dtype.size_bytes();
+                    let output_len = bound_output_len(dump_bound).max(1)
+                        * device_element_bytes(dump_bound.dtype);
                     debug!(
                         plan_shape,
                         position = dump_position as u64,
@@ -1341,7 +1341,7 @@ pub(super) fn execute_plan_with_placements_inner(
         if let (Some(target_nodes), Some((buffer, offset))) = (head_debug_target_nodes(), placement)
             && let Some(target_index) = target_nodes.iter().position(|node| *node == bound.node)
         {
-            let byte_length = bound_output_len(bound).max(1) * bound.dtype.size_bytes();
+            let byte_length = bound_output_len(bound).max(1) * device_element_bytes(bound.dtype);
             let (_, grid) = kernel_dispatch_shape(bound, packed_operands, plan.numeric_policy)?;
             debug!(
                 target_index = target_index as u64,
@@ -1381,7 +1381,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 .iter()
                 .any(|(_, copies)| copies.contains(&bound.node))
         {
-            let byte_length = bound_output_len(bound).max(1) * bound.dtype.size_bytes();
+            let byte_length = bound_output_len(bound).max(1) * device_element_bytes(bound.dtype);
             chunk_audit_record_write(
                 Retained::as_ptr(buffer) as usize,
                 offset,

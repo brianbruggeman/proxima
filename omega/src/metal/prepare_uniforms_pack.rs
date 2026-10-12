@@ -440,7 +440,7 @@ pub(super) fn reject_unsupported_gpu_dtype(
         if index_nodes.contains(&node) || packed_nodes.contains(&node) {
             continue;
         }
-        if !matches!(expr.dtype(), DType::Float32 | DType::Float16) {
+        if !is_gpu_float(expr.dtype()) {
             return Err(TensorError::NotLowerable {
                 node,
                 reason: "metal execution supports float32 or float16 in v1, \
@@ -539,7 +539,9 @@ pub(super) fn operand_tensor_bytes(
         // `source` is always an OPERAND reference here, never a duplicate's
         // own primary node -- `apply_repeat_nodes` copies operands
         // verbatim, so an empty `resolved` slice is exact, not a shortcut.
-        None => elements * gpu_dtype(program, index_nodes, &[], source).size_bytes() as u64,
+        None => {
+            elements * device_element_bytes(gpu_dtype(program, index_nodes, &[], source)) as u64
+        }
     }
 }
 
@@ -1937,4 +1939,26 @@ pub(super) fn pack_scan_uniforms(bound: &BoundOp, bytes: &mut Vec<u8>) -> Result
 
 pub(super) fn nserror_description(error: &NSError) -> String {
     error.localizedDescription().to_string()
+}
+
+/// Bytes one element of a `dtype` node occupies in its device buffer: the width of the scalar
+/// [`device_scalar_token`] names for it, so the buffer's size and the kernel's element type are
+/// one decision. `dtype.size_bytes()` is the logical (storage) width and differs for a layout the
+/// kernel computes in `float`.
+pub(super) fn device_element_bytes(dtype: DType) -> usize {
+    match device_scalar_token(dtype) {
+        Some("half") => size_of::<u16>(),
+        Some(_) => size_of::<f32>(),
+        None => dtype.size_bytes(),
+    }
+}
+
+#[cfg(not(feature = "float-layout-dtype"))]
+fn is_gpu_float(dtype: DType) -> bool {
+    matches!(dtype, DType::Float32 | DType::Float16)
+}
+
+#[cfg(feature = "float-layout-dtype")]
+fn is_gpu_float(dtype: DType) -> bool {
+    matches!(dtype, DType::Float(_))
 }

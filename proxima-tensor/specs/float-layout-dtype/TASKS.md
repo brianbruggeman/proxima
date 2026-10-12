@@ -34,8 +34,8 @@ In the table above `\|` stands for a literal pipe character; the SPEC's `### com
 
 ## resume
 
-Last landed slice: 4 (the one MSL emitter over a layout), 2 (DType float variant carrying a FloatLayout), 3 (bf16.rs as the BF16 instance of float_layout, 29 codec cases), 18a (retirement schedule in the cached arena plan) and 18b (packed operands through the arena path); slice 1 before them
-Next action: slice 5 (Metal admission by fields), then 7, 6, 8, 9 to 19; slice 18c (experts and exact activations through the arena loop, delete the packed loop, migrate the `evaluate_named` call sites so the entry-point count reaches 1)
+Last landed slice: 5 (Metal admission by fields), 4 (the one MSL emitter over a layout), 2 (DType float variant carrying a FloatLayout), 3 (bf16.rs as the BF16 instance of float_layout, 29 codec cases), 18a (retirement schedule in the cached arena plan) and 18b (packed operands through the arena path); slice 1 before them
+Next action: slice 7 (bytes per element), then 6, 8, 9 to 19; slice 18c (experts and exact activations through the arena loop, delete the packed loop, migrate the `evaluate_named` call sites so the entry-point count reaches 1)
 Open question, if any: none; the sign-field name `sign` with `Absent | Magnitude | TwosComplement` is a proposal in the owner's vocabulary (sign, mantissa, exponent) and is renamed in slice 12 if the owner prefers another
 
 ## struck

@@ -1284,7 +1284,7 @@ pub(super) fn build_merged_dispatch(
         depth: group.len() as u64,
         grid2d: None,
     };
-    let member_bytes = bound_output_len(leader).max(1) * leader.dtype.size_bytes();
+    let member_bytes = bound_output_len(leader).max(1) * device_element_bytes(leader.dtype);
     Ok(Some(MergedDispatch {
         members: group.to_vec(),
         pipeline,
@@ -1420,7 +1420,7 @@ pub(super) fn ensure_merged_group_resolved(
     let allocated_output = if all_caller_placed {
         None
     } else {
-        let member_elements = dispatch.member_bytes / dispatch.dtype.size_bytes();
+        let member_elements = dispatch.member_bytes / device_element_bytes(dispatch.dtype);
         Some(allocate_buffer_for(
             "merged_output",
             "plan",
@@ -1587,12 +1587,12 @@ pub(super) fn ensure_round_group_resolved(
         });
     };
     let round_count = round_routes.len();
-    let output_member_bytes = bound_output_len(bound) * bound.dtype.size_bytes();
+    let output_member_bytes = bound_output_len(bound) * device_element_bytes(bound.dtype);
     let output_buffer = allocate_buffer_for(
         "merged_output",
         "call",
         device,
-        (output_member_bytes * round_count) / bound.dtype.size_bytes(),
+        (output_member_bytes * round_count) / device_element_bytes(bound.dtype),
         bound.dtype,
     )?;
     let offsets: Vec<u64> = (0..round_count)

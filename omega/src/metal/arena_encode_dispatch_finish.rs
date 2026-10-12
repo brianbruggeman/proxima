@@ -218,7 +218,7 @@ fn arena_allocations(
     let mut live_index: BTreeMap<NodeId, usize> = BTreeMap::new();
     for (position, bound) in resolved.iter().enumerate() {
         let resident = resident_nodes.contains(&bound.node);
-        let element_bytes = bound.dtype.size_bytes();
+        let element_bytes = device_element_bytes(bound.dtype);
         if is_placed(bound.node) {
             found.primary.push(None);
         } else {
@@ -283,7 +283,7 @@ pub(super) fn build_buffer_arena(
     let outputs: BTreeSet<NodeId> = plan.prepared.effective_outputs.iter().copied().collect();
     let naive_transient_bytes: usize = resolved
         .iter()
-        .map(|bound| bound_output_len(bound).max(1) * bound.dtype.size_bytes())
+        .map(|bound| bound_output_len(bound).max(1) * device_element_bytes(bound.dtype))
         .sum();
     let uniform_bytes: usize = resolved
         .iter()
@@ -3432,7 +3432,7 @@ fn record_chunk_audit_dispatch(
     output: (&MetalBuffer, usize),
 ) {
     let position = bound.node.0 as usize;
-    let output_len = bound_output_len(bound).max(1) * bound.dtype.size_bytes();
+    let output_len = bound_output_len(bound).max(1) * device_element_bytes(bound.dtype);
     chunk_audit_record_dispatch(
         Retained::as_ptr(output.0) as usize,
         output.1,
@@ -4344,26 +4344,10 @@ pub(super) fn read_back(
     if element_count == 0 {
         return Ok(Vec::new());
     }
-    match dtype {
-        DType::Float16 => Ok(read_back_half(buffer, byte_offset, element_count)),
-        DType::Float32
-        | DType::BFloat16
-        | DType::Bool
-        | DType::Int8
-        | DType::UInt8
-        | DType::Int32
-        | DType::UInt32 => Ok(read_back_as_device_f32(buffer, byte_offset, element_count)),
-        DType::Int16
-        | DType::UInt16
-        | DType::Int64
-        | DType::UInt64
-        | DType::Int128
-        | DType::UInt128
-        | DType::BFloat8
-        | DType::Fp6E3M2
-        | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }.into()),
-        #[cfg(feature = "float-layout-dtype")]
-        DType::Float(_) => Err(EmitError::UnsupportedDType { node, dtype }.into()),
+    match device_scalar_token(dtype) {
+        Some("half") => Ok(read_back_half(buffer, byte_offset, element_count)),
+        Some(_) => Ok(read_back_as_device_f32(buffer, byte_offset, element_count)),
+        None => Err(EmitError::UnsupportedDType { node, dtype }.into()),
     }
 }
 
@@ -4505,16 +4489,7 @@ pub(super) fn finish(
             // would silently return its buffer's UNRELATED leading bytes
             // instead of the bytes this node actually wrote.
             Some((buffer, offset)) => {
-                let recyclable_dtype = matches!(
-                    dtype,
-                    DType::Float32
-                        | DType::BFloat16
-                        | DType::Bool
-                        | DType::Int8
-                        | DType::UInt8
-                        | DType::Int32
-                        | DType::UInt32
-                );
+                let recyclable_dtype = device_scalar_token(dtype) == Some("float");
                 if *node == root
                     && recyclable_dtype
                     && let Some(mut target) = recycle.take()

@@ -299,7 +299,7 @@ pub(super) fn execute_plan_inner(
         .resolved
         .iter()
         .map(|bound| {
-            let byte_length = bound_output_len(bound).max(1) * bound.dtype.size_bytes();
+            let byte_length = bound_output_len(bound).max(1) * device_element_bytes(bound.dtype);
             (bound.node, (pool_bucket(byte_length), bound.dtype))
         })
         .collect();

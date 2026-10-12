@@ -309,15 +309,23 @@ pub(super) fn grid_threads_with_schedule(
 /// `Float64`) is rejected here by name instead of silently folded into the
 /// 4-byte `float` bucket it does not fit.
 pub(super) fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
+    device_scalar_token(dtype).ok_or(EmitError::UnsupportedDType { node, dtype })
+}
+
+/// The MSL scalar a device buffer of `dtype` holds, or `None` for a dtype this backend never
+/// emits. The one place both [`type_token`] and the Metal buffer code (upload, read-back, sizing)
+/// ask, so a buffer's element type and its byte width cannot disagree.
+#[cfg(not(feature = "float-layout-dtype"))]
+pub(crate) fn device_scalar_token(dtype: DType) -> Option<&'static str> {
     match dtype {
-        DType::Float16 => Ok("half"),
+        DType::Float16 => Some("half"),
         DType::Float32
         | DType::BFloat16
         | DType::Bool
         | DType::Int8
         | DType::UInt8
         | DType::Int32
-        | DType::UInt32 => Ok("float"),
+        | DType::UInt32 => Some("float"),
         DType::Int16
         | DType::UInt16
         | DType::Int64
@@ -326,9 +334,29 @@ pub(super) fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, Emi
         | DType::UInt128
         | DType::BFloat8
         | DType::Fp6E3M2
-        | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }),
-        #[cfg(feature = "float-layout-dtype")]
-        DType::Float(_) => Err(EmitError::UnsupportedDType { node, dtype }),
+        | DType::Float64 => None,
+    }
+}
+
+/// The MSL scalar a device buffer of `dtype` holds, selected by the layout's fields: `half` where
+/// the fields equal binary16's ([`layout_render::hardware_type`]), `float` for every other layout
+/// (the kernel computes in binary32 and the host narrows through the layout codec at the buffer
+/// boundary). `None` for a dtype this backend never emits.
+#[cfg(feature = "float-layout-dtype")]
+pub(crate) fn device_scalar_token(dtype: DType) -> Option<&'static str> {
+    match dtype {
+        DType::Float(layout) => match layout_render::hardware_type(&layout) {
+            Some("half") => Some("half"),
+            _ => Some("float"),
+        },
+        DType::Bool | DType::Int8 | DType::UInt8 | DType::Int32 | DType::UInt32 => Some("float"),
+        DType::Int16
+        | DType::UInt16
+        | DType::Int64
+        | DType::UInt64
+        | DType::Int128
+        | DType::UInt128
+        | DType::Float64 => None,
     }
 }
 
