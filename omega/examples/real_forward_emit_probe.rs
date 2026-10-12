@@ -84,6 +84,7 @@ fn main() {
     let mut source_len_total = 0usize;
     let mut entry_len_total = 0usize;
     let mut source_len_max = 0usize;
+    let mut tiled_gemm_kernels = 0usize;
     for op in &bound {
         match omega::emit(op, &no_packed, proxima_tensor::NumericPolicy::default()) {
             Ok(kernel) => {
@@ -91,6 +92,8 @@ fn main() {
                 source_len_total += kernel.source.len();
                 entry_len_total += kernel.entry.len();
                 source_len_max = source_len_max.max(kernel.source.len());
+                tiled_gemm_kernels +=
+                    usize::from(kernel.source.contains("simdgroup_multiply_accumulate"));
             }
             Err(error) => {
                 let reason = format!("{error}");
@@ -112,6 +115,9 @@ fn main() {
         source_len_total as f64 / emitted.max(1) as f64,
         source_len_max,
         entry_len_total as f64 / emitted.max(1) as f64,
+    );
+    println!(
+        "tiled_gemm_kernels={tiled_gemm_kernels} (sources issuing simdgroup_multiply_accumulate)"
     );
     for (reason, count) in &failures {
         println!("  {count:>5}x  {reason}");
