@@ -37,6 +37,16 @@ pub fn causal_conv1d(
     weight: NodeId,
     l_cache: u32,
 ) -> Result<NodeId, TensorError> {
+    causal_conv1d_with_history(program, x, weight, l_cache, None)
+}
+
+pub(super) fn causal_conv1d_with_history(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    weight: NodeId,
+    l_cache: u32,
+    history: Option<NodeId>,
+) -> Result<NodeId, TensorError> {
     if l_cache == 0 {
         return Err(TensorError::InvalidConvConfig { l_cache });
     }
@@ -166,11 +176,60 @@ pub fn causal_conv1d(
         Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Identity,
-            operands: alloc::vec![(x, gathered_map)],
+            operands: alloc::vec![(x, gathered_map.clone())],
             name: None,
         },
     );
 
+    let missing_tap = if let Some(history) = history.filter(|_| l_cache > 1) {
+        // negative positions address the persisted oldest-to-newest window;
+        // the other taps gather row zero so both select operands stay in bounds.
+        let history_position = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Select,
+            &[
+                (is_valid, "sl->sl"),
+                (zero, "->sl"),
+                (sequence_plus_tap, "sl->sl"),
+            ],
+        )?;
+        let history_position = reduce(
+            program,
+            DType::Int32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            history_position,
+            "sl->sl",
+            "sl->sl",
+        )?;
+        let mut history_map = gathered_map;
+        if let IndexMap::Computed { indices, .. } = &mut history_map {
+            *indices = history_position;
+        }
+        let history_window = op::append(
+            program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(history, history_map)],
+                name: None,
+            },
+        );
+        elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(history_window, "sld->sld"), (weight, "dl->sld")],
+        )?
+    } else {
+        scalar_constant(program, 0.0)
+    };
+    let missing_map = if history.is_some() && l_cache > 1 {
+        "sld->sld"
+    } else {
+        "->sld"
+    };
     // `weight`'s own declared shape is `[embedding, l_cache]` (`d` axis
     // first/outer, `l` axis last/fastest) -- `dl->sld`, not `ld->sld` --
     // matching `row_major_strides`'s (`bind.rs`) own last-axis-fastest
@@ -186,7 +245,6 @@ pub fn causal_conv1d(
         ScalarOp::Multiply,
         &[(windowed, "sld->sld"), (weight, "dl->sld")],
     )?;
-    let zero_tap = scalar_constant(program, 0.0);
     let masked_tap = elementwise(
         program,
         DType::Float32,
@@ -194,10 +252,9 @@ pub fn causal_conv1d(
         &[
             (is_valid, "sl->sld"),
             (tap_product, "sld->sld"),
-            (zero_tap, "->sld"),
+            (missing_tap, missing_map),
         ],
     )?;
-
     reduce(
         program,
         DType::Float32,
@@ -1374,6 +1431,7 @@ pub fn append_delta_net_conv_branch(
         key_dim,
         value_dim,
         l_cache,
+        None,
     )?;
 
     let q_conv = l2norm(program, q_raw, eps, "sw->sw", "s->sw")?;
@@ -1391,9 +1449,10 @@ pub(super) fn append_delta_net_conv_raw(
     key_dim: u32,
     value_dim: u32,
     l_cache: u32,
+    history: Option<NodeId>,
 ) -> Result<(NodeId, NodeId, NodeId), TensorError> {
     let qkv_dim = 2 * key_dim + value_dim;
-    let convolved = causal_conv1d(program, qkv_mixed, conv_weight, l_cache)?;
+    let convolved = causal_conv1d_with_history(program, qkv_mixed, conv_weight, l_cache, history)?;
     let activated = silu(program, convolved, one, "sd->sd")?;
 
     let q_raw = channel_slice(program, activated, qkv_dim, 0, key_dim)?;
@@ -2342,11 +2401,8 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         ],
     )?;
 
-    // The persisted-history branch below is the decode path. Its history
-    // term is intentionally position-invariant and therefore cannot supply
-    // a multi-position prefill. Keep a separate, root-pruned causal branch
-    // for the opt-in prefill executor: with an empty cache it gives every
-    // sequence tap the same causal window repeated one-position decode would.
+    // verification starts after an existing prefix, so negative positions
+    // must read its convolution history before the first new row.
     let (query_prefill_raw, key_prefill_raw, value_prefill) = append_delta_net_conv_raw(
         program,
         qkv_mixed,
@@ -2355,6 +2411,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         key_dim,
         value_dim,
         l_cache,
+        Some(conv_history_in),
     )?;
     let query_prefill_split = elementwise(
         program,

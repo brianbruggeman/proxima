@@ -6401,6 +6401,59 @@ async fn causal_conv1d_matches_a_hand_computed_causal_window() {
     assert_eq!(result, [100.0, 210.0, 321.0, 432.0]);
 }
 
+#[proxima::test]
+async fn causal_conv1d_cached_history_matches_each_hand_computed_window() {
+    let mut program = Vec::new();
+    let input = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Symbolic(0), Extent::Static(1)],
+        "input",
+    );
+    let history = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(2), Extent::Static(1)],
+        "history",
+    );
+    let weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(1), Extent::Static(3)],
+        "weight",
+    );
+    let cached = causal_conv1d_with_history(&mut program, input, weight, 3, Some(history))
+        .expect("cached convolution lowers");
+    let empty =
+        causal_conv1d(&mut program, input, weight, 3).expect("zero-padded convolution lowers");
+    let input_data = [1.0_f32, 2.0, 3.0, 4.0];
+    let history_data = [7.0_f32, 8.0];
+    let weight_data = [1.0_f32, 10.0, 100.0];
+    // [7,8,1], [8,1,2], [1,2,3], [2,3,4] dot [1,10,100].
+    let expected = [187.0_f32, 218.0, 321.0, 432.0];
+    for width in [1_usize, 2, 3, 4] {
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[width as u64],
+            &[
+                ("input", &input_data[..width]),
+                ("history", &history_data),
+                ("weight", &weight_data),
+            ],
+            &[cached, empty],
+        )
+        .expect("cached convolution evaluates at each width");
+        let (actual, shape) = evaluated.get(cached).expect("cached output is present");
+        assert_eq!(shape, [width as u64, 1]);
+        assert_eq!(actual, &expected[..width]);
+        let (without_history, _) = evaluated.get(empty).expect("zero-padded output is present");
+        assert_ne!(
+            actual[0], without_history[0],
+            "the control must expose discarded history"
+        );
+    }
+}
+
 #[test]
 fn architecture_matrix_shortconv_fused_projection_contracts_the_input_axis() {
     const EMBEDDING: u32 = 3;
@@ -10115,7 +10168,11 @@ async fn qwen35_ssm_mixer_rejects_a_static_zero_width_step() {
 /// `qkv_mixed` into the next call's `conv_history_in` exactly the way a
 /// real decode loop already does.
 #[proxima::test]
-async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps() {
+#[case::empty_prefix(false)]
+#[case::cached_prefix(true)]
+async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps(
+    #[case] cached_prefix: bool,
+) {
     let key_dim = 1u32;
     let value_dim = 2u32;
     let kv_heads = 1u32;
@@ -10141,8 +10198,16 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps(
     let ssm_norm_weight_data = [1.0_f32];
     let ssm_out_data = [0.75_f32, -0.5];
     let head_eps_data = [0.0_f32, 0.0];
-    let initial_state = [0.0_f32, 0.0];
-    let initial_history = [0.0_f32; 4];
+    let initial_state = if cached_prefix {
+        [0.75_f32, -0.5]
+    } else {
+        [0.0; 2]
+    };
+    let initial_history = if cached_prefix {
+        [2.0_f32, -3.0, 0.25, 1.5]
+    } else {
+        [0.0; 4]
+    };
 
     let mut static_program = Vec::new();
     let x = input_leaf(
@@ -10275,6 +10340,8 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps(
     )
     .expect("the M>1 branch lowers");
 
+    let mut static_roots = alloc::vec![static_mixer_out];
+    static_roots.extend_from_slice(&static_taps.per_position_state_out);
     let static_result = crate::cpu::evaluate_named(
         &static_program,
         &[u64::from(positions)],
@@ -10295,7 +10362,7 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps(
             ("ssm_out", &ssm_out_data),
             ("state_in", &initial_state),
         ],
-        &[static_mixer_out, static_taps.state_out],
+        &static_roots,
     )
     .expect("the M>1 program evaluates");
     let static_mixer_rows = static_result
@@ -10351,6 +10418,14 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps(
             .expect("sequential state_out present")
             .0
             .to_vec();
+        let (static_prefix_state, _) = static_result
+            .get(static_taps.per_position_state_out[position])
+            .expect("every input position retains its recurrence state");
+        assert_relative_rows_match(
+            static_prefix_state,
+            &sequential_state,
+            "accepted-prefix state_out",
+        );
         sequential_history = evaluated
             .get(repeated_taps.qkv_mixed)
             .expect("sequential qkv_mixed present")
