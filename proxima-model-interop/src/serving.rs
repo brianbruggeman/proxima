@@ -54,7 +54,7 @@ use alloc::string::String;
     target_os = "macos"
 ))]
 use omega::AttentionVariant;
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 use omega::config::RuntimeConfig;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::{DispatchType, MathMode};
@@ -154,7 +154,7 @@ pub const GPU_LAYERS_ALL: i32 = -1;
 /// that has a GPU backend, CPU-only on one that does not --
 /// [`apply_serving_config`] rejects [`GPU_LAYERS_ALL`] without the `metal`
 /// feature, so a default of `-1` there would fail its own admission check.
-pub const DEFAULT_GPU_LAYERS: i32 = if cfg!(feature = "metal") {
+pub const DEFAULT_GPU_LAYERS: i32 = if cfg!(feature = "gpu") {
     GPU_LAYERS_ALL
 } else {
     0
@@ -792,7 +792,7 @@ pub struct ServingConfig<'model> {
     /// plan or cache work ([`RecurrentConfig::matches_model`]).
     pub recurrent: RecurrentConfig,
     /// Optional configured Omega planner/executor policy for GPU serving.
-    #[cfg(feature = "metal")]
+    #[cfg(feature = "gpu")]
     pub omega_runtime: Option<&'model RuntimeConfig>,
     /// `-np`: number of parallel sequence slots served at once.
     pub parallel_sequences: u32,
@@ -1230,7 +1230,7 @@ impl<'model> ServingConfig<'model> {
     }
 
     /// Supplies the caller-owned Omega runtime policy for the GPU route.
-    #[cfg(feature = "metal")]
+    #[cfg(feature = "gpu")]
     #[must_use]
     pub const fn with_omega_runtime(mut self, omega_runtime: &'model RuntimeConfig) -> Self {
         self.omega_runtime = Some(omega_runtime);
@@ -1268,7 +1268,7 @@ impl Default for ServingConfig<'static> {
             context_length: ContextLength::Native,
             rope_scaling: None,
             recurrent: RecurrentConfig::neutral(),
-            #[cfg(feature = "metal")]
+            #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
@@ -1447,7 +1447,7 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
             config.gpu_layers
         )));
     }
-    if config.gpu_layers == GPU_LAYERS_ALL && !cfg!(feature = "metal") {
+    if config.gpu_layers == GPU_LAYERS_ALL && !cfg!(feature = "gpu") {
         return Err(InteropError::UnsupportedServingConfig(format!(
             "gpu_layers={GPU_LAYERS_ALL} (-ngl all): this build was not compiled with \
              proxima-model-interop's `metal` feature, so there is no GPU backend to \
@@ -1783,7 +1783,7 @@ mod tests {
             context_length: ContextLength::Native,
             rope_scaling: None,
             recurrent: RecurrentConfig::neutral(),
-            #[cfg(feature = "metal")]
+            #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
@@ -1971,7 +1971,7 @@ mod tests {
             context_length: ContextLength::Native,
             rope_scaling: None,
             recurrent: RecurrentConfig::neutral(),
-            #[cfg(feature = "metal")]
+            #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
@@ -2104,7 +2104,7 @@ mod tests {
             context_length: ContextLength::Native,
             rope_scaling: None,
             recurrent: RecurrentConfig::neutral(),
-            #[cfg(feature = "metal")]
+            #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
@@ -2210,7 +2210,7 @@ mod tests {
             context_length: ContextLength::Native,
             rope_scaling: None,
             recurrent: RecurrentConfig::neutral(),
-            #[cfg(feature = "metal")]
+            #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
@@ -2306,7 +2306,7 @@ mod tests {
             context_length: ContextLength::Native,
             rope_scaling: None,
             recurrent: RecurrentConfig::neutral(),
-            #[cfg(feature = "metal")]
+            #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,

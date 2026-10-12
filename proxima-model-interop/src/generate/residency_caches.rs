@@ -1,15 +1,15 @@
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 use conflaguration::Validate;
 use core::ops::ControlFlow;
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 use omega::config::{RuntimeConfig, SelectionMode};
 
 use super::*;
 use proxima_core::ServingState;
-#[cfg(all(feature = "instrument", feature = "metal"))]
+#[cfg(all(feature = "instrument", feature = "gpu"))]
 use proxima_telemetry::metric::Counter;
 
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 pub(crate) fn validate_omega_runtime_config(config: &ServingConfig) -> Result<(), InteropError> {
     let Some(runtime) = config.omega_runtime else {
         return Ok(());
@@ -38,7 +38,7 @@ pub(crate) fn validate_omega_runtime_config(config: &ServingConfig) -> Result<()
     Ok(())
 }
 
-#[cfg(all(test, feature = "metal"))]
+#[cfg(all(test, feature = "gpu"))]
 mod configured_runtime_tests {
     use super::*;
     use crate::generate::prompt_cache_key::CacheKey;
@@ -118,7 +118,7 @@ mod configured_runtime_tests {
 
     #[cfg(any(
         all(feature = "cuda", not(target_os = "macos")),
-        target_os = "macos"
+        all(feature = "metal", target_os = "macos")
     ))]
     fn gpu_runtime() -> BackendRuntime {
         BackendRuntime::new(&ServingConfig {
@@ -211,7 +211,7 @@ mod configured_runtime_tests {
 }
 
 #[cfg(any(test, all(feature = "metal-output-placement", target_os = "macos")))]
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 fn reject_configured_placements(config: Option<&RuntimeConfig>) -> Result<(), InteropError> {
     if config.is_some() {
         return Err(InteropError::UnsupportedServingConfig(String::from(
@@ -221,7 +221,7 @@ fn reject_configured_placements(config: Option<&RuntimeConfig>) -> Result<(), In
     Ok(())
 }
 
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 fn plan_with_omega_config(
     config: &RuntimeConfig,
     program: &[Op],
@@ -244,16 +244,16 @@ fn plan_with_omega_config(
 /// as an explicit parameter instead.
 ///
 /// Gated on `metal` as well as `instrument`: both the writer (this file's
-/// `resolve_cached_plan`, inside the `#[cfg(feature = "metal")] impl
+/// `resolve_cached_plan`, inside the `#[cfg(feature = "gpu")] impl
 /// BackendRuntime`) and the only reader
-/// (`emit_token_breakdown_metal`, `#[cfg(all(feature = "metal", target_os =
+/// (`emit_token_breakdown_metal`, `#[cfg(all(feature = "gpu", target_os =
 /// "macos"))]` in `decode.rs`) require `metal`; an `instrument`-only build
 /// declared these statics with no reachable writer or reader at all, which
 /// `-D dead-code` correctly flagged.
-#[cfg(all(feature = "instrument", feature = "metal"))]
+#[cfg(all(feature = "instrument", feature = "gpu"))]
 pub(super) static RESOLVE_PLAN_CALLS: Counter =
     Counter::new("proxima_model_interop.residency.resolve_plan_calls");
-#[cfg(all(feature = "instrument", feature = "metal"))]
+#[cfg(all(feature = "instrument", feature = "gpu"))]
 pub(super) static RESOLVE_PLAN_TICKS: Counter =
     Counter::new("proxima_model_interop.residency.resolve_plan_ticks");
 
@@ -319,7 +319,7 @@ impl NodeValuesSink<'_> {
 impl LogitsSink<'_> {
     /// `barriers_step` is this step's own `MetalStageTotals::barriers_emitted`
     /// (already read once, snapshot-and-reset, by the caller's `metal_stage`
-    /// local) -- callers outside `feature = "instrument", feature = "metal",
+    /// local) -- callers outside `feature = "instrument", feature = "gpu",
     /// target_os = "macos"` pass `0`, matching every run where the counter
     /// itself never exists.
     pub(super) fn observe(&mut self, logits: &[f32], _barriers_step: u64) {
@@ -2456,7 +2456,7 @@ pub(super) mod supported_serving_config_tests {
 /// selects [`Engine::Gpu`]. `apply_serving_config` rejects every other
 /// value before a forward ever runs, so those are the only two this match
 /// needs to distinguish.
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 pub(super) fn select_backend(config: &ServingConfig) -> Engine {
     if config.gpu_layers == GPU_LAYERS_ALL {
         Engine::Gpu
@@ -2534,7 +2534,7 @@ pub(super) struct SsmPlacement<'buffers> {
     pub(super) use_second_as_input: bool,
 }
 
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 pub(crate) struct BackendRuntime {
     pub(super) omega_runtime: Option<omega::config::RuntimeConfig>,
     pub(super) engine: Engine,
@@ -2720,7 +2720,7 @@ impl Drop for BackendRuntime {
     }
 }
 
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 impl BackendRuntime {
     pub(crate) fn new(config: &ServingConfig) -> Self {
         Self {
@@ -2823,7 +2823,7 @@ impl BackendRuntime {
         matches!(self.engine, Engine::Gpu)
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(feature = "gpu")]
     pub(super) fn uses_gpu(&self) -> bool {
         matches!(self.engine, Engine::Gpu)
     }
@@ -2832,7 +2832,7 @@ impl BackendRuntime {
     /// resolved GPU driver renders the fused `CachedAttention` bound that excludes the
     /// pad rows. A driver running the unfused chain (CUDA) needs the exact
     /// `cached_len`, because the program has no mask over the cached range.
-    #[cfg(feature = "metal")]
+    #[cfg(feature = "gpu")]
     pub(super) fn pads_cached_kv(&self) -> bool {
         self.uses_gpu()
             && omega::backend::GpuDriver::for_target()
@@ -4264,7 +4264,7 @@ impl BackendRuntime {
 /// are the same scratch this loop's local variables used to own directly --
 /// moved onto this struct so [`LoadedModel::generate_with_serving_config`]'s
 /// loop body reads identically whether or not `metal` is compiled in.
-#[cfg(not(feature = "metal"))]
+#[cfg(not(feature = "gpu"))]
 pub(crate) struct BackendRuntime {
     pub(super) free_buffers: Vec<Vec<f32>>,
     pub(super) validated_weight_nodes: Option<BTreeSet<NodeId>>,
@@ -4273,7 +4273,7 @@ pub(crate) struct BackendRuntime {
     pub(super) exact_activations: bool,
 }
 
-#[cfg(not(feature = "metal"))]
+#[cfg(not(feature = "gpu"))]
 impl BackendRuntime {
     pub(crate) fn new(_config: &ServingConfig) -> Self {
         Self {

@@ -367,7 +367,7 @@ pub enum InteropError {
     /// [`omega::backend`] to plan or execute a forward step and the backend
     /// itself refused -- an unrecognized/uncompiled backend name, or a
     /// codec the chosen backend's driver has no kernel for.
-    #[cfg(feature = "metal")]
+    #[cfg(feature = "gpu")]
     #[error(transparent)]
     Backend(#[from] omega::backend::BackendError),
 
@@ -649,7 +649,7 @@ pub enum InteropError {
     // constructs must be reachable there too -- `feature = "std"` alone
     // left this variant absent under a bare `cargo nextest run` with no
     // features, breaking the module that names it in its own doc comment.
-    #[cfg(any(test, all(feature = "std", feature = "metal")))]
+    #[cfg(any(test, all(feature = "std", feature = "gpu")))]
     #[error(
         "load-time memory budget exceeded: dense_weights_bytes={dense_weights_bytes} \
          expert_weights_bytes={expert_weights_bytes} table_weights_bytes={table_weights_bytes} \
@@ -882,7 +882,7 @@ pub enum InteropError {
     // own doc): the module is forced into a bare `cargo test` build
     // regardless of features, so a variant it constructs must stay
     // reachable there too.
-    #[cfg(any(test, all(feature = "std", feature = "metal")))]
+    #[cfg(any(test, all(feature = "std", feature = "gpu")))]
     #[error(
         "checkpoint mapping of {mapped_bytes} bytes exceeds the {available_bytes}-byte resident \
          budget; pre-gather into moe_residency_budget_bytes instead of a whole-mapping \
@@ -902,7 +902,7 @@ pub enum InteropError {
     /// `class`'s own computed bytes exceed it, independent of
     /// [`Self::MemoryBudgetExceeded`]'s aggregate-limit check -- a class can
     /// fit the whole-host limit and still blow its own configured cap.
-    #[cfg(any(test, all(feature = "std", feature = "metal")))]
+    #[cfg(any(test, all(feature = "std", feature = "gpu")))]
     #[error(
         "load-time per-class residency budget exceeded: class={class} bytes={bytes} \
          budget_bytes={budget_bytes}"

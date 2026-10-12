@@ -281,7 +281,7 @@ pub fn supported_dense_cpu_codecs() -> Vec<GgmlType> {
 /// `omega`'s GPU emitters, which this module no longer reads (`omega::msl`'s
 /// own former codec identity enum was folded onto this same `Codec`, see
 /// that migration's own commit).
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 pub mod quant_format {
     use alloc::string::String;
     use core::fmt::Write as _;
@@ -470,7 +470,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "metal"))]
+#[cfg(all(test, feature = "gpu"))]
 mod quant_format_tests {
     use super::quant_format::{ALL_CODECS, render_markdown};
 

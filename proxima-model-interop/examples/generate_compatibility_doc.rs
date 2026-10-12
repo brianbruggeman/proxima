@@ -16,7 +16,7 @@
 use std::fs;
 use std::path::Path;
 
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 use proxima_model_interop::capability::quant_format::render_markdown as render_quant_format_markdown;
 use proxima_model_interop::capability::render_ggml_matrix_markdown;
 
@@ -35,10 +35,10 @@ fn document_body() -> String {
     body.push_str("## GGML codec x topology x backend\n\n");
     body.push_str(&render_ggml_matrix_markdown());
     body.push_str("\n## Quantized packed-format coverage\n\n");
-    #[cfg(feature = "metal")]
+    #[cfg(feature = "gpu")]
     body.push_str(&render_quant_format_markdown());
-    #[cfg(not(feature = "metal"))]
-    body.push_str("(this section needs `--features metal`; not rendered by this build)\n");
+    #[cfg(not(feature = "gpu"))]
+    body.push_str("(this section needs `--features gpu`; not rendered by this build)\n");
     body
 }
 

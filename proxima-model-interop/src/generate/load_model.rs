@@ -1002,7 +1002,7 @@ pub struct LoadedModel<'file> {
     // the field is genuinely dead weight there rather than a leftover
     // `_` this cfg_attr is hiding a real bug behind.
     #[cfg_attr(
-        not(feature = "metal"),
+        not(feature = "gpu"),
         allow(dead_code, reason = "only `Drop`, itself `metal`-gated, reads this")
     )]
     pub(super) checkpoint_mapping: &'file [u8],
@@ -1230,7 +1230,7 @@ pub(super) fn fused_segment_experts_are_current_layer(
 /// `omega::metal::unregister_checkpoint_mapping`'s own docs for the
 /// mechanism. A no-op unless this build was compiled with the `metal`
 /// feature: the CPU evaluator has no device buffer to release.
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 impl Drop for LoadedModel<'_> {
     fn drop(&mut self) {
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -1502,9 +1502,9 @@ pub(super) struct PreGatherContext<'context, 'mapping, 'file> {
     // `'mapping` is only borrowed by metal-gated fields below; this marker
     // keeps the lifetime parameter used on every feature combination.
     pub(super) marker: PhantomData<&'mapping ()>,
-    #[cfg(feature = "metal")]
+    #[cfg(feature = "gpu")]
     pub(super) sidecar: Option<&'mapping crate::expert_sidecar::MappedExpertSidecar>,
-    #[cfg(feature = "metal")]
+    #[cfg(feature = "gpu")]
     pub(super) all_low_expert_scratch:
         &'context mut crate::expert_slab::AllLowExpertSourceScratch<'mapping>,
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]

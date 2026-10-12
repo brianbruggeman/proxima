@@ -8,7 +8,7 @@
 //! with the regen command named in its own failure message, not a stale
 //! green.
 
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 use proxima_model_interop::capability::quant_format::render_markdown as render_quant_format_markdown;
 use proxima_model_interop::capability::render_ggml_matrix_markdown;
 
@@ -33,7 +33,7 @@ fn ggml_matrix_section_matches_committed_doc() {
 /// The `metal`-gated half: [`quant_format`] is only compiled under `metal`,
 /// so it can only run in the same feature configuration the doc itself was
 /// generated under.
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 #[test]
 fn quant_format_section_matches_committed_doc() {
     let rendered = render_quant_format_markdown();
@@ -47,7 +47,7 @@ fn quant_format_section_matches_committed_doc() {
 /// Full-document byte equality, only checkable under the same feature set
 /// the committed file was generated with (`metal`) -- the strongest form of
 /// this guard, run whenever that feature is on.
-#[cfg(feature = "metal")]
+#[cfg(feature = "gpu")]
 #[test]
 fn full_document_is_byte_identical_to_the_generator_output() {
     let mut expected = String::new();

@@ -46,10 +46,10 @@ pub(super) struct CacheKey {
     /// Which bind-time rewrites fire and how kernels reduce.
     pub(super) numeric_policy: NumericPolicy,
     /// Configured Omega fusion permission; fused and unfused plans round differently.
-    #[cfg(feature = "metal")]
+    #[cfg(feature = "gpu")]
     pub(super) omega_fusion: Option<bool>,
     /// Configured Omega GPU driver identity (0 unconfigured).
-    #[cfg(feature = "metal")]
+    #[cfg(feature = "gpu")]
     pub(super) omega_driver: u8,
     /// Metal kernel math mode, the narrower projection of `numeric_policy`
     /// that is applied to the compiled plans.
@@ -170,7 +170,7 @@ impl CacheKey {
             ))]
             attention_variant,
             numeric_policy,
-            #[cfg(feature = "metal")]
+            #[cfg(feature = "gpu")]
             omega_runtime,
             // serial vs concurrent encoder: scheduling, same arithmetic
             #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -224,9 +224,9 @@ impl CacheKey {
             rope_scaling,
             gpu_route: uses_gpu,
             numeric_policy,
-            #[cfg(feature = "metal")]
+            #[cfg(feature = "gpu")]
             omega_fusion: omega_runtime.map(|config| config.allow_fusion),
-            #[cfg(feature = "metal")]
+            #[cfg(feature = "gpu")]
             omega_driver: omega_runtime.map_or(0, |config| match config.gpu_driver.as_str() {
                 "auto" => 1,
                 "metal" => 2,

@@ -212,8 +212,8 @@ pub struct ServingSettings {
     #[builder(default = DEFAULT_UBATCH_SIZE)]
     pub ubatch_size: u32,
     /// `ServingConfig::gpu_layers`: `-ngl`; `-1` offloads every layer.
-    #[cfg_attr(feature = "metal", setting(default = -1))]
-    #[cfg_attr(not(feature = "metal"), setting(default = 0))]
+    #[cfg_attr(feature = "gpu", setting(default = -1))]
+    #[cfg_attr(not(feature = "gpu"), setting(default = 0))]
     #[builder(default = DEFAULT_GPU_LAYERS)]
     pub gpu_layers: i32,
     /// `ServingConfig::gpu_memory_fit`: `--fit`.

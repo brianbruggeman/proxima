@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use proxima_gguf::quant::{bf16, f16, q2_k, q3_k, q4_0, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0};
 use proxima_tensor::NodeId;
-#[cfg(any(test, feature = "metal"))]
+#[cfg(any(test, feature = "gpu"))]
 use proxima_tensor::cpu::ExpertPayloadSpan;
 use proxima_tensor::cpu::{ExpertEntry, ExpertSource};
 
@@ -39,7 +39,7 @@ use crate::bind::{Codec, quantize_to_kind};
 use crate::error::InteropError;
 use crate::residency::ExpertAddress;
 
-#[cfg(any(test, feature = "metal"))]
+#[cfg(any(test, feature = "gpu"))]
 pub(crate) type AllLowExpertSourceScratch<'mapping> = Vec<(
     NodeId,
     ExpertProjection,
@@ -1098,7 +1098,7 @@ impl<'file> ExpertSlab<'file> {
             .collect()
     }
 
-    #[cfg(any(test, feature = "metal"))]
+    #[cfg(any(test, feature = "gpu"))]
     pub(crate) fn all_low_sources_for_step<'mapping, 'scratch>(
         &self,
         sidecar: &'mapping crate::expert_sidecar::MappedExpertSidecar,
@@ -1115,7 +1115,7 @@ impl<'file> ExpertSlab<'file> {
     /// only the window's six projection nodes are exposed, so a caller can
     /// execute two adjacent layers without staging the model's full expert
     /// sidecar.
-    #[cfg(any(test, feature = "metal"))]
+    #[cfg(any(test, feature = "gpu"))]
     pub(crate) fn all_low_sources_for_layers<'mapping, 'scratch>(
         &self,
         sidecar: &'mapping crate::expert_sidecar::MappedExpertSidecar,
@@ -1230,12 +1230,12 @@ impl<'file> StepGuard<'_, 'file> {
     }
 
     /// Forwards to [`ExpertSlab::all_low_sources_for_step`]. Only
-    /// `feature = "metal"` (not `cfg(test)`) has a caller through
+    /// `feature = "gpu"` (not `cfg(test)`) has a caller through
     /// `StepGuard` -- the crate's own unit tests exercise
     /// [`ExpertSlab::all_low_sources_for_step`] directly on a bare
     /// `ExpertSlab` (`expert_sidecar.rs`'s own tests), bypassing this
     /// forwarding method entirely.
-    #[cfg(feature = "metal")]
+    #[cfg(feature = "gpu")]
     pub(crate) fn all_low_sources_for_step<'mapping, 'scratch>(
         &self,
         sidecar: &'mapping crate::expert_sidecar::MappedExpertSidecar,

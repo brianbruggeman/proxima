@@ -22,7 +22,7 @@ use crate::bind::Codec;
 use crate::expert_slab::{ExpertProjection, ExpertSlab};
 use crate::residency::{ExpertAddress, ResidencyAction, ServeDecision, ServePrecision};
 use crate::{InteropError, recode_expert_into};
-#[cfg(any(test, feature = "metal"))]
+#[cfg(any(test, feature = "gpu"))]
 use proxima_tensor::cpu::ExpertEntry;
 use proxima_tensor::cpu::ExpertPayloadSpan;
 
@@ -76,7 +76,7 @@ pub struct ExpertSidecar {
 }
 
 impl ExpertSidecar {
-    #[cfg(any(test, feature = "metal"))]
+    #[cfg(any(test, feature = "gpu"))]
     #[must_use]
     pub(crate) fn preserves_source_codecs(&self) -> bool {
         self.descriptors
@@ -572,7 +572,7 @@ impl MappedExpertSidecar {
     /// The monolithic Metal path cannot inspect routes before binding all
     /// experts, so it may only substitute bytes that are numerically identical
     /// to the original packed weights.
-    #[cfg(feature = "metal")]
+    #[cfg(feature = "gpu")]
     #[must_use]
     pub(crate) fn preserves_source_codecs(&self) -> bool {
         self.sidecar.preserves_source_codecs()
@@ -582,7 +582,7 @@ impl MappedExpertSidecar {
     /// monolithic source table. This is a preflight quantity: the routed
     /// path only stages selected ranges, while the monolithic path retains
     /// every low-codec payload in one command-buffer-visible arena.
-    #[cfg(feature = "metal")]
+    #[cfg(feature = "gpu")]
     #[must_use]
     pub(crate) fn all_low_bytes(&self) -> u64 {
         self.sidecar
@@ -606,13 +606,13 @@ impl MappedExpertSidecar {
         })
     }
 
-    #[cfg(any(test, feature = "metal"))]
+    #[cfg(any(test, feature = "gpu"))]
     #[must_use]
     pub(crate) fn mapping_bytes(&self) -> &[u8] {
         &self.mapping
     }
 
-    #[cfg(any(test, feature = "metal"))]
+    #[cfg(any(test, feature = "gpu"))]
     pub(crate) fn populate_all_low_source<'mapping>(
         &'mapping self,
         layer: usize,
