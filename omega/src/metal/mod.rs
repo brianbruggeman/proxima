@@ -267,6 +267,7 @@ mod pipeline_buffers_upload;
 mod pipeline_disk_cache;
 #[macro_use]
 mod resident_nocopy_cache;
+mod resident_context;
 mod env_flags;
 mod warm_resident_buffers;
 #[macro_use]
@@ -285,6 +286,7 @@ pub use device_buffers_arena_plan::*;
 pub use dispatch_timed_and_classify::*;
 pub use execute_and_hazards::*;
 pub use pipeline_buffers_upload::*;
+pub use resident_context::{ResidentContext, ResidentContextGuard};
 use pipeline_disk_cache::*;
 pub use pipeline_disk_cache::{pipeline_disk_cache_counts, set_runtime_config};
 pub use placements_execute_named::*;

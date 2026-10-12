@@ -1557,7 +1557,7 @@ fn capture_dispatch(
 /// -- at encode time (where [`capture_dispatch`] runs) this dispatch has
 /// only been recorded into the command buffer, not yet executed.
 #[cfg(feature = "instrument")]
-struct CaptureDumpEntry {
+pub(super) struct CaptureDumpEntry {
     step: u64,
     node: u32,
     bound_op_line: String,
@@ -1585,7 +1585,7 @@ struct CaptureDumpEntry {
 
 thread_local! {
     #[cfg(feature = "instrument")]
-    static CAPTURE_DUMP_PENDING: RefCell<Vec<CaptureDumpEntry>> = const { RefCell::new(Vec::new()) };
+    pub(super) static CAPTURE_DUMP_PENDING: RefCell<Vec<CaptureDumpEntry>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Reads back every [`CaptureDumpEntry`] queued since the last flush and
@@ -2033,7 +2033,7 @@ fn floor_pipeline_for(
 
 #[cfg(feature = "instrument")]
 thread_local! {
-    static CAPTURE_LIVE_PENDING: RefCell<Vec<CapturedDispatch>> = const { RefCell::new(Vec::new()) };
+    pub(super) static CAPTURE_LIVE_PENDING: RefCell<Vec<CapturedDispatch>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Drains every [`CapturedDispatch`] queued on this thread since the last
