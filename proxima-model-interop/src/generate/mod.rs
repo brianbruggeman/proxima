@@ -233,6 +233,7 @@ mod cpu_forward_tests;
 mod device_kv;
 #[cfg(test)]
 mod disk_tier_tests;
+mod draft_model;
 mod drafter;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod epilogue_sources_real_model_tests;
