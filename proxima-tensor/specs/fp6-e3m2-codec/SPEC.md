@@ -165,7 +165,7 @@ Each block is one command; the count it prints is the asserted N, and a count of
 
 ```sh
 # AC14
-cargo run --release -p proxima-model-interop --example convert_codec -- --codec fp6_e3m2 --policy default --job $GRANITE=$OUT/granite-fp6.gguf --job $E2B=$OUT/e2b-fp6.gguf | grep -c -E '^converted: [1-9][0-9]* tensors, kept: [0-9]+, bytes: [1-9][0-9]* -> [1-9][0-9]*$'
+cargo run --release -p proxima-model-interop --features std --example convert_codec -- --codec fp6_e3m2 --policy default --job $GRANITE=$OUT/granite-fp6.gguf --job $E2B=$OUT/e2b-fp6.gguf | grep -c -E '^converted: [1-9][0-9]* tensors, kept: [0-9]+, bytes: [1-9][0-9]* -> [1-9][0-9]*$'
 # AC16
 cargo run --release -p proxima-model-interop --example codec_token_agreement -- --fixtures llama_ids.json,long_prompt_llama_ids.json --allowed-gap-rate 0.02 --cell granite=$OUT/granite-fp6.gguf,$GRANITE,$IDS/granite_moe --cell e2b=$OUT/e2b-fp6.gguf,$E2B,$IDS/gemma4_e2b | grep -c -E '^cell=(granite|e2b) codec=(fp6|shipped) match=[1-9][0-9]* of (224|164)$|^cell=(granite|e2b) bound allowed_gap=[34] gap=[0-9]+ within=true$'
 # AC17
