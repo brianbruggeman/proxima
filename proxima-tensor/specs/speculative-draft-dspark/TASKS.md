@@ -11,21 +11,24 @@ Every validation command is literal, in the commands section below, one fenced b
 | 1 | classify DSpark versus DFlash from tensor presence (R1) | AC1 | 1 | [ ] | depends on the DFlash sub-spec's GGUF-side reads of the shared dflash keys existing first |
 | 2 | descriptor resolves the Markov and confidence tensors (R2) | AC2 | 3 | [ ] | |
 | 3 | descriptor reads `dflash.sample_from_anchor` and `dflash.has_confidence_head` (R3) | AC3 (R3, R3a) | 1 | [ ] | |
-| 4 | Markov head readout roots on the DFlash draft descriptor; bias `markov_w2 @ markov_w1[prev_token]` in the shared draft loop (R4) | AC4 (R4, R4a) | 1 | [ ] | |
+| 4 | Markov head readout roots on the DFlash draft descriptor; bias `markov_w2 @ markov_w1[prev_token]` in the shared draft loop (R4) | AC4 (R4) | 1 | [ ] | |
 | 5 | confidence-gate truncation `sigmoid(conf_proj . [feat; markov_w1[prev]] + bias) < p_min` (R5) | AC5 | 1 | [ ] | |
 | 6 | typed error when `p_min > 0.0` and no confidence head (R6) | AC6 (R6, R6a) | 1 | [ ] | |
 | 7 | `sample_from_anchor` layout dispatch: anchor-first versus bonus-anchor (R7) | AC7 (R7, R7a) | 1 | [ ] | |
 | 8 | structural check: no type named for DSpark exists, with its control (R9) | AC8 | two lines: `0`, then >= 1 | [ ] | if the first is above 0, the fix is deleting or folding the type into the DFlash descriptor, never an `allow` |
 | 9 | lossless over a random draft on E2B, 51 prompts (RL1, RL3) | ACL1, ACL5 | four lines: `51`, `51`, `1`, `3` | [ ] | a count below 51 on the second line is a lossless failure |
-| 10 | lossless over the trained E2B draft, `accepted` > 0 on every prompt (RL1, RL2); also loads and pairs the trained draft (R10) | ACL2, AC9 | four lines: `51`, `51`, `1` (corpus-level `rejected_total` >= 1), `1` (AC9 load and pair) | [ ] | blocked on `speculative-draft-training` slice 11; the `rejected_total` gate reason is in SPEC.md ACL2 (threshold >= 1 pre-registered, plausible) |
+| 10 | lossless over the trained E2B draft, `accepted` > 0 on every prompt (RL1, RL2); also loads and pairs the trained draft (R10) | ACL2, AC9, ACL5 | five lines: `51`, `51`, `1` (corpus-level `rejected_total` >= 1), `1` (AC9 load and pair), `3` (ACL5 controls) | [ ] | blocked on `speculative-draft-training` slice 11; the `rejected_total` gate reason is in SPEC.md ACL2 (threshold >= 1 pre-registered, plausible) |
 | 11 | `dspark_markov_ablation` example: runs the draft loop per block over a 200-block run with `--p-min 0.5`, once with the Markov bias computed and once skipped, and once with the confidence gate active and once forced off; prints `markov_differing_blocks=N executed_blocks=B`, `conf_differing_blocks=N executed_blocks=B` and `p_min_stops=M executed_blocks=B`, where B is a counter incremented per executed block, not the `--blocks` argument; `--zero-markov` is the control | AC10, AC11 | two lines: `1`, `1` | [ ] | a printed `markov_differing_blocks=0` on the first command means stop: per the Markov refutation condition R4 is struck |
 | 12 | granite arm over a random draft (ACL3) | ACL3 | three lines: `51`, `51`, `1` | [ ] | blocked on `speculative-draft-training` slice 9 (granite verify) |
 | 13 | lossless over the trained granite draft, `accepted` > 0 on every prompt (RL1, RL2, RL4) | ACL4 | three lines: `51`, `51`, `1` | [ ] | blocked on `speculative-draft-training` slice 12 and slice 9's granite verify; the `rejected_total` >= 1 gate has the reason in SPEC.md ACL2; struck to a recorded shape refusal if granite's shape cannot carry the draft |
 | 14 | typed `speculative_verify` refusal on an unarmed profile, no refusal on an armed one (RL4) | ACL6 | 1 | [ ] | runs today, independent of `speculative-draft-training` slice 9 |
-| 15 | structural check: DSpark reuses DFlash's block batching, feature extraction and injection (R9), with the planted control | AC12 | three lines: `3 3`, `0`, then >= 3 | [ ] | needs `speculative-draft-dflash` slices 3, 5 and 6 to have created the three functions; a first value other than `3 3` means DSpark reimplemented or bypassed the shared work: fold it into the shared function, never an `allow` |
+| 15 | structural check: DSpark reuses DFlash's block batching, feature extraction and injection (R9a), with the planted control | AC12 | three lines: `3 3`, `0`, then >= 3 | [ ] | needs `speculative-draft-dflash` slices 3, 5 and 6 to have created the three functions; a first value other than `3 3` means DSpark reimplemented or bypassed the shared work: fold it into the shared function, never an `allow` |
 | 16 | confidence gate fires and is load-bearing (R11): `p_min_stops` >= 1 and `conf_differing_blocks` >= 1 at `--p-min 0.5` | AC13 | two lines: `1`, `1` | [ ] | blocked on `speculative-draft-training` slice 11; `p_min_stops=0` or `conf_differing_blocks=0` strikes R5, independently of slice 11 |
 | 17 | executed-block counter control: `--blocks 50` prints `executed_blocks=50` on all three lines | AC14 | 3 | [ ] | blocked on `speculative-draft-training` slice 11 |
-| 18 | positive call-count of the shared functions through the DSpark path (R9) | AC15 | 1 | [ ] | needs `speculative-draft-dflash` slices 3, 5 and 6 |
+| 18 | each shared function emits one `trace!` event with `function = "<its name>"` per call (R12): adds the one line to `masked_block_rows`, `tap_feature_rows` and `inject_feature_rows` | AC18 | 1 | [ ] | explicit dependency: `speculative-draft-dflash` slices 3, 5 and 6 create the functions first and do not themselves require the event; this slice edits those function bodies after they land |
+| 19 | Markov head early return on an oversized block (R7b) | AC16 | 1 | [ ] | the early return leaves the logits raw and raises no error |
+| 20 | confidence-gate control: `--p-min 0.0` prints `conf_differing_blocks=0` and `p_min_stops=0` (R11) | AC17 | two lines: `1`, `1` | [ ] | blocked on `speculative-draft-training` slice 11; a nonzero count here voids AC13 |
+| 21 | positive call-count of the shared functions through the DSpark path (R9a) | AC15 | 1 | [ ] | needs slice 18 and `speculative-draft-dflash` slices 3, 5 and 6 |
 
 
 ## commands
@@ -143,6 +146,24 @@ cargo run --release -p proxima-model-interop --features std --example dspark_mar
 ```
 
 ### slice 18
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/shared_functions_emit_named_trace_events/)' 2>&1 | grep -cE '^events = masked_block_rows,tap_feature_rows,inject_feature_rows each = 1 control_double_call = 2,1,1$'
+```
+
+### slice 19
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dspark_markov_head_oversized_block_returns_early/)' 2>&1 | grep -cE '^block_size = 3 biased_len3_chain = 2,2,2 oversized_len4_max_abs_diff = 0 oversized_error = none control_block_size_4_biased = true$'
+```
+
+### slice 20
+
+```sh
+cargo run --release -p proxima-model-interop --features std --example dspark_markov_ablation -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --draft-model /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-dspark/e2b-dspark.gguf --p-min 0.0 --blocks 200 /Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd > ablation_conf_off.txt 2>&1; grep -cE '^conf_differing_blocks=0 executed_blocks=200$' ablation_conf_off.txt; grep -cE '^p_min_stops=0 executed_blocks=200$' ablation_conf_off.txt
+```
+
+### slice 21
 
 ```sh
 cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dspark_draft_goes_through_shared_functions/)' 2>&1 | grep -cE '^run_a blocks = 3 calls = 3,3,3 run_b blocks = 5 calls = 5,5,5$'
