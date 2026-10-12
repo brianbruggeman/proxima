@@ -922,6 +922,7 @@ pub(super) fn resolve_step(
         crate::msl::debug_tiled_gemm_classification(
             bound,
             &crate::identity::operand_codecs(bound, packed_operands),
+            numeric_policy,
             *reduce_op,
             *init,
             output_axes,

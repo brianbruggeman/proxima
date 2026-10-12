@@ -156,7 +156,7 @@ pub(super) fn grid_threads_with_schedule(
                     }),
                 )?
             } else if let Some(block) =
-                dense_batched_gemm_block(resolved, quantized, *reduce_op, *init, output_axes)
+                dense_batched_gemm_block(resolved, quantized, numeric_policy, *reduce_op, *init, output_axes)
             {
                 // Same tile-grid shape as the arm above -- the batch axes
                 // dispatch over `GridSpec::depth` (z), never widen this `x`

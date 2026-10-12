@@ -1322,6 +1322,8 @@ pub(super) fn push_dense_batched_gemm_body(
     let DenseBatchedGemmBlock {
         weight,
         other,
+        weight_codec,
+        other_codec,
         reduce_dim,
         ref token_axes,
         ref feature_axes,
@@ -1521,7 +1523,7 @@ pub(super) fn push_dense_batched_gemm_body(
     ));
     source.push_str(&format!(
         "                    w_regs[w_k] = (k0 + w_k < u.reduction_total) ? {dense_value_cast}{} : {dense_zero_literal};\n",
-        operand_read(weight, "row_base + (long)w_k * w_stride", None)
+        operand_read(weight, "row_base + (long)w_k * w_stride", weight_codec)
     ));
     source.push_str("                }\n");
     source.push_str("                #pragma unroll\n");
@@ -1558,7 +1560,7 @@ pub(super) fn push_dense_batched_gemm_body(
     ));
     source.push_str(&format!(
         "                a_value = {};\n",
-        operand_read(other, "aoff", None)
+        operand_read(other, "aoff", other_codec)
     ));
     source.push_str("            }\n");
     let dense_act_index = format!("a_col * {block_k} + a_k");
@@ -1846,7 +1848,7 @@ pub(super) fn tiled_gemm_threadgroup_width_with_schedule(
         if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some() {
             return Some((TILED_GEMM_NSG as u64) * SIMD_WIDTH);
         }
-        if dense_batched_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some() {
+        if dense_batched_gemm_block(resolved, quantized, numeric_policy, *reduce_op, *init, output_axes).is_some() {
             return Some((TILED_GEMM_NSG as u64) * SIMD_WIDTH);
         }
         if let Some(block) = packed_row_block(resolved, quantized) {
@@ -2097,6 +2099,7 @@ pub(super) fn push_cooperative_reduce_body(
     reduce_dims: &[u16],
     rank: usize,
     quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
@@ -2149,7 +2152,7 @@ pub(super) fn push_cooperative_reduce_body(
     // above by construction: `classify_dense_batched_gemm` requires BOTH
     // operands unquantized, `classify_tiled_gemm` requires exactly ONE
     // packed. Same preamble ownership as the arm above.
-    if let Some(block) = dense_batched_gemm_block(resolved, quantized, reduce_op, init, output_axes)
+    if let Some(block) = dense_batched_gemm_block(resolved, quantized, numeric_policy, reduce_op, init, output_axes)
     {
         push_dense_batched_gemm_body(
             source,
