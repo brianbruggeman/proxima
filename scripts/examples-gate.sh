@@ -89,6 +89,12 @@ needs_input() {
     # default -- same "external artifact this host lacks" class as the
     # DPDK/XDP/nvme-uio hardware skips above, just not hardware.
     q4k_ggml_fidelity) return 0 ;;
+    # takes CONTROL_DIR ENABLED_DIR LLAMA_JSONL OUTPUT_DIR result paths and
+    # prints usage without them
+    omega_programmable_recount) return 0 ;;
+    # lab binaries that need a manifest, a fresh --output directory, a
+    # checkpoint, or `--features proxima-tensor` (not in the root union)
+    decode_performance_lab|loopcd_lab|ouro_loopcd_lab|ouro_native_oracle|ouro_adaptive_graph_diagnostic) return 0 ;;
     *) return 1 ;;
   esac
 }
