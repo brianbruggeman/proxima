@@ -84,14 +84,19 @@ impl Child {
 pub struct SpawnOptions {
     pub dispatch_fd: Option<i32>,
     pub controlling_tty: bool,
+    pub process_group: bool,
     pub umask: Option<u32>,
 }
 
 pub fn spawn(descriptor: &CommandDescriptor, options: SpawnOptions) -> Result<Child, ProximaError> {
-    if options.dispatch_fd.is_some() || options.controlling_tty || options.umask.is_some() {
+    if options.dispatch_fd.is_some()
+        || options.controlling_tty
+        || options.process_group
+        || options.umask.is_some()
+    {
         return Err(process_error(io::Error::new(
             io::ErrorKind::Unsupported,
-            "POSIX dispatch, terminal and umask options require Unix",
+            "POSIX dispatch, terminal, process group and umask options require Unix",
         )));
     }
     let mut command = NativeCommand::new(descriptor_text(&descriptor.program)?);
