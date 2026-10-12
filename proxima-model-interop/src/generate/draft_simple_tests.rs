@@ -16,7 +16,6 @@ use super::{
 const PROMPT: [u32; 3] = [49, 50, 51];
 const MAX_TOKENS: usize = 8;
 const COMPARISON_ROUNDOFF: f32 = 64.0 * f32::EPSILON;
-const DENSE_MULTI_ROW_ROUNDOFF: f32 = 0.05;
 
 struct DecodeResult {
     generated: Vec<u32>,
@@ -326,12 +325,12 @@ fn with_zero_output_draft(run: impl FnOnce(&LoadedModel<'_>, &str)) {
 
 #[test]
 fn draft_simple_identical_model_accepts_every_draft_and_preserves_cache() {
-    check_identical_checkpoint(dense_checkpoint(), DENSE_MULTI_ROW_ROUNDOFF);
+    check_identical_checkpoint(dense_checkpoint(), COMPARISON_ROUNDOFF);
 }
 
 #[test]
 fn draft_simple_dense_moe_preserves_padded_cache_and_all_layer_residuals() {
-    check_identical_checkpoint(dense_moe_checkpoint(), DENSE_MULTI_ROW_ROUNDOFF);
+    check_identical_checkpoint(dense_moe_checkpoint(), COMPARISON_ROUNDOFF);
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -339,12 +338,30 @@ fn draft_simple_dense_moe_preserves_padded_cache_and_all_layer_residuals() {
 #[case::dense(false)]
 #[case::gemma4(true)]
 async fn draft_simple_placed_models_keep_separate_resident_weights(#[case] gemma: bool) {
-    let (checkpoint, roundoff) = if gemma {
-        (gemma4_checkpoint(), COMPARISON_ROUNDOFF)
+    let checkpoint = if gemma {
+        gemma4_checkpoint()
     } else {
-        (dense_checkpoint(), DENSE_MULTI_ROW_ROUNDOFF)
+        dense_checkpoint()
     };
-    check_identical_checkpoint_on(checkpoint, crate::GPU_LAYERS_ALL, roundoff);
+    check_identical_checkpoint_on(checkpoint, crate::GPU_LAYERS_ALL, COMPARISON_ROUNDOFF);
+}
+
+#[proxima::test]
+#[case::cpu_binds_the_live_rows_only(false, 3, 4, 3)]
+#[case::cpu_prefill_binds_an_empty_cached_range(false, 0, 3, 0)]
+#[case::gpu_rounds_up_to_the_bucket(true, 3, 4, 32)]
+#[case::gpu_without_bucketing_binds_merged_len(true, 3, 4, 7)]
+async fn cached_kv_extent_pads_only_where_the_fused_bound_excludes_the_padding(
+    #[case] padded: bool,
+    #[case] cached_len: usize,
+    #[case] new_count: usize,
+    #[case] expected: usize,
+) {
+    let bucket_tokens = if expected == 7 { 1 } else { 32 };
+    assert_eq!(
+        crate::generate::cached_kv_extent(padded, cached_len, new_count, bucket_tokens),
+        expected
+    );
 }
 
 #[proxima::test]
@@ -538,7 +555,7 @@ fn draft_simple_uses_distinct_output_weights_and_restores_target_cache() {
 
         assert_eq!(speculative.generated, plain.generated);
         assert_eq!(speculative.generated.get(1), Some(&forced_correction));
-        assert_cache_state_equal(DENSE_MULTI_ROW_ROUNDOFF, &plain.state, &speculative.state);
+        assert_cache_state_equal(COMPARISON_ROUNDOFF, &plain.state, &speculative.state);
         assert!(speculative.stats.draft_simple.drafted > 0);
         assert!(speculative.stats.draft_simple.drafted > speculative.stats.draft_simple.accepted);
         assert_eq!(
@@ -575,7 +592,7 @@ fn draft_simple_rejection_restores_branch_before_the_next_real_token() {
 
         assert_eq!(speculative.generated, plain.generated);
         assert_eq!(speculative.generated.get(1), Some(&forced_correction));
-        assert_cache_state_equal(DENSE_MULTI_ROW_ROUNDOFF, &plain.state, &speculative.state);
+        assert_cache_state_equal(COMPARISON_ROUNDOFF, &plain.state, &speculative.state);
         assert!(speculative.stats.verify_steps >= 2);
         assert!(speculative.stats.drafted_total > speculative.stats.accepted_total);
         assert_eq!(
@@ -599,7 +616,7 @@ fn draft_simple_p_min_one_proposes_no_tokens() {
         let speculative = decode(model, &speculative_config, MAX_TOKENS, None);
 
         assert_eq!(speculative.generated, plain.generated);
-        assert_cache_state_equal(DENSE_MULTI_ROW_ROUNDOFF, &plain.state, &speculative.state);
+        assert_cache_state_equal(COMPARISON_ROUNDOFF, &plain.state, &speculative.state);
         assert_eq!(speculative.stats.verify_steps, 0);
         assert_eq!(speculative.stats.draft_simple.drafted, 0);
     });
@@ -680,7 +697,7 @@ fn draft_simple_negative_minimum_clears_bounded_proposals() {
         assert_eq!(speculative.generated, plain.generated);
         assert_eq!(speculative.stats.verify_steps, 0);
         assert_eq!(speculative.stats.draft_simple.drafted, 0);
-        assert_cache_state_equal(DENSE_MULTI_ROW_ROUNDOFF, &plain.state, &speculative.state);
+        assert_cache_state_equal(COMPARISON_ROUNDOFF, &plain.state, &speculative.state);
     });
 }
 
@@ -699,7 +716,7 @@ fn draft_simple_clears_proposals_when_n_min_exceeds_n_max() {
         let speculative = decode(model, &speculative_config, MAX_TOKENS, None);
 
         assert_eq!(speculative.generated, plain.generated);
-        assert_cache_state_equal(DENSE_MULTI_ROW_ROUNDOFF, &plain.state, &speculative.state);
+        assert_cache_state_equal(COMPARISON_ROUNDOFF, &plain.state, &speculative.state);
         assert_eq!(speculative.stats.verify_steps, 0);
         assert_eq!(speculative.stats.draft_simple.drafted, 0);
     });

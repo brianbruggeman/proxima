@@ -4127,9 +4127,10 @@ only the single-row decode kernel reads the half-width device cache",
                     // placed-KV path's fixed buffer capacity: the two-range KV
                     // cache below is a growing `Vec`, not a preallocated
                     // device buffer, so there is no hard cap to clamp against.
-                    let kv_bound_extent = kv_extent(
-                        cached_len + new_count,
-                        usize::MAX,
+                    let kv_bound_extent = cached_kv_extent(
+                        runtime.uses_gpu(),
+                        cached_len,
+                        new_count,
                         serving_config.kv_bucket_tokens,
                     );
                     // `gqa_cached_forward_program_with_experts`'s own
@@ -7538,7 +7539,12 @@ did not hold every cached position)",
         // per-position logits (not just the last row) has no opt-in path
         // yet -- residual, not fixed here.
         let lm_head_row_scalar = [(ids.len() - 1) as f32];
-        let kv_bound_extent = kv_extent(ids.len(), usize::MAX, serving_config.kv_bucket_tokens);
+        let kv_bound_extent = cached_kv_extent(
+            runtime.uses_gpu(),
+            0,
+            ids.len(),
+            serving_config.kv_bucket_tokens,
+        );
 
         let sliding_len_scalar = sliding_cached_len_scalar(&layer_caches, 0);
         let symbols = self.push_step_named_blocks(
