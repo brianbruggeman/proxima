@@ -212,6 +212,8 @@ mod elementwise_matmul;
 #[macro_use]
 mod run_reduce_scan;
 #[macro_use]
+mod coalesce;
+#[macro_use]
 mod gemm_tile;
 #[macro_use]
 mod gemm_dot_quant;
@@ -222,6 +224,8 @@ mod width_kernels;
 #[macro_use]
 mod typed_eval;
 pub use arena::*;
+use coalesce::*;
+pub use coalesce::set_dim_coalescing_enabled;
 use elementwise_matmul::*;
 pub use epilogue::*;
 pub use gemm_dot_quant::*;
@@ -247,3 +251,7 @@ mod tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod twin_elementwise_tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod coalesce_tests;
