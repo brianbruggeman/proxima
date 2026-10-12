@@ -187,12 +187,31 @@ fn output_layout(extents: &[u64], output_axes: &[u16]) -> (Layout, usize) {
     )
 }
 
+/// The folds a width-stepped reduce has to combine correctly: sum, max and
+/// min from their identity seeds, and a sum seeded from the first element.
+fn pick_fold(lcg: &mut Lcg) -> (ScalarOp, ReduceInit) {
+    match (lcg.next_unit() * 4.0) as u32 {
+        0 => (ScalarOp::Add, ReduceInit::Zero),
+        1 => (ScalarOp::Maximum, ReduceInit::NegativeInfinity),
+        2 => (ScalarOp::Minimum, ReduceInit::PositiveInfinity),
+        _ => (ScalarOp::Add, ReduceInit::FirstElement),
+    }
+}
+
 fn reduce_case(seed: u64, integers: bool) -> Case {
+    reduce_case_with(seed, integers, None)
+}
+
+/// `generic` forces the fused multi-step body (`Some(true)`) or the bare
+/// multiply (`Some(false)`); `None` lets the seed choose.
+fn reduce_case_with(seed: u64, integers: bool, generic: Option<bool>) -> Case {
     let mut lcg = Lcg(seed);
     let rank = 2 + (lcg.next_unit() * 3.0) as usize;
     let extents: Vec<u64> = (0..rank).map(|_| pick_extent(&mut lcg)).collect();
     let output_axes = pick_output_axes(&mut lcg, rank);
-    let generic = lcg.next_unit() < 0.5;
+    let (reduce_op, init) = pick_fold(&mut lcg);
+    let drawn_generic = lcg.next_unit() < 0.5;
+    let generic = generic.unwrap_or(drawn_generic);
     let (body, operand_count) = if generic {
         (generic_body(), 3)
     } else {
@@ -207,8 +226,8 @@ fn reduce_case(seed: u64, integers: bool) -> Case {
             extents,
             kind: BoundOpKind::Reduce {
                 element_body: body,
-                reduce_op: ScalarOp::Add,
-                init: ReduceInit::Zero,
+                reduce_op,
+                init,
                 keep: Keep::Reduce,
                 operands,
                 output_axes: output_axes.into_iter().collect(),
@@ -264,21 +283,33 @@ fn reference_elementwise(case: &Case) -> Vec<f32> {
 }
 
 fn reference_reduce(case: &Case) -> Vec<f32> {
-    let BoundOpKind::Reduce { out_layout, .. } = &case.op.kind else {
+    let BoundOpKind::Reduce {
+        out_layout,
+        reduce_op,
+        init,
+        ..
+    } = &case.op.kind
+    else {
         unreachable!("reference_reduce is only called on a reduce case")
     };
     let extents = &case.op.extents;
-    let mut output = vec![0.0f32; case.output_len];
+    let mut output: Vec<Option<f32>> = vec![initial_value(*init); case.output_len];
     let mut coordinate = vec![0u64; extents.len()];
     loop {
         let value = body_at(case, case.op.element_body(), &coordinate);
         let slot = out_layout.offset_of(&coordinate) as usize;
-        output[slot] += value;
+        output[slot] = Some(match output[slot] {
+            Some(accumulator) => apply_scalar_op(*reduce_op, &[accumulator, value]),
+            None => value,
+        });
         if !odometer_step(&mut coordinate, extents) {
             break;
         }
     }
     output
+        .into_iter()
+        .map(|slot| slot.expect("every output position receives at least one reduction step"))
+        .collect()
 }
 
 fn run_executor(case: &Case) -> Vec<f32> {
@@ -593,4 +624,101 @@ fn the_delta_net_state_fold_runs_identically_coalesced_and_not() {
 
     assert_same(&coalesced, &expected, true, "coalesced state fold");
     assert_same(&uncoalesced, &expected, true, "uncoalesced state fold");
+}
+
+proptest! {
+    #[test]
+    fn generic_body_reduce_matches_the_scalar_reference_bit_exact_on_integers(seed in any::<u64>()) {
+        let case = reduce_case_with(seed, true, Some(true));
+        let expected = reference_reduce(&case);
+        let uncoalesced = with_coalescing(false, || run_executor(&case));
+        assert_same(&uncoalesced, &expected, true, "generic reduce without coalescing");
+        assert_same(&run_executor(&case), &expected, true, "generic reduce with coalescing");
+    }
+
+    #[test]
+    fn generic_body_reduce_matches_the_scalar_reference_within_tolerance_on_floats(seed in any::<u64>()) {
+        let case = reduce_case_with(seed, false, Some(true));
+        let expected = reference_reduce(&case);
+        let uncoalesced = with_coalescing(false, || run_executor(&case));
+        assert_same(&uncoalesced, &expected, false, "generic reduce without coalescing");
+        assert_same(&run_executor(&case), &expected, false, "generic reduce with coalescing");
+    }
+}
+
+fn contiguous_generic_reduce(reduce_op: ScalarOp, init: ReduceInit) -> Case {
+    let mut lcg = Lcg(0x6e17_0003);
+    let operands = vec![
+        (NodeId(0), layout(0, &[32, 1]), None),
+        (NodeId(1), layout(0, &[0, 1]), None),
+        (NodeId(2), layout(0, &[32, 1]), None),
+    ];
+    let op = BoundOp {
+        node: NodeId(3),
+        dtype: DType::Float32,
+        extents: vec![6, 32],
+        kind: BoundOpKind::Reduce {
+            element_body: generic_body(),
+            reduce_op,
+            init,
+            keep: Keep::Reduce,
+            operands,
+            output_axes: smallvec![1],
+            out_layout: layout(0, &[0, 1]),
+            out_scatter: None,
+            epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
+            epilogue_operands: Vec::new(),
+            epilogue_broadcast_axes: smallvec![],
+        },
+    };
+    Case {
+        op,
+        buffers: vec![
+            Some(operand_values(&mut lcg, 192, true)),
+            Some(operand_values(&mut lcg, 32, true)),
+            Some(operand_values(&mut lcg, 192, true)),
+        ],
+        output_len: 32,
+    }
+}
+
+#[test]
+fn a_wide_contiguous_generic_reduce_matches_the_reference_for_every_fold() {
+    for (reduce_op, init) in [
+        (ScalarOp::Add, ReduceInit::Zero),
+        (ScalarOp::Add, ReduceInit::FirstElement),
+        (ScalarOp::Maximum, ReduceInit::NegativeInfinity),
+        (ScalarOp::Minimum, ReduceInit::PositiveInfinity),
+    ] {
+        let case = contiguous_generic_reduce(reduce_op, init);
+        let expected = reference_reduce(&case);
+
+        assert_same(
+            &run_executor(&case),
+            &expected,
+            true,
+            &format!("{reduce_op:?} from {init:?}"),
+        );
+    }
+}
+
+#[cfg(feature = "instrument")]
+#[test]
+fn a_wide_contiguous_generic_reduce_takes_the_width_path_not_the_per_element_loop() {
+    let case = contiguous_generic_reduce(ScalarOp::Add, ReduceInit::Zero);
+    let width_fast_before = crate::instrument::PATH_WIDTH_FAST.get();
+    let generic_before = crate::instrument::PATH_GENERIC.get();
+
+    let _ = run_executor(&case);
+
+    assert_eq!(
+        crate::instrument::PATH_WIDTH_FAST.get() - width_fast_before,
+        1,
+        "the fused body is stepped a whole row at a time"
+    );
+    assert_eq!(
+        crate::instrument::PATH_GENERIC.get() - generic_before,
+        0,
+        "no per-element fallback runs for an affine generic body"
+    );
 }

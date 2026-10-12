@@ -1242,11 +1242,23 @@ pub(super) fn run_reduce<B: Deref<Target = [f32]>>(
     // `gather_cursors`'s per-element `Option` check and `operand_values`'s
     // per-element copy entirely, reading straight-line out of `raw`'s own
     // subslices instead (`proxima-tensor/docs/discipline.md` ROW 3).
-    // `Generic` bodies and any gathered operand fall back to the loop
-    // unchanged. The width path wins the tie against the dot path below,
-    // the ordering every ROW 3/10 measurement was taken under.
+    // `Generic` bodies take `generic_fast_path` below; a gathered operand
+    // falls back to the loop unchanged. The width path wins the tie against
+    // the dot path below, the ordering every ROW 3/10 measurement was taken
+    // under.
     let fast_path = body_shape_is_affine_fast_path(resolved, &shape, &strides);
-    let reduction_step_strides: Vec<Vec<i64>> = if fast_path {
+    // A fused multi-step body has no dot-path alternative, so it is admitted
+    // under `run_elementwise`'s own `Generic` gate (any non-negative constant
+    // stride): each reduction step evaluates the body over the whole width
+    // row with `elementwise_width_generic`, then folds that row into the
+    // accumulator, instead of the per-element coordinate loop below.
+    let generic_fast_path = !fast_path
+        && match shape {
+            BodyShape::Generic(body) => generic_body_is_affine_fast_path(resolved, body, &strides),
+            _ => false,
+        };
+    let width_stepped = fast_path || generic_fast_path;
+    let reduction_step_strides: Vec<Vec<i64>> = if width_stepped {
         reduction_dims
             .iter()
             .map(|&dim| {
@@ -1269,7 +1281,7 @@ pub(super) fn run_reduce<B: Deref<Target = [f32]>>(
     #[cfg(feature = "instrument")]
     let path = if reduction_fast_path {
         Path::DotFast
-    } else if fast_path {
+    } else if width_stepped {
         Path::WidthFast
     } else {
         Path::Generic
@@ -1937,6 +1949,15 @@ pub(super) fn run_reduce<B: Deref<Target = [f32]>>(
     // touches.
     if main_loop_start < leading_total {
         let mut accumulator = vec![seed; width];
+        let mut generic_row = vec![0.0f32; if generic_fast_path { width } else { 0 }];
+        let mut generic_step_values = vec![
+            0.0f32;
+            if generic_fast_path {
+                body.steps.len() * width.min(GENERIC_WIDTH_TILE)
+            } else {
+                0
+            }
+        ];
         for leading_flat in main_loop_start..leading_total {
             unflatten_into(leading_flat, &leading_extents, &mut leading_coordinate);
             accumulator.fill(seed);
@@ -2000,7 +2021,7 @@ pub(super) fn run_reduce<B: Deref<Target = [f32]>>(
                 // operand's offset from a fresh coordinate (measured: that
                 // re-derivation was 83% of `run_reduce`'s samples on a
                 // `[128,128,16,2]` delta-net state fold whose width is 2).
-                if fast_path {
+                if width_stepped {
                     reduction_coordinate.fill(0);
                     merge_coordinates_into(
                         leading_output_axes,
@@ -2012,7 +2033,7 @@ pub(super) fn run_reduce<B: Deref<Target = [f32]>>(
                     fill_running_offsets(resolved, &full_coordinate, &mut running);
                 }
                 for reduction_flat in 0..reduction_total {
-                    if !fast_path {
+                    if !width_stepped {
                         unflatten_into(
                             reduction_flat,
                             &reduction_extents,
@@ -2028,16 +2049,38 @@ pub(super) fn run_reduce<B: Deref<Target = [f32]>>(
                         fill_running_offsets(resolved, &full_coordinate, &mut running);
                     }
 
-                    if fast_path {
-                        reduce_width_fast(
-                            &shape,
-                            *reduce_op,
-                            &raw,
-                            &running,
-                            &strides,
-                            &mut accumulator,
-                            seeded,
-                        );
+                    if width_stepped {
+                        if let BodyShape::Generic(generic_body) = shape {
+                            elementwise_width_generic(
+                                generic_body,
+                                &raw,
+                                &running,
+                                &strides,
+                                &mut generic_row,
+                                &mut generic_step_values,
+                            );
+                            reduce_width_unary(
+                                ScalarOp::Identity,
+                                *reduce_op,
+                                OperandSpan {
+                                    data: &generic_row,
+                                    base: 0,
+                                    stride: 1,
+                                },
+                                &mut accumulator,
+                                seeded,
+                            );
+                        } else {
+                            reduce_width_fast(
+                                &shape,
+                                *reduce_op,
+                                &raw,
+                                &running,
+                                &strides,
+                                &mut accumulator,
+                                seeded,
+                            );
+                        }
                         #[cfg(feature = "instrument")]
                         {
                             counters.kernel_calls += 1;
