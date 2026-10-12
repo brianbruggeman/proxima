@@ -1050,6 +1050,21 @@ fn push_gather_fetch(
     ));
 }
 
+/// `gid` reconstructs the flat thread index from `workgroup_id`/
+/// `num_workgroups` rather than reading `global_invocation_id.x` directly --
+/// `global_invocation_id.x` alone only tells the truth for a `(N, 1, 1)`
+/// dispatch, and `crate::wgpu_driver::dispatch_grid` folds a `workgroups`
+/// count exceeding the device's `max_compute_workgroups_per_dimension` into
+/// an `(x, y)` grid instead (a real vocab-sized reduce, with an
+/// `output_axes` product past 65535, hits this on this GPU).
+/// `workgroup_id.y * num_workgroups.x + workgroup_id.x` is the flat
+/// workgroup index across THAT grid, identical to plain `workgroup_id.x`
+/// whenever `num_workgroups.y == 1` (every dispatch this driver issued
+/// before `dispatch_grid` existed), so this is the same value for every
+/// kernel that never needed the split, and the right one for every kernel
+/// that does -- change this without also changing `crate::wgpu_driver`'s
+/// dispatch call and a kernel silently reads/writes the wrong element
+/// instead of erroring.
 fn kernel_signature(source: &mut String, entry: &str) {
     source.push_str(&format!("@compute @workgroup_size({WORKGROUP_SIZE})\n"));
     source.push_str(&format!(
@@ -1065,7 +1080,12 @@ fn kernel_signature(source: &mut String, entry: &str) {
 /// exactly `width` threads per workgroup (baked into `@workgroup_size` so
 /// one workgroup is exactly one subgroup) and carries the extra
 /// `subgroup_invocation_id` builtin every lane needs to know its own
-/// position within that subgroup.
+/// position within that subgroup. `gid` is reconstructed from
+/// `workgroup_id`/`num_workgroups` for the same reason [`kernel_signature`]'s
+/// own doc gives -- `render_reduce_cooperative` divides this by `width` to
+/// recover the output-row index, and one workgroup is exactly one output
+/// row here, so `gid / width` must still equal the flat workgroup index
+/// after a 2D dispatch split, not just `workgroup_id.x` alone.
 fn cooperative_kernel_signature(source: &mut String, entry: &str, width: u32) {
     source.push_str(&format!("@compute @workgroup_size({width})\n"));
     source.push_str(&format!(

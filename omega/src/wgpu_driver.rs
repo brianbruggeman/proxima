@@ -40,6 +40,8 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 use std::sync::mpsc;
 
+use proxima_telemetry::counter;
+use proxima_telemetry::metric::Counter;
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, NumericPolicy, Op,
     QuantizedBlock, Shapes, TensorError, bind_without_reduce_epilogue_fusion, infer, prune_dead,
@@ -49,6 +51,26 @@ use proxima_tensor::{
 use crate::error::EmitError;
 use crate::msl::{Binding, Codec, PackedOperands, gather_count};
 use crate::wgsl::{WgslCaps, WgslKernel, emit_wgsl_with_policy};
+
+/// How many adapter/device/queue triples [`acquire_device`] built — one per
+/// [`WgpuPlan`]. A caller seeing this climb with the call count, rather than
+/// sitting at the plan count, is re-planning a program it could have reused.
+pub static DEVICE_ACQUISITIONS: Counter = Counter::new("omega.wgpu.device_acquisitions");
+/// Reuses of an already-compiled pipeline, keyed by [`WgslKernel::entry`].
+pub static PIPELINE_HITS: Counter = Counter::new("omega.wgpu.pipeline_hits");
+/// WGSL compilations — each one is a `create_compute_pipeline` the plan had
+/// no cached entry for. Mirrors `crate::metal`'s own hit/miss partition.
+pub static PIPELINE_MISSES: Counter = Counter::new("omega.wgpu.pipeline_misses");
+/// [`execute_plan`] calls, each one command encoder and one `queue.submit`.
+pub static GPU_EXEC_CALLS: Counter = Counter::new("omega.wgpu.gpu_exec_calls");
+/// `dispatch_workgroups` calls — one per [`proxima_tensor::BoundOp`] per
+/// [`execute_plan`]. This is the count that says work reached the device,
+/// where a wall-clock or utilization figure only says something did.
+pub static DISPATCH_CALLS: Counter = Counter::new("omega.wgpu.dispatch_calls");
+/// Blocks written to a device buffer, and their byte volume — the two halves
+/// of "what did this plan actually upload".
+pub static BLOCK_UPLOAD_CALLS: Counter = Counter::new("omega.wgpu.block_upload_calls");
+pub static BLOCK_UPLOADED_BYTES: Counter = Counter::new("omega.wgpu.block_uploaded_bytes");
 
 /// Everything the wgpu driver can fail with.
 #[derive(Debug, thiserror::Error)]
@@ -425,9 +447,12 @@ fn block_codec_name(block: &QuantizedBlock<'_>) -> &'static str {
 /// Acquires one adapter/device/queue triple, blocking only here (see the
 /// module doc's "async edge" section). `request_adapter` prefers a
 /// high-performance (discrete GPU) adapter, matching what a compute-bound
-/// caller wants; on this box (arm64 macOS) that resolves to `wgpu`'s Metal
-/// backend, same physical device `crate::metal` drives directly.
+/// caller wants. On arm64 macOS that resolves to `wgpu`'s Metal backend, the
+/// same physical device `crate::metal` drives directly; on a Linux host it
+/// resolves to Vulkan (the RTX 2070 this crate's `wgpu_parity` suite runs
+/// against).
 fn acquire_device() -> Result<(wgpu::Device, wgpu::Queue, WgslCaps), WgpuError> {
+    counter!(DEVICE_ACQUISITIONS, 1);
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
@@ -648,6 +673,11 @@ fn pipeline_for<'plan>(
     pipelines: &'plan mut BTreeMap<String, wgpu::ComputePipeline>,
     kernel: &WgslKernel,
 ) -> &'plan wgpu::ComputePipeline {
+    if pipelines.contains_key(&kernel.entry) {
+        counter!(PIPELINE_HITS, 1);
+    } else {
+        counter!(PIPELINE_MISSES, 1);
+    }
     pipelines.entry(kernel.entry.clone()).or_insert_with(|| {
         let module = shader_module(device, kernel);
         device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -943,17 +973,47 @@ fn gpu_dtype(program: &[Op], node: NodeId) -> DType {
     program[node.0 as usize].dtype()
 }
 
+/// Splits a flat `workgroups` count into an `(x, y)` dispatch grid, each
+/// axis within `max_per_dimension` -- Vulkan (and WebGPU generally) caps
+/// EVERY `dispatch_workgroups` dimension there, so a large-vocab reduce
+/// (`grid_threads` in `crate::wgsl` returns one flat count per output
+/// element, with no axis split of its own) blows past it in `x` alone once
+/// the output is wider than the limit (real device, this GPU: 65535;
+/// hit at vocab_size=151936 on a real Qwen3 checkpoint's lm_head logits
+/// reduce). `crate::wgsl::kernel_signature`/`cooperative_kernel_signature`
+/// reconstruct the SAME flat thread index this used to hand them via
+/// `global_invocation_id.x` alone, from `workgroup_id`/`num_workgroups`
+/// instead -- change one side without the other and a shader silently
+/// reads/writes the wrong element instead of erroring, which is why both
+/// sides of this split live in the same commit.
+///
+/// `x = max_per_dimension` whenever `workgroups` does not already fit in
+/// one axis; `y = ceil(workgroups / x)` picks up the remainder. The
+/// dispatched grid can therefore cover more workgroups than requested
+/// (`x * y >= workgroups`) -- every kernel already returns early past its
+/// own `total`/`output_total` uniform (`crate::wgsl`'s `if (gid >=
+/// u.total_elements) { return; }` and its reduce-kernel counterpart), so
+/// the extra tail workgroups are inert, not a correctness gap.
+fn dispatch_grid(workgroups: u32, max_per_dimension: u32) -> (u32, u32) {
+    if workgroups <= max_per_dimension {
+        (workgroups, 1)
+    } else {
+        (max_per_dimension, workgroups.div_ceil(max_per_dimension))
+    }
+}
+
 /// Runs an already-resolved [`WgpuPlan`] against fresh block data — the
 /// serving-loop entry point. `&mut self` because dispatch may populate
 /// `pipelines` on a cache miss.
 ///
 /// # Errors
-/// Propagates block-shape mismatches, unsupported (non-`Float32`) blocks,
-/// and every WGSL emit/dispatch failure.
+/// Propagates block-shape mismatches, blocks whose codec has no WGSL unpack
+/// kernel, and every WGSL emit/dispatch failure.
 pub fn execute_plan(
     plan: &mut WgpuPlan,
     blocks: &[QuantizedBlock<'_>],
 ) -> Result<Evaluated, WgpuError> {
+    counter!(GPU_EXEC_CALLS, 1);
     if blocks.len() != plan.block_nodes.len() {
         return Err(TensorError::InputCountMismatch {
             expected: plan.block_nodes.len(),
@@ -1020,6 +1080,8 @@ pub fn execute_plan(
             WgpuError::Driver(format!("input buffer for node {node} disappeared"))
         })?;
         plan.queue.write_buffer(buffer, 0, bytes);
+        counter!(BLOCK_UPLOADED_BYTES, bytes.len() as u64);
+        counter!(BLOCK_UPLOAD_CALLS, 1);
         device_buffers.insert(*node, buffer.clone());
     }
 
@@ -1071,6 +1133,7 @@ pub fn execute_plan(
     // `crate::metal::encode_op`'s own `pending_faults` accumulator.
     let mut pending_faults: Vec<(NodeId, wgpu::Buffer, Vec<u64>)> = Vec::new();
     let storage_buffer_limit = plan.device.limits().max_storage_buffers_per_shader_stage;
+    let max_workgroups_per_dimension = plan.device.limits().max_compute_workgroups_per_dimension;
     for bound in &plan.resolved {
         let kernel =
             emit_wgsl_with_policy(bound, plan.caps, &plan.packed_operands, plan.numeric_policy)?;
@@ -1169,9 +1232,7 @@ pub fn execute_plan(
         // 151,936-token output head reaches 151,936 groups), so spill whole
         // workgroups into y. WGSL reconstructs the same linear gid using
         // `num_workgroups.x`.
-        let max_x = plan.device.limits().max_compute_workgroups_per_dimension;
-        let dispatch_x = workgroups.min(max_x).max(1);
-        let dispatch_y = workgroups.div_ceil(dispatch_x).max(1);
+        let (dispatch_x, dispatch_y) = dispatch_grid(workgroups, max_workgroups_per_dimension);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some(kernel.entry.as_str()),
             timestamp_writes: None,
@@ -1179,6 +1240,7 @@ pub fn execute_plan(
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+        counter!(DISPATCH_CALLS, 1);
         drop(pass);
         uniform_buffers.push(uniform_buffer);
         if let Some(buffer) = fault_buffer {
