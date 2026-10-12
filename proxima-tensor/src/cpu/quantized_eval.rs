@@ -213,67 +213,83 @@ pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
     buffers: &mut [Option<Cow<'_, [f32]>>],
 ) -> Result<(), TensorError> {
-    for computed in resolved {
-        if quantized_gather_operand(computed).is_some_and(|(source, lookup)| {
-            quantized_weights
-                .get(&source)
-                .is_some_and(|block| quantized_gather_row_is_aligned(&lookup, block))
-        }) {
+    for (computed, operand, row_shape) in non_primary_operand_reads(resolved, quantized_weights) {
+        #[cfg(not(feature = "instrument"))]
+        let _ = computed;
+        if expert_sources.is_some_and(|sources| sources.contains_key(&operand)) {
             continue;
         }
-        let sources: &[(NodeId, bind::Layout, Option<bind::Lookup>)] = match &computed.kind {
-            BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. } => {
-                computed.operands()
-            }
-            BoundOpKind::Reduce {
-                epilogue_operands, ..
-            }
-            | BoundOpKind::RoundBatchedReduce {
-                epilogue_operands, ..
-            } => epilogue_operands,
-            BoundOpKind::CachedAttention { .. }
-            | BoundOpKind::CachedSoftmaxWeights { .. }
-            | BoundOpKind::GatedDeltaNet { .. }
-            | BoundOpKind::MoeTopK { .. }
-            | BoundOpKind::TopFractionSelect { .. }
-            | BoundOpKind::Iota
-            | BoundOpKind::Constant { .. } => &[],
-        };
-        let consumer_is_elementwise = matches!(
-            computed.kind,
-            BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. }
-        );
-        for (index, (operand, ..)) in sources.iter().enumerate() {
-            if expert_sources.is_some_and(|sources| sources.contains_key(operand)) {
-                continue;
-            }
-            #[cfg(feature = "instrument")]
-            if buffers[operand.0 as usize].is_none() && quantized_weights.contains_key(operand) {
-                debug!(
-                    weight_node = operand.0,
-                    weight_name = ?program.get(operand.0 as usize).and_then(Op::name),
-                    weight_shape = ?shapes.of(*operand),
-                    consumer_node = computed.node.0,
-                    consumer_name = ?program.get(computed.node.0 as usize).and_then(Op::name),
-                    consumer_kind = ?computed.kind,
-                    consumer_extents = ?computed.extents,
-                    direct_quantized_gather = quantized_gather_operand(computed).is_some(),
-                    "quantized operand selected for materialization"
-                );
-            }
-            let row_shape = consumer_is_elementwise
-                .then(|| packed_operand_row_shape(computed, index))
-                .flatten();
-            materialize_quantized_weight_output(
-                *operand,
-                shapes,
-                quantized_weights,
-                row_shape,
-                buffers,
-            )?;
+        #[cfg(feature = "instrument")]
+        if buffers[operand.0 as usize].is_none() && quantized_weights.contains_key(&operand) {
+            debug!(
+                weight_node = operand.0,
+                weight_name = ?program.get(operand.0 as usize).and_then(Op::name),
+                weight_shape = ?shapes.of(operand),
+                consumer_node = computed.node.0,
+                consumer_name = ?program.get(computed.node.0 as usize).and_then(Op::name),
+                consumer_kind = ?computed.kind,
+                consumer_extents = ?computed.extents,
+                direct_quantized_gather = quantized_gather_operand(computed).is_some(),
+                "quantized operand selected for materialization"
+            );
         }
+        materialize_quantized_weight_output(
+            operand,
+            shapes,
+            quantized_weights,
+            row_shape,
+            buffers,
+        )?;
     }
     Ok(())
+}
+
+pub(super) fn non_primary_operand_reads<'resolved>(
+    resolved: &'resolved [BoundOp],
+    quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
+) -> impl Iterator<Item = (&'resolved BoundOp, NodeId, Option<(usize, usize)>)> {
+    resolved
+        .iter()
+        .filter(|computed| {
+            !quantized_gather_operand(computed).is_some_and(|(source, lookup)| {
+                quantized_weights
+                    .get(&source)
+                    .is_some_and(|block| quantized_gather_row_is_aligned(&lookup, block))
+            })
+        })
+        .flat_map(|computed| {
+            let sources: &[(NodeId, bind::Layout, Option<bind::Lookup>)] = match &computed.kind {
+                BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. } => {
+                    computed.operands()
+                }
+                BoundOpKind::Reduce {
+                    epilogue_operands, ..
+                }
+                | BoundOpKind::RoundBatchedReduce {
+                    epilogue_operands, ..
+                } => epilogue_operands,
+                BoundOpKind::CachedAttention { .. }
+                | BoundOpKind::CachedSoftmaxWeights { .. }
+                | BoundOpKind::GatedDeltaNet { .. }
+                | BoundOpKind::MoeTopK { .. }
+                | BoundOpKind::TopFractionSelect { .. }
+                | BoundOpKind::Iota
+                | BoundOpKind::Constant { .. } => &[],
+            };
+            let consumer_is_elementwise = matches!(
+                computed.kind,
+                BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. }
+            );
+            sources
+                .iter()
+                .enumerate()
+                .map(move |(index, (operand, ..))| {
+                    let row_shape = consumer_is_elementwise
+                        .then(|| packed_operand_row_shape(computed, index))
+                        .flatten();
+                    (computed, *operand, row_shape)
+                })
+        })
 }
 
 pub(super) fn quantized_gather_planning_outputs(
