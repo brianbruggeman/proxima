@@ -1,0 +1,21 @@
+ 6:36  up 6 days, 16:40, 5 users, load averages: 2.58 4.15 4.93
+Processes: 756 total, 4 running, 752 sleeping, 4304 threads 
+2026/10/07 06:36:48
+Load Avg: 2.58, 4.15, 4.93 
+CPU usage: 14.33% user, 9.92% sys, 75.73% idle 
+SharedLibs: 932M resident, 166M data, 250M linkedit.
+MemRegions: 266862 total, 6778M resident, 659M private, 3204M shared.
+PhysMem: 62G used (3750M wired, 3489M compressor), 1636M unused.
+VM: 312T vsize, 5703M framework vsize, 786910(0) swapins, 1172497(0) swapouts.
+Networks: packets: 61089055/51G in, 44972527/36G out.
+Disks: 268648640/6514G read, 485082002/20T written.
+
+PID    COMMAND          %CPU
+99617  extensionkitserv 0.0 
+97330  intents_helper   0.0 
+97329  intents_helper   0.0 
+97328  webprivacyd      0.0 
+96644  ssh              0.0 
+94702  DataDetectorsSou 0.0 
+94690  mbuseragent      0.0 
+94639  VTEncoderXPCServ 0.0 
