@@ -62,6 +62,7 @@ enum Registration {
 /// Reactor registration for one externally-owned fd. Deregisters on drop.
 pub struct Readiness {
     registration: Registration,
+    interest: Interest,
     owner: Option<Wakeup>,
     source: Option<SourceKey>,
     last_blocked_epoch: Option<u32>,
@@ -71,7 +72,24 @@ impl Readiness {
     #[cfg(unix)]
     #[must_use]
     pub fn new(fd: RawSource) -> Self {
-        Self::with_registration(Registration::Descriptor(fd))
+        Self::with_registration(Registration::Descriptor(fd), Interest::Read)
+    }
+
+    /// Gate that opens when `fd` can accept a write (`POLLOUT`/`EVFILT_WRITE`).
+    ///
+    /// This is the write-side twin of [`Readiness::new`], over the same
+    /// reactor source and the same epoch handshake: [`Readiness::poll`] arms the
+    /// reactor's write waker (`Reactor::register_write_waker_ref`) and compares
+    /// `Reactor::write_ready_epoch` where [`Readiness::new`] uses the read pair
+    /// (`register_read_waker_ref` / `read_ready_epoch`). The composition is a
+    /// sink pipe: do one nonblocking write, and on `EAGAIN` poll this gate;
+    /// [`ReadyState::Retry`] means write again, [`ReadyState::Parked`] means
+    /// return `Pending`. Edge-triggered like the read gate, so attempt the write
+    /// until `EAGAIN` before arming.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn writable(fd: RawSource) -> Self {
+        Self::with_registration(Registration::Descriptor(fd), Interest::Write)
     }
 
     /// Gate that opens when the child `pid` exits (EVFILT_PROC/NOTE_EXIT on the
@@ -82,19 +100,32 @@ impl Readiness {
     #[cfg(target_os = "macos")]
     #[must_use]
     pub fn process_exit(pid: NonZeroI32) -> Self {
-        Self::with_registration(Registration::Process(pid))
+        Self::with_registration(Registration::Process(pid), Interest::Read)
     }
 
     #[cfg(windows)]
     pub fn new(socket: &impl AsSocket) -> io::Result<Self> {
-        Ok(Self::with_registration(Registration::Owned(
-            socket.as_socket().try_clone_to_owned()?,
-        )))
+        Ok(Self::with_registration(
+            Registration::Owned(socket.as_socket().try_clone_to_owned()?),
+            Interest::Read,
+        ))
     }
 
-    fn with_registration(registration: Registration) -> Self {
+    /// Gate that opens when the socket can accept a write; the write-side twin
+    /// of [`Readiness::new`], armed through the same reactor `rearm` path. A
+    /// sink pipe does one nonblocking write, and on `WouldBlock` polls this gate.
+    #[cfg(windows)]
+    pub fn writable(socket: &impl AsSocket) -> io::Result<Self> {
+        Ok(Self::with_registration(
+            Registration::Owned(socket.as_socket().try_clone_to_owned()?),
+            Interest::Write,
+        ))
+    }
+
+    fn with_registration(registration: Registration, interest: Interest) -> Self {
         Self {
             registration,
+            interest,
             owner: None,
             source: None,
             last_blocked_epoch: None,
@@ -137,11 +168,21 @@ impl Readiness {
                 }
             };
             #[cfg(windows)]
-            reactor.rearm(key, Interest::Read)?;
-            if !reactor.register_read_waker_ref(key, context.waker()) {
+            reactor.rearm(key, self.interest)?;
+            let armed = match self.interest {
+                Interest::Write => reactor.register_write_waker_ref(key, context.waker()),
+                Interest::Read | Interest::ReadWrite => {
+                    reactor.register_read_waker_ref(key, context.waker())
+                }
+            };
+            if !armed {
                 return Err(stale_registration());
             }
-            reactor.read_ready_epoch(key).ok_or_else(stale_registration)
+            let epoch = match self.interest {
+                Interest::Write => reactor.write_ready_epoch(key),
+                Interest::Read | Interest::ReadWrite => reactor.read_ready_epoch(key),
+            };
+            epoch.ok_or_else(stale_registration)
         });
         let Some(epoch_result) = outcome else {
             if self.owner.is_some() {
@@ -168,7 +209,7 @@ impl Readiness {
                 let source = socket.as_raw_fd();
                 #[cfg(windows)]
                 let source = socket;
-                reactor.register(source, Interest::Read)
+                reactor.register(source, self.interest)
             }
             #[cfg(target_os = "macos")]
             Registration::Process(pid) => reactor.register_process_exit(*pid),
@@ -231,6 +272,88 @@ mod tests {
             .expect("polling off-worker never fails");
 
         assert_eq!(outcome, ReadyState::OffWorker);
+    }
+
+    #[cfg(unix)]
+    fn fill_until_would_block(fd: std::os::fd::RawFd) -> usize {
+        let chunk = [0u8; 4096];
+        let mut written = 0;
+        loop {
+            // safety: fd is a live nonblocking socket and chunk outlives the call.
+            let count = unsafe { libc::write(fd, chunk.as_ptr().cast(), chunk.len()) };
+            if count < 0 {
+                assert_eq!(io::Error::last_os_error().kind(), io::ErrorKind::WouldBlock);
+                return written;
+            }
+            written += count as usize;
+        }
+    }
+
+    #[cfg(unix)]
+    fn drain_all(fd: std::os::fd::RawFd) -> usize {
+        let mut sink = [0u8; 65536];
+        let mut drained = 0;
+        loop {
+            // safety: fd is a live nonblocking socket and sink outlives the call.
+            let count = unsafe { libc::read(fd, sink.as_mut_ptr().cast(), sink.len()) };
+            if count <= 0 {
+                return drained;
+            }
+            drained += count as usize;
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_gate_parks_until_peer_drains() {
+        use super::super::core_shard::launch_with_lanes;
+        use proxima_runtime::CoreId;
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc;
+
+        let (writer, peer) = UnixStream::pair().expect("socketpair");
+        writer.set_nonblocking(true).expect("nonblocking writer");
+        peer.set_nonblocking(true).expect("nonblocking peer");
+        let (sender, receiver) = mpsc::channel();
+        let handle = launch_with_lanes(CoreId(0), None, 2, 16).expect("launch worker");
+        handle
+            .dispatch_send(Box::pin(async move {
+                let writer_fd = writer.as_raw_fd();
+                let peer_fd = peer.as_raw_fd();
+                let filled = fill_until_would_block(writer_fd);
+                let mut gate = Readiness::writable(writer_fd);
+                let mut states = Vec::new();
+                for _ in 0..2 {
+                    let state = std::future::poll_fn(|context| {
+                        std::task::Poll::Ready(gate.poll(context))
+                    })
+                    .await
+                    .expect("poll write gate");
+                    states.push(state);
+                }
+                let drained = drain_all(peer_fd);
+                let opened = std::future::poll_fn(|context| match gate.poll(context) {
+                    Ok(ReadyState::Retry) => std::task::Poll::Ready(Ok(())),
+                    Ok(_) => std::task::Poll::Pending,
+                    Err(error) => std::task::Poll::Ready(Err(error)),
+                })
+                .await;
+                let rewritten = fill_until_would_block(writer_fd);
+                sender
+                    .send((filled, states, drained, opened.is_ok(), rewritten))
+                    .expect("report to test thread");
+            }))
+            .expect("dispatch probe to worker");
+
+        let (filled, states, drained, opened, rewritten) =
+            receiver.recv().expect("worker reports gate outcome");
+
+        assert!(filled > 0, "writer accepted bytes before EAGAIN");
+        assert_eq!(states, vec![ReadyState::Retry, ReadyState::Parked]);
+        assert_eq!(drained, filled, "peer drained exactly what was written");
+        assert!(opened, "gate reopened after the peer drained");
+        assert!(rewritten > 0, "write succeeds after the gate opened");
+        handle.shutdown_and_join().expect("shutdown worker");
     }
 
     #[cfg(unix)]
