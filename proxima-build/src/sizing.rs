@@ -39,7 +39,8 @@ pub enum SizingError {
     #[error("read {0}: {1}")]
     Read(PathBuf, std::io::Error),
     #[error("parse {0}: {1}")]
-    Parse(PathBuf, toml::de::Error),
+    // box: toml::de::Error is large enough to trip clippy::result_large_err on windows
+    Parse(PathBuf, Box<toml::de::Error>),
     #[error("{toml}: missing or non-integer [{section}].{key}", toml = .toml.display())]
     MissingInt {
         toml: PathBuf,
@@ -119,7 +120,7 @@ impl SizingSource {
             .map_err(|err| SizingError::Read(toml_path.clone(), err))?;
         let table: Value = text
             .parse()
-            .map_err(|err| SizingError::Parse(toml_path.clone(), err))?;
+            .map_err(|err| SizingError::Parse(toml_path.clone(), Box::new(err)))?;
         Ok(Self {
             toml_path,
             table,

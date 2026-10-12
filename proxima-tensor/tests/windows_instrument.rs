@@ -1,4 +1,5 @@
 #![cfg(all(windows, feature = "instrument"))]
+#![allow(clippy::expect_used)]
 
 use std::hint::black_box;
 use std::time::{Duration, Instant};
