@@ -126,21 +126,10 @@ impl Gpu {
     }
 }
 
-pub fn words(values: &[u32]) -> Vec<u8> {
-    values
-        .iter()
-        .flat_map(|value| value.to_le_bytes())
-        .collect()
-}
-
-pub fn floats(values: &[f32]) -> Vec<u8> {
-    values
-        .iter()
-        .flat_map(|value| value.to_le_bytes())
-        .collect()
-}
-
 pub fn read_words(bytes: &[u8]) -> Vec<u32> {
     let (chunks, _) = bytes.as_chunks::<4>();
-    chunks.iter().map(|chunk| u32::from_le_bytes(*chunk)).collect()
+    chunks
+        .iter()
+        .map(|chunk| u32::from_le_bytes(*chunk))
+        .collect()
 }

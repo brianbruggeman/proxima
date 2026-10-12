@@ -8,6 +8,7 @@
 
 mod compare;
 mod gpu;
+mod upload;
 mod probes;
 mod rows;
 
@@ -17,7 +18,8 @@ use proxima_gguf::quant::float_layout::{decode, encode};
 use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
 
 use compare::{compare_bits, compare_codes};
-use gpu::{Gpu, floats, read_words, words};
+use gpu::{Gpu, read_words};
+use upload::{floats, words};
 use probes::{narrow, widen};
 
 const E4M3_FROM_FIELDS: FloatLayout = FloatLayout {

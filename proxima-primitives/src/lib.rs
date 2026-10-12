@@ -32,6 +32,7 @@ extern crate alloc;
 #[cfg(all(test, not(feature = "std")))]
 extern crate std;
 
+pub mod block_layout;
 pub mod codec;
 pub mod driver;
 pub mod float_layout;

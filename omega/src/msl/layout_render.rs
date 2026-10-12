@@ -12,6 +12,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use proxima_primitives::block_layout::{BlockLayout, Field, Plane, PlaneOrder};
 use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
 
 pub(crate) const F32_FRACTION_BITS: u32 = 23;
@@ -316,4 +317,61 @@ pub fn layout_unpack_msl(layout: FloatLayout, name: &str) -> Option<String> {
     Some(format!(
         "{value}\nstatic inline float {name}(device const uchar *payload, uint index) {{\n{code}    return {value_name}(code);\n}}\n"
     ))
+}
+
+fn plane_expression(plane: &Plane, elements: u16, binding: &str) -> String {
+    let offset = plane.byte_offset;
+    let mask = (1u32 << plane.bits) - 1;
+    match plane.order {
+        PlaneOrder::Contiguous => format!(
+            "    uint {binding}_bit = index * {}u;\n    uint {binding} = ((uint)block[{offset}u + {binding}_bit / 8u] >> ({binding}_bit % 8u)) & {mask:#x}u;\n",
+            plane.bits
+        ),
+        PlaneOrder::NibbleSplit => {
+            let half = elements / 2;
+            format!(
+                "    uint {binding} = ((uint)block[{offset}u + index % {half}u] >> (index >= {half}u ? 4u : 0u)) & {mask:#x}u;\n"
+            )
+        }
+    }
+}
+
+fn field_expression(field: &Field, binding: &str, helper: &str) -> String {
+    let offset = field.byte_offset;
+    let bytes = usize::from(field.layout.width()) / 8;
+    let gathered = (0..bytes)
+        .map(|byte| format!("((uint)block[{}u] << {}u)", usize::from(offset) + byte, byte * 8))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!("    float {binding} = {helper}({gathered});\n")
+}
+
+/// Renders `static inline float name(device const uchar *block, uint index)`: element `index` of
+/// one block of `layout`, assembled from its planes and scaled by its fields. The helpers
+/// `name_code`, `name_scale` and `name_min` are the layout loads of the code and field layouts.
+#[must_use]
+pub fn block_unpack_msl(layout: &BlockLayout, name: &str) -> String {
+    let mut helpers = layout_load_msl(layout.code, &format!("{name}_code"));
+    helpers.push_str(&layout_load_msl(layout.scale.layout, &format!("{name}_scale")));
+    if let Some(min) = &layout.min {
+        helpers.push_str(&layout_load_msl(min.layout, &format!("{name}_min")));
+    }
+    let mut body = plane_expression(&layout.low, layout.elements, "low");
+    let mut code = "low".to_string();
+    if let Some(high) = &layout.high {
+        body.push_str(&plane_expression(high, layout.elements, "high"));
+        code = format!("(low | (high << {}u))", layout.low.bits);
+    }
+    body.push_str(&field_expression(&layout.scale, "scale", &format!("{name}_scale")));
+    let mut value = format!(
+        "(({}.0f * {name}_code({code})) - {}.0f) * scale",
+        layout.multiplier, layout.bias
+    );
+    if let Some(min) = &layout.min {
+        body.push_str(&field_expression(min, "minimum", &format!("{name}_min")));
+        value.push_str(" + minimum");
+    }
+    format!(
+        "{helpers}\nstatic inline float {name}(device const uchar *block, uint index) {{\n{body}    return {value};\n}}\n"
+    )
 }
