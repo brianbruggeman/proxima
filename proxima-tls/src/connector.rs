@@ -508,7 +508,7 @@ mod tests {
     #[cfg(windows)]
     use windows_sys::Win32::Security::Cryptography::{
         CERT_STORE_ADD_ALWAYS, CERT_STORE_MAXIMUM_ALLOWED_FLAG, CERT_STORE_OPEN_EXISTING_FLAG,
-        CERT_STORE_PROV_SYSTEM_W, CERT_SYSTEM_STORE_CURRENT_USER, CertAddEncodedCertificateToStore,
+        CERT_STORE_PROV_SYSTEM_W, CERT_SYSTEM_STORE_LOCAL_MACHINE, CertAddEncodedCertificateToStore,
         CertCloseStore, CertDeleteCertificateFromStore, CertEnumCertificatesInStore,
         CertFreeCertificateContext, CertOpenStore, HCERTSTORE, X509_ASN_ENCODING,
     };
@@ -922,13 +922,13 @@ mod tests {
     #[cfg(windows)]
     #[proxima::test(runtime = "tokio")]
     async fn tls_trust_native_store_round_trip() {
-        struct UserRootStore {
+        struct MachineRootStore {
             handle: HCERTSTORE,
             certificate: Vec<u8>,
             installed: bool,
         }
 
-        impl UserRootStore {
+        impl MachineRootStore {
             fn install(certificate: Vec<u8>) -> Self {
                 let root_name = OsStr::new("ROOT")
                     .encode_wide()
@@ -940,7 +940,7 @@ mod tests {
                         CERT_STORE_PROV_SYSTEM_W,
                         0,
                         0,
-                        CERT_SYSTEM_STORE_CURRENT_USER
+                        CERT_SYSTEM_STORE_LOCAL_MACHINE
                             | CERT_STORE_OPEN_EXISTING_FLAG
                             | CERT_STORE_MAXIMUM_ALLOWED_FLAG,
                         root_name.as_ptr().cast(),
@@ -948,7 +948,8 @@ mod tests {
                 };
                 assert!(
                     !handle.is_null(),
-                    "open current-user ROOT certificate store"
+                    "open local-machine ROOT certificate store (writing LocalMachine\\Root requires an elevated administrator process): {}",
+                    io::Error::last_os_error()
                 );
                 let mut context = ptr::null_mut();
                 // the store and DER slice are valid for the duration of certificate insertion
@@ -963,9 +964,12 @@ mod tests {
                     )
                 };
                 if added == 0 {
+                    let cause = io::Error::last_os_error();
                     // the store was opened by this fixture and no guard exists yet
                     unsafe { CertCloseStore(handle, 0) };
-                    panic!("install test CA in current-user ROOT store");
+                    panic!(
+                        "install test CA in local-machine ROOT store (requires an elevated administrator process): {cause}"
+                    );
                 }
                 if !context.is_null() {
                     // insertion returned this owned certificate context
@@ -1010,7 +1014,7 @@ mod tests {
             }
         }
 
-        impl Drop for UserRootStore {
+        impl Drop for MachineRootStore {
             fn drop(&mut self) {
                 let _ = self.remove();
                 // this guard owns the open store handle
@@ -1096,7 +1100,7 @@ mod tests {
             incumbent_connect().await == Ok(true),
             "incumbent trust must pass before install"
         );
-        let mut user_roots = UserRootStore::install(certificate);
+        let mut machine_roots = MachineRootStore::install(certificate);
         assert!(
             configured_connect()
                 .await
@@ -1109,8 +1113,8 @@ mod tests {
             "incumbent trust must pass while installed"
         );
         assert!(
-            user_roots.remove(),
-            "remove the exact test CA from the user store"
+            machine_roots.remove(),
+            "remove the exact test CA from the machine store"
         );
         let rejected_after_removal = configured_connect().await;
         assert!(
