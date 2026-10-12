@@ -1,6 +1,6 @@
 # speculative-draft-training
 
-status: draft
+status: audited
 owner: brian bruggeman
 created: 2026-10-12
 
