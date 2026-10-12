@@ -712,6 +712,7 @@ dependencies = [
  "conflaguration",
  "serde",
  "thiserror",
+ "toml",
 ]
 
 [[package]]
@@ -733,7 +734,6 @@ dependencies = [
  "proxima-build",
  "smallvec",
  "thiserror",
- "toml",
 ]
 
 [[package]]
@@ -812,11 +812,11 @@ dependencies = [
  "hkdf",
  "hmac",
  "httparse",
+ "proxima-build",
  "rand_core",
  "sha2",
  "smallvec",
  "thiserror",
- "toml",
  "tracing",
 ]
 
@@ -849,11 +849,14 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "half",
+ "libm",
+ "proxima-build",
  "proxima-gguf",
  "proxima-primitives",
+ "serde",
  "smallvec",
  "thiserror",
- "toml",
+ "windows-sys",
 ]
 
 [[package]]
