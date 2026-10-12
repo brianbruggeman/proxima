@@ -1,14 +1,18 @@
 use alloc::collections::BTreeMap;
 
+#[cfg(not(feature = "float-layout-dtype"))]
 use proxima_primitives::float_layout::FloatLayout;
 
 use super::tests::{TILED_ADMITTED_TOKENS, gathered_matmul_op, matmul_op, tiled_gemm_op};
 use super::*;
 
+#[cfg(not(feature = "float-layout-dtype"))]
 const ROW_BLOCKED_1024X512: &str =
     include_str!("../../tests/fixtures/scaled_e3m2_row_blocked_1024x512.msl");
+#[cfg(not(feature = "float-layout-dtype"))]
 const ROW_BLOCKED_1536X6144: &str =
     include_str!("../../tests/fixtures/scaled_e3m2_row_blocked_1536x6144.msl");
+#[cfg(not(feature = "float-layout-dtype"))]
 const DECODER_START: &str = "static inline float scaled_e3m2_field";
 
 fn e3m2_kernel_source(bound: &BoundOp) -> String {
@@ -22,6 +26,7 @@ fn full_matvec_source(rows: u32, reduction: u32) -> String {
     e3m2_kernel_source(&matmul_op(rows, reduction, 1))
 }
 
+#[cfg(not(feature = "float-layout-dtype"))]
 fn matvec_source(rows: u32, reduction: u32) -> String {
     let source = full_matvec_source(rows, reduction);
     let start = source
@@ -30,6 +35,7 @@ fn matvec_source(rows: u32, reduction: u32) -> String {
     source[start..].to_string()
 }
 
+#[cfg(not(feature = "float-layout-dtype"))]
 fn assert_carries_the_six_bit_unpack(source: &str) {
     for shift in [0, 6, 12, 18] {
         assert!(
@@ -47,6 +53,7 @@ fn assert_carries_the_six_bit_unpack(source: &str) {
     );
 }
 
+#[cfg(not(feature = "float-layout-dtype"))]
 #[test]
 fn scaled_e3m2_render_row_blocked_1024x512() {
     let source = matvec_source(1024, 512);
@@ -55,6 +62,7 @@ fn scaled_e3m2_render_row_blocked_1024x512() {
     assert_carries_the_six_bit_unpack(&source);
 }
 
+#[cfg(not(feature = "float-layout-dtype"))]
 #[test]
 fn scaled_e3m2_render_row_blocked_1536x6144() {
     let source = matvec_source(1536, 6144);
@@ -63,6 +71,7 @@ fn scaled_e3m2_render_row_blocked_1536x6144() {
     assert_carries_the_six_bit_unpack(&source);
 }
 
+#[cfg(not(feature = "float-layout-dtype"))]
 #[test]
 fn scaled_e3m2_render_decode_carries_bias_3_and_field_masks() {
     let layout = FloatLayout::E3M2;

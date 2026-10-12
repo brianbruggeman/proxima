@@ -9,6 +9,7 @@ use super::*;
 /// lane-span partial kernel (`[attention_decode]`), the one place those goldens
 /// differ from `main`; the merge text and the preamble are still `main`'s. They
 /// come from `attn_golden_tests::record_main_goldens`.
+#[cfg(not(feature = "float-layout-dtype"))]
 mod golden_identity {
     use super::super::attn_golden_tests::{
         GOLDEN_PREFIX, golden_cases, golden_dir, preamble_of, rendered,

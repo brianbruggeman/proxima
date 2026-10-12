@@ -124,6 +124,8 @@ mod packed_row_blocked_ggml;
 mod tiled_gemm_cooperative_scan;
 mod expert_grouped_gemm;
 mod index_narrowing;
+#[cfg(feature = "float-layout-dtype")]
+pub mod layout_render;
 mod scaled_float_render;
 mod wide_grid;
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -232,6 +234,9 @@ mod cooperative_fold_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod index_narrowing_tests;
+#[cfg(all(test, feature = "float-layout-dtype"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod layout_render_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod scaled_e3m2_render_tests;
