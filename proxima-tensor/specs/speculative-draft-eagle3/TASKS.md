@@ -7,7 +7,7 @@ Update the checkbox and the note IN THE SAME COMMIT as the slice.
 
 | # | slice | discharges | validation command | expected | done | note |
 |---|---|---|---|---|---|---|
-| 0 | prerequisite, owned by `decode-as-data` slice 3: the `build_forward` readout list (logits rows, hidden-state taps at named layers, extra head roots). This sub-spec consumes it and does not re-implement it | R2 prerequisite, discharged by the `decode-as-data` readout tests (cross-spec; the command asserts its own count of 2) | see `commands` slice 0 | 1 | [ ] | fails until `decode-as-data` slice 3 lands |
+| 0 | prerequisite, owned by `decode-as-data` slice 3: the `build_forward` readout list (logits rows, hidden-state taps at named layers, extra head roots). This sub-spec consumes it and does not re-implement it | AC13 (R2 prerequisite; the command asserts N = 2 `decode-as-data` readout tests passed, with a zero-match control) | see `commands` slice 0 | two lines: `1`, `0` | [ ] | fails until `decode-as-data` slice 3 lands |
 | 1 | the lossless harness: `speculative_lossless_corpus` example (plain greedy versus speculative per prompt, `--draft-random <seed>`, `--draft-model <path>`, `--drafter <name>`), its pure comparator, a `summary prompts=<n> identical=<n> ... rejected_total=<n>` line that carries the corpus-sum `rejected_total`, and the three control tests (RL5); the example builds and runs a 1-prompt smoke (`--drafter none --limit 1`, flags `--corpus --drafter --draft-random --draft-model --max-tokens --limit`) whose summary carries a count | ACL5, ACL0 | see `commands` slice 1 | four lines: `3`; then `1`, `1`, `1` | [ ] | the other three method specs consume this example |
 | 2 | draft descriptor from GGUF-key reads (12 required, 1 conditional, 4 optional tensors), the llama-written `$GRANITE` parser and writer oracle, and the `eagle3` family profile TOML `proxima-model-interop/src/profiles/eagle3.toml` resolved by `general.architecture = eagle3` (R1); no forward program yet | AC1, AC12 | see `commands` slice 2 | two lines: `1`, `1` | [ ] | |
 | 3 | gemma4 all-positions hidden-state tap at 3 caller-chosen layer indices, through the readout list (R2) | AC2 | see `commands` slice 3 | 1 | [ ] | needs slice 0 |
@@ -32,10 +32,10 @@ Run each from the worktree root.
 ### slice 0
 
 ```sh
-cargo nextest run -p proxima-tensor -E 'test(/readout_/)' 2>&1 | grep -c 'Summary .* 2 tests run: 2 passed'
+cargo nextest run -p proxima-tensor -E 'test(/readout_/)' 2>&1 | grep -c 'Summary .* 2 tests run: 2 passed'; cargo nextest run -p proxima-tensor -E 'test(/readout_no_such_test_/)' 2>&1 | grep -c 'Summary .* 2 tests run: 2 passed'
 ```
 
-expected: 1
+expected: two lines: `1`, `0` (the second is the control: a filter that matches no test must not print 1)
 
 ### slice 1
 
@@ -133,14 +133,6 @@ cargo run --release -p proxima-model-interop --features std --example speculativ
 
 expected: four lines: `51`, `51`, `1` (rejected_total >= 1, pre-registered, plausible: zero rollbacks over 51 prompts means the rollback path was never exercised by this draft), `1` (AC10)
 
-### slice 14
-
-```sh
-cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_granite_verify_arming_/)' 2>&1 | grep -cE '^arming method=eagle3 cases = 3 unarmed_refused = 1 error_names_speculative_verify = true armed_refused = 0 control_wrong_error_rejected = true$'
-```
-
-expected: 1
-
 ### slice 13
 
 ```sh
@@ -148,6 +140,14 @@ grep -c '^speculative_verify = true' proxima-model-interop/src/profiles/granitem
 ```
 
 expected: ten lines: `1`, `51`, `51`, `1`, `0` (ACL3, armed random arm, rejected_total >= 1 proves rollback independent of the weights) then `1`, `51`, `51`, `1`, `0` (ACL4, armed trained arm; rejected_total >= 1, pre-registered, plausible: zero rollbacks over 51 prompts means the rollback path was never exercised by this draft); a first line of `0` means the profile is unarmed, this slice is not runnable, and slice 15 applies
+
+### slice 14
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_granite_verify_arming_/)' 2>&1 | grep -cE '^arming method=eagle3 cases = 3 unarmed_refused = 1 error_names_speculative_verify = true armed_refused = 0 control_wrong_error_rejected = true$'
+```
+
+expected: 1
 
 ### slice 15
 
