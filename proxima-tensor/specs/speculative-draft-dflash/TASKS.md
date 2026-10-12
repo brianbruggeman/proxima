@@ -1,28 +1,146 @@
 # speculative-draft-dflash -- slices
 
-Each slice: one commit, one behaviour change, one validation command, under ~30 minutes.
+Each slice: one commit, one behaviour change, one validation command block, under ~30 minutes.
 Update the checkbox and the note IN THE SAME COMMIT as the slice.
 
-Every validation command below is literal; the paths are the absolute paths defined in the acceptance criteria preamble of SPEC.md.
+Slice 0 is the only slice that names no AC: it gates on sibling-spec work, carries a literal command and an expected count, and discharges nothing here. Every validation command is literal and lives in the `## commands` section below, one fenced block per slice, so no table escape sits inside a command; the paths are the absolute paths defined in the acceptance criteria preamble of SPEC.md. Run each block from the repository root, line by line.
 
 | # | slice | discharges | validation command | expected | done | note |
 |---|---|---|---|---|---|---|
-| 0 | prerequisites owned by sibling specs: the `build_forward` readout list (`decode-as-data` slice 3) and the lossless harness (`speculative-draft-eagle3` slice 1). This sub-spec consumes both and does not re-implement them | ACL5 (second command only); the first command is a prerequisite check, no AC | `cargo nextest run -p proxima-tensor -E 'test(/readout_/)' 2>&1 \| grep -c 'Summary .* 2 tests run: 2 passed'; cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/lossless_comparator_\|lossless_guard_/)' 2>&1 \| grep -cE '^control=(self\|flip\|zero_draft) '` | two lines: `1`, `3` | [ ] | fails until those slices land |
-| 1 | descriptor reads the seven `dflash.*` keys (including `dflash.target_layers`) and classifies DFlash1 versus DFlash2 (R1) | AC1 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_descriptor_reads_known_keys/)' 2>&1 \| grep -cE 'keys_read = 7 block_size = 8 target_layers = \[3, 7, 11\] selector_top_k = 0 causal = false perturbed_differs = true'` | 1 | [ ] | |
-| 2 | descriptor resolves the seven conv and selector tensor names when present (R2) | AC2 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_tensor_names_resolve/)' 2>&1 \| grep -cE 'tensors_resolved = 7 absent_resolves_dflash1 = true'` | 1 | [ ] | |
-| 3 | masked-block input row layout (R3) | AC3 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_masked_block_shape/)' 2>&1 \| grep -cE 'block_size = 4 mask_positions = 3 positions = 100,101,102,103 read_positions = 1,2,3'` | 1 | [ ] | the row layout is the function `masked_block_rows`, defined once (`speculative-draft-dspark` AC12) |
-| 4 | non-causal block attention unless `dflash.attention.causal` is set (R10) | AC10 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_attention_causality_switch/)' 2>&1 \| grep -cE 'noncausal_ones = 16 causal_ones = 10'` | 1 | [ ] | |
-| 5 | target-layer tap through the readout list, gathered to `[n_chunk, n_embd_enc]` (R4) | AC4 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_target_tap_metal_equals_cpu/)' 2>&1 \| grep -cE 'positions = 64 layers = 3 rows_per_layer = 64 layer_ids = \[2, 13, 25\] max_abs_diff = 0\.[0-9]+ independent_max_abs_diff = 0\.[0-9]+ control_self = 0\.0 control_perturbed_rejected = true wrong_layer_rejected = true'` | 1 | [ ] | needs slice 0; the extraction is the function `tap_feature_rows`, defined once (`speculative-draft-dspark` AC12) |
-| 6 | one-call embd injection into the draft's decode (R5) | AC5 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_features_reach_draft_in_one_decode_call/)' 2>&1 \| grep -cE 'chunks = 12 decode_calls_per_chunk = 1 split_path_calls_per_chunk = 2'` | 1 | [ ] | the injection is the function `inject_feature_rows`, defined once (`speculative-draft-dspark` AC12) |
-| 7 | DFlash1 block decode: per-position top-1, `p_min` stop, `n_min` clear (R6) | AC6 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash1_block_decode_reads_block/)' 2>&1 \| grep -cE 'cases = 4 p_min_stops = 3 n_min_clears = 1'` | 1 | [ ] | |
-| 8 | DFlash2 selector-lattice decode: predecessor-argmax chain, softmax `p_min` truncation (R7) | AC7 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash2_selector_decode_lattice/)' 2>&1 \| grep -cE 'cases = 3 truncated = 1 ablated_differs = true'` | 1 | [ ] | |
-| 9 | confirm no dflash-specific rollback type exists (R8 is a negative requirement; this slice is the grep, plus its control) | AC8 | `git grep -ciE 'DflashRollback\|dflash.*snapshot' -- proxima-model-interop/src proxima-tensor/src \| wc -l; git grep -c 'fn truncate' -- proxima-model-interop/src \| wc -l` | two lines: `0`, then >= 1 | [ ] | |
-| 10 | `draft-dflash` sub-config with defaults `n_max` 3, `n_min` 0, `p_min` 0.0, `backend_sampling` true, builder and loader parity (R9) | AC9 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/speculative_config_draft_dflash_defaults/)' 2>&1 \| grep -cE 'builder_n_max = 3 builder_n_min = 0 loader_n_max = 3 loader_n_min = 0 p_min = 0 backend_sampling = true override_differs = true'` | 1 | [ ] | lands after parent slice 8 (the `ServingConfig` speculative section) |
-| 11 | lossless over a random draft on E2B, 51 prompts (RL1, RL3) | ACL1 | `cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --drafter draft-dflash --draft-random 17 --max-tokens 64 /Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd > lossless_dflash_e2b_random.txt 2>&1; grep -c '^lossless ' lossless_dflash_e2b_random.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* ' lossless_dflash_e2b_random.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_dflash_e2b_random.txt` | three lines: `51`, `51`, `1` | [ ] | a count below 51 on the second line invokes the refutation condition |
-| 12 | lossless over the trained E2B draft, `accepted` > 0 on every prompt (RL1, RL2); also loads and pairs the trained draft (R11) | ACL2, AC11 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_trained_draft_loads_and_pairs/)' 2>&1 \| grep -cE 'e2b_pair = ok granite_pair = width_mismatch block_size = [0-9]+'; cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --drafter draft-dflash --draft-model /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-dflash/e2b-dflash.gguf --max-tokens 64 /Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd > lossless_dflash_e2b_trained.txt 2>&1; grep -c '^lossless ' lossless_dflash_e2b_trained.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* accepted=[1-9][0-9]* ' lossless_dflash_e2b_trained.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_dflash_e2b_trained.txt` | four lines: `1`, `51`, `51`, `1` (AC11, 51 prompts, 51 identical with `accepted` > 0, `rejected_total` >= 1 pre-registered, plausible: zero rollbacks over 51 prompts means verify never disagreed with the draft) | [ ] | blocked on `speculative-draft-training` slice 11 |
-| 13 | granite arm over a random draft (ACL3) | ACL3 | `cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --drafter draft-dflash --draft-random 17 --max-tokens 64 /Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80 > lossless_dflash_granite_random.txt 2>&1; grep -c '^lossless ' lossless_dflash_granite_random.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* ' lossless_dflash_granite_random.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_dflash_granite_random.txt` | three lines: `51`, `51`, `1` | [ ] | blocked on `speculative-draft-training` slice 9 (granite verify) |
-| 14 | lossless over the trained granite draft, `accepted` > 0 on every prompt (RL1, RL2, RL4) | ACL4 | `cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --drafter draft-dflash --draft-model /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-dflash/granite-dflash.gguf --max-tokens 64 /Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80 > lossless_dflash_granite_trained.txt 2>&1; grep -c '^lossless ' lossless_dflash_granite_trained.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* accepted=[1-9][0-9]* ' lossless_dflash_granite_trained.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_dflash_granite_trained.txt` | three lines: `51`, `51`, `1` | [ ] | blocked on `speculative-draft-training` slice 12 and slice 13's granite verify; struck to a recorded shape refusal if granite's shape cannot carry the draft |
-| 15 | typed `speculative_verify` refusal on an unarmed profile, no refusal on an armed one (RL4) | ACL6 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_granite_verify_arming_/)' 2>&1 \| grep -cE '^arming method=dflash cases = 3 unarmed_refused = 1 error_names_speculative_verify = true armed_refused = 0 control_wrong_error_rejected = true$'` | 1 | [ ] | runs today, independent of `speculative-draft-training` slice 9 |
+| 0 | prerequisites owned by sibling specs: the `build_forward` readout list (`decode-as-data` slice 3) and the lossless harness (`speculative-draft-eagle3` slice 1). This sub-spec consumes both and does not re-implement them | prerequisite, no AC | commands, slice 0 | two lines: `1`, `3` | [ ] | fails until those slices land; the second line is the harness's comparator and guard tests run as a presence check, discharged by slice 11 |
+| 1 | descriptor reads the seven `dflash.*` keys (including a non-empty `i32` `dflash.target_layers`) and classifies DFlash1 versus DFlash2 by `selector_top_k` (R1) | AC1 | commands, slice 1 | 1 | [ ] | |
+| 2 | descriptor resolves the seven conv and selector tensor names when present, without changing the classification (R2) | AC2 | commands, slice 2 | 1 | [ ] | |
+| 3 | masked-block input row layout (R3) | AC3 | commands, slice 3 | 1 | [ ] | the row layout is the function `masked_block_rows`, defined once (`speculative-draft-dspark` AC12) |
+| 4 | non-causal block attention unless `dflash.attention.causal` is set (R10) | AC10 | commands, slice 4 | 1 | [ ] | |
+| 5 | target-layer tap through the readout list: rows per layer and layer ids (R4a), equality with an independent forward (R4b), Metal equals CPU (R4c) | AC4a, AC4b, AC4c | commands, slice 5 | three lines: `1`, `1`, `1` | [ ] | needs slice 0; the extraction is the function `tap_feature_rows`, defined once (`speculative-draft-dspark` AC12) |
+| 6 | one-call embd injection into the draft's decode (R5) | AC5 | commands, slice 6 | 1 | [ ] | the injection is the function `inject_feature_rows`, defined once (`speculative-draft-dspark` AC12) |
+| 7 | DFlash1 block decode: per-position top-1, `p_min` stop, `n_min` clear (R6) | AC6 | commands, slice 7 | 1 | [ ] | |
+| 8 | DFlash2 selector-lattice decode: predecessor-argmax chain, softmax `p_min` truncation (R7) | AC7 | commands, slice 8 | 1 | [ ] | |
+| 9 | confirm no dflash-specific rollback type exists (R8 is a negative requirement; this slice is the grep, plus its pathspec checks and positive control) | AC8 | commands, slice 9 | four lines: >= 1, >= 1, `0`, >= 1 | [ ] | |
+| 10 | `draft-dflash` sub-config with defaults `n_max` 3, `n_min` 0, `p_min` 0.0, `backend_sampling` true, `block_size` 0, builder and loader parity (R9) | AC9 | commands, slice 10 | 1 | [ ] | lands after parent slice 8 (the `ServingConfig` speculative section) |
+| 11 | lossless comparator and guard controls (RL5), then lossless over a random draft on E2B, 51 prompts (RL1, RL3) | ACL5, ACL1 | commands, slice 11 | four lines: `3`, `51`, `51`, `1` | [ ] | needs slice 0; a count below 51 on the third line invokes the refutation condition |
+| 12 | lossless over the trained E2B draft, `accepted` > 0 on every prompt (RL1, RL2); also loads and pairs the trained draft (R11) | ACL2, AC11 | commands, slice 12 | four lines: `1`, `51`, `51`, `1` (AC11, 51 prompts, 51 identical with `accepted` > 0, `rejected_total` >= 1 pre-registered, plausible: zero rollbacks over 51 prompts means verify never disagreed with the draft) | [ ] | blocked on `speculative-draft-training` slice 11 |
+| 13 | granite arm over a random draft (ACL3) | ACL3 | commands, slice 13 | three lines: `51`, `51`, `1` | [ ] | blocked on `speculative-draft-training` slice 9 (granite verify) |
+| 14 | lossless over the trained granite draft, `accepted` > 0 on every prompt (RL1, RL2, RL4) | ACL4 | commands, slice 14 | three lines: `51`, `51`, `1` | [ ] | blocked on `speculative-draft-training` slice 12 (places the granite draft) and slice 9 (arms granite verify); struck to a recorded shape refusal if granite's shape cannot carry the draft |
+| 15 | typed `speculative_verify` refusal on an unarmed profile, no refusal on an armed one (RL4) | ACL6 | commands, slice 15 | 1 | [ ] | runs today, independent of `speculative-draft-training` slice 9 |
+
+## commands
+
+Slice 0:
+
+```
+cargo nextest run -p proxima-tensor -E 'test(/readout_/)' 2>&1 | grep -c 'Summary .* 2 tests run: 2 passed'
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/lossless_comparator_|lossless_guard_/)' 2>&1 | grep -cE '^control=(self compared=51 identical=51|flip compared=51 identical=50|zero_draft drafted_prompts=0 flagged=true)$'
+```
+
+Slice 1:
+
+```
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_descriptor_reads_known_keys/)' 2>&1 | grep -cE '^dflash_keys keys_read = 7 block_size = 8 target_layers = \[3, 7, 11\] selector_top_k = 0 class = DFlash1 causal = false perturbed_differs = true perturbed_class = DFlash2 missing_block_size_rejected = true missing_target_layers_rejected = true wrong_length_rejected = true non_i32_rejected = true$'
+```
+
+Slice 2:
+
+```
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_tensor_names_resolve/)' 2>&1 | grep -cE '^dflash_tensors tensors_resolved = 7 absent_resolved = 0 class_unchanged_by_tensors = true$'
+```
+
+Slice 3:
+
+```
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_masked_block_shape/)' 2>&1 | grep -cE 'block_size = 4 mask_positions = 3 positions = 100,101,102,103 read_positions = 1,2,3'
+```
+
+Slice 4:
+
+```
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_attention_causality_switch/)' 2>&1 | grep -cE 'noncausal_ones = 16 causal_ones = 10'
+```
+
+Slice 5:
+
+```
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_target_tap_rows_per_layer/)' 2>&1 | grep -cE '^tap_rows positions = 64 layers = 3 rows_per_layer = 64 layer_ids = \[2, 13, 25\] gathered_cols_equal_layers_times_n_embd = true layer_ids_equal_descriptor = true control_other_ids_rejected = true$'
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_target_tap_equals_independent_forward/)' 2>&1 | grep -cE '^tap_independent positions = 64 layers = 3 independent_max_abs_diff = 0\.[0-9]+ control_self = 0\.0 control_perturbed_rejected = true wrong_layer_rejected = true$'
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_target_tap_metal_equals_cpu/)' 2>&1 | grep -cE '^tap_metal positions = 64 layers = 3 layer_ids = \[2, 13, 25\] max_abs_diff = 0\.[0-9]+ control_self = 0\.0 control_perturbed_rejected = true$'
+```
+
+Slice 6:
+
+```
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_features_reach_draft_in_one_decode_call/)' 2>&1 | grep -cE 'chunks = 12 decode_calls_per_chunk = 1 split_path_calls_per_chunk = 2'
+```
+
+Slice 7:
+
+```
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash1_block_decode_reads_block/)' 2>&1 | grep -cE 'cases = 4 p_min_stops = 3 n_min_clears = 1'
+```
+
+Slice 8:
+
+```
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash2_selector_decode_lattice/)' 2>&1 | grep -cE 'cases = 3 truncated = 1 ablated_differs = true'
+```
+
+Slice 9:
+
+```
+git ls-files -- proxima-model-interop/src | wc -l
+git ls-files -- proxima-tensor/src | wc -l
+git grep -ciE 'DflashRollback|dflash.*snapshot' -- proxima-model-interop/src proxima-tensor/src | wc -l
+git grep -ciE 'DflashRollback|dflash.*snapshot|fn truncate' -- proxima-model-interop/src proxima-tensor/src | wc -l
+```
+
+Slice 10:
+
+```
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/speculative_config_draft_dflash_defaults/)' 2>&1 | grep -cE '^dflash_config block_size = 0 builder_equals_loader = true builder_n_max = 3 builder_n_min = 0 p_min = 0 backend_sampling = true override_differs = true block_size_override_differs = true$'
+```
+
+Slice 11:
+
+```
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/lossless_comparator_|lossless_guard_/)' 2>&1 | grep -cE '^control=(self compared=51 identical=51|flip compared=51 identical=50|zero_draft drafted_prompts=0 flagged=true)$'
+cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --drafter draft-dflash --draft-random 17 --max-tokens 64 /Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd > lossless_dflash_e2b_random.txt 2>&1
+grep -c '^lossless ' lossless_dflash_e2b_random.txt
+grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* ' lossless_dflash_e2b_random.txt
+grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_dflash_e2b_random.txt
+```
+
+Slice 12:
+
+```
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_trained_draft_loads_and_pairs/)' 2>&1 | grep -cE 'e2b_pair = ok granite_pair = width_mismatch block_size = [0-9]+'
+cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --drafter draft-dflash --draft-model /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-dflash/e2b-dflash.gguf --max-tokens 64 /Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd > lossless_dflash_e2b_trained.txt 2>&1
+grep -c '^lossless ' lossless_dflash_e2b_trained.txt
+grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* accepted=[1-9][0-9]* ' lossless_dflash_e2b_trained.txt
+grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_dflash_e2b_trained.txt
+```
+
+Slice 13:
+
+```
+cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --drafter draft-dflash --draft-random 17 --max-tokens 64 /Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80 > lossless_dflash_granite_random.txt 2>&1
+grep -c '^lossless ' lossless_dflash_granite_random.txt
+grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* ' lossless_dflash_granite_random.txt
+grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_dflash_granite_random.txt
+```
+
+Slice 14:
+
+```
+cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --drafter draft-dflash --draft-model /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-dflash/granite-dflash.gguf --max-tokens 64 /Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80 > lossless_dflash_granite_trained.txt 2>&1
+grep -c '^lossless ' lossless_dflash_granite_trained.txt
+grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* accepted=[1-9][0-9]* ' lossless_dflash_granite_trained.txt
+grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_dflash_granite_trained.txt
+```
+
+Slice 15:
+
+```
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash_granite_verify_arming_/)' 2>&1 | grep -cE '^arming method=dflash cases = 3 unarmed_refused = 1 error_names_speculative_verify = true armed_refused = 0 control_wrong_error_rejected = true$'
+```
 
 ## resume
 
