@@ -462,6 +462,13 @@ required-features = ["std"]
 name = "gemma4_ring_parity"
 required-features = ["std", "metal"]
 
+# Full-tensor op-by-op diff against a `llama-eval-callback` full dump; the
+# recorder install needs the same `instrument` surface the layer-oracle
+# examples above use.
+[[example]]
+name = "gemma4_op_diff"
+required-features = ["std", "metal", "instrument"]
+
 [[example]]
 name = "long_context_niah"
 required-features = ["std", "metal"]
