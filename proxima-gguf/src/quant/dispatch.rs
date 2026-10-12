@@ -6,9 +6,10 @@
 //! missing arm is an explicit capability result, never an accidental byte
 //! reinterpretation.
 
+use proxima_primitives::block_layout::BlockLayout;
+
 use super::{
-    QuantError, bf16, f16, iq2_xs, iq3_xxs, iq4_nl, q1_0, q2_0, q2_k, q3_k, q4_0, q4_1, q4_k, q5_0,
-    q5_1, q5_k, q6_k, q8_0, q8_1, q8_k,
+    QuantError, bf16, block_layout, f16, iq2_xs, iq3_xxs, iq4_nl, q2_k, q3_k, q4_k, q5_k, q6_k, q8_k,
 };
 use crate::types::GgmlType;
 
@@ -18,18 +19,18 @@ pub fn dequantize(kind: GgmlType, data: &[u8], output: &mut [f32]) -> Result<(),
         GgmlType::F16 => f16::dequantize(data, output),
         GgmlType::Bf16 => bf16::dequantize(data, output),
         GgmlType::Q2_K => q2_k::dequantize(data, output),
-        GgmlType::Q1_0 => q1_0::dequantize(data, output),
-        GgmlType::Q2_0 => q2_0::dequantize(data, output),
+        GgmlType::Q1_0 => block_layout::dequantize(&BlockLayout::Q1_0, data, output),
+        GgmlType::Q2_0 => block_layout::dequantize(&BlockLayout::Q2_0, data, output),
         GgmlType::Q3_K => q3_k::dequantize(data, output),
-        GgmlType::Q4_0 => q4_0::dequantize(data, output),
-        GgmlType::Q4_1 => q4_1::dequantize(data, output),
+        GgmlType::Q4_0 => block_layout::dequantize(&BlockLayout::Q4_0, data, output),
+        GgmlType::Q4_1 => block_layout::dequantize(&BlockLayout::Q4_1, data, output),
         GgmlType::Q4_K => q4_k::dequantize(data, output),
-        GgmlType::Q5_0 => q5_0::dequantize(data, output),
-        GgmlType::Q5_1 => q5_1::dequantize(data, output),
+        GgmlType::Q5_0 => block_layout::dequantize(&BlockLayout::Q5_0, data, output),
+        GgmlType::Q5_1 => block_layout::dequantize(&BlockLayout::Q5_1, data, output),
         GgmlType::Q5_K => q5_k::dequantize(data, output),
         GgmlType::Q6_K => q6_k::dequantize(data, output),
-        GgmlType::Q8_0 => q8_0::dequantize(data, output),
-        GgmlType::Q8_1 => q8_1::dequantize(data, output),
+        GgmlType::Q8_0 => block_layout::dequantize(&BlockLayout::Q8_0, data, output),
+        GgmlType::Q8_1 => block_layout::dequantize(&BlockLayout::Q8_1, data, output),
         GgmlType::Q8_K => q8_k::dequantize(data, output),
         GgmlType::Iq2Xs => iq2_xs::dequantize(data, output),
         GgmlType::Iq3Xxs => iq3_xxs::dequantize(data, output),
@@ -44,6 +45,7 @@ pub fn dequantize(kind: GgmlType, data: &[u8], output: &mut [f32]) -> Result<(),
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use crate::quant::{q1_0, q2_0, q4_0, q4_1, q8_1};
 
     #[test]
     fn dispatches_a_registered_decoder_without_format_specific_caller_logic() {

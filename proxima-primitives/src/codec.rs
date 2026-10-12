@@ -10,6 +10,7 @@
 //! (migrated onto this type), `omega`'s `PackedCodec`, and
 //! `proxima-tensor`'s `QuantizedBlock` tag (both still to migrate).
 
+use crate::block_layout::BlockLayout;
 use crate::float_layout::FloatLayout;
 
 /// Which packed byte layout a codec-tagged buffer holds.
@@ -140,6 +141,22 @@ impl Codec {
     /// packed, then the f16 scale.
     pub const FP6_E3M2_BLOCK_BYTES: usize =
         Self::FP6_E3M2_BLOCK_ELEMENTS * FloatLayout::E3M2.width() as usize / 8 + 2;
+
+    /// The block packing of the linear block codecs, `None` for every other codec.
+    #[must_use]
+    pub const fn block_layout(self) -> Option<BlockLayout> {
+        match self {
+            Codec::Q4_0 => Some(BlockLayout::Q4_0),
+            Codec::Q4_1 => Some(BlockLayout::Q4_1),
+            Codec::Q5_0 => Some(BlockLayout::Q5_0),
+            Codec::Q5_1 => Some(BlockLayout::Q5_1),
+            Codec::Q8_0 => Some(BlockLayout::Q8_0),
+            Codec::Q8_1 => Some(BlockLayout::Q8_1),
+            Codec::Q1_0 => Some(BlockLayout::Q1_0),
+            Codec::Q2_0 => Some(BlockLayout::Q2_0),
+            _ => None,
+        }
+    }
 
     /// The element layout of the float codecs, `None` for every codec that is not a plain float
     /// layout (block-quantized integer codecs, codebooks, and the formats with no decoder).
