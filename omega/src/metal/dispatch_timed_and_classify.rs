@@ -1802,32 +1802,8 @@ pub(super) mod classify_kind_packed_row_marker_tests {
     /// names, so a failure shows which of the three expert reduces
     /// (gate/up/down) regressed and why.
     ///
-    /// ROW 538 update: with `correct_packed_matmul_layouts` applied (this
-    /// test used to skip it -- see the call site's own doc), gate and up
-    /// both classify `reduce-packed-row-blocked` with `diagnose_packed_row_block`
-    /// verdict `Ok(())`, unconditionally. Down alone declines
-    /// `Err(GatheredOperand)` (`msl.rs:2740-2742`) with the feature off:
-    /// unlike gate/up, whose activation is the SAME `x` for every one of the
-    /// `k` selected experts (`split_token_feature_axes` sees a zero stride on
-    /// the selected axis for both operands and falls back to "no token
-    /// axis"), down's own activation genuinely varies per selected expert
-    /// (`silu(gate_k) * up_k`), so `split_token_feature_axes` correctly
-    /// names BOTH `sequence` and `selected` as token axes and
-    /// `packed_row_block_token_total` comes back `8 > 1` -- a real
-    /// multi-row-gathered dispatch, not a probe artifact. Turning
-    /// `metal-gathered-packed-row` on flips `diagnose_packed_row_block` to
-    /// `Ok(())` for down too, but `classify_kind`'s own render-and-inspect
-    /// still reports `reduce-cooperative` for it even then -- a SECOND site
-    /// beyond `classify_packed_row_block`'s admission (inside
-    /// `push_packed_row_blocked_body`'s multi-row body,
-    /// `msl.rs:8169-8183` and onward) does not yet emit the packed markers
-    /// for this shape. That is a kernel-body change, out of scope for this
-    /// slice -- named here rather than fixed.
-    #[ignore = "down's grouped reduce is a genuine multi-row-gathered dispatch \
-                (msl.rs:2740 GatheredOperand); metal-gathered-packed-row admits \
-                it structurally but push_packed_row_blocked_body's multi-row \
-                body still does not render the packed markers for it (kernel \
-                change, out of scope)"]
+    /// With `correct_packed_matmul_layouts` applied, as `omega::metal::prepare`
+    /// does, gate, up and down all classify `reduce-packed-row-blocked`.
     #[test]
     fn qwen35moe_shaped_grouped_expert_reduces_classify_as_packed_row_blocked() {
         const EMBEDDING: usize = 512;
