@@ -2176,6 +2176,86 @@ pub(super) fn dequantize_row(
     decode(row_bytes_slice, output).map_err(|_| unaligned_row())
 }
 
+/// A packed weight operand's own logical shape CAN be declared with its
+/// contraction axis (or axes -- `wo`'s own `"ugdo->sugdo"` contracts THREE,
+/// `u`,`g`,`d`, at once) declared FIRST (`spec.rs`'s `"ihd->shdi"`-style GQA
+/// projections declare `wq` as `[embedding, heads, head_dim]`; `wo` as
+/// `[u, g, d, embedding_out]`), in which case its physical GGUF bytes pack
+/// the opposite way round: `row_count` whole rows back to back, each
+/// `contraction_width` contiguous elements wide (`run_reduce_quantized`'s
+/// own doc: "the physical weight row a given (h, d) pair needs is
+/// h * head_dim + d, exactly GGUF's own on-disk row order"). An embedding
+/// table declared `[vocab, embedding]`, or any weight declared with its
+/// contraction axis LAST, has NO such mismatch -- that axis's canonical
+/// stride is already 1, matching physical order exactly. Picking
+/// "whichever axis has the largest stride" cannot tell these two
+/// conventions apart GLOBALLY (confirmed the hard way: an early version of
+/// this fix always treated the largest-stride axis as the contraction axis
+/// and broke embedding-gather materialization, which declares `vocab`
+/// first with the largest stride but needs NO conversion at all) -- the
+/// robust source of truth is EVERY axis where this operand AND at least one
+/// other operand of the SAME consumer both vary (the shared, dotted
+/// dimensions a Multiply's own two operands agree on), not stride
+/// magnitude. WITHIN that known set, canonical row-major composition
+/// guarantees the group's own outermost (largest-stride) member's stride
+/// IS the true combined `row_count` -- that narrower, axis-scoped use of
+/// "largest stride" is sound precisely because the set was already proven
+/// correct, not guessed. `contraction_width` is the PRODUCT of every
+/// shared axis's own extent, read straight out of `computed.extents` since
+/// each is one of the consumer's own iteration axes. `None` when this
+/// operand has no consumer to derive a split from (a raw weight requested
+/// directly as an output), no shared axis exists, or the resulting
+/// `row_count` is `<= 1` (already physically contiguous there).
+pub(super) fn packed_operand_row_shape(computed: &BoundOp, operand_index: usize) -> Option<(usize, usize)> {
+    let operands = computed.operands();
+    let (_, weight_layout, _) = operands.get(operand_index)?;
+    let shared_axes: Vec<u16> = (0..computed.extents.len() as u16)
+        .filter(|&axis| {
+            computed.extents[axis as usize] > 1
+                && weight_layout.stride(axis) != 0
+                && operands
+                    .iter()
+                    .enumerate()
+                    .any(|(other_index, (_, other_layout, _))| other_index != operand_index && other_layout.stride(axis) != 0)
+        })
+        .collect();
+    if shared_axes.is_empty() {
+        return None;
+    }
+    let contraction_width: i64 = shared_axes.iter().map(|&axis| computed.extents[axis as usize] as i64).product();
+    if contraction_width <= 1 {
+        return None;
+    }
+    // Discriminator for "does this operand need converting AT ALL": the
+    // contraction group's own innermost member's stride. Already `1` means
+    // the group already sits at the physically fast/inner position (the
+    // ordinary contraction-last convention every OTHER packed weight in
+    // this crate uses) -- nothing to convert. Dropping this check when
+    // generalizing from one contraction axis to a group regressed
+    // `quantized_embedding_gather_matches_dequantized_reference_*` the hard
+    // way: `row_count` reached via division is not automatically a safe
+    // no-op just because it comes out `<= 1`, so this must be checked
+    // BEFORE that division runs, not inferred from its result.
+    let min_contraction_stride = shared_axes.iter().map(|&axis| weight_layout.stride(axis)).min().unwrap_or(1);
+    if min_contraction_stride <= 1 {
+        return None;
+    }
+    // NOT the largest stride among `shared_axes` -- see `omega::wgsl::
+    // packed_row_shape`'s own doc for why that coincidence only holds for a
+    // single-axis contraction group (`wq`/`wk`) and double-counts a
+    // multi-axis group's own inner extents (`wo`'s real `u`,`g`,`d` group).
+    // The general, correct derivation: every axis this operand actually
+    // varies over (nonzero stride) is either part of the contraction group
+    // or the row/output group, so `total_real_elements / contraction_width`
+    // is exactly the row count regardless of which side is declared first.
+    let total_real_elements: i64 = (0..computed.extents.len() as u16)
+        .filter(|&axis| weight_layout.stride(axis) != 0)
+        .map(|axis| computed.extents[axis as usize] as i64)
+        .product();
+    let row_count = total_real_elements / contraction_width;
+    (row_count > 1).then_some((row_count as usize, contraction_width as usize))
+}
+
 /// [`evaluate_quantized_with_scratch`]'s own pre-materialization pass: if
 /// `node` names a still-unbound (`buffers[node] == None`) entry in
 /// `quantized_weights`, dequantizes its WHOLE buffer via [`dequantize_row`]
@@ -2185,10 +2265,29 @@ pub(super) fn dequantize_row(
 /// to one call) and stores it. A no-op whenever `node` already has a
 /// buffer or is not a quantized weight at all. Callers use this for requested
 /// raw weights and consumers whose executors require floating point buffers.
+///
+/// `row_shape`, from [`packed_operand_row_shape`], is `Some((row_count,
+/// contraction_width))` when a consumer's own [`Layout`] proves this
+/// buffer's physical byte order is transposed relative to its declared
+/// canonical shape (`wq`/`wk`/`wv`'s own case, see that function's doc) --
+/// dequantizing row by row and scattering each row into its canonical
+/// `[contraction, row]` position corrects it, matching what the consumer
+/// (the elementwise/reduce interpreters, `bind.rs`'s own canonical
+/// `Layout`) already assumes. `run_reduce_quantized`'s own fast path never
+/// needs this: it only ever asks whether a `Layout::stride` is zero or not
+/// (to classify batch vs. row axes), never its numeric value, so the
+/// mismatched strides are invisible there -- this function is the one place
+/// that materializes such a weight as an ordinary dense `f32` buffer, so
+/// this is the one place the transpose belongs. `None` dequantizes flat, in
+/// physical byte order unchanged -- this function's original, correct
+/// behavior for anything (an embedding table, or a weight with no live
+/// consumer at all) whose declared shape already matches its physical
+/// layout.
 pub(super) fn materialize_quantized_weight_output(
     node: NodeId,
     shapes: &shape::Shapes,
     quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
+    row_shape: Option<(usize, usize)>,
     buffers: &mut [Option<Cow<'_, [f32]>>],
 ) -> Result<(), TensorError> {
     if buffers[node.0 as usize].is_some() {
@@ -2203,8 +2302,20 @@ pub(super) fn materialize_quantized_weight_output(
         elements = element_count(shapes.of(node)),
         "materializing quantized weight for requested output"
     );
-    let mut dequantized = vec![0.0f32; element_count(shapes.of(node))];
-    dequantize_row(node, block, 0, dequantized.len(), &mut dequantized)?;
+    let total = element_count(shapes.of(node));
+    let mut dequantized = vec![0.0f32; total];
+    match row_shape {
+        Some((row_count, contraction_width)) if row_count * contraction_width == total => {
+            let mut row_values = vec![0.0f32; contraction_width];
+            for row in 0..row_count {
+                dequantize_row(node, block, row, contraction_width, &mut row_values)?;
+                for (contraction_index, &value) in row_values.iter().enumerate() {
+                    dequantized[contraction_index * row_count + row] = value;
+                }
+            }
+        }
+        _ => dequantize_row(node, block, 0, total, &mut dequantized)?,
+    }
     buffers[node.0 as usize] = Some(Cow::Owned(dequantized));
     Ok(())
 }

@@ -978,6 +978,25 @@ fn preamble(
     source.push('\n');
 }
 
+/// Declares the `Uniforms` fields `push_packed_physical_offset`'s runtime
+/// conversion needs — one `i32` pair per operand, filled per dispatch by
+/// `crate::wgpu_driver::pack_reduce_uniforms`/`pack_elementwise_uniforms`
+/// via `packed_row_shape`. Declared only when at least one operand is
+/// packed (`entry_name`'s own kernel identity already varies on that, via
+/// `operand_codecs` — see that function's own doc on why two operands
+/// differing only in codec cannot share a compiled kernel), so a
+/// packed-free kernel's `Uniforms` struct, and its shared pipeline-cache
+/// identity, are byte-for-byte what they were before this fix.
+fn push_packed_row_uniform_fields(source: &mut String, operand_count: usize, quantized: &[Option<Codec>]) {
+    if !quantized.iter().any(Option::is_some) {
+        return;
+    }
+    source.push_str(&format!("    packed_row_count: array<i32, {operand_count}>,\n"));
+    source.push_str(&format!(
+        "    packed_contraction_width: array<i32, {operand_count}>,\n"
+    ));
+}
+
 /// Declares the `Uniforms` fields a gather needs — the WGSL counterpart of
 /// `crate::msl::push_gather_uniform_fields`. Declared only when
 /// `gather_count > 0`, so a gather-free kernel's `Uniforms` struct is
@@ -1141,6 +1160,171 @@ fn codec_function_name(node: NodeId, codec: Codec) -> Result<&'static str, EmitE
     }
 }
 
+/// A packed weight operand's own logical shape CAN be declared with its
+/// contraction axis (or axes — `wo`'s own `"ugdo->sugdo"` contracts THREE,
+/// `u`,`g`,`d`, at once) declared FIRST (`spec.rs`'s `"ihd->shdi"`-style GQA
+/// projections declare `wq` as `[embedding, heads, head_dim]`; `wo` as
+/// `[u, g, d, embedding_out]`), in which case the canonical row-major
+/// strides `operand_strides` carries for it address a `[contraction...,
+/// row]`-ordered space — but the physical GGUF bytes pack the opposite way
+/// round: `row_count` whole rows back to back, each `contraction_width`
+/// contiguous elements wide (`run_reduce_quantized`'s own doc,
+/// `proxima-tensor/src/cpu.rs`: "the physical weight row a given (h, d)
+/// pair needs is h * head_dim + d, exactly GGUF's own on-disk row order").
+/// A weight declared with its contraction axis LAST (the ordinary
+/// convention every other packed matmul this crate renders uses) has NO
+/// such mismatch — canonical stride already puts it at 1, matching physical
+/// order exactly. Picking "whichever axis has the largest stride" cannot
+/// tell these two conventions apart GLOBALLY (confirmed the hard way: an
+/// earlier version of this fix did exactly that across every axis and
+/// broke every ordinary contraction-last packed matmul parity test) —
+/// `contraction_axes` must come from the CALLER, which knows exactly which
+/// axes are actually being contracted (the reduce's own reduction axes, or
+/// the axes a plain elementwise product's OTHER operand also varies on),
+/// never guessed from stride magnitude alone globally. WITHIN that known
+/// set, though, canonical row-major composition guarantees every
+/// contraction axis's own combined stride is monotonic in declared order,
+/// so the group's own outermost (largest-stride) member's stride IS the
+/// true `row_count` — that narrower, axis-scoped use of "largest stride"
+/// is sound precisely because the set was already proven correct by the
+/// caller, not guessed. `proxima-tensor::cpu`'s
+/// `materialize_quantized_weight_output`/`packed_operand_row_shape` apply
+/// the identical, axis-precise conversion for the CPU-side dense-buffer
+/// case; this is its WGSL twin.
+///
+/// Returns `(1, 1)` — the pair `push_packed_physical_offset`'s own runtime
+/// formula treats as an identity no-op — when `contraction_axes` is empty,
+/// every listed axis has extent `<= 1`, or the group's own combined stride
+/// is already `<= 1` (already physically contiguous there). Deliberately
+/// returns PLAIN VALUES, never text baked into the WGSL source: two nodes
+/// with the same structural `entry_name`/pipeline-cache identity (same
+/// rank, dtype, codec, body shape — e.g. Q's and K's own GQA projection
+/// reduces, identical in every way `entry_name` hashes except their actual
+/// head counts) SHARE one compiled kernel, the same way they already share
+/// one compiled kernel for different `extents` via `operand_strides`'s own
+/// uniform values — baking `row_count`/`contraction_width` into the WGSL
+/// TEXT instead (an earlier version of this fix did exactly that) breaks
+/// the instant two such nodes disagree on the actual values, since
+/// whichever compiles first silently wins the shared cache entry for both
+/// (confirmed the hard way: Q came out correct, K silently reused Q's own
+/// baked-in row_count on a real device). `crate::wgpu_driver::pack_reduce_
+/// uniforms`/`pack_elementwise_uniforms` call this at BIND time, per node,
+/// to fill the new `packed_row_count`/`packed_contraction_width` uniform
+/// arrays this function's own runtime formula reads back per dispatch.
+pub(crate) fn packed_row_shape(resolved: &BoundOp, operand_index: usize, contraction_axes: &[u16]) -> (i64, i64) {
+    let no_conversion = (1, 1);
+    let Some((_, layout, _)) = resolved.operands().get(operand_index) else {
+        return no_conversion;
+    };
+    if contraction_axes.is_empty() {
+        return no_conversion;
+    }
+    let contraction_width: i64 = contraction_axes
+        .iter()
+        .map(|&axis| resolved.extents.get(axis as usize).copied().unwrap_or(1) as i64)
+        .product();
+    if contraction_width <= 1 {
+        return no_conversion;
+    }
+    // The discriminator for "does this operand need converting AT ALL":
+    // the contraction group's own INNERMOST member's stride. When it is
+    // already `1`, the group already sits at the physically fast/inner
+    // position (declared order already matches physical order -- the
+    // ordinary contraction-last convention every OTHER packed matmul in
+    // this crate uses), and nothing should be touched. Only when the
+    // group's own innermost stride is NOT `1` (something else, a row/
+    // output axis, occupies the fast position instead) does the mismatch
+    // this whole function corrects actually exist. Dropping this check
+    // when generalizing from one contraction axis to a group is exactly
+    // what regressed every ordinary contraction-last packed matmul parity
+    // test the hard way: `row_count` computed as `1` is not automatically
+    // a safe no-op once it is reached via division rather than compared
+    // directly against a stride, so the check must happen BEFORE that
+    // division, not be inferred from its result.
+    let min_contraction_stride = contraction_axes.iter().map(|&axis| layout.stride(axis)).min().unwrap_or(1);
+    if min_contraction_stride <= 1 {
+        return no_conversion;
+    }
+    // `row_count` is NOT the largest stride among `contraction_axes` --
+    // that only happens to equal the true row count when there is exactly
+    // one contraction axis (`wq`/`wk`'s own shape: canonical row-major
+    // makes a lone leading axis's stride the product of every LATER axis,
+    // which in that case is entirely the row/output group). `wo`'s own
+    // three-axis group (`u`,`g`,`d`, all declared before the single output
+    // axis `o`) breaks that coincidence: the group's own outermost member
+    // (`u`) has stride `g_extent * d_extent * o_extent`, which double-counts
+    // `g`/`d`'s own extents (confirmed the hard way: this exact formula,
+    // before this fix, computed `row_count = 262144` for a real `wo` whose
+    // true row count is `1024`). The general, correct derivation: every
+    // axis this operand ACTUALLY varies over (nonzero stride) is either
+    // part of the contraction group or part of the row/output group, with
+    // no third kind — so `total_real_elements / contraction_width` is
+    // exactly the row count, regardless of how many axes make up either
+    // side or which side is declared first.
+    let total_real_elements: i64 = (0..resolved.extents.len() as u16)
+        .filter(|&axis| layout.stride(axis) != 0)
+        .map(|axis| resolved.extents[axis as usize] as i64)
+        .product();
+    let row_count = total_real_elements / contraction_width;
+    if row_count <= 1 {
+        return no_conversion;
+    }
+    (row_count, contraction_width)
+}
+
+/// The axes a plain elementwise product's packed operand is contracted
+/// along: every axis where BOTH this operand AND at least one other
+/// operand vary (nonzero stride) — the shared, dotted dimensions, as
+/// opposed to an axis only the packed operand varies on (its own "row"
+/// split, e.g. `h`/`d`) or only another operand varies on (that operand's
+/// own broadcast batch axis, e.g. `s`). Empty when no such axis exists —
+/// `packed_row_shape` already treats an empty set as "nothing to convert".
+pub(crate) fn packed_contraction_axes_elementwise(resolved: &BoundOp, operand_index: usize) -> Vec<u16> {
+    let operands = resolved.operands();
+    let Some((_, weight_layout, _)) = operands.get(operand_index) else {
+        return Vec::new();
+    };
+    (0..resolved.extents.len() as u16)
+        .filter(|&axis| {
+            resolved.extents[axis as usize] > 1
+                && weight_layout.stride(axis) != 0
+                && operands
+                    .iter()
+                    .enumerate()
+                    .any(|(other_index, (_, other_layout, _))| other_index != operand_index && other_layout.stride(axis) != 0)
+        })
+        .collect()
+}
+
+/// The axes a fused reduce's packed operand is contracted along: exactly
+/// the reduce's own reduction axes (every axis of `resolved` missing from
+/// `output_axes`) — `wo`'s own reduce contracts three (`u`, `g`, `d`) at
+/// once, `wq`/`wk`'s contract one (`i`); `packed_row_shape` handles either
+/// count uniformly once it has the full set.
+pub(crate) fn packed_contraction_axes_reduce(resolved: &BoundOp, output_axes: &[u16]) -> Vec<u16> {
+    (0..resolved.extents.len() as u16).filter(|axis| !output_axes.contains(axis)).collect()
+}
+
+/// Emits the runtime physical-offset conversion every packed-operand read
+/// at operand `index` must use instead of the caller's own canonical
+/// `off{index}` — `packed_row_shape`'s own formula, but reading
+/// `u.packed_row_count[index]`/`u.packed_contraction_width[index]` from the
+/// UNIFORM buffer (filled per dispatch by `crate::wgpu_driver::pack_reduce_
+/// uniforms`/`pack_elementwise_uniforms`) rather than baking either value
+/// into the WGSL text — see `packed_row_shape`'s own doc for why: this
+/// keeps the emitted SOURCE identical (and therefore safely shareable
+/// across the pipeline cache) for every node with the same structural
+/// shape, regardless of their differing actual head counts. `(1, 1)` is
+/// the identity pair (`off % 1 == 0`, `off / 1 == off`), so this formula is
+/// unconditionally safe to emit for every packed operand, including one
+/// `packed_row_shape` found nothing to convert for.
+fn push_packed_physical_offset(source: &mut String, indent: &str, index: usize) -> String {
+    source.push_str(&format!(
+        "{indent}let off{index}_physical: i32 = (off{index} % u.packed_row_count[{index}]) * u.packed_contraction_width[{index}] + off{index} / u.packed_row_count[{index}];\n"
+    ));
+    format!("off{index}_physical")
+}
+
 /// How operand `index` is READ, given the element-offset expression the
 /// caller already computed — the WGSL counterpart of `crate::msl::operand_read`.
 /// A plain operand is a direct index; a packed operand's element offset
@@ -1187,6 +1371,7 @@ fn render_elementwise(
     uniforms.push_str(&format!(
         "    operand_strides: array<array<i32, {rank_len}>, {operand_count}>,\n"
     ));
+    push_packed_row_uniform_fields(&mut uniforms, operand_count, quantized);
     push_gather_uniform_fields(&mut uniforms, gather_total, rank_len);
     uniforms.push_str("};\n");
 
@@ -1240,7 +1425,12 @@ fn render_elementwise(
     ));
     for index in 0..operand_count {
         let codec = quantized.get(index).copied().flatten();
-        let expr = wgsl_operand_read(resolved.node, index, &format!("off{index}"), codec)?;
+        let offset_expr = if codec.is_some() {
+            push_packed_physical_offset(&mut source, "    ", index)
+        } else {
+            format!("off{index}")
+        };
+        let expr = wgsl_operand_read(resolved.node, index, &offset_expr, codec)?;
         let read = read_cast(element_type, &expr);
         source.push_str(&format!("    scratch[{index}] = {read};\n"));
     }
@@ -1315,6 +1505,7 @@ fn render_reduce(
     uniforms.push_str(&format!(
         "    operand_strides: array<array<i32, {rank_len}>, {operand_count}>,\n"
     ));
+    push_packed_row_uniform_fields(&mut uniforms, operand_count, quantized);
     uniforms.push_str("    out_base: i32,\n");
     uniforms.push_str(&format!("    out_strides: array<i32, {rank_len}>,\n"));
     if epilogue_operand_count > 0 {
@@ -1413,7 +1604,12 @@ fn render_reduce(
     ));
     for index in 0..operand_count {
         let codec = quantized.get(index).copied().flatten();
-        let expr = wgsl_operand_read(resolved.node, index, &format!("off{index}"), codec)?;
+        let offset_expr = if codec.is_some() {
+            push_packed_physical_offset(&mut source, "        ", index)
+        } else {
+            format!("off{index}")
+        };
+        let expr = wgsl_operand_read(resolved.node, index, &offset_expr, codec)?;
         let read = read_cast(element_type, &expr);
         source.push_str(&format!("        scratch[{index}] = {read};\n"));
     }
@@ -1523,6 +1719,7 @@ fn render_reduce_cooperative(
     uniforms.push_str(&format!(
         "    operand_strides: array<array<i32, {rank_len}>, {operand_count}>,\n"
     ));
+    push_packed_row_uniform_fields(&mut uniforms, operand_count, quantized);
     uniforms.push_str("    out_base: i32,\n");
     uniforms.push_str(&format!("    out_strides: array<i32, {rank_len}>,\n"));
     if epilogue_operand_count > 0 {
@@ -1646,7 +1843,12 @@ fn render_reduce_cooperative(
     ));
     for index in 0..operand_count {
         let codec = quantized.get(index).copied().flatten();
-        let expr = wgsl_operand_read(resolved.node, index, &format!("off{index}"), codec)?;
+        let offset_expr = if codec.is_some() {
+            push_packed_physical_offset(&mut source, "        ", index)
+        } else {
+            format!("off{index}")
+        };
+        let expr = wgsl_operand_read(resolved.node, index, &offset_expr, codec)?;
         let read = read_cast(element_type, &expr);
         source.push_str(&format!("        scratch[{index}] = {read};\n"));
     }

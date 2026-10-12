@@ -735,10 +735,53 @@ fn push_gather_uniforms(bytes: &mut Vec<u8>, bound: &BoundOp, rank_len: usize) {
     }
 }
 
+/// Appends the `packed_row_count`/`packed_contraction_width` arrays
+/// `crate::wgsl::push_packed_row_uniform_fields` declares, one `i32` pair
+/// per operand — the runtime data
+/// `crate::wgsl::push_packed_physical_offset`'s emitted formula reads back
+/// per dispatch (see `crate::wgsl::packed_row_shape`'s own doc for why this
+/// data belongs in the uniform buffer, not baked into the WGSL text: two
+/// structurally-identical nodes with different actual head counts, e.g.
+/// Q's and K's own GQA projection reduces, share one compiled pipeline via
+/// `entry_name`'s cache key, so anything that differs between them must
+/// travel as uniform data the same way `operand_strides` already does).
+/// `contraction_axes` resolves every axis this operand is actually
+/// contracted along for `bound`'s own shape (the reduce's own reduction
+/// axes, or the axes a plain elementwise product's two operands share) --
+/// an empty set for a non-packed operand, or one `packed_row_shape` finds
+/// nothing to convert at, both correctly encoded as the `(1, 1)` identity
+/// pair. A no-op (writes nothing) when NO operand is packed, mirroring
+/// `push_packed_row_uniform_fields`'s own conditional declaration.
+fn push_packed_row_uniforms(
+    bytes: &mut Vec<u8>,
+    bound: &BoundOp,
+    packed_operands: &PackedOperands,
+    contraction_axes: impl Fn(usize) -> Vec<u16>,
+) {
+    let quantized = crate::identity::operand_codecs(bound, packed_operands);
+    if !quantized.iter().any(Option::is_some) {
+        return;
+    }
+    let shapes: Vec<(i64, i64)> = (0..bound.operands().len())
+        .map(|index| {
+            if quantized[index].is_none() {
+                return (1, 1);
+            }
+            crate::wgsl::packed_row_shape(bound, index, &contraction_axes(index))
+        })
+        .collect();
+    for (row_count, _) in &shapes {
+        push_i32(bytes, *row_count as i32);
+    }
+    for (_, contraction_width) in &shapes {
+        push_i32(bytes, *contraction_width as i32);
+    }
+}
+
 /// Mirrors `crate::metal::pack_elementwise_uniforms`, narrowed to `i32` (see
 /// `crate::wgsl`'s own doc on why WGSL fields are `i32` rather than `long`)
 /// and with no gather fields (v1 has no gather).
-fn pack_elementwise_uniforms(bound: &BoundOp) -> Vec<u8> {
+fn pack_elementwise_uniforms(bound: &BoundOp, packed_operands: &PackedOperands) -> Vec<u8> {
     let rank_len = bound.extents.len().max(1);
     let extents: Vec<i64> = bound.extents.iter().map(|extent| *extent as i64).collect();
     let mut bytes = Vec::new();
@@ -750,11 +793,14 @@ fn pack_elementwise_uniforms(bound: &BoundOp) -> Vec<u8> {
     for (_, layout, _) in bound.operands() {
         push_i32_row(&mut bytes, &layout.strides, rank_len);
     }
+    push_packed_row_uniforms(&mut bytes, bound, packed_operands, |index| {
+        crate::wgsl::packed_contraction_axes_elementwise(bound, index)
+    });
     push_gather_uniforms(&mut bytes, bound, rank_len);
     bytes
 }
 
-fn pack_reduce_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
+fn pack_reduce_uniforms(bound: &BoundOp, packed_operands: &PackedOperands) -> Result<Vec<u8>, EmitError> {
     let BoundOpKind::Reduce {
         output_axes,
         out_layout,
@@ -800,6 +846,9 @@ fn pack_reduce_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
     for (_, layout, _) in bound.operands() {
         push_i32_row(&mut bytes, &layout.strides, rank_len);
     }
+    push_packed_row_uniforms(&mut bytes, bound, packed_operands, |_index| {
+        crate::wgsl::packed_contraction_axes_reduce(bound, output_axes.as_slice())
+    });
     push_i32(&mut bytes, out_layout.base as i32);
     if is_broadcast_epilogue {
         let mut strides = vec![1i64; rank_len];
@@ -874,12 +923,12 @@ fn pack_leaf_uniforms(bound: &BoundOp) -> Vec<u8> {
     bytes
 }
 
-fn pack_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
+fn pack_uniforms(bound: &BoundOp, packed_operands: &PackedOperands) -> Result<Vec<u8>, EmitError> {
     match &bound.kind {
-        BoundOpKind::Elementwise { .. } => Ok(pack_elementwise_uniforms(bound)),
+        BoundOpKind::Elementwise { .. } => Ok(pack_elementwise_uniforms(bound, packed_operands)),
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
-        } => pack_reduce_uniforms(bound),
+        } => pack_reduce_uniforms(bound, packed_operands),
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => pack_scan_uniforms(bound),
@@ -1152,7 +1201,7 @@ pub fn execute_plan(
                 limit: storage_buffer_limit,
             });
         }
-        let uniform_bytes = pack_uniforms(bound)?;
+        let uniform_bytes = pack_uniforms(bound, &plan.packed_operands)?;
         let uniform_buffer = plan.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("omega-wgpu-uniforms"),
             size: uniform_bytes.len().max(4) as u64,
@@ -1389,8 +1438,8 @@ mod tests {
     #[test]
     fn pack_reduce_uniforms_rejects_an_elementwise_bound_op() {
         let bound = elementwise_tanh_op(8);
-        let error =
-            pack_reduce_uniforms(&bound).expect_err("an elementwise chain is not a Reduce fold");
+        let error = pack_reduce_uniforms(&bound, &PackedOperands::new())
+            .expect_err("an elementwise chain is not a Reduce fold");
         assert!(matches!(
             error,
             EmitError::RenderKindMismatch {
