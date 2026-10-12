@@ -21,8 +21,8 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
-    ForwardProgram, LayerCacheRoots, LayerKind, ModelDescriptor, RecurrentReadoutRoots,
-    ScheduleSource, build_forward,
+    ForwardProgram, LayerCacheRoots, LayerKind, LoopCdConfig, ModelDescriptor, RecurrenceConfig,
+    RecurrentReadoutRoots, ScheduleSource, build_forward,
 };
 
 use crate::bind::{BoundWeights, ModelHparams, bind_native_f32, metadata_str};
@@ -295,6 +295,47 @@ pub fn header_descriptor(
     layout: KvLayout,
 ) -> Result<ModelDescriptor, InteropError> {
     header(parsed, layout).map(|(descriptor, _)| descriptor)
+}
+
+/// [`header_descriptor`] with its recurrence and LoopCD edited to `config`,
+/// resolved against the checkpoint's own pass count: the descriptor a model is
+/// loaded with when the caller wants a different depth or guidance than the
+/// header's. A family with no recurrence accepts only the neutral policy.
+///
+/// # Errors
+///
+/// The header reader refuses the header; [`InteropError::InvalidRecurrentConfig`]
+/// when `config` is unusable against the checkpoint's depth;
+/// [`InteropError::UnsupportedRecurrentConfig`] when the family does not recur
+/// and `config` asks for something.
+pub fn recurrent_descriptor(
+    parsed: &ParsedGguf,
+    layout: KvLayout,
+    config: RecurrentConfig,
+) -> Result<ModelDescriptor, InteropError> {
+    let (descriptor, architecture) = header(parsed, layout)?;
+    let Some(recurrence) = descriptor.recurrence else {
+        return if config.is_neutral() {
+            Ok(descriptor)
+        } else {
+            Err(InteropError::UnsupportedRecurrentConfig {
+                family: architecture.family,
+            })
+        };
+    };
+    let resolved = config.resolve(recurrence.iterations)?;
+    Ok(ModelDescriptor {
+        recurrence: Some(RecurrenceConfig {
+            iterations: resolved.iterations.unwrap_or(recurrence.iterations),
+            ..recurrence
+        }),
+        loopcd: LoopCdConfig {
+            mode: resolved.mode,
+            strength: resolved.strength,
+            reference_iteration: resolved.reference_iteration,
+        },
+        ..descriptor
+    })
 }
 
 /// Binds every weight tensor and lowers the forward program in one pass,

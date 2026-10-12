@@ -424,6 +424,12 @@ pub struct FamilyProfile {
     /// families are [`RopeLayout::SplitHalf`], NORM families are
     /// [`RopeLayout::Adjacent`]. Never inferred from tensor presence.
     pub rope_layout: RopeLayout,
+    /// Present for a family whose header repeats its physical layers: the
+    /// checkpoint's `{family}.num_loops` is the pass count and this says how the
+    /// passes join ([`RecurrenceProfile`]). Such a family lowers on the padded
+    /// cached engine, the only one that gives every pass its own KV.
+    #[serde(default)]
+    pub recurrence: Option<RecurrenceProfile>,
     /// Lower the verify program by default ([`ModelDescriptor::speculative_verify`]):
     /// set only for a family whose measured verify step costs less than the
     /// tokens its drafts save.
@@ -516,6 +522,17 @@ pub enum RopeLayout {
     Adjacent,
 }
 
+/// How a recurrent family's passes join, as data on
+/// [`FamilyProfile::recurrence`]. The pass count is the checkpoint's own
+/// (`{family}.num_loops`); this carries what a header does not spell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecurrenceProfile {
+    /// Apply the output norm to every completed pass before the next one
+    /// reads it ([`RecurrenceConfig::normalize_each_iteration`]).
+    pub normalize_each_iteration: bool,
+}
+
 impl FamilyProfile {
     /// One layer's [`LayerFfnConfig`]: [`Self::ffn`], with the combination
     /// taken from [`Self::parallel_dense_moe`] when the checkpoint has experts.
@@ -528,6 +545,27 @@ impl FamilyProfile {
         LayerFfnConfig {
             combination,
             ..self.ffn
+        }
+    }
+
+    /// `descriptor` repeated `iterations` times as this profile's
+    /// [`Self::recurrence`] says, or unchanged for a family without one. The
+    /// repeats need a KV per pass, which only the padded cached engine gives, so
+    /// the descriptor moves to [`CacheMask::Padded`] with it; the physical
+    /// schedule, `block_count` and `layers` included, is left as it was.
+    #[must_use]
+    pub fn recurring(&self, descriptor: ModelDescriptor, iterations: u32) -> ModelDescriptor {
+        match self.recurrence {
+            Some(profile) => ModelDescriptor {
+                cache_strategy: CacheStrategy::Cached,
+                cache_mask: CacheMask::Padded,
+                recurrence: Some(RecurrenceConfig {
+                    iterations,
+                    normalize_each_iteration: profile.normalize_each_iteration,
+                }),
+                ..descriptor
+            },
+            None => descriptor,
         }
     }
 

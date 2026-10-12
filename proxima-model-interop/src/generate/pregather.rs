@@ -2646,6 +2646,27 @@ impl<'file> LoadedModel<'file> {
         )
     }
 
+    /// [`Self::load`] with the recurrence and LoopCD the caller names instead
+    /// of the header's: the descriptor is the header's own edited by
+    /// [`crate::recurrent_descriptor`], so a depth or guidance change is a
+    /// different lowered graph over the same weights. The model resolves the
+    /// policy once here; every serving call must name the same one
+    /// ([`Self::admit_recurrent`]).
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`crate::recurrent_descriptor`] and [`Self::load_with_descriptor`]
+    /// can fail with.
+    pub fn load_with_recurrent_config(
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+        recurrent: crate::recurrent_config::RecurrentConfig,
+    ) -> Result<Self, InteropError> {
+        let descriptor =
+            crate::lowering::recurrent_descriptor(parsed, KvLayout::SlidingRing, recurrent)?;
+        Self::load_with_descriptor(parsed, file_bytes, &descriptor)
+    }
+
     /// [`Self::load`] for a Hugging Face directory: the weights bind out of
     /// `shards` under the family's binding profile
     /// ([`crate::bind_hf_checkpoint`], [`crate::bind_safetensors_shards`]) and

@@ -25,7 +25,7 @@ enum Outcome {
     Refused,
 }
 
-const SHIPPED: [(&str, Outcome); 13] = [
+const SHIPPED: [(&str, Outcome); 14] = [
     ("gemma4", Outcome::Bound),
     ("llama", Outcome::Bound),
     ("mistral", Outcome::Bound),
@@ -39,6 +39,7 @@ const SHIPPED: [(&str, Outcome); 13] = [
     ("qwen35moe", Outcome::Bound),
     ("lfm2", Outcome::Refused),
     ("lfm2moe", Outcome::Refused),
+    ("ouro", Outcome::Bound),
 ];
 
 fn header_of(bytes: &[u8]) -> ModelDescriptor {
@@ -47,7 +48,7 @@ fn header_of(bytes: &[u8]) -> ModelDescriptor {
 }
 
 fn uniform_descriptor(profile: &FamilyProfile, outcome: Outcome) -> ModelDescriptor {
-    let mut descriptor = gqa_descriptor_from_shape(
+    let descriptor = gqa_descriptor_from_shape(
         VOCAB as u32,
         16,
         32,
@@ -63,6 +64,7 @@ fn uniform_descriptor(profile: &FamilyProfile, outcome: Outcome) -> ModelDescrip
         false,
         profile,
     );
+    let mut descriptor = profile.recurring(descriptor, 2);
     if outcome == Outcome::Refused {
         descriptor.layers[0].kind = LayerKind::ShortConv;
     }

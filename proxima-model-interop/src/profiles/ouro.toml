@@ -1,0 +1,17 @@
+score_scale_inverse_sqrt_head_dim = true
+value_norm = false
+qk_norm = false
+rope_layout = "adjacent"
+kv_cache_shape = "custom"
+
+[recurrence]
+normalize_each_iteration = true
+
+[ffn]
+post_attention_norm = true
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = true
