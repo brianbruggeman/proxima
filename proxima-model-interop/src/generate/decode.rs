@@ -2442,6 +2442,55 @@ impl<'file> LoadedModel<'file> {
         Ok((generated_ids, text, stopped_by_eos))
     }
 
+    /// Teacher-forced logits over recorded token ids: the same cached decode loop
+    /// [`Self::generate_from_ids`] runs, with every step's token forced to
+    /// `forced_ids[step]` and every step's last-position logits collected. Row `step` is the
+    /// vocabulary-logit row that chooses `forced_ids[step]` after `prompt_ids` and
+    /// `forced_ids[..step]`, so two models given the same ids are compared on identical
+    /// inputs at every position. Composes `run_decode_loop_through_cache` with
+    /// `token_override` and `LogitsSink::Collect`, the pair `quality_report` already uses.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::generate_with_serving_config`]; [`InteropError::LogitsShapeMismatch`]
+    /// when the loop stopped before it produced one row per forced id.
+    pub fn teacher_forced_logits_from_ids(
+        &self,
+        prompt_ids: &[u32],
+        forced_ids: &[u32],
+        serving_config: &ServingConfig,
+    ) -> Result<Vec<Vec<f32>>, InteropError> {
+        // a speculative verify batch settles accepted drafts without a per-step row
+        let unspeculated = serving_config.with_speculative(SpeculativeConfig::none());
+        let effective_serving_config = self.effective_serving_config(&unspeculated)?;
+        let mut runtime = self.backend_runtime(&effective_serving_config);
+        let mut rows: Vec<Vec<f32>> = Vec::with_capacity(forced_ids.len());
+        self.run_decode_loop_through_cache(
+            prompt_ids.to_vec(),
+            &[],
+            forced_ids.len(),
+            &effective_serving_config,
+            &mut runtime,
+            Some(forced_ids),
+            &mut LogitsSink::Collect(&mut rows),
+            &mut NodeValuesSink::Discard,
+            &mut |_event| ControlFlow::Continue(()),
+            None,
+            true,
+            None,
+            None,
+        )?;
+        rows.truncate(forced_ids.len());
+        if rows.len() == forced_ids.len() {
+            return Ok(rows);
+        }
+        Err(InteropError::LogitsShapeMismatch {
+            expected_rows: forced_ids.len(),
+            found_rows: rows.len(),
+            vocab: self.architecture.vocab as usize,
+        })
+    }
+
     /// [`Self::generate_from_ids`], with the caller marking where turns end.
     /// `turn_ends` are token counts into `prompt_ids` -- the index just past an
     /// end-of-turn token -- and the prefill stops at each to snapshot the
