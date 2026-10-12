@@ -101,3 +101,91 @@ pub(super) fn tiny_ouro_gguf(num_loops: u32, skip_loop_final_norm: bool) -> Vec<
     })
     .expect("write the tiny recurrent GGUF")
 }
+
+/// The same checkpoint as Hugging Face stores it: split-half row order (with a
+/// width-2 head the two orders coincide), the four branch norms under their HF
+/// names, Q zero, K and V identity, output and FFN zero.
+pub(super) fn tiny_ouro_safetensors() -> Vec<u8> {
+    let zeros = [0.0f32; 4];
+    let identity = [1.0f32, 0.0, 0.0, 1.0];
+    let gamma = [1.0f32, 1.0];
+    let entries: [(&str, Vec<u64>, &[f32]); 14] = [
+        ("model.embed_tokens.weight", vec![2, 2], &EMBEDDING[..]),
+        ("model.layers.0.input_layernorm.weight", vec![2], &gamma[..]),
+        (
+            "model.layers.0.input_layernorm_2.weight",
+            vec![2],
+            &gamma[..],
+        ),
+        (
+            "model.layers.0.post_attention_layernorm.weight",
+            vec![2],
+            &gamma[..],
+        ),
+        (
+            "model.layers.0.post_attention_layernorm_2.weight",
+            vec![2],
+            &gamma[..],
+        ),
+        (
+            "model.layers.0.self_attn.q_proj.weight",
+            vec![2, 2],
+            &zeros[..],
+        ),
+        (
+            "model.layers.0.self_attn.k_proj.weight",
+            vec![2, 2],
+            &identity[..],
+        ),
+        (
+            "model.layers.0.self_attn.v_proj.weight",
+            vec![2, 2],
+            &identity[..],
+        ),
+        (
+            "model.layers.0.self_attn.o_proj.weight",
+            vec![2, 2],
+            &zeros[..],
+        ),
+        (
+            "model.layers.0.mlp.gate_proj.weight",
+            vec![2, 2],
+            &zeros[..],
+        ),
+        ("model.layers.0.mlp.up_proj.weight", vec![2, 2], &zeros[..]),
+        (
+            "model.layers.0.mlp.down_proj.weight",
+            vec![2, 2],
+            &zeros[..],
+        ),
+        ("model.norm.weight", vec![2], &gamma[..]),
+        ("lm_head.weight", vec![2, 2], &identity[..]),
+    ];
+    let encoded: Vec<(&str, Vec<u64>, Vec<u8>)> = entries
+        .into_iter()
+        .map(|(name, shape, values)| (name, shape, f32_bytes(values)))
+        .collect();
+    let tensors = encoded
+        .iter()
+        .map(|(name, shape, bytes)| proxima_safetensors::TensorPayload {
+            name: (*name).into(),
+            dtype: proxima_tensor::DType::Float32,
+            shape: shape.clone(),
+            data: bytes,
+        })
+        .collect();
+    proxima_safetensors::write_complete(&proxima_safetensors::SafetensorsModel {
+        tensors,
+        metadata: Default::default(),
+    })
+    .expect("write the tiny recurrent safetensors")
+}
+
+/// Its `config.json`, as the pinned checkpoint spells the keys that matter.
+pub(super) const TINY_OURO_HF_CONFIG: &[u8] = br#"{
+    "model_type": "ouro", "hidden_act": "silu", "total_ut_steps": 2,
+    "early_exit_threshold": 1.0, "hidden_size": 2, "num_attention_heads": 1,
+    "num_key_value_heads": 1, "num_hidden_layers": 1, "intermediate_size": 2,
+    "layer_types": ["full_attention"], "vocab_size": 2, "head_dim": 2,
+    "rms_norm_eps": 1.0, "rope_theta": 1000000.0, "tie_word_embeddings": false
+}"#;

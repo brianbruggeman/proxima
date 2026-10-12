@@ -91,7 +91,7 @@ mod runner {
 
     pub fn arguments() -> io::Result<Arguments> {
         let mut output = None;
-        let mut directory = PathBuf::from("/private/tmp/proxima-loopcd-models/ouro-1.4b");
+        let mut directory = PathBuf::from("/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/models/ouro-1.4b");
         let mut backend = String::from("cpu");
         let mut prefix = vec![19556, 905, 30];
         let mut samples = 20;

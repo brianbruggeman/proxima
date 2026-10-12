@@ -84,6 +84,8 @@ pub mod profiles;
 #[cfg(feature = "std")]
 mod prompt_cache_settings;
 #[cfg(feature = "std")]
+mod hf_descriptor;
+#[cfg(feature = "std")]
 mod quality;
 mod recurrent_config;
 #[cfg(feature = "std")]
@@ -160,6 +162,8 @@ pub use lowering::{
 };
 #[cfg(feature = "std")]
 pub use prompt_cache_settings::PromptCacheSettings;
+#[cfg(feature = "std")]
+pub use hf_descriptor::ouro_descriptor_from_hf_config;
 #[cfg(feature = "std")]
 pub use proxima_core::ServingState;
 #[cfg(all(feature = "std", feature = "instrument"))]

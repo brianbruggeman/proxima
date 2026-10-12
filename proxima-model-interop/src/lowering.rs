@@ -394,7 +394,7 @@ fn bind_descriptor<'file>(
 
 /// The policy `descriptor` lowers under, in the shape serving admission
 /// compares: neutral when the descriptor does not recur.
-fn resolved_recurrence(descriptor: &ModelDescriptor) -> RecurrentConfig {
+pub(crate) fn resolved_recurrence(descriptor: &ModelDescriptor) -> RecurrentConfig {
     RecurrentConfig {
         iterations: descriptor
             .recurrence

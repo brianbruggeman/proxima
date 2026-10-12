@@ -43,6 +43,7 @@ use proxima_safetensors::{Manifest, TensorEntry};
 use proxima_tensor::DType;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{Extent, Op};
+use proxima_tensor::spec::{LayerSchedule, ModelDescriptor, RopePairing};
 
 use crate::Codec;
 use crate::bind::{
@@ -1069,6 +1070,26 @@ pub mod names {
     pub fn post_attention_layernorm(layer: u32) -> String {
         format!("model.layers.{layer}.post_attention_layernorm.weight")
     }
+    /// The second norm a sandwich-normed block applies to its attention output
+    /// before the residual add (`input_layernorm_2`).
+    #[must_use]
+    pub fn input_layernorm_2(layer: u32) -> String {
+        format!("model.layers.{layer}.input_layernorm_2.weight")
+    }
+    /// The second norm a sandwich-normed block applies to its FFN output
+    /// before the residual add (`post_attention_layernorm_2`).
+    #[must_use]
+    pub fn post_attention_layernorm_2(layer: u32) -> String {
+        format!("model.layers.{layer}.post_attention_layernorm_2.weight")
+    }
+    #[must_use]
+    pub fn q_norm(layer: u32) -> String {
+        format!("model.layers.{layer}.self_attn.q_norm.weight")
+    }
+    #[must_use]
+    pub fn k_norm(layer: u32) -> String {
+        format!("model.layers.{layer}.self_attn.k_norm.weight")
+    }
     #[must_use]
     pub fn q_proj(layer: u32) -> String {
         format!("model.layers.{layer}.self_attn.q_proj.weight")
@@ -1131,6 +1152,22 @@ pub mod node_names {
     #[must_use]
     pub fn ffn_norm(layer: u32) -> String {
         format!("blk.{layer}.ffn_norm.weight")
+    }
+    #[must_use]
+    pub fn post_attention_norm(layer: u32) -> String {
+        format!("blk.{layer}.post_attention_norm.weight")
+    }
+    #[must_use]
+    pub fn post_ffw_norm(layer: u32) -> String {
+        format!("blk.{layer}.post_ffw_norm.weight")
+    }
+    #[must_use]
+    pub fn attn_q_norm(layer: u32) -> String {
+        format!("blk.{layer}.attn_q_norm.weight")
+    }
+    #[must_use]
+    pub fn attn_k_norm(layer: u32) -> String {
+        format!("blk.{layer}.attn_k_norm.weight")
     }
     #[must_use]
     pub fn attn_q(layer: u32) -> String {
@@ -1207,6 +1244,45 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
     data_start: u64,
     architecture: &ModelHparams,
 ) -> Result<BoundWeights<'file>, InteropError> {
+    bind_dense_decoder_weights(manifest, file_bytes, data_start, architecture, None)
+}
+
+/// [`bind_all_weights_from_safetensors`] for a block schedule the caller's
+/// `descriptor` states instead of the one a dense decoder implies: each layer's
+/// RoPE pairing says whether its Q/K rows are reordered (adjacent pairing
+/// reorders HF's `rotate_half` rows; split-half pairing keeps them as stored),
+/// its `qk_norm` whether the per-head norm weights bind, and its FFN norm flags
+/// whether the second branch norms of a sandwich-normed block bind. Nothing is
+/// inferred from which tensors the file happens to hold.
+///
+/// # Errors
+///
+/// Whatever [`bind_all_weights_from_safetensors`] can fail with, plus
+/// [`InteropError::UnknownTensor`] for a norm the schedule needs and the file
+/// lacks.
+pub(crate) fn bind_all_weights_from_safetensors_with_descriptor<'file>(
+    manifest: &Manifest,
+    file_bytes: &'file [u8],
+    data_start: u64,
+    architecture: &ModelHparams,
+    descriptor: &ModelDescriptor,
+) -> Result<BoundWeights<'file>, InteropError> {
+    bind_dense_decoder_weights(
+        manifest,
+        file_bytes,
+        data_start,
+        architecture,
+        Some(&descriptor.layers),
+    )
+}
+
+fn bind_dense_decoder_weights<'file>(
+    manifest: &Manifest,
+    file_bytes: &'file [u8],
+    data_start: u64,
+    architecture: &ModelHparams,
+    schedule: Option<&[LayerSchedule]>,
+) -> Result<BoundWeights<'file>, InteropError> {
     refuse_mlx_quantized_header(manifest)?;
     if architecture.expert_count != 0 {
         return Err(InteropError::HfMoeWeightsUnsupported {
@@ -1239,6 +1315,10 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
     )?;
 
     for layer in 0..architecture.block_count {
+        let entry = schedule.and_then(|layers| layers.get(layer as usize));
+        let permute_layer_rows = entry.map_or(permute_rope_rows, |entry| {
+            entry.attention.rope_pairing == RopePairing::Interleaved
+        });
         hf_bind_dense(
             manifest,
             file_bytes,
@@ -1255,6 +1335,44 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
             node_names::ffn_norm(layer),
             &mut state,
         )?;
+        if entry.is_some_and(|entry| entry.attention.qk_norm) {
+            hf_bind_dense(
+                manifest,
+                file_bytes,
+                data_start,
+                names::q_norm(layer),
+                node_names::attn_q_norm(layer),
+                &mut state,
+            )?;
+            hf_bind_dense(
+                manifest,
+                file_bytes,
+                data_start,
+                names::k_norm(layer),
+                node_names::attn_k_norm(layer),
+                &mut state,
+            )?;
+        }
+        if entry.is_some_and(|entry| entry.ffn.post_attention_norm) {
+            hf_bind_dense(
+                manifest,
+                file_bytes,
+                data_start,
+                names::input_layernorm_2(layer),
+                node_names::post_attention_norm(layer),
+                &mut state,
+            )?;
+        }
+        if entry.is_some_and(|entry| entry.ffn.exclusive_dense_post_norm) {
+            hf_bind_dense(
+                manifest,
+                file_bytes,
+                data_start,
+                names::post_attention_layernorm_2(layer),
+                node_names::post_ffw_norm(layer),
+                &mut state,
+            )?;
+        }
         hf_bind_rope_weight(
             manifest,
             file_bytes,
@@ -1264,7 +1382,7 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
             architecture.query_heads as usize,
             architecture.head_dim as usize,
             embedding,
-            permute_rope_rows,
+            permute_layer_rows,
             &mut state,
         )?;
         hf_bind_rope_weight(
@@ -1276,7 +1394,7 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
             architecture.kv_heads as usize,
             architecture.head_dim as usize,
             embedding,
-            permute_rope_rows,
+            permute_layer_rows,
             &mut state,
         )?;
         hf_bind_matmul_weight(
@@ -1386,6 +1504,8 @@ mod granitemoe_binding;
 mod expert_views;
 #[cfg(test)]
 mod inout_views;
+#[cfg(test)]
+mod rope_rows;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

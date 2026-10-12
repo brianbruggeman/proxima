@@ -1,5 +1,32 @@
 use super::*;
 
+/// The descriptor [`LoadedModel::load_from_safetensors`] lowers a dense
+/// decoder's single safetensors file with: the family profile over the
+/// architecture's own shape, per-head Q/K norm off. A descriptor handed to the
+/// descriptor-aware loader that equals it takes the same placed single-range
+/// program; any other does not.
+fn canonical_safetensors_descriptor(
+    architecture: &ModelHparams,
+) -> Result<ModelDescriptor, InteropError> {
+    let profile = family_profile(&architecture.family)?;
+    Ok(gqa_descriptor_from_shape(
+        architecture.vocab,
+        architecture.embedding,
+        architecture.feed_forward,
+        architecture.query_heads,
+        architecture.kv_heads,
+        architecture.head_dim,
+        architecture.block_count,
+        architecture.expert_count,
+        architecture.expert_used_count,
+        false,
+        false,
+        false,
+        false,
+        &profile,
+    ))
+}
+
 impl<'file> LoadedModel<'file> {
     #[must_use]
     pub fn token_id_for_piece(&self, piece: &str) -> Option<u32> {
@@ -2856,7 +2883,8 @@ impl<'file> LoadedModel<'file> {
             kv_buffer_source: None,
             prewarm_gate: PrewarmGate::new(),
             prewarm_queue: PrewarmQueue::new(),
-            weights: bound.weights,
+            weights: Arc::new(SharedWeights::new(bound.weights, file_bytes)),
+            safetensors_descriptor: None,
             architecture: bound.architecture,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             kv_cache_shape: profile.kv_cache_shape,
@@ -2937,27 +2965,105 @@ impl<'file> LoadedModel<'file> {
     ) -> Result<Self, InteropError> {
         let weights =
             bind_all_weights_from_safetensors(manifest, file_bytes, data_start, &architecture)?;
-        // safetensors carries no GGUF tensor directory to probe for
-        // `attn_q_norm.weight`, and no HF/safetensors checkpoint this crate
-        // binds today needs QK-norm -- see [`Self::load`]'s own `qk_norm` for
-        // the GGUF path that does.
-        let profile = family_profile(&architecture.family)?;
-        let descriptor = gqa_descriptor_from_shape(
-            architecture.vocab,
-            architecture.embedding,
-            architecture.feed_forward,
-            architecture.query_heads,
-            architecture.kv_heads,
-            architecture.head_dim,
-            architecture.block_count,
-            architecture.expert_count,
-            architecture.expert_used_count,
-            false,
-            false,
-            false,
-            false,
-            &profile,
-        );
+        let descriptor = canonical_safetensors_descriptor(&architecture)?;
+        Self::from_safetensors_weights(
+            Arc::new(SharedWeights::new(weights, file_bytes)),
+            architecture,
+            vocab,
+            &descriptor,
+            file_bytes,
+        )
+    }
+
+    /// [`Self::load_from_safetensors`] for a schedule the caller's `descriptor`
+    /// states: the weights bind by what each layer of it needs (rows reordered
+    /// only for an adjacent RoPE pairing, per-head Q/K norms only where
+    /// `qk_norm` is set, the second branch norms of a sandwich-normed block
+    /// where its FFN flags say so), and the forward program is
+    /// [`proxima_tensor::spec::build_forward`] over it, recurrence included. The
+    /// descriptor keeps the physical schedule; the model's depth and cache
+    /// owners follow its recurrence.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::load_from_safetensors`] can fail with, plus
+    /// [`proxima_tensor::spec::build_forward`] refusing the descriptor.
+    pub fn load_from_safetensors_with_descriptor(
+        manifest: &proxima_safetensors::Manifest,
+        file_bytes: &'file [u8],
+        data_start: u64,
+        architecture: ModelHparams,
+        vocab: Vocab,
+        descriptor: &ModelDescriptor,
+    ) -> Result<Self, InteropError> {
+        let weights = crate::hf_bind::bind_all_weights_from_safetensors_with_descriptor(
+            manifest,
+            file_bytes,
+            data_start,
+            &architecture,
+            descriptor,
+        )?;
+        Self::from_safetensors_weights(
+            Arc::new(SharedWeights::new(weights, file_bytes)),
+            architecture,
+            vocab,
+            descriptor,
+            file_bytes,
+        )
+    }
+
+    /// Another forward graph over this model's already bound weights, for a
+    /// `descriptor` that differs from the one it was loaded with in its
+    /// recurrence and LoopCD alone: depth and guidance change the lowered
+    /// program, not the checkpoint, so the weights are shared rather than bound
+    /// again.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::InvalidRecurrentConfig`] when this model did not load
+    /// from safetensors, or `descriptor` changes anything the weights were
+    /// bound by; whatever [`proxima_tensor::spec::build_forward`] refuses.
+    pub fn with_forward_descriptor(
+        &self,
+        descriptor: &ModelDescriptor,
+    ) -> Result<Self, InteropError> {
+        let origin =
+            self.safetensors_descriptor
+                .as_ref()
+                .ok_or(InteropError::InvalidRecurrentConfig {
+                    reason: "forward descriptor reuse requires a safetensors origin",
+                })?;
+        let admitted = ModelDescriptor {
+            recurrence: descriptor.recurrence,
+            loopcd: descriptor.loopcd,
+            ..origin.clone()
+        };
+        if &admitted != descriptor {
+            return Err(InteropError::InvalidRecurrentConfig {
+                reason: "forward descriptor changes the physical weight binding",
+            });
+        }
+        let physical = ModelHparams {
+            block_count: origin.block_count,
+            kv_heads_by_layer: alloc::vec![self.architecture.kv_heads; origin.block_count as usize],
+            ..self.architecture.clone()
+        };
+        Self::from_safetensors_weights(
+            Arc::clone(&self.weights),
+            physical,
+            self.vocab.clone(),
+            descriptor,
+            self.checkpoint_mapping,
+        )
+    }
+
+    fn from_safetensors_weights(
+        weights: Arc<SharedWeights<'file>>,
+        architecture: ModelHparams,
+        vocab: Vocab,
+        descriptor: &ModelDescriptor,
+        file_bytes: &'file [u8],
+    ) -> Result<Self, InteropError> {
         let ForwardProgram {
             program,
             logits: logits_root,
@@ -2965,15 +3071,27 @@ impl<'file> LoadedModel<'file> {
             moe_sites,
             layer_residuals,
             hidden: hidden_root,
+            readouts,
             ..
-        } = build_forward(&descriptor)?;
-        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let single_range = build_single_range_program(&architecture, false)?;
-        let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
-        let kv_layers = alloc::vec![
+        } = build_forward(descriptor)?;
+        let recurrent = crate::lowering::resolved_recurrence(descriptor);
+        let physical_kv_layers = alloc::vec![
             (architecture.kv_heads, architecture.head_dim, None);
             architecture.block_count as usize
         ];
+        let kv_layers = physical_kv_layers.repeat(
+            descriptor
+                .recurrence
+                .map_or(1, |recurrence| recurrence.iterations as usize),
+        );
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let single_range = if descriptor == &canonical_safetensors_descriptor(&architecture)? {
+            build_single_range_program(&architecture, false)?
+        } else {
+            None
+        };
+        let architecture = architecture.logical(descriptor.recurrence);
+        let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
         Self {
             expert_slab: Mutex::new(expert_slab),
             expert_sidecar: None,
@@ -2985,6 +3103,7 @@ impl<'file> LoadedModel<'file> {
             prewarm_gate: PrewarmGate::new(),
             prewarm_queue: PrewarmQueue::new(),
             weights,
+            safetensors_descriptor: Some(descriptor.clone()),
             architecture,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             kv_cache_shape: KvCacheShape::Uniform,
@@ -3029,8 +3148,8 @@ impl<'file> LoadedModel<'file> {
             moe_sites,
             duplicate_head_roots: Vec::new(),
             single_position_step: false,
-            recurrent: RecurrentConfig::neutral(),
-            recurrent_readouts: None,
+            recurrent,
+            recurrent_readouts: readouts,
             recurrent_routed_interval_hparams: None,
             // safetensors carries no `general.name`-equivalent key this
             // crate reads (`Self::model_name`'s own doc).

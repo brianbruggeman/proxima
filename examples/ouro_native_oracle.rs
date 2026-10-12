@@ -48,7 +48,7 @@ struct Arguments {
 impl Arguments {
     fn parse() -> io::Result<Self> {
         let mut arguments = Self {
-            checkpoint: PathBuf::from("/private/tmp/proxima-loopcd-models/ouro-1.4b"),
+            checkpoint: PathBuf::from("/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/models/ouro-1.4b"),
             output: None,
             prefix: vec![19556, 905, 30],
             mode: Mode::F32,

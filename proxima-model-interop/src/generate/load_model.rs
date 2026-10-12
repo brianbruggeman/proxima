@@ -804,7 +804,11 @@ pub(super) fn strip_layer_index(name: &str) -> String {
 /// keeps its own `mmap`/`Vec<u8>` alive for as long as it holds a
 /// `LoadedModel` borrowed from it.
 pub struct LoadedModel<'file> {
-    pub(super) weights: BoundWeights<'file>,
+    pub(super) weights: Arc<SharedWeights<'file>>,
+    /// The descriptor a safetensors load lowered, kept so another forward
+    /// graph over the same weights can be admitted against it
+    /// ([`Self::with_forward_descriptor`]); `None` for a GGUF load.
+    pub(super) safetensors_descriptor: Option<ModelDescriptor>,
     pub(super) architecture: ModelHparams,
     /// The decode-time cache shape this checkpoint's family profile names
     /// ([`proxima_tensor::spec::FamilyProfile::kv_cache_shape`]); `Uniform` for
@@ -1219,6 +1223,60 @@ pub(super) fn fused_segment_experts_are_current_layer(
         })
 }
 
+/// A checkpoint's bound weights, shared by every [`LoadedModel`] lowered over
+/// them. A recurrent model at another depth or guidance is another forward
+/// program over the same bytes ([`LoadedModel::with_forward_descriptor`]), so
+/// the weights live behind an `Arc` and the device registrations they caused
+/// are released once, when the last model over them goes.
+pub(super) struct SharedWeights<'file> {
+    bound: BoundWeights<'file>,
+    #[cfg_attr(
+        not(feature = "metal"),
+        allow(dead_code, reason = "only `Drop`, itself `metal`-gated, reads this")
+    )]
+    mapping: &'file [u8],
+}
+
+impl<'file> SharedWeights<'file> {
+    pub(super) const fn new(bound: BoundWeights<'file>, mapping: &'file [u8]) -> Self {
+        Self { bound, mapping }
+    }
+}
+
+impl<'file> core::ops::Deref for SharedWeights<'file> {
+    type Target = BoundWeights<'file>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.bound
+    }
+}
+
+#[cfg(feature = "metal")]
+impl Drop for SharedWeights<'_> {
+    fn drop(&mut self) {
+        let names = self
+            .bound
+            .owned
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(self.bound.packed.iter().map(|(name, _)| name.as_str()))
+            .chain(
+                self.bound
+                    .packed_owned
+                    .iter()
+                    .map(|(name, _, _)| name.as_str()),
+            )
+            .chain(
+                self.bound
+                    .expert_ranges
+                    .iter()
+                    .map(|(name, _, _)| name.as_str()),
+            );
+        release_resident_names(names);
+        unregister_checkpoint_mapping(self.mapping);
+    }
+}
+
 /// Releases every device buffer this checkpoint's own load caused: the
 /// no-copy/resident-copy buffers keyed under `Self::resident_names`, and
 /// (GGUF checkpoints only -- see `Self::checkpoint_mapping`'s own doc) the
@@ -1241,8 +1299,6 @@ impl Drop for LoadedModel<'_> {
             self.plan_life = Arc::new(());
             super::resident_plans::release_orphans();
         }
-        release_resident_names(self.resident_names().iter().copied());
-        unregister_checkpoint_mapping(self.checkpoint_mapping);
     }
 }
 

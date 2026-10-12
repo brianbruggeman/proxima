@@ -54,6 +54,21 @@ pub struct HfConfig {
     /// e.g. `["Qwen3MoeForCausalLM"]` -- same status as `model_type`.
     #[serde(default)]
     pub architectures: Vec<String>,
+    /// Passes a recurrent checkpoint makes over its physical layers
+    /// (`total_ut_steps` in Ouro's `config.json`).
+    #[serde(default)]
+    pub total_ut_steps: Option<u32>,
+    /// `true` would skip the loop norm between passes, which the profile's
+    /// `normalize_each_iteration` contradicts.
+    #[serde(default)]
+    pub skip_loop_final_norm: Option<bool>,
+    /// A learned early-exit gate's threshold; only the no-early-exit `1.0` is
+    /// lowered.
+    #[serde(default)]
+    pub early_exit_threshold: Option<f32>,
+    /// The FFN activation (`silu`).
+    #[serde(default)]
+    pub hidden_act: Option<String>,
     pub hidden_size: u32,
     pub num_attention_heads: u32,
     /// Absent on a plain multi-head-attention checkpoint (no GQA), in which
