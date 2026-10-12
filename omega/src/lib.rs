@@ -102,9 +102,9 @@ pub use metal::{
     move_placed_buffer_bytes, narrow_placed_buffer_f32_to_bf8, narrow_placed_buffer_f32_to_bf16,
     narrow_placed_buffer_f32_to_f16, placed_buffer_len, plan_named_with_placed_inputs,
     read_placed_buffer_bf8_as_f32, read_placed_buffer_bf16_as_f32, read_placed_buffer_f16_as_f32,
-    read_placed_buffer_f32, write_placed_buffer_f32, write_placed_buffer_f32_as_bf8,
-    write_placed_buffer_f32_as_bf16, write_placed_buffer_f32_as_f16, zero_placed_buffer,
-    zero_placed_buffer_range,
+    read_placed_buffer_f32, read_placed_buffer_f32_into, try_write_placed_buffer_f32,
+    write_placed_buffer_f32, write_placed_buffer_f32_as_bf8, write_placed_buffer_f32_as_bf16,
+    write_placed_buffer_f32_as_f16, zero_placed_buffer, zero_placed_buffer_range,
 };
 #[cfg(all(
     feature = "metal-output-placement",

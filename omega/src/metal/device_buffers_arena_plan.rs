@@ -286,6 +286,14 @@ impl core::fmt::Display for CommandBufferFailureContext {
 pub enum MetalError {
     #[error("no Metal device available on this host")]
     NoDevice,
+    #[error(
+        "placed buffer range offset={byte_offset} length={byte_length} exceeds buffer length={buffer_length}"
+    )]
+    PlacedBufferRange {
+        byte_offset: usize,
+        byte_length: usize,
+        buffer_length: usize,
+    },
     #[error("metal driver error: {log}")]
     CompileFailed { log: String },
     #[error(transparent)]
