@@ -30,8 +30,6 @@
 //! mismatch. llama's own `predicted_per_token_ms`/`draft_n`/
 //! `draft_n_accepted` come straight off its `/completion` response
 //! `"timings"` object -- never wall-clock around the HTTP call.
-#![allow(clippy::expect_used, clippy::unwrap_used)]
-#![allow(clippy::too_many_lines)]
 
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use std::env;
@@ -67,6 +65,8 @@ use proxima_model_interop::{
 };
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use proxima_primitives::sync::blocking::Mutex;
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+use proxima_telemetry::emit::{EnvFilter, global};
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use proxima_telemetry::export::Exporter;
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
@@ -351,19 +351,11 @@ fn ollama_busy() -> Option<String> {
     if loaded.is_empty() {
         return None;
     }
-    for name in &loaded {
-        let _ = Command::new("ollama").args(["stop", name]).output();
-    }
-    let still_loaded = ollama_loaded_models();
-    if still_loaded.is_empty() {
-        None
-    } else {
-        Some(format!(
-            "ollama ps reports {} loaded model(s) surviving `ollama stop`: {}",
-            still_loaded.len(),
-            still_loaded.join(", ")
-        ))
-    }
+    Some(format!(
+        "ollama ps reports {} loaded model(s): {}",
+        loaded.len(),
+        loaded.join(", ")
+    ))
 }
 
 /// Host CPU split from one `top` sample. macOS load average counts blocked
@@ -457,11 +449,23 @@ fn load_average_line() -> Option<String> {
     })
 }
 
-/// Scans `ps -Ao comm` for other cargo/rustc processes by name -- this
-/// process's own `argv[0]` is not itself named any of these, so no
-/// self-exclusion is needed. `ollama`/`Ollama` are handled separately by
-/// [`ollama_busy`], which stops a loaded model rather than failing on the
-/// app process merely being present.
+/// cargo artifact workers can outlive their test runner; refuse their direct executables too.
+/// `ollama`/`Ollama` are handled separately by [`ollama_busy`], which stops a loaded model
+/// rather than failing on the app process merely being present.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+fn is_build_process(command: &str) -> bool {
+    let path = Path::new(command.trim());
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name == "cargo"
+        || name.starts_with("cargo-")
+        || name == "rustc"
+        || path.parent().is_some_and(|parent| {
+            parent.ends_with("debug/deps") || parent.ends_with("release/deps")
+        })
+}
+
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn other_processes_busy() -> Option<String> {
     let output = Command::new("ps").args(["-Ao", "comm"]).output().ok()?;
@@ -469,13 +473,10 @@ fn other_processes_busy() -> Option<String> {
         return None;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let needles = ["cargo", "rustc"];
     let mut hits: Vec<String> = Vec::new();
     for line in stdout.lines() {
-        for needle in needles {
-            if line.contains(needle) && !hits.iter().any(|hit| hit == line) {
-                hits.push(line.trim().to_string());
-            }
+        if is_build_process(line) && !hits.iter().any(|hit| hit == line.trim()) {
+            hits.push(line.trim().to_string());
         }
     }
     if hits.is_empty() {
@@ -506,10 +507,7 @@ fn summarize_gpu_idle_samples(samples: &[f64]) -> Option<GpuIdleBaseline> {
         return None;
     }
     let mut sorted = samples.to_vec();
-    sorted.sort_by(|left, right| {
-        left.partial_cmp(right)
-            .expect("gpu idle samples are finite")
-    });
+    sorted.sort_by(f64::total_cmp);
     Some(GpuIdleBaseline {
         median: percentile(&sorted, 50.0),
         mean: mean(&sorted),
@@ -616,43 +614,35 @@ fn gpu_utilization_sample() -> Option<f64> {
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct GpuSampler {
     running: Arc<AtomicBool>,
-    samples: Arc<Mutex<Vec<f64>>>,
-    handle: Option<std::thread::JoinHandle<()>>,
+    handle: std::thread::JoinHandle<Vec<f64>>,
 }
 
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 impl GpuSampler {
     fn start() -> Self {
         let running = Arc::new(AtomicBool::new(true));
-        let samples: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
         let thread_running = Arc::clone(&running);
-        let thread_samples = Arc::clone(&samples);
         let handle = std::thread::Builder::new()
             .name("gpu-utilization-sampler".to_string())
             .spawn(move || {
+                let mut samples = Vec::new();
                 while thread_running.load(Ordering::Relaxed) {
                     if let Some(sample) = gpu_utilization_sample() {
-                        thread_samples.lock().push(sample);
+                        samples.push(sample);
                     }
                     std::thread::sleep(GPU_SAMPLE_INTERVAL);
                 }
+                samples
             })
-            .expect("spawn gpu-utilization-sampler thread");
-        Self {
-            running,
-            samples,
-            handle: Some(handle),
-        }
+            .unwrap_or_else(|error| panic!("spawn GPU utilization sampler: {error}"));
+        Self { running, handle }
     }
 
-    fn stop(mut self) -> Vec<f64> {
+    fn stop(self) -> Vec<f64> {
         self.running.store(false, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            handle.join().expect("join gpu-utilization-sampler thread");
-        }
-        Arc::try_unwrap(self.samples)
-            .expect("sampler thread joined, sole owner remains")
-            .into_inner()
+        self.handle
+            .join()
+            .unwrap_or_else(|error| panic!("join GPU utilization sampler: {error:?}"))
     }
 }
 
@@ -671,7 +661,7 @@ fn summarize_gpu_samples(mut samples: Vec<f64>) -> Option<GpuUtilizationSummary>
     if samples.is_empty() {
         return None;
     }
-    samples.sort_by(|left, right| left.partial_cmp(right).expect("gpu samples are finite"));
+    samples.sort_by(f64::total_cmp);
     let sample_count = samples.len();
     let mean = samples.iter().sum::<f64>() / sample_count as f64;
     Some(GpuUtilizationSummary {
@@ -802,7 +792,10 @@ fn try_http_request_json(
     path: &str,
     body: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    let payload = body.map(|value| serde_json::to_vec(value).expect("serialize json body"));
+    let payload = body.map(|value| {
+        serde_json::to_vec(value)
+            .unwrap_or_else(|error| panic!("serialize HTTP JSON request body: {error}"))
+    });
     let mut stream =
         TcpStream::connect(("127.0.0.1", port)).map_err(|err| format!("connect: {err}"))?;
     let content_length = payload.as_ref().map_or(0, Vec::len);
@@ -988,6 +981,7 @@ fn ngram_type_args(spec_type: SpeculativeType, speculative: &SpeculativeConfig) 
 /// PIDs, not `Child` handles: the hook needs to reach these from a context
 /// that does not (and must not) own the `Child` itself -- the normal drop
 /// path already owns and reaps it directly.
+// synchronous panic cleanup must reach children owned by other stack frames.
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 static REAPABLE_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
@@ -1148,7 +1142,7 @@ impl LlamaServerHandle {
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 const LLAMA_REPREFILL_PROMPT_N_BOUND: u64 = 8;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct LlamaArmResult {
     ms_per_token: f64,
@@ -1158,6 +1152,7 @@ struct LlamaArmResult {
     draft_n_accepted: u64,
     prompt_n: u64,
     llama_reprefilled: bool,
+    token_ids: Vec<u32>,
 }
 
 /// Parses one llama-server `/completion` response body into
@@ -1192,6 +1187,18 @@ fn parse_llama_completion_response(response: &serde_json::Value) -> LlamaArmResu
         draft_n_accepted: get_u64("draft_n_accepted"),
         prompt_n,
         llama_reprefilled: prompt_n > LLAMA_REPREFILL_PROMPT_N_BOUND,
+        token_ids: response
+            .get("tokens")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("llama completion response has no token array"))
+            .iter()
+            .map(|token| {
+                token
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .unwrap_or_else(|| panic!("llama completion token is outside the u32 range"))
+            })
+            .collect(),
     }
 }
 
@@ -1210,8 +1217,10 @@ fn run_llama_completion(port: u16, token_ids: &[u32], max_tokens: usize) -> Llam
         "n_predict": max_tokens,
         "cache_prompt": true,
         "stream": false,
+        "return_tokens": true,
     });
     let response = http_post_json(port, "/completion", &body);
+    println!("llama_completion_payload port={port} response={response}");
     parse_llama_completion_response(&response)
 }
 
@@ -1349,28 +1358,38 @@ fn spawn_incumbent_servers(
 // corpus loading
 // ---------------------------------------------------------------------
 
-/// Any jsonl of `{"prompt": ...}` -- SPEC's own invariant on this harness's
-/// corpus contract. A malformed or prompt-less line is skipped, not fatal:
-/// a corpus assembled by a separate slice (18) may carry other fields this
-/// harness does not need.
+/// malformed records fail the run so the measured corpus cannot silently shrink.
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn load_corpus(path: &Path) -> Vec<String> {
     let file =
         File::open(path).unwrap_or_else(|err| panic!("open corpus {}: {err}", path.display()));
     let reader = std::io::BufReader::new(file);
     let mut prompts = Vec::new();
-    for line in reader.lines() {
-        let line = line.expect("read corpus line");
+    for (line_index, line) in reader.lines().enumerate() {
+        let line = line.unwrap_or_else(|error| {
+            panic!(
+                "read corpus {} line {}: {error}",
+                path.display(),
+                line_index + 1
+            )
+        });
         if line.trim().is_empty() {
             continue;
         }
-        let value: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        if let Some(prompt) = value.get("prompt").and_then(serde_json::Value::as_str) {
-            prompts.push(prompt.to_string());
-        }
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap_or_else(|error| {
+            panic!("corpus {} line {}: {error}", path.display(), line_index + 1)
+        });
+        let prompt = value
+            .get("prompt")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| {
+                panic!(
+                    "corpus {} line {} has no string prompt",
+                    path.display(),
+                    line_index + 1
+                )
+            });
+        prompts.push(prompt.to_string());
     }
     prompts
 }
@@ -1394,9 +1413,33 @@ struct ArmResult {
     gpu: Option<GpuUtilizationSummary>,
     tokens_generated: usize,
     decode_wall_ms: f64,
+    request_wall_ms: f64,
     max_gap_token_index: usize,
     token_ids: Vec<u32>,
     token_elapsed_ms: Vec<u64>,
+}
+
+fn sweep_ms_per_evaluation(arm: &ArmResult, draft_width: usize, full_steps: usize) -> Option<f64> {
+    let supported = if draft_width == 0 {
+        arm.verify_steps == 0 && arm.drafted_total == 0 && arm.accepted_total == 0
+    } else {
+        sweep_has_full_width_steps(arm, draft_width, full_steps)
+    };
+    supported
+        .then(|| full_width_ms_per_step(&arm.token_elapsed_ms, full_steps))
+        .flatten()
+}
+
+fn sweep_has_full_width_steps(arm: &ArmResult, draft_width: usize, full_steps: usize) -> bool {
+    // a one-token suffix can verify at step zero; a longer suffix prefills.
+    // forced widths never exceed the cap, so equality proves no batch shrank.
+    draft_width > 0
+        && full_steps > 0
+        && arm.accepted_total == 0
+        && arm.verify_steps >= full_steps as u64
+        && arm.verify_steps <= arm.tokens_generated as u64
+        && arm.verify_steps >= arm.tokens_generated.saturating_sub(1) as u64
+        && (draft_width as u64).checked_mul(arm.verify_steps) == Some(arm.drafted_total)
 }
 
 /// Every arm's own cached context -- a [`PrefixState`] a single per-prompt
@@ -1428,7 +1471,6 @@ fn run_one_arm(
     forced_draft_width: Option<u16>,
     stop_after_tokens: Option<usize>,
 ) -> ArmResult {
-    let mut prefill_elapsed_ms: u64 = 0;
     let cpu_start = cpu_seconds();
     let wall_start = Instant::now();
     let sampler = if sample_gpu {
@@ -1466,7 +1508,7 @@ fn run_one_arm(
             &mut stats,
             forced_draft_width,
         )
-        .expect("decode arm");
+        .unwrap_or_else(|error| panic!("decode benchmark arm: {error}"));
     let wall_ms = wall_start.elapsed().as_secs_f64() * 1000.0;
     let cpu_delta = cpu_seconds() - cpu_start;
     let cpu_percent = if wall_ms > 0.0 {
@@ -1474,12 +1516,6 @@ fn run_one_arm(
     } else {
         0.0
     };
-    for (_step, phase, elapsed_ms) in &elapsed_by_step {
-        if matches!(phase, Phase::Prefill { .. }) {
-            prefill_elapsed_ms = *elapsed_ms;
-        }
-    }
-
     let token_elapsed_ms: Vec<u64> = elapsed_by_step
         .iter()
         .filter(|(_, phase, _)| matches!(phase, Phase::Token))
@@ -1496,14 +1532,12 @@ fn run_one_arm(
         .windows(2)
         .map(|pair| (pair[1] - pair[0]) as f64)
         .collect();
-    per_token_deltas.sort_by(|left, right| left.partial_cmp(right).expect("finite latencies"));
+    per_token_deltas.sort_by(f64::total_cmp);
 
     let tokens_generated = token_ids.len();
-    let ms_per_token = if tokens_generated > 1 {
-        (wall_ms - prefill_elapsed_ms as f64) / (tokens_generated - 1) as f64
-    } else {
-        0.0
-    };
+    // both endpoints share the decode loop's clock, excluding setup and teardown.
+    let decode_intervals = token_elapsed_ms.len().saturating_sub(1);
+    let ms_per_token = full_width_ms_per_step(&token_elapsed_ms, decode_intervals).unwrap_or(0.0);
 
     let gpu = sampler
         .map(|sampler| sampler.stop())
@@ -1521,7 +1555,8 @@ fn run_one_arm(
         cpu_percent,
         gpu,
         tokens_generated,
-        decode_wall_ms: wall_ms - prefill_elapsed_ms as f64,
+        decode_wall_ms: ms_per_token * decode_intervals as f64,
+        request_wall_ms: wall_ms,
         max_gap_token_index,
         token_ids,
         token_elapsed_ms,
@@ -1702,7 +1737,7 @@ fn prefill_prompt_once<'prompt>(
     let prefill_start = Instant::now();
     let prefix_state = model
         .prefill_prefix(prefix_text, serving_config)
-        .expect("prefill this prompt's shared prefix exactly once");
+        .unwrap_or_else(|error| panic!("prefill shared prompt prefix: {error}"));
     let prefill_ttft_ms = prefill_start.elapsed().as_secs_f64() * 1000.0;
     CachedPrompt {
         prefix_state,
@@ -1733,7 +1768,7 @@ fn verify_prefix_resume_matches_full_decode(
             &mut fresh_stats,
             None,
         )
-        .expect("fresh full-prompt decode for the prefix-resume parity check");
+        .unwrap_or_else(|error| panic!("decode full prompt for prefix-resume check: {error}"));
     let mut resumed_stats = SpeculativeDecodeStats::default();
     let (resumed_ids, ..) = model
         .generate_from_prefix_with_speculative_stats(
@@ -1745,7 +1780,7 @@ fn verify_prefix_resume_matches_full_decode(
             &mut resumed_stats,
             None,
         )
-        .expect("resumed decode for the prefix-resume parity check");
+        .unwrap_or_else(|error| panic!("decode resumed prompt for prefix-resume check: {error}"));
     println!(
         "prefix_resume_parity fresh_first32={fresh_ids:?} resumed_first32={resumed_ids:?} \
          identical={}",
@@ -1805,7 +1840,9 @@ fn format_arm(label: &str, arm: &ArmResult) -> String {
         "{label}_ms_per_token={:.3} {label}_ttft_ms={:.3} {label}_p50_token_ms={:.3} \
          {label}_p99_token_ms={:.3} {label}_verify_steps={} {label}_accepted_total={} \
          {label}_drafted_total={} {label}_max_gap_token_index={} {label}_rss_bytes={} \
-         {label}_cpu_percent={:.2} {gpu}",
+         {label}_cpu_percent={:.2} {label}_decode_wall_ms={:.3} \
+         {label}_request_wall_ms={:.3} {label}_decode_intervals={} \
+         {label}_timing=token_event_intervals {gpu}",
         arm.ms_per_token,
         arm.ttft_ms,
         arm.p50_token_ms,
@@ -1816,11 +1853,18 @@ fn format_arm(label: &str, arm: &ArmResult) -> String {
         arm.max_gap_token_index,
         arm.rss_bytes,
         arm.cpu_percent,
+        arm.decode_wall_ms,
+        arm.request_wall_ms,
+        arm.token_elapsed_ms.len().saturating_sub(1),
     )
 }
 
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasured_label: &str) {
+    assert!(
+        args.pairs > 0,
+        "--pairs must include at least one timed pair"
+    );
     let drafter = args.drafter.unwrap_or(SpeculativeType::NgramSimple);
 
     if let Some(incumbent) = &args.incumbent
@@ -1865,9 +1909,8 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
     let token_ids_per_prompt: Vec<Vec<u32>> = prompts
         .iter()
         .map(|prompt| {
-            proxima_tokenizer::encode_with_bos_eos(prompt, vocab, add_bos, add_eos).expect(
-                "tokenize prompt under the cached_len convention run_one_arm's decode call uses",
-            )
+            proxima_tokenizer::encode_with_bos_eos(prompt, vocab, add_bos, add_eos)
+                .unwrap_or_else(|error| panic!("tokenize prompt for cached decode: {error}"))
         })
         .collect();
     let longest_prompt_tokens = token_ids_per_prompt
@@ -1883,7 +1926,7 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
     // correctness-sensitive comparison run.
     let llama_context_length =
         u32::try_from(longest_prompt_tokens + args.max_tokens + LLAMA_CONTEXT_HEADROOM_TOKENS)
-            .expect("corpus's longest prompt + max_tokens + headroom fits in a u32 context size");
+            .unwrap_or_else(|error| panic!("corpus prompt context length exceeds u32: {error}"));
 
     let incumbent_handles = args.incumbent.as_deref().map(|_| {
         spawn_incumbent_servers(
@@ -1942,7 +1985,8 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
             suffix: cached.suffix,
         };
 
-        for pair_index in 0..args.pairs {
+        // pair zero warms the plans; --pairs counts only the measured pairs.
+        for pair_index in 0..=args.pairs {
             let swap_order = pair_index % 2 == 1;
             let pair = run_pair(
                 model,
@@ -1962,6 +2006,22 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
                 0.0
             };
             let is_warmup = pair_index == 0;
+            println!(
+                "pair_payload prompt_index={prompt_index} pair_index={pair_index} \
+                 off_ids={:?} on_ids={:?} off_elapsed_ms={:?} on_elapsed_ms={:?}",
+                pair.off.token_ids,
+                pair.on.token_ids,
+                pair.off.token_elapsed_ms,
+                pair.on.token_elapsed_ms,
+            );
+            assert_eq!(
+                pair.off.token_ids, pair.on.token_ids,
+                "prompt {prompt_index} pair {pair_index}: speculative tokens differ from ordinary decode"
+            );
+            assert!(
+                pair.off.ms_per_token > 0.0 && pair.on.ms_per_token > 0.0,
+                "prompt {prompt_index} pair {pair_index}: no positive decode interval; inspect printed token events"
+            );
 
             let llama_pair = incumbent_handles.as_ref().map(|(off_handle, on_handle)| {
                 run_llama_pair(
@@ -1973,6 +2033,13 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
                 )
             });
             let llama_ratio = llama_pair.as_ref().map(|llama_pair| {
+                println!(
+                    "llama_pair_payload prompt_index={prompt_index} pair_index={pair_index} off_ids={:?} on_ids={:?}",
+                    llama_pair.off.token_ids,
+                    llama_pair.on.token_ids,
+                );
+                assert_eq!(llama_pair.off.token_ids, llama_pair.on.token_ids,
+                    "llama prompt {prompt_index} pair {pair_index}: speculative tokens differ from ordinary decode");
                 if llama_pair.on.ms_per_token > 0.0 {
                     llama_pair.off.ms_per_token / llama_pair.on.ms_per_token
                 } else {
@@ -2027,8 +2094,14 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
         on_handle.stop();
     }
 
-    pair_ratios.sort_by(|left, right| left.partial_cmp(right).expect("finite ratios"));
+    pair_ratios.sort_by(f64::total_cmp);
     let median_speedup = percentile(&pair_ratios, 50.0);
+    let overhead_ratios: Vec<f64> = pair_ratios
+        .iter()
+        .rev()
+        .map(|ratio| ratio.recip())
+        .collect();
+    let median_overhead = percentile(&overhead_ratios, 50.0);
     let p90_speedup = percentile(&pair_ratios, 90.0);
     let pair_cov = coefficient_of_variation(&pair_ratios);
     let win_fraction = if pair_ratios.is_empty() {
@@ -2040,7 +2113,7 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
     let llama_summary_fields = if llama_pair_ratios.is_empty() {
         String::new()
     } else {
-        llama_pair_ratios.sort_by(|left, right| left.partial_cmp(right).expect("finite ratios"));
+        llama_pair_ratios.sort_by(f64::total_cmp);
         let llama_median_speedup = percentile(&llama_pair_ratios, 50.0);
         let llama_win_fraction = llama_wins as f64 / llama_pair_ratios.len() as f64;
         format!(
@@ -2051,7 +2124,8 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
 
     println!(
         "{unmeasured_label} summary drafter={} prompts={} pairs_per_prompt={} \
-         median_speedup={:.4} p90_speedup={:.4} pair_cov={:.4} win_fraction={:.4} \
+         median_speedup={:.4} median_overhead={median_overhead:.4} p90_speedup={:.4} pair_cov={:.4} win_fraction={:.4} \
+         warmup_pairs_per_prompt=1 error_count=0 timed_pairs={} \
          contaminated_pairs={contaminated_pairs} verify_steps_total={verify_steps_total} \
          accepted_total={accepted_total} drafted_total={drafted_total}{llama_summary_fields}",
         drafter.llama_name(),
@@ -2061,6 +2135,7 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
         p90_speedup,
         pair_cov,
         win_fraction,
+        pair_ratios.len(),
     );
 }
 
@@ -2092,9 +2167,12 @@ const SWEEP_FULL_WIDTH_STEPS: usize = 16;
 /// drafted-token count.
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn full_width_ms_per_step(token_elapsed_ms: &[u64], full_steps: usize) -> Option<f64> {
+    if full_steps == 0 {
+        return None;
+    }
     let first = token_elapsed_ms.first()?;
     let last = token_elapsed_ms.get(full_steps)?;
-    Some((last - first) as f64 / full_steps as f64)
+    Some(last.checked_sub(*first)? as f64 / full_steps as f64)
 }
 
 /// Median of the same steps' individual gaps. A KV-bucket crossing lands one slow step inside any
@@ -2106,7 +2184,7 @@ fn full_width_median_ms_per_step(token_elapsed_ms: &[u64], full_steps: usize) ->
         .windows(2)
         .map(|pair| (pair[1] - pair[0]) as f64)
         .collect();
-    gaps.sort_by(|left, right| left.partial_cmp(right).expect("finite"));
+    gaps.sort_by(f64::total_cmp);
     Some(percentile(&gaps, 50.0))
 }
 
@@ -2123,8 +2201,10 @@ fn run_llama_greedy_ids(port: u16, token_ids: &[u32], max_tokens: usize) -> Vec<
         "cache_prompt": false,
         "stream": false,
         "return_tokens": true,
+        "n_probs": 5,
     });
     let response = http_post_json(port, "/completion", &body);
+    println!("llama_greedy_response response={response}");
     response
         .get("tokens")
         .and_then(serde_json::Value::as_array)
@@ -2161,7 +2241,7 @@ fn greedy_ids_from_prefix(
             &mut stats,
             None,
         )
-        .expect("resumed greedy decode for the parity arm");
+        .unwrap_or_else(|error| panic!("decode resumed greedy parity arm: {error}"));
     (ids.iter().map(|&id| u64::from(id)).collect(), stats)
 }
 
@@ -2199,13 +2279,13 @@ fn run_llama_parity_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs) {
         .iter()
         .map(|prompt| {
             proxima_tokenizer::encode_with_bos_eos(prompt, vocab, add_bos, add_eos)
-                .expect("tokenize prompt the way the decode call does")
+                .unwrap_or_else(|error| panic!("tokenize prompt for llama parity: {error}"))
         })
         .collect();
     let longest_prompt_tokens = token_ids_per_prompt.iter().map(Vec::len).max().unwrap_or(0);
     let llama_context_length =
         u32::try_from(longest_prompt_tokens + args.max_tokens + LLAMA_CONTEXT_HEADROOM_TOKENS)
-            .expect("longest prompt + max_tokens + headroom fits in a u32 context size");
+            .unwrap_or_else(|error| panic!("llama parity context length exceeds u32: {error}"));
 
     let config = base_serving_config(args.gpu_layers);
     let on_config = config.with_speculative(SpeculativeConfig {
@@ -2248,6 +2328,23 @@ fn run_llama_parity_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs) {
             token_ids.len(),
             divergence.is_none(),
         );
+
+        if divergence == Some(0) {
+            let logits = model
+                .forward_logits_on_backend(prompt, args.gpu_layers)
+                .unwrap_or_else(|error| panic!("first-position diagnostic logits: {error}"));
+            let mut ranked: Vec<(usize, f32)> = logits.into_iter().enumerate().collect();
+            ranked.sort_by(|left, right| {
+                right
+                    .1
+                    .total_cmp(&left.1)
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+            ranked.truncate(5);
+            println!(
+                "llama_parity_first_position prompt={prompt_index} one_shot_top_logits={ranked:?}"
+            );
+        }
 
         let cached = prefill_prompt_once(model, prompt, &on_config);
         let (off_resumed_ids, off_stats) =
@@ -2311,7 +2408,7 @@ fn run_prefill_throughput_mode(
             let started = Instant::now();
             let prefix_state = model
                 .prefill_prefix(prompt, &serving_config)
-                .expect("prefill the throughput prompt");
+                .unwrap_or_else(|error| panic!("prefill throughput prompt: {error}"));
             let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
             let tokens_per_second = prefix_state.len() as f64 / (wall_ms / 1000.0);
             println!(
@@ -2322,7 +2419,7 @@ fn run_prefill_throughput_mode(
             );
             samples_tokens_per_second.push(tokens_per_second);
         }
-        samples_tokens_per_second.sort_by(|left, right| left.partial_cmp(right).expect("finite"));
+        samples_tokens_per_second.sort_by(f64::total_cmp);
         println!(
             "{unmeasured_label} prefill_throughput chars={char_count} ubatch={} \
              tokens_per_s={:.2} cov={:.4}",
@@ -2361,7 +2458,7 @@ fn run_verify_width_sweep_mode(
         Some(corpus_path) => chat_prompt(
             load_corpus(corpus_path)
                 .first()
-                .expect("--corpus given to the sweep must hold at least one prompt"),
+                .unwrap_or_else(|| panic!("--corpus sweep input has no prompt records")),
         ),
         None => [REPEATED_PARAGRAPH; 6].join("\n"),
     };
@@ -2370,12 +2467,13 @@ fn run_verify_width_sweep_mode(
 
     // Same prefill-once path `run_pairs_mode` uses (invariant 3): one
     // forward pass over this fixed prompt, reused across every width and
-    // every one of the 3 runs per width below.
+    // every warmup and measured run at each width below.
     let widest_width = widths.iter().copied().max().unwrap_or(0);
     let prefill_config = serving_config.with_speculative(SpeculativeConfig {
         speculative_types: SpeculativeTypeSet::single(SpeculativeType::NgramSimple),
         ngram_simple: NgramMapParams {
-            size_m: u16::try_from(widest_width).expect("sweep width fits in a u16"),
+            size_m: u16::try_from(widest_width)
+                .unwrap_or_else(|error| panic!("sweep width does not fit ngram size: {error}")),
             ..NgramMapParams::default()
         },
         ..SpeculativeConfig::none()
@@ -2399,16 +2497,13 @@ fn run_verify_width_sweep_mode(
 
     for &width in widths {
         let full_steps = args.sweep_full_steps;
-        let (width_max_tokens, stop_after_tokens) = if width == 0 {
-            (args.max_tokens, None)
-        } else {
-            (width + 1 + full_steps, Some(full_steps + 1))
-        };
-        let expected_drafted = (width * (full_steps + 1)) as u64;
+        let width_max_tokens = width + 1 + full_steps;
+        let stop_after_tokens = Some(full_steps + 1);
         let mut samples_ms_per_verify = Vec::new();
         let mut samples_full_width = Vec::new();
         let mut samples_full_width_median = Vec::new();
-        for run in 0..args.sweep_runs {
+        for run in 0..=args.sweep_runs {
+            let warmup = run == 0;
             let forced_draft_width = if width == 0 { None } else { Some(width as u16) };
             let arm = run_one_arm(
                 model,
@@ -2420,16 +2515,16 @@ fn run_verify_width_sweep_mode(
                 stop_after_tokens,
             );
             println!(
-                "{unmeasured_label} sweep_run k={width} run={run} tokens={} verify_steps={} \
-                 drafted={} accepted={} decode_wall_ms={:.3} ms_per_token={:.4} \
-                 ms_per_verify_step={:.4} cpu_percent={:.2}",
+                "{unmeasured_label} sweep_run k={width} run={run} warmup={warmup} tokens={} verify_steps={} \
+                 drafted={} accepted={} decode_wall_ms={:.3} request_wall_ms={:.3} ms_per_token={:.4} \
+                 cpu_percent={:.2}",
                 arm.tokens_generated,
                 arm.verify_steps,
                 arm.drafted_total,
                 arm.accepted_total,
                 arm.decode_wall_ms,
+                arm.request_wall_ms,
                 arm.ms_per_token,
-                arm.decode_wall_ms / arm.verify_steps.max(1) as f64,
                 arm.cpu_percent,
             );
             println!("sweep_ids k={width} run={run} ids={:?}", arm.token_ids);
@@ -2437,33 +2532,25 @@ fn run_verify_width_sweep_mode(
                 "sweep_token_ms k={width} run={run} elapsed_ms={:?}",
                 arm.token_elapsed_ms
             );
-            let one_token_per_step =
-                arm.accepted_total == 0 && arm.drafted_total == expected_drafted;
-            let full_width = full_width_ms_per_step(&arm.token_elapsed_ms, full_steps)
-                .filter(|_| width > 0 && one_token_per_step);
-            if let Some(full_width_ms) = full_width {
-                let median_ms = full_width_median_ms_per_step(&arm.token_elapsed_ms, full_steps)
-                    .expect("mean exists so the median does");
-                println!(
-                    "{unmeasured_label} sweep_full_width k={width} run={run} rows={} steps={full_steps} \
-                     ms_per_step={full_width_ms:.4} median_ms_per_step={median_ms:.4}",
-                    width + 1,
-                );
-                samples_full_width.push(full_width_ms);
-                samples_full_width_median.push(median_ms);
+            let ms_per_verify = sweep_ms_per_evaluation(&arm, width, full_steps)
+                .unwrap_or_else(|| panic!("sweep lacks full-width one-token evaluation intervals; inspect printed ids and counters"));
+            let median_ms = full_width_median_ms_per_step(&arm.token_elapsed_ms, full_steps)
+                .unwrap_or_else(|| panic!("full-width median requires a complete event interval"));
+            println!(
+                "{unmeasured_label} sweep_full_width k={width} run={run} warmup={warmup} rows={} steps={full_steps} \
+                 ms_per_step={ms_per_verify:.4} median_ms_per_step={median_ms:.4}",
+                width + 1,
+            );
+            if warmup {
+                continue;
             }
-            let steps = arm.verify_steps.max(1);
-            let wall_over_decode = arm.ms_per_token * (steps as f64).max(1.0);
-            let ms_per_verify = if width == 0 {
-                arm.ms_per_token
-            } else {
-                wall_over_decode / steps as f64
-            };
+            samples_full_width.push(ms_per_verify);
+            samples_full_width_median.push(median_ms);
             samples_ms_per_verify.push(ms_per_verify);
         }
-        samples_ms_per_verify.sort_by(|left, right| left.partial_cmp(right).expect("finite"));
-        samples_full_width.sort_by(|left, right| left.partial_cmp(right).expect("finite"));
-        samples_full_width_median.sort_by(|left, right| left.partial_cmp(right).expect("finite"));
+        samples_ms_per_verify.sort_by(f64::total_cmp);
+        samples_full_width.sort_by(f64::total_cmp);
+        samples_full_width_median.sort_by(f64::total_cmp);
         let cov = coefficient_of_variation(&samples_ms_per_verify);
         let median = percentile(&samples_ms_per_verify, 50.0);
         if width == 0 {
@@ -2471,10 +2558,11 @@ fn run_verify_width_sweep_mode(
         }
         println!(
             "{unmeasured_label} verify_width_sweep k={width} width_plus_one={} \
-             ms_per_verify={median:.4} cov={cov:.4} full_width_runs={} full_width_steps={full_steps} \
+             evaluation={} timing=token_event_intervals discarded_warmup_runs=1 ms_per_verify={median:.4} cov={cov:.4} full_width_runs={} full_width_steps={full_steps} \
              full_width_ms_per_verify={:.4} full_width_cov={:.4} \
              full_width_median_ms_per_verify={:.4} full_width_median_cov={:.4}",
             width + 1,
+            if width == 0 { "decode" } else { "verify" },
             samples_full_width.len(),
             percentile(&samples_full_width, 50.0),
             coefficient_of_variation(&samples_full_width),
@@ -2532,11 +2620,16 @@ impl LeverVar {
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn compiled_perf_features_summary() -> String {
     format!(
-        "metal_feature={} metal_fuse_attn_decode_feature={} identity_copy_alias_feature={} metal_tiled_gemm_feature={}",
+        "metal_feature={} metal_fuse_attn_decode_feature={} identity_copy_alias_feature={} metal_tiled_gemm_feature={} cached_attention_streaming_feature={} metal_attn_split_decode_feature={} metal_attn_split_rows_feature={} instrument_feature={} metal_output_placement_feature={}",
         cfg!(feature = "metal"),
         cfg!(feature = "metal-fuse-attn-decode"),
         cfg!(feature = "identity-copy-alias"),
         cfg!(feature = "metal-tiled-gemm"),
+        cfg!(feature = "cached-attention-streaming"),
+        cfg!(feature = "metal-attn-split-decode"),
+        cfg!(feature = "metal-attn-split-rows"),
+        cfg!(feature = "instrument"),
+        cfg!(feature = "metal-output-placement"),
     )
 }
 
@@ -2603,17 +2696,19 @@ fn print_lever_config_and_refuse_if_unsafe() {
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn install_telemetry_file_sink() -> Option<Arc<Recorder>> {
     let path = env::var("PROXIMA_TELEMETRY_FILE").ok()?;
+    let filter = env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+    global::install(EnvFilter::parse(&filter));
     let recorder = Recorder::builder()
         .ring_capacity(65536)
         .export(Exporter::file(path))
-        .expect("file exporter composes")
+        .unwrap_or_else(|error| panic!("install telemetry file export: {error}"))
         .install()
-        .expect("telemetry recorder installs");
+        .unwrap_or_else(|error| panic!("install telemetry recorder: {error}"));
     let pump = Arc::clone(&recorder);
     std::thread::Builder::new()
         .name("telemetry-file-drain".to_string())
         .spawn(move || pump.run_drain_loop())
-        .expect("spawn telemetry drain thread");
+        .unwrap_or_else(|error| panic!("spawn telemetry file drain thread: {error}"));
     Some(recorder)
 }
 
@@ -2658,9 +2753,12 @@ fn main() {
         .unwrap_or_else(|err| panic!("open model {}: {err}", args.model_path));
     // SAFETY: `file` stays alive for the duration of this mapping's use --
     // it is dropped only at the end of `main`, after every decode call.
-    let bytes: Mmap = unsafe { MmapOptions::new().map(&file) }.expect("map model");
-    let parsed = parse_complete(&bytes).expect("parse model");
-    let model = LoadedModel::load(&parsed, &bytes).expect("bind model");
+    let bytes: Mmap = unsafe { MmapOptions::new().map(&file) }
+        .unwrap_or_else(|error| panic!("map model {}: {error}", args.model_path));
+    let parsed = parse_complete(&bytes)
+        .unwrap_or_else(|error| panic!("parse model {}: {error}", args.model_path));
+    let model = LoadedModel::load(&parsed, &bytes)
+        .unwrap_or_else(|error| panic!("load model {}: {error}", args.model_path));
     // SAME tokenization `run_one_arm`'s decode call performs internally
     // (`generate/residency_caches.rs::wants_bos`, crate-private) -- this
     // example rebuilds the identical `Vocab` from the identical metadata to
@@ -2668,7 +2766,7 @@ fn main() {
     // trusting the two tokenizers to agree from a shared prompt string
     // (invariant 2).
     let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
-        .expect("builds vocab via the current gemma4 dispatch");
+        .unwrap_or_else(|error| panic!("build model vocabulary: {error}"));
 
     match &args.mode {
         BenchMode::Pairs => run_pairs_mode(&model, &vocab, &args, unmeasured_label),
@@ -2687,24 +2785,136 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use tempfile::NamedTempFile;
 
     use super::{
-        ChildGuard, CpuIdleBaseline, GPU_IDLE_CONTAMINATION_THRESHOLD_PERCENT,
+        ArmResult, ChildGuard, CpuIdleBaseline, GPU_IDLE_CONTAMINATION_THRESHOLD_PERCENT,
         LLAMA_REPREFILL_PROMPT_N_BOUND, REAPABLE_PIDS, chat_prompt, compiled_perf_features_summary,
         cpu_idle_decision, full_width_median_ms_per_step, full_width_ms_per_step,
-        git_commit_at_startup, parse_llama_completion_response, parse_top_cpu_line,
-        split_prompt_at_hard_boundary, summarize_gpu_idle_samples, text_prefix_at_char_count,
+        git_commit_at_startup, is_build_process, load_corpus, parse_llama_completion_response,
+        parse_top_cpu_line, split_prompt_at_hard_boundary, summarize_gpu_idle_samples,
+        sweep_has_full_width_steps, sweep_ms_per_evaluation, text_prefix_at_char_count,
     };
 
     const REAL_TOP_CPU_LINE: &str = "CPU usage: 8.97% user, 5.40% sys, 85.61% idle ";
 
     #[test]
+    fn decode_rate_excludes_first_token_setup_and_counts_burst_deliveries() {
+        assert_eq!(full_width_ms_per_step(&[10, 30, 50], 2), Some(20.0));
+        assert_eq!(full_width_ms_per_step(&[1000, 1020, 1040], 2), Some(20.0));
+        assert_eq!(
+            full_width_ms_per_step(&[1000, 1000, 1000, 1060], 3),
+            Some(20.0)
+        );
+        assert_eq!(full_width_ms_per_step(&[1000], 0), None);
+        assert_eq!(full_width_ms_per_step(&[], 0), None);
+    }
+
+    #[test]
+    fn corpus_loader_preserves_every_prompt_record() {
+        let mut file = NamedTempFile::new()
+            .unwrap_or_else(|error| panic!("create temporary corpus fixture: {error}"));
+        writeln!(
+            file,
+            "{{\"prompt\":\"first\"}}\n\n{{\"prompt\":\"second\"}}"
+        )
+        .unwrap_or_else(|error| panic!("write temporary corpus fixture: {error}"));
+        assert_eq!(load_corpus(file.path()), ["first", "second"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "line 2")]
+    fn corpus_loader_rejects_malformed_records_instead_of_skipping_them() {
+        let mut file = NamedTempFile::new()
+            .unwrap_or_else(|error| panic!("create malformed corpus fixture: {error}"));
+        writeln!(file, "{{\"prompt\":\"first\"}}\nmalformed")
+            .unwrap_or_else(|error| panic!("write malformed corpus fixture: {error}"));
+        load_corpus(file.path());
+    }
+
+    #[test]
+    #[should_panic(expected = "has no string prompt")]
+    fn corpus_loader_rejects_missing_prompt_fields() {
+        let mut file = NamedTempFile::new()
+            .unwrap_or_else(|error| panic!("create missing-prompt corpus fixture: {error}"));
+        writeln!(file, "{{\"id\":\"missing\"}}")
+            .unwrap_or_else(|error| panic!("write missing-prompt corpus fixture: {error}"));
+        load_corpus(file.path());
+    }
+
+    #[test]
+    fn width_sweep_rejects_event_intervals_containing_accepted_token_delivery() {
+        let arm = ArmResult {
+            ms_per_token: 10.0,
+            decode_wall_ms: 120.0,
+            tokens_generated: 13,
+            verify_steps: 4,
+            accepted_total: 8,
+            ..ArmResult::default()
+        };
+
+        assert_eq!(sweep_ms_per_evaluation(&arm, 3, 3), None);
+    }
+
+    #[test]
+    fn width_sweep_zero_uses_ordinary_decode_evaluations() {
+        let arm = ArmResult {
+            decode_wall_ms: 120.0,
+            tokens_generated: 13,
+            verify_steps: 0,
+            token_elapsed_ms: vec![100, 110, 120, 130],
+            ..ArmResult::default()
+        };
+
+        assert_eq!(sweep_ms_per_evaluation(&arm, 0, 3), Some(10.0));
+    }
+
+    #[test]
+    fn width_sweep_requires_an_evaluation_in_the_requested_arm() {
+        let arm = ArmResult {
+            tokens_generated: 1,
+            ..ArmResult::default()
+        };
+
+        assert_eq!(sweep_ms_per_evaluation(&arm, 0, 3), None);
+        assert_eq!(sweep_ms_per_evaluation(&arm, 3, 3), None);
+    }
+
+    #[test]
+    fn width_sweep_full_batches_allow_prefill_or_verify_at_step_zero() {
+        for verify_steps in [16, 17] {
+            let arm = ArmResult {
+                tokens_generated: 17,
+                verify_steps,
+                drafted_total: 4 * verify_steps,
+                token_elapsed_ms: (0..=16).map(|step| 100 + 10 * step).collect(),
+                ..ArmResult::default()
+            };
+            assert!(sweep_has_full_width_steps(&arm, 4, 16));
+            assert_eq!(sweep_ms_per_evaluation(&arm, 4, 16), Some(10.0));
+            let mut invalid = arm.clone();
+            invalid.drafted_total -= 1;
+            assert!(!sweep_has_full_width_steps(&invalid, 4, 16));
+            invalid = arm.clone();
+            invalid.accepted_total = 1;
+            assert!(!sweep_has_full_width_steps(&invalid, 4, 16));
+            invalid = arm.clone();
+            invalid.verify_steps = 18;
+            invalid.drafted_total = 72;
+            assert!(!sweep_has_full_width_steps(&invalid, 4, 16));
+            assert!(!sweep_has_full_width_steps(&arm, 4, 18));
+            assert!(!sweep_has_full_width_steps(&arm, 0, 16));
+        }
+    }
+
+    #[test]
     fn full_width_mean_is_the_gap_between_token_events_zero_and_last_full_step() {
         let token_elapsed_ms = [310, 400, 489, 580, 671];
 
-        let mean =
-            full_width_ms_per_step(&token_elapsed_ms, 4).expect("five events cover four steps");
+        let mean = full_width_ms_per_step(&token_elapsed_ms, 4)
+            .unwrap_or_else(|| panic!("five token events cover four intervals"));
 
         assert!(
             (mean - 90.25).abs() < 1e-9,
@@ -2717,7 +2927,7 @@ mod tests {
         let token_elapsed_ms = [310, 400, 489, 640, 731, 822];
 
         let median = full_width_median_ms_per_step(&token_elapsed_ms, 5)
-            .expect("six events cover five steps");
+            .unwrap_or_else(|| panic!("six token events cover five intervals"));
 
         assert!(
             (median - 91.0).abs() < 1e-9,
@@ -2742,7 +2952,8 @@ mod tests {
 
     #[test]
     fn top_cpu_line_from_this_mac_parses_user_sys_idle() {
-        let baseline = parse_top_cpu_line(REAL_TOP_CPU_LINE).expect("real top line parses");
+        let baseline = parse_top_cpu_line(REAL_TOP_CPU_LINE)
+            .unwrap_or_else(|| panic!("representative top CPU line parses"));
 
         assert_eq!(
             baseline,
@@ -2755,13 +2966,34 @@ mod tests {
     }
 
     #[test]
+    fn build_process_detection_uses_executable_name_instead_of_install_directory() {
+        assert!(is_build_process("/Users/brianbruggeman/.cargo/bin/cargo"));
+        assert!(is_build_process(
+            "/Users/brianbruggeman/.cargo/bin/cargo-nextest"
+        ));
+        assert!(is_build_process("/toolchains/stable/bin/rustc"));
+        assert!(is_build_process(
+            "/tmp/cargo_target/debug/deps/omega-1234567890abcdef"
+        ));
+        assert!(is_build_process(
+            "/private/tmp/cargo_target_long_ctx/release/deps/proxima_tensor-1234567890abcdef"
+        ));
+        assert!(!is_build_process(
+            "/home/builder/.cargo/bin/sccache"
+        ));
+        assert!(!is_build_process("/tmp/cargo_target/debug/hello"));
+        assert!(!is_build_process("COMM"));
+    }
+
+    #[test]
     fn top_line_without_cpu_usage_prefix_is_rejected() {
         assert_eq!(parse_top_cpu_line("Processes: 512 total, 2 running"), None);
     }
 
     #[test]
     fn cpu_idle_85_percent_passes_and_40_percent_refuses() {
-        let quiet = parse_top_cpu_line(REAL_TOP_CPU_LINE).expect("real top line parses");
+        let quiet = parse_top_cpu_line(REAL_TOP_CPU_LINE)
+            .unwrap_or_else(|| panic!("representative top CPU line parses"));
         let contended = CpuIdleBaseline {
             user: 45.0,
             sys: 15.0,
@@ -2769,7 +3001,8 @@ mod tests {
         };
 
         assert_eq!(cpu_idle_decision(&quiet), None);
-        let reason = cpu_idle_decision(&contended).expect("40% idle must refuse");
+        let reason = cpu_idle_decision(&contended)
+            .unwrap_or_else(|| panic!("40% CPU idle triggers precheck refusal"));
         assert!(
             reason.contains("idle=40.00%"),
             "reason carries the sample: {reason}"
@@ -2790,7 +3023,8 @@ mod tests {
     fn all_zero_idle_window_is_not_contaminated_on_median() {
         let samples = vec![0.0_f64; 50];
 
-        let baseline = summarize_gpu_idle_samples(&samples).expect("50 samples summarize");
+        let baseline = summarize_gpu_idle_samples(&samples)
+            .unwrap_or_else(|| panic!("50 GPU samples summarize"));
 
         assert!(
             baseline.median <= GPU_IDLE_CONTAMINATION_THRESHOLD_PERCENT,
@@ -2803,7 +3037,8 @@ mod tests {
     fn one_spike_in_fifty_passes_on_median() {
         let samples = idle_window_with_one_spike(88.0, 50);
 
-        let baseline = summarize_gpu_idle_samples(&samples).expect("50 samples summarize");
+        let baseline = summarize_gpu_idle_samples(&samples)
+            .unwrap_or_else(|| panic!("50 GPU samples summarize"));
 
         assert!(
             baseline.median <= GPU_IDLE_CONTAMINATION_THRESHOLD_PERCENT,
@@ -2826,7 +3061,8 @@ mod tests {
     fn one_spike_in_five_fails_on_mean_but_passes_on_median() {
         let samples = idle_window_with_one_spike(30.0, 5);
 
-        let baseline = summarize_gpu_idle_samples(&samples).expect("5 samples summarize");
+        let baseline = summarize_gpu_idle_samples(&samples)
+            .unwrap_or_else(|| panic!("5 GPU samples summarize"));
 
         assert!(
             baseline.mean > GPU_IDLE_CONTAMINATION_THRESHOLD_PERCENT,
@@ -2844,7 +3080,8 @@ mod tests {
     fn sustained_high_utilization_fails_on_median() {
         let samples = vec![30.0_f64; 50];
 
-        let baseline = summarize_gpu_idle_samples(&samples).expect("50 samples summarize");
+        let baseline = summarize_gpu_idle_samples(&samples)
+            .unwrap_or_else(|| panic!("50 GPU samples summarize"));
 
         assert!(
             baseline.median > GPU_IDLE_CONTAMINATION_THRESHOLD_PERCENT,
@@ -2961,6 +3198,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_llama_completion_response_retains_token_payload() {
+        let mut response = cache_hit_response_body();
+        response["tokens"] = serde_json::json!([42, 107, 238]);
+        let arm = parse_llama_completion_response(&response);
+        assert_eq!(arm.token_ids, [42, 107, 238]);
+    }
+
+    #[test]
     fn parse_llama_completion_response_flags_a_cache_hit_as_not_reprefilled() {
         let arm = parse_llama_completion_response(&cache_hit_response_body());
 
@@ -3069,15 +3314,14 @@ mod tests {
 
     /// Regression for the real-run orphan bug: two llama-server processes
     /// survived a mid-run panic because nothing ever killed them.
-    /// `sleep 60` stands in for llama-server here -- any long-lived,
-    /// harmless child proves the same claim (`ChildGuard::drop` kills AND
-    /// waits it) without needing the real binary or a model on this host.
+    /// the child waits for input so no timer determines its lifetime.
     #[test]
     fn child_guard_kills_and_reaps_a_real_child_on_drop() {
-        let child = Command::new("sleep")
-            .arg("60")
+        let child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
             .spawn()
-            .expect("spawn a harmless `sleep 60` child for the kill-on-drop test");
+            .unwrap_or_else(|error| panic!("spawn child for kill-on-drop test: {error}"));
         let pid = child.id();
 
         {
@@ -3087,7 +3331,7 @@ mod tests {
                 REAPABLE_PIDS.lock().contains(&pid),
                 "ChildGuard::new must register its pid for the panic-hook fallback"
             );
-        } // `guard` drops here -- kills and waits `sleep 60`.
+        }
 
         assert!(
             !REAPABLE_PIDS.lock().contains(&pid),
@@ -3101,7 +3345,7 @@ mod tests {
             .arg("-0")
             .arg(pid.to_string())
             .status()
-            .expect("run `kill -0` to probe the child's liveness");
+            .unwrap_or_else(|error| panic!("run kill -0 liveness probe: {error}"));
         assert!(
             !status.success(),
             "pid {pid} still answers a liveness probe after ChildGuard was dropped"
@@ -3117,6 +3361,11 @@ mod tests {
             "metal_fuse_attn_decode_feature=",
             "identity_copy_alias_feature=",
             "metal_tiled_gemm_feature=",
+            "cached_attention_streaming_feature=",
+            "metal_attn_split_decode_feature=",
+            "metal_attn_split_rows_feature=",
+            "instrument_feature=",
+            "metal_output_placement_feature=",
         ] {
             assert!(
                 summary.contains(key),
