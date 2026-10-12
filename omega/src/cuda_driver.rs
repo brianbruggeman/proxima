@@ -570,9 +570,10 @@ impl CudaDriver {
     }
 
     /// Runs two add-one dispatches through one persistent arena. The returned
-    /// allocation count is an observable reuse oracle: three allocations are
-    /// expected (input plus two distinct output nodes), not one new allocation
-    /// per dispatch plus a host round trip.
+    /// allocation count is an observable reuse oracle: five allocations are
+    /// expected (input, two distinct output nodes, and one retained uniform
+    /// buffer per output node), not one new allocation per dispatch plus a
+    /// host round trip.
     pub fn smoke_add_one_persistent(
         &self,
         input: &[f32],
