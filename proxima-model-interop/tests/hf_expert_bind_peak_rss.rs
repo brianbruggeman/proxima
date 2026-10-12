@@ -14,6 +14,7 @@ use proxima_primitives::pipe::sans_io::Outcome;
 use proxima_safetensors::{Manifest, SafetensorsParser};
 use proxima_tensor::op::Op;
 use proxima_tensor::spec::build_forward;
+use proxima_tensor::test_support::process_usage;
 
 const EXPORT_ENV: &str = "PROXIMA_GRANITE_PLAIN_EXPORT";
 const GGUF_ENV: &str = "PROXIMA_GRANITE_GGUF";
@@ -27,17 +28,7 @@ const EMBEDDING_LEAF: &str = "token_embd.weight";
 const HF_OVER_GGUF_PEAK_BOUND: f64 = 13.0;
 
 fn peak_rss_bytes() -> u64 {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
-    // SAFETY: `usage` is a valid, writable `rusage`; `RUSAGE_SELF` takes no other pointer.
-    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    assert_eq!(status, 0, "getrusage(RUSAGE_SELF) failed");
-    // SAFETY: `getrusage` returned 0, so it filled the struct.
-    let maxrss = unsafe { usage.assume_init() }.ru_maxrss as u64;
-    if cfg!(target_os = "macos") {
-        maxrss
-    } else {
-        maxrss * 1024
-    }
+    process_usage::peak_rss_bytes().expect("peak rss must be readable for the current process")
 }
 
 fn gguf_path() -> PathBuf {

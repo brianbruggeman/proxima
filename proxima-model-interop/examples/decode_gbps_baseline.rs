@@ -53,19 +53,14 @@ use proxima_model_interop::{
 use proxima_telemetry::export::Exporter;
 #[cfg(feature = "instrument")]
 use proxima_telemetry::recorder::Recorder;
+use proxima_tensor::test_support::process_usage;
 
 /// User and system CPU milliseconds the whole process has used so far
-/// (`getrusage(RUSAGE_SELF)`), so the difference across one generation is the
+/// (`process_usage::process_cpu_ms`), so the difference across one generation is the
 /// CPU that generation cost every thread of this process.
 fn process_cpu_ms() -> (f64, f64) {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
-    // SAFETY: `usage` is a valid, writable `rusage`; `RUSAGE_SELF` takes no other pointer.
-    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    assert_eq!(status, 0, "getrusage(RUSAGE_SELF) failed");
-    // SAFETY: `getrusage` returned 0, so it filled the struct.
-    let usage = unsafe { usage.assume_init() };
-    let millis = |time: libc::timeval| time.tv_sec as f64 * 1000.0 + time.tv_usec as f64 / 1000.0;
-    (millis(usage.ru_utime), millis(usage.ru_stime))
+    process_usage::process_cpu_ms()
+        .expect("process cpu times must be readable for the current process")
 }
 
 /// Resident set and physical footprint of this process right now, in bytes
