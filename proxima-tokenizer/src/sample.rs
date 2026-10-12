@@ -576,6 +576,29 @@ mod tests {
     }
 
     #[test]
+    fn greedy_tie_selects_the_first_tied_index_with_and_without_a_penalty_window() {
+        let logits = [1.0f32, 3.0, 3.0, 2.0];
+        let greedy = SamplingConfig {
+            temperature: 0.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            repeat_penalty: 1.1,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+        };
+        let mut rng = Rng::with_seed(1);
+
+        assert_eq!(sample_next_token(&logits, &[], greedy, &mut rng), Some(1));
+        assert_eq!(sample_next_token(&logits, &[0, 3], greedy, &mut rng), Some(1));
+        assert_eq!(
+            sample_next_token(&[1.0, 3.0, 3.5, 2.0], &[], greedy, &mut rng),
+            Some(2),
+            "control without a tie"
+        );
+    }
+
+    #[test]
     fn constant_logits_do_not_leak_a_wrong_peak() {
         // degenerate control: a broken argmax that always returns a
         // fixed non-zero index would pass a naive "returns something"

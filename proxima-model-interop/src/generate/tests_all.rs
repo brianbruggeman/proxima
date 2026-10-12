@@ -5292,3 +5292,61 @@ mod block_summarizer_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod greedy_tie_break {
+    use super::super::decode::select_decoded_token;
+    use proxima_tokenizer::SamplingConfig;
+
+    fn greedy_config() -> SamplingConfig {
+        SamplingConfig {
+            temperature: 0.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            repeat_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+        }
+    }
+
+    fn select(logits: &[f32], history: &[u32], override_tokens: Option<&[u32]>) -> u32 {
+        select_decoded_token(
+            0,
+            logits,
+            history,
+            history.len(),
+            override_tokens,
+            greedy_config(),
+            &mut fastrand::Rng::with_seed(1),
+        )
+        .expect("non-empty logits select a token")
+    }
+
+    /// llama.cpp's greedy sampler (`llama_sampler_greedy_apply`, src/llama-sampler.cpp:1053-1060
+    /// at f1ea20621) replaces the pick only on a strict `>`, so the first of tied maxima wins.
+    #[test]
+    fn exact_tie_for_the_maximum_selects_the_first_tied_index() {
+        assert_eq!(select(&[1.0, 3.0, 3.0, 2.0], &[], None), 1);
+    }
+
+    #[test]
+    fn three_way_tie_with_the_last_index_tied_still_selects_the_first() {
+        assert_eq!(select(&[0.5, 7.25, 7.25, 1.0, 7.25], &[], None), 1);
+    }
+
+    #[test]
+    fn exact_tie_still_selects_the_first_when_a_repetition_window_is_present() {
+        assert_eq!(select(&[1.0, 3.0, 3.0, 2.0], &[0, 3, 0], None), 1);
+    }
+
+    #[test]
+    fn untied_maximum_selects_the_peak_as_the_control() {
+        assert_eq!(select(&[1.0, 3.0, 3.5, 2.0], &[], None), 2);
+    }
+
+    #[test]
+    fn forced_token_override_wins_over_a_tie() {
+        assert_eq!(select(&[1.0, 3.0, 3.0, 2.0], &[], Some(&[3])), 3);
+    }
+}
