@@ -688,17 +688,17 @@ fn run() -> anyhow::Result<()> {
             family_a_program(token, reduce_len, feature, batch);
         let shapes = infer(&program, &[]).context("family A infers")?;
         let bound_ops =
-            bind(&program, &shapes, &[sum], NumericPolicy::default()).context("family A binds")?;
+            bind(&program, &shapes, &[sum], NumericPolicy::llama_relaxed()).context("family A binds")?;
         let bound = bound_ops
             .into_iter()
             .find(|op| op.node == sum)
             .context("family A fused reduce present")?;
         let packed_operands = omega::PackedOperands::new();
-        let uniform_bytes = omega::metal::pack_uniforms_for(&bound, NumericPolicy::default())
+        let uniform_bytes = omega::metal::pack_uniforms_for(&bound, NumericPolicy::llama_relaxed())
             .context("family A uniforms pack")?;
 
         let kernel_new = temp_env::with_var("PROXIMA_TILED_GEMM_DENSE", Some("1"), || {
-            omega::emit(&bound, &packed_operands, NumericPolicy::default())
+            omega::emit(&bound, &packed_operands, NumericPolicy::llama_relaxed())
                 .context("family A new-copyout kernel emits")
         })?;
         let (old_source, params) = render_old_copyout(&kernel_new.source)?;
@@ -763,13 +763,13 @@ fn run() -> anyhow::Result<()> {
             family_b_program(token, reduce_len, batch, feature);
         let shapes = infer(&program, &[]).context("family B infers")?;
         let bound_ops =
-            bind(&program, &shapes, &[sum], NumericPolicy::default()).context("family B binds")?;
+            bind(&program, &shapes, &[sum], NumericPolicy::llama_relaxed()).context("family B binds")?;
         let bound = bound_ops
             .into_iter()
             .find(|op| op.node == sum)
             .context("family B fused reduce present")?;
         let packed_operands = omega::PackedOperands::new();
-        let uniform_bytes = omega::metal::pack_uniforms_for(&bound, NumericPolicy::default())
+        let uniform_bytes = omega::metal::pack_uniforms_for(&bound, NumericPolicy::llama_relaxed())
             .context("family B uniforms pack")?;
 
         let device_ref = &device;
@@ -786,7 +786,7 @@ fn run() -> anyhow::Result<()> {
                     ("PROXIMA_TILED_GEMM_DIRECT_STORE", dstore_env),
                 ],
                 || {
-                    omega::emit(&bound, &packed_operands, NumericPolicy::default())
+                    omega::emit(&bound, &packed_operands, NumericPolicy::llama_relaxed())
                         .context("family B new-copyout kernel emits")
                 },
             )?;
