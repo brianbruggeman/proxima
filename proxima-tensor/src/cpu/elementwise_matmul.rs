@@ -6,6 +6,9 @@ pub(super) fn run_elementwise_dispatch<B: Deref<Target = [f32]> + Sync>(
     session: Option<&MatmulSession<'_>>,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
+    if let Some(coalesced) = coalesce_dims(resolved) {
+        return run_elementwise_dispatch(&coalesced, buffers, session, output);
+    }
     let Some(session) = session else {
         return run_elementwise(resolved, buffers, output);
     };

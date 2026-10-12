@@ -1140,6 +1140,11 @@ pub(super) fn run_reduce<B: Deref<Target = [f32]>>(
     output: &mut [f32],
     packed_width: Option<&PackedWidthPanels>,
 ) -> Result<(), TensorError> {
+    if packed_width.is_none()
+        && let Some(coalesced) = coalesce_dims(resolved)
+    {
+        return run_reduce(&coalesced, buffers, output, None);
+    }
     if std::env::var_os("PROXIMA_DEBUG_DENSE_DIGEST").is_some() && resolved.node.0 == 1265 {
         let output_axes = match &resolved.kind {
             BoundOpKind::Reduce { output_axes, .. } => output_axes.as_slice(),
