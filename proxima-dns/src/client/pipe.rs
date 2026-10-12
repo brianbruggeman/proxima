@@ -24,9 +24,9 @@ use proxima_primitives::stream::{
 };
 
 use crate::client::config::DnsResolverConfig;
-use crate::client::session::{decode_response_with_metadata, encode_query};
+use crate::client::session::{decode_response, encode_query};
 use crate::error::DnsClientError;
-use crate::pipes::{DnsAnswer, DnsAnswerWithMetadata, DnsPipeReply, DnsPipeRequest, DnsQuery};
+use crate::pipes::{DnsAnswer, DnsPipeReply, DnsPipeRequest, DnsQuery};
 
 /// Receive-buffer size for one UDP reply. 4096 bytes covers every
 /// EDNS0-negotiated response a stub resolver client advertises in
@@ -139,18 +139,6 @@ impl DnsClientUpstream {
         qtype: u16,
         qclass: u16,
     ) -> Result<DnsAnswer, DnsClientError> {
-        Ok(self.query_with_metadata(name, qtype, qclass).await?.answer)
-    }
-
-    /// Send one query and retain the response-envelope metadata needed for
-    /// question validation and TCP fallback. The existing [`Self::query`]
-    /// method remains the answer-only compatibility facade.
-    pub async fn query_with_metadata(
-        &self,
-        name: &str,
-        qtype: u16,
-        qclass: u16,
-    ) -> Result<DnsAnswerWithMetadata, DnsClientError> {
         let mut last_error = DnsClientError::Timeout(self.config.query_timeout_ms);
         for _ in 0..self.config.max_attempts.max(1) {
             #[cfg(feature = "doh")]
@@ -183,15 +171,11 @@ impl DnsClientUpstream {
                 continue;
             }
             match self.try_query(name, qtype, qclass).await {
-                Ok(response) if response.metadata.truncated => {
+                Ok(response) if response.truncated => {
                     let Some(tcp_upstream) = self.tcp_upstream.as_ref() else {
                         return Ok(response);
                     };
-                    let id = response
-                        .metadata
-                        .question
-                        .as_ref()
-                        .map_or(0, |question| question.id);
+                    let id = response.question.as_ref().map_or(0, |question| question.id);
                     match self
                         .try_tcp_query(tcp_upstream, id, name, qtype, qclass)
                         .await
@@ -215,7 +199,7 @@ impl DnsClientUpstream {
         name: &str,
         qtype: u16,
         qclass: u16,
-    ) -> Result<DnsAnswerWithMetadata, DnsClientError> {
+    ) -> Result<DnsAnswer, DnsClientError> {
         let query = encode_query(id, name, qtype, qclass, true)?;
         let request = proxima_primitives::pipe::request::Request::builder()
             .method("POST")
@@ -244,7 +228,7 @@ impl DnsClientUpstream {
                 "DoH response exceeds the bounded DNS response size".into(),
             ));
         }
-        decode_response_with_metadata(id, &body)
+        decode_response(id, &body)
     }
 
     async fn try_query(
@@ -252,7 +236,7 @@ impl DnsClientUpstream {
         name: &str,
         qtype: u16,
         qclass: u16,
-    ) -> Result<DnsAnswerWithMetadata, DnsClientError> {
+    ) -> Result<DnsAnswer, DnsClientError> {
         let id = self.next_id();
         let query_bytes = encode_query(id, name, qtype, qclass, true)?;
 
@@ -282,7 +266,7 @@ impl DnsClientUpstream {
                 // waiting against the same deadline.
                 continue;
             }
-            return decode_response_with_metadata(id, &buf[..len]);
+            return decode_response(id, &buf[..len]);
         }
     }
 
@@ -293,7 +277,7 @@ impl DnsClientUpstream {
         name: &str,
         qtype: u16,
         qclass: u16,
-    ) -> Result<DnsAnswerWithMetadata, DnsClientError> {
+    ) -> Result<DnsAnswer, DnsClientError> {
         let deadline = now() + core::time::Duration::from_millis(self.config.query_timeout_ms);
         let query = encode_query(id, name, qtype, qclass, true)?;
         let frame_len = u16::try_from(query.len())
@@ -331,7 +315,7 @@ impl DnsClientUpstream {
             .await
             .map_err(|_| DnsClientError::Timeout(self.config.query_timeout_ms))?
             .map_err(DnsClientError::Io)?;
-        decode_response_with_metadata(id, &response)
+        decode_response(id, &response)
     }
 }
 
@@ -358,6 +342,7 @@ impl SendPipe for DnsClientUpstream {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[cfg(feature = "doh")]
     use bytes::Bytes;
     use std::collections::VecDeque;
     use std::future::Future;
@@ -366,7 +351,9 @@ mod tests {
     use std::task::{Context, Waker};
 
     use futures::io::{AsyncRead, AsyncWrite, Cursor};
+    #[cfg(feature = "doh")]
     use proxima_primitives::pipe::handler::into_handle;
+    #[cfg(feature = "doh")]
     use proxima_primitives::pipe::request::{Request, Response};
     use proxima_primitives::stream::{
         ConnectFuture, DatagramSocket, PeerInfo, StreamConnection, StreamUpstream,
@@ -682,7 +669,7 @@ mod tests {
             .build();
         let client = DnsClientUpstream::new(factory, config).with_tcp_upstream(tcp);
 
-        let query_future = client.query_with_metadata("example.com.", 1, 1);
+        let query_future = client.query("example.com.", 1, 1);
         futures::pin_mut!(query_future);
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -695,8 +682,8 @@ mod tests {
             }
         };
 
-        assert_eq!(response.answer.rcode, 0);
-        assert!(!response.metadata.truncated);
+        assert_eq!(response.rcode, 0);
+        assert!(!response.truncated);
         let request = writes.lock().unwrap();
         let frame_len = usize::from(u16::from_be_bytes([request[0], request[1]]));
         assert_eq!(frame_len, request.len() - 2);
@@ -744,11 +731,8 @@ mod tests {
             .with_tcp_upstream(tcp)
             .with_tcp_only();
 
-        let response = client
-            .query_with_metadata("example.com.", 1, 1)
-            .await
-            .unwrap();
-        assert_eq!(response.answer.rcode, 0);
+        let response = client.query("example.com.", 1, 1).await.unwrap();
+        assert_eq!(response.rcode, 0);
         assert!(socket.state.lock().unwrap().sent.is_empty());
         let request = writes.lock().unwrap();
         assert_eq!(parse_message(&request[2..]).unwrap().header.id, 1);
@@ -816,11 +800,8 @@ mod tests {
             .build();
         let client = DnsClientUpstream::new(factory, config).with_doh_upstream(doh);
 
-        let response = client
-            .query_with_metadata("example.com.", 1, 1)
-            .await
-            .unwrap();
-        assert_eq!(response.answer.rcode, 0);
+        let response = client.query("example.com.", 1, 1).await.unwrap();
+        assert_eq!(response.rcode, 0);
         assert!(socket.state.lock().unwrap().sent.is_empty());
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1);

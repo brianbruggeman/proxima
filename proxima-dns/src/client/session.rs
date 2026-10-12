@@ -8,7 +8,7 @@
 //! exchange ([`super::pipe::DnsClientUpstream`]), which is also what keeps
 //! encoding deterministic and testable at this layer.
 
-use proxima_protocols::dns::codec_trait::parse_message;
+use proxima_protocols::dns::codec_trait::{Message, parse_message};
 use proxima_protocols::dns::encode::{self, EncodeQuestion};
 
 use crate::error::DnsClientError;
@@ -47,8 +47,9 @@ pub fn encode_query(
 ///
 /// # Errors
 /// [`DnsClientError::IdMismatch`] when the reply answers a different query,
-/// [`DnsClientError::Wire`] when the message or one of its answer records
-/// fails to parse.
+/// [`DnsClientError::Wire`] when the message is not a standard-opcode response
+/// (RFC 1035 §4.1.1: QR=1, OPCODE=0), does not echo exactly one question, or
+/// the message or one of its answer records fails to parse.
 pub fn decode_response(expected_id: u16, bytes: &[u8]) -> Result<DnsAnswer, DnsClientError> {
     let message = parse_message(bytes).map_err(|error| DnsClientError::Wire(error.to_string()))?;
     if message.header.id != expected_id {
@@ -57,8 +58,31 @@ pub fn decode_response(expected_id: u16, bytes: &[u8]) -> Result<DnsAnswer, DnsC
             reply: message.header.id,
         });
     }
+    require_standard_response(&message)?;
     message_to_answer(&message)
         .ok_or_else(|| DnsClientError::Wire("response answer record failed to decode".to_string()))
+}
+
+fn require_standard_response(message: &Message<'_>) -> Result<(), DnsClientError> {
+    let header = &message.header;
+    if !header.flags.is_response() {
+        return Err(DnsClientError::Wire(
+            "reply has QR=0, not a response".into(),
+        ));
+    }
+    if header.flags.opcode() != 0 {
+        return Err(DnsClientError::Wire(format!(
+            "reply carries nonstandard opcode {}",
+            header.flags.opcode()
+        )));
+    }
+    if header.qdcount != 1 {
+        return Err(DnsClientError::Wire(format!(
+            "reply echoes {} questions, expected exactly 1",
+            header.qdcount
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -181,5 +205,58 @@ mod tests {
                 qclass: 1,
             })
         );
+    }
+
+    fn canonical_response(id: u16) -> Vec<u8> {
+        let mut response = Vec::new();
+        let flags = proxima_protocols::dns::Flags::for_response(true, false, true, 0);
+        encode::encode_response(
+            id,
+            flags,
+            EncodeQuestion {
+                name: "example.com.",
+                qtype: 1,
+                qclass: 1,
+            },
+            &[],
+            &mut response,
+        )
+        .unwrap();
+        response
+    }
+
+    #[test]
+    fn decode_response_rejects_non_response_or_nonstandard_opcode() {
+        let mut query_flagged = canonical_response(7);
+        query_flagged[2] &= 0x7f;
+        assert!(matches!(
+            decode_response(7, &query_flagged),
+            Err(DnsClientError::Wire(_))
+        ));
+
+        let mut nonstandard_opcode = canonical_response(7);
+        nonstandard_opcode[2] |= 0x08;
+        assert!(matches!(
+            decode_response(7, &nonstandard_opcode),
+            Err(DnsClientError::Wire(_))
+        ));
+    }
+
+    #[test]
+    fn decode_response_rejects_a_reply_without_exactly_one_question() {
+        let mut no_question = canonical_response(7);
+        no_question[4..6].copy_from_slice(&0u16.to_be_bytes());
+        let outcome = decode_response(7, &no_question);
+        assert!(
+            matches!(&outcome, Err(DnsClientError::Wire(reason)) if reason.contains("questions")),
+            "{outcome:?}"
+        );
+
+        let mut two_questions = canonical_response(7);
+        two_questions[4..6].copy_from_slice(&2u16.to_be_bytes());
+        assert!(matches!(
+            decode_response(7, &two_questions),
+            Err(DnsClientError::Wire(_))
+        ));
     }
 }
