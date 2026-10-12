@@ -192,7 +192,7 @@ fn run() -> anyhow::Result<()> {
         root: NodeId,
         blocks: &[QuantizedBlock<'_>],
     ) -> anyhow::Result<u64> {
-        let plan = omega::plan(program, &[], blocks, &[root], NumericPolicy::default())
+        let plan = omega::plan(program, &[], blocks, &[root], NumericPolicy::llama_relaxed())
             .context("plan compiles")?;
         let (_, timings) = omega::metal::execute_plan_op_timed(&plan, blocks, None)
             .context("metal executes on a real device")?;
