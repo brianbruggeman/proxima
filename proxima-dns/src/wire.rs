@@ -25,9 +25,9 @@ use proxima_telemetry::warn;
 
 use crate::pipes::DnsAnswer;
 #[cfg(feature = "client")]
-use crate::pipes::{DnsAnswerMetadata, DnsAnswerRecord, DnsAnswerWithMetadata, DnsQuery};
+use crate::pipes::{DnsAnswerRecord, DnsQuery};
 #[cfg(feature = "listen")]
-use crate::pipes::{DnsPipeHandle, UDP_TRANSPORT, build_request};
+use crate::pipes::{DnsPipeHandle, DnsQuery, UDP_TRANSPORT, build_request};
 
 /// Decode a query out of an already-parsed [`Message`]. `None` for anything
 /// other than exactly one question (RFC 1035 §4.1.2 permits more; no
@@ -62,6 +62,18 @@ pub(crate) fn message_to_query(message: &Message<'_>) -> Option<DnsQuery> {
 #[cfg(feature = "client")]
 pub(crate) fn message_to_answer(message: &Message<'_>) -> Option<DnsAnswer> {
     let flags = message.header.flags;
+    let question = if message.header.qdcount == 1 {
+        let question = message.questions().next()?.ok()?;
+        Some(DnsQuery {
+            id: message.header.id,
+            recursion_desired: flags.rd(),
+            name: question.name.to_dotted(),
+            qtype: question.qtype,
+            qclass: question.qclass,
+        })
+    } else {
+        None
+    };
     let mut records = Vec::with_capacity(usize::from(message.header.ancount));
     for answer in message.answers() {
         let record = answer.ok()?;
@@ -78,36 +90,8 @@ pub(crate) fn message_to_answer(message: &Message<'_>) -> Option<DnsAnswer> {
         authoritative: flags.aa(),
         recursion_available: flags.ra(),
         records,
-    })
-}
-
-/// Decode the answer and the response-envelope fields needed by an upstream
-/// to validate that it answered the requested question. A response must echo
-/// exactly one question; malformed or multi-question responses are rejected.
-#[cfg(feature = "client")]
-pub(crate) fn message_to_answer_with_metadata(
-    message: &Message<'_>,
-) -> Option<DnsAnswerWithMetadata> {
-    if !message.header.flags.is_response() || message.header.flags.opcode() != 0 {
-        return None;
-    }
-    if message.header.qdcount != 1 {
-        return None;
-    }
-    let question = message.questions().next()?.ok()?;
-    let query = DnsQuery {
-        id: message.header.id,
-        recursion_desired: message.header.flags.rd(),
-        name: question.name.to_dotted(),
-        qtype: question.qtype,
-        qclass: question.qclass,
-    };
-    Some(DnsAnswerWithMetadata {
-        answer: message_to_answer(message)?,
-        metadata: DnsAnswerMetadata {
-            question: Some(query),
-            truncated: message.header.flags.tc(),
-        },
+        question,
+        truncated: flags.tc(),
     })
 }
 

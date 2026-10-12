@@ -273,6 +273,7 @@ where
             let options = super::spawn::SpawnOptions {
                 dispatch_fd: None,
                 controlling_tty: true,
+                process_group: false,
                 umask: None,
             };
             let dispatched =

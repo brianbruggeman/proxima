@@ -65,6 +65,10 @@ pub struct DnsAnswer {
     pub authoritative: bool,
     pub recursion_available: bool,
     pub records: Vec<DnsAnswerRecord>,
+    /// The single question decoded from a resolver response, when present.
+    pub question: Option<DnsQuery>,
+    /// Whether the resolver set the DNS truncation bit.
+    pub truncated: bool,
 }
 
 /// Metadata from the DNS response envelope needed for upstream validation.
@@ -94,6 +98,8 @@ impl DnsAnswer {
             authoritative: false,
             recursion_available: true,
             records,
+            question: None,
+            truncated: false,
         }
     }
 
@@ -105,6 +111,8 @@ impl DnsAnswer {
             authoritative: false,
             recursion_available: true,
             records: Vec::new(),
+            question: None,
+            truncated: false,
         }
     }
 }

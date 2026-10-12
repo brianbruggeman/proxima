@@ -633,6 +633,7 @@ impl Command {
         SpawnOptions {
             dispatch_fd,
             controlling_tty: self.controlling_tty,
+            process_group: false,
             umask: self.umask,
         }
     }
@@ -772,6 +773,7 @@ async fn run_pipe_call(
                 SpawnOptions {
                     dispatch_fd: None,
                     controlling_tty,
+                    process_group: false,
                     umask,
                 },
             )?;
@@ -786,6 +788,7 @@ async fn run_pipe_call(
                 SpawnOptions {
                     dispatch_fd: None,
                     controlling_tty,
+                    process_group: false,
                     umask,
                 },
             )?;

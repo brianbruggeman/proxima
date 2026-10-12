@@ -150,6 +150,8 @@ pub fn shed_reply(reason: ShedReason, input: &DnsTcpOwnedFrame) -> DnsTcpOutcome
                 authoritative: false,
                 recursion_available: true,
                 records: Vec::new(),
+                question: None,
+                truncated: false,
             };
             let mut out = Vec::new();
             match answer_to_wire(&query, &answer, &mut out) {

@@ -17,6 +17,9 @@
 //!   child's env AND its `PATH` search.
 //! - `umask` → `umask(2)` in the child before exec
 //! - `controlling_tty` → `setsid()` + `ioctl(TIOCSCTTY, 0)` on fd 0
+//! - `process_group` → `setsid()` alone, so the child leads its own
+//!   group and [`Child::kill_process_group`] can reach its descendants
+//!   without claiming a terminal a pipe-only child has no use for
 //! - per-slot [`Stdio`] wiring:
 //!   - [`Stdio::Inherit`] — child inherits parent's fd at that index
 //!   - [`Stdio::Null`] — open `/dev/null` in the child, dup2 onto the slot
@@ -55,6 +58,12 @@ pub struct Child {
     /// [`Child::wait`] or [`Child::try_wait`]. `None` means not yet
     /// reaped — the pid is still safe to signal or wait on.
     exit: Option<i32>,
+    /// Whether the child was spawned with [`SpawnOptions::process_group`]
+    /// and so leads a group of its own. Recorded because
+    /// [`Child::kill_process_group`] is only safe when it does — without
+    /// its own `setsid`, the child shares the caller's group and a
+    /// `killpg` on its pid would signal the caller.
+    leads_process_group: bool,
     /// Parent's write end of the input pipe when
     /// `CommandDescriptor.input == Stdio::Piped`; `None` otherwise.
     pub stdin: Option<OwnedFd>,
@@ -174,6 +183,48 @@ impl Child {
 
         Ok(())
     }
+
+    /// Send `SIGKILL` to the child's whole process group, reaching the
+    /// grandchildren a bare [`Child::kill`] would orphan. A no-op if the
+    /// child has already been reaped.
+    ///
+    /// # Errors
+    ///
+    /// [`ProximaError::Body`] if the child was not spawned with
+    /// [`SpawnOptions::process_group`] — it then shares the caller's group,
+    /// and signalling it would signal the caller — or if `killpg` fails for
+    /// any reason other than the group already being gone.
+    pub fn kill_process_group(&mut self) -> Result<(), ProximaError> {
+        if !self.leads_process_group {
+            return Err(ProximaError::Body(format!(
+                "kill process group {}: child was not spawned with SpawnOptions::process_group",
+                self.pid
+            )));
+        }
+
+        if self.exit.is_some() {
+            return Ok(());
+        }
+
+        // SAFETY: the child called setsid() before exec, so its pgid equals
+        // its pid and names a group containing only its own descendants;
+        // self.exit is still None, so that pid has not been reaped and the
+        // OS cannot have recycled it.
+        let result = unsafe { libc::killpg(self.pid, libc::SIGKILL) };
+
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            return Err(ProximaError::Body(format!(
+                "kill process group {}: {error}",
+                self.pid
+            )));
+        }
+
+        Ok(())
+    }
 }
 
 /// Decode a `waitpid` status word into a shell-convention exit code.
@@ -258,6 +309,12 @@ pub struct SpawnOptions {
     /// PTY-wrapper code sets this; vanilla `CommandPipe` leaves
     /// it `false`.
     pub controlling_tty: bool,
+    /// If `true`, child calls `setsid()` so it leads a process group of
+    /// its own, making [`Child::kill_process_group`] safe and reaching any
+    /// grandchildren it spawns. Implied by `controlling_tty`, which already
+    /// calls `setsid()`; unlike that flag it does not also claim a
+    /// controlling terminal, so it is the one to use for a pipe-only child.
+    pub process_group: bool,
     /// File-creation umask to apply in the child before exec.
     /// `None` inherits the parent's umask. Maximum 0o777.
     pub umask: Option<u32>,
@@ -453,7 +510,11 @@ fn spawn_fork(command: &CommandDescriptor, options: SpawnOptions) -> Result<Chil
         );
     }
 
-    Ok(parent_after_fork(pid, piped_pairs))
+    Ok(parent_after_fork(
+        pid,
+        piped_pairs,
+        options.process_group || options.controlling_tty,
+    ))
 }
 
 fn slot_io(command: &CommandDescriptor, slot: Slot) -> Stdio {
@@ -478,10 +539,15 @@ fn allocate_piped_pair(slot: Slot) -> Result<PipedPair, ProximaError> {
     })
 }
 
-fn parent_after_fork(pid: libc::pid_t, piped_pairs: Vec<PipedPair>) -> Child {
+fn parent_after_fork(
+    pid: libc::pid_t,
+    piped_pairs: Vec<PipedPair>,
+    leads_process_group: bool,
+) -> Child {
     let mut child = Child {
         pid,
         exit: None,
+        leads_process_group,
         stdin: None,
         stdout: None,
         stderr: None,
@@ -556,11 +622,18 @@ fn run_child(
     // the caller asked for it. Single optional fd instead of a
     // generic Vec — proxima-process only needs the one side
     // channel.
-    if let Some(source) = options.dispatch_fd
-        && source != DISPATCH_FD_TARGET
-        && unsafe { libc::dup2(source, DISPATCH_FD_TARGET) } < 0
-    {
-        unsafe { libc::_exit(127) };
+    // dup2 clears CLOEXEC on the descriptor it creates, so the usual path
+    // needs nothing further; the already-on-target case never calls it and
+    // would otherwise lose the fd at exec, since make_pipe sets CLOEXEC.
+    if let Some(source) = options.dispatch_fd {
+        let placed = if source == DISPATCH_FD_TARGET {
+            unsafe { libc::fcntl(DISPATCH_FD_TARGET, libc::F_SETFD, 0) }
+        } else {
+            unsafe { libc::dup2(source, DISPATCH_FD_TARGET) }
+        };
+        if placed < 0 {
+            unsafe { libc::_exit(127) };
+        }
     }
 
     if let Some(cwd) = command.current_dir.as_ref()
@@ -585,11 +658,18 @@ fn run_child(
         }
     }
 
-    if options.controlling_tty {
+    // setsid() fails with EPERM when already a group leader, so the two
+    // flags share one call rather than each making their own.
+    if options.controlling_tty || options.process_group {
         unsafe {
             if libc::setsid() == -1 {
                 libc::_exit(127);
             }
+        }
+    }
+
+    if options.controlling_tty {
+        unsafe {
             if libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
                 libc::_exit(127);
             }
@@ -658,7 +738,7 @@ mod tests {
     )]
 
     use super::*;
-    use std::io::{Read, Write};
+    use std::io::{BufRead, Read, Write};
     use std::os::fd::{FromRawFd, IntoRawFd};
     use std::thread;
 
@@ -1004,5 +1084,119 @@ mod tests {
             Some(reaped_code),
             "kill after reap must not disturb the cached exit code"
         );
+    }
+
+    #[test]
+    fn process_group_makes_the_child_its_own_group_leader() {
+        let mut command = CommandDescriptor::new(cstr("/bin/sh"));
+        command
+            .arg(cstr("-c"))
+            .arg(cstr("read line"))
+            .stdin(Stdio::Piped);
+
+        let options = SpawnOptions {
+            process_group: true,
+            ..SpawnOptions::default()
+        };
+        let mut spawned = spawn(&command, options).expect("spawn");
+
+        assert_eq!(
+            poll_until_group_leader(spawned.pid()),
+            spawned.pid(),
+            "setsid must leave the child leading a group of its own"
+        );
+
+        spawned.kill_process_group().expect("kill process group");
+        assert_eq!(
+            spawned.wait().expect("wait after group kill"),
+            128 + libc::SIGKILL,
+            "the group kill must reach the child itself, not only its descendants"
+        );
+    }
+
+    #[test]
+    fn kill_process_group_refuses_a_child_that_shares_our_group() {
+        let mut command = CommandDescriptor::new(cstr("/bin/sh"));
+        command
+            .arg(cstr("-c"))
+            .arg(cstr("read line"))
+            .stdin(Stdio::Piped);
+
+        let mut spawned = spawn(&command, SpawnOptions::default()).expect("spawn");
+
+        let error = spawned
+            .kill_process_group()
+            .expect_err("a child sharing our group must be refused, never signalled");
+        assert!(
+            format!("{error:?}").contains("process_group"),
+            "the refusal must name the spawn option that was missing: {error:?}"
+        );
+
+        spawned.kill().expect("kill");
+        spawned.wait().expect("wait");
+    }
+
+    #[test]
+    fn kill_process_group_reaches_a_grandchild_that_kill_would_orphan() {
+        // the grandchild announces its pid on the shared stdout and then
+        // blocks forever, so nothing but a group-wide signal can end it --
+        // which is the whole difference between kill and kill_process_group.
+        let mut command = CommandDescriptor::new(cstr("/bin/sh"));
+        command
+            .arg(cstr("-c"))
+            .arg(cstr("sh -c 'echo $$; read line' & read line"))
+            .stdin(Stdio::Piped)
+            .stdout(Stdio::Piped);
+
+        let options = SpawnOptions {
+            process_group: true,
+            ..SpawnOptions::default()
+        };
+        let mut spawned = spawn(&command, options).expect("spawn");
+
+        let stdout = spawned.stdout.take().expect("piped stdout");
+        let grandchild = read_pid_line(stdout);
+
+        spawned.kill_process_group().expect("kill process group");
+        spawned.wait().expect("wait after group kill");
+
+        assert!(
+            poll_until_gone(grandchild),
+            "grandchild {grandchild} outlived the group kill"
+        );
+    }
+
+    /// The child calls `setsid` after fork but before exec, so a `getpgid`
+    /// issued immediately after `spawn` returns can still observe the
+    /// inherited group. Poll the live condition rather than guess a delay.
+    fn poll_until_group_leader(pid: libc::pid_t) -> libc::pid_t {
+        for _ in 0..100_000 {
+            let group = unsafe { libc::getpgid(pid) };
+            if group == pid {
+                return group;
+            }
+            thread::yield_now();
+        }
+        panic!("child never became its own process group leader");
+    }
+
+    fn read_pid_line(fd: OwnedFd) -> libc::pid_t {
+        let mut reader = std::io::BufReader::new(std::fs::File::from(fd));
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read grandchild pid");
+        line.trim().parse().expect("grandchild pid is a number")
+    }
+
+    /// The grandchild is not our child, so it is reparented and reaped by
+    /// init rather than by us — `kill(pid, 0)` reporting ESRCH is the only
+    /// signal we get that it is really gone.
+    fn poll_until_gone(pid: libc::pid_t) -> bool {
+        for _ in 0..100_000 {
+            if unsafe { libc::kill(pid, 0) } == -1 {
+                return true;
+            }
+            thread::yield_now();
+        }
+        false
     }
 }

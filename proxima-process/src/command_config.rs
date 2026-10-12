@@ -314,6 +314,7 @@ impl CommandConfig {
         super::spawn::SpawnOptions {
             dispatch_fd: None,
             controlling_tty: self.controlling_tty,
+            process_group: false,
             umask: self.umask,
         }
     }
