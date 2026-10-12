@@ -762,3 +762,9 @@ required-features = ["std", "metal"]
 [[example]]
 name = "speculative_acceptance_corpus"
 required-features = ["std", "metal"]
+
+# Loads a checkpoint via `generate::LoadedModel` over an mmap'd file and runs
+# CPU vs CUDA greedy decode -- same `std`-only reason as `compare_local`.
+[[example]]
+name = "decode_compare"
+required-features = ["std"]
