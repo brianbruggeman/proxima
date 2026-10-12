@@ -2459,7 +2459,7 @@ fn dense_weight_staging_loads_a_register_array_before_the_tile_stores() {
         "{source}"
     );
     assert!(source.contains(
-        "w_regs[w_k] = (k0 + w_k < u.reduction_total) ? in0[row_base + (long)w_k * w_stride] : 0.0f;"
+        "w_regs[w_k] = (k0 + w_k < u.reduction_total) ? in0[(row_base + (long)w_k * w_stride)] : 0.0f;"
     ), "the partial-k guard stays per load\n{source}");
     assert!(source.contains(&format!(
         "weight_tile[w_row * {block_k} + w_k] = w_regs[w_k];"
@@ -2740,7 +2740,7 @@ fn programmable_tiled_f16_renderer_uses_existing_float_tiles() {
             || kernel.source.contains("threadgroup float act_tile[")
     );
     assert!(!kernel.source.contains("threadgroup half"));
-    assert!(kernel.source.contains("in0[row_base"));
+    assert!(kernel.source.contains("in0[(row_base"));
     assert!(kernel.source.contains("in1[aoff]"));
 }
 
@@ -2982,7 +2982,7 @@ fn programmable_tiled_cache_key_role_suffix_separates_operand_order() {
         let read = |index: usize, offset: &str| {
             signature_tokens_prelude::operand_read(index, offset, codec)
         };
-        let weight_offset = "row_base + (long)w_k * w_stride";
+        let weight_offset = "(row_base + (long)w_k * w_stride)";
         assert!(original_kernel.source.contains(&read(0, weight_offset)));
         assert!(original_kernel.source.contains(&read(1, "aoff")));
         assert!(reversed_kernel.source.contains(&read(1, weight_offset)));
@@ -11091,4 +11091,24 @@ mod expert_grouped_route_segments {
         assert!(text.contains("placed += simd_sum(hit);"), "{text}");
         assert!(!text.contains("atomic_fetch"), "{text}");
     }
+}
+
+#[cfg(all(feature = "metal-tiled-gemm", omega_dense_float_storage))]
+#[test]
+fn dense_bf16_weight_read_parenthesizes_the_compound_offset() {
+    let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 1, 16);
+    let operands = bound.operands();
+    let packed = BTreeMap::from([(operands[0].0, Codec::BFloat16)]);
+
+    let kernel =
+        emit(&bound, &packed, NumericPolicy::llama_relaxed()).expect("bf16 dense weight emits");
+
+    let offset = "(row_base + (long)w_k * w_stride)";
+    assert!(
+        kernel.source.contains(&format!(
+            "bf16_element(in0 + ({offset} / 1) * 2, (uint)({offset} % 1))"
+        )),
+        "the sub-block index must be zero for every offset expression\n{}",
+        kernel.source,
+    );
 }

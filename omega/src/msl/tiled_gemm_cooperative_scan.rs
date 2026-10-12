@@ -1523,7 +1523,7 @@ pub(super) fn push_dense_batched_gemm_body(
     ));
     source.push_str(&format!(
         "                    w_regs[w_k] = (k0 + w_k < u.reduction_total) ? {dense_value_cast}{} : {dense_zero_literal};\n",
-        operand_read(weight, "row_base + (long)w_k * w_stride", weight_codec)
+        operand_read(weight, "(row_base + (long)w_k * w_stride)", weight_codec)
     ));
     source.push_str("                }\n");
     source.push_str("                #pragma unroll\n");
