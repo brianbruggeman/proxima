@@ -14,12 +14,12 @@
 //! `identical = true` alone is a degenerate control: it cannot distinguish
 //! "drafts were proposed, verified, and matched the target model" from
 //! "speculation never actually fired, so the ON run just re-ran the OFF
-//! path." To rule the second case out, this probe installs a telemetry
-//! recorder (the same `Recorder::builder().export(..).install()` convention
-//! `decode_gbps_baseline.rs` uses) and captures `decode.rs`'s own
-//! `speculative_verify` `debug!` event in memory, then asserts the ON run
-//! actually emitted at least one, for BOTH configs.
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+//! path." With the built-in prompt, both configurations therefore require
+//! a nonzero verify count returned by the decode loop. An explicitly supplied
+//! prompt checks nonempty token equality and reports whether drafting occurred.
+//! Captured telemetry is reported separately;
+//! `--telemetry-file` additionally checks each request's draft/accept totals
+//! against the returned counters.
 
 use core::ops::ControlFlow;
 use std::env;
@@ -37,10 +37,10 @@ use proxima_model_interop::{
 };
 use proxima_telemetry::emit::{EnvFilter, global};
 use proxima_telemetry::export::Exporter;
-use proxima_telemetry::log::LogBody;
+use proxima_telemetry::log::{LogBody, LogRecord};
 use proxima_telemetry::pipes::{InMemoryPipe, into_telemetry_handle};
 use proxima_telemetry::recorder::Recorder;
-use proxima_telemetry::tag::ScalarValue;
+use proxima_telemetry::tag::{ScalarValue, Tag};
 
 /// Installs the process-default recorder, fanned to a file sink (the
 /// `decode.rs` `speculative_verify` line is human-readable there too) and an
@@ -70,29 +70,28 @@ fn install_telemetry(log_path: &std::path::Path) -> (InMemoryPipe, std::sync::Ar
         Exporter::pipe(into_telemetry_handle(capture.clone())),
         Exporter::file(log_path),
     ])
-    .expect("fan of capture + file sink composes");
+    .unwrap_or_else(|error| panic!("fan capture and file telemetry sinks: {error}"));
     let recorder = Recorder::builder()
         .ring_capacity(65536)
         .export(exporter)
-        .expect("recorder export installs")
+        .unwrap_or_else(|error| panic!("install telemetry export: {error}"))
         .install()
-        .expect("recorder installs as process default");
+        .unwrap_or_else(|error| panic!("install process telemetry recorder: {error}"));
     (capture, recorder)
 }
 
-/// `verified.accepted` from every captured `speculative_verify` event --
-/// `decode.rs` tags it `accepted = verified.accepted as u64`.
-fn accepted_field(record: &proxima_telemetry::log::LogRecord) -> Option<u64> {
+/// reads a named unsigned counter without treating a missing field as zero.
+fn counter_field(record: &LogRecord, name: &str) -> Option<u64> {
     record.attrs.iter().find_map(|tag| match tag {
-        proxima_telemetry::tag::Tag::Scalar {
-            key: "accepted",
-            value: ScalarValue::U64(accepted),
-        } => Some(*accepted),
+        Tag::Scalar {
+            key,
+            value: ScalarValue::U64(value),
+        } if *key == name => Some(*value),
         _ => None,
     })
 }
 
-fn speculative_verify_events(capture: &InMemoryPipe) -> Vec<proxima_telemetry::log::LogRecord> {
+fn speculative_verify_events(capture: &InMemoryPipe) -> Vec<LogRecord> {
     capture
         .logs()
         .into_iter()
@@ -111,6 +110,18 @@ struct PairResult {
     speculative_verify_steps: usize,
     accepted_total: u64,
     on_stats: SpeculativeDecodeStats,
+    request_counters: Vec<(Option<u64>, Option<u64>)>,
+}
+
+fn request_counters_match(
+    counters: &[(Option<u64>, Option<u64>)],
+    stats: &SpeculativeDecodeStats,
+) -> bool {
+    if stats.drafted_total == 0 {
+        counters.is_empty()
+    } else {
+        counters == [(Some(stats.drafted_total), Some(stats.accepted_total))]
+    }
 }
 
 /// `off_serving_config` and `on_serving_config` differ only in
@@ -130,7 +141,7 @@ fn run_pair(
     let off_started = Instant::now();
     let (off_ids, _off_text, _off_eos) = model
         .generate_with_serving_config(prompt, max_tokens, off_serving_config)
-        .expect("OFF decode");
+        .unwrap_or_else(|error| panic!("decode with speculation off: {error}"));
     let off_elapsed_ms = off_started.elapsed().as_secs_f64() * 1000.0;
 
     // `install()` registers the recorder as the process default but spawns
@@ -157,7 +168,10 @@ fn run_pair(
     // won each step, which the telemetry ring below cannot do (it only
     // records the pooled `accepted` field, not `drafting_type`).
     let mut on_stats = SpeculativeDecodeStats::default();
-    let mut on_token = |_event: proxima_model_interop::TokenEvent<'_>| ControlFlow::Continue(());
+    let mut on_token = |_event: proxima_model_interop::TokenEvent<'_>| {
+        recorder.drain();
+        ControlFlow::Continue(())
+    };
     let on_started = Instant::now();
     let (on_ids, _on_text, _on_eos) = model
         .generate_streaming_with_speculative_stats(
@@ -168,13 +182,32 @@ fn run_pair(
             &mut on_stats,
             None,
         )
-        .expect("ON decode");
+        .unwrap_or_else(|error| panic!("decode with speculation on: {error}"));
     let on_elapsed_ms = on_started.elapsed().as_secs_f64() * 1000.0;
     recorder.drain();
 
     let verify_events = speculative_verify_events(capture);
     let speculative_verify_steps = verify_events.len();
-    let accepted_total: u64 = verify_events.iter().filter_map(accepted_field).sum();
+    let accepted_total: u64 = verify_events
+        .iter()
+        .filter_map(|record| counter_field(record, "accepted"))
+        .sum();
+    let request_counters = capture
+        .logs()
+        .iter()
+        .filter(|record| {
+            record.body
+                == LogBody::Text(
+                    "draft_n_accepted: request-level speculative decode draft/accept totals",
+                )
+        })
+        .map(|record| {
+            (
+                counter_field(record, "draft_n"),
+                counter_field(record, "draft_n_accepted"),
+            )
+        })
+        .collect();
 
     PairResult {
         off_ids,
@@ -184,6 +217,7 @@ fn run_pair(
         speculative_verify_steps,
         accepted_total,
         on_stats,
+        request_counters,
     }
 }
 
@@ -215,6 +249,7 @@ fn report_pair(
     result: &PairResult,
     drafter_types: SpeculativeTypeSet,
     expect_divergence: bool,
+    require_verification: bool,
 ) -> bool {
     let first_divergence = result
         .off_ids
@@ -239,19 +274,43 @@ fn report_pair(
     );
     println!(
         "speculative_verify_steps = {}",
-        result.speculative_verify_steps
+        result.on_stats.verify_steps
     );
-    println!("accepted_total = {}", result.accepted_total);
+    println!("drafted_total = {}", result.on_stats.drafted_total);
+    println!("accepted_total = {}", result.on_stats.accepted_total);
+    println!(
+        "telemetry_verify_steps = {} telemetry_accepted_total = {} request_counters = {:?}",
+        result.speculative_verify_steps, result.accepted_total, result.request_counters,
+    );
     print_per_type_stats(drafter_types, &result.on_stats);
 
+    pair_matches_expectation(
+        &result.off_ids,
+        &result.on_ids,
+        result.on_stats.verify_steps,
+        expect_divergence,
+        require_verification,
+    )
+}
+
+fn pair_matches_expectation(
+    off_ids: &[u32],
+    on_ids: &[u32],
+    verify_steps: u64,
+    expect_divergence: bool,
+    require_verification: bool,
+) -> bool {
+    if off_ids.is_empty() || on_ids.is_empty() {
+        return false;
+    }
     // the non-control pass rule additionally requires speculation to have
     // fired at all (the degenerate-control guard); the mismatch control's
     // pass rule is `identical == false` alone -- a reseeded ON run that hits
     // EOS after its first, already-diverged token is still a valid control.
     if expect_divergence {
-        !identical
+        off_ids != on_ids
     } else {
-        identical && result.speculative_verify_steps > 0
+        off_ids == on_ids && (!require_verification || verify_steps > 0)
     }
 }
 
@@ -458,14 +517,15 @@ fn main() {
         .next()
         .unwrap_or_else(|| "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd".to_string());
     let explicit_prompt = args.next();
+    let require_verification = explicit_prompt.is_none();
     let explicit_max_tokens: Option<usize> = args.next().and_then(|value| value.parse().ok());
     let (chosen_prompt, chosen_max_tokens) = default_prompt_and_max_tokens(drafter_types);
     let prompt = explicit_prompt.unwrap_or(chosen_prompt);
     let max_tokens = explicit_max_tokens.unwrap_or(chosen_max_tokens);
     println!(
-        "speculative_decode_parity: drafter={:?} max_tokens={max_tokens} prompt={:?}",
+        "speculative_decode_parity: drafter={:?} max_tokens={max_tokens} require_verification={require_verification} prompt={:?}",
         drafter_types.iter_priority_order().collect::<Vec<_>>(),
-        &prompt[..prompt.len().min(80)]
+        prompt
     );
 
     let log_path: PathBuf = telemetry_file_flag
@@ -473,11 +533,15 @@ fn main() {
         .unwrap_or_else(|| std::env::temp_dir().join("speculative_decode_parity_telemetry.log"));
     let (capture, recorder) = install_telemetry(&log_path);
 
-    let file = File::open(&model_path).expect("open model");
+    let file =
+        File::open(&model_path).unwrap_or_else(|error| panic!("open model {model_path}: {error}"));
     // SAFETY: `file` remains alive while the read-only mapping is borrowed.
-    let bytes: Mmap = unsafe { MmapOptions::new().map(&file) }.expect("map model");
-    let parsed = parse_complete(&bytes).expect("parse model");
-    let model = LoadedModel::load(&parsed, &bytes).expect("bind model");
+    let bytes: Mmap = unsafe { MmapOptions::new().map(&file) }
+        .unwrap_or_else(|error| panic!("map model {model_path}: {error}"));
+    let parsed =
+        parse_complete(&bytes).unwrap_or_else(|error| panic!("parse model {model_path}: {error}"));
+    let model = LoadedModel::load(&parsed, &bytes)
+        .unwrap_or_else(|error| panic!("load model {model_path}: {error}"));
 
     let base_config = ServingConfig {
         gpu_layers,
@@ -550,7 +614,13 @@ fn main() {
         &capture,
         &recorder,
     );
-    let greedy_ok = report_pair("greedy", &greedy_result, drafter_types, false);
+    let greedy_ok = report_pair(
+        "greedy",
+        &greedy_result,
+        drafter_types,
+        false,
+        require_verification,
+    );
 
     // `--seed-mismatch-control` reseeds only the sampled ON run: greedy's
     // argmax selection ignores the rng entirely, so its OFF/ON pair stays
@@ -579,14 +649,26 @@ fn main() {
         &sampled_result,
         drafter_types,
         seed_mismatch_control,
+        require_verification,
     );
+
+    if telemetry_file_flag_index.is_some() {
+        assert!(
+            request_counters_match(&greedy_result.request_counters, &greedy_result.on_stats),
+            "greedy request telemetry must equal returned draft/accept totals"
+        );
+        assert!(
+            request_counters_match(&sampled_result.request_counters, &sampled_result.on_stats),
+            "sampled request telemetry must equal returned draft/accept totals"
+        );
+    }
 
     if !greedy_ok || !sampled_ok {
         eprintln!(
-            "speculative_decode_parity: greedy_ok={greedy_ok} sampled_ok={sampled_ok} -- either \
-             the OFF/ON token streams diverged or the ON run emitted zero speculative_verify \
-             events (speculation never fired, so identical=true would be a degenerate control, \
-             not evidence the speculative path ran). telemetry log: {}",
+            "speculative_decode_parity: greedy_ok={greedy_ok} sampled_ok={sampled_ok} \
+             require_verification={require_verification} seed_mismatch_control={seed_mismatch_control} -- \
+             a token stream was empty, token equality did not match the expected control, \
+             or required verification did not occur. telemetry log: {}",
             log_path.display()
         );
         std::process::exit(1);
@@ -595,7 +677,105 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{compiled_perf_features_summary, git_commit_at_startup};
+    use super::{
+        SpeculativeDecodeStats, compiled_perf_features_summary, git_commit_at_startup,
+        pair_matches_expectation, request_counters_match,
+    };
+
+    #[test]
+    fn parity_gate_distinguishes_default_verification_from_custom_prompt_equality() {
+        assert!(pair_matches_expectation(&[7, 11], &[7, 11], 1, false, true));
+        assert!(!pair_matches_expectation(
+            &[7, 11],
+            &[7, 11],
+            0,
+            false,
+            true
+        ));
+        assert!(pair_matches_expectation(
+            &[7, 11],
+            &[7, 11],
+            0,
+            false,
+            false
+        ));
+        assert!(!pair_matches_expectation(
+            &[7, 11],
+            &[7, 13],
+            0,
+            false,
+            false
+        ));
+        assert!(!pair_matches_expectation(&[7, 11], &[7], 0, false, false));
+    }
+
+    #[test]
+    fn parity_gate_rejects_empty_outputs_in_every_mode() {
+        for require_verification in [false, true] {
+            for expect_divergence in [false, true] {
+                assert!(!pair_matches_expectation(
+                    &[],
+                    &[],
+                    1,
+                    expect_divergence,
+                    require_verification
+                ));
+                assert!(!pair_matches_expectation(
+                    &[],
+                    &[7],
+                    1,
+                    expect_divergence,
+                    require_verification
+                ));
+                assert!(!pair_matches_expectation(
+                    &[7],
+                    &[],
+                    1,
+                    expect_divergence,
+                    require_verification
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn parity_gate_seed_control_requires_difference_without_verification() {
+        for require_verification in [false, true] {
+            assert!(pair_matches_expectation(
+                &[7],
+                &[11],
+                0,
+                true,
+                require_verification
+            ));
+            assert!(!pair_matches_expectation(
+                &[7],
+                &[7],
+                1,
+                true,
+                require_verification
+            ));
+        }
+    }
+
+    #[test]
+    fn request_telemetry_matches_request_totals_independently_of_verify_count() {
+        let stats = SpeculativeDecodeStats {
+            verify_steps: 4,
+            drafted_total: 12,
+            accepted_total: 9,
+            ..SpeculativeDecodeStats::default()
+        };
+        assert!(request_counters_match(&[(Some(12), Some(9))], &stats));
+        assert!(!request_counters_match(&[], &stats));
+        assert!(!request_counters_match(&[(Some(12), Some(8))], &stats));
+        assert!(!request_counters_match(&[(Some(12), None)], &stats));
+        assert!(!request_counters_match(&[(Some(12), Some(9)); 2], &stats));
+        assert!(request_counters_match(
+            &[],
+            &SpeculativeDecodeStats::default()
+        ));
+    }
 
     #[test]
     fn compiled_perf_features_summary_names_every_performance_relevant_feature() {
