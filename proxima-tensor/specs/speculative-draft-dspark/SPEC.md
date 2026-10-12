@@ -1,6 +1,6 @@
 # speculative-draft-dspark
 
-status: draft
+status: audited
 owner: brian bruggeman
 created: 2026-09-28
 restated: 2026-10-12 against `decode-as-data` R5, R6, R11 (readouts plus a draft descriptor)
@@ -106,6 +106,7 @@ Every count below is asserted by its test, which prints the count only after the
 | AC16 | R7b | section `ac commands`, `### AC16` | 1 (reuses the AC4 weights with `dflash.block_size` 3: a block of 3 tokens is biased and prints its chain `2,2,2`; a block of 4 tokens (`block_drafts` 4 > `block_size` 3) returns early, so its logits equal the raw input logits with `max_abs_diff = 0` and no error; the control sets `block_size` 4 for the same 4-token block and asserts the bias is then applied, so the unbiased result of the oversized block is the early return and not a zero bias; asserted before the print) |
 | AC17 | R11 | section `ac commands`, `### AC17` | two lines: `1`, `1` (the confidence-gate control: `--p-min 0.0` turns the gate off in both arms, so `conf_differing_blocks=0` and `p_min_stops=0` with `executed_blocks=200`; if either printed a nonzero count, AC13 would be measuring something other than the gate; blocked until `speculative-draft-training` slice 11) |
 | AC18 | R12 | section `ac commands`, `### AC18` | 1 (the test calls each of `masked_block_rows`, `tap_feature_rows`, `inject_feature_rows` once on a synthetic draft with an in-memory exporter attached and asserts exactly one `trace!` event per function carrying `function = "<name>"`; the control calls `masked_block_rows` twice and asserts that name's count is 2 while the other two stay 1; asserted before the print; needs `speculative-draft-dflash` slices 3, 5 and 6) |
+| AC19 | R2, R9a, RL5 | `cargo nextest run -p proxima-tensor -E 'test(/readout_/)' 2>&1 \| grep -c 'Summary .* 2 tests run: 2 passed'; cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/lossless_comparator_\|lossless_guard_/)' 2>&1 \| grep -cE '^control=(self\|flip\|zero_draft) '; cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/dflash1_block_decode_reads_block/)' 2>&1 \| grep -cE 'cases = 4 p_min_stops = 3 n_min_clears = 1'` | three lines: `1`, `3`, `1` (line 1: both readout tests pass, the readout list from `decode-as-data` slice 3 that the Markov and confidence roots of R2 read through; line 2: the three planted controls of the lossless harness, `control=self`, `control=flip` and `control=zero_draft`, each printed only after its assertion passes, so a count below 3 means the comparator or guard did not run its controls (RL5); line 3: the DFlash block-decode case set from `speculative-draft-dflash` slice 7, which the shared-function reuse of R9a consumes; all three are sibling-spec prerequisites and stay blocked until those slices land; the planted controls on line 2 are what keep the pass from being vacuous) |
 
 ## ac commands
 
