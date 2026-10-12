@@ -307,6 +307,52 @@ fn tract_record_degenerate_control_cosine_a_b_altered_by_1e_3_fails() -> Result<
     Ok(())
 }
 
+const TIMING_WARMUPS: u64 = 3;
+const TIMING_PASSES: u64 = 5;
+
+#[test]
+fn tract_record_timing_has_b1_and_b32_cells_with_3_warmup_and_5_timed_passes_each_and_load_before_at_or_below_the_header_max_load()
+-> Result<()> {
+    let timing = bge::read_timing()?;
+    let max_load = timing.header["max_load"]
+        .as_f64()
+        .context("timing header has no max_load")?;
+
+    ensure!(
+        timing.header["tract_onnx"] == "0.22.4" && timing.header["model_sha256"] == MODEL_SHA256,
+        "timing header names tract {} and model {}",
+        timing.header["tract_onnx"],
+        timing.header["model_sha256"]
+    );
+    ensure!(
+        timing.header["warmups"] == TIMING_WARMUPS && timing.header["timed"] == TIMING_PASSES,
+        "timing header declares {} warmups and {} timed passes",
+        timing.header["warmups"],
+        timing.header["timed"]
+    );
+    for cell in ["b1", "b32"] {
+        ensure!(
+            bge::passes_in(&timing, cell, "warmup") as u64 == TIMING_WARMUPS
+                && bge::passes_in(&timing, cell, "timed") as u64 == TIMING_PASSES,
+            "cell {cell} does not hold {TIMING_WARMUPS} warmup and {TIMING_PASSES} timed passes"
+        );
+    }
+    ensure!(
+        bge::all_started_at_or_below(&timing.passes, max_load),
+        "a pass started above the header max_load {max_load}"
+    );
+    let highest = timing
+        .passes
+        .iter()
+        .map(|pass| pass.load_before)
+        .fold(f64::MIN, f64::max);
+    ensure!(
+        !bge::all_started_at_or_below(&timing.passes, highest - 1e-9),
+        "a limit just under the highest recorded load still admitted every pass"
+    );
+    Ok(())
+}
+
 const CPU_TOLERANCE: f32 = 1e-5;
 const METAL_TOLERANCE: f32 = 1e-3;
 const OUTPUT_NAME: &str = "last_hidden_state";
