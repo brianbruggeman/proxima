@@ -43,7 +43,8 @@ enum AgreementError {
     #[error("{path}: {source}")]
     Gguf { path: PathBuf, source: GgufError },
     #[error("{path}: {source}")]
-    Model { path: PathBuf, source: InteropError },
+    // box: InteropError is >128 bytes under the metal feature (clippy result_large_err)
+    Model { path: PathBuf, source: Box<InteropError> },
 }
 
 #[derive(Deserialize)]
@@ -183,7 +184,7 @@ fn hits_of(cases: &[Case], generations: &[Vec<u32>]) -> Vec<Vec<bool>> {
 fn generations_for(path: &Path, cases: &[Case]) -> Result<Vec<Vec<u32>>, AgreementError> {
     let model_error = |source| AgreementError::Model {
         path: path.to_owned(),
-        source,
+        source: Box::new(source),
     };
     let file = File::open(path).map_err(|source| AgreementError::Io {
         path: path.to_owned(),
