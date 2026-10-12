@@ -258,8 +258,9 @@ impl core::str::FromStr for Engine {
 /// failure the underlying evaluator itself (CPU, Metal, or wgpu) produced.
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {
+    /// Boxed: the validation error is 104 bytes and would make every `Result<_, BackendError>` large.
     #[error("invalid runtime configuration: {0}")]
-    Configuration(#[from] conflaguration::Error),
+    Configuration(Box<conflaguration::Error>),
     #[error("backend `{backend}` cannot enforce `{field}`: {reason}")]
     UnsupportedConstraint {
         backend: &'static str,
@@ -347,6 +348,12 @@ pub enum BackendError {
     #[cfg(feature = "cuda-driver")]
     #[error(transparent)]
     Cuda(#[from] CudaDriverError),
+}
+
+impl From<conflaguration::Error> for BackendError {
+    fn from(error: conflaguration::Error) -> Self {
+        Self::Configuration(Box::new(error))
+    }
 }
 
 /// [`Plan::Metal`]'s own payload type. Boxed only under
