@@ -454,7 +454,7 @@ Multiple sources, autodetect:
 - `plan_named_with_config` returns a reusable `Plan` plus candidate records; `selection.mode` is `configured` or `minimum_measured_wall_time` with raw synchronized samples — [shipped; 12 `config_plan_` and 5 `config_selection_` lib tests, 1 doctest]
 - `[constraints]` byte ceilings (`max_host_tensor_bytes`, `max_device_buffer_bytes`, `max_single_device_buffer_bytes`) enforced by the CPU and Metal payload owners — [shipped; 5 `config_cpu_budget_` and 4 `config_metal_` lib tests]; wgpu and CUDA accounting have no dedicated count here
 - `ServingConfig::omega_runtime` routes `proxima-model-interop` serving plans through `plan_named_with_config` (configured selection only, placements rejected, config in the prompt-cache key) — [shipped; 3 `configured_runtime_` lib tests under `std,metal`]
-- `[experimental] dense_float_storage` BF16/F16 tile input decoding (feature `metal-tiled-gemm`) — [experimental, off by default; `programmable_vector_metal_bf16` fails with the switch on]
+- `[experimental] dense_float_storage` BF16/F16 tile input decoding (feature `metal-tiled-gemm`) — [experimental, off by default; 8 `programmable_tiled_` lib tests and 8 `programmable_execution_vectors` tests pass with the switch on]
 
 ---
 
