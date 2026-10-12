@@ -1444,3 +1444,48 @@ fn the_qwen3_gqa_qk_norm_decode_step_after_a_prefill_runs_on_cuda_at_cpu_parity(
         "omega::backend's cpu and cuda arms disagree on the post-prefill decode step: relative={relative} max_diff={max_diff}"
     );
 }
+
+#[test]
+fn embedding_lookup_runs_on_cuda_at_cpu_parity_for_int32_token_blocks() {
+    let (vocab, dim, seq) = (256usize, 8usize, 4usize);
+    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
+    let table_data: Vec<f32> = (0..vocab * dim).map(|value| (value % 97) as f32).collect();
+    let ids_data = [3i32, 255, 12, 0];
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("table", QuantizedBlock::Float32(&table_data)),
+        ("ids", QuantizedBlock::Int32(&ids_data)),
+    ];
+
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the int32 gather on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named)
+        .expect("omega::backend runs the int32 gather on cpu");
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the int32 gather on cuda");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend uploads an int32 token block to a real cuda device");
+
+    assert_eq!(cuda.root().len(), seq * dim);
+    assert_eq!(
+        cuda.root(),
+        cpu.root(),
+        "int32 token ids must gather the same table rows on cuda as on cpu"
+    );
+}

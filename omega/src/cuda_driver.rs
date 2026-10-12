@@ -503,6 +503,25 @@ impl CudaDriver {
         Ok(())
     }
 
+    /// Integer inputs reach the kernels as f32 -- the emitter maps every
+    /// integer dtype to `float` -- so both input kinds share this upload.
+    fn upload_float_input(
+        &self,
+        arena: &mut CudaF32Arena,
+        node: NodeId,
+        values: &[f32],
+    ) -> Result<(), CudaDriverError> {
+        if values.is_empty() {
+            arena.allocations += 1;
+            arena.buffers.insert(
+                node,
+                CudaGraphBuffer::F32(self.stream.alloc_zeros::<f32>(0)?),
+            );
+            return Ok(());
+        }
+        self.upload_f32(arena, node, values)
+    }
+
     /// Materializes a plan-constant directly into the persistent arena. A
     /// constant has no data dependency and never needs a CUDA launch; keeping
     /// its device buffer alive also means repeated token evaluations do not
@@ -1178,15 +1197,13 @@ impl CudaPlan {
             }
             match block {
                 QuantizedBlock::Float32(values) => {
-                    if values.is_empty() {
-                        self.arena.allocations += 1;
-                        self.arena.buffers.insert(
-                            node,
-                            CudaGraphBuffer::F32(self.driver.stream.alloc_zeros::<f32>(0)?),
-                        );
-                    } else {
-                        self.driver.upload_f32(&mut self.arena, node, values)?;
-                    }
+                    self.driver
+                        .upload_float_input(&mut self.arena, node, values)?
+                }
+                QuantizedBlock::Int32(values) => {
+                    let widened: Vec<f32> = values.iter().map(|&value| value as f32).collect();
+                    self.driver
+                        .upload_float_input(&mut self.arena, node, &widened)?;
                 }
                 other => {
                     let Some(codec) = packed_codec(other) else {
