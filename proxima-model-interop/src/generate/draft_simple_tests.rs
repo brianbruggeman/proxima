@@ -26,7 +26,7 @@ struct DecodeResult {
     logits: Vec<Vec<f32>>,
 }
 
-fn write_draft_checkpoint(checkpoint: &[u8]) -> tempfile::NamedTempFile {
+pub(super) fn write_draft_checkpoint(checkpoint: &[u8]) -> tempfile::NamedTempFile {
     let mut file = tempfile::NamedTempFile::new()
         .unwrap_or_else(|error| panic!("creates a temporary draft checkpoint: {error:?}"));
     file.write_all(checkpoint)
@@ -34,7 +34,7 @@ fn write_draft_checkpoint(checkpoint: &[u8]) -> tempfile::NamedTempFile {
     file
 }
 
-fn serving_config(speculative: SpeculativeConfig<'_>) -> ServingConfig<'_> {
+pub(super) fn serving_config(speculative: SpeculativeConfig<'_>) -> ServingConfig<'_> {
     ServingConfig {
         gpu_layers: 0,
         kv_cache_key_quant: GgmlType::F32,
@@ -48,7 +48,7 @@ fn serving_config(speculative: SpeculativeConfig<'_>) -> ServingConfig<'_> {
     }
 }
 
-fn draft_simple_config(draft_path: &str) -> ServingConfig<'_> {
+pub(super) fn draft_simple_config(draft_path: &str) -> ServingConfig<'_> {
     serving_config(SpeculativeConfig {
         speculative_types: SpeculativeTypeSet::single(SpeculativeType::DraftSimple),
         draft_model_path: Some(draft_path),
@@ -268,7 +268,7 @@ fn assert_cache_state_equal(roundoff: f32, expected: &PrefixState, actual: &Pref
     }
 }
 
-fn armed_target<'file>(
+pub(super) fn armed_target<'file>(
     parsed: &proxima_gguf::ParsedGguf,
     checkpoint: &'file [u8],
 ) -> LoadedModel<'file> {
