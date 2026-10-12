@@ -5413,22 +5413,26 @@ fn a_two_leading_axis_shared_weight_reduce_engages_width_tile_and_matches_naive_
     );
 }
 
-/// Negative ratchet, UPDATED by the three-axis-merge task (2026-09-02):
-/// this is NO LONGER "3 leading axes always decline" -- BGE's own
-/// `attn_qk`/`attn_v` shape (1 row axis + 2 `b`-varying outer axes that
-/// compose) now engages, see
-/// `a_three_leading_axis_batched_reduce_engages_width_tile_and_matches_naive_matmul`
-/// below. This test instead pins the OTHER 3-axis shape,
-/// `three_leading_axes_matmul_program`'s `rhs` invariant over ALL THREE
-/// leading axes (a plain shared-weight GEMM, not attention) -- no axis
-/// is the unique row candidate (`layout_b.stride == 0` on all three),
-/// so `width_tile_plan`'s 3-axis arm still declines it, unchanged.
-/// Pinned explicitly so a future widening past "exactly one row axis"
-/// must re-derive this test's expected engagement rather than silently
-/// making it pass for the wrong reason.
+/// `three_leading_axes_matmul_program`'s `rhs` is invariant over ALL THREE
+/// leading axes (a plain shared-weight GEMM, not attention), so no leading
+/// axis is `width_tile_plan`'s unique row axis and the plan itself still
+/// declines it with `AxesShape` (pinned uncoalesced by
+/// `an_uncoalesced_three_leading_axis_reduce_declines_width_tile_with_axes_shape_reason`).
+/// Dimension coalescing (`cpu/coalesce.rs`) merges the three contiguous
+/// leading axes into one row axis before the plan runs, so through
+/// `evaluate` this shape now engages the tile -- it is the same GEMM as
+/// `[outer*batch*seq, contraction] @ [contraction, width]`.
+///
+/// Measured evidence for accepting the new engagement (same binary, coalescing
+/// on vs off interleaved per iteration, release, thread CPU time; box load
+/// 30-45 so only the within-run ratio is used): `[2,3,4] x k5 x n16` evaluate
+/// CPU 6125 ns -> 4417 ns and reduce kernel 2541 ns -> 375 ns; `[2,4,16] x k384
+/// x n384` evaluate CPU 2217791 ns -> 484750 ns (4.6x) and reduce kernel
+/// 2212083 ns -> 478583 ns, with the tile at gate_passes 0 -> 1 and
+/// invocations 0 -> 768. The result is checked against `naive_matmul` below.
 #[test]
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
-fn a_three_leading_axis_reduce_declines_width_tile_with_axes_shape_reason() {
+fn a_three_leading_axis_reduce_coalesces_into_one_row_axis_and_engages_width_tile() {
     let (outer, batch, seq, contraction, width) = (2u32, 3u32, 4u32, 5u32, 16u32);
     let (program, sum) = three_leading_axes_matmul_program(outer, batch, seq, contraction, width);
 
@@ -5441,10 +5445,10 @@ fn a_three_leading_axis_reduce_declines_width_tile_with_axes_shape_reason() {
         .collect();
 
     instrument::reset_width_tile_decline();
-    let (gate_passes_before, _, _) = width_tile_counters();
+    let (gate_passes_before, invocations_before, _) = width_tile_counters();
     let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[])
-        .expect("the three-leading-axis reduce evaluates on the generic path");
-    let (gate_passes_after, _, _) = width_tile_counters();
+        .expect("the three-leading-axis reduce evaluates");
+    let (gate_passes_after, invocations_after, _) = width_tile_counters();
 
     assert_eq!(
         evaluated.shape(),
@@ -5461,21 +5465,17 @@ fn a_three_leading_axis_reduce_declines_width_tile_with_axes_shape_reason() {
 
     assert_eq!(
         gate_passes_after - gate_passes_before,
-        0,
-        "the all-invariant-rhs 3-leading-axis GEMM engaged width_tile_plan -- if this fires, \
-         a shape with no unique row axis started engaging; re-derive this test's expected \
-         engagement count rather than deleting the assertion"
+        1,
+        "the coalesced all-invariant-rhs GEMM should pass width_tile_plan's gate exactly once"
+    );
+    assert!(
+        invocations_after - invocations_before > 0,
+        "the gate passed but no width tile ran on the coalesced 24-row GEMM"
     );
     let declines = instrument::width_tile_decline_snapshot();
-    let matched = declines
-        .iter()
-        .find(|&&(node, ..)| node == sum.0)
-        .expect("the three-leading-axis node should have recorded a width_tile_plan decline");
-    assert_eq!(
-        matched.1,
-        instrument::WidthDeclineReason::AxesShape,
-        "expected AxesShape (no unique row axis among 3 non-degenerate leading axes), got {:?}",
-        matched.1
+    assert!(
+        declines.iter().all(|&(node, ..)| node != sum.0),
+        "the coalesced three-leading-axis node declined instead of engaging: {declines:?}"
     );
 }
 
