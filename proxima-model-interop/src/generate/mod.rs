@@ -284,6 +284,12 @@ mod thread_index_census_tests;
 mod verify_bound_tests;
 #[cfg(test)]
 mod forward_from_ids_tests;
+#[cfg(test)]
+mod ouro_fixture;
+#[cfg(test)]
+mod recurrent_mainline_tests;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod recurrent_metal_tests;
 mod warm_buffers;
 use decode::*;
 use draft_model::ModelProposer;

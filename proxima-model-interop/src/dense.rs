@@ -19,15 +19,16 @@
 //! into the one generic [`build_forward`] call every family takes. A family with
 //! no profile is an error, never a default.
 
+use proxima_gguf::MetadataValue;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
-    AttentionScoreScale, CacheStrategy, EmbeddingScale, LayerAttentionConfig, LayerKind,
-    LayerSchedule, ModelDescriptor, gqa_descriptor_from_shape,
+    AttentionScoreScale, CacheStrategy, EmbeddingScale, FamilyProfile, LayerAttentionConfig,
+    LayerKind, LayerSchedule, ModelDescriptor, gqa_descriptor_from_shape,
 };
 
 use crate::bind::{
     ModelHparams, architecture_from_metadata, checkpoint_has_qk_norm, checkpoint_qkv_biases,
-    metadata_f32_optional, metadata_u32_optional,
+    metadata_f32_optional, metadata_u32, metadata_u32_optional,
 };
 use crate::error::InteropError;
 use crate::profiles::family_profile;
@@ -78,7 +79,7 @@ pub fn descriptor_from_gguf(
         architecture.block_count,
         architecture.expert_count,
         architecture.expert_used_count,
-        checkpoint_has_qk_norm(parsed),
+        checkpoint_has_qk_norm(parsed) && profile.qk_norm,
         checkpoint_qkv_biases(parsed, architecture)?,
         false,
         false,
@@ -89,6 +90,7 @@ pub fn descriptor_from_gguf(
     // projection stays narrow there (`proxima-tensor/docs/discipline.md`
     // ROW 418/421 measured the cost of computing every row instead).
     let last_row_only = !matches!(classify_task(parsed).task, ModelTask::Embedding);
+    let descriptor = with_recurrence(descriptor, parsed, &architecture.family, &profile)?;
     let descriptor = with_conv_layers(descriptor, parsed, architecture)?;
     let descriptor = with_header_window(
         with_header_scales(descriptor, parsed, &architecture.family),
@@ -99,6 +101,32 @@ pub fn descriptor_from_gguf(
         last_row_only,
         ..descriptor
     })
+}
+
+/// A family whose profile names a `RecurrenceProfile` repeats its physical
+/// layers `{family}.num_loops` times, each pass with its own KV; the
+/// descriptor keeps the physical schedule and gains the recurrence. A header
+/// that skips the loop norm contradicts the profile's `normalize_each_iteration`
+/// and is refused instead of lowered as something else. A family with no
+/// recurrence is returned unchanged.
+fn with_recurrence(
+    descriptor: ModelDescriptor,
+    parsed: &ParsedGguf,
+    family: &str,
+    profile: &FamilyProfile,
+) -> Result<ModelDescriptor, InteropError> {
+    if profile.recurrence.is_none() {
+        return Ok(descriptor);
+    }
+    if let Some(MetadataValue::Bool(true)) =
+        parsed.metadata_value(&format!("{family}.skip_loop_final_norm"))
+    {
+        return Err(InteropError::InvalidRecurrentConfig {
+            reason: "a header that skips the loop norm contradicts the family profile",
+        });
+    }
+    let iterations = metadata_u32(parsed, &format!("{family}.num_loops"))?;
+    Ok(profile.recurring(descriptor, iterations))
 }
 
 /// A checkpoint whose header declares zero KV heads on some layers is a hybrid

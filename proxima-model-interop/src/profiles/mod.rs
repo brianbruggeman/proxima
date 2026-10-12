@@ -36,6 +36,7 @@ pub(crate) const FAMILY_PROFILES: &[(&str, &str)] = &[
     ("qwen35moe", include_str!("qwen35moe.toml")),
     ("lfm2", include_str!("lfm2moe.toml")),
     ("lfm2moe", include_str!("lfm2moe.toml")),
+    ("ouro", include_str!("ouro.toml")),
 ];
 
 /// The [`FamilyProfile`] for `family`: a checkpoint's `general.architecture`
@@ -72,7 +73,7 @@ mod tests {
     fn every_embedded_profile_parses() {
         assert_eq!(
             FAMILY_PROFILES.len(),
-            13,
+            14,
             "one row per embedded family string"
         );
         for (family, _) in FAMILY_PROFILES {
@@ -230,6 +231,8 @@ mod tests {
     /// split-half over the partial rotary width.
     /// mixtral GGUFs declare `general.architecture = llama`.
     /// GRANITE_MOE is NORM (`src/llama-model.cpp:3019`, the group returns at :3039).
+    /// OURO is NORM (the pinned llama.cpp selects `ROPE_TYPE_NORM`, and its converter permutes the
+    /// Q/K rows into the adjacent layout).
     #[test]
     fn every_profile_pairs_rope_as_llama_cpp_rope_type_says() {
         let table = [
@@ -246,6 +249,7 @@ mod tests {
             ("qwen35moe", true),
             ("lfm2", true),
             ("lfm2moe", true),
+            ("ouro", false),
         ];
         assert_eq!(
             table.len(),
