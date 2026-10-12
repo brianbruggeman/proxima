@@ -1525,8 +1525,7 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
     for type_id in config.speculative.speculative_types.iter_priority_order() {
         if matches!(
             type_id,
-            SpeculativeType::DraftSimple
-                | SpeculativeType::DraftEagle3
+            SpeculativeType::DraftEagle3
                 | SpeculativeType::DraftMtp
                 | SpeculativeType::DraftDflash
                 | SpeculativeType::DraftDspark
@@ -1537,11 +1536,22 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
             unwired_types.push_str(type_id.llama_name());
         }
     }
+    if config
+        .speculative
+        .speculative_types
+        .contains(SpeculativeType::DraftSimple)
+        && config.speculative.draft_model_path.is_none_or(str::is_empty)
+    {
+        return Err(InteropError::UnsupportedServingConfig(
+            "speculative.speculative_types=draft-simple requires speculative.draft_model_path"
+                .into(),
+        ));
+    }
     if !unwired_types.is_empty() {
         return Err(InteropError::UnsupportedServingConfig(format!(
             "speculative.speculative_types={unwired_types} (--spec-type): draft-model \
              speculation needs a second GGUF checkpoint's forward path, owned by each named \
-             type's own speculative-<type> sub-spec; only none and the five n-gram types \
+             type's own speculative-<type> sub-spec; only none, draft-simple and the five n-gram types \
              (ngram-simple, ngram-map-k, ngram-map-k4v, ngram-mod, ngram-cache) run end to end \
              today"
         )));
@@ -2392,16 +2402,40 @@ mod tests {
     }
 
     #[test]
-    fn draft_model_type_is_still_rejected_when_selected_over_the_default() {
+    fn unwired_draft_model_types_are_still_rejected_when_selected_over_the_default() {
         let draft_model = supported_default().with_speculative(SpeculativeConfig {
-            speculative_types: SpeculativeTypeSet::single(SpeculativeType::DraftSimple),
+            speculative_types: SpeculativeTypeSet::single(SpeculativeType::DraftEagle3),
             ..SpeculativeConfig::none()
         });
 
         let error = apply_serving_config(&draft_model, 6)
             .expect_err("an unwired draft-model type must be rejected");
 
-        assert!(error.to_string().contains("draft-simple"));
+        assert!(error.to_string().contains("draft-eagle3"));
+    }
+
+    #[test]
+    fn draft_simple_without_a_draft_model_path_is_rejected() {
+        let draft_model = supported_default().with_speculative(SpeculativeConfig {
+            speculative_types: SpeculativeTypeSet::single(SpeculativeType::DraftSimple),
+            ..SpeculativeConfig::none()
+        });
+
+        let error = apply_serving_config(&draft_model, 6)
+            .expect_err("draft-simple has no model to draft with");
+
+        assert!(error.to_string().contains("draft_model_path"));
+    }
+
+    #[test]
+    fn draft_simple_with_a_draft_model_path_is_accepted() {
+        let draft_model = supported_default().with_speculative(SpeculativeConfig {
+            speculative_types: SpeculativeTypeSet::single(SpeculativeType::DraftSimple),
+            draft_model_path: Some("/models/granite-draft.gguf"),
+            ..SpeculativeConfig::none()
+        });
+
+        apply_serving_config(&draft_model, 6).expect("a draft model path wires draft-simple");
     }
 
     /// I11: the three scheduling levels are independent structs consulted

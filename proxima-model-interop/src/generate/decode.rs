@@ -3123,20 +3123,23 @@ impl<'file> LoadedModel<'file> {
         speculative_stats: Option<&mut SpeculativeDecodeStats>,
         forced_draft_width: Option<u16>,
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
-        let outcome = self.drive_serving_loop(
-            ids,
-            max_tokens,
-            serving_config,
-            runtime,
-            token_override,
-            logits_sink,
-            node_values_sink,
-            on_token,
-            seed,
-            force_two_range,
-            speculative_stats,
-            forced_draft_width,
-        );
+        let outcome = self.with_draft_model(serving_config, |model_proposer| {
+            self.drive_serving_loop(
+                ids,
+                max_tokens,
+                serving_config,
+                runtime,
+                token_override,
+                logits_sink,
+                node_values_sink,
+                on_token,
+                seed,
+                force_two_range,
+                speculative_stats,
+                forced_draft_width,
+                model_proposer,
+            )
+        });
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if should_release_monolithic_sources(
             self.monolithic_all_low_requested(serving_config, runtime),
@@ -3182,6 +3185,7 @@ impl<'file> LoadedModel<'file> {
         force_two_range: bool,
         mut speculative_stats: Option<&mut SpeculativeDecodeStats>,
         forced_draft_width: Option<u16>,
+        mut model_proposer: Option<&mut ModelProposer<'_>>,
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
         let mut resolved_serving_config = *serving_config;
         self.apply_context_resolution(&mut resolved_serving_config)?;
@@ -3690,9 +3694,8 @@ impl<'file> LoadedModel<'file> {
         // [`Self::speculative_verify_program`]'s own doc): built once, here,
         // outside the decode loop, matching [`prefill_one_evaluation_requested`]'s
         // own config-gate shape. `DrafterSet` drives every enabled n-gram type in llama.cpp's own
-        // priority order (`drafter.rs`'s own doc); `apply_serving_config`
-        // already rejects the unwired draft-model types before this call is
-        // reached. `begin` trains `ngram-map`/`ngram-mod`'s own index over
+        // priority order (`drafter.rs`'s own doc); `model_proposer` is the draft
+        // model's rows when `with_draft_model` loaded one. `begin` trains `ngram-map`/`ngram-mod`'s own index over
         // the full prompt seen so far (`token_history` already holds
         // `seed_ids` + `ids` at this point in the function).
         let drafter_context_length = self.serving_context_length(serving_config)?;
@@ -3702,8 +3705,9 @@ impl<'file> LoadedModel<'file> {
         // A ring cache carried in from a call that ran without speculation
         // has no slack to rewind into ([`rings_cover_speculation`]), so
         // speculation stays off for that call rather than rewinding inexactly.
-        let speculative_enabled = (!drafter_set.is_empty() || forced_draft_width.is_some())
-            && rings_cover_speculation(&layer_caches, draft_limit);
+        let speculative_enabled =
+            (!drafter_set.is_empty() || model_proposer.is_some() || forced_draft_width.is_some())
+                && rings_cover_speculation(&layer_caches, draft_limit);
         if speculative_enabled && serving_config.kv_cache_key_quant == GgmlType::F16 {
             return Err(InteropError::UnsupportedServingConfig(String::from(
                 "kv_cache_key_quant=f16 with speculative decoding: a verify step attends several \
@@ -3788,6 +3792,7 @@ only the single-row decode kernel reads the half-width device cache",
         let mut pending_bytes: Vec<u8> = Vec::new();
         let mut unigram_leading_space_trimmed = false;
         let mut settled_tokens: Vec<u32> = Vec::with_capacity(draft_limit + 1);
+        let mut undelivered = 0usize;
         let loop_started = std::time::Instant::now();
         let mut step = 0usize;
         'decode: while step < max_tokens {
@@ -3813,10 +3818,11 @@ only the single-row decode kernel reads the half-width device cache",
                     ServingState::Decode { last, .. } => Some(*last),
                     _ => None,
                 };
+                let mut model_drafted = false;
                 // Speculative decode's draft half (`drafter.rs`'s
                 // `DrafterSet`, a faithful port of llama.cpp's own
-                // `common_speculative_draft` priority walk -- no second
-                // model, only the five n-gram types): only attempted on a
+                // `common_speculative_draft` priority walk, then the draft
+                // model's proposer when no n-gram type drafted): only attempted on a
                 // genuine one-token decode step (`ServingState::Decode`,
                 // never the prompt's own `Prefill`) with a
                 // real cache to draft against (`cached_len > 0`) and a
@@ -3879,6 +3885,12 @@ only the single-row decode kernel reads the half-width device cache",
                             step_draft_limit,
                             &mut speculative_draft,
                         );
+                        if speculative_draft.is_empty()
+                            && let Some(propose) = model_proposer.as_deref_mut()
+                        {
+                            propose(&token_history, step_draft_limit, &mut speculative_draft)?;
+                            model_drafted = !speculative_draft.is_empty();
+                        }
                     }
                 } else {
                     speculative_draft.clear();
@@ -6126,7 +6138,9 @@ did not hold every cached position)",
                         // correction (a mismatch) or the bonus token (every
                         // draft matched).
                         let accepted = emitted.len() - 1;
-                        let drafting_type = drafter_set.active_type();
+                        let drafting_type = drafter_set.active_type().or_else(|| {
+                            model_drafted.then_some(crate::SpeculativeType::DraftSimple)
+                        });
                         debug!(
                             step = step as u64,
                             draft_len = speculative_draft.len() as u64,
@@ -6636,6 +6650,7 @@ did not hold every cached position)",
 
             for (offset, &token_id) in settled_tokens.iter().enumerate() {
                 if step >= max_tokens {
+                    undelivered = settled_tokens.len() - offset;
                     break 'decode;
                 }
                 if offset > 0 {
@@ -6658,13 +6673,14 @@ did not hold every cached position)",
                 )?;
                 if let ControlFlow::Break(by_eos) = delivery {
                     stopped_by_eos = by_eos;
+                    undelivered = settled_tokens.len() - offset - 1;
                     break 'decode;
                 }
                 step += 1;
             }
         }
 
-        let Some(ServingState::Done { cache: cached_len }) =
+        let Some(ServingState::Done { cache: settled_len }) =
             serving.take().map(ServingState::finish)
         else {
             return Err(ServingFsmError::IllegalTransition {
@@ -6672,6 +6688,22 @@ did not hold every cached position)",
             }
             .into());
         };
+        // a stop inside an accepted span leaves forwarded rows the caller never received
+        let cached_len = settled_len - undelivered;
+        if undelivered > 0 {
+            for (widths, state) in layer_row_widths.iter().zip(&mut layer_caches) {
+                if let (
+                    LayerPadRowWidths::Attention {
+                        even_odd_row,
+                        v_row,
+                    },
+                    LayerCacheState::Attention(cache),
+                ) = (widths, state)
+                {
+                    cache.try_truncate(cached_len, *even_odd_row, *v_row)?;
+                }
+            }
+        }
 
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         if let Some(device) = device_kv.as_ref() {

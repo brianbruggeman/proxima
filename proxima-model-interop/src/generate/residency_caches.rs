@@ -96,6 +96,10 @@ impl LogitsSink<'_> {
         match self {
             Self::Discard => {}
             Self::Collect(buffer) => buffer.push(logits.to_vec()),
+            Self::Last(buffer) => {
+                buffer.clear();
+                buffer.extend_from_slice(logits);
+            }
             #[cfg(all(test, feature = "metal"))]
             Self::SumBarriers(total) => **total += _barriers_step,
         }
@@ -4163,6 +4167,8 @@ pub struct SpeculativeDecodeStats {
     /// actually won each verify step, when more than one n-gram type is
     /// enabled at once.
     pub per_type: [SpeculativeTypeStats; SPECULATIVE_NGRAM_TYPE_COUNT],
+    /// second-model proposals, kept apart from the five n-gram families.
+    pub draft_simple: SpeculativeTypeStats,
     /// Serving-machine evaluations that entered `ServingState::Prefill`: the
     /// prompt's own evaluation (one per decode call; cacheless
     /// architectures re-enter it every step).
@@ -4180,10 +4186,8 @@ pub struct SpeculativeDecodeStats {
 }
 
 /// The five n-gram [`SpeculativeType`] variants the decode loop's own
-/// `DrafterSet` can report as its active drafter -- the only member count
-/// [`SpeculativeDecodeStats::per_type`] needs to carry, since
-/// `apply_serving_config` rejects every other variant before a decode call
-/// is reached.
+/// `DrafterSet` can report as its active drafter. Second-model totals are
+/// carried separately in [`SpeculativeDecodeStats::draft_simple`].
 pub const SPECULATIVE_NGRAM_TYPE_COUNT: usize = 5;
 
 /// [`SpeculativeDecodeStats::per_type`]'s index for `type_id` -- `None` for
@@ -4241,6 +4245,11 @@ impl SpeculativeDecodeStats {
         drafted: usize,
         accepted: usize,
     ) {
+        if type_id == crate::SpeculativeType::DraftSimple {
+            self.draft_simple.drafted += drafted as u64;
+            self.draft_simple.accepted += accepted as u64;
+            return;
+        }
         if let Some(index) = speculative_ngram_type_index(type_id) {
             self.per_type[index].drafted += drafted as u64;
             self.per_type[index].accepted += accepted as u64;
@@ -4251,6 +4260,9 @@ impl SpeculativeDecodeStats {
     /// `speculative_ngram_type_index` does not recognise.
     #[must_use]
     pub fn per_type_stats(&self, type_id: crate::SpeculativeType) -> SpeculativeTypeStats {
+        if type_id == crate::SpeculativeType::DraftSimple {
+            return self.draft_simple;
+        }
         speculative_ngram_type_index(type_id)
             .map(|index| self.per_type[index])
             .unwrap_or_default()

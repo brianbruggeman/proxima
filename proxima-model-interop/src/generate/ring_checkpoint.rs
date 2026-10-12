@@ -36,6 +36,7 @@ pub(super) struct LayerRows {
 pub(super) struct RingCheckpoint {
     position: usize,
     layers: Vec<LayerRows>,
+    fixed_layers: Vec<(usize, LayerCacheState)>,
 }
 
 impl RingCheckpoint {
@@ -53,7 +54,12 @@ impl RingCheckpoint {
                 (rows.k_even.capacity() + rows.k_odd.capacity() + rows.v.capacity())
                     * size_of::<f32>()
             })
-            .sum()
+            .sum::<usize>()
+            + self
+                .fixed_layers
+                .iter()
+                .map(|(_, cache)| fixed_layer_bytes(cache))
+                .sum::<usize>()
     }
 
     /// Snapshots `state` at its current `cached_len`. `None` when a snapshot
@@ -77,7 +83,54 @@ impl RingCheckpoint {
                 | LayerCacheState::Ssm(_) => return None,
             }
         }
-        (position > 0 && !layers.is_empty()).then_some(Self { position, layers })
+        (position > 0 && !layers.is_empty()).then_some(Self {
+            position,
+            layers,
+            fixed_layers: Vec::new(),
+        })
+    }
+
+    /// Snapshots `state` so a speculative branch can rewind to its current
+    /// `cached_len`: ring layers keep their live window, fixed-size recurrent
+    /// and short-convolution layers are copied whole, and append-only layers
+    /// keep nothing because truncation rewinds them. `None` when a ring is
+    /// displaced ([`KvRing::write_offset`]). Unlike [`Self::capture`] it needs
+    /// no ring to be present and accepts position zero.
+    pub(super) fn capture_for_speculation(state: &PrefixState) -> Option<Self> {
+        let position = state.cached_len;
+        let mut layers = Vec::new();
+        let mut fixed_layers = Vec::new();
+        for (layer, entry) in state.layer_caches.iter().enumerate() {
+            match entry {
+                LayerCacheState::Attention(cache) => {
+                    if let Some(rows) = LayerRows::capture(layer, cache, position)? {
+                        layers.push(rows);
+                    }
+                }
+                LayerCacheState::Ssm(_) | LayerCacheState::ShortConv(_) => {
+                    fixed_layers.push((layer, entry.clone()));
+                }
+                LayerCacheState::DenseAttention(_) | LayerCacheState::SharedFromLayer => {}
+            }
+        }
+        Some(Self {
+            position,
+            layers,
+            fixed_layers,
+        })
+    }
+}
+
+fn fixed_layer_bytes(cache: &LayerCacheState) -> usize {
+    match cache {
+        LayerCacheState::Ssm(ssm) => {
+            (ssm.conv_history.capacity() + ssm.state.capacity()) * size_of::<f32>()
+        }
+        LayerCacheState::ShortConv(short_conv) => {
+            short_conv.history.capacity() * size_of::<f32>()
+                + short_conv.roll_indices.capacity() * size_of::<i32>()
+        }
+        _ => 0,
     }
 }
 
@@ -120,15 +173,28 @@ impl PrefixState {
     ) {
         let position = checkpoint.position;
         for (state, width) in self.layer_caches.iter_mut().zip(widths) {
-            if let (
-                LayerCacheState::Attention(cache),
-                LayerPadRowWidths::Attention {
-                    even_odd_row,
-                    v_row,
-                },
-            ) = (state, width)
-            {
-                cache.truncate(position, *even_odd_row, *v_row);
+            match (state, width) {
+                (
+                    LayerCacheState::Attention(cache),
+                    LayerPadRowWidths::Attention {
+                        even_odd_row,
+                        v_row,
+                    },
+                ) => cache.truncate(position, *even_odd_row, *v_row),
+                (
+                    LayerCacheState::DenseAttention(cache),
+                    LayerPadRowWidths::DenseAttention {
+                        even_odd_row,
+                        pass_row,
+                        v_row,
+                    },
+                ) => {
+                    cache.k_first.truncate(position * even_odd_row);
+                    cache.k_second.truncate(position * even_odd_row);
+                    cache.k_pass.truncate(position * pass_row);
+                    cache.v.truncate(position * v_row);
+                }
+                _ => {}
             }
         }
         for rows in &checkpoint.layers {
@@ -137,6 +203,11 @@ impl PrefixState {
             {
                 let first = position - ring.live_rows(position);
                 cache.append_at(first, &rows.k_even, &rows.k_odd, &rows.v);
+            }
+        }
+        for (layer, snapshot) in &checkpoint.fixed_layers {
+            if let Some(entry) = self.layer_caches.get_mut(*layer) {
+                entry.clone_from(snapshot);
             }
         }
         self.ids.truncate(position);
@@ -346,6 +417,163 @@ mod tests {
         assert!(RingCheckpoint::capture(&recurrent).is_none());
         assert!(RingCheckpoint::capture(&empty).is_none());
         assert!(RingCheckpoint::capture(&full_only).is_none());
+    }
+
+    fn dense_layer(positions: usize) -> DenseAttentionCache {
+        let mut cache = DenseAttentionCache::new();
+        for position in 0..positions {
+            let value = marker(position);
+            cache.append(
+                &[value; 2],
+                &[value + 10.0; 2],
+                &[value + 20.0],
+                &[value + 30.0; 3],
+            );
+        }
+        cache
+    }
+
+    fn recurrent_dense_widths() -> [LayerPadRowWidths; 2] {
+        [
+            LayerPadRowWidths::Ssm {
+                conv_history_len: 4,
+                state_len: 3,
+            },
+            LayerPadRowWidths::DenseAttention {
+                even_odd_row: 2,
+                pass_row: 1,
+                v_row: 3,
+            },
+        ]
+    }
+
+    #[test]
+    fn speculative_checkpoint_restores_recurrent_and_dense_without_a_ring() {
+        let mut recurrent = SsmLayerCache::new(4, 3);
+        recurrent
+            .conv_history
+            .copy_from_slice(&[4.0, 5.0, 6.0, 7.0]);
+        recurrent.state.copy_from_slice(&[10.0, 20.0, 30.0]);
+        let mut branch = PrefixState {
+            ids: vec![1, 2],
+            layer_caches: vec![
+                LayerCacheState::Ssm(recurrent),
+                LayerCacheState::DenseAttention(dense_layer(2)),
+            ],
+            cached_len: 2,
+        };
+        assert!(RingCheckpoint::capture(&branch).is_none());
+        let checkpoint = RingCheckpoint::capture_for_speculation(&branch)
+            .expect("a recurrent and dense branch can rewind without a ring");
+        assert_eq!(checkpoint.position(), 2);
+        assert_eq!(checkpoint.byte_len(), 7 * size_of::<f32>());
+        match &mut branch.layer_caches[0] {
+            LayerCacheState::Ssm(cache) => cache.advance(&[8.0, 9.0], &[40.0, 50.0, 60.0], 4),
+            _ => panic!("the first fixture layer is recurrent"),
+        }
+        branch.layer_caches[1] = LayerCacheState::DenseAttention(dense_layer(5));
+        branch.ids.extend_from_slice(&[3, 4, 5]);
+        branch.cached_len = 5;
+
+        branch.restore_checkpoint(&checkpoint, &recurrent_dense_widths());
+
+        assert_eq!(branch.cached_len, 2);
+        assert_eq!(branch.ids, [1, 2]);
+        match &branch.layer_caches[0] {
+            LayerCacheState::Ssm(cache) => {
+                assert_eq!(cache.conv_history, [4.0, 5.0, 6.0, 7.0]);
+                assert_eq!(cache.state, [10.0, 20.0, 30.0]);
+            }
+            _ => panic!("the restored first layer remains recurrent"),
+        }
+        match &branch.layer_caches[1] {
+            LayerCacheState::DenseAttention(cache) => {
+                assert_eq!(cache.k_first, [1.0, 1.0, 2.0, 2.0]);
+                assert_eq!(cache.k_second, [11.0, 11.0, 12.0, 12.0]);
+                assert_eq!(cache.k_pass, [21.0, 22.0]);
+                assert_eq!(cache.v, [31.0, 31.0, 31.0, 32.0, 32.0, 32.0]);
+            }
+            _ => panic!("the restored second layer remains dense attention"),
+        }
+    }
+
+    #[test]
+    fn speculative_checkpoint_full_attention_only_keeps_no_kv_copy() {
+        let mut branch = PrefixState {
+            ids: vec![1, 2],
+            layer_caches: vec![LayerCacheState::Attention(full_layer(2))],
+            cached_len: 2,
+        };
+        let checkpoint = RingCheckpoint::capture_for_speculation(&branch)
+            .expect("an append-only full attention branch needs no copied payload");
+        assert_eq!(checkpoint.byte_len(), 0);
+        branch.layer_caches[0] = LayerCacheState::Attention(full_layer(5));
+        branch.ids.extend_from_slice(&[3, 4, 5]);
+        branch.cached_len = 5;
+
+        branch.restore_checkpoint(
+            &checkpoint,
+            &[LayerPadRowWidths::Attention {
+                even_odd_row: EVEN_ODD_ROW,
+                v_row: V_ROW,
+            }],
+        );
+
+        assert_eq!(branch.ids, [1, 2]);
+        assert_eq!(branch.cached_len, 2);
+        match &branch.layer_caches[0] {
+            LayerCacheState::Attention(cache) => {
+                assert_eq!(cache.k_even, [1.0, 1.0, 2.0, 2.0]);
+                assert_eq!(cache.v, [1.0, 1.0, 1.0, 2.0, 2.0, 2.0]);
+            }
+            _ => panic!("the full attention fixture keeps its cache kind"),
+        }
+    }
+
+    #[test]
+    fn speculative_checkpoint_restores_zero_position() {
+        let mut branch = PrefixState {
+            ids: Vec::new(),
+            layer_caches: vec![
+                LayerCacheState::Ssm(SsmLayerCache::new(4, 3)),
+                LayerCacheState::DenseAttention(dense_layer(0)),
+            ],
+            cached_len: 0,
+        };
+        let checkpoint = RingCheckpoint::capture_for_speculation(&branch)
+            .expect("an empty position can seed a speculative branch");
+        assert_eq!(checkpoint.position(), 0);
+        match &mut branch.layer_caches[0] {
+            LayerCacheState::Ssm(cache) => cache.advance(&[8.0, 9.0], &[40.0, 50.0, 60.0], 4),
+            _ => panic!("the fixture layer is recurrent"),
+        }
+        branch.layer_caches[1] = LayerCacheState::DenseAttention(dense_layer(2));
+        branch.ids.extend_from_slice(&[1, 2]);
+        branch.cached_len = 2;
+
+        branch.restore_checkpoint(&checkpoint, &recurrent_dense_widths());
+
+        assert!(branch.ids.is_empty());
+        assert_eq!(branch.cached_len, 0);
+        match &branch.layer_caches[0] {
+            LayerCacheState::Ssm(cache) => {
+                assert_eq!(cache.conv_history, [0.0; 4]);
+                assert_eq!(cache.state, [0.0; 3]);
+            }
+            _ => panic!("the restored fixture layer is recurrent"),
+        }
+    }
+
+    #[test]
+    fn speculative_checkpoint_rejects_a_displaced_ring() {
+        let displaced = KvRing::new(WINDOW, SLACK, EVEN_ODD_ROW, V_ROW, 1);
+        let branch = PrefixState {
+            ids: vec![1, 2],
+            layer_caches: vec![LayerCacheState::Attention(LayerCache::ring(displaced, 2))],
+            cached_len: 2,
+        };
+
+        assert!(RingCheckpoint::capture_for_speculation(&branch).is_none());
     }
 
     #[test]

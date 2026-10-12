@@ -135,6 +135,10 @@ pub enum InteropError {
         draft: String,
     },
 
+    /// the draft model's retained state cannot propose from the committed tokens.
+    #[error("draft-model state cannot advance: {reason}")]
+    DraftModelState { reason: &'static str },
+
     /// `crate::profiles::family_profile`: no embedded profile file exists for
     /// this family string. Never defaulted: a family whose profile is absent
     /// would lower with another family's activation, scales and norm shifts.

@@ -218,7 +218,9 @@ pub(super) fn attention_cache(
 /// (`proxima-tokenizer/src/draft/ngram_simple.rs:174`), ngram-map-k and
 /// ngram-map-k4v (`draft/ngram_map.rs:449`, `:527`) cap at `size_m`;
 /// ngram-mod loops `0..n_max` (`draft/ngram_mod.rs:283`); ngram-cache stops at
-/// `DEFAULT_N_DRAFT` (`draft/ngram_cache.rs:577`, passed at `generate/drafter.rs:83`).
+/// `DEFAULT_N_DRAFT` (`draft/ngram_cache.rs:577`, passed at `generate/drafter.rs:83`);
+/// draft-simple checks `n_max` after pushing its first candidate, so its bound
+/// is at least one even when the configured maximum is nonpositive.
 pub(super) fn speculative_draft_limit(
     config: &SpeculativeConfig<'_>,
     forced_draft_width: Option<u16>,
@@ -228,14 +230,15 @@ pub(super) fn speculative_draft_limit(
             .speculative_types
             .iter_priority_order()
             .filter_map(|drafter| match drafter {
-                SpeculativeType::NgramSimple => Some(config.ngram_simple.size_m),
-                SpeculativeType::NgramMapK => Some(config.ngram_map_k.size_m),
-                SpeculativeType::NgramMapK4v => Some(config.ngram_map_k4v.size_m),
-                SpeculativeType::NgramMod => Some(config.ngram_mod.n_max),
-                SpeculativeType::NgramCache => Some(DEFAULT_N_DRAFT),
+                SpeculativeType::DraftSimple => Some(config.n_max.max(1) as usize),
+                SpeculativeType::NgramSimple => Some(usize::from(config.ngram_simple.size_m)),
+                SpeculativeType::NgramMapK => Some(usize::from(config.ngram_map_k.size_m)),
+                SpeculativeType::NgramMapK4v => Some(usize::from(config.ngram_map_k4v.size_m)),
+                SpeculativeType::NgramMod => Some(usize::from(config.ngram_mod.n_max)),
+                SpeculativeType::NgramCache => Some(usize::from(DEFAULT_N_DRAFT)),
                 _ => None,
             });
-    enabled.chain(forced_draft_width).max().map(usize::from)
+    enabled.chain(forced_draft_width.map(usize::from)).max()
 }
 
 /// Rows every sliding ring keeps past its window: the wider of the speculative
@@ -297,7 +300,7 @@ fn copy_row(destination: &mut Vec<f32>, slot: usize, width: usize, source: &[f32
 mod tests {
     use super::*;
     use crate::memory_fit::{MemoryBudget, WeightClassBytes};
-    use crate::serving::{NgramModParams, SpeculativeTypeSet};
+    use crate::serving::{NgramModParams, PromptCacheConfig, SpeculativeTypeSet};
     use crate::test_support::gemma4_e2b_header;
 
     const EVEN_ODD_ROW: usize = 2;
@@ -572,6 +575,43 @@ mod tests {
         assert_eq!(speculative_draft_limit(&config, None), Some(64));
         assert_eq!(speculative_draft_limit(&cache_only, None), Some(8));
         assert_eq!(speculative_draft_limit(&cache_only, Some(100)), Some(100));
+    }
+
+    #[test]
+    fn draft_simple_limit_keeps_ring_rows_after_a_partial_acceptance() {
+        let speculative = SpeculativeConfig {
+            speculative_types: SpeculativeTypeSet::single(SpeculativeType::DraftSimple),
+            n_max: 3,
+            ..SpeculativeConfig::none()
+        };
+        let serving = ServingConfig {
+            speculative,
+            prompt_cache: PromptCacheConfig::off(),
+            ..ServingConfig::default()
+        };
+        let slack = ring_slack_rows(&serving, None);
+        assert_eq!(speculative_draft_limit(&serving.speculative, None), Some(3));
+        assert_eq!(slack, 3);
+        let mut cache = ring_cache(slack, 0, 20);
+        append_positions(&mut cache, 0..8);
+        append_positions(&mut cache, 8..12);
+        let (live, even, odd, value) = unrolled(&cache, 9);
+        let (expected_even, expected_odd, expected_value) = expected_rows(5, 4);
+        assert_eq!(live, 4);
+        assert_eq!(&even[..live * EVEN_ODD_ROW], expected_even);
+        assert_eq!(&odd[..live * EVEN_ODD_ROW], expected_odd);
+        assert_eq!(&value[..live * V_ROW], expected_value);
+    }
+
+    #[test]
+    fn a_nonpositive_draft_simple_maximum_still_drafts_one_row() {
+        let speculative = SpeculativeConfig {
+            speculative_types: SpeculativeTypeSet::single(SpeculativeType::DraftSimple),
+            n_max: -4,
+            ..SpeculativeConfig::none()
+        };
+
+        assert_eq!(speculative_draft_limit(&speculative, None), Some(1));
     }
 
     #[test]
