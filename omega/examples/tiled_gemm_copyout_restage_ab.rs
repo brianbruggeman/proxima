@@ -687,8 +687,8 @@ fn run() -> anyhow::Result<()> {
         let (program, weight_node, other_node, sum) =
             family_a_program(token, reduce_len, feature, batch);
         let shapes = infer(&program, &[]).context("family A infers")?;
-        let bound_ops =
-            bind(&program, &shapes, &[sum], NumericPolicy::llama_relaxed()).context("family A binds")?;
+        let bound_ops = bind(&program, &shapes, &[sum], NumericPolicy::llama_relaxed())
+            .context("family A binds")?;
         let bound = bound_ops
             .into_iter()
             .find(|op| op.node == sum)
@@ -697,10 +697,16 @@ fn run() -> anyhow::Result<()> {
         let uniform_bytes = omega::metal::pack_uniforms_for(&bound, NumericPolicy::llama_relaxed())
             .context("family A uniforms pack")?;
 
-        let kernel_new = temp_env::with_var("PROXIMA_TILED_GEMM_DENSE", Some("1"), || {
-            omega::emit(&bound, &packed_operands, NumericPolicy::llama_relaxed())
-                .context("family A new-copyout kernel emits")
-        })?;
+        let kernel_new = temp_env::with_vars(
+            [
+                ("PROXIMA_TILED_GEMM_DENSE", Some("1")),
+                ("PROXIMA_TILED_GEMM_DIRECT_STORE", Some("0")),
+            ],
+            || {
+                omega::emit(&bound, &packed_operands, NumericPolicy::llama_relaxed())
+                    .context("family A new-copyout kernel emits")
+            },
+        )?;
         let (old_source, params) = render_old_copyout(&kernel_new.source)?;
         anyhow::ensure!(
             params.rank == 4,
@@ -762,8 +768,8 @@ fn run() -> anyhow::Result<()> {
         let (program, weight_node, other_node, sum) =
             family_b_program(token, reduce_len, batch, feature);
         let shapes = infer(&program, &[]).context("family B infers")?;
-        let bound_ops =
-            bind(&program, &shapes, &[sum], NumericPolicy::llama_relaxed()).context("family B binds")?;
+        let bound_ops = bind(&program, &shapes, &[sum], NumericPolicy::llama_relaxed())
+            .context("family B binds")?;
         let bound = bound_ops
             .into_iter()
             .find(|op| op.node == sum)
@@ -779,7 +785,7 @@ fn run() -> anyhow::Result<()> {
         let output_len =
             (token as usize) * (batch as usize) * (feature as usize) * size_of::<f32>();
 
-        for (dstore_tag, dstore_env) in [("dstore0", None::<&str>), ("dstore1", Some("1"))] {
+        for (dstore_tag, dstore_env) in [("dstore0", Some("0")), ("dstore1", Some("1"))] {
             let kernel_new = temp_env::with_vars(
                 [
                     ("PROXIMA_TILED_GEMM_DENSE", Some("1")),
@@ -866,8 +872,9 @@ fn run() -> anyhow::Result<()> {
         // -- golden self-check: base kernel (no WWS, no DSTORE) must
         // reconstruct byte-identical to GOLDEN_COPYOUT_TAIL, captured at
         // this exact shape before the copy-out rewrite (ROW C4.13) landed --
-        let kernel_base = omega::emit(&bound, &packed_operands, numeric_policy)
-            .context("Q4_0 base kernel emits")?;
+        let kernel_base = temp_env::with_var("PROXIMA_TILED_GEMM_DIRECT_STORE", Some("0"), || {
+            omega::emit(&bound, &packed_operands, numeric_policy).context("Q4_0 base kernel emits")
+        })?;
         let (reconstructed_old, base_params) = render_old_copyout(&kernel_base.source)?;
         // Only the copy-out TAIL (from the last threadgroup barrier onward)
         // is what the rewrite touched; other uncommitted lever work
@@ -895,7 +902,7 @@ fn run() -> anyhow::Result<()> {
         let group_index = groups.len();
         let output_len = (TOKENS as usize) * (FEED_FORWARD as usize) * size_of::<f32>();
 
-        for (dstore_tag, dstore_env) in [("dstore0", None::<&str>), ("dstore1", Some("1"))] {
+        for (dstore_tag, dstore_env) in [("dstore0", Some("0")), ("dstore1", Some("1"))] {
             let kernel_new = temp_env::with_vars(
                 [
                     ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("1")),
