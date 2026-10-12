@@ -1394,6 +1394,27 @@ pub(super) fn kv_extent(merged_len: usize, capacity: usize, bucket_tokens: usize
         .min(capacity)
 }
 
+/// The cached-range extent a two-range step binds as `Extent::Symbolic(1)`.
+/// `padded` (the GPU engine) is [`kv_extent`] over `cached_len + new_count`;
+/// otherwise it is exactly `cached_len`. The program has no mask over the
+/// cached range (its `cached_len` input feeds no arithmetic), so a pad row
+/// is excluded only by the fused `CachedAttention` bound. The CPU evaluator
+/// may run the unfused chain, where a zero pad row scores 0 and adds
+/// `exp(0 - max)` to the softmax denominator -- and the pad count
+/// (`extent - cached_len`) differs between a 1-row decode and a k-row verify.
+pub(super) fn cached_kv_extent(
+    padded: bool,
+    cached_len: usize,
+    new_count: usize,
+    bucket_tokens: usize,
+) -> usize {
+    if padded {
+        kv_extent(cached_len + new_count, usize::MAX, bucket_tokens)
+    } else {
+        cached_len
+    }
+}
+
 /// [`crate::lowering::kv_layers`] as `layout` allocates it. A ring layout keeps
 /// each sliding layer's window, so [`crate::memory_fit`] prices the rows the
 /// ring holds. A full layout stores every position of a sliding layer too, so
