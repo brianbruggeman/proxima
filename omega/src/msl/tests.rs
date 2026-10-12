@@ -2313,40 +2313,61 @@ fn multi_head_matmul_op(seq: u32, heads: u32, head_dim: u32, embed: u32) -> Boun
 /// axis, one column axis, one batch axis.
 #[cfg(feature = "metal-tiled-gemm")]
 fn dense_batched_score_shaped_op(token: u32, feature: u32, batch: u32, reduce_len: u32) -> BoundOp {
+    dense_batched_score_shaped_op_with_operand_order(token, feature, batch, reduce_len, false)
+}
+
+#[cfg(feature = "metal-tiled-gemm")]
+fn dense_batched_score_shaped_op_with_operand_order(
+    token: u32,
+    feature: u32,
+    batch: u32,
+    reduce_len: u32,
+    reversed: bool,
+) -> BoundOp {
     let mut program = Vec::new();
-    let weight = append(
-        &mut program,
-        Op::Input {
-            dtype: DType::Float32,
-            shape: vec![
-                Extent::Static(feature),
-                Extent::Static(batch),
-                Extent::Static(reduce_len),
-            ],
-            name: None,
-        },
-    );
-    let other = append(
-        &mut program,
-        Op::Input {
-            dtype: DType::Float32,
-            shape: vec![
-                Extent::Static(token),
-                Extent::Static(batch),
-                Extent::Static(reduce_len),
-            ],
-            name: None,
-        },
-    );
+    let weight_input = Op::Input {
+        dtype: DType::Float32,
+        shape: vec![
+            Extent::Static(feature),
+            Extent::Static(batch),
+            Extent::Static(reduce_len),
+        ],
+        name: None,
+    };
+    let other_input = Op::Input {
+        dtype: DType::Float32,
+        shape: vec![
+            Extent::Static(token),
+            Extent::Static(batch),
+            Extent::Static(reduce_len),
+        ],
+        name: None,
+    };
+    let (weight, other) = if reversed {
+        let other = append(&mut program, other_input);
+        let weight = append(&mut program, weight_input);
+        (weight, other)
+    } else {
+        let weight = append(&mut program, weight_input);
+        let other = append(&mut program, other_input);
+        (weight, other)
+    };
     let product = append(
         &mut program,
         Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Multiply,
-            operands: vec![
-                (weight, IndexMap::Affine(map::projection(4, &[1, 2, 3]))),
-                (other, IndexMap::Affine(map::projection(4, &[0, 2, 3]))),
-            ],
+            operands: if reversed {
+                vec![
+                    (other, IndexMap::Affine(map::projection(4, &[0, 2, 3]))),
+                    (weight, IndexMap::Affine(map::projection(4, &[1, 2, 3]))),
+                ]
+            } else {
+                vec![
+                    (weight, IndexMap::Affine(map::projection(4, &[1, 2, 3]))),
+                    (other, IndexMap::Affine(map::projection(4, &[0, 2, 3]))),
+                ]
+            },
             name: None,
         },
     );
@@ -2868,6 +2889,98 @@ fn programmable_tiled_grid_emit_and_cache_follow_one_admission() {
     let denied_key = kernel_cache_key(&bound, &packed, NumericPolicy::bit_exact())
         .expect("denied identity resolves");
     assert_ne!(admitted_key, denied_key);
+}
+#[cfg(all(feature = "metal-tiled-gemm", omega_dense_float_storage))]
+#[test]
+fn programmable_tiled_classifier_follows_ownership_for_reversed_operand_order() {
+    for reversed in [false, true] {
+        let bound = dense_batched_score_shaped_op_with_operand_order(
+            TILED_ADMITTED_TOKENS,
+            5,
+            1,
+            16,
+            reversed,
+        );
+        let BoundOpKind::Reduce {
+            reduce_op,
+            init,
+            ref output_axes,
+            ..
+        } = bound.kind
+        else {
+            panic!("dense fixture reduces")
+        };
+        let weight_operand = usize::from(reversed);
+        let activation_operand = 1 - weight_operand;
+        for codecs in [
+            [Some(Codec::BFloat16), Some(Codec::BFloat16)],
+            [Some(Codec::BFloat16), Some(Codec::Float16)],
+            [Some(Codec::Float16), Some(Codec::BFloat16)],
+        ] {
+            let block = classify_dense_batched_gemm(
+                &bound,
+                &codecs,
+                NumericPolicy::llama_relaxed(),
+                reduce_op,
+                init,
+                output_axes,
+            )
+            .expect("supported float-storage codec pair admits in either operand order");
+            assert_eq!(block.weight, weight_operand, "reversed={reversed}");
+            assert_eq!(block.other, activation_operand, "reversed={reversed}");
+            assert_eq!(block.weight_codec, codecs[weight_operand]);
+            assert_eq!(block.other_codec, codecs[activation_operand]);
+            assert_eq!(
+                bound.extents[usize::from(block.token_axes[0])],
+                u64::from(TILED_ADMITTED_TOKENS)
+            );
+        }
+    }
+}
+
+#[cfg(all(feature = "metal-tiled-gemm", omega_dense_float_storage))]
+#[test]
+fn programmable_tiled_cache_key_role_suffix_separates_operand_order() {
+    for same_codecs in [true, false] {
+        let original = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 2, 16);
+        let reversed =
+            dense_batched_score_shaped_op_with_operand_order(TILED_ADMITTED_TOKENS, 5, 2, 16, true);
+        let packed_for = |bound: &BoundOp| {
+            if same_codecs {
+                BTreeMap::from([
+                    (bound.operands()[0].0, Codec::BFloat16),
+                    (bound.operands()[1].0, Codec::BFloat16),
+                ])
+            } else {
+                BTreeMap::new()
+            }
+        };
+        let policy = NumericPolicy::llama_relaxed();
+        let original_packed = packed_for(&original);
+        let reversed_packed = packed_for(&reversed);
+        let original_kernel = emit(&original, &original_packed, policy).expect("original emits");
+        let reversed_kernel = emit(&reversed, &reversed_packed, policy).expect("reversed emits");
+        let original_key =
+            kernel_cache_key(&original, &original_packed, policy).expect("original identity");
+        let reversed_key =
+            kernel_cache_key(&reversed, &reversed_packed, policy).expect("reversed identity");
+
+        let original_role = original_key.rfind("_w").expect("weight role suffix exists");
+        let reversed_role = reversed_key.rfind("_w").expect("weight role suffix exists");
+        assert_eq!(&original_key[..original_role], &reversed_key[..reversed_role]);
+        assert!(original_key[original_role..].starts_with("_w0_o1"));
+        assert!(reversed_key[reversed_role..].starts_with("_w1_o0"));
+        assert_ne!(original_kernel.source, reversed_kernel.source);
+        let codec = same_codecs.then_some(Codec::BFloat16);
+        let read = |index: usize, offset: &str| {
+            signature_tokens_prelude::operand_read(index, offset, codec)
+        };
+        let weight_offset = "row_base + (long)w_k * w_stride";
+        assert!(original_kernel.source.contains(&read(0, weight_offset)));
+        assert!(original_kernel.source.contains(&read(1, "aoff")));
+        assert!(reversed_kernel.source.contains(&read(1, weight_offset)));
+        assert!(reversed_kernel.source.contains(&read(0, "aoff")));
+    }
 }
 
 #[cfg(all(feature = "metal-tiled-gemm", not(omega_dense_float_storage)))]
