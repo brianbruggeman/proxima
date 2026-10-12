@@ -3,7 +3,7 @@
 //! instead of each hand-coding the same arithmetic.
 
 /// How a layout treats the all-ones exponent and finite overflow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Specials {
     /// No inf or nan encodings; the all-ones exponent is a normal value and overflow saturates
     /// to the signed max normal (E3M2, E2M1).
@@ -16,7 +16,7 @@ pub enum Specials {
 }
 
 /// One sign bit, `exponent_bits`, `mantissa_bits`; at most 32 bits wide.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct FloatLayout {
     /// Width of the exponent field; 3 for E3M2, 8 for binary32.
     pub exponent_bits: u8,
@@ -43,6 +43,8 @@ impl FloatLayout {
     pub const E5M2: Self = Self::ieee_like(5, 2, Specials::InfinityOnOverflow);
     /// E5M2 widths with saturation: the GGUF bf8 storage policy, which keeps infinities out of stored weights.
     pub const E5M2_SATURATING: Self = Self::ieee_like(5, 2, Specials::SaturateOnOverflow);
+    /// IEEE 754 binary16: bias 15, inf and nan reserved, max normal 65504.0.
+    pub const F16: Self = Self::ieee_like(5, 10, Specials::InfinityOnOverflow);
     pub const E2M1: Self = Self::ieee_like(2, 1, Specials::None);
     /// Proxima cold-storage E2M2: bias 1, no inf or nan, max normal 7.0.
     pub const E2M2: Self = Self::ieee_like(2, 2, Specials::None);
@@ -190,6 +192,15 @@ mod tests {
         assert_eq!((layout.exponent_bits, layout.mantissa_bits), (8, 23));
         assert_eq!(layout.max_normal(), f32::MAX);
         assert_eq!(layout.min_subnormal().to_bits(), 1);
+    }
+
+    #[test]
+    fn float_layout_constants_f16_is_e5m10() {
+        let layout = FloatLayout::F16;
+
+        assert_eq!((layout.exponent_bits, layout.mantissa_bits), (5, 10));
+        assert_eq!(layout.max_normal(), 65504.0);
+        assert_eq!(layout.min_subnormal(), 2.0f32.powi(-24));
     }
 
     #[test]
