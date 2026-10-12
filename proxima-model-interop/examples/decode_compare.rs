@@ -11,15 +11,25 @@
 //! (`LoadedModel::teacher_forced_logits_from_ids`) and prints the top-2 logit
 //! margin at that position on each side, so a near-tie reads differently from a
 //! real routing or kernel bug.
+//!
+//! Each backend's run is timed with `Instant` at every streamed token event:
+//! `decode_step backend=<cuda|cpu> step=<i> ms=<f>` per decoded token and
+//! `decode_timing backend=.. prefill_ms=.. decode_ms_mean=.. decode_ms_cov=.. steps=N`.
+//! `prefill_ms` runs from the call start to the prefill event, so it includes
+//! tokenization and runtime construction; step `i` is the gap since the previous event.
 
 use std::env;
 use std::fs::File;
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use memmap2::Mmap;
 use proxima_gguf::parse_complete;
-use proxima_model_interop::{GPU_LAYERS_ALL, InteropError, LoadedModel, ServingConfig};
+use proxima_model_interop::{
+    GPU_LAYERS_ALL, InteropError, LoadedModel, Phase, ServingConfig, TokenEvent,
+};
 use proxima_tokenizer::gguf::vocab_from_metadata;
 use proxima_tokenizer::{TokenizerError, Vocab, encode_with_bos_eos};
 
@@ -96,15 +106,69 @@ fn prompt_ids(model_vocab: &Vocab, prompt: &str) -> Result<Vec<u32>, TokenizerEr
     encode_with_bos_eos(prompt, model_vocab, wants_bos, wants_eos)
 }
 
+struct Timing {
+    prefill_ms: f64,
+    step_ms: Vec<f64>,
+}
+
+impl Timing {
+    fn mean(&self) -> f64 {
+        self.step_ms.iter().sum::<f64>() / self.step_ms.len().max(1) as f64
+    }
+
+    fn cov(&self) -> f64 {
+        let mean = self.mean();
+        let variance = self
+            .step_ms
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / self.step_ms.len().max(1) as f64;
+        if mean > 0.0 {
+            variance.sqrt() / mean
+        } else {
+            0.0
+        }
+    }
+
+    fn report(&self, backend: &str) {
+        for (step, millis) in self.step_ms.iter().enumerate() {
+            println!("decode_step backend={backend} step={step} ms={millis:.3}");
+        }
+        println!(
+            "decode_timing backend={backend} prefill_ms={:.3} decode_ms_mean={:.3} decode_ms_cov={:.4} steps={}",
+            self.prefill_ms,
+            self.mean(),
+            self.cov(),
+            self.step_ms.len()
+        );
+    }
+}
+
 fn decode(
     model: &LoadedModel,
     prompt: &str,
     tokens: usize,
     gpu_layers: i32,
-) -> Result<Vec<u32>, InteropError> {
+) -> Result<(Vec<u32>, Timing), InteropError> {
+    let mut timing = Timing {
+        prefill_ms: 0.0,
+        step_ms: Vec::new(),
+    };
+    let mut previous = Instant::now();
+    let mut on_token = |event: TokenEvent<'_>| {
+        let now = Instant::now();
+        let millis = now.duration_since(previous).as_secs_f64() * 1000.0;
+        previous = now;
+        match event.phase {
+            Phase::Prefill { .. } => timing.prefill_ms = millis,
+            Phase::Token => timing.step_ms.push(millis),
+        }
+        ControlFlow::Continue(())
+    };
     let (ids, _text, _stopped) =
-        model.generate_with_serving_config(prompt, tokens, config(gpu_layers))?;
-    Ok(ids)
+        model.generate_streaming(prompt, tokens, config(gpu_layers), &mut on_token)?;
+    Ok((ids, timing))
 }
 
 fn first_divergence(cpu: &[u32], cuda: &[u32]) -> Option<usize> {
@@ -156,8 +220,10 @@ fn run(path: &str, prompt: &str, tokens: usize) -> Result<(), ExampleError> {
     })?;
     let vocab = vocab_from_metadata(&parsed)?;
     let model = LoadedModel::load(&parsed, &mapping)?;
-    let cpu = decode(&model, prompt, tokens, 0)?;
-    let cuda = decode(&model, prompt, tokens, GPU_LAYERS_ALL)?;
+    let (cpu, cpu_timing) = decode(&model, prompt, tokens, 0)?;
+    let (cuda, cuda_timing) = decode(&model, prompt, tokens, GPU_LAYERS_ALL)?;
+    cpu_timing.report("cpu");
+    cuda_timing.report("cuda");
     summarize(&model, &vocab, path, prompt, &cpu, &cuda)
 }
 
