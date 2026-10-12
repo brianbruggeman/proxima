@@ -11,6 +11,10 @@ pub mod reactor;
 #[cfg(all(unix, feature = "runtime-prime-reactor"))]
 pub mod child;
 
+// test-only until the windows reactor consumes it; unused pub(crate) items would trip dead_code
+#[cfg(all(windows, test, feature = "runtime-prime-reactor"))]
+mod iocp;
+
 #[cfg(feature = "runtime-prime-bgpool")]
 pub mod background;
 
