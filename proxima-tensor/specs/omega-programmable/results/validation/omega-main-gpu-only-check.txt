@@ -1,0 +1,11 @@
+    Checking proxima-core v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-core)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/omega)
+    Checking proxima-runtime v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-runtime)
+    Checking proxima-config v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-config)
+    Checking proxima-primitives v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-primitives)
+    Checking proxima-clock v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-clock)
+    Checking proxima-gguf v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-gguf)
+    Checking proxima-telemetry v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-telemetry)
+    Checking prime v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/prime)
+    Checking proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-tensor)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.85s

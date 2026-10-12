@@ -1,0 +1,453 @@
+info: experimental features enabled: wrapper-scripts
+    Blocking waiting for file lock on build directory
+   Compiling proxima-protocols v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-protocols)
+   Compiling proxima-gguf v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-gguf)
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-tensor)
+   Compiling proxima-patterns v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-patterns)
+   Compiling proxima-test v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-test)
+   Compiling proxima-tokenizer v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-tokenizer)
+   Compiling proxima-net v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-net)
+   Compiling proxima-process v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-process)
+   Compiling proxima-recording v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-recording)
+   Compiling proxima-listen v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-listen)
+   Compiling proxima-quic v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-quic)
+   Compiling proxima-http v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-http)
+   Compiling proxima v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 37.37s
+────────────
+ Nextest run ID 388defd4-8d91-490f-8487-13550fcbe5cf with nextest profile: default
+    Starting 45 tests across 1 binary (644 tests skipped)
+       START [         ] ( 1/45) proxima-tensor bind::programmable_tests::programmable_binding_fused_chain
+
+running 1 test
+test bind::programmable_tests::programmable_binding_fused_chain ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.01s
+
+        PASS [   0.019s] ( 1/45) proxima-tensor bind::programmable_tests::programmable_binding_fused_chain
+       START [         ] ( 2/45) proxima-tensor bind::programmable_tests::programmable_binding_oracle_corrupt_control
+
+running 1 test
+test bind::programmable_tests::programmable_binding_oracle_corrupt_control ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.012s] ( 2/45) proxima-tensor bind::programmable_tests::programmable_binding_oracle_corrupt_control
+       START [         ] ( 3/45) proxima-tensor bind::programmable_tests::programmable_binding_oracle_self_control
+
+running 1 test
+test bind::programmable_tests::programmable_binding_oracle_self_control ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.008s] ( 3/45) proxima-tensor bind::programmable_tests::programmable_binding_oracle_self_control
+       START [         ] ( 4/45) proxima-tensor bind::programmable_tests::programmable_binding_requested_intermediate
+
+running 1 test
+test bind::programmable_tests::programmable_binding_requested_intermediate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] ( 4/45) proxima-tensor bind::programmable_tests::programmable_binding_requested_intermediate
+       START [         ] ( 5/45) proxima-tensor bind::programmable_tests::programmable_binding_signed_zero_permission
+
+running 1 test
+test bind::programmable_tests::programmable_binding_signed_zero_permission ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.010s] ( 5/45) proxima-tensor bind::programmable_tests::programmable_binding_signed_zero_permission
+       START [         ] ( 6/45) proxima-tensor bind::programmable_tests::programmable_binding_unfused_chain
+
+running 1 test
+test bind::programmable_tests::programmable_binding_unfused_chain ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] ( 6/45) proxima-tensor bind::programmable_tests::programmable_binding_unfused_chain
+       START [         ] ( 7/45) proxima-tensor bind::programmable_tests::programmable_binding_unfused_projection
+
+running 1 test
+test bind::programmable_tests::programmable_binding_unfused_projection ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.010s] ( 7/45) proxima-tensor bind::programmable_tests::programmable_binding_unfused_projection
+       START [         ] ( 8/45) proxima-tensor bind::programmable_tests::programmable_binding_unreachable_branch
+
+running 1 test
+test bind::programmable_tests::programmable_binding_unreachable_branch ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] ( 8/45) proxima-tensor bind::programmable_tests::programmable_binding_unreachable_branch
+       START [         ] ( 9/45) proxima-tensor bind::tests::a_broadcast_operand_has_stride_zero_in_the_broadcast_axis
+
+running 1 test
+test bind::tests::a_broadcast_operand_has_stride_zero_in_the_broadcast_axis ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] ( 9/45) proxima-tensor bind::tests::a_broadcast_operand_has_stride_zero_in_the_broadcast_axis
+       START [         ] (10/45) proxima-tensor bind::tests::a_chain_of_elementwise_ops_fuses_into_one_bound_op_not_three
+
+running 1 test
+test bind::tests::a_chain_of_elementwise_ops_fuses_into_one_bound_op_not_three ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (10/45) proxima-tensor bind::tests::a_chain_of_elementwise_ops_fuses_into_one_bound_op_not_three
+       START [         ] (11/45) proxima-tensor bind::tests::a_computed_index_reached_only_through_a_sibling_map_is_materialized_before_the_gather_reads_it
+
+running 1 test
+test bind::tests::a_computed_index_reached_only_through_a_sibling_map_is_materialized_before_the_gather_reads_it ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (11/45) proxima-tensor bind::tests::a_computed_index_reached_only_through_a_sibling_map_is_materialized_before_the_gather_reads_it
+       START [         ] (12/45) proxima-tensor bind::tests::a_conv_window_operand_folds_two_terms_into_one_stride_slot
+
+running 1 test
+test bind::tests::a_conv_window_operand_folds_two_terms_into_one_stride_slot ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (12/45) proxima-tensor bind::tests::a_conv_window_operand_folds_two_terms_into_one_stride_slot
+       START [         ] (13/45) proxima-tensor bind::tests::a_masked_window_reduce_folds_to_a_single_operand_identity_read_of_source
+
+running 1 test
+test bind::tests::a_masked_window_reduce_folds_to_a_single_operand_identity_read_of_source ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (13/45) proxima-tensor bind::tests::a_masked_window_reduce_folds_to_a_single_operand_identity_read_of_source
+       START [         ] (14/45) proxima-tensor bind::tests::a_masked_window_reduce_that_fails_the_in_bounds_proof_declines_and_binds_as_a_reduce
+
+running 1 test
+test bind::tests::a_masked_window_reduce_that_fails_the_in_bounds_proof_declines_and_binds_as_a_reduce ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (14/45) proxima-tensor bind::tests::a_masked_window_reduce_that_fails_the_in_bounds_proof_declines_and_binds_as_a_reduce
+       START [         ] (15/45) proxima-tensor bind::tests::a_masked_window_reduce_with_a_non_windowed_axis_matches_a_direct_window_read
+
+running 1 test
+test bind::tests::a_masked_window_reduce_with_a_non_windowed_axis_matches_a_direct_window_read ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (15/45) proxima-tensor bind::tests::a_masked_window_reduce_with_a_non_windowed_axis_matches_a_direct_window_read
+       START [         ] (16/45) proxima-tensor bind::tests::a_non_equal_mask_chain_declines_and_binds_as_a_reduce
+
+running 1 test
+test bind::tests::a_non_equal_mask_chain_declines_and_binds_as_a_reduce ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (16/45) proxima-tensor bind::tests::a_non_equal_mask_chain_declines_and_binds_as_a_reduce
+       START [         ] (17/45) proxima-tensor bind::tests::add_zero_to_negative_zero_differs_by_numeric_policy
+
+running 1 test
+test bind::tests::add_zero_to_negative_zero_differs_by_numeric_policy ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (17/45) proxima-tensor bind::tests::add_zero_to_negative_zero_differs_by_numeric_policy
+       START [         ] (18/45) proxima-tensor bind::tests::an_elementwise_intermediate_consumed_by_two_different_ops_is_not_fused
+
+running 1 test
+test bind::tests::an_elementwise_intermediate_consumed_by_two_different_ops_is_not_fused ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (18/45) proxima-tensor bind::tests::an_elementwise_intermediate_consumed_by_two_different_ops_is_not_fused
+       START [         ] (19/45) proxima-tensor bind::tests::an_elementwise_intermediate_requested_as_an_output_prevents_fusion
+
+running 1 test
+test bind::tests::an_elementwise_intermediate_requested_as_an_output_prevents_fusion ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (19/45) proxima-tensor bind::tests::an_elementwise_intermediate_requested_as_an_output_prevents_fusion
+       START [         ] (20/45) proxima-tensor bind::tests::an_iota_binds_to_its_own_ready_bound_op_with_no_operands
+
+running 1 test
+test bind::tests::an_iota_binds_to_its_own_ready_bound_op_with_no_operands ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.008s] (20/45) proxima-tensor bind::tests::an_iota_binds_to_its_own_ready_bound_op_with_no_operands
+       START [         ] (21/45) proxima-tensor bind::tests::correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_multi_axis_contraction_group
+
+running 1 test
+test bind::tests::correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_multi_axis_contraction_group ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.008s] (21/45) proxima-tensor bind::tests::correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_multi_axis_contraction_group
+       START [         ] (22/45) proxima-tensor bind::tests::correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_two_axis_output_group
+
+running 1 test
+test bind::tests::correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_two_axis_output_group ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.008s] (22/45) proxima-tensor bind::tests::correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_two_axis_output_group
+       START [         ] (23/45) proxima-tensor bind::tests::elementwise_into_elementwise_into_reduce_fuses_into_one_bound_op
+
+running 1 test
+test bind::tests::elementwise_into_elementwise_into_reduce_fuses_into_one_bound_op ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.008s] (23/45) proxima-tensor bind::tests::elementwise_into_elementwise_into_reduce_fuses_into_one_bound_op
+       START [         ] (24/45) proxima-tensor bind::tests::infer_and_then_build_ops_matches_the_free_function_pipeline
+
+running 1 test
+test bind::tests::infer_and_then_build_ops_matches_the_free_function_pipeline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.008s] (24/45) proxima-tensor bind::tests::infer_and_then_build_ops_matches_the_free_function_pipeline
+       START [         ] (25/45) proxima-tensor bind::tests::matmul_resolves_to_one_fused_op_not_two
+
+running 1 test
+test bind::tests::matmul_resolves_to_one_fused_op_not_two ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.008s] (25/45) proxima-tensor bind::tests::matmul_resolves_to_one_fused_op_not_two
+       START [         ] (26/45) proxima-tensor bind::tests::maximum_of_nan_and_negative_infinity_differs_by_numeric_policy
+
+running 1 test
+test bind::tests::maximum_of_nan_and_negative_infinity_differs_by_numeric_policy ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (26/45) proxima-tensor bind::tests::maximum_of_nan_and_negative_infinity_differs_by_numeric_policy
+       START [         ] (27/45) proxima-tensor bind::tests::moe_routing_census::qwen35moe_routing_census_at_real_expert_shape
+
+running 1 test
+row 569 qwen35moe routing census: 64 ops in the pure routing-decision closure for expert_count=256, expert_used_count=8
+  node=6 kind=Discriminant(3)
+  node=7 kind=Discriminant(4)
+  node=8 kind=Discriminant(2)
+  node=9 kind=Discriminant(1)
+  node=10 kind=Discriminant(1)
+  node=11 kind=Discriminant(2)
+  node=12 kind=Discriminant(1)
+  node=13 kind=Discriminant(1)
+  node=27 kind=Discriminant(1)
+  node=28 kind=Discriminant(2)
+  node=29 kind=Discriminant(1)
+  node=30 kind=Discriminant(1)
+  node=31 kind=Discriminant(2)
+  node=32 kind=Discriminant(1)
+  node=33 kind=Discriminant(1)
+  node=48 kind=Discriminant(1)
+  node=49 kind=Discriminant(1)
+  node=50 kind=Discriminant(2)
+  node=51 kind=Discriminant(1)
+  node=52 kind=Discriminant(1)
+  node=53 kind=Discriminant(2)
+  node=54 kind=Discriminant(1)
+  node=55 kind=Discriminant(1)
+  node=70 kind=Discriminant(1)
+  node=71 kind=Discriminant(1)
+  node=72 kind=Discriminant(2)
+  node=73 kind=Discriminant(1)
+  node=74 kind=Discriminant(1)
+  node=75 kind=Discriminant(2)
+  node=76 kind=Discriminant(1)
+  node=77 kind=Discriminant(1)
+  node=92 kind=Discriminant(1)
+  node=93 kind=Discriminant(1)
+  node=94 kind=Discriminant(2)
+  node=95 kind=Discriminant(1)
+  node=96 kind=Discriminant(1)
+  node=97 kind=Discriminant(2)
+  node=98 kind=Discriminant(1)
+  node=99 kind=Discriminant(1)
+  node=114 kind=Discriminant(1)
+  node=115 kind=Discriminant(1)
+  node=116 kind=Discriminant(2)
+  node=117 kind=Discriminant(1)
+  node=118 kind=Discriminant(1)
+  node=119 kind=Discriminant(2)
+  node=120 kind=Discriminant(1)
+  node=121 kind=Discriminant(1)
+  node=136 kind=Discriminant(1)
+  node=137 kind=Discriminant(1)
+  node=138 kind=Discriminant(2)
+  node=139 kind=Discriminant(1)
+  node=140 kind=Discriminant(1)
+  node=141 kind=Discriminant(2)
+  node=142 kind=Discriminant(1)
+  node=143 kind=Discriminant(1)
+  node=158 kind=Discriminant(1)
+  node=159 kind=Discriminant(1)
+  node=160 kind=Discriminant(2)
+  node=161 kind=Discriminant(1)
+  node=162 kind=Discriminant(1)
+  node=163 kind=Discriminant(2)
+  node=164 kind=Discriminant(1)
+  node=165 kind=Discriminant(1)
+  node=180 kind=Discriminant(1)
+gather-index nodes (site.selected): [NodeId(11), NodeId(31), NodeId(53), NodeId(75), NodeId(97), NodeId(119), NodeId(141), NodeId(163)]
+weight nodes (site.weights, last is weight_total): [NodeId(13), NodeId(33), NodeId(55), NodeId(77), NodeId(99), NodeId(121), NodeId(143), NodeId(165), NodeId(180)]
+resolved bind produced 74 total BoundOps for this routing+FFN program (routing closure = 64 of them)
+tie fixture: round 0 route = 9 (expects 9, the higher index)
+test bind::tests::moe_routing_census::qwen35moe_routing_census_at_real_expert_shape ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.013s] (27/45) proxima-tensor bind::tests::moe_routing_census::qwen35moe_routing_census_at_real_expert_shape
+       START [         ] (28/45) proxima-tensor bind::tests::name_reports_the_variant_backends_render_error_messages_with
+
+running 1 test
+test bind::tests::name_reports_the_variant_backends_render_error_messages_with ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.008s] (28/45) proxima-tensor bind::tests::name_reports_the_variant_backends_render_error_messages_with
+       START [         ] (29/45) proxima-tensor bind::tests::nan_assumption_alone_does_not_eliminate_add_zero
+
+running 1 test
+test bind::tests::nan_assumption_alone_does_not_eliminate_add_zero ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (29/45) proxima-tensor bind::tests::nan_assumption_alone_does_not_eliminate_add_zero
+       START [         ] (30/45) proxima-tensor bind::tests::requesting_the_intermediate_elementwise_op_as_an_output_prevents_fusion
+
+running 1 test
+test bind::tests::requesting_the_intermediate_elementwise_op_as_an_output_prevents_fusion ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (30/45) proxima-tensor bind::tests::requesting_the_intermediate_elementwise_op_as_an_output_prevents_fusion
+       START [         ] (31/45) proxima-tensor bind::tests::select_push_emits_three_when_all_three_operands_are_held_and_non_fusing
+
+running 1 test
+test bind::tests::select_push_emits_three_when_all_three_operands_are_held_and_non_fusing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.008s] (31/45) proxima-tensor bind::tests::select_push_emits_three_when_all_three_operands_are_held_and_non_fusing
+       START [         ] (32/45) proxima-tensor bind::tests::split_aligned_below_the_alignment_falls_back_to_unaligned
+
+running 1 test
+test bind::tests::split_aligned_below_the_alignment_falls_back_to_unaligned ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.008s] (32/45) proxima-tensor bind::tests::split_aligned_below_the_alignment_falls_back_to_unaligned
+       START [         ] (33/45) proxima-tensor bind::tests::split_aligned_rounds_non_final_chunks_down_to_the_alignment
+
+running 1 test
+test bind::tests::split_aligned_rounds_non_final_chunks_down_to_the_alignment ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.008s] (33/45) proxima-tensor bind::tests::split_aligned_rounds_non_final_chunks_down_to_the_alignment
+       START [         ] (34/45) proxima-tensor bind::tests::split_aligned_with_alignment_one_matches_split_exactly
+
+running 1 test
+test bind::tests::split_aligned_with_alignment_one_matches_split_exactly ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.008s] (34/45) proxima-tensor bind::tests::split_aligned_with_alignment_one_matches_split_exactly
+       START [         ] (35/45) proxima-tensor bind::tests::split_of_a_fused_matmul_reduction_rebases_operands_but_not_out_layout
+
+running 1 test
+test bind::tests::split_of_a_fused_matmul_reduction_rebases_operands_but_not_out_layout ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.008s] (35/45) proxima-tensor bind::tests::split_of_a_fused_matmul_reduction_rebases_operands_but_not_out_layout
+       START [         ] (36/45) proxima-tensor bind::tests::split_of_an_elementwise_op_yields_contiguous_chunks_with_a_ragged_last
+
+running 1 test
+test bind::tests::split_of_an_elementwise_op_yields_contiguous_chunks_with_a_ragged_last ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (36/45) proxima-tensor bind::tests::split_of_an_elementwise_op_yields_contiguous_chunks_with_a_ragged_last
+       START [         ] (37/45) proxima-tensor bind::tests::split_returns_none_when_unsound_or_unhelpful::extent_smaller_than_parts
+
+running 1 test
+test bind::tests::split_returns_none_when_unsound_or_unhelpful::extent_smaller_than_parts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.011s] (37/45) proxima-tensor bind::tests::split_returns_none_when_unsound_or_unhelpful::extent_smaller_than_parts
+       START [         ] (38/45) proxima-tensor bind::tests::split_returns_none_when_unsound_or_unhelpful::keep_scan_scan
+
+running 1 test
+test bind::tests::split_returns_none_when_unsound_or_unhelpful::keep_scan_scan ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.011s] (38/45) proxima-tensor bind::tests::split_returns_none_when_unsound_or_unhelpful::keep_scan_scan
+       START [         ] (39/45) proxima-tensor bind::tests::split_returns_none_when_unsound_or_unhelpful::scalar_reduction
+
+running 1 test
+test bind::tests::split_returns_none_when_unsound_or_unhelpful::scalar_reduction ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.011s] (39/45) proxima-tensor bind::tests::split_returns_none_when_unsound_or_unhelpful::scalar_reduction
+       START [         ] (40/45) proxima-tensor bind::tests::split_returns_none_when_unsound_or_unhelpful::too_few_parts
+
+running 1 test
+test bind::tests::split_returns_none_when_unsound_or_unhelpful::too_few_parts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (40/45) proxima-tensor bind::tests::split_returns_none_when_unsound_or_unhelpful::too_few_parts
+       START [         ] (41/45) proxima-tensor bind::tests::transpose_layout_has_permuted_strides
+
+running 1 test
+test bind::tests::transpose_layout_has_permuted_strides ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (41/45) proxima-tensor bind::tests::transpose_layout_has_permuted_strides
+       START [         ] (42/45) proxima-tensor cpu::tests::evaluate_quantized_applies_the_composed_gate_over_a_multi_axis_packed_contraction
+
+running 1 test
+fused=[262.97955, 277.9224, 215.28856] materialized=[262.97955, 277.9224, 215.28856] expected=[261.31027, 281.778, 213.51807]
+test cpu::tests::evaluate_quantized_applies_the_composed_gate_over_a_multi_axis_packed_contraction ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (42/45) proxima-tensor cpu::tests::evaluate_quantized_applies_the_composed_gate_over_a_multi_axis_packed_contraction
+       START [         ] (43/45) proxima-tensor cpu::tests::evaluate_quantized_exact_matches_dequantize_then_f32_evaluate_near_exactly
+
+running 1 test
+evaluate_quantized_exact vs dequantize-then-evaluate: max_diff=0.0024414063
+test cpu::tests::evaluate_quantized_exact_matches_dequantize_then_f32_evaluate_near_exactly ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.01s
+
+        PASS [   0.013s] (43/45) proxima-tensor cpu::tests::evaluate_quantized_exact_matches_dequantize_then_f32_evaluate_near_exactly
+       START [         ] (44/45) proxima-tensor cpu::tests::evaluate_quantized_matmul_matches_dequantize_then_f32_evaluate
+
+running 1 test
+evaluate_quantized vs dequantize-then-evaluate: max_diff=1.4460449 rms_diff=0.6766685614144368 max_magnitude=3366.781 relative_max_diff=0.0004295037
+test cpu::tests::evaluate_quantized_matmul_matches_dequantize_then_f32_evaluate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.01s
+
+        PASS [   0.013s] (44/45) proxima-tensor cpu::tests::evaluate_quantized_matmul_matches_dequantize_then_f32_evaluate
+       START [         ] (45/45) proxima-tensor cpu::tests::qwen35_batched_packed_ssm_projection_matches_repeated_rows
+
+running 1 test
+test cpu::tests::qwen35_batched_packed_ssm_projection_matches_repeated_rows ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (45/45) proxima-tensor cpu::tests::qwen35_batched_packed_ssm_projection_matches_repeated_rows
+────────────
+     Summary [   0.436s] 45 tests run: 45 passed, 644 skipped

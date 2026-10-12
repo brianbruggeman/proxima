@@ -1,0 +1,9 @@
+VERDICT: REFUSE
+gates: G1 pass, G2 pass, G3 pass, G4 FAIL, G5 pass, G6 pass, G7 pass
+counts: R 11 / discharged 11 | AC 14 / orphaned 0 | slices 14 / unvalidated 0 | paths 14 / dangling 0
+
+G4 -- `SPEC.md:105`
+
+> | AC9 | R9,R10 | `env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=1 OMEGA_TILED_GEMM_MIN_TOKENS=1 cargo run --release --example ouro_loopcd_lab --features proxima-tensor,omega/metal-tiled-gemm -- --performance --backend metal --samples 5 --omega-config proxima-tensor/specs/omega-programmable/relaxed-metal.toml --output proxima-tensor/specs/omega-programmable/results/ouro-configured`; paired control: `env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=0 OMEGA_TILED_GEMM_MIN_TOKENS=1 cargo run --release --example ouro_loopcd_lab --features proxima-tensor,omega/metal-tiled-gemm -- --performance --backend metal --samples 5 --omega-config proxima-tensor/specs/omega-programmable/relaxed-metal.toml --output proxima-tensor/specs/omega-programmable/results/ouro-configured-control` | Each arm: 40 timed records over 8 prefix/method cells, 8 warmups, 8 CoV rows, full payloads, 0 silent fallback records; only float-storage gate differs; pinned llama comparison kept separately |
+
+The command emits 40 timed and 8 warmup sample records per arm, but no CoV records. The resulting `samples.jsonl` contains `sample`/`warmup` rows only, while `records.jsonl` contains `performance_invocation_index` rows and no CoV rows. The expected count of eight CoV rows therefore cannot be checked from either command's output as written.

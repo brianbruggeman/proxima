@@ -1,0 +1,11 @@
+    Blocking waiting for file lock on build directory
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/omega)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.36s
+   Doc-tests omega
+
+running 1 test
+test omega/src/backend.rs - backend::plan_named_with_config (line 432) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.02s
+
+all doctests ran in 0.99s; merged doctests compilation took 0.74s

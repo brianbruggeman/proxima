@@ -1,0 +1,18 @@
+info: experimental features enabled: wrapper-scripts
+    Blocking waiting for file lock on build directory
+   Compiling proxima-tensor v0.1.0 (/private/tmp/proxima-omega-execution-worker/proxima-tensor)
+   Compiling proxima-autograd v0.1.0 (/private/tmp/proxima-omega-execution-worker/proxima-autograd)
+   Compiling proxima-onnx v0.1.0 (/private/tmp/proxima-omega-execution-worker/proxima-onnx)
+   Compiling proxima-safetensors v0.1.0 (/private/tmp/proxima-omega-execution-worker/proxima-safetensors)
+   Compiling omega v0.1.0 (/private/tmp/proxima-omega-execution-worker/omega)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.53s
+────────────
+ Nextest run ID 9faf1781-9ea9-46af-9e5b-1570f5a55785 with nextest profile: default
+    Starting 5 tests across 1 binary (271 tests skipped)
+        PASS [   0.011s] (1/5) omega backend::programmable_tests::config_cpu_budget_rejects_device_only_constraint
+        PASS [   0.012s] (2/5) omega backend::programmable_tests::config_cpu_budget_rejects_one_byte_below_envelope
+        PASS [   0.012s] (3/5) omega backend::programmable_tests::config_cpu_budget_rejects_unbounded_specialized_workspace
+        PASS [   0.012s] (4/5) omega backend::programmable_tests::config_cpu_budget_admits_literal_envelope
+        PASS [   0.012s] (5/5) omega backend::programmable_tests::config_cpu_budget_trims_retained_capacity_before_repeat
+────────────
+     Summary [   0.013s] 5 tests run: 5 passed, 271 skipped

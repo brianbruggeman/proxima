@@ -1,0 +1,2878 @@
+[
+  {
+    "case_id": "france",
+    "cold_model_setup_ms": 11.409041,
+    "context": {
+      "arm": "baseline4",
+      "author_activation_oracle_status": "unmeasured",
+      "backend": "metal",
+      "build_dense_float_storage": true,
+      "build_tiled_min_tokens": 1,
+      "checkpoint_expected_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+      "checkpoint_mapping_mode": "whole_checkpoint_mapping",
+      "checkpoint_observed_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+      "checkpoint_revision": "574fa66cb8bf5abdc979642d01cf2b79b16bfab1",
+      "depth": 4,
+      "digest_verified_during_setup": true,
+      "method": "baseline",
+      "model": "ByteDance/Ouro-1.4B",
+      "numeric_policy": {
+        "approx_functions": false,
+        "contraction": true,
+        "epilogue_sources": false,
+        "nan_assumptions": false,
+        "reassociation": true,
+        "signed_zero": false
+      },
+      "omega_config": {
+        "allow_fusion": true,
+        "constraints": {
+          "max_device_buffer_bytes": null,
+          "max_host_tensor_bytes": null,
+          "max_single_device_buffer_bytes": null
+        },
+        "engine": "gpu",
+        "exact_activations": true,
+        "gpu_driver": "metal",
+        "numeric": {
+          "approx_functions": false,
+          "contraction": true,
+          "epilogue_sources": false,
+          "nan_assumptions": false,
+          "reassociation": true,
+          "signed_zero": false
+        },
+        "selection": {
+          "measurement_runs": null,
+          "mode": "configured",
+          "warmup_runs": null
+        }
+      },
+      "planning": {
+        "contrast": [
+          {
+            "cold_plan_ns": 9708,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r1_n4_fused_subtract_o2_o3__multiply_s0_o1__add_s1_o0_wideS_eanc_d111103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "diagnostic_layer": [
+          {
+            "cold_plan_ns": 180208,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_constant_r0_v3db504f3_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_iota_r1_wideS03R",
+              "omega_iota_r1_wideS03R",
+              "omega_constant_r0_vff800000_wideS03R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_epi5_fused_identity_o5__greater_o0_o1__add_s0_o4__multiply_s2_o3__select_s1_o2_s3_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_reduce_r3_ax0_2_n1_identity_maximum_negative_infinity_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_subtract_o0_o1__exponential_s0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r3_ax0_2_n1_identity_add_zero_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_reciprocal_o1__multiply_s0_o0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r4_ax0_2_3_n2_multiply_add_zero_wideS_w12803_c32_dbg3_0_2_w0_o1_slimR",
+              "omega_reduce_r4_ax0_3_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg3_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_elementwise_r2_n2_add_wideS_eanc_d1103R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_constant_r0_vbf800000_wideS03R",
+              "omega_constant_r0_v3f800000_wideS03R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_o2_o3__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_elementwise_r2_n2_add_wideS_eanc_d1103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 35,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "embedding": [
+          {
+            "cold_plan_ns": 9958,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r2_n1_identity_g1_wideS_ea4c_0_1_d003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "hidden_contrast": [
+          {
+            "cold_plan_ns": 7083,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r1_n4_fused_subtract_o2_o3__multiply_s0_o1__add_s1_o0_wideS_eanc_d111103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "layer": [
+          {
+            "cold_plan_ns": 238291,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_constant_r0_v3db504f3_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_iota_r1_wideS03R",
+              "omega_iota_r1_wideS03R",
+              "omega_constant_r0_vff800000_wideS03R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_epi5_fused_identity_o5__greater_o0_o1__add_s0_o4__multiply_s2_o3__select_s1_o2_s3_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_reduce_r3_ax0_2_n1_identity_maximum_negative_infinity_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_subtract_o0_o1__exponential_s0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r3_ax0_2_n1_identity_add_zero_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_reciprocal_o1__multiply_s0_o0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r4_ax0_2_3_n2_multiply_add_zero_wideS_w12803_c32_dbg3_0_2_w0_o1_slimR",
+              "omega_reduce_r4_ax0_3_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg3_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_o1__add_s5_o0_wideS_ea4c_0_1_d10100003R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_constant_r0_vbf800000_wideS03R",
+              "omega_constant_r0_v3f800000_wideS03R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_o2_o3__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_o1__add_s5_o0_wideS_ea4c_0_1_d10100003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 33,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "normalization": [
+          {
+            "cold_plan_ns": 17667,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 3,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "readout": [
+          {
+            "cold_plan_ns": 7416,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cfbS_w12803_c32_dbg2_0_w1_o0_slimR"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ]
+      },
+      "positions": 5,
+      "prefix_ids": [
+        504,
+        3575,
+        282,
+        4649,
+        314
+      ],
+      "readout": "explicit terminal recurrent step",
+      "retained_layer_statistic_nodes": [
+        18,
+        54,
+        57,
+        65,
+        74,
+        96
+      ],
+      "retained_loop_norm_statistic_nodes": [
+        5
+      ],
+      "retained_statistic_reason": "required output boundaries preserve separate softmax/norm folds supported by the Metal renderer; their retention/readback cost is included",
+      "strength": null,
+      "use_cache": false
+    },
+    "cost": {
+      "cov_percent": 3.4491082705382383,
+      "input_tokens_per_second": 8.797921768714936,
+      "mean_ms": 568.3160332,
+      "p50_ms": 561.36,
+      "p90_ms": 602.9031249999999,
+      "p95_ms": 602.9031249999999,
+      "p999_ms": 602.9031249999999,
+      "p99_ms": 602.9031249999999,
+      "raw_durations_ms": [
+        556.562,
+        556.630708,
+        561.36,
+        564.124333,
+        602.9031249999999
+      ],
+      "sample_count": 5,
+      "sample_standard_deviation_ms": 19.601835303896042
+    },
+    "duration_order_statistics_ms": {
+      "max_ms": 602.9031249999999,
+      "min_ms": 556.562,
+      "nearest_rank_definition": "ceil(p*n), one-based rank",
+      "p90_ms": 602.9031249999999,
+      "p99_9_ms": 602.9031249999999,
+      "p99_ms": 602.9031249999999
+    },
+    "forward_readouts_per_second": 1.7595843537429872,
+    "method": "baseline4",
+    "raw_durations_ms": [
+      556.562,
+      556.630708,
+      561.36,
+      564.124333,
+      602.9031249999999
+    ],
+    "sample_ids": [
+      "france:baseline4:sample:0",
+      "france:baseline4:sample:1",
+      "france:baseline4:sample:2",
+      "france:baseline4:sample:3",
+      "france:baseline4:sample:4"
+    ],
+    "sources": [
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:baseline4:sample:0"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:baseline4:sample:1"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:baseline4:sample:2"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:baseline4:sample:3"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:baseline4:sample:4"
+      }
+    ],
+    "warmup_sample_id": "france:baseline4:warmup:0"
+  },
+  {
+    "case_id": "france",
+    "cold_model_setup_ms": 11.409041,
+    "context": {
+      "arm": "fixed-logits-0.5",
+      "author_activation_oracle_status": "unmeasured",
+      "backend": "metal",
+      "build_dense_float_storage": true,
+      "build_tiled_min_tokens": 1,
+      "checkpoint_expected_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+      "checkpoint_mapping_mode": "whole_checkpoint_mapping",
+      "checkpoint_observed_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+      "checkpoint_revision": "574fa66cb8bf5abdc979642d01cf2b79b16bfab1",
+      "depth": 4,
+      "digest_verified_during_setup": true,
+      "method": "fixed-logits",
+      "model": "ByteDance/Ouro-1.4B",
+      "numeric_policy": {
+        "approx_functions": false,
+        "contraction": true,
+        "epilogue_sources": false,
+        "nan_assumptions": false,
+        "reassociation": true,
+        "signed_zero": false
+      },
+      "omega_config": {
+        "allow_fusion": true,
+        "constraints": {
+          "max_device_buffer_bytes": null,
+          "max_host_tensor_bytes": null,
+          "max_single_device_buffer_bytes": null
+        },
+        "engine": "gpu",
+        "exact_activations": true,
+        "gpu_driver": "metal",
+        "numeric": {
+          "approx_functions": false,
+          "contraction": true,
+          "epilogue_sources": false,
+          "nan_assumptions": false,
+          "reassociation": true,
+          "signed_zero": false
+        },
+        "selection": {
+          "measurement_runs": null,
+          "mode": "configured",
+          "warmup_runs": null
+        }
+      },
+      "planning": {
+        "contrast": [
+          {
+            "cold_plan_ns": 9708,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r1_n4_fused_subtract_o2_o3__multiply_s0_o1__add_s1_o0_wideS_eanc_d111103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "diagnostic_layer": [
+          {
+            "cold_plan_ns": 180208,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_constant_r0_v3db504f3_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_iota_r1_wideS03R",
+              "omega_iota_r1_wideS03R",
+              "omega_constant_r0_vff800000_wideS03R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_epi5_fused_identity_o5__greater_o0_o1__add_s0_o4__multiply_s2_o3__select_s1_o2_s3_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_reduce_r3_ax0_2_n1_identity_maximum_negative_infinity_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_subtract_o0_o1__exponential_s0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r3_ax0_2_n1_identity_add_zero_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_reciprocal_o1__multiply_s0_o0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r4_ax0_2_3_n2_multiply_add_zero_wideS_w12803_c32_dbg3_0_2_w0_o1_slimR",
+              "omega_reduce_r4_ax0_3_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg3_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_elementwise_r2_n2_add_wideS_eanc_d1103R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_constant_r0_vbf800000_wideS03R",
+              "omega_constant_r0_v3f800000_wideS03R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_o2_o3__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_elementwise_r2_n2_add_wideS_eanc_d1103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 35,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "embedding": [
+          {
+            "cold_plan_ns": 9958,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r2_n1_identity_g1_wideS_ea4c_0_1_d003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "hidden_contrast": [
+          {
+            "cold_plan_ns": 7083,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r1_n4_fused_subtract_o2_o3__multiply_s0_o1__add_s1_o0_wideS_eanc_d111103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "layer": [
+          {
+            "cold_plan_ns": 238291,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_constant_r0_v3db504f3_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_iota_r1_wideS03R",
+              "omega_iota_r1_wideS03R",
+              "omega_constant_r0_vff800000_wideS03R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_epi5_fused_identity_o5__greater_o0_o1__add_s0_o4__multiply_s2_o3__select_s1_o2_s3_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_reduce_r3_ax0_2_n1_identity_maximum_negative_infinity_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_subtract_o0_o1__exponential_s0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r3_ax0_2_n1_identity_add_zero_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_reciprocal_o1__multiply_s0_o0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r4_ax0_2_3_n2_multiply_add_zero_wideS_w12803_c32_dbg3_0_2_w0_o1_slimR",
+              "omega_reduce_r4_ax0_3_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg3_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_o1__add_s5_o0_wideS_ea4c_0_1_d10100003R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_constant_r0_vbf800000_wideS03R",
+              "omega_constant_r0_v3f800000_wideS03R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_o2_o3__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_o1__add_s5_o0_wideS_ea4c_0_1_d10100003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 33,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "normalization": [
+          {
+            "cold_plan_ns": 17667,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 3,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "readout": [
+          {
+            "cold_plan_ns": 7416,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cfbS_w12803_c32_dbg2_0_w1_o0_slimR"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ]
+      },
+      "positions": 5,
+      "prefix_ids": [
+        504,
+        3575,
+        282,
+        4649,
+        314
+      ],
+      "readout": "explicit terminal recurrent step",
+      "retained_layer_statistic_nodes": [
+        18,
+        54,
+        57,
+        65,
+        74,
+        96
+      ],
+      "retained_loop_norm_statistic_nodes": [
+        5
+      ],
+      "retained_statistic_reason": "required output boundaries preserve separate softmax/norm folds supported by the Metal renderer; their retention/readback cost is included",
+      "strength": 0.5,
+      "use_cache": false
+    },
+    "cost": {
+      "cov_percent": 0.20497977101620915,
+      "input_tokens_per_second": 8.806013862727132,
+      "mean_ms": 567.7937916,
+      "p50_ms": 567.498542,
+      "p90_ms": 569.339875,
+      "p95_ms": 569.339875,
+      "p999_ms": 569.339875,
+      "p99_ms": 569.339875,
+      "raw_durations_ms": [
+        567.498542,
+        568.610083,
+        566.497625,
+        569.339875,
+        567.022833
+      ],
+      "sample_count": 5,
+      "sample_standard_deviation_ms": 1.1638624138659317
+    },
+    "duration_order_statistics_ms": {
+      "max_ms": 569.339875,
+      "min_ms": 566.497625,
+      "nearest_rank_definition": "ceil(p*n), one-based rank",
+      "p90_ms": 569.339875,
+      "p99_9_ms": 569.339875,
+      "p99_ms": 569.339875
+    },
+    "forward_readouts_per_second": 1.7612027725454265,
+    "method": "fixed-logits-0.5",
+    "raw_durations_ms": [
+      567.498542,
+      568.610083,
+      566.497625,
+      569.339875,
+      567.022833
+    ],
+    "sample_ids": [
+      "france:fixed-logits-0.5:sample:0",
+      "france:fixed-logits-0.5:sample:1",
+      "france:fixed-logits-0.5:sample:2",
+      "france:fixed-logits-0.5:sample:3",
+      "france:fixed-logits-0.5:sample:4"
+    ],
+    "sources": [
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:fixed-logits-0.5:sample:0"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:fixed-logits-0.5:sample:1"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:fixed-logits-0.5:sample:2"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:fixed-logits-0.5:sample:3"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:fixed-logits-0.5:sample:4"
+      }
+    ],
+    "warmup_sample_id": "france:fixed-logits-0.5:warmup:0"
+  },
+  {
+    "case_id": "france",
+    "cold_model_setup_ms": 11.409041,
+    "context": {
+      "arm": "adaptive-logits-cap-1",
+      "author_activation_oracle_status": "unmeasured",
+      "backend": "metal",
+      "build_dense_float_storage": true,
+      "build_tiled_min_tokens": 1,
+      "checkpoint_expected_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+      "checkpoint_mapping_mode": "whole_checkpoint_mapping",
+      "checkpoint_observed_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+      "checkpoint_revision": "574fa66cb8bf5abdc979642d01cf2b79b16bfab1",
+      "depth": 4,
+      "digest_verified_during_setup": true,
+      "method": "adaptive-logits",
+      "model": "ByteDance/Ouro-1.4B",
+      "numeric_policy": {
+        "approx_functions": false,
+        "contraction": true,
+        "epilogue_sources": false,
+        "nan_assumptions": false,
+        "reassociation": true,
+        "signed_zero": false
+      },
+      "omega_config": {
+        "allow_fusion": true,
+        "constraints": {
+          "max_device_buffer_bytes": null,
+          "max_host_tensor_bytes": null,
+          "max_single_device_buffer_bytes": null
+        },
+        "engine": "gpu",
+        "exact_activations": true,
+        "gpu_driver": "metal",
+        "numeric": {
+          "approx_functions": false,
+          "contraction": true,
+          "epilogue_sources": false,
+          "nan_assumptions": false,
+          "reassociation": true,
+          "signed_zero": false
+        },
+        "selection": {
+          "measurement_runs": null,
+          "mode": "configured",
+          "warmup_runs": null
+        }
+      },
+      "planning": {
+        "contrast": [
+          {
+            "cold_plan_ns": 9708,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r1_n4_fused_subtract_o2_o3__multiply_s0_o1__add_s1_o0_wideS_eanc_d111103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "diagnostic_layer": [
+          {
+            "cold_plan_ns": 180208,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_constant_r0_v3db504f3_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_iota_r1_wideS03R",
+              "omega_iota_r1_wideS03R",
+              "omega_constant_r0_vff800000_wideS03R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_epi5_fused_identity_o5__greater_o0_o1__add_s0_o4__multiply_s2_o3__select_s1_o2_s3_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_reduce_r3_ax0_2_n1_identity_maximum_negative_infinity_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_subtract_o0_o1__exponential_s0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r3_ax0_2_n1_identity_add_zero_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_reciprocal_o1__multiply_s0_o0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r4_ax0_2_3_n2_multiply_add_zero_wideS_w12803_c32_dbg3_0_2_w0_o1_slimR",
+              "omega_reduce_r4_ax0_3_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg3_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_elementwise_r2_n2_add_wideS_eanc_d1103R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_constant_r0_vbf800000_wideS03R",
+              "omega_constant_r0_v3f800000_wideS03R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_o2_o3__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_elementwise_r2_n2_add_wideS_eanc_d1103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 35,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "embedding": [
+          {
+            "cold_plan_ns": 9958,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r2_n1_identity_g1_wideS_ea4c_0_1_d003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "hidden_contrast": [
+          {
+            "cold_plan_ns": 7083,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r1_n4_fused_subtract_o2_o3__multiply_s0_o1__add_s1_o0_wideS_eanc_d111103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "layer": [
+          {
+            "cold_plan_ns": 238291,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_constant_r0_v3db504f3_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_iota_r1_wideS03R",
+              "omega_iota_r1_wideS03R",
+              "omega_constant_r0_vff800000_wideS03R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_epi5_fused_identity_o5__greater_o0_o1__add_s0_o4__multiply_s2_o3__select_s1_o2_s3_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_reduce_r3_ax0_2_n1_identity_maximum_negative_infinity_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_subtract_o0_o1__exponential_s0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r3_ax0_2_n1_identity_add_zero_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_reciprocal_o1__multiply_s0_o0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r4_ax0_2_3_n2_multiply_add_zero_wideS_w12803_c32_dbg3_0_2_w0_o1_slimR",
+              "omega_reduce_r4_ax0_3_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg3_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_o1__add_s5_o0_wideS_ea4c_0_1_d10100003R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_constant_r0_vbf800000_wideS03R",
+              "omega_constant_r0_v3f800000_wideS03R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_o2_o3__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_o1__add_s5_o0_wideS_ea4c_0_1_d10100003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 33,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "normalization": [
+          {
+            "cold_plan_ns": 17667,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 3,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "readout": [
+          {
+            "cold_plan_ns": 7416,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cfbS_w12803_c32_dbg2_0_w1_o0_slimR"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ]
+      },
+      "positions": 5,
+      "prefix_ids": [
+        504,
+        3575,
+        282,
+        4649,
+        314
+      ],
+      "readout": "explicit terminal recurrent step",
+      "retained_layer_statistic_nodes": [
+        18,
+        54,
+        57,
+        65,
+        74,
+        96
+      ],
+      "retained_loop_norm_statistic_nodes": [
+        5
+      ],
+      "retained_statistic_reason": "required output boundaries preserve separate softmax/norm folds supported by the Metal renderer; their retention/readback cost is included",
+      "strength": 1.0,
+      "use_cache": false
+    },
+    "cost": {
+      "cov_percent": 2.725536702239354,
+      "input_tokens_per_second": 8.71847714708411,
+      "mean_ms": 573.49465,
+      "p50_ms": 569.265959,
+      "p90_ms": 600.8893330000001,
+      "p95_ms": 600.8893330000001,
+      "p999_ms": 600.8893330000001,
+      "p99_ms": 600.8893330000001,
+      "raw_durations_ms": [
+        569.770625,
+        569.265959,
+        565.5164580000001,
+        600.8893330000001,
+        562.030875
+      ],
+      "sample_count": 5,
+      "sample_standard_deviation_ms": 15.630807171129128
+    },
+    "duration_order_statistics_ms": {
+      "max_ms": 600.8893330000001,
+      "min_ms": 562.030875,
+      "nearest_rank_definition": "ceil(p*n), one-based rank",
+      "p90_ms": 600.8893330000001,
+      "p99_9_ms": 600.8893330000001,
+      "p99_ms": 600.8893330000001
+    },
+    "forward_readouts_per_second": 1.743695429416822,
+    "method": "adaptive-logits-cap-1",
+    "raw_durations_ms": [
+      569.770625,
+      569.265959,
+      565.5164580000001,
+      600.8893330000001,
+      562.030875
+    ],
+    "sample_ids": [
+      "france:adaptive-logits-cap-1:sample:0",
+      "france:adaptive-logits-cap-1:sample:1",
+      "france:adaptive-logits-cap-1:sample:2",
+      "france:adaptive-logits-cap-1:sample:3",
+      "france:adaptive-logits-cap-1:sample:4"
+    ],
+    "sources": [
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:adaptive-logits-cap-1:sample:0"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:adaptive-logits-cap-1:sample:1"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:adaptive-logits-cap-1:sample:2"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:adaptive-logits-cap-1:sample:3"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:adaptive-logits-cap-1:sample:4"
+      }
+    ],
+    "warmup_sample_id": "france:adaptive-logits-cap-1:warmup:0"
+  },
+  {
+    "case_id": "france",
+    "cold_model_setup_ms": 11.409041,
+    "context": {
+      "arm": "fixed-hidden-0.5",
+      "author_activation_oracle_status": "unmeasured",
+      "backend": "metal",
+      "build_dense_float_storage": true,
+      "build_tiled_min_tokens": 1,
+      "checkpoint_expected_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+      "checkpoint_mapping_mode": "whole_checkpoint_mapping",
+      "checkpoint_observed_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+      "checkpoint_revision": "574fa66cb8bf5abdc979642d01cf2b79b16bfab1",
+      "depth": 4,
+      "digest_verified_during_setup": true,
+      "method": "fixed-hidden",
+      "model": "ByteDance/Ouro-1.4B",
+      "numeric_policy": {
+        "approx_functions": false,
+        "contraction": true,
+        "epilogue_sources": false,
+        "nan_assumptions": false,
+        "reassociation": true,
+        "signed_zero": false
+      },
+      "omega_config": {
+        "allow_fusion": true,
+        "constraints": {
+          "max_device_buffer_bytes": null,
+          "max_host_tensor_bytes": null,
+          "max_single_device_buffer_bytes": null
+        },
+        "engine": "gpu",
+        "exact_activations": true,
+        "gpu_driver": "metal",
+        "numeric": {
+          "approx_functions": false,
+          "contraction": true,
+          "epilogue_sources": false,
+          "nan_assumptions": false,
+          "reassociation": true,
+          "signed_zero": false
+        },
+        "selection": {
+          "measurement_runs": null,
+          "mode": "configured",
+          "warmup_runs": null
+        }
+      },
+      "planning": {
+        "contrast": [
+          {
+            "cold_plan_ns": 9708,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r1_n4_fused_subtract_o2_o3__multiply_s0_o1__add_s1_o0_wideS_eanc_d111103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "diagnostic_layer": [
+          {
+            "cold_plan_ns": 180208,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_constant_r0_v3db504f3_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_iota_r1_wideS03R",
+              "omega_iota_r1_wideS03R",
+              "omega_constant_r0_vff800000_wideS03R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_epi5_fused_identity_o5__greater_o0_o1__add_s0_o4__multiply_s2_o3__select_s1_o2_s3_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_reduce_r3_ax0_2_n1_identity_maximum_negative_infinity_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_subtract_o0_o1__exponential_s0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r3_ax0_2_n1_identity_add_zero_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_reciprocal_o1__multiply_s0_o0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r4_ax0_2_3_n2_multiply_add_zero_wideS_w12803_c32_dbg3_0_2_w0_o1_slimR",
+              "omega_reduce_r4_ax0_3_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg3_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_elementwise_r2_n2_add_wideS_eanc_d1103R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_constant_r0_vbf800000_wideS03R",
+              "omega_constant_r0_v3f800000_wideS03R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_o2_o3__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_elementwise_r2_n2_add_wideS_eanc_d1103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 35,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "embedding": [
+          {
+            "cold_plan_ns": 9958,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r2_n1_identity_g1_wideS_ea4c_0_1_d003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "hidden_contrast": [
+          {
+            "cold_plan_ns": 7083,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r1_n4_fused_subtract_o2_o3__multiply_s0_o1__add_s1_o0_wideS_eanc_d111103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "layer": [
+          {
+            "cold_plan_ns": 238291,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_constant_r0_v3db504f3_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_iota_r1_wideS03R",
+              "omega_iota_r1_wideS03R",
+              "omega_constant_r0_vff800000_wideS03R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_epi5_fused_identity_o5__greater_o0_o1__add_s0_o4__multiply_s2_o3__select_s1_o2_s3_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_reduce_r3_ax0_2_n1_identity_maximum_negative_infinity_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_subtract_o0_o1__exponential_s0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r3_ax0_2_n1_identity_add_zero_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_reciprocal_o1__multiply_s0_o0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r4_ax0_2_3_n2_multiply_add_zero_wideS_w12803_c32_dbg3_0_2_w0_o1_slimR",
+              "omega_reduce_r4_ax0_3_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg3_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_o1__add_s5_o0_wideS_ea4c_0_1_d10100003R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_constant_r0_vbf800000_wideS03R",
+              "omega_constant_r0_v3f800000_wideS03R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_o2_o3__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_o1__add_s5_o0_wideS_ea4c_0_1_d10100003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 33,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "normalization": [
+          {
+            "cold_plan_ns": 17667,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 3,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "readout": [
+          {
+            "cold_plan_ns": 7416,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cfbS_w12803_c32_dbg2_0_w1_o0_slimR"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ]
+      },
+      "positions": 5,
+      "prefix_ids": [
+        504,
+        3575,
+        282,
+        4649,
+        314
+      ],
+      "readout": "explicit terminal recurrent step",
+      "retained_layer_statistic_nodes": [
+        18,
+        54,
+        57,
+        65,
+        74,
+        96
+      ],
+      "retained_loop_norm_statistic_nodes": [
+        5
+      ],
+      "retained_statistic_reason": "required output boundaries preserve separate softmax/norm folds supported by the Metal renderer; their retention/readback cost is included",
+      "strength": 0.5,
+      "use_cache": false
+    },
+    "cost": {
+      "cov_percent": 0.6926004513563773,
+      "input_tokens_per_second": 8.888286191978784,
+      "mean_ms": 562.538142,
+      "p50_ms": 561.0231249999999,
+      "p90_ms": 568.929209,
+      "p95_ms": 568.929209,
+      "p999_ms": 568.929209,
+      "p99_ms": 568.929209,
+      "raw_durations_ms": [
+        563.163334,
+        558.773625,
+        561.0231249999999,
+        560.801417,
+        568.929209
+      ],
+      "sample_count": 5,
+      "sample_standard_deviation_ms": 3.896141710543778
+    },
+    "duration_order_statistics_ms": {
+      "max_ms": 568.929209,
+      "min_ms": 558.773625,
+      "nearest_rank_definition": "ceil(p*n), one-based rank",
+      "p90_ms": 568.929209,
+      "p99_9_ms": 568.929209,
+      "p99_ms": 568.929209
+    },
+    "forward_readouts_per_second": 1.7776572383957567,
+    "method": "fixed-hidden-0.5",
+    "raw_durations_ms": [
+      563.163334,
+      558.773625,
+      561.0231249999999,
+      560.801417,
+      568.929209
+    ],
+    "sample_ids": [
+      "france:fixed-hidden-0.5:sample:0",
+      "france:fixed-hidden-0.5:sample:1",
+      "france:fixed-hidden-0.5:sample:2",
+      "france:fixed-hidden-0.5:sample:3",
+      "france:fixed-hidden-0.5:sample:4"
+    ],
+    "sources": [
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:fixed-hidden-0.5:sample:0"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:fixed-hidden-0.5:sample:1"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:fixed-hidden-0.5:sample:2"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:fixed-hidden-0.5:sample:3"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "france:fixed-hidden-0.5:sample:4"
+      }
+    ],
+    "warmup_sample_id": "france:fixed-hidden-0.5:warmup:0"
+  },
+  {
+    "case_id": "ball",
+    "cold_model_setup_ms": 2.309625,
+    "context": {
+      "arm": "baseline4",
+      "author_activation_oracle_status": "unmeasured",
+      "backend": "metal",
+      "build_dense_float_storage": true,
+      "build_tiled_min_tokens": 1,
+      "checkpoint_expected_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+      "checkpoint_mapping_mode": "whole_checkpoint_mapping",
+      "checkpoint_observed_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+      "checkpoint_revision": "574fa66cb8bf5abdc979642d01cf2b79b16bfab1",
+      "depth": 4,
+      "digest_verified_during_setup": true,
+      "method": "baseline",
+      "model": "ByteDance/Ouro-1.4B",
+      "numeric_policy": {
+        "approx_functions": false,
+        "contraction": true,
+        "epilogue_sources": false,
+        "nan_assumptions": false,
+        "reassociation": true,
+        "signed_zero": false
+      },
+      "omega_config": {
+        "allow_fusion": true,
+        "constraints": {
+          "max_device_buffer_bytes": null,
+          "max_host_tensor_bytes": null,
+          "max_single_device_buffer_bytes": null
+        },
+        "engine": "gpu",
+        "exact_activations": true,
+        "gpu_driver": "metal",
+        "numeric": {
+          "approx_functions": false,
+          "contraction": true,
+          "epilogue_sources": false,
+          "nan_assumptions": false,
+          "reassociation": true,
+          "signed_zero": false
+        },
+        "selection": {
+          "measurement_runs": null,
+          "mode": "configured",
+          "warmup_runs": null
+        }
+      },
+      "planning": {
+        "contrast": [
+          {
+            "cold_plan_ns": 9167,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r1_n4_fused_subtract_o2_o3__multiply_s0_o1__add_s1_o0_wideS_eanc_d111103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "diagnostic_layer": [
+          {
+            "cold_plan_ns": 174083,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_constant_r0_v3db504f3_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_iota_r1_wideS03R",
+              "omega_iota_r1_wideS03R",
+              "omega_constant_r0_vff800000_wideS03R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_epi5_fused_identity_o5__greater_o0_o1__add_s0_o4__multiply_s2_o3__select_s1_o2_s3_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_reduce_r3_ax0_2_n1_identity_maximum_negative_infinity_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_subtract_o0_o1__exponential_s0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r3_ax0_2_n1_identity_add_zero_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_reciprocal_o1__multiply_s0_o0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r4_ax0_2_3_n2_multiply_add_zero_wideS_w12803_c32_dbg3_0_2_w0_o1_slimR",
+              "omega_reduce_r4_ax0_3_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg3_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_elementwise_r2_n2_add_wideS_eanc_d1103R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_constant_r0_vbf800000_wideS03R",
+              "omega_constant_r0_v3f800000_wideS03R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_o2_o3__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_elementwise_r2_n2_add_wideS_eanc_d1103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 35,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "embedding": [
+          {
+            "cold_plan_ns": 28459,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r2_n1_identity_g1_wideS_ea4c_0_1_d003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "hidden_contrast": [
+          {
+            "cold_plan_ns": 7000,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r1_n4_fused_subtract_o2_o3__multiply_s0_o1__add_s1_o0_wideS_eanc_d111103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "layer": [
+          {
+            "cold_plan_ns": 203042,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_constant_r0_v3db504f3_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_iota_r1_wideS03R",
+              "omega_iota_r1_wideS03R",
+              "omega_constant_r0_vff800000_wideS03R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_epi5_fused_identity_o5__greater_o0_o1__add_s0_o4__multiply_s2_o3__select_s1_o2_s3_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_reduce_r3_ax0_2_n1_identity_maximum_negative_infinity_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_subtract_o0_o1__exponential_s0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r3_ax0_2_n1_identity_add_zero_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_reciprocal_o1__multiply_s0_o0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r4_ax0_2_3_n2_multiply_add_zero_wideS_w12803_c32_dbg3_0_2_w0_o1_slimR",
+              "omega_reduce_r4_ax0_3_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg3_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_o1__add_s5_o0_wideS_ea4c_0_1_d10100003R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_constant_r0_vbf800000_wideS03R",
+              "omega_constant_r0_v3f800000_wideS03R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_o2_o3__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_o1__add_s5_o0_wideS_ea4c_0_1_d10100003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 33,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "normalization": [
+          {
+            "cold_plan_ns": 17375,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 3,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "readout": [
+          {
+            "cold_plan_ns": 7542,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cfbS_w12803_c32_dbg2_0_w1_o0_slimR"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ]
+      },
+      "positions": 24,
+      "prefix_ids": [
+        6340,
+        260,
+        5307,
+        5054,
+        30,
+        533,
+        451,
+        1977,
+        260,
+        3985,
+        314,
+        4461,
+        284,
+        260,
+        4405,
+        314,
+        2382,
+        30,
+        378,
+        2380,
+        282,
+        260,
+        4405,
+        314
+      ],
+      "readout": "explicit terminal recurrent step",
+      "retained_layer_statistic_nodes": [
+        18,
+        54,
+        57,
+        65,
+        74,
+        96
+      ],
+      "retained_loop_norm_statistic_nodes": [
+        5
+      ],
+      "retained_statistic_reason": "required output boundaries preserve separate softmax/norm folds supported by the Metal renderer; their retention/readback cost is included",
+      "strength": null,
+      "use_cache": false
+    },
+    "cost": {
+      "cov_percent": 0.39112104819119714,
+      "input_tokens_per_second": 39.022484588798946,
+      "mean_ms": 615.0300334,
+      "p50_ms": 614.3011670000001,
+      "p90_ms": 619.036083,
+      "p95_ms": 619.036083,
+      "p999_ms": 619.036083,
+      "p99_ms": 619.036083,
+      "raw_durations_ms": [
+        619.036083,
+        614.3011670000001,
+        614.9565,
+        614.2735419999999,
+        612.582875
+      ],
+      "sample_count": 5,
+      "sample_standard_deviation_ms": 2.40551191332475
+    },
+    "duration_order_statistics_ms": {
+      "max_ms": 619.036083,
+      "min_ms": 612.582875,
+      "nearest_rank_definition": "ceil(p*n), one-based rank",
+      "p90_ms": 619.036083,
+      "p99_9_ms": 619.036083,
+      "p99_ms": 619.036083
+    },
+    "forward_readouts_per_second": 1.6259368578666227,
+    "method": "baseline4",
+    "raw_durations_ms": [
+      619.036083,
+      614.3011670000001,
+      614.9565,
+      614.2735419999999,
+      612.582875
+    ],
+    "sample_ids": [
+      "ball:baseline4:sample:0",
+      "ball:baseline4:sample:1",
+      "ball:baseline4:sample:2",
+      "ball:baseline4:sample:3",
+      "ball:baseline4:sample:4"
+    ],
+    "sources": [
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:baseline4:sample:0"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:baseline4:sample:1"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:baseline4:sample:2"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:baseline4:sample:3"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:baseline4:sample:4"
+      }
+    ],
+    "warmup_sample_id": "ball:baseline4:warmup:0"
+  },
+  {
+    "case_id": "ball",
+    "cold_model_setup_ms": 2.309625,
+    "context": {
+      "arm": "fixed-logits-0.5",
+      "author_activation_oracle_status": "unmeasured",
+      "backend": "metal",
+      "build_dense_float_storage": true,
+      "build_tiled_min_tokens": 1,
+      "checkpoint_expected_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+      "checkpoint_mapping_mode": "whole_checkpoint_mapping",
+      "checkpoint_observed_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+      "checkpoint_revision": "574fa66cb8bf5abdc979642d01cf2b79b16bfab1",
+      "depth": 4,
+      "digest_verified_during_setup": true,
+      "method": "fixed-logits",
+      "model": "ByteDance/Ouro-1.4B",
+      "numeric_policy": {
+        "approx_functions": false,
+        "contraction": true,
+        "epilogue_sources": false,
+        "nan_assumptions": false,
+        "reassociation": true,
+        "signed_zero": false
+      },
+      "omega_config": {
+        "allow_fusion": true,
+        "constraints": {
+          "max_device_buffer_bytes": null,
+          "max_host_tensor_bytes": null,
+          "max_single_device_buffer_bytes": null
+        },
+        "engine": "gpu",
+        "exact_activations": true,
+        "gpu_driver": "metal",
+        "numeric": {
+          "approx_functions": false,
+          "contraction": true,
+          "epilogue_sources": false,
+          "nan_assumptions": false,
+          "reassociation": true,
+          "signed_zero": false
+        },
+        "selection": {
+          "measurement_runs": null,
+          "mode": "configured",
+          "warmup_runs": null
+        }
+      },
+      "planning": {
+        "contrast": [
+          {
+            "cold_plan_ns": 9167,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r1_n4_fused_subtract_o2_o3__multiply_s0_o1__add_s1_o0_wideS_eanc_d111103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "diagnostic_layer": [
+          {
+            "cold_plan_ns": 174083,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_constant_r0_v3db504f3_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_iota_r1_wideS03R",
+              "omega_iota_r1_wideS03R",
+              "omega_constant_r0_vff800000_wideS03R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_epi5_fused_identity_o5__greater_o0_o1__add_s0_o4__multiply_s2_o3__select_s1_o2_s3_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_reduce_r3_ax0_2_n1_identity_maximum_negative_infinity_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_subtract_o0_o1__exponential_s0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r3_ax0_2_n1_identity_add_zero_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_reciprocal_o1__multiply_s0_o0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r4_ax0_2_3_n2_multiply_add_zero_wideS_w12803_c32_dbg3_0_2_w0_o1_slimR",
+              "omega_reduce_r4_ax0_3_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg3_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_elementwise_r2_n2_add_wideS_eanc_d1103R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_constant_r0_vbf800000_wideS03R",
+              "omega_constant_r0_v3f800000_wideS03R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_o2_o3__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_elementwise_r2_n2_add_wideS_eanc_d1103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 35,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "embedding": [
+          {
+            "cold_plan_ns": 28459,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r2_n1_identity_g1_wideS_ea4c_0_1_d003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "hidden_contrast": [
+          {
+            "cold_plan_ns": 7000,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r1_n4_fused_subtract_o2_o3__multiply_s0_o1__add_s1_o0_wideS_eanc_d111103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "layer": [
+          {
+            "cold_plan_ns": 203042,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_constant_r0_v3db504f3_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_iota_r1_wideS03R",
+              "omega_iota_r1_wideS03R",
+              "omega_constant_r0_vff800000_wideS03R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_epi5_fused_identity_o5__greater_o0_o1__add_s0_o4__multiply_s2_o3__select_s1_o2_s3_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_reduce_r3_ax0_2_n1_identity_maximum_negative_infinity_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_subtract_o0_o1__exponential_s0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r3_ax0_2_n1_identity_add_zero_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_reciprocal_o1__multiply_s0_o0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r4_ax0_2_3_n2_multiply_add_zero_wideS_w12803_c32_dbg3_0_2_w0_o1_slimR",
+              "omega_reduce_r4_ax0_3_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg3_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_o1__add_s5_o0_wideS_ea4c_0_1_d10100003R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_constant_r0_vbf800000_wideS03R",
+              "omega_constant_r0_v3f800000_wideS03R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_o2_o3__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_o1__add_s5_o0_wideS_ea4c_0_1_d10100003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 33,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "normalization": [
+          {
+            "cold_plan_ns": 17375,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 3,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "readout": [
+          {
+            "cold_plan_ns": 7542,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cfbS_w12803_c32_dbg2_0_w1_o0_slimR"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ]
+      },
+      "positions": 24,
+      "prefix_ids": [
+        6340,
+        260,
+        5307,
+        5054,
+        30,
+        533,
+        451,
+        1977,
+        260,
+        3985,
+        314,
+        4461,
+        284,
+        260,
+        4405,
+        314,
+        2382,
+        30,
+        378,
+        2380,
+        282,
+        260,
+        4405,
+        314
+      ],
+      "readout": "explicit terminal recurrent step",
+      "retained_layer_statistic_nodes": [
+        18,
+        54,
+        57,
+        65,
+        74,
+        96
+      ],
+      "retained_loop_norm_statistic_nodes": [
+        5
+      ],
+      "retained_statistic_reason": "required output boundaries preserve separate softmax/norm folds supported by the Metal renderer; their retention/readback cost is included",
+      "strength": 0.5,
+      "use_cache": false
+    },
+    "cost": {
+      "cov_percent": 0.3369625533471886,
+      "input_tokens_per_second": 38.55206220045487,
+      "mean_ms": 622.5347914,
+      "p50_ms": 621.8325,
+      "p90_ms": 625.085791,
+      "p95_ms": 625.085791,
+      "p999_ms": 625.085791,
+      "p99_ms": 625.085791,
+      "raw_durations_ms": [
+        625.085791,
+        621.069542,
+        620.2960830000001,
+        621.8325,
+        624.390041
+      ],
+      "sample_count": 5,
+      "sample_standard_deviation_ms": 2.0977091285760343
+    },
+    "duration_order_statistics_ms": {
+      "max_ms": 625.085791,
+      "min_ms": 620.2960830000001,
+      "nearest_rank_definition": "ceil(p*n), one-based rank",
+      "p90_ms": 625.085791,
+      "p99_9_ms": 625.085791,
+      "p99_ms": 625.085791
+    },
+    "forward_readouts_per_second": 1.606335925018953,
+    "method": "fixed-logits-0.5",
+    "raw_durations_ms": [
+      625.085791,
+      621.069542,
+      620.2960830000001,
+      621.8325,
+      624.390041
+    ],
+    "sample_ids": [
+      "ball:fixed-logits-0.5:sample:0",
+      "ball:fixed-logits-0.5:sample:1",
+      "ball:fixed-logits-0.5:sample:2",
+      "ball:fixed-logits-0.5:sample:3",
+      "ball:fixed-logits-0.5:sample:4"
+    ],
+    "sources": [
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:fixed-logits-0.5:sample:0"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:fixed-logits-0.5:sample:1"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:fixed-logits-0.5:sample:2"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:fixed-logits-0.5:sample:3"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:fixed-logits-0.5:sample:4"
+      }
+    ],
+    "warmup_sample_id": "ball:fixed-logits-0.5:warmup:0"
+  },
+  {
+    "case_id": "ball",
+    "cold_model_setup_ms": 2.309625,
+    "context": {
+      "arm": "adaptive-logits-cap-1",
+      "author_activation_oracle_status": "unmeasured",
+      "backend": "metal",
+      "build_dense_float_storage": true,
+      "build_tiled_min_tokens": 1,
+      "checkpoint_expected_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+      "checkpoint_mapping_mode": "whole_checkpoint_mapping",
+      "checkpoint_observed_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+      "checkpoint_revision": "574fa66cb8bf5abdc979642d01cf2b79b16bfab1",
+      "depth": 4,
+      "digest_verified_during_setup": true,
+      "method": "adaptive-logits",
+      "model": "ByteDance/Ouro-1.4B",
+      "numeric_policy": {
+        "approx_functions": false,
+        "contraction": true,
+        "epilogue_sources": false,
+        "nan_assumptions": false,
+        "reassociation": true,
+        "signed_zero": false
+      },
+      "omega_config": {
+        "allow_fusion": true,
+        "constraints": {
+          "max_device_buffer_bytes": null,
+          "max_host_tensor_bytes": null,
+          "max_single_device_buffer_bytes": null
+        },
+        "engine": "gpu",
+        "exact_activations": true,
+        "gpu_driver": "metal",
+        "numeric": {
+          "approx_functions": false,
+          "contraction": true,
+          "epilogue_sources": false,
+          "nan_assumptions": false,
+          "reassociation": true,
+          "signed_zero": false
+        },
+        "selection": {
+          "measurement_runs": null,
+          "mode": "configured",
+          "warmup_runs": null
+        }
+      },
+      "planning": {
+        "contrast": [
+          {
+            "cold_plan_ns": 9167,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r1_n4_fused_subtract_o2_o3__multiply_s0_o1__add_s1_o0_wideS_eanc_d111103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "diagnostic_layer": [
+          {
+            "cold_plan_ns": 174083,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_constant_r0_v3db504f3_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_iota_r1_wideS03R",
+              "omega_iota_r1_wideS03R",
+              "omega_constant_r0_vff800000_wideS03R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_epi5_fused_identity_o5__greater_o0_o1__add_s0_o4__multiply_s2_o3__select_s1_o2_s3_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_reduce_r3_ax0_2_n1_identity_maximum_negative_infinity_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_subtract_o0_o1__exponential_s0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r3_ax0_2_n1_identity_add_zero_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_reciprocal_o1__multiply_s0_o0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r4_ax0_2_3_n2_multiply_add_zero_wideS_w12803_c32_dbg3_0_2_w0_o1_slimR",
+              "omega_reduce_r4_ax0_3_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg3_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_elementwise_r2_n2_add_wideS_eanc_d1103R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_constant_r0_vbf800000_wideS03R",
+              "omega_constant_r0_v3f800000_wideS03R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_o2_o3__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_elementwise_r2_n2_add_wideS_eanc_d1103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 35,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "embedding": [
+          {
+            "cold_plan_ns": 28459,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r2_n1_identity_g1_wideS_ea4c_0_1_d003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "hidden_contrast": [
+          {
+            "cold_plan_ns": 7000,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r1_n4_fused_subtract_o2_o3__multiply_s0_o1__add_s1_o0_wideS_eanc_d111103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "layer": [
+          {
+            "cold_plan_ns": 203042,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_constant_r0_v3db504f3_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_iota_r1_wideS03R",
+              "omega_iota_r1_wideS03R",
+              "omega_constant_r0_vff800000_wideS03R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_epi5_fused_identity_o5__greater_o0_o1__add_s0_o4__multiply_s2_o3__select_s1_o2_s3_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_reduce_r3_ax0_2_n1_identity_maximum_negative_infinity_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_subtract_o0_o1__exponential_s0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r3_ax0_2_n1_identity_add_zero_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_reciprocal_o1__multiply_s0_o0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r4_ax0_2_3_n2_multiply_add_zero_wideS_w12803_c32_dbg3_0_2_w0_o1_slimR",
+              "omega_reduce_r4_ax0_3_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg3_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_o1__add_s5_o0_wideS_ea4c_0_1_d10100003R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_constant_r0_vbf800000_wideS03R",
+              "omega_constant_r0_v3f800000_wideS03R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_o2_o3__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_o1__add_s5_o0_wideS_ea4c_0_1_d10100003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 33,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "normalization": [
+          {
+            "cold_plan_ns": 17375,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 3,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "readout": [
+          {
+            "cold_plan_ns": 7542,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cfbS_w12803_c32_dbg2_0_w1_o0_slimR"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ]
+      },
+      "positions": 24,
+      "prefix_ids": [
+        6340,
+        260,
+        5307,
+        5054,
+        30,
+        533,
+        451,
+        1977,
+        260,
+        3985,
+        314,
+        4461,
+        284,
+        260,
+        4405,
+        314,
+        2382,
+        30,
+        378,
+        2380,
+        282,
+        260,
+        4405,
+        314
+      ],
+      "readout": "explicit terminal recurrent step",
+      "retained_layer_statistic_nodes": [
+        18,
+        54,
+        57,
+        65,
+        74,
+        96
+      ],
+      "retained_loop_norm_statistic_nodes": [
+        5
+      ],
+      "retained_statistic_reason": "required output boundaries preserve separate softmax/norm folds supported by the Metal renderer; their retention/readback cost is included",
+      "strength": 1.0,
+      "use_cache": false
+    },
+    "cost": {
+      "cov_percent": 0.4255097945353688,
+      "input_tokens_per_second": 38.56827233548455,
+      "mean_ms": 622.2731418000001,
+      "p50_ms": 620.929375,
+      "p90_ms": 626.358375,
+      "p95_ms": 626.358375,
+      "p999_ms": 626.358375,
+      "p99_ms": 626.358375,
+      "raw_durations_ms": [
+        623.4588749999999,
+        619.844875,
+        620.929375,
+        620.774209,
+        626.358375
+      ],
+      "sample_count": 5,
+      "sample_standard_deviation_ms": 2.6478331671219646
+    },
+    "duration_order_statistics_ms": {
+      "max_ms": 626.358375,
+      "min_ms": 619.844875,
+      "nearest_rank_definition": "ceil(p*n), one-based rank",
+      "p90_ms": 626.358375,
+      "p99_9_ms": 626.358375,
+      "p99_ms": 626.358375
+    },
+    "forward_readouts_per_second": 1.6070113473118564,
+    "method": "adaptive-logits-cap-1",
+    "raw_durations_ms": [
+      623.4588749999999,
+      619.844875,
+      620.929375,
+      620.774209,
+      626.358375
+    ],
+    "sample_ids": [
+      "ball:adaptive-logits-cap-1:sample:0",
+      "ball:adaptive-logits-cap-1:sample:1",
+      "ball:adaptive-logits-cap-1:sample:2",
+      "ball:adaptive-logits-cap-1:sample:3",
+      "ball:adaptive-logits-cap-1:sample:4"
+    ],
+    "sources": [
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:adaptive-logits-cap-1:sample:0"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:adaptive-logits-cap-1:sample:1"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:adaptive-logits-cap-1:sample:2"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:adaptive-logits-cap-1:sample:3"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:adaptive-logits-cap-1:sample:4"
+      }
+    ],
+    "warmup_sample_id": "ball:adaptive-logits-cap-1:warmup:0"
+  },
+  {
+    "case_id": "ball",
+    "cold_model_setup_ms": 2.309625,
+    "context": {
+      "arm": "fixed-hidden-0.5",
+      "author_activation_oracle_status": "unmeasured",
+      "backend": "metal",
+      "build_dense_float_storage": true,
+      "build_tiled_min_tokens": 1,
+      "checkpoint_expected_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+      "checkpoint_mapping_mode": "whole_checkpoint_mapping",
+      "checkpoint_observed_sha256": "58872a72616c736595b8b7662079c5b12c5a162ec16eae94f21c348dfa9885af",
+      "checkpoint_revision": "574fa66cb8bf5abdc979642d01cf2b79b16bfab1",
+      "depth": 4,
+      "digest_verified_during_setup": true,
+      "method": "fixed-hidden",
+      "model": "ByteDance/Ouro-1.4B",
+      "numeric_policy": {
+        "approx_functions": false,
+        "contraction": true,
+        "epilogue_sources": false,
+        "nan_assumptions": false,
+        "reassociation": true,
+        "signed_zero": false
+      },
+      "omega_config": {
+        "allow_fusion": true,
+        "constraints": {
+          "max_device_buffer_bytes": null,
+          "max_host_tensor_bytes": null,
+          "max_single_device_buffer_bytes": null
+        },
+        "engine": "gpu",
+        "exact_activations": true,
+        "gpu_driver": "metal",
+        "numeric": {
+          "approx_functions": false,
+          "contraction": true,
+          "epilogue_sources": false,
+          "nan_assumptions": false,
+          "reassociation": true,
+          "signed_zero": false
+        },
+        "selection": {
+          "measurement_runs": null,
+          "mode": "configured",
+          "warmup_runs": null
+        }
+      },
+      "planning": {
+        "contrast": [
+          {
+            "cold_plan_ns": 9167,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r1_n4_fused_subtract_o2_o3__multiply_s0_o1__add_s1_o0_wideS_eanc_d111103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "diagnostic_layer": [
+          {
+            "cold_plan_ns": 174083,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_constant_r0_v3db504f3_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_iota_r1_wideS03R",
+              "omega_iota_r1_wideS03R",
+              "omega_constant_r0_vff800000_wideS03R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_epi5_fused_identity_o5__greater_o0_o1__add_s0_o4__multiply_s2_o3__select_s1_o2_s3_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_reduce_r3_ax0_2_n1_identity_maximum_negative_infinity_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_subtract_o0_o1__exponential_s0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r3_ax0_2_n1_identity_add_zero_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_reciprocal_o1__multiply_s0_o0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r4_ax0_2_3_n2_multiply_add_zero_wideS_w12803_c32_dbg3_0_2_w0_o1_slimR",
+              "omega_reduce_r4_ax0_3_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg3_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_elementwise_r2_n2_add_wideS_eanc_d1103R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_constant_r0_vbf800000_wideS03R",
+              "omega_constant_r0_v3f800000_wideS03R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_o2_o3__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_elementwise_r2_n2_add_wideS_eanc_d1103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 35,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "embedding": [
+          {
+            "cold_plan_ns": 28459,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r2_n1_identity_g1_wideS_ea4c_0_1_d003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "hidden_contrast": [
+          {
+            "cold_plan_ns": 7000,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_elementwise_r1_n4_fused_subtract_o2_o3__multiply_s0_o1__add_s1_o0_wideS_eanc_d111103R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "layer": [
+          {
+            "cold_plan_ns": 203042,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_constant_r0_v3db504f3_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_1_w0_o1_slimR",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_wideS_ea4c_0_1_2_d000003R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_iota_r1_wideS03R",
+              "omega_iota_r1_wideS03R",
+              "omega_constant_r0_vff800000_wideS03R",
+              "omega_reduce_r4_ax0_1_2_n2_multiply_add_zero_epi5_fused_identity_o5__greater_o0_o1__add_s0_o4__multiply_s2_o3__select_s1_o2_s3_wideS_w12803_c32_dbg1_0_2_w1_o0_slimR",
+              "omega_reduce_r3_ax0_2_n1_identity_maximum_negative_infinity_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_subtract_o0_o1__exponential_s0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r3_ax0_2_n1_identity_add_zero_wideS_w3203_c32R",
+              "omega_elementwise_r3_n2_fused_reciprocal_o1__multiply_s0_o0_wideS_ea4c_0_2_d1003R",
+              "omega_reduce_r4_ax0_2_3_n2_multiply_add_zero_wideS_w12803_c32_dbg3_0_2_w0_o1_slimR",
+              "omega_reduce_r4_ax0_3_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg3_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_o1__add_s5_o0_wideS_ea4c_0_1_d10100003R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_constant_r0_vbf800000_wideS03R",
+              "omega_constant_r0_v3f800000_wideS03R",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_o2_o3__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cbfS_w12803_c32_dbg2_0_w0_o1_slimR",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_o1__add_s5_o0_wideS_ea4c_0_1_d10100003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 33,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "normalization": [
+          {
+            "cold_plan_ns": 17375,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_constant_r0_v3a000000_wideS03R",
+              "omega_reduce_r2_ax0_n2_multiply_add_zero_wideS_w25603_c32R",
+              "omega_elementwise_r2_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4_o0_wideS_ea4c_0_1_d0100003R"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 3,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ],
+        "readout": [
+          {
+            "cold_plan_ns": 7542,
+            "device_buffer_reserved_bytes": null,
+            "device_identity": "Apple M1 Max",
+            "driver": "metal",
+            "engine": "gpu",
+            "execution_ns": [],
+            "execution_sum_ns": null,
+            "host_tensor_reserved_bytes": null,
+            "kernel_identities": [
+              "omega_reduce_r3_ax0_2_n2_multiply_add_zero_wide_cfbS_w12803_c32_dbg2_0_w1_o0_slimR"
+            ],
+            "largest_device_buffer_bytes": null,
+            "rejection": null,
+            "resolved_op_count": 1,
+            "selected": true,
+            "warmup_ns": []
+          }
+        ]
+      },
+      "positions": 24,
+      "prefix_ids": [
+        6340,
+        260,
+        5307,
+        5054,
+        30,
+        533,
+        451,
+        1977,
+        260,
+        3985,
+        314,
+        4461,
+        284,
+        260,
+        4405,
+        314,
+        2382,
+        30,
+        378,
+        2380,
+        282,
+        260,
+        4405,
+        314
+      ],
+      "readout": "explicit terminal recurrent step",
+      "retained_layer_statistic_nodes": [
+        18,
+        54,
+        57,
+        65,
+        74,
+        96
+      ],
+      "retained_loop_norm_statistic_nodes": [
+        5
+      ],
+      "retained_statistic_reason": "required output boundaries preserve separate softmax/norm folds supported by the Metal renderer; their retention/readback cost is included",
+      "strength": 0.5,
+      "use_cache": false
+    },
+    "cost": {
+      "cov_percent": 0.4540173258845441,
+      "input_tokens_per_second": 38.95296538984392,
+      "mean_ms": 616.127675,
+      "p50_ms": 614.737459,
+      "p90_ms": 620.939083,
+      "p95_ms": 620.939083,
+      "p999_ms": 620.939083,
+      "p99_ms": 620.939083,
+      "raw_durations_ms": [
+        614.12575,
+        616.193583,
+        614.6424999999999,
+        614.737459,
+        620.939083
+      ],
+      "sample_count": 5,
+      "sample_standard_deviation_ms": 2.7973263940696143
+    },
+    "duration_order_statistics_ms": {
+      "max_ms": 620.939083,
+      "min_ms": 614.12575,
+      "nearest_rank_definition": "ceil(p*n), one-based rank",
+      "p90_ms": 620.939083,
+      "p99_9_ms": 620.939083,
+      "p99_ms": 620.939083
+    },
+    "forward_readouts_per_second": 1.6230402245768298,
+    "method": "fixed-hidden-0.5",
+    "raw_durations_ms": [
+      614.12575,
+      616.193583,
+      614.6424999999999,
+      614.737459,
+      620.939083
+    ],
+    "sample_ids": [
+      "ball:fixed-hidden-0.5:sample:0",
+      "ball:fixed-hidden-0.5:sample:1",
+      "ball:fixed-hidden-0.5:sample:2",
+      "ball:fixed-hidden-0.5:sample:3",
+      "ball:fixed-hidden-0.5:sample:4"
+    ],
+    "sources": [
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:fixed-hidden-0.5:sample:0"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:fixed-hidden-0.5:sample:1"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:fixed-hidden-0.5:sample:2"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:fixed-hidden-0.5:sample:3"
+      },
+      {
+        "file": "samples.jsonl",
+        "sample_id": "ball:fixed-hidden-0.5:sample:4"
+      }
+    ],
+    "warmup_sample_id": "ball:fixed-hidden-0.5:warmup:0"
+  }
+]

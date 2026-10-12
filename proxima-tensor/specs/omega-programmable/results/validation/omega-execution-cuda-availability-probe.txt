@@ -1,0 +1,17 @@
+info: experimental features enabled: wrapper-scripts
+   Compiling omega v0.1.0 (/private/tmp/proxima-omega-execution-worker/omega)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.24s
+────────────
+ Nextest run ID 723bbe16-3f74-4643-8332-f786c656fa2a with nextest profile: default
+    Starting 1 test across 90 binaries (221 tests skipped)
+       START [         ] (1/1) omega backend::programmable_tests::config_plan_explicit_unavailable_driver_does_not_fallback
+
+running 1 test
+cuda_availability_probe=Driver("cuda driver library unavailable")
+test backend::programmable_tests::config_plan_explicit_unavailable_driver_does_not_fallback ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 187 filtered out; finished in 0.01s
+
+        PASS [   0.019s] (1/1) omega backend::programmable_tests::config_plan_explicit_unavailable_driver_does_not_fallback
+────────────
+     Summary [   0.020s] 1 test run: 1 passed, 221 skipped

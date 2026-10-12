@@ -1,0 +1,22 @@
+Final bounded source review — 2026-10-03
+
+Metal configured-resource path
+- `omega/src/metal/configured.rs:143-170` validates the repeated call's input count and codec/element-count contract before execution; `:174-238` rejects preexisting resident/external buffers and unsupported converted input payloads, calculates physical input capacity, deduplicates mappings, and enforces hardware/max-single-buffer ceilings.
+- `omega/src/metal/configured.rs:239-302` rejects specialized/gathered operations without a bounded workspace contract, checks products/sums, accounts output and uniform capacities plus host output bytes, enforces all three limits, and records the reservation only after admission.
+- `omega/src/metal/execute_and_hazards.rs` calls configured input validation and constraint preflight before upload/output allocation; allocated buffers are recorded after creation. `omega/src/metal/placements_execute_named.rs` refuses configured external placement/recycle-pool routes, while the bounded-extension check rejects expert/timed execution.
+- `omega/src/backend/programmable_tests.rs:748-778` asserts a 143-byte device ceiling rejects the 144-byte request and, with instrument enabled, before/after upload/output/dispatch counters remain zero. `:594-625` pins literal output vectors and a one-cell-corruption comparator control. `:780-795` exercises same-shape repeated allocation census.
+
+Classifier, cache, and source/grid coherence
+- `omega/src/identity.rs:856-869` includes feature/token/batch axes and the weight/other operand positions in the dense specialization identity. `omega/src/msl/emit_and_classify.rs:1404-1420` fills those role positions from the selected block; the classifier decision is then used for rendering and grid.
+- `omega/src/msl/tests.rs:2125-2221` covers the gated admission/emit/grid/cache case, reversed operand ordering with identical codec sets, and source fingerprint/operand-read assertions. The role suffix ensures equal old-key inputs that bind different source operands no longer alias.
+
+Native evidence recount
+- `examples/omega_programmable_recount.rs:27-53` rejects nonfinite/malformed numeric vectors and emits coordinate-level signed deltas. `:56-113` independently recomputes five-sample statistics and reconciles summary means, sample SD, CoV and percentiles.
+- `:116-199` rejects duplicate IDs, wrong row/warmup/cell counts, missing/multiple summaries, and incomplete summary reconciliation. `:250-326` requires paired context/work/build-gate identity and preserves every coordinate delta in output. `:402-499` validates paired micro setups, unique IDs, exact record-kind counts, and their payload/control records. Llama pin/identity validation is at `:328-399`.
+
+Main-tree alloc/std build evidence
+- AC7 raw JSON: `/private/tmp/omega-main-ac7-json-only.txt`; command stderr: `/private/tmp/omega-main-ac7-stderr.txt`; `jq -s` counted 1 omega library compiler artifact and 0 error diagnostics.
+- AC8 raw JSON: `/private/tmp/omega-main-ac8-json-only.txt`; command stderr: `/private/tmp/omega-main-ac8-stderr.txt`; `jq -s` counted 1 omega library compiler artifact and 0 error diagnostics.
+- Both used `/private/tmp/proxima-omega-main-tier-target`; cargo check exited 0. The first capture attempt mixed Cargo progress text into the JSON file and is retained as `/private/tmp/omega-main-ac7-json.txt` and `...ac8-json.txt`; the later JSON-only captures are the countable artifacts.
+
+Review result: no additional actionable source defect found in these bounded paths. This records inspected code and assertions, not a correctness or performance verdict.

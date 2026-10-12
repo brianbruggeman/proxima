@@ -1,0 +1,2 @@
+    Finished `release` profile [optimized] target(s) in 0.27s
+     Running `/private/tmp/proxima-omega-measure-enabled-target/release/examples/ouro_loopcd_lab --performance --microbench --backend metal --samples 5 --omega-config proxima-tensor/specs/omega-programmable/relaxed-metal.toml --output proxima-tensor/specs/omega-programmable/results/micro-enabled`

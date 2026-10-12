@@ -1,0 +1,7 @@
+info: experimental features enabled: wrapper-scripts
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/omega)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.27s
+omega backend::programmable_tests::config_cuda_affine_matmul_named_program
+omega backend::programmable_tests::config_cuda_cap_failure_precedes_upload_and_dispatch
+omega backend::programmable_tests::config_cuda_named_program_and_repeat
+omega backend::programmable_tests::config_cuda_same_shape_execution_resource_census

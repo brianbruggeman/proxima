@@ -1,0 +1,73 @@
+info: experimental features enabled: wrapper-scripts
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+────────────
+ Nextest run ID 77fdecfa-3402-4366-888f-129aa37150e7 with nextest profile: default
+    Starting 8 tests across 1 binary (271 tests skipped)
+       START [         ] (1/8) omega msl::tests::programmable_tiled_bf16_classifier_accepts_supported_operand_positions
+
+running 1 test
+dense_operand_order reversed=false extents=[160, 5, 1, 16] output_axes=[0, 1, 2] operands=[(NodeId(0), Layout { base: 0, strides: [0, 16, 16, 1] }, None), (NodeId(1), Layout { base: 0, strides: [16, 0, 16, 1] }, None)]
+dense_operand_order reversed=true extents=[160, 5, 1, 16] output_axes=[0, 1, 2] operands=[(NodeId(0), Layout { base: 0, strides: [16, 0, 16, 1] }, None), (NodeId(1), Layout { base: 0, strides: [0, 16, 16, 1] }, None)]
+test msl::tests::programmable_tiled_bf16_classifier_accepts_supported_operand_positions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 278 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (1/8) omega msl::tests::programmable_tiled_bf16_classifier_accepts_supported_operand_positions
+       START [         ] (2/8) omega msl::tests::programmable_tiled_cpu_oracle_and_corrupt_cell_control
+
+running 1 test
+test msl::tests::programmable_tiled_cpu_oracle_and_corrupt_cell_control ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 278 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (2/8) omega msl::tests::programmable_tiled_cpu_oracle_and_corrupt_cell_control
+       START [         ] (3/8) omega msl::tests::programmable_tiled_f16_renderer_uses_existing_float_tiles
+
+running 1 test
+test msl::tests::programmable_tiled_f16_renderer_uses_existing_float_tiles ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 278 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (3/8) omega msl::tests::programmable_tiled_f16_renderer_uses_existing_float_tiles
+       START [         ] (4/8) omega msl::tests::programmable_tiled_grid_emit_and_cache_follow_one_admission
+
+running 1 test
+test msl::tests::programmable_tiled_grid_emit_and_cache_follow_one_admission ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 278 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (4/8) omega msl::tests::programmable_tiled_grid_emit_and_cache_follow_one_admission
+       START [         ] (5/8) omega msl::tests::programmable_tiled_noncontiguous_reduction_is_rejected
+
+running 1 test
+test msl::tests::programmable_tiled_noncontiguous_reduction_is_rejected ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 278 filtered out; finished in 0.00s
+
+        PASS [   0.008s] (5/8) omega msl::tests::programmable_tiled_noncontiguous_reduction_is_rejected
+       START [         ] (6/8) omega msl::tests::programmable_tiled_numeric_policy_requires_both_rewrites
+
+running 1 test
+test msl::tests::programmable_tiled_numeric_policy_requires_both_rewrites ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 278 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (6/8) omega msl::tests::programmable_tiled_numeric_policy_requires_both_rewrites
+       START [         ] (7/8) omega msl::tests::programmable_tiled_ragged_k_and_feature_tail_keep_bounds_masks
+
+running 1 test
+test msl::tests::programmable_tiled_ragged_k_and_feature_tail_keep_bounds_masks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 278 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (7/8) omega msl::tests::programmable_tiled_ragged_k_and_feature_tail_keep_bounds_masks
+       START [         ] (8/8) omega msl::tests::programmable_tiled_unsupported_codec_is_rejected_by_dense_classifier
+
+running 1 test
+test msl::tests::programmable_tiled_unsupported_codec_is_rejected_by_dense_classifier ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 278 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (8/8) omega msl::tests::programmable_tiled_unsupported_codec_is_rejected_by_dense_classifier
+────────────
+     Summary [   0.075s] 8 tests run: 8 passed, 271 skipped
