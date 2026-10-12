@@ -20,12 +20,16 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
-use proxima_tensor::{BoundOpKind, NumericPolicy, bind};
+use proxima_tensor::test_support::Lcg;
+use proxima_tensor::{
+    BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NumericPolicy, Op, Reduce, ReduceInit,
+    ScalarOp, append, bind, infer, projection,
+};
 
 mod support;
 use support::{as_named_blocks, real_single_range_forward_fixture_with_padding};
 
-fn epilogued_reduce_count(resolved: &[proxima_tensor::BoundOp]) -> usize {
+fn epilogued_reduce_count(resolved: &[BoundOp]) -> usize {
     resolved
         .iter()
         .filter(|bound| {
@@ -52,7 +56,7 @@ fn assert_parity_at_padding(padding: u64) {
     let named = as_named_blocks(&owned);
 
     let shapes =
-        proxima_tensor::infer(&program, &symbols).expect("single-range padded fixture infers");
+        infer(&program, &symbols).expect("single-range padded fixture infers");
     let resolved = bind(&program, &shapes, &output_roots, NumericPolicy::default())
         .expect("single-range padded fixture binds");
     assert!(
@@ -173,11 +177,6 @@ fn the_fused_epilogue_is_byte_identical_across_twenty_dispatches() {
 /// the CPU's serial fold).
 #[test]
 fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
-    use proxima_tensor::test_support::Lcg;
-    use proxima_tensor::{
-        DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, projection,
-    };
-
     const SEQ: u32 = 7;
     const DIM: u32 = 4096;
 
@@ -297,7 +296,7 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
         },
     );
 
-    let shapes = proxima_tensor::infer(&program, &[]).expect("rmsnorm program infers");
+    let shapes = infer(&program, &[]).expect("rmsnorm program infers");
     let output_roots = [scaled];
     let resolved = bind(&program, &shapes, &output_roots, NumericPolicy::default())
         .expect("rmsnorm program binds with fusion");
@@ -366,4 +365,142 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
         "metal disagrees with cpu on the rmsnorm broadcast-reduce epilogue: relative={relative} \
          max_diff={max_diff}"
     );
+}
+
+fn assert_broadcast_fold_rows(width: u32, input: Vec<f32>, expected: Vec<f32>) {
+    let mut program = Vec::new();
+    let rows = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(2), Extent::Static(width)],
+            name: Some("rows".into()),
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: rows,
+            in_map: IndexMap::Affine(projection(2, &[0, 1])),
+            out_map: IndexMap::Affine(projection(2, &[0])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+    let normalized = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Divide,
+            operands: vec![
+                (rows, IndexMap::Affine(projection(2, &[0, 1]))),
+                (sum, IndexMap::Affine(projection(2, &[0]))),
+            ],
+            name: None,
+        },
+    );
+    let owned = vec![("rows".to_string(), input)];
+    let named = as_named_blocks(&owned);
+    let shapes = infer(&program, &[]).expect("two broadcast rows infer");
+    let resolved = bind(&program, &shapes, &[normalized], NumericPolicy::bit_exact())
+        .expect("two broadcast rows bind");
+    assert_eq!(
+        epilogued_reduce_count(&resolved),
+        1,
+        "the fused path must execute"
+    );
+    let strict = omega::plan_named(
+        &program,
+        &[],
+        &named,
+        &[normalized],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("strict fused rows plan");
+    let fused = omega::execute_plan_named(&strict, &named).expect("strict fused rows execute");
+    assert_eq!(
+        fused.root(),
+        expected.as_slice(),
+        "each strict row follows its literal ordered fold"
+    );
+    let materialized = omega::plan_named(
+        &program,
+        &[],
+        &named,
+        &[sum, normalized],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("strict materialized rows plan");
+    let all_roots =
+        omega::execute_plan_named(&materialized, &named).expect("strict materialized rows execute");
+    assert_eq!(
+        all_roots.root(),
+        expected.as_slice(),
+        "materialized ordered fold follows the literals"
+    );
+    assert_eq!(
+        fused.root(),
+        all_roots.root(),
+        "strict requested roots cannot grant reassociation"
+    );
+    let permitted = omega::plan_named(
+        &program,
+        &[],
+        &named,
+        &[normalized],
+        NumericPolicy::llama_relaxed(),
+    )
+    .expect("permitted tree rows plan");
+    let tree = omega::execute_plan_named(&permitted, &named).expect("permitted tree rows execute");
+    assert_ne!(
+        tree.root()[0],
+        expected[0],
+        "the admitted tree is the negative ordered-fold control"
+    );
+    eprintln!(
+        "broadcast width={width} input={:?} expected={expected:?} fused={:?} materialized={:?} permitted={:?}",
+        owned[0].1,
+        fused.root(),
+        all_roots.root(),
+        tree.root()
+    );
+}
+
+#[test]
+fn broadcast_fold_policy_cancellation_rows() {
+    let mut input = vec![0.0f32; 1024];
+    input[0] = 16_777_216.0;
+    input[1] = 1.0;
+    input[256] = -16_777_216.0;
+    input[257] = 1.0;
+    input[512] = 16_777_216.0;
+    input[513] = -16_777_216.0;
+    input[514] = 1.0;
+    input[515] = 1.0;
+    let mut expected = vec![0.0f32; 1024];
+    expected[0] = 16_777_216.0;
+    expected[1] = 1.0;
+    expected[256] = -16_777_216.0;
+    expected[257] = 1.0;
+    expected[512] = 8_388_608.0;
+    expected[513] = -8_388_608.0;
+    expected[514] = 0.5;
+    expected[515] = 0.5;
+    assert_broadcast_fold_rows(512, input, expected);
+}
+
+#[test]
+fn broadcast_fold_policy_positive_rows() {
+    let tiny = 1.0f32 / 33_554_432.0;
+    let mut input = vec![tiny; 512];
+    input[0] = 1.0;
+    input[256..].fill(2.0 * tiny);
+    input[256] = 2.0;
+    let mut expected = vec![tiny; 512];
+    expected[0] = 1.0;
+    expected[256] = 1.0;
+    assert_broadcast_fold_rows(256, input, expected);
 }

@@ -112,7 +112,7 @@ fn bit_exact_policy_keeps_the_serial_fold_and_never_batches() {
         !source.contains("batch["),
         "no cooperative fold means no batched loads"
     );
-    assert!(source.contains("for (long r = 0; r < u.reduction_total; r++)"));
+    assert!(source.contains("accumulator = seeded ? (accumulator + value) : value;"), "{source}");
 }
 
 #[cfg(all(
@@ -219,7 +219,7 @@ pub(super) mod normalization_rows {
         emit(
             &rmsnorm_over_row(width),
             &BTreeMap::new(),
-            NumericPolicy::default(),
+            NumericPolicy::bit_exact().with_reassociation(true),
         )
         .expect("normalization row emits")
         .source
@@ -241,6 +241,21 @@ pub(super) mod normalization_rows {
     fn row_wider_than_the_cap_is_held_to_the_cap() {
         let expected = 1024.min(crate::sized::BROADCAST_REDUCE_MAX_WIDTH);
         assert_eq!(dispatch_width(4096), expected);
+    }
+
+    #[test]
+    fn row_without_tree_reduce_permission_folds_in_order_on_lane_zero() {
+        let source = emit(
+            &rmsnorm_over_row(1536),
+            &BTreeMap::new(),
+            NumericPolicy::bit_exact(),
+        )
+        .expect("normalization row emits")
+        .source;
+        assert!(source.contains("ordered_fold = accumulator;"), "{source}");
+        assert!(source.contains("accumulator = seeded ? (accumulator + value) : value;"), "{source}");
+        assert!(!source.contains("simd_sum"), "{source}");
+        assert!(!source.contains("partials["), "{source}");
     }
 
     #[test]
