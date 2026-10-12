@@ -3,25 +3,149 @@
 Each slice: one commit, one behaviour change, one validation command, under ~30 minutes.
 Update the checkbox and the note IN THE SAME COMMIT as the slice.
 
-`$E2B`, `$GRANITE`, `$CORPUS`, `$DRAFT_E2B`, `$DRAFT_GRANITE` are the absolute paths defined in the acceptance criteria preamble of SPEC.md; every validation command below is literal.
+`$E2B`, `$GRANITE`, `$CORPUS`, `$DRAFT_E2B`, `$DRAFT_GRANITE` are the absolute paths defined in the acceptance criteria preamble of SPEC.md; every validation command is literal and lives in the `commands` section below the table (a markdown table cell cannot carry a literal pipe).
 
 | # | slice | discharges | validation command | expected | done | note |
 |---|---|---|---|---|---|---|
-| 0 | prerequisite, owned by `decode-as-data` slice 3: the `build_forward` readout list (logits rows, hidden-state taps at named layers, extra head roots). This sub-spec consumes it and does not re-implement it | prerequisite, no AC | `cargo nextest run -p proxima-tensor -E 'test(/readout_/)' 2>&1 \| grep -c 'Summary .* 2 tests run: 2 passed'` | 1 | [ ] | fails until `decode-as-data` slice 3 lands |
-| 1 | the lossless harness: `speculative_lossless_corpus` example (plain greedy versus speculative per prompt, `--draft-random <seed>`, `--draft-model <path>`, `--drafter <name>`), its pure comparator, a `summary prompts=<n> identical=<n> ... rejected_total=<n>` line that carries the corpus-sum `rejected_total`, and the three control tests (RL5) | ACL5 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/lossless_comparator_\|lossless_guard_/)' 2>&1 \| grep -cE '^control=(self\|flip\|zero_draft) '` | 3 | [ ] | the other three method specs consume this example |
-| 2 | draft descriptor from GGUF-key reads (12 required, 1 conditional, 4 optional tensors) and the `eagle3` family profile TOML (R1); no forward program yet | AC1 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_descriptor_reads_target_layers_and_tensors/)' 2>&1 \| grep -cE 'target_layers = \[3, 7, 11\] target_hidden_size = 16 required_resolved = 12 conditional_resolved = 1 optional_resolved = 4 perturbed_differs = true missing_required_typed_error = true'` | 1 | [ ] | |
-| 3 | gemma4 all-positions hidden-state tap at 3 caller-chosen layer indices, through the readout list (R2) | AC2 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/gemma4_hidden_tap_metal_equals_cpu/)' 2>&1 \| grep -cE 'positions = 64 layers = 3 rows_per_layer = 64 layer_ids = \[2, 13, 25\] max_abs_diff = [0-9.e-]+ independent_max_abs_diff = [0-9.e-]+ control_self = 0\.0 control_perturbed_rejected = true wrong_layer_rejected = true'` | 1 | [ ] | needs slice 0 |
-| 4 | encoder graph: 3-layer fuse -> optional RMSNorm -> `fc` -> g_embd (R3) | AC3 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_encoder_worked_example/)' 2>&1 \| grep -cE 'cases = 2 max_abs_diff = [0-9.e-]+ unnormed_equals_slice = true normed_differs = true ops_outside_allowed = 0'` | 1 | [ ] | |
-| 5 | decoder step graph: concat(embd_norm, g_norm) -> attention -> FFN -> output_norm -> lm_head -> optional `d2t` (R4) | AC4, AC11 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_decoder_stepwise_equals_batch/)' 2>&1 \| grep -cE 'positions = 8 batch_vs_stepwise_max_abs_diff = [0-9.e-]+ g_embd_perturbed_diff = [0-9.e-]+'; cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_decoder_worked_example/)' 2>&1 \| grep -cE '^decoder_worked_example n_embd = 2 draft_vocab = 3 target_vocab = 5 max_abs_diff = [0-9.e-]+ argmax_target_id = 4 unmapped_neg_inf = 2 wrong_residual_rejected = true ops_outside_allowed = 0$'` | two lines: `1`, `1` | [ ] | |
-| 6 | draft loop: top-1 per step, `p_min` stop, `n_max` stop, `n_min` clear (R5) | AC5 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_draft_loop_stops/)' 2>&1 \| grep -cE 'cases = 4 p_min_stops = 3 n_max_stops = 1 n_min_clears = 1'` | 1 | [ ] | |
-| 7 | accept-time boundary rewind (R6) | AC6 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_accept_rewinds_boundary/)' 2>&1 \| grep -cE 'cases = 5 wrong_row_rejected = true'` | 1 | [ ] | |
-| 8 | empty stash and no-op restore for an attention-only target (R7) | AC7 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_state_stash_empty_for_attention_target/)' 2>&1 \| grep -cE 'stash_len = 0 restore_noop = true mutation_survives = true'` | 1 | [ ] | |
-| 9 | route the `draft-eagle3` config value to the propose pipe carrying taps and the draft descriptor, with builder/loader parity (R8; the five tests include the parity test) | AC8 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/speculative_config_selects_draft_eagle3/)' 2>&1 \| grep -c 'Summary .* 5 tests run: 5 passed'` | 1 | [ ] | |
-| 10 | pairing compatibility typed errors (R9) | AC9 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/eagle3_pairing_/)' 2>&1 \| grep -c 'Summary .* 5 tests run: 5 passed'` | 1 | [ ] | |
-| 11 | lossless over a random draft on E2B, 51 prompts (RL1, RL3) | ACL1 | `cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --drafter draft-eagle3 --draft-random 17 --max-tokens 64 /Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd > lossless_eagle3_e2b_random.txt 2>&1; grep -c '^lossless ' lossless_eagle3_e2b_random.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* ' lossless_eagle3_e2b_random.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_eagle3_e2b_random.txt` | three lines: `51`, `51`, `1` | [ ] | a count below 51 on the second line invokes the refutation condition |
-| 12 | lossless over the trained E2B draft, 51 prompts, `accepted` > 0 on every prompt (RL1, RL2); also loads and pairs the trained draft (R10) | ACL2, AC10 | `cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --drafter draft-eagle3 --draft-model /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-eagle3/e2b-eagle3.gguf --max-tokens 64 /Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd > lossless_eagle3_e2b_trained.txt 2>&1; grep -c '^lossless ' lossless_eagle3_e2b_trained.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* accepted=[1-9][0-9]* ' lossless_eagle3_e2b_trained.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_eagle3_e2b_trained.txt; cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_trained_draft_loads_and_pairs/)' 2>&1 \| grep -cE 'e2b_pair = ok granite_pair = width_mismatch target_layers = \[[0-9]+, [0-9]+, [0-9]+\]'` | four lines: `51`, `51`, `1` (rejected_total >= 1, pre-registered, plausible: zero rollbacks over 51 prompts means the rollback path was never exercised by this draft), `1` (AC10) | [ ] | blocked on `speculative-draft-training` slice 11 |
-| 13 | granite arms: lossless over a random draft (ACL3) and over the trained draft (ACL4) | ACL3, ACL4 | `cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --drafter draft-eagle3 --draft-random 17 --max-tokens 64 /Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80 > lossless_eagle3_granite_random.txt 2>&1; grep -c '^lossless ' lossless_eagle3_granite_random.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* ' lossless_eagle3_granite_random.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_eagle3_granite_random.txt; cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --drafter draft-eagle3 --draft-model /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-eagle3/granite-eagle3.gguf --max-tokens 64 /Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80 > lossless_eagle3_granite_trained.txt 2>&1; grep -c '^lossless ' lossless_eagle3_granite_trained.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* accepted=[1-9][0-9]* ' lossless_eagle3_granite_trained.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_eagle3_granite_trained.txt` | six lines: `51`, `51`, `1` (random arm ACL3, rejected_total >= 1 proves rollback independent of the weights), `51`, `51`, `1` (trained arm ACL4; rejected_total >= 1, pre-registered, plausible: zero rollbacks over 51 prompts means the rollback path was never exercised by this draft) | [ ] | blocked on `speculative-draft-training` slice 9 (granite verify) for the random arm and slice 12 for the trained arm |
-| 14 | typed `speculative_verify` refusal on an unarmed profile, no refusal on an armed one (RL4) | ACL6 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_granite_verify_arming_/)' 2>&1 \| grep -cE '^arming method=eagle3 cases = 3 unarmed_refused = 1 error_names_speculative_verify = true armed_refused = 0 control_wrong_error_rejected = true$'` | 1 | [ ] | runs today, independent of `speculative-draft-training` slice 9 |
+| 0 | prerequisite, owned by `decode-as-data` slice 3: the `build_forward` readout list (logits rows, hidden-state taps at named layers, extra head roots). This sub-spec consumes it and does not re-implement it | prerequisite: `decode-as-data` AC7 (cross-spec) | see `commands` slice 0 | 1 | [ ] | fails until `decode-as-data` slice 3 lands |
+| 1 | the lossless harness: `speculative_lossless_corpus` example (plain greedy versus speculative per prompt, `--draft-random <seed>`, `--draft-model <path>`, `--drafter <name>`), its pure comparator, a `summary prompts=<n> identical=<n> ... rejected_total=<n>` line that carries the corpus-sum `rejected_total`, and the three control tests (RL5) | ACL5 | see `commands` slice 1 | 3 | [ ] | the other three method specs consume this example |
+| 2 | draft descriptor from GGUF-key reads (12 required, 1 conditional, 4 optional tensors), the llama-written `$GRANITE` parser and writer oracle, and the `eagle3` family profile TOML (R1); no forward program yet | AC1 | see `commands` slice 2 | 1 | [ ] | |
+| 3 | gemma4 all-positions hidden-state tap at 3 caller-chosen layer indices, through the readout list (R2) | AC2 | see `commands` slice 3 | 1 | [ ] | needs slice 0 |
+| 4 | encoder graph: 3-layer fuse -> optional RMSNorm -> `fc` -> g_embd (R3) | AC3 | see `commands` slice 4 | 1 | [ ] | |
+| 5 | decoder step graph: concat(embd_norm, g_norm) -> attention -> FFN -> output_norm -> lm_head -> optional `d2t` (R4) | AC4, AC11 | see `commands` slice 5 | two lines: `1`, `1` | [ ] | |
+| 6 | draft loop: top-1 per step, `p_min` stop, `n_max` stop, `n_min` clear (R5) | AC5 | see `commands` slice 6 | 1 | [ ] | |
+| 7 | accept-time boundary rewind (R6) | AC6 | see `commands` slice 7 | 1 | [ ] | |
+| 8 | empty stash and no-op restore for an attention-only target (R7) | AC7 | see `commands` slice 8 | 1 | [ ] | |
+| 9 | route the `draft-eagle3` config value to the propose pipe carrying taps and the draft descriptor, with builder/loader parity (R8; the five tests include the parity test) | AC8 | see `commands` slice 9 | 1 | [ ] | |
+| 10 | pairing compatibility typed errors (R9) | AC9 | see `commands` slice 10 | 1 | [ ] | |
+| 11 | lossless over a random draft on E2B, 51 prompts (RL1, RL3) | ACL1 | see `commands` slice 11 | three lines: `51`, `51`, `1` | [ ] | a count below 51 on the second line invokes the refutation condition |
+| 12 | lossless over the trained E2B draft, 51 prompts, `accepted` > 0 on every prompt (RL1, RL2); also loads and pairs the trained draft (R10) | ACL2, AC10 | see `commands` slice 12 | four lines: `51`, `51`, `1` (rejected_total >= 1, pre-registered, plausible: zero rollbacks over 51 prompts means the rollback path was never exercised by this draft), `1` (AC10) | [ ] | blocked on `speculative-draft-training` slice 11 |
+| 13 | granite arms: lossless over a random draft (ACL3) and over the trained draft (ACL4) | ACL3, ACL4 | see `commands` slice 13 | six lines plus one refusal-count line per arm (eight, see commands): `51`, `51`, `1` (random arm ACL3, rejected_total >= 1 proves rollback independent of the weights), `51`, `51`, `1` (trained arm ACL4; rejected_total >= 1, pre-registered, plausible: zero rollbacks over 51 prompts means the rollback path was never exercised by this draft) | [ ] | blocked on `speculative-draft-training` slice 9 (granite verify) for the random arm and slice 12 for the trained arm |
+| 14 | typed `speculative_verify` refusal on an unarmed profile, no refusal on an armed one (RL4) | ACL6 | see `commands` slice 14 | 1 | [ ] | runs today, independent of `speculative-draft-training` slice 9 |
+
+## commands
+
+Run each from the worktree root.
+
+### slice 0
+
+```sh
+cargo nextest run -p proxima-tensor -E 'test(/readout_/)' 2>&1 | grep -c 'Summary .* 2 tests run: 2 passed'
+```
+
+expected: 1
+
+### slice 1
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/lossless_comparator_|lossless_guard_/)' 2>&1 | grep -cE '^control=(self|flip|zero_draft) '
+```
+
+expected: 3
+
+### slice 2
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_descriptor_reads_target_layers_and_tensors/)' 2>&1 | grep -cE 'target_layers = \[3, 7, 11\] target_hidden_size = 16 required_resolved = 12 conditional_resolved = 1 optional_resolved = 4 perturbed_differs = true missing_required_typed_error = true rms_epsilon_read = true norm_before_residual_read = true key_names_equal_llama = true llama_written_i32_array_len_matches_tokens = true llama_written_bool_key_read = true writer_array_bytes_equal_llama = true'
+```
+
+expected: 1
+
+### slice 3
+
+```sh
+cargo nextest run -p proxima-model-interop --features std,metal --no-capture -E 'test(/gemma4_hidden_tap_metal_equals_cpu/)' 2>&1 | grep -cE 'positions = 64 layers = 3 rows_per_layer = 64 layer_ids = \[2, 13, 25\] max_abs_diff = [0-9.e-]+ independent_max_abs_diff = [0-9.e-]+ control_self = 0\.0 control_perturbed_rejected = true wrong_layer_rejected = true pseudo_index_rows = 64'
+```
+
+expected: 1
+
+### slice 4
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_encoder_worked_example/)' 2>&1 | grep -cE 'cases = 2 max_abs_diff = [0-9.e-]+ unnormed_equals_slice = true normed_differs = true ops_outside_allowed = 0'
+```
+
+expected: 1
+
+### slice 5
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_decoder_stepwise_equals_batch/)' 2>&1 | grep -cE 'positions = 8 batch_vs_stepwise_max_abs_diff = [0-9.e-]+ g_embd_perturbed_diff = [0-9.e-]+'; cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_decoder_worked_example/)' 2>&1 | grep -cE '^decoder_worked_example n_embd = 2 draft_vocab = 3 target_vocab = 5 max_abs_diff = [0-9.e-]+ argmax_target_id = 4 unmapped_neg_inf = 2 wrong_residual_rejected = true norm_before_residual_max_abs_diff = [0-9.e-]+ norm_before_residual_distinct = true single_position_attention_max_abs_diff = [0-9.e-]+ no_d2t_identity = true fallback_head_is_target_lm_head = true fallback_embd_is_target_token_embd = true ops_outside_allowed = 0$'
+```
+
+expected: two lines: `1`, `1`
+
+### slice 6
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_draft_loop_stops/)' 2>&1 | grep -cE 'cases = 4 p_min_stops = 3 n_max_stops = 1 n_min_clears = 1'
+```
+
+expected: 1
+
+### slice 7
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_accept_rewinds_boundary/)' 2>&1 | grep -cE 'cases = 5 wrong_row_rejected = true'
+```
+
+expected: 1
+
+### slice 8
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_state_stash_empty_for_attention_target/)' 2>&1 | grep -cE 'stash_len = 0 restore_noop = true mutation_survives = true'
+```
+
+expected: 1
+
+### slice 9
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/speculative_config_selects_draft_eagle3/)' 2>&1 | grep -c 'Summary .* 5 tests run: 5 passed'
+```
+
+expected: 1
+
+### slice 10
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_pairing_/)' 2>&1 | grep -c 'Summary .* 5 tests run: 5 passed'
+```
+
+expected: 1
+
+### slice 11
+
+```sh
+cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --drafter draft-eagle3 --draft-random 17 --max-tokens 64 /Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd > lossless_eagle3_e2b_random.txt 2>&1; grep -c '^lossless ' lossless_eagle3_e2b_random.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* ' lossless_eagle3_e2b_random.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_eagle3_e2b_random.txt
+```
+
+expected: three lines: `51`, `51`, `1`
+
+### slice 12
+
+```sh
+cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --drafter draft-eagle3 --draft-model /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-eagle3/e2b-eagle3.gguf --max-tokens 64 /Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd > lossless_eagle3_e2b_trained.txt 2>&1; grep -c '^lossless ' lossless_eagle3_e2b_trained.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* accepted=[1-9][0-9]* ' lossless_eagle3_e2b_trained.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_eagle3_e2b_trained.txt; cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_trained_draft_loads_and_pairs/)' 2>&1 | grep -cE 'e2b_pair = ok granite_pair = width_mismatch target_layers = \[[0-9]+, [0-9]+, [0-9]+\]'
+```
+
+expected: four lines: `51`, `51`, `1` (rejected_total >= 1, pre-registered, plausible: zero rollbacks over 51 prompts means the rollback path was never exercised by this draft), `1` (AC10)
+
+### slice 13
+
+```sh
+cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --drafter draft-eagle3 --draft-random 17 --max-tokens 64 /Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80 > lossless_eagle3_granite_random.txt 2>&1; grep -c '^lossless ' lossless_eagle3_granite_random.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* ' lossless_eagle3_granite_random.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_eagle3_granite_random.txt; grep -cE '^refused method=eagle3 reason=(speculative_verify|draft_shape) ' lossless_eagle3_granite_random.txt; cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl --drafter draft-eagle3 --draft-model /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-eagle3/granite-eagle3.gguf --max-tokens 64 /Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80 > lossless_eagle3_granite_trained.txt 2>&1; grep -c '^lossless ' lossless_eagle3_granite_trained.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* accepted=[1-9][0-9]* ' lossless_eagle3_granite_trained.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_eagle3_granite_trained.txt; grep -cE '^refused method=eagle3 reason=(speculative_verify|draft_shape) ' lossless_eagle3_granite_trained.txt
+```
+
+expected: six lines: `51`, `51`, `1` (random arm ACL3, rejected_total >= 1 proves rollback independent of the weights), `51`, `51`, `1` (trained arm ACL4; rejected_total >= 1, pre-registered, plausible: zero rollbacks over 51 prompts means the rollback path was never exercised by this draft); plus a fourth line per arm: `0` when the arm ran, `1` when the harness recorded the typed `speculative_verify` or `draft_shape` refusal (RL4), in which case the first three lines print `0`; line 1 plus line 4 must be nonzero, so the arm is never skipped silently
+
+### slice 14
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/eagle3_granite_verify_arming_/)' 2>&1 | grep -cE '^arming method=eagle3 cases = 3 unarmed_refused = 1 error_names_speculative_verify = true armed_refused = 0 control_wrong_error_rejected = true$'
+```
+
+expected: 1
 
 ## resume
 
