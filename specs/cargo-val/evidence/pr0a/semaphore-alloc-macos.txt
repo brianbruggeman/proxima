@@ -1,0 +1,15 @@
+$ RUSTC_WRAPPER= CARGO_TARGET_DIR=/tmp/cargo-val-pr0-final/target cargo test -p proxima-primitives --no-default-features --features alloc --test semaphore_alloc measure_uncontended_acquire_allocations -- --exact --nocapture --test-threads=1
+   Compiling proxima-primitives v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-primitives)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.54s
+     Running tests/semaphore_alloc.rs (/tmp/cargo-val-pr0-final/target/debug/deps/semaphore_alloc-317244c3070490ab)
+
+running 1 test
+test measure_uncontended_acquire_allocations ... alloc_record {"case":"empty_window_control","cycles":0,"allocation_delta":0}
+alloc_record {"case":"boxed_allocation_positive_control","cycles":1,"allocation_delta":1}
+alloc_record {"case":"uncontended_acquire_once","cycles":1,"allocation_delta":1}
+alloc_record {"case":"uncontended_acquire_repeated","cycles":16,"allocation_delta":16}
+alloc_record {"case":"uncontended_try_acquire_once","cycles":1,"allocation_delta":0}
+alloc_record {"case":"uncontended_try_acquire_repeated","cycles":16,"allocation_delta":0}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
