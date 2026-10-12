@@ -12,7 +12,7 @@ proxima-model-interop cannot serve llama.cpp's `draft-mtp` speculation (gemma4 E
 
 ## refutation condition
 
-Written before evidence: if, after slice 1 obtains the real sidecar GGUF, the sidecar graph (`src/models/gemma4-assistant.cpp:84-200`) cannot be reproduced losslessly from `ModelDescriptor` fields, a readout list and `Op::Input` leaves -- i.e. it needs a graph concept (a new `Op`, or a family-keyed branch in the loop) that the descriptor cannot carry as data, observed as fewer than 51 prompts identical to plain greedy on the 51-prompt corpus with a correct verify path -- this sub-spec's architecture section is wrong and must be redone against the actual graph shape, not patched.
+Written before evidence: if, after slice 1 obtains the real sidecar GGUF, the sidecar graph (`src/models/gemma4-assistant.cpp:84-200`) cannot be reproduced losslessly from `ModelDescriptor` fields, a readout list and `Op::Input` leaves -- i.e. it needs a graph concept (a new `Op`, or a family-keyed branch in the loop) that the descriptor cannot carry as data, observed as either (a) the AC6 readout comparison failing (`max_abs_diff` at or above the 1e-4 tolerance against the per-position `t_h_nextn` rows llama.cpp computes for the sidecar graph) or (b) `accepted` = 0 on every prompt of ACL2 with the published draft. Lossless failure is NOT the observable: greedy verify makes the output equal plain decode for any draft, so a lossless count below 51 indicates a verify or rollback bug and not a graph-reproduction failure. If either (a) or (b) is observed, this sub-spec's architecture section is wrong and must be redone against the actual graph shape, not patched.
 
 ## requirements
 
@@ -35,7 +35,7 @@ Written before evidence: if, after slice 1 obtains the real sidecar GGUF, the si
 
 Nothing here is a new type. MTP is a second descriptor with its own `ServingState`, driven through the four pipes of `decode-as-data` (propose, shape, accept, commit). Its row in that spec's table is "extra readout roots on the target program (nextn block) | chain | sample-and-match | prefix", specialised here to the sidecar, whose readout roots are the sidecar's own `t_h_nextn`.
 
-- **detection (R1)** is a free function over `&ParsedGguf`, not a method on a type: detection needs no bound weights. It lives beside the existing tensor-name lookup (`proxima-model-interop/src/bind.rs:298-304` `find_tensor`, `proxima-gguf/src/parser.rs`); slice 4 decides which crate by reading their neighbors first.
+- **detection (R1)** is a free function over `&ParsedGguf`, not a method on a type: detection needs no bound weights. It lives in `proxima-gguf` beside `proxima-gguf/src/parser.rs`, the crate that owns `ParsedGguf` (`proxima-gguf/src/pipe.rs:25`), so detection needs nothing from proxima-model-interop.
 - **hidden-state readout (R3/R4)**: the target's final hidden row per verified position is a readout at the final layer (`decode-as-data` R5), the analogue of `llama_get_embeddings_nextn_ith` (`src/llama-ext.h:108`). `BoundProgram::hidden_root` (`proxima-model-interop/src/lowering.rs:137`) is the final-norm activation of the last row only; the all-positions tap is the readout list, `decode-as-data` slice 3, a prerequisite named in TASKS slice 0.
 - **sidecar descriptor (R2/R3)** is a second `ModelDescriptor` (`proxima-tensor/src/spec/descriptor.rs:130-296`) loaded by the same path as the existing draft-model support (`proxima-model-interop/src/generate/draft_model.rs:174-183`, `load_draft`) and driven by its own `ServingState` instance. What is new is only that its embedding table and its attention KV are the target's: descriptor fields naming the source, resolved at construction into a borrowed read-only handle to the target state. The shape (field names, how the draft `ServingState` aliases the target's cache layers) is the design slice's output (TASKS slice 3), a signature there, not a settled design here.
 - **draft loop (R4/R5)** is the propose pipe configured by the `draft-mtp` config value; accept is sample-and-match; commit is prefix truncate. The sidecar's `is_mem_shared` behaviour is a branch on the descriptor's KV-source field in the propose pipe, not a second pipe, because the accept and rollback shape is identical.
@@ -62,22 +62,26 @@ Every count below is asserted by its test, which prints the count only after the
 
 | id | discharges | command | expected |
 |---|---|---|---|
-| AC1 | R2 | `strings -a "$GEMMA_MTP" \| grep -c 'nextn.pre_projection'` | count >= 1 (the sidecar's own tensor name, not `eh_proj`); the control is the same command on `$E2B`, which prints 0 |
-| AC2 | R7 | `$LLAMA_SPEC_SIMPLE --model "$E2B" --model-draft "$GEMMA_MTP" --spec-type draft-mtp -p "test" -n 8 2>&1 \| grep -cE 'n_drafted = [1-9]'` | 1 (one `n_drafted = N` line with N >= 1; 0 is RED; llama.cpp itself drafts with the fixture, so a garbage conversion is caught before any proxima code is blamed) |
-| AC3 | R1 | `cargo nextest run -p proxima-gguf --no-capture -E 'test(/mtp_form_classification/)' 2>&1 \| grep -cE 'cases = 4 sidecar = 1 single_gguf_unsupported = 1 not_mtp = 2'` | 1 (four synthetic GGUFs written with `proxima-gguf`'s writer: `gemma4-assistant` architecture classifies as the sidecar, a `qwen35`-architecture GGUF with `blk.<last>.nextn.eh_proj.weight` returns the unsupported-form error, a `gemma4`-architecture GGUF and a `llama`-architecture GGUF are not MTP drafts; asserted before the print; the real-file halves print `real_sidecar = true` for `$GEMMA_MTP` and `real_target_is_mtp = false` for `$E2B` only when run with `--ignored`, and are not part of this count) |
-| AC4 | R2 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mtp_sidecar_descriptor_binds/)' 2>&1 \| grep -c 'Summary .* 3 tests run: 3 passed'` | 1 (three tests: the descriptor binds against `$GEMMA_MTP`; a different-width target returns the typed width error; a sidecar whose `n_embd_out` equals its own `n_embd` returns the load-time typed error) |
-| AC5 | R3 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/mtp_sidecar_alias_equals_copy/)' 2>&1 \| grep -cE 'rows = [0-9]+ alias_vs_copy_max_abs_diff = [0-9.e-]+ target_mutated_alias_differs = true'` | 1 (the sidecar forward over the target's KV by alias equals the forward over an explicit copy of that KV, asserted `< 1e-4` over at least 8 rows; the control mutates the target's KV after the alias is taken and asserts the alias result changes while the copy result does not, which shows the alias is live and not a copy) |
-| AC6 | R3 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/mtp_sidecar_readout_matches_llama_fixture/)' 2>&1 \| grep -cE 'cases = [0-9]+ max_abs_diff = [0-9.e-]+ control_self = 0\.0 control_perturbed_rejected = true'` | 1 (secondary check against llama.cpp: the per-position `t_h_nextn` rows llama.cpp `f1ea20621` computes for the sidecar graph (`src/models/gemma4-assistant.cpp:195-196`), dumped by slice 2; the test asserts `cases` >= 50 and `max_abs_diff` < 1e-4, that the fixture compared with itself gives exactly 0.0, and that one element moved by 2e-4 is rejected, then prints) |
-| AC7 | R4 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/mtp_draft_loop_stops/)' 2>&1 \| grep -cE 'cases = 4 p_min_stops = 3 n_max_stops = 1 n_min_clears = 1'; cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/mtp_accept_selects_carried_row/)' 2>&1 \| grep -cE 'cases = 5 accept_rows = 0,2,3,3,keep wrong_row_rejected = true'` | two lines: `1`, `1` (test `mtp_draft_loop_stops` runs 4 draft cases on the scripted top-1 `(token, probability)` sequence `(11, 0.90)`, `(12, 0.70)`, `(13, 0.40)`, `(14, 0.80)`: `n_max` is 4 and `n_min` is 1 in cases 1, 2 and 4, and `n_min` is 3 in case 3: case 1 `p_min` 0.5 gives `[11, 12]` and ends on `p_min`; case 2 `p_min` 0.0 gives `[11, 12, 13, 14]` and ends on `n_max`; case 3 `p_min` 0.5 ends on `p_min` with 2 collected and clears to `[]` because 2 < `n_min`; case 4 `p_min` 0.95 collects 0 and gives `[]`, ending on `p_min`, which is not a clear because the result was already empty; so `p_min_stops` counts the cases that ended on `p_min` (1, 3, 4, so 3), `n_max_stops` counts the cases that ended on `n_max` (2, so 1) and `n_min_clears` counts the cases where a non-empty collected list was discarded because its length was below `n_min` (case 3 only, so 1); test `mtp_accept_selects_carried_row` runs 5 accept cases: with `n_rows` 4 the selector picks rows 0, 2, 3 and 3 (clamped) for `n_accepted` 0, 2, 3 and 9, and keeps the carried row for `n_rows` 0; the control asserts an off-by-one selector is rejected; all asserted before each print; `p_min` and `n_min` values are test inputs, not thresholds) |
-| AC8 | R5 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/draft_mtp_is_mem_shared_positions/)' 2>&1 \| grep -cE 'draft_positions = 5,5,5 catchup_decodes = 0 non_shared_positions = 5,6,7 non_shared_catchup_decodes = 1'` | 1 (with `pos0` 5 and `n_max` 3 the shared-memory path decodes three batch entries: `id_last` at position 5 (`common/speculative.cpp:1604`), then the first and second drafted tokens, each appended at `dp.pos0`, also position 5 (`:1697-1703`); the third drafted token reaches `n_max` at `:1680-1683` and is never appended, so `draft_positions = 5,5,5` lists the positions of `id_last`, draft 1 and draft 2, and 0 catch-up decodes run; the control configures a non-shared draft, whose entries land at `pos0 + i + 1` (`:1703-1707`), and asserts `5,6,7` for the same three entries (`id_last` at 5, draft 1 at 6, draft 2 at 7) and 1 catch-up decode, so the test can tell the two branches apart) |
-| AC9 | R5 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/draft_mtp_positions_match_llama_fixture/)' 2>&1 \| grep -cE 'records = [0-9]+ control_self = true control_perturbed_rejected = true'` | 1 (secondary check against llama.cpp: the draft positions and ids llama.cpp `f1ea20621` records for a shared-memory run (`common/speculative.cpp:1697-1703`), dumped by slice 2 and vendored as `proxima-model-interop/tests/fixtures/llama-mtp/gemma-internals.jsonl`; the test asserts `records` >= 1, all positions of each draft record equal, and that moving one recorded position by one is rejected by the same comparator) |
-| AC10 | R6 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/speculative_config_draft_mtp_/)' 2>&1 \| grep -c 'Summary .* 3 tests run: 3 passed'` | 1 (three tests: `draft-mtp` with a sidecar path routes to the second-descriptor path; with no sidecar path it is a typed error; with a sidecar path to a GGUF that is not the R1 sidecar form it is a typed error) |
-| AC11 | R7 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/mtp_llama_parity_gemma_seed_/)' 2>&1 \| grep -cE 'ids_compared = [0-9]+'` | 3 (one printed line per seed 1, 2, 3; each test ASSERTS `ids_compared` >= 8 and id equality with the ids vendored from `$LLAMA_SPEC_SIMPLE --model "$E2B" --model-draft "$GEMMA_MTP" --spec-type draft-mtp --seed <seed> -n 40` (oracle: llama.cpp `f1ea20621`), and prints `ids_compared = N` only after those assertions pass; secondary) |
-| AC12 | R7 | `jq '([.cases[] \| select(.n_drafted > 0)] \| length), (.cases \| length)' proxima-model-interop/tests/fixtures/llama-mtp/gemma.json` | two lines: `3`, `3` (the drafted-case count and the total case count; both 3, so every vendored oracle run drafted and no undrafted run hides in the file; verified on synthetic fixtures: 3 drafted of 3 prints `3 3`, one `n_drafted` 0 prints `2 3`, a fourth undrafted case prints `3 4`, two cases print `2 2`, no cases print `0 0`) |
-| AC13 | R8 | `cargo nextest run -p proxima-model-interop --features std -E 'test(/mtp_oracle_control_/)' 2>&1 \| grep -c 'Summary .* 6 tests run: 6 passed'` | 1 (six tests: `mtp_oracle_control_self_<comparator>` and `mtp_oracle_control_perturbed_<comparator>` for the three comparators ids, float rows and positions; the perturbed tests assert the rejection) |
+| AC1 | R2 | section `ac commands`, `### AC1` | count 1 (the sidecar's own tensor name, not `eh_proj`; `nextn.pre_projection` is a global tensor with no block index, `src/llama-arch.cpp:582-583`, so it occurs once in the tensor directory; pre-registered, status plausible, slice 1 records the observed count); the control is the same command on `$E2B`, which prints 0 |
+| AC2 | R7 | section `ac commands`, `### AC2` | 1 (one `n_drafted = N` line with N >= 1; 0 is RED; llama.cpp itself drafts with the fixture, so a garbage conversion is caught before any proxima code is blamed) |
+| AC3 | R1 | section `ac commands`, `### AC3` | 1 (four synthetic GGUFs written with `proxima-gguf`'s writer: `gemma4-assistant` architecture classifies as the sidecar, a `qwen35`-architecture GGUF with `blk.<last>.nextn.eh_proj.weight` returns the unsupported-form error, a `gemma4`-architecture GGUF and a `llama`-architecture GGUF are not MTP drafts; asserted before the print; the real-file halves print `real_sidecar = true` for `$GEMMA_MTP` and `real_target_is_mtp = false` for `$E2B` only when run with `--ignored`, and are not part of this count) |
+| AC4 | R2 | section `ac commands`, `### AC4` | 1 (three tests: the descriptor binds against `$GEMMA_MTP`; a different-width target returns the typed width error; a sidecar whose `n_embd_out` equals its own `n_embd` returns the load-time typed error) |
+| AC5 | R3 | section `ac commands`, `### AC5` | 1 (the sidecar forward over the target's KV by alias equals the forward over an explicit copy of that KV, asserted `< 1e-4` over at least 8 rows; the control mutates the target's KV after the alias is taken and asserts the alias result changes while the copy result does not, which shows the alias is live and not a copy) |
+| AC6 | R3 | section `ac commands`, `### AC6` | 1 (secondary check against llama.cpp: the per-position `t_h_nextn` rows llama.cpp `f1ea20621` computes for the sidecar graph (`src/models/gemma4-assistant.cpp:195-196`), dumped by slice 2; the test asserts `cases` >= 50 and `max_abs_diff` < 1e-4, that the fixture compared with itself gives exactly 0.0, and that one element moved by 2e-4 is rejected, then prints) |
+| AC7 | R4 | section `ac commands`, `### AC7` | two lines: `1`, `1` (test `mtp_draft_loop_stops` runs 4 draft cases on the scripted top-1 `(token, probability)` sequence `(11, 0.90)`, `(12, 0.70)`, `(13, 0.40)`, `(14, 0.80)`: `n_max` is 4 and `n_min` is 1 in cases 1, 2 and 4, and `n_min` is 3 in case 3: case 1 `p_min` 0.5 gives `[11, 12]` and ends on `p_min`; case 2 `p_min` 0.0 gives `[11, 12, 13, 14]` and ends on `n_max`; case 3 `p_min` 0.5 ends on `p_min` with 2 collected and clears to `[]` because 2 < `n_min`; case 4 `p_min` 0.95 collects 0 and gives `[]`, ending on `p_min`, which is not a clear because the result was already empty; so `p_min_stops` counts the cases that ended on `p_min` (1, 3, 4, so 3), `n_max_stops` counts the cases that ended on `n_max` (2, so 1) and `n_min_clears` counts the cases where a non-empty collected list was discarded because its length was below `n_min` (case 3 only, so 1); test `mtp_accept_selects_carried_row` runs 5 accept cases: with `n_rows` 4 the selector picks rows 0, 2, 3 and 3 (clamped) for `n_accepted` 0, 2, 3 and 9, and keeps the carried row for `n_rows` 0; the control asserts an off-by-one selector is rejected; all asserted before each print; `p_min` and `n_min` values are test inputs, not thresholds) |
+| AC8 | R5 | section `ac commands`, `### AC8` | 1 (with `pos0` 5 and `n_max` 3 the shared-memory path decodes three batch entries: `id_last` at position 5 (`common/speculative.cpp:1604`), then the first and second drafted tokens, each appended at `dp.pos0`, also position 5 (`:1697-1703`); the third drafted token reaches `n_max` at `:1680-1684` and is never appended, so `draft_positions = 5,5,5` lists the positions of `id_last`, draft 1 and draft 2, and 0 catch-up decodes run; the control configures a non-shared draft, whose entries land at `pos0 + i + 1` (`:1703-1707`), and asserts `5,6,7` for the same three entries (`id_last` at 5, draft 1 at 6, draft 2 at 7) and 1 catch-up decode, so the test can tell the two branches apart) |
+| AC9 | R5 | section `ac commands`, `### AC9` | 1 (secondary check against llama.cpp: the draft positions and ids llama.cpp `f1ea20621` records for a shared-memory run (`common/speculative.cpp:1697-1703`), dumped by slice 2 and vendored as `proxima-model-interop/tests/fixtures/llama-mtp/gemma-internals.jsonl`; the test asserts `records` >= 1, all positions of each draft record equal, and that moving one recorded position by one is rejected by the same comparator) |
+| AC10 | R6 | section `ac commands`, `### AC10` | 1 (three tests: `draft-mtp` with a sidecar path routes to the second-descriptor path; with no sidecar path it is a typed error; with a sidecar path to a GGUF that is not the R1 sidecar form it is a typed error) |
+| AC11 | R7 | section `ac commands`, `### AC11` | 3 (one printed line per seed 1, 2, 3; each test ASSERTS `ids_compared` >= 8 and id equality with the ids vendored from `$LLAMA_SPEC_SIMPLE --model "$E2B" --model-draft "$GEMMA_MTP" --spec-type draft-mtp --seed <seed> -n 40` (oracle: llama.cpp `f1ea20621`), and prints `ids_compared = N` only after those assertions pass; secondary) |
+| AC12 | R7 | section `ac commands`, `### AC12` | two lines: `3`, `3` (the drafted-case count and the total case count; both 3, so every vendored oracle run drafted and no undrafted run hides in the file; verified on synthetic fixtures: 3 drafted of 3 prints `3 3`, one `n_drafted` 0 prints `2 3`, a fourth undrafted case prints `3 4`, two cases print `2 2`, no cases print `0 0`) |
+| AC13 | R8 | section `ac commands`, `### AC13` | 1 (six tests: `mtp_oracle_control_self_<comparator>` and `mtp_oracle_control_perturbed_<comparator>` for the three comparators ids, float rows and positions; the perturbed tests assert the rejection) |
+| AC14 | R7 | section `ac commands`, `### AC14` | 1 (the oracle binary built by slice 0b registers `--spec-type`; 0 is RED) |
+| AC15 | R3 | section `ac commands`, `### AC15` | 3 (`SIDECAR_SHAPE.md` written by slice 3 has exactly three `###` sections: descriptor source fields, the read-only cache alias, the next-hidden-row readout) |
+| AC16 | R3 | section `ac commands`, `### AC16` | 1 (the sibling spec's `readout_` tests, 2 tests run: 2 passed, so the all-positions readout tap this spec consumes exists) |
+| AC17 | R3, R5 | section `ac commands`, `### AC17` | four lines: `>= 1`, `0`, `0`, `>= 50` (pre-registered bounds as stated in TASKS slice 2: draft records with equal positions, draft records with differing positions, catch-up records, non-empty `h_nextn` rows; the vendored dump is the input to AC6 and AC9) |
 | ACL1 | RL1, RL3 | `cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus "$CORPUS" --drafter draft-mtp --draft-random 17 --max-tokens 64 "$E2B" > lossless_mtp_e2b_random.txt 2>&1; grep -c '^lossless ' lossless_mtp_e2b_random.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* ' lossless_mtp_e2b_random.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_mtp_e2b_random.txt` | three lines printed: `51`, `51`, `1` (51 prompts processed; 51 of them identical to plain greedy with at least one drafted token; the summary line states prompts=51, identical=51 and a nonzero `rejected_total` (>= 1, pre-registered, status plausible), so the rollback path ran; acceptance is printed in `accepted_total` and `mean_accepted_per_step` and is not gated for a random draft) |
 | ACL2 | RL1, RL2 | `cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus "$CORPUS" --drafter draft-mtp --draft-model "$GEMMA_MTP" --max-tokens 64 "$E2B" > lossless_mtp_e2b_published.txt 2>&1; grep -c '^lossless ' lossless_mtp_e2b_published.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* accepted=[1-9][0-9]* ' lossless_mtp_e2b_published.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_mtp_e2b_published.txt` | three lines printed: `51`, `51`, `1` (every prompt identical to plain greedy, with `n_drafted` and `accepted` both above 0 on every prompt; the published assistant is the draft, so there is no training dependency; blocked only on slice 1 placing `$GEMMA_MTP`; the third grep gates `rejected_total` >= 1 as a corpus sum, not per prompt: lossless output with zero rollbacks over all 51 prompts means verify never disagreed with the draft, so this draft never exercised the rollback path, while a draft that rejects nothing on some prompts still passes; the threshold >= 1 is pre-registered, status plausible, and ACL1's random draft proves rollback independent of the published weights) |
-| ACL5 | RL5 | `cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/lossless_comparator_\|lossless_guard_/)' 2>&1 \| grep -cE '^control=(self\|flip\|zero_draft) '` | 3 (three tests, each asserting before it prints: `lossless_comparator_self_passes` prints `control=self compared=51 identical=51`; `lossless_comparator_rejects_flipped_token` flips one id of one prompt and prints `control=flip compared=51 identical=50`; `lossless_guard_rejects_zero_draft` feeds 51 prompts that drafted nothing and prints `control=zero_draft drafted_prompts=0 flagged=true`) |
+| ACL5 | RL5 | section `ac commands`, `### ACL5` | 3 (three tests, each asserting before it prints: `lossless_comparator_self_passes` prints `control=self compared=51 identical=51`; `lossless_comparator_rejects_flipped_token` flips one id of one prompt and prints `control=flip compared=51 identical=50`; `lossless_guard_rejects_zero_draft` feeds 51 prompts that drafted nothing and prints `control=zero_draft drafted_prompts=0 flagged=true`) |
 
 ## out of scope
 
@@ -109,3 +113,124 @@ Every count below is asserted by its test, which prints the count only after the
 - proxima: `proxima-tensor/src/spec/descriptor.rs:130-296` (`ModelDescriptor`), `proxima-model-interop/src/lowering.rs:118-189` (`BoundProgram`; `hidden_root` at `:137`), `proxima-model-interop/src/profiles/gemma4.toml`, `proxima-model-interop/src/generate/draft_model.rs:174-183` (`load_draft`), `proxima-model-interop/src/generate/drafter.rs`, `proxima-model-interop/src/speculative_settings.rs:36-59` (`SpeculativeTypeName`), `proxima-model-interop/src/serving.rs:205-217` (`SpeculativeType`), `proxima-model-interop/src/bind.rs:298-304` (`find_tensor`), `proxima-gguf/src/parser.rs`, `proxima-model-interop/examples/speculative_decode_parity.rs`, `proxima-tensor/specs/decode-as-data/SPEC.md`, `proxima-tensor/specs/speculative-decode-llama-parity/SPEC.md`, `proxima-tensor/specs/speculative-draft-eagle3/SPEC.md` (the lossless harness)
 - llama.cpp `f1ea20621` at `~/repos/others/llama.cpp`, design references only (read with `git show f1ea20621:<path>`): `common/speculative.cpp:1331-1747` (`common_speculative_impl_draft_mtp`), `:1375-1377` (width assert), `:1420` (`is_mem_shared`), `:1508-1579` (catch-up skip), `:1584-1731` (`draft`), `:1697-1703` (same-position append), `:1733-1746` (`accept`), `:2273-2308` (`common_speculative_types_from_gguf`), `common/arg.cpp:4237-4254` (`--model-draft`, `--spec-type`), `src/llama-arch.cpp:60,582-583`, `src/models/gemma4-assistant.cpp:30-32,43,54-56,84-200`
 - real sidecar GGUFs to obtain (named via web search 2026-09-28, not yet downloaded or byte-checked): a published E2B-sized GGUF of `google/gemma-4-E2B-it-assistant`, found by searching Hugging Face for `gemma-4-E2B-it-assistant`; this spec runs no conversion
+
+## ac commands
+
+Each command is literal shell; run it from the repository root.
+
+The four variables defined in the acceptance criteria preamble are bound first:
+
+```sh
+export E2B=/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd
+export GEMMA_MTP=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-mtp/gemma4-e2b-assistant.gguf
+export CORPUS=proxima-model-interop/examples/data/speculative_corpus.jsonl
+export LLAMA_SPEC_SIMPLE=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/llama-f1ea20621/bin/llama-speculative-simple
+```
+
+### AC1
+
+```sh
+strings -a "$GEMMA_MTP" | grep -c 'nextn.pre_projection'
+```
+
+### AC2
+
+```sh
+$LLAMA_SPEC_SIMPLE --model "$E2B" --model-draft "$GEMMA_MTP" --spec-type draft-mtp -p "test" -n 8 2>&1 | grep -cE 'n_drafted = [1-9]'
+```
+
+### AC3
+
+```sh
+cargo nextest run -p proxima-gguf --no-capture -E 'test(/mtp_form_classification/)' 2>&1 | grep -cE 'cases = 4 sidecar = 1 single_gguf_unsupported = 1 not_mtp = 2'
+```
+
+### AC4
+
+```sh
+cargo nextest run -p proxima-model-interop --features std -E 'test(/mtp_sidecar_descriptor_binds/)' 2>&1 | grep -c 'Summary .* 3 tests run: 3 passed'
+```
+
+### AC5
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/mtp_sidecar_alias_equals_copy/)' 2>&1 | grep -cE 'rows = [0-9]+ alias_vs_copy_max_abs_diff = [0-9.e-]+ target_mutated_alias_differs = true'
+```
+
+### AC6
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/mtp_sidecar_readout_matches_llama_fixture/)' 2>&1 | grep -cE 'cases = [0-9]+ max_abs_diff = [0-9.e-]+ control_self = 0\.0 control_perturbed_rejected = true'
+```
+
+### AC7
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/mtp_draft_loop_stops/)' 2>&1 | grep -cE 'cases = 4 p_min_stops = 3 n_max_stops = 1 n_min_clears = 1'; cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/mtp_accept_selects_carried_row/)' 2>&1 | grep -cE 'cases = 5 accept_rows = 0,2,3,3,keep wrong_row_rejected = true'
+```
+
+### AC8
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/draft_mtp_is_mem_shared_positions/)' 2>&1 | grep -cE 'draft_positions = 5,5,5 catchup_decodes = 0 non_shared_positions = 5,6,7 non_shared_catchup_decodes = 1'
+```
+
+### AC9
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/draft_mtp_positions_match_llama_fixture/)' 2>&1 | grep -cE 'records = [0-9]+ control_self = true control_perturbed_rejected = true'
+```
+
+### AC10
+
+```sh
+cargo nextest run -p proxima-model-interop --features std -E 'test(/speculative_config_draft_mtp_/)' 2>&1 | grep -c 'Summary .* 3 tests run: 3 passed'
+```
+
+### AC11
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/mtp_llama_parity_gemma_seed_/)' 2>&1 | grep -cE 'ids_compared = [0-9]+'
+```
+
+### AC12
+
+```sh
+jq '([.cases[] | select(.n_drafted > 0)] | length), (.cases | length)' proxima-model-interop/tests/fixtures/llama-mtp/gemma.json
+```
+
+### AC13
+
+```sh
+cargo nextest run -p proxima-model-interop --features std -E 'test(/mtp_oracle_control_/)' 2>&1 | grep -c 'Summary .* 6 tests run: 6 passed'
+```
+
+### ACL5
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/lossless_comparator_|lossless_guard_/)' 2>&1 | grep -cE '^control=(self|flip|zero_draft) '
+```
+
+### AC14
+
+```sh
+/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/llama-f1ea20621/bin/llama-speculative-simple --help 2>&1 | grep -c -- '--spec-type'
+```
+
+### AC15
+
+```sh
+grep -c '^### ' proxima-tensor/specs/speculative-draft-mtp/SIDECAR_SHAPE.md
+```
+
+### AC16
+
+```sh
+cargo nextest run -p proxima-tensor -E 'test(/readout_/)' 2>&1 | grep -c 'Summary .* 2 tests run: 2 passed'
+```
+
+### AC17
+
+```sh
+jq -s '([.[] | select(.kind == "draft" and (.positions | length) > 1 and (.positions | unique | length) == 1)] | length), ([.[] | select(.kind == "draft" and (.positions | unique | length) > 1)] | length), ([.[] | select(.kind == "catchup")] | length), ([.[] | select(.kind == "h_nextn" and ((.h_row | length) > 0))] | length)' proxima-model-interop/tests/fixtures/llama-mtp/gemma-internals.jsonl
+```
