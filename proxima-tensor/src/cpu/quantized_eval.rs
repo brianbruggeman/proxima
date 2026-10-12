@@ -239,7 +239,11 @@ pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
             | BoundOpKind::Iota
             | BoundOpKind::Constant { .. } => &[],
         };
-        for (operand, ..) in sources {
+        let consumer_is_elementwise = matches!(
+            computed.kind,
+            BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. }
+        );
+        for (index, (operand, ..)) in sources.iter().enumerate() {
             if expert_sources.is_some_and(|sources| sources.contains_key(operand)) {
                 continue;
             }
@@ -257,7 +261,16 @@ pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
                     "quantized operand selected for materialization"
                 );
             }
-            materialize_quantized_weight_output(*operand, shapes, quantized_weights, buffers)?;
+            let row_shape = consumer_is_elementwise
+                .then(|| packed_operand_row_shape(computed, index))
+                .flatten();
+            materialize_quantized_weight_output(
+                *operand,
+                shapes,
+                quantized_weights,
+                row_shape,
+                buffers,
+            )?;
         }
     }
     Ok(())
@@ -474,7 +487,13 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
         if expert_sources.is_some_and(|sources| sources.contains_key(&output)) {
             continue;
         }
-        materialize_quantized_weight_output(output, &shapes, &quantized_weights, &mut buffers)?;
+        materialize_quantized_weight_output(
+            output,
+            &shapes,
+            &quantized_weights,
+            None,
+            &mut buffers,
+        )?;
     }
     let retires = node_retirement(&resolved, &effective_outputs);
     // ROW 181 profile-gate probe: `evaluate_named` no longer reaches this
