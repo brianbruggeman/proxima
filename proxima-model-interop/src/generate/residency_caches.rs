@@ -116,6 +116,41 @@ mod configured_runtime_tests {
         );
     }
 
+    #[cfg(any(
+        all(feature = "cuda", not(target_os = "macos")),
+        target_os = "macos"
+    ))]
+    fn gpu_runtime() -> BackendRuntime {
+        BackendRuntime::new(&ServingConfig {
+            gpu_layers: crate::GPU_LAYERS_ALL,
+            ..ServingConfig::default()
+        })
+    }
+
+    #[cfg(all(feature = "cuda", not(target_os = "macos")))]
+    #[test]
+    fn a_cuda_prefill_binds_an_empty_cached_range_not_the_bucket() {
+        let runtime = gpu_runtime();
+
+        assert!(runtime.uses_gpu());
+        assert_eq!(
+            crate::generate::cached_kv_extent(runtime.pads_cached_kv(), 0, 5, 32),
+            0
+        );
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn a_metal_prefill_binds_the_bucketed_cached_range_its_fused_bound_masks() {
+        let runtime = gpu_runtime();
+
+        assert!(runtime.uses_gpu());
+        assert_eq!(
+            crate::generate::cached_kv_extent(runtime.pads_cached_kv(), 0, 5, 32),
+            32
+        );
+    }
+
     #[test]
     fn configured_runtime_refuses_placements_and_wrong_identity() {
         reject_configured_placements(None).expect("legacy placement");
@@ -2793,6 +2828,17 @@ impl BackendRuntime {
         matches!(self.engine, Engine::Gpu)
     }
 
+    /// Whether the cached K/V range is bound padded to its bucket: only where the
+    /// resolved GPU driver renders the fused `CachedAttention` bound that excludes the
+    /// pad rows. A driver running the unfused chain (CUDA) needs the exact
+    /// `cached_len`, because the program has no mask over the cached range.
+    #[cfg(feature = "metal")]
+    pub(super) fn pads_cached_kv(&self) -> bool {
+        self.uses_gpu()
+            && omega::backend::GpuDriver::for_target()
+                .is_some_and(omega::backend::GpuDriver::fuses_cached_attention)
+    }
+
     /// `resident_names` -- the caller's own model-weight names, fixed for
     /// the whole [`LoadedModel::generate_with_serving_config`] call -- is
     /// handed to [`mark_resident`] exactly once per distinct [`Plan`] (right
@@ -4238,6 +4284,10 @@ impl BackendRuntime {
     }
 
     pub(super) fn uses_gpu(&self) -> bool {
+        false
+    }
+
+    pub(super) fn pads_cached_kv(&self) -> bool {
         false
     }
 
