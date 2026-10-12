@@ -26,7 +26,7 @@
 use loom::sync::Mutex;
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 #[cfg(not(feature = "loom"))]
 use std::sync::Mutex;
 #[cfg(not(feature = "loom"))]
@@ -159,7 +159,7 @@ impl Signal {
     pub fn fired(&self) -> Fired {
         Fired {
             levels: self.levels.clone(),
-            slot: None,
+            slot: OnceLock::new(),
         }
     }
 
@@ -194,32 +194,41 @@ impl core::fmt::Debug for Signal {
 /// is `'static` and can outlive the handle it came from.
 pub struct Fired {
     levels: Arc<[Arc<Level>]>,
-    slot: Option<Arc<WakerSlot>>,
+    slot: OnceLock<Arc<WakerSlot>>,
+}
+
+impl Fired {
+    /// Poll through a shared reference, for an owner that must keep this
+    /// registration alive across abandoned call futures (`FanIn` drops a
+    /// `Pending` call every scan). The waker slot lives in `self`, so it is
+    /// unregistered only when the `Fired` itself drops; a re-poll refreshes
+    /// the slot's waker in place. Prefer `.await` / `Future::poll` when the
+    /// future is polled to completion by one owner.
+    pub fn poll_shared(&self, cx: &mut Context<'_>) -> Poll<()> {
+        // register-then-check closes the lost-wakeup race: fire() sets
+        // the flag before draining waiters, so a fire that slipped past
+        // our registration is visible in the check below.
+        let slot = self.slot.get_or_init(|| {
+            let slot = Arc::new(WakerSlot::new());
+            for level in self.levels.iter() {
+                level.waiters().push(slot.clone());
+            }
+            slot
+        });
+        slot.register(cx.waker());
+        if self.levels.iter().any(|level| level.is_fired()) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
 }
 
 impl Future for Fired {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        let this = self.get_mut();
-        // register-then-check closes the lost-wakeup race: fire() sets
-        // the flag before draining waiters, so a fire that slipped past
-        // our registration is visible in the check below.
-        if this.slot.is_none() {
-            let slot = Arc::new(WakerSlot::new());
-            for level in this.levels.iter() {
-                level.waiters().push(slot.clone());
-            }
-            this.slot = Some(slot);
-        }
-        if let Some(slot) = &this.slot {
-            slot.register(cx.waker());
-        }
-        if this.levels.iter().any(|level| level.is_fired()) {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
+        self.poll_shared(cx)
     }
 }
 
