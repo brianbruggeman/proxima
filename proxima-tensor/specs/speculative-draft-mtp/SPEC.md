@@ -35,7 +35,7 @@ Written before evidence: if, after slice 1 obtains the real sidecar GGUF, the si
 
 Nothing here is a new type. MTP is a second descriptor with its own `ServingState`, driven through the four pipes of `decode-as-data` (propose, shape, accept, commit). Its row in that spec's table is "extra readout roots on the target program (nextn block) | chain | sample-and-match | prefix", specialised here to the sidecar, whose readout roots are the sidecar's own `t_h_nextn`.
 
-- **detection (R1)** is a free function over `&ParsedGguf`, not a method on a type: detection needs no bound weights. It lives in `proxima-gguf` beside `proxima-gguf/src/parser.rs`, the crate that owns `ParsedGguf` (`proxima-gguf/src/pipe.rs:25`), so detection needs nothing from proxima-model-interop.
+- **detection (R1)** is a free function over `&ParsedGguf`, not a method on a type: detection needs no bound weights. It lives in `proxima-gguf` beside `proxima-gguf/src/parser.rs`, the crate that owns `ParsedGguf` (`proxima-gguf/src/pipe.rs:25-33`), so detection needs nothing from proxima-model-interop.
 - **hidden-state readout (R3/R4)**: the target's final hidden row per verified position is a readout at the final layer (`decode-as-data` R5), the analogue of `llama_get_embeddings_nextn_ith` (`src/llama-ext.h:108`). `BoundProgram::hidden_root` (`proxima-model-interop/src/lowering.rs:137`) is the final-norm activation of the last row only; the all-positions tap is the readout list, `decode-as-data` slice 3, a prerequisite named in TASKS slice 0.
 - **sidecar descriptor (R2/R3)** is a second `ModelDescriptor` (`proxima-tensor/src/spec/descriptor.rs:130-296`) loaded by the same path as the existing draft-model support (`proxima-model-interop/src/generate/draft_model.rs:174-183`, `load_draft`) and driven by its own `ServingState` instance. What is new is only that its embedding table and its attention KV are the target's: descriptor fields naming the source, resolved at construction into a borrowed read-only handle to the target state. The shape (field names, how the draft `ServingState` aliases the target's cache layers) is the design slice's output (TASKS slice 3), a signature there, not a settled design here.
 - **draft loop (R4/R5)** is the propose pipe configured by the `draft-mtp` config value; accept is sample-and-match; commit is prefix truncate. The sidecar's `is_mem_shared` behaviour is a branch on the descriptor's KV-source field in the propose pipe, not a second pipe, because the accept and rollback shape is identical.
@@ -72,15 +72,15 @@ Every count below is asserted by its test, which prints the count only after the
 | AC8 | R5 | section `ac commands`, `### AC8` | 1 (with `pos0` 5 and `n_max` 3 the shared-memory path decodes three batch entries: `id_last` at position 5 (`common/speculative.cpp:1604`), then the first and second drafted tokens, each appended at `dp.pos0`, also position 5 (`:1697-1703`); the third drafted token reaches `n_max` at `:1680-1684` and is never appended, so `draft_positions = 5,5,5` lists the positions of `id_last`, draft 1 and draft 2, and 0 catch-up decodes run; the control configures a non-shared draft, whose entries land at `pos0 + i + 1` (`:1703-1707`), and asserts `5,6,7` for the same three entries (`id_last` at 5, draft 1 at 6, draft 2 at 7) and 1 catch-up decode, so the test can tell the two branches apart) |
 | AC9 | R5 | section `ac commands`, `### AC9` | 1 (secondary check against llama.cpp: the draft positions and ids llama.cpp `f1ea20621` records for a shared-memory run (`common/speculative.cpp:1697-1703`), dumped by slice 2 and vendored as `proxima-model-interop/tests/fixtures/llama-mtp/gemma-internals.jsonl`; the test asserts `records` >= 1, all positions of each draft record equal, and that moving one recorded position by one is rejected by the same comparator) |
 | AC10 | R6 | section `ac commands`, `### AC10` | 1 (three tests: `draft-mtp` with a sidecar path routes to the second-descriptor path; with no sidecar path it is a typed error; with a sidecar path to a GGUF that is not the R1 sidecar form it is a typed error) |
-| AC11 | R7 | section `ac commands`, `### AC11` | 3 (one printed line per seed 1, 2, 3; each test ASSERTS `ids_compared` >= 8 and id equality with the ids vendored from `$LLAMA_SPEC_SIMPLE --model "$E2B" --model-draft "$GEMMA_MTP" --spec-type draft-mtp --seed <seed> -n 40` (oracle: llama.cpp `f1ea20621`), and prints `ids_compared = N` only after those assertions pass; secondary) |
+| AC11 | R7 | section `ac commands`, `### AC11` | 3 (one printed line per seed 1, 2, 3; each test ASSERTS `ids_compared` >= 8 and id equality with the ids vendored from the `### AC11` oracle command (oracle: llama.cpp `f1ea20621`, one run per seed), and prints `ids_compared = N` only after those assertions pass; secondary) |
 | AC12 | R7 | section `ac commands`, `### AC12` | two lines: `3`, `3` (the drafted-case count and the total case count; both 3, so every vendored oracle run drafted and no undrafted run hides in the file; verified on synthetic fixtures: 3 drafted of 3 prints `3 3`, one `n_drafted` 0 prints `2 3`, a fourth undrafted case prints `3 4`, two cases print `2 2`, no cases print `0 0`) |
 | AC13 | R8 | section `ac commands`, `### AC13` | 1 (six tests: `mtp_oracle_control_self_<comparator>` and `mtp_oracle_control_perturbed_<comparator>` for the three comparators ids, float rows and positions; the perturbed tests assert the rejection) |
 | AC14 | R7 | section `ac commands`, `### AC14` | 1 (the oracle binary built by slice 0b registers `--spec-type`; 0 is RED) |
 | AC15 | R3 | section `ac commands`, `### AC15` | 3 (`SIDECAR_SHAPE.md` written by slice 3 has exactly three `###` sections: descriptor source fields, the read-only cache alias, the next-hidden-row readout) |
 | AC16 | R3 | section `ac commands`, `### AC16` | 1 (the sibling spec's `readout_` tests, 2 tests run: 2 passed, so the all-positions readout tap this spec consumes exists) |
 | AC17 | R3, R5 | section `ac commands`, `### AC17` | four lines: `>= 1`, `0`, `0`, `>= 50` (pre-registered bounds as stated in TASKS slice 2: draft records with equal positions, draft records with differing positions, catch-up records, non-empty `h_nextn` rows; the vendored dump is the input to AC6 and AC9) |
-| ACL1 | RL1, RL3 | `cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus "$CORPUS" --drafter draft-mtp --draft-random 17 --max-tokens 64 "$E2B" > lossless_mtp_e2b_random.txt 2>&1; grep -c '^lossless ' lossless_mtp_e2b_random.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* ' lossless_mtp_e2b_random.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_mtp_e2b_random.txt` | three lines printed: `51`, `51`, `1` (51 prompts processed; 51 of them identical to plain greedy with at least one drafted token; the summary line states prompts=51, identical=51 and a nonzero `rejected_total` (>= 1, pre-registered, status plausible), so the rollback path ran; acceptance is printed in `accepted_total` and `mean_accepted_per_step` and is not gated for a random draft) |
-| ACL2 | RL1, RL2 | `cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus "$CORPUS" --drafter draft-mtp --draft-model "$GEMMA_MTP" --max-tokens 64 "$E2B" > lossless_mtp_e2b_published.txt 2>&1; grep -c '^lossless ' lossless_mtp_e2b_published.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* accepted=[1-9][0-9]* ' lossless_mtp_e2b_published.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_mtp_e2b_published.txt` | three lines printed: `51`, `51`, `1` (every prompt identical to plain greedy, with `n_drafted` and `accepted` both above 0 on every prompt; the published assistant is the draft, so there is no training dependency; blocked only on slice 1 placing `$GEMMA_MTP`; the third grep gates `rejected_total` >= 1 as a corpus sum, not per prompt: lossless output with zero rollbacks over all 51 prompts means verify never disagreed with the draft, so this draft never exercised the rollback path, while a draft that rejects nothing on some prompts still passes; the threshold >= 1 is pre-registered, status plausible, and ACL1's random draft proves rollback independent of the published weights) |
+| ACL1 | RL1, RL3 | section `ac commands`, `### ACL1` | three lines printed: `51`, `51`, `1` (51 prompts processed; 51 of them identical to plain greedy with at least one drafted token; the summary line states prompts=51, identical=51 and a nonzero `rejected_total` (>= 1, pre-registered, status plausible), so the rollback path ran; acceptance is printed in `accepted_total` and `mean_accepted_per_step` and is not gated for a random draft) |
+| ACL2 | RL1, RL2 | section `ac commands`, `### ACL2` | three lines printed: `51`, `51`, `1` (every prompt identical to plain greedy, with `n_drafted` and `accepted` both above 0 on every prompt; the published assistant is the draft, so there is no training dependency; blocked only on slice 1 placing `$GEMMA_MTP`; the third grep gates `rejected_total` >= 1 as a corpus sum, not per prompt: lossless output with zero rollbacks over all 51 prompts means verify never disagreed with the draft, so this draft never exercised the rollback path, while a draft that rejects nothing on some prompts still passes; the threshold >= 1 is pre-registered, status plausible, and ACL1's random draft proves rollback independent of the published weights) |
 | ACL5 | RL5 | section `ac commands`, `### ACL5` | 3 (three tests, each asserting before it prints: `lossless_comparator_self_passes` prints `control=self compared=51 identical=51`; `lossless_comparator_rejects_flipped_token` flips one id of one prompt and prints `control=flip compared=51 identical=50`; `lossless_guard_rejects_zero_draft` feeds 51 prompts that drafted nothing and prints `control=zero_draft drafted_prompts=0 flagged=true`) |
 
 ## out of scope
@@ -130,7 +130,7 @@ export LLAMA_SPEC_SIMPLE=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fi
 ### AC1
 
 ```sh
-strings -a "$GEMMA_MTP" | grep -c 'nextn.pre_projection'
+strings -a "$GEMMA_MTP" | grep -c 'nextn.pre_projection'; strings -a "$E2B" | grep -c 'nextn.pre_projection'
 ```
 
 ### AC2
@@ -154,13 +154,13 @@ cargo nextest run -p proxima-model-interop --features std -E 'test(/mtp_sidecar_
 ### AC5
 
 ```sh
-cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/mtp_sidecar_alias_equals_copy/)' 2>&1 | grep -cE 'rows = [0-9]+ alias_vs_copy_max_abs_diff = [0-9.e-]+ target_mutated_alias_differs = true'
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/mtp_sidecar_alias_equals_copy/)' 2>&1 | grep -cE 'rows = ([89]|[1-9][0-9]+) alias_vs_copy_max_abs_diff = [0-9.e-]+ target_mutated_alias_differs = true'
 ```
 
 ### AC6
 
 ```sh
-cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/mtp_sidecar_readout_matches_llama_fixture/)' 2>&1 | grep -cE 'cases = [0-9]+ max_abs_diff = [0-9.e-]+ control_self = 0\.0 control_perturbed_rejected = true'
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/mtp_sidecar_readout_matches_llama_fixture/)' 2>&1 | grep -cE 'cases = ([5-9][0-9]|[1-9][0-9]{2,}) max_abs_diff = [0-9.e-]+ control_self = 0\.0 control_perturbed_rejected = true'
 ```
 
 ### AC7
@@ -178,7 +178,7 @@ cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(
 ### AC9
 
 ```sh
-cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/draft_mtp_positions_match_llama_fixture/)' 2>&1 | grep -cE 'records = [0-9]+ control_self = true control_perturbed_rejected = true'
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/draft_mtp_positions_match_llama_fixture/)' 2>&1 | grep -cE 'records = [1-9][0-9]* control_self = true control_perturbed_rejected = true'
 ```
 
 ### AC10
@@ -189,8 +189,16 @@ cargo nextest run -p proxima-model-interop --features std -E 'test(/speculative_
 
 ### AC11
 
+The oracle that vendors the ids, run once per seed before the parity tests:
+
 ```sh
-cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/mtp_llama_parity_gemma_seed_/)' 2>&1 | grep -cE 'ids_compared = [0-9]+'
+for seed in 1 2 3; do $LLAMA_SPEC_SIMPLE --model "$E2B" --model-draft "$GEMMA_MTP" --spec-type draft-mtp --seed "$seed" -n 40 > "llama_mtp_gemma_seed_$seed.txt" 2>&1; done
+```
+
+The parity count:
+
+```sh
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/mtp_llama_parity_gemma_seed_/)' 2>&1 | grep -cE 'ids_compared = ([89]|[1-9][0-9]+)$'
 ```
 
 ### AC12
@@ -205,10 +213,22 @@ jq '([.cases[] | select(.n_drafted > 0)] | length), (.cases | length)' proxima-m
 cargo nextest run -p proxima-model-interop --features std -E 'test(/mtp_oracle_control_/)' 2>&1 | grep -c 'Summary .* 6 tests run: 6 passed'
 ```
 
+### ACL1
+
+```sh
+cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus "$CORPUS" --drafter draft-mtp --draft-random 17 --max-tokens 64 "$E2B" > lossless_mtp_e2b_random.txt 2>&1; grep -c '^lossless ' lossless_mtp_e2b_random.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* ' lossless_mtp_e2b_random.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_mtp_e2b_random.txt
+```
+
+### ACL2
+
+```sh
+cargo run --release -p proxima-model-interop --features std --example speculative_lossless_corpus -- --corpus "$CORPUS" --drafter draft-mtp --draft-model "$GEMMA_MTP" --max-tokens 64 "$E2B" > lossless_mtp_e2b_published.txt 2>&1; grep -c '^lossless ' lossless_mtp_e2b_published.txt; grep -cE '^lossless id=[^ ]+ identical=true n_drafted=[1-9][0-9]* accepted=[1-9][0-9]* ' lossless_mtp_e2b_published.txt; grep -cE '^summary prompts=51 identical=51 .* rejected_total=[1-9][0-9]* ' lossless_mtp_e2b_published.txt
+```
+
 ### ACL5
 
 ```sh
-cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/lossless_comparator_|lossless_guard_/)' 2>&1 | grep -cE '^control=(self|flip|zero_draft) '
+cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/lossless_comparator_|lossless_guard_/)' 2>&1 | grep -cE '^control=(self compared=51 identical=51|flip compared=51 identical=50|zero_draft drafted_prompts=0 flagged=true)$'
 ```
 
 ### AC14
