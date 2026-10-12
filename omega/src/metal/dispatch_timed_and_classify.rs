@@ -361,6 +361,8 @@ pub(super) fn execute_plan_op_timed_inner(
     expert_buffers: &BTreeMap<NodeId, ExpertSourceBuffers>,
     cpu_reference: Option<&BTreeMap<NodeId, alloc::vec::Vec<f32>>>,
 ) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
+    plan.reject_bounded_extension()?;
+    plan.validate_configured_inputs(blocks)?;
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
     let selected_bound = env_flags::compare_bound_node();
@@ -528,6 +530,8 @@ pub fn execute_plan_with_placements_op_timed(
     input_placements: &[(NodeId, &PlacedBuffer, usize)],
     output_placements: &[(NodeId, &PlacedBuffer, usize)],
 ) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
+    plan.reject_bounded_extension()?;
+    plan.validate_configured_inputs(blocks)?;
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
     let input_placed: BTreeMap<NodeId, (&PlacedBuffer, usize)> = input_placements
@@ -770,6 +774,8 @@ pub fn execute_plan_with_placements_dispatch_timed(
     input_placements: &[(NodeId, &PlacedBuffer, usize)],
     output_placements: &[(NodeId, &PlacedBuffer, usize)],
 ) -> Result<DispatchTimedOutcome, MetalError> {
+    plan.reject_bounded_extension()?;
+    plan.validate_configured_inputs(blocks)?;
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
     let input_placed: BTreeMap<NodeId, (&PlacedBuffer, usize)> = input_placements

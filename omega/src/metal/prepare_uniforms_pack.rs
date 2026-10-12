@@ -67,6 +67,25 @@ pub(super) fn prepare(
     placed_input_nodes: &[NodeId],
     fuse_cached_attention: bool,
 ) -> Result<Prepared, MetalError> {
+    prepare_with_options(
+        program,
+        symbols,
+        blocks,
+        outputs,
+        (numeric_policy, fuse_cached_attention, true),
+        placed_input_nodes,
+    )
+}
+
+pub(super) fn prepare_with_options(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[QuantizedBlock<'_>],
+    outputs: &[NodeId],
+    policy: (NumericPolicy, bool, bool),
+    placed_input_nodes: &[NodeId],
+) -> Result<Prepared, MetalError> {
+    let (numeric_policy, fuse_cached_attention, allow_fusion) = policy;
     #[cfg(feature = "instrument")]
     let infer_started = read_ticks();
     #[allow(unused_mut)]
@@ -102,7 +121,14 @@ pub(super) fn prepare(
         if placed_input_nodes.iter().any(|placed| placed == node) {
             continue;
         }
-        let expected = element_count(shapes.of(*node));
+        let expected = shapes.of(*node).iter().try_fold(1_usize, |count, extent| {
+            usize::try_from(*extent)
+                .ok()
+                .and_then(|extent| count.checked_mul(extent))
+                .ok_or(MetalError::ResourceOverflow {
+                    field: "input_elements",
+                })
+        })?;
         let found = block.element_count()?;
         if found != expected {
             return Err(TensorError::InputSizeMismatch {
@@ -153,22 +179,30 @@ pub(super) fn prepare(
     #[cfg(feature = "instrument")]
     let bind_started = read_ticks();
     #[cfg(not(feature = "top-fraction-fusion"))]
-    let mut resolved = bind_with_fusion(
-        program,
-        &shapes,
-        &effective_outputs,
-        fuse_cached_attention,
-        numeric_policy,
-    )?;
+    let mut resolved = if allow_fusion {
+        bind_with_fusion(
+            program,
+            &shapes,
+            &effective_outputs,
+            fuse_cached_attention,
+            numeric_policy,
+        )?
+    } else {
+        bind_unfused(program, &shapes, &effective_outputs, numeric_policy)?
+    };
     #[cfg(feature = "top-fraction-fusion")]
-    let mut resolved = bind_with_top_fraction(
-        program,
-        &shapes,
-        &effective_outputs,
-        fuse_cached_attention,
-        numeric_policy,
-        crate::sized::SELECTION_TOP_FRACTION_MIN_ROWS,
-    )?;
+    let mut resolved = if allow_fusion {
+        bind_with_top_fraction(
+            program,
+            &shapes,
+            &effective_outputs,
+            fuse_cached_attention,
+            numeric_policy,
+            crate::sized::SELECTION_TOP_FRACTION_MIN_ROWS,
+        )?
+    } else {
+        bind_unfused(program, &shapes, &effective_outputs, numeric_policy)?
+    };
     #[cfg(feature = "instrument")]
     counter!(PREPARE_BIND_TICKS, elapsed_ticks(bind_started));
     // attn_parity followon (2026-09-22): the duplicate-dispatch attribution

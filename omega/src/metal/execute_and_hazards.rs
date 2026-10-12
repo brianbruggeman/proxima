@@ -43,6 +43,20 @@ pub(super) fn plan_with_placed_inputs(
         counter!(PREPARE_TICKS, elapsed_ticks(prepare_started));
         emit_step_phase("prepare", prepare_started.as_raw(), read_ticks().as_raw());
     }
+    Ok(plan_from_prepared(
+        program,
+        symbols,
+        prepared,
+        numeric_policy,
+    ))
+}
+
+pub(super) fn plan_from_prepared(
+    program: &[Op],
+    symbols: &[u64],
+    prepared: Prepared,
+    numeric_policy: NumericPolicy,
+) -> Plan {
     // `prepare` already built this attribution once, off the same `blocks`
     // argument, checked count- and shape-consistent against `block_nodes`
     // (ROW 327) -- cloning it here instead of re-zipping `block_nodes`
@@ -55,7 +69,11 @@ pub(super) fn plan_with_placed_inputs(
         .iter()
         .map(|node| gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, *node))
         .collect();
-    Ok(Plan {
+    Plan {
+        configured_constraints: None,
+        configured_input_contract: Vec::new(),
+        scoped_reservation: RefCell::new(None),
+        scoped_resource_rows: RefCell::new(Vec::new()),
         program: program.to_vec(),
         prepared,
         packed_operands,
@@ -85,7 +103,7 @@ pub(super) fn plan_with_placed_inputs(
         block_identity: RefCell::new(Vec::new()),
         chunk_status_buffers: RefCell::new(Vec::new()),
         chunk_status_diagnostics: RefCell::new(Vec::new()),
-    })
+    }
 }
 
 /// Same contract as [`proxima_tensor::cpu::evaluate`], and returns the same
@@ -120,6 +138,17 @@ pub(super) fn execute_plan_inner(
     blocks: &[QuantizedBlock<'_>],
     expert_buffers: &BTreeMap<NodeId, ExpertSourceBuffers>,
 ) -> Result<Evaluated, MetalError> {
+    plan.validate_configured_inputs(blocks)?;
+    if plan.has_constraints() {
+        if !expert_buffers.is_empty() {
+            return Err(MetalError::UnsupportedConstraint {
+                field: "constraints",
+                reason: "expert buffers have no bounded execution contract",
+            });
+        }
+        plan.preflight_constraints(blocks)?;
+        plan.scoped_resource_rows.borrow_mut().clear();
+    }
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
 
@@ -170,6 +199,7 @@ pub(super) fn execute_plan_inner(
             block_identity_key(&block).0 as *const c_void,
             block_identity_key(&block).1,
         )? {
+            plan.record_scoped_buffer("input", node, &buffer);
             device_buffers.insert(node, (buffer, offset));
             continue;
         }
@@ -218,6 +248,7 @@ pub(super) fn execute_plan_inner(
                 upload_packed_bytes(&device, bytes, resident_name)?
             }
         };
+        plan.record_scoped_buffer("input", node, &buffer.0);
         device_buffers.insert(node, buffer);
     }
     #[cfg(feature = "instrument")]
@@ -368,6 +399,17 @@ pub(super) fn execute_plan_inner(
             expert_buffers,
             Some(&mut route_compactions),
         )?;
+        if plan.has_constraints() {
+            if let Some((buffer, _)) = device_buffers.get(&bound.node) {
+                plan.record_scoped_buffer("output", bound.node, buffer);
+            }
+            let uniform_bytes = pack_uniforms(bound, plan.numeric_policy)?;
+            UNIFORM_BUFFERS.with(|cache| {
+                if let Some((buffer, _)) = cache.borrow().get(&uniform_bytes) {
+                    plan.record_scoped_buffer("uniform", bound.node, buffer);
+                }
+            });
+        }
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
         }
@@ -916,6 +958,10 @@ pub(super) fn stage_expert_sources(
     blocks: &[QuantizedBlock<'_>],
     expert_sources: &BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
 ) -> Result<BTreeMap<NodeId, ExpertSourceBuffers>, MetalError> {
+    if !expert_sources.is_empty() {
+        plan.reject_bounded_extension()?;
+    }
+    plan.validate_configured_inputs(blocks)?;
     let plan_identity = core::ptr::from_ref(plan) as usize;
     for (node, source) in expert_sources {
         let block_position = plan

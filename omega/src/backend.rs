@@ -46,8 +46,8 @@
 //! choice made by the caller for THIS call, not a cached global one call
 //! reads and every later call inherits. [`Engine::from_env`] exists only as
 //! a convenience a caller may use to *compute* that argument (the same
-//! env-var-into-`OnceLock` idiom [`proxima_tensor::cpu`]'s own
-//! `matmul_worker_count` uses for `PROXIMA_MATMUL_WORKERS`), never as
+//! environment resolution performed by [`proxima_tensor::cpu`]'s
+//! `matmul_worker_count` for `PROXIMA_MATMUL_WORKERS`), never as
 //! something `plan_named`/`execute_plan_named` consult on their own — so one
 //! process can plan one program on [`Engine::Cpu`] and the next on
 //! [`Engine::Gpu`] without touching an environment variable in between.
@@ -66,27 +66,37 @@
 //! so a wrapper would relocate the impl without enabling any composition. The
 //! free-function pair stays.
 
+use crate::config::{RuntimeConfig, SelectionMode};
+use conflaguration::Validate;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "cuda-driver")]
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use proxima_tensor::cpu::ExpertSource;
 use proxima_tensor::{Evaluated, NodeId, NumericPolicy, Op, QuantizedBlock, TensorError};
 
 #[cfg(feature = "cpu")]
+use crate::msl::Codec;
+#[cfg(feature = "cpu")]
+use proxima_tensor::config::TensorExecutionConfig;
+#[cfg(feature = "cpu")]
 use proxima_tensor::cpu::{
-    evaluate_quantized_named_exact_with_scratch_and_experts,
-    evaluate_quantized_named_with_scratch_and_experts,
+    cpu_tensor_reserved_bytes, evaluate_quantized_named_exact_with_scratch_and_experts,
+    evaluate_quantized_named_with_config, evaluate_quantized_named_with_scratch_and_experts,
 };
 #[cfg(feature = "cpu")]
 use proxima_tensor::resolve_named_blocks;
 
 #[cfg(feature = "cuda-driver")]
-use crate::cuda_driver::CudaDriverError;
+use crate::cuda_driver::{CudaDriver, CudaDriverError};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use crate::metal::{self, MetalError};
 #[cfg(feature = "wgpu-backend")]
 use crate::wgpu_driver::{self, WgpuError};
+
+#[cfg(feature = "cpu")]
+type CpuInputContract = (NodeId, Option<Codec>, bool, usize);
 
 /// Where an op runs. Two variants, because there are two places: a CPU core
 /// and a GPU. `Metal`/`Wgpu`/`Vulkan`/`Cuda` are DRIVERS of the Gpu engine,
@@ -248,6 +258,32 @@ impl core::str::FromStr for Engine {
 /// failure the underlying evaluator itself (CPU, Metal, or wgpu) produced.
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {
+    #[error("invalid runtime configuration: {0}")]
+    Configuration(#[from] conflaguration::Error),
+    #[error("backend `{backend}` cannot enforce `{field}`: {reason}")]
+    UnsupportedConstraint {
+        backend: &'static str,
+        field: &'static str,
+        reason: &'static str,
+    },
+    #[error("backend `{backend}` needs {requested} bytes for `{field}`, exceeding {limit}")]
+    ResourceLimit {
+        backend: &'static str,
+        field: &'static str,
+        requested: u64,
+        limit: u64,
+    },
+    #[error("backend `{backend}` overflowed `{field}` accounting")]
+    ResourceOverflow {
+        backend: &'static str,
+        field: &'static str,
+    },
+    #[error("input contract changed for {node:?}: {reason}")]
+    InputContractChanged { node: NodeId, reason: &'static str },
+    #[error("no admissible execution candidate")]
+    NoAdmissibleCandidate {
+        candidates: Vec<CandidateMeasurement>,
+    },
     #[error("unknown engine name `{name}`; known engines: cpu, gpu")]
     UnknownName { name: String },
 
@@ -350,6 +386,643 @@ pub enum Plan {
     Cuda(crate::cuda_driver::CudaPlan),
 }
 
+/// Raw cold and synchronized execution observations for one candidate.
+#[derive(Debug, Clone)]
+pub struct CandidateMeasurement {
+    pub engine: Engine,
+    pub driver: Option<GpuDriver>,
+    pub device_identity: String,
+    pub cold_plan_ns: Option<u128>,
+    pub warmup_ns: Vec<u128>,
+    pub execution_ns: Vec<u128>,
+    pub execution_sum_ns: Option<u128>,
+    pub selected: bool,
+    pub rejection: Option<String>,
+    pub host_tensor_reserved_bytes: Option<u64>,
+    pub device_buffer_reserved_bytes: Option<u64>,
+    pub largest_device_buffer_bytes: Option<u64>,
+    pub resolved_op_count: usize,
+    pub kernel_identities: Vec<String>,
+}
+
+impl CandidateMeasurement {
+    fn new(engine: Engine, driver: Option<GpuDriver>) -> Self {
+        Self {
+            engine,
+            driver,
+            device_identity: driver.map_or_else(|| "cpu".into(), |value| value.name().into()),
+            cold_plan_ns: None,
+            warmup_ns: Vec::new(),
+            execution_ns: Vec::new(),
+            execution_sum_ns: None,
+            selected: false,
+            rejection: None,
+            host_tensor_reserved_bytes: None,
+            device_buffer_reserved_bytes: None,
+            largest_device_buffer_bytes: None,
+            resolved_op_count: 0,
+            kernel_identities: Vec::new(),
+        }
+    }
+}
+
+/// Build an existing backend plan using the resolved runtime configuration.
+///
+/// The returned [`Plan`] owns reusable backend state. Configured mode performs
+/// no trial executions; measured mode retains each synchronized sample in the
+/// returned report and selects the smallest observed arithmetic mean.
+///
+/// ```
+/// # #[cfg(feature = "cpu")]
+/// # {
+/// use omega::backend::{plan_named_with_config, execute_plan_named};
+/// use omega::config::RuntimeConfig;
+/// use proxima_tensor::{DType, Extent, NodeId, Op, QuantizedBlock, ScalarOp};
+/// use proxima_tensor::map::{self, IndexMap};
+/// let program = vec![
+///     Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(2)], name: Some("input".into()) },
+///     Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Negate,
+///         operands: vec![(NodeId(0), IndexMap::Affine(map::projection(1, &[0])))], name: None },
+/// ];
+/// let input = [1.0, 2.0];
+/// let named = [("input", QuantizedBlock::Float32(&input))];
+/// let (mut plan, report) = plan_named_with_config(&RuntimeConfig::default(), &program, &[], &named, &[NodeId(1)])?;
+/// assert!(report[0].execution_ns.is_empty());
+/// assert_eq!(execute_plan_named(&mut plan, &named)?.root(), &[-1.0, -2.0]);
+/// # }
+/// # Ok::<(), omega::backend::BackendError>(())
+/// ```
+pub fn plan_named_with_config(
+    config: &RuntimeConfig,
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+) -> Result<(Plan, Vec<CandidateMeasurement>), BackendError> {
+    config.validate()?;
+    if config.selection.mode == SelectionMode::Configured {
+        let engine = config.engine.parse()?;
+        let driver = configured_driver(config, engine)?;
+        let mut measurement = CandidateMeasurement::new(engine, driver);
+        let started = Instant::now();
+        let plan =
+            plan_configured_candidate(config, engine, driver, program, symbols, named, outputs)?;
+        measurement.cold_plan_ns = Some(started.elapsed().as_nanos());
+        fill_candidate_identity(
+            &plan,
+            config,
+            program,
+            symbols,
+            named,
+            outputs,
+            &mut measurement,
+        )?;
+        measurement.selected = true;
+        return Ok((plan, vec![measurement]));
+    }
+    let mut measurements: Vec<CandidateMeasurement> = Vec::new();
+    let configured_engine = config.engine.parse()?;
+    let preferred_driver = configured_driver(config, configured_engine);
+    let ordered = ordered_candidates(config)?;
+    match preferred_driver {
+        Err(error) => {
+            let mut rejected = CandidateMeasurement::new(configured_engine, None);
+            rejected.device_identity = config.gpu_driver.clone();
+            rejected.rejection = Some(error.to_string());
+            measurements.push(rejected);
+        }
+        Ok(driver) if !ordered.contains(&(configured_engine, driver)) => {
+            let mut rejected = CandidateMeasurement::new(configured_engine, driver);
+            let started = Instant::now();
+            rejected.rejection = plan_configured_candidate(
+                config,
+                configured_engine,
+                driver,
+                program,
+                symbols,
+                named,
+                outputs,
+            )
+            .err()
+            .map(|error| error.to_string());
+            rejected.cold_plan_ns = Some(started.elapsed().as_nanos());
+            measurements.push(rejected);
+        }
+        Ok(_) => {}
+    }
+    let mut winner: Option<(Plan, usize)> = None;
+    for (engine, driver) in ordered {
+        let mut measurement = CandidateMeasurement::new(engine, driver);
+        let started = Instant::now();
+        let planned =
+            plan_configured_candidate(config, engine, driver, program, symbols, named, outputs);
+        measurement.cold_plan_ns = Some(started.elapsed().as_nanos());
+        match planned {
+            Ok(mut plan) => {
+                let sampled = fill_candidate_identity(
+                    &plan,
+                    config,
+                    program,
+                    symbols,
+                    named,
+                    outputs,
+                    &mut measurement,
+                )
+                .and_then(|()| measure_candidate(&mut plan, named, config, &mut measurement));
+                if let Err(error) = sampled {
+                    measurement.rejection = Some(error.to_string());
+                } else {
+                    let improves = winner.as_ref().is_none_or(|(_, index)| {
+                        candidate_is_better(&measurement, &measurements[*index])
+                    });
+                    if improves {
+                        winner = Some((plan, measurements.len()));
+                    }
+                }
+            }
+            Err(error) => measurement.rejection = Some(error.to_string()),
+        }
+        measurements.push(measurement);
+    }
+    let Some((plan, index)) = winner else {
+        return Err(BackendError::NoAdmissibleCandidate {
+            candidates: measurements,
+        });
+    };
+    measurements[index].selected = true;
+    Ok((plan, measurements))
+}
+
+fn candidate_is_better(candidate: &CandidateMeasurement, incumbent: &CandidateMeasurement) -> bool {
+    candidate.rejection.is_none()
+        && candidate.execution_sum_ns.is_some()
+        && candidate.execution_ns.len() == incumbent.execution_ns.len()
+        && candidate.execution_sum_ns < incumbent.execution_sum_ns
+}
+
+#[cfg(any(feature = "wgpu-backend", feature = "cuda-driver"))]
+pub(crate) fn checked_resource_sum(values: impl IntoIterator<Item = u64>) -> Option<u64> {
+    values.into_iter().try_fold(0_u64, u64::checked_add)
+}
+
+fn prefer_candidate<T: PartialEq>(candidates: &mut Vec<T>, preferred: &T) {
+    if let Some(position) = candidates
+        .iter()
+        .position(|candidate| candidate == preferred)
+    {
+        let preferred = candidates.remove(position);
+        candidates.insert(0, preferred);
+    }
+}
+
+fn configured_driver(
+    config: &RuntimeConfig,
+    engine: Engine,
+) -> Result<Option<GpuDriver>, BackendError> {
+    if engine == Engine::Cpu {
+        return Ok(None);
+    }
+    match config.gpu_driver.as_str() {
+        "auto" => GpuDriver::for_target()
+            .map(Some)
+            .ok_or(BackendError::NoGpuDriver),
+        "metal" => Ok(Some(GpuDriver::Metal)),
+        "wgpu" => Ok(Some(GpuDriver::Wgpu)),
+        "cuda" => {
+            #[cfg(feature = "cuda-driver")]
+            {
+                Ok(Some(GpuDriver::Cuda))
+            }
+            #[cfg(not(feature = "cuda-driver"))]
+            {
+                Err(BackendError::NotCompiled {
+                    backend: "cuda",
+                    feature: "cuda-driver",
+                })
+            }
+        }
+        _ => Err(BackendError::NoGpuDriver),
+    }
+}
+
+fn ordered_candidates(
+    config: &RuntimeConfig,
+) -> Result<Vec<(Engine, Option<GpuDriver>)>, BackendError> {
+    let candidates: Vec<_> = [
+        (cfg!(feature = "cpu"), (Engine::Cpu, None)),
+        (
+            cfg!(all(feature = "metal", target_os = "macos")),
+            (Engine::Gpu, Some(GpuDriver::Metal)),
+        ),
+        (
+            cfg!(feature = "wgpu-backend"),
+            (Engine::Gpu, Some(GpuDriver::Wgpu)),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(compiled, candidate)| compiled.then_some(candidate))
+    .collect();
+    #[cfg(feature = "cuda-driver")]
+    let candidates = candidates
+        .into_iter()
+        .chain([(Engine::Gpu, Some(GpuDriver::Cuda))])
+        .collect();
+    let mut candidates: Vec<_> = candidates;
+    let engine = config.engine.parse()?;
+    if let Ok(driver) = configured_driver(config, engine) {
+        prefer_candidate(&mut candidates, &(engine, driver));
+    }
+    Ok(candidates)
+}
+
+fn measure_candidate(
+    plan: &mut Plan,
+    named: &[(&str, QuantizedBlock<'_>)],
+    config: &RuntimeConfig,
+    measurement: &mut CandidateMeasurement,
+) -> Result<(), BackendError> {
+    for _ in 0..config.selection.resolved_warmup_runs() {
+        let started = Instant::now();
+        let result = execute_plan_named(plan, named)?;
+        measurement.warmup_ns.push(started.elapsed().as_nanos());
+        drop(result);
+    }
+    let mut sum = 0_u128;
+    for _ in 0..config.selection.resolved_measurement_runs() {
+        let started = Instant::now();
+        let result = execute_plan_named(plan, named)?;
+        let elapsed = started.elapsed().as_nanos();
+        measurement.execution_ns.push(elapsed);
+        sum = sum
+            .checked_add(elapsed)
+            .ok_or(BackendError::ResourceOverflow {
+                backend: "selection",
+                field: "execution_sum_ns",
+            })?;
+        drop(result);
+    }
+    measurement.execution_sum_ns = Some(sum);
+    Ok(())
+}
+
+fn plan_configured_candidate(
+    config: &RuntimeConfig,
+    engine: Engine,
+    driver: Option<GpuDriver>,
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+) -> Result<Plan, BackendError> {
+    if engine == Engine::Cpu {
+        #[cfg(feature = "cpu")]
+        {
+            for (field, value) in [
+                (
+                    "max_device_buffer_bytes",
+                    config.constraints.max_device_buffer_bytes,
+                ),
+                (
+                    "max_single_device_buffer_bytes",
+                    config.constraints.max_single_device_buffer_bytes,
+                ),
+            ] {
+                if value.is_some() {
+                    return Err(BackendError::UnsupportedConstraint {
+                        backend: "cpu",
+                        field,
+                        reason: "cpu plans own no device buffers",
+                    });
+                }
+            }
+            let input_contract = capture_input_contract(program, symbols, named)?;
+            let execution = TensorExecutionConfig::builder()
+                .numeric(config.numeric)
+                .allow_fusion(config.allow_fusion)
+                .exact_activations(config.exact_activations)
+                .maybe_max_host_tensor_bytes(config.constraints.max_host_tensor_bytes)
+                .build();
+            if let Some(limit) = execution.max_host_tensor_bytes {
+                let requested =
+                    cpu_tensor_reserved_bytes(program, symbols, named, outputs, &[], &execution)?;
+                if requested > limit {
+                    return Err(BackendError::ResourceLimit {
+                        backend: "cpu",
+                        field: "max_host_tensor_bytes",
+                        requested,
+                        limit,
+                    });
+                }
+            }
+            return Ok(Plan::Cpu(CpuPlan {
+                program: program.to_vec(),
+                symbols: symbols.to_vec(),
+                outputs: outputs.to_vec(),
+                free_buffers: Vec::new(),
+                validated_weight_nodes: None,
+                exact_activations: config.exact_activations,
+                execution_config: Some(execution),
+                input_contract,
+            }));
+        }
+        #[cfg(not(feature = "cpu"))]
+        return Err(BackendError::NotCompiled {
+            backend: "cpu",
+            feature: "cpu",
+        });
+    }
+    plan_configured_gpu(config, driver, program, symbols, named, outputs)
+}
+
+fn plan_configured_gpu(
+    config: &RuntimeConfig,
+    driver: Option<GpuDriver>,
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+) -> Result<Plan, BackendError> {
+    let _ = (config, program, symbols, named, outputs);
+    let driver = driver.ok_or(BackendError::NoGpuDriver)?;
+    match driver {
+        GpuDriver::Metal => {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            {
+                Ok(Plan::Metal(
+                    metal::plan_named_with_config(program, symbols, named, outputs, config)
+                        .map_err(map_metal_configuration_error)?
+                        .into(),
+                ))
+            }
+            #[cfg(not(all(feature = "metal", target_os = "macos")))]
+            {
+                Err(BackendError::NotCompiled {
+                    backend: "metal",
+                    feature: "metal",
+                })
+            }
+        }
+        GpuDriver::Wgpu => {
+            #[cfg(feature = "wgpu-backend")]
+            {
+                Ok(Plan::Wgpu(
+                    wgpu_driver::plan_named_with_config(config, program, symbols, named, outputs)
+                        .map_err(map_wgpu_configuration_error)?,
+                ))
+            }
+            #[cfg(not(feature = "wgpu-backend"))]
+            {
+                Err(BackendError::NotCompiled {
+                    backend: "wgpu",
+                    feature: "wgpu-backend",
+                })
+            }
+        }
+        #[cfg(feature = "cuda-driver")]
+        GpuDriver::Cuda => Ok(Plan::Cuda(
+            cuda_driver()?
+                .plan_with_config(program, symbols, outputs, named, config)
+                .map_err(map_cuda_configuration_error)?,
+        )),
+    }
+}
+
+#[cfg(feature = "cuda-driver")]
+fn map_cuda_configuration_error(error: CudaDriverError) -> BackendError {
+    match error {
+        CudaDriverError::UnsupportedConstraint { field, reason } => {
+            BackendError::UnsupportedConstraint {
+                backend: "cuda",
+                field,
+                reason,
+            }
+        }
+        CudaDriverError::ResourceLimit {
+            field,
+            requested,
+            limit,
+        } => BackendError::ResourceLimit {
+            backend: "cuda",
+            field,
+            requested,
+            limit,
+        },
+        CudaDriverError::ResourceOverflow => BackendError::ResourceOverflow {
+            backend: "cuda",
+            field: "tensor_payload_bytes",
+        },
+        CudaDriverError::InputContractChanged { node, reason } => {
+            BackendError::InputContractChanged { node, reason }
+        }
+        other => BackendError::Cuda(other),
+    }
+}
+
+#[cfg(feature = "wgpu-backend")]
+fn map_wgpu_configuration_error(error: WgpuError) -> BackendError {
+    match error {
+        WgpuError::ResourceLimit {
+            field,
+            requested,
+            limit,
+        } => BackendError::ResourceLimit {
+            backend: "wgpu",
+            field,
+            requested,
+            limit,
+        },
+        WgpuError::ResourceOverflow => BackendError::ResourceOverflow {
+            backend: "wgpu",
+            field: "tensor_payload_bytes",
+        },
+        WgpuError::InputContractChanged { node, reason } => {
+            BackendError::InputContractChanged { node, reason }
+        }
+        other => BackendError::Wgpu(other),
+    }
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn map_metal_configuration_error(error: MetalError) -> BackendError {
+    match error {
+        MetalError::UnsupportedConstraint { field, reason } => {
+            BackendError::UnsupportedConstraint {
+                backend: "metal",
+                field,
+                reason,
+            }
+        }
+        MetalError::ResourceLimit {
+            field,
+            requested,
+            limit,
+        } => BackendError::ResourceLimit {
+            backend: "metal",
+            field,
+            requested,
+            limit,
+        },
+        MetalError::ResourceOverflow { field } => BackendError::ResourceOverflow {
+            backend: "metal",
+            field,
+        },
+        MetalError::InputContractChanged { node, reason } => {
+            BackendError::InputContractChanged { node, reason }
+        }
+        other => BackendError::Metal(other),
+    }
+}
+
+fn fill_candidate_identity(
+    plan: &Plan,
+    config: &RuntimeConfig,
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+    measurement: &mut CandidateMeasurement,
+) -> Result<(), BackendError> {
+    let shapes = proxima_tensor::infer(program, symbols)?;
+    let resolved = if config.allow_fusion {
+        proxima_tensor::bind_with_fusion(program, &shapes, outputs, true, config.numeric)?
+    } else {
+        proxima_tensor::bind_unfused(program, &shapes, outputs, config.numeric)?
+    };
+    measurement.resolved_op_count = resolved.len();
+    measurement.kernel_identities = resolved
+        .iter()
+        .map(|bound| format!("{}:{:?}", bound.node.0, bound.kind))
+        .collect();
+    #[cfg(any(
+        feature = "cpu",
+        all(feature = "metal", target_os = "macos"),
+        feature = "wgpu-backend",
+        feature = "cuda-driver"
+    ))]
+    match plan {
+        #[cfg(feature = "cpu")]
+        Plan::Cpu(cpu) => {
+            if let Some(execution) = &cpu.execution_config
+                && execution.max_host_tensor_bytes.is_some()
+            {
+                measurement.host_tensor_reserved_bytes = Some(cpu_tensor_reserved_bytes(
+                    program,
+                    symbols,
+                    named,
+                    outputs,
+                    &cpu.free_buffers,
+                    execution,
+                )?);
+            }
+        }
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        Plan::Metal(metal) => {
+            measurement.device_identity = metal.device_identity()?;
+            measurement.resolved_op_count = metal.resolved_op_count();
+            measurement.kernel_identities = metal.kernel_keys()?;
+            if let Some((host, total, largest)) = metal.scoped_reservation() {
+                measurement.host_tensor_reserved_bytes = Some(host);
+                measurement.device_buffer_reserved_bytes = Some(total);
+                measurement.largest_device_buffer_bytes = Some(largest);
+            }
+        }
+        #[cfg(feature = "wgpu-backend")]
+        Plan::Wgpu(wgpu) => {
+            measurement.device_identity = wgpu.device_identity().to_owned();
+            measurement.resolved_op_count = wgpu.resolved_op_count();
+            measurement.kernel_identities = wgpu.kernel_identities()?;
+            let (host, total, largest) = wgpu.scoped_reservation()?;
+            measurement.host_tensor_reserved_bytes = Some(host);
+            measurement.device_buffer_reserved_bytes = Some(total);
+            measurement.largest_device_buffer_bytes = Some(largest);
+        }
+        #[cfg(feature = "cuda-driver")]
+        Plan::Cuda(cuda) => {
+            measurement.device_identity = cuda.device_identity()?;
+            measurement.resolved_op_count = cuda.resolved_op_count();
+            measurement.kernel_identities = cuda.kernel_identities();
+            if config.constraints.max_host_tensor_bytes.is_some()
+                || config.constraints.max_device_buffer_bytes.is_some()
+                || config.constraints.max_single_device_buffer_bytes.is_some()
+            {
+                let (host, total, largest) = cuda.scoped_reservation()?;
+                measurement.host_tensor_reserved_bytes = Some(host);
+                measurement.device_buffer_reserved_bytes = Some(total);
+                measurement.largest_device_buffer_bytes = Some(largest);
+            }
+        }
+    }
+    let _ = (plan, named);
+    Ok(())
+}
+
+#[cfg(feature = "cpu")]
+fn capture_input_contract(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+) -> Result<Vec<CpuInputContract>, BackendError> {
+    let shapes = proxima_tensor::infer(program, symbols)?;
+    let blocks = resolve_named_blocks(program, named)?;
+    proxima_tensor::block_node_ids(program)
+        .iter()
+        .zip(blocks)
+        .map(|(node, block)| {
+            let expected = shapes
+                .of(*node)
+                .iter()
+                .try_fold(1_usize, |count, extent| {
+                    count.checked_mul(usize::try_from(*extent).ok()?)
+                })
+                .ok_or(BackendError::ResourceOverflow {
+                    backend: "cpu",
+                    field: "input_elements",
+                })?;
+            if block.element_count()? != expected {
+                return Err(BackendError::InputContractChanged {
+                    node: *node,
+                    reason: "input element count does not match the planned shape",
+                });
+            }
+            let (codec, integer) = block_codec_identity(block);
+            Ok((*node, codec, integer, expected))
+        })
+        .collect()
+}
+
+#[cfg(feature = "cpu")]
+fn block_codec_identity(block: QuantizedBlock<'_>) -> (Option<Codec>, bool) {
+    match block {
+        QuantizedBlock::Float32(_) => (None, false),
+        QuantizedBlock::Int32(_) => (None, true),
+        QuantizedBlock::Packed { codec, .. } => (Some(codec), false),
+    }
+}
+
+#[cfg(feature = "cpu")]
+fn validate_input_contract(
+    program: &[Op],
+    named: &[(&str, QuantizedBlock<'_>)],
+    contract: &[CpuInputContract],
+) -> Result<(), BackendError> {
+    let blocks = resolve_named_blocks(program, named)?;
+    for ((node, codec, integer, elements), block) in contract.iter().zip(blocks) {
+        if block_codec_identity(block) != (*codec, *integer) {
+            return Err(BackendError::InputContractChanged {
+                node: *node,
+                reason: "input codec differs from the planned codec",
+            });
+        }
+        if block.element_count()? != *elements {
+            return Err(BackendError::InputContractChanged {
+                node: *node,
+                reason: "input element count differs from the planned shape",
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The CPU arm's plan state. `proxima_tensor::cpu` has no persistent
 /// plan/execute split of its own — `evaluate_quantized_with_scratch`
 /// re-runs `infer`/`bind` every call — so "planning" here is exactly the
@@ -375,6 +1048,8 @@ pub struct CpuPlan {
     // must itself be exact -- see `proxima_tensor::cpu::evaluate_quantized_exact`'s
     // own doc for the finding this exists to fix.
     exact_activations: bool,
+    execution_config: Option<TensorExecutionConfig>,
+    input_contract: Vec<CpuInputContract>,
 }
 
 /// Resolves a program into a reusable [`Plan`] for `engine`, binding blocks
@@ -526,7 +1201,9 @@ pub fn execute_plan_named_with_resident_names(
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(cuda_plan) => {
             reject_gpu_expert_sources("cuda", _expert_sources)?;
-            Ok(cuda_plan.execute_named(_named, _resident_names)?)
+            Ok(cuda_plan
+                .execute_named(_named, _resident_names)
+                .map_err(map_cuda_configuration_error)?)
         }
         // `Plan` is uninhabited with every backend feature off; `*plan {}`
         // is the never-pattern proof of that rather than a runtime `todo!`.
@@ -887,6 +1564,8 @@ fn plan_named_cpu(
         free_buffers: Vec::new(),
         validated_weight_nodes: None,
         exact_activations: false,
+        execution_config: None,
+        input_contract: Vec::new(),
     }))
 }
 
@@ -914,6 +1593,8 @@ fn plan_named_cpu_exact(
         free_buffers: Vec::new(),
         validated_weight_nodes: None,
         exact_activations: true,
+        execution_config: None,
+        input_contract: Vec::new(),
     }))
 }
 
@@ -970,7 +1651,18 @@ fn execute_plan_named_cpu(
     named: &[(&str, QuantizedBlock<'_>)],
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
 ) -> Result<Evaluated, BackendError> {
-    let evaluated = if plan.exact_activations {
+    let evaluated = if let Some(config) = &plan.execution_config {
+        validate_input_contract(&plan.program, named, &plan.input_contract)?;
+        evaluate_quantized_named_with_config(
+            &plan.program,
+            &plan.symbols,
+            named,
+            &plan.outputs,
+            (&mut plan.free_buffers, &mut plan.validated_weight_nodes),
+            expert_sources,
+            config,
+        )?
+    } else if plan.exact_activations {
         evaluate_quantized_named_exact_with_scratch_and_experts(
             &plan.program,
             &plan.symbols,
@@ -1014,7 +1706,8 @@ fn execute_plan_named_metal(
     plan: &metal::Plan,
     named: &[(&str, QuantizedBlock<'_>)],
 ) -> Result<Evaluated, BackendError> {
-    let evaluated = metal::execute_plan_named_with_placements(plan, named, &[], &[])?;
+    let evaluated = metal::execute_plan_named_with_placements(plan, named, &[], &[])
+        .map_err(map_metal_configuration_error)?;
     Ok(evaluated)
 }
 
@@ -1036,7 +1729,8 @@ fn execute_plan_named_wgpu(
     plan: &mut wgpu_driver::WgpuPlan,
     named: &[(&str, QuantizedBlock<'_>)],
 ) -> Result<Evaluated, BackendError> {
-    let evaluated = wgpu_driver::execute_plan_named(plan, named)?;
+    let evaluated =
+        wgpu_driver::execute_plan_named(plan, named).map_err(map_wgpu_configuration_error)?;
     Ok(evaluated)
 }
 
@@ -1048,7 +1742,18 @@ fn plan_named_cuda(
     outputs: &[NodeId],
     numeric_policy: NumericPolicy,
 ) -> Result<Plan, BackendError> {
-    static DRIVER: OnceLock<Result<crate::cuda_driver::CudaDriver, String>> = OnceLock::new();
+    Ok(Plan::Cuda(cuda_driver()?.plan(
+        program,
+        symbols,
+        outputs,
+        numeric_policy,
+        named,
+    )?))
+}
+
+#[cfg(feature = "cuda-driver")]
+fn cuda_driver() -> Result<&'static CudaDriver, BackendError> {
+    static DRIVER: OnceLock<Result<CudaDriver, String>> = OnceLock::new();
     let driver = match DRIVER
         .get_or_init(|| crate::cuda_driver::CudaDriver::new(0).map_err(|error| error.to_string()))
     {
@@ -1057,13 +1762,7 @@ fn plan_named_cuda(
             return Err(BackendError::Cuda(CudaDriverError::Driver(error.clone())));
         }
     };
-    Ok(Plan::Cuda(driver.plan(
-        program,
-        symbols,
-        outputs,
-        numeric_policy,
-        named,
-    )?))
+    Ok(driver)
 }
 
 /// Diagnostic counterpart of [`execute_plan_named`], reachable only when a
@@ -1092,6 +1791,8 @@ pub fn execute_plan_named_metal_op_timed(
         Plan::Cpu(_) => Err(BackendError::NotImplemented { backend: "cpu" }),
         #[cfg(feature = "wgpu-backend")]
         Plan::Wgpu(_) => Err(BackendError::NotImplemented { backend: "wgpu" }),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Cuda(_) => Err(BackendError::NotImplemented { backend: "cuda" }),
     }
 }
 
@@ -1120,6 +1821,8 @@ pub fn execute_plan_named_metal_op_timed_with_expert_sources(
         Plan::Cpu(_) => Err(BackendError::NotImplemented { backend: "cpu" }),
         #[cfg(feature = "wgpu-backend")]
         Plan::Wgpu(_) => Err(BackendError::NotImplemented { backend: "wgpu" }),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Cuda(_) => Err(BackendError::NotImplemented { backend: "cuda" }),
     }
 }
 

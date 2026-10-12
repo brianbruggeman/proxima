@@ -607,6 +607,15 @@ pub(super) fn execute_plan_with_placements_inner(
     expert_buffers: &BTreeMap<NodeId, ExpertSourceBuffers>,
     while_gpu_runs: impl FnOnce(),
 ) -> Result<Evaluated, MetalError> {
+    plan.validate_configured_inputs(blocks)?;
+    if plan.has_constraints() {
+        if !input_placements.is_empty() || !output_placements.is_empty() || !recycle.is_empty() {
+            return Err(MetalError::UnsupportedConstraint {
+                field: "constraints", reason: "external placements and readback pools have no bounded execution contract",
+            });
+        }
+        return execute_plan_inner(plan, blocks, expert_buffers);
+    }
     // ROW GAP.md A3: the sole host span between this function's own entry
     // and `step_encode_start` (:762 below) -- everything the caller's
     // `resolve_cached_plan` hit already paid for is NOT in this window;
@@ -2303,6 +2312,8 @@ pub fn execute_plan_timed(
     plan: &Plan,
     blocks: &[QuantizedBlock<'_>],
 ) -> Result<(Evaluated, u64), MetalError> {
+    plan.reject_bounded_extension()?;
+    plan.validate_configured_inputs(blocks)?;
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
 
