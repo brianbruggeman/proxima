@@ -368,10 +368,15 @@ targets. Each one runs 3 vendored prompts.
       mismatch, and the test asserts that rejection.
   - Control: absent.
 - **AC10, consistency (R11).**
-  - Command: `git grep -nE 'Architecture|Eagle3Arch|DflashArch|gemma4-assistant' -- proxima-tensor/specs/speculative-draft-mtp/SPEC.md proxima-tensor/specs/speculative-draft-eagle3/SPEC.md proxima-tensor/specs/speculative-draft-dflash/SPEC.md proxima-tensor/specs/speculative-draft-dspark/SPEC.md | wc -l`.
-  - Expected: 0. The sub-specs restate their mechanisms as readouts plus a draft
-    descriptor, and llama's `general.architecture` strings become GGUF-key reads.
-  - Control: 41, measured 2026-10-04.
+  - Command: `git grep -nE 'Architecture|Eagle3Arch|DflashArch|DflashDraftProgram' -- proxima-tensor/specs/speculative-draft-mtp/SPEC.md proxima-tensor/specs/speculative-draft-eagle3/SPEC.md proxima-tensor/specs/speculative-draft-dflash/SPEC.md proxima-tensor/specs/speculative-draft-dspark/SPEC.md | wc -l`.
+  - Expected: 0. The sub-specs name no `Architecture` impl or per-family type; llama's
+    `general.architecture` strings (for example `gemma4-assistant`) appear in them only as
+    GGUF-key values read at load, which is data and not a type, so the pattern matches
+    type names and not those strings.
+  - Control: the same pattern over `proxima-tensor/specs/decode-as-data/SPEC.md`, which
+    names those types in its problem statement, prints 7 (measured 2026-10-12); the
+    previous pattern, which also matched the string `gemma4-assistant`, printed 41 over
+    the four sub-specs on 2026-10-04.
 
 - **AC12, oracle (R13).**
   - Command: `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/prefill_one_path_llama_parity_/)'`.
