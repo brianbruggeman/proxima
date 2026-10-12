@@ -25,7 +25,7 @@ Every validation command is literal and lives in the `## commands` section, one 
 | 8 | DFlash and DSpark training runs on E2B (R8, R9) | AC11, AC12 | commands section, slice 8 | `1`, `1` | [ ] | same jq gate as slice 7 |
 | 8b | the random-initialization baseline read from all three logs (R9) | AC13 | commands section, slice 8b | 1 | [ ] | verified on synthetic input: a value of 7.2, two values, four values, a non-numeric value and 11.0 each print 0 |
 | 9 | arm granite's verify program: `speculative_verify = true` in `granitemoe.toml` and the one-row-per-position test (R10) | AC14 | commands section, slice 9 | two lines: `1`, `1` | [ ] | the first prints 0 today; if the MoE verify program cannot keep one row per position, this slice's outcome is the recorded typed refusal and slice 12 and the granite arms of the method specs are struck with that evidence |
-| 10 | export to the draft GGUF and the train/serve round trip, per method (R13) | AC15 | commands section, slice 10 | 4 | [ ] | |
+| 10 | export to the draft GGUF and the train/serve round trip, per method (R13) | AC15 | commands section, slice 10 | `3`, `3` | [ ] | |
 | 11 | place the three E2B drafts and measure acceptance against the random draft, with the corpus-level rollback gate on the trained draft (R11, R12) | AC31, AC16, AC17, AC18 | commands section, slice 11 | `3`; then `1`, `1`, `1`; then `1`, `1`, `1`; then `51`, `51`, `1` for each of the three methods | [ ] | AC16 below 0.5 or AC17 above 0.05 invokes the refutation condition; the `rejected_total` >= 1 clause (pre-registered, status plausible) is the corpus-level proof the rollback path ran on the trained draft, and a per-prompt `rejected` > 0 gate is not used; greps and awks verified on synthetic files (raw output in the scratch directory) |
 | 12 | granite: self-distill, train and export the three granite drafts, when slice 9 armed the verify program (R10, R13) | AC26 | commands section, slice 12 | `1`, `1`, `1`, `3` | [ ] | struck to the recorded refusal if slice 9 recorded one; AC14 is discharged in slice 9 |
 | 13 | determinism: three runs into new directories, the same seed twice and a seed-18 control (R14) | AC19 | commands section, slice 13 | two lines: `1`, `1` | [ ] | the control requires both curves to have 9 held-out losses, so a crashed seed-18 run prints 0; verified on synthetic logs (see SPEC.md AC19) |
@@ -39,7 +39,7 @@ Each block is the literal text of the slice's validation command; run its lines 
 ### slice 0
 
 ```sh
-cargo nextest run -p proxima-tensor -E 'test(/readout_/)' 2>&1 | grep -c 'Summary .* 2 tests run: 2 passed'; cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/lossless_comparator_|lossless_guard_/)' 2>&1 | grep -cE '^control=(self|flip|zero_draft) '
+cargo nextest run -p proxima-tensor -E 'test(/readout_/)' 2>&1 | grep -cE 'Summary .* 2 tests run: 2 passed, [0-9]+ skipped$'; cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/lossless_comparator_|lossless_guard_/)' 2>&1 | grep -cE '^control=(self compared=51 identical=51|flip compared=51 identical=50|zero_draft drafted_prompts=0 flagged=true)$'
 ```
 
 ### slice 1
@@ -51,19 +51,19 @@ cargo run --release -p proxima-model-interop --features draft-train --example dr
 ### slice 1b
 
 ```sh
-cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_corpus_overlap_detector/)' 2>&1 | grep -c 'planted_detected = true clean_detected = false'
+cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_corpus_overlap_detector/)' 2>&1 | grep -c '^overlap_detector planted_detected = true clean_detected = false$'
 ```
 
 ### slice 2
 
 ```sh
-mkdir -p "/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-train"; OUT=$(mktemp -d "/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-train/selfdistill.XXXXXX"); cargo run --release -p proxima-model-interop --features draft-train,metal --example draft_selfdistill -- --target /Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd --out "$OUT" > "$OUT/selfdistill.log" 2>&1; ran=$(grep -c '^selfdistill records=2176 ' "$OUT/selfdistill.log"); ids=$(jq -s -c '{records:length, train:([.[]|select(.split=="train")]|length), heldout:([.[]|select(.split=="heldout")]|length), len_ok:([.[]|((.generated_ids|length)>=16 and (.generated_ids|length)<=64)]|all), empty_prompt:([.[]|select((.prompt_ids|length)==0)]|length)}' "$OUT/ids_e2b.jsonl" | grep -c '^{"records":2176,"train":2048,"heldout":128,"len_ok":true,"empty_prompt":0}$'); taps=$(jq -s -c '{records:length, present:([.[]|(.tap_rows>=1)]|all), at_most_64:([.[]|(.tap_rows<=64)]|all)}' "$OUT/taps_index_e2b.jsonl" | grep -c '^{"records":2176,"present":true,"at_most_64":true}$'); echo "$ran $ids $taps"; [ "$ran $ids $taps" = "1 1 1" ] && cp -R "$OUT"/. /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-train/; ls -1 /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-train/ids_e2b.jsonl /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-train/taps_index_e2b.jsonl | wc -l
+mkdir -p "/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-train"; export OUT=$(mktemp -d "/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-train/selfdistill.XXXXXX"); cargo run --release -p proxima-model-interop --features draft-train,metal --example draft_selfdistill -- --target /Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd --out "$OUT" > "$OUT/selfdistill.log" 2>&1; ran=$(grep -c '^selfdistill records=2176 ' "$OUT/selfdistill.log"); ids=$(jq -s -c '{records:length, train:([.[]|select(.split=="train")]|length), heldout:([.[]|select(.split=="heldout")]|length), len_ok:([.[]|((.generated_ids|length)>=16 and (.generated_ids|length)<=64)]|all), empty_prompt:([.[]|select((.prompt_ids|length)==0)]|length)}' "$OUT/ids_e2b.jsonl" | grep -c '^{"records":2176,"train":2048,"heldout":128,"len_ok":true,"empty_prompt":0}$'); taps=$(jq -s -c '{records:length, present:([.[]|(.tap_rows>=1)]|all), at_most_64:([.[]|(.tap_rows<=64)]|all)}' "$OUT/taps_index_e2b.jsonl" | grep -c '^{"records":2176,"present":true,"at_most_64":true}$'); echo "$ran $ids $taps"; [ "$ran $ids $taps" = "1 1 1" ] && cp -R "$OUT"/. /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-train/; ls -1 /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-train/ids_e2b.jsonl /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-train/taps_index_e2b.jsonl | wc -l
 ```
 
 ### slice 2b
 
 ```sh
-cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_selfdistill_labels_are_target_greedy/)' 2>&1 | grep -c 'records_checked = 64 label_mismatches = 0 perturbed_label_detected = true'
+cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_selfdistill_labels_are_target_greedy/)' 2>&1 | grep -c '^labels records_checked = 64 label_mismatches = 0 perturbed_label_detected = true$'
 ```
 
 ### slice 2c
@@ -81,19 +81,19 @@ cargo run --release -p proxima-model-interop --features draft-train --example dr
 ### slice 2e
 
 ```sh
-cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_taps_equal_independent_forward/)' 2>&1 | grep -cE '^taps records_checked = 16 rows_checked = [1-9][0-9]* layers = 3 max_abs_diff = [0-9.e-]+ perturbed_rejected = true wrong_layer_rejected = true$'
+cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_taps_equal_independent_forward/)' 2>&1 | grep -cE '^taps records_checked = 16 rows_checked = [1-9][0-9]* layers = 3 max_abs_diff = [0-9]+(\.[0-9]+)?(e-[0-9]+)? perturbed_rejected = true wrong_layer_rejected = true$'
 ```
 
 ### slice 3
 
 ```sh
-cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_vocab_reduction/)' 2>&1 | grep -cE 'draft_vocab = 32768 d2t_len = 32768 d2t_roundtrip = true logits_cols = 32768 masked_label_loss = 0 masked_label_grad = 0 masked_control_nonzero = true coverage = 0\.9[0-9]+'
+cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_vocab_reduction/)' 2>&1 | grep -cE '^draft_vocab_reduction draft_vocab = 32768 d2t_len = 32768 d2t_roundtrip = true logits_cols = 32768 masked_label_loss = 0 masked_label_grad = 0 masked_control_nonzero = true coverage = 0\.9[0-9]+$'
 ```
 
 ### slice 4
 
 ```sh
-cargo run --release -p proxima-model-interop --features draft-train,metal --example draft_census 2>&1 | grep -cE '^census method=(eagle3|dflash|dspark) refusals=0 nodes=[1-9][0-9]*$'; cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_census_reports_a_refusal/)' 2>&1 | grep -c 'control refusals = 1'
+cargo run --release -p proxima-model-interop --features draft-train,metal --example draft_census 2>&1 | grep -cE '^census method=(eagle3|dflash|dspark) refusals=0 nodes=[1-9][0-9]*$'; cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_census_reports_a_refusal/)' 2>&1 | grep -c '^census_control refusals = 1$'
 ```
 
 ### slice 4b
@@ -105,19 +105,19 @@ cargo nextest run -p proxima-model-interop --features draft-train --no-capture -
 ### slice 5
 
 ```sh
-cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_overfits_one_sequence_/)' 2>&1 | grep -cE '^overfit method=(eagle3|dflash|dspark) first_loss=[0-9.]+ last_loss=0\.0[0-9]+$'
+cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_overfits_one_sequence_/)' 2>&1 | grep -cE '^overfit method=(eagle3|dflash|dspark) first_loss=[0-9]+\.[0-9]+ last_loss=0\.0[0-9]+$'
 ```
 
 ### slice 6
 
 ```sh
-cargo nextest run -p proxima-model-interop --features draft-train,metal --no-capture -E 'test(/draft_step_cpu_equals_metal/)' 2>&1 | grep -cE 'cpu_loss = [0-9.]+ metal_loss = [0-9.]+ abs_diff = 0\.000[0-9]* perturbed_rejected = true'
+cargo nextest run -p proxima-model-interop --features draft-train,metal --no-capture -E 'test(/draft_step_cpu_equals_metal/)' 2>&1 | grep -cE '^step_equivalence cpu_loss = [1-9][0-9]*\.[0-9]+ metal_loss = [1-9][0-9]*\.[0-9]+ abs_diff = 0\.000[0-9]* perturbed_rejected = true$'
 ```
 
 ### slice 6b
 
 ```sh
-cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_resume_equals_uninterrupted_/)' 2>&1 | grep -cE '^resume method=(eagle3|dflash|dspark) steps=64 resumed_at=32 max_abs_diff=[0-9.e-]+ within=true dropped_optimizer_max_abs_diff=[0-9.e-]+ dropped_optimizer_rejected=true$'
+cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_resume_equals_uninterrupted_/)' 2>&1 | grep -cE '^resume method=(eagle3|dflash|dspark) steps=64 resumed_at=32 max_abs_diff=[0-9]+(\.[0-9]+)?(e-[0-9]+)? within=true dropped_optimizer_max_abs_diff=[0-9]+(\.[0-9]+)?(e-[0-9]+)? dropped_optimizer_rejected=true$'
 ```
 
 ### slice 7
@@ -141,13 +141,14 @@ for f in train_e2b_eagle3 train_e2b_dflash train_e2b_dspark; do jq -s '[.[]|sele
 ### slice 9
 
 ```sh
-grep -c '^speculative_verify = true' proxima-model-interop/src/profiles/granitemoe.toml; cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/granitemoe_verify_program_keeps_one_logits_row_per_position/)' 2>&1 | grep -c 'rows_per_position = 1 positions = 8'
+grep -c '^speculative_verify = true$' proxima-model-interop/src/profiles/granitemoe.toml; cargo nextest run -p proxima-model-interop --features std --no-capture -E 'test(/granitemoe_verify_program_keeps_one_logits_row_per_position/)' 2>&1 | grep -c '^granitemoe_verify rows_per_position = 1 positions = 8$'
 ```
 
 ### slice 10
 
 ```sh
-cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_export_roundtrip_/) + test(/draft_export_hand_vector_eagle3/)' 2>&1 | grep -cE '^export(_hand_vector)? method=(eagle3|dflash|dspark) max_abs_diff = [0-9.e-]+ (perturbed_rejected = true|expected = -inf,0\.848528,-inf,1\.131371,1\.979899)$'
+cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_export_roundtrip_/)' 2>&1 | grep -cE '^export method=(eagle3|dflash|dspark) max_abs_diff = [0-9]+(\.[0-9]+)?(e-[0-9]+)? perturbed_rejected = true$'
+cargo nextest run -p proxima-model-interop --features draft-train --no-capture -E 'test(/draft_export_hand_vector_/)' 2>&1 | grep -cE '^export_hand_vector method=(eagle3 max_abs_diff = [0-9]+(\.[0-9]+)?(e-[0-9]+)? expected = -inf,0\.848528,-inf,1\.131371,1\.979899|dflash max_abs_diff = [0-9]+(\.[0-9]+)?(e-[0-9]+)? expected = 1\.568929,0\.588348|dspark max_abs_diff = [0-9]+(\.[0-9]+)?(e-[0-9]+)? expected = 3,7,11) perturbed_rejected = true$'
 ```
 
 ### slice 11
@@ -174,7 +175,7 @@ for run in a:17 b:17 c:18; do cargo run --release -p proxima-model-interop --fea
 ### slice 14
 
 ```sh
-/usr/bin/time -l cargo run --release -p proxima-model-interop --features draft-train,metal --example draft_train -- --method eagle3 --target /Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd --steps 1024 --seed 17 --out /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-train/e2b-eagle3-timed > time_e2b_eagle3.txt 2>&1; grep -cE 'wall_seconds=[0-9.]+ tokens_per_second=[0-9.]+' time_e2b_eagle3.txt; grep -cE '^ +[0-9.]+ +real ' time_e2b_eagle3.txt; grep -cE '^ +[0-9]+ +maximum resident set size$' time_e2b_eagle3.txt
+/usr/bin/time -l cargo run --release -p proxima-model-interop --features draft-train,metal --example draft_train -- --method eagle3 --target /Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd --steps 1024 --seed 17 --out /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fixtures/draft-train/e2b-eagle3-timed > time_e2b_eagle3.txt 2>&1; grep -cE 'wall_seconds=[1-9][0-9]*\.[0-9]+ tokens_per_second=[1-9][0-9]*\.[0-9]+' time_e2b_eagle3.txt; grep -cE '^ +[1-9][0-9]*\.[0-9]+ +real ' time_e2b_eagle3.txt; grep -cE '^ +[1-9][0-9]* +maximum resident set size$' time_e2b_eagle3.txt
 ```
 
 ### slice 15
