@@ -5,7 +5,9 @@ use proxima_gguf::parse_complete;
 use proxima_model_interop::{LoadedModel, PromptCacheConfig, ServingConfig};
 use serde::Deserialize;
 
-use crate::reencode::reencode;
+use proxima_gguf::GgmlType;
+
+use crate::reencode::{Target, reencode};
 
 #[derive(Deserialize)]
 pub struct Case {
@@ -61,7 +63,11 @@ pub fn incremented_generations(cases: &[Case]) -> Vec<Vec<u32>> {
 
 /// Loads `env`'s checkpoint, re-encodes its block weights into the family, runs free-running
 /// greedy generation from each recorded prompt and prints `reencoded=<n>` and `agree=<n> of <N>`.
-pub fn run(environment: &str, model_directory: &str) -> f64 {
+pub fn run(
+    environment: &str,
+    model_directory: &str,
+    target_of: fn(GgmlType) -> Option<Target>,
+) -> f64 {
     let path = std::env::var(environment)
         .unwrap_or_else(|_| panic!("set {environment} to the {model_directory} checkpoint path"));
     assert!(
@@ -72,7 +78,7 @@ pub fn run(environment: &str, model_directory: &str) -> f64 {
     // the checkpoint is not written while this process reads it
     let mapping = unsafe { memmap2::Mmap::map(&file) }.expect("map the checkpoint");
     let parsed = parse_complete(&mapping).expect("parse the checkpoint header");
-    let rewritten = reencode(&parsed, &mapping);
+    let rewritten = reencode(&parsed, &mapping, target_of);
     let reencoded: usize = rewritten.counts.iter().map(|(_, count)| count).sum();
     println!("reencoded={reencoded} by_target={:?}", rewritten.counts);
     assert!(
@@ -101,6 +107,17 @@ pub fn run(environment: &str, model_directory: &str) -> f64 {
                 .0
         })
         .collect();
+    for (position, (case, generated)) in cases.iter().zip(&generations).enumerate() {
+        let first = case
+            .generated_ids
+            .iter()
+            .zip(generated)
+            .position(|(want, got)| want != got);
+        println!(
+            "case={position} positions={} first_divergence={first:?}",
+            case.generated_ids.len()
+        );
+    }
     let (agreeing, total) = agree(&cases, &generations);
     let rate = agreeing as f64 / total as f64;
     println!("agree={agreeing} of {total} rate={rate:.4}");

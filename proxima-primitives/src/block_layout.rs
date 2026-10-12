@@ -1,168 +1,458 @@
 //! A block layout describes how a run of stored numbers is packed: how many elements share one
-//! scale (and optional min), where each bit plane of an element's code lives, and how a code
-//! becomes a value, `(multiplier * code - bias) * scale + min`.
+//! scale (and optional min), where each bit plane of an element's code lives, how sub-blocks of
+//! the block carry their own scale and min, and how a code becomes a value,
+//! `(multiplier * code - bias) * scale * sub_scale + min_multiplier * (min * sub_min)`.
 //!
 //! Teaching pointer: [`FloatLayout`] is the data of one stored number; this is the data of a
 //! block of them. One CPU walker (`proxima_gguf::quant::block_layout`) and one MSL emitter
-//! (`omega::msl::layout_render::block_unpack_msl`) read it, so a new linear block format is a
-//! constant here plus its parity fixture, not a decoder.
+//! (`omega::msl::layout_render::block_unpack_msl`) read it, so a new block format is a constant
+//! here plus its parity fixture, not a decoder. Where the bits of a code live is an affine map
+//! from the element index: the index is split into mixed-radix digits and each digit moves the
+//! bit address by a stride, which expresses contiguous runs, nibble-split pairs, and the
+//! interleaved lanes of the K formats with one rule.
 
 use crate::float_layout::FloatLayout;
 
-/// How the elements of one plane are addressed in the block's bytes.
+/// One digit of an element index: `radix` values, each moving the bit address by `stride_bits`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum PlaneOrder {
-    /// Element `i` occupies bits `i * bits ..` counted from the least significant bit of the
-    /// plane's first byte.
-    Contiguous,
-    /// Four-bit codes, two per byte: elements `0 .. n/2` in the low nibbles of the plane's `n/2`
-    /// bytes and elements `n/2 .. n` in the high nibbles (Q4_0, Q4_1, Q5_0, Q5_1).
-    NibbleSplit,
+pub struct Digit {
+    pub radix: u16,
+    pub stride_bits: u16,
 }
 
-/// One bit plane of an element code: `bits` wide, starting at `byte_offset` in the block.
+/// The most digits a plane's address map uses (Q3_K needs four).
+pub const MAX_DIGITS: usize = 4;
+
+/// One bit plane of a code: `bits` wide, at the bit address
+/// `base_bits + sum(digit_value * stride_bits)`, with the index split least significant digit
+/// first. Unused digits have radix 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Plane {
     pub bits: u8,
-    pub byte_offset: u16,
-    pub order: PlaneOrder,
+    pub base_bits: u32,
+    pub digits: [Digit; MAX_DIGITS],
 }
 
-/// A scale or min stored in the block: its layout and byte offset.
+impl Plane {
+    /// The bit address of the plane's value for element `index`.
+    #[must_use]
+    pub const fn address(&self, index: usize) -> usize {
+        let mut remaining = index;
+        let mut address = self.base_bits as usize;
+        let mut position = 0;
+        while position < MAX_DIGITS {
+            let digit = self.digits[position];
+            let radix = digit.radix as usize;
+            address += (remaining % radix) * digit.stride_bits as usize;
+            remaining /= radix;
+            position += 1;
+        }
+        address
+    }
+}
+
+/// A code assembled from one or two planes (the second holds the bits above the first).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct Coded {
+    /// Layout of the assembled code: unsigned for offset-binary codes, `TwosComplement` for i8.
+    pub code: FloatLayout,
+    pub low: Plane,
+    pub high: Option<Plane>,
+    /// Subtracted from the multiplied code.
+    pub bias: i16,
+}
+
+/// A scale or min stored once per block: its layout and byte offset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Field {
     pub layout: FloatLayout,
     pub byte_offset: u16,
 }
 
+/// Sub-blocks of the block, each with its own scale code and optionally a min code, indexed by
+/// `element / (elements / count)` and addressed by the planes of the codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SubBlocks {
+    pub count: u16,
+    pub scale: Coded,
+    pub min: Option<Coded>,
+}
+
 /// The packing of one block of `elements` codes under a shared scale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BlockLayout {
-    /// Elements per block; 32 for Q4_0, 128 for Q1_0.
+    /// Elements per block; 32 for Q4_0, 256 for the K formats.
     pub elements: u16,
-    /// Bytes per block; 18 for Q4_0.
+    /// Bytes per block; 18 for Q4_0, 144 for Q4_K.
     pub block_bytes: u16,
-    /// Layout of an assembled code: unsigned for offset-binary codes, `TwosComplement` for Q8.
-    pub code: FloatLayout,
-    /// The low bits of each code.
-    pub low: Plane,
-    /// The bits above `low.bits`, when the code is split over two planes (Q5_0 and Q5_1).
-    pub high: Option<Plane>,
-    pub scale: Field,
-    pub min: Option<Field>,
+    /// The element code; its `bias` is the offset-binary bias (8 for Q4_0, 32 for Q6_K).
+    pub element: Coded,
     /// Multiplies the code before the bias: 2 for Q1_0, whose value is `(2 * code - 1) * scale`.
     pub multiplier: i16,
-    /// Subtracted from the multiplied code: 8 for Q4_0, 16 for Q5_0, 0 for Q8_1 and Q4_1.
-    pub bias: i16,
+    pub scale: Field,
+    pub min: Option<Field>,
+    /// Applied to the min term: 1 where the min is added (Q4_1), -1 where it is subtracted (Q4_K).
+    pub min_multiplier: i8,
+    pub sub: Option<SubBlocks>,
 }
 
-const F16_SCALE: Field = Field {
-    layout: FloatLayout::F16,
-    byte_offset: 0,
-};
+const F16_SCALE: Field = field_at(FloatLayout::F16, 0);
 
-const fn field_at(byte_offset: u16) -> Field {
+const fn field_at(layout: FloatLayout, byte_offset: u16) -> Field {
     Field {
-        layout: FloatLayout::F16,
+        layout,
         byte_offset,
     }
 }
 
-const fn plane(bits: u8, byte_offset: u16, order: PlaneOrder) -> Plane {
+const NO_DIGIT: Digit = Digit {
+    radix: 1,
+    stride_bits: 0,
+};
+
+const fn digit(radix: u16, stride_bits: u16) -> Digit {
+    Digit { radix, stride_bits }
+}
+
+const fn plane(bits: u8, base_bits: u32, digits: [Digit; MAX_DIGITS]) -> Plane {
     Plane {
         bits,
-        byte_offset,
-        order,
+        base_bits,
+        digits,
+    }
+}
+
+const fn coded(code: FloatLayout, low: Plane, high: Option<Plane>, bias: i16) -> Coded {
+    Coded {
+        code,
+        low,
+        high,
+        bias,
+    }
+}
+
+const fn nibbles(base_bits: u32, span: u16) -> Plane {
+    plane(
+        4,
+        base_bits,
+        [digit(span, 8), digit(2, 4), NO_DIGIT, NO_DIGIT],
+    )
+}
+
+const fn run(bits: u8, base_bits: u32, elements: u16) -> Plane {
+    plane(
+        bits,
+        base_bits,
+        [digit(elements, bits as u16), NO_DIGIT, NO_DIGIT, NO_DIGIT],
+    )
+}
+
+const fn linear(
+    elements: u16,
+    block_bytes: u16,
+    element: Coded,
+    multiplier: i16,
+    min: Option<Field>,
+) -> BlockLayout {
+    BlockLayout {
+        elements,
+        block_bytes,
+        element,
+        multiplier,
+        scale: F16_SCALE,
+        min,
+        min_multiplier: 1,
+        sub: None,
+    }
+}
+
+const QK_QS_PAIR_LANES: [Digit; MAX_DIGITS] = [digit(32, 8), digit(2, 4), digit(4, 256), NO_DIGIT];
+
+const K4_SCALE_BASE: u32 = 32;
+
+const fn k4_sub_blocks() -> SubBlocks {
+    let scale = coded(
+        FloatLayout::UINT6,
+        plane(
+            4,
+            K4_SCALE_BASE,
+            [digit(4, 8), digit(2, 64), NO_DIGIT, NO_DIGIT],
+        ),
+        Some(plane(
+            2,
+            K4_SCALE_BASE + 4,
+            [digit(4, 8), digit(2, 2), NO_DIGIT, NO_DIGIT],
+        )),
+        0,
+    );
+    let min = coded(
+        FloatLayout::UINT6,
+        plane(
+            4,
+            K4_SCALE_BASE + 32,
+            [digit(4, 8), digit(2, 36), NO_DIGIT, NO_DIGIT],
+        ),
+        Some(plane(
+            2,
+            K4_SCALE_BASE + 36,
+            [digit(4, 8), digit(2, 2), NO_DIGIT, NO_DIGIT],
+        )),
+        0,
+    );
+    SubBlocks {
+        count: 8,
+        scale,
+        min: Some(min),
     }
 }
 
 impl BlockLayout {
-    pub const Q4_0: Self = Self {
-        elements: 32,
-        block_bytes: 18,
-        code: FloatLayout::UINT4,
-        low: plane(4, 2, PlaneOrder::NibbleSplit),
-        high: None,
-        scale: F16_SCALE,
+    pub const Q4_0: Self = linear(
+        32,
+        18,
+        coded(FloatLayout::UINT4, nibbles(16, 16), None, 8),
+        1,
+        None,
+    );
+    pub const Q4_1: Self = linear(
+        32,
+        20,
+        coded(FloatLayout::UINT4, nibbles(32, 16), None, 0),
+        1,
+        Some(field_at(FloatLayout::F16, 2)),
+    );
+    pub const Q5_0: Self = linear(
+        32,
+        22,
+        coded(
+            FloatLayout::UINT5,
+            nibbles(48, 16),
+            Some(run(1, 16, 32)),
+            16,
+        ),
+        1,
+        None,
+    );
+    pub const Q5_1: Self = linear(
+        32,
+        24,
+        coded(FloatLayout::UINT5, nibbles(64, 16), Some(run(1, 32, 32)), 0),
+        1,
+        Some(field_at(FloatLayout::F16, 2)),
+    );
+    pub const Q8_0: Self = linear(
+        32,
+        34,
+        coded(FloatLayout::INT8, run(8, 16, 32), None, 0),
+        1,
+        None,
+    );
+    pub const Q8_1: Self = linear(
+        32,
+        36,
+        coded(FloatLayout::INT8, run(8, 32, 32), None, 0),
+        1,
+        None,
+    );
+    pub const Q1_0: Self = linear(
+        128,
+        18,
+        coded(FloatLayout::UINT1, run(1, 16, 128), None, 1),
+        2,
+        None,
+    );
+    pub const Q2_0: Self = linear(
+        64,
+        18,
+        coded(FloatLayout::UINT2, run(2, 16, 64), None, 1),
+        1,
+        None,
+    );
+
+    pub const Q2_K: Self = Self {
+        elements: 256,
+        block_bytes: 84,
+        element: coded(
+            FloatLayout::UINT2,
+            plane(
+                2,
+                128,
+                [digit(16, 8), digit(2, 128), digit(4, 2), digit(2, 256)],
+            ),
+            None,
+            0,
+        ),
+        multiplier: 1,
+        scale: field_at(FloatLayout::F16, 80),
+        min: Some(field_at(FloatLayout::F16, 82)),
+        min_multiplier: -1,
+        sub: Some(SubBlocks {
+            count: 16,
+            scale: coded(
+                FloatLayout::UINT4,
+                plane(4, 0, [digit(16, 8), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
+                None,
+                0,
+            ),
+            min: Some(coded(
+                FloatLayout::UINT4,
+                plane(4, 4, [digit(16, 8), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
+                None,
+                0,
+            )),
+        }),
+    };
+    pub const Q3_K: Self = Self {
+        elements: 256,
+        block_bytes: 110,
+        element: coded(
+            FloatLayout::UINT3,
+            plane(
+                2,
+                256,
+                [digit(16, 8), digit(2, 128), digit(4, 2), digit(2, 256)],
+            ),
+            Some(plane(
+                1,
+                0,
+                [digit(16, 8), digit(2, 128), digit(4, 1), digit(2, 4)],
+            )),
+            4,
+        ),
+        multiplier: 1,
+        scale: field_at(FloatLayout::F16, 108),
         min: None,
-        multiplier: 1,
-        bias: 8,
+        min_multiplier: 1,
+        sub: Some(SubBlocks {
+            count: 16,
+            scale: coded(
+                FloatLayout::UINT6,
+                plane(4, 768, [digit(4, 8), digit(2, 32), digit(2, 4), NO_DIGIT]),
+                Some(plane(
+                    2,
+                    832,
+                    [digit(4, 8), digit(4, 2), NO_DIGIT, NO_DIGIT],
+                )),
+                32,
+            ),
+            min: None,
+        }),
     };
-    pub const Q4_1: Self = Self {
-        elements: 32,
-        block_bytes: 20,
-        code: FloatLayout::UINT4,
-        low: plane(4, 4, PlaneOrder::NibbleSplit),
-        high: None,
-        scale: F16_SCALE,
-        min: Some(field_at(2)),
+    pub const Q4_K: Self = Self {
+        elements: 256,
+        block_bytes: 144,
+        element: coded(FloatLayout::UINT4, plane(4, 128, QK_QS_PAIR_LANES), None, 0),
         multiplier: 1,
-        bias: 0,
-    };
-    pub const Q5_0: Self = Self {
-        elements: 32,
-        block_bytes: 22,
-        code: FloatLayout::UINT5,
-        low: plane(4, 6, PlaneOrder::NibbleSplit),
-        high: Some(plane(1, 2, PlaneOrder::Contiguous)),
         scale: F16_SCALE,
+        min: Some(field_at(FloatLayout::F16, 2)),
+        min_multiplier: -1,
+        sub: Some(k4_sub_blocks()),
+    };
+    pub const Q5_K: Self = Self {
+        elements: 256,
+        block_bytes: 176,
+        element: coded(
+            FloatLayout::UINT5,
+            plane(4, 384, QK_QS_PAIR_LANES),
+            Some(plane(
+                1,
+                128,
+                [digit(32, 8), digit(2, 1), digit(4, 2), NO_DIGIT],
+            )),
+            0,
+        ),
+        multiplier: 1,
+        scale: F16_SCALE,
+        min: Some(field_at(FloatLayout::F16, 2)),
+        min_multiplier: -1,
+        sub: Some(k4_sub_blocks()),
+    };
+    pub const Q6_K: Self = Self {
+        elements: 256,
+        block_bytes: 210,
+        element: coded(
+            FloatLayout::UINT6,
+            plane(
+                4,
+                0,
+                [digit(32, 8), digit(2, 256), digit(2, 4), digit(2, 512)],
+            ),
+            Some(plane(
+                2,
+                1024,
+                [digit(32, 8), digit(4, 2), digit(2, 256), NO_DIGIT],
+            )),
+            32,
+        ),
+        multiplier: 1,
+        scale: field_at(FloatLayout::F16, 208),
         min: None,
-        multiplier: 1,
-        bias: 16,
+        min_multiplier: 1,
+        sub: Some(SubBlocks {
+            count: 16,
+            scale: coded(
+                FloatLayout::INT8,
+                plane(8, 1536, [digit(16, 8), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
+                None,
+                0,
+            ),
+            min: None,
+        }),
     };
-    pub const Q5_1: Self = Self {
-        elements: 32,
-        block_bytes: 24,
-        code: FloatLayout::UINT5,
-        low: plane(4, 8, PlaneOrder::NibbleSplit),
-        high: Some(plane(1, 4, PlaneOrder::Contiguous)),
-        scale: F16_SCALE,
-        min: Some(field_at(2)),
+    pub const Q8_K: Self = Self {
+        elements: 256,
+        block_bytes: 292,
+        element: coded(FloatLayout::INT8, run(8, 32, 256), None, 0),
         multiplier: 1,
-        bias: 0,
-    };
-    pub const Q8_0: Self = Self {
-        elements: 32,
-        block_bytes: 34,
-        code: FloatLayout::INT8,
-        low: plane(8, 2, PlaneOrder::Contiguous),
-        high: None,
-        scale: F16_SCALE,
+        scale: field_at(FloatLayout::BF32, 0),
         min: None,
-        multiplier: 1,
-        bias: 0,
+        min_multiplier: 1,
+        sub: None,
     };
-    pub const Q8_1: Self = Self {
-        elements: 32,
-        block_bytes: 36,
-        code: FloatLayout::INT8,
-        low: plane(8, 4, PlaneOrder::Contiguous),
-        high: None,
-        scale: F16_SCALE,
-        min: None,
-        multiplier: 1,
-        bias: 0,
-    };
-    pub const Q1_0: Self = Self {
-        elements: 128,
-        block_bytes: 18,
-        code: FloatLayout::UINT1,
-        low: plane(1, 2, PlaneOrder::Contiguous),
-        high: None,
-        scale: F16_SCALE,
-        min: None,
-        multiplier: 2,
-        bias: 1,
-    };
-    pub const Q2_0: Self = Self {
-        elements: 64,
-        block_bytes: 18,
-        code: FloatLayout::UINT2,
-        low: plane(2, 2, PlaneOrder::Contiguous),
-        high: None,
-        scale: F16_SCALE,
-        min: None,
-        multiplier: 1,
-        bias: 1,
-    };
+}
+
+/// Walks a plane's addresses for consecutive element indexes without dividing: the digits are an
+/// odometer, so each step adds one stride and carries.
+#[derive(Debug, Clone, Copy)]
+pub struct PlaneCursor {
+    plane: Plane,
+    counters: [u16; MAX_DIGITS],
+    address: usize,
+}
+
+impl Plane {
+    /// A cursor positioned at element 0.
+    #[must_use]
+    pub const fn cursor(&self) -> PlaneCursor {
+        PlaneCursor {
+            plane: *self,
+            counters: [0; MAX_DIGITS],
+            address: self.base_bits as usize,
+        }
+    }
+}
+
+impl PlaneCursor {
+    /// The bit address of the current element.
+    #[must_use]
+    pub const fn address(&self) -> usize {
+        self.address
+    }
+
+    /// Moves to the next element index.
+    pub const fn advance(&mut self) {
+        let mut position = 0;
+        while position < MAX_DIGITS {
+            let digit = self.plane.digits[position];
+            let next = self.counters[position] + 1;
+            if next < digit.radix {
+                self.counters[position] = next;
+                self.address += digit.stride_bits as usize;
+                return;
+            }
+            self.counters[position] = 0;
+            self.address -= (digit.radix as usize - 1) * digit.stride_bits as usize;
+            position += 1;
+        }
+    }
 }
