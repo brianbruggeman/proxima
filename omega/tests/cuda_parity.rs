@@ -14,11 +14,13 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod support;
-use support::{as_named_blocks, real_forward_fixture};
+use support::{as_named_blocks, qwen3_gqa_qk_norm_forward_fixture, real_forward_fixture};
 
 use omega::backend::{BackendError, Engine, GpuDriver, execute_plan_named, plan_named};
 use proxima_tensor::NumericPolicy;
 use proxima_tensor::test_support::Lcg;
+use proxima_tensor::spec::qwen3_cached_forward_program;
+use proxima_tensor::infer;
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append,
     map, projection,
@@ -909,5 +911,194 @@ fn the_full_mistral_cached_forward_runs_on_cuda_at_cpu_parity() {
     assert!(
         relative < 1e-4,
         "omega::backend's cpu and cuda arms disagree on the real forward: relative={relative} max_diff={max_diff}"
+    );
+}
+
+/// `support::qwen3_gqa_qk_norm_forward_fixture` -- the real Qwen3 shape's
+/// two distinguishing features over Mistral: GQA (already exercised by
+/// `real_forward_fixture`) plus per-head `q_norm`/`k_norm`, a SECOND
+/// broadcast-reduce epilogue site (RMSNorm's own row-mean-square fold is the
+/// first, already covered by [`the_full_mistral_cached_forward_runs_on_cuda_at_cpu_parity`])
+/// with a narrower per-head reduction extent than the row-wide RMSNorm case.
+/// Needs `reduce-epilogue-fusion` to actually bind a non-identity
+/// `epilogue_broadcast_axes` at all -- run with
+/// `--features cpu,cuda-backend,reduce-epilogue-fusion`.
+#[test]
+fn the_qwen3_gqa_qk_norm_forward_runs_on_cuda_at_cpu_parity() {
+    let (program, symbols, roots, owned) = qwen3_gqa_qk_norm_forward_fixture(1, 0);
+    let named = as_named_blocks(&owned);
+
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the qk-norm forward on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named)
+        .expect("omega::backend runs the qk-norm forward on cpu");
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the qk-norm forward on cuda");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend runs the qk-norm forward on a real cuda device");
+
+    let expected = cpu.root();
+    let actual = cuda.root();
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(
+            got.is_finite(),
+            "cuda, via the wrapper, produced a non-finite value: {got}"
+        );
+        max_diff = max_diff.max((got - want).abs());
+    }
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude.max(f32::MIN_POSITIVE);
+    eprintln!(
+        "cuda qk-norm forward parity: max_diff={max_diff} max_magnitude={max_magnitude} relative={relative}"
+    );
+    assert!(
+        relative < 1e-4,
+        "omega::backend's cpu and cuda arms disagree on the qk-norm forward: relative={relative} max_diff={max_diff}"
+    );
+}
+
+/// [`the_qwen3_gqa_qk_norm_forward_runs_on_cuda_at_cpu_parity`]'s own fixture
+/// pins `HEAD_DIM = 16`, SMALLER than [`omega::WARP_SIZE`] (32) -- every lane
+/// of the cooperative reduce's warp never loops more than once, so this is
+/// the ONE shape neither that test nor `the_full_mistral_cached_forward_runs_
+/// on_cuda_at_cpu_parity` (a per-ROW `[batch, embedding=64]` RMSNorm, not a
+/// per-HEAD one) actually exercises for the broadcast-write loop:
+/// `reduction_total > WARP_SIZE` combined with the per-head (not per-row)
+/// axis topology real Qwen3 checkpoints use (`query_heads`/`kv_heads` as
+/// EXTRA, non-reduced axes alongside the reduced `head_dim`). Built directly
+/// from `qwen3_cached_forward_program` (bypassing `support`'s fixed-width
+/// fixture) at `HEAD_DIM = 64`, matching a real checkpoint's own per-head
+/// width, so a bug that only appears once a lane strides through the
+/// reduction more than once cannot hide behind the narrower fixture.
+#[test]
+fn the_qwen3_gqa_qk_norm_forward_runs_on_cuda_at_cpu_parity_with_head_dim_wider_than_a_warp() {
+
+    const VOCAB: u32 = 64;
+    const EMBEDDING: u32 = 256;
+    const FEED_FORWARD: u32 = 512;
+    const QUERY_HEADS: u32 = 4;
+    const KV_HEADS: u32 = 2;
+    const HEAD_DIM: u32 = 64;
+    const LAYERS: u32 = 2;
+
+    let (program, logits_root, cache_roots) = qwen3_cached_forward_program(
+        VOCAB,
+        EMBEDDING,
+        FEED_FORWARD,
+        QUERY_HEADS,
+        KV_HEADS,
+        HEAD_DIM,
+        LAYERS,
+    )
+    .expect("the wide-head-dim qwen3 gqa+qk_norm forward program builds");
+
+    let mut roots = vec![logits_root];
+    for (even, odd, value) in &cache_roots {
+        roots.push(*even);
+        roots.push(*odd);
+        roots.push(*value);
+    }
+
+    let symbols = vec![1u64, 0u64];
+    let shapes = infer(&program, &symbols)
+        .expect("the wide-head-dim qwen3 gqa+qk_norm forward infers");
+
+    let mut owned: Vec<(String, Vec<f32>)> = Vec::new();
+    for (position, op) in program.iter().enumerate() {
+        let Op::Input { name, .. } = op else { continue };
+        let node = NodeId(position as u32);
+        let count: usize = shapes
+            .of(node)
+            .iter()
+            .map(|extent| *extent as usize)
+            .product();
+        let name = name
+            .clone()
+            .expect("every block input in this program is named");
+        let data = if name == "ids" {
+            vec![3.0f32; count]
+        } else if name == "eps" {
+            vec![1e-5f32; count]
+        } else if name == "cached_len" {
+            vec![0.0f32]
+        } else {
+            random_vec(position as u64 + 1, count)
+        };
+        owned.push((name, data));
+    }
+    let named = as_named_blocks(&owned);
+
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the wide-head-dim qk-norm forward on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named)
+        .expect("omega::backend runs the wide-head-dim qk-norm forward on cpu");
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the wide-head-dim qk-norm forward on cuda");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend runs the wide-head-dim qk-norm forward on a real cuda device");
+
+    let expected = cpu.root();
+    let actual = cuda.root();
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(
+            got.is_finite(),
+            "cuda, via the wrapper, produced a non-finite value: {got}"
+        );
+        max_diff = max_diff.max((got - want).abs());
+    }
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude.max(f32::MIN_POSITIVE);
+    eprintln!(
+        "cuda wide-head-dim qk-norm forward parity: max_diff={max_diff} max_magnitude={max_magnitude} relative={relative}"
+    );
+    assert!(
+        relative < 1e-4,
+        "omega::backend's cpu and cuda arms disagree on the wide-head-dim qk-norm forward: relative={relative} max_diff={max_diff}"
     );
 }
