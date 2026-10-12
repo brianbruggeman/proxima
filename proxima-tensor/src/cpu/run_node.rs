@@ -775,6 +775,23 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
     } else {
         None
     };
+    #[cfg(feature = "instrument")]
+    debug!(
+        node = resolved.node.0,
+        query_rows = *query_rows,
+        cached_key_rows = live_cached_key_rows,
+        new_key_rows = *new_key_rows,
+        kv_heads = *kv_heads,
+        query_groups = *query_groups,
+        head_dim = *head_dim,
+        rotary_dim = *rotary_dim,
+        scale = *scale,
+        cached_lower_inclusive = *cached_lower_inclusive,
+        new_upper_inclusive,
+        query_even_node = operands[0].0.0,
+        new_value_node = operands[7].0.0,
+        "cached attention bound extents"
+    );
     let streamed = crate::physical::stream_cached_attention_split_gqa(
         [query_even, query_odd],
         [
