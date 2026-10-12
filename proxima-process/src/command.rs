@@ -20,6 +20,8 @@
 //!   interpose `.dylib`/`.so`. Default off.
 //! - [`Command::controlling_tty`] / [`Command::umask`] —
 //!   Unix-specific knobs std handles via `pre_exec` closures.
+//! - [`Command::process_group`] — lead a process group of its own so
+//!   the whole subtree can be signalled (`setsid()` without a tty).
 //! - [`Command::inherit_current_env`] — explicit env-snapshot
 //!   opt-in (std snapshots implicitly unless you call
 //!   `env_clear`; we make it explicit to match the alloc-tier
@@ -185,6 +187,10 @@ pub struct Command {
     #[builder(default)]
     controlling_tty: bool,
 
+    /// Additive process-group leadership (`setsid()` without a controlling tty).
+    #[builder(default)]
+    process_group: bool,
+
     /// Additive umask override.
     umask: Option<u32>,
 }
@@ -199,7 +205,7 @@ impl core::fmt::Debug for Command {
         for arg in &self.args {
             write!(formatter, " {:?}", arg)?;
         }
-        if self.chain.is_some() || self.libc_shim || self.controlling_tty {
+        if self.chain.is_some() || self.libc_shim || self.controlling_tty || self.process_group {
             formatter.write_str(" [+")?;
             if self.chain.is_some() {
                 formatter.write_str("dispatch ")?;
@@ -209,6 +215,9 @@ impl core::fmt::Debug for Command {
             }
             if self.controlling_tty {
                 formatter.write_str("controlling_tty ")?;
+            }
+            if self.process_group {
+                formatter.write_str("process_group ")?;
             }
             formatter.write_str("]")?;
         }
@@ -233,6 +242,7 @@ impl Command {
             chain: None,
             libc_shim: false,
             controlling_tty: false,
+            process_group: false,
             umask: None,
         }
     }
@@ -410,6 +420,12 @@ impl Command {
         self.controlling_tty
     }
 
+    /// Whether the child leads its own process group (`setsid()` without a controlling tty).
+    #[must_use]
+    pub fn is_process_group(&self) -> bool {
+        self.process_group
+    }
+
     /// The umask override, if set.
     #[must_use]
     pub fn get_umask(&self) -> Option<u32> {
@@ -488,6 +504,15 @@ impl Command {
     /// touch it.
     pub fn controlling_tty(&mut self, value: bool) -> &mut Self {
         self.controlling_tty = value;
+        self
+    }
+
+    /// Additive: make the child lead a process group of its own via
+    /// `setsid()` so `Child::kill_process_group` reaches its descendants.
+    /// Unlike [`Self::controlling_tty`] it claims no terminal, so it is
+    /// the one for a pipe-only child.
+    pub fn process_group(&mut self, value: bool) -> &mut Self {
+        self.process_group = value;
         self
     }
 
@@ -633,7 +658,7 @@ impl Command {
         SpawnOptions {
             dispatch_fd,
             controlling_tty: self.controlling_tty,
-            process_group: false,
+            process_group: self.process_group,
             umask: self.umask,
         }
     }
@@ -748,11 +773,20 @@ impl SendPipe for Command {
         let descriptor_result = self.to_descriptor();
         let chain = self.chain.clone();
         let controlling_tty = self.controlling_tty;
+        let process_group = self.process_group;
         let umask = self.umask;
         async move {
             let mut descriptor = descriptor_result?;
             descriptor.stdin(Stdio::Piped).stdout(Stdio::Piped);
-            run_pipe_call(descriptor, chain, controlling_tty, umask, request).await
+            run_pipe_call(
+                descriptor,
+                chain,
+                controlling_tty,
+                process_group,
+                umask,
+                request,
+            )
+            .await
         }
     }
 }
@@ -762,6 +796,7 @@ async fn run_pipe_call(
     descriptor: CommandDescriptor,
     chain: Option<alloc_tier::PipeHandle<ChildRequest, ChildResponse>>,
     controlling_tty: bool,
+    process_group: bool,
     umask: Option<u32>,
     request: Request<Bytes>,
 ) -> Result<Response<Bytes>, ProximaError> {
@@ -773,7 +808,7 @@ async fn run_pipe_call(
                 SpawnOptions {
                     dispatch_fd: None,
                     controlling_tty,
-                    process_group: false,
+                    process_group,
                     umask,
                 },
             )?;
@@ -788,7 +823,7 @@ async fn run_pipe_call(
                 SpawnOptions {
                     dispatch_fd: None,
                     controlling_tty,
-                    process_group: false,
+                    process_group,
                     umask,
                 },
             )?;
@@ -1156,7 +1191,12 @@ mod tests {
 #[cfg(windows)]
 impl Command {
     fn native_command(&self) -> Result<NativeCommand, ProximaError> {
-        if self.chain.is_some() || self.libc_shim || self.controlling_tty || self.umask.is_some() {
+        if self.chain.is_some()
+            || self.libc_shim
+            || self.controlling_tty
+            || self.process_group
+            || self.umask.is_some()
+        {
             return Err(ProximaError::Body(
                 "POSIX dispatch, interposition, terminal and umask options require Unix".into(),
             ));
