@@ -2227,7 +2227,7 @@ __device__ __forceinline__ float q5k_element(const unsigned char *block, unsigne
 pub const Q5K_BLOCK_BYTES: usize = proxima_gguf::quant::q5_k::BLOCK_BYTES;
 
 /// CUDA C source for unpacking one element of a `Q8_0` block — ports
-/// `crate::msl::Q8_0_UNPACK_MSL`'s `q8_0_element` exactly: a flat 32-element
+/// `crate::msl::q8_0_unpack_msl`'s `q8_0_element` exactly: a flat 32-element
 /// block, one `f16` scale, no sub-block structure.
 pub const Q8_0_UNPACK_CUDA: &str = "\
 __device__ __forceinline__ float q8_0_element(const unsigned char *block, unsigned int index) {

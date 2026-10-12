@@ -200,6 +200,7 @@ use expert_grouped_gemm::*;
 pub(crate) use expert_grouped_gemm::{route_prepass, route_prepass_active};
 use index_narrowing::*;
 use packed_row_blocked_ggml::*;
+pub use scaled_float_render::q8_0_unpack_msl;
 use scaled_float_render::*;
 use selection_render::render_top_fraction_select;
 use tiled_gemm_cooperative_scan::*;
@@ -236,6 +237,9 @@ mod index_narrowing_tests;
 #[cfg(all(test, feature = "float-layout-dtype"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layout_render_tests;
+#[cfg(all(test, feature = "float-layout-dtype"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod layout_int_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod scaled_e3m2_render_tests;

@@ -100,7 +100,7 @@ fn q8_0_has_no_sub_block_structure() {
 fn q8_0_unpack_msl_assembles_with_the_real_metal_toolchain() {
     let source = format!(
         "#include <metal_stdlib>\nusing namespace metal;\n{}\nkernel void q8_0_unpack_probe(\n    device const uchar *block [[buffer(0)]],\n    device float *out [[buffer(1)]],\n    uint gid [[thread_position_in_grid]]) {{\n    out[gid] = q8_0_element(block, gid);\n}}\n",
-        omega::Q8_0_UNPACK_MSL
+        omega::q8_0_unpack_msl()
     );
 
     let dir = tempfile::tempdir().expect("temp dir for the metal source");

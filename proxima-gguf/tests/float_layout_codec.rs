@@ -1,6 +1,6 @@
 use half::{bf16, f16};
 use proxima_gguf::quant::float_layout::{decode, encode};
-use proxima_primitives::float_layout::{FloatLayout, Specials};
+use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
 
 const SAMPLE_LEN: u32 = 1 << 20;
 const SAMPLE_STRIDE: u32 = 4093;
@@ -10,12 +10,14 @@ const LAYOUT_F16: FloatLayout = FloatLayout {
     mantissa_bits: 10,
     specials: Specials::InfinityOnOverflow,
     bias_override: None,
+    sign: SignEncoding::Magnitude,
 };
 const LAYOUT_E4M3: FloatLayout = FloatLayout {
     exponent_bits: 4,
     mantissa_bits: 3,
     specials: Specials::None,
     bias_override: None,
+    sign: SignEncoding::Magnitude,
 };
 
 fn power_of_two(exponent: i32) -> f64 {

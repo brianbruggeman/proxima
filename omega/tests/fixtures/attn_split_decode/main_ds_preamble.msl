@@ -718,15 +718,22 @@ static inline float uniform_expert_element_from_offset_q6k(
 }
 
 
-// element `index` (0..32) of one Q8_0 block, byte-for-byte the value
-// proxima_gguf::quant::q8_0::dequantize_block writes at the same index.
-static inline float q8_0_element(device const uchar *block, uint index) {
-    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
-    float d = (float)as_type<half>(d_bits);
-    char level = (char)block[2u + index];
-    return (float)level * d;
+static inline float q8_0_field(uint code) {
+    uint mantissa = code & 0x7fu;
+    return ((float)((long)mantissa - (long)(((code >> 7u) & 1u) << 7u))) * 1e0f;
 }
 
+static inline uint q8_0_group(device const uchar *group) {
+    return ((uint)group[0] << 0u);
+}
+
+static inline float q8_0_element(device const uchar *block, uint index) {
+    ushort scale_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    float scale = (float)as_type<half>(scale_bits);
+    uint word = q8_0_group(block + 2u + (index / 1u) * 1u);
+    uint field = (word >> ((index % 1u) * 8u)) & 0xffu;
+    return q8_0_field(field) * scale;
+}
 
 static inline float q8_0_super_element(device const uchar *superblock, uint index) {
     return q8_0_element(superblock + (index / 32u) * 34u, index % 32u);

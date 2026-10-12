@@ -1,6 +1,6 @@
 use alloc::collections::BTreeMap;
 
-use proxima_primitives::float_layout::{FloatLayout, Specials};
+use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
 use proxima_tensor::{
     BoundOp, DType, Extent, IndexMap, NodeId, NumericPolicy, Op, ScalarOp, append, bind, infer, map,
 };
@@ -15,6 +15,7 @@ const E4M3_FROM_FIELDS: FloatLayout = FloatLayout {
     mantissa_bits: 3,
     specials: Specials::None,
     bias_override: None,
+    sign: SignEncoding::Magnitude,
 };
 
 const BINARY16_BY_FIELDS: FloatLayout = FloatLayout {
@@ -22,6 +23,7 @@ const BINARY16_BY_FIELDS: FloatLayout = FloatLayout {
     mantissa_bits: 10,
     specials: Specials::InfinityOnOverflow,
     bias_override: Some(15),
+    sign: SignEncoding::Magnitude,
 };
 
 const BRAIN16_BY_FIELDS: FloatLayout = FloatLayout {
@@ -29,6 +31,7 @@ const BRAIN16_BY_FIELDS: FloatLayout = FloatLayout {
     mantissa_bits: 7,
     specials: Specials::InfinityOnOverflow,
     bias_override: Some(127),
+    sign: SignEncoding::Magnitude,
 };
 
 fn negate_bound(layout: FloatLayout) -> BoundOp {
@@ -207,4 +210,20 @@ fn float_layout_cuda_wgsl_control_changed_bias_changes_constants() {
     assert_ne!(wgsl, wgsl_shifted);
     assert!(cuda.contains("- (3)") && cuda_shifted.contains("- (4)"));
     assert!(wgsl.contains("- (3)") && wgsl_shifted.contains("- (4)"));
+}
+
+#[test]
+fn integer_wgsl_text_validates_in_naga() {
+    for layout in [
+        FloatLayout::INT8,
+        FloatLayout::UINT8,
+        FloatLayout::INT16,
+        FloatLayout::UINT16,
+        FloatLayout::SIGN_MAGNITUDE_INT8,
+    ] {
+        assert_wgsl_validates(
+            &layout_load_wgsl(layout, "probe_load"),
+            &layout_store_wgsl(layout, "probe_store"),
+        );
+    }
 }

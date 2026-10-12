@@ -15,7 +15,9 @@
 //! [`crate::types::GgmlType::Q8_0`]'s already-landed
 //! [`crate::types::GgmlType::block_layout`] rather than re-typed by hand.
 
-use crate::quant::QuantError;
+use proxima_primitives::float_layout::FloatLayout;
+
+use crate::quant::{QuantError, float_layout};
 use crate::types::GgmlType;
 
 /// This codec's name as it appears in a rendered [`QuantError`] message.
@@ -81,7 +83,7 @@ pub fn dequantize_block(block: &[u8], output: &mut [f32]) {
     let d = f16_at(block, D_OFFSET).to_f32();
     let qs = &block[QS_OFFSET..QS_OFFSET + QK8_0];
     for (out, &byte) in output.iter_mut().zip(qs.iter()) {
-        *out = f32::from(byte as i8) * d;
+        *out = float_layout::decode(u32::from(byte), FloatLayout::INT8) * d;
     }
 }
 
@@ -137,7 +139,7 @@ fn quantize_block(x: &[f32], output: &mut [u8]) {
 
     let qs = &mut output[QS_OFFSET..QS_OFFSET + QK8_0];
     for (out, &value) in qs.iter_mut().zip(x.iter()) {
-        *out = libm::roundf(value * inv_d) as i8 as u8;
+        *out = float_layout::encode(libm::roundf(value * inv_d), FloatLayout::INT8) as u8;
     }
 }
 

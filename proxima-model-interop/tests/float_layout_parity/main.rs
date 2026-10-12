@@ -14,7 +14,7 @@ mod rows;
 use std::sync::OnceLock;
 
 use proxima_gguf::quant::float_layout::{decode, encode};
-use proxima_primitives::float_layout::{FloatLayout, Specials};
+use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
 
 use compare::{compare_bits, compare_codes};
 use gpu::{Gpu, floats, read_words, words};
@@ -25,6 +25,7 @@ const E4M3_FROM_FIELDS: FloatLayout = FloatLayout {
     mantissa_bits: 3,
     specials: Specials::None,
     bias_override: None,
+    sign: SignEncoding::Magnitude,
 };
 
 const MATMUL_ROWS: usize = 64;
