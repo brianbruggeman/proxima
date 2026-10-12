@@ -598,6 +598,7 @@ impl Command {
     /// remaining safe after the parent has created runtime threads. The
     /// external route rejects options that require child-side setup before
     /// `exec`; use [`Self::spawn`] for those legacy cases.
+    #[cfg(unix)]
     pub fn spawn_external(&mut self) -> Result<Child, ProximaError> {
         let descriptor = self.to_descriptor()?;
         spawn_external(&descriptor, self.spawn_options(None))
@@ -1224,6 +1225,10 @@ impl Command {
 
     pub fn spawn(&mut self) -> Result<Child, ProximaError> {
         Child::from_command(&mut self.native_command()?)
+    }
+
+    pub fn spawn_external(&mut self) -> Result<Child, ProximaError> {
+        self.spawn()
     }
 
     fn spawn_and_collect(&mut self) -> Result<Output, ProximaError> {
