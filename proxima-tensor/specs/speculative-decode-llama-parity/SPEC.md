@@ -39,10 +39,10 @@ of this spec (R4-R7, R13) is struck.
 | R8 | `draft_ngram_lookup` is removed; `ngram-simple` (R4) replaces it -- one prompt-lookup primitive, the incumbent's | yes |
 | R9 | `ServingConfig` carries a speculative section mirroring `common_params_speculative`; builder and conflaguration loader produce identical configs; the env var is removed | yes |
 | R10 | `draft-simple`: a second GGUF draft model, compatibility check equivalent to `common_speculative_are_compatible`, drafting equivalent to `common_speculative_impl_draft_simple` (`common/speculative.cpp:179-418`) | yes |
-| R11a | an audited sub-spec exists for `draft-mtp` (`common/speculative.cpp:1331-1747`); draft correctness is that sub-spec's requirement | yes |
-| R11b | an audited sub-spec exists for `draft-eagle3` (`common/speculative.cpp:455-920`) | yes |
-| R11c | an audited sub-spec exists for `draft-dflash` (`common/speculative.cpp:923-1329`) | yes |
-| R11d | an audited sub-spec exists for `draft-dspark` | yes |
+| R11a | an audited sub-spec exists for `draft-mtp` (`common/speculative.cpp:1331-1747`) for gemma4 E2B plus its published assistant draft; its correctness gate is lossless output (speculative greedy output equals the target's plain greedy decode over the 51-prompt corpus), with llama.cpp token parity on that pair as a secondary check | yes |
+| R11b | an audited sub-spec exists for `draft-eagle3` (design reference `common/speculative.cpp:455-920`); its correctness gate is lossless output over our own trained draft for gemma4 E2B and granite 1b (`speculative-draft-training`), not llama.cpp token parity | yes |
+| R11c | an audited sub-spec exists for `draft-dflash` (design reference `common/speculative.cpp:923-1329`); its correctness gate is lossless output over our own trained draft for gemma4 E2B and granite 1b, not llama.cpp token parity | yes |
+| R11d | an audited sub-spec exists for `draft-dspark` (design reference `common/speculative.cpp:923-1329`, the shared struct); its correctness gate is lossless output over our own trained draft for gemma4 E2B and granite 1b, not llama.cpp token parity | yes |
 | R12 | per-request `draft_n` / `draft_n_accepted` emitted as proxima telemetry events, matching llama-server's timings fields | yes |
 | R14 | the refutation measurement: mean accepted draft tokens per verify step is recorded per n-gram type on the AC17 corpus | yes |
 | R15 | speculation ON is faster than OFF: per n-gram type, on the AC17 corpus, on the metal path (`gpu_layers = all`) and the CPU path, median per-pair speedup (OFF ms/token ÷ ON ms/token) > 1.0 with pair-ratio CoV ≤ 5% over ≥ 5 interleaved OFF/ON pairs per prompt | yes |
@@ -142,7 +142,7 @@ Two pure halves plus one loop seam, all sans-IO:
 - tree / multi-sequence drafting (`examples/speculative` branch splitting, `n_seq_dft > 1`) -- not in llama-server's path
 - synthetic acceptance rates (`server_sample_and_accept_synth`) -- bench-only upstream
 - multimodal speculation -- disabled upstream (server mmproj abort)
-- draft correctness for mtp/eagle3/dflash/dspark -- owned by their sub-specs (R11a-d)
+- draft correctness for mtp/eagle3/dflash/dspark -- owned by their sub-specs (R11a-d); the relation they are gated on is speculative output == plain greedy output (lossless), with plain decode ~ incumbent an owner-stated premise (2026-10-12) that those sub-specs do not re-measure
 
 ## risks
 
