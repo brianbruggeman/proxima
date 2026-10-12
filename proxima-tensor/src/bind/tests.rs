@@ -5541,6 +5541,70 @@ mod gated_delta_net_tests {
     }
 
     #[test]
+    fn fused_gated_delta_net_state_out_survives_when_its_output_reduce_is_dead() {
+        let mut synthetic = synthetic_gated_delta_net_program();
+        let tapped_sources = synthetic
+            .inputs
+            .iter()
+            .zip(["ij", "ij", "ij", "i", "i", "ijk"])
+            .map(|((source, _), axes)| (*source, alloc::format!("{axes}->{axes}")))
+            .collect::<Vec<_>>();
+        let mut requested = vec![synthetic.state_out];
+        for (source, map) in tapped_sources {
+            let tap = elementwise(
+                &mut synthetic.program,
+                DType::Float32,
+                ScalarOp::Negate,
+                &[(source, map.as_str())],
+            )
+            .expect("source tap lowers");
+            requested.push(tap);
+        }
+        let shapes = shape::infer(&synthetic.program, &[])
+            .expect("delta-net program with tapped sources infers");
+
+        let unfused = bind_plain(
+            &synthetic.program,
+            &shapes,
+            &requested,
+            NumericPolicy::bit_exact(),
+        )
+        .expect("unfused program binds");
+        let fused = bind_with_fusion(
+            &synthetic.program,
+            &shapes,
+            &requested,
+            true,
+            NumericPolicy::bit_exact(),
+        )
+        .expect("fused program binds");
+
+        let unfused_buffers =
+            run_resolved(synthetic.program.len(), &unfused, synthetic.inputs.clone());
+        let fused_buffers = run_resolved(synthetic.program.len(), &fused, synthetic.inputs);
+        let state_index = synthetic.state_out.0 as usize;
+        let fused_state = fused_buffers[state_index]
+            .as_ref()
+            .expect("fused state_out must be materialized, not read back empty");
+        let unfused_state = unfused_buffers[state_index]
+            .as_ref()
+            .expect("unfused state_out present");
+        let worst = fused_state
+            .iter()
+            .zip(unfused_state)
+            .map(|(fused, unfused)| (fused - unfused).abs() / unfused.abs().max(1e-6))
+            .fold(0.0_f32, f32::max);
+        assert!(worst <= 1e-6, "state_out relative error {worst}");
+        assert!(
+            fused
+                .iter()
+                .any(|bound| matches!(bound.kind, BoundOpKind::GatedDeltaNet { .. })),
+            "matcher must fire, got kinds {:?}",
+            resolved_kinds(&fused)
+        );
+    }
+
+    #[test]
     fn fused_and_unfused_gated_delta_net_agree_bit_for_bit_at_one_token() {
         let synthetic = synthetic_gated_delta_net_program();
         let shapes = shape::infer(&synthetic.program, &[])

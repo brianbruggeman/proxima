@@ -1349,6 +1349,9 @@ pub(super) fn apply_gated_delta_net_fusion(
         let BoundOpKind::GatedDeltaNet { operands, .. } = &fused.kind else {
             continue;
         };
+        if !planning_outputs.contains(&fused.node) {
+            planning_outputs.push(fused.node);
+        }
         for (source, _, _) in operands {
             if !planning_outputs.contains(source) {
                 planning_outputs.push(*source);
