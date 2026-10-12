@@ -1288,7 +1288,7 @@ fn run_variant_prefill_probe_shapes_with_grid_requirement(
         if require_equal_output {
             assert_eq!(
                 output_difference["changed_bits"], 0,
-                "Rows16 must preserve every captured output bit"
+                "{variant_name} must preserve every captured output bit"
             );
         }
         let token_comparison = compare_token_ids(&baseline.token_ids, &selected.token_ids);
