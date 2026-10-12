@@ -26,6 +26,10 @@
 //! `--dump-llama-ids DIR` writes, per case, the first llama-server process's last run as one
 //! record (`prompt`, llama's `prompt_ids`, greedy `generated_ids`) in the shape
 //! `tests/arch_data_baseline.rs` reads, so a long-prompt oracle fixture is a run of this driver.
+//! `--ignore-peer <name>` (repeatable) stops a peer whose `ps` command name
+//! contains `<name>` from blocking a launch, for a peer the caller has checked
+//! does not use the GPU (a `cargo-nextest` run built without `metal`); every
+//! launch prints the peers it let through.
 //!
 //! ```sh
 //! cargo run --release -p proxima-model-interop --example decode_arms -- \
@@ -40,6 +44,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -67,6 +72,7 @@ const OUTLIER_MAD_SCALE: f64 = 3.0 * 1.4826;
 static SERVER_PID: AtomicU32 = AtomicU32::new(0);
 static IGNORE_OLLAMA: AtomicBool = AtomicBool::new(false);
 static NEW_TOKENS: AtomicUsize = AtomicUsize::new(DEFAULT_NEW_TOKENS);
+static IGNORED_PEERS: OnceLock<Vec<String>> = OnceLock::new();
 
 // the release profile aborts on panic, so Drop never runs and a failed request
 // would orphan the server; the hook kills the registered pid before the abort
@@ -127,6 +133,7 @@ fn parse_arguments() -> Arguments {
         cases: Vec::new(),
         dump_llama_ids: None,
     };
+    let mut ignored_peers: Vec<String> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let mut value = || {
@@ -144,6 +151,7 @@ fn parse_arguments() -> Arguments {
             "--dump-llama-ids" => arguments.dump_llama_ids = Some(PathBuf::from(value())),
             "--ollama" => refuse_ollama_arm(),
             "--new-tokens" => NEW_TOKENS.store(value().parse().expect("integer"), Ordering::SeqCst),
+            "--ignore-peer" => ignored_peers.push(value()),
             "--ignore-ollama" => {
                 // a token-id correctness run, not a timing run: Ollama is neither quit nor a GPU peer
                 IGNORE_OLLAMA.store(true, Ordering::SeqCst);
@@ -185,6 +193,9 @@ fn parse_arguments() -> Arguments {
             model: arguments.model.clone(),
         });
     }
+    IGNORED_PEERS
+        .set(ignored_peers)
+        .expect("peers are set once");
     arguments
 }
 
@@ -257,8 +268,16 @@ fn running_peers() -> Vec<String> {
 fn require_quiet_gpu(what: &str) {
     let started = Instant::now();
     loop {
-        let peers = running_peers();
+        let (ignored, peers): (Vec<String>, Vec<String>) =
+            running_peers().into_iter().partition(|line| {
+                IGNORED_PEERS
+                    .get()
+                    .is_some_and(|names| names.iter().any(|name| line.contains(name.as_str())))
+            });
         if peers.is_empty() {
+            if !ignored.is_empty() {
+                println!("peers ignored by --ignore-peer before launching {what}: {ignored:?}");
+            }
             return;
         }
         assert!(
