@@ -1,0 +1,19 @@
+model=granite-1b-a400m id=ibm-granite/granite-3.1-1b-a400m-instruct checkpoint=/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80 checkpoint_exists=true architecture=granitemoe expected_name=Granite 3.1 1b A400M Instruct
+model=gemma-4-e2b-qat id=google/gemma-4-E2B-it-GGUF QAT local conversion checkpoint=/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd checkpoint_exists=true architecture=gemma4 expected_name=2B_dequant_qat_it_hf
+models=2 prompts=2 planned_runs=32 methods=5
+method=baseline eligible=true reason=existing GGUF generation path
+method=ngram_speculation eligible=true reason=ngram-simple uses size_n=3 and size_m=3 to permit drafting within the 24-token run cap; attributed only when execution counters are captured
+method=loopcd eligible=false reason=shared-block recurrent execution and contrastive iteration readouts are not bound
+method=gemma_mtp eligible=false reason=assistant MTP sidecar binding is not implemented
+method=diffusion eligible=false reason=iterative diffusion decode binding is not implemented
+primary_source topic=loopcd url=https://arxiv.org/html/2610.02185v1
+primary_source topic=gemma_mtp url=https://blog.google/innovation-and-ai/technology/developers-tools/multi-token-prediction-gemma-4/
+primary_source topic=gemma_qat url=https://blog.google/innovation-and-ai/technology/developers-tools/quantization-aware-training-gemma-4/
+primary_source topic=diffusion_gemma url=https://blog.google/innovation-and-ai/technology/developers-tools/diffusion-gemma-faster-text-generation/
+reference method=gemma_mtp model_id=google/gemma-4-E2B-it-assistant model_type=gemma4_assistant
+reference method=diffusion model_id=google/diffusiongemma-26B-A4B-it model_type=diffusion_gemma
+reference method=ouro_recurrent_depth model_id=ByteDance/Ouro-1.4B model_type=ouro
+model_identity key=granite-1b-a400m id=ibm-granite/granite-3.1-1b-a400m-instruct exists=true
+model_identity key=gemma-4-e2b-qat id=google/gemma-4-E2B-it-GGUF QAT local conversion exists=true
+reference_configs=3 reference_model_type_checks=3 models=2 local_runtime_eligibility=5 methods
+incumbent_fixtures=2 parser_mismatches=0

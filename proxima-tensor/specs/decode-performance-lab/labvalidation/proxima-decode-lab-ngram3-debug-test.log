@@ -1,0 +1,16 @@
+   Compiling proxima v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.24s
+     Running unittests examples/decode_performance_lab.rs (/private/tmp/proxima-decode-lab-target/debug/examples/decode_performance_lab-8257c78022bc7bad)
+
+running 8 tests
+test tests::valid_manifest_has_two_by_two_by_four_plan ... ok
+test tests::cpu_fallback_is_rejected_even_when_output_contains_tokens ... ok
+test tests::event_parser_keeps_text_piece_spaces_and_decode_intervals ... ok
+test tests::zero_exit_with_failure_marker_is_rejected ... ok
+test tests::captured_literal_fixtures_match_transcribed_payloads ... ok
+test tests::missing_gpu_counter_and_empty_ids_are_not_captured ... ok
+test tests::empty_prompt_is_rejected ... ok
+test tests::mac_time_payload_parses_cpu_and_peak_rss ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
