@@ -54,6 +54,8 @@ use alloc::string::String;
     target_os = "macos"
 ))]
 use omega::AttentionVariant;
+#[cfg(feature = "metal")]
+use omega::config::RuntimeConfig;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::{DispatchType, MathMode};
 use proxima_gguf::types::GgmlType;
@@ -784,6 +786,9 @@ pub struct ServingConfig<'model> {
     /// `Some` (e.g. `Some(RopeScaling::yarn(4.0, 32_768))` to run qwen3-8b at
     /// 131072); `None` keeps whatever the checkpoint declares.
     pub rope_scaling: Option<RopeScaling>,
+    /// Optional configured Omega planner/executor policy for GPU serving.
+    #[cfg(feature = "metal")]
+    pub omega_runtime: Option<&'model RuntimeConfig>,
     /// `-np`: number of parallel sequence slots served at once.
     pub parallel_sequences: u32,
     /// `-ctk`: KV cache key-tensor storage type. `F32`, or `F16` for the
@@ -1218,6 +1223,14 @@ impl<'model> ServingConfig<'model> {
         self.prompt_cache = prompt_cache;
         self
     }
+
+    /// Supplies the caller-owned Omega runtime policy for the GPU route.
+    #[cfg(feature = "metal")]
+    #[must_use]
+    pub const fn with_omega_runtime(mut self, omega_runtime: &'model RuntimeConfig) -> Self {
+        self.omega_runtime = Some(omega_runtime);
+        self
+    }
 }
 
 impl Default for ServingConfig<'static> {
@@ -1242,6 +1255,8 @@ impl Default for ServingConfig<'static> {
             model_path: DEFAULT_MODEL_PATH,
             context_length: ContextLength::Native,
             rope_scaling: None,
+            #[cfg(feature = "metal")]
+            omega_runtime: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
@@ -1751,6 +1766,8 @@ mod tests {
             model_path: DEFAULT_MODEL_PATH,
             context_length: ContextLength::Native,
             rope_scaling: None,
+            #[cfg(feature = "metal")]
+            omega_runtime: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
@@ -1936,6 +1953,8 @@ mod tests {
             model_path: DEFAULT_MODEL_PATH,
             context_length: ContextLength::Native,
             rope_scaling: None,
+            #[cfg(feature = "metal")]
+            omega_runtime: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
@@ -2066,6 +2085,8 @@ mod tests {
             model_path: DEFAULT_MODEL_PATH,
             context_length: ContextLength::Native,
             rope_scaling: None,
+            #[cfg(feature = "metal")]
+            omega_runtime: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
@@ -2169,6 +2190,8 @@ mod tests {
             model_path: DEFAULT_MODEL_PATH,
             context_length: ContextLength::Native,
             rope_scaling: None,
+            #[cfg(feature = "metal")]
+            omega_runtime: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
@@ -2262,6 +2285,8 @@ mod tests {
             model_path: DEFAULT_MODEL_PATH,
             context_length: ContextLength::Native,
             rope_scaling: None,
+            #[cfg(feature = "metal")]
+            omega_runtime: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,

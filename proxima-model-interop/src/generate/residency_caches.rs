@@ -1,9 +1,204 @@
+#[cfg(feature = "metal")]
+use conflaguration::Validate;
 use core::ops::ControlFlow;
+#[cfg(feature = "metal")]
+use omega::config::{RuntimeConfig, SelectionMode};
 
 use super::*;
 use proxima_core::ServingState;
 #[cfg(all(feature = "instrument", feature = "metal"))]
 use proxima_telemetry::metric::Counter;
+
+#[cfg(feature = "metal")]
+pub(crate) fn validate_omega_runtime_config(config: &ServingConfig) -> Result<(), InteropError> {
+    let Some(runtime) = config.omega_runtime else {
+        return Ok(());
+    };
+    runtime
+        .validate()
+        .map_err(|error| InteropError::UnsupportedServingConfig(error.to_string()))?;
+    let expected_engine = if config.gpu_layers == GPU_LAYERS_ALL {
+        "gpu"
+    } else {
+        "cpu"
+    };
+    if runtime.engine != expected_engine
+        || runtime.numeric != config.numeric_policy
+        || runtime.exact_activations != config.exact_activations
+    {
+        return Err(InteropError::UnsupportedServingConfig(String::from(
+            "omega runtime engine/numeric/activation policy conflicts with serving configuration",
+        )));
+    }
+    if runtime.selection.mode != SelectionMode::Configured {
+        return Err(InteropError::UnsupportedServingConfig(String::from(
+            "serving requires configured selection until resolved candidate identity owns cache and placement admission",
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(all(test, feature = "metal"))]
+mod configured_runtime_tests {
+    use super::*;
+    use crate::generate::prompt_cache_key::CacheKey;
+    use proxima_tensor::map::{self, IndexMap};
+    use proxima_tensor::{DType, ScalarOp};
+
+    #[test]
+    fn configured_runtime_plans_once_and_zero_budget_refuses() {
+        let runtime_config = RuntimeConfig::default();
+        let config = ServingConfig {
+            gpu_layers: 0,
+            numeric_policy: runtime_config.numeric,
+            exact_activations: runtime_config.exact_activations,
+            omega_runtime: Some(&runtime_config),
+            ..ServingConfig::default()
+        };
+        validate_omega_runtime_config(&config).expect("coherent runtime configuration");
+        let program = vec![
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(2)],
+                name: Some(String::from("values")),
+            },
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Negate,
+                operands: vec![(NodeId(0), IndexMap::Affine(map::projection(1, &[0])))],
+                name: Some(String::from("negated")),
+            },
+        ];
+        let mut runtime = BackendRuntime::new(&config);
+        let first = runtime
+            .evaluate(
+                &program,
+                &[1, 1],
+                &[("values", QuantizedBlock::Float32(&[3.0, -4.0]))],
+                &[NodeId(1)],
+                &BTreeSet::new(),
+                None,
+            )
+            .expect("configured shared evaluate");
+        assert_eq!(first.get(NodeId(1)).expect("output").0, &[-3.0, 4.0]);
+        let second = runtime
+            .evaluate(
+                &program,
+                &[1, 1],
+                &[("values", QuantizedBlock::Float32(&[5.0, -6.0]))],
+                &[NodeId(1)],
+                &BTreeSet::new(),
+                None,
+            )
+            .expect("same cached plan new payload");
+        assert_eq!(second.get(NodeId(1)).expect("output").0, &[-5.0, 6.0]);
+        assert_eq!(runtime.plan_misses, 1);
+        assert_eq!(runtime.plan_hits, 1);
+        let mut bounded = runtime_config.clone();
+        bounded.constraints.max_host_tensor_bytes = Some(0);
+        let mut refused = BackendRuntime::new(&ServingConfig {
+            omega_runtime: Some(&bounded),
+            ..config
+        });
+        let error = refused
+            .evaluate(
+                &program,
+                &[1, 1],
+                &[("values", QuantizedBlock::Float32(&[3.0, -4.0]))],
+                &[NodeId(1)],
+                &BTreeSet::new(),
+                None,
+            )
+            .expect_err("zero budget must reach owner and refuse");
+        assert!(
+            matches!(error, InteropError::Backend(_)),
+            "zero host tensor budget must surface the omega refusal, got {error}"
+        );
+    }
+
+    #[test]
+    fn configured_runtime_refuses_placements_and_wrong_identity() {
+        reject_configured_placements(None).expect("legacy placement");
+        let config = RuntimeConfig::default();
+        assert!(reject_configured_placements(Some(&config)).is_err());
+        let wrong = ServingConfig {
+            gpu_layers: -1,
+            omega_runtime: Some(&config),
+            ..ServingConfig::default()
+        };
+        assert!(
+            validate_omega_runtime_config(&wrong).is_err(),
+            "wrong backend or numeric identity must fail"
+        );
+    }
+
+    #[test]
+    fn configured_runtime_changes_cache_identity() {
+        let first = RuntimeConfig::default();
+        let mut fused = first.clone();
+        fused.allow_fusion = true;
+        let mut driver = first.clone();
+        driver.gpu_driver = String::from("metal");
+        let base = ServingConfig {
+            gpu_layers: 0,
+            numeric_policy: first.numeric,
+            omega_runtime: Some(&first),
+            ..ServingConfig::default()
+        };
+        let original = CacheKey::of(&base, false, RopeScaling::None, 0, 0);
+        let fused_key = CacheKey::of(
+            &ServingConfig {
+                omega_runtime: Some(&fused),
+                ..base
+            },
+            false,
+            RopeScaling::None,
+            0,
+            0,
+        );
+        let driver_key = CacheKey::of(
+            &ServingConfig {
+                omega_runtime: Some(&driver),
+                ..base
+            },
+            false,
+            RopeScaling::None,
+            0,
+            0,
+        );
+        assert_ne!(original, fused_key);
+        assert_ne!(original, driver_key);
+        assert_eq!(
+            original,
+            CacheKey::of(&base, false, RopeScaling::None, 0, 0)
+        );
+    }
+}
+
+#[cfg(any(test, all(feature = "metal-output-placement", target_os = "macos")))]
+#[cfg(feature = "metal")]
+fn reject_configured_placements(config: Option<&RuntimeConfig>) -> Result<(), InteropError> {
+    if config.is_some() {
+        return Err(InteropError::UnsupportedServingConfig(String::from(
+            "configured omega planning does not yet own external placement scratch; refusing before placed plan construction",
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "metal")]
+fn plan_with_omega_config(
+    config: &RuntimeConfig,
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+) -> Result<omega::backend::Plan, InteropError> {
+    let (plan, candidates) =
+        omega::backend::plan_named_with_config(config, program, symbols, named, outputs)?;
+    debug!(candidates = ?candidates, "configured plan built through shared omega lowering");
+    Ok(plan)
+}
 
 /// GAP.md's own residual: the `resolve_cached_plan` `BTreeMap` lookup runs
 /// between `evaluate_started` (`decode.rs:3847`) and `step_encode_start`
@@ -2306,6 +2501,7 @@ pub(super) struct SsmPlacement<'buffers> {
 
 #[cfg(feature = "metal")]
 pub(crate) struct BackendRuntime {
+    pub(super) omega_runtime: Option<omega::config::RuntimeConfig>,
     pub(super) engine: Engine,
     /// Warmup deliberately retains the monolithic all-low source snapshot so
     /// the timed prefill can reuse its plans and Metal bindings. The real
@@ -2493,6 +2689,7 @@ impl Drop for BackendRuntime {
 impl BackendRuntime {
     pub(crate) fn new(config: &ServingConfig) -> Self {
         Self {
+            omega_runtime: config.omega_runtime.cloned(),
             engine: select_backend(config),
             retain_monolithic_prefill_sources: false,
             plans: alloc::collections::BTreeMap::new(),
@@ -2531,7 +2728,7 @@ impl BackendRuntime {
             #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
             plan_handoff_reuses: 0,
             #[cfg(all(feature = "metal", target_os = "macos"))]
-            plan_refit: config.plan_refit,
+            plan_refit: config.plan_refit && config.omega_runtime.is_none(),
             exact_activations: config.exact_activations,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_time_constants: config.plan_time_constants,
@@ -2666,7 +2863,9 @@ impl BackendRuntime {
                     self.plan_refits += 1;
                     return Ok(near);
                 }
-                let mut plan = if exact_activations {
+                let mut plan = if let Some(config) = &self.omega_runtime {
+                    plan_with_omega_config(config, program, symbols, named, outputs)?
+                } else if exact_activations {
                     plan_named_exact(
                         self.engine,
                         None,
@@ -2777,7 +2976,9 @@ impl BackendRuntime {
                 self.numeric_policy.epilogue_sources,
             ),
             || {
-                let mut plan = if exact_activations {
+                let mut plan = if let Some(config) = &self.omega_runtime {
+                    plan_with_omega_config(config, program, symbols, named, outputs)?
+                } else if exact_activations {
                     plan_named_exact(
                         self.engine,
                         None,
@@ -2921,7 +3122,9 @@ impl BackendRuntime {
                 self.numeric_policy.epilogue_sources,
             ),
             || {
-                let mut plan = if exact_activations {
+                let mut plan = if let Some(config) = &self.omega_runtime {
+                    plan_with_omega_config(config, program, symbols, named, &profile_outputs)?
+                } else if exact_activations {
                     plan_named_exact(
                         self.engine,
                         None,
@@ -3010,6 +3213,7 @@ impl BackendRuntime {
         let program_key = program.as_ptr() as usize;
         let new_count = symbols.first().copied().unwrap_or_default() as usize;
         let kv_bound_extent = symbols.get(1).copied().unwrap_or_default() as usize;
+        reject_configured_placements(self.omega_runtime.as_ref())?;
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -3077,6 +3281,7 @@ impl BackendRuntime {
             outputs.to_vec(),
             self.numeric_policy.epilogue_sources,
         );
+        reject_configured_placements(self.omega_runtime.as_ref())?;
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -3145,6 +3350,7 @@ impl BackendRuntime {
             outputs.to_vec(),
             self.numeric_policy.epilogue_sources,
         );
+        reject_configured_placements(self.omega_runtime.as_ref())?;
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -3417,6 +3623,7 @@ impl BackendRuntime {
             outputs.to_vec(),
             self.numeric_policy.epilogue_sources,
         );
+        reject_configured_placements(self.omega_runtime.as_ref())?;
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -3497,6 +3704,7 @@ impl BackendRuntime {
             outputs.to_vec(),
             self.numeric_policy.epilogue_sources,
         );
+        reject_configured_placements(self.omega_runtime.as_ref())?;
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -3837,15 +4045,19 @@ impl BackendRuntime {
             &mut self.plan_misses,
             shape,
             || {
-                let mut plan = plan_named(
-                    self.engine,
-                    None,
-                    program,
-                    symbols,
-                    named,
-                    outputs,
-                    self.numeric_policy,
-                )?;
+                let mut plan = if let Some(config) = &self.omega_runtime {
+                    plan_with_omega_config(config, program, symbols, named, outputs)?
+                } else {
+                    plan_named(
+                        self.engine,
+                        None,
+                        program,
+                        symbols,
+                        named,
+                        outputs,
+                        self.numeric_policy,
+                    )?
+                };
                 #[cfg(all(
                     feature = "metal",
                     feature = "metal-attn-variants",
@@ -3917,15 +4129,19 @@ impl BackendRuntime {
             &mut self.plan_misses,
             shape,
             || {
-                let mut plan = plan_named(
-                    self.engine,
-                    None,
-                    program,
-                    symbols,
-                    named,
-                    &profile_outputs,
-                    self.numeric_policy,
-                )?;
+                let mut plan = if let Some(config) = &self.omega_runtime {
+                    plan_with_omega_config(config, program, symbols, named, &profile_outputs)?
+                } else {
+                    plan_named(
+                        self.engine,
+                        None,
+                        program,
+                        symbols,
+                        named,
+                        &profile_outputs,
+                        self.numeric_policy,
+                    )?
+                };
                 #[cfg(all(
                     feature = "metal",
                     feature = "metal-attn-variants",
