@@ -170,7 +170,7 @@ get deleted. `docs/tutorials/00-foundations.md` walks the ladder.
 
 ## the crate map
 
-35 crates, in seven groups. Each group only depends on the ones above it, so you
+43 crates, in eight groups. Each group only depends on the ones above it, so you
 can read down the list and never meet a name you have not been given yet. The
 one thing to hold onto: `Pipe` lives in `proxima-primitives`, and every other
 crate is either something it stands on, something shaped out of it, or somewhere
@@ -232,6 +232,18 @@ codec.
 |---|---|
 | `proxima-storage` | the NVMe queue-pair engine (`nvme`), the pmem crash-consistency leaf (unconditional, `no_std` + no-alloc), the DAX mmap facade (`dax`). |
 | `proxima-process` | capability-typed commands, PTY and FD pipes, libc shim dispatch, host grounds. |
+
+**ml & tensor** — a model is a program over the op algebra; there is no `Tensor` type.
+
+| crate | what it is |
+|---|---|
+| `proxima-tensor` | a program is a `Vec<Op>` with three op forms (Input, Elementwise, Reduce) and an affine index-map grammar; shape inference, binding, fusion and partitioning are independent of any model family. |
+| `proxima-autograd` | reverse-mode autodiff as an adjoint transform over a program; Adam is elementwise update nodes, no `Optimizer` trait. |
+| `omega` | kernel emission from the bound tensor descriptor (MSL, WGSL, CUDA) with CPU, Metal, wgpu and CUDA backends behind `plan_named`; `RuntimeConfig` is its [conflaguration surface](docs/configuration.md#omega-tensor-execution). |
+| `proxima-gguf` `proxima-safetensors` | sans-IO format readers: byte-fed state machines over header, metadata, and tensor directory. The caller owns getting bytes in. |
+| `proxima-model-interop` | the GGUF <-> safetensors transform over named tensors, and `LoadedModel` generation and `ServingConfig` serving over `omega`. |
+| `proxima-onnx` | sans-IO ONNX parser over the protobuf wire walker, plus `NodeProto -> Op` lowering onto the closed op algebra. |
+| `proxima-tokenizer` | sans-IO byte-level BPE: encode/decode over a caller-supplied vocab, built directly or parsed from GGUF metadata. |
 
 **apps** — things you run.
 
