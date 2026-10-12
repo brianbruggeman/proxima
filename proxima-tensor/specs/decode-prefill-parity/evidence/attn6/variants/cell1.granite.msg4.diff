@@ -1,0 +1,4 @@
+857c857
+<     constexpr long tile_rows = 8; constexpr long simdgroups = 2; constexpr long block = 64; constexpr long split_keys = 64;
+---
+>     constexpr long tile_rows = 8; constexpr long simdgroups = 4; constexpr long block = 128; constexpr long split_keys = 64;
