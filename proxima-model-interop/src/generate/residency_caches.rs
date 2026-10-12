@@ -2679,10 +2679,10 @@ impl BackendRuntime {
                     feature = "metal-attn-variants",
                     target_os = "macos"
                 ))]
-                if symbols.first().is_some_and(|query_rows| *query_rows > 1) {
-                    if let Some(variant) = self.attention_variant {
-                        set_attention_variant(&mut plan, variant)?;
-                    }
+                if symbols.first().is_some_and(|query_rows| *query_rows > 1)
+                    && let Some(variant) = self.attention_variant
+                {
+                    set_attention_variant(&mut plan, variant)?;
                 }
                 mark_resident(&mut plan, resident_names);
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -2790,10 +2790,10 @@ impl BackendRuntime {
                     feature = "metal-attn-variants",
                     target_os = "macos"
                 ))]
-                if symbols.first().is_some_and(|query_rows| *query_rows > 1) {
-                    if let Some(variant) = self.attention_variant {
-                        set_attention_variant(&mut plan, variant)?;
-                    }
+                if symbols.first().is_some_and(|query_rows| *query_rows > 1)
+                    && let Some(variant) = self.attention_variant
+                {
+                    set_attention_variant(&mut plan, variant)?;
                 }
                 mark_resident(&mut plan, resident_names);
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -2934,10 +2934,10 @@ impl BackendRuntime {
                     feature = "metal-attn-variants",
                     target_os = "macos"
                 ))]
-                if symbols.first().is_some_and(|query_rows| *query_rows > 1) {
-                    if let Some(variant) = self.attention_variant {
-                        set_attention_variant(&mut plan, variant)?;
-                    }
+                if symbols.first().is_some_and(|query_rows| *query_rows > 1)
+                    && let Some(variant) = self.attention_variant
+                {
+                    set_attention_variant(&mut plan, variant)?;
                 }
                 mark_resident(&mut plan, resident_names);
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -3353,11 +3353,11 @@ impl BackendRuntime {
         }
         plan.set_math_mode(numerics.math_mode)?;
         #[cfg(feature = "metal-attn-variants")]
-        if symbols.first().is_some_and(|query_rows| *query_rows > 1) {
-            if let Some(variant) = numerics.attention_variant {
-                plan.set_attention_variant(variant)
-                    .map_err(omega::backend::BackendError::from)?;
-            }
+        if symbols.first().is_some_and(|query_rows| *query_rows > 1)
+            && let Some(variant) = numerics.attention_variant
+        {
+            plan.set_attention_variant(variant)
+                .map_err(omega::backend::BackendError::from)?;
         }
         plan.set_dispatch_type(numerics.dispatch_type);
         // Decode-shaped: this plan's own new-token count (`symbols[0]`, the
@@ -3838,10 +3838,10 @@ impl BackendRuntime {
                     feature = "metal-attn-variants",
                     target_os = "macos"
                 ))]
-                if symbols.first().is_some_and(|query_rows| *query_rows > 1) {
-                    if let Some(variant) = self.attention_variant {
-                        set_attention_variant(&mut plan, variant)?;
-                    }
+                if symbols.first().is_some_and(|query_rows| *query_rows > 1)
+                    && let Some(variant) = self.attention_variant
+                {
+                    set_attention_variant(&mut plan, variant)?;
                 }
                 mark_resident(&mut plan, resident_names);
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -3918,10 +3918,10 @@ impl BackendRuntime {
                     feature = "metal-attn-variants",
                     target_os = "macos"
                 ))]
-                if symbols.first().is_some_and(|query_rows| *query_rows > 1) {
-                    if let Some(variant) = self.attention_variant {
-                        set_attention_variant(&mut plan, variant)?;
-                    }
+                if symbols.first().is_some_and(|query_rows| *query_rows > 1)
+                    && let Some(variant) = self.attention_variant
+                {
+                    set_attention_variant(&mut plan, variant)?;
                 }
                 mark_resident(&mut plan, resident_names);
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
