@@ -4,6 +4,37 @@ use proxima_core::{ServingFsmError, ServingState};
 
 use super::drafter::{DrafterSet, draft_limit_for_step};
 use super::*;
+/// The request-level `draft_n`/`draft_n_accepted` event: llama-server's own
+/// per-request field names (`tools/server/server-common.cpp:96-101`'s
+/// `if (n_draft_tokens > 0) { base["draft_n"] = ...; }`) plus each
+/// proposer family's drafted/accepted split. `request` is one request's own
+/// counts ([`SpeculativeDecodeStats::since`]); a request that drafted nothing
+/// emits nothing, matching llama-server's gate. Every public `generate*`
+/// funnels through [`LoadedModel::drive_serving_loop`], which calls this
+/// once on success.
+fn emit_request_speculative_stats(request: &SpeculativeDecodeStats) {
+    if request.drafted_total == 0 {
+        return;
+    }
+    info!(
+        draft_n = request.drafted_total,
+        draft_n_accepted = request.accepted_total,
+        ngram_simple_drafted = request.per_type[0].drafted,
+        ngram_simple_accepted = request.per_type[0].accepted,
+        ngram_map_k_drafted = request.per_type[1].drafted,
+        ngram_map_k_accepted = request.per_type[1].accepted,
+        ngram_map_k4v_drafted = request.per_type[2].drafted,
+        ngram_map_k4v_accepted = request.per_type[2].accepted,
+        ngram_mod_drafted = request.per_type[3].drafted,
+        ngram_mod_accepted = request.per_type[3].accepted,
+        ngram_cache_drafted = request.per_type[4].drafted,
+        ngram_cache_accepted = request.per_type[4].accepted,
+        draft_simple_drafted = request.draft_simple.drafted,
+        draft_simple_accepted = request.draft_simple.accepted,
+        "draft_n_accepted: request-level speculative decode draft/accept totals"
+    );
+}
+
 
 /// Measurement-only edge switch: mirrors `ServingConfig`'s three fusion
 /// bools into the process env vars `proxima_tensor::bind::bind_with_fusion`
@@ -2880,15 +2911,11 @@ impl<'file> LoadedModel<'file> {
     /// setting -- keeping it out of the config surface means no builder
     /// setter, TOML key, or env var ever reaches it.
     ///
-    /// On return, if this request drafted anything at all
-    /// (`speculative_stats.drafted_total > 0`), emits exactly one `info!`
-    /// event carrying `draft_n`/`draft_n_accepted` -- llama-server's own
-    /// per-request field names (`tools/server/server-common.cpp:96-101`'s
-    /// `if (n_draft_tokens > 0) { base["draft_n"] = ...; }`), read straight
-    /// off `speculative_stats` (the spec), never a second counter -- plus
-    /// each n-gram type's own drafted/accepted split
-    /// ([`SpeculativeDecodeStats::per_type`]'s own doc). A request that
-    /// never drafted emits nothing, matching llama-server's own gate.
+    /// Like every public `generate*` entry point, a request that drafted
+    /// anything emits exactly one request-level `info!` event from the
+    /// serving loop ([`Self::drive_serving_loop`]); `speculative_stats` may
+    /// be reused across requests, the event carries only this request's own
+    /// counts ([`SpeculativeDecodeStats::since`]).
     pub fn generate_streaming_with_speculative_stats(
         &self,
         prompt: &str,
@@ -2908,7 +2935,7 @@ impl<'file> LoadedModel<'file> {
             serving_config
         };
         let mut runtime = self.backend_runtime(&serving_config);
-        let result = self.run_decode_loop_observed_with_stats(
+        self.run_decode_loop_observed_with_stats(
             prompt,
             max_tokens,
             &serving_config,
@@ -2918,27 +2945,7 @@ impl<'file> LoadedModel<'file> {
             on_token,
             speculative_stats,
             forced_draft_width,
-        );
-        if result.is_ok() && speculative_stats.drafted_total > 0 {
-            info!(
-                draft_n = speculative_stats.drafted_total,
-                draft_n_accepted = speculative_stats.accepted_total,
-                ngram_simple_drafted = speculative_stats.per_type[0].drafted,
-                ngram_simple_accepted = speculative_stats.per_type[0].accepted,
-                ngram_map_k_drafted = speculative_stats.per_type[1].drafted,
-                ngram_map_k_accepted = speculative_stats.per_type[1].accepted,
-                ngram_map_k4v_drafted = speculative_stats.per_type[2].drafted,
-                ngram_map_k4v_accepted = speculative_stats.per_type[2].accepted,
-                ngram_mod_drafted = speculative_stats.per_type[3].drafted,
-                ngram_mod_accepted = speculative_stats.per_type[3].accepted,
-                ngram_cache_drafted = speculative_stats.per_type[4].drafted,
-                ngram_cache_accepted = speculative_stats.per_type[4].accepted,
-                draft_simple_drafted = speculative_stats.draft_simple.drafted,
-                draft_simple_accepted = speculative_stats.draft_simple.accepted,
-                "draft_n_accepted: request-level speculative decode draft/accept totals"
-            );
-        }
-        result
+        )
     }
 
     /// [`Self::run_decode_loop`]'s own body, plus the two hooks
@@ -3185,10 +3192,13 @@ impl<'file> LoadedModel<'file> {
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
         seed: Option<PrefixState>,
         force_two_range: bool,
-        mut speculative_stats: Option<&mut SpeculativeDecodeStats>,
+        speculative_stats: Option<&mut SpeculativeDecodeStats>,
         forced_draft_width: Option<u16>,
         mut model_proposer: Option<&mut ModelProposer<'_>>,
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
+        let mut local_speculative_stats = SpeculativeDecodeStats::default();
+        let speculative_stats = speculative_stats.unwrap_or(&mut local_speculative_stats);
+        let initial_speculative_stats = *speculative_stats;
         let mut resolved_serving_config = *serving_config;
         self.apply_context_resolution(&mut resolved_serving_config)?;
         let serving_config = &resolved_serving_config;
@@ -3910,9 +3920,7 @@ only the single-row decode kernel reads the half-width device cache",
                 if speculative_step {
                     state = state.enter_verify(speculative_draft.clone())?;
                 }
-                if let Some(stats) = speculative_stats.as_deref_mut() {
-                    stats.record_state(&state);
-                }
+                speculative_stats.record_state(&state);
                 let next_ids: &[u32] = match &state {
                     ServingState::Prefill { positions, .. } => positions,
                     ServingState::Decode { last, .. } => core::slice::from_ref(last),
@@ -6151,11 +6159,13 @@ did not hold every cached position)",
                             drafter = ?drafting_type,
                             "speculative_verify"
                         );
-                        if let Some(stats) = speculative_stats.as_deref_mut() {
-                            stats.record_verify_step(speculative_draft.len(), accepted);
-                            if let Some(type_id) = drafting_type {
-                                stats.record_per_type(type_id, speculative_draft.len(), accepted);
-                            }
+                        speculative_stats.record_verify_step(speculative_draft.len(), accepted);
+                        if let Some(type_id) = drafting_type {
+                            speculative_stats.record_per_type(
+                                type_id,
+                                speculative_draft.len(),
+                                accepted,
+                            );
                         }
                         // `common_speculative_accept`'s own bookkeeping
                         // update for the drafting impl -- see `drafter.rs`'s
@@ -6173,9 +6183,7 @@ did not hold every cached position)",
                             &emitted[..emitted.len().min(draft_rows)],
                             row_caches,
                         )?;
-                        if let Some(stats) = speculative_stats.as_deref_mut() {
-                            stats.record_state(&settled);
-                        }
+                        speculative_stats.record_state(&settled);
                         // The append loop above wrote `new_count` positions'
                         // worth of K/V for every layer; a rollback keeps only
                         // the rows its snapshot names (`LayerCache::truncate`'s
@@ -6756,6 +6764,7 @@ did not hold every cached position)",
             layer_caches,
             cached_len,
         };
+        emit_request_speculative_stats(&speculative_stats.since(&initial_speculative_stats));
         Ok((generated_ids, text, stopped_by_eos, final_state))
     }
 
