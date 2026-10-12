@@ -3,6 +3,7 @@
     feature = "instrument",
     target_os = "macos"
 ))]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::env;
 use std::fs::{self, File};
@@ -331,7 +332,7 @@ fn capture_attention_replay(
         "replay output span is incomplete"
     );
     assert!(
-        output.chunks_exact(4).any(|word| word != [0x55; 4]),
+        output.as_chunks::<4>().0.iter().any(|word| *word != [0x55; 4]),
         "replayed attention output contains only poison bytes"
     );
     CapturedReplay {
@@ -349,7 +350,6 @@ fn replay_evidence(replay: &CapturedReplay) -> ReplayEvidence {
     }
 }
 
-#[must_use]
 fn compare_replay_pair(
     legacy: Option<&ReplayEvidence>,
     selected: Option<&ReplayEvidence>,
@@ -578,10 +578,10 @@ fn captured_route_prepass_summary(node: u32) -> String {
                             bytes
                                 .get(..bytes.len().min(32))
                                 .unwrap_or_default()
-                                .chunks_exact(4)
-                                .map(|word| {
-                                    f32::from_ne_bytes([word[0], word[1], word[2], word[3]])
-                                })
+                                .as_chunks::<4>()
+                                .0
+                                .iter()
+                                .map(|word| f32::from_ne_bytes(*word))
                                 .collect::<Vec<_>>()
                         });
                     format!("({index}, {binding:?}, {head:?})")
@@ -603,8 +603,10 @@ fn captured_route_prepass_summary(node: u32) -> String {
                     bytes
                         .get(..bytes.len().min(128))
                         .unwrap_or_default()
-                        .chunks_exact(4)
-                        .map(|word| u32::from_ne_bytes([word[0], word[1], word[2], word[3]]))
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|word| u32::from_ne_bytes(*word))
                         .collect::<Vec<_>>()
                 });
             format!(
@@ -830,8 +832,10 @@ async fn card_23_granite_prefill_uses_selected_attention_dispatch() {
     assert!(prompt_tokens >= PROMPT_TOKENS);
     let model = LoadedModel::load(&parsed, &mapping).expect("bind the Granite checkpoint");
     let (legacy_dispatches, legacy_tokens) = capture_prompt_dispatches(&model, &prompt, None);
-    let mut selected = AttentionVariant::default();
-    selected.kv_reuse = AttentionKvReuse::SharedK;
+    let selected = AttentionVariant {
+        kv_reuse: AttentionKvReuse::SharedK,
+        ..AttentionVariant::default()
+    };
     let (selected_dispatches, selected_tokens) =
         capture_prompt_dispatches(&model, &prompt, Some(selected));
     let matched = assert_selected_dispatch_pair(&legacy_dispatches, &selected_dispatches)
@@ -866,7 +870,7 @@ async fn card_23_legacy_dispatch_fails_selected_identity_control() {
             grid2d: None,
         },
     };
-    let error = assert_selected_dispatch_pair(&[legacy.clone()], &[legacy])
+    let error = assert_selected_dispatch_pair(std::slice::from_ref(&legacy), std::slice::from_ref(&legacy))
         .expect_err("the control must reject identical legacy and selected identities");
     assert!(error.contains("kept legacy entry"));
 }
@@ -1052,20 +1056,22 @@ async fn card_25_granite_sequential_public_requests_complete_on_one_model() {
 }
 
 fn shared_k_variant() -> AttentionVariant {
-    let mut variant = AttentionVariant::default();
-    variant.kv_reuse = AttentionKvReuse::SharedK;
-    variant
+    AttentionVariant {
+        kv_reuse: AttentionKvReuse::SharedK,
+        ..AttentionVariant::default()
+    }
 }
 
 fn f32_shared_prefetch_variant() -> AttentionVariant {
-    let mut variant = AttentionVariant::default();
-    variant.mma_precision = omega::AttentionMmaPrecision::F16;
-    variant.kv_reuse = omega::AttentionKvReuse::SharedKv;
-    variant.tile_height = omega::AttentionTileHeight::Rows8;
-    variant.query_parallelism = omega::AttentionQueryParallelism::SimdgroupRows;
-    variant.simd_topology = omega::AttentionSimdTopology::PerHead;
-    variant.prefetch = omega::AttentionPrefetch::NextBlock;
-    variant
+    AttentionVariant {
+        mma_precision: omega::AttentionMmaPrecision::F16,
+        kv_reuse: omega::AttentionKvReuse::SharedKv,
+        tile_height: omega::AttentionTileHeight::Rows8,
+        query_parallelism: omega::AttentionQueryParallelism::SimdgroupRows,
+        simd_topology: omega::AttentionSimdTopology::PerHead,
+        prefetch: omega::AttentionPrefetch::NextBlock,
+        ..AttentionVariant::default()
+    }
 }
 
 fn f32_shared_variant() -> AttentionVariant {
@@ -1081,9 +1087,10 @@ fn f32_shared_k_variant() -> AttentionVariant {
 }
 
 fn f16_variant() -> AttentionVariant {
-    let mut variant = AttentionVariant::default();
-    variant.mma_precision = omega::AttentionMmaPrecision::F16;
-    variant
+    AttentionVariant {
+        mma_precision: omega::AttentionMmaPrecision::F16,
+        ..AttentionVariant::default()
+    }
 }
 
 fn f16_rows8_groups4_variant() -> AttentionVariant {
@@ -1107,24 +1114,27 @@ fn f16_shared_kv_simdgroup_rows_variant() -> AttentionVariant {
 }
 
 fn f16_simdgroup_rows_variant() -> AttentionVariant {
-    let mut variant = AttentionVariant::default();
-    variant.mma_precision = omega::AttentionMmaPrecision::F16;
-    variant.query_parallelism = omega::AttentionQueryParallelism::SimdgroupRows;
-    variant
+    AttentionVariant {
+        mma_precision: omega::AttentionMmaPrecision::F16,
+        query_parallelism: omega::AttentionQueryParallelism::SimdgroupRows,
+        ..AttentionVariant::default()
+    }
 }
 
 fn f16_shared_k_variant() -> AttentionVariant {
-    let mut variant = AttentionVariant::default();
-    variant.mma_precision = omega::AttentionMmaPrecision::F16;
-    variant.kv_reuse = AttentionKvReuse::SharedK;
-    variant
+    AttentionVariant {
+        mma_precision: omega::AttentionMmaPrecision::F16,
+        kv_reuse: AttentionKvReuse::SharedK,
+        ..AttentionVariant::default()
+    }
 }
 
 fn f16_rows16_variant() -> AttentionVariant {
-    let mut variant = AttentionVariant::default();
-    variant.mma_precision = omega::AttentionMmaPrecision::F16;
-    variant.tile_height = omega::AttentionTileHeight::Rows16;
-    variant
+    AttentionVariant {
+        mma_precision: omega::AttentionMmaPrecision::F16,
+        tile_height: omega::AttentionTileHeight::Rows16,
+        ..AttentionVariant::default()
+    }
 }
 
 fn f16_rows16_shared_k_variant() -> AttentionVariant {
@@ -1158,15 +1168,10 @@ fn f32_output_difference(left: &[u8], right: &[u8]) -> Value {
     let mut max_absolute_difference = 0.0f32;
     let mut squared_difference_sum = 0.0f64;
     let mut non_finite_pairs = 0usize;
-    for (left_value, right_value) in left.chunks_exact(4).zip(right.chunks_exact(4)) {
+    for (left_value, right_value) in left.as_chunks::<4>().0.iter().zip(right.as_chunks::<4>().0.iter()) {
         let left_value =
-            f32::from_ne_bytes([left_value[0], left_value[1], left_value[2], left_value[3]]);
-        let right_value = f32::from_ne_bytes([
-            right_value[0],
-            right_value[1],
-            right_value[2],
-            right_value[3],
-        ]);
+            f32::from_ne_bytes(*left_value);
+        let right_value = f32::from_ne_bytes(*right_value);
         changed_bits += usize::from(left_value.to_bits() != right_value.to_bits());
         if left_value.is_finite() && right_value.is_finite() {
             let difference = (left_value - right_value).abs();
@@ -1504,6 +1509,7 @@ async fn card_26_replay_comparator_rejects_three_false_pairs() {
     println!("card_26 comparator_controls=3 rejected=3");
 }
 
+#[allow(clippy::too_many_arguments)]
 fn measure_granite_attention_shape(
     model: &LoadedModel<'_>,
     nominal_prompt_tokens: usize,
