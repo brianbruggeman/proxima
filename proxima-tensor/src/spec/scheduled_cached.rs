@@ -48,8 +48,8 @@ pub fn append_single_range_cached_attention(
     neg_infinity: NodeId,
     group: u32,
     attn_norm_weight: NodeId,
-    q_norm_weight: NodeId,
-    k_norm_weight: NodeId,
+    q_norm_weight: Option<NodeId>,
+    k_norm_weight: Option<NodeId>,
     wq: NodeId,
     wk: NodeId,
     value_source: ValueSource,
@@ -78,7 +78,10 @@ pub fn append_single_range_cached_attention(
         "shdi->shdi",
         "shd->shdi",
     )?;
-    let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, "h")?;
+    let q = match q_norm_weight {
+        Some(gamma) => rmsnorm_per_head(program, q_raw, gamma, inv_head_dim, eps, "h")?,
+        None => q_raw,
+    };
 
     let k_new_product = elementwise(
         program,
@@ -95,7 +98,10 @@ pub fn append_single_range_cached_attention(
         "sudi->sudi",
         "sud->sudi",
     )?;
-    let k_new = rmsnorm_per_head(program, k_new_raw, k_norm_weight, inv_head_dim, eps, "u")?;
+    let k_new = match k_norm_weight {
+        Some(gamma) => rmsnorm_per_head(program, k_new_raw, gamma, inv_head_dim, eps, "u")?,
+        None => k_new_raw,
+    };
 
     let v_new_raw = match value_source {
         ValueSource::Projected(wv) => {
@@ -445,7 +451,7 @@ pub fn append_two_range_cached_attention(
     neg_infinity_cached: NodeId,
     group: u32,
     attn_norm_weight: NodeId,
-    q_norm_weight: NodeId,
+    q_norm_weight: Option<NodeId>,
     key_source: KeySource,
     wq: NodeId,
     value_source: ValueSource,
@@ -474,7 +480,10 @@ pub fn append_two_range_cached_attention(
         "shdi->shdi",
         "shd->shdi",
     )?;
-    let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, "h")?;
+    let q = match q_norm_weight {
+        Some(gamma) => rmsnorm_per_head(program, q_raw, gamma, inv_head_dim, eps, "h")?,
+        None => q_raw,
+    };
 
     // `KeySource::Shared` (the E2B checkpoint's cross-layer shared-KV,
     // `KeySourceKind::SharedFromLayer(source)`): no `attn_k.weight`/
@@ -502,8 +511,10 @@ pub fn append_two_range_cached_attention(
                 "sudi->sudi",
                 "sud->sudi",
             )?;
-            let k_new =
-                rmsnorm_per_head(program, k_new_raw, k_norm_weight, inv_head_dim, eps, "u")?;
+            let k_new = match k_norm_weight {
+                Some(gamma) => rmsnorm_per_head(program, k_new_raw, gamma, inv_head_dim, eps, "u")?,
+                None => k_new_raw,
+            };
             let (rotated_even, rotated_odd) =
                 fused_rope_pair(program, k_new, 'u', cos_new, sin_new, rope_pairing)?;
             (Some(k_new_raw), rotated_even, rotated_odd)
@@ -773,18 +784,22 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
             ],
             &alloc::format!("blk.{layer}.attn_output.weight"),
         );
-        let q_norm_weight = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(head_dim)],
-            &alloc::format!("blk.{layer}.attn_q_norm.weight"),
-        );
-        let k_norm_weight = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(head_dim)],
-            &alloc::format!("blk.{layer}.attn_k_norm.weight"),
-        );
+        let q_norm_weight = config.qk_norm.then(|| {
+            input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(head_dim)],
+                &alloc::format!("blk.{layer}.attn_q_norm.weight"),
+            )
+        });
+        let k_norm_weight = config.qk_norm.then(|| {
+            input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(head_dim)],
+                &alloc::format!("blk.{layer}.attn_k_norm.weight"),
+            )
+        });
 
         let k_even_cache = input_leaf(
             &mut program,
@@ -1471,12 +1486,14 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                     ],
                     &alloc::format!("blk.{layer}.attn_k.weight"),
                 );
-                let k_norm_weight = input_leaf(
-                    &mut program,
-                    DType::Float32,
-                    alloc::vec![Extent::Static(head_dim)],
-                    &alloc::format!("blk.{layer}.attn_k_norm.weight"),
-                );
+                let k_norm_weight = config.qk_norm.then(|| {
+                    input_leaf(
+                        &mut program,
+                        DType::Float32,
+                        alloc::vec![Extent::Static(head_dim)],
+                        &alloc::format!("blk.{layer}.attn_k_norm.weight"),
+                    )
+                });
                 let value_source = match config.value_source_kind {
                     ValueSourceKind::ProjectedV => {
                         let wv = input_leaf(
@@ -1542,12 +1559,14 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             ],
             &alloc::format!("blk.{layer}.attn_output.weight"),
         );
-        let q_norm_weight = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(head_dim)],
-            &alloc::format!("blk.{layer}.attn_q_norm.weight"),
-        );
+        let q_norm_weight = config.qk_norm.then(|| {
+            input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(head_dim)],
+                &alloc::format!("blk.{layer}.attn_q_norm.weight"),
+            )
+        });
 
         let (post_mixer, layer_roots) = append_two_range_cached_attention(
             &mut program,

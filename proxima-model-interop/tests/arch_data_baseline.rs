@@ -924,6 +924,7 @@ fn gemma4_26b_hand_written_layers() -> Vec<LayerSchedule> {
                     },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
+                    qk_norm: true,
                 },
                 ffn,
             }

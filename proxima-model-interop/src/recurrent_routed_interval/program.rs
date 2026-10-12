@@ -70,6 +70,7 @@ pub fn descriptor_from_architecture(
         rope_pairing: profile.rope_pairing(architecture.rope_dims),
         score_scale: profile.score_scale(architecture.attn_head_dim),
         value_norm: profile.value_norm,
+        qk_norm: profile.qk_norm,
     };
     let ffn = profile.layer_ffn(architecture.expert_count);
     let layers = architecture

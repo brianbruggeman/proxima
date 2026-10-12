@@ -79,6 +79,7 @@ pub fn sliding_pattern_descriptor_from_gguf(
         rope_pairing: profile.rope_pairing(rotary_dim_swa),
         score_scale: profile.score_scale(key_length_swa),
         value_norm: profile.value_norm,
+        qk_norm: profile.qk_norm,
     };
     let full = LayerAttentionConfig {
         head_dim: key_length,
