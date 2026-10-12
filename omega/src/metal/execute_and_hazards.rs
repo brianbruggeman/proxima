@@ -1147,6 +1147,94 @@ pub fn zero_placed_buffer_range(buffer: &PlacedBuffer, byte_offset: usize, byte_
     slots.fill(0);
 }
 
+/// Copies `source` into a caller-owned placed buffer at `byte_offset`.
+/// Call this after the command buffer that last used the buffer has
+/// completed; execution calls this driver performs return only after
+/// `waitUntilCompleted`.
+///
+/// # Errors
+/// Returns [`MetalError::PlacedBufferRange`] when the requested byte range
+/// overflows or extends past the buffer's allocated length.
+#[cfg(feature = "metal-output-placement")]
+pub fn try_write_placed_buffer_f32(
+    buffer: &PlacedBuffer,
+    byte_offset: usize,
+    source: &[f32],
+) -> Result<(), MetalError> {
+    let byte_length = f32_byte_length(buffer, byte_offset, source.len())?;
+    validate_placed_buffer_range(buffer, byte_offset, byte_length)?;
+    // SAFETY: `source` exposes `byte_length` initialized bytes for the
+    // duration of this call, and viewing f32 storage as bytes is valid.
+    let source_bytes =
+        unsafe { core::slice::from_raw_parts(source.as_ptr().cast::<u8>(), byte_length) };
+    // SAFETY: validation proves `byte_offset` is at most the buffer length,
+    // so this byte pointer is within or one past its allocation.
+    let destination = unsafe { buffer.contents().as_ptr().cast::<u8>().add(byte_offset) };
+    // SAFETY: range validation proves the destination span lies in the
+    // caller-owned shared buffer; the source span is `source`'s f32 bytes.
+    unsafe { core::ptr::copy_nonoverlapping(source_bytes.as_ptr(), destination, byte_length) };
+    Ok(())
+}
+
+/// Copies a placed buffer byte range into the caller's `dest` slice.
+/// Call this only after the command buffer that wrote the buffer has
+/// completed; execution calls this driver performs return only after
+/// `waitUntilCompleted`.
+///
+/// # Errors
+/// Returns [`MetalError::PlacedBufferRange`] when the requested byte range
+/// overflows or extends past the buffer's allocated length.
+#[cfg(feature = "metal-output-placement")]
+pub fn read_placed_buffer_f32_into(
+    buffer: &PlacedBuffer,
+    byte_offset: usize,
+    dest: &mut [f32],
+) -> Result<(), MetalError> {
+    let byte_length = f32_byte_length(buffer, byte_offset, dest.len())?;
+    validate_placed_buffer_range(buffer, byte_offset, byte_length)?;
+    // SAFETY: validation proves `byte_offset` is at most the buffer length,
+    // so this byte pointer is within or one past its allocation.
+    let source = unsafe { buffer.contents().as_ptr().cast::<u8>().add(byte_offset) };
+    let destination = dest.as_mut_ptr().cast::<u8>();
+    // SAFETY: range validation proves the source span lies in the
+    // caller-owned shared buffer; the destination span is `dest`'s f32 bytes.
+    unsafe { core::ptr::copy_nonoverlapping(source, destination, byte_length) };
+    Ok(())
+}
+
+#[cfg(feature = "metal-output-placement")]
+fn f32_byte_length(
+    buffer: &PlacedBuffer,
+    byte_offset: usize,
+    element_count: usize,
+) -> Result<usize, MetalError> {
+    element_count
+        .checked_mul(size_of::<f32>())
+        .ok_or_else(|| MetalError::PlacedBufferRange {
+            byte_offset,
+            byte_length: usize::MAX,
+            buffer_length: buffer.length(),
+        })
+}
+
+#[cfg(feature = "metal-output-placement")]
+fn validate_placed_buffer_range(
+    buffer: &PlacedBuffer,
+    byte_offset: usize,
+    byte_length: usize,
+) -> Result<(), MetalError> {
+    let buffer_length = buffer.length();
+    let end = byte_offset.checked_add(byte_length);
+    if end.is_none_or(|end| byte_offset > buffer_length || end > buffer_length) {
+        return Err(MetalError::PlacedBufferRange {
+            byte_offset,
+            byte_length,
+            buffer_length,
+        });
+    }
+    Ok(())
+}
+
 /// Bytes the device allocated for `buffer`: the length a caller that pools placed buffers compares against the bytes it needs.
 #[cfg(feature = "metal-output-placement")]
 #[must_use]
