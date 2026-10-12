@@ -3,7 +3,9 @@ use crate::BFloat8;
 use crate::bind::BodyStep;
 use crate::map::{self, AxisTerm, IndexMap};
 use crate::op::{Extent, Reduce, append};
+use crate::spec::{elementwise as append_elementwise, embedding_lookup};
 
+use core::slice;
 use std::time::Instant;
 
 use crate::test_support::Lcg;
@@ -11566,6 +11568,8 @@ fn reduce_epilogue_only_quantized_weight_is_materialized_before_evaluation() {
     );
 
     materialize_quantized_weights_read_by_non_primary_operands(
+        #[cfg(feature = "instrument")]
+        &program,
         core::slice::from_ref(&resolved),
         &shapes,
         &quantized_weights,
@@ -13746,6 +13750,305 @@ fn round_group_program(rounds: u32) -> (Vec<Op>, Vec<NodeId>) {
         })
         .collect();
     (program, outputs)
+}
+
+fn packed_gather_hand_bytes() -> [u8; 68] {
+    let mut bytes = [0u8; 68];
+    bytes[1] = 0x3c;
+    bytes[2] = 1;
+    bytes[3] = 2;
+    bytes[35] = 0x3c;
+    bytes[36] = 4;
+    bytes[37] = 255;
+    bytes
+}
+
+fn packed_gather_hand_values() -> [f32; 64] {
+    let mut values = [0.0; 64];
+    values[0] = 1.0;
+    values[1] = 2.0;
+    values[32] = 4.0;
+    values[33] = -1.0;
+    values
+}
+
+fn packed_gather_hand_program(count: u32, dtype: DType) -> (Vec<Op>, [NodeId; 4]) {
+    let mut program = Vec::new();
+    let table = block(
+        &mut program,
+        dtype,
+        &[Extent::Static(2), Extent::Static(32)],
+    );
+    let indices = f32_block(&mut program, &[Extent::Static(count)]);
+    let gathered = embedding_lookup(&mut program, table, indices);
+    let scalar = append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: vec![],
+            value: 3.0,
+        },
+    );
+    let scaled = append_elementwise(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(gathered, "sd->sd"), (scalar, "->sd")],
+    )
+    .expect("the gathered rows scale by a broadcast scalar");
+    (program, [table, indices, gathered, scaled])
+}
+
+#[proxima::test]
+#[case::one_row(1)]
+#[case::two_rows(2)]
+async fn packed_gather_preserves_scaled_rows(#[case] count: u32) {
+    let (program, [table, indices, gathered, scaled]) =
+        packed_gather_hand_program(count, DType::UInt8);
+    let bytes = packed_gather_hand_bytes();
+    let packed = QuantizedBlock::Packed {
+        codec: Codec::Q8_0,
+        bytes: &bytes,
+    };
+    let selected = [1.0, 0.0];
+    let selected = &selected[..count as usize];
+    let weights = BTreeMap::from([(table, packed)]);
+    let shapes = shape::infer(&program, &[]).expect("the hand graph has concrete shapes");
+    let planning = quantized_gather_planning_outputs(&program, &weights, &[scaled]);
+    assert_eq!(planning, [scaled, gathered]);
+    let resolved = bind::bind(&program, &shapes, &planning, NumericPolicy::bit_exact())
+        .expect("the packed gather boundary binds");
+    let gather_op = resolved
+        .iter()
+        .find(|bound| bound.node == gathered)
+        .expect("the gather remains its own operation");
+    assert!(quantized_gather_operand(gather_op).is_some());
+    let scale_op = resolved
+        .iter()
+        .find(|bound| bound.node == scaled)
+        .expect("the scale remains a requested output");
+    assert!(
+        scale_op
+            .operands()
+            .iter()
+            .any(|(source, _, _)| *source == gathered)
+    );
+    let mut buffers: Vec<Option<Cow<'_, [f32]>>> = vec![None; program.len()];
+    buffers[indices.0 as usize] = Some(Cow::Borrowed(selected));
+    materialize_quantized_weights_read_by_non_primary_operands(
+        #[cfg(feature = "instrument")]
+        &program,
+        &resolved,
+        &shapes,
+        &weights,
+        None,
+        &mut buffers,
+    )
+    .expect("direct row gathering needs no full table");
+    assert!(buffers[table.0 as usize].is_none());
+
+    let unfenced = bind::bind(&program, &shapes, &[scaled], NumericPolicy::bit_exact())
+        .expect("the original fused lowering binds");
+    materialize_quantized_weights_read_by_non_primary_operands(
+        #[cfg(feature = "instrument")]
+        &program,
+        &unfenced,
+        &shapes,
+        &weights,
+        None,
+        &mut buffers,
+    )
+    .expect("the unfenced control expands the table");
+    assert_eq!(
+        buffers[table.0 as usize].as_deref(),
+        Some(packed_gather_hand_values().as_slice())
+    );
+
+    let result = evaluate_quantized(
+        &program,
+        &[],
+        &[packed, QuantizedBlock::Float32(selected)],
+        &[scaled],
+    )
+    .expect("the packed scaled lookup evaluates");
+    let mut expected = vec![0.0; count as usize * 32];
+    expected[0] = 12.0;
+    expected[1] = -3.0;
+    if count == 2 {
+        expected[32] = 3.0;
+        expected[33] = 6.0;
+    }
+    assert_eq!(
+        result.get(scaled).expect("scaled rows are returned").0,
+        expected
+    );
+}
+
+#[test]
+fn packed_gather_preserves_nonpacked_control() {
+    let (program, [_, _, _, scaled]) = packed_gather_hand_program(2, DType::Float32);
+    assert_eq!(
+        quantized_gather_planning_outputs(&program, &BTreeMap::new(), &[scaled]),
+        [scaled]
+    );
+    let values = packed_gather_hand_values();
+    let result = evaluate_quantized(
+        &program,
+        &[],
+        &[
+            QuantizedBlock::Float32(&values),
+            QuantizedBlock::Float32(&[1.0, 0.0]),
+        ],
+        &[scaled],
+    )
+    .expect("the nonpacked path evaluates without a gather fence");
+    let mut expected = [0.0; 64];
+    expected[0] = 12.0;
+    expected[1] = -3.0;
+    expected[32] = 3.0;
+    expected[33] = 6.0;
+    assert_eq!(
+        result.get(scaled).expect("scaled rows are returned").0,
+        expected
+    );
+}
+
+#[test]
+fn packed_gather_preserves_unreachable_invalid_lookup() {
+    let (mut program, [table, _, _, _]) = packed_gather_hand_program(1, DType::UInt8);
+    let output = append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: vec![],
+            value: 7.0,
+        },
+    );
+    let bytes = packed_gather_hand_bytes();
+    let packed = QuantizedBlock::Packed {
+        codec: Codec::Q8_0,
+        bytes: &bytes,
+    };
+    assert_eq!(
+        quantized_gather_planning_outputs(&program, &BTreeMap::from([(table, packed)]), &[output]),
+        [output]
+    );
+    let result = evaluate_quantized(
+        &program,
+        &[],
+        &[packed, QuantizedBlock::Float32(&[2.0])],
+        &[output],
+    )
+    .expect("an unreachable invalid gather cannot change the requested constant");
+    assert_eq!(
+        result
+            .get(output)
+            .expect("the requested constant is returned")
+            .0,
+        [7.0]
+    );
+}
+
+#[test]
+fn packed_gather_preserves_requested_raw_table() {
+    let (program, [table, _, _, _]) = packed_gather_hand_program(1, DType::UInt8);
+    let bytes = packed_gather_hand_bytes();
+    let result = evaluate_quantized(
+        &program,
+        &[],
+        &[
+            QuantizedBlock::Packed {
+                codec: Codec::Q8_0,
+                bytes: &bytes,
+            },
+            QuantizedBlock::Float32(&[1.0]),
+        ],
+        &[table],
+    )
+    .expect("an explicitly requested packed table is materialized");
+    assert_eq!(
+        result.get(table).expect("the complete table is returned").0,
+        packed_gather_hand_values()
+    );
+}
+
+#[test]
+fn packed_gather_preserves_noncanonical_layout_fallback() {
+    let (program, [table, _, gathered, _]) = packed_gather_hand_program(1, DType::UInt8);
+    let shapes = shape::infer(&program, &[]).expect("the hand graph infers");
+    let resolved = bind::bind(&program, &shapes, &[gathered], NumericPolicy::bit_exact())
+        .expect("the identity gather binds");
+    let mut bound = resolved
+        .into_iter()
+        .find(|bound| bound.node == gathered)
+        .expect("the requested gather is bound");
+    if let BoundOpKind::Elementwise { operands, .. } = &mut bound.kind {
+        operands[0].1.strides[1] = 2;
+    }
+    bound.extents[1] = 16;
+    assert!(quantized_gather_operand(&bound).is_none());
+    let bytes = packed_gather_hand_bytes();
+    let packed = QuantizedBlock::Packed {
+        codec: Codec::Q8_0,
+        bytes: &bytes,
+    };
+    let weights = BTreeMap::from([(table, packed)]);
+    let mut buffers: Vec<Option<Cow<'_, [f32]>>> = vec![None; program.len()];
+    buffers[1] = Some(Cow::Borrowed(&[1.0]));
+    materialize_quantized_weights_read_by_non_primary_operands(
+        #[cfg(feature = "instrument")]
+        &program,
+        slice::from_ref(&bound),
+        &shapes,
+        &weights,
+        None,
+        &mut buffers,
+    )
+    .expect("a strided consumer retains its full-table fallback");
+    assert!(buffers[table.0 as usize].is_some());
+    let mut output = [0.0; 16];
+    run_node_into(
+        &bound,
+        &buffers,
+        Some(&weights),
+        None,
+        None,
+        false,
+        &mut output,
+    )
+    .expect("the ordinary evaluator follows the strided lookup");
+    let mut expected = [0.0; 16];
+    expected[0] = 4.0;
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn packed_gather_preserves_unaligned_row_fallback() {
+    let (mut program, [table, _, _, scaled]) = packed_gather_hand_program(1, DType::UInt8);
+    if let Op::Input { shape, .. } = &mut program[table.0 as usize] {
+        *shape = vec![Extent::Static(4), Extent::Static(16)];
+    }
+    let bytes = packed_gather_hand_bytes();
+    let result = evaluate_quantized(
+        &program,
+        &[],
+        &[
+            QuantizedBlock::Packed {
+                codec: Codec::Q8_0,
+                bytes: &bytes,
+            },
+            QuantizedBlock::Float32(&[2.0]),
+        ],
+        &[scaled],
+    )
+    .expect("a row crossing the codec block boundary uses the full-table fallback");
+    let mut expected = [0.0; 16];
+    expected[0] = 12.0;
+    expected[1] = -3.0;
+    assert_eq!(
+        result.get(scaled).expect("the scaled row is returned").0,
+        expected
+    );
 }
 
 /// The collapsed dispatch binds the fold's 2 operands, its 1 gather index

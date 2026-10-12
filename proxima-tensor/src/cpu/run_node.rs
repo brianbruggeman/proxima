@@ -193,7 +193,9 @@ pub(super) fn run_node_into_with_round_sink<B: Deref<Target = [f32]> + Sync>(
             instrument::record_op_kind(instrument::OpKind::Elementwise);
             let gather_block = quantized_gather_operand(resolved).and_then(|(source, lookup)| {
                 quantized_weights
-                    .and_then(|weights| weights.get(&source).map(|block| (lookup, block)))
+                    .and_then(|weights| weights.get(&source))
+                    .filter(|block| quantized_gather_row_is_aligned(&lookup, block))
+                    .map(|block| (lookup, block))
             });
             match gather_block {
                 Some((lookup, block)) => {
@@ -1942,10 +1944,32 @@ pub(super) fn quantized_gather_operand(resolved: &BoundOp) -> Option<(NodeId, bi
     if body.steps.len() != 1 || body.steps[0].op != ScalarOp::Identity {
         return None;
     }
-    let [(source, _layout, Some(lookup))] = resolved.operands() else {
+    let [(source, layout, Some(lookup))] = resolved.operands() else {
         return None;
     };
+    let [_, columns] = resolved.extents.as_slice() else {
+        return None;
+    };
+    if layout.base != 0
+        || layout.strides.as_slice() != [0, 1]
+        || lookup.element_stride <= 0
+        || *columns != lookup.element_stride as u64
+        || lookup.index_layout.strides.len() != 2
+        || lookup.index_layout.strides[1] != 0
+    {
+        return None;
+    }
     Some((*source, lookup.clone()))
+}
+
+pub(super) fn quantized_gather_row_is_aligned(
+    lookup: &bind::Lookup,
+    block: &QuantizedBlock<'_>,
+) -> bool {
+    lookup.element_stride > 0
+        && block.block_layout().is_some_and(|(_, elements)| {
+            elements != 0 && (lookup.element_stride as usize).is_multiple_of(elements)
+        })
 }
 
 /// [`quantized_gather_operand`]'s executor: one embedding row per output
@@ -2159,10 +2183,8 @@ pub(super) fn dequantize_row(
 /// "row" spanning the entire tensor, exactly [`dequantize_row`]'s own
 /// `row_bytes = (dim / block_elements) * block_bytes` arithmetic collapsed
 /// to one call) and stores it. A no-op whenever `node` already has a
-/// buffer or is not a quantized weight at all, which is every ordinary
-/// decode call -- this only does real work for the diagnostic window this
-/// defect (`docs/discipline.md`, `int8-logs`) was reported against, never
-/// inside the per-element hot loop.
+/// buffer or is not a quantized weight at all. Callers use this for requested
+/// raw weights and consumers whose executors require floating point buffers.
 pub(super) fn materialize_quantized_weight_output(
     node: NodeId,
     shapes: &shape::Shapes,

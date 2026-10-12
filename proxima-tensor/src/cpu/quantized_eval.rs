@@ -1,4 +1,5 @@
 use super::*;
+use crate::live;
 
 /// [`evaluate`]'s counterpart for a program with one `Q4_K`-quantized weight
 /// operand — the entry point that actually reaches [`matmul_q4k_f32`], which
@@ -202,14 +203,10 @@ pub fn evaluate_quantized_exact_with_scratch_and_experts(
 }
 
 /// [`evaluate_quantized_with_scratch_impl`]'s own pre-materialization pass:
-/// a quantized weight read anywhere other than a `Reduce` fold's own
-/// primary `operands()` (that path stays on `run_reduce_with_quantized_
-/// weights`, which reads `quantized_weights` directly) needs its bytes in
-/// `buffers` before evaluation, or `buffer_of` finds the slot `None` and
-/// raises `NotLowerable`. An `Elementwise` node's `operands()` and a
-/// `Reduce`'s own `epilogue_operands` (`apply_reduce_epilogue`) are the two
-/// shapes that can name such a weight today.
+/// operands consumed through floating point buffers must be materialized;
+/// packed reduction and identity-gather executors read packed bytes directly.
 pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
+    #[cfg(feature = "instrument")] program: &[Op],
     resolved: &[BoundOp],
     shapes: &shape::Shapes,
     quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
@@ -217,6 +214,13 @@ pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
     buffers: &mut [Option<Cow<'_, [f32]>>],
 ) -> Result<(), TensorError> {
     for computed in resolved {
+        if quantized_gather_operand(computed).is_some_and(|(source, lookup)| {
+            quantized_weights
+                .get(&source)
+                .is_some_and(|block| quantized_gather_row_is_aligned(&lookup, block))
+        }) {
+            continue;
+        }
         let sources: &[(NodeId, bind::Layout, Option<bind::Lookup>)] = match &computed.kind {
             BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. } => {
                 computed.operands()
@@ -239,10 +243,50 @@ pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
             if expert_sources.is_some_and(|sources| sources.contains_key(operand)) {
                 continue;
             }
+            #[cfg(feature = "instrument")]
+            if buffers[operand.0 as usize].is_none() && quantized_weights.contains_key(operand) {
+                debug!(
+                    weight_node = operand.0,
+                    weight_name = ?program.get(operand.0 as usize).and_then(Op::name),
+                    weight_shape = ?shapes.of(*operand),
+                    consumer_node = computed.node.0,
+                    consumer_name = ?program.get(computed.node.0 as usize).and_then(Op::name),
+                    consumer_kind = ?computed.kind,
+                    consumer_extents = ?computed.extents,
+                    direct_quantized_gather = quantized_gather_operand(computed).is_some(),
+                    "quantized operand selected for materialization"
+                );
+            }
             materialize_quantized_weight_output(*operand, shapes, quantized_weights, buffers)?;
         }
     }
     Ok(())
+}
+
+pub(super) fn quantized_gather_planning_outputs(
+    program: &[Op],
+    quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
+    outputs: &[NodeId],
+) -> Vec<NodeId> {
+    let mut planning_outputs = outputs.to_vec();
+    for node in live::reachable(program, outputs) {
+        let Some(Op::Elementwise {
+            body: ScalarOp::Identity,
+            operands,
+            ..
+        }) = program.get(node.0 as usize)
+        else {
+            continue;
+        };
+        let [(source, IndexMap::Computed { .. })] = operands.as_slice() else {
+            continue;
+        };
+        if quantized_weights.contains_key(source) {
+            // fusion must preserve the packed row executor's input boundary.
+            planning_outputs.push(node);
+        }
+    }
+    planning_outputs
 }
 
 // every `NodeId` the fused kernel dereferences at `fire_position` --
@@ -398,54 +442,20 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
     }
     reject_non_float32_outputs(program, &quantized_weight_nodes, &effective_outputs)?;
 
+    let planning_outputs =
+        quantized_gather_planning_outputs(program, &quantized_weights, &effective_outputs);
     let resolved = bind::bind_with_fusion(
         program,
         &shapes,
-        &effective_outputs,
+        &planning_outputs,
         fuse_cached_attention,
         NumericPolicy::bit_exact(),
     )?;
-    // Packed matmul lowering is valid only when the weight's contraction axes
-    // are physically contiguous.  Materialize the exceptional non-contiguous
-    // views before execution so `run_reduce` can honor their index maps; this
-    // is the same one-time setup seam used for requested quantized outputs.
-    // A caller-requested output can force a node that ordinary decode always
-    // fuses away into its own standalone `BoundOp` -- `node_retirement`
-    // below correctly keeps ANY node in `effective_outputs` alive, but
-    // "alive" and "independently computable" are different questions.
-    // `is_quantized_matmul_operand`'s own shape (an `Elementwise` multiply
-    // against a `Q4_K`/`Q5_K`/`Q3_K`/`Q6_K`/`Q8_0` weight, feeding exactly
-    // one `Reduce::Add`) is ordinarily consumed ONLY by
-    // `run_reduce_with_quantized_weights`, which reads `quantized_weights`
-    // directly and never touches `buffers` for that operand -- but once the
-    // multiply itself is a requested output (or merely shares this call's
-    // `effective_outputs` window with something that keeps it live), `bind`
-    // stops fusing it into the reduce (the same `outputs`-liveness check
-    // that protects every other requested node), and it materializes
-    // standalone through the plain `run_elementwise_dispatch` path, which
-    // has no quantized-operand awareness at all: `buffer_of` finds the
-    // weight's slot `None` (its real bytes live in `quantized_weights`, a
-    // *node* was never dequantized into `buffers`) and raises
-    // `NotLowerable { reason: "operand buffer missing at evaluation time" }`
-    // naming the WEIGHT, not the multiply that actually needed evaluating.
-    // Dequantizing any such weight into `buffers` here -- once, at bind
-    // setup, never inside the per-element hot loop -- closes the gap: it is
-    // a no-op scan over `resolved` on every ordinary decode call (no
-    // `Elementwise` node there ever reads a still-unbound quantized weight,
-    // since the fusion above already absorbed it into its reduce), and only
-    // does real work on exactly the diagnostic window this defect was
-    // reported against (`docs/discipline.md`, `int8-logs`).
-    //
-    // A `Reduce`'s epilogue is the same gap under a different fusion: an
-    // RMSNorm gamma multiply fused into `epilogue_operands` (`apply_reduce_
-    // epilogue`, `run_node.rs`) reads `buffer_of` too, but `quantized_
-    // operand`/`run_reduce_with_quantized_weights` only ever inspect the
-    // fold's own `operands()` -- the epilogue's quantized weight is never
-    // that fold's primary operand, so nothing else in this function
-    // dequantizes it. Widening this scan to `epilogue_operands` (never
-    // `operands()` for a `Reduce`, which stays on the direct-from-
-    // `quantized_weights` path above) closes that second gap the same way.
+    // standalone diagnostic operations and reduce epilogues read f32 buffers;
+    // direct packed gathers and reduction folds retain their packed operands.
     materialize_quantized_weights_read_by_non_primary_operands(
+        #[cfg(feature = "instrument")]
+        program,
         &resolved,
         &shapes,
         &quantized_weights,
