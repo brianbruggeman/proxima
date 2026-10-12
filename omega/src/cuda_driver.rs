@@ -68,6 +68,8 @@ pub enum CudaDriverError {
     },
     #[error("CUDA graph path rejected node {node:?}: {reason}")]
     UnsupportedGraph { node: NodeId, reason: &'static str },
+    #[error("CUDA graph path rejected op kinds (node {node:?} is the first): {kinds}")]
+    UnsupportedOpKinds { node: NodeId, kinds: String },
     #[error("CUDA graph node {node:?} has unsupported output dtype {dtype:?}")]
     UnsupportedDtype { node: NodeId, dtype: DType },
     #[error("CUDA graph node {node:?} could not be emitted: {error}")]
@@ -388,19 +390,8 @@ impl CudaDriver {
         correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
         for bound in &resolved {
             validate_cuda_dtype(bound)?;
-            if !matches!(
-                bound.kind,
-                BoundOpKind::Elementwise { .. }
-                    | BoundOpKind::Reduce { .. }
-                    | BoundOpKind::Iota
-                    | BoundOpKind::Constant { .. }
-            ) {
-                return Err(CudaDriverError::UnsupportedGraph {
-                    node: bound.node,
-                    reason: "unsupported op kind",
-                });
-            }
         }
+        reject_unsupported_kinds(&resolved)?;
         let mut kernels = Vec::with_capacity(resolved.len());
         let mut uniforms = Vec::with_capacity(resolved.len());
         for bound in &resolved {
@@ -885,6 +876,38 @@ impl CudaDriver {
         };
         Ok(self.stream.clone_dtoh(buffer)?)
     }
+}
+
+fn cuda_supports_kind(kind: &BoundOpKind) -> bool {
+    matches!(
+        kind,
+        BoundOpKind::Elementwise { .. }
+            | BoundOpKind::Reduce { .. }
+            | BoundOpKind::Iota
+            | BoundOpKind::Constant { .. }
+    )
+}
+
+/// Rejects the whole graph at once, naming every unsupported kind with its
+/// node count, so a model's full gap list is one error rather than one node at a time.
+fn reject_unsupported_kinds(resolved: &[BoundOp]) -> Result<(), CudaDriverError> {
+    let mut census: BTreeMap<&'static str, (usize, NodeId)> = BTreeMap::new();
+    for bound in resolved.iter().filter(|bound| !cuda_supports_kind(&bound.kind)) {
+        census
+            .entry(bound.kind.name())
+            .or_insert((0, bound.node))
+            .0 += 1;
+    }
+    let Some((_, (_, first))) = census.iter().next() else {
+        return Ok(());
+    };
+    let first = *first;
+    let kinds = census
+        .iter()
+        .map(|(name, (count, node))| format!("{name} x{count} (first {node:?})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(CudaDriverError::UnsupportedOpKinds { node: first, kinds })
 }
 
 fn validate_cuda_dtype(bound: &BoundOp) -> Result<(), CudaDriverError> {
