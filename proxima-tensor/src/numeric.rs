@@ -19,25 +19,32 @@ use crate::error::TensorError;
 /// reduce-epilogue fusion) needs none of these and is admitted regardless.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "config", derive(conflaguration::Settings))]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "config", serde(default, deny_unknown_fields))]
 #[cfg_attr(feature = "config", serde(rename_all = "snake_case"))]
 pub struct NumericPolicy {
     /// Permits merging a multiply and an add into one hardware FMA (one
     /// rounding instead of two). LLVM's `contract`.
+    #[cfg_attr(feature = "config", setting(default = false))]
     pub contraction: bool,
     /// Permits reordering an associative fold: tree-reduce, the simdgroup
     /// context-chunk merge, quantization-scale factoring across a block.
     /// LLVM's `reassoc`.
+    #[cfg_attr(feature = "config", setting(default = false))]
     pub reassociation: bool,
     /// Permits assuming no operand is NaN, so an op whose *only* deviation
     /// from its algebraic identity is NaN propagation may be eliminated
     /// (`max(x, -inf)`, `min(x, +inf)`). LLVM's `nnan`.
+    #[cfg_attr(feature = "config", setting(default = false))]
     pub nan_assumptions: bool,
     /// Permits treating `+0.0`/`-0.0` as interchangeable, so `x + 0.0` may
     /// be eliminated. LLVM's `nsz`.
+    #[cfg_attr(feature = "config", setting(default = false))]
     pub signed_zero: bool,
     /// Permits approximate transcendentals/reciprocals with a bounded
     /// relative error. LLVM's `afn`/`arcp`.
+    #[cfg_attr(feature = "config", setting(default = false))]
     pub approx_functions: bool,
     /// Permits [`NumericRewrite::WidenedReduceEpilogueFusion`]: the
     /// reduce-epilogue pass considers every reduce operand of a consumer
@@ -66,6 +73,7 @@ pub struct NumericPolicy {
     /// effect is read against the `PROXIMA_EPILOGUE_SOURCES=0` arm of
     /// `decode_gbps_baseline`. It is
     /// part of the plan identity, so a plan cache keys on it.
+    #[cfg_attr(feature = "config", setting(default = false))]
     #[cfg_attr(feature = "config", serde(default))]
     pub epilogue_sources: bool,
 }
