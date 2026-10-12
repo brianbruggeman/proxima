@@ -1013,6 +1013,7 @@ pub(super) type TwoRangeLayerRootForwardProgram = (
     Vec<LayerCacheRoots>,
     MoeSites,
     alloc::vec::Vec<NodeId>,
+    Option<RecurrentReadoutRoots>,
 );
 
 #[allow(clippy::too_many_arguments)]
@@ -1085,7 +1086,7 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
     sliding_kv_ring: bool,
     head_repeats: u32,
 ) -> Result<TwoRangeForwardProgram, TensorError> {
-    let (program, logits, layer_roots, moe_sites, duplicate_head_roots) =
+    let (program, logits, layer_roots, moe_sites, duplicate_head_roots, _) =
         scheduled_two_range_cached_forward_program_with_layer_roots(
             vocab,
             embedding,
@@ -1104,6 +1105,8 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
             sliding_kv_ring,
             0,
             head_repeats,
+            None,
+            LoopCdConfig::default(),
         )?;
     let mut cache_roots = Vec::with_capacity(layer_roots.len());
     for roots in layer_roots {
@@ -1148,6 +1151,8 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
     sliding_kv_ring: bool,
     short_conv_cache_len: u32,
     head_repeats: u32,
+    recurrence: Option<RecurrenceConfig>,
+    loopcd: LoopCdConfig,
 ) -> Result<TwoRangeLayerRootForwardProgram, TensorError> {
     if schedule.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
@@ -1183,6 +1188,14 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             });
         }
     }
+    let iterations = recurrence.map_or(1, |config| config.iterations);
+    let logical_count =
+        block_count
+            .checked_mul(iterations)
+            .ok_or(TensorError::UnsupportedInBuilder {
+                builder: "scheduled_two_range_cached_forward_program_with_experts",
+                feature: "logical layer count overflow",
+            })?;
 
     let mut program = Vec::new();
 
@@ -1281,7 +1294,8 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
         cached_masks.push(pair);
     }
 
-    let mut cache_roots: Vec<LayerCacheRoots> = Vec::with_capacity(block_count as usize);
+    let mut cache_roots: Vec<LayerCacheRoots> = Vec::with_capacity(logical_count as usize);
+    let mut readouts = RecurrentReadoutRoots::default();
     let mut moe_sites: Vec<MoeSite> = Vec::new();
     // One slot per block, populated only for a layer that owns a real
     // `K`/`V` projection and its own `kv_cache.{layer}.*` leaves -- a later
@@ -1292,11 +1306,20 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
     // `scheduled_forward_program_with_experts`'s own `stored_kv` already uses for
     // the cacheless path (`attention_forward.rs`'s own doc on it). See
     // [`StoredSharedKv`] for what each field carries.
-    let mut stored_kv: Vec<Option<StoredSharedKv>> = alloc::vec![None; block_count as usize];
-    let mut attention_resource_index = 0usize;
+    let mut stored_kv: Vec<Option<StoredSharedKv>> = alloc::vec![None; logical_count as usize];
+    let resource_slots: Vec<usize> = schedule
+        .iter()
+        .scan(0usize, |next_slot, entry| {
+            let slot = *next_slot;
+            *next_slot += usize::from(entry.kind != LayerKind::ShortConv);
+            Some(slot)
+        })
+        .collect();
 
-    for (layer, entry) in schedule.iter().enumerate() {
-        let layer = layer as u32;
+    for logical in 0..logical_count {
+        let layer = logical % block_count;
+        let iteration_base = logical - layer;
+        let entry = &schedule[layer as usize];
         let config = &entry.attention;
         let ffn_config = &entry.ffn;
         let (is_future_cached, neg_infinity_cached) = cached_masks[layer as usize];
@@ -1405,8 +1428,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             continue;
         }
 
-        let resources = &attention_resources[attention_resource_index];
-        attention_resource_index += 1;
+        let resources = &attention_resources[resource_slots[layer as usize]];
         let head_dim = config.head_dim;
         let kv_heads = config.kv_heads;
         let pairs = head_dim / 2;
@@ -1445,7 +1467,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                         source_layer: value_source,
                     });
                 }
-                Some(key_source)
+                Some(iteration_base + key_source)
             }
             (KeySourceKind::SharedFromLayer(source), _)
             | (_, ValueSourceKind::SharedFromLayer(source)) => {
@@ -1459,11 +1481,12 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
 
         let (key_source, value_source, k_even_cache, k_odd_cache, v_cache) = match shared_source {
             Some(source) => {
-                let donor =
-                    stored_kv[source as usize].ok_or(TensorError::SharedKvSourceNotAvailable {
+                let donor = stored_kv.get(source as usize).copied().flatten().ok_or(
+                    TensorError::SharedKvSourceNotAvailable {
                         layer,
                         source_layer: source,
-                    })?;
+                    },
+                )?;
                 (
                     KeySource::Shared {
                         rotated_even: donor.rotated_k_even,
@@ -1520,13 +1543,13 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                     &mut program,
                     DType::Float32,
                     alloc::vec![cache_bound, Extent::Static(kv_heads), Extent::Static(pairs)],
-                    &alloc::format!("kv_cache.{layer}.k_even"),
+                    &alloc::format!("kv_cache.{logical}.k_even"),
                 );
                 let k_odd_cache = input_leaf(
                     &mut program,
                     DType::Float32,
                     alloc::vec![cache_bound, Extent::Static(kv_heads), Extent::Static(pairs)],
-                    &alloc::format!("kv_cache.{layer}.k_odd"),
+                    &alloc::format!("kv_cache.{logical}.k_odd"),
                 );
                 let v_cache = input_leaf(
                     &mut program,
@@ -1536,7 +1559,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                         Extent::Static(kv_heads),
                         Extent::Static(head_dim)
                     ],
-                    &alloc::format!("kv_cache.{layer}.v"),
+                    &alloc::format!("kv_cache.{logical}.v"),
                 );
                 (
                     KeySource::Projected { wk, k_norm_weight },
@@ -1599,7 +1622,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
 
         if shared_source.is_none() {
             let (rotated_k_even, rotated_k_odd, v_new) = layer_roots;
-            stored_kv[layer as usize] = Some(StoredSharedKv {
+            stored_kv[logical as usize] = Some(StoredSharedKv {
                 rotated_k_even,
                 rotated_k_odd,
                 v_new,
@@ -1609,6 +1632,9 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             });
         }
 
+        // a recurrent visit labels its routing site with the logical layer;
+        // the expert weights it routes over keep the physical layer's names.
+        let sites_before = moe_sites.len();
         x = append_layer_ffn(
             &mut program,
             layer,
@@ -1628,6 +1654,9 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             ple_dim.unwrap_or(0),
             &mut moe_sites,
         )?;
+        for site in &mut moe_sites[sites_before..] {
+            site.layer = logical;
+        }
 
         // A shared-KV layer owns no `kv_cache.{layer}.*` leaves of its own
         // (`stored_kv`'s own doc) -- `cache_roots` stays exactly the set of
@@ -1639,6 +1668,50 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             Some(source) => cache_roots.push(LayerCacheRoots::SharedFromLayer(source)),
             None => cache_roots.push(LayerCacheRoots::Attention(layer_roots)),
         }
+
+        if let Some(recurrence) = recurrence
+            && layer + 1 == block_count
+        {
+            let completed = logical / block_count + 1;
+            let is_reference = completed == loopcd.reference_iteration;
+            if is_reference {
+                readouts.reference_raw = Some(x);
+            }
+            if completed == iterations {
+                readouts.terminal_raw = Some(x);
+                if loopcd.mode == LoopCdMode::FixedHidden {
+                    let reference =
+                        readouts
+                            .reference_raw
+                            .ok_or(TensorError::UnsupportedInBuilder {
+                                builder: "scheduled_two_range_cached_forward_program_with_experts",
+                                feature: "completed hidden reference absent",
+                            })?;
+                    x = append_loopcd_contrast(&mut program, reference, x, loopcd.strength, "sd")?;
+                    readouts.guided_raw = Some(x);
+                }
+            } else if recurrence.normalize_each_iteration
+                || (is_reference
+                    && matches!(
+                        loopcd.mode,
+                        LoopCdMode::FixedLogits | LoopCdMode::AdaptiveLogits
+                    ))
+            {
+                let gamma = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(embedding)],
+                    "output_norm.weight",
+                );
+                let normalized = rmsnorm(&mut program, x, gamma, inv_dim, eps)?;
+                if is_reference {
+                    readouts.reference_normalized = Some(normalized);
+                }
+                if recurrence.normalize_each_iteration {
+                    x = normalized;
+                }
+            }
+        }
     }
 
     let output_norm_weight = input_leaf(
@@ -1648,18 +1721,14 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
         "output_norm.weight",
     );
     let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
+    if recurrence.is_some() {
+        readouts.terminal_normalized = Some(normed_final);
+        if loopcd.reference_iteration == iterations {
+            readouts.reference_normalized = Some(normed_final);
+        }
+    }
 
-    let normed_last = if last_row_only {
-        let lm_head_row = input_leaf(
-            &mut program,
-            DType::Int32,
-            alloc::vec![Extent::Static(1)],
-            "lm_head_row",
-        );
-        embedding_lookup(&mut program, normed_final, lm_head_row)
-    } else {
-        normed_final
-    };
+    let normed_last = gather_last_row(&mut program, normed_final, last_row_only);
 
     let lm_head = input_leaf(
         &mut program,
@@ -1675,12 +1744,12 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
     // calls (`CacheMask::Padded`, `bind_gemma4_with_last_row_only`),
     // so this copy, not the cacheless one, is what the measurement harness
     // needs live.
-    let append_head = |program: &mut Vec<Op>| -> Result<NodeId, TensorError> {
+    let append_head = |program: &mut Vec<Op>, hidden: NodeId| -> Result<NodeId, TensorError> {
         let logits_product = elementwise(
             program,
             DType::Float32,
             ScalarOp::Multiply,
-            &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
+            &[(hidden, "sd->sdv"), (lm_head, "dv->sdv")],
         )?;
         let logits = reduce(
             program,
@@ -1717,18 +1786,68 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
         }
     };
 
-    let logits = append_head(&mut program)?;
+    let terminal_logits = append_head(&mut program, normed_last)?;
+    readouts.terminal_logits = recurrence.map(|_| terminal_logits);
+    let logits = match loopcd.mode {
+        LoopCdMode::FixedLogits | LoopCdMode::AdaptiveLogits => {
+            let reference_normalized =
+                readouts
+                    .reference_normalized
+                    .ok_or(TensorError::UnsupportedInBuilder {
+                        builder: "scheduled_two_range_cached_forward_program_with_experts",
+                        feature: "completed normalized reference absent",
+                    })?;
+            let reference_logits = if reference_normalized == normed_final {
+                terminal_logits
+            } else {
+                let reference_last =
+                    gather_last_row(&mut program, reference_normalized, last_row_only);
+                append_head(&mut program, reference_last)?
+            };
+            readouts.reference_logits = Some(reference_logits);
+            if loopcd.mode == LoopCdMode::AdaptiveLogits {
+                let strength = append_adaptive_loopcd_strength(
+                    &mut program,
+                    terminal_logits,
+                    loopcd.strength,
+                )?;
+                readouts.adaptive_strength = Some(strength);
+                append_loopcd_contrast_node(
+                    &mut program,
+                    reference_logits,
+                    terminal_logits,
+                    strength,
+                    "sv",
+                    "s->sv",
+                )?
+            } else {
+                append_loopcd_contrast(
+                    &mut program,
+                    reference_logits,
+                    terminal_logits,
+                    loopcd.strength,
+                    "sv",
+                )?
+            }
+        }
+        LoopCdMode::Disabled | LoopCdMode::FixedHidden => terminal_logits,
+    };
 
     let mut duplicate_head_roots = alloc::vec::Vec::new();
     for _ in 1..head_repeats.clamp(1, 3) {
-        duplicate_head_roots.push(append_head(&mut program)?);
+        duplicate_head_roots.push(append_head(&mut program, normed_last)?);
     }
 
-    Ok((
+    let forward = (
         program,
         logits,
         cache_roots,
         MoeSites(moe_sites),
         duplicate_head_roots,
-    ))
+        recurrence.map(|_| readouts),
+    );
+    if recurrence.is_some() {
+        return share_recurrent_weights(forward);
+    }
+    Ok(forward)
 }

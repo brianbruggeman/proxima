@@ -187,6 +187,8 @@ pub fn sliding_pattern_descriptor_from_gguf(
         expert_shared_feed_forward: 0,
         prefill_width: None,
         gated_attention: false,
+        recurrence: None,
+        loopcd: LoopCdConfig::default(),
     })
 }
 

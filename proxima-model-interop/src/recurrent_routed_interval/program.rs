@@ -22,7 +22,7 @@
 
 use proxima_tensor::spec::{
     CacheMask, CacheStrategy, ForwardProgram, ForwardRoots, KeySourceKind, LayerAttentionConfig,
-    LayerCacheRoots, LayerKind, LayerSchedule, ModelDescriptor, MoeSites, RopeTableSel,
+    LayerCacheRoots, LayerKind, LayerSchedule, LoopCdConfig, ModelDescriptor, MoeSites, RopeTableSel,
     ValueSourceKind, build_forward,
 };
 use proxima_tensor::{Op, TensorError};
@@ -126,6 +126,8 @@ pub fn descriptor_from_architecture(
         expert_shared_feed_forward: architecture.expert_shared_feed_forward,
         prefill_width: width,
         gated_attention: true,
+        recurrence: None,
+        loopcd: LoopCdConfig::default(),
     })
 }
 

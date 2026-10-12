@@ -38,6 +38,69 @@ pub enum CacheMask {
     Padded,
 }
 
+/// Repeated visits to one physical layer schedule, as data on
+/// [`ModelDescriptor::recurrence`]. The physical schedule (`block_count`
+/// entries, one weight set each) runs `iterations` times in order; logical
+/// layer `logical` reads physical weights `logical % block_count` and owns the
+/// KV leaves `kv_cache.{logical}.*`, so a visit never reads another visit's
+/// history unless the schedule names a shared-KV donor within one iteration.
+/// Weight sharing is the whole of what recurrence means; sharing history is a
+/// separate, explicit schedule choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecurrenceConfig {
+    /// Completed passes over the physical schedule; positive.
+    pub iterations: u32,
+    /// Apply the shared `output_norm.weight` RMSNorm to every completed pass
+    /// before the next pass reads it. The terminal pass is always normalized
+    /// once, by the output head's own norm, never twice.
+    pub normalize_each_iteration: bool,
+}
+
+/// Contrast of two completed states from the same token prefix, as data on
+/// [`ModelDescriptor::loopcd`]: the reference pass `reference_iteration`
+/// (one-based, completed passes) against the terminal pass, at the boundary
+/// [`LoopCdMode`] names. [`LoopCdMode::Disabled`] consumes no strength.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoopCdConfig {
+    pub mode: LoopCdMode,
+    /// `terminal + strength * (terminal - reference)`; the ceiling when the
+    /// mode is adaptive.
+    pub strength: f32,
+    pub reference_iteration: u32,
+}
+
+impl Default for LoopCdConfig {
+    fn default() -> Self {
+        Self {
+            mode: LoopCdMode::Disabled,
+            strength: 0.0,
+            reference_iteration: 1,
+        }
+    }
+}
+
+/// Roots at completed recurrence boundaries, present on a recurrent program so
+/// a caller can read the states a contrast was taken between. Reading them back
+/// is the caller's choice; ordinary serving requests only the logits and cache
+/// roots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RecurrentReadoutRoots {
+    /// the reference pass's state before any output norm.
+    pub reference_raw: Option<NodeId>,
+    /// the terminal pass's state before any output norm.
+    pub terminal_raw: Option<NodeId>,
+    pub reference_normalized: Option<NodeId>,
+    pub terminal_normalized: Option<NodeId>,
+    pub reference_logits: Option<NodeId>,
+    pub terminal_logits: Option<NodeId>,
+    /// the fixed-hidden contrast before the final normalization.
+    pub guided_raw: Option<NodeId>,
+    /// the per-row strength an adaptive contrast used.
+    pub adaptive_strength: Option<NodeId>,
+}
+
 /// A whole model's build-time shape as DATA: the global hyperparameters
 /// [`scheduled_forward_program_with_experts`] already takes as loose positional
 /// arguments (`vocab`, `embedding`, `block_count`, `expert_count`,
@@ -216,6 +279,20 @@ pub struct ModelDescriptor {
     /// inferred from the layer kinds.
     #[serde(default)]
     pub gated_attention: bool,
+    /// Runs the physical schedule `iterations` times with separate KV per
+    /// visit ([`RecurrenceConfig`]). `None` is exactly the original schedule.
+    /// `block_count` and `layers` stay the physical, checkpoint-side counts; the
+    /// logical depth is `block_count * iterations`. Honoured by
+    /// [`CacheMask::Padded`]'s cached engine only; every other engine refuses it.
+    #[cfg_attr(feature = "config", setting(skip))]
+    #[serde(default)]
+    pub recurrence: Option<RecurrenceConfig>,
+    /// Which completed-pass states the readout contrasts ([`LoopCdConfig`]);
+    /// requires [`Self::recurrence`] unless disabled.
+    #[cfg_attr(feature = "config", setting(skip))]
+    #[cfg_attr(feature = "config", builder(default))]
+    #[serde(default)]
+    pub loopcd: LoopCdConfig,
 }
 
 impl ModelDescriptor {
@@ -566,6 +643,8 @@ pub fn gqa_descriptor_from_shape(
         expert_shared_feed_forward: 0,
         prefill_width: None,
         gated_attention: false,
+        recurrence: None,
+        loopcd: LoopCdConfig::default(),
     }
 }
 
@@ -597,6 +676,10 @@ pub struct ForwardProgram {
     /// One diagnostic boundary per layer, populated only by the recurrent
     /// hybrid engine's routed arm; empty for every other engine.
     pub layer_diagnostics: Vec<MoeLayerDiagnostics>,
+    /// Completed-pass roots of a recurrent program
+    /// ([`ModelDescriptor::recurrence`]); `None` for every program without
+    /// recurrence.
+    pub readouts: Option<RecurrentReadoutRoots>,
 }
 
 /// One [`LayerCacheRoots`] per layer for a cached program: the engine returns
@@ -643,6 +726,82 @@ pub(super) fn refuse_when(
     Ok(())
 }
 
+/// Refuses a [`ModelDescriptor::recurrence`] or [`ModelDescriptor::loopcd`]
+/// the descriptor's engine cannot honour, before any node is built: a request
+/// is lowered as asked or rejected by name, never dropped. Recurrence is the
+/// padded cached engine's alone; a recurrent short convolution or per-layer
+/// embedding has no logical state contract, so those schedules are refused.
+fn validate_recurrence(descriptor: &ModelDescriptor) -> Result<(), TensorError> {
+    const BUILDER: &str = "build_forward(recurrence)";
+    let loopcd = descriptor.loopcd;
+    let hybrid = descriptor.gated_attention
+        || descriptor
+            .layers
+            .iter()
+            .any(|layer| layer.kind == LayerKind::Gdn);
+    let padded_engine = !hybrid
+        && descriptor.cache_strategy == CacheStrategy::Cached
+        && descriptor.cache_mask == CacheMask::Padded;
+    refuse_when(
+        !padded_engine && (descriptor.recurrence.is_some() || loopcd.mode != LoopCdMode::Disabled),
+        BUILDER,
+        "recurrence or LoopCD outside the padded cached engine",
+    )?;
+    refuse_when(
+        !loopcd.strength.is_finite() || loopcd.strength < 0.0,
+        BUILDER,
+        "LoopCD strength must be finite and nonnegative",
+    )?;
+    refuse_when(
+        loopcd.mode == LoopCdMode::Disabled && loopcd.strength != 0.0,
+        BUILDER,
+        "disabled LoopCD does not consume strength",
+    )?;
+    let Some(recurrence) = descriptor.recurrence else {
+        return refuse_when(
+            loopcd.mode != LoopCdMode::Disabled,
+            BUILDER,
+            "LoopCD requires explicit recurrence",
+        );
+    };
+    refuse_when(
+        descriptor.block_count == 0 || recurrence.iterations == 0,
+        BUILDER,
+        "positive physical block and recurrence counts required",
+    )?;
+    refuse_when(
+        descriptor
+            .block_count
+            .checked_mul(recurrence.iterations)
+            .is_none(),
+        BUILDER,
+        "logical layer count overflow",
+    )?;
+    refuse_when(
+        descriptor
+            .layers
+            .iter()
+            .any(|layer| layer.kind == LayerKind::ShortConv),
+        BUILDER,
+        "recurrent ShortConv has no logical state contract",
+    )?;
+    refuse_when(
+        descriptor.ple_dim.is_some() || descriptor.layers.iter().any(|layer| layer.ffn.ple),
+        BUILDER,
+        "recurrent per-layer embedding has no logical embedding contract",
+    )?;
+    refuse_when(
+        loopcd.reference_iteration == 0 || loopcd.reference_iteration > recurrence.iterations,
+        BUILDER,
+        "LoopCD reference iteration outside completed depths",
+    )?;
+    refuse_when(
+        loopcd.mode == LoopCdMode::AdaptiveLogits && descriptor.vocab < 2,
+        BUILDER,
+        "adaptive LoopCD requires at least two vocabulary entries",
+    )
+}
+
 /// Generalizes [`scheduled_two_range_cached_forward_program_with_experts`] (the
 /// working sliding-pattern two-range engine, already schedule-driven rather than
 /// sliding-pattern-hardcoded internally) and [`scheduled_forward_program_with_experts`]
@@ -681,6 +840,7 @@ pub(super) fn refuse_when(
 ///
 /// [`ForwardProgram`]'s own doc names each root and which engine fills it.
 pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, TensorError> {
+    validate_recurrence(descriptor)?;
     if descriptor.gated_attention
         || descriptor
             .layers
@@ -709,7 +869,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                 "build_forward(CacheMask::Padded)",
                 "a residual scale",
             )?;
-            let (program, logits, cache_roots, moe_sites, duplicate_head_roots) =
+            let (program, logits, cache_roots, moe_sites, duplicate_head_roots, readouts) =
                 scheduled_two_range_cached_forward_program_with_layer_roots(
                     descriptor.vocab,
                     descriptor.embedding,
@@ -728,6 +888,8 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                     descriptor.sliding_kv_ring,
                     descriptor.l_cache,
                     descriptor.head_repeats,
+                    descriptor.recurrence,
+                    descriptor.loopcd,
                 )?;
             Ok(ForwardProgram {
                 program,
@@ -738,6 +900,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                 hidden: None,
                 duplicate_head_roots,
                 layer_diagnostics: Vec::new(),
+                readouts,
             })
         }
         (CacheStrategy::Cacheless, _) => {
@@ -779,6 +942,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                 hidden: None,
                 duplicate_head_roots,
                 layer_diagnostics: Vec::new(),
+                readouts: None,
             })
         }
         (CacheStrategy::Cached, CacheMask::Bounded) => {
@@ -879,6 +1043,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                 hidden: Some(roots.hidden),
                 duplicate_head_roots: Vec::new(),
                 layer_diagnostics: Vec::new(),
+                readouts: None,
             })
         }
     }

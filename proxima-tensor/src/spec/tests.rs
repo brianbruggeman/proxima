@@ -6561,9 +6561,27 @@ fn architecture_matrix_mixed_cached_conv_roots() {
         },
     ];
 
-    let (program, _logits, roots, _moe_sites, _head_repeats) =
+    let (program, _logits, roots, _moe_sites, _head_repeats, _readouts) =
         scheduled_two_range_cached_forward_program_with_layer_roots(
-            4, EMBEDDING, 2, 2, 1, 2, 0, 0, 2, &schedule, None, None, true, None, false, L_CACHE, 1,
+            4,
+            EMBEDDING,
+            2,
+            2,
+            1,
+            2,
+            0,
+            0,
+            2,
+            &schedule,
+            None,
+            None,
+            true,
+            None,
+            false,
+            L_CACHE,
+            1,
+            None,
+            LoopCdConfig::default(),
         )
         .expect("mixed attention and short-convolution schedule lowers");
 
@@ -16430,6 +16448,8 @@ mod gemma4_synthetic_parity {
             expert_shared_feed_forward: 0,
             prefill_width: None,
             gated_attention: false,
+            recurrence: None,
+            loopcd: LoopCdConfig::default(),
         };
 
         let ForwardProgram {
@@ -19149,6 +19169,8 @@ mod head_repeats {
             expert_shared_feed_forward: 0,
             prefill_width: None,
             gated_attention: false,
+            recurrence: None,
+            loopcd: LoopCdConfig::default(),
         }
     }
 
@@ -20333,6 +20355,8 @@ mod recurrence_fields {
             expert_shared_feed_forward: 512,
             prefill_width: Some(13),
             gated_attention: true,
+            recurrence: None,
+            loopcd: LoopCdConfig::default(),
             ..head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Bounded, 1)
         };
         let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
@@ -20515,6 +20539,8 @@ mod hybrid_dense_descriptor {
             expert_shared_feed_forward: 0,
             prefill_width: None,
             gated_attention: true,
+            recurrence: None,
+            loopcd: LoopCdConfig::default(),
         }
     }
 
@@ -20574,6 +20600,8 @@ mod hybrid_dense_descriptor {
         let kinds = [LayerKind::Attention, LayerKind::Attention];
         let plain = ModelDescriptor {
             gated_attention: false,
+            recurrence: None,
+            loopcd: LoopCdConfig::default(),
             ..descriptor(&kinds)
         };
 
@@ -20803,6 +20831,8 @@ mod hybrid_routed_descriptor {
             expert_shared_feed_forward: 4,
             prefill_width: None,
             gated_attention: true,
+            recurrence: None,
+            loopcd: LoopCdConfig::default(),
         }
     }
 
@@ -21105,7 +21135,8 @@ mod layer_qk_norm {
 
     #[test]
     fn a_hybrid_engine_refuses_attention_without_qk_norm() {
-        let mut hybrid = hybrid_dense_descriptor::descriptor(&[LayerKind::Gdn, LayerKind::Attention]);
+        let mut hybrid =
+            hybrid_dense_descriptor::descriptor(&[LayerKind::Gdn, LayerKind::Attention]);
         for layer in &mut hybrid.layers {
             layer.attention.qk_norm = false;
         }
@@ -21115,6 +21146,871 @@ mod layer_qk_norm {
         assert!(
             matches!(outcome, Err(TensorError::UnsupportedInBuilder { .. })),
             "{outcome:?}"
+        );
+    }
+}
+
+mod recurrent_shared {
+    use super::head_repeats::descriptor as sized_descriptor;
+    use super::*;
+    use crate::Evaluated;
+    use crate::cpu::evaluate_named;
+    use crate::shape::infer;
+    const DENSE_NODES: usize = 268;
+    const DENSE_DIGEST: u64 = 0x00e4_e873_ea47_5ea1;
+    const ROUTED_NODES: usize = 348;
+    const ROUTED_DIGEST: u64 = 0xbc72_2fb9_9e3e_63c8;
+    const DONOR_NODES: usize = 324;
+    const DONOR_DIGEST: u64 = 0x8b58_8aa4_4615_c13a;
+    const RING_NODES: usize = 277;
+    const RING_DIGEST: u64 = 0x39a1_6ff2_0710_4f7f;
+
+    fn tiny_descriptor(iterations: u32) -> ModelDescriptor {
+        let mut descriptor = sized_descriptor(CacheStrategy::Cached, CacheMask::Padded, 1);
+        descriptor.vocab = 2;
+        descriptor.embedding = 2;
+        descriptor.feed_forward = 2;
+        descriptor.query_heads = 1;
+        descriptor.block_count = 1;
+        descriptor.leading_dense_block_count = 1;
+        descriptor.embedding_scale = None;
+        descriptor.logit_softcap = None;
+        descriptor.last_row_only = true;
+        descriptor.layers.truncate(1);
+        let attention = &mut descriptor.layers[0].attention;
+        attention.head_dim = 2;
+        attention.kv_heads = 1;
+        attention.rope_pairing = RopePairing::SplitHalf { pairs: 1 };
+        attention.qk_norm = false;
+        descriptor.recurrence = Some(RecurrenceConfig {
+            iterations,
+            normalize_each_iteration: true,
+        });
+        descriptor
+    }
+
+    fn routed_donor_descriptor() -> ModelDescriptor {
+        let mut descriptor = sized_descriptor(CacheStrategy::Cached, CacheMask::Padded, 1);
+        descriptor.vocab = 3;
+        descriptor.embedding = 4;
+        descriptor.feed_forward = 6;
+        descriptor.expert_feed_forward = 4;
+        descriptor.query_heads = 2;
+        descriptor.expert_count = 3;
+        descriptor.expert_used_count = 2;
+        descriptor.leading_dense_block_count = 0;
+        descriptor.embedding_scale = None;
+        descriptor.logit_softcap = None;
+        descriptor.last_row_only = true;
+        for layer in &mut descriptor.layers {
+            layer.attention.head_dim = 2;
+            layer.attention.kv_heads = 1;
+            layer.attention.rope_pairing = RopePairing::SplitHalf { pairs: 1 };
+        }
+        descriptor.layers[1].attention.key_source_kind = KeySourceKind::SharedFromLayer(0);
+        descriptor.layers[1].attention.value_source_kind = ValueSourceKind::SharedFromLayer(0);
+        descriptor
+    }
+
+    fn input_names(program: &[Op]) -> Vec<&str> {
+        program
+            .iter()
+            .filter_map(|operation| match operation {
+                Op::Input {
+                    name: Some(name), ..
+                } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn position_of_input(program: &[Op], wanted: &str) -> NodeId {
+        let position = program
+            .iter()
+            .position(|operation| {
+                matches!(operation, Op::Input { name: Some(name), .. } if name == wanted)
+            })
+            .unwrap_or_else(|| panic!("input {wanted} is declared"));
+        NodeId(position as u32)
+    }
+
+    fn multiplies_reading(program: &[Op], gamma: NodeId) -> usize {
+        program
+            .iter()
+            .filter(|operation| {
+                matches!(operation, Op::Elementwise { body: ScalarOp::Multiply, operands, .. }
+                    if operands.iter().any(|(node, _)| *node == gamma))
+            })
+            .count()
+    }
+
+    fn near(actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len(), "{actual:?} vs {expected:?}");
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                actual.is_finite()
+                    && (*actual - *expected).abs() <= 0.000001 + 0.000001 * expected.abs(),
+                "coordinate {index}: actual={actual} expected={expected}"
+            );
+        }
+    }
+
+    fn tiny_inputs<'program>(
+        program: &'program [Op],
+        symbols: &[u64],
+        ids: &[f32],
+        overrides: &dyn Fn(&str, usize) -> Option<Vec<f32>>,
+    ) -> Vec<(&'program str, Vec<f32>)> {
+        let shapes = infer(program, symbols).expect("tiny graph shapes");
+        let mut owned = Vec::new();
+        for (index, operation) in program.iter().enumerate() {
+            let Op::Input {
+                name: Some(name), ..
+            } = operation
+            else {
+                continue;
+            };
+            let count = shapes.of(NodeId(index as u32)).iter().product::<u64>() as usize;
+            let values = overrides(name, count).unwrap_or_else(|| match name.as_str() {
+                "ids" => ids.to_vec(),
+                "eps" | "rope_cos" => vec![1.0; count],
+                "lm_head_row" => vec![ids.len() as f32 - 1.0],
+                "token_embd.weight" => vec![3.0, 4.0, 0.0, 5.0],
+                "output.weight" => vec![1.0, 0.0, 0.0, 1.0],
+                _ if name.ends_with("norm.weight") => vec![1.0; count],
+                _ if name.ends_with("attn_k.weight") || name.ends_with("attn_v.weight") => {
+                    vec![1.0, 0.0, 0.0, 1.0]
+                }
+                _ => vec![0.0; count],
+            });
+            assert_eq!(values.len(), count, "{name} payload width");
+            owned.push((name.as_str(), values));
+        }
+        owned
+    }
+
+    fn evaluate_tiny(built: &ForwardProgram, ids: &[f32]) -> Evaluated {
+        let symbols = [ids.len() as u64, 2];
+        let owned = tiny_inputs(&built.program, &symbols, ids, &|_, _| None);
+        let named: Vec<_> = owned
+            .iter()
+            .map(|(name, values)| (*name, values.as_slice()))
+            .collect();
+        let mut outputs = vec![built.logits];
+        for roots in &built.layer_roots {
+            if let LayerCacheRoots::Attention((even, odd, value)) = roots {
+                outputs.extend([*even, *odd, *value]);
+            }
+        }
+        if let Some(readouts) = built.readouts {
+            outputs.extend(
+                [
+                    readouts.reference_raw,
+                    readouts.terminal_raw,
+                    readouts.reference_normalized,
+                    readouts.terminal_normalized,
+                    readouts.reference_logits,
+                    readouts.terminal_logits,
+                    readouts.guided_raw,
+                    readouts.adaptive_strength,
+                ]
+                .into_iter()
+                .flatten(),
+            );
+        }
+        evaluate_named(&built.program, &symbols, &named, &outputs).expect("tiny CPU payload")
+    }
+
+    fn attention_roots(built: &ForwardProgram, layer: usize) -> CachedLayerRoots {
+        match built.layer_roots[layer] {
+            LayerCacheRoots::Attention(roots) => roots,
+            other => panic!("logical layer {layer} owns a cache, got {other:?}"),
+        }
+    }
+
+    fn assert_matches_pre_change(descriptor: &ModelDescriptor, nodes: usize, digest: u64) {
+        let built = build_forward(descriptor).expect("ordinary descriptor lowers");
+
+        assert_eq!(built.program.len(), nodes);
+        assert_eq!(head_repeats::digest(&built.program), digest);
+        assert!(built.readouts.is_none());
+    }
+
+    #[test]
+    fn recurrent_shared_disabled_descriptor_same_graph() {
+        let dense = sized_descriptor(CacheStrategy::Cached, CacheMask::Padded, 1);
+        let routed = {
+            let mut routed = routed_donor_descriptor();
+            routed.layers[1].attention.key_source_kind = KeySourceKind::ProjectedK;
+            routed.layers[1].attention.value_source_kind = ValueSourceKind::ProjectedV;
+            routed
+        };
+        let donor = routed_donor_descriptor();
+        let ring = {
+            let mut ring = sized_descriptor(CacheStrategy::Cached, CacheMask::Padded, 1);
+            ring.sliding_kv_ring = true;
+            for layer in &mut ring.layers {
+                layer.attention.mask_window = Some(4);
+            }
+            ring
+        };
+
+        assert_matches_pre_change(&dense, DENSE_NODES, DENSE_DIGEST);
+        assert_matches_pre_change(&routed, ROUTED_NODES, ROUTED_DIGEST);
+        assert_matches_pre_change(&donor, DONOR_NODES, DONOR_DIGEST);
+        assert_matches_pre_change(&ring, RING_NODES, RING_DIGEST);
+        let altered = ModelDescriptor {
+            logit_softcap: Some(1.0),
+            ..dense
+        };
+        let program = build_forward(&altered)
+            .expect("altered descriptor lowers")
+            .program;
+        assert_ne!(
+            head_repeats::digest(&program),
+            DENSE_DIGEST,
+            "a different graph must not share the frozen digest"
+        );
+    }
+
+    #[test]
+    fn recurrent_shared_schedule_two_indices() {
+        let mut descriptor = tiny_descriptor(2);
+        descriptor.block_count = 2;
+        descriptor.leading_dense_block_count = 2;
+        descriptor.layers.push(descriptor.layers[0].clone());
+
+        let built = build_forward(&descriptor).expect("four logical layers");
+
+        assert_eq!(built.layer_roots.len(), 4);
+        let names = input_names(&built.program);
+        for logical in 0..4 {
+            for suffix in ["k_even", "k_odd", "v"] {
+                assert!(names.contains(&format!("kv_cache.{logical}.{suffix}").as_str()));
+            }
+        }
+        for physical in 0..2 {
+            let name = format!("blk.{physical}.attn_k.weight");
+            assert_eq!(
+                names.iter().filter(|candidate| **candidate == name).count(),
+                1
+            );
+        }
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.starts_with("blk.2.") || name.starts_with("blk.3."))
+        );
+        let distinct_roots: std::collections::BTreeSet<_> = (0..4)
+            .flat_map(|layer| {
+                let (even, odd, value) = attention_roots(&built, layer);
+                [even, odd, value]
+            })
+            .collect();
+        assert_eq!(
+            distinct_roots.len(),
+            12,
+            "twelve distinct logical cache roots"
+        );
+    }
+
+    #[test]
+    fn recurrent_shared_qk_norm_none_direct_projection() {
+        let built = build_forward(&tiny_descriptor(1)).expect("unnormalized Q/K");
+        let evaluated = evaluate_tiny(&built, &[0.0]);
+        let (key_even, _, _) = attention_roots(&built, 0);
+        let key = evaluated.get(key_even).expect("raw projected key").0;
+        near(key, &[3.0 * (2.0f32 / 27.0).sqrt()]);
+        assert!(
+            !input_names(&built.program)
+                .iter()
+                .any(|name| name.contains("attn_q_norm") || name.contains("attn_k_norm"))
+        );
+
+        let mut gamma_one = tiny_descriptor(1);
+        gamma_one.layers[0].attention.qk_norm = true;
+        let wrong = build_forward(&gamma_one).expect("gamma-one norm control");
+        let wrong_values = evaluate_tiny(&wrong, &[0.0]);
+        let (wrong_even, _, _) = attention_roots(&wrong, 0);
+        let wrong_key = wrong_values.get(wrong_even).expect("normalized key").0;
+        near(wrong_key, &[3.0 * (2.0f32 / 52.0).sqrt()]);
+        assert_ne!(
+            key, wrong_key,
+            "gamma one must not stand for absent normalization"
+        );
+    }
+
+    #[test]
+    fn recurrent_shared_norm_each_iteration_once() {
+        let built = build_forward(&tiny_descriptor(2)).expect("two boundary norms");
+        let evaluated = evaluate_tiny(&built, &[0.0]);
+        let roots = built.readouts.expect("completed-depth roots");
+        let first = [3.0 * (2.0f32 / 27.0).sqrt(), 4.0 * (2.0f32 / 27.0).sqrt()];
+        let second = [3.0 * (2.0f32 / 52.0).sqrt(), 4.0 * (2.0f32 / 52.0).sqrt()];
+
+        near(
+            evaluated
+                .get(roots.reference_raw.expect("first raw"))
+                .expect("raw")
+                .0,
+            &[3.0, 4.0],
+        );
+        near(
+            evaluated
+                .get(roots.reference_normalized.expect("first normalized"))
+                .expect("first boundary")
+                .0,
+            &first,
+        );
+        near(
+            evaluated
+                .get(roots.terminal_raw.expect("terminal raw"))
+                .expect("raw")
+                .0,
+            &first,
+        );
+        near(
+            evaluated.get(built.logits).expect("terminal logits").0,
+            &second,
+        );
+        assert!(
+            roots.reference_logits.is_none(),
+            "disabled guidance has no reference head"
+        );
+        let gamma = position_of_input(&built.program, "output_norm.weight");
+        assert_eq!(
+            input_names(&built.program)
+                .iter()
+                .filter(|name| **name == "output_norm.weight")
+                .count(),
+            1
+        );
+        assert_eq!(multiplies_reading(&built.program, gamma), 2);
+    }
+
+    #[test]
+    fn recurrent_shared_sandwich_norm_boundaries() {
+        let mut descriptor = tiny_descriptor(1);
+        descriptor.layers[0].ffn.post_attention_norm = true;
+        descriptor.layers[0].ffn.exclusive_dense_post_norm = true;
+
+        let built = build_forward(&descriptor).expect("sandwich norms");
+
+        let names = input_names(&built.program);
+        for suffix in [
+            "attn_norm.weight",
+            "post_attention_norm.weight",
+            "ffn_norm.weight",
+            "post_ffw_norm.weight",
+        ] {
+            let name = format!("blk.0.{suffix}");
+            assert_eq!(
+                names.iter().filter(|candidate| **candidate == name).count(),
+                1
+            );
+            if !suffix.starts_with("post_") {
+                continue;
+            }
+            let gamma = position_of_input(&built.program, &name);
+            let normalized = built
+                .program
+                .iter()
+                .position(|operation| {
+                    matches!(operation, Op::Elementwise { body: ScalarOp::Multiply, operands, .. }
+                        if operands.iter().any(|(node, _)| *node == gamma))
+                })
+                .map(|position| NodeId(position as u32))
+                .expect("gamma multiply");
+            assert!(
+                built.program.iter().any(|operation| matches!(
+                    operation,
+                    Op::Elementwise { body: ScalarOp::Add, operands, .. }
+                        if operands.iter().any(|(node, _)| *node == normalized)
+                )),
+                "{name} precedes its residual addition"
+            );
+        }
+        let evaluated = evaluate_tiny(&built, &[0.0]);
+        near(
+            evaluated
+                .get(built.logits)
+                .expect("zero branches preserve x")
+                .0,
+            &[3.0 * (2.0f32 / 27.0).sqrt(), 4.0 * (2.0f32 / 27.0).sqrt()],
+        );
+    }
+
+    fn projected_attention(
+        new_values: &[f32],
+        past_values: &[f32],
+        cached_len: f32,
+    ) -> (Vec<f32>, [Vec<f32>; 3]) {
+        let mut descriptor = tiny_descriptor(1);
+        descriptor.last_row_only = false;
+        let mut built = build_forward(&descriptor).expect("shared two-range fixture");
+        let (key_even, key_odd, value) = attention_roots(&built, 0);
+        for (node, name, width) in [
+            (key_even, "injected_key_even", 1),
+            (key_odd, "injected_key_odd", 1),
+            (value, "injected_value", 2),
+        ] {
+            built.program[node.0 as usize] = Op::Input {
+                dtype: DType::Float32,
+                shape: vec![
+                    Extent::Symbolic(0),
+                    Extent::Static(1),
+                    Extent::Static(width),
+                ],
+                name: Some(name.into()),
+            };
+        }
+        let positions = new_values.len() / 2;
+        let symbols = [positions as u64, 2];
+        let owned = tiny_inputs(&built.program, &symbols, &[], &|name, count| match name {
+            "token_embd.weight" => Some(vec![0.0; count]),
+            "cached_len" => Some(vec![cached_len]),
+            "blk.0.attn_output.weight" => Some(vec![1.0, 0.0, 0.0, 1.0]),
+            "injected_key_even" => Some(new_values.chunks(2).map(|row| row[0]).collect()),
+            "injected_key_odd" => Some(vec![0.0; positions]),
+            "injected_value" => Some(new_values.to_vec()),
+            "kv_cache.0.k_even" => Some(past_values.chunks(2).map(|row| row[0]).collect()),
+            "kv_cache.0.k_odd" => Some(vec![0.0; 2]),
+            "kv_cache.0.v" => Some(past_values.to_vec()),
+            "ids" => Some(vec![0.0; positions]),
+            _ => None,
+        });
+        let named: Vec<_> = owned
+            .iter()
+            .map(|(name, values)| (*name, values.as_slice()))
+            .collect();
+        let raw = built
+            .readouts
+            .expect("raw completed state")
+            .terminal_raw
+            .expect("raw attention plus zero FFN");
+        let evaluated = evaluate_named(
+            &built.program,
+            &symbols,
+            &named,
+            &[raw, key_even, key_odd, value],
+        )
+        .expect("projected two-range CPU execution");
+        let payload = evaluated.get(raw).expect("raw attention values").0.to_vec();
+        let caches = [key_even, key_odd, value]
+            .map(|node| evaluated.get(node).expect("new projected cache").0.to_vec());
+        (payload, caches)
+    }
+
+    #[test]
+    fn recurrent_shared_distinct_kv_literal() {
+        let (first, first_cache) =
+            projected_attention(&[4.0, 0.0], &[2.0, 0.0, 1000.0, 1000.0], 1.0);
+        let (second, second_cache) =
+            projected_attention(&[8.0, 0.0], &[6.0, 0.0, 1000.0, 1000.0], 1.0);
+
+        assert_eq!(first, [3.0, 0.0]);
+        assert_eq!(second, [7.0, 0.0]);
+        assert_eq!(first_cache, [vec![4.0], vec![0.0], vec![4.0, 0.0]]);
+        assert_eq!(second_cache, [vec![8.0], vec![0.0], vec![8.0, 0.0]]);
+        let (wrong, _) = projected_attention(&[8.0, 0.0], &[2.0, 0.0, 1000.0, 1000.0], 1.0);
+        assert_eq!(wrong, [5.0, 0.0]);
+        assert_ne!(
+            wrong, second,
+            "physical weight reuse must not imply logical KV reuse"
+        );
+    }
+
+    #[test]
+    fn recurrent_shared_cached_vs_prefill_literal() {
+        let (prefill, prefill_cache) =
+            projected_attention(&[2.0, 0.0, 4.0, 0.0], &[1000.0; 4], 0.0);
+        assert_eq!(prefill, [2.0, 0.0, 3.0, 0.0]);
+        assert_eq!(
+            prefill_cache,
+            [vec![2.0, 4.0], vec![0.0, 0.0], vec![2.0, 0.0, 4.0, 0.0]]
+        );
+
+        let (first, first_cache) = projected_attention(&[2.0, 0.0], &[1000.0; 4], 0.0);
+        assert_eq!(first, [2.0, 0.0]);
+        let mut past = first_cache[2].clone();
+        past.extend([1000.0, 1000.0]);
+        let (continued, continued_cache) = projected_attention(&[4.0, 0.0], &past, 1.0);
+
+        assert_eq!(continued, prefill[2..]);
+        let joined_even: Vec<f32> = [&first_cache[0][..], &continued_cache[0][..]].concat();
+        let joined_value: Vec<f32> = [&first_cache[2][..], &continued_cache[2][..]].concat();
+        assert_eq!(joined_even, prefill_cache[0]);
+        assert_eq!(joined_value, prefill_cache[2]);
+        let (wrong, _) = projected_attention(&[4.0, 0.0], &past, 0.0);
+        assert_eq!(wrong, [4.0, 0.0]);
+        assert_ne!(wrong, continued, "missing historical prefix control");
+    }
+
+    #[test]
+    fn recurrent_shared_loopcd_logits_hidden_literal() {
+        let mut program = Vec::new();
+        let reference = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![Extent::Static(1), Extent::Static(2)],
+            "reference",
+        );
+        let terminal = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![Extent::Static(1), Extent::Static(2)],
+            "terminal",
+        );
+        let gamma = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![Extent::Static(2)],
+            "gamma",
+        );
+        let epsilon = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![Extent::Static(1)],
+            "epsilon",
+        );
+        let inverse = scalar_constant(&mut program, 0.5);
+        let reference_normalized =
+            rmsnorm(&mut program, reference, gamma, inverse, epsilon).expect("first norm");
+        let terminal_normalized =
+            rmsnorm(&mut program, terminal, gamma, inverse, epsilon).expect("terminal norm");
+        let logits = append_loopcd_contrast(
+            &mut program,
+            reference_normalized,
+            terminal_normalized,
+            0.5,
+            "sd",
+        )
+        .expect("fixed logit contrast");
+        let raw_contrast = append_loopcd_contrast(&mut program, reference, terminal, 0.5, "sd")
+            .expect("pre-normalization hidden contrast");
+        let hidden = rmsnorm(&mut program, raw_contrast, gamma, inverse, epsilon)
+            .expect("guided final norm");
+        let zero_logits = append_loopcd_contrast(
+            &mut program,
+            reference_normalized,
+            terminal_normalized,
+            0.0,
+            "sd",
+        )
+        .expect("zero logit control");
+        let zero_raw = append_loopcd_contrast(&mut program, reference, terminal, 0.0, "sd")
+            .expect("zero hidden control");
+        let zero_hidden =
+            rmsnorm(&mut program, zero_raw, gamma, inverse, epsilon).expect("zero hidden readout");
+        let evaluated = evaluate_named(
+            &program,
+            &[],
+            &[
+                ("reference", &[3.0, 4.0]),
+                ("terminal", &[0.0, 5.0]),
+                ("gamma", &[1.0, 1.0]),
+                ("epsilon", &[0.0]),
+            ],
+            &[logits, raw_contrast, hidden, zero_logits, zero_hidden],
+        )
+        .expect("literal completed-depth vectors");
+
+        near(
+            evaluated.get(logits).expect("logit result").0,
+            &[-3.0 * 2.0f32.sqrt() / 10.0, 11.0 * 2.0f32.sqrt() / 10.0],
+        );
+        assert_eq!(
+            evaluated.get(raw_contrast).expect("raw result").0,
+            [-1.5, 5.5]
+        );
+        near(
+            evaluated.get(hidden).expect("hidden result").0,
+            &[-3.0 / 65.0f32.sqrt(), 11.0 / 65.0f32.sqrt()],
+        );
+        near(
+            evaluated.get(zero_logits).expect("zero logits").0,
+            &[0.0, 2.0f32.sqrt()],
+        );
+        near(
+            evaluated.get(zero_hidden).expect("zero hidden").0,
+            &[0.0, 2.0f32.sqrt()],
+        );
+        assert_ne!(
+            evaluated.get(logits).expect("logit boundary").0,
+            evaluated.get(hidden).expect("hidden boundary").0,
+            "wrong-boundary negative control"
+        );
+    }
+
+    #[test]
+    fn recurrent_shared_loopcd_modes_through_the_builder() {
+        let second = [3.0 * (2.0f32 / 52.0).sqrt(), 4.0 * (2.0f32 / 52.0).sqrt()];
+        for mode in [LoopCdMode::FixedLogits, LoopCdMode::FixedHidden] {
+            let mut descriptor = tiny_descriptor(2);
+            descriptor.loopcd = LoopCdConfig {
+                mode,
+                strength: 0.0,
+                reference_iteration: 1,
+            };
+            let built = build_forward(&descriptor).expect("zero-strength mode lowers");
+            near(
+                evaluate_tiny(&built, &[0.0])
+                    .get(built.logits)
+                    .expect("logits")
+                    .0,
+                &second,
+            );
+            assert_eq!(
+                built
+                    .readouts
+                    .expect("boundaries")
+                    .reference_logits
+                    .is_some(),
+                mode == LoopCdMode::FixedLogits
+            );
+
+            descriptor.loopcd.strength = 0.5;
+            let built = build_forward(&descriptor).expect("nonzero guidance lowers");
+            let values = evaluate_tiny(&built, &[0.0]);
+            let raw_scale = 1.5 * (2.0f32 / 27.0).sqrt() - 0.5;
+            let coefficient = match mode {
+                LoopCdMode::FixedLogits => {
+                    1.5 * (2.0f32 / 52.0).sqrt() - 0.5 * (2.0f32 / 27.0).sqrt()
+                }
+                _ => raw_scale / (12.5 * raw_scale * raw_scale + 1.0).sqrt(),
+            };
+            near(
+                values.get(built.logits).expect("guided logits").0,
+                &[3.0 * coefficient, 4.0 * coefficient],
+            );
+            let readouts = built.readouts.expect("guidance roots");
+            assert_eq!(
+                readouts.guided_raw.is_some(),
+                mode == LoopCdMode::FixedHidden
+            );
+            if let Some(guided_raw) = readouts.guided_raw {
+                near(
+                    values.get(guided_raw).expect("raw contrast").0,
+                    &[3.0 * raw_scale, 4.0 * raw_scale],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recurrent_shared_adaptive_ties_literal() {
+        let mut program = Vec::new();
+        let terminal = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![Extent::Static(2), Extent::Static(2)],
+            "terminal",
+        );
+        let strength = append_adaptive_loopcd_strength(&mut program, terminal, 1.0)
+            .expect("stable top-two margin");
+        let reference = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![Extent::Static(2), Extent::Static(2)],
+            "reference",
+        );
+        let contrasted =
+            append_loopcd_contrast_node(&mut program, reference, terminal, strength, "sv", "s->sv")
+                .expect("row-specific adaptive contrast");
+        let evaluated = evaluate_named(
+            &program,
+            &[],
+            &[
+                ("terminal", &[0.0, 0.0, 3.0f32.ln(), 0.0]),
+                ("reference", &[1.0, -1.0, 0.0, 2.0]),
+            ],
+            &[strength, contrasted],
+        )
+        .expect("tie and unique-top rows");
+
+        near(
+            evaluated.get(contrasted).expect("adaptive coordinates").0,
+            &[-1.0, 1.0, 1.5 * 3.0f32.ln(), -1.0],
+        );
+        near(
+            evaluated.get(strength).expect("effective strengths").0,
+            &[1.0, 0.5],
+        );
+
+        let mut descriptor = tiny_descriptor(2);
+        descriptor.loopcd = LoopCdConfig {
+            mode: LoopCdMode::AdaptiveLogits,
+            strength: 0.5,
+            reference_iteration: 1,
+        };
+        let built = build_forward(&descriptor).expect("adaptive builder");
+        let values = evaluate_tiny(&built, &[0.0]);
+        let strength_root = built
+            .readouts
+            .expect("adaptive roots")
+            .adaptive_strength
+            .expect("per-row strength");
+        let ratio = (2.0f32 / 52.0).sqrt().exp();
+        near(
+            values.get(strength_root).expect("strength payload").0,
+            &[0.5 * 2.0 / (1.0 + ratio)],
+        );
+    }
+
+    #[test]
+    fn recurrent_shared_logical_moe_and_shared_donors() {
+        let mut descriptor = routed_donor_descriptor();
+        descriptor.recurrence = Some(RecurrenceConfig {
+            iterations: 2,
+            normalize_each_iteration: true,
+        });
+
+        let built = build_forward(&descriptor).expect("repeated routed donor schedule");
+
+        assert_eq!(
+            built
+                .moe_sites
+                .0
+                .iter()
+                .map(|site| site.layer)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+        assert!(matches!(
+            built.layer_roots[0],
+            LayerCacheRoots::Attention(_)
+        ));
+        assert!(matches!(
+            built.layer_roots[1],
+            LayerCacheRoots::SharedFromLayer(0)
+        ));
+        assert!(matches!(
+            built.layer_roots[2],
+            LayerCacheRoots::Attention(_)
+        ));
+        assert!(matches!(
+            built.layer_roots[3],
+            LayerCacheRoots::SharedFromLayer(2)
+        ));
+        let names = input_names(&built.program);
+        assert!(names.contains(&"kv_cache.0.v") && names.contains(&"kv_cache.2.v"));
+        assert!(!names.contains(&"kv_cache.1.v") && !names.contains(&"kv_cache.3.v"));
+        for physical in 0..2 {
+            let name = format!("blk.{physical}.ffn_norm.weight");
+            assert_eq!(
+                names.iter().filter(|candidate| **candidate == name).count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn recurrent_shared_descriptor_round_trips_as_data() {
+        let mut descriptor = tiny_descriptor(4);
+        descriptor.loopcd = LoopCdConfig {
+            mode: LoopCdMode::AdaptiveLogits,
+            strength: 0.5,
+            reference_iteration: 2,
+        };
+
+        let written = toml::to_string(&descriptor).expect("recurrent descriptor serializes");
+        let restored: ModelDescriptor = toml::from_str(&written).expect("and parses back");
+
+        assert_eq!(restored, descriptor);
+        assert!(written.contains("iterations = 4"), "{written}");
+        assert!(written.contains("mode = \"AdaptiveLogits\""), "{written}");
+    }
+
+    #[test]
+    fn recurrent_shared_ordinary_config_stays_without_recurrence() {
+        let ordinary = sized_descriptor(CacheStrategy::Cached, CacheMask::Padded, 1);
+        let written = toml::to_string(&ordinary).expect("descriptor serializes");
+        let legacy = written
+            .lines()
+            .take_while(|line| *line != "[loopcd]")
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let restored: ModelDescriptor = toml::from_str(&legacy).expect("legacy config parses");
+
+        assert_eq!(restored.recurrence, None);
+        assert_eq!(restored.loopcd, LoopCdConfig::default());
+    }
+    #[test]
+    fn recurrent_shared_refuses_what_it_cannot_lower() {
+        let refuse = |label: &str, descriptor: ModelDescriptor| {
+            let outcome = build_forward(&descriptor);
+            assert!(
+                matches!(outcome, Err(TensorError::UnsupportedInBuilder { .. })),
+                "{label}: {outcome:?}"
+            );
+        };
+        let with = |edit: &dyn Fn(&mut ModelDescriptor)| {
+            let mut descriptor = tiny_descriptor(2);
+            edit(&mut descriptor);
+            descriptor
+        };
+
+        refuse("zero iterations", tiny_descriptor(0));
+        refuse(
+            "logical depth overflow",
+            with(&|descriptor| {
+                descriptor
+                    .recurrence
+                    .as_mut()
+                    .expect("recurrence")
+                    .iterations = u32::MAX;
+                descriptor.block_count = 2;
+            }),
+        );
+        refuse(
+            "recurrent short convolution",
+            with(&|descriptor| descriptor.layers[0].kind = LayerKind::ShortConv),
+        );
+        refuse(
+            "recurrent per-layer embedding",
+            with(&|descriptor| descriptor.ple_dim = Some(2)),
+        );
+        refuse(
+            "reference past the terminal pass",
+            with(&|descriptor| {
+                descriptor.loopcd = LoopCdConfig {
+                    mode: LoopCdMode::FixedHidden,
+                    strength: 0.5,
+                    reference_iteration: 3,
+                };
+            }),
+        );
+        for strength in [-1.0, f32::NAN, f32::INFINITY] {
+            refuse(
+                "unusable strength",
+                with(&|descriptor| {
+                    descriptor.loopcd = LoopCdConfig {
+                        mode: LoopCdMode::FixedLogits,
+                        strength,
+                        reference_iteration: 1,
+                    };
+                }),
+            );
+        }
+        refuse(
+            "strength with a disabled mode",
+            with(&|descriptor| descriptor.loopcd.strength = 0.5),
+        );
+        refuse(
+            "LoopCD without recurrence",
+            with(&|descriptor| {
+                descriptor.recurrence = None;
+                descriptor.loopcd.mode = LoopCdMode::FixedLogits;
+            }),
+        );
+        refuse(
+            "recurrence on the cacheless engine",
+            with(&|descriptor| descriptor.cache_strategy = CacheStrategy::Cacheless),
+        );
+        refuse(
+            "recurrence on the bounded engine",
+            with(&|descriptor| descriptor.cache_mask = CacheMask::Bounded),
         );
     }
 }

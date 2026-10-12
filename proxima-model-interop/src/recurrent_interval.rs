@@ -22,6 +22,7 @@ use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
     CacheMask, CacheStrategy, ForwardProgram, KeySourceKind, LayerAttentionConfig, LayerKind,
+    LoopCdConfig,
     LayerSchedule, ModelDescriptor, RopeTableSel, ValueSourceKind, build_forward,
 };
 
@@ -413,6 +414,8 @@ pub fn descriptor_from_architecture(
         expert_shared_feed_forward: 0,
         prefill_width: None,
         gated_attention: true,
+        recurrence: None,
+        loopcd: LoopCdConfig::default(),
     })
 }
 

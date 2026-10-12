@@ -57,7 +57,11 @@ fn producer_side_refs(op: &Op, boundary: u32) -> Vec<NodeId> {
 /// loop, so a miss means the caller built `table` wrong — reported as the
 /// same "reads a node that is not there yet" error [`shape::infer`] would
 /// raise for the same defect in a hand-written program.
-fn remap(op: &Op, table: &BTreeMap<NodeId, NodeId>, self_id: NodeId) -> Result<Op, TensorError> {
+pub(crate) fn remap(
+    op: &Op,
+    table: &BTreeMap<NodeId, NodeId>,
+    self_id: NodeId,
+) -> Result<Op, TensorError> {
     let translate = |node: NodeId| {
         table
             .get(&node)
