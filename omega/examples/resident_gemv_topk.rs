@@ -87,6 +87,7 @@ fn main() {
 fn run() {
     use std::time::Instant;
 
+    use proxima_tensor::process_usage;
     use proxima_tensor::test_support::Lcg;
     use proxima_tensor::{
         AlignedBuffer, DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce,
@@ -221,12 +222,9 @@ fn run() {
     }
 
     fn ru_maxrss_gib() -> f64 {
-        let mut usage: libc::rusage = unsafe { core::mem::zeroed() };
-        if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
-            return 0.0;
-        }
-        // macOS reports ru_maxrss in BYTES, unlike Linux's KiB.
-        usage.ru_maxrss as f64 / (1024.0 * 1024.0 * 1024.0)
+        let bytes = process_usage::peak_rss_bytes()
+            .expect("peak rss must be readable for the current process");
+        bytes as f64 / (1024.0 * 1024.0 * 1024.0)
     }
 
     fn percentile(sorted_ms: &[f64], fraction: f64) -> f64 {

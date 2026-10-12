@@ -219,6 +219,8 @@ pub mod similarity;
 pub mod error;
 #[cfg(feature = "instrument")]
 pub mod instrument;
+#[cfg(feature = "std")]
+pub mod process_usage;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod live;
 #[cfg(any(feature = "std", feature = "alloc"))]

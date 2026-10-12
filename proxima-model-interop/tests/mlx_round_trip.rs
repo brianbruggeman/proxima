@@ -140,12 +140,7 @@ fn divergence_after_stop(expected: &[u32], actual: &[u32], stop_ids: &[u32]) -> 
 }
 
 fn peak_rss_bytes() -> u64 {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
-    // SAFETY: `usage` is a valid, writable `rusage`; `RUSAGE_SELF` takes no other pointer.
-    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    assert_eq!(status, 0, "getrusage(RUSAGE_SELF) failed");
-    // SAFETY: `getrusage` returned 0, so it filled the struct.
-    unsafe { usage.assume_init() }.ru_maxrss as u64
+    process_usage::peak_rss_bytes().expect("peak rss must be readable for the current process")
 }
 
 fn gguf_path(model: &Model) -> PathBuf {

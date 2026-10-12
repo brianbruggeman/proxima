@@ -6,6 +6,8 @@
 
 use std::time::Instant;
 
+use proxima_tensor::process_usage;
+
 pub struct Cell {
     started: Instant,
     cpu_before_ms: f64,
@@ -19,35 +21,16 @@ struct Snapshot {
 }
 
 fn snapshot() -> Snapshot {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
-    // SAFETY: `usage` is a valid, writable `rusage`; `RUSAGE_SELF` takes no other pointer.
-    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    assert_eq!(status, 0, "getrusage(RUSAGE_SELF) failed");
-    // SAFETY: `getrusage` returned 0, so it filled the struct.
-    let usage = unsafe { usage.assume_init() };
-    let millis = |time: libc::timeval| time.tv_sec as f64 * 1000.0 + time.tv_usec as f64 / 1000.0;
+    let (user_ms, system_ms) = process_usage::process_cpu_ms()
+        .expect("process cpu times must be readable for the current process");
+    let (_, footprint_bytes) = process_usage::resident_and_footprint_bytes()
+        .expect("physical footprint must be readable for the current process");
     Snapshot {
-        cpu_ms: millis(usage.ru_utime) + millis(usage.ru_stime),
-        rss_peak_bytes: usage.ru_maxrss as u64,
-        footprint_bytes: physical_footprint_bytes(),
+        cpu_ms: user_ms + system_ms,
+        rss_peak_bytes: process_usage::peak_rss_bytes()
+            .expect("peak rss must be readable for the current process"),
+        footprint_bytes,
     }
-}
-
-fn physical_footprint_bytes() -> u64 {
-    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
-    // SAFETY: `RUSAGE_INFO_V2` fills a `rusage_info_v2`; the C signature takes the struct's address cast to `rusage_info_t *`.
-    let status = unsafe {
-        libc::proc_pid_rusage(
-            std::process::id() as libc::c_int,
-            libc::RUSAGE_INFO_V2,
-            info.as_mut_ptr().cast(),
-        )
-    };
-    if status != 0 {
-        return 0;
-    }
-    // SAFETY: the call returned 0, so the struct is filled.
-    unsafe { info.assume_init() }.ri_phys_footprint
 }
 
 fn load_one_minute() -> f64 {

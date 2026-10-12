@@ -34,11 +34,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use criterion::Criterion;
-use libc::{RUSAGE_SELF, getrusage, rusage};
 use proxima_gguf::parser::{GgufEvent, GgufParser};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::tensor::TensorInfo;
 use proxima_tensor::cpu::{dot_q4k_q8k, matmul_q4k_q8k_f32, quantize_row_q8k};
+use proxima_tensor::process_usage;
 use proxima_tensor::test_support::Lcg;
 use std::hint::black_box;
 
@@ -70,11 +70,7 @@ const Q8K_BLOCK_BYTES: usize = 4 + Q4K_BLOCK_ELEMENTS + (Q4K_BLOCK_ELEMENTS / 16
 const BLOCK_COUNT: usize = 32;
 
 fn ru_minflt() -> u64 {
-    let mut usage: rusage = unsafe { core::mem::zeroed() };
-    if unsafe { getrusage(RUSAGE_SELF, &mut usage) } != 0 {
-        return 0;
-    }
-    usage.ru_minflt as u64
+    process_usage::minor_faults().expect("minor faults must be readable for the current process")
 }
 
 /// Streams the file in growing prefixes until the parser reports

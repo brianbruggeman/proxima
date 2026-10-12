@@ -17,7 +17,8 @@ use proxima_tensor::cpu::{
 use proxima_tensor::dtype::DType;
 use proxima_tensor::map::{self, AxisIndex, AxisTerm, IndexMap, IndexPattern};
 use proxima_tensor::op::{self, Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
-use proxima_tensor::test_support::{Lcg, process_usage};
+use proxima_tensor::process_usage;
+use proxima_tensor::test_support::Lcg;
 
 #[cfg(feature = "instrument")]
 #[global_allocator]
