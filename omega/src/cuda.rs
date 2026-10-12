@@ -90,6 +90,12 @@ pub struct CudaKernel {
     pub entry: String,
     pub bindings: Vec<Binding>,
     pub grid: CudaGridSpec,
+    /// Arena buffers a driver binds after the [`Binding::Uniforms`] slot, in
+    /// kernel-argument order, each with its element count. Non-empty only for
+    /// a kind that writes outputs beyond [`Binding::Output`] (`MoeTopK`); the
+    /// list is `BoundOpKind::moe_topk_extra_outputs`, the one layout the CPU
+    /// interpreter's extra sink and the Metal backend follow too.
+    pub extra_outputs: Vec<(NodeId, usize)>,
 }
 
 /// How many threads a driver must launch, and — for a cooperative reduce —
@@ -217,12 +223,7 @@ pub fn emit_cuda_with_policy(
                 kind: "gated_delta_net",
             });
         }
-        BoundOpKind::MoeTopK { .. } => {
-            return Err(EmitError::CudaUnsupportedOpKind {
-                node: resolved.node,
-                kind: "moe_topk",
-            });
-        }
+        BoundOpKind::MoeTopK { .. } => render_moe_topk(resolved, &entry)?,
         BoundOpKind::TopFractionSelect { .. } => {
             return Err(EmitError::CudaUnsupportedOpKind {
                 node: resolved.node,
@@ -251,7 +252,10 @@ pub fn emit_cuda_with_policy(
     let cooperative = reduce_is_cooperative(resolved, &quantized, numeric_policy);
     let grid = CudaGridSpec {
         threads: grid_threads(resolved, cooperative)?,
-        block_width: cooperative.then_some(WARP_SIZE),
+        block_width: match &resolved.kind {
+            BoundOpKind::MoeTopK { expert_count, .. } => Some(moe_block_width(*expert_count)),
+            _ => cooperative.then_some(WARP_SIZE),
+        },
     };
     if grid.blocks() > MAX_GRID_BLOCKS {
         return Err(EmitError::GridExceedsThreadIndex {
@@ -265,6 +269,9 @@ pub fn emit_cuda_with_policy(
         entry,
         bindings: bindings(resolved),
         grid,
+        extra_outputs: resolved
+            .kind
+            .moe_topk_extra_outputs(resolved.extents.iter().product::<u64>() as usize),
     })
 }
 
@@ -467,12 +474,11 @@ pub(crate) fn pack_cuda_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitErro
             push_cuda_i64(&mut bytes, out_layout.base);
             push_cuda_i64_row(&mut bytes, &out_layout.strides, rank_len);
         }
-        BoundOpKind::Iota | BoundOpKind::Constant { .. } => {
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } | BoundOpKind::MoeTopK { .. } => {
             push_cuda_i64(&mut bytes, resolved.extents.iter().product::<u64>() as i64);
         }
         BoundOpKind::CachedAttention { .. }
         | BoundOpKind::GatedDeltaNet { .. }
-        | BoundOpKind::MoeTopK { .. }
         | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
         | BoundOpKind::CachedSoftmaxWeights { .. }
@@ -505,6 +511,125 @@ fn render_leaf(
         None => source.push_str(&format!("    out[gid] = ({element_type})gid;\n")),
     }
     source.push_str("}\n");
+    Ok(source)
+}
+
+/// Most threads one CUDA block holds (`maxThreadsPerBlock`, fixed at 1024 on
+/// every generation `emit_cuda` targets).
+const MAX_BLOCK_WIDTH: u64 = 1024;
+
+/// Block width of the `MoeTopK` kernel: `expert_count` rounded up to whole
+/// warps, so every `__shfl_xor_sync` reduces a full warp and the padding
+/// lanes past `expert_count` are masked rather than divergent.
+fn moe_block_width(expert_count: u64) -> u64 {
+    expert_count.div_ceil(WARP_SIZE).max(1) * WARP_SIZE
+}
+
+/// [`BoundOpKind::MoeTopK`]'s fused kernel, the CUDA port of
+/// [`crate::msl`]'s `render_moe_topk`: one block per token, `top_k` rounds of
+/// take-the-maximum-with-exclusion. A warp reduces with `__shfl_xor_sync`, one
+/// value per warp crosses through shared memory, and two `__syncthreads` per
+/// round publish the warp maxima and the warp winners.
+///
+/// Ties resolve to the HIGHER index (`max` over `masked == max_value ? tid : -1`),
+/// and exclusion removes EVERY expert tied with the round's maximum -- both
+/// exactly as the Metal arm and `proxima_tensor::cpu::run_moe_topk` do. The
+/// candidate guard `tid < expert_count` keeps a padding lane (held at `-inf`)
+/// from winning a row whose real scores are all `-inf`.
+///
+/// Arguments after the `Uniforms` slot are the `2 * top_k` extra outputs, then
+/// the stacked pair when present, in `moe_topk_extra_outputs` order.
+fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
+    let BoundOpKind::MoeTopK {
+        expert_count,
+        top_k,
+        stacked,
+        ..
+    } = &resolved.kind
+    else {
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "moe_topk",
+            found: resolved.kind.name(),
+        });
+    };
+    let block_width = moe_block_width(*expert_count);
+    if block_width > MAX_BLOCK_WIDTH {
+        return Err(EmitError::WideGridUnsupported {
+            node: resolved.node,
+            reason: "its reduction is coherent only inside the one block it runs as, and expert_count exceeds one block",
+        });
+    }
+    let expert_count = *expert_count;
+    let top_k = *top_k;
+    let extra_count = 2 * top_k;
+    let num_warps = block_width / WARP_SIZE;
+    let mut source = String::new();
+    preamble(&mut source, "float");
+    source.push_str("struct Uniforms { long unused; };\n\n");
+    source.push_str(&format!(
+        "extern \"C\" __global__ void {entry}(\n    const float* __restrict__ scores,\n    float* __restrict__ route0,\n    const Uniforms* __restrict__ u_ptr"
+    ));
+    for index in 0..extra_count {
+        source.push_str(&format!(",\n    float* __restrict__ extra{index}"));
+    }
+    if stacked.is_some() {
+        source.push_str(
+            ",\n    float* __restrict__ stacked_routes,\n    float* __restrict__ stacked_weights",
+        );
+    }
+    source.push_str(") {\n");
+    let extra_params: Vec<String> = (0..extra_count)
+        .map(|index| format!("extra{index}"))
+        .collect();
+    let stacked_writes = if stacked.is_some() {
+        "            stacked_routes[(long)token * top_k + round] = (float)winner_index;\n\
+         \x20           stacked_weights[(long)token * top_k + round] = weight;\n"
+    } else {
+        ""
+    };
+    source.push_str(&format!(
+        "    constexpr unsigned int expert_count = {expert_count}u;\n\
+         \x20   constexpr unsigned int top_k = {top_k}u;\n\
+         \x20   constexpr unsigned int num_warps = {num_warps}u;\n\
+         \x20   float* extras[{extra_count}] = {{ {extras} }};\n\
+         \x20   const float negative_infinity = -__int_as_float(0x7f800000);\n\
+         \x20   __shared__ float warp_max[num_warps];\n\
+         \x20   __shared__ int warp_index[num_warps];\n\
+         \x20   const unsigned int token = blockIdx.x;\n\
+         \x20   const unsigned int tid = threadIdx.x;\n\
+         \x20   const unsigned int warp_id = tid >> 5;\n\
+         \x20   const unsigned int lane = tid & 31u;\n\
+         \x20   float masked = (tid < expert_count) ? scores[(long)token * expert_count + tid] : negative_infinity;\n\
+         \x20   float max0 = 0.0f;\n\
+         \x20   float weight_total = 0.0f;\n\
+         \x20   for (unsigned int round = 0; round < top_k; round++) {{\n\
+         \x20       float lane_max = masked;\n\
+         \x20       for (int offset = 16; offset > 0; offset >>= 1) {{ lane_max = fmaxf(lane_max, __shfl_xor_sync(0xffffffffu, lane_max, offset)); }}\n\
+         \x20       if (lane == 0) {{ warp_max[warp_id] = lane_max; }}\n\
+         \x20       __syncthreads();\n\
+         \x20       float max_value = warp_max[0];\n\
+         \x20       for (unsigned int warp = 1; warp < num_warps; warp++) {{ max_value = fmaxf(max_value, warp_max[warp]); }}\n\
+         \x20       int candidate = (masked == max_value && tid < expert_count) ? (int)tid : -1;\n\
+         \x20       for (int offset = 16; offset > 0; offset >>= 1) {{ candidate = max(candidate, __shfl_xor_sync(0xffffffffu, candidate, offset)); }}\n\
+         \x20       if (lane == 0) {{ warp_index[warp_id] = candidate; }}\n\
+         \x20       __syncthreads();\n\
+         \x20       int winner_index = warp_index[0];\n\
+         \x20       for (unsigned int warp = 1; warp < num_warps; warp++) {{ winner_index = max(winner_index, warp_index[warp]); }}\n\
+         \x20       if (round == 0) {{ max0 = max_value; }}\n\
+         \x20       if (tid == 0) {{\n\
+         \x20           const float weight = expf(max_value - max0);\n\
+         \x20           weight_total += weight;\n\
+         \x20           if (round == 0) {{ route0[token] = (float)winner_index; }} else {{ extras[round - 1][token] = (float)winner_index; }}\n\
+         \x20           extras[(top_k - 1) + round][token] = weight;\n\
+         {stacked_writes}\
+         \x20           if (round == top_k - 1) {{ extras[{extra_count} - 1][token] = weight_total; }}\n\
+         \x20       }}\n\
+         \x20       if (masked == max_value) {{ masked = negative_infinity; }}\n\
+         \x20   }}\n\
+         }}\n",
+        extras = extra_params.join(", ")
+    ));
     Ok(source)
 }
 
@@ -717,10 +842,16 @@ fn grid_threads(resolved: &BoundOp, cooperative: bool) -> Result<u64, EmitError>
         // `EmitError::CudaUnsupportedOpKind` for each before `grid_threads`
         // is ever called. Grouped with `Iota`/`Constant` only to satisfy
         // exhaustiveness with a harmless value, never a real dispatch shape.
+        BoundOpKind::MoeTopK { expert_count, .. } => checked_product(
+            resolved.node,
+            [
+                resolved.extents.iter().product::<u64>(),
+                moe_block_width(*expert_count),
+            ],
+        ),
         BoundOpKind::Iota
         | BoundOpKind::Constant { .. }
         | BoundOpKind::GatedDeltaNet { .. }
-        | BoundOpKind::MoeTopK { .. }
         | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
         | BoundOpKind::CachedSoftmaxWeights { .. }
@@ -2368,6 +2499,87 @@ mod tests {
             assert!(kernel.source.contains("u.total_elements"));
             assert_eq!(pack_cuda_uniforms(&bound).expect("leaf packs").len(), 8);
         }
+    }
+
+    fn moe_top_k_op(expert_count: u64, top_k: u64, stacked: bool) -> BoundOp {
+        let nodes = |start: u32| {
+            (0..top_k as u32)
+                .map(|index| NodeId(start + index))
+                .collect()
+        };
+        BoundOp {
+            node: NodeId(100),
+            dtype: DType::Float32,
+            extents: vec![5],
+            kind: BoundOpKind::MoeTopK {
+                operands: vec![(
+                    NodeId(1),
+                    Layout {
+                        base: 0,
+                        strides: vec![expert_count as i64, 1].into(),
+                    },
+                    None,
+                )],
+                expert_count,
+                top_k,
+                routes: nodes(100),
+                weights: nodes(200),
+                weight_total: NodeId(300),
+                stacked: stacked.then_some((NodeId(400), NodeId(401))),
+            },
+        }
+    }
+
+    #[test]
+    fn moe_topk_emits_one_block_per_token_with_warp_shuffle_reduction_and_extra_outputs() {
+        let bound = moe_top_k_op(32, 8, false);
+
+        let kernel = emit_cuda(&bound, &no_packed()).expect("a 32 expert router emits");
+
+        assert_eq!(kernel.grid.block_width, Some(32));
+        assert_eq!(kernel.grid.threads, 5 * 32);
+        assert_eq!(kernel.grid.blocks(), 5);
+        assert_eq!(
+            kernel.bindings,
+            vec![
+                Binding::Input(NodeId(1)),
+                Binding::Output(NodeId(100)),
+                Binding::Uniforms
+            ]
+        );
+        assert_eq!(kernel.extra_outputs.len(), 16);
+        assert!(kernel.extra_outputs.iter().all(|(_, length)| *length == 5));
+        assert!(kernel.source.contains("__shfl_xor_sync"));
+        assert!(
+            kernel
+                .source
+                .contains("masked == max_value && tid < expert_count")
+        );
+        assert!(kernel.source.contains("float* __restrict__ extra15"));
+        assert!(!kernel.source.contains("extra16"));
+        assert_eq!(pack_cuda_uniforms(&bound).expect("moe packs").len(), 8);
+    }
+
+    #[test]
+    fn moe_topk_pads_a_non_warp_multiple_expert_count_to_whole_warps_and_appends_stacked_outputs() {
+        let kernel = emit_cuda(&moe_top_k_op(40, 6, true), &no_packed())
+            .expect("a 40 expert stacked router emits");
+
+        assert_eq!(kernel.grid.block_width, Some(64));
+        assert_eq!(kernel.grid.threads, 5 * 64);
+        assert_eq!(kernel.extra_outputs.len(), 12 + 2);
+        assert_eq!(kernel.extra_outputs[12], (NodeId(400), 30));
+        assert!(kernel.source.contains("stacked_weights"));
+    }
+
+    #[test]
+    fn moe_topk_wider_than_one_block_is_refused_with_a_typed_error() {
+        let refused = emit_cuda(&moe_top_k_op(1056, 8, false), &no_packed());
+
+        assert!(
+            matches!(refused, Err(EmitError::WideGridUnsupported { node, .. }) if node == NodeId(100)),
+            "expected WideGridUnsupported, got {refused:?}"
+        );
     }
 
     #[test]

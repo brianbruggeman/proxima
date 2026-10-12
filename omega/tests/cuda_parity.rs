@@ -16,11 +16,16 @@
 mod support;
 use support::{as_named_blocks, qwen3_gqa_qk_norm_forward_fixture, real_forward_fixture};
 
+use moe_test_json as serde_json;
 use omega::Codec;
 use omega::backend::{BackendError, Engine, GpuDriver, execute_plan_named, plan_named};
 use proxima_tensor::NumericPolicy;
 use proxima_tensor::infer;
 use proxima_tensor::spec::qk_norm_cached_forward_program;
+use proxima_tensor::spec::{
+    Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter, append_moe_ffn,
+    input_leaf, scalar_constant,
+};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
@@ -1488,4 +1493,231 @@ fn embedding_lookup_runs_on_cuda_at_cpu_parity_for_int32_token_blocks() {
         cpu.root(),
         "int32 token ids must gather the same table rows on cuda as on cpu"
     );
+}
+
+const GRANITE_EXPERT_COUNT: u32 = 32;
+const GRANITE_TOP_K: u32 = 8;
+const GRANITE_ROUTER_LOGITS: &str = include_str!("fixtures/granite_router_logits.jsonl");
+
+struct MoeRoutingFixture {
+    program: Vec<Op>,
+    outputs: Vec<NodeId>,
+    named: Vec<(&'static str, Vec<f32>)>,
+}
+
+fn moe_routing_fixture(
+    logits: &[f32],
+    seq: u32,
+    expert_count: u32,
+    top_k: u32,
+) -> MoeRoutingFixture {
+    let embedding = 16u32;
+    let expert_hidden = 8u32;
+    let mut program = Vec::new();
+    let x = input_leaf(
+        &mut program,
+        DType::Float32,
+        vec![Extent::Static(seq), Extent::Static(embedding)],
+        "x",
+    );
+    let router_logits = input_leaf(
+        &mut program,
+        DType::Float32,
+        vec![Extent::Static(seq), Extent::Static(expert_count)],
+        "router_logits",
+    );
+    let slab = |program: &mut Vec<Op>, name: &str, rows: u32, cols: u32| {
+        input_leaf(
+            program,
+            DType::Float32,
+            vec![
+                Extent::Static(expert_count),
+                Extent::Static(rows),
+                Extent::Static(cols),
+            ],
+            name,
+        )
+    };
+    let expert_w_gate = slab(&mut program, "expert_w_gate", embedding, expert_hidden);
+    let expert_w_up = slab(&mut program, "expert_w_up", embedding, expert_hidden);
+    let expert_w_down = slab(&mut program, "expert_w_down", expert_hidden, embedding);
+    let ones = scalar_constant(&mut program, 1.0);
+    let spec = MoeFfnSpec {
+        router: MoeRouter::Logits(router_logits),
+        expert_w_gate,
+        expert_w_up,
+        expert_w_down,
+        expert_count,
+        expert_used_count: top_k,
+        ones,
+        gating: ExpertGatingFunc::Softmax,
+        expert_bias: None,
+        expert_scale: None,
+        activation: Activation::Silu,
+        strategy: MoeProjectionStrategy::PerRoute,
+    };
+    let (routed, site) = append_moe_ffn(&mut program, 0, x, &spec).expect("routed moe ffn lowers");
+    let _ = routed;
+    let mut outputs = Vec::new();
+    outputs.extend(site.selected.iter().copied());
+    outputs.extend(site.weights.iter().copied());
+    let experts = expert_count as usize;
+    let named = vec![
+        ("x", random_vec(31, seq as usize * embedding as usize)),
+        ("router_logits", logits.to_vec()),
+        (
+            "expert_w_gate",
+            random_vec(32, experts * (embedding * expert_hidden) as usize),
+        ),
+        (
+            "expert_w_up",
+            random_vec(33, experts * (embedding * expert_hidden) as usize),
+        ),
+        (
+            "expert_w_down",
+            random_vec(34, experts * (expert_hidden * embedding) as usize),
+        ),
+    ];
+    MoeRoutingFixture {
+        program,
+        outputs,
+        named,
+    }
+}
+
+fn run_moe_routing(
+    engine: Engine,
+    driver: Option<GpuDriver>,
+    fixture: &MoeRoutingFixture,
+) -> Vec<Vec<f32>> {
+    let named: Vec<(&str, QuantizedBlock<'_>)> = fixture
+        .named
+        .iter()
+        .map(|(name, values)| (*name, QuantizedBlock::Float32(values.as_slice())))
+        .collect();
+    let mut plan = plan_named(
+        engine,
+        driver,
+        &fixture.program,
+        &[],
+        &named,
+        &fixture.outputs,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the routed moe ffn");
+    let evaluated =
+        execute_plan_named(&mut plan, &named).expect("omega::backend runs the routed moe ffn");
+    fixture
+        .outputs
+        .iter()
+        .map(|node| {
+            evaluated
+                .get(*node)
+                .expect("every requested output is materialized")
+                .0
+                .to_vec()
+        })
+        .collect()
+}
+
+fn assert_moe_routing_parity(label: &str, logits: &[f32], seq: u32, expert_count: u32, top_k: u32) {
+    let fixture = moe_routing_fixture(logits, seq, expert_count, top_k);
+    let cpu = run_moe_routing(Engine::Cpu, None, &fixture);
+    let cuda = run_moe_routing(Engine::Gpu, Some(GpuDriver::Cuda), &fixture);
+    let weights = top_k as usize;
+    let routes = cpu.len() - weights;
+    assert!(
+        routes >= weights,
+        "{label}: degenerate gate: at least top_k routes and top_k weights are compared"
+    );
+    for slot in 0..routes {
+        assert_eq!(
+            cuda[slot], cpu[slot],
+            "{label}: route of round {slot} differs between cuda and cpu"
+        );
+    }
+    let mut max_weight_diff = 0.0f32;
+    for slot in routes..cpu.len() {
+        for (&got, &want) in cuda[slot].iter().zip(cpu[slot].iter()) {
+            max_weight_diff = max_weight_diff.max((got - want).abs());
+            assert!(
+                (got.is_nan() && want.is_nan()) || (got - want).abs() <= 1e-5 * want.abs().max(1.0),
+                "{label}: weight slot {slot} cuda={got} cpu={want}"
+            );
+        }
+    }
+    eprintln!("cuda moe_topk {label}: routes identical, max weight diff={max_weight_diff}");
+}
+
+#[test]
+fn granite_router_logits_route_on_cuda_exactly_as_on_cpu_at_layers_0_10_23() {
+    let mut layers_checked = 0;
+    for line in GRANITE_ROUTER_LOGITS
+        .lines()
+        .filter(|line| !line.is_empty())
+    {
+        let record: serde_json::Value = serde_json::from_str(line).expect("fixture line is json");
+        let values: Vec<f32> = record["values"]
+            .as_array()
+            .expect("fixture carries a values array")
+            .iter()
+            .map(|value| value.as_f64().expect("router logit is a number") as f32)
+            .collect();
+        assert_eq!(values.len(), 5 * GRANITE_EXPERT_COUNT as usize);
+        let label = format!("granite node {}", record["node"]);
+        assert_moe_routing_parity(&label, &values, 5, GRANITE_EXPERT_COUNT, GRANITE_TOP_K);
+        layers_checked += 1;
+    }
+    assert_eq!(layers_checked, 3, "fixture holds layers 0, 10 and 23");
+}
+
+#[test]
+fn moe_topk_ties_resolve_to_the_higher_expert_and_exclude_every_tied_expert_on_cuda() {
+    let experts = GRANITE_EXPERT_COUNT as usize;
+    let mut logits = vec![0.0f32; 3 * experts];
+    for (index, value) in logits.iter_mut().enumerate().take(experts) {
+        *value = index as f32 * 0.01;
+    }
+    logits[5] = 9.0;
+    logits[20] = 9.0;
+    let second = experts;
+    for (offset, value) in logits[second..second + experts].iter_mut().enumerate() {
+        *value = -(offset as f32) * 0.1;
+    }
+    logits[second + 3] = 4.0;
+    logits[second + 11] = 2.5;
+    logits[second + 12] = 2.5;
+    logits[second + 30] = 2.5;
+    assert_moe_routing_parity("ties", &logits, 3, GRANITE_EXPERT_COUNT, GRANITE_TOP_K);
+}
+
+#[test]
+fn moe_topk_over_all_negative_infinity_scores_never_selects_a_padding_lane_on_cuda() {
+    let experts = GRANITE_EXPERT_COUNT as usize;
+    let mut logits = vec![f32::NEG_INFINITY; 2 * experts];
+    for (offset, value) in logits[experts..].iter_mut().enumerate() {
+        *value = offset as f32;
+    }
+    let fixture = moe_routing_fixture(&logits, 2, GRANITE_EXPERT_COUNT, GRANITE_TOP_K);
+    let cpu = run_moe_routing(Engine::Cpu, None, &fixture);
+    let cuda = run_moe_routing(Engine::Gpu, Some(GpuDriver::Cuda), &fixture);
+    for slot in 0..GRANITE_TOP_K as usize {
+        assert_eq!(
+            cuda[slot], cpu[slot],
+            "all -inf row: route of round {} differs",
+            slot
+        );
+        assert!(
+            cuda[slot][0] < GRANITE_EXPERT_COUNT as f32,
+            "all -inf row selected padding lane {}",
+            cuda[slot][0]
+        );
+    }
+}
+
+#[test]
+fn moe_topk_with_a_non_warp_multiple_expert_count_matches_cpu_on_cuda() {
+    let experts = 40usize;
+    let logits = random_vec(77, 4 * experts);
+    assert_moe_routing_parity("40 experts", &logits, 4, 40, 6);
 }

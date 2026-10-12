@@ -755,6 +755,16 @@ impl CudaDriver {
         }
         let function = self.function_for(kernel)?;
         self.upload_uniform(arena, output_node, uniforms)?;
+        let mut extra_buffers = Vec::with_capacity(kernel.extra_outputs.len());
+        for (node, length) in &kernel.extra_outputs {
+            match self.take_extra_output(arena, *node, *length) {
+                Ok(buffer) => extra_buffers.push((*node, buffer)),
+                Err(error) => {
+                    Self::restore_extra_outputs(arena, extra_buffers);
+                    return Err(error);
+                }
+            }
+        }
         let device_uniforms = arena
             .uniforms
             .get(&output_node)
@@ -825,7 +835,11 @@ impl CudaDriver {
                 _ => return Err(CudaDriverError::BindingContract),
             };
         }
+        for (_, buffer) in &mut extra_buffers {
+            args.arg(buffer);
+        }
         let launch_result = unsafe { args.launch(config) };
+        Self::restore_extra_outputs(arena, extra_buffers);
         if let Err(error) = launch_result {
             arena
                 .buffers
@@ -860,6 +874,28 @@ impl CudaDriver {
         Ok(())
     }
 
+    fn take_extra_output(
+        &self,
+        arena: &mut CudaF32Arena,
+        node: NodeId,
+        length: usize,
+    ) -> Result<CudaSlice<f32>, CudaDriverError> {
+        match arena.buffers.remove(&node) {
+            Some(CudaGraphBuffer::F32(buffer)) if buffer.len() == length => Ok(buffer),
+            Some(CudaGraphBuffer::Bytes(_)) => Err(CudaDriverError::BindingContract),
+            Some(CudaGraphBuffer::F32(_)) | None => {
+                arena.allocations += 1;
+                Ok(self.stream.alloc_zeros::<f32>(length)?)
+            }
+        }
+    }
+
+    fn restore_extra_outputs(arena: &mut CudaF32Arena, buffers: Vec<(NodeId, CudaSlice<f32>)>) {
+        for (node, buffer) in buffers {
+            arena.buffers.insert(node, CudaGraphBuffer::F32(buffer));
+        }
+    }
+
     /// Copies one persistent node back to the host for an explicit oracle or
     /// final-result readback.
     pub fn read_f32(
@@ -885,6 +921,7 @@ fn cuda_supports_kind(kind: &BoundOpKind) -> bool {
             | BoundOpKind::Reduce { .. }
             | BoundOpKind::Iota
             | BoundOpKind::Constant { .. }
+            | BoundOpKind::MoeTopK { .. }
     )
 }
 
@@ -892,11 +929,11 @@ fn cuda_supports_kind(kind: &BoundOpKind) -> bool {
 /// node count, so a model's full gap list is one error rather than one node at a time.
 fn reject_unsupported_kinds(resolved: &[BoundOp]) -> Result<(), CudaDriverError> {
     let mut census: BTreeMap<&'static str, (usize, NodeId)> = BTreeMap::new();
-    for bound in resolved.iter().filter(|bound| !cuda_supports_kind(&bound.kind)) {
-        census
-            .entry(bound.kind.name())
-            .or_insert((0, bound.node))
-            .0 += 1;
+    for bound in resolved
+        .iter()
+        .filter(|bound| !cuda_supports_kind(&bound.kind))
+    {
+        census.entry(bound.kind.name()).or_insert((0, bound.node)).0 += 1;
     }
     let Some((_, (_, first))) = census.iter().next() else {
         return Ok(());
@@ -911,7 +948,10 @@ fn reject_unsupported_kinds(resolved: &[BoundOp]) -> Result<(), CudaDriverError>
 }
 
 fn validate_cuda_dtype(bound: &BoundOp) -> Result<(), CudaDriverError> {
-    if bound.dtype != DType::Float32 {
+    // the route reduce is typed Int32 in the program but every device buffer, like the cpu interpreter's, holds f32
+    let routes_as_f32 =
+        bound.dtype == DType::Int32 && matches!(bound.kind, BoundOpKind::MoeTopK { .. });
+    if bound.dtype != DType::Float32 && !routes_as_f32 {
         return Err(CudaDriverError::UnsupportedDtype {
             node: bound.node,
             dtype: bound.dtype,
@@ -1582,6 +1622,7 @@ fn add_one_kernel(input: NodeId, output: NodeId, elements: usize) -> CudaKernel 
             threads: elements as u64,
             block_width: None,
         },
+        extra_outputs: Vec::new(),
     }
 }
 
