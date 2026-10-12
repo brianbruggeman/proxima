@@ -1,7 +1,22 @@
 [[alias]]
 kind = "rename"
+leaf = "token_embd.weight"
+from = "model.embed_tokens.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "output_norm.weight"
+from = "model.embedding_norm.weight"
+
+[[alias]]
+kind = "rename"
 leaf = "output_norm.weight"
 from = "token_embd_norm.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "output.weight"
+from = "model.embed_tokens.weight"
 
 [[alias]]
 kind = "part"

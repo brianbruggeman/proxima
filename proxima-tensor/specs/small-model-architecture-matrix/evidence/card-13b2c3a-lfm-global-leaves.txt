@@ -1,0 +1,24 @@
+Card 13b2c3a execution record
+Date: 2026-10-10
+Host: macOS 15.8, arm64
+Compiler: rustc 1.99.0 (b940084d7 2026-09-28)
+
+Acceptance command:
+nice -n 20 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo test -p proxima-model-interop --features std --lib architecture_matrix_lfm_global_leaves -- --nocapture
+
+Initial output:
+Compiling proxima-model-interop v0.1.0 (/private/tmp/proxima-model-matrix/proxima-model-interop)
+
+The command did not reach a test result. At elapsed 2:13, `ps` reported the cargo parent and rustc child in interruptible sleep, both NI 20 and 0.0% CPU. Ctrl-C ended cargo with exit 130. The rustc sample command entered "Sampling completed, processing symbols..." and did not finish within 21 seconds; it was interrupted. No test assertion result is recorded from this attempt.
+
+Docker fallback preflight:
+python3 subprocess.run(['docker', 'info', '--format', '{{.NCPU}} {{.MemTotal}}'], timeout=8)
+Observed: timeout_seconds=8, stdout=None, stderr=None. No container test was started.
+
+Static checks:
+Python parsed the LFM profile TOML and pinned safetensors header, found the three expected aliases, checked pinned source shapes `[65536,2048]` and `[2048]`, and independently computed the compact fixture's four hand-worked logits `[2,1,2,3]`. Output: `profile_aliases=3 pinned_sources=2 table_shape=[4,2] norm_shape=[2] hand_logits=4 logits=[2,1,2,3]`.
+
+`git diff --check`: exit 0, no diagnostics.
+`rustfmt --check --edition 2024 proxima-model-interop/src/hf_bind/matrix_lfm_bind.rs`: exit 0, no diagnostics.
+
+Status: Rust acceptance remains unexecuted; this evidence is not a pass. A bounded delegated retry is in progress.
