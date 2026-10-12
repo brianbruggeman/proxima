@@ -28,9 +28,20 @@ pub(super) fn run_elementwise_dispatch<B: Deref<Target = [f32]> + Sync>(
     session: Option<&MatmulSession<'_>>,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
-    if let Some(coalesced) = coalesce_dims(resolved) {
-        return run_elementwise_dispatch(&coalesced, buffers, session, output);
+    match coalesce_dims(resolved) {
+        Some(coalesced) => run_elementwise_dispatch_planned(&coalesced, buffers, session, output),
+        None => run_elementwise_dispatch_planned(resolved, buffers, session, output),
     }
+}
+
+/// [`run_elementwise_dispatch`] on the axes exactly as bound, with no
+/// dimension coalescing: the uncoalesced arm for a paired test or bench.
+pub(super) fn run_elementwise_dispatch_planned<B: Deref<Target = [f32]> + Sync>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    session: Option<&MatmulSession<'_>>,
+    output: &mut [f32],
+) -> Result<(), TensorError> {
     let Some(session) = session else {
         return run_elementwise(resolved, buffers, output);
     };

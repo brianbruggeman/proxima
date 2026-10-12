@@ -1140,11 +1140,20 @@ pub(super) fn run_reduce<B: Deref<Target = [f32]>>(
     output: &mut [f32],
     packed_width: Option<&PackedWidthPanels>,
 ) -> Result<(), TensorError> {
-    if packed_width.is_none()
-        && let Some(coalesced) = coalesce_dims(resolved)
-    {
-        return run_reduce(&coalesced, buffers, output, None);
+    match coalesce_dims(resolved).filter(|_| packed_width.is_none()) {
+        Some(coalesced) => run_reduce_planned(&coalesced, buffers, output, None),
+        None => run_reduce_planned(resolved, buffers, output, packed_width),
     }
+}
+
+/// [`run_reduce`] on the axes exactly as bound, with no dimension
+/// coalescing: the uncoalesced arm for a paired test or bench.
+pub(super) fn run_reduce_planned<B: Deref<Target = [f32]>>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    output: &mut [f32],
+    packed_width: Option<&PackedWidthPanels>,
+) -> Result<(), TensorError> {
     if std::env::var_os("PROXIMA_DEBUG_DENSE_DIGEST").is_some() && resolved.node.0 == 1265 {
         let output_axes = match &resolved.kind {
             BoundOpKind::Reduce { output_axes, .. } => output_axes.as_slice(),

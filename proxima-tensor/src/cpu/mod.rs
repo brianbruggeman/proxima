@@ -228,7 +228,6 @@ mod width_kernels;
 mod typed_eval;
 pub use arena::*;
 use coalesce::*;
-pub use coalesce::set_dim_coalescing_enabled;
 use elementwise_matmul::*;
 pub use epilogue::*;
 pub use gemm_dot_quant::*;

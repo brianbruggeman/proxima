@@ -5479,6 +5479,62 @@ fn a_three_leading_axis_reduce_coalesces_into_one_row_axis_and_engages_width_til
     );
 }
 
+/// The plan-level contract the coalescing test above leans on: handed the
+/// three leading axes exactly as bound (`run_reduce_planned`, no coalescing),
+/// `width_tile_plan` finds no unique row axis -- `rhs` has stride 0 on all
+/// three -- and declines with `AxesShape` without passing its gate. If this
+/// starts engaging, the plan widened past "exactly one row axis" and the
+/// coalescing test's measured evidence needs re-deriving.
+#[test]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+fn an_uncoalesced_three_leading_axis_reduce_declines_width_tile_with_axes_shape_reason() {
+    let (outer, batch, seq, contraction, width) = (2u32, 3u32, 4u32, 5u32, 16u32);
+    let (program, sum) = three_leading_axes_matmul_program(outer, batch, seq, contraction, width);
+    let rows = (outer * batch * seq) as usize;
+    let lhs: Vec<f32> = (0..rows * contraction as usize)
+        .map(|value| value as f32 * 0.01 + 1.0)
+        .collect();
+    let rhs: Vec<f32> = (0..(contraction * width) as usize)
+        .map(|value| value as f32 * 0.001)
+        .collect();
+    let shapes = shape::infer(&program, &[]).expect("three-leading-axis program infers");
+    let resolved = bind::bind(&program, &shapes, &[sum], NumericPolicy::bit_exact())
+        .expect("three-leading-axis program binds");
+    let reduce = resolved
+        .iter()
+        .find(|op| op.node == sum)
+        .expect("the reduce node is present in the bound program");
+    let buffers: Vec<Option<Vec<f32>>> = vec![Some(lhs.clone()), Some(rhs.clone()), None, None];
+    let mut output = vec![0.0f32; rows * width as usize];
+
+    instrument::reset_width_tile_decline();
+    let (gate_passes_before, _, _) = width_tile_counters();
+    run_reduce_planned(reduce, &buffers, &mut output, None)
+        .expect("the uncoalesced three-leading-axis reduce runs on the generic path");
+    let (gate_passes_after, _, _) = width_tile_counters();
+
+    let reference = naive_matmul(&lhs, &rhs, rows, contraction as usize, width as usize);
+    assert_all_close(&output, &reference, 1e-5);
+    assert_eq!(
+        gate_passes_after - gate_passes_before,
+        0,
+        "an all-invariant-rhs 3-leading-axis GEMM passed width_tile_plan's gate uncoalesced -- \
+         a shape with no unique row axis started engaging; re-derive this test's expected \
+         engagement rather than deleting the assertion"
+    );
+    let declines = instrument::width_tile_decline_snapshot();
+    let matched = declines
+        .iter()
+        .find(|&&(node, ..)| node == sum.0)
+        .expect("the uncoalesced node should have recorded a width_tile_plan decline");
+    assert_eq!(
+        matched.1,
+        instrument::WidthDeclineReason::AxesShape,
+        "expected AxesShape (no unique row axis among 3 non-degenerate leading axes), got {:?}",
+        matched.1
+    );
+}
+
 /// Positive ratchet: BGE's own `attn_qk`/`attn_v` shape (`[batch, heads,
 /// seq_q]`, `b` invariant on `seq_q` alone, varying on `batch` AND
 /// `heads`) must route through `width_tile_plan`, not just compute the
