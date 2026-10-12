@@ -26,6 +26,7 @@ use proxima_model_interop::{
 };
 use proxima_primitives::pipe::sans_io::Outcome;
 use proxima_safetensors::{Manifest, SafetensorsParser, TensorPayload};
+use proxima_tensor::process_usage;
 use proxima_tokenizer::hf::{bos_eos_policy_from_tokenizer_config, vocab_from_tokenizer_json};
 use proxima_tokenizer::{Vocab, encode_with_bos_eos};
 use serde_json::Value;
