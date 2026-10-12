@@ -2978,8 +2978,9 @@ pub(crate) enum LogitsSink<'sink> {
     Last(&'sink mut Vec<f32>),
     /// `real_openchat_file::decode_text_is_deterministic_across_repeated_runs`'s
     /// own sink: that test is `#[cfg(feature = "metal")]`, so this variant
-    /// carries the same gate (plus `test`) rather than sitting dead in a
-    /// `std`-only test build.
-    #[cfg(all(test, feature = "metal"))]
+    /// carries the same gate (plus `test`, `std` and `unix`, the gate of its
+    /// `real_openchat_file` module) rather than sitting dead in a test build
+    /// where that module is absent.
+    #[cfg(all(test, feature = "metal", feature = "std", unix))]
     SumBarriers(&'sink mut u64),
 }
