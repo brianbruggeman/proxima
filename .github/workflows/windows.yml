@@ -53,6 +53,8 @@ jobs:
         run: cargo nextest run -p proxima-cli --bin proximad -E 'test(windows_cli_)' --no-tests=fail --test-threads 1 --retries 0
       - name: Windows child processes
         run: cargo nextest run -p proxima-process --test windows_process --no-tests=fail --test-threads 1 --retries 0
+      - name: Windows command environment and cwd
+        run: cargo nextest run -p proxima-process --test windows_command --no-tests=fail --test-threads 1 --retries 0
       - name: exercise doctests and example
         run: cargo test -p proxima --doc
       - name: run independent Windows network example
