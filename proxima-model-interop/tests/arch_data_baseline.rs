@@ -4,7 +4,10 @@
 //! (`bind_checkpoint_with_kv_layout(SlidingRing)`
 //! and the verify program where one exists). Expected values live in
 //! `tests/fixtures/llama-parity/<name>.digest` and `<name>.bound`; a refactor slice that changes
-//! the program or the bound bytes fails here. This is a CONSISTENCY check against the incumbent,
+//! the program or the bound bytes fails here. A routed-expert checkpoint's digest depends on
+//! `MoeProjectionStrategy::production()`, so its expected file is `<name>.digest` for one
+//! operation per selected expert and `<name>.stacked.digest` when `moe-stacked-experts` (part of
+//! `metal`) is on. This is a CONSISTENCY check against the incumbent,
 //! never a correctness oracle -- the llama.cpp artifacts next to it are the oracle.
 //!
 //! A missing checkpoint fails with its path and env override; it never skips.
@@ -54,55 +57,68 @@ struct Checkpoint {
     env: &'static str,
     path: &'static str,
     architecture: &'static str,
+    /// Lowers routed experts, so its program depends on `MoeProjectionStrategy::production()`
+    /// (stacked projections when `moe-stacked-experts` is on, one per selected expert otherwise).
+    routed: bool,
 }
+
+const STACKED_EXPERTS: bool = cfg!(feature = "moe-stacked-experts");
 
 const GEMMA4_26B: Checkpoint = Checkpoint {
     name: "gemma4_26b",
     env: "PROXIMA_ARCH_GEMMA4_26B_GGUF",
     path: "/Users/brianbruggeman/.ollama/models/blobs/sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129",
     architecture: "gemma4",
+    routed: true,
 };
 const GEMMA4_E2B: Checkpoint = Checkpoint {
     name: "gemma4_e2b",
     env: "PROXIMA_ARCH_GEMMA4_E2B_GGUF",
     path: "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd",
     architecture: "gemma4",
+    routed: false,
 };
 const OPENCHAT: Checkpoint = Checkpoint {
     name: "openchat",
     env: "PROXIMA_ARCH_OPENCHAT_GGUF",
     path: "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf",
     architecture: "llama",
+    routed: false,
 };
 const QWEN2: Checkpoint = Checkpoint {
     name: "qwen2",
     env: "PROXIMA_ARCH_QWEN2_GGUF",
     path: "/Users/brianbruggeman/.ollama/models/blobs/sha256-c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515",
     architecture: "qwen2",
+    routed: false,
 };
 const QWEN3: Checkpoint = Checkpoint {
     name: "qwen3",
     env: "PROXIMA_ARCH_QWEN3_GGUF",
     path: "/Users/brianbruggeman/.ollama/models/blobs/sha256-a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa40d0b8e686f",
     architecture: "qwen3",
+    routed: false,
 };
 const QWEN35: Checkpoint = Checkpoint {
     name: "qwen35",
     env: "PROXIMA_ARCH_QWEN35_GGUF",
     path: "/Users/brianbruggeman/.ollama/models/blobs/sha256-afb707b6b8fac6e475acc42bc8380fc0b8d2e0e4190be5a969fbf62fcc897db5",
     architecture: "qwen35",
+    routed: false,
 };
 const QWEN35MOE: Checkpoint = Checkpoint {
     name: "qwen35moe",
     env: "PROXIMA_ARCH_QWEN35MOE_GGUF",
     path: "/Users/brianbruggeman/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d",
     architecture: "qwen35moe",
+    routed: true,
 };
 const GRANITE_MOE: Checkpoint = Checkpoint {
     name: "granite_moe",
     env: "PROXIMA_ARCH_GRANITE_MOE_GGUF",
     path: "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80",
     architecture: "granitemoe",
+    routed: true,
 };
 
 const LFM2: Checkpoint = Checkpoint {
@@ -110,6 +126,7 @@ const LFM2: Checkpoint = Checkpoint {
     env: "PROXIMA_ARCH_LFM2_GGUF",
     path: "/Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf",
     architecture: "lfm2moe",
+    routed: false,
 };
 
 const ALL: [&Checkpoint; 8] = [
@@ -129,9 +146,14 @@ impl Checkpoint {
     }
 
     fn fixture(&self, extension: &str) -> PathBuf {
+        let strategy = if extension == "digest" && self.routed && STACKED_EXPERTS {
+            ".stacked"
+        } else {
+            ""
+        };
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/llama-parity")
-            .join(format!("{}.{extension}", self.name))
+            .join(format!("{}{strategy}.{extension}", self.name))
     }
 
     fn open(&self) -> memmap2::Mmap {
@@ -454,10 +476,12 @@ fn assert_bound(checkpoint: &Checkpoint) {
 #[test]
 fn arch_data_digest_gemma4_26b() {
     let record = digest_record(&GEMMA4_26B);
+    let ops = if STACKED_EXPERTS { 10434 } else { 13314 };
     assert!(
-        record.contains("\nbind.ops=10434\n")
-            && record.contains("\nbind.logits_root=NodeId(10433)\n"),
-        "gemma4 26B must lower to 10434 ops ending at NodeId(10433), got:\n{record}"
+        record.contains(&format!("\nbind.ops={ops}\n"))
+            && record.contains(&format!("\nbind.logits_root=NodeId({})\n", ops - 1)),
+        "gemma4 26B must lower to {ops} ops ending at NodeId({}), got:\n{record}",
+        ops - 1
     );
     assert_matches_fixture(&GEMMA4_26B, "digest", &record);
 }
