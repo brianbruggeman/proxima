@@ -722,6 +722,11 @@ required-features = ["std"]
 name = "convert_codec"
 required-features = ["std"]
 
+# fp6 vs shipped positional agreement with recorded llama ids; Metal on a `metal` build, CPU otherwise.
+[[example]]
+name = "codec_token_agreement"
+required-features = ["std"]
+
 [[example]]
 name = "qat_census"
 required-features = ["std", "metal", "qat"]
