@@ -3,7 +3,7 @@ use super::*;
 use proxima_primitives::pipe::sans_io::Outcome;
 use proxima_safetensors::SafetensorsParser;
 use proxima_tensor::map::{self, IndexMap};
-use proxima_tensor::op::{Keep, Reduce, ReduceInit, ScalarOp, append};
+use proxima_tensor::op::{Extent, Keep, Reduce, ReduceInit, ScalarOp, append};
 use proxima_tensor::spec::LayerKind;
 
 use crate::hf_config::{architecture_from_hf_config, lfm_layer_kinds_from_manifest};
@@ -90,6 +90,221 @@ fn expected_leaves() -> Vec<(String, String, &'static [u64])> {
         }
     }
     leaves
+}
+
+#[test]
+fn architecture_matrix_lfm_global_leaves() {
+    let (_, pinned_manifest) = pinned_config_and_manifest();
+    let pinned_sources = [
+        ("model.embed_tokens.weight", &[65536, 2048][..]),
+        ("model.embedding_norm.weight", &[2048][..]),
+    ];
+    for (name, shape) in pinned_sources {
+        let entry = pinned_manifest
+            .tensor(name)
+            .expect("pinned LFM header contains each graph-global source");
+        assert_eq!(entry.dtype, DType::BFloat16);
+        assert_eq!(entry.shape, shape);
+    }
+
+    let table_values = [1.0f32, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0];
+    let table_bytes = table_values
+        .into_iter()
+        .flat_map(|value| ((value.to_bits() >> 16) as u16).to_le_bytes())
+        .collect::<Vec<_>>();
+    let norm_bytes = [1.0f32, 1.0]
+        .into_iter()
+        .flat_map(|value| ((value.to_bits() >> 16) as u16).to_le_bytes())
+        .collect::<Vec<_>>();
+    let mut file_bytes = table_bytes;
+    file_bytes.extend_from_slice(&norm_bytes);
+    let manifest = Manifest {
+        tensors: vec![
+            proxima_safetensors::TensorEntry {
+                name: "model.embed_tokens.weight".into(),
+                dtype: DType::BFloat16,
+                shape: vec![4, 2],
+                data_offsets: (0, 16),
+            },
+            proxima_safetensors::TensorEntry {
+                name: "model.embedding_norm.weight".into(),
+                dtype: DType::BFloat16,
+                shape: vec![2],
+                data_offsets: (16, 20),
+            },
+        ],
+        ..Manifest::default()
+    };
+
+    let mut program = Vec::new();
+    let token_ids = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Int32,
+            shape: vec![Extent::Static(1)],
+            name: Some("ids".into()),
+        },
+    );
+    let embedding = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(4), Extent::Static(2)],
+            name: Some("token_embd.weight".into()),
+        },
+    );
+    let hidden = proxima_tensor::spec::embedding_lookup(&mut program, embedding, token_ids);
+    let output_norm = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(2)],
+            name: Some("output_norm.weight".into()),
+        },
+    );
+    let inverse_width = append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: Vec::new(),
+            value: 0.5,
+        },
+    );
+    let epsilon = append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: Vec::new(),
+            value: 0.0,
+        },
+    );
+    let normed =
+        proxima_tensor::spec::rmsnorm(&mut program, hidden, output_norm, inverse_width, epsilon)
+            .expect("global output norm composes from existing operations");
+    let output_weight = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(2), Extent::Static(4)],
+            name: Some("output.weight".into()),
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (normed, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                (output_weight, IndexMap::Affine(map::projection(3, &[2, 1]))),
+            ],
+            name: None,
+        },
+    );
+    let logits = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+    let binding = binding_profile("lfm2").expect("LFM binding profile parses");
+    let embedding_source = super::safetensors_source(
+        &manifest,
+        &binding,
+        "token_embd.weight",
+        &[Extent::Static(4), Extent::Static(2)],
+    )
+    .expect("embedding leaf resolves to the pinned source name");
+    let output_source = super::safetensors_source(
+        &manifest,
+        &binding,
+        "output.weight",
+        &[Extent::Static(2), Extent::Static(4)],
+    )
+    .expect("tied head resolves to the same pinned source name");
+    assert_eq!(embedding_source.name, "model.embed_tokens.weight");
+    assert_eq!(output_source.name, "model.embed_tokens.weight");
+    assert!(core::ptr::eq(embedding_source, output_source));
+    let weights = bind_safetensors_program_leaves(
+        &manifest,
+        &file_bytes,
+        0,
+        &program,
+        &binding,
+        &["ids".into()],
+    )
+    .expect("global graph leaves resolve through generic profile binding");
+
+    assert_eq!(weights.owned().len(), 2);
+    assert!(weights.owned().iter().any(|(name, values)| {
+        name == "token_embd.weight" && values == &[1.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0]
+    }));
+    assert!(
+        weights
+            .owned()
+            .iter()
+            .any(|(name, values)| { name == "output_norm.weight" && values == &[1.0, 1.0] })
+    );
+    assert_eq!(weights.packed().len(), 1);
+    let (output_source, output_block) = &weights.packed()[0];
+    assert_eq!(output_source, "output.weight");
+    let QuantizedBlock::Packed { bytes, codec } = output_block else {
+        panic!("tied BF16 output matrix remains packed");
+    };
+    assert_eq!(*codec, Codec::BFloat16);
+    assert_eq!(*bytes, &file_bytes[..16]);
+    assert!(core::ptr::eq(bytes.as_ptr(), file_bytes.as_ptr()));
+
+    let token_values = [0i32];
+    let mut named = vec![("ids", QuantizedBlock::Int32(&token_values))];
+    named.extend(
+        weights
+            .owned()
+            .iter()
+            .map(|(name, values)| (name.as_str(), QuantizedBlock::Float32(values))),
+    );
+    named.extend(
+        weights
+            .packed()
+            .iter()
+            .map(|(name, block)| (name.as_str(), *block)),
+    );
+    let evaluated = proxima_tensor::cpu::evaluate_quantized_named(&program, &[], &named, &[logits])
+        .expect("generic evaluator consumes bound embedding, norm, and tied head");
+    let (values, axes) = evaluated.get(logits).expect("logits root is retained");
+    assert_eq!(axes, [1, 4]);
+    assert_eq!(values, [2.0, 1.0, 2.0, 3.0]);
+
+    let missing_norm = Manifest {
+        tensors: manifest
+            .tensors
+            .iter()
+            .filter(|entry| entry.name != "model.embedding_norm.weight")
+            .cloned()
+            .collect(),
+        ..Manifest::default()
+    };
+    assert!(matches!(
+        bind_safetensors_program_leaves(
+            &missing_norm,
+            &file_bytes,
+            0,
+            &program,
+            &binding,
+            &["ids".into()],
+        ),
+        Err(InteropError::UnknownTensor { .. })
+    ));
+    println!(
+        "pinned_sources=2 bound_leaves=3 tied_source_uses=2 evaluated_logits=4 missing_source_rejected=1"
+    );
 }
 
 fn append_matrix_leaf(
