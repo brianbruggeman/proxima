@@ -2259,6 +2259,38 @@ pub(super) fn push_cooperative_reduce_body(
         }
     }
 
+    if is_broadcast_epilogue
+        && !expert_source_mode
+        && admit(numeric_policy, NumericRewrite::TreeReduce).is_err()
+    {
+        push_broadcast_epilogue_preload(
+            source,
+            rank,
+            reduce_dims,
+            width,
+            epilogue_body,
+            epilogue_operands,
+            element_type,
+        );
+        source.push_str(&format!("    threadgroup {element_type} ordered_fold;\n"));
+        source.push_str("    if (lane == 0u) {\n");
+        push_ordered_reduce_fold(source, resolved, quantized, "        ", false)?;
+        source.push_str("        ordered_fold = accumulator;\n");
+        source.push_str("    }\n");
+        source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+        push_broadcast_epilogue_write(
+            source,
+            rank,
+            reduce_dims,
+            width,
+            epilogue_body,
+            epilogue_operands,
+            element_type,
+            "ordered_fold",
+        );
+        return Ok(());
+    }
+
     let (init_expr, seeded_init) = fold_init_tokens(init);
     let identity = cooperative_identity_token(resolved.node, reduce_op)?;
     source.push_str(&format!("    {element_type} accumulator;\n"));

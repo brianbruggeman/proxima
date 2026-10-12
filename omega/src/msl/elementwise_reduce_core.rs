@@ -377,7 +377,6 @@ pub(super) fn render_reduce(
         }
     }
     let gather_count = gather_count(resolved);
-    let gather_slots = gather_slots(resolved);
     let element_type = type_token(resolved.node, resolved.dtype)?;
     let epilogue_operand_count = epilogue_operands.len();
     // The tiled `simdgroup_matrix` GEMM path (`push_tiled_gemm_body`) now
@@ -498,24 +497,17 @@ pub(super) fn render_reduce(
         push_serial_reduce_body(
             &mut source,
             resolved,
-            *reduce_op,
-            *init,
             output_axes,
-            &reduce_dims,
             rank,
             rank_len,
             output_rank,
             output_rank_len,
-            reduce_rank,
-            reduce_rank_len,
-            operand_count,
-            &gather_slots,
             quantized,
             element_type,
             epilogue_body,
             epilogue_operands,
             metal,
-        );
+        )?;
     }
     source.push_str("}\n");
     if !expert_source_mode {
@@ -697,24 +689,17 @@ fn serial_decode_step(
 pub(super) fn push_serial_reduce_body(
     source: &mut String,
     resolved: &BoundOp,
-    reduce_op: ScalarOp,
-    init: ReduceInit,
     output_axes: &[u16],
-    reduce_dims: &[u16],
     rank: usize,
     rank_len: usize,
     output_rank: usize,
     output_rank_len: usize,
-    reduce_rank: usize,
-    reduce_rank_len: usize,
-    operand_count: usize,
-    gather_slots: &[Option<usize>],
     quantized: &[Option<Codec>],
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
     metal: &MetalOnlyExtras,
-) {
+) -> Result<(), EmitError> {
     let narrow = metal.coord_index32;
     source.push_str("    if ((long)gid >= u.output_total) { return; }\n");
 
@@ -740,74 +725,7 @@ pub(super) fn push_serial_reduce_body(
         }
     }
 
-    let (init_expr, seeded_init) = fold_init_tokens(init);
-    source.push_str(&format!("    {element_type} accumulator = {init_expr};\n"));
-    source.push_str(&format!("    bool seeded = {seeded_init};\n"));
-
-    source.push_str("    for (long r = 0; r < u.reduction_total; r++) {\n");
-    if reduce_rank > 0 {
-        source.push_str(&format!(
-            "        long reduction_coord[{reduce_rank_len}];\n"
-        ));
-        if reduce_rank > 1 {
-            source.push_str("        long remaining_r = r;\n");
-        }
-        for index in (1..reduce_rank).rev() {
-            source.push_str(&serial_decode_step(
-                "        ",
-                "remaining_r",
-                &format!("reduction_coord[{index}]"),
-                &format!("u.reduction_extents[{index}]"),
-                narrow,
-            ));
-        }
-        let outermost = if reduce_rank > 1 { "remaining_r" } else { "r" };
-        source.push_str(&format!("        reduction_coord[0] = {outermost};\n"));
-        for (index, dim) in reduce_dims.iter().enumerate() {
-            source.push_str(&format!(
-                "        full_coord[{dim}] = reduction_coord[{index}];\n"
-            ));
-        }
-    }
-
-    for (index, gather_slot) in gather_slots.iter().enumerate() {
-        source.push_str(&format!(
-            "        long off{index} = u.operand_base[{index}];\n"
-        ));
-        for dim in 0..rank {
-            source.push_str(&format!(
-                "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
-            ));
-        }
-        if let Some(slot) = gather_slot {
-            push_gather_fetch(
-                source,
-                index,
-                *slot,
-                rank,
-                "full_coord",
-                &format!("off{index}"),
-            );
-        }
-    }
-    source.push_str(&format!(
-        "        {element_type} scratch[{}];\n",
-        operand_count.max(1)
-    ));
-    for (index, &codec) in quantized.iter().enumerate() {
-        source.push_str(&format!(
-            "        scratch[{index}] = {};\n",
-            operand_read(index, &format!("off{index}"), codec)
-        ));
-    }
-    let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
-    source.push_str(&format!("        {element_type} value = {value_expr};\n"));
-    let combine_expr = scalar_op_expr(reduce_op, &["accumulator", "value"]);
-    source.push_str(&format!(
-        "        accumulator = seeded ? {combine_expr} : value;\n"
-    ));
-    source.push_str("        seeded = true;\n");
-    source.push_str("    }\n");
+    push_ordered_reduce_fold(source, resolved, quantized, "    ", narrow)?;
 
     source.push_str("    long out_offset = u.out_base;\n");
     for dim in 0..rank {
@@ -832,6 +750,119 @@ pub(super) fn push_serial_reduce_body(
         "accumulator",
         "out_offset",
     );
+    Ok(())
+}
+
+/// The reduction walked in index order by one thread: `accumulator` starts at
+/// the op's real `ReduceInit` and each element folds in after the previous
+/// one, the order [`proxima_tensor::cpu::evaluate`] folds in. The serial
+/// renderer runs it per output; a broadcast-epilogue cooperative kernel runs
+/// it on lane 0 when the numeric policy withholds
+/// [`NumericRewrite::TreeReduce`]. `full_coord` must already hold the output
+/// coordinates; this writes the reduction coordinates into it.
+pub(super) fn push_ordered_reduce_fold(
+    source: &mut String,
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    indent: &str,
+    narrow: bool,
+) -> Result<(), EmitError> {
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        output_axes,
+        ..
+    } = &resolved.kind
+    else {
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "reduce fold",
+            found: resolved.kind.name(),
+        });
+    };
+    let rank = resolved.extents.len();
+    let reduce_dims = reduction_dims(resolved, output_axes);
+    let reduce_rank = reduce_dims.len();
+    let reduce_rank_len = reduce_rank.max(1);
+    let operand_count = resolved.operands().len();
+    let gather_slots = gather_slots(resolved);
+    let element_type = type_token(resolved.node, resolved.dtype)?;
+    let body_indent = format!("{indent}    ");
+    let (init_expr, seeded_init) = fold_init_tokens(*init);
+    source.push_str(&format!(
+        "{indent}{element_type} accumulator = {init_expr};\n"
+    ));
+    source.push_str(&format!("{indent}bool seeded = {seeded_init};\n"));
+
+    source.push_str(&format!(
+        "{indent}for (long r = 0; r < u.reduction_total; r++) {{\n"
+    ));
+    if reduce_rank > 0 {
+        source.push_str(&format!(
+            "{body_indent}long reduction_coord[{reduce_rank_len}];\n"
+        ));
+        if reduce_rank > 1 {
+            source.push_str(&format!("{body_indent}long remaining_r = r;\n"));
+        }
+        for index in (1..reduce_rank).rev() {
+            source.push_str(&serial_decode_step(
+                &body_indent,
+                "remaining_r",
+                &format!("reduction_coord[{index}]"),
+                &format!("u.reduction_extents[{index}]"),
+                narrow,
+            ));
+        }
+        let outermost = if reduce_rank > 1 { "remaining_r" } else { "r" };
+        source.push_str(&format!("{body_indent}reduction_coord[0] = {outermost};\n"));
+        for (index, dim) in reduce_dims.iter().enumerate() {
+            source.push_str(&format!(
+                "{body_indent}full_coord[{dim}] = reduction_coord[{index}];\n"
+            ));
+        }
+    }
+
+    for (index, gather_slot) in gather_slots.iter().enumerate() {
+        source.push_str(&format!(
+            "{body_indent}long off{index} = u.operand_base[{index}];\n"
+        ));
+        for dim in 0..rank {
+            source.push_str(&format!(
+                "{body_indent}off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+            ));
+        }
+        if let Some(slot) = gather_slot {
+            push_gather_fetch(
+                source,
+                index,
+                *slot,
+                rank,
+                "full_coord",
+                &format!("off{index}"),
+            );
+        }
+    }
+    source.push_str(&format!(
+        "{body_indent}{element_type} scratch[{}];\n",
+        operand_count.max(1)
+    ));
+    for (index, &codec) in quantized.iter().enumerate() {
+        source.push_str(&format!(
+            "{body_indent}scratch[{index}] = {};\n",
+            operand_read(index, &format!("off{index}"), codec)
+        ));
+    }
+    let value_expr = push_body_steps(source, resolved.element_body(), &body_indent, element_type);
+    source.push_str(&format!(
+        "{body_indent}{element_type} value = {value_expr};\n"
+    ));
+    let combine_expr = scalar_op_expr(*reduce_op, &["accumulator", "value"]);
+    source.push_str(&format!(
+        "{body_indent}accumulator = seeded ? {combine_expr} : value;\n"
+    ));
+    source.push_str(&format!("{body_indent}seeded = true;\n"));
+    source.push_str(&format!("{indent}}}\n"));
+    Ok(())
 }
 
 /// The SIMD-group cooperative fold: `SIMD_WIDTH` lanes split one output
