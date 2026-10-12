@@ -314,6 +314,28 @@ pub fn evaluate_named(
     evaluate_named_via_arena(program, symbols, named, outputs)
 }
 
+/// [`evaluate_named`] with every input carried as a [`QuantizedBlock`]: an
+/// `f32` slice borrowed from the caller, an `i32` index tensor, or a packed
+/// operand with its [`Codec`] layout. The plan, the plan cache and the loop
+/// are [`evaluate_named`]'s own -- a packed program is keyed into the same
+/// `ARENA_CACHE` beside its packed node set, so its second call hits exactly
+/// as an `f32` program's does. Exists because `evaluate_named`'s
+/// `&[(&str, &[f32])]` parameter is what lets a call site pass arrays of
+/// differing lengths in one literal; widening it to a generic operand broke
+/// 80 such sites in this crate's own tests.
+///
+/// # Errors
+/// The errors [`evaluate_named`] raises, plus [`TensorError::NotLowerable`]
+/// for a packed operand that no matmul or gather in `program` reads.
+pub fn evaluate_named_operands(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+) -> Result<Evaluated, TensorError> {
+    evaluate_named_via_arena(program, symbols, named, outputs)
+}
+
 /// One output-set-dependent decision the planner made while building
 /// `resolved` from `program` -- never evaluation state, only what
 /// [`bind::bind`], [`dead_resolved_nodes`], [`node_retirement`],
@@ -618,6 +640,14 @@ pub struct StaticArena {
     /// from the start, one per produced node, one per fused fire, one less
     /// per retirement), call-invariant so derived once at build time.
     pub(super) peak_live_buffers: usize,
+    /// Input nodes bound as packed operands: the plan identity that
+    /// [`checkout_arena`] keys on beside `(program, symbols, outputs)`, so a
+    /// packed program and the same program in f32 are two plans in the one cache.
+    pub(super) packed_nodes: BTreeSet<NodeId>,
+    /// Packed nodes some resolved node reads as a plain f32 operand or a
+    /// caller requested as an output; dequantized into their resident slot
+    /// once per call. Every other packed node has no f32 slot at all.
+    pub(super) materialize_packed: BTreeMap<NodeId, Option<(usize, usize)>>,
 }
 
 // `StaticArena::dead`'s own computation -- every `resolved` node neither
@@ -704,8 +734,19 @@ pub fn build_static_arena_with_constants(
     outputs: &[NodeId],
     constant_inputs: &[(&str, &[f32])],
 ) -> Result<StaticArena, TensorError> {
+    build_static_arena_with_packed(program, symbols, outputs, constant_inputs, &BTreeMap::new())
+}
+
+pub(super) fn build_static_arena_with_packed(
+    program: &[Op],
+    symbols: &[u64],
+    outputs: &[NodeId],
+    constant_inputs: &[(&str, &[f32])],
+    packed: &BTreeMap<NodeId, QuantizedBlock<'_>>,
+) -> Result<StaticArena, TensorError> {
+    let packed_nodes: BTreeSet<NodeId> = packed.keys().copied().collect();
     let shapes = shape::infer(program, symbols)?;
-    reject_non_float32(program, &BTreeSet::new())?;
+    reject_non_float32(program, &packed_nodes)?;
 
     let root = program
         .len()
@@ -722,7 +763,7 @@ pub fn build_static_arena_with_constants(
     } else {
         outputs.to_vec()
     };
-    reject_non_float32_outputs(program, &BTreeSet::new(), &effective_outputs)?;
+    reject_non_float32_outputs(program, &packed_nodes, &effective_outputs)?;
 
     let block_nodes = block_node_ids(program);
     let mut input_names = Vec::with_capacity(block_nodes.len());
@@ -806,6 +847,13 @@ pub fn build_static_arena_with_constants(
             }
         }
     }
+    let materialize_packed = packed_nodes_to_materialize(&resolved, &effective_outputs, packed);
+    for node in packed_nodes
+        .iter()
+        .filter(|node| !materialize_packed.contains_key(node))
+    {
+        buffers[node.0 as usize] = None;
+    }
 
     // Computed exactly once, here, never inside `run_resolved_nodes_in_arena`
     // -- fusion is call-invariant over `resolved`'s own structure, the same
@@ -814,12 +862,8 @@ pub fn build_static_arena_with_constants(
     // f32-only (`reject_non_float32` above), so `epilogue_fuse_plan`'s own
     // quantized-weight exclusion guard is a no-op here, matching
     // `evaluate_named`'s own all-`Float32` call into this same machinery.
-    let (epilogue_fuse_plan, layer_norm_cluster_plan, rewrite_fires) = run_rewrite_worklist(
-        &resolved,
-        program.len(),
-        &effective_outputs,
-        &BTreeMap::new(),
-    );
+    let (epilogue_fuse_plan, layer_norm_cluster_plan, rewrite_fires) =
+        run_rewrite_worklist(&resolved, program.len(), &effective_outputs, packed);
     record_rewrite_engine_fires(&rewrite_fires);
     let (epilogue_fuse_skip, epilogue_fuse_fire_at, layer_norm_cluster_fire_at) =
         fusion_schedule(&resolved, &epilogue_fuse_plan, &layer_norm_cluster_plan);
@@ -892,6 +936,8 @@ pub fn build_static_arena_with_constants(
         epilogue_fuse_skip,
         epilogue_fuse_fire_at,
         layer_norm_cluster_fire_at,
+        packed_nodes,
+        materialize_packed,
         retires,
         free_buffers: Vec::new(),
         peak_live_buffers: 0,
@@ -1025,6 +1071,22 @@ impl StaticArena {
     }
 }
 
+pub(super) fn packed_nodes_to_materialize(
+    resolved: &[BoundOp],
+    effective_outputs: &[NodeId],
+    packed: &BTreeMap<NodeId, QuantizedBlock<'_>>,
+) -> BTreeMap<NodeId, Option<(usize, usize)>> {
+    let mut materialize = BTreeMap::new();
+    non_primary_operand_reads(resolved, packed)
+        .map(|(_, operand, row_shape)| (operand, row_shape))
+        .chain(effective_outputs.iter().map(|node| (*node, None)))
+        .filter(|(node, _)| packed.contains_key(node))
+        .for_each(|(node, row_shape)| {
+            materialize.entry(node).or_insert(row_shape);
+        });
+    materialize
+}
+
 /// Runs `arena`'s already-[`bind::bind`]-resolved program once against this
 /// step's `named` host buffers, writing every input and every computed
 /// node's output into the SAME per-node storage [`build_static_arena`]
@@ -1044,7 +1106,7 @@ pub fn evaluate_named_with_arena(
     named: &[(&str, &[f32])],
 ) -> Result<Evaluated, TensorError> {
     bind_named_inputs_into_arena(arena, named, true)?;
-    run_resolved_nodes_in_arena(arena)?;
+    run_resolved_nodes_in_arena(arena, &BTreeMap::new())?;
 
     let results = arena
         .effective_outputs
@@ -1089,20 +1151,29 @@ pub(super) fn f32_slice_as_bytes(slice: &[f32]) -> &[u8] {
 /// false`: a name absent from `named` is treated as "already correct in
 /// the arena" (the in-place rebind lever put it there) rather than an
 /// error, instead of duplicating the loop body.
-pub(super) fn bind_named_inputs_into_arena(
+pub(super) fn bind_named_inputs_into_arena<'operand, Operand>(
     arena: &mut StaticArena,
-    named: &[(&str, &[f32])],
+    named: &[(&str, Operand)],
     require_all: bool,
-) -> Result<(), TensorError> {
+) -> Result<(), TensorError>
+where
+    Operand: Into<QuantizedBlock<'operand>> + Copy,
+{
     #[cfg(feature = "instrument")]
     let compare_started = instrument::read_ticks();
     for (node, name) in &arena.input_names {
         let found = named
             .iter()
             .find(|(candidate, _)| candidate == name)
-            .map(|(_, data)| *data);
+            .map(|(_, operand)| (*operand).into());
         let data = match found {
-            Some(data) => data,
+            Some(QuantizedBlock::Float32(data)) => data,
+            Some(QuantizedBlock::Int32(values)) => {
+                let slot = arena.buffers[node.0 as usize].as_mut();
+                fill_integer_input(*node, slot, values)?;
+                continue;
+            }
+            Some(QuantizedBlock::Packed { .. }) => continue,
             // A name `build_static_arena_with_constants`'s own `constant_inputs`
             // loop already bound is correct in the arena right now without
             // being re-passed -- `require_all` asks "is every genuine input
@@ -1158,6 +1229,50 @@ pub(super) fn bind_named_inputs_into_arena(
     Ok(())
 }
 
+fn fill_integer_input(
+    node: NodeId,
+    slot: Option<&mut Vec<f32>>,
+    values: &[i32],
+) -> Result<(), TensorError> {
+    let slot = slot.ok_or(TensorError::NotLowerable {
+        node,
+        reason: "static arena has no pre-sized slot for this integer input node -- build_static_arena did not size it",
+    })?;
+    if slot.len() != values.len() {
+        return Err(TensorError::InputSizeMismatch {
+            node,
+            expected: slot.len(),
+            found: values.len(),
+        });
+    }
+    slot.iter_mut()
+        .zip(values)
+        .for_each(|(cell, value)| *cell = *value as f32);
+    Ok(())
+}
+
+fn materialize_packed_inputs(
+    arena: &mut StaticArena,
+    packed: &BTreeMap<NodeId, QuantizedBlock<'_>>,
+) -> Result<(), TensorError> {
+    for (node, row_shape) in &arena.materialize_packed {
+        let block = packed
+            .get(node)
+            .ok_or(TensorError::UnboundInputName(format!(
+                "packed node {} named by the plan has no packed operand this call",
+                node.0
+            )))?;
+        let slot = arena.buffers[node.0 as usize]
+            .as_mut()
+            .ok_or(TensorError::NotLowerable {
+                node: *node,
+                reason: "static arena has no f32 slot for this packed node -- the plan did not list it for materialization",
+            })?;
+        dequantize_weight_into(*node, block, *row_shape, slot)?;
+    }
+    Ok(())
+}
+
 /// `docs/discipline.md` ROW 174/234's own per-node profile: a coarse,
 /// four-way label distinguishing [`BoundOpKind`] variants, not the
 /// finer `Path::{DotFast,WidthFast,ConvTile,Generic}` route census
@@ -1190,7 +1305,15 @@ pub(super) fn arena_node_kind_label(kind: &BoundOpKind) -> &'static str {
 /// [`evaluate_named_with_arena`]'s own resolved-node execution loop,
 /// factored out so [`evaluate_named_with_arena_in_place`] shares the
 /// identical execution path rather than a second copy of it.
-pub(super) fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorError> {
+pub(super) fn run_resolved_nodes_in_arena(
+    arena: &mut StaticArena,
+    packed: &BTreeMap<NodeId, QuantizedBlock<'_>>,
+) -> Result<(), TensorError> {
+    materialize_packed_inputs(arena, packed)?;
+    let quantized = (!packed.is_empty()).then_some(packed);
+    let session = quantized
+        .and_then(|_| nest_cohort())
+        .and_then(|cohort| cohort.enter().ok());
     #[cfg(feature = "epilogue-profile-probe")]
     let reduce_nodes = epilogue_profile_reduce_flags(&arena.resolved, arena.buffers.len());
     for position in 0..arena.resolved.len() {
@@ -1238,9 +1361,9 @@ pub(super) fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(),
                 None => run_node_into_with_round_sink(
                     computed,
                     &arena.buffers,
+                    quantized,
                     None,
-                    None,
-                    None,
+                    session.as_ref(),
                     false,
                     &mut output,
                     Some(&mut gdn_state),
@@ -1519,18 +1642,25 @@ pub fn arena_cache_packed_node_count() -> usize {
 /// `constant_inputs`, `docs/discipline.md` ROW 207's own training-safety
 /// invariant), so a trainable parameter is never even offered as a
 /// candidate here, structurally, regardless of anything below.
-pub(super) fn checkout_arena(
+pub(super) fn checkout_arena<'operand, Operand>(
     program: &[Op],
     symbols: &[u64],
     outputs: &[NodeId],
-    named: &[(&str, &[f32])],
-) -> Result<CachedArena, TensorError> {
+    named: &[(&str, Operand)],
+    packed: &BTreeMap<NodeId, QuantizedBlock<'operand>>,
+) -> Result<CachedArena, TensorError>
+where
+    Operand: Into<QuantizedBlock<'operand>> + Copy,
+{
     {
         let mut cache = lock_arena_cache();
         #[cfg(feature = "instrument")]
         let compare_started = instrument::read_ticks();
         let found = cache.iter().position(|entry| {
-            entry.program == program && entry.symbols == symbols && entry.outputs == outputs
+            entry.program == program
+                && entry.symbols == symbols
+                && entry.outputs == outputs
+                && entry.arena.packed_nodes.iter().eq(packed.keys())
         });
         #[cfg(feature = "instrument")]
         instrument::record_checkout_arena_key_compare_ticks(instrument::elapsed_ticks(
@@ -1550,9 +1680,13 @@ pub(super) fn checkout_arena(
                 .iter()
                 .any(|node| program[node.0 as usize].name() == Some(*name))
         })
-        .copied()
+        .filter_map(|(name, operand)| match (*operand).into() {
+            QuantizedBlock::Float32(data) => Some((*name, data)),
+            QuantizedBlock::Int32(_) | QuantizedBlock::Packed { .. } => None,
+        })
         .collect();
-    let arena = build_static_arena_with_constants(program, symbols, outputs, &constant_inputs)?;
+    let arena =
+        build_static_arena_with_packed(program, symbols, outputs, &constant_inputs, packed)?;
     Ok(CachedArena {
         program: program.to_vec(),
         symbols: symbols.to_vec(),
@@ -1587,12 +1721,15 @@ pub(super) fn checkin_arena(entry: CachedArena) {
 /// that loop already carries, without ever building or owning an arena
 /// itself, and without [`evaluate_named`]'s own signature changing to carry
 /// one.
-pub(super) fn evaluate_named_via_arena(
+pub(super) fn evaluate_named_via_arena<'operand, Operand>(
     program: &[Op],
     symbols: &[u64],
-    named: &[(&str, &[f32])],
+    named: &[(&str, Operand)],
     outputs: &[NodeId],
-) -> Result<Evaluated, TensorError> {
+) -> Result<Evaluated, TensorError>
+where
+    Operand: Into<QuantizedBlock<'operand>> + Copy,
+{
     let root = program
         .len()
         .checked_sub(1)
@@ -1609,10 +1746,11 @@ pub(super) fn evaluate_named_via_arena(
         outputs.to_vec()
     };
 
-    let mut entry = checkout_arena(program, symbols, &effective_outputs, named)?;
+    let packed = packed_operands_of(program, named);
+    let mut entry = checkout_arena(program, symbols, &effective_outputs, named, &packed)?;
     let arena = &mut entry.arena;
     let run = bind_named_inputs_into_arena(arena, named, true)
-        .and_then(|()| run_resolved_nodes_in_arena(arena));
+        .and_then(|()| run_resolved_nodes_in_arena(arena, &packed));
     match run {
         Ok(()) => {
             let results = arena
@@ -1634,6 +1772,32 @@ pub(super) fn evaluate_named_via_arena(
         }
         Err(error) => Err(error),
     }
+}
+
+pub(super) fn packed_operands_of<'operand, Operand>(
+    program: &[Op],
+    named: &[(&str, Operand)],
+) -> BTreeMap<NodeId, QuantizedBlock<'operand>>
+where
+    Operand: Into<QuantizedBlock<'operand>> + Copy,
+{
+    let carries_packed = named
+        .iter()
+        .any(|(_, operand)| matches!((*operand).into(), QuantizedBlock::Packed { .. }));
+    if !carries_packed {
+        return BTreeMap::new();
+    }
+    block_node_ids(program)
+        .into_iter()
+        .filter_map(|node| {
+            let name = program[node.0 as usize].name()?;
+            let (_, operand) = named.iter().find(|(candidate, _)| *candidate == name)?;
+            match (*operand).into() {
+                block @ QuantizedBlock::Packed { .. } => Some((node, block)),
+                QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => None,
+            }
+        })
+        .collect()
 }
 
 /// `docs/discipline.md` ROW 181's profile-gate probe: a flat bitmap over

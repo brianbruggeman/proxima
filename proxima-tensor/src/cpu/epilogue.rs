@@ -1356,7 +1356,7 @@ pub fn evaluate_named_with_arena_in_place(
     rebind: &[(NodeId, &str)],
 ) -> Result<f32, TensorError> {
     bind_named_inputs_into_arena(arena, named, false)?;
-    run_resolved_nodes_in_arena(arena)?;
+    run_resolved_nodes_in_arena(arena, &BTreeMap::new())?;
 
     let loss_value = arena_output(arena, loss)
         .and_then(|data| data.first().copied())
@@ -1429,6 +1429,12 @@ pub enum QuantizedBlock<'a> {
     Float32(&'a [f32]),
     Int32(&'a [i32]),
     Packed { codec: Codec, bytes: &'a [u8] },
+}
+
+impl<'a> From<&'a [f32]> for QuantizedBlock<'a> {
+    fn from(data: &'a [f32]) -> Self {
+        Self::Float32(data)
+    }
 }
 
 /// The [`proxima_gguf::GgmlType`] `codec` names, for every `Codec` a

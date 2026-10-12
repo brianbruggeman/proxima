@@ -2206,7 +2206,10 @@ pub(super) fn dequantize_row(
 /// operand has no consumer to derive a split from (a raw weight requested
 /// directly as an output), no shared axis exists, or the resulting
 /// `row_count` is `<= 1` (already physically contiguous there).
-pub(super) fn packed_operand_row_shape(computed: &BoundOp, operand_index: usize) -> Option<(usize, usize)> {
+pub(super) fn packed_operand_row_shape(
+    computed: &BoundOp,
+    operand_index: usize,
+) -> Option<(usize, usize)> {
     let operands = computed.operands();
     let (_, weight_layout, _) = operands.get(operand_index)?;
     let shared_axes: Vec<u16> = (0..computed.extents.len() as u16)
@@ -2216,13 +2219,18 @@ pub(super) fn packed_operand_row_shape(computed: &BoundOp, operand_index: usize)
                 && operands
                     .iter()
                     .enumerate()
-                    .any(|(other_index, (_, other_layout, _))| other_index != operand_index && other_layout.stride(axis) != 0)
+                    .any(|(other_index, (_, other_layout, _))| {
+                        other_index != operand_index && other_layout.stride(axis) != 0
+                    })
         })
         .collect();
     if shared_axes.is_empty() {
         return None;
     }
-    let contraction_width: i64 = shared_axes.iter().map(|&axis| computed.extents[axis as usize] as i64).product();
+    let contraction_width: i64 = shared_axes
+        .iter()
+        .map(|&axis| computed.extents[axis as usize] as i64)
+        .product();
     if contraction_width <= 1 {
         return None;
     }
@@ -2236,7 +2244,11 @@ pub(super) fn packed_operand_row_shape(computed: &BoundOp, operand_index: usize)
     // way: `row_count` reached via division is not automatically a safe
     // no-op just because it comes out `<= 1`, so this must be checked
     // BEFORE that division runs, not inferred from its result.
-    let min_contraction_stride = shared_axes.iter().map(|&axis| weight_layout.stride(axis)).min().unwrap_or(1);
+    let min_contraction_stride = shared_axes
+        .iter()
+        .map(|&axis| weight_layout.stride(axis))
+        .min()
+        .unwrap_or(1);
     if min_contraction_stride <= 1 {
         return None;
     }
@@ -2302,22 +2314,32 @@ pub(super) fn materialize_quantized_weight_output(
         elements = element_count(shapes.of(node)),
         "materializing quantized weight for requested output"
     );
-    let total = element_count(shapes.of(node));
-    let mut dequantized = vec![0.0f32; total];
+    let mut dequantized = vec![0.0f32; element_count(shapes.of(node))];
+    dequantize_weight_into(node, block, row_shape, &mut dequantized)?;
+    buffers[node.0 as usize] = Some(Cow::Owned(dequantized));
+    Ok(())
+}
+
+pub(super) fn dequantize_weight_into(
+    node: NodeId,
+    block: &QuantizedBlock<'_>,
+    row_shape: Option<(usize, usize)>,
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    let total = output.len();
     match row_shape {
         Some((row_count, contraction_width)) if row_count * contraction_width == total => {
             let mut row_values = vec![0.0f32; contraction_width];
             for row in 0..row_count {
                 dequantize_row(node, block, row, contraction_width, &mut row_values)?;
                 for (contraction_index, &value) in row_values.iter().enumerate() {
-                    dequantized[contraction_index * row_count + row] = value;
+                    output[contraction_index * row_count + row] = value;
                 }
             }
+            Ok(())
         }
-        _ => dequantize_row(node, block, 0, total, &mut dequantized)?,
+        _ => dequantize_row(node, block, 0, total, output),
     }
-    buffers[node.0 as usize] = Some(Cow::Owned(dequantized));
-    Ok(())
 }
 
 pub(super) fn run_top_fraction_select<B: Deref<Target = [f32]> + Sync>(

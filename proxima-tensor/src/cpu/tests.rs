@@ -14456,3 +14456,246 @@ fn evaluate_retirement_arena_keeps_inputs_statics_and_outputs_resident() {
         );
     }
 }
+
+#[cfg(feature = "float-layout-dtype")]
+mod float_layout_evaluate {
+    use super::*;
+
+    const ROWS: u32 = 8;
+    const K: u32 = 512;
+    const BF4_RANGE_SCALE: f32 = 32.0;
+    const BF8_ROWS: &[u8] =
+        include_bytes!("../../specs/float-layout-dtype/fixtures/Bf8E5M2/blocks.bin");
+    const BF4_ROWS: &[u8] =
+        include_bytes!("../../specs/float-layout-dtype/fixtures/Bf4E2M1/blocks.bin");
+    const E3M2_ROWS: &[u8] =
+        include_bytes!("../../specs/float-layout-dtype/fixtures/Fp6E3M2/blocks.bin");
+    const BF8_DECODED: &[u8] =
+        include_bytes!("../../specs/float-layout-dtype/fixtures/Bf8E5M2/decoded_f32.bin");
+
+    fn named_program(rows: u32) -> (Vec<Op>, NodeId) {
+        let (mut program, sum) = quantized_matmul_program(rows, K);
+        let names = ["weight", "activation"];
+        for (op, name) in program.iter_mut().zip(names) {
+            if let Op::Input { name: slot, .. } = op {
+                *slot = Some(String::from(name));
+            }
+        }
+        (program, sum)
+    }
+
+    fn activation(seed: u64) -> Vec<f32> {
+        random_vec(seed, K as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect()
+    }
+
+    fn oracle(program: &[Op], sum: NodeId, codec: Codec, rows: &[u8], x: &[f32]) -> Vec<f32> {
+        let named = [
+            ("weight", QuantizedBlock::Packed { codec, bytes: rows }),
+            ("activation", QuantizedBlock::Float32(x)),
+        ];
+        let mut pool = Vec::new();
+        let mut validated = None;
+        evaluate_quantized_named_with_scratch_and_experts(
+            program,
+            &[],
+            &named,
+            &[sum],
+            &mut pool,
+            &mut validated,
+            None,
+        )
+        .expect("scratch evaluator runs the packed granite rows")
+        .root()
+        .to_vec()
+    }
+
+    fn arena_path(program: &[Op], sum: NodeId, codec: Codec, rows: &[u8], x: &[f32]) -> Vec<f32> {
+        let named = [
+            ("weight", QuantizedBlock::Packed { codec, bytes: rows }),
+            ("activation", QuantizedBlock::Float32(x)),
+        ];
+        evaluate_named_operands(program, &[], &named, &[sum])
+            .expect("evaluate_named runs the packed granite rows")
+            .root()
+            .to_vec()
+    }
+
+    fn assert_bit_exact(codec: Codec, rows: &[u8]) {
+        let (program, sum) = named_program(ROWS);
+        let x = activation(31);
+        let expected = oracle(&program, sum, codec, rows, &x);
+        let actual = arena_path(&program, sum, codec, rows, &x);
+        let to_bits = |values: &[f32]| {
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(actual.len(), ROWS as usize, "one dot per granite row");
+        assert_ne!(
+            to_bits(&expected),
+            vec![0; ROWS as usize],
+            "the oracle rows are not all zero"
+        );
+        assert_eq!(to_bits(&actual), to_bits(&expected));
+    }
+
+    #[test]
+    fn float_layout_evaluate_packed_program_bf8_equals_scratch_oracle_bit_for_bit() {
+        assert_bit_exact(Codec::Bf8E5M2, BF8_ROWS);
+    }
+
+    fn granite_rows_scaled_into_bf4_range() -> Vec<u8> {
+        BF8_DECODED
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| f32::from_le_bytes(*word) * BF4_RANGE_SCALE)
+            .collect::<Vec<f32>>()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| {
+                proxima_gguf::quant::bf4_e2m1::pack_pair(pair[0], pair[1])
+                    .expect("scaled granite pair is finite")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn float_layout_evaluate_packed_program_bf4_equals_scratch_oracle_bit_for_bit() {
+        assert_bit_exact(Codec::Bf4E2M1, &granite_rows_scaled_into_bf4_range());
+    }
+
+    #[test]
+    fn float_layout_evaluate_packed_program_bf4_fixture_rows_are_all_zero_codes() {
+        let nonzero_codes = BF4_ROWS.iter().filter(|byte| **byte & 0x77 != 0).count();
+        assert_eq!(
+            nonzero_codes, 0,
+            "E2M1 flushes every attn_q magnitude to zero"
+        );
+    }
+
+    #[test]
+    fn float_layout_evaluate_packed_program_e3m2_equals_scratch_oracle_bit_for_bit() {
+        assert_bit_exact(Codec::Fp6E3M2, E3M2_ROWS);
+    }
+
+    #[test]
+    fn float_layout_evaluate_packed_program_second_call_hits_the_plan_cache() {
+        let (program, sum) = named_program(ROWS);
+        arena_cache_reset();
+        let calls: Vec<Vec<f32>> = [31, 31, 47]
+            .iter()
+            .map(|seed| arena_path(&program, sum, Codec::Bf8E5M2, BF8_ROWS, &activation(*seed)))
+            .collect();
+        assert_eq!(
+            arena_cache_totals(),
+            (1, 2),
+            "(builds, hits) over three packed calls"
+        );
+        assert_eq!(calls[0], calls[1]);
+        assert_eq!(
+            calls[2],
+            oracle(&program, sum, Codec::Bf8E5M2, BF8_ROWS, &activation(47)),
+            "a hit rebinds the new activation, it does not replay the first result"
+        );
+    }
+
+    #[test]
+    fn float_layout_evaluate_changed_program_misses_the_plan_cache() {
+        let (wide, wide_sum) = named_program(ROWS);
+        let (narrow, narrow_sum) = named_program(ROWS / 2);
+        let half = BF8_ROWS.len() / 2;
+        arena_cache_reset();
+        let x = activation(31);
+        arena_path(&wide, wide_sum, Codec::Bf8E5M2, BF8_ROWS, &x);
+        arena_path(&narrow, narrow_sum, Codec::Bf8E5M2, &BF8_ROWS[..half], &x);
+        assert_eq!(
+            arena_cache_totals(),
+            (2, 0),
+            "a changed shape builds a second plan"
+        );
+        arena_path(&wide, wide_sum, Codec::Bf8E5M2, BF8_ROWS, &x);
+        assert_eq!(
+            arena_cache_totals(),
+            (2, 1),
+            "the first plan is still cached"
+        );
+    }
+
+    #[test]
+    fn float_layout_evaluate_same_program_in_f32_is_a_different_plan_than_packed() {
+        let (program, sum) = named_program(ROWS);
+        let decoded: Vec<f32> = BF8_DECODED
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| f32::from_le_bytes(*word))
+            .collect();
+        let x = activation(31);
+        arena_cache_reset();
+        arena_path(&program, sum, Codec::Bf8E5M2, BF8_ROWS, &x);
+        let f32_named = [("weight", decoded.as_slice()), ("activation", x.as_slice())];
+        evaluate_named(&program, &[], &f32_named, &[sum]).expect_err(
+            "a UInt8-declared weight is only admitted as a packed operand, never as f32",
+        );
+        assert_eq!(
+            arena_cache_totals(),
+            (2, 0),
+            "the f32 binding built its own plan and never hit the packed one"
+        );
+    }
+
+    #[test]
+    fn float_layout_evaluate_f32_control_cache_counts_match_the_packed_program() {
+        let (program, sum) = matmul_program(ROWS, K, 1, false);
+        let named_weight = |program: &mut Vec<Op>| {
+            for (op, name) in program.iter_mut().zip(["weight", "activation"]) {
+                if let Op::Input { name: slot, .. } = op {
+                    *slot = Some(String::from(name));
+                }
+            }
+        };
+        let mut program = program;
+        named_weight(&mut program);
+        let decoded: Vec<f32> = random_vec(5, (ROWS * K) as usize);
+        let x = activation(31);
+        arena_cache_reset();
+        for _ in 0..3 {
+            evaluate_named(
+                &program,
+                &[],
+                &[("weight", &decoded[..]), ("activation", &x[..])],
+                &[sum],
+            )
+            .expect("f32 control evaluates");
+        }
+        assert_eq!(
+            arena_cache_totals(),
+            (1, 2),
+            "(builds, hits) for the f32 control"
+        );
+    }
+
+    #[test]
+    fn float_layout_evaluate_packed_program_missing_activation_is_unbound_input() {
+        let (program, sum) = named_program(ROWS);
+        let named = [(
+            "weight",
+            QuantizedBlock::Packed {
+                codec: Codec::Bf8E5M2,
+                bytes: BF8_ROWS,
+            },
+        )];
+        let error =
+            evaluate_named_operands(&program, &[], &named, &[sum]).expect_err("activation unbound");
+        assert_eq!(
+            error,
+            TensorError::UnboundInputName(String::from("activation"))
+        );
+    }
+}
