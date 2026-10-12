@@ -140,6 +140,48 @@ impl Codec {
     /// packed, then the f16 scale.
     pub const FP6_E3M2_BLOCK_BYTES: usize =
         Self::FP6_E3M2_BLOCK_ELEMENTS * FloatLayout::E3M2.width() as usize / 8 + 2;
+
+    /// The element layout of the float codecs, `None` for every codec that is not a plain float
+    /// layout (block-quantized integer codecs, codebooks, and the formats with no decoder).
+    /// `Fp6E3M2` is the layout of its six-bit fields; the f16 scale per 32 elements is its block.
+    #[must_use]
+    pub const fn layout(self) -> Option<FloatLayout> {
+        match self {
+            Codec::Float16 => Some(FloatLayout::F16),
+            Codec::BFloat16 => Some(FloatLayout::BF16),
+            Codec::BFloat8 => Some(FloatLayout::E5M2),
+            Codec::Bf8E5M2 => Some(FloatLayout::E5M2_SATURATING),
+            Codec::Bf4E2M1 => Some(FloatLayout::E2M1),
+            Codec::Fp6E3M2 => Some(FloatLayout::E3M2),
+            Codec::Q4K
+            | Codec::Q5K
+            | Codec::Q6K
+            | Codec::Q8_0
+            | Codec::Q3K
+            | Codec::Q4_0
+            | Codec::Q2K
+            | Codec::Q5_1
+            | Codec::Q5_0
+            | Codec::Q4_1
+            | Codec::Q8_1
+            | Codec::Q8K
+            | Codec::Iq1S
+            | Codec::Iq1M
+            | Codec::Iq2Xxs
+            | Codec::Iq2Xs
+            | Codec::Iq2S
+            | Codec::Iq3Xxs
+            | Codec::Iq3S
+            | Codec::Iq4Nl
+            | Codec::Iq4Xs
+            | Codec::Tq10
+            | Codec::Tq20
+            | Codec::Mxfp4
+            | Codec::Nvfp4
+            | Codec::Q1_0
+            | Codec::Q2_0 => None,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -78,6 +78,17 @@ impl FloatLayout {
         1 + self.exponent_bits + self.mantissa_bits
     }
 
+    /// Whether two layouts are the same format: equal exponent and mantissa widths, equal
+    /// specials, and equal effective bias. `==` also compares the raw `bias_override`, so a
+    /// layout spelled with `Some(15)` and one with `None` differ under `==` and agree here.
+    #[must_use]
+    pub fn same_format(&self, other: &Self) -> bool {
+        self.exponent_bits == other.exponent_bits
+            && self.mantissa_bits == other.mantissa_bits
+            && self.specials == other.specials
+            && self.bias() == other.bias()
+    }
+
     /// Bytes `elements` values occupy packed densely at `width()` bits each, plus one `scale` code
     /// per `block` elements when `scale_block` is `Some((scale, block))`, rounded up to whole
     /// bytes: 32 elements of E3M2 under an f16 scale are 32 * 6 + 16 = 208 bits, 26 bytes.
