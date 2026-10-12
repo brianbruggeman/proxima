@@ -1,0 +1,136 @@
+gguf_path = /Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd
+prompt = "The capital of France is"
+max_tokens = 24
+requested_backend = gpu
+mmap_flags = MAP_SHARED (memmap2::Mmap::map, prot=PROT_READ)
+file_bytes = 3349514112 bytes
+gguf_parse_ms = 143.829
+general.name = 2B_dequant_qat_it_hf
+general.architecture = gemma4
+  gemma4.block_count = U32(35)
+  gemma4.context_length = U32(131072)
+  gemma4.embedding_length = U32(1536)
+  gemma4.feed_forward_length = Array(I32([6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288]))
+  gemma4.attention.head_count = U32(8)
+  gemma4.attention.head_count_kv = U32(1)
+  gemma4.rope.freq_base = F32(1000000.0)
+  gemma4.rope.freq_base_swa = F32(10000.0)
+  gemma4.attention.layer_norm_rms_epsilon = F32(1e-6)
+  gemma4.attention.key_length = U32(512)
+  gemma4.attention.value_length = U32(512)
+  gemma4.final_logit_softcapping = F32(30.0)
+  gemma4.attention.sliding_window = U32(512)
+  gemma4.attention.shared_kv_layers = U32(20)
+  gemma4.embedding_length_per_layer_input = U32(256)
+  gemma4.attention.sliding_window_pattern = Array(Bool([true, true, true, true, false, true, true, true, true, false, true, true, true, true, false, true, true, true, true, false, true, true, true, true, false, true, true, true, true, false, true, true, true, true, false]))
+  gemma4.attention.key_length_swa = U32(256)
+  gemma4.attention.value_length_swa = U32(256)
+  gemma4.rope.dimension_count = U32(512)
+  gemma4.rope.dimension_count_swa = U32(256)
+matched 20 keys under prefix "gemma4."
+tensor_count = 541
+  required_key gemma4.embedding_length = U32(1536)
+  required_key gemma4.feed_forward_length = Array(I32([6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288]))
+  required_key gemma4.attention.head_count = U32(8)
+  required_key gemma4.attention.head_count_kv = U32(1)
+  required_key gemma4.block_count = U32(35)
+distinct_tensor_name_patterns = 23
+  tensor_name_pattern: blk.N.attn_k.weight
+  tensor_name_pattern: blk.N.attn_k_norm.weight
+  tensor_name_pattern: blk.N.attn_norm.weight
+  tensor_name_pattern: blk.N.attn_output.weight
+  tensor_name_pattern: blk.N.attn_q.weight
+  tensor_name_pattern: blk.N.attn_q_norm.weight
+  tensor_name_pattern: blk.N.attn_v.weight
+  tensor_name_pattern: blk.N.ffn_down.weight
+  tensor_name_pattern: blk.N.ffn_gate.weight
+  tensor_name_pattern: blk.N.ffn_norm.weight
+  tensor_name_pattern: blk.N.ffn_up.weight
+  tensor_name_pattern: blk.N.inp_gate.weight
+  tensor_name_pattern: blk.N.layer_output_scale.weight
+  tensor_name_pattern: blk.N.post_attention_norm.weight
+  tensor_name_pattern: blk.N.post_ffw_norm.weight
+  tensor_name_pattern: blk.N.post_norm.weight
+  tensor_name_pattern: blk.N.proj.weight
+  tensor_name_pattern: output_norm.weight
+  tensor_name_pattern: per_layer_model_proj.weight
+  tensor_name_pattern: per_layer_proj_norm.weight
+  tensor_name_pattern: per_layer_token_embd.weight
+  tensor_name_pattern: rope_freqs.weight
+  tensor_name_pattern: token_embd.weight
+PROBE_DIMS blk.3.attn_q.weight dims=[1536, 2048] ggml_type=Q4_0 offset=2347736160 bytes=Some(1769472)
+PROBE_DIMS blk.3.attn_k.weight dims=[1536, 256] ggml_type=Q4_0 offset=2345738336 bytes=Some(221184)
+PROBE_DIMS blk.3.attn_v.weight dims=[1536, 256] ggml_type=Q4_0 offset=2349506656 bytes=Some(221184)
+PROBE_DIMS blk.3.attn_output.weight dims=[2048, 1536] ggml_type=Q4_0 offset=2345966688 bytes=Some(1769472)
+PROBE_DIMS blk.3.attn_q_norm.weight dims=[256] ggml_type=F32 offset=2349505632 bytes=Some(1024)
+PROBE_DIMS blk.3.attn_k_norm.weight dims=[256] ggml_type=F32 offset=2345959520 bytes=Some(1024)
+PROBE_DIMS blk.0.attn_qkv.weight MISSING
+PROBE_DIMS blk.0.attn_gate.weight MISSING
+PROBE_DIMS blk.0.ffn_gate_exps.weight MISSING
+PROBE_DIMS blk.0.ffn_up_exps.weight MISSING
+PROBE_DIMS blk.0.ffn_down_exps.weight MISSING
+ssm_or_conv_tensor_count = 0
+2026-10-02T17:24:32.012659083Z INFO omega::metal::device_buffers_arena_plan: system_facts: host and device memory facts probed at load time recommended_max_working_set_size=51539607552 max_buffer_length=38654705664 has_unified_memory=true current_allocated_size=393216 physical_memory_bytes=68719476736
+2026-10-02T17:24:32.430421916Z INFO proxima_model_interop::generate::pregather: checkpoint_mapping_residency: proved resident before metal no-copy registration mapping_prefault_ms=185.481208 mapping_resident_pages=204439 mapping_missing_pages=0
+weight_load_ms = 974.540
+backend_evidence_note = look for a 'token_breakdown_metal ... gpu_exec_calls=' line per decode step below -- that is the mechanical proof Metal ran, not this flag
+serving_mode pre_gather=false persistent_cuts=false layer_window=1 dispatch=serial residency_budget_bytes=0 gpu_memory_limit_bytes=0 sidecar_configured=false sidecar_source=none monolithic_all_low=false monolithic_high_mmap=false
+2026-10-02T17:24:32.934141333Z INFO gguf_generate: resolved speculative generation settings speculative_types=ngram-simple ngram_simple_size_n=1 ngram_simple_size_m=3
+2026-10-02T17:24:32.934154083Z INFO omega::metal::device_buffers_arena_plan: system_facts: host and device memory facts probed at load time recommended_max_working_set_size=51539607552 max_buffer_length=38654705664 has_unified_memory=true current_allocated_size=393216 physical_memory_bytes=68719476736
+2026-10-02T17:24:32.934156208Z INFO proxima_model_interop::generate::decode: memory_budget: load-time device-memory budget derived from checkpoint shape, by class dense_weights_bytes=3003400192 expert_weights_bytes=0 table_weights_bytes=330301440 kv_cache_bytes=1629487104 ssm_state_bytes=0 arena_allowance_bytes=28311552 total_bytes=4991500288 limit_bytes=51539607552 os_headroom_bytes=8589934592
+prefill_event prompt_tokens=6 step=0 elapsed_ms=180
+token_event token_id=9079 text_piece=" Paris" step=0 elapsed_ms=180
+2026-10-02T17:24:33.114428916Z INFO proxima_model_interop::generate::load_model: token_breakdown: per-decode-step wall-clock attribution step=0 new_count=6 cached_len_before=0 step_wall_ms=179.950625 apply_serving_config_ms=0.000041 build_position_inputs_ms=0.013583 named_blocks_weights_ms=0.100833 named_blocks_kv_ms=0.098583 kv_cache_upload_bytes=737280 ssm_state_transfer_bytes=0 evaluate_ms=179.19725 layer_cache_append_ms=0.047083 layer_cache_append_bytes=221184 greedy_pick_ms=0.436916
+2026-10-02T17:24:33.114430750Z INFO proxima_model_interop::generate::decode: token_attribution: per-step kernel/dispatch/park-spin-wake split step=0 evaluate_ms=179.19725 kernel_ms=0 dispatch_ms=0 park_spin_wake_ms=0 residual_ms=179.19725 residual_underflow=false named_plus_residual_ms=179.19725 cached_attention_ops=35
+2026-10-02T17:24:33.114431041Z INFO proxima_model_interop::generate::decode: token_quantize_calls: redundant-activation-quantize hypothesis check step=0 total_calls=0 distinct_nodes=0 cache_hits=0
+2026-10-02T17:24:33.114449041Z INFO proxima_model_interop::generate::load_model: token_breakdown_metal: per-decode-step metal stage attribution step=0 prepare_calls=1 prepare_ms=18.543958 emit_calls=0 emit_ms=0 pipeline_hits=1115 pipeline_misses=35 pipeline_compile_ms=25.786875 block_upload_calls=282 block_upload_ms=0 block_offered_bytes=332643388 block_copied_bytes=1555516 block_nocopy_bound_bytes=786432 block_offset_bound_bytes=330301440 op_setup_calls=1150 op_setup_ms=0.027625 pipeline_lookup_calls=0 pipeline_lookup_ms=0 encode_dispatch_calls=1150 physical_dispatch_calls=1150 encode_dispatch_ms=1.5395 gpu_exec_calls=1 gpu_exec_ms=118.546833 readback_calls=46 readback_ms=0.270875 readback_bytes=1269760 nocopy_uploads=28 copying_uploads=253 nocopy_reuses=0 resident_uploads=227 resident_reuses=0 mapping_offset_uploads=1 mapping_rebound_blocks=0 mapping_residency_rung=prefault expert_mapping_candidate_uploads=0 expert_mapping_missed_uploads=0 nocopy_cache_len=1 resident_cache_len=227 resident_cache_bytes=1143808 uniform_cache_len=0 phys_footprint_bytes=247523008 device_allocated_bytes=3354902528 output_buffer_allocations=322 output_buffer_allocated_bytes=3169872 checkpoint_mapping_buffer_bytes=3349528576 expert_mapping_buffer_bytes=0 plan_uniform_writes=1150 retire_scan_calls=1699 retire_scan_ms=0.114416 expert_buffers_lookup_calls=1150 expert_buffers_lookup_ms=0.015958 placement_resolve_calls=1150 placement_resolve_ms=3.064125 loop_head_calls=1150 loop_head_ms=1.435875 encoder_finish_ms=0.003666 pre_encode_calls=1 pre_encode_ms=34.614791 resolve_plan_ms=19.238458 prepare_infer_ms=0.486583 prepare_validate_ms=0.11275 prepare_bind_ms=15.888333 prepare_optimize_ms=1.622416 prepare_retire_ms=0.431708 build_plan_uniforms_ms=3.039375 resolve_steps_ms=33.235833 uniform_buffer_allocations=1150 barriers=0 barriers_raw=0 barriers_waw=0 barriers_war=0 barriers_waw_war_arena_recycled=0 barriers_waw_war_persistent=0 expert_source_cache_hits=0 expert_source_cache_misses=0 expert_source_cache_cold_misses=0 expert_source_cache_replacement_misses=0 expert_source_reuse_copy_bytes=0 expert_source_reuse_copy_ms=0 plan_cache_len=1 plan_hits=0 plan_misses=1 plan_refits=0 plan_arena_allocated_bytes=3071184 segment_arena_allocated_bytes=0 placed_arena_allocated_bytes=0 ablation=false kind_filter=
+2026-10-02T17:24:33.114459666Z INFO proxima_model_interop::generate::load_model: device_memory_by_class: load-time device allocation broken out by class step=0 weights_nocopy_bytes=786432 weights_copied_bytes=1555516 weights_offset_bytes=330301440 kv_cache_device_bytes=0 kv_cache_device_bytes_known=false device_allocated_bytes=3354902528 phys_footprint_bytes=247523008
+token_event token_id=236761 text_piece="." step=1 elapsed_ms=252
+2026-10-02T17:24:33.186745041Z INFO proxima_model_interop::generate::load_model: token_breakdown: per-decode-step wall-clock attribution step=1 new_count=1 cached_len_before=6 step_wall_ms=72.141791 apply_serving_config_ms=0.000416 build_position_inputs_ms=0.004041 named_blocks_weights_ms=0.055125 named_blocks_kv_ms=0.053041 kv_cache_upload_bytes=811008 ssm_state_transfer_bytes=0 evaluate_ms=71.464333 layer_cache_append_ms=0.042416 layer_cache_append_bytes=36864 greedy_pick_ms=0.424833
+2026-10-02T17:24:33.186746500Z INFO proxima_model_interop::generate::decode: token_attribution: per-step kernel/dispatch/park-spin-wake split step=1 evaluate_ms=71.464333 kernel_ms=0 dispatch_ms=0 park_spin_wake_ms=0 residual_ms=71.464333 residual_underflow=false named_plus_residual_ms=71.464333 cached_attention_ops=35
+2026-10-02T17:24:33.186746833Z INFO proxima_model_interop::generate::decode: token_quantize_calls: redundant-activation-quantize hypothesis check step=1 total_calls=0 distinct_nodes=0 cache_hits=0
+2026-10-02T17:24:33.186765583Z INFO proxima_model_interop::generate::load_model: token_breakdown_metal: per-decode-step metal stage attribution step=1 prepare_calls=1 prepare_ms=18.667541 emit_calls=0 emit_ms=0 pipeline_hits=1142 pipeline_misses=8 pipeline_compile_ms=4.018458 block_upload_calls=54 block_upload_ms=0 block_offered_bytes=1182740 block_copied_bytes=396308 block_nocopy_bound_bytes=786432 block_offset_bound_bytes=0 op_setup_calls=1150 op_setup_ms=0.02825 pipeline_lookup_calls=0 pipeline_lookup_ms=0 encode_dispatch_calls=1150 physical_dispatch_calls=1185 encode_dispatch_ms=1.555083 gpu_exec_calls=8 gpu_exec_ms=17.231708 readback_calls=46 readback_ms=0.173125 readback_bytes=1085440 nocopy_uploads=28 copying_uploads=26 nocopy_reuses=0 resident_uploads=0 resident_reuses=0 mapping_offset_uploads=0 mapping_rebound_blocks=0 mapping_residency_rung=prefault expert_mapping_candidate_uploads=0 expert_mapping_missed_uploads=0 nocopy_cache_len=1 resident_cache_len=227 resident_cache_bytes=1143808 uniform_cache_len=1 phys_footprint_bytes=261515008 device_allocated_bytes=3364683776 output_buffer_allocations=356 output_buffer_allocated_bytes=12468252 checkpoint_mapping_buffer_bytes=3349528576 expert_mapping_buffer_bytes=0 plan_uniform_writes=1150 retire_scan_calls=1699 retire_scan_ms=0.112458 expert_buffers_lookup_calls=1150 expert_buffers_lookup_ms=0.015 placement_resolve_calls=1150 placement_resolve_ms=3.009916 loop_head_calls=1150 loop_head_ms=1.4375 encoder_finish_ms=0.000291 pre_encode_calls=1 pre_encode_ms=12.278333 resolve_plan_ms=21.748125 prepare_infer_ms=0.498625 prepare_validate_ms=0.110541 prepare_bind_ms=16.050916 prepare_optimize_ms=1.587916 prepare_retire_ms=0.417458 build_plan_uniforms_ms=2.839375 resolve_steps_ms=11.844083 uniform_buffer_allocations=1150 barriers=0 barriers_raw=0 barriers_waw=0 barriers_war=0 barriers_waw_war_arena_recycled=0 barriers_waw_war_persistent=0 expert_source_cache_hits=0 expert_source_cache_misses=0 expert_source_cache_cold_misses=0 expert_source_cache_replacement_misses=0 expert_source_reuse_copy_bytes=0 expert_source_reuse_copy_ms=0 plan_cache_len=1 plan_hits=0 plan_misses=2 plan_refits=0 plan_arena_allocated_bytes=1386524 segment_arena_allocated_bytes=0 placed_arena_allocated_bytes=0 ablation=false kind_filter=
+token_event token_id=106 text_piece="" step=2 elapsed_ms=268
+2026-10-02T17:24:33.202502916Z INFO proxima_model_interop::generate::load_model: token_breakdown: per-decode-step wall-clock attribution step=2 new_count=1 cached_len_before=7 step_wall_ms=15.723375 apply_serving_config_ms=0.000625 build_position_inputs_ms=0.003708 named_blocks_weights_ms=0.06 named_blocks_kv_ms=0.057583 kv_cache_upload_bytes=823296 ssm_state_transfer_bytes=0 evaluate_ms=15.045916 layer_cache_append_ms=0.034541 layer_cache_append_bytes=36864 greedy_pick_ms=0.424916
+2026-10-02T17:24:33.202504291Z INFO proxima_model_interop::generate::decode: token_attribution: per-step kernel/dispatch/park-spin-wake split step=2 evaluate_ms=15.045916 kernel_ms=0 dispatch_ms=0 park_spin_wake_ms=0 residual_ms=15.045916 residual_underflow=false named_plus_residual_ms=15.045916 cached_attention_ops=35
+2026-10-02T17:24:33.202504583Z INFO proxima_model_interop::generate::decode: token_quantize_calls: redundant-activation-quantize hypothesis check step=2 total_calls=0 distinct_nodes=0 cache_hits=0
+2026-10-02T17:24:33.202517166Z INFO proxima_model_interop::generate::load_model: token_breakdown_metal: per-decode-step metal stage attribution step=2 prepare_calls=0 prepare_ms=0 emit_calls=0 emit_ms=0 pipeline_hits=0 pipeline_misses=0 pipeline_compile_ms=0 block_upload_calls=54 block_upload_ms=0 block_offered_bytes=1182740 block_copied_bytes=396308 block_nocopy_bound_bytes=786432 block_offset_bound_bytes=0 op_setup_calls=896 op_setup_ms=0.024541 pipeline_lookup_calls=0 pipeline_lookup_ms=0 encode_dispatch_calls=896 physical_dispatch_calls=931 encode_dispatch_ms=1.443791 gpu_exec_calls=8 gpu_exec_ms=12.554 readback_calls=46 readback_ms=0.038166 readback_bytes=1085440 nocopy_uploads=28 copying_uploads=26 nocopy_reuses=0 resident_uploads=0 resident_reuses=0 mapping_offset_uploads=0 mapping_rebound_blocks=6 mapping_residency_rung=prefault expert_mapping_candidate_uploads=0 expert_mapping_missed_uploads=0 nocopy_cache_len=1 resident_cache_len=227 resident_cache_bytes=1143808 uniform_cache_len=1 phys_footprint_bytes=261515008 device_allocated_bytes=3364683776 output_buffer_allocations=0 output_buffer_allocated_bytes=0 checkpoint_mapping_buffer_bytes=3349528576 expert_mapping_buffer_bytes=0 plan_uniform_writes=0 retire_scan_calls=1699 retire_scan_ms=0.1155 expert_buffers_lookup_calls=896 expert_buffers_lookup_ms=0.012291 placement_resolve_calls=896 placement_resolve_ms=0.011125 loop_head_calls=1150 loop_head_ms=0.183791 encoder_finish_ms=0.000208 pre_encode_calls=1 pre_encode_ms=0.293958 resolve_plan_ms=0.000333 prepare_infer_ms=0 prepare_validate_ms=0 prepare_bind_ms=0 prepare_optimize_ms=0 prepare_retire_ms=0 build_plan_uniforms_ms=0 resolve_steps_ms=0 uniform_buffer_allocations=0 barriers=0 barriers_raw=0 barriers_waw=0 barriers_war=0 barriers_waw_war_arena_recycled=0 barriers_waw_war_persistent=0 expert_source_cache_hits=0 expert_source_cache_misses=0 expert_source_cache_cold_misses=0 expert_source_cache_replacement_misses=0 expert_source_reuse_copy_bytes=0 expert_source_reuse_copy_ms=0 plan_cache_len=1 plan_hits=1 plan_misses=2 plan_refits=0 plan_arena_allocated_bytes=1386524 segment_arena_allocated_bytes=0 placed_arena_allocated_bytes=0 ablation=false kind_filter=
+token_event token_id=106 text_piece="" step=3 elapsed_ms=283
+2026-10-02T17:24:33.218088375Z INFO proxima_model_interop::generate::load_model: token_breakdown: per-decode-step wall-clock attribution step=3 new_count=1 cached_len_before=8 step_wall_ms=15.561625 apply_serving_config_ms=0.000375 build_position_inputs_ms=0.00325 named_blocks_weights_ms=0.053375 named_blocks_kv_ms=0.051375 kv_cache_upload_bytes=835584 ssm_state_transfer_bytes=0 evaluate_ms=14.897958 layer_cache_append_ms=0.034458 layer_cache_append_bytes=36864 greedy_pick_ms=0.424541
+2026-10-02T17:24:33.218089541Z INFO proxima_model_interop::generate::decode: token_attribution: per-step kernel/dispatch/park-spin-wake split step=3 evaluate_ms=14.897958 kernel_ms=0 dispatch_ms=0 park_spin_wake_ms=0 residual_ms=14.897958 residual_underflow=false named_plus_residual_ms=14.897958 cached_attention_ops=35
+2026-10-02T17:24:33.218089791Z INFO proxima_model_interop::generate::decode: token_quantize_calls: redundant-activation-quantize hypothesis check step=3 total_calls=0 distinct_nodes=0 cache_hits=0
+2026-10-02T17:24:33.218104333Z INFO proxima_model_interop::generate::load_model: token_breakdown_metal: per-decode-step metal stage attribution step=3 prepare_calls=0 prepare_ms=0 emit_calls=0 emit_ms=0 pipeline_hits=0 pipeline_misses=0 pipeline_compile_ms=0 block_upload_calls=54 block_upload_ms=0 block_offered_bytes=1182740 block_copied_bytes=396308 block_nocopy_bound_bytes=786432 block_offset_bound_bytes=0 op_setup_calls=896 op_setup_ms=0.025125 pipeline_lookup_calls=0 pipeline_lookup_ms=0 encode_dispatch_calls=896 physical_dispatch_calls=931 encode_dispatch_ms=1.434916 gpu_exec_calls=8 gpu_exec_ms=12.456291 readback_calls=46 readback_ms=0.038166 readback_bytes=1085440 nocopy_uploads=28 copying_uploads=26 nocopy_reuses=0 resident_uploads=0 resident_reuses=0 mapping_offset_uploads=0 mapping_rebound_blocks=4 mapping_residency_rung=prefault expert_mapping_candidate_uploads=0 expert_mapping_missed_uploads=0 nocopy_cache_len=1 resident_cache_len=227 resident_cache_bytes=1143808 uniform_cache_len=1 phys_footprint_bytes=261515008 device_allocated_bytes=3364683776 output_buffer_allocations=0 output_buffer_allocated_bytes=0 checkpoint_mapping_buffer_bytes=3349528576 expert_mapping_buffer_bytes=0 plan_uniform_writes=0 retire_scan_calls=1699 retire_scan_ms=0.117416 expert_buffers_lookup_calls=896 expert_buffers_lookup_ms=0.011833 placement_resolve_calls=896 placement_resolve_ms=0.010583 loop_head_calls=1150 loop_head_ms=0.173583 encoder_finish_ms=0.000166 pre_encode_calls=1 pre_encode_ms=0.287958 resolve_plan_ms=0.000083 prepare_infer_ms=0 prepare_validate_ms=0 prepare_bind_ms=0 prepare_optimize_ms=0 prepare_retire_ms=0 build_plan_uniforms_ms=0 resolve_steps_ms=0 uniform_buffer_allocations=0 barriers=0 barriers_raw=0 barriers_waw=0 barriers_war=0 barriers_waw_war_arena_recycled=0 barriers_waw_war_persistent=0 expert_source_cache_hits=0 expert_source_cache_misses=0 expert_source_cache_cold_misses=0 expert_source_cache_replacement_misses=0 expert_source_reuse_copy_bytes=0 expert_source_reuse_copy_ms=0 plan_cache_len=1 plan_hits=2 plan_misses=2 plan_refits=0 plan_arena_allocated_bytes=1386524 segment_arena_allocated_bytes=0 placed_arena_allocated_bytes=0 ablation=false kind_filter=
+token_event token_id=107 text_piece="\n" step=4 elapsed_ms=299
+2026-10-02T17:24:33.234071916Z INFO proxima_model_interop::generate::load_model: token_breakdown: per-decode-step wall-clock attribution step=4 new_count=1 cached_len_before=9 step_wall_ms=15.959125 apply_serving_config_ms=0.000125 build_position_inputs_ms=0.003416 named_blocks_weights_ms=0.053416 named_blocks_kv_ms=0.0515 kv_cache_upload_bytes=847872 ssm_state_transfer_bytes=0 evaluate_ms=15.285 layer_cache_append_ms=0.033625 layer_cache_append_bytes=36864 greedy_pick_ms=0.435208
+2026-10-02T17:24:33.234073375Z INFO proxima_model_interop::generate::decode: token_attribution: per-step kernel/dispatch/park-spin-wake split step=4 evaluate_ms=15.285 kernel_ms=0 dispatch_ms=0 park_spin_wake_ms=0 residual_ms=15.285 residual_underflow=false named_plus_residual_ms=15.285 cached_attention_ops=35
+2026-10-02T17:24:33.234073666Z INFO proxima_model_interop::generate::decode: token_quantize_calls: redundant-activation-quantize hypothesis check step=4 total_calls=0 distinct_nodes=0 cache_hits=0
+2026-10-02T17:24:33.234085541Z INFO proxima_model_interop::generate::load_model: token_breakdown_metal: per-decode-step metal stage attribution step=4 prepare_calls=0 prepare_ms=0 emit_calls=0 emit_ms=0 pipeline_hits=0 pipeline_misses=0 pipeline_compile_ms=0 block_upload_calls=54 block_upload_ms=0 block_offered_bytes=1182740 block_copied_bytes=396308 block_nocopy_bound_bytes=786432 block_offset_bound_bytes=0 op_setup_calls=896 op_setup_ms=0.023625 pipeline_lookup_calls=0 pipeline_lookup_ms=0 encode_dispatch_calls=896 physical_dispatch_calls=931 encode_dispatch_ms=1.425666 gpu_exec_calls=8 gpu_exec_ms=12.779583 readback_calls=46 readback_ms=0.117541 readback_bytes=1085440 nocopy_uploads=28 copying_uploads=26 nocopy_reuses=0 resident_uploads=0 resident_reuses=0 mapping_offset_uploads=0 mapping_rebound_blocks=5 mapping_residency_rung=prefault expert_mapping_candidate_uploads=0 expert_mapping_missed_uploads=0 nocopy_cache_len=1 resident_cache_len=227 resident_cache_bytes=1143808 uniform_cache_len=1 phys_footprint_bytes=262579968 device_allocated_bytes=3364683776 output_buffer_allocations=0 output_buffer_allocated_bytes=0 checkpoint_mapping_buffer_bytes=3349528576 expert_mapping_buffer_bytes=0 plan_uniform_writes=0 retire_scan_calls=1699 retire_scan_ms=0.110208 expert_buffers_lookup_calls=896 expert_buffers_lookup_ms=0.01175 placement_resolve_calls=896 placement_resolve_ms=0.008958 loop_head_calls=1150 loop_head_ms=0.169666 encoder_finish_ms=0.000291 pre_encode_calls=1 pre_encode_ms=0.2915 resolve_plan_ms=0.000083 prepare_infer_ms=0 prepare_validate_ms=0 prepare_bind_ms=0 prepare_optimize_ms=0 prepare_retire_ms=0 build_plan_uniforms_ms=0 resolve_steps_ms=0 uniform_buffer_allocations=0 barriers=0 barriers_raw=0 barriers_waw=0 barriers_war=0 barriers_waw_war_arena_recycled=0 barriers_waw_war_persistent=0 expert_source_cache_hits=0 expert_source_cache_misses=0 expert_source_cache_cold_misses=0 expert_source_cache_replacement_misses=0 expert_source_reuse_copy_bytes=0 expert_source_reuse_copy_ms=0 plan_cache_len=1 plan_hits=3 plan_misses=2 plan_refits=0 plan_arena_allocated_bytes=1386524 segment_arena_allocated_bytes=0 placed_arena_allocated_bytes=0 ablation=false kind_filter=
+backend_requested = GPU/METAL (requested, gpu_layers = GPU_LAYERS_ALL)
+generate_ms = 318.987
+tokens_generated = 5
+tokens_per_sec = 15.675
+stopped_by_eos = true
+generated_ids = [9079, 236761, 106, 106, 107]
+generated_text = " Paris.\n"
+ttft_ms = 180
+ttnt_sample_count = 4
+ttnt_min_ms = 15
+ttnt_max_ms = 72
+ttnt_mean_ms = 29.750
+ttnt_two_standard_deviations_ms = 48.793
+ttnt_p90_ms = 72
+ttnt_p99_ms = 72
+decode_tokens_per_sec = 33.613
+nocopy_buffer_uploads = 0
+nocopy_buffer_reuses = 0
+mapping_offset_uploads = 0
+resident_buffer_uploads = 0
+resident_buffer_reuses = 0
+copying_buffer_uploads = 0
+device_current_allocated_size = Some(3351494656)
+nocopy_cache_len = 1
+peak_rss_bytes = 3654959104
+2026-10-02T17:24:33.250190666Z INFO proxima_model_interop::generate::load_model: token_breakdown: per-decode-step wall-clock attribution step=5 new_count=1 cached_len_before=10 step_wall_ms=16.095208 apply_serving_config_ms=0.000166 build_position_inputs_ms=0.00325 named_blocks_weights_ms=0.057041 named_blocks_kv_ms=0.051916 kv_cache_upload_bytes=860160 ssm_state_transfer_bytes=0 evaluate_ms=15.421416 layer_cache_append_ms=0.033833 layer_cache_append_bytes=36864 greedy_pick_ms=0.434125
+2026-10-02T17:24:33.250191875Z INFO proxima_model_interop::generate::decode: token_attribution: per-step kernel/dispatch/park-spin-wake split step=5 evaluate_ms=15.421416 kernel_ms=0 dispatch_ms=0 park_spin_wake_ms=0 residual_ms=15.421416 residual_underflow=false named_plus_residual_ms=15.421416 cached_attention_ops=35
+2026-10-02T17:24:33.250192166Z INFO proxima_model_interop::generate::decode: token_quantize_calls: redundant-activation-quantize hypothesis check step=5 total_calls=0 distinct_nodes=0 cache_hits=0
+2026-10-02T17:24:33.250203583Z INFO proxima_model_interop::generate::load_model: token_breakdown_metal: per-decode-step metal stage attribution step=5 prepare_calls=0 prepare_ms=0 emit_calls=0 emit_ms=0 pipeline_hits=0 pipeline_misses=0 pipeline_compile_ms=0 block_upload_calls=54 block_upload_ms=0 block_offered_bytes=1182740 block_copied_bytes=396308 block_nocopy_bound_bytes=786432 block_offset_bound_bytes=0 op_setup_calls=896 op_setup_ms=0.028333 pipeline_lookup_calls=0 pipeline_lookup_ms=0 encode_dispatch_calls=896 physical_dispatch_calls=931 encode_dispatch_ms=1.3985 gpu_exec_calls=8 gpu_exec_ms=13.028333 readback_calls=46 readback_ms=0.035833 readback_bytes=1085440 nocopy_uploads=28 copying_uploads=26 nocopy_reuses=0 resident_uploads=0 resident_reuses=0 mapping_offset_uploads=0 mapping_rebound_blocks=6 mapping_residency_rung=prefault expert_mapping_candidate_uploads=0 expert_mapping_missed_uploads=0 nocopy_cache_len=1 resident_cache_len=227 resident_cache_bytes=1143808 uniform_cache_len=1 phys_footprint_bytes=262629120 device_allocated_bytes=3364683776 output_buffer_allocations=0 output_buffer_allocated_bytes=0 checkpoint_mapping_buffer_bytes=3349528576 expert_mapping_buffer_bytes=0 plan_uniform_writes=0 retire_scan_calls=1699 retire_scan_ms=0.104291 expert_buffers_lookup_calls=896 expert_buffers_lookup_ms=0.011041 placement_resolve_calls=896 placement_resolve_ms=0.010041 loop_head_calls=1150 loop_head_ms=0.166375 encoder_finish_ms=0.00025 pre_encode_calls=1 pre_encode_ms=0.301875 resolve_plan_ms=0.000416 prepare_infer_ms=0 prepare_validate_ms=0 prepare_bind_ms=0 prepare_optimize_ms=0 prepare_retire_ms=0 build_plan_uniforms_ms=0 resolve_steps_ms=0 uniform_buffer_allocations=0 barriers=0 barriers_raw=0 barriers_waw=0 barriers_war=0 barriers_waw_war_arena_recycled=0 barriers_waw_war_persistent=0 expert_source_cache_hits=0 expert_source_cache_misses=0 expert_source_cache_cold_misses=0 expert_source_cache_replacement_misses=0 expert_source_reuse_copy_bytes=0 expert_source_reuse_copy_ms=0 plan_cache_len=1 plan_hits=4 plan_misses=2 plan_refits=0 plan_arena_allocated_bytes=1386524 segment_arena_allocated_bytes=0 placed_arena_allocated_bytes=0 ablation=false kind_filter=
