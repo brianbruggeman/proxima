@@ -219,14 +219,14 @@ pub mod similarity;
 pub mod error;
 #[cfg(feature = "instrument")]
 pub mod instrument;
-#[cfg(feature = "std")]
-pub mod process_usage;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod live;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod lowered;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod map;
+#[cfg(feature = "std")]
+pub mod process_usage;
 // pure over `NumericPolicy`/`NumericRewrite`/`TensorError` -- no alloc, no
 // std -- so it lives ungated at the same `alloc`+ tier `error` needs for the
 // `TensorError` variant it constructs.
@@ -239,6 +239,7 @@ pub mod op;
 /// the mode is allocation free so serving configuration can retain it without
 /// enabling the std graph builder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LoopCdMode {
     #[default]
     Disabled,

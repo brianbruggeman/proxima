@@ -2659,6 +2659,8 @@ pub(super) mod memory_fit_gate_tests {
             moe_sites: proxima_tensor::spec::MoeSites::default(),
             duplicate_head_roots: Vec::new(),
             single_position_step: false,
+            recurrent: crate::RecurrentConfig::neutral(),
+            recurrent_readouts: None,
             recurrent_routed_interval_hparams: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range: None,

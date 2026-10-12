@@ -79,10 +79,13 @@ mod memory_fit;
 pub mod profiles;
 #[cfg(feature = "std")]
 mod prompt_cache_settings;
+mod recurrent_config;
 #[cfg(feature = "std")]
 mod quality;
 #[cfg(feature = "std")]
 mod recurrent_interval;
+#[cfg(feature = "std")]
+mod recurrent_settings;
 pub mod rope_scaling;
 mod serving;
 mod serving_grammar;
@@ -153,6 +156,9 @@ pub use lowering::{
 };
 #[cfg(feature = "std")]
 pub use prompt_cache_settings::PromptCacheSettings;
+pub use recurrent_config::RecurrentConfig;
+#[cfg(feature = "std")]
+pub use recurrent_settings::RecurrentSettings;
 #[cfg(feature = "std")]
 pub use proxima_core::ServingState;
 #[cfg(all(feature = "std", feature = "instrument"))]

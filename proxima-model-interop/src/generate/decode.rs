@@ -35,7 +35,6 @@ fn emit_request_speculative_stats(request: &SpeculativeDecodeStats) {
     );
 }
 
-
 /// Measurement-only edge switch: mirrors `ServingConfig`'s three fusion
 /// bools into the process env vars `proxima_tensor::bind::bind_with_fusion`
 /// already reads (`PROXIMA_DISABLE_CACHED_ATTENTION_FUSION` pre-existing;
@@ -7465,20 +7464,61 @@ did not hold every cached position)",
             #[cfg(all(feature = "metal", target_os = "macos"))]
             omega::MathMode::default(),
         );
-        #[cfg(feature = "metal")]
-        validate_omega_runtime_config(&serving_config)?;
-        self.apply_context_resolution(&mut serving_config)?;
-        let mut runtime = BackendRuntime::new(&serving_config);
-
+        serving_config.recurrent = self.recurrent;
         let ids = proxima_tokenizer::encode_with_bos_eos(
             prompt,
             &self.vocab,
             wants_bos(&self.vocab),
             self.vocab.add_eos_token().unwrap_or(false),
         )?;
+        self.forward_node_values_from_ids(&ids, node_ids, &serving_config)
+    }
+
+    /// [`Self::forward_node_values_on_backend`] over caller-chosen token ids
+    /// and the caller's whole [`ServingConfig`]: one forward from an empty
+    /// cache over exactly `ids`, no BOS or EOS added, reading back `node_ids`.
+    /// The ids are the ones a frozen prefix names, so a diagnostic compares
+    /// token for token; the config carries the backend, the numeric policy and
+    /// the recurrent policy the graph must have been lowered under
+    /// ([`Self::admit_recurrent`]).
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::EmptyForwardTokens`] for no ids,
+    /// [`InteropError::InvalidForwardToken`] for an id outside the vocabulary,
+    /// the recurrent admission errors, and whatever
+    /// [`Self::forward_node_values_on_backend`] can fail with.
+    pub fn forward_node_values_from_ids(
+        &self,
+        ids: &[u32],
+        node_ids: &[NodeId],
+        serving_config: &ServingConfig,
+    ) -> Result<Vec<Vec<f32>>, InteropError> {
+        self.admit_recurrent(serving_config)?;
+        if ids.is_empty() {
+            return Err(InteropError::EmptyForwardTokens);
+        }
+        let vocab = self.architecture.vocab as usize;
+        if let Some((position, token)) = ids
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, token)| *token as usize >= vocab)
+        {
+            return Err(InteropError::InvalidForwardToken {
+                position,
+                token,
+                vocab,
+            });
+        }
+        let mut serving_config = *serving_config;
+        #[cfg(feature = "metal")]
+        validate_omega_runtime_config(&serving_config)?;
+        self.apply_context_resolution(&mut serving_config)?;
+        let mut runtime = BackendRuntime::new(&serving_config);
         apply_serving_config(&serving_config, ids.len())?;
         let inputs = build_position_inputs(
-            &ids,
+            ids,
             0,
             self.architecture.head_dim,
             self.architecture.rope_freq_base,

@@ -46,7 +46,7 @@ use proxima_gguf::tensor::TensorInfo;
 use proxima_gguf::types::GgmlType;
 #[cfg(feature = "std")]
 use proxima_tensor::op::Op;
-use proxima_tensor::spec::ModelDescriptor;
+use proxima_tensor::spec::{ModelDescriptor, RecurrenceConfig};
 
 use crate::error::InteropError;
 #[cfg(feature = "std")]
@@ -530,6 +530,25 @@ impl ModelHparams {
             block_count: descriptor.block_count,
             expert_count: descriptor.expert_count,
             expert_used_count: descriptor.expert_used_count,
+            ..self.clone()
+        }
+    }
+
+    /// This architecture at the logical depth of `recurrence`: the physical
+    /// schedule's block count and per-layer KV heads repeated once per
+    /// iteration, which is how many cache owners the lowered graph declares. A
+    /// schedule that does not recur is returned unchanged. Weights stay
+    /// physical; only the state a decode loop sizes per layer follows this.
+    #[must_use]
+    pub fn logical(&self, recurrence: Option<RecurrenceConfig>) -> Self {
+        let Some(recurrence) = recurrence else {
+            return self.clone();
+        };
+        Self {
+            block_count: self.block_count.saturating_mul(recurrence.iterations),
+            kv_heads_by_layer: self
+                .kv_heads_by_layer
+                .repeat(recurrence.iterations as usize),
             ..self.clone()
         }
     }

@@ -48,6 +48,54 @@ impl<'file> LoadedModel<'file> {
     pub fn hidden_root(&self) -> Option<NodeId> {
         self.hidden_root
     }
+    /// The recurrence and LoopCD policy this model's graph was lowered under;
+    /// neutral for an ordinary forward.
+    #[must_use]
+    pub fn recurrent_config(&self) -> RecurrentConfig {
+        self.recurrent
+    }
+
+    /// Refuses a serving call whose recurrence policy names a different graph
+    /// than the one this model lowered, before any plan lookup, prefill or
+    /// cache write: the policy is part of the lowered program, so a call cannot
+    /// retarget it mid-prefix. An ordinary model refuses any non-neutral policy
+    /// as unsupported instead.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::UnsupportedRecurrentConfig`] when an ordinary model is
+    /// asked for recurrence; [`InteropError::InvalidRecurrentConfig`] when a
+    /// recurrent model is asked for a different depth, mode, strength or
+    /// reference pass than it resolved.
+    pub(super) fn admit_recurrent(&self, config: &ServingConfig) -> Result<(), InteropError> {
+        if self.recurrent.matches_model(config.recurrent) {
+            return Ok(());
+        }
+        if self.recurrent.is_neutral() {
+            return Err(InteropError::UnsupportedRecurrentConfig {
+                family: self.architecture.family.clone(),
+            });
+        }
+        Err(InteropError::InvalidRecurrentConfig {
+            reason: "serving policy names a different recurrent graph than the loaded model",
+        })
+    }
+
+    /// The vocabulary-logits root a generation step samples from, one row of
+    /// `vocab` values (`ForwardProgram::logits`); a caller requests it as an
+    /// output node of [`Self::forward_node_values_from_ids`].
+    #[must_use]
+    pub fn logits_root(&self) -> NodeId {
+        self.logits_root
+    }
+
+    /// The roots for the completed recurrence boundaries of this graph, when
+    /// it recurs: the raw and normalized states and the logits at the
+    /// reference and terminal passes. `None` for an ordinary forward.
+    #[must_use]
+    pub fn recurrent_readout_roots(&self) -> Option<&proxima_tensor::spec::RecurrentReadoutRoots> {
+        self.recurrent_readouts.as_ref()
+    }
 
     /// Router-logit roots aligned with the routed layers of this model.
     /// These are the exact nodes already used by the production MoE graph;
@@ -2761,7 +2809,15 @@ impl<'file> LoadedModel<'file> {
         let expert_slab =
             crate::bind::build_expert_slab(&bound.architecture, &bound.program, &bound.weights);
         let rope_scaling = RopeScaling::from_gguf(parsed)?;
-        let kv_layers = kv_layers_for_layout(kv_layout, crate::lowering::kv_layers(parsed)?);
+        let kv_layers = kv_layers_for_layout(
+            kv_layout,
+            crate::lowering::kv_layers(parsed)?.repeat(
+                bound
+                    .recurrent
+                    .iterations
+                    .map_or(1, |iterations| iterations as usize),
+            ),
+        );
         Self {
             expert_slab: Mutex::new(expert_slab),
             expert_sidecar: None,
@@ -2803,6 +2859,8 @@ impl<'file> LoadedModel<'file> {
             moe_sites: bound.moe_sites,
             duplicate_head_roots: bound.duplicate_head_roots,
             single_position_step: bound.single_position_step,
+            recurrent: bound.recurrent,
+            recurrent_readouts: bound.readouts,
             recurrent_routed_interval_hparams: (profile.ffn_routing == FfnRouting::Routed)
                 .then(|| crate::recurrent_routed_interval::hparams::from_metadata(parsed).ok())
                 .flatten(),
@@ -2942,6 +3000,8 @@ impl<'file> LoadedModel<'file> {
             moe_sites,
             duplicate_head_roots: Vec::new(),
             single_position_step: false,
+            recurrent: RecurrentConfig::neutral(),
+            recurrent_readouts: None,
             recurrent_routed_interval_hparams: None,
             // safetensors carries no `general.name`-equivalent key this
             // crate reads (`Self::model_name`'s own doc).

@@ -116,6 +116,9 @@ impl CacheKey {
             // row depends on it (rope enters through `rope_scaling`)
             context_length: _,
             rope_scaling: _,
+            // graph-bound at load: admission refuses any config that names a
+            // different recurrence, so one model's entries share one identity
+            recurrent: _,
             // admission rejects every value but 1
             parallel_sequences: _,
             // admission rejects every value but F32

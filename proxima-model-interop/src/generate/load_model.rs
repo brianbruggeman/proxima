@@ -946,6 +946,14 @@ pub struct LoadedModel<'file> {
     /// branch -- and swaps it into `program`/`logits_root`/`layer_roots`/
     /// `single_position_step` for exactly that one evaluation, restoring
     /// the ordinary `Extent::Symbolic(0)` decode program right after.
+    /// The recurrence and LoopCD policy this model's graph was lowered under,
+    /// resolved against the checkpoint at load: neutral for an ordinary
+    /// forward. Every serving call is admitted against it
+    /// ([`Self::admit_recurrent`]).
+    pub(super) recurrent: RecurrentConfig,
+    /// The completed-pass roots of a recurrent graph
+    /// ([`proxima_tensor::spec::ForwardProgram::readouts`]); `None` otherwise.
+    pub(super) recurrent_readouts: Option<proxima_tensor::spec::RecurrentReadoutRoots>,
     pub(super) recurrent_routed_interval_hparams:
         Option<crate::recurrent_routed_interval::hparams::RecurrentRoutedIntervalHparams>,
     /// The single-range, device-resident-KV counterpart of `program`/
