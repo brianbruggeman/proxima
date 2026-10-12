@@ -1900,36 +1900,15 @@ pub(super) fn fill_running_offsets(resolved: &BoundOp, coordinate: &[u64], runni
     }
 }
 
-/// Dispatches one elementwise node across the cohort when a `session` is
-/// open, the node clears [`PARALLEL_THRESHOLD`], and there is more than one
-/// outer position to spread across workers. [`BoundOp::split`] only chunks
-/// the outermost *axis* (`split_axis`'s own doc), which for this program's
-/// shapes is the sequence dim — 6 for the forward pass this was measured
-/// against, smaller than `workers` on any real box, so every elementwise
-/// node fell through to the sequential fallback and the split never fired
-/// (`DIAG elementwise_split_none`, measured against every node above
-/// threshold). The fix chunks the same *flattened* outer-position space
-/// [`run_elementwise`]'s own loop already walks instead: each outer
-/// position writes an independent, contiguous `inner_len`-wide row of
-/// `output` (`fill_running_offsets`/`fill_gather_cursors` reseed fresh from
-/// that position's own coordinate every iteration, so no state carries
-/// across positions — see their own docs), so a contiguous range of
-/// positions is exactly as independent as [`matmul_rows_threaded`]'s row
-/// ranges, without needing [`BoundOp::split`]'s single-axis rebase at all.
-/// Reuses [`row_chunk_count`] (rows = outer positions, contraction width =
-/// `inner_len`) for the same oversubscription/macs-floor policy
-/// [`matmul_rows_threaded`] already tunes, rather than a second policy for
-/// this axis. Falls straight through to [`run_elementwise`] whenever any
-/// gate fails: no session, too few elements, or too few outer positions to
-/// clear even a one-chunk-per-worker split.
+/// A gather over exactly one operand whose body is a bare `Identity` and
+/// whose operand is an outer-indexed, row-major slab (a 2-D embedding table
+/// read by row, or an expert stack `[experts, out, in]` read as
+/// `[tokens, out, in]`). Returns the source node and its lookup; any other
+/// shape (second operand, extra body step, strided slab) falls back to the
+/// ordinary f32 [`run_elementwise_dispatch`] path.
 ///
-/// Whether `resolved` is a whole-row gather over a single operand with an
-/// `Identity` body — the exact shape `proxima-tensor/src/spec.rs`'s
-/// `embedding_lookup` emits (`table[ids[s], d]`), and the only
-/// [`BoundOpKind::Elementwise`] shape a packed, non-`Float32` operand can
-/// answer without dequantizing anything but the rows actually read. A
-/// second operand, or any body step beyond a bare passthrough, falls back
-/// to the ordinary f32 [`run_elementwise_dispatch`] path.
+/// Shape only: whether the source is actually packed is
+/// [`packed_gather_read`]'s question.
 pub(super) fn quantized_gather_operand(resolved: &BoundOp) -> Option<(NodeId, bind::Lookup)> {
     if !matches!(resolved.kind, BoundOpKind::Elementwise { .. }) {
         return None;
@@ -1982,13 +1961,15 @@ fn is_row_major_slab(strides: &[i64], slab_extents: &[u64]) -> bool {
     *outer_stride == 0 && slab_strides.len() == slab_extents.len() && row_major
 }
 
-/// The one definition of "this consumer reads its operand straight out of
-/// packed bytes": a [`quantized_gather_operand`] shape whose source is a
-/// packed weight in `quantized_weights` and whose row width lands on the
-/// codec's block boundary. [`run_node_into`] dispatches on it and
-/// [`non_primary_operand_reads`] excludes exactly these consumers from the
-/// operands that must be materialized as f32, so the executor that runs and
-/// the buffers that exist can never disagree.
+/// Accepts a [`quantized_gather_operand`] consumer whose source is a packed
+/// weight in `quantized_weights` and whose slab width lands on the codec's
+/// block boundary; returns the lookup and that weight's block.
+///
+/// This is the single definition shared by [`run_node_into`], which
+/// dispatches such a consumer to the packed executor, and
+/// [`non_primary_operand_reads`], which leaves exactly these consumers'
+/// operands unmaterialized. Two definitions could disagree, leaving an
+/// operand neither read packed nor dequantized.
 pub(super) fn packed_gather_read<'weights, 'block>(
     resolved: &BoundOp,
     quantized_weights: Option<&'weights BTreeMap<NodeId, QuantizedBlock<'block>>>,

@@ -1,5 +1,27 @@
 use super::*;
 
+/// Dispatches one elementwise node across the cohort when a `session` is
+/// open, the node clears [`PARALLEL_THRESHOLD`], and there is more than one
+/// outer position to spread across workers. [`BoundOp::split`] only chunks
+/// the outermost *axis* (`split_axis`'s own doc), which for this program's
+/// shapes is the sequence dim — 6 for the forward pass this was measured
+/// against, smaller than `workers` on any real box, so every elementwise
+/// node fell through to the sequential fallback and the split never fired
+/// (`DIAG elementwise_split_none`, measured against every node above
+/// threshold). The fix chunks the same *flattened* outer-position space
+/// [`run_elementwise`]'s own loop already walks instead: each outer
+/// position writes an independent, contiguous `inner_len`-wide row of
+/// `output` (`fill_running_offsets`/`fill_gather_cursors` reseed fresh from
+/// that position's own coordinate every iteration, so no state carries
+/// across positions — see their own docs), so a contiguous range of
+/// positions is exactly as independent as [`matmul_rows_threaded`]'s row
+/// ranges, without needing [`BoundOp::split`]'s single-axis rebase at all.
+/// Reuses [`row_chunk_count`] (rows = outer positions, contraction width =
+/// `inner_len`) for the same oversubscription/macs-floor policy
+/// [`matmul_rows_threaded`] already tunes, rather than a second policy for
+/// this axis. Falls straight through to [`run_elementwise`] whenever any
+/// gate fails: no session, too few elements, or too few outer positions to
+/// clear even a one-chunk-per-worker split.
 pub(super) fn run_elementwise_dispatch<B: Deref<Target = [f32]> + Sync>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
