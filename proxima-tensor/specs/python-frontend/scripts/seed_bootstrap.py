@@ -246,6 +246,8 @@ def precommit(args: argparse.Namespace) -> None:
 
 
 def finalize(args: argparse.Namespace, output: bool = True, write_record: bool = True) -> dict:
+    if args.card_id == "00a1":
+        return finalize_follow_on(args, output=output, write_record=write_record)
     root = args.finalize
     receipt, rows, payload = validate_entry(root, args.raw, args.repo_root)
     for token, marker in [
@@ -370,6 +372,85 @@ def finalize(args: argparse.Namespace, output: bool = True, write_record: bool =
     return record
 
 
+def finalize_follow_on(args: argparse.Namespace, output: bool = True, write_record: bool = True) -> dict:
+    root = args.finalize
+    if args.card_id != "00a1":
+        fail("follow-on card identity mismatch")
+    active = read_json(root / "active-verifier.json")
+    functional = read_json(root / "functional-check.json")
+    precommit = read_json(root / "precommit-check.json")
+    verifier_path = pathlib.Path(active.get("source_path", ""))
+    if not verifier_path.is_file() or hashlib.sha256(verifier_path.read_bytes()).hexdigest() != active.get("source_sha256"):
+        fail("active verifier hash mismatch")
+    if functional.get("source_sha256") != active.get("source_sha256"):
+        fail("functional verifier linkage mismatch")
+    raw = args.raw.read_bytes()
+    precommit_raw = (args.precommit_raw or args.raw).read_bytes()
+    prefix_path = root / "transcript-prefix.log"
+    prefix = prefix_path.read_bytes()
+    if len(prefix) != precommit.get("prefix_size") or hashlib.sha256(prefix).hexdigest() != precommit.get("prefix_sha256"):
+        fail("follow-on precommit prefix hash mismatch")
+    if not precommit_raw.startswith(prefix) or len(prefix) >= len(precommit_raw):
+        fail("follow-on precommit prefix is not strict")
+    if functional.get("output", "").encode() not in prefix:
+        fail("follow-on AC1 output missing from prefix")
+    if precommit.get("control_count") != 4 or precommit.get("functional_source_sha256") != active.get("source_sha256"):
+        fail("follow-on precommit record mismatch")
+
+    card_root = pathlib.Path(args.repo_root)
+    integration_root = pathlib.Path("/private/tmp/proxima-python-card-00a1-integration")
+    integration_branch = "codex/python-frontend-card-00a1-integration"
+    operations = []
+
+    def run_git(label: str, cwd: pathlib.Path, argv: list[str]) -> subprocess.CompletedProcess:
+        started = time.monotonic_ns()
+        process = subprocess.run(["git", *argv], cwd=cwd, capture_output=True, text=True, check=False)
+        ended = time.monotonic_ns()
+        operations.append({"label": label, "argv": ["git", *argv], "cwd": str(cwd), "started_monotonic_ns": started,
+                           "ended_monotonic_ns": ended, "exit_code": process.returncode, "stdout": process.stdout,
+                           "stderr": process.stderr, "stdout_sha256": hashlib.sha256(process.stdout.encode()).hexdigest(),
+                           "stderr_sha256": hashlib.sha256(process.stderr.encode()).hexdigest()})
+        print("git_operation={} argv={} cwd={} exit_code={}".format(label, shlex.join(["git", *argv]), cwd, process.returncode))
+        if process.stdout:
+            print("git_stdout_begin={}\n{}git_stdout_end={}".format(label, process.stdout, label))
+        if process.stderr:
+            print("git_stderr_begin={}\n{}git_stderr_end={}".format(label, process.stderr, label))
+        if process.returncode != 0:
+            fail("follow-on git command failed: {}".format(label))
+        return process
+
+    run_git("stage", card_root, ["add", "proxima-tensor/specs/python-frontend/scripts/check_plan_bootstrap.py", "proxima-tensor/specs/python-frontend/scripts/seed_bootstrap.py", "proxima-tensor/specs/python-frontend/scripts/check_cards.py", "proxima-tensor/specs/python-frontend/cards/00a1-bootstrap-verifier.md", "proxima-tensor/specs/python-frontend/TASKS.md"])
+    status = run_git("staged_status", card_root, ["status", "--short"])
+    if not status.stdout.strip():
+        fail("follow-on staged tree is empty")
+    run_git("commit", card_root, ["commit", "-m", "feat: verify bootstrap receipt and events"])
+    run_git("rebase", card_root, ["rebase", "origin/main"])
+    card_head = run_git("card_head", card_root, ["rev-parse", "HEAD"]).stdout.strip()
+    run_git("integration_add", card_root, ["worktree", "add", "-b", integration_branch, str(integration_root), "origin/main"])
+    run_git("integration_ff", integration_root, ["merge", "--ff-only", "codex/python-frontend-card-00a1-checker"])
+    integration_head = run_git("integration_head", integration_root, ["rev-parse", "HEAD"]).stdout.strip()
+    if card_head != integration_head:
+        fail("follow-on integration HEAD mismatch")
+    run_git("push", integration_root, ["push", "origin", "HEAD:main"])
+    remote = run_git("remote_main", integration_root, ["ls-remote", "origin", "refs/heads/main"]).stdout.strip().split()
+    if len(remote) != 2 or remote[0] != card_head or remote[1] != "refs/heads/main":
+        fail("follow-on remote main mismatch")
+    landing = [item for item in operations if item["label"] in {"commit", "rebase", "integration_ff", "push", "remote_main"}]
+    if len(landing) != 5:
+        fail("follow-on landing record count mismatch")
+    elapsed = (time.monotonic_ns() - int((root / "timer-start-ns.txt").read_text().strip())) / 1_000_000_000
+    if elapsed > 1800:
+        fail("follow-on elapsed limit exceeded")
+    record = {"card_id": "00a1", "landing_operations": landing, "all_git_operations": operations,
+              "card_head": card_head, "integration_head": integration_head, "remote_main": remote[0],
+              "elapsed_seconds": elapsed, "exit_code": 0}
+    if write_record:
+        (root / "postpush-check.json").write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    if output:
+        print("postpush_check=1 captured_landing_records>=5 elapsed_seconds<=1800")
+    return record
+
+
 def capture_closure(args: argparse.Namespace) -> None:
     argv = shlex.split(args.finalize_argv)
     started = time.monotonic_ns()
@@ -388,6 +469,15 @@ def capture_closure(args: argparse.Namespace) -> None:
         sys.stderr.write(process.stderr)
     if process.returncode != 0:
         raise SystemExit(process.returncode)
+    if args.card_id == "00a1":
+        closure = read_json(args.finalizer_log)
+        check = read_json(args.capture_postpush_closure / "postpush-check.json")
+        if closure.get("exit_code") != 0 or check.get("exit_code") != 0 or len(check.get("landing_operations", [])) != 5:
+            fail("follow-on closure record mismatch")
+        elapsed = (time.monotonic_ns() - int((args.capture_postpush_closure / "timer-start-ns.txt").read_text().strip())) / 1_000_000_000
+        if elapsed > 1800:
+            fail("follow-on elapsed limit exceeded")
+        print("postpush_check=1 captured_landing_records>=5 elapsed_seconds<=1800")
 
 
 def postseal(args: argparse.Namespace) -> None:
@@ -569,6 +659,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seal-closed", type=pathlib.Path)
     parser.add_argument("--verify-closed", type=pathlib.Path)
     parser.add_argument("--card-id")
+    parser.add_argument("--precommit-raw", type=pathlib.Path)
     parser.add_argument("--raw", type=pathlib.Path, default=DEFAULT_RAW)
     parser.add_argument("--sealed-transcript", type=pathlib.Path)
     parser.add_argument("--repo-root", type=pathlib.Path, default=pathlib.Path.cwd())
