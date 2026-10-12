@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "max_tokens": 24,
+  "pairs_per_prompt": 4,
+  "models": [
+    {
+      "key": "granite-1b-a400m",
+      "model_id": "ibm-granite/granite-3.1-1b-a400m-instruct",
+      "checkpoint": "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80",
+      "expected_architecture": "granitemoe",
+      "expected_general_name": "Granite 3.1 1b A400M Instruct",
+      "speculative_verification": false
+    },
+    {
+      "key": "gemma-4-e2b-qat",
+      "model_id": "google/gemma-4-E2B-it-GGUF QAT local conversion",
+      "checkpoint": "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd",
+      "expected_architecture": "gemma4",
+      "expected_general_name": "2B_dequant_qat_it_hf",
+      "speculative_verification": true
+    }
+  ],
+  "prompts": [
+    { "key": "capital-france", "text": "The capital of France is" },
+    { "key": "repeated-colors", "text": "red blue green red blue green red blue green red blue green" }
+  ],
+  "references": [
+    { "method": "gemma_mtp", "model_id": "google/gemma-4-E2B-it-assistant", "model_type": "gemma4_assistant", "path": "references/gemma4-e2b-assistant.json" },
+    { "method": "diffusion", "model_id": "google/diffusiongemma-26B-A4B-it", "model_type": "diffusion_gemma", "path": "references/diffusiongemma.json" },
+    { "method": "ouro_recurrent_depth", "model_id": "ByteDance/Ouro-1.4B", "model_type": "ouro", "path": "references/ouro-1.4b.json" }
+  ],
+  "method_eligibility": [
+    { "method": "baseline", "eligible": true, "reason": "existing GGUF generation path" },
+    { "method": "ngram_speculation", "eligible": true, "reason": "ngram-simple uses size_n=1 and size_m=3 to test token continuation matches within the 24-token run cap; attributed only when execution counters are captured" },
+    { "method": "loopcd", "eligible": false, "reason": "shared-block recurrent execution and contrastive iteration readouts are not bound" },
+    { "method": "gemma_mtp", "eligible": false, "reason": "assistant MTP sidecar binding is not implemented" },
+    { "method": "diffusion", "eligible": false, "reason": "iterative diffusion decode binding is not implemented" }
+  ],
+  "primary_sources": [
+    { "topic": "loopcd", "url": "https://arxiv.org/html/2610.02185v1" },
+    { "topic": "gemma_mtp", "url": "https://blog.google/innovation-and-ai/technology/developers-tools/multi-token-prediction-gemma-4/" },
+    { "topic": "gemma_qat", "url": "https://blog.google/innovation-and-ai/technology/developers-tools/quantization-aware-training-gemma-4/" },
+    { "topic": "diffusion_gemma", "url": "https://blog.google/innovation-and-ai/technology/developers-tools/diffusion-gemma-faster-text-generation/" }
+  ]
+}

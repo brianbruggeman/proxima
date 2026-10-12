@@ -1,0 +1,24 @@
+{
+  "fixtures": [
+    {
+      "model_key": "granite-1b-a400m",
+      "stdout_path": "fixtures/granite.log",
+      "generated_ids": [318],
+      "generated_text": "ed",
+      "status": "captured",
+      "exit_code": 0,
+      "failure_marker": false,
+      "gpu_execution_observed": true
+    },
+    {
+      "model_key": "gemma-4-e2b-qat",
+      "stdout_path": "fixtures/gemma.log",
+      "generated_ids": [9079, 236761],
+      "generated_text": " Paris.",
+      "status": "captured",
+      "exit_code": 0,
+      "failure_marker": false,
+      "gpu_execution_observed": true
+    }
+  ]
+}
