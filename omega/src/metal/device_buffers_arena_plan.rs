@@ -284,6 +284,24 @@ impl core::fmt::Display for CommandBufferFailureContext {
 /// [`proxima_tensor`] or [`crate::msl`] already have a name for.
 #[derive(Debug, thiserror::Error)]
 pub enum MetalError {
+    #[error("metal cannot enforce {field}: {reason}")]
+    UnsupportedConstraint {
+        field: &'static str,
+        reason: &'static str,
+    },
+    #[error("metal {field} reservation {requested} exceeds limit {limit}")]
+    ResourceLimit {
+        field: &'static str,
+        requested: u64,
+        limit: u64,
+    },
+    #[error("metal {field} reservation overflows")]
+    ResourceOverflow { field: &'static str },
+    #[error("metal input {node} changed: {reason}")]
+    InputContractChanged {
+        node: NodeId,
+        reason: &'static str,
+    },
     #[error("no Metal device available on this host")]
     NoDevice,
     #[error(
@@ -779,6 +797,10 @@ pub(super) fn device_and_queue() -> Result<DeviceAndQueue, MetalError> {
 /// codec set are all functions of the PROGRAM, and a serving loop holds the
 /// program fixed while the block DATA changes every token.
 pub struct Plan {
+    pub(super) configured_constraints: Option<ResourceConstraints>,
+    pub(super) configured_input_contract: Vec<(Option<Codec>, bool, usize)>,
+    pub(super) scoped_reservation: RefCell<Option<(u64, u64, u64)>>,
+    pub(super) scoped_resource_rows: RefCell<Vec<(&'static str, NodeId, usize, u64)>>,
     /// The plan owns its program: `finish` needs it for output dtypes, and a
     /// plan that borrowed it could not outlive the caller's buffer.
     pub(super) program: Vec<Op>,
@@ -2253,6 +2275,10 @@ impl Plan {
     /// Shape inference or kernel resolution failing at `symbols`; the plan is
     /// unchanged on `Err`.
     pub fn refit_symbols(&mut self, symbols: &[u64]) -> Result<bool, MetalError> {
+        // configured plans bind their input and resource contract once.
+        if self.configured_constraints.is_some() {
+            return Ok(false);
+        }
         let next_shapes = infer(&self.program, symbols)?;
         let Some(patches) = refit_cached_attention_rows(
             &self.prepared.resolved,

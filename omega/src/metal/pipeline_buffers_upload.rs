@@ -51,6 +51,12 @@ pub enum MathMode {
 }
 
 impl MathMode {
+    /// selects the widest compiler mode permitted by the bound numeric policy.
+    #[must_use]
+    pub const fn for_numeric_policy(policy: NumericPolicy) -> Self {
+        numeric_policy_as_metal_math_mode(policy)
+    }
+
     pub(super) const fn as_mtl(self) -> MTLMathMode {
         match self {
             MathMode::Safe => MTLMathMode::Safe,
@@ -520,6 +526,42 @@ pub(super) fn pipeline_for_kernel(
     Ok(pipeline)
 }
 
+pub(super) fn allocation_capacity(element_count: usize, dtype: DType) -> Result<usize, MetalError> {
+    let bytes = element_count
+        .max(1)
+        .checked_mul(dtype.size_bytes())
+        .ok_or(MetalError::ResourceOverflow {
+            field: "buffer_capacity",
+        })?;
+    #[cfg(feature = "metal-buffer-pool")]
+    let bytes = pool_bucket_checked(bytes)?;
+    Ok(bytes)
+}
+
+#[cfg(feature = "metal-buffer-pool")]
+fn pool_bucket_checked(byte_length: usize) -> Result<usize, MetalError> {
+    byte_length
+        .checked_next_power_of_two()
+        .ok_or(MetalError::ResourceOverflow {
+            field: "buffer_capacity",
+        })
+}
+
+fn check_device_buffer_length(
+    device: &ProtocolObject<dyn MTLDevice>,
+    requested: usize,
+) -> Result<(), MetalError> {
+    let limit = device.maxBufferLength();
+    if requested > limit {
+        return Err(MetalError::ResourceLimit {
+            field: "max_buffer_length",
+            requested: requested as u64,
+            limit: limit as u64,
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn allocate_buffer(
     device: &ProtocolObject<dyn MTLDevice>,
     element_count: usize,
@@ -536,7 +578,8 @@ pub(super) fn allocate_buffer_for(
     element_count: usize,
     dtype: DType,
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
-    let byte_length = element_count.max(1) * dtype.size_bytes();
+    let byte_length = allocation_capacity(element_count, dtype)?;
+    check_device_buffer_length(device, byte_length)?;
     counter!(OUTPUT_BUFFER_ALLOCATIONS, 1);
     counter!(OUTPUT_BUFFER_ALLOCATED_BYTES, byte_length as u64);
     let buffer = device
@@ -566,8 +609,8 @@ pub(super) fn allocate_buffer_for(
     element_count: usize,
     dtype: DType,
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
-    let byte_length = element_count.max(1) * dtype.size_bytes();
-    let bucket = pool_bucket(byte_length);
+    let bucket = allocation_capacity(element_count, dtype)?;
+    check_device_buffer_length(device, bucket)?;
     let pooled = OUTPUT_BUFFER_POOL.with(|pool| {
         pool.borrow_mut()
             .get_mut(&(bucket, dtype))

@@ -8,26 +8,46 @@
 //! marshalling, launch, synchronization, and device-to-host readback before
 //! the full graph binding layer is connected.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use cudarc::driver::sys as cuda_sys;
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DriverError, LaunchConfig,
     PushKernelArg,
 };
+use cudarc::nvrtc::sys as nvrtc_sys;
 use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
+use proxima_primitives::sync::blocking::Mutex;
 
+use crate::config::{ResourceConstraints, RuntimeConfig};
 use crate::cuda::{CudaGridSpec, CudaKernel};
-use crate::msl::{Binding, Codec, PackedOperands};
+use crate::msl::{Binding, Codec, PackedOperands, gather_count};
 use proxima_tensor::{
-    BoundOp, DType, Evaluated, NodeId, NumericPolicy, Op, QuantizedBlock, Shapes, bind_with_fusion,
-    block_node_ids, infer, prune_dead, resolve_named_blocks,
+    BoundOp, BoundOpKind, DType, Evaluated, Keep, NodeId, NumericPolicy, Op, QuantizedBlock,
+    Shapes, bind_unfused, bind_with_fusion, block_node_ids, correct_packed_matmul_layouts, infer,
+    prune_dead, resolve_named_blocks,
 };
 
 /// Errors from CUDA initialization, NVRTC compilation, or execution.
 #[derive(Debug, thiserror::Error)]
 pub enum CudaDriverError {
+    #[error("CUDA cannot enforce `{field}`: {reason}")]
+    UnsupportedConstraint {
+        field: &'static str,
+        reason: &'static str,
+    },
+    #[error("CUDA needs {requested} bytes for `{field}`, exceeding {limit}")]
+    ResourceLimit {
+        field: &'static str,
+        requested: u64,
+        limit: u64,
+    },
+    #[error("CUDA overflowed payload accounting")]
+    ResourceOverflow,
+    #[error("input contract changed for {node:?}: {reason}")]
+    InputContractChanged { node: NodeId, reason: &'static str },
     #[error("CUDA driver: {0}")]
     Driver(String),
     #[error("CUDA NVRTC: {0}")]
@@ -64,13 +84,42 @@ impl From<DriverError> for CudaDriverError {
 
 type ResidentBuffers = BTreeMap<NodeId, ((usize, usize), CudaGraphBuffer)>;
 
+fn cuda_float_bytes(extents: &[u64]) -> Result<u64, CudaDriverError> {
+    extents.iter().try_fold(4_u64, |bytes, extent| {
+        bytes
+            .checked_mul(*extent)
+            .ok_or(CudaDriverError::ResourceOverflow)
+    })
+}
+
+fn cuda_input_contract(
+    block: &QuantizedBlock<'_>,
+) -> Result<(Option<Codec>, bool, usize), CudaDriverError> {
+    let (codec, integer) = match block {
+        QuantizedBlock::Float32(_) => (None, false),
+        QuantizedBlock::Int32(_) => (None, true),
+        QuantizedBlock::Packed { codec, .. } => (Some(*codec), false),
+    };
+    Ok((
+        codec,
+        integer,
+        block
+            .element_count()
+            .map_err(|_| CudaDriverError::InputContractChanged {
+                node: NodeId(0),
+                reason: "malformed packed input",
+            })?,
+    ))
+}
+
 /// One CUDA context and stream owned by a caller's inference runtime.
 #[derive(Debug, Clone)]
 pub struct CudaDriver {
     context: Arc<CudaContext>,
     stream: Arc<CudaStream>,
-    modules: Arc<std::sync::Mutex<BTreeMap<String, CachedCudaModule>>>,
-    resident_buffers: Arc<std::sync::Mutex<ResidentBuffers>>,
+    // synchronous ffi callers share these short cache mutations; compilation and dispatch happen outside the guard.
+    modules: Arc<Mutex<BTreeMap<String, CachedCudaModule>>>,
+    resident_buffers: Arc<Mutex<ResidentBuffers>>,
     kernel_compilations: Arc<AtomicU64>,
 }
 
@@ -102,6 +151,8 @@ enum CudaGraphBuffer {
 /// execution refreshes only named inputs and reuses the device arena.
 #[derive(Debug)]
 pub struct CudaPlan {
+    constraints: Option<ResourceConstraints>,
+    block_contract: Vec<(Option<Codec>, bool, usize)>,
     driver: CudaDriver,
     program: Vec<Op>,
     shapes: Shapes,
@@ -129,13 +180,19 @@ impl CudaDriver {
     /// visible NVIDIA device it returns a typed `Driver` error rather than
     /// pretending that emitted CUDA source is executable.
     pub fn new(ordinal: usize) -> Result<Self, CudaDriverError> {
+        // the dynamic loader otherwise panics before it can return a driver error.
+        if !unsafe { cuda_sys::is_culib_present() } {
+            return Err(CudaDriverError::Driver(
+                "cuda driver library unavailable".into(),
+            ));
+        }
         let context = CudaContext::new(ordinal)?;
         let stream = context.default_stream();
         Ok(Self {
             context,
             stream,
-            modules: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
-            resident_buffers: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            modules: Arc::new(Mutex::new(BTreeMap::new())),
+            resident_buffers: Arc::new(Mutex::new(BTreeMap::new())),
             kernel_compilations: Arc::new(AtomicU64::new(0)),
         })
     }
@@ -165,26 +222,26 @@ impl CudaDriver {
         let cached = self
             .modules
             .lock()
-            .map_err(|_| CudaDriverError::Driver("CUDA module cache poisoned".into()))?
             .get(&kernel.entry)
             .filter(|cached| cached.source == kernel.source)
             .map(|cached| cached.module.clone());
         let module = match cached {
             Some(module) => module,
             None => {
+                // nvrtc has the same panic-on-missing-library loader contract.
+                if !unsafe { nvrtc_sys::is_culib_present() } {
+                    return Err(CudaDriverError::Nvrtc("nvrtc library unavailable".into()));
+                }
                 let ptx = compile_cuda_source(&kernel.source)
                     .map_err(|error| CudaDriverError::Nvrtc(error.to_string()))?;
                 let module = self.context.load_module(ptx)?;
-                self.modules
-                    .lock()
-                    .map_err(|_| CudaDriverError::Driver("CUDA module cache poisoned".into()))?
-                    .insert(
-                        kernel.entry.clone(),
-                        CachedCudaModule {
-                            source: kernel.source.clone(),
-                            module: module.clone(),
-                        },
-                    );
+                self.modules.lock().insert(
+                    kernel.entry.clone(),
+                    CachedCudaModule {
+                        source: kernel.source.clone(),
+                        module: module.clone(),
+                    },
+                );
                 self.kernel_compilations.fetch_add(1, Ordering::Relaxed);
                 module
             }
@@ -208,7 +265,6 @@ impl CudaDriver {
         let cached = self
             .modules
             .lock()
-            .map_err(|_| CudaDriverError::Driver("CUDA module cache poisoned".into()))?
             .get(&cache_key)
             .filter(|cached| cached.source == ptx_source)
             .map(|cached| cached.module.clone());
@@ -216,16 +272,13 @@ impl CudaDriver {
             Some(module) => module,
             None => {
                 let module = self.context.load_module(Ptx::from_src(ptx_source))?;
-                self.modules
-                    .lock()
-                    .map_err(|_| CudaDriverError::Driver("CUDA module cache poisoned".into()))?
-                    .insert(
-                        cache_key,
-                        CachedCudaModule {
-                            source: ptx_source.to_owned(),
-                            module: module.clone(),
-                        },
-                    );
+                self.modules.lock().insert(
+                    cache_key,
+                    CachedCudaModule {
+                        source: ptx_source.to_owned(),
+                        module: module.clone(),
+                    },
+                );
                 self.kernel_compilations.fetch_add(1, Ordering::Relaxed);
                 module
             }
@@ -242,6 +295,36 @@ impl CudaDriver {
         numeric_policy: NumericPolicy,
         named: &[(&str, QuantizedBlock<'_>)],
     ) -> Result<CudaPlan, CudaDriverError> {
+        self.plan_with_options(program, symbols, outputs, numeric_policy, named, None)
+    }
+
+    pub fn plan_with_config(
+        &self,
+        program: &[Op],
+        symbols: &[u64],
+        outputs: &[NodeId],
+        named: &[(&str, QuantizedBlock<'_>)],
+        config: &RuntimeConfig,
+    ) -> Result<CudaPlan, CudaDriverError> {
+        self.plan_with_options(
+            program,
+            symbols,
+            outputs,
+            config.numeric,
+            named,
+            Some(config),
+        )
+    }
+
+    fn plan_with_options(
+        &self,
+        program: &[Op],
+        symbols: &[u64],
+        outputs: &[NodeId],
+        numeric_policy: NumericPolicy,
+        named: &[(&str, QuantizedBlock<'_>)],
+        config: Option<&RuntimeConfig>,
+    ) -> Result<CudaPlan, CudaDriverError> {
         let blocks = resolve_named_blocks(program, named).map_err(|_| {
             CudaDriverError::UnsupportedGraph {
                 node: NodeId(0),
@@ -249,7 +332,7 @@ impl CudaDriver {
             }
         })?;
         let block_nodes = block_node_ids(program);
-        let packed_operands = block_nodes
+        let packed_operands: PackedOperands = block_nodes
             .iter()
             .zip(blocks.iter())
             .filter_map(|(node, block)| packed_codec(block).map(|codec| (*node, codec)))
@@ -258,23 +341,45 @@ impl CudaDriver {
             node: NodeId(0),
             reason: "shape inference failed",
         })?;
-        let resolved = prune_dead(
-            bind_with_fusion(program, &shapes, outputs, false, numeric_policy).map_err(|_| {
-                CudaDriverError::UnsupportedGraph {
-                    node: NodeId(0),
-                    reason: "graph binding failed",
+        if config.is_some() {
+            for (node, block) in block_nodes.iter().zip(&blocks) {
+                let expected = shapes.of(*node).iter().try_fold(1_usize, |count, extent| {
+                    count
+                        .checked_mul(
+                            usize::try_from(*extent)
+                                .map_err(|_| CudaDriverError::ResourceOverflow)?,
+                        )
+                        .ok_or(CudaDriverError::ResourceOverflow)
+                })?;
+                if cuda_input_contract(block)?.2 != expected {
+                    return Err(CudaDriverError::InputContractChanged {
+                        node: *node,
+                        reason: "element count does not match the planned shape",
+                    });
                 }
+            }
+        }
+        let mut resolved = prune_dead(
+            if config.is_some_and(|value| !value.allow_fusion) {
+                bind_unfused(program, &shapes, outputs, numeric_policy)
+            } else {
+                bind_with_fusion(program, &shapes, outputs, false, numeric_policy)
+            }
+            .map_err(|_| CudaDriverError::UnsupportedGraph {
+                node: NodeId(0),
+                reason: "graph binding failed",
             })?,
             outputs,
         );
+        correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
         for bound in &resolved {
             validate_cuda_dtype(bound)?;
             if !matches!(
                 bound.kind,
-                proxima_tensor::BoundOpKind::Elementwise { .. }
-                    | proxima_tensor::BoundOpKind::Reduce { .. }
-                    | proxima_tensor::BoundOpKind::Iota
-                    | proxima_tensor::BoundOpKind::Constant { .. }
+                BoundOpKind::Elementwise { .. }
+                    | BoundOpKind::Reduce { .. }
+                    | BoundOpKind::Iota
+                    | BoundOpKind::Constant { .. }
             ) {
                 return Err(CudaDriverError::UnsupportedGraph {
                     node: bound.node,
@@ -298,7 +403,12 @@ impl CudaDriver {
             kernels.push(kernel);
             uniforms.push(packed_uniforms);
         }
-        Ok(CudaPlan {
+        let plan = CudaPlan {
+            constraints: config.map(|value| value.constraints.clone()),
+            block_contract: blocks
+                .iter()
+                .map(cuda_input_contract)
+                .collect::<Result<Vec<_>, _>>()?,
             driver: self.clone(),
             program: program.to_vec(),
             shapes,
@@ -309,7 +419,14 @@ impl CudaDriver {
             outputs: outputs.to_vec(),
             arena: self.new_arena(),
             packed_operands,
-        })
+        };
+        if config.is_some() {
+            plan.validate_resources(&blocks, None)?;
+            for kernel in &plan.kernels {
+                self.function_for(kernel)?;
+            }
+        }
+        Ok(plan)
     }
 
     /// Uploads or refreshes one named f32 input, retaining its allocation for
@@ -771,12 +888,230 @@ fn compile_cuda_source(source: &str) -> Result<Ptx, cudarc::nvrtc::CompileError>
 }
 
 impl CudaPlan {
+    pub fn scoped_reservation(&self) -> Result<(u64, u64, u64), CudaDriverError> {
+        let mut total = 0_u64;
+        let mut largest = 0_u64;
+        let mut add = |bytes: u64| -> Result<(), CudaDriverError> {
+            total = crate::backend::checked_resource_sum([total, bytes])
+                .ok_or(CudaDriverError::ResourceOverflow)?;
+            largest = largest.max(bytes);
+            Ok(())
+        };
+        for node in &self.block_nodes {
+            let bytes = cuda_float_bytes(self.shapes.of(*node))?;
+            match self.arena.buffers.get(node) {
+                Some(CudaGraphBuffer::F32(buffer)) => {
+                    let current = (buffer.len() as u64)
+                        .checked_mul(4)
+                        .ok_or(CudaDriverError::ResourceOverflow)?;
+                    add(current)?;
+                    if current != bytes {
+                        add(bytes)?;
+                    }
+                }
+                Some(CudaGraphBuffer::Bytes(buffer)) => {
+                    add(buffer.len() as u64)?;
+                    add(bytes)?;
+                }
+                None => add(bytes)?,
+            }
+        }
+        let mut host_workspace = 0_u64;
+        for (bound, uniform) in self.resolved.iter().zip(&self.uniforms) {
+            let bytes = cuda_float_bytes(self.shapes.of(bound.node))?;
+            match self.arena.buffers.get(&bound.node) {
+                Some(CudaGraphBuffer::F32(buffer)) => {
+                    let current = (buffer.len() as u64)
+                        .checked_mul(4)
+                        .ok_or(CudaDriverError::ResourceOverflow)?;
+                    add(current)?;
+                    if current != bytes {
+                        add(bytes)?;
+                    }
+                }
+                Some(CudaGraphBuffer::Bytes(buffer)) => {
+                    add(buffer.len() as u64)?;
+                    add(bytes)?;
+                }
+                None => add(bytes)?,
+            }
+            if !matches!(bound.kind, BoundOpKind::Constant { .. }) {
+                if let Some(existing) = self.arena.uniforms.get(&bound.node) {
+                    add(existing.len() as u64)?;
+                    if existing.len() != uniform.len() {
+                        add(uniform.len() as u64)?;
+                    }
+                } else {
+                    add(uniform.len() as u64)?;
+                }
+            } else {
+                host_workspace = host_workspace.max(bytes);
+            }
+        }
+        let host = self
+            .outputs
+            .iter()
+            .try_fold(0_u64, |count, node| {
+                count
+                    .checked_add(cuda_float_bytes(self.shapes.of(*node))?)
+                    .ok_or(CudaDriverError::ResourceOverflow)
+            })?
+            .max(host_workspace);
+        Ok((host, total, largest))
+    }
+
+    fn validate_resources(
+        &self,
+        blocks: &[QuantizedBlock<'_>],
+        resident_names: Option<&BTreeSet<&str>>,
+    ) -> Result<(), CudaDriverError> {
+        let Some(limits) = &self.constraints else {
+            return Ok(());
+        };
+        if blocks.len() != self.block_contract.len() {
+            return Err(CudaDriverError::InputContractChanged {
+                node: NodeId(0),
+                reason: "input count differs from the planned contract",
+            });
+        }
+        for ((node, expected), block) in self
+            .block_nodes
+            .iter()
+            .zip(&self.block_contract)
+            .zip(blocks)
+        {
+            if cuda_input_contract(block)? != *expected {
+                return Err(CudaDriverError::InputContractChanged {
+                    node: *node,
+                    reason: "codec or element count differs from the planned contract",
+                });
+            }
+        }
+        if limits.max_host_tensor_bytes.is_none()
+            && limits.max_device_buffer_bytes.is_none()
+            && limits.max_single_device_buffer_bytes.is_none()
+        {
+            return Ok(());
+        }
+        if resident_names.is_some_and(|names| !names.is_empty()) {
+            return Err(CudaDriverError::UnsupportedConstraint {
+                field: "constraints",
+                reason: "shared resident cache has no per-plan reservation owner",
+            });
+        }
+        if ["PROXIMA_CUDA_TRACE_OUTPUTS", "PROXIMA_CUDA_TRACE_VALUES"]
+            .iter()
+            .any(|key| std::env::var_os(key).is_some())
+        {
+            return Err(CudaDriverError::UnsupportedConstraint {
+                field: "max_host_tensor_bytes",
+                reason: "diagnostic tensor copies have no bounded workspace contract",
+            });
+        }
+        if blocks
+            .iter()
+            .any(|block| !matches!(block, QuantizedBlock::Float32(_)))
+            || self.resolved.iter().any(|bound| {
+                bound.dtype != DType::Float32
+                    || gather_count(bound) != 0
+                    || !matches!(
+                        bound.kind,
+                        BoundOpKind::Elementwise { .. }
+                            | BoundOpKind::Reduce { .. }
+                            | BoundOpKind::Iota
+                            | BoundOpKind::Constant { .. }
+                    )
+            })
+        {
+            return Err(CudaDriverError::UnsupportedConstraint {
+                field: "constraints",
+                reason: "packed, gathered or specialized operations have no bounded CUDA workspace contract",
+            });
+        }
+        let (host, total, largest) = self.scoped_reservation()?;
+        for (field, requested, limit) in [
+            ("max_host_tensor_bytes", host, limits.max_host_tensor_bytes),
+            (
+                "max_device_buffer_bytes",
+                total,
+                limits.max_device_buffer_bytes,
+            ),
+            (
+                "max_single_device_buffer_bytes",
+                largest,
+                limits.max_single_device_buffer_bytes,
+            ),
+        ] {
+            if let Some(limit) = limit
+                && requested > limit
+            {
+                return Err(CudaDriverError::ResourceLimit {
+                    field,
+                    requested,
+                    limit,
+                });
+            }
+        }
+        let retained_graph = self.arena.buffers.values().try_fold(0_u64, |sum, buffer| {
+            let bytes = match buffer {
+                CudaGraphBuffer::F32(values) => (values.len() as u64)
+                    .checked_mul(4)
+                    .ok_or(CudaDriverError::ResourceOverflow)?,
+                CudaGraphBuffer::Bytes(values) => values.len() as u64,
+            };
+            sum.checked_add(bytes)
+                .ok_or(CudaDriverError::ResourceOverflow)
+        })?;
+        let retained_uniforms = self
+            .arena
+            .uniforms
+            .values()
+            .try_fold(0_u64, |sum, buffer| {
+                sum.checked_add(buffer.len() as u64)
+                    .ok_or(CudaDriverError::ResourceOverflow)
+            })?;
+        let retained = retained_graph
+            .checked_add(retained_uniforms)
+            .ok_or(CudaDriverError::ResourceOverflow)?;
+        let additional = total
+            .checked_sub(retained)
+            .ok_or(CudaDriverError::ResourceOverflow)?;
+        // this is an observed free-capacity check; other contexts can allocate after it.
+        let (free, _) = self.driver.memory_info()?;
+        if additional > free as u64 {
+            return Err(CudaDriverError::ResourceLimit {
+                field: "observed_free_device_bytes",
+                requested: additional,
+                limit: free as u64,
+            });
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn kernel_identities(&self) -> Vec<String> {
+        self.kernels
+            .iter()
+            .map(|kernel| format!("{}\n{}", kernel.entry, kernel.source))
+            .collect()
+    }
+    #[must_use]
+    pub fn resolved_op_count(&self) -> usize {
+        self.resolved.len()
+    }
+    pub fn device_identity(&self) -> Result<String, CudaDriverError> {
+        Ok(format!(
+            "cuda:{}:{}",
+            self.driver.context.ordinal(),
+            self.driver.context.name()?
+        ))
+    }
     /// Executes the planned graph with name-resolved inputs and returns the
     /// requested outputs. Packed bytes stay on device in the persistent arena.
     pub fn execute_named(
         &mut self,
         named: &[(&str, QuantizedBlock<'_>)],
-        resident_names: Option<&std::collections::BTreeSet<&str>>,
+        resident_names: Option<&BTreeSet<&str>>,
     ) -> Result<Evaluated, CudaDriverError> {
         let host_timing = std::env::var_os("PROXIMA_CUDA_HOST_TIMING").is_some();
         let upload_started = host_timing.then(std::time::Instant::now);
@@ -794,6 +1129,7 @@ impl CudaPlan {
                 reason: "input count mismatch",
             });
         }
+        self.validate_resources(&blocks, resident_names)?;
         for (node, block) in self.block_nodes.iter().copied().zip(blocks.iter()) {
             let name = match self.program.get(node.0 as usize) {
                 Some(Op::Input {
@@ -812,7 +1148,6 @@ impl CudaPlan {
                     .driver
                     .resident_buffers
                     .lock()
-                    .map_err(|_| CudaDriverError::Driver("CUDA resident cache poisoned".into()))?
                     .get(&node)
                     .filter(|(cached_source, _)| *cached_source == source)
                     .map(|(_, buffer)| buffer.clone());
@@ -861,9 +1196,6 @@ impl CudaPlan {
                     self.driver
                         .resident_buffers
                         .lock()
-                        .map_err(|_| {
-                            CudaDriverError::Driver("CUDA resident cache poisoned".into())
-                        })?
                         .insert(node, (source, buffer));
                 }
             } else {
@@ -927,8 +1259,8 @@ impl CudaPlan {
                 );
             }
             let output_len = match &bound.kind {
-                proxima_tensor::BoundOpKind::Reduce {
-                    keep: proxima_tensor::Keep::Reduce,
+                BoundOpKind::Reduce {
+                    keep: Keep::Reduce,
                     output_axes,
                     epilogue_broadcast_axes,
                     ..
@@ -974,7 +1306,7 @@ impl CudaPlan {
                         CudaGraphBuffer::F32(self.driver.stream.alloc_zeros::<f32>(0)?),
                     );
                 }
-            } else if let proxima_tensor::BoundOpKind::Constant { value } = bound.kind {
+            } else if let BoundOpKind::Constant { value } = bound.kind {
                 self.driver
                     .materialize_constant(&mut self.arena, bound.node, value, output_len)?;
             } else {

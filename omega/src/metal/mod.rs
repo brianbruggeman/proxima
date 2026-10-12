@@ -220,6 +220,7 @@ use objc2_metal::{MTLCounterSampleBuffer, MTLCounterSet};
 use proxima_tensor::apply_repeat_nodes;
 #[cfg(not(feature = "top-fraction-fusion"))]
 use proxima_tensor::bind_with_fusion;
+use proxima_tensor::bind_unfused;
 #[cfg(feature = "top-fraction-fusion")]
 use proxima_tensor::bind_with_top_fraction;
 #[cfg(feature = "twin-elementwise-fusion")]
@@ -239,6 +240,7 @@ use proxima_tensor::{
 
 #[cfg(feature = "instrument")]
 use crate::emit;
+use crate::config::{ResourceConstraints, RuntimeConfig};
 use crate::error::EmitError;
 #[cfg(feature = "instrument")]
 use crate::msl::diagnose_packed_row_block;
@@ -254,6 +256,8 @@ use crate::{Binding, Codec, GridSpec, Kernel, PackedOperands};
 
 #[macro_use]
 mod device_buffers_arena_plan;
+mod configured;
+pub use configured::plan_named_with_config;
 #[macro_use]
 mod execute_and_hazards;
 #[macro_use]
