@@ -1830,26 +1830,11 @@ pub(super) mod classify_kind_packed_row_marker_tests {
                 change, out of scope)"]
     #[test]
     fn qwen35moe_shaped_grouped_expert_reduces_classify_as_packed_row_blocked() {
-        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
-
         const EMBEDDING: usize = 512;
         const FEED_FORWARD: usize = 2048;
         const EXPERT_COUNT: u32 = 256;
         const EXPERT_USED_COUNT: u32 = 8;
         const SEQUENCE: usize = 1;
-
-        fn quantized_stack(expert_count: u32, rows: usize, k: usize) -> Vec<u8> {
-            let elements_per_expert = rows * k;
-            let blocks_per_expert = elements_per_expert / QK_K;
-            let mut stacked = vec![0u8; expert_count as usize * blocks_per_expert * BLOCK_BYTES];
-            let input = vec![0.01f32; elements_per_expert];
-            for expert in 0..expert_count as usize {
-                let byte_span = blocks_per_expert * BLOCK_BYTES;
-                let output = &mut stacked[expert * byte_span..(expert + 1) * byte_span];
-                quantize(&input, output).expect("synthetic expert slab quantizes to Q4_K");
-            }
-            stacked
-        }
 
         let mut program = Vec::new();
         let x_node = input_leaf(
@@ -1995,17 +1980,10 @@ pub(super) mod classify_kind_packed_row_marker_tests {
             bind_with_fusion(&program, &shapes, &[root], true, NumericPolicy::default())
                 .expect("the routed-expert-shaped grouped ffn binds");
 
-        let gate_stack = quantized_stack(EXPERT_COUNT, EMBEDDING, FEED_FORWARD);
-        let up_stack = quantized_stack(EXPERT_COUNT, EMBEDDING, FEED_FORWARD);
-        let down_stack = quantized_stack(EXPERT_COUNT, FEED_FORWARD, EMBEDDING);
         let mut packed_operands: PackedOperands = BTreeMap::new();
         packed_operands.insert(expert_w_gate_node, Codec::Q4K);
         packed_operands.insert(expert_w_up_node, Codec::Q4K);
         packed_operands.insert(expert_w_down_node, Codec::Q4K);
-        // the stacks are built purely to size the quantized codec buffers
-        // `classify_kind`'s emit path never reads bytes -- kept alive so the
-        // borrow checker sees them span the assertions below.
-        let _ = (gate_stack, up_stack, down_stack);
 
         // `bind_with_fusion`'s own `layout_of` assumes every operand is
         // row-major in its DECLARED axis order -- wrong for a packed Q4_K
@@ -2187,7 +2165,6 @@ pub(super) mod classify_kind_packed_row_marker_tests {
     /// product.
     #[test]
     fn qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down() {
-        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
         use proxima_tensor::spec::{Activation, ExpertGatingFunc};
 
         const EMBEDDING: usize = 512;
@@ -2195,19 +2172,6 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         const EXPERT_COUNT: u32 = 256;
         const EXPERT_USED_COUNT: u32 = 8;
         const SEQUENCE: usize = 1;
-
-        fn quantized_stack(expert_count: u32, rows: usize, k: usize) -> Vec<u8> {
-            let elements_per_expert = rows * k;
-            let blocks_per_expert = elements_per_expert / QK_K;
-            let mut stacked = vec![0u8; expert_count as usize * blocks_per_expert * BLOCK_BYTES];
-            let input = vec![0.01f32; elements_per_expert];
-            for expert in 0..expert_count as usize {
-                let byte_span = blocks_per_expert * BLOCK_BYTES;
-                let output = &mut stacked[expert * byte_span..(expert + 1) * byte_span];
-                quantize(&input, output).expect("synthetic expert slab quantizes to Q4_K");
-            }
-            stacked
-        }
 
         let mut program = Vec::new();
         let x_node = input_leaf(
@@ -2288,10 +2252,6 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         packed_operands.insert(expert_w_gate_node, Codec::Q4K);
         packed_operands.insert(expert_w_up_node, Codec::Q4K);
         packed_operands.insert(expert_w_down_node, Codec::Q4K);
-        let gate_stack = quantized_stack(EXPERT_COUNT, EMBEDDING, FEED_FORWARD);
-        let up_stack = quantized_stack(EXPERT_COUNT, EMBEDDING, FEED_FORWARD);
-        let down_stack = quantized_stack(EXPERT_COUNT, FEED_FORWARD, EMBEDDING);
-        let _ = (gate_stack, up_stack, down_stack);
 
         // `omega::metal::prepare` (`metal.rs:6530`) always runs this
         // correction before `emit`/`classify_kind` ever see `resolved` --
