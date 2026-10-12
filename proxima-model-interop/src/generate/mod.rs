@@ -236,6 +236,8 @@ mod disk_tier_tests;
 mod draft_model;
 #[cfg(test)]
 mod draft_simple_tests;
+#[cfg(test)]
+mod speculative_telemetry_tests;
 mod drafter;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod epilogue_sources_real_model_tests;

@@ -2933,6 +2933,8 @@ impl<'file> LoadedModel<'file> {
                 ngram_mod_accepted = speculative_stats.per_type[3].accepted,
                 ngram_cache_drafted = speculative_stats.per_type[4].drafted,
                 ngram_cache_accepted = speculative_stats.per_type[4].accepted,
+                draft_simple_drafted = speculative_stats.draft_simple.drafted,
+                draft_simple_accepted = speculative_stats.draft_simple.accepted,
                 "draft_n_accepted: request-level speculative decode draft/accept totals"
             );
         }
