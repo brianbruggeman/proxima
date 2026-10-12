@@ -8,6 +8,9 @@ pub mod thread_identity;
 #[cfg(feature = "runtime-prime-reactor")]
 pub mod reactor;
 
+#[cfg(all(unix, feature = "runtime-prime-reactor"))]
+pub mod child;
+
 #[cfg(feature = "runtime-prime-bgpool")]
 pub mod background;
 

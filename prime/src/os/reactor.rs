@@ -12,6 +12,8 @@
 //! needs them.
 
 use std::io;
+#[cfg(target_os = "macos")]
+use std::num::NonZeroI32;
 #[cfg(unix)]
 use std::os::fd::RawFd;
 #[cfg(unix)]
@@ -51,7 +53,7 @@ pub struct Wakeup {
 struct WakeupInner {
     needs_wake: AtomicBool,
     alive: AtomicBool,
-    cancellations: SegQueue<(SourceKey, OwnedSource)>,
+    cancellations: SegQueue<(SourceKey, Option<OwnedSource>)>,
     #[cfg(windows)]
     poller: Arc<polling::Poller>,
     #[cfg(target_os = "macos")]
@@ -113,10 +115,27 @@ impl Wakeup {
         feature = "runtime-prime-inbox-alloc"
     ))]
     pub(crate) fn release_source(&self, key: SourceKey, socket: OwnedSource) {
+        self.queue_cancellation(key, Some(socket));
+    }
+
+    #[cfg(all(
+        target_os = "macos",
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-inbox-alloc"
+    ))]
+    pub(crate) fn release_process_exit(&self, key: SourceKey) {
+        self.queue_cancellation(key, None);
+    }
+
+    #[cfg(all(
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-inbox-alloc"
+    ))]
+    fn queue_cancellation(&self, key: SourceKey, retained: Option<OwnedSource>) {
         if !self.inner.alive.load(Ordering::Acquire) {
             return;
         }
-        self.inner.cancellations.push((key, socket));
+        self.inner.cancellations.push((key, retained));
         self.fire();
         if !self.inner.alive.load(Ordering::Acquire) {
             while self.inner.cancellations.pop().is_some() {}
@@ -207,6 +226,16 @@ struct SourceSlot {
     read_ready_epoch: u32,
     write_ready_epoch: u32,
     next_free: Option<u32>,
+    #[cfg(target_os = "macos")]
+    kind: SlotKind,
+}
+
+/// what the slot's kernel registration watches: a descriptor, or one child's exit.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotKind {
+    Descriptor,
+    ProcessExit,
 }
 
 /// Bump the generation counter, skipping 0 (the dead sentinel).
@@ -318,6 +347,32 @@ mod kqueue {
         }
 
         pub fn register(&mut self, fd: RawFd, interest: Interest) -> io::Result<SourceKey> {
+            let key = self.claim_slot(fd, interest, SlotKind::Descriptor);
+            let udata = pack_udata(key.index, key.generation);
+            if let Err(error) = self.kevent_change(fd, interest, libc::EV_ADD | libc::EV_CLEAR, udata) {
+                self.release_slot(key);
+                return Err(error);
+            }
+            self.live_sources = self.live_sources.saturating_add(1);
+            Ok(key)
+        }
+
+        /// watches one child's exit with EVFILT_PROC/NOTE_EXIT, oneshot, on this
+        /// reactor's own kqueue. A fired knote bumps the read epoch like a readable
+        /// descriptor. ESRCH comes back as the raw errno: the kernel is saying the
+        /// process is already past its knote, so the caller reaps it now.
+        pub fn register_process_exit(&mut self, pid: NonZeroI32) -> io::Result<SourceKey> {
+            let key = self.claim_slot(pid.get(), Interest::Read, SlotKind::ProcessExit);
+            let udata = pack_udata(key.index, key.generation);
+            if let Err(error) = self.process_change(pid, libc::EV_ADD | libc::EV_ONESHOT, libc::NOTE_EXIT, udata) {
+                self.release_slot(key);
+                return Err(error);
+            }
+            self.live_sources = self.live_sources.saturating_add(1);
+            Ok(key)
+        }
+
+        fn claim_slot(&mut self, fd: RawFd, interest: Interest, kind: SlotKind) -> SourceKey {
             let generation = self.next_generation;
             self.next_generation = super::bump_generation(self.next_generation);
             let index = match self.free_head {
@@ -332,6 +387,7 @@ mod kqueue {
                     slot.write_waker = None;
                     slot.read_ready_epoch = 0;
                     slot.write_ready_epoch = 0;
+                    slot.kind = kind;
                     free
                 }
                 None => {
@@ -345,16 +401,27 @@ mod kqueue {
                         write_waker: None,
                         read_ready_epoch: 0,
                         write_ready_epoch: 0,
-
                         next_free: None,
+                        kind,
                     });
                     raw as u32
                 }
             };
-            let udata = pack_udata(index, generation);
-            self.kevent_change(fd, interest, libc::EV_ADD | libc::EV_CLEAR, udata)?;
-            self.live_sources = self.live_sources.saturating_add(1);
-            Ok(SourceKey { index, generation })
+            SourceKey { index, generation }
+        }
+
+        fn release_slot(&mut self, key: SourceKey) {
+            if let Some(slot) = self.slab.get_mut(key.index as usize) {
+                slot.generation = 0;
+                slot.fd = -1;
+                slot.interest = Interest::Read;
+                slot.read_waker = None;
+                slot.write_waker = None;
+                slot.read_ready_epoch = 0;
+                slot.write_ready_epoch = 0;
+                slot.kind = SlotKind::Descriptor;
+                slot.next_free = self.free_head.replace(key.index);
+            }
         }
 
         pub fn reregister(&mut self, key: SourceKey, interest: Interest) -> io::Result<()> {
@@ -397,29 +464,24 @@ mod kqueue {
             let slot_index = key.index as usize;
             // pull fd out under a short-scoped borrow so the subsequent
             // self.kevent_change call doesn't conflict with the &mut self.slab.
-            let (fd, interest) = {
+            let (fd, interest, kind) = {
                 let Some(slot) = self.slab.get_mut(slot_index) else {
                     return Ok(());
                 };
                 if slot.generation != key.generation {
                     return Ok(());
                 }
-                (slot.fd, slot.interest)
+                (slot.fd, slot.interest, slot.kind)
             };
-            // remove from kqueue (ignore errors — fd may already be closed).
-            let _ = self.kevent_change(fd, interest, libc::EV_DELETE, 0);
-            // re-borrow to clear the slot fields after the kevent syscall.
-            if let Some(slot) = self.slab.get_mut(slot_index) {
-                slot.generation = 0;
-                slot.fd = -1;
-                slot.interest = Interest::Read;
-                slot.read_waker = None;
-                slot.write_waker = None;
-                slot.read_ready_epoch = 0;
-                slot.write_ready_epoch = 0;
-                slot.next_free = self.free_head.replace(key.index);
-            }
-
+            // remove from kqueue (ignore errors — fd may already be closed, or a
+            // oneshot process knote may already have fired and gone).
+            let _ = match (kind, NonZeroI32::new(fd)) {
+                (SlotKind::ProcessExit, Some(pid)) => {
+                    self.process_change(pid, libc::EV_DELETE, 0, 0)
+                }
+                _ => self.kevent_change(fd, interest, libc::EV_DELETE, 0),
+            };
+            self.release_slot(key);
             self.live_sources = self.live_sources.saturating_sub(1);
             Ok(())
         }
@@ -554,7 +616,7 @@ mod kqueue {
                 // in the slot, so the next register_*_waker_ref's will_wake
                 // check succeeds and elides the Arc clone. Net per request:
                 // 1 fewer Arc bump + 1 fewer slot mutation per I/O event.
-                if event.filter == libc::EVFILT_READ {
+                if event.filter == libc::EVFILT_READ || event.filter == libc::EVFILT_PROC {
                     if let Some(waker) = slot.read_waker.as_ref() {
                         slot.read_ready_epoch = super::bump_generation(slot.read_ready_epoch);
                         #[cfg(feature = "runtime-prime-reactor-trace")]
@@ -584,6 +646,31 @@ mod kqueue {
                 }
             }
             Ok(fired)
+        }
+
+        fn process_change(
+            &self,
+            pid: NonZeroI32,
+            flags: u16,
+            fflags: u32,
+            udata: u64,
+        ) -> io::Result<()> {
+            let change = libc::kevent {
+                ident: pid.get() as usize,
+                filter: libc::EVFILT_PROC,
+                flags,
+                fflags,
+                data: 0,
+                udata: udata as *mut _,
+            };
+            // SAFETY: one change, zero events requested; kq is owned and valid.
+            let ret = unsafe {
+                libc::kevent(self.kq, &change, 1, core::ptr::null_mut(), 0, core::ptr::null())
+            };
+            if ret < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
         }
 
         fn kevent_change(

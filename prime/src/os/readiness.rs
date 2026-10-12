@@ -23,6 +23,8 @@
 #[cfg(unix)]
 use super::reactor::RawSource;
 use std::io;
+#[cfg(target_os = "macos")]
+use std::num::NonZeroI32;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(windows)]
@@ -30,7 +32,7 @@ use std::os::windows::io::AsSocket;
 use std::task::Context;
 
 use super::core_shard::with_current_reactor;
-use super::reactor::{Interest, OwnedSource, SourceKey, Wakeup};
+use super::reactor::{Interest, OwnedSource, Reactor, SourceKey, Wakeup};
 
 /// Outcome of arming read-readiness for a registered fd.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,11 +48,20 @@ pub enum ReadyState {
     OffWorker,
 }
 
+/// What the reactor is asked to watch. `Spent` is the state after `Drop` moved
+/// the registration out.
+enum Registration {
+    #[cfg(unix)]
+    Descriptor(RawSource),
+    Owned(OwnedSource),
+    #[cfg(target_os = "macos")]
+    Process(NonZeroI32),
+    Spent,
+}
+
 /// Reactor registration for one externally-owned fd. Deregisters on drop.
 pub struct Readiness {
-    #[cfg(unix)]
-    fd: RawSource,
-    socket: Option<OwnedSource>,
+    registration: Registration,
     owner: Option<Wakeup>,
     source: Option<SourceKey>,
     last_blocked_epoch: Option<u32>,
@@ -60,23 +71,34 @@ impl Readiness {
     #[cfg(unix)]
     #[must_use]
     pub fn new(fd: RawSource) -> Self {
-        Self {
-            fd,
-            socket: None,
-            owner: None,
-            source: None,
-            last_blocked_epoch: None,
-        }
+        Self::with_registration(Registration::Descriptor(fd))
+    }
+
+    /// Gate that opens when the child `pid` exits (EVFILT_PROC/NOTE_EXIT on the
+    /// worker's own kqueue). A pid already past its knote fails the first
+    /// `poll` with the raw `ESRCH`; the caller then reaps it immediately with
+    /// [`child::reap_reported`](super::child::reap_reported). Linux gates a
+    /// pidfd through [`Readiness::new`] instead.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn process_exit(pid: NonZeroI32) -> Self {
+        Self::with_registration(Registration::Process(pid))
     }
 
     #[cfg(windows)]
     pub fn new(socket: &impl AsSocket) -> io::Result<Self> {
-        Ok(Self {
-            socket: Some(socket.as_socket().try_clone_to_owned()?),
+        Ok(Self::with_registration(Registration::Owned(
+            socket.as_socket().try_clone_to_owned()?,
+        )))
+    }
+
+    fn with_registration(registration: Registration) -> Self {
+        Self {
+            registration,
             owner: None,
             source: None,
             last_blocked_epoch: None,
-        })
+        }
     }
 
     /// Arm read-readiness for the fd against the current worker's reactor.
@@ -96,27 +118,19 @@ impl Readiness {
                 ));
             }
             #[cfg(unix)]
-            if self.socket.is_none() {
+            if let Registration::Descriptor(fd) = self.registration {
                 // safety: fcntl validates the descriptor; the duplicate belongs to this readiness.
-                let duplicate = unsafe { libc::fcntl(self.fd, libc::F_DUPFD_CLOEXEC, 0) };
+                let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
                 if duplicate < 0 {
                     return Err(io::Error::last_os_error());
                 }
-                self.socket = Some(unsafe { OwnedSource::from_raw_fd(duplicate) });
+                self.registration = Registration::Owned(unsafe { OwnedSource::from_raw_fd(duplicate) });
             }
-            let socket = self
-                .socket
-                .as_ref()
-                .ok_or_else(|| io::Error::other("readiness source missing"))?;
-            #[cfg(unix)]
-            let fd = socket.as_raw_fd();
-            #[cfg(windows)]
-            let fd = socket;
 
             let key = match self.source {
                 Some(existing) => existing,
                 None => {
-                    let registered = reactor.register(fd, Interest::Read)?;
+                    let registered = self.register(reactor)?;
                     self.source = Some(registered);
                     self.owner = Some(reactor.wakeup());
                     registered
@@ -146,25 +160,48 @@ impl Readiness {
             }
         }
     }
+
+    fn register(&self, reactor: &mut Reactor) -> io::Result<SourceKey> {
+        match &self.registration {
+            Registration::Owned(socket) => {
+                #[cfg(unix)]
+                let source = socket.as_raw_fd();
+                #[cfg(windows)]
+                let source = socket;
+                reactor.register(source, Interest::Read)
+            }
+            #[cfg(target_os = "macos")]
+            Registration::Process(pid) => reactor.register_process_exit(*pid),
+            #[cfg(unix)]
+            Registration::Descriptor(_) => Err(io::Error::other("readiness source not yet owned")),
+            Registration::Spent => Err(io::Error::other("readiness source missing")),
+        }
+    }
 }
 
 impl Drop for Readiness {
     fn drop(&mut self) {
-        if let (Some(key), Some(owner), Some(socket)) =
-            (self.source.take(), self.owner.take(), self.socket.take())
-        {
-            let local = with_current_reactor(|reactor| {
-                if reactor.owns(&owner) {
-                    let _ = reactor.deregister(key);
-                    true
-                } else {
-                    false
-                }
-            })
-            .unwrap_or(false);
-            if !local {
-                owner.release_source(key, socket);
+        let registration = std::mem::replace(&mut self.registration, Registration::Spent);
+        let (Some(key), Some(owner)) = (self.source.take(), self.owner.take()) else {
+            return;
+        };
+        let local = with_current_reactor(|reactor| {
+            reactor.owns(&owner) && {
+                let _ = reactor.deregister(key);
+                true
             }
+        })
+        .unwrap_or(false);
+        if local {
+            return;
+        }
+        match registration {
+            Registration::Owned(socket) => owner.release_source(key, socket),
+            #[cfg(target_os = "macos")]
+            Registration::Process(_) => owner.release_process_exit(key),
+            #[cfg(unix)]
+            Registration::Descriptor(_) => {}
+            Registration::Spent => {}
         }
     }
 }
