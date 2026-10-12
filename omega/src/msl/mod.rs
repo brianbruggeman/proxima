@@ -176,7 +176,7 @@ use cached_attention_row_tiled::render_cached_attention_row_tiled;
 #[cfg(test)]
 pub(crate) use cached_attention_render::emit_cached_attention_merge;
 #[cfg(any(
-    all(test, feature = "metal-attn-split-rows"),
+    all(test, feature = "metal-attn-variants"),
     all(feature = "metal", target_os = "macos")
 ))]
 pub(crate) use cached_attention_render::emit_cached_attention_merge_with_schedule;
