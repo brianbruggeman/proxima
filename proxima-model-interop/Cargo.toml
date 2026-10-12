@@ -734,3 +734,17 @@ required-features = ["std", "metal", "qat"]
 [[example]]
 name = "layout_record"
 required-features = ["std", "float-layout-dtype"]
+
+# Drive `LoadedModel` (std-gated) on the GPU path; the documented invocation is
+# `--features std,metal`, so a default-features build skips them.
+[[example]]
+name = "gemma4_layer_diff"
+required-features = ["std", "metal"]
+
+[[example]]
+name = "gemma4_step0_logits"
+required-features = ["std", "metal"]
+
+[[example]]
+name = "llama_answer_oracle"
+required-features = ["std", "metal"]
