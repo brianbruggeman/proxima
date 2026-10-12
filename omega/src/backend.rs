@@ -221,6 +221,14 @@ impl GpuDriver {
             GpuDriver::Cuda => "cuda",
         }
     }
+
+    /// Whether this driver renders the fused `BoundOpKind::CachedAttention`, whose bound
+    /// excludes the pad rows of a bucketed KV range. A driver that runs the unfused
+    /// chain (CUDA, wgpu) sees every pad row, so its KV range must be bound exact.
+    #[must_use]
+    pub const fn fuses_cached_attention(self) -> bool {
+        matches!(self, GpuDriver::Metal)
+    }
 }
 
 /// Emits the telemetry event for an unrecognized `OMEGA_BACKEND` value.
@@ -1853,11 +1861,19 @@ mod tests {
         DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, projection,
     };
 
-    use super::{BackendError, Engine};
+    use super::{BackendError, Engine, GpuDriver};
     #[cfg(all(feature = "metal", target_os = "macos"))]
-    use super::{GpuDriver, MetalError};
+    use super::MetalError;
 
     static ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn only_the_metal_driver_renders_the_fused_cached_attention_bound() {
+        assert!(GpuDriver::Metal.fuses_cached_attention());
+        assert!(!GpuDriver::Wgpu.fuses_cached_attention());
+        #[cfg(feature = "cuda-driver")]
+        assert!(!GpuDriver::Cuda.fuses_cached_attention());
+    }
 
     #[test]
     fn gpu_expert_source_gate_rejects_a_nonempty_substitution_table() {
