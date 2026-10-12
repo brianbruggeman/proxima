@@ -105,9 +105,10 @@ impl ArchiveError {
 
 /// Installs the policy the pipeline cache reads, before the first kernel
 /// compiles. Returns the config back when the policy was already fixed, by an
-/// earlier call or by the first compile reading `OMEGA_*` itself.
-pub fn set_runtime_config(config: RuntimeConfig) -> Result<(), RuntimeConfig> {
-    RUNTIME_CONFIG.set(config)
+/// earlier call or by the first compile reading `OMEGA_*` itself. The rejected
+/// config is boxed because `RuntimeConfig` is large enough to bloat the `Err` arm.
+pub fn set_runtime_config(config: RuntimeConfig) -> Result<(), Box<RuntimeConfig>> {
+    RUNTIME_CONFIG.set(config).map_err(Box::new)
 }
 
 /// `(archive hits, archive files published)` since process start. A hit is a
