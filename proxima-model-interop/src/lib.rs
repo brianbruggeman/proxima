@@ -215,8 +215,11 @@ pub use transform::{
 #[cfg(feature = "std")]
 pub use transform::{Layout, MlxNames, SANDWICH_NORM_LAYOUT, STANDARD_LAYOUT, dense_names};
 #[cfg(feature = "std")]
-pub use transform::{TokenizerFiles, copy_tokenizer, export_tokenizer};
+pub use transform::{
+    QuantizedConventions, copy_config, hf_config_bytes, hf_config_bytes_with_overrides,
+    sliding_pattern_hparams,
+};
 #[cfg(feature = "std")]
-pub use transform::{copy_config, hf_config_bytes, sliding_pattern_hparams};
+pub use transform::{TokenizerFiles, copy_tokenizer, export_tokenizer};
 #[cfg(feature = "std")]
 pub use transform::{export_affine_named, export_mlx_directory, mlx_directory_files};

@@ -61,6 +61,8 @@ mod gguf_names;
 pub mod hf;
 #[cfg(feature = "hf")]
 pub mod hf_write;
+#[cfg(feature = "hf")]
+mod hf_write_pipeline;
 pub mod pipe;
 pub mod pretokenize;
 mod pretokenize_passes;

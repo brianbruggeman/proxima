@@ -19,6 +19,7 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::DType;
 
 use super::mlx_affine::{AffineExport, AffineParams, export_affine};
+use super::mlx_conventions::QuantizedConventions;
 use super::mlx_names::{FusedName, Layout, MlxNames};
 use super::mlx_plain::{PlainTensor, export_plain_leaf};
 use super::mlx_plain_named::{interleave, leaf_names};
@@ -37,6 +38,9 @@ type Directory<'parsed> = BTreeMap<&'parsed str, &'parsed TensorInfo>;
 /// layout row; [`InteropError::AffineDTypeUnsupported`] for a non-float
 /// `dtype`; whatever [`super::export_plain`] and [`super::export_affine`] can
 /// fail with.
+#[allow(clippy::too_many_arguments)]
+// the eight inputs are the checkpoint, the naming and the family's quantized conventions;
+// grouping them would mint a type whose only job is to be passed here
 pub fn export_affine_named(
     parsed: &ParsedGguf,
     file_bytes: &[u8],
@@ -45,8 +49,9 @@ pub fn export_affine_named(
     binding: &BindingProfile,
     layout: Layout,
     hf_prefix: &str,
+    conventions: QuantizedConventions,
 ) -> Result<Vec<PlainTensor>, InteropError> {
-    let names = leaf_names(parsed, binding, layout, hf_prefix)?;
+    let names = conventions.apply(leaf_names(parsed, binding, layout, hf_prefix)?);
     let directory: Directory = parsed
         .tensors
         .iter()
@@ -54,7 +59,7 @@ pub fn export_affine_named(
         .collect();
     let load =
         |tensor: &TensorInfo, kind: DType| export_plain_leaf(parsed, file_bytes, tensor, kind);
-    let mut groups = pack_singles(&names, &directory, &load, params, dtype)?;
+    let mut groups = pack_singles(&names, &directory, &load, (params, conventions), dtype)?;
     groups.extend(pack_fused(&names, &directory, &load, params, dtype)?);
     Ok(groups.into_iter().flatten().collect())
 }
@@ -63,7 +68,7 @@ fn pack_singles(
     names: &MlxNames,
     directory: &Directory,
     load: &impl Fn(&TensorInfo, DType) -> Result<PlainTensor, InteropError>,
-    params: AffineParams,
+    (base, conventions): (AffineParams, QuantizedConventions),
     dtype: DType,
 ) -> Result<Vec<Vec<PlainTensor>>, InteropError> {
     names
@@ -72,6 +77,7 @@ fn pack_singles(
         .filter_map(|(leaf, hf)| directory.get(leaf.as_str()).map(|info| (*info, hf)))
         .map(|(info, hf)| {
             let quantizable = hf.ends_with(".weight") && info.dims.len() >= 2;
+            let params = conventions.params_for(hf, base)?;
             let read = |kind: DType| load(info, kind).map(|tensor| renamed(tensor, hf));
             quantize_or_cast(read, quantizable, params, dtype)
         })
@@ -260,6 +266,7 @@ mod tests {
             &binding,
             STANDARD_LAYOUT,
             "model.",
+            QuantizedConventions::NONE,
         )
     }
 

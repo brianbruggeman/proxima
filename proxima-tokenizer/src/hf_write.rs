@@ -8,9 +8,10 @@
 //! for every [`TokenType::Control`]/[`TokenType::UserDefined`] entry, and
 //! in the config the bos/eos/unk token strings plus the auto-add policy.
 //! The `normalizer`, `pre_tokenizer`, `post_processor` and `decoder` blocks
-//! are written as `null`, and `model` carries `type`, `vocab` and `merges`
-//! only: a `Vocab` keeps the ids and the merge table, not the pipeline
-//! description that surrounds them.
+//! and the extra `model` keys follow the vocab's own shape, as
+//! `crate::hf_write_pipeline` describes: a char-level vocab gets the
+//! SentencePiece-style blocks, a byte-level vocab the ByteLevel blocks its
+//! [`crate::pretokenize::PreType`] selects.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -18,6 +19,7 @@ use alloc::vec::Vec;
 use serde_json::{Map, Value, json};
 
 use crate::error::TokenizerError;
+use crate::hf_write_pipeline::pipeline_of;
 use crate::vocab::{TokenType, Vocab};
 
 /// Serializes `vocab` to a `tokenizer.json` whose `model.vocab` and
@@ -34,20 +36,27 @@ use crate::vocab::{TokenType, Vocab};
 /// [`TokenizerError::HfTokenizerJsonWrite`] if two ids carry the same
 /// token string (a JSON object cannot hold both) or serialization fails.
 pub fn tokenizer_json_bytes(vocab: &Vocab) -> Result<Vec<u8>, TokenizerError> {
+    let pipeline = pipeline_of(vocab)?;
+    let mut model = json!({
+        "type": "BPE",
+        "vocab": vocab_object(vocab)?,
+        "merges": merges_array(vocab),
+    });
+    if let (Some(entries), Some(extras)) =
+        (model.as_object_mut(), pipeline.model_extras.as_object())
+    {
+        entries.extend(extras.clone());
+    }
     let root = json!({
         "version": "1.0",
         "truncation": null,
         "padding": null,
         "added_tokens": added_tokens(vocab),
-        "normalizer": null,
-        "pre_tokenizer": null,
-        "post_processor": null,
-        "decoder": null,
-        "model": {
-            "type": "BPE",
-            "vocab": vocab_object(vocab)?,
-            "merges": merges_array(vocab),
-        },
+        "normalizer": pipeline.normalizer,
+        "pre_tokenizer": pipeline.pre_tokenizer,
+        "post_processor": pipeline.post_processor,
+        "decoder": pipeline.decoder,
+        "model": model,
     });
     to_bytes(&root)
 }
@@ -151,6 +160,7 @@ mod tests {
 
     use super::*;
     use crate::hf::{bos_eos_policy_from_tokenizer_config, vocab_from_tokenizer_json};
+    use crate::pretokenize::PreType;
 
     const FIXTURES: &str = "../proxima-model-interop/tests/fixtures/mlx-reference";
 
@@ -189,7 +199,7 @@ mod tests {
         serde_json::from_slice(bytes).expect("writer output is json")
     }
 
-    fn load(directory: &str) -> Reference {
+    fn load(directory: &str, pre_type: PreType) -> Reference {
         let plain_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(FIXTURES)
             .join(directory)
@@ -200,8 +210,9 @@ mod tests {
             .expect("vendored tokenizer_config.json");
         let (json, config) = (parse(&json_bytes), parse(&config_bytes));
         let [bos, eos, unk] = special_ids(&json, &config);
-        let plain =
-            vocab_from_tokenizer_json(&json_bytes, bos, eos, unk).expect("reader loads fixture");
+        let plain = vocab_from_tokenizer_json(&json_bytes, bos, eos, unk)
+            .expect("reader loads fixture")
+            .with_pre_type(pre_type);
         let (add_bos, add_eos) =
             bos_eos_policy_from_tokenizer_config(&config_bytes).expect("policy");
         let typed = plain
@@ -233,12 +244,12 @@ mod tests {
 
     fn granite() -> &'static Reference {
         static CELL: OnceLock<Reference> = OnceLock::new();
-        CELL.get_or_init(|| load("granite-3.1-1b-a400m-moe"))
+        CELL.get_or_init(|| load("granite-3.1-1b-a400m-moe", PreType::Gpt2))
     }
 
     fn gemma() -> &'static Reference {
         static CELL: OnceLock<Reference> = OnceLock::new();
-        CELL.get_or_init(|| load("gemma4-e2b"))
+        CELL.get_or_init(|| load("gemma4-e2b", PreType::Default))
     }
 
     fn read_back(vocab: &Vocab) -> Vocab {
@@ -256,7 +267,9 @@ mod tests {
                 .with_token_types(token_types(&json, vocab.len()))
                 .expect("types"),
         };
-        typed.with_bos_eos_policy(add_bos, add_eos)
+        typed
+            .with_bos_eos_policy(add_bos, add_eos)
+            .with_pre_type(vocab.pre_type())
     }
 
     fn renamed(vocab: &Vocab, id: u32, token: &str) -> Vocab {
@@ -289,6 +302,7 @@ mod tests {
             vocab.unknown_token_id(),
         )
         .expect("renamed vocab builds")
+        .with_pre_type(vocab.pre_type())
     }
 
     fn model_vocab_agrees(written: &Value, reference: &Value) -> bool {
@@ -422,5 +436,96 @@ mod tests {
         let altered = renamed(&reference.typed, 0, "<|altered_end_of_text|>");
         let written = parse(&tokenizer_json_bytes(&altered).expect("json written"));
         assert!(!model_vocab_agrees(&written, &reference.json));
+    }
+
+    const PIPELINE_KEYS: [&str; 4] = ["normalizer", "pre_tokenizer", "post_processor", "decoder"];
+    const MODEL_EXTRA_KEYS: [&str; 7] = [
+        "dropout",
+        "unk_token",
+        "continuing_subword_prefix",
+        "end_of_word_suffix",
+        "fuse_unk",
+        "byte_fallback",
+        "ignore_merges",
+    ];
+
+    fn differing_keys(written: &Value, reference: &Value, keys: &[&str]) -> Vec<String> {
+        keys.iter()
+            .filter(|key| written.get(**key) != reference.get(**key))
+            .map(|key| String::from(*key))
+            .collect()
+    }
+
+    #[test]
+    fn hf_write_gemma4_pipeline_blocks_equal_vendored() {
+        let reference = gemma();
+        assert_eq!(
+            differing_keys(&reference.written_json, &reference.json, &PIPELINE_KEYS),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn hf_write_gemma4_model_extras_equal_vendored() {
+        let reference = gemma();
+        assert_eq!(
+            differing_keys(
+                &reference.written_json["model"],
+                &reference.json["model"],
+                &MODEL_EXTRA_KEYS
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn hf_write_granite_gpt2_pipeline_blocks_equal_vendored() {
+        let reference = granite();
+        assert_eq!(
+            differing_keys(&reference.written_json, &reference.json, &PIPELINE_KEYS),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn hf_write_granite_model_extras_equal_vendored() {
+        let reference = granite();
+        assert_eq!(
+            differing_keys(
+                &reference.written_json["model"],
+                &reference.json["model"],
+                &MODEL_EXTRA_KEYS
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn hf_write_digit_isolated_gpt2_pre_split_is_digits_then_byte_level() {
+        let isolated = granite()
+            .typed
+            .clone()
+            .with_pre_type(PreType::DigitIsolatedGpt2);
+
+        let written = parse(&tokenizer_json_bytes(&isolated).expect("json written"));
+
+        let steps = written["pre_tokenizer"]["pretokenizers"]
+            .as_array()
+            .expect("sequence of pre-tokenizers");
+        assert_eq!(steps[0]["type"], "Digits");
+        assert_eq!(steps[0]["individual_digits"], true);
+        assert_eq!(steps[1], granite().json["pre_tokenizer"]);
+    }
+
+    #[test]
+    fn hf_write_byte_level_pre_split_without_a_hugging_face_spelling_is_refused() {
+        let unspelled = granite().typed.clone().with_pre_type(PreType::Default);
+
+        let refusal = tokenizer_json_bytes(&unspelled).expect_err("default pre-split");
+
+        assert!(matches!(
+            refusal,
+            TokenizerError::HfTokenizerJsonWrite { reason } if reason.contains("Default")
+        ));
     }
 }

@@ -26,11 +26,12 @@ mod tests {
     use crate::profiles::binding_profile;
     use crate::sliding_pattern::hparams::from_metadata as sliding_from_metadata;
     use crate::transform::mlx::{MLX_MAX_SHARD_BYTES, MlxExport};
+    use crate::transform::mlx_config::GRANITE_QUANTIZED;
     use crate::transform::mlx_names::FusedName;
     use crate::transform::{
         AffineExport, AffineParams, DEFAULT_PLAIN_DTYPE, Layout, MlxNames, PlainTensor,
-        SANDWICH_NORM_LAYOUT, STANDARD_LAYOUT, dense_names, export_affine, export_plain,
-        hf_config_bytes, sliding_pattern_hparams,
+        QuantizedConventions, SANDWICH_NORM_LAYOUT, STANDARD_LAYOUT, dense_names, export_affine,
+        export_plain, hf_config_bytes, sliding_pattern_hparams,
     };
 
     const E2B_GGUF: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
@@ -44,6 +45,7 @@ mod tests {
         family: &'static str,
         layout: Layout,
         prefix: &'static str,
+        quantized: QuantizedConventions,
     }
 
     const GRANITE: Case = Case {
@@ -52,6 +54,7 @@ mod tests {
         family: "granitemoe",
         layout: STANDARD_LAYOUT,
         prefix: "model.",
+        quantized: GRANITE_QUANTIZED,
     };
 
     const E2B: Case = Case {
@@ -60,6 +63,7 @@ mod tests {
         family: "gemma4",
         layout: SANDWICH_NORM_LAYOUT,
         prefix: "language_model.model.",
+        quantized: QuantizedConventions::NONE,
     };
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,7 +175,7 @@ mod tests {
         }
     }
 
-    fn names_of(case: &Case, parsed: &ParsedGguf) -> MlxNames {
+    fn names_of(case: &Case, parsed: &ParsedGguf, conventions: QuantizedConventions) -> MlxNames {
         let binding = binding_profile(case.family).unwrap();
         let directory: Vec<&str> = parsed.tensors.iter().map(|t| t.name.as_str()).collect();
         let leaves: Vec<&str> = directory
@@ -179,7 +183,13 @@ mod tests {
             .copied()
             .filter(|name| !binding.extra.iter().any(|extra| extra == name))
             .collect();
-        dense_names(&leaves, &directory, &binding, case.layout, case.prefix)
+        conventions.apply(dense_names(
+            &leaves,
+            &directory,
+            &binding,
+            case.layout,
+            case.prefix,
+        ))
     }
 
     fn interleave(name: &str, parts: &[PlainTensor]) -> PlainTensor {
@@ -222,8 +232,13 @@ mod tests {
             .collect()
     }
 
-    fn hf_tensors(case: &Case, source: &Source, dtype: DType) -> Vec<PlainTensor> {
-        let names = names_of(case, &source.reduced);
+    fn hf_tensors(
+        case: &Case,
+        source: &Source,
+        dtype: DType,
+        conventions: QuantizedConventions,
+    ) -> Vec<PlainTensor> {
+        let names = names_of(case, &source.reduced, conventions);
         assert!(names.unmapped.is_empty(), "unmapped: {:?}", names.unmapped);
         let exported = export_plain(&source.reduced, &source.mapping, dtype).unwrap();
         let mut by_leaf: BTreeMap<String, PlainTensor> = exported
@@ -244,8 +259,8 @@ mod tests {
         named
     }
 
-    fn kept_rows(case: &Case, source: &Source) -> Rows {
-        let names = names_of(case, &source.reduced);
+    fn kept_rows(case: &Case, source: &Source, conventions: QuantizedConventions) -> Rows {
+        let names = names_of(case, &source.reduced, conventions);
         let fused = names.fused.iter().map(|item| (&item.leaf, &item.hf));
         let mapped = names.mapped.iter().map(|(leaf, hf)| (leaf, hf));
         mapped
@@ -307,11 +322,12 @@ mod tests {
         source: &Source,
         params_for: &dyn Fn(&str) -> AffineParams,
     ) -> Vec<PlainTensor> {
-        let floats: BTreeMap<String, PlainTensor> = hf_tensors(case, source, DType::Float32)
-            .into_iter()
-            .map(|tensor| (tensor.name.clone(), tensor))
-            .collect();
-        hf_tensors(case, source, DEFAULT_PLAIN_DTYPE)
+        let floats: BTreeMap<String, PlainTensor> =
+            hf_tensors(case, source, DType::Float32, case.quantized)
+                .into_iter()
+                .map(|tensor| (tensor.name.clone(), tensor))
+                .collect();
+        hf_tensors(case, source, DEFAULT_PLAIN_DTYPE, case.quantized)
             .into_iter()
             .flat_map(|plain| {
                 let packed = floats
@@ -442,14 +458,25 @@ mod tests {
 
     fn plain_export(case: &Case) -> (Header, Rows) {
         let source = source(case);
-        let tensors = hf_tensors(case, &source, DEFAULT_PLAIN_DTYPE);
-        (assembled_header(&tensors).0, kept_rows(case, &source))
+        let tensors = hf_tensors(
+            case,
+            &source,
+            DEFAULT_PLAIN_DTYPE,
+            QuantizedConventions::NONE,
+        );
+        (
+            assembled_header(&tensors).0,
+            kept_rows(case, &source, QuantizedConventions::NONE),
+        )
     }
 
     fn affine_export(case: &Case, params_for: &dyn Fn(&str) -> AffineParams) -> (Header, Rows) {
         let source = source(case);
         let tensors = affine_tensors(case, &source, params_for);
-        (assembled_header(&tensors).0, kept_rows(case, &source))
+        (
+            assembled_header(&tensors).0,
+            kept_rows(case, &source, case.quantized),
+        )
     }
 
     fn prefix_counts(names: &[String]) -> BTreeMap<String, usize> {
@@ -556,7 +583,7 @@ mod tests {
     fn assert_affine_dtypes(case: &Case) {
         let source = source(case);
         let (exported, metadata) = assembled_header(&affine_tensors(case, &source, &uniform));
-        let kept = kept_rows(case, &source);
+        let kept = kept_rows(case, &source, case.quantized);
         let found = compare(&exported, &reference_header(case.model, "affine4"), &kept);
         assert!(found.dtype.is_empty(), "{:?}", found.dtype);
         let reference = reference_metadata(case.model, "affine4");

@@ -22,8 +22,210 @@
   "num_local_experts": 32,
   "output_router_logits": false,
   "pad_token_id": 0,
+  "quantization": {
+    "bits": 4,
+    "group_size": 64,
+    "mode": "affine",
+    "model.layers.0.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.1.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.10.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.11.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.12.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.13.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.14.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.15.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.16.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.17.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.18.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.19.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.2.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.20.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.21.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.22.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.23.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.3.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.4.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.5.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.6.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.7.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.8.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.9.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    }
+  },
+  "quantization_config": {
+    "bits": 4,
+    "group_size": 64,
+    "mode": "affine",
+    "model.layers.0.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.1.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.10.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.11.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.12.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.13.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.14.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.15.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.16.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.17.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.18.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.19.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.2.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.20.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.21.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.22.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.23.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.3.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.4.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.5.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.6.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.7.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.8.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    },
+    "model.layers.9.block_sparse_moe.router.layer": {
+      "bits": 8,
+      "group_size": 64
+    }
+  },
   "residual_multiplier": 0.22,
-  "rms_norm_eps": 0.000001,
+  "rms_norm_eps": 1e-6,
   "rope_scaling": null,
   "rope_theta": 1500000.0,
   "router_aux_loss_coef": 0.0,
@@ -31,15 +233,5 @@
   "torch_dtype": "bfloat16",
   "transformers_version": "4.47.0",
   "use_cache": true,
-  "vocab_size": 49155,
-  "quantization": {
-    "group_size": 64,
-    "bits": 4,
-    "mode": "affine"
-  },
-  "quantization_config": {
-    "group_size": 64,
-    "bits": 4,
-    "mode": "affine"
-  }
+  "vocab_size": 49155
 }
