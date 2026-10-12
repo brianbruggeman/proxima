@@ -12,7 +12,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_primitives::float_layout::{FloatLayout, Specials};
+use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
 
 pub(crate) const F32_FRACTION_BITS: u32 = 23;
 pub(crate) const F32_INFINITY_BITS: u32 = 0x7f80_0000;
@@ -35,6 +35,7 @@ pub fn hardware_type(layout: &FloatLayout) -> Option<&'static str> {
                 && *mantissa_bits == layout.mantissa_bits
                 && *specials == layout.specials
                 && *bias == layout.bias()
+                && layout.sign == SignEncoding::Magnitude
         })
         .map(|entry| entry.4)
 }
@@ -80,9 +81,67 @@ pub(crate) const fn reserves_all_ones(layout: &FloatLayout) -> bool {
     !matches!(layout.specials, Specials::None)
 }
 
+fn integer_scale(layout: &FloatLayout) -> f32 {
+    let exponent = 1 - i32::from(layout.bias()) - i32::from(layout.mantissa_bits);
+    f32::from_bits(((exponent + 127).clamp(1, 254) as u32) << 23)
+}
+
+fn integer_load_msl(layout: &FloatLayout, name: &str) -> String {
+    let mantissa_bits = layout.mantissa_bits;
+    let mantissa_mask = (1u64 << mantissa_bits) - 1;
+    let scale = integer_scale(layout);
+    let value = match layout.sign {
+        SignEncoding::Absent => "(float)(long)mantissa".to_string(),
+        SignEncoding::Magnitude => format!(
+            "((code >> {mantissa_bits}u) & 1u) == 0u ? (float)(long)mantissa : -(float)(long)mantissa"
+        ),
+        SignEncoding::TwosComplement => format!(
+            "(float)((long)mantissa - (long)(((code >> {mantissa_bits}u) & 1u) << {mantissa_bits}u))"
+        ),
+    };
+    format!(
+        "
+static inline float {name}(uint code) {{
+    uint mantissa = code & {mantissa_mask:#x}u;
+    return ({value}) * {scale:e}f;
+}}
+"
+    )
+}
+
+fn integer_store_msl(layout: &FloatLayout, name: &str) -> String {
+    let mantissa_bits = layout.mantissa_bits;
+    let mantissa_mask = (1u64 << mantissa_bits) - 1;
+    let unscale = 1.0 / integer_scale(layout);
+    let body = match layout.sign {
+        SignEncoding::Absent => {
+            format!("    return (uint)clamp(rint(scaled), 0.0f, {mantissa_mask}.0f);")
+        }
+        SignEncoding::Magnitude => format!(
+            "    uint magnitude = (uint)min(rint(fabs(scaled)), {mantissa_mask}.0f);\n    return magnitude | ((as_type<uint>(scaled) >> 31u) << {mantissa_bits}u);"
+        ),
+        SignEncoding::TwosComplement => format!(
+            "    int clamped = (int)clamp(rint(scaled), -{negative_limit}.0f, {mantissa_mask}.0f);\n    return (uint)clamped & {full_mask:#x}u;",
+            negative_limit = 1u64 << mantissa_bits,
+            full_mask = (1u64 << (mantissa_bits + 1)) - 1
+        ),
+    };
+    format!(
+        "
+static inline uint {name}(float value) {{
+    float scaled = value * {unscale:e}f;
+{body}
+}}
+"
+    )
+}
+
 /// Renders `static inline float name(uint code)`: the value of the `layout.width()`-bit `code`.
 #[must_use]
 pub fn layout_load_msl(layout: FloatLayout, name: &str) -> String {
+    if layout.exponent_bits == 0 {
+        return integer_load_msl(&layout, name);
+    }
     match hardware_type(&layout) {
         Some("float") => format!(
             "\nstatic inline float {name}(uint code) {{\n    return as_type<float>(code);\n}}\n"
@@ -156,6 +215,9 @@ fn field_load_reserved_msl(
 /// ties to the even code, overflow and NaN under the layout's [`Specials`].
 #[must_use]
 pub fn layout_store_msl(layout: FloatLayout, name: &str) -> String {
+    if layout.exponent_bits == 0 {
+        return integer_store_msl(&layout, name);
+    }
     match hardware_type(&layout) {
         Some("float") => format!(
             "\nstatic inline uint {name}(float value) {{\n    return as_type<uint>(value);\n}}\n"

@@ -393,7 +393,7 @@ mod tests {
 
     #[cfg(feature = "float-layout-dtype")]
     mod layout_carrier {
-        use proxima_primitives::float_layout::{FloatLayout, Specials};
+        use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
 
         use super::*;
 
@@ -402,6 +402,7 @@ mod tests {
             mantissa_bits: 3,
             specials: Specials::SaturateOnOverflow,
             bias_override: None,
+            sign: SignEncoding::Magnitude,
         };
 
         #[proxima::test]

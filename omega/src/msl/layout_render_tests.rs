@@ -6,7 +6,7 @@ use objc2_foundation::NSString;
 use objc2_metal::{
     MTLCompileOptions, MTLCreateSystemDefaultDevice, MTLDevice, MTLLanguageVersion, MTLLibrary,
 };
-use proxima_primitives::float_layout::{FloatLayout, Specials};
+use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
 
 use super::layout_render::{hardware_type, layout_load_msl, layout_store_msl, layout_unpack_msl};
 
@@ -20,6 +20,7 @@ const E4M3_FROM_FIELDS: FloatLayout = FloatLayout {
     mantissa_bits: 3,
     specials: Specials::None,
     bias_override: None,
+    sign: SignEncoding::Magnitude,
 };
 
 fn blank_numeric_literals(source: &str) -> String {
@@ -59,6 +60,7 @@ fn float_layout_msl_hardware_type_chosen_by_fields_not_names() {
         mantissa_bits: 7,
         specials: Specials::InfinityOnOverflow,
         bias_override: Some(127),
+        sign: SignEncoding::Magnitude,
     };
     let bfloat_without_infinity = FloatLayout {
         specials: Specials::None,

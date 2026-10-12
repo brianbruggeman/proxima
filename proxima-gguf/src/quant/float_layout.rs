@@ -5,7 +5,7 @@
 //! ties to the even code, no `f64`, no allocation. Layouts are at most 32 bits wide with at most
 //! 23 mantissa bits, so every intermediate fits in `u32`.
 
-use proxima_primitives::float_layout::{FloatLayout, Specials};
+use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
 
 const F32_FRACTION_BITS: u32 = 23;
 const F32_FRACTION_MASK: u32 = 0x7f_ffff;
@@ -117,6 +117,97 @@ const fn nan_code(bits: u32, layout: &FloatLayout, nan_count: &mut u64) -> u32 {
     }
 }
 
+const fn scale_by_power_of_two(mut value: f32, exponent: i32) -> f32 {
+    let mut remaining = exponent;
+    while remaining > 0 {
+        value *= 2.0;
+        remaining -= 1;
+    }
+    while remaining < 0 {
+        value *= 0.5;
+        remaining += 1;
+    }
+    value
+}
+
+const fn integer_scale_exponent(layout: &FloatLayout) -> i32 {
+    1 - layout.bias() as i32 - layout.mantissa_bits as i32
+}
+
+const fn integer_mantissa_mask(layout: &FloatLayout) -> u64 {
+    (1u64 << layout.mantissa_bits) - 1
+}
+
+const fn integer_sign_bit(code: u32, layout: &FloatLayout) -> u64 {
+    match layout.sign {
+        SignEncoding::Absent => 0,
+        SignEncoding::Magnitude | SignEncoding::TwosComplement => {
+            ((code as u64) >> layout.mantissa_bits) & 1
+        }
+    }
+}
+
+const fn integer_decode(code: u32, layout: &FloatLayout) -> f32 {
+    let mantissa = (code as u64) & integer_mantissa_mask(layout);
+    let sign = integer_sign_bit(code, layout);
+    let exponent = integer_scale_exponent(layout);
+    match layout.sign {
+        SignEncoding::Absent => scale_by_power_of_two(mantissa as f32, exponent),
+        SignEncoding::Magnitude => {
+            let magnitude = scale_by_power_of_two(mantissa as f32, exponent);
+            if sign == 1 { -magnitude } else { magnitude }
+        }
+        SignEncoding::TwosComplement => {
+            let value = mantissa as i64 - ((sign as i64) << layout.mantissa_bits);
+            scale_by_power_of_two(value as f32, exponent)
+        }
+    }
+}
+
+const fn round_magnitude_ties_even(magnitude: f32) -> u64 {
+    let truncated = magnitude as u64;
+    let fraction = magnitude - truncated as f32;
+    if fraction > 0.5 || (fraction == 0.5 && truncated & 1 == 1) {
+        truncated.saturating_add(1)
+    } else {
+        truncated
+    }
+}
+
+const fn integer_encode(value: f32, layout: &FloatLayout) -> u32 {
+    if value.is_nan() {
+        return 0;
+    }
+    let scaled = scale_by_power_of_two(value, -integer_scale_exponent(layout));
+    let negative = scaled.is_sign_negative();
+    let magnitude = round_magnitude_ties_even(if negative { -scaled } else { scaled });
+    let mask = integer_mantissa_mask(layout);
+    let top = layout.mantissa_bits;
+    let code = match layout.sign {
+        SignEncoding::Absent => {
+            if negative {
+                0
+            } else {
+                min_u64(magnitude, mask)
+            }
+        }
+        SignEncoding::Magnitude => min_u64(magnitude, mask) | ((negative as u64) << top),
+        SignEncoding::TwosComplement => {
+            if negative {
+                let clamped = min_u64(magnitude, 1u64 << top);
+                ((1u64 << (top + 1)) - clamped) & ((1u64 << (top + 1)) - 1)
+            } else {
+                min_u64(magnitude, mask)
+            }
+        }
+    };
+    code as u32
+}
+
+const fn min_u64(left: u64, right: u64) -> u64 {
+    if left < right { left } else { right }
+}
+
 /// Encodes `value` into `layout`, counting NaN inputs for layouts that have no NaN encoding.
 ///
 /// Rounds to nearest, ties to the even code. Overflow clamps to the signed max normal for
@@ -126,6 +217,12 @@ const fn nan_code(bits: u32, layout: &FloatLayout, nan_count: &mut u64) -> u32 {
 /// sign and the top payload bits of the NaN, set the quiet bit, and leave the counter alone.
 #[must_use]
 pub const fn encode_counting(value: f32, layout: FloatLayout, nan_count: &mut u64) -> u32 {
+    if layout.exponent_bits == 0 {
+        if value.is_nan() {
+            *nan_count += 1;
+        }
+        return integer_encode(value, &layout);
+    }
     if value.is_nan() {
         return nan_code(value.to_bits(), &layout, nan_count);
     }
@@ -176,6 +273,9 @@ const fn finite_magnitude_bits(exponent: u32, mantissa: u32, layout: &FloatLayou
 /// A reserved NaN code keeps its payload, shifted to the top of the `f32` fraction, and widens quiet.
 #[must_use]
 pub const fn decode(code: u32, layout: FloatLayout) -> f32 {
+    if layout.exponent_bits == 0 {
+        return integer_decode(code, &layout);
+    }
     let mantissa = code & mantissa_mask(&layout);
     let exponent = (code >> layout.mantissa_bits) & exponent_ones(&layout);
     let reserved = !matches!(layout.specials, Specials::None) && exponent == exponent_ones(&layout);

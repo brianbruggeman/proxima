@@ -8,7 +8,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_primitives::float_layout::{FloatLayout, SignEncoding};
 
 use crate::msl::layout_render::{
     F32_ABS_MASK, F32_FRACTION_BITS, F32_INFINITY_BITS, F32_QUIET_BIT, exponent_ones,
@@ -16,9 +16,67 @@ use crate::msl::layout_render::{
     sign_shift,
 };
 
+fn integer_scale(layout: &FloatLayout) -> f32 {
+    let exponent = 1 - i32::from(layout.bias()) - i32::from(layout.mantissa_bits);
+    f32::from_bits(((exponent + 127).clamp(1, 254) as u32) << 23)
+}
+
+fn integer_load(layout: &FloatLayout, name: &str) -> String {
+    let mantissa_bits = layout.mantissa_bits;
+    let mantissa_mask = (1u64 << mantissa_bits) - 1;
+    let scale = integer_scale(layout);
+    let value = match layout.sign {
+        SignEncoding::Absent => "f32(mantissa)".to_string(),
+        SignEncoding::Magnitude => format!(
+            "select(f32(mantissa), -f32(mantissa), ((code >> {mantissa_bits}u) & 1u) == 1u)"
+        ),
+        SignEncoding::TwosComplement => format!(
+            "f32(mantissa) - select(0.0, f32(1u << {mantissa_bits}u), ((code >> {mantissa_bits}u) & 1u) == 1u)"
+        ),
+    };
+    format!(
+        "
+fn {name}(code: u32) -> f32 {{
+    let mantissa = code & {mantissa_mask:#x}u;
+    return ({value}) * {scale:e};
+}}
+"
+    )
+}
+
+fn integer_store(layout: &FloatLayout, name: &str) -> String {
+    let mantissa_bits = layout.mantissa_bits;
+    let mantissa_mask = (1u64 << mantissa_bits) - 1;
+    let unscale = 1.0 / integer_scale(layout);
+    let body = match layout.sign {
+        SignEncoding::Absent => {
+            format!("    return u32(clamp(round(scaled), 0.0, {mantissa_mask}.0));")
+        }
+        SignEncoding::Magnitude => format!(
+            "    let magnitude = u32(min(round(abs(scaled)), {mantissa_mask}.0));\n    return magnitude | ((bitcast<u32>(scaled) >> 31u) << {mantissa_bits}u);"
+        ),
+        SignEncoding::TwosComplement => format!(
+            "    let clamped = i32(clamp(round(scaled), -{negative_limit}.0, {mantissa_mask}.0));\n    return bitcast<u32>(clamped) & {full_mask:#x}u;",
+            negative_limit = 1u64 << mantissa_bits,
+            full_mask = (1u64 << (mantissa_bits + 1)) - 1
+        ),
+    };
+    format!(
+        "
+fn {name}(value: f32) -> u32 {{
+    let scaled = value * {unscale:e};
+{body}
+}}
+"
+    )
+}
+
 /// `fn name(code: u32) -> f32`: the value of the `layout.width()`-bit `code`.
 #[must_use]
 pub fn layout_load_wgsl(layout: FloatLayout, name: &str) -> String {
+    if layout.exponent_bits == 0 {
+        return integer_load(&layout, name);
+    }
     match hardware_type(&layout) {
         Some("float") => {
             format!("\nfn {name}(code: u32) -> f32 {{\n    return bitcast<f32>(code);\n}}\n")
@@ -93,6 +151,9 @@ fn {name}(code: u32) -> f32 {{
 /// code, overflow and NaN under the layout's specials.
 #[must_use]
 pub fn layout_store_wgsl(layout: FloatLayout, name: &str) -> String {
+    if layout.exponent_bits == 0 {
+        return integer_store(&layout, name);
+    }
     match hardware_type(&layout) {
         Some("float") => {
             format!("\nfn {name}(value: f32) -> u32 {{\n    return bitcast<u32>(value);\n}}\n")

@@ -15,7 +15,22 @@ pub enum Specials {
     InfinityOnOverflow,
 }
 
-/// One sign bit, `exponent_bits`, `mantissa_bits`; at most 32 bits wide.
+/// How the sign of a stored number is encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SignEncoding {
+    /// No sign bit: the layout is unsigned and `width()` has no sign bit (`uint`).
+    Absent,
+    /// A sign bit above the other fields selects the sign of the magnitude, so zero has two
+    /// encodings (every IEEE-family float; sign-magnitude integers).
+    Magnitude,
+    /// A sign bit of weight `-2^(mantissa_bits)` over the mantissa field: the range is
+    /// asymmetric and zero has one encoding (`int8` and the other native integers).
+    TwosComplement,
+}
+
+/// A sign encoding, `exponent_bits`, `mantissa_bits`; at most 32 bits wide. An integer is the
+/// layout with `exponent_bits` 0 and a `bias_override` of `1 - mantissa_bits`, which makes its
+/// scale exactly 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct FloatLayout {
     /// Width of the exponent field; 3 for E3M2, 8 for binary32.
@@ -28,6 +43,8 @@ pub struct FloatLayout {
     /// Replaces the IEEE bias `2^(exponent_bits - 1) - 1` when set; `Some(4)` on E3M2 shifts
     /// its max normal from 28.0 to 14.0.
     pub bias_override: Option<i16>,
+    /// How the sign is encoded; `Magnitude` for IEEE floats, `TwosComplement` for `int8`.
+    pub sign: SignEncoding,
 }
 
 const fn pow2(exponent: i32) -> f32 {
@@ -55,6 +72,14 @@ impl FloatLayout {
     pub const BF16: Self = Self::ieee_like(8, 7, Specials::InfinityOnOverflow);
     pub const BF8: Self = Self::E5M2;
     pub const BF4: Self = Self::E2M1;
+    pub const INT8: Self = Self::integer(8, SignEncoding::TwosComplement);
+    pub const UINT8: Self = Self::integer(8, SignEncoding::Absent);
+    pub const INT16: Self = Self::integer(16, SignEncoding::TwosComplement);
+    pub const UINT16: Self = Self::integer(16, SignEncoding::Absent);
+    pub const INT32: Self = Self::integer(32, SignEncoding::TwosComplement);
+    pub const UINT32: Self = Self::integer(32, SignEncoding::Absent);
+    /// Sign-magnitude eight bits: range -127..=127 with a negative zero.
+    pub const SIGN_MAGNITUDE_INT8: Self = Self::integer(8, SignEncoding::Magnitude);
 
     const fn ieee_like(exponent_bits: u8, mantissa_bits: u8, specials: Specials) -> Self {
         Self {
@@ -62,6 +87,21 @@ impl FloatLayout {
             mantissa_bits,
             specials,
             bias_override: None,
+            sign: SignEncoding::Magnitude,
+        }
+    }
+
+    const fn integer(width: u8, sign: SignEncoding) -> Self {
+        let mantissa_bits = match sign {
+            SignEncoding::Absent => width,
+            SignEncoding::Magnitude | SignEncoding::TwosComplement => width - 1,
+        };
+        Self {
+            exponent_bits: 0,
+            mantissa_bits,
+            specials: Specials::None,
+            bias_override: Some(1 - mantissa_bits as i16),
+            sign,
         }
     }
 
@@ -75,7 +115,11 @@ impl FloatLayout {
 
     #[must_use]
     pub const fn width(&self) -> u8 {
-        1 + self.exponent_bits + self.mantissa_bits
+        let sign_bits = match self.sign {
+            SignEncoding::Absent => 0,
+            SignEncoding::Magnitude | SignEncoding::TwosComplement => 1,
+        };
+        sign_bits + self.exponent_bits + self.mantissa_bits
     }
 
     /// Whether two layouts are the same format: equal exponent and mantissa widths, equal
@@ -87,6 +131,7 @@ impl FloatLayout {
             && self.mantissa_bits == other.mantissa_bits
             && self.specials == other.specials
             && self.bias() == other.bias()
+            && self.sign == other.sign
     }
 
     /// Bytes `elements` values occupy packed densely at `width()` bits each, plus one `scale` code

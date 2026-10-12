@@ -1167,58 +1167,6 @@ static inline float q5k_pair_dot(device const uchar *block, uint iq, uint ir, th
 }
 "#;
 
-/// `Q8_0`: a flat 32-element block, one `f16` scale, no sub-block scale/min
-/// pair and no bit-packing at all -- genuinely a different SHAPE from the
-/// K-quant family above (no super-block; each level is already a full signed
-/// byte, not a nibble), not a widening or narrowing of one. It slots into
-/// the same PACKED-OPERAND mechanism ([`Codec`], `operand_read`,
-/// this preamble) as a fourth codec precisely because that mechanism is
-/// generic over block byte width and element count; the tiled-GEMM
-/// (`classify_tiled_gemm`) fast path reads it through its `tiled_decode`
-/// description ([`Q8_0_DEQUANT_HALF16_MSL`]), and every other path renders it
-/// through the per-element accessor below.
-///
-/// It DOES take the row-blocked (`classify_packed_row_block`) fast path:
-/// eight real `Q8_0` blocks (32 elements, 34 bytes each) sit contiguously in
-/// exactly the byte span one K-quant super-block ([`Q4K_BLOCK_ELEMENTS`] =
-/// 256 elements) occupies, so `crate::msl::codec_row_block_step_bytes`
-/// treats every 8-block run as one super-block for that path's addressing,
-/// and [`Q8_0_SUPER_ELEMENT_MSL`] is the matching per-element read inside
-/// it.
-///
-/// Ports `proxima_gguf::quant::q8_0::dequantize_block` exactly: `x = q*d`
-/// per element, no sub-block structure at all.
-///
-/// Layout, 34 bytes per 32 elements: `d` f16 at 0, 32 signed `int8_t` levels
-/// at 2.
-pub const Q8_0_UNPACK_MSL: &str = r#"
-// element `index` (0..32) of one Q8_0 block, byte-for-byte the value
-// proxima_gguf::quant::q8_0::dequantize_block writes at the same index.
-static inline float q8_0_element(device const uchar *block, uint index) {
-    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
-    float d = (float)as_type<half>(d_bits);
-    char level = (char)block[2u + index];
-    return (float)level * d;
-}
-"#;
-
-/// The row-blocked packed path's per-superblock-relative `Q8_0` accessor --
-/// mirrors `q2k_element`/`q3k_element`'s own `(superblock_ptr,
-/// index_0_255)` convention so `push_packed_row_blocked_body`'s single-row
-/// `else` arm can call it exactly like the K-quant codecs it already
-/// handles, even though `Q8_0` has no super-block of its own: `index / 32`
-/// selects which of the eight real 32-element blocks packed into that span,
-/// and the remainder feeds [`Q8_0_UNPACK_MSL`]'s own per-block decode
-/// (`q8_0_element`) unchanged. `34` is [`Q8_0_BLOCK_BYTES`] and `32` is
-/// [`Q8_0_BLOCK_ELEMENTS`], both inlined as literals here the same way every
-/// other codec's superblock-relative accessor inlines its own fixed layout
-/// constants -- pinned against drift by `omega/tests/q8_0_unpack.rs`.
-pub const Q8_0_SUPER_ELEMENT_MSL: &str = r#"
-static inline float q8_0_super_element(device const uchar *superblock, uint index) {
-    return q8_0_element(superblock + (index / 32u) * 34u, index % 32u);
-}
-"#;
-
 /// Batched-unpack fast arm for `Q8_0`, mirroring [`Q4K_UNPACK_MSL`]'s
 /// `q4k_pair_dot`'s posture (decode the block's one scale ONCE, then walk
 /// its packed levels

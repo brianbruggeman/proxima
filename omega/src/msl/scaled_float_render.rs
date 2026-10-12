@@ -24,9 +24,9 @@ pub(super) fn push_scaled_float_decoders(source: &mut String, quantized: &[Optio
 pub(super) fn scaled_e3m2_unpack_msl(layout: FloatLayout) -> String {
     [
         scaled_e3m2_field_msl(layout),
-        scaled_e3m2_group_msl(),
-        scaled_e3m2_element_msl(layout),
-        scaled_e3m2_super_element_msl(),
+        scaled_block_group_msl(&E3M2_BLOCK),
+        scaled_block_element_msl(&E3M2_BLOCK, layout),
+        scaled_block_super_element_msl(&E3M2_BLOCK),
         scaled_e3m2_quad_dot_msl(layout),
     ]
     .concat()
@@ -36,43 +36,95 @@ fn scaled_e3m2_field_msl(layout: FloatLayout) -> String {
     super::layout_render::layout_load_msl(layout, "scaled_e3m2_field")
 }
 
-fn scaled_e3m2_group_msl() -> String {
-    let word = (0..BYTES_PER_GROUP)
+/// The geometry of one block of fields under an f16 scale at its start: how many elements, how
+/// many bytes, and how fields pack into groups of bytes. The block emitters below render the
+/// element accessors of any such block from a layout; fp6 e3m2 (four six-bit fields in three
+/// bytes) and Q8_0 (one eight-bit integer in one byte) are two instances of it.
+#[derive(Clone, Copy)]
+pub(super) struct ScaledBlock {
+    pub prefix: &'static str,
+    pub elements: usize,
+    pub block_bytes: usize,
+    pub fields_per_group: u32,
+    pub bytes_per_group: u32,
+}
+
+impl ScaledBlock {
+    const fn scale_bytes(&self, layout: &FloatLayout) -> usize {
+        self.block_bytes - self.elements * layout.width() as usize / 8
+    }
+}
+
+pub(super) const E3M2_BLOCK: ScaledBlock = ScaledBlock {
+    prefix: "scaled_e3m2",
+    elements: FP6_E3M2_ELEMENTS,
+    block_bytes: FP6_E3M2_BYTES,
+    fields_per_group: FIELDS_PER_GROUP,
+    bytes_per_group: BYTES_PER_GROUP,
+};
+
+pub(super) const Q8_0_BLOCK: ScaledBlock = ScaledBlock {
+    prefix: "q8_0",
+    elements: Q8_0_BLOCK_ELEMENTS,
+    block_bytes: Q8_0_BLOCK_BYTES,
+    fields_per_group: 1,
+    bytes_per_group: 1,
+};
+
+pub(super) fn scaled_block_group_msl(block: &ScaledBlock) -> String {
+    let prefix = block.prefix;
+    let word = (0..block.bytes_per_group)
         .map(|byte| format!("((uint)group[{byte}] << {}u)", byte * 8))
         .collect::<Vec<_>>()
         .join(" | ");
     format!(
         "
-static inline uint scaled_e3m2_group(device const uchar *group) {{
+static inline uint {prefix}_group(device const uchar *group) {{
     return {word};
 }}
 "
     )
 }
 
-fn scaled_e3m2_element_msl(layout: FloatLayout) -> String {
+pub(super) fn scaled_block_element_msl(block: &ScaledBlock, layout: FloatLayout) -> String {
+    let prefix = block.prefix;
     let width = layout.width();
-    let mask = (1u32 << width) - 1;
+    let mask = (1u64 << width) - 1;
+    let scale_bytes = block.scale_bytes(&layout);
+    let (fields, group_bytes) = (block.fields_per_group, block.bytes_per_group);
     format!(
         "
-static inline float scaled_e3m2_element(device const uchar *block, uint index) {{
-{SCALE_DECODE_MSL}    uint word = scaled_e3m2_group(block + {SCALE_BYTES}u + (index / {FIELDS_PER_GROUP}u) * {BYTES_PER_GROUP}u);
-    uint field = (word >> ((index % {FIELDS_PER_GROUP}u) * {width}u)) & {mask:#04x}u;
-    return scaled_e3m2_field(field) * scale;
+static inline float {prefix}_element(device const uchar *block, uint index) {{
+{SCALE_DECODE_MSL}    uint word = {prefix}_group(block + {scale_bytes}u + (index / {fields}u) * {group_bytes}u);
+    uint field = (word >> ((index % {fields}u) * {width}u)) & {mask:#04x}u;
+    return {prefix}_field(field) * scale;
 }}
 "
     )
 }
 
-fn scaled_e3m2_super_element_msl() -> String {
-    let (elements, bytes) = (FP6_E3M2_ELEMENTS, FP6_E3M2_BYTES);
+pub(super) fn scaled_block_super_element_msl(block: &ScaledBlock) -> String {
+    let prefix = block.prefix;
+    let (elements, bytes) = (block.elements, block.block_bytes);
     format!(
         "
-static inline float scaled_e3m2_super_element(device const uchar *superblock, uint index) {{
-    return scaled_e3m2_element(superblock + (index / {elements}u) * {bytes}u, index % {elements}u);
+static inline float {prefix}_super_element(device const uchar *superblock, uint index) {{
+    return {prefix}_element(superblock + (index / {elements}u) * {bytes}u, index % {elements}u);
 }}
 "
     )
+}
+
+/// The `q8_0_field`, `q8_0_group`, `q8_0_element` and `q8_0_super_element` accessors of a Q8_0
+/// block, rendered by the same block emitters as the fp6 e3m2 ones.
+pub fn q8_0_unpack_msl() -> String {
+    [
+        super::layout_render::layout_load_msl(FloatLayout::INT8, "q8_0_field"),
+        scaled_block_group_msl(&Q8_0_BLOCK),
+        scaled_block_element_msl(&Q8_0_BLOCK, FloatLayout::INT8),
+        scaled_block_super_element_msl(&Q8_0_BLOCK),
+    ]
+    .concat()
 }
 
 fn scaled_e3m2_quad_dot_msl(layout: FloatLayout) -> String {

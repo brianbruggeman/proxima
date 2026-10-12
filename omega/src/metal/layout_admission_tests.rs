@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use proxima_primitives::float_layout::{FloatLayout, Specials};
+use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
 use proxima_tensor::{
     AxisTerm, DType, Extent, IndexMap, NodeId, NumericPolicy, Op, ScalarOp, TensorError, append,
     bind, infer, map,
@@ -14,6 +14,7 @@ const E4M3_FROM_FIELDS: FloatLayout = FloatLayout {
     mantissa_bits: 3,
     specials: Specials::None,
     bias_override: None,
+    sign: SignEncoding::Magnitude,
 };
 
 fn negate_program(dtype: DType) -> Vec<Op> {
@@ -176,6 +177,7 @@ fn float_layout_admit_buffer_bytes_derive_from_layout_fields() {
         mantissa_bits: 10,
         specials: Specials::InfinityOnOverflow,
         bias_override: Some(15),
+        sign: SignEncoding::Magnitude,
     };
     let cases = [
         (DType::Float(FloatLayout::BF32), 4),

@@ -1,5 +1,5 @@
 use objc2_metal::{MTLBuffer, MTLDevice, MTLResourceOptions};
-use proxima_primitives::float_layout::{FloatLayout, Specials};
+use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
 
 use super::device_buffers_arena_plan::device_and_queue;
 use crate::Codec;
@@ -14,6 +14,7 @@ const E4M3_FROM_FIELDS: FloatLayout = FloatLayout {
     mantissa_bits: 3,
     specials: Specials::None,
     bias_override: None,
+    sign: SignEncoding::Magnitude,
 };
 
 fn bits_per_element(layout: FloatLayout, scale_block: Option<(FloatLayout, u64)>) -> f64 {

@@ -1392,7 +1392,7 @@ mod tests {
     use alloc::vec;
 
     #[cfg(feature = "float-layout-dtype")]
-    use proxima_primitives::float_layout::{FloatLayout, Specials};
+    use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
     use proxima_safetensors::{SafetensorsModel, TensorPayload, write_complete};
 
     use super::*;
@@ -1405,18 +1405,21 @@ mod tests {
             mantissa_bits: 10,
             specials: Specials::InfinityOnOverflow,
             bias_override: Some(15),
+            sign: SignEncoding::Magnitude,
         };
         let brain16_by_fields = FloatLayout {
             exponent_bits: 8,
             mantissa_bits: 7,
             specials: Specials::InfinityOnOverflow,
             bias_override: None,
+            sign: SignEncoding::Magnitude,
         };
         let unnamed = FloatLayout {
             exponent_bits: 4,
             mantissa_bits: 3,
             specials: Specials::None,
             bias_override: None,
+            sign: SignEncoding::Magnitude,
         };
 
         assert_eq!(

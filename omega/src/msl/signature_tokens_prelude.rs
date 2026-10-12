@@ -1011,9 +1011,7 @@ pub(super) fn preamble(source: &mut String) {
     source.push('\n');
     source.push_str(UNIFORM_EXPERT_READ_MSL);
     source.push('\n');
-    source.push_str(Q8_0_UNPACK_MSL);
-    source.push('\n');
-    source.push_str(Q8_0_SUPER_ELEMENT_MSL);
+    source.push_str(&scaled_float_render::q8_0_unpack_msl());
     source.push('\n');
     // unconditional, same posture as `Q5K_PAIR_DOT_MSL` above: the selector
     // is `is_plain_product_reduce`, decided at EMIT time by
