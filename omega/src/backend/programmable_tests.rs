@@ -149,9 +149,7 @@ fn config_plan_fusion_false_keeps_chain_nodes() {
 fn config_plan_explicit_unavailable_driver_does_not_fallback() {
     #[cfg(all(feature = "cuda-driver", target_os = "macos"))]
     {
-        let error = CudaDriver::new(0)
-            .err()
-            .expect("Mac fixture has no CUDA driver");
+        let error = CudaDriver::new(0).expect_err("Mac fixture has no CUDA driver");
         println!("cuda_availability_probe={error:?}");
         assert!(matches!(error, CudaDriverError::Driver(_)));
     }
@@ -1101,8 +1099,7 @@ fn config_cuda_cap_failure_precedes_upload_and_dispatch() {
     config.constraints.max_device_buffer_bytes = Some(total - 1);
     let error = driver
         .plan_with_config(&program, &[], &outputs, &named, &config)
-        .err()
-        .expect("one byte below CUDA envelope rejects");
+        .expect_err("one byte below CUDA envelope rejects");
     assert!(
         matches!(error, CudaDriverError::ResourceLimit { field: "max_device_buffer_bytes", requested, limit } if requested == total && limit == total - 1)
     );

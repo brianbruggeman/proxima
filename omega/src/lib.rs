@@ -48,6 +48,8 @@ pub mod config;
 pub mod coreml;
 #[cfg(feature = "cuda")]
 pub mod cuda;
+#[cfg(all(feature = "cuda", feature = "float-layout-dtype"))]
+pub mod cuda_layout;
 #[cfg(feature = "cuda-driver")]
 pub mod cuda_driver;
 #[cfg(feature = "door")]
@@ -72,6 +74,16 @@ pub mod sized;
 pub mod wgpu_driver;
 #[cfg(feature = "wgpu-backend")]
 pub mod wgsl;
+#[cfg(all(feature = "wgpu-backend", feature = "float-layout-dtype"))]
+pub mod wgsl_layout;
+#[cfg(all(
+    test,
+    feature = "cuda",
+    feature = "wgpu-backend",
+    feature = "float-layout-dtype"
+))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod layout_text_tests;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{CudaGridSpec, CudaKernel, WARP_SIZE, emit_cuda, emit_cuda_with_policy};

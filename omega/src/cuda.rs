@@ -493,7 +493,7 @@ fn render_leaf(
 ) -> Result<String, EmitError> {
     let element_type = type_token(resolved.node, resolved.dtype)?;
     let mut source = String::new();
-    preamble(&mut source, element_type == "__half");
+    preamble(&mut source, element_type);
     source.push_str("struct Uniforms { long total_elements; };\n\n");
     kernel_signature(&mut source, &[], 0, 0, entry, element_type);
     source.push_str("    if (gid >= u.total_elements) { return; }\n");
@@ -520,6 +520,7 @@ fn cuda_float_literal(value: f32) -> String {
     }
 }
 
+#[cfg(not(feature = "float-layout-dtype"))]
 fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
     match dtype {
         DType::Float16 => Ok("__half"),
@@ -539,6 +540,28 @@ fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
         | DType::Float64
         | DType::BFloat8
         | DType::Fp6E3M2 => Err(EmitError::UnsupportedDType { node, dtype }),
+    }
+}
+
+/// `__half` and `__nv_bfloat16` where the layout's fields equal binary16's and bfloat16's, `float`
+/// for every other layout (the kernel computes in binary32 and the host narrows through the
+/// layout codec at the buffer boundary, as on Metal).
+#[cfg(feature = "float-layout-dtype")]
+fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
+    match dtype {
+        DType::Float(layout) => Ok(match crate::msl::layout_render::hardware_type(&layout) {
+            Some("half") => "__half",
+            Some("bfloat") => "__nv_bfloat16",
+            _ => "float",
+        }),
+        DType::Bool | DType::Int8 | DType::UInt8 | DType::Int32 | DType::UInt32 => Ok("float"),
+        DType::Int16
+        | DType::UInt16
+        | DType::Int64
+        | DType::UInt64
+        | DType::Int128
+        | DType::UInt128
+        | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }),
     }
 }
 
@@ -984,15 +1007,16 @@ __device__ __forceinline__ float proxima_erf(float x) {
 }
 ";
 
-fn preamble(source: &mut String, needs_half: bool) {
+fn preamble(source: &mut String, element_type: &str) {
     source.push_str("#include <cuda_runtime.h>\n");
     // The packed-codec helpers use CUDA's half bit-conversion intrinsics even
     // when the graph's materialized element type is f32.  Keeping this header
     // unconditional makes the emitted translation unit self-contained for
-    // NVRTC; `needs_half` remains part of the call contract for source-shape
-    // compatibility with the f16 path.
-    let _ = needs_half;
+    // NVRTC; only the bfloat header follows the graph's element type.
     source.push_str("#include <cuda_fp16.h>\n");
+    if element_type == "__nv_bfloat16" {
+        source.push_str("#include <cuda_bf16.h>\n");
+    }
     source.push('\n');
     source.push_str(PROXIMA_ERF_FN_CUDA);
     source.push('\n');
@@ -1268,7 +1292,7 @@ fn render_elementwise(
     let element_type = type_token(resolved.node, resolved.dtype)?;
 
     let mut source = String::new();
-    preamble(&mut source, element_type == "__half");
+    preamble(&mut source, element_type);
 
     source.push_str("struct Uniforms {\n");
     source.push_str("    long total_elements;\n");
@@ -1857,7 +1881,7 @@ fn render_reduce(
     let epilogue_operand_count = epilogue_operands.len();
 
     let mut source = String::new();
-    preamble(&mut source, element_type == "__half");
+    preamble(&mut source, element_type);
 
     source.push_str("struct Uniforms {\n");
     source.push_str("    long output_total;\n");
@@ -1961,7 +1985,7 @@ fn render_scan(
     let element_type = type_token(resolved.node, resolved.dtype)?;
 
     let mut source = String::new();
-    preamble(&mut source, element_type == "__half");
+    preamble(&mut source, element_type);
 
     source.push_str("struct Uniforms {\n");
     source.push_str("    long outer_total;\n");

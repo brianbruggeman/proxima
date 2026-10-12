@@ -14,10 +14,10 @@ use alloc::vec::Vec;
 
 use proxima_primitives::float_layout::{FloatLayout, Specials};
 
-const F32_FRACTION_BITS: u32 = 23;
-const F32_INFINITY_BITS: u32 = 0x7f80_0000;
-const F32_QUIET_BIT: u32 = 1 << 22;
-const F32_ABS_MASK: u32 = 0x7fff_ffff;
+pub(crate) const F32_FRACTION_BITS: u32 = 23;
+pub(crate) const F32_INFINITY_BITS: u32 = 0x7f80_0000;
+pub(crate) const F32_QUIET_BIT: u32 = 1 << 22;
+pub(crate) const F32_ABS_MASK: u32 = 0x7fff_ffff;
 
 const HARDWARE_TYPES: [(u8, u8, Specials, i16, &str); 3] = [
     (8, 23, Specials::InfinityOnOverflow, 127, "float"),
@@ -39,23 +39,23 @@ pub fn hardware_type(layout: &FloatLayout) -> Option<&'static str> {
         .map(|entry| entry.4)
 }
 
-const fn exponent_ones(layout: &FloatLayout) -> u32 {
+pub(crate) const fn exponent_ones(layout: &FloatLayout) -> u32 {
     (1u32 << layout.exponent_bits) - 1
 }
 
-const fn mantissa_mask(layout: &FloatLayout) -> u32 {
+pub(crate) const fn mantissa_mask(layout: &FloatLayout) -> u32 {
     ((1u64 << layout.mantissa_bits) - 1) as u32
 }
 
-const fn sign_shift(layout: &FloatLayout) -> u32 {
+pub(crate) const fn sign_shift(layout: &FloatLayout) -> u32 {
     layout.exponent_bits as u32 + layout.mantissa_bits as u32
 }
 
-const fn infinity_code(layout: &FloatLayout) -> u32 {
+pub(crate) const fn infinity_code(layout: &FloatLayout) -> u32 {
     exponent_ones(layout) << layout.mantissa_bits
 }
 
-const fn max_normal_code(layout: &FloatLayout) -> u32 {
+pub(crate) const fn max_normal_code(layout: &FloatLayout) -> u32 {
     let top = match layout.specials {
         Specials::None => infinity_code(layout),
         Specials::SaturateOnOverflow | Specials::InfinityOnOverflow => {
@@ -65,18 +65,18 @@ const fn max_normal_code(layout: &FloatLayout) -> u32 {
     top | mantissa_mask(layout)
 }
 
-const fn overflow_code(layout: &FloatLayout) -> u32 {
+pub(crate) const fn overflow_code(layout: &FloatLayout) -> u32 {
     match layout.specials {
         Specials::InfinityOnOverflow => infinity_code(layout),
         Specials::None | Specials::SaturateOnOverflow => max_normal_code(layout),
     }
 }
 
-const fn quiet_bit(layout: &FloatLayout) -> u32 {
+pub(crate) const fn quiet_bit(layout: &FloatLayout) -> u32 {
     (1u32 << layout.mantissa_bits) >> 1
 }
 
-const fn reserves_all_ones(layout: &FloatLayout) -> bool {
+pub(crate) const fn reserves_all_ones(layout: &FloatLayout) -> bool {
     !matches!(layout.specials, Specials::None)
 }
 
