@@ -526,6 +526,9 @@ pub fn pack_uniforms_for(
 #[cfg(all(test, feature = "float-layout-dtype"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layout_admission_tests;
+#[cfg(all(test, feature = "float-layout-dtype"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod layout_bytes_tests;
 #[cfg(test)]
 mod command_buffer_failed_label_tests {
     use super::label_or_unlabeled;
