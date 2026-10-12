@@ -205,6 +205,8 @@ pub mod convert;
 #[cfg(feature = "std")]
 pub mod cpu;
 pub mod dtype;
+#[cfg(all(feature = "float-layout-dtype", feature = "config"))]
+mod dtype_spelling;
 #[cfg(feature = "std")]
 pub mod gdn;
 #[cfg(feature = "std")]
