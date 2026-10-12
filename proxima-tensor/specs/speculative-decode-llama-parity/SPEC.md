@@ -31,17 +31,17 @@ of this spec (R4-R7, R13) is struck.
 | R2 | every embedded family profile (`profiles::FAMILY_PROFILES`) either lowers a verify program through `ModelDescriptor::verify()` or is refused by a typed `speculative_verify` validation error; restated 2026-10-12 because 2935ab55 deleted the `Architecture` trait | yes |
 | R3a | rejected drafts are rolled back in attention KV via `LayerCache::truncate` | yes |
 | R3b | rejected drafts are rolled back in recurrent/SSM state: the pre-verify state is the snapshot (a verify step never advances it) and the readout advances each recurrent layer only through the accepted rows, from the per-row state the width-pinned verify program keeps | yes |
-| R4 | `ngram-simple` drafter, token-identical to `common_ngram_simple_draft` (`common/ngram-map.cpp:49`) | yes |
+| R4 | `ngram-simple` drafter, token-identical to `common_ngram_simple_draft` (`common/ngram-map.cpp:49-112`) | yes |
 | R5 | `ngram-map-k` drafter, token-identical to `common_ngram_map_begin/draft/accept` with `key_only = true` | yes |
 | R13 | `ngram-map-k4v` drafter, token-identical to the same functions with `key_only = false` | yes |
 | R6 | `ngram-mod` drafter, token-identical to `common_speculative_impl_ngram_mod` (`common/speculative.cpp:1849-2022`) including the 0.25 occupancy reset and the 5-round low-acceptance reset | yes |
 | R7 | `ngram-cache` drafter, token-identical to `common_ngram_cache_draft` (`common/ngram-cache.cpp`), and loads llama.cpp static/dynamic cache files | yes |
 | R8 | `draft_ngram_lookup` is removed; `ngram-simple` (R4) replaces it -- one prompt-lookup primitive, the incumbent's | yes |
 | R9 | `ServingConfig` carries a speculative section mirroring `common_params_speculative`; builder and conflaguration loader produce identical configs; the env var is removed | yes |
-| R10 | `draft-simple`: a second GGUF draft model, compatibility check equivalent to `common_speculative_are_compatible`, drafting equivalent to `common_speculative_impl_draft_simple` (`common/speculative.cpp:179`) | yes |
-| R11a | an audited sub-spec exists for `draft-mtp` (`common/speculative.cpp:1331`); draft correctness is that sub-spec's requirement | yes |
-| R11b | an audited sub-spec exists for `draft-eagle3` (`:455`) | yes |
-| R11c | an audited sub-spec exists for `draft-dflash` (`:923`) | yes |
+| R10 | `draft-simple`: a second GGUF draft model, compatibility check equivalent to `common_speculative_are_compatible`, drafting equivalent to `common_speculative_impl_draft_simple` (`common/speculative.cpp:179-418`) | yes |
+| R11a | an audited sub-spec exists for `draft-mtp` (`common/speculative.cpp:1331-1747`); draft correctness is that sub-spec's requirement | yes |
+| R11b | an audited sub-spec exists for `draft-eagle3` (`common/speculative.cpp:455-920`) | yes |
+| R11c | an audited sub-spec exists for `draft-dflash` (`common/speculative.cpp:923-1329`) | yes |
 | R11d | an audited sub-spec exists for `draft-dspark` | yes |
 | R12 | per-request `draft_n` / `draft_n_accepted` emitted as proxima telemetry events, matching llama-server's timings fields | yes |
 | R14 | the refutation measurement: mean accepted draft tokens per verify step is recorded per n-gram type on the AC17 corpus | yes |
@@ -155,5 +155,5 @@ Two pure halves plus one loop seam, all sans-IO:
 
 ## context
 
-- proxima: `proxima-tokenizer/src/draft/` (`mod.rs`, `ngram_simple.rs`), `proxima-tokenizer/src/sample.rs`, `proxima-model-interop/src/generate/decode.rs:3922` (`drafter_set.draft` call in `drive_serving_loop`, defined at `:3196`), `proxima-model-interop/src/generate/decode.rs:1418` (`select_decoded_token`, the shared verify selection, called at `:6212` per verify row and `:6655` per ordinary step), `proxima-model-interop/src/lowering.rs:490-502` (`bind_speculative_verify`), `proxima-model-interop/src/profiles/gemma4.toml:5` (`speculative_verify = true`), `proxima-model-interop/src/generate/residency_caches.rs` (`LayerCache::truncate`), `proxima-model-interop/examples/speculative_decode_parity.rs`
-- llama.cpp `f1ea20621` at `~/repos/others/llama.cpp`: `common/speculative.cpp` (impls at 179, 455, 923, 1331, 1750, 1795, 1849, 2024), `common/ngram-map.cpp`, `common/ngram-mod.cpp`, `common/ngram-cache.cpp`, `common/sampling.cpp` (`common_sampler_sample_and_accept_n`), `tools/server/server-context.cpp:3885-3900`, `common/common.h:173-186`, `:355-364`
+- proxima: `proxima-tokenizer/src/draft/` (`mod.rs`, `ngram_simple.rs`), `proxima-tokenizer/src/sample.rs`, `proxima-model-interop/src/generate/decode.rs:3971-3976` (`drafter_set.draft` call in `drive_serving_loop`, defined at `:3245-7015`), `proxima-model-interop/src/generate/decode.rs:1418-1436` (`select_decoded_token`, the shared verify selection, called at `:6261` per verify row and `:6704` per ordinary step), `proxima-model-interop/src/lowering.rs:490-502` (`bind_speculative_verify`), `proxima-model-interop/src/profiles/gemma4.toml:5` (`speculative_verify = true`), `proxima-model-interop/src/generate/residency_caches.rs` (`LayerCache::truncate`), `proxima-model-interop/examples/speculative_decode_parity.rs`
+- llama.cpp `f1ea20621` at `~/repos/others/llama.cpp`: `common/speculative.cpp` (impls at 179-418, 455-920, 923-1329, 1331-1747, 1750-1793, 1795-1847, 1849-2022, 2024-2161), `common/ngram-map.cpp`, `common/ngram-mod.cpp`, `common/ngram-cache.cpp`, `common/sampling.cpp` (`common_sampler_sample_and_accept_n`), `tools/server/server-context.cpp:3885-3900`, `common/common.h:173-186`, `:354-365`
