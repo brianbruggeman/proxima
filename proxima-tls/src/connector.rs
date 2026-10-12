@@ -489,8 +489,8 @@ mod tests {
     use proxima_net::tokio::{TokioTcpListener, TokioTcpUpstream};
     use proxima_primitives::stream::{StreamListener, StreamListenerExt, StreamUpstreamExt};
     use rcgen::{
-        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-        KeyUsagePurpose,
+        BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose,
+        IsCa, Issuer, KeyPair, KeyUsagePurpose,
     };
     #[cfg(windows)]
     use std::ffi::OsStr;
@@ -513,8 +513,15 @@ mod tests {
         CertFreeCertificateContext, CertOpenStore, HCERTSTORE, X509_ASN_ENCODING,
     };
 
+    fn common_name(name: &str) -> DistinguishedName {
+        let mut distinguished_name = DistinguishedName::new();
+        distinguished_name.push(DnType::CommonName, name);
+        distinguished_name
+    }
+
     fn generate_ca_and_leaf() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
         let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA parameters");
+        ca_params.distinguished_name = common_name("proxima-tls test root CA");
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let ca_key = KeyPair::generate().expect("CA key");
@@ -523,6 +530,7 @@ mod tests {
 
         let mut leaf_params =
             CertificateParams::new(vec!["localhost".to_string()]).expect("leaf parameters");
+        leaf_params.distinguished_name = common_name("localhost");
         leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         let leaf_key = KeyPair::generate().expect("leaf key");
