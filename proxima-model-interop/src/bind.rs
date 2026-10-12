@@ -177,7 +177,7 @@ pub fn gguf_tensor_as_f32(
 /// `file_bytes`; [`InteropError::MisalignedFloat32Tensor`] if `name`'s
 /// tensor is `F32` but `file_bytes`'s base pointer leaves its byte range
 /// unaligned for `&[f32]`; [`InteropError::UnrepresentableGgmlType`] if
-/// `name`'s tensor is none of `F32`/`Q4_K`/`Q5_K`/`Q3_K`/`Q6_K`/`Q8_0`/`F16`/`Bf16`
+/// `name`'s tensor is none of `F32`/`Q4_K`/`Q5_K`/`Q3_K`/`Q6_K`/`Q8_0`/`F16`/`Bf16`/`Fp6E3M2`
 /// -- a block-quantized type this crate has no dequantizer for at all, since
 /// `F16`/`Bf16` are the only codecs this function decodes packed that
 /// [`gguf_tensor_as_f32`] does not independently cover.
@@ -250,6 +250,10 @@ pub fn gguf_tensor_as_packed_block<'a>(
         }),
         GgmlType::Bf16 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
             codec: Codec::BFloat16,
+            bytes,
+        }),
+        GgmlType::Fp6E3M2 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Fp6E3M2,
             bytes,
         }),
         other => Err(InteropError::UnrepresentableGgmlType {
@@ -1106,7 +1110,8 @@ pub(crate) fn as_block(
         | Codec::Q5_0
         | Codec::Iq4Nl
         | Codec::Iq2Xs
-        | Codec::Iq3Xxs => Some(proxima_tensor::cpu::QuantizedBlock::Packed { codec, bytes }),
+        | Codec::Iq3Xxs
+        | Codec::Fp6E3M2 => Some(proxima_tensor::cpu::QuantizedBlock::Packed { codec, bytes }),
         Codec::Q4_1
         | Codec::Q8_1
         | Codec::Q8K
@@ -1124,8 +1129,7 @@ pub(crate) fn as_block(
         | Codec::Q2_0
         | Codec::BFloat8
         | Codec::Bf8E5M2
-        | Codec::Bf4E2M1
-        | Codec::Fp6E3M2 => None,
+        | Codec::Bf4E2M1 => None,
     }
 }
 
@@ -1179,6 +1183,7 @@ pub(crate) fn codec_from_ggml_type(ggml_type: GgmlType) -> Option<Codec> {
         GgmlType::Nvfp4 => Some(Codec::Nvfp4),
         GgmlType::Q1_0 => Some(Codec::Q1_0),
         GgmlType::Q2_0 => Some(Codec::Q2_0),
+        GgmlType::Fp6E3M2 => Some(Codec::Fp6E3M2),
         // `F32`/the integer types/`F64` have no `Codec` counterpart.
         // `GgmlType` is `#[non_exhaustive]` (a foreign, still-growing wire
         // enum), so this wildcard also covers a future wire value neither
@@ -1237,8 +1242,9 @@ fn codec_name_suffix(codec: Codec) -> &'static str {
 /// The on-disk [`GgmlType`] `codec` packs bytes as -- the reverse of
 /// [`codec_from_ggml_type`], needed by [`codec_byte_len_for`] to look up a
 /// codec's block layout without re-typing [`GgmlType::block_layout`]'s
-/// numbers a second time here. Proxima brain-float encodings have no GGML
-/// wire type and return [`InteropError::UnsupportedCodec`].
+/// numbers a second time here. The proxima brain-float encodings (`BFloat8`,
+/// `Bf8E5M2`, `Bf4E2M1`) have no GGML wire type and return
+/// [`InteropError::UnsupportedCodec`]; `Fp6E3M2` maps to its proxima-own id.
 #[cfg(feature = "std")]
 pub(crate) fn codec_to_ggml_type(codec: Codec) -> Result<GgmlType, InteropError> {
     Ok(match codec {
@@ -1271,7 +1277,8 @@ pub(crate) fn codec_to_ggml_type(codec: Codec) -> Result<GgmlType, InteropError>
         Codec::Nvfp4 => GgmlType::Nvfp4,
         Codec::Q1_0 => GgmlType::Q1_0,
         Codec::Q2_0 => GgmlType::Q2_0,
-        Codec::BFloat8 | Codec::Bf8E5M2 | Codec::Bf4E2M1 | Codec::Fp6E3M2 => {
+        Codec::Fp6E3M2 => GgmlType::Fp6E3M2,
+        Codec::BFloat8 | Codec::Bf8E5M2 | Codec::Bf4E2M1 => {
             return Err(InteropError::UnsupportedCodec { codec });
         }
     })

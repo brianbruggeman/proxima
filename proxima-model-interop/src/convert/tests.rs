@@ -6,10 +6,16 @@ use proxima_gguf::quant::scaled_float::{BLOCK_BYTES, BLOCK_ELEMENTS, dequantize_
 use proxima_gguf::quant::{f16, q4_0, q8_0};
 use proxima_gguf::tensor::MAX_DIMS;
 use proxima_gguf::{GgmlType, GgufModel, TensorPayload, parse_complete, write_complete};
+use proxima_primitives::Codec;
 use proxima_primitives::float_layout::FloatLayout;
+use proxima_tensor::cpu::QuantizedBlock;
 
 use super::{convert_codec, policy_selects};
+use crate::bind::{
+    as_block, codec_from_ggml_type, codec_to_ggml_type, gguf_tensor_as_packed_block,
+};
 use crate::codec_policy_settings::{CodecPolicySettings, CodecPolicyWeights};
+use crate::error::InteropError;
 use crate::gguf_tensor_as_f32;
 use crate::test_support::require_fixture;
 
@@ -297,4 +303,55 @@ fn convert_codec_checkpoint_moe_q8_0_saves_250mb() {
     assert!(expected > 0, "the policy matched no tensor in the header");
     assert_eq!(converted, expected);
     assert!(saved >= SAVING_FLOOR_BYTES, "saved only {saved} bytes");
+}
+
+#[test]
+fn fp6_e3m2_bind_packed_block_borrows_the_converted_tensor_bytes() {
+    let weights = granite_q8_0_weights();
+    let source_file = single_tensor_checkpoint(GgmlType::Q8_0, &weights);
+    let source = parse_complete(&source_file).expect("source parses");
+    let (output_file, _) =
+        convert_codec(&source, &source_file, &fp6_policy()).expect("convert the checkpoint");
+    let output = parse_complete(&output_file).expect("converted checkpoint parses");
+
+    let block = gguf_tensor_as_packed_block(&output, &output_file, "blk.0.attn_q.weight")
+        .expect("an fp6 tensor binds as a packed block");
+
+    let QuantizedBlock::Packed { codec, bytes } = block else {
+        panic!("an fp6 tensor must bind as a packed block");
+    };
+    assert_eq!(codec, Codec::Fp6E3M2);
+    assert_eq!(
+        bytes,
+        tensor_bytes(&output, &output_file, "blk.0.attn_q.weight")
+    );
+    assert_eq!(bytes.len(), weights.len() / BLOCK_ELEMENTS * BLOCK_BYTES);
+}
+
+#[test]
+fn fp6_e3m2_bind_ggml_type_and_codec_round_trip() {
+    let ggml_type = codec_to_ggml_type(Codec::Fp6E3M2).expect("fp6 has a proxima-own wire type");
+    let block = [0u8; BLOCK_BYTES];
+
+    assert_eq!(ggml_type, GgmlType::Fp6E3M2);
+    assert_eq!(codec_from_ggml_type(ggml_type), Some(Codec::Fp6E3M2));
+    assert!(matches!(
+        as_block(Codec::Fp6E3M2, &block),
+        Some(QuantizedBlock::Packed {
+            codec: Codec::Fp6E3M2,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn fp6_e3m2_bind_brain_float_codecs_still_have_no_ggml_type() {
+    for codec in [Codec::BFloat8, Codec::Bf8E5M2, Codec::Bf4E2M1] {
+        let result = codec_to_ggml_type(codec);
+
+        assert!(
+            matches!(result, Err(InteropError::UnsupportedCodec { .. })),
+            "{codec:?} has no wire type"
+        );
+    }
 }
