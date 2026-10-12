@@ -411,11 +411,11 @@ grants a numerical rewrite on its own. Dense Metal matrix accumulation requires
 both contraction and reassociation. `[experimental] dense_float_storage` in
 `omega/omega-runtime.toml` (build override
 `OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE`, default 0) is a build-time switch for
-BF16/F16 tile input decoding under Cargo feature `metal-tiled-gemm`; leave it
-off: with it set to 1, the Metal cases in
-`omega/tests/programmable_execution_vectors.rs` do not select the dense tiled
-kernel on this tree. Build geometry stays in `omega/omega-runtime.toml`.
-Runtime settings are std-only; the binder and emitter retain their alloc tier.
+BF16/F16 tile input decoding under Cargo feature `metal-tiled-gemm`. It is
+experimental and off by default; with it set to 1 the Metal cases in
+`omega/tests/programmable_execution_vectors.rs` select the dense tiled kernel
+and pass. Build geometry stays in `omega/omega-runtime.toml`. Runtime settings
+are std-only; the binder and emitter retain their alloc tier.
 
 `selection.mode = "minimum_measured_wall_time"` times compiled, available
 backend candidates with the same program and policy. Optional `warmup_runs`
