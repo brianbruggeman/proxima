@@ -123,6 +123,15 @@ impl Wakeup {
     }
 
     #[cfg(all(
+        windows,
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-inbox-alloc"
+    ))]
+    pub(crate) fn release_handle(&self, key: SourceKey) {
+        self.queue_cancellation(key, None);
+    }
+
+    #[cfg(all(
         target_os = "macos",
         feature = "runtime-prime-executor",
         feature = "runtime-prime-inbox-alloc"

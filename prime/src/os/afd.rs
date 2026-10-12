@@ -347,7 +347,7 @@ fn afd_mask(interest: Interest) -> u32 {
     mask
 }
 
-fn check(status: NTSTATUS) -> io::Result<()> {
+pub(crate) fn check(status: NTSTATUS) -> io::Result<()> {
     match status {
         STATUS_SUCCESS => Ok(()),
         failed => {
