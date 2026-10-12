@@ -161,3 +161,70 @@ References (continued from [34]):
 [57] https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/03d3979f8d6091a8357b122ac8148c231c01f362/schema/core/litertlm_header_schema.fbs (namespace `litert.lm.schema`; `SystemMetadata`; `AnySectionDataType` incl. `TFLiteModel`, `TFLiteWeights`, `LlmMetadataProto`; `SectionObject`)
 [58] https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/03d3979f8d6091a8357b122ac8148c231c01f362/runtime/util/file_format_util.cc (lines 43-47: `TFL3`, `PK`, `LITERTLM` magic checks)
 [59] https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/03d3979f8d6091a8357b122ac8148c231c01f362/docs/litert_lm_builder.md (`litert-lm-builder` build / unpack, `litert-lm-peek` inspect)
+
+## Open paths for Rockchip and Qualcomm NPUs (sourced 2026-10-12)
+
+Pins: linux master 24a19b95; mesa main 716eb010; qualcomm/hexagon-mlir main 178e173c. Quotes are verbatim from the cited line or page. No recommendations.
+
+### Q1. Rockchip RK3588: open kernel driver and userspace
+
+| Item | Finding | Ref |
+|---|---|---|
+| Kernel driver | `accel/rocket`, GPL-2.0-only. "The accel/rocket driver supports the Neural Processing Units (NPUs) inside some Rockchip SoCs such as the RK3588." "Hardware currently supported: * RK3588". Docs file absent at tag v6.17 (HTTP 404), present at tag v6.18 (HTTP 200) | [60][61] |
+| Kernel scope | "This driver just powers the hardware on and off, allocates and maps buffers to the device and submits jobs to the frontend unit. Everything else is done in userspace, as a Gallium driver (also called rocket) that is part of the Mesa3D project." | [60] |
+| Userspace | Mesa Gallium driver `src/gallium/drivers/rocket` (MIT), consumed by Teflon, Mesa's TFLite external delegate. Mesa 25.3.0 relnotes (2025-11-14): "rocket: Initial commit of a driver for Rockchip's NPU", "teflon: Link to the rocket driver" | [62][63] |
+| Teflon hardware table | "Rocket / `RK3588 NPU` / `PINE64 QuartzPro64`"; delegate is "a shared library that the TensorFlow Lite runtime can load at startup". The doc's kernel line ("a mainline 6.7 (6.8 for the i.MX8MP) or greater kernel") is etnaviv-era text; the rocket minimum kernel is the v6.18 fact above | [62] |
+| Ops | `rkt_ml_operation_supported` accepts only `PIPE_ML_OPERATION_TYPE_CONVOLUTION` and `PIPE_ML_OPERATION_TYPE_ADD` (add only when both inputs have `data == NULL`); `default: supported = false`. Convolution requires dilation 1x1 and `tensor_quantization_supported` on input, weight, bias, output; source comment: "Dilation and per-axis quantization not yet implemented" | [64] |
+| Dtypes | Teflon tested-models table lists UINT8 for MobileNet V1, MobileNet V2, SSDLite MobileDet ("Fully supported"; QuartzPro64 ~18 ms, ~21 ms, ~48 ms; single figures from the doc). The full accepted dtype set lives in `tensor_quantization_supported`, not read: unsourced | [62][64] |
+| What is submitted | A register command buffer, not a compiled blob. `struct drm_rocket_task { __u32 regcmd; __u32 regcmd_count; }`: "regcmd: Input: DMA address to NPU mapping of register command buffer"; `drm_rocket_job` carries a pointer to an array of tasks plus input and output BO handle arrays; `DRM_IOCTL_ROCKET_SUBMIT` takes `drm_rocket_submit`. Mesa packs each entry as `target << 48 \| value << 16 \| reg` (`emit_raw`) and issues `drmIoctl(screen->fd, DRM_IOCTL_ROCKET_SUBMIT, &submit)` | [64][65][66] |
+| Kernel consumption | `rocket_pc_writel(core, BASE_ADDRESS, task->regcmd)` then a data-amount register from `(task->regcmd_count + 1) / 2 - 1`: the kernel points the hardware program-counter unit at the buffer; it does not parse entries | [67] |
+| Register documentation | Mesa carries `registers.xml` (rules-ng schema `rules-ng.xsd`) plus `gen_header.py` in the rocket directory; the kernel doc names "chapter 36 in the RK3588 TRM" as the hardware description | [60][68] |
+| Non-TFLite producer | The uapi takes DMA-mapped buffers plus a register-command array, so a producer that fills BOs and emits the 64-bit entries can submit without Teflon or TFLite. Entry encoding is from `rkt_regcmd.c`; the per-operation register sequences (`fill_first_regcmd` onward, weight layout in `rkt_coefs.c`) were not read beyond line 50, so register-map completeness for anything beyond conv and add is unsourced | [65][66][68] |
+| Other SoCs | Kernel doc lists RK3588 only at the pinned commit | [60] |
+
+### Q2. Qualcomm Hexagon NPU
+
+| Path | Finding | Ref |
+|---|---|---|
+| QNN / AI Engine Direct | Closed SDK lane, carried from census row 4. LiteRT's Qualcomm page: "LiteRT supports Qualcomm AI Engine Direct (QNN) through the `CompiledModel` API for both AOT and on-device compilation." The page does not state whether the libraries are closed | [69] |
+| FastRPC, mainline kernel | `drivers/misc/fastrpc.c`, GPL-2.0; Kconfig `QCOM_FASTRPC`: "Provides a communication mechanism that allows for clients to make remote method invocations across processor boundary to applications DSP processor." Depends on `ARCH_QCOM`, `RPMSG`. Source distinguishes `adsp` and `cdsp` domains; compatible list includes `qcom,sm8450`, `qcom,sa8775p`, `qcom,qcs8300`. The DSP-side skel is still built with the Hexagon toolchain (census row 3) | [70][71] |
+| qcom accel driver | `drivers/accel/qaic` is "Qualcomm Cloud AI accelerators ... PCIe cards", depends on `PCI` and `MHI_BUS`: not the Snapdragon Hexagon NPU. No Snapdragon Hexagon accel driver was found by checking this Kconfig only; a full-tree search was not run | [72] |
+| hexagon-mlir license | `LICENSE.txt`: "Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries. Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met"; the file contains the "Neither the name" clause (grep count 1), the BSD-3-Clause text. GitHub's repository listing states BSD-3-Clause | [73] |
+| hexagon-mlir input IR | Paper: "PyTorch models convert to Linalg and other MLIR core ops using Torch-MLIR [1]. Similarly, Triton kernels convert to MLIR using triton-to-linalg"; working abstraction `linalg.generic` on tensors, then tiling, `scf.for`/`scf.forall`, MLIR Async dialect for threading, `linalg.pack/unpack`. Entry points are Triton and PyTorch; no ONNX, StableHLO or TOSA entry appears in the sources read | [74][75] |
+| hexagon-mlir output | Module attribute `llvm.target_triple = "hexagon"`; paper: "LLVM-IR with runtime calls"; user guide: "see the generated LLVM-IR along with Hexagon assembly". Final binaries need Hexagon SDK 6.4.0.2, Hexagon Tools and HexKL downloaded from Qualcomm's software center | [74][76] |
+| hexagon-mlir targets | Tested v73, v75, v79 (FAQ) and v73, v75, v79, v81 (user guide); "You do need access to a Qualcomm device with Hexagon NPU hardware to run the compiled kernels." Execution via `ANDROID_HOST` and `ANDROID_SERIAL`, or the Hexagon simulator with `RUN_ON_SIM=1`. Retail Snapdragon device versus dev board: unsourced (docs say "a Qualcomm device with Hexagon NPU" and give a support email for test-device access) | [76][77] |
+| Dtypes in paper | Census row 6 records float16/float32 only in the results tables | [74] |
+
+### Q3. LiteRT as an interchange
+
+| Item | Finding | Ref |
+|---|---|---|
+| NPU vendor list | LiteRT NPU page lists five: Google Tensor, Qualcomm AI Engine Direct, MediaTek NeuroPilot, Intel OpenVINO, Samsung Exynos AI LiteCore. Google Tensor: "doesn't yet support on-device (JIT) compilation"; Intel: "Support AOT and on-device compilation execution through the `CompiledModel` API" | [78] |
+| Input and flow | "use LiteRT AOT Compiler to compile your .tflite model to the supported SoCs"; unsupported subgraphs fall back to CPU or GPU (partial delegation) | [78] |
+| Qualcomm | SoCs SM8850, SM8750, SM8650, SM8550, SM8475, SM8450; Bazel 7.4.1, Android API 34 | [69] |
+| MediaTek | NeuroPilot is on the vendor list; the dedicated MediaTek page was not fetched: details unsourced | [78] |
+| Rockchip | Not in the LiteRT list. Reached through Mesa Teflon, an external delegate for the TFLite runtime, not through LiteRT CompiledModel | [62][78] |
+| Hub question | A `.tflite` file is a documented FlatBuffer (schema [55]) and is the stated input to the LiteRT AOT compiler and to Teflon. Not established by the sources: per-vendor op and dtype coverage; whether the vendor compiler plugins are open; Teflon coverage for an LLM graph (conv and add only per [64]). End-to-end coverage for a proxima graph via `.tflite` is unmeasured | [55][62][64][78] |
+
+Not sourced this session: the full accepted dtype set of `tensor_quantization_supported`; register sequences for any rocket operation beyond `rkt_regcmd.c` lines 1-50; whether retail Snapdragon devices run hexagon-mlir output; hexagon-mlir launch mechanism; any Snapdragon Hexagon accel driver in mainline beyond `fastrpc.c`; LiteRT MediaTek page contents; open or closed status of the LiteRT vendor compiler plugins; any benchmark of any lane.
+
+References (continued from [59]):
+[60] https://raw.githubusercontent.com/torvalds/linux/24a19b953e2a3d0ea5a8c4951a0ab8f32720c907/Documentation/accel/rocket/index.rst (lines 5-15)
+[61] https://raw.githubusercontent.com/torvalds/linux/v6.18/Documentation/accel/rocket/index.rst (HTTP 200); same path at tag v6.17 (HTTP 404)
+[62] https://gitlab.freedesktop.org/mesa/mesa/-/raw/716eb0108e7d695393d865197de68fcdb5c223ca/docs/teflon.rst (hardware table, tested-models table, build and kernel lines)
+[63] https://docs.mesa3d.org/relnotes/25.3.0.html (dated 2025-11-14; rocket and teflon entries)
+[64] https://gitlab.freedesktop.org/mesa/mesa/-/raw/716eb0108e7d695393d865197de68fcdb5c223ca/src/gallium/drivers/rocket/rkt_ml.c (`rkt_ml_operation_supported` lines 275-310; `DRM_IOCTL_ROCKET_SUBMIT` line 548)
+[65] https://raw.githubusercontent.com/torvalds/linux/24a19b953e2a3d0ea5a8c4951a0ab8f32720c907/include/uapi/drm/rocket_accel.h (lines 94-185)
+[66] https://gitlab.freedesktop.org/mesa/mesa/-/raw/716eb0108e7d695393d865197de68fcdb5c223ca/src/gallium/drivers/rocket/rkt_regcmd.c (lines 1-50; SPDX MIT)
+[67] https://raw.githubusercontent.com/torvalds/linux/24a19b953e2a3d0ea5a8c4951a0ab8f32720c907/drivers/accel/rocket/rocket_job.c (lines 92-99, 138-140)
+[68] https://gitlab.freedesktop.org/api/v4/projects/mesa%2Fmesa/repository/tree?path=src/gallium/drivers/rocket&ref=main (entries `registers.xml`, `rules-ng.xsd`, `gen_header.py`, `rkt_coefs.c`, `rkt_regcmd.c`, `rkt_task.c`)
+[69] https://developers.google.com/edge/litert/next/qualcomm (supported SoCs, requirements, QNN sentence)
+[70] https://raw.githubusercontent.com/torvalds/linux/24a19b953e2a3d0ea5a8c4951a0ab8f32720c907/drivers/misc/Kconfig (lines 266-276)
+[71] https://raw.githubusercontent.com/torvalds/linux/24a19b953e2a3d0ea5a8c4951a0ab8f32720c907/drivers/misc/fastrpc.c (lines 2486-2488, 2523-2527)
+[72] https://raw.githubusercontent.com/torvalds/linux/24a19b953e2a3d0ea5a8c4951a0ab8f32720c907/drivers/accel/qaic/Kconfig (lines 1-12)
+[73] https://raw.githubusercontent.com/qualcomm/hexagon-mlir/178e173c329322f79e88cd17847d9fad4e77b3e5/LICENSE.txt
+[74] https://arxiv.org/pdf/2602.19762v1 (Torch-MLIR and triton-to-linalg passage; `llvm.target_triple = "hexagon"`; "LLVM-IR with runtime calls")
+[75] https://raw.githubusercontent.com/qualcomm/hexagon-mlir/178e173c329322f79e88cd17847d9fad4e77b3e5/README.md ("complements our commercial toolchains")
+[76] https://raw.githubusercontent.com/qualcomm/hexagon-mlir/178e173c329322f79e88cd17847d9fad4e77b3e5/docs/user-guide.md (lines 44-45, 91, 129, 292-297)
+[77] https://raw.githubusercontent.com/qualcomm/hexagon-mlir/178e173c329322f79e88cd17847d9fad4e77b3e5/docs/faq.md (hardware section; `linalg-hexagon-opt`)
+[78] https://developers.google.com/edge/litert/next/npu (vendor list, .tflite AOT flow, fallback)
