@@ -341,6 +341,20 @@ impl CudaDriver {
             node: NodeId(0),
             reason: "shape inference failed",
         })?;
+        let root = program
+            .len()
+            .checked_sub(1)
+            .map(|last| NodeId(last as u32))
+            .ok_or(CudaDriverError::UnsupportedGraph {
+                node: NodeId(0),
+                reason: "empty program",
+            })?;
+        let outputs: Vec<NodeId> = if outputs.is_empty() {
+            vec![root]
+        } else {
+            outputs.to_vec()
+        };
+        let outputs = outputs.as_slice();
         if config.is_some() {
             for (node, block) in block_nodes.iter().zip(&blocks) {
                 let expected = shapes.of(*node).iter().try_fold(1_usize, |count, extent| {
