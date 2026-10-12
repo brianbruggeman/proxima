@@ -2687,6 +2687,24 @@ impl CapturedDispatch {
         Ok(region.to_vec())
     }
 
+    /// This dispatch relaunched through `dispatchThreadgroups` with
+    /// `threadgroups` groups of `width_x` by `width_y` threads, ggml's launch
+    /// shape (`dispatchThreadgroups(rows / (nr0 * nsg), MTLSize(32, nsg, 1))`),
+    /// over the same pipeline and buffers, so the launch API is the only
+    /// variable between this record and the one it was made from.
+    #[must_use]
+    pub fn with_threadgroup_launch(mut self, threadgroups: u64, width_x: u64, width_y: u64) -> Self {
+        self.grid.grid2d = Some(crate::msl::Grid2DSpec {
+            form: crate::msl::Grid2DForm::FlatThreadgroupIndex,
+            threadgroups_x: threadgroups,
+            threadgroups_y: 1,
+            threads_per_threadgroup_x: width_x,
+            threads_per_threadgroup_y: width_y,
+            threadgroup_bytes: 0,
+        });
+        self
+    }
+
     /// GPU time in nanoseconds (`GPUEndTime - GPUStartTime`) of ONE command
     /// buffer holding `batch` back-to-back copies of this dispatch in one
     /// serial encoder over the captured buffers. `batch == 1` is the

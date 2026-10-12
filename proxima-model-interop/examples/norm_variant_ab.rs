@@ -11,7 +11,8 @@
 //! `<sha16>.<tag>.width` file holds the new threadgroup width; the thread
 //! count scales with it. An optional `<sha16>.<tag>.scale` file holds `n/d`, a further
 //! multiplier on the thread count, for a variant that changes how many rows one
-//! simdgroup folds.
+//! simdgroup folds. An optional `<sha16>.<tag>.launch` file holds `<width x> <width y>`
+//! and relaunches the variant through `dispatchThreadgroups` (ggml's launch API).
 //!
 //! A `<sha16>.<tag>.f16` file lists comma-separated binding indices whose buffers the variant reads as `half` (the replay narrows them from f32). `AB_GEMM_ONLY` times a compacted gemm without its route prepass (the compaction buffer is refilled by the prepass alone, which writes nothing else), `AB_PREPASS_ONLY` the prepass alone.
 //! Each `ab group` line carries the median over `AB_ROUNDS` rounds beside the minimum, maximum and coefficient of variation of those rounds (`round_min_us`, `round_max_us`, `round_cov_pct`).
@@ -473,9 +474,24 @@ mod harness {
                 }
                 Err(_) => threads,
             };
-            let template = base
+            let compiled = base
                 .with_kernel_variant(&source, &base.entry, threads, width, numeric_policy())
                 .unwrap_or_else(|error| panic!("variant {name} does not compile: {error}"));
+            let template = match std::fs::read_to_string(dir.join(name.replace(".metal", ".launch")))
+            {
+                Ok(text) => {
+                    let fields: Vec<u64> = text
+                        .split_whitespace()
+                        .map(|field| field.parse().expect("launch integer"))
+                        .collect();
+                    let [width_x, width_y] = fields[..] else {
+                        panic!("launch file holds `<width x> <width y>`, got {text:?}");
+                    };
+                    let threadgroups = compiled.grid.threads / (width_x * width_y);
+                    compiled.with_threadgroup_launch(threadgroups, width_x, width_y)
+                }
+                Err(_) => compiled,
+            };
             let narrowed: Vec<usize> =
                 std::fs::read_to_string(dir.join(name.replace(".metal", ".f16")))
                     .map(|text| {
