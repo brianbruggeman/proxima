@@ -529,7 +529,7 @@ pub(super) fn pipeline_for_kernel(
 pub(super) fn allocation_capacity(element_count: usize, dtype: DType) -> Result<usize, MetalError> {
     let bytes = element_count
         .max(1)
-        .checked_mul(dtype.size_bytes())
+        .checked_mul(device_element_bytes(dtype))
         .ok_or(MetalError::ResourceOverflow {
             field: "buffer_capacity",
         })?;
@@ -1308,31 +1308,15 @@ pub(super) fn upload_block(
             "metal_block_upload"
         );
     }
-    match dtype {
+    match device_scalar_token(dtype) {
         // unreached by every program this driver compiles today (none
         // declares a `Float16` block input -- `proxima-tensor/src/spec.rs`'s
         // `gqa_cached_forward_program` is `Float32` throughout), so it is
         // not worth the residency cache's extra bookkeeping: the narrowed
         // `Vec<f16>` this allocates is dropped every call regardless.
-        DType::Float16 => upload_block_as_half(device, data).map(|buffer| (buffer, 0)),
-        DType::Float32
-        | DType::BFloat16
-        | DType::Bool
-        | DType::Int8
-        | DType::UInt8
-        | DType::Int32
-        | DType::UInt32 => upload_block_as_float(device, data, resident_name),
-        DType::Int16
-        | DType::UInt16
-        | DType::Int64
-        | DType::UInt64
-        | DType::Int128
-        | DType::UInt128
-        | DType::BFloat8
-        | DType::Fp6E3M2
-        | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }.into()),
-        #[cfg(feature = "float-layout-dtype")]
-        DType::Float(_) => Err(EmitError::UnsupportedDType { node, dtype }.into()),
+        Some("half") => upload_block_as_half(device, data).map(|buffer| (buffer, 0)),
+        Some(_) => upload_block_as_float(device, data, resident_name),
+        None => Err(EmitError::UnsupportedDType { node, dtype }.into()),
     }
 }
 
