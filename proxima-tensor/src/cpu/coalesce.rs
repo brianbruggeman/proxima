@@ -165,6 +165,9 @@ fn can_extend(
     if !output_axes_are_adjacent(group.last_axis, axis, output_axes) {
         return false;
     }
+    if leading_unit_axis_is_a_row_axis(group, axis, extent, output_axes) {
+        return false;
+    }
     if extent == 1 || group.extent == 1 {
         return true;
     }
@@ -173,6 +176,25 @@ fn can_extend(
         .iter()
         .zip(strides)
         .all(|(&outer_stride, &inner_stride)| outer_stride == inner_stride * extent as i64)
+}
+
+/// A fold's extent-1 kept axis in front of a wider kept axis is the row axis
+/// `width_tile_plan`/`neon_tile_plan` key on (an `M = 1` matmul written
+/// `[m, n, k]`): absorbing it into the axis behind it leaves the fold with
+/// only a width axis, and both tiles decline that shape (`AxesShape`).
+/// Absorbing it adds no contiguity either -- the merged group keeps the inner
+/// axis' strides and extent -- so the pair stays split. An extent-1 axis
+/// BEHIND a wider one still merges: that widens the row (`[n, 1]` -> `[n]`).
+fn leading_unit_axis_is_a_row_axis(
+    group: &AxisGroup,
+    axis: usize,
+    extent: u64,
+    output_axes: Option<&[u16]>,
+) -> bool {
+    output_axes.is_some()
+        && group.extent == 1
+        && extent != 1
+        && axis_class(axis, output_axes) == AxisClass::Output
 }
 
 /// Two kept axes merge only when the fold writes them consecutively, in this

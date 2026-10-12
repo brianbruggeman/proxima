@@ -524,6 +524,83 @@ fn coalescing_forced_off_returns_no_rewrite() {
     assert!(merged.is_none());
 }
 
+/// `[m, n, k]` matmul fold (`out[m, n] += a[m, k] * b[k, n]`), the iteration
+/// order `neon_tile_full_output`'s `matmul_program` binds.
+fn mnk_matmul_fold(m: u64, n: u64, k: u64) -> BoundOp {
+    let (k_i, n_i) = (k as i64, n as i64);
+    BoundOp {
+        node: NodeId(2),
+        dtype: DType::Float32,
+        extents: vec![m, n, k],
+        kind: BoundOpKind::Reduce {
+            element_body: multiply_body(),
+            reduce_op: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            keep: Keep::Reduce,
+            operands: vec![
+                (NodeId(0), layout(0, &[k_i, 0, 1]), None),
+                (NodeId(1), layout(0, &[0, 1, n_i]), None),
+            ],
+            output_axes: smallvec![0, 1],
+            out_layout: layout(0, &[n_i, 1, 0]),
+            out_scatter: None,
+            epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
+            epilogue_operands: Vec::new(),
+            epilogue_broadcast_axes: smallvec![],
+        },
+    }
+}
+
+#[test]
+fn a_unit_row_axis_of_a_matmul_fold_is_not_absorbed_into_the_width_axis() {
+    let op = mnk_matmul_fold(1, 384, 64);
+
+    assert!(
+        coalesce_dims(&op).is_none(),
+        "absorbing m=1 into n leaves a fold with no leading axis, which both GEMM tiles decline"
+    );
+}
+
+#[test]
+fn a_unit_row_axis_before_a_leading_batch_axis_keeps_its_own_group() {
+    let mut op = mnk_matmul_fold(1, 384, 64);
+    op.extents = vec![1, 3, 384, 64];
+    if let BoundOpKind::Reduce {
+        operands,
+        output_axes,
+        out_layout,
+        ..
+    } = &mut op.kind
+    {
+        operands[0].1 = layout(0, &[0, 64, 0, 1]);
+        operands[1].1 = layout(0, &[0, 0, 1, 384]);
+        *output_axes = smallvec![0, 1, 2];
+        *out_layout = layout(0, &[0, 384, 1, 0]);
+    }
+
+    assert!(coalesce_dims(&op).is_none());
+}
+
+#[test]
+fn a_trailing_unit_kept_axis_still_merges_into_the_row() {
+    let mut op = mnk_matmul_fold(3, 1, 4);
+    if let BoundOpKind::Reduce {
+        operands,
+        out_layout,
+        ..
+    } = &mut op.kind
+    {
+        operands[0].1 = layout(0, &[4, 0, 1]);
+        operands[1].1 = layout(0, &[0, 1, 1]);
+        *out_layout = layout(0, &[1, 1, 0]);
+    }
+
+    let merged = coalesce_dims(&op).expect("a kept extent-1 axis behind a wider one widens the row");
+
+    assert_eq!(merged.extents, vec![3, 4]);
+}
+
+
 fn delta_net_state_fold() -> BoundOp {
     let state = layout(0, &[64, 16, 2, 1]);
     let key = layout(0, &[32, 0, 2, 1]);
