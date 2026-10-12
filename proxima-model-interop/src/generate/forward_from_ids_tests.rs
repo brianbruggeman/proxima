@@ -197,3 +197,44 @@ fn a_forward_needs_tokens_the_vocabulary_has() {
         );
     });
 }
+
+#[test]
+fn teacher_forced_rows_equal_a_full_forward_over_each_forced_prefix() {
+    with_dense_model(|model| {
+        let config = ServingConfig::default();
+        let prompt = [0u32, 1];
+        let forced = [1u32, 0, 1];
+
+        let rows = model
+            .teacher_forced_logits_from_ids(&prompt, &forced, &config)
+            .expect("the tiny model teacher-forces three tokens");
+
+        assert_eq!(rows.len(), forced.len(), "one row per forced token");
+        for (step, row) in rows.iter().enumerate() {
+            let prefix: Vec<u32> = prompt.iter().chain(&forced[..step]).copied().collect();
+            let expected = model
+                .forward_node_values_from_ids(&prefix, &[model.logits_root()], &config)
+                .expect("a full forward over the prefix")
+                .remove(0);
+            assert_eq!(row.len(), expected.len(), "step {step} row width");
+            for (got, want) in row.iter().zip(&expected) {
+                assert!((got - want).abs() < 1.0e-5, "step {step}: {got} vs {want}");
+            }
+        }
+    });
+}
+
+#[test]
+fn teacher_forcing_refuses_recurrence_an_ordinary_model_cannot_run() {
+    with_dense_model(|model| {
+        let config =
+            ServingConfig::default().with_recurrent(guided(Some(2), LoopCdMode::Disabled, 0.0));
+
+        let rows = model.teacher_forced_logits_from_ids(&[0], &[1], &config);
+
+        assert!(
+            matches!(rows, Err(InteropError::UnsupportedRecurrentConfig { .. })),
+            "{rows:?}"
+        );
+    });
+}
