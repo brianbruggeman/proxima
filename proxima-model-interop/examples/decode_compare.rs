@@ -15,8 +15,10 @@
 //! Each backend's run is timed with `Instant` at every streamed token event:
 //! `decode_step backend=<cuda|cpu> step=<i> ms=<f>` per decoded token and
 //! `decode_timing backend=.. prefill_ms=.. decode_ms_mean=.. decode_ms_cov=.. steps=N`.
-//! `prefill_ms` runs from the call start to the prefill event, so it includes
-//! tokenization and runtime construction; step `i` is the gap since the previous event.
+//! `prefill_ms` runs from the call start through the step-0 token event (the token
+//! sampled from the prefill pass), so it includes tokenization and runtime
+//! construction, which the streaming API does not expose separately. Decode steps
+//! start at the second token event; step `i` is the gap since the previous event.
 
 use std::env;
 use std::fs::File;
@@ -162,6 +164,7 @@ fn decode(
         previous = now;
         match event.phase {
             Phase::Prefill { .. } => timing.prefill_ms = millis,
+            Phase::Token if event.step == 0 => timing.prefill_ms += millis,
             Phase::Token => timing.step_ms.push(millis),
         }
         ControlFlow::Continue(())
