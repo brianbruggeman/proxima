@@ -78,9 +78,11 @@
 //!   `crate::affine_scatter` composes the scatter-add along the map from
 //!   `Iota`/`Equal`/`Multiply` and a pure-projection `Reduce(Add)`; a pure
 //!   projection keeps the direct `Reduce(Add)`. An `Elementwise` operand map
-//!   that cannot be lowered that way (an axis leaving the operand's extent)
-//!   and a `Reduce::in_map` of this kind are rejected with
-//!   [`AutogradError::NonProjectionOperandMap`].
+//!   that cannot be lowered that way (an axis leaving the operand's extent),
+//!   or a `Reduce::in_map` whose iteration extents stay unresolved, is
+//!   rejected with [`AutogradError::NonProjectionOperandMap`]; a
+//!   `Reduce::in_map` of this kind (a tiled `2*i + k` read) otherwise takes
+//!   the same rule through `route_through_in_map`.
 
 use alloc::collections::BTreeSet;
 use alloc::vec;
@@ -852,16 +854,15 @@ fn differentiate_reduce(
         return Ok(());
     }
     let in_pattern = reduce.in_map.affine();
-    if !expr::is_pure_projection(in_pattern) {
-        return Err(AutogradError::NonProjectionOperandMap {
+    let anchor_extents = expr::reduce_iteration_extents(shapes, node, reduce).ok_or(
+        AutogradError::NonProjectionOperandMap {
             node,
             operand: reduce.operand,
-        });
-    }
+        },
+    )?;
     let full = expr::identity(in_pattern.iter_rank);
     let out_map_as_operand = IndexMap::Affine(reduce.out_map.affine().clone());
 
-    let anchor_extents = expr::iter_extents(shapes, reduce.operand, in_pattern);
     let anchor = expr::broadcast_anchor(program, reduce.dtype, &anchor_extents, 0.0);
 
     let contribution = match reduce.body {
@@ -966,19 +967,15 @@ fn differentiate_reduce(
     // `Elementwise` nodes are ever held, `Reduce` nodes always retire
     // unconditionally) can then fuse straight into whichever consumer reads
     // it next, instead of a forced intermediate materialize.
-    let routed = if reduce.in_map == full {
-        contribution
-    } else {
-        expr::reduce(
-            program,
-            operand_dtype,
-            ScalarOp::Add,
-            ReduceInit::Zero,
-            contribution,
-            full,
-            reduce.in_map.clone(),
-        )
-    };
+    let routed = route_through_in_map(
+        program,
+        shapes,
+        node,
+        reduce,
+        contribution,
+        &anchor_extents,
+        operand_dtype,
+    )?;
     let operand_rank = shapes.of(reduce.operand).len() as u16;
     accumulate(
         program,
@@ -989,6 +986,51 @@ fn differentiate_reduce(
         routed,
     );
     Ok(())
+}
+
+/// Folds `contribution` (at `reduce`'s iteration space) back onto the
+/// operand through `reduce.in_map`, the same operand-map rule
+/// `route_contribution` applies to an `Elementwise` operand: the identity
+/// map keeps `contribution` as is, a pure projection is the direct
+/// `Reduce(Add)` with the map as its `out_map`, and anything else is
+/// `affine_scatter::scatter_add_along_map`.
+fn route_through_in_map(
+    program: &mut Vec<Op>,
+    shapes: &Shapes,
+    node: NodeId,
+    reduce: &Reduce,
+    contribution: NodeId,
+    iteration_extents: &[u64],
+    operand_dtype: DType,
+) -> Result<NodeId, AutogradError> {
+    let pattern = reduce.in_map.affine();
+    let full = expr::identity(pattern.iter_rank);
+    if reduce.in_map == full {
+        return Ok(contribution);
+    }
+    if expr::is_pure_projection(pattern) {
+        return Ok(expr::reduce(
+            program,
+            operand_dtype,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            contribution,
+            full,
+            reduce.in_map.clone(),
+        ));
+    }
+    affine_scatter::scatter_add_along_map(
+        program,
+        operand_dtype,
+        contribution,
+        pattern,
+        iteration_extents,
+        shapes.of(reduce.operand),
+    )
+    .ok_or(AutogradError::NonProjectionOperandMap {
+        node,
+        operand: reduce.operand,
+    })
 }
 
 /// The adjoint of a forward scatter (`Reduce::out_map` data-dependent),
@@ -1046,14 +1088,12 @@ fn differentiate_scatter(
     if is_unwanted_input(original_program, wanted, reduce.operand) {
         return Ok(());
     }
-    let in_pattern = reduce.in_map.affine();
-    if !expr::is_pure_projection(in_pattern) {
-        return Err(AutogradError::NonProjectionOperandMap {
+    let iteration_extents = expr::reduce_iteration_extents(shapes, node, reduce).ok_or(
+        AutogradError::NonProjectionOperandMap {
             node,
             operand: reduce.operand,
-        });
-    }
-    let full = expr::identity(in_pattern.iter_rank);
+        },
+    )?;
     let gather_map =
         reduce
             .out_map
@@ -1074,19 +1114,15 @@ fn differentiate_scatter(
     // `differentiate_reduce`'s own tail already documents: `in_map == full`
     // means no source position ever shares an iteration point with another,
     // so `contribution` is already `grad_of[operand]` verbatim.
-    let routed = if reduce.in_map == full {
-        contribution
-    } else {
-        expr::reduce(
-            program,
-            operand_dtype,
-            ScalarOp::Add,
-            ReduceInit::Zero,
-            contribution,
-            full,
-            reduce.in_map.clone(),
-        )
-    };
+    let routed = route_through_in_map(
+        program,
+        shapes,
+        node,
+        reduce,
+        contribution,
+        &iteration_extents,
+        operand_dtype,
+    )?;
     let operand_rank = shapes.of(reduce.operand).len() as u16;
     accumulate(
         program,
