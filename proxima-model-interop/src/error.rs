@@ -126,6 +126,15 @@ pub enum InteropError {
         sealed_end: usize,
     },
 
+    /// llama.cpp's `common_speculative_are_compatible` rejected the
+    /// target/draft vocabulary at one of its explicit parity predicates.
+    #[error("draft model vocab incompatibility ({criterion}): target={target:?}, draft={draft:?}")]
+    IncompatibleDraftModelVocab {
+        criterion: &'static str,
+        target: String,
+        draft: String,
+    },
+
     /// `crate::profiles::family_profile`: no embedded profile file exists for
     /// this family string. Never defaulted: a family whose profile is absent
     /// would lower with another family's activation, scales and norm shifts.

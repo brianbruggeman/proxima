@@ -36,6 +36,8 @@ pub mod capability;
 pub mod cold_artifact;
 #[cfg(feature = "std")]
 mod dense;
+#[cfg(feature = "std")]
+mod draft_model_compatibility;
 mod dtype;
 mod error;
 #[cfg(feature = "std")]

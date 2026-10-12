@@ -245,7 +245,7 @@ pub(super) fn gemma4_checkpoint() -> Vec<u8> {
     encode(metadata, &specs)
 }
 
-fn dense_checkpoint() -> Vec<u8> {
+pub(super) fn dense_checkpoint() -> Vec<u8> {
     let mut rng = Lcg(0x2545_f491_4f6c_dd1d);
     let projection = EMBEDDING;
     let mut specs = alloc::vec![
