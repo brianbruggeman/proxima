@@ -42,6 +42,7 @@ kv_heads = 8
 value_source_kind = "ProjectedV"
 key_source_kind = "ProjectedK"
 value_norm = false
+qk_norm = false
 score_scale = { Factor = 0.015625 }
 rope_table = { cos_name = "rope_cos", sin_name = "rope_sin" }
 rope_pairing = "Interleaved"
