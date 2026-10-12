@@ -214,32 +214,19 @@ impl GpuDriver {
 }
 
 /// Emits the telemetry event for an unrecognized `OMEGA_BACKEND` value.
-/// `proxima-telemetry` is only pulled in by the `metal` feature
-/// (`omega/Cargo.toml`'s `dep:proxima-telemetry` line lives on that
-/// feature's dependency list), so a `cpu`-only build without `metal` gets a
-/// no-op here rather than a missing-dependency compile error.
-#[cfg(feature = "metal")]
 fn warn_unknown_backend_env(value: &str, error: &BackendError) {
     proxima_telemetry::warn!(%value, %error, "OMEGA_BACKEND names no known backend");
 }
 
-#[cfg(not(feature = "metal"))]
-fn warn_unknown_backend_env(_value: &str, _error: &BackendError) {}
-
 /// Emits the deprecation event for the legacy `metal`/`wgpu` `OMEGA_BACKEND`
 /// spelling — see [`Engine::from_env`]'s own doc for the one-release grace
-/// period this backs. Same cfg split as [`warn_unknown_backend_env`]: a
-/// `cpu`-only build without `metal` gets a no-op.
-#[cfg(feature = "metal")]
+/// period this backs.
 fn warn_deprecated_driver_name(value: &str) {
     proxima_telemetry::warn!(
         %value,
         "OMEGA_BACKEND names a GPU driver, not an engine; use `gpu` instead (this alias is removed next release)"
     );
 }
-
-#[cfg(not(feature = "metal"))]
-fn warn_deprecated_driver_name(_value: &str) {}
 
 impl core::str::FromStr for Engine {
     type Err = BackendError;

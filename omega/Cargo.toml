@@ -16,7 +16,7 @@ readme.workspace = true
 # nextest's "0 skipped" reads exactly like "everything passed". They sat
 # broken and uncompiled behind that flag.
 default = ["std", "metal", "cpu"]
-std = ["alloc", "thiserror/std", "proxima-tensor/std", "dep:conflaguration", "dep:serde"]
+std = ["alloc", "thiserror/std", "proxima-tensor/std", "dep:conflaguration", "dep:serde", "dep:proxima-telemetry", "proxima-telemetry/std", "proxima-telemetry/emit"]
 mlx-gdn = ["std"]
 alloc = []
 float-layout-dtype = ["proxima-tensor/float-layout-dtype", "proxima-gguf/float-layout-dtype"]
@@ -208,9 +208,6 @@ metal = [
     "dep:objc2-metal",
     "dep:objc2-foundation",
     "dep:half",
-    "dep:proxima-telemetry",
-    "proxima-telemetry/std",
-    "proxima-telemetry/emit",
     "dep:libc",
     "dep:sha2",
     "dep:block2",
