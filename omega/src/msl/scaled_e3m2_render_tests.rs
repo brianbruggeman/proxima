@@ -160,7 +160,6 @@ fn scaled_e3m2_render_model_name_free() {
     feature = "std",
     any(
         all(feature = "metal", target_os = "macos"),
-        feature = "cuda-driver",
         feature = "wgpu-backend"
     )
 ))]

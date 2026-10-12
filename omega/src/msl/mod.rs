@@ -84,7 +84,6 @@ use proxima_tensor::{
     feature = "std",
     any(
         all(feature = "metal", target_os = "macos"),
-        feature = "cuda-driver",
         feature = "wgpu-backend"
     )
 ))]
