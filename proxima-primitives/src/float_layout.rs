@@ -78,6 +78,23 @@ impl FloatLayout {
         1 + self.exponent_bits + self.mantissa_bits
     }
 
+    /// Bytes `elements` values occupy packed densely at `width()` bits each, plus one `scale` code
+    /// per `block` elements when `scale_block` is `Some((scale, block))`, rounded up to whole
+    /// bytes: 32 elements of E3M2 under an f16 scale are 32 * 6 + 16 = 208 bits, 26 bytes.
+    #[must_use]
+    pub const fn packed_bytes(
+        &self,
+        elements: u64,
+        scale_block: Option<(FloatLayout, u64)>,
+    ) -> u64 {
+        let element_bits = elements * self.width() as u64;
+        let scale_bits = match scale_block {
+            Some((scale, block)) if block > 0 => elements.div_ceil(block) * scale.width() as u64,
+            _ => 0,
+        };
+        (element_bits + scale_bits).div_ceil(8)
+    }
+
     #[must_use]
     pub const fn max_normal(&self) -> f32 {
         let exponent_codes = (1i32 << self.exponent_bits) - 1;
