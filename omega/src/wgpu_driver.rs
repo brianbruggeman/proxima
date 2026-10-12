@@ -24,12 +24,15 @@
 //! await anything, matching this crate's box-free/no-async-runtime-dependency
 //! stance for the rest of the emit-then-drive split.
 //!
-//! # v1 scope
+//! # Which blocks upload
 //!
-//! Only [`proxima_tensor::QuantizedBlock::Float32`] blocks upload — every
-//! packed/narrow codec is rejected with [`WgpuError::UnsupportedBlock`]
-//! rather than dequantized on the host, matching [`crate::wgsl`]'s own v1
-//! scope (no [`crate::msl::Codec`] table exists on this path).
+//! A [`proxima_tensor::QuantizedBlock::Float32`] block uploads as `f32`, and
+//! every codec [`crate::wgsl`] renders an unpack body for -- `Q4_K`, `Q5_K`,
+//! `Q6_K`, `Q8_0`, `Q4_0`, `Float16`, `BFloat16` -- uploads as its RAW PACKED
+//! bytes and is decoded on the device, never dequantized on the host. That
+//! set is exactly what `packed_operands_of` resolves to a [`Codec`] at plan
+//! time; any other codec (`Q3_K`, `Q2_K`, `Q5_1`, the IQ family -- CPU decode
+//! paths with no WGSL kernel) is rejected with [`WgpuError::UnsupportedBlock`].
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -56,9 +59,10 @@ pub enum WgpuError {
     NoDevice(String),
     #[error("wgpu driver error: {0}")]
     Driver(String),
-    /// v1 uploads `Float32` blocks only — see the module doc.
+    /// The codec has no WGSL unpack body — see the module doc for the set
+    /// that does.
     #[error(
-        "node {node} is bound to a {codec} block, which the wgpu v1 driver does not upload (float32 only)"
+        "node {node} is bound to a {codec} block, which the wgsl emitter has no unpack kernel for"
     )]
     UnsupportedBlock { node: NodeId, codec: &'static str },
     #[error(transparent)]
