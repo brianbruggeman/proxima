@@ -76,12 +76,16 @@ fn run_prompt(
     let (ids, _text, _stopped) = model
         .run_decode_loop(prompt, TOKENS, &effective, &mut runtime)
         .expect("greedy decode on the real gemma4-E2B checkpoint");
+    #[cfg(feature = "instrument")]
+    let drained_reuses = runtime.plan_handoff_reuses;
+    #[cfg(not(feature = "instrument"))]
+    let drained_reuses = 0;
     Generation {
         ids,
         plan_hits: runtime.plan_hits,
         plan_misses: runtime.plan_misses,
         plan_refits: runtime.plan_refits,
-        weight_blocks_rebound: PLAN_HANDOFF_REUSES.snapshot_and_reset(),
+        weight_blocks_rebound: PLAN_HANDOFF_REUSES.snapshot_and_reset() + drained_reuses,
     }
 }
 

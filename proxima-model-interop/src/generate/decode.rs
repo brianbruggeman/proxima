@@ -5455,6 +5455,10 @@ did not hold every cached position)",
                     let evaluate_ticks = elapsed_ticks(evaluate_started);
                     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                     let metal_stage = metal_stage_totals();
+                    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                    {
+                        runtime.plan_handoff_reuses += metal_stage.plan_handoff_reuses;
+                    }
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     if let Some(device) = device_kv.as_ref() {
                         #[cfg(feature = "instrument")]
@@ -7139,6 +7143,10 @@ did not hold every cached position)",
                 // one-time cost after step 0, never a hardcoded zero.
                 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                 let metal_stage = metal_stage_totals();
+                #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                {
+                    runtime.plan_handoff_reuses += metal_stage.plan_handoff_reuses;
+                }
                 // `max_command_buffers_per_token == 0` (the default) leaves this
                 // step's command-buffer count unmeasured -- ROW invariant 1 is a
                 // caller-opted-in ceiling, not an unconditional assertion.
