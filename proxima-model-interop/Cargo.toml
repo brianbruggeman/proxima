@@ -705,6 +705,11 @@ required-features = ["std"]
 name = "mlx_plain_export"
 required-features = ["std"]
 
+# offline codec conversion: mmap's the source checkpoint, `convert_codec` is `std`-gated.
+[[example]]
+name = "convert_codec"
+required-features = ["std"]
+
 [[example]]
 name = "qat_census"
 required-features = ["std", "metal", "qat"]
