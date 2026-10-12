@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "samples": 5,
+  "warmups": 1,
+  "arms": [
+    { "name": "serial", "parallel_sequences": 1, "allow_fusion": true },
+    { "name": "unified", "parallel_sequences": 3, "allow_fusion": true }
+  ],
+  "workloads": [
+    {
+      "name": "single",
+      "concurrency": 1,
+      "max_new_tokens": 64,
+      "prompt_text": "The capital of France is"
+    },
+    {
+      "name": "mixed_three_stream",
+      "concurrency": 3,
+      "max_new_tokens": 64,
+      "max_decode_batches_before_prefill": 2,
+      "arrival_fixture": "fixtures.json#/arrival_schedule",
+      "streams": [
+        { "stream_id": 41, "arrival_tick": 0, "messages": [{ "role": "user", "content": "Describe a lighthouse during a storm." }, { "role": "assistant", "content": "A lighthouse marks the coast with a steady beam." }, { "role": "user", "content": "What should a keeper record after the storm?" }, { "role": "assistant", "content": "Record wind direction, tide level, visibility, equipment faults and the times each observation was made." }, { "role": "user", "content": "How would those notes help the next shift?" }, { "role": "assistant", "content": "The next keeper can compare conditions, prioritize repairs and know which warnings remain active." }, { "role": "user", "content": "Give a short handoff checklist." }] },
+        { "stream_id": 73, "arrival_tick": 1, "messages": [{ "role": "user", "content": "Explain why a small town keeps an archive." }, { "role": "assistant", "content": "An archive preserves decisions and local records." }, { "role": "user", "content": "How would you organize one shelf?" }, { "role": "assistant", "content": "Group records by collection, date them consistently, label folders clearly and leave an index where visitors can find it." }, { "role": "user", "content": "What should the index include?" }, { "role": "assistant", "content": "Include the collection name, date range, folder label, access limits and a brief description of the records." }, { "role": "user", "content": "How should staff handle a record with restricted access?" }] },
+        { "stream_id": 89, "arrival_tick": 2, "initial_residency": "cold_evicted", "eviction_event": { "tick": 1, "reason": "resident_byte_budget" }, "messages": [{ "role": "user", "content": "Give a practical plan for a community garden." }, { "role": "assistant", "content": "Start with sunlight, water access and shared tools." }, { "role": "user", "content": "Which task should volunteers do first?" }, { "role": "assistant", "content": "Map the sunny areas, test the soil, locate a water source and list tools that neighbors can share." }, { "role": "user", "content": "How should we divide the beds?" }, { "role": "assistant", "content": "Keep paths wide enough for access, group plants with similar water needs and reserve one bed for rotating community choices." }, { "role": "user", "content": "What should happen during the first month?" }] }
+      ]
+    }
+  ],
+  "models": [
+    {
+      "key": "ouro-1.4b",
+      "model_id": "ByteDance/Ouro-1.4B",
+      "revision": "574fa66cb8bf5abdc979642d01cf2b79b16bfab1",
+      "artifact": "/private/tmp/ouro-llama-converted-v1/ouro-bf16.gguf",
+      "sha256": "d3cdf276005d768c5def9cfb6679eb5600a424c5cd23b45157e65204708ae478",
+      "architecture": "ouro",
+      "kind": "dense_recurrent",
+      "kv_policy": "f32",
+      "numeric_policy": "bit_exact"
+    },
+    {
+      "key": "qwen3-1.7b-bf16",
+      "model_id": "Qwen3-1.7B",
+      "revision": "unrecorded-local-source",
+      "config_artifact": "/Users/brianbruggeman/.cache/proxima/models/Qwen3-1.7B/config.json",
+      "config_sha256": "1ddb5b89ebc90dcb417a45c213d818577e65976454d29385c8f6140771d95197",
+      "llama_cpp_metadata_overrides": ["qwen3.context_length=int:40960"],
+      "artifact": "/Users/brianbruggeman/.cache/proxima/models/Qwen3-1.7B/qwen3-1.7b-bf16.gguf",
+      "sha256": "ef2864916b951ebd2f072c759d11a442ba31acc3bcb7e5db5ca1d6fcf78b93cb",
+      "architecture": "qwen3",
+      "kind": "dense",
+      "kv_policy": "f32",
+      "numeric_policy": "bit_exact"
+    },
+    {
+      "key": "granite-3.1-1b-a400m-instruct",
+      "model_id": "ibm-granite/granite-3.1-1b-a400m-instruct",
+      "revision": "unrecorded-local-source",
+      "artifact": "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80",
+      "sha256": "cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80",
+      "architecture": "granitemoe",
+      "general_name": "Granite 3.1 1b A400M Instruct",
+      "kind": "moe",
+      "expert_count": 32,
+      "experts_per_token": 8,
+      "kv_policy": "f32",
+      "numeric_policy": "bit_exact"
+    },
+    {
+      "key": "gemma4-e2b-qat",
+      "model_id": "google/gemma-4-E2B-it-GGUF QAT local conversion",
+      "revision": "unrecorded-local-source",
+      "artifact": "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd",
+      "sha256": "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd",
+      "architecture": "gemma4",
+      "general_name": "2B_dequant_qat_it_hf",
+      "kind": "dense",
+      "kv_policy": "f32",
+      "numeric_policy": "bit_exact"
+    }
+  ],
+  "llama_cpp": {
+    "binary": "/Users/brianbruggeman/.cache/proxima-72c0/llama-oracle/build/bin/llama-server",
+    "binary_sha256": "522c6ab9f29c733aff86a90e52c4604d730ba245d1756ac6c8b8fd7b84e42054",
+    "version": "0.4.0-dev (commit unknown in binary metadata)",
+    "ouro_source_revision": "1550360e089185632c2036c908411b05fafa1119"
+  }
+}
