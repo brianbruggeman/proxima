@@ -15,14 +15,16 @@
 mod door_support;
 #[path = "../tests/door_support/walkthrough.rs"]
 mod walkthrough;
+#[path = "../tests/door_support/walkthrough_mil.rs"]
+mod walkthrough_mil;
 
 use anyhow::{Result, bail};
 
 fn main() -> Result<()> {
     let lines = match std::env::args().nth(1).as_deref() {
         Some("onnx") => walkthrough::onnx_lines()?,
-        Some("mil") => walkthrough::mil_lines()?,
-        None => [walkthrough::onnx_lines()?, walkthrough::mil_lines()?].concat(),
+        Some("mil") => walkthrough_mil::mil_lines()?,
+        None => [walkthrough::onnx_lines()?, walkthrough_mil::mil_lines()?].concat(),
         Some(other) => bail!("unknown instance `{other}`, expected `onnx` or `mil`"),
     };
     lines.iter().for_each(|line| println!("{line}"));

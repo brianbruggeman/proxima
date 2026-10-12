@@ -7,6 +7,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod door_support;
+#[path = "door_support/walkthrough.rs"]
+mod walkthrough;
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -144,4 +146,45 @@ fn door_shared_core_door_module_is_format_name_free() {
 #[test]
 fn door_shared_core_format_name_counter_control_counts_one_in_a_string_containing_the_name() {
     assert_eq!(count_format_names("pub struct TfLiteWriter;"), 1);
+}
+
+fn lines_containing(lines: &[String], needle: &str) -> usize {
+    lines.iter().filter(|line| line.contains(needle)).count()
+}
+
+#[test]
+fn door_shared_core_onnx_walkthrough_prints_five_advances_and_five_failure_exits() {
+    let lines = walkthrough::onnx_lines().expect("the onnx walkthrough runs");
+
+    assert_eq!(lines.len(), 10);
+    assert!(lines.iter().all(|line| line.starts_with("transition ")));
+    assert_eq!(lines_containing(&lines, "outcome=advanced"), 5);
+    assert_eq!(lines_containing(&lines, "outcome=failed"), 5);
+}
+
+#[test]
+fn door_shared_core_onnx_walkthrough_fails_each_reading_stage_exactly_once() {
+    let lines = walkthrough::onnx_lines().expect("the onnx walkthrough runs");
+
+    let stages = [
+        StageKind::Parse,
+        StageKind::Validate,
+        StageKind::Lower,
+        StageKind::Plan,
+        StageKind::Execute,
+    ];
+    let per_stage: Vec<usize> = stages
+        .iter()
+        .map(|stage| lines_containing(&lines, &format!("stage={} outcome=failed", stage.name())))
+        .collect();
+
+    assert_eq!(per_stage, vec![1; 5]);
+    assert_eq!(lines_containing(&lines, "stage=emit"), 0);
+}
+
+#[test]
+fn door_shared_core_walkthrough_counter_control_counts_zero_for_a_stage_it_never_fails() {
+    let lines = walkthrough::onnx_lines().expect("the onnx walkthrough runs");
+
+    assert_eq!(lines_containing(&lines, "stage=verify outcome=failed"), 0);
 }
