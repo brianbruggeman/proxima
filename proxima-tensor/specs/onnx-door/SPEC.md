@@ -44,7 +44,7 @@ Each R is one consumer-visible behaviour; its single AC enumerates the named tes
 | R12 | Memory bound: peak RSS of each of the four omega cells is within the 500 MB cap of `AGENTS.md` | yes |
 | R13 | Generic-ness: mnist.onnx (a convolutional model of another family) runs through the same door constructor on CPU and Metal with top-1 accuracy at or above 0.98 over the first 1000 `t10k` images, and the door sources name no model | yes |
 | R14 | No tract and no onnxruntime in proxima: no crate named `tract*`, `ort`, `ort-sys` or `onnxruntime*` appears in proxima's `Cargo.lock` or `fuzz/Cargo.lock`, while the same check finds them in the indexer repo's lock | yes |
-| R15 | The `fuzz_onnx` target still reaches no panic after the lowering changes, and gains a sweep that chains `parse_complete` into the census | yes |
+| R15 | The `fuzz_onnx` target still reaches no panic after the lowering changes, and gains a sweep that chains `parse_complete` into the census; the chained sweeps draw from a mutated serialized seed model because uniform random bytes decode to no graph (0 of 150000 at the chained seeds), so a random chain would run neither the lowering nor the census | yes |
 
 ## architecture
 
@@ -68,7 +68,7 @@ omega/tests/onnx_door_bge.rs                                  // new: R6 to R9 o
 omega/tests/onnx_door_generic.rs                              // new: R13
 omega/tests/support/bge.rs                                    // new: CLS pooling, L2 normalization, tolerance compare, record readers
 omega/tests/fixtures/bge-small/                               // new: README.md, model.sha256, model_header.bin, corpus.jsonl, tract_b1.jsonl, tract_b32.jsonl, tract_timing.jsonl
-fuzz/src/bin/fuzz_onnx.rs                                     // third sweep: parse_complete into census
+fuzz/src/bin/fuzz_onnx.rs                                     // third sweep: parse_complete into census; chained sweeps mutate a seed model (fuzz_onnx/seed.rs, fuzz_onnx/mutation.rs)
 <indexer crate>/examples/corpus_build.rs, tract_record.rs     // new, in the indexer repo only: tokenizes the corpus with tokenizer.json, runs tract
 ```
 
@@ -127,7 +127,7 @@ Paths and variables: `BGE_MODEL_PATH` is `$HOME/.cache/huggingface/hub/models--B
 | AC12 | R12 | `grep -c -E '^bound metric=rss_peak_mb arm=omega_(cpu\|metal) vs=cap500 cell=b(1\|32) .* within=true$' "$OUT/bench.log"` | `4` (reference median is the constant 500) |
 | AC13 | R13 | `cargo nextest run --release -p omega --features onnx-door,cpu,metal -E 'test(/onnx_door_generic_/)'` | `6 passed` (mnist_cpu_top1_at_least_0_98_over_first_1000_t10k_images; mnist_metal_top1_at_least_0_98 (also asserts the `omega::metal` bound-byte counters moved); labels_compared_with_themselves_score_1_0 as the identity control; labels_shuffled_by_one_position_score_below_0_98 as the degenerate control; door_sources_name_no_model: the count of `bge`, `bert` and `mnist` (case-insensitive) in `omega/src/onnx_door/*.rs` and `omega/src/door/*.rs` is 0; model_name_counter_control: the same counter over a string containing `Mnist` returns 1) |
 | AC14 | R14 | `for lock in Cargo.lock "$INDEXER_REPO/Cargo.lock" fuzz/Cargo.lock; do grep -c -E '^name = "(tract[a-z0-9_-]*\|ort\|ort-sys\|onnxruntime[a-z0-9_-]*)"$' "$lock"; done \| paste -sd' ' -` | `0 7 0` (proxima's lock, the indexer repo's lock as the degenerate control that must match, the fuzz lock) |
-| AC15 | R15 | `( cd fuzz && cargo run --release --bin fuzz_onnx ) \| grep -c 'panics=0$'` | `3` (onnx::parse_complete::random, onnx::parse_complete::then_lower_graph, onnx::parse_complete::then_census; each line is `SweepReport::print_line`, `fuzz/src/lib.rs:67`) |
+| AC15 | R15 | `( cd fuzz && cargo run --release --bin fuzz_onnx ) \| grep -c 'panics=0$'` | `3` (onnx::parse_complete::random, onnx::parse_complete::then_lower_graph, onnx::parse_complete::then_census; each line is `SweepReport::print_line`, `fuzz/src/lib.rs:67`; the last two lines must also print `accepted=` above 0, which the `fuzz_onnx` unit tests assert) |
 
 GPU cells: AC9, AC10 (and so AC11, AC12) and AC13's Metal tests run behind `gpu.lock`; AC1 to AC8, AC14 and AC15 are CPU-only.
 

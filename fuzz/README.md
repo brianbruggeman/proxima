@@ -39,7 +39,7 @@ at all, with every planned draw accounted for by the `assert_eq!` in
 | `fuzz_h2` | HTTP/2 frame header + payload parse | `proxima_protocols::http2_codec::frame::{FrameHeader::parse,parse_payload}` |
 | `fuzz_quic` | QUIC long/short packet header, incl. version negotiation | `proxima_protocols::quic::packet::header::{parse_long,parse_short}` |
 | `fuzz_gguf` | GGUF file parse (persistence boundary) | `proxima_gguf::parse_complete` |
-| `fuzz_onnx` | ONNX protobuf parse + graph lowering | `proxima_onnx::{parse_complete,lower_graph}` |
+| `fuzz_onnx` | ONNX protobuf parse + graph lowering + census (chained sweeps mutate a serialized seed model) | `proxima_onnx::{parse_complete,lower_graph,census::census}` |
 | `fuzz_safetensors` | safetensors header/manifest load | `proxima_safetensors::parse_complete` |
 
 Each bin runs a "pure random bytes" sweep plus at least one
