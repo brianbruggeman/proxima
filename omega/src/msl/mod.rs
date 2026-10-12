@@ -124,7 +124,6 @@ mod packed_row_blocked_ggml;
 mod tiled_gemm_cooperative_scan;
 mod expert_grouped_gemm;
 mod index_narrowing;
-#[cfg(feature = "float-layout-dtype")]
 pub mod layout_render;
 mod scaled_float_render;
 mod wide_grid;

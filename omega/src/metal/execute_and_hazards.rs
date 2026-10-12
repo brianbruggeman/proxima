@@ -239,7 +239,7 @@ pub(super) fn execute_plan_inner(
             // which narrows a caller's `&[f32]`): a `Float16` weight's on-
             // disk bytes already ARE its device buffer's bytes (native
             // `half`), and a `BFloat16` weight's bytes are widened entirely
-            // on the GPU at the read (`msl::BF16_UNPACK_MSL`), never on the
+            // on the GPU at the read (`msl::layout_render`), never on the
             // host.
             // `Q3_K` uploads its raw super-block bytes unchanged, same as
             // every other packed codec below -- `msl::Codec::Q3K`'s

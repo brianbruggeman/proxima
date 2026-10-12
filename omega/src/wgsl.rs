@@ -654,7 +654,7 @@ fn f16_bits_to_f32(bits: u32) -> f32 {
 
 /// Word-based ports of `crate::msl`'s five packed-codec unpack functions
 /// (`Q4K_UNPACK_MSL`/`Q5K_UNPACK_MSL`/`Q6K_UNPACK_MSL`/`Q8_0_UNPACK_MSL`/
-/// `Q4_0_UNPACK_MSL`) plus `BF16_UNPACK_MSL` and a `Float16` reader,
+/// `Q4_0_UNPACK_MSL`) plus the `bf16_element` accessor and a `Float16` reader,
 /// specialized to operand index `op` (`in{op}` is the only storage buffer
 /// this generated text touches) — WGSL rejects a `ptr<storage, ...>`
 /// function PARAMETER outright (naga: "pointer ... can't be passed into

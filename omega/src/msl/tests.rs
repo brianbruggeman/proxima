@@ -14,6 +14,8 @@ use proxima_tensor::{
     map,
 };
 
+use proxima_primitives::float_layout::FloatLayout;
+
 use super::*;
 
 /// The last node `program` builds -- what every fixture in this module
@@ -47,8 +49,11 @@ fn brain_float_scalar_codecs_read_packed_bytes_directly() {
     let bf8_read =
         signature_tokens_prelude::operand_read(0, "native_packed_index", Some(Codec::Bf8E5M2));
     assert_eq!(bf8_read, "bf8_e5m2_element(in0 + native_packed_index, 0u)");
-    assert!(BRAIN_FLOAT_SCALAR_UNPACK_MSL.contains("static inline float bf8_e5m2_element"));
-    assert!(BRAIN_FLOAT_SCALAR_UNPACK_MSL.contains("payload[0]"));
+    let bf8_accessor =
+        layout_render::layout_unpack_msl(FloatLayout::E5M2_SATURATING, "bf8_e5m2_element")
+            .expect("an eight-bit layout has a flat accessor");
+    assert!(bf8_accessor.contains("bf8_e5m2_element(device const uchar *payload, uint index)"));
+    assert!(bf8_accessor.contains("payload[offset + 0u]"));
 
     let bf4_read =
         signature_tokens_prelude::operand_read(0, "native_packed_index", Some(Codec::Bf4E2M1));
@@ -56,8 +61,10 @@ fn brain_float_scalar_codecs_read_packed_bytes_directly() {
         bf4_read,
         "bf4_e2m1_element(in0 + (native_packed_index / 2), (uint)(native_packed_index % 2))"
     );
-    assert!(BRAIN_FLOAT_SCALAR_UNPACK_MSL.contains("(packed & 0x0fu)"));
-    assert!(BRAIN_FLOAT_SCALAR_UNPACK_MSL.contains("(packed >> 4u)"));
+    let bf4_accessor = layout_render::layout_unpack_msl(FloatLayout::E2M1, "bf4_e2m1_element")
+        .expect("a four-bit layout has a flat accessor");
+    assert!(bf4_accessor.contains("uint bit = index * 4u;"));
+    assert!(bf4_accessor.contains("(bit % 8u)) & 0xfu"));
 }
 
 #[test]

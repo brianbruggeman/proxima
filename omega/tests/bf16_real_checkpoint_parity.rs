@@ -11,7 +11,7 @@
 //!
 //! Unlike `Float16`, MSL has no native `bfloat` storage type on this
 //! driver's baseline toolchain, so a `BFloat16` weight genuinely needs an
-//! unpack kernel -- `omega::msl::BF16_UNPACK_MSL`'s widen-by-shift
+//! unpack kernel -- `omega::msl::layout_render`'s widen-by-shift
 //! (`bfloat16` is the top 16 bits of an `f32`; reconstructing it is
 //! `bits << 16` reinterpreted, no rounding table). This test proves that
 //! kernel is bit-correct against real checkpoint bytes.
