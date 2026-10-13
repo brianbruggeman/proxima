@@ -720,7 +720,7 @@ impl CudaDriver {
         uniforms: &[u8],
         output_len: usize,
     ) -> Result<(), CudaDriverError> {
-        self.launch_f32_persistent_sized_with_sync(arena, kernel, uniforms, output_len, true)
+        self.launch_f32_persistent_sized_with_sync(arena, kernel, uniforms, output_len, true, None)
     }
 
     /// Enqueues a kernel on the driver's stream without synchronizing.
@@ -728,24 +728,33 @@ impl CudaDriver {
     /// CUDA stream order already preserves the graph's dependency order. The
     /// graph plan uses this form for ordinary kernels and performs one stream
     /// synchronization after the whole evaluation, avoiding a host/device
-    /// round trip after every node. Fault-buffer kernels remain on the
-    /// synchronous path because their diagnostic readback must be observed
-    /// before the next operation can be trusted.
+    /// round trip after every node. A kernel with a fault binding must be
+    /// given `deferred_fault`: an `(array, offset, slots)` window of a device fault array that the
+    /// caller reads back once after the final synchronization. Without it the
+    /// diagnostic would never be observed, so the launch is rejected.
     pub fn launch_f32_persistent_sized_async(
         &self,
         arena: &mut CudaF32Arena,
         kernel: &CudaKernel,
         uniforms: &[u8],
         output_len: usize,
+        deferred_fault: Option<(&CudaSlice<u32>, usize, usize)>,
     ) -> Result<(), CudaDriverError> {
-        if kernel
+        let faults = kernel
             .bindings
             .iter()
-            .any(|binding| matches!(binding, Binding::Fault))
-        {
+            .any(|binding| matches!(binding, Binding::Fault));
+        if faults && deferred_fault.is_none() {
             return Err(CudaDriverError::BindingContract);
         }
-        self.launch_f32_persistent_sized_with_sync(arena, kernel, uniforms, output_len, false)
+        self.launch_f32_persistent_sized_with_sync(
+            arena,
+            kernel,
+            uniforms,
+            output_len,
+            false,
+            deferred_fault,
+        )
     }
 
     fn launch_f32_persistent_sized_with_sync(
@@ -755,6 +764,7 @@ impl CudaDriver {
         uniforms: &[u8],
         output_len: usize,
         synchronize: bool,
+        deferred_fault: Option<(&CudaSlice<u32>, usize, usize)>,
     ) -> Result<(), CudaDriverError> {
         let Some((output_index, Binding::Output(output_node))) = kernel
             .bindings
@@ -850,9 +860,16 @@ impl CudaDriver {
             block_dim: (kernel.grid.block_width_or_default() as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        let mut fault_buffer = (fault_count > 0)
-            .then(|| self.stream.alloc_zeros::<u32>(fault_count))
+        let gather_slots = kernel
+            .bindings
+            .iter()
+            .filter(|binding| matches!(binding, Binding::Indices(_)))
+            .count();
+        let mut fault_buffer = (fault_count > 0 && deferred_fault.is_none())
+            .then(|| self.stream.alloc_zeros::<u32>(gather_slots))
             .transpose()?;
+        let fault_window =
+            deferred_fault.map(|(array, offset, slots)| array.slice(offset..offset + slots));
         let mut args = self.stream.launch_builder(&function);
         for binding in &kernel.bindings[..output_index] {
             match binding {
@@ -873,11 +890,11 @@ impl CudaDriver {
         for binding in &kernel.bindings[output_index + 1..] {
             match binding {
                 Binding::Uniforms => args.arg(device_uniforms),
-                Binding::Fault => args.arg(
-                    fault_buffer
-                        .as_ref()
-                        .ok_or(CudaDriverError::BindingContract)?,
-                ),
+                Binding::Fault => match (&fault_window, &fault_buffer) {
+                    (Some(window), _) => args.arg(window),
+                    (None, Some(buffer)) => args.arg(buffer),
+                    (None, None) => return Err(CudaDriverError::BindingContract),
+                },
                 _ => return Err(CudaDriverError::BindingContract),
             };
         }
@@ -1429,6 +1446,25 @@ impl CudaPlan {
                 self.resolved.last().map(|bound| bound.node)
             );
         }
+        let mut fault_windows: Vec<(NodeId, usize, usize)> = Vec::new();
+        for (bound, kernel) in self.resolved.iter().zip(self.kernels.iter()) {
+            if kernel
+                .bindings
+                .iter()
+                .any(|binding| matches!(binding, Binding::Fault))
+            {
+                let offset = fault_windows
+                    .last()
+                    .map_or(0, |(_, offset, slots)| offset + slots);
+                fault_windows.push((bound.node, offset, gather_count(bound)));
+            }
+        }
+        let fault_total = fault_windows
+            .last()
+            .map_or(0, |(_, offset, slots)| offset + slots);
+        let fault_array = (fault_total > 0)
+            .then(|| self.driver.stream.alloc_zeros::<u32>(fault_total))
+            .transpose()?;
         let dispatch_started = host_timing.then(std::time::Instant::now);
         for (bound, (kernel, uniforms)) in self
             .resolved
@@ -1505,12 +1541,13 @@ impl CudaPlan {
                 self.driver
                     .materialize_constant(&mut self.arena, bound.node, value, output_len)?;
             } else {
-                let launch = if timing
-                    || kernel
-                        .bindings
+                let deferred_fault = fault_array.as_ref().and_then(|array| {
+                    fault_windows
                         .iter()
-                        .any(|binding| matches!(binding, Binding::Fault))
-                {
+                        .find(|(node, _, _)| *node == bound.node)
+                        .map(|(_, offset, slots)| (array, *offset, *slots))
+                });
+                let launch = if timing {
                     self.driver.launch_f32_persistent_sized(
                         &mut self.arena,
                         kernel,
@@ -1523,6 +1560,7 @@ impl CudaPlan {
                         kernel,
                         uniforms,
                         output_len,
+                        deferred_fault,
                     )
                 };
                 launch.map_err(|error| match error {
@@ -1561,6 +1599,20 @@ impl CudaPlan {
         }
         let sync_started = host_timing.then(std::time::Instant::now);
         self.driver.stream.synchronize()?;
+        if let Some(array) = &fault_array {
+            let faults = self.driver.stream.clone_dtoh(array)?;
+            for (node, offset, slots) in &fault_windows {
+                let window = &faults[*offset..*offset + *slots];
+                if let Some(slot) = window.iter().position(|value| *value != 0) {
+                    let index = i32::from_ne_bytes(window[slot].to_ne_bytes()) as i64;
+                    return Err(CudaDriverError::GatherIndexOutOfRange {
+                        node: *node,
+                        slot,
+                        index,
+                    });
+                }
+            }
+        }
         if let Some(started) = sync_started {
             eprintln!(
                 "cuda_host_timing: phase=sync_ms value={:.3}",
