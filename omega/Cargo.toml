@@ -7,7 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme.workspace = true
+readme = "README.md"
+include = ["src/**", "build.rs", "Cargo.toml", "omega-runtime.toml", "README.md", "LICENSE*"]
 
 [lib]
 name = "omega"

@@ -7,8 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme.workspace = true
-include = ["src/**", "build.rs", "Cargo.toml", "proxima-tensor-runtime.toml", "examples/**", "benches/**"]
+readme = "README.md"
+include = ["src/**", "build.rs", "Cargo.toml", "proxima-tensor-runtime.toml", "examples/**", "benches/**", "README.md", "LICENSE*"]
 
 [features]
 default = ["std", "config", "q4k-int8-dot", "q5k-int8-dot", "q6k-int8-dot"]
