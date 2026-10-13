@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
+include = ["src/**", "build.rs", "Cargo.toml", "proxima-tensor-runtime.toml", "examples/**", "benches/**"]
 
 [features]
 default = ["std", "config", "q4k-int8-dot", "q5k-int8-dot", "q6k-int8-dot"]
