@@ -13,6 +13,8 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
+use std::panic::resume_unwind;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use proxima_gguf::TensorInfo;
 use proxima_gguf::pipe::ParsedGguf;
@@ -52,6 +54,31 @@ pub fn export_affine_named(
     conventions: QuantizedConventions,
 ) -> Result<Vec<PlainTensor>, InteropError> {
     let names = conventions.apply(leaf_names(parsed, binding, layout, hf_prefix)?);
+    let workers = available_workers();
+    quantize_named(
+        parsed,
+        file_bytes,
+        &names,
+        params,
+        dtype,
+        conventions,
+        workers,
+    )
+}
+
+fn available_workers() -> usize {
+    std::thread::available_parallelism().map_or(1, |count| count.get())
+}
+
+fn quantize_named(
+    parsed: &ParsedGguf,
+    file_bytes: &[u8],
+    names: &MlxNames,
+    params: AffineParams,
+    dtype: DType,
+    conventions: QuantizedConventions,
+    workers: usize,
+) -> Result<Vec<PlainTensor>, InteropError> {
     let directory: Directory = parsed
         .tensors
         .iter()
@@ -59,49 +86,92 @@ pub fn export_affine_named(
         .collect();
     let load =
         |tensor: &TensorInfo, kind: DType| export_plain_leaf(parsed, file_bytes, tensor, kind);
-    let mut groups = pack_singles(&names, &directory, &load, (params, conventions), dtype)?;
-    groups.extend(pack_fused(&names, &directory, &load, params, dtype)?);
+    let mut groups = pack_singles(
+        names,
+        &directory,
+        &load,
+        (params, conventions),
+        dtype,
+        workers,
+    )?;
+    groups.extend(pack_fused(
+        names, &directory, &load, params, dtype, workers,
+    )?);
     Ok(groups.into_iter().flatten().collect())
 }
 
 fn pack_singles(
     names: &MlxNames,
     directory: &Directory,
-    load: &impl Fn(&TensorInfo, DType) -> Result<PlainTensor, InteropError>,
+    load: &(impl Fn(&TensorInfo, DType) -> Result<PlainTensor, InteropError> + Sync),
     (base, conventions): (AffineParams, QuantizedConventions),
     dtype: DType,
+    workers: usize,
 ) -> Result<Vec<Vec<PlainTensor>>, InteropError> {
-    names
+    let leaves: Vec<(&TensorInfo, &String)> = names
         .mapped
         .iter()
         .filter_map(|(leaf, hf)| directory.get(leaf.as_str()).map(|info| (*info, hf)))
-        .map(|(info, hf)| {
-            let quantizable = hf.ends_with(".weight") && info.dims.len() >= 2;
-            let params = conventions.params_for(hf, base)?;
-            let read = |kind: DType| load(info, kind).map(|tensor| renamed(tensor, hf));
-            quantize_or_cast(read, quantizable, params, dtype)
-        })
-        .collect()
+        .collect();
+    ordered_map(&leaves, workers, |&(info, hf)| {
+        let quantizable = hf.ends_with(".weight") && info.dims.len() >= 2;
+        let params = conventions.params_for(hf, base)?;
+        let read = |kind: DType| load(info, kind).map(|tensor| renamed(tensor, hf));
+        quantize_or_cast(read, quantizable, params, dtype)
+    })
 }
 
 fn pack_fused(
     names: &MlxNames,
     directory: &Directory,
-    load: &impl Fn(&TensorInfo, DType) -> Result<PlainTensor, InteropError>,
+    load: &(impl Fn(&TensorInfo, DType) -> Result<PlainTensor, InteropError> + Sync),
     params: AffineParams,
     dtype: DType,
+    workers: usize,
 ) -> Result<Vec<Vec<PlainTensor>>, InteropError> {
-    fused_groups(names, directory)
-        .into_iter()
-        .map(|(hf, parts)| {
-            let read = |kind: DType| {
-                let loaded: Result<Vec<PlainTensor>, InteropError> =
-                    parts.iter().map(|info| load(info, kind)).collect();
-                loaded.map(|loaded| interleave(hf, &loaded))
-            };
-            quantize_or_cast(read, true, params, dtype)
-        })
-        .collect()
+    let groups = fused_groups(names, directory);
+    ordered_map(&groups, workers, |(hf, parts)| {
+        let read = |kind: DType| {
+            let loaded: Result<Vec<PlainTensor>, InteropError> =
+                parts.iter().map(|info| load(info, kind)).collect();
+            loaded.map(|loaded| interleave(hf, &loaded))
+        };
+        quantize_or_cast(read, true, params, dtype)
+    })
+}
+
+fn ordered_map<Item: Sync, Output: Send, Failure: Send>(
+    items: &[Item],
+    workers: usize,
+    work: impl Fn(&Item) -> Result<Output, Failure> + Sync,
+) -> Result<Vec<Output>, Failure> {
+    if workers <= 1 {
+        return items.iter().map(&work).collect();
+    }
+    let next = AtomicUsize::new(0);
+    let mut claimed: Vec<(usize, Result<Output, Failure>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers.min(items.len()))
+            .map(|_| scope.spawn(|| claim_in_turn(items, &next, &work)))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap_or_else(|panic| resume_unwind(panic)))
+            .collect()
+    });
+    claimed.sort_unstable_by_key(|(index, _)| *index);
+    claimed.into_iter().map(|(_, result)| result).collect()
+}
+
+fn claim_in_turn<Item, Output, Failure>(
+    items: &[Item],
+    next: &AtomicUsize,
+    work: &impl Fn(&Item) -> Result<Output, Failure>,
+) -> Vec<(usize, Result<Output, Failure>)> {
+    std::iter::from_fn(|| {
+        let index = next.fetch_add(1, Ordering::Relaxed);
+        items.get(index).map(|item| (index, work(item)))
+    })
+    .collect()
 }
 
 fn renamed(mut tensor: PlainTensor, name: &str) -> PlainTensor {
@@ -372,5 +442,74 @@ mod tests {
                 dtype: DType::UInt32
             }
         ));
+    }
+
+    #[test]
+    fn parallel_quantize_is_byte_equal_to_the_sequential_oracle_at_every_worker_count() {
+        let bytes = gguf_of(&[
+            (MATRIX, &[32, 2], GgmlType::Q8_0, &q8_0_matrix_bytes()),
+            (
+                "blk.1.ffn_down.weight",
+                &[32, 2],
+                GgmlType::Q8_0,
+                &q8_0_matrix_bytes(),
+            ),
+            (NORM, &[32], GgmlType::F32, &norm_bytes()),
+            (
+                "blk.1.attn_norm.weight",
+                &[32],
+                GgmlType::F32,
+                &norm_bytes(),
+            ),
+            (
+                "blk.0.ffn_gate_exps.weight",
+                &[32, 2],
+                GgmlType::Q8_0,
+                &q8_0_matrix_bytes(),
+            ),
+            (
+                "blk.0.ffn_up_exps.weight",
+                &[32, 2],
+                GgmlType::Q8_0,
+                &q8_0_matrix_bytes(),
+            ),
+        ]);
+        let parsed = parse_complete(&bytes).expect("parses the gguf just written");
+        let binding = binding_profile("granitemoe").expect("granitemoe binding profile");
+        let conventions = QuantizedConventions::NONE;
+        let names = conventions.apply(
+            leaf_names(&parsed, &binding, STANDARD_LAYOUT, "model.")
+                .expect("maps every leaf of the fixture"),
+        );
+        let params = AffineParams::new(4, 32).expect("grid member");
+        let quantize = |workers| {
+            quantize_named(
+                &parsed,
+                &bytes,
+                &names,
+                params,
+                DType::BFloat16,
+                conventions,
+                workers,
+            )
+            .expect("quantizes the fixture")
+        };
+
+        let sequential = quantize(1);
+
+        assert_eq!(
+            sequential.len(),
+            11,
+            "two matrices and one fused pair as triples, two norms"
+        );
+        assert!(
+            shapes_by_name(&sequential)
+                .iter()
+                .any(|(name, _, _)| *name == "model.layers.0.block_sparse_moe.input_linear.weight"),
+            "the fused gate and up pair packs through pack_fused"
+        );
+        for workers in [2, 3, 8] {
+            assert_eq!(quantize(workers), sequential, "workers={workers}");
+        }
     }
 }
