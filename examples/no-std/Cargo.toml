@@ -2,6 +2,7 @@
 name = "proxima-example-no-std"
 description = "frontier example: proxima's sans-IO Pipe compiles no_std + no-alloc; config becomes build-time constants via build.rs — the no-runtime tier of conflaguration"
 version.workspace = true
+publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
