@@ -101,12 +101,13 @@ pub enum RefreshRefusal {
     /// The window `recover_window` rebuilt from `program` recomposed to a
     /// DIFFERENT step-op sequence than the retained op's own `element_body`
     /// — the validity check task step 3 requires. Means either this
-    /// recovery over- or under-absorbed relative to what the original bind
-    /// actually did (most likely `quarantine_broadcast_operands`'s
-    /// shape-dependent exception, which this recovery does not model), or a
-    /// genuinely different fusion decision was made at the new shapes. In
-    /// either case the ONLY safe answer is to refuse rather than bind a
-    /// silently different composition.
+    /// recovery under-absorbed relative to what the original bind actually
+    /// did, or a genuinely different fusion decision was made at the new
+    /// shapes. Multi-consumer over-absorption is already excluded by
+    /// `fusable_retires`; the remaining known gap is `quarantine_broadcast_operands`'s
+    /// shape-dependent exception, which this recovery does not model. Either
+    /// way the ONLY safe answer is to refuse rather than bind a silently
+    /// different composition.
     #[error(
         "position {position}, node {node}: recomposed element_body step sequence {recomposed:?} does not match retained {retained:?}"
     )]
@@ -120,11 +121,11 @@ pub enum RefreshRefusal {
     /// The recomposed operand list names a DIFFERENT set of leaf `NodeId`s
     /// than the retained op's own `operands()` — node identity is
     /// symbol-independent, so any difference here means `recover_window`
-    /// absorbed a node the original bind actually kept materialized (most
-    /// likely `quarantine_broadcast_operands`'s shape-dependent exception,
-    /// which this recovery does not model — a broadcast operand whose
-    /// materialized extent was smaller than the reduce's iteration extent at
-    /// bind time). Refuses rather than silently bind a different leaf than
+    /// absorbed a node the original bind actually kept materialized. The
+    /// likely cause is `quarantine_broadcast_operands`'s shape-dependent
+    /// exception (a broadcast operand whose materialized extent was smaller
+    /// than the reduce's iteration extent at bind time), which this recovery
+    /// does not model. Refuses rather than silently bind a different leaf than
     /// the one the real program actually reads.
     #[error(
         "position {position}, node {node}: recomposed operand set {recomposed:?} does not match retained {retained:?}"
