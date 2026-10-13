@@ -308,6 +308,15 @@ Status: **roadmap, owner-requested, not designed yet.** No spec, no slice.
   token mask, plus grammar state advanced on commit.
 - A grammar is a sans-IO enum FSM over the tokenizer vocabulary, transitions
   consuming the old state. The constraint spec is conflaguration config.
+- Raw GBNF is a first-class input: the constraint config accepts GBNF text
+  verbatim (inline or by path), exactly as llama.cpp takes it. GBNF is one
+  door on the door FSM; its sans-IO parser lowers the text into the grammar
+  IR. JSON schema and regex are peer doors lowering into the same IR, so
+  nothing downstream knows which form the grammar arrived in.
+- Parity: every grammar in llama.cpp's `grammars/` directory parses, and for
+  the same vocabulary and the same accepted prefix yields the identical
+  allowed-token set as llama.cpp's grammar sampler at every step. The mask is
+  discrete, so parity is exact (incumbent wins on correctness).
 - No model-specific code: a constraint is model-agnostic data over the vocab.
 
 ### Performance constraints to honour
@@ -322,7 +331,9 @@ Status: **roadmap, owner-requested, not designed yet.** No spec, no slice.
       jump-forward decoding
 
 ### Open questions
-- [ ] grammar formalism: CFG, or a regex / FSM subset
+- [ ] grammar IR: GBNF is a CFG (rules, alternation, repetition, character
+      classes), so the IR is at least CFG; whether regex / JSON schema doors
+      lower to a cheaper FSM subset of it
 - [ ] how tokenizer merges interact with grammar states
 - [ ] jump-forward over forced spans
 - [ ] interaction with speculative accept: rejecting draft tokens that violate the grammar
