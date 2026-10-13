@@ -141,7 +141,7 @@ impl ProximaBackgroundPool {
     pub fn spawn<F, T>(
         &self,
         work: F,
-    ) -> impl Future<Output = Result<T, ProximaError>> + Send + 'static
+    ) -> impl Future<Output = Result<T, ProximaError>> + Send + 'static + use<F, T>
     where
         F: FnOnce() -> Result<T, ProximaError> + Send + 'static,
         T: Send + 'static,

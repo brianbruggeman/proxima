@@ -1520,7 +1520,8 @@ pub const BFLOAT16_BLOCK_ELEMENTS: usize = proxima_gguf::quant::bf16::QK_BF16;
     feature = "std",
     any(
         all(feature = "metal", target_os = "macos"),
-        feature = "wgpu-backend"
+        feature = "wgpu-backend",
+        feature = "cuda-driver"
     )
 ))]
 pub(crate) const fn codec_from_quantized_block(block: &QuantizedBlock<'_>) -> Option<Codec> {

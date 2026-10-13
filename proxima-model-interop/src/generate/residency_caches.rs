@@ -5,6 +5,12 @@ use core::ops::ControlFlow;
 use omega::config::{RuntimeConfig, SelectionMode};
 
 use super::*;
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+use crate::cuda_async::{
+    CudaGpuService, CudaPlanLease, OwnedBlock, OwnedGpuInputs, validate_cuda_plan_options,
+};
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+use proxima_core::ProximaError;
 use proxima_core::ServingState;
 #[cfg(all(feature = "instrument", feature = "gpu"))]
 use proxima_telemetry::metric::Counter;
@@ -233,6 +239,38 @@ fn plan_with_omega_config(
         omega::backend::plan_named_with_config(config, program, symbols, named, outputs)?;
     debug!(candidates = ?candidates, "configured plan built through shared omega lowering");
     Ok(plan)
+}
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+fn resident_source_identity(block: QuantizedBlock<'_>) -> (usize, usize) {
+    match block {
+        QuantizedBlock::Float32(values) => {
+            (values.as_ptr() as usize, core::mem::size_of_val(values))
+        }
+        QuantizedBlock::Int32(values) => (values.as_ptr() as usize, core::mem::size_of_val(values)),
+        QuantizedBlock::Packed { bytes, .. } => (bytes.as_ptr() as usize, bytes.len()),
+    }
+}
+
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+fn resident_payload_matches(owned: &OwnedBlock, source: QuantizedBlock<'_>) -> bool {
+    match (owned, source) {
+        (OwnedBlock::Float32(cached), QuantizedBlock::Float32(values)) => {
+            cached.len() == values.len()
+                && cached
+                    .iter()
+                    .zip(values)
+                    .all(|(left, right)| left.to_bits() == right.to_bits())
+        }
+        (OwnedBlock::Int32(cached), QuantizedBlock::Int32(values)) => cached.as_ref() == values,
+        (
+            OwnedBlock::Packed {
+                codec: cached_codec,
+                bytes: cached,
+            },
+            QuantizedBlock::Packed { codec, bytes },
+        ) => *cached_codec == codec && cached.as_ref() == bytes,
+        _ => false,
+    }
 }
 
 /// GAP.md's own residual: the `resolve_cached_plan` `BTreeMap` lookup runs
@@ -2535,8 +2573,20 @@ pub(super) struct SsmPlacement<'buffers> {
 }
 
 #[cfg(feature = "gpu")]
-pub(crate) struct BackendRuntime {
+pub struct BackendRuntime {
     pub(super) omega_runtime: Option<omega::config::RuntimeConfig>,
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    cuda_plans: alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), CudaPlanLease>,
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    cuda_program: Vec<Op>,
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    pending_cuda_retire: Vec<CudaPlanLease>,
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    cuda_resident_names: BTreeSet<String>,
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    cuda_resident_source_identities: Vec<(usize, usize)>,
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    cuda_resident_inputs: Option<OwnedGpuInputs>,
     pub(super) engine: Engine,
     /// Warmup deliberately retains the monolithic all-low source snapshot so
     /// the timed prefill can reuse its plans and Metal bindings. The real
@@ -2722,9 +2772,21 @@ impl Drop for BackendRuntime {
 
 #[cfg(feature = "gpu")]
 impl BackendRuntime {
-    pub(crate) fn new(config: &ServingConfig) -> Self {
+    pub fn new(config: &ServingConfig) -> Self {
         Self {
             omega_runtime: config.omega_runtime.cloned(),
+            #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+            cuda_plans: alloc::collections::BTreeMap::new(),
+            #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+            cuda_program: Vec::new(),
+            #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+            pending_cuda_retire: Vec::new(),
+            #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+            cuda_resident_names: BTreeSet::new(),
+            #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+            cuda_resident_source_identities: Vec::new(),
+            #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+            cuda_resident_inputs: None,
             engine: select_backend(config),
             retain_monolithic_prefill_sources: false,
             plans: alloc::collections::BTreeMap::new(),
@@ -2998,6 +3060,164 @@ impl BackendRuntime {
             "cuda decode plan resolved against the one-entry plan cache"
         );
         Ok(evaluated)
+    }
+
+    /// Evaluates one CUDA graph through owned inputs and the dedicated service owner.
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    pub async fn evaluate_async<Owner>(
+        &mut self,
+        service: &CudaGpuService<Owner>,
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        expert_sources: Option<
+            &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
+        >,
+    ) -> Result<Evaluated, InteropError>
+    where
+        Owner: Future<Output = Result<(), ProximaError>> + Send,
+    {
+        if self.engine != Engine::Gpu {
+            return Err(InteropError::AsyncCudaRequiresGpu);
+        }
+        validate_cuda_plan_options(
+            self.numeric_policy,
+            self.exact_activations,
+            self.omega_runtime.as_ref(),
+        )?;
+        if let Some(sources) = expert_sources.filter(|sources| !sources.is_empty()) {
+            return Err(InteropError::AsyncCudaExpertSourcesUnsupported {
+                source_count: sources.len(),
+            });
+        }
+        if self.cuda_program != program {
+            self.invalidate_async_program();
+            self.cuda_program.clear();
+            self.cuda_program.extend_from_slice(program);
+        }
+        let shape = (
+            symbols.first().copied().unwrap_or_default() as usize,
+            symbols.get(1).copied().unwrap_or_default() as usize,
+            outputs.to_vec(),
+            self.numeric_policy.epilogue_sources,
+        );
+        if !self.cuda_plans.contains_key(&shape) {
+            self.invalidate_async_program();
+        }
+        let resident = named
+            .iter()
+            .copied()
+            .filter(|(name, _)| resident_names.contains(name))
+            .collect::<Vec<_>>();
+        let source_identities = resident
+            .iter()
+            .map(|(_, block)| resident_source_identity(*block))
+            .collect::<Vec<_>>();
+        let resident_changed = (!resident_names.is_empty() || !self.cuda_resident_names.is_empty())
+            && (!resident_names
+                .iter()
+                .copied()
+                .eq(self.cuda_resident_names.iter().map(String::as_str))
+                || source_identities != self.cuda_resident_source_identities
+                || !self.cuda_resident_inputs.as_ref().is_some_and(|owned| {
+                    owned.blocks.len() == resident.len()
+                        && owned
+                            .blocks
+                            .iter()
+                            .zip(&resident)
+                            .all(|(cached, (name, block))| {
+                                cached.name.as_ref() == *name
+                                    && resident_payload_matches(&cached.block, *block)
+                            })
+                }));
+        if resident_changed {
+            self.invalidate_async_program();
+            self.cuda_resident_inputs = None;
+        }
+        while let Some(lease) = self.pending_cuda_retire.pop() {
+            let retirement = match service.retire_cuda_plan(&lease) {
+                Ok(retirement) => retirement,
+                Err(error) => {
+                    self.pending_cuda_retire.push(lease.clone());
+                    return Err(error.into());
+                }
+            };
+            retirement.await?;
+        }
+
+        if resident_changed {
+            let invalidated_names = self
+                .cuda_resident_names
+                .iter()
+                .map(String::as_str)
+                .chain(resident_names.iter().copied())
+                .collect::<BTreeSet<_>>();
+            service
+                .invalidate_resident_sources(program, &invalidated_names)
+                .await?;
+            let owned = if resident.is_empty() {
+                None
+            } else {
+                Some(service.copy_named_blocks(&resident).await?)
+            };
+            self.cuda_resident_names = resident_names
+                .iter()
+                .map(|name| String::from(*name))
+                .collect();
+            self.cuda_resident_source_identities = source_identities;
+            self.cuda_resident_inputs = owned;
+        }
+        let dynamic = named
+            .iter()
+            .copied()
+            .filter(|(name, _)| !resident_names.contains(name))
+            .collect::<Vec<_>>();
+        let dynamic_inputs = service.copy_named_blocks(&dynamic).await?;
+        let inputs = match &self.cuda_resident_inputs {
+            Some(resident) => OwnedGpuInputs::with_resident_blocks(
+                named,
+                resident_names,
+                resident,
+                dynamic_inputs,
+            )?,
+            None => dynamic_inputs,
+        };
+        let lease = match self.cuda_plans.get(&shape) {
+            Some(lease) => {
+                self.plan_hits += 1;
+                lease.clone()
+            }
+            None => {
+                let lease = service
+                    .register_graph(
+                        program,
+                        symbols,
+                        outputs,
+                        self.numeric_policy,
+                        self.exact_activations,
+                        self.omega_runtime.as_ref(),
+                        &inputs,
+                    )
+                    .await?;
+                self.plan_misses += 1;
+                self.cuda_plans.insert(shape, lease.clone());
+                lease
+            }
+        };
+        service
+            .execute_cuda(&lease, inputs)
+            .await
+            .map_err(InteropError::from)
+    }
+
+    /// Retires CUDA graph leases when the bound stream program changes.
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    pub(crate) fn invalidate_async_program(&mut self) {
+        self.pending_cuda_retire
+            .extend(self.cuda_plans.values().cloned());
+        self.cuda_plans.clear();
     }
 
     /// Evaluates one graph partition without allowing the ordinary
@@ -4394,6 +4614,575 @@ impl BackendRuntime {
             resident_names,
             expert_sources,
         )
+    }
+}
+
+#[cfg(all(test, feature = "cuda", feature = "interop-bgpool"))]
+mod omega_async_serving_tests {
+    use super::*;
+    use crate::cuda_async::{
+        CudaExecutionError, CudaPlanRegistrationError, GpuPipeError, OwnedInputError,
+    };
+    use omega::config::{RuntimeConfig, SelectionMode};
+    use prime::os::core_shard::{current_core, spawn_on_current_core};
+    use prime::os::runtime::PrimeRuntime;
+    use proxima::CoreId;
+    use proxima_primitives::pipe::CreditAcquireError;
+    use proxima_tensor::map::{self, IndexMap};
+    use proxima_tensor::{DType, ScalarOp};
+    use std::boxed::Box;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn program() -> Vec<Op> {
+        vec![
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Symbolic(0)],
+                name: Some(String::from("values")),
+            },
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Negate,
+                operands: vec![(NodeId(0), IndexMap::Affine(map::projection(1, &[0])))],
+                name: Some(String::from("negated")),
+            },
+        ]
+    }
+
+    fn runtime() -> BackendRuntime {
+        BackendRuntime::new(&ServingConfig {
+            gpu_layers: GPU_LAYERS_ALL,
+            ..ServingConfig::default()
+        })
+    }
+
+    #[proxima::test]
+    async fn test_omega_async_plan_config_forwards_configured_cuda_inputs() {
+        let service = CudaGpuService::start_fake().expect("fake owner should start");
+        let mut configured = RuntimeConfig::default();
+        configured.engine = String::from("gpu");
+        configured.gpu_driver = String::from("cuda");
+        configured.allow_fusion = true;
+        configured.exact_activations = false;
+        configured.constraints.max_host_tensor_bytes = Some(4096);
+        let serving_config = ServingConfig {
+            gpu_layers: GPU_LAYERS_ALL,
+            omega_runtime: Some(&configured),
+            numeric_policy: configured.numeric,
+            exact_activations: configured.exact_activations,
+            ..ServingConfig::default()
+        };
+        let mut async_runtime = BackendRuntime::new(&serving_config);
+        let values = [3.0_f32, -4.0];
+        let named = [("values", QuantizedBlock::Float32(&values))];
+        let graph = program();
+        let async_result = async_runtime
+            .evaluate_async(
+                &service,
+                &graph,
+                &[2, 1],
+                &named,
+                &[NodeId(1)],
+                &BTreeSet::new(),
+                None,
+            )
+            .await;
+        let planned = service.fake_plan_inputs();
+        let executed = service.fake_execute_count();
+        service.shutdown().await.expect("fake owner should drain");
+
+        let mut cpu_configured = configured.clone();
+        cpu_configured.engine = String::from("cpu");
+        cpu_configured.gpu_driver = String::from("auto");
+        let cpu_serving = ServingConfig {
+            gpu_layers: 0,
+            omega_runtime: Some(&cpu_configured),
+            numeric_policy: cpu_configured.numeric,
+            exact_activations: cpu_configured.exact_activations,
+            ..ServingConfig::default()
+        };
+        let mut sync_runtime = BackendRuntime::new(&cpu_serving);
+        let sync_result = sync_runtime
+            .evaluate(
+                &graph,
+                &[2, 1],
+                &named,
+                &[NodeId(1)],
+                &BTreeSet::new(),
+                None,
+            )
+            .expect("configured CPU incumbent should evaluate");
+        assert_eq!(sync_result.root(), &[-3.0, 4.0]);
+        assert_eq!(
+            async_result
+                .expect("fake owner should evaluate configured graph")
+                .root(),
+            &[-3.0, 4.0]
+        );
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].omega_runtime.as_ref(), Some(&configured));
+        assert_eq!(planned[0].numeric_policy, cpu_configured.numeric);
+        assert_eq!(
+            planned[0].exact_activations,
+            cpu_configured.exact_activations
+        );
+        assert_eq!(sync_runtime.numeric_policy, planned[0].numeric_policy);
+        assert_eq!(sync_runtime.exact_activations, planned[0].exact_activations);
+        assert_eq!(executed, 1);
+    }
+
+    #[proxima::test]
+    async fn test_omega_async_plan_config_preserves_legacy_exact_activation_choice() {
+        let service = CudaGpuService::start_fake().expect("fake owner should start");
+        let values = [3.0_f32, -4.0];
+        let named = [("values", QuantizedBlock::Float32(&values))];
+        let graph = program();
+        for exact_activations in [false, true] {
+            let gpu_serving = ServingConfig {
+                gpu_layers: GPU_LAYERS_ALL,
+                exact_activations,
+                ..ServingConfig::default()
+            };
+            let mut async_runtime = BackendRuntime::new(&gpu_serving);
+            let async_result = async_runtime
+                .evaluate_async(
+                    &service,
+                    &graph,
+                    &[2, 1],
+                    &named,
+                    &[NodeId(1)],
+                    &BTreeSet::new(),
+                    None,
+                )
+                .await
+                .expect("legacy CUDA request should evaluate");
+            let cpu_serving = ServingConfig {
+                gpu_layers: 0,
+                exact_activations,
+                ..ServingConfig::default()
+            };
+            let mut sync_runtime = BackendRuntime::new(&cpu_serving);
+            let sync_result = sync_runtime
+                .evaluate(
+                    &graph,
+                    &[2, 1],
+                    &named,
+                    &[NodeId(1)],
+                    &BTreeSet::new(),
+                    None,
+                )
+                .expect("CPU incumbent should evaluate chosen activation policy");
+            assert_eq!(sync_runtime.exact_activations, exact_activations);
+            assert_eq!(sync_result.root(), &[-3.0, 4.0]);
+            assert_eq!(async_result.root(), &[-3.0, 4.0]);
+        }
+        let planned = service.fake_plan_inputs();
+        let executed = service.fake_execute_count();
+        service.shutdown().await.expect("fake owner should drain");
+
+        assert_eq!(planned.len(), 2);
+        assert!(planned.iter().all(|inputs| inputs.omega_runtime.is_none()));
+        assert_eq!(
+            planned
+                .iter()
+                .map(|inputs| inputs.exact_activations)
+                .collect::<Vec<_>>(),
+            [false, true]
+        );
+        assert_eq!(executed, 2);
+    }
+
+    #[proxima::test]
+    async fn test_omega_async_plan_config_refuses_unsupported_modes_before_owner_work() {
+        let service = CudaGpuService::start_fake().expect("fake owner should start");
+        let mut configured = RuntimeConfig::default();
+        configured.engine = String::from("gpu");
+        configured.gpu_driver = String::from("cuda");
+        let mut measured = configured.clone();
+        measured.selection.mode = SelectionMode::MinimumMeasuredWallTime;
+        let mut other_driver = configured.clone();
+        other_driver.gpu_driver = String::from("metal");
+        let mut other_engine = configured.clone();
+        other_engine.engine = String::from("cpu");
+        let mut other_activation = configured.clone();
+        other_activation.exact_activations = false;
+        let cases = [
+            (measured, "candidate measurement selection"),
+            (other_driver, "non-cuda driver selection"),
+            (other_engine, "non-gpu engine"),
+            (other_activation, "conflicting numeric or activation policy"),
+        ];
+        let values = [3.0_f32, -4.0];
+        let named = [("values", QuantizedBlock::Float32(&values))];
+        let graph = program();
+        let available_before = service.available_owned_host_bytes();
+        for (runtime_config, expected_mode) in &cases {
+            let serving_config = ServingConfig {
+                gpu_layers: GPU_LAYERS_ALL,
+                omega_runtime: Some(runtime_config),
+                numeric_policy: configured.numeric,
+                exact_activations: configured.exact_activations,
+                ..ServingConfig::default()
+            };
+            let mut runtime = BackendRuntime::new(&serving_config);
+            let result = runtime
+                .evaluate_async(
+                    &service,
+                    &graph,
+                    &[2, 1],
+                    &named,
+                    &[NodeId(1)],
+                    &BTreeSet::new(),
+                    None,
+                )
+                .await;
+            assert!(matches!(
+                result,
+                Err(InteropError::AsyncCudaRegistration(
+                    CudaPlanRegistrationError::UnsupportedMode { mode }
+                )) if mode == *expected_mode
+            ));
+            assert_eq!((runtime.plan_misses, runtime.plan_hits), (0, 0));
+        }
+        let planned = service.fake_plan_inputs();
+        let executed = service.fake_execute_count();
+        let available_after = service.available_owned_host_bytes();
+        service.shutdown().await.expect("fake owner should drain");
+
+        assert!(planned.is_empty());
+        assert_eq!(executed, 0);
+        assert_eq!(available_after, available_before);
+    }
+
+    #[proxima::test]
+    async fn test_omega_async_prime_graph_progress_runs_unrelated_task_before_owner_release() {
+        let (service, control) =
+            CudaGpuService::start_fake_held().expect("held fake owner should start");
+        let prime = PrimeRuntime::new(1).expect("one Prime core should start");
+        let values = [3.0_f32, -4.0];
+        let named = [("values", QuantizedBlock::Float32(&values))];
+        let baseline = proxima_tensor::cpu::evaluate_quantized_named(
+            &program(),
+            &[2, 1],
+            &named,
+            &[NodeId(1)],
+        )
+        .expect("CPU incumbent should evaluate");
+        assert_eq!(baseline.root(), &[-3.0, 4.0]);
+
+        let (result_sender, result_receiver) = mpsc::channel();
+        prime
+            .spawn_typed_on_core(CoreId(0), async move {
+                spawn_on_current_core(Box::pin(async move {
+                    let mut backend = runtime();
+                    let result = backend
+                        .evaluate_async(
+                            &service,
+                            &program(),
+                            &[2, 1],
+                            &[("values", QuantizedBlock::Float32(&values))],
+                            &[NodeId(1)],
+                            &BTreeSet::new(),
+                            None,
+                        )
+                        .await
+                        .expect("async graph should complete after owner release");
+                    let output = result.root().to_vec();
+                    service.shutdown().await.expect("service should drain");
+                    result_sender
+                        .send(output)
+                        .expect("result receiver should remain available");
+                }));
+            })
+            .expect("async graph future should enter Prime core");
+
+        control
+            .accepted
+            .recv_timeout(Duration::from_secs(2))
+            .expect("service owner should receive the accepted graph before release");
+        let (progress_sender, progress_receiver) = mpsc::channel();
+        prime
+            .spawn_typed_on_core(CoreId(0), async move {
+                progress_sender
+                    .send(current_core())
+                    .expect("progress receiver should remain available");
+            })
+            .expect("unrelated task should enter Prime core");
+        assert_eq!(
+            progress_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("unrelated task should complete before owner release"),
+            Some(CoreId(0))
+        );
+        assert!(matches!(
+            result_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        control
+            .release
+            .send(())
+            .expect("owner release signal should be accepted");
+        assert_eq!(
+            result_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("original graph task should wake after completion"),
+            [-3.0, 4.0]
+        );
+    }
+
+    #[proxima::test]
+    async fn test_omega_async_serving_literal_graph_results_match_cpu_and_reuse_lease() {
+        let service = CudaGpuService::start_fake().expect("fake owner should start");
+        let program = program();
+        let mut runtime = runtime();
+        for (input, expected) in [([3.0, -4.0], [-3.0, 4.0]), ([5.0, -6.0], [-5.0, 6.0])] {
+            let named = [("values", QuantizedBlock::Float32(&input))];
+            let baseline = proxima_tensor::cpu::evaluate_quantized_named(
+                &program,
+                &[2, 1],
+                &named,
+                &[NodeId(1)],
+            )
+            .expect("cpu graph should evaluate");
+            let actual = runtime
+                .evaluate_async(
+                    &service,
+                    &program,
+                    &[2, 1],
+                    &named,
+                    &[NodeId(1)],
+                    &BTreeSet::new(),
+                    None,
+                )
+                .await
+                .expect("async graph should evaluate");
+            assert_eq!(actual.root(), &expected);
+            assert_eq!(actual.root(), baseline.root());
+            assert_eq!(actual.shape(), baseline.shape());
+        }
+        let mut resident_values = [7.0, 8.0];
+        let residents = BTreeSet::from(["values"]);
+        let available_before = service.available_owned_host_bytes();
+        for _ in 0..2 {
+            let actual = runtime
+                .evaluate_async(
+                    &service,
+                    &program,
+                    &[2, 1],
+                    &[("values", QuantizedBlock::Float32(&resident_values))],
+                    &[NodeId(1)],
+                    &residents,
+                    None,
+                )
+                .await
+                .expect("resident graph should evaluate");
+            assert_eq!(actual.root(), &[-7.0, -8.0]);
+            assert_eq!(available_before - service.available_owned_host_bytes(), 14);
+        }
+        resident_values.copy_from_slice(&[9.0, -10.0]);
+        let changed = runtime
+            .evaluate_async(
+                &service,
+                &program,
+                &[2, 1],
+                &[("values", QuantizedBlock::Float32(&resident_values))],
+                &[NodeId(1)],
+                &residents,
+                None,
+            )
+            .await
+            .expect("changed resident values should evaluate");
+        assert_eq!(changed.root(), &[-9.0, 10.0]);
+        assert_eq!(available_before - service.available_owned_host_bytes(), 14);
+        let previous_owned = runtime
+            .cuda_resident_inputs
+            .as_ref()
+            .expect("resident copy")
+            .clone();
+        let replacement = [9.0, -10.0];
+        let replaced = runtime
+            .evaluate_async(
+                &service,
+                &program,
+                &[2, 1],
+                &[("values", QuantizedBlock::Float32(&replacement))],
+                &[NodeId(1)],
+                &residents,
+                None,
+            )
+            .await
+            .expect("new resident source should evaluate");
+        assert_eq!(replaced.root(), &[-9.0, 10.0]);
+        assert!(!Arc::ptr_eq(
+            &previous_owned.blocks,
+            &runtime
+                .cuda_resident_inputs
+                .as_ref()
+                .expect("replacement copy")
+                .blocks,
+        ));
+        assert_eq!(available_before - service.available_owned_host_bytes(), 28);
+        drop(previous_owned);
+        assert_eq!(available_before - service.available_owned_host_bytes(), 14);
+        assert_eq!((runtime.plan_misses, runtime.plan_hits), (4, 2));
+        service.shutdown().await.expect("owner should drain");
+    }
+
+    #[proxima::test]
+    async fn test_omega_async_serving_closed_admission_returns_typed_error() {
+        let service = CudaGpuService::start_fake().expect("fake owner should start");
+        service.close_admission();
+        let mut runtime = runtime();
+        let values = [3.0, -4.0];
+        let result = runtime
+            .evaluate_async(
+                &service,
+                &program(),
+                &[2, 1],
+                &[("values", QuantizedBlock::Float32(&values))],
+                &[NodeId(1)],
+                &BTreeSet::new(),
+                None,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(InteropError::AsyncCudaInput(OwnedInputError::Budget(
+                CreditAcquireError::Closed
+            )))
+        ));
+        assert_eq!((runtime.plan_misses, runtime.plan_hits), (0, 0));
+        service.shutdown().await.expect("owner should drain");
+    }
+
+    #[proxima::test]
+    async fn test_omega_async_serving_shape_miss_retires_old_lease() {
+        let service = CudaGpuService::start_fake().expect("fake owner should start");
+        let program = program();
+        let mut runtime = runtime();
+        let first = [1.0, 2.0];
+        runtime
+            .evaluate_async(
+                &service,
+                &program,
+                &[2, 1],
+                &[("values", QuantizedBlock::Float32(&first))],
+                &[NodeId(1)],
+                &BTreeSet::new(),
+                None,
+            )
+            .await
+            .expect("first shape should evaluate");
+        let previous = runtime
+            .cuda_plans
+            .values()
+            .next()
+            .expect("first lease")
+            .clone();
+        let second = [4.0, 5.0, 6.0];
+        let actual = runtime
+            .evaluate_async(
+                &service,
+                &program,
+                &[3, 1],
+                &[("values", QuantizedBlock::Float32(&second))],
+                &[NodeId(1)],
+                &BTreeSet::new(),
+                None,
+            )
+            .await
+            .expect("second shape should evaluate");
+        assert_eq!(actual.root(), &[-4.0, -5.0, -6.0]);
+        assert_eq!((runtime.plan_misses, runtime.plan_hits), (2, 0));
+        let owned = service
+            .copy_named_blocks(&[("values", QuantizedBlock::Float32(&first))])
+            .await
+            .expect("old input copy should fit");
+        let stale = service.execute_cuda(&previous, owned).await;
+        assert!(matches!(
+            stale,
+            Err(GpuPipeError::Execution(CudaExecutionError::Plan(
+                crate::cuda_async::CudaPlanRegistryError::Stale
+            )))
+        ));
+        let current = runtime
+            .cuda_plans
+            .values()
+            .next()
+            .expect("second lease")
+            .clone();
+        runtime.invalidate_async_program();
+        let refreshed = runtime
+            .evaluate_async(
+                &service,
+                &program,
+                &[3, 1],
+                &[("values", QuantizedBlock::Float32(&second))],
+                &[NodeId(1)],
+                &BTreeSet::new(),
+                None,
+            )
+            .await
+            .expect("invalidated graph should register again");
+        assert_eq!(refreshed.root(), &[-4.0, -5.0, -6.0]);
+        let stale = service
+            .execute_cuda(
+                &current,
+                service
+                    .copy_named_blocks(&[("values", QuantizedBlock::Float32(&second))])
+                    .await
+                    .expect("input copy should fit"),
+            )
+            .await;
+        assert!(matches!(
+            stale,
+            Err(GpuPipeError::Execution(CudaExecutionError::Plan(
+                crate::cuda_async::CudaPlanRegistryError::Stale
+            )))
+        ));
+        assert_eq!((runtime.plan_misses, runtime.plan_hits), (3, 0));
+        let current = runtime
+            .cuda_plans
+            .values()
+            .next()
+            .expect("third lease")
+            .clone();
+        let mut changed_program = program.clone();
+        let Op::Elementwise { body, .. } = &mut changed_program[1] else {
+            panic!("second operation must be elementwise");
+        };
+        *body = ScalarOp::Identity;
+        let changed = runtime
+            .evaluate_async(
+                &service,
+                &changed_program,
+                &[3, 1],
+                &[("values", QuantizedBlock::Float32(&second))],
+                &[NodeId(1)],
+                &BTreeSet::new(),
+                None,
+            )
+            .await
+            .expect("changed program should register again");
+        assert_eq!(changed.root(), &second);
+        assert_eq!((runtime.plan_misses, runtime.plan_hits), (4, 0));
+        let stale = service
+            .execute_cuda(
+                &current,
+                service
+                    .copy_named_blocks(&[("values", QuantizedBlock::Float32(&second))])
+                    .await
+                    .expect("input copy should fit"),
+            )
+            .await;
+        assert!(matches!(
+            stale,
+            Err(GpuPipeError::Execution(CudaExecutionError::Plan(
+                crate::cuda_async::CudaPlanRegistryError::Stale
+            )))
+        ));
+        service.shutdown().await.expect("owner should drain");
     }
 }
 

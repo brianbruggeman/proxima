@@ -94,7 +94,7 @@ pub use cuda_driver::CudaF32Arena;
 #[cfg(feature = "cuda-driver")]
 pub use cuda_driver::CudaPlan;
 #[cfg(feature = "cuda-driver")]
-pub use cuda_driver::{CudaDriver, CudaDriverError};
+pub use cuda_driver::{CudaDeviceSnapshot, CudaDriver, CudaDriverError};
 pub use error::EmitError;
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 pub use metal::{

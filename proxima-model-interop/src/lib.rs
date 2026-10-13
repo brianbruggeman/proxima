@@ -34,6 +34,8 @@ pub mod block_file;
 pub mod capability;
 #[cfg(feature = "std")]
 pub mod cold_artifact;
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+pub mod cuda_async;
 #[cfg(feature = "std")]
 mod dense;
 #[cfg(feature = "std")]
@@ -46,6 +48,8 @@ pub mod expert_sidecar;
 pub mod expert_slab;
 #[cfg(feature = "std")]
 mod generate;
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+pub use generate::BackendRuntime;
 #[cfg(feature = "std")]
 mod hf_bind;
 mod hf_config;
@@ -79,9 +83,9 @@ mod memory_fit;
 pub mod profiles;
 #[cfg(feature = "std")]
 mod prompt_cache_settings;
-mod recurrent_config;
 #[cfg(feature = "std")]
 mod quality;
+mod recurrent_config;
 #[cfg(feature = "std")]
 mod recurrent_interval;
 #[cfg(feature = "std")]
@@ -152,26 +156,25 @@ pub use lowering::{
     BoundProgram, FfnRouting, KvCacheShape, KvLayout, StepInput, StepState, bind_checkpoint,
     bind_checkpoint_with_kv_layout, bind_hf_checkpoint, bind_speculative_verify, bind_symbols,
     header_descriptor, kv_layers, recurrent_descriptor, recurrent_speculative_verify,
-    rope_freq_factors, sliding_rope_inputs, step_state, symbols,
-    trained_context_length,
+    rope_freq_factors, sliding_rope_inputs, step_state, symbols, trained_context_length,
 };
 #[cfg(feature = "std")]
 pub use prompt_cache_settings::PromptCacheSettings;
-pub use recurrent_config::RecurrentConfig;
-#[cfg(feature = "std")]
-pub use recurrent_settings::RecurrentSettings;
 #[cfg(feature = "std")]
 pub use proxima_core::ServingState;
 #[cfg(all(feature = "std", feature = "instrument"))]
 pub use quality::print_quality_report;
 #[cfg(feature = "std")]
 pub use quality::{Prompt, PromptQuality, QualityReport, parse_prompts_jsonl, quality_report};
+pub use recurrent_config::RecurrentConfig;
 #[cfg(feature = "std")]
 pub use recurrent_interval::{
     IntervalLayerKind, RecurrentIntervalHparams, SsmShape, bind_recurrent_interval_checkpoint,
     descriptor_from_architecture as recurrent_interval_descriptor_from_architecture,
     recurrent_interval_architecture_from_metadata,
 };
+#[cfg(feature = "std")]
+pub use recurrent_settings::RecurrentSettings;
 #[cfg(feature = "std")]
 pub use residency::{
     ExpertAddress, ExpertPage, ExpertResidency, PrefetchCandidate, PrefetchCandidates,

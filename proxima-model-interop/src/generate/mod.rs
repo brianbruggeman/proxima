@@ -68,10 +68,7 @@ use proxima_gguf::GgmlType;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_primitives::pipe::Pipe;
 use proxima_primitives::sync::blocking::Mutex;
-#[cfg(any(
-    not(feature = "gpu"),
-    all(feature = "instrument", target_os = "macos")
-))]
+#[cfg(any(not(feature = "gpu"), all(feature = "instrument", target_os = "macos")))]
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch_and_experts;
 use proxima_tensor::cpu::{
     Evaluated, ExpertSource, QuantizedBlock,
@@ -194,7 +191,6 @@ use proxima_tensor::spec::{DuplicateHeadPosition, gqa_single_range_cached_forwar
 
 use crate::bind::{BoundWeights, Codec, ModelHparams, metadata_str};
 use crate::error::InteropError;
-use crate::recurrent_config::RecurrentConfig;
 use crate::hf_bind::{HfShard, bind_all_weights_from_safetensors};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use crate::lowering::KvCacheShape;
@@ -202,6 +198,7 @@ use crate::lowering::{
     FfnRouting, KvLayout, StepInput, bind_symbols, rope_freq_factors, sliding_rope_inputs,
 };
 use crate::profiles::family_profile;
+use crate::recurrent_config::RecurrentConfig;
 use crate::rope_scaling::{RopeScaling, f32_from_u32};
 #[cfg(feature = "gpu")]
 use crate::serving::GPU_LAYERS_ALL;
@@ -239,18 +236,20 @@ mod disk_tier_tests;
 mod draft_model;
 #[cfg(test)]
 mod draft_simple_tests;
-#[cfg(test)]
-mod speculative_telemetry_tests;
 mod drafter;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod epilogue_sources_real_model_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod follow_up_conditioning_tests;
+#[cfg(test)]
+mod forward_from_ids_tests;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 mod greedy_device;
 mod kv_ring;
 #[cfg(test)]
 mod kv_seal_tests;
+#[cfg(test)]
+mod ouro_fixture;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod prefix_resume_long_prompt_tests;
 mod prefix_state_file;
@@ -270,6 +269,10 @@ mod prompt_cache_real_model_tests;
 #[cfg(test)]
 mod recurrent_checkpoint_fixture;
 #[cfg(test)]
+mod recurrent_mainline_tests;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod recurrent_metal_tests;
+#[cfg(test)]
 mod recurrent_verify_tests;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 mod resident_plans;
@@ -279,24 +282,18 @@ mod ring_checkpoint;
 mod serving_backend;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod speculative_default_on_tests;
+#[cfg(test)]
+mod speculative_telemetry_tests;
 mod tests_all;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod thread_index_census_tests;
 #[cfg(test)]
 mod verify_bound_tests;
-#[cfg(test)]
-mod forward_from_ids_tests;
-#[cfg(test)]
-mod ouro_fixture;
-#[cfg(test)]
-mod recurrent_mainline_tests;
-#[cfg(all(test, feature = "metal", target_os = "macos"))]
-mod recurrent_metal_tests;
 mod warm_buffers;
 use decode::*;
-use draft_model::ModelProposer;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use device_kv::{DeviceKv, KvLeafNodes, kv_leaf_nodes};
+use draft_model::ModelProposer;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use greedy_device::{device_token, with_greedy_argmax};
 use kv_ring::{

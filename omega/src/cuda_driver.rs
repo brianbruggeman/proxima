@@ -128,6 +128,17 @@ pub struct CudaDriver {
     resident_buffers: Arc<Mutex<ResidentBuffers>>,
     kernel_compilations: Arc<AtomicU64>,
     packed_upload_bytes: Arc<AtomicU64>,
+    graph_uploads: Arc<AtomicU64>,
+    graph_launches: Arc<AtomicU64>,
+}
+
+/// Device identity and successful graph upload/launch submissions from one CUDA driver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CudaDeviceSnapshot {
+    pub ordinal: usize,
+    pub name: String,
+    pub graph_uploads: u64,
+    pub graph_launches: u64,
 }
 
 #[derive(Debug)]
@@ -173,6 +184,7 @@ pub struct CudaPlan {
     arena: CudaF32Arena,
     numeric_policy: NumericPolicy,
     packed_operands: PackedOperands,
+    exact_activations: bool,
     // resident_nodes is sorted; boxed slices keep CudaPlan under clippy's large_enum_variant gap against the cpu plan
     resident_nodes: Box<[NodeId]>,
 }
@@ -186,6 +198,16 @@ impl CudaF32Arena {
 }
 
 impl CudaDriver {
+    /// Removes device copies for resident input nodes after their host source changes.
+    pub fn invalidate_resident_buffers(&self, nodes: &[NodeId]) -> Result<(), CudaDriverError> {
+        let mut buffers = self.resident_buffers.lock();
+        if !nodes.is_empty() {
+            // graph-local node ids cannot identify entries keyed by host source identity.
+            buffers.clear();
+        }
+        Ok(())
+    }
+
     /// Initializes the CUDA primary context for `ordinal`.
     ///
     /// This is the first real device boundary: on a machine without a
@@ -209,6 +231,18 @@ impl CudaDriver {
             resident_buffers: Arc::new(Mutex::new(BTreeMap::new())),
             kernel_compilations: Arc::new(AtomicU64::new(0)),
             packed_upload_bytes: Arc::new(AtomicU64::new(0)),
+            graph_uploads: Arc::new(AtomicU64::new(0)),
+            graph_launches: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    /// Reads the selected CUDA device and the driver's graph activity counters.
+    pub fn device_snapshot(&self) -> Result<CudaDeviceSnapshot, CudaDriverError> {
+        Ok(CudaDeviceSnapshot {
+            ordinal: self.context.ordinal(),
+            name: self.context.name()?,
+            graph_uploads: self.graph_uploads.load(Ordering::Relaxed),
+            graph_launches: self.graph_launches.load(Ordering::Relaxed),
         })
     }
 
@@ -340,7 +374,28 @@ impl CudaDriver {
         numeric_policy: NumericPolicy,
         named: &[(&str, QuantizedBlock<'_>)],
     ) -> Result<CudaPlan, CudaDriverError> {
-        self.plan_with_options(program, symbols, outputs, numeric_policy, named, None)
+        self.plan_with_options(program, symbols, outputs, numeric_policy, true, named, None)
+    }
+
+    /// Retains the configured activation policy on the reusable CUDA plan.
+    pub fn plan_with_activation_policy(
+        &self,
+        program: &[Op],
+        symbols: &[u64],
+        outputs: &[NodeId],
+        numeric_policy: NumericPolicy,
+        exact_activations: bool,
+        named: &[(&str, QuantizedBlock<'_>)],
+    ) -> Result<CudaPlan, CudaDriverError> {
+        self.plan_with_options(
+            program,
+            symbols,
+            outputs,
+            numeric_policy,
+            exact_activations,
+            named,
+            None,
+        )
     }
 
     pub fn plan_with_config(
@@ -356,6 +411,7 @@ impl CudaDriver {
             symbols,
             outputs,
             config.numeric,
+            config.exact_activations,
             named,
             Some(config),
         )
@@ -367,6 +423,7 @@ impl CudaDriver {
         symbols: &[u64],
         outputs: &[NodeId],
         numeric_policy: NumericPolicy,
+        exact_activations: bool,
         named: &[(&str, QuantizedBlock<'_>)],
         config: Option<&RuntimeConfig>,
     ) -> Result<CudaPlan, CudaDriverError> {
@@ -445,6 +502,7 @@ impl CudaDriver {
             arena: self.new_arena(),
             numeric_policy,
             packed_operands,
+            exact_activations,
             resident_nodes: Box::default(),
         };
         if config.is_some() {
@@ -468,9 +526,11 @@ impl CudaDriver {
             && buffer.len() == values.len()
         {
             self.stream.memcpy_htod(values, buffer)?;
+            self.graph_uploads.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
         let buffer = self.stream.clone_htod(values)?;
+        self.graph_uploads.fetch_add(1, Ordering::Relaxed);
         arena.buffers.insert(node, CudaGraphBuffer::F32(buffer));
         arena.allocations += 1;
         Ok(())
@@ -490,9 +550,11 @@ impl CudaDriver {
             && let Some(buffer) = Arc::get_mut(shared)
         {
             self.stream.memcpy_htod(values, buffer)?;
+            self.graph_uploads.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
         let buffer = self.stream.clone_htod(values)?;
+        self.graph_uploads.fetch_add(1, Ordering::Relaxed);
         arena
             .buffers
             .insert(node, CudaGraphBuffer::Bytes(Arc::new(buffer)));
@@ -514,9 +576,11 @@ impl CudaDriver {
             && buffer.len() == values.len()
         {
             self.stream.memcpy_htod(values, buffer)?;
+            self.graph_uploads.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
         let buffer = self.stream.clone_htod(values)?;
+        self.graph_uploads.fetch_add(1, Ordering::Relaxed);
         arena.uniforms.insert(node, buffer);
         arena.allocations += 1;
         Ok(())
@@ -562,7 +626,9 @@ impl CudaDriver {
             self.stream.alloc_zeros::<f32>(0)?
         } else {
             let values = vec![value; output_len];
-            self.stream.clone_htod(&values)?
+            let buffer = self.stream.clone_htod(&values)?;
+            self.graph_uploads.fetch_add(1, Ordering::Relaxed);
+            buffer
         };
         arena.buffers.insert(node, CudaGraphBuffer::F32(buffer));
         arena.allocations += 1;
@@ -891,6 +957,7 @@ impl CudaDriver {
                 .insert(output_node, CudaGraphBuffer::F32(device_output));
             return Err(error.into());
         }
+        self.graph_launches.fetch_add(1, Ordering::Relaxed);
         if synchronize {
             if let Err(error) = self.stream.synchronize() {
                 arena
@@ -1134,6 +1201,11 @@ fn compile_cuda_source(source: &str) -> Result<Ptx, CudaDriverError> {
 }
 
 impl CudaPlan {
+    #[must_use]
+    pub const fn exact_activations(&self) -> bool {
+        self.exact_activations
+    }
+
     /// Moves this plan to new symbol values when its graph structure is unchanged,
     /// re-binding extents and uniforms while keeping the device arena, resident
     /// weights and compiled modules. `Ok(false)` when a resource-constrained plan
@@ -1798,6 +1870,7 @@ impl CudaPlan {
 // `None`. Every unsupported codec is named so a new `Codec` variant forces a
 // decision here instead of slipping through a wildcard.
 fn packed_codec(block: &QuantizedBlock<'_>) -> Option<Codec> {
+    crate::msl::codec_from_quantized_block(block)?;
     let QuantizedBlock::Packed { codec, .. } = block else {
         return None;
     };
