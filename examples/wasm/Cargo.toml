@@ -2,6 +2,7 @@
 name = "proxima-example-wasm"
 description = "frontier example: a sans-IO Pipe compiled to wasm32-unknown-unknown"
 version.workspace = true
+publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

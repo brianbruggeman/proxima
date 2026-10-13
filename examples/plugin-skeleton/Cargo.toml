@@ -2,6 +2,7 @@
 name = "proxima-plugin-skeleton"
 description = "canonical plugin skeleton for proxima — copy this dir, rename, and replace the example middleware with your own"
 version.workspace = true
+publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
