@@ -181,12 +181,23 @@ pub struct CudaPlan {
     uniforms: Vec<Vec<u8>>,
     block_nodes: Vec<NodeId>,
     outputs: Box<[NodeId]>,
-    arena: CudaF32Arena,
+    // boxed: the arena is three maps (72 bytes) that only move when the plan is built, keeping CudaPlan inside clippy's large_enum_variant gap against the cpu plan
+    arena: Box<CudaF32Arena>,
     numeric_policy: NumericPolicy,
     packed_operands: PackedOperands,
     exact_activations: bool,
     // resident_nodes is sorted; boxed slices keep CudaPlan under clippy's large_enum_variant gap against the cpu plan
     resident_nodes: Box<[NodeId]>,
+}
+
+/// Numeric and activation policy for one plan, plus the runtime config when the
+/// plan is built from one. Not a `RuntimeConfig`: the config-less entry points
+/// plan with fusion enabled, which `RuntimeConfig::default()` (fusion off) would
+/// silently change.
+struct PlanPolicy<'config> {
+    numeric_policy: NumericPolicy,
+    exact_activations: bool,
+    config: Option<&'config RuntimeConfig>,
 }
 
 impl CudaF32Arena {
@@ -374,7 +385,12 @@ impl CudaDriver {
         numeric_policy: NumericPolicy,
         named: &[(&str, QuantizedBlock<'_>)],
     ) -> Result<CudaPlan, CudaDriverError> {
-        self.plan_with_options(program, symbols, outputs, numeric_policy, true, named, None)
+        let policy = PlanPolicy {
+            numeric_policy,
+            exact_activations: true,
+            config: None,
+        };
+        self.plan_with_options(program, symbols, outputs, named, policy)
     }
 
     /// Retains the configured activation policy on the reusable CUDA plan.
@@ -387,15 +403,12 @@ impl CudaDriver {
         exact_activations: bool,
         named: &[(&str, QuantizedBlock<'_>)],
     ) -> Result<CudaPlan, CudaDriverError> {
-        self.plan_with_options(
-            program,
-            symbols,
-            outputs,
+        let policy = PlanPolicy {
             numeric_policy,
             exact_activations,
-            named,
-            None,
-        )
+            config: None,
+        };
+        self.plan_with_options(program, symbols, outputs, named, policy)
     }
 
     pub fn plan_with_config(
@@ -406,15 +419,12 @@ impl CudaDriver {
         named: &[(&str, QuantizedBlock<'_>)],
         config: &RuntimeConfig,
     ) -> Result<CudaPlan, CudaDriverError> {
-        self.plan_with_options(
-            program,
-            symbols,
-            outputs,
-            config.numeric,
-            config.exact_activations,
-            named,
-            Some(config),
-        )
+        let policy = PlanPolicy {
+            numeric_policy: config.numeric,
+            exact_activations: config.exact_activations,
+            config: Some(config),
+        };
+        self.plan_with_options(program, symbols, outputs, named, policy)
     }
 
     fn plan_with_options(
@@ -422,11 +432,14 @@ impl CudaDriver {
         program: &[Op],
         symbols: &[u64],
         outputs: &[NodeId],
-        numeric_policy: NumericPolicy,
-        exact_activations: bool,
         named: &[(&str, QuantizedBlock<'_>)],
-        config: Option<&RuntimeConfig>,
+        policy: PlanPolicy<'_>,
     ) -> Result<CudaPlan, CudaDriverError> {
+        let PlanPolicy {
+            numeric_policy,
+            exact_activations,
+            config,
+        } = policy;
         let blocks = resolve_named_blocks(program, named).map_err(|_| {
             CudaDriverError::UnsupportedGraph {
                 node: NodeId(0),
@@ -499,7 +512,7 @@ impl CudaDriver {
             uniforms,
             block_nodes,
             outputs: outputs.into(),
-            arena: self.new_arena(),
+            arena: Box::new(self.new_arena()),
             numeric_policy,
             packed_operands,
             exact_activations,
