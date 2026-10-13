@@ -61,16 +61,21 @@ fn agrees(actual: usize, expected: usize) -> Result<(), String> {
 }
 
 fn proxima_binary() -> PathBuf {
+    let mut args = vec![
+        "build",
+        "-p",
+        "proxima-cli",
+        "--bin",
+        "proxima",
+        "-j2",
+        "--message-format=json-render-diagnostics",
+    ];
+    // the cli must match the test profile, or a release test drives a debug export
+    if !cfg!(debug_assertions) {
+        args.push("--release");
+    }
     let built = Command::new(env!("CARGO"))
-        .args([
-            "build",
-            "-p",
-            "proxima-cli",
-            "--bin",
-            "proxima",
-            "-j2",
-            "--message-format=json-render-diagnostics",
-        ])
+        .args(args)
         .stderr(Stdio::inherit())
         .output()
         .expect("spawn cargo to build the proxima cli");
