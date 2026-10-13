@@ -253,6 +253,7 @@ cuda-driver = [
     "std",
     "cuda",
     "dep:cudarc",
+    "dep:sha2",
     "cudarc/driver",
     "cudarc/nvrtc",
     "cudarc/fallback-dynamic-loading",

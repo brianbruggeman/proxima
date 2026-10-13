@@ -52,6 +52,8 @@ pub mod cuda;
 pub mod cuda_layout;
 #[cfg(feature = "cuda-driver")]
 pub mod cuda_driver;
+#[cfg(feature = "cuda-driver")]
+pub mod cuda_kernel_cache;
 #[cfg(feature = "door")]
 pub mod door;
 #[cfg(feature = "alloc")]
