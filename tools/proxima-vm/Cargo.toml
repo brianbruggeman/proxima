@@ -127,5 +127,5 @@ criterion = { workspace = true, features = ["html_reports"] }
 goblin = "0.10.7"
 object = "0.40.0"
 proptest.workspace = true
-proxima = { workspace = true, features = ["test-support"] }
+proxima = { package = "proxima-lib", path = "../..", features = ["test-support"] }
 tempfile.workspace = true

@@ -46,7 +46,7 @@ std = [
 ]
 
 [dev-dependencies]
-proxima = { workspace = true, features = ["test-support"] }
+proxima = { package = "proxima-lib", path = "..", features = ["test-support"] }
 serde = { workspace = true, features = ["derive"] }
 
 [lints]

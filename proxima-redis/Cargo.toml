@@ -97,7 +97,7 @@ temp-env = { workspace = true }
 # behind `proxima-test/tokio-driver` — only reachable transitively through
 # `proxima`'s own `tokio` feature (mirrors `proxima-listen`'s identical
 # dev-dependency line for the same reason).
-proxima = { workspace = true, features = ["test-support", "tokio"] }
+proxima = { package = "proxima-lib", path = "..", features = ["test-support", "tokio"] }
 
 [lints]
 workspace = true

@@ -100,7 +100,7 @@ listen = [
 ]
 
 [dev-dependencies]
-proxima = { workspace = true, features = ["test-support", "tokio"] }
+proxima = { package = "proxima-lib", path = "..", features = ["test-support", "tokio"] }
 serde_json = { workspace = true }
 temp-env = { workspace = true }
 # `PrimeDatagramFactory` in the `DnsClientUpstream::new` doctest — the real

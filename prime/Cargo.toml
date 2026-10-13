@@ -18,7 +18,7 @@ toml = { workspace = true }
 proxima-build = { workspace = true }
 
 [dev-dependencies]
-proxima = { package = "proxima-lib", path = "..", version = "0.1.0", default-features = false, features = ["test-support", "http1", "http2"] }
+proxima = { package = "proxima-lib", path = "..", default-features = false, features = ["test-support", "http1", "http2"] }
 criterion = { workspace = true }
 embassy-sync = "0.8"
 heapless = "0.8"
