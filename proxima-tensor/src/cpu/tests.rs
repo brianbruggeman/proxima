@@ -15042,3 +15042,42 @@ mod float_layout_evaluate {
         );
     }
 }
+
+#[test]
+fn f16_packed_embedding_rows_decode_bit_exact_to_the_dequantized_reference() {
+    let dim = 64usize;
+    let vocab_rows = 3usize;
+    let values: Vec<f32> = (0..dim * vocab_rows)
+        .map(|index| ((index as f32) * 0.37).sin() * 0.05)
+        .collect();
+    let bytes: Vec<u8> = values
+        .iter()
+        .flat_map(|value| half::f16::from_f32(*value).to_le_bytes())
+        .collect();
+    let block = QuantizedBlock::Packed {
+        codec: Codec::Float16,
+        bytes: &bytes,
+    };
+    let mut reference = vec![0f32; dim * vocab_rows];
+    proxima_gguf::quant::f16::dequantize(&bytes, &mut reference)
+        .expect("f16 fixture is a whole number of elements");
+    for row in 0..vocab_rows {
+        let mut decoded = vec![0f32; dim];
+        dequantize_row(NodeId(0), &block, row, dim, &mut decoded)
+            .expect("in-range f16 embedding row decodes");
+        assert_eq!(decoded, reference[row * dim..(row + 1) * dim]);
+    }
+}
+
+#[test]
+fn f16_packed_embedding_row_past_the_table_end_is_refused() {
+    let dim = 64usize;
+    let bytes = vec![0u8; dim * 2];
+    let block = QuantizedBlock::Packed {
+        codec: Codec::Float16,
+        bytes: &bytes,
+    };
+    let mut decoded = vec![0f32; dim];
+    let outcome = dequantize_row(NodeId(0), &block, 1, dim, &mut decoded);
+    assert!(outcome.is_err(), "row 1 of a one-row f16 table must not decode");
+}

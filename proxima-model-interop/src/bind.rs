@@ -1332,20 +1332,14 @@ pub(crate) fn codec_byte_len_for(
     Ok((element_count as u64 / layout.block_elements * layout.block_bytes) as usize)
 }
 
-/// A learned 1-D scale (RMSNorm weight) or `token_embd.weight` (indexed by
-/// row via `embedding_lookup`, never projected). `Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`
-/// bind packed and zero-copy here too, exactly like [`bind_matmul_weight_as`]'s
-/// own packed arm -- `proxima_tensor::cpu`'s private `run_embedding_gather_quantized`
-/// (the CPU evaluator's `BoundOpKind::Elementwise` counterpart to that
-/// module's `run_reduce_with_quantized_weights`) and `omega::msl`'s
-/// already-codec-generic `render_elementwise`/`operand_read` decode one row
-/// at a time, straight out of the packed bytes, at whichever row a real
-/// token id selects -- never the whole table. Falls back to
-/// [`gguf_tensor_as_f32`]'s owned copy only if the zero-copy borrow is
-/// refused (misaligned base pointer) or the tensor is some other
-/// decodable-but-not-borrowable `GgmlType` (`Q4_0`/`F16`/`BF16`: no CPU
-/// row-gather decoder exists for those yet, so they still take the eager
-/// dequantize path rather than silently mis-decoding).
+/// A learned 1-D scale (RMSNorm weight) or any other non-matmul dense leaf.
+/// `Q4_K`/`Q5_K`/`Q6_K`/`Q8_0` bind packed and zero-copy here, exactly like
+/// [`bind_matmul_weight_as`]'s own packed arm. `F16` widens to an owned f32
+/// copy: only a leaf the program reads through a data-dependent gather (the
+/// embedding, see [`bind_gathered_as`]) keeps `F16` packed, so a norm never
+/// pays the packed-f16 decode path it has no row-gather reason to take. The
+/// dequantize fallback covers a borrow refused for a misaligned base pointer
+/// and the decodable-but-not-borrowable `GgmlType`s (`Q4_0`/`Q5_0`/`BF16`).
 ///
 /// # Errors
 ///
@@ -1381,6 +1375,58 @@ pub fn bind_dense_as<'file>(
     file_bytes: &'file [u8],
     source_name: &str,
     target_name: alloc::string::String,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    bind_dense_with(
+        parsed,
+        file_bytes,
+        source_name,
+        target_name,
+        Float16Residency::Widened,
+        state,
+    )
+}
+
+/// [`bind_dense_as`] for a leaf the program reads through a data-dependent
+/// gather (`token_embd.weight` via `embedding_lookup`). An `F16` table stays
+/// packed so `proxima_tensor::cpu::dequantize_row` decodes only the row a token
+/// id selects, straight from the mmap bytes, rather than widening the whole
+/// table to 2x its file size.
+#[cfg(feature = "std")]
+pub(crate) fn bind_gathered_as<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    source_name: &str,
+    target_name: alloc::string::String,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    bind_dense_with(
+        parsed,
+        file_bytes,
+        source_name,
+        target_name,
+        Float16Residency::Packed,
+        state,
+    )
+}
+
+/// Whether an `F16` dense leaf stays packed. Only the gathered embedding
+/// (`bind_gathered_as`) reads its rows one at a time; every other leaf is read
+/// whole, so packing it buys nothing and changes the binding the fixtures pin.
+#[cfg(feature = "std")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Float16Residency {
+    Widened,
+    Packed,
+}
+
+#[cfg(feature = "std")]
+fn bind_dense_with<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    source_name: &str,
+    target_name: alloc::string::String,
+    float16: Float16Residency,
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
     if std::env::var_os("PROXIMA_FORCE_F32_WEIGHTS").is_some() {
@@ -1426,6 +1472,15 @@ pub fn bind_dense_as<'file>(
                 bytes,
             }),
         ) => {
+            state.resident_bytes += bytes.len();
+            state.packed.push((target_name, block));
+        }
+        Ok(
+            block @ proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Float16,
+                bytes,
+            },
+        ) if float16 == Float16Residency::Packed => {
             state.resident_bytes += bytes.len();
             state.packed.push((target_name, block));
         }
