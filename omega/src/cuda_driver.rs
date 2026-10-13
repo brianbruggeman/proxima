@@ -366,6 +366,7 @@ impl CudaDriver {
             self.compile_counters
                 .disk_cache_hits
                 .fetch_add(1, Ordering::Relaxed);
+            proxima_telemetry::debug!(entry = %kernel.entry, "kernel loaded from disk cache");
             return Ok(self.context.load_module(Ptx::from_src(text))?);
         }
         let nvrtc_started = Instant::now();
