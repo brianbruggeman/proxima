@@ -1,4 +1,3 @@
-use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -8,9 +7,7 @@ mod error;
 
 pub use error::StoreError;
 
-const OVERRIDE_VAR: &str = "PROXIMA_CUDA_KERNEL_CACHE_DIR";
-const DISABLED_VALUE: &str = "off";
-const DEFAULT_RELATIVE_PATH: &str = ".cache/proxima/cuda-ptx";
+use crate::kernel_cache_config::KernelCacheConfig;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -25,41 +22,12 @@ pub enum PtxStore {
 }
 
 impl PtxStore {
-    /// Resolves the store from the process environment.
-    ///
-    /// # Errors
-    ///
-    /// [`StoreError::NoHome`] when the override is unset and `HOME` is not set.
-    pub fn from_env() -> Result<Self, StoreError> {
-        Self::resolve(
-            std::env::var_os(OVERRIDE_VAR).as_deref(),
-            std::env::var_os("HOME").as_deref(),
-        )
-    }
-
-    /// Resolves the store from an explicit override and home directory.
-    ///
-    /// An empty or `off` override disables the store; any other override is
-    /// the directory itself; without an override the store lives under `home`.
-    ///
-    /// # Errors
-    ///
-    /// [`StoreError::NoHome`] when there is no override and no `home`.
-    pub fn resolve(
-        override_value: Option<&OsStr>,
-        home: Option<&OsStr>,
-    ) -> Result<Self, StoreError> {
-        match override_value {
-            Some(value) if value.is_empty() || value == OsStr::new(DISABLED_VALUE) => {
-                Ok(Self::Disabled)
-            }
-            Some(value) => Ok(Self::Directory(PathBuf::from(value))),
-            None => {
-                let home = home.ok_or(StoreError::NoHome)?;
-                Ok(Self::Directory(
-                    PathBuf::from(home).join(DEFAULT_RELATIVE_PATH),
-                ))
-            }
+    /// Maps a loaded config onto a store; a config without a directory disables it.
+    #[must_use]
+    pub fn from_config(config: &KernelCacheConfig) -> Self {
+        match &config.kernel_cache_dir {
+            Some(dir) => Self::Directory(dir.clone()),
+            None => Self::Disabled,
         }
     }
 
@@ -156,7 +124,6 @@ fn discard(temp: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsStr;
     use std::sync::Barrier;
 
     use super::*;
@@ -168,8 +135,7 @@ mod tests {
     #[test]
     fn put_then_get_returns_the_same_bytes() {
         let dir = tempfile::tempdir().expect("tempdir for store root");
-        let store =
-            PtxStore::resolve(Some(dir.path().as_os_str()), None).expect("override resolves");
+        let store = PtxStore::Directory(dir.path().to_owned());
 
         store.put(HEX_NAME, PTX_V1).expect("put writes the entry");
 
@@ -192,48 +158,23 @@ mod tests {
     }
 
     #[test]
-    fn disabled_override_never_writes_and_never_reads() {
-        let home = tempfile::tempdir().expect("tempdir for home");
-        let home_os = home.path().as_os_str();
-        for disabled in [OsStr::new("off"), OsStr::new("")] {
-            temp_env::with_vars(
-                [(OVERRIDE_VAR, Some(disabled)), ("HOME", Some(home_os))],
-                || {
-                    let store = PtxStore::from_env().expect("disabled env resolves");
-                    assert_eq!(store, PtxStore::Disabled, "override {disabled:?} disables");
-                    store.put(HEX_NAME, PTX_V1).expect("disabled put succeeds");
-                    assert_eq!(store.get(HEX_NAME).expect("disabled get"), None);
-                },
-            );
-        }
-        assert!(
-            !home.path().join(".cache").exists(),
-            "disabled store created no directory under HOME"
-        );
+    fn disabled_config_never_writes_and_never_reads() {
+        let config = KernelCacheConfig::default().with_kernel_cache_dir(None);
+        let store = PtxStore::from_config(&config);
+        assert_eq!(store, PtxStore::Disabled, "a config without a dir disables");
+        store.put(HEX_NAME, PTX_V1).expect("disabled put succeeds");
+        assert_eq!(store.get(HEX_NAME).expect("disabled get"), None);
     }
 
     #[test]
-    fn unset_override_defaults_under_home_cache() {
-        let home = tempfile::tempdir().expect("tempdir for home");
-        temp_env::with_vars(
-            [
-                (OVERRIDE_VAR, None::<&OsStr>),
-                ("HOME", Some(home.path().as_os_str())),
-            ],
-            || {
-                let store = PtxStore::from_env().expect("default resolves under HOME");
-                assert_eq!(
-                    store,
-                    PtxStore::Directory(home.path().join(DEFAULT_RELATIVE_PATH)),
-                );
-            },
+    fn configured_directory_resolves_to_a_directory_store() {
+        let dir = tempfile::tempdir().expect("tempdir for cache root");
+        let config =
+            KernelCacheConfig::default().with_kernel_cache_dir(Some(dir.path().to_owned()));
+        assert_eq!(
+            PtxStore::from_config(&config),
+            PtxStore::Directory(dir.path().to_owned())
         );
-    }
-
-    #[test]
-    fn unset_override_without_home_is_a_typed_error() {
-        let error = PtxStore::resolve(None, None).expect_err("no override and no HOME");
-        assert!(matches!(error, StoreError::NoHome), "got {error:?}");
     }
 
     #[test]

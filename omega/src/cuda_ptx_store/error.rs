@@ -17,9 +17,6 @@ pub enum StoreError {
         #[source]
         source: io::Error,
     },
-
-    #[error("HOME is not set, so the default kernel cache directory is unknown")]
-    NoHome,
 }
 
 impl StoreError {

@@ -53,6 +53,8 @@ pub mod cuda_layout;
 #[cfg(feature = "cuda-driver")]
 pub mod cuda_driver;
 #[cfg(feature = "cuda-driver")]
+pub mod kernel_cache_config;
+#[cfg(feature = "cuda-driver")]
 pub mod cuda_kernel_cache;
 #[cfg(feature = "cuda-driver")]
 pub mod cuda_ptx_store;

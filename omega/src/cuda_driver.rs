@@ -26,6 +26,7 @@ use proxima_primitives::sync::blocking::Mutex;
 use crate::config::{ResourceConstraints, RuntimeConfig};
 use crate::cuda::{CudaGridSpec, CudaKernel};
 use crate::cuda_kernel_cache::{CacheKey, decode_entry, encode_entry};
+use crate::kernel_cache_config::KernelCacheConfig;
 use crate::cuda_ptx_store::PtxStore;
 use crate::msl::{Binding, Codec, PackedOperands, gather_count};
 use proxima_tensor::bind::{RefreshRefusal, refresh_bound_ops, touches_changed};
@@ -1421,13 +1422,16 @@ fn nvrtc_version() -> Result<(i32, i32), CudaDriverError> {
 }
 
 fn kernel_disk_store() -> PtxStore {
-    PtxStore::from_env().unwrap_or_else(|error| {
-        proxima_telemetry::warn!(
-            error = %error,
-            "kernel disk cache disabled; kernels compile in memory only"
-        );
-        PtxStore::Disabled
-    })
+    KernelCacheConfig::from_env().map_or_else(
+        |error| {
+            proxima_telemetry::warn!(
+                error = %error,
+                "kernel cache config rejected; kernels compile in memory only"
+            );
+            PtxStore::Disabled
+        },
+        |config| PtxStore::from_config(&config),
+    )
 }
 
 fn cached_ptx(store: &PtxStore, key: &CacheKey) -> Option<String> {
