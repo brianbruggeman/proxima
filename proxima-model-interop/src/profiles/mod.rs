@@ -54,7 +54,7 @@ pub fn family_profile(family: &str) -> Result<FamilyProfile, InteropError> {
         .ok_or_else(|| InteropError::MissingFamilyProfile {
             family: family.into(),
         })?;
-    toml::from_str(text).map_err(|error| InteropError::InvalidFamilyProfile {
+    conflaguration::from_toml_str(text).map_err(|error| InteropError::InvalidFamilyProfile {
         family: family.into(),
         message: error.to_string(),
     })

@@ -13,7 +13,9 @@
 //! [`super::family_profile`] states for the descriptor profiles. A family with
 //! no file in `binding/` binds with the defaults alone.
 
-use serde::Deserialize;
+use bon::Builder;
+use conflaguration::{Error, Settings, Validate, ValidationMessage};
+use serde::{Deserialize, Serialize};
 
 use crate::error::InteropError;
 
@@ -33,7 +35,7 @@ const FAMILY_BINDINGS: &[(&str, &str)] = &[
 /// `.` boundary (or at the start of the name), and the text before the `leaf`
 /// suffix is carried onto each `from`, so `blk.7.` is preserved across the
 /// rewrite.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TensorAlias {
     /// The leaf reads another tensor's bytes under its own name (a tied output
@@ -63,18 +65,51 @@ impl TensorAlias {
 /// How one family's tensor directory differs from its lowered program's
 /// leaves. Every field defaults to empty, so a family that needs nothing
 /// ships no file.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Builder, Deserialize, Serialize, Settings)]
+#[builder(derive(Clone, Debug))]
 #[serde(deny_unknown_fields, default)]
 pub struct BindingProfile {
     /// Tried in order after an exact directory match fails; first match wins.
     #[serde(rename = "alias")]
+    #[setting(skip)]
+    #[builder(default)]
     pub aliases: Vec<TensorAlias>,
     /// Leaf name suffixes bound as owned `f32`, decoded from whatever codec
     /// the file stores, instead of staying packed.
+    #[setting(skip)]
+    #[builder(default)]
     pub decode_f32: Vec<String>,
     /// Tensors bound by name although no leaf reads them: a lookup table a
     /// step input derives its values from.
+    #[setting(skip)]
+    #[builder(default)]
     pub extra: Vec<String>,
+}
+
+impl Validate for BindingProfile {
+    fn validate(&self) -> conflaguration::Result<()> {
+        let errors: Vec<ValidationMessage> = self
+            .aliases
+            .iter()
+            .enumerate()
+            .filter_map(|(index, alias)| alias_violation(alias).map(|rule| (index, rule)))
+            .map(|(index, rule)| ValidationMessage::new(format!("alias[{index}]"), rule))
+            .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Validation { errors })
+        }
+    }
+}
+
+fn alias_violation(alias: &TensorAlias) -> Option<&'static str> {
+    match alias {
+        TensorAlias::Part { of: 0, .. } => Some("`of` must be at least 1"),
+        TensorAlias::Part { part, of, .. } if part >= of => Some("`part` must be less than `of`"),
+        TensorAlias::Join { from, .. } if from.is_empty() => Some("`from` must name a tensor"),
+        _ => None,
+    }
 }
 
 /// The text before `suffix` when `name` ends with `suffix` at a `.` boundary:
@@ -116,10 +151,19 @@ impl BindingProfile {
 }
 
 fn parse(family: &str, text: &str) -> Result<BindingProfile, InteropError> {
-    toml::from_str(text).map_err(|error| InteropError::InvalidBindingProfile {
+    let profile: BindingProfile =
+        conflaguration::from_toml_str(text).map_err(|error| invalid(family, error.to_string()))?;
+    profile
+        .validate()
+        .map_err(|error| invalid(family, error.to_string()))?;
+    Ok(profile)
+}
+
+fn invalid(family: &str, message: String) -> InteropError {
+    InteropError::InvalidBindingProfile {
         family: family.into(),
-        message: error.to_string(),
-    })
+        message,
+    }
 }
 
 /// The [`BindingProfile`] for `family` (`general.architecture`): the family's
@@ -221,6 +265,73 @@ mod tests {
         let profile = binding_profile("gemma4").expect("gemma4 parses");
 
         assert_eq!(profile.extra, ["rope_freqs.weight"]);
+    }
+
+    #[test]
+    fn the_default_file_equals_its_fluent_build() {
+        let built = BindingProfile::builder()
+            .aliases(vec![
+                TensorAlias::Rename {
+                    leaf: "output.weight".into(),
+                    from: "token_embd.weight".into(),
+                },
+                TensorAlias::Part {
+                    leaf: "ffn_gate_exps.weight".into(),
+                    from: "ffn_gate_up_exps.weight".into(),
+                    part: 0,
+                    of: 2,
+                },
+                TensorAlias::Part {
+                    leaf: "ffn_up_exps.weight".into(),
+                    from: "ffn_gate_up_exps.weight".into(),
+                    part: 1,
+                    of: 2,
+                },
+                TensorAlias::Join {
+                    leaf: "ffn_gate_up.weight".into(),
+                    from: vec!["ffn_gate.weight".into(), "ffn_up.weight".into()],
+                },
+                TensorAlias::Join {
+                    leaf: "attn_qkv.weight".into(),
+                    from: vec![
+                        "attn_q.weight".into(),
+                        "attn_k.weight".into(),
+                        "attn_v.weight".into(),
+                    ],
+                },
+            ])
+            .build();
+
+        let loaded = parse("default", DEFAULT_BINDING).expect("default.toml loads");
+
+        assert_eq!(built, loaded);
+        assert!(built.validate().is_ok());
+    }
+
+    #[test]
+    fn a_part_index_outside_its_slice_count_is_refused() {
+        let refused = parse(
+            "fixture",
+            "[[alias]]\nkind = \"part\"\nleaf = \"ffn_up_exps.weight\"\nfrom = \"fused.weight\"\npart = 2\nof = 2\n",
+        );
+
+        assert!(matches!(
+            refused,
+            Err(InteropError::InvalidBindingProfile { message, .. }) if message.contains("alias[0]")
+        ));
+    }
+
+    #[test]
+    fn a_join_with_no_sources_is_refused() {
+        let refused = parse(
+            "fixture",
+            "[[alias]]\nkind = \"join\"\nleaf = \"attn_qkv.weight\"\nfrom = []\n",
+        );
+
+        assert!(matches!(
+            refused,
+            Err(InteropError::InvalidBindingProfile { .. })
+        ));
     }
 
     #[test]
