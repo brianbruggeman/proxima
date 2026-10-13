@@ -1,5 +1,5 @@
 use bon::Builder;
-use conflaguration::Settings;
+use conflaguration::{Settings, Validate};
 #[cfg(all(
     feature = "metal",
     feature = "metal-attn-variants",
@@ -18,8 +18,9 @@ use crate::prompt_cache_settings::PromptCacheSettings;
 use crate::serving::{
     ContextLength, DEFAULT_BATCH_SIZE, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH,
     DEFAULT_RESIDENT_KV_BYTES, DEFAULT_RESIDENT_PREFILL_PLAN_BYTES, DEFAULT_UBATCH_SIZE,
-    GdnPrefillBackend, NamePattern, ServingConfig, WeightPrecisionRule,
+    GdnPrefillBackend, NamePattern, PrefillConfig, ServingConfig, WeightPrecisionRule,
 };
+use crate::serving_grammar::AssembleStep;
 use crate::speculative_settings::SpeculativeSettings;
 
 mod levels;
@@ -165,7 +166,7 @@ pub enum WeightPrecisionRuleSettings {
 /// the llama-flag surface of [`ServingConfig`], loadable from toml and env
 /// (`PROXIMA_SERVING_<FIELD>`) and fluent-buildable; `as_serving_config` lowers
 /// it into the `Copy` shape the decode path reads.
-#[derive(Debug, Clone, PartialEq, Builder, Deserialize, Serialize, Settings)]
+#[derive(Debug, Clone, PartialEq, Builder, Deserialize, Serialize, Settings, Validate)]
 #[settings(prefix = "PROXIMA_SERVING")]
 #[builder(derive(Clone, Debug))]
 #[serde(default)]
@@ -333,6 +334,10 @@ pub struct ServingSettings {
     #[setting(default = 0)]
     #[builder(default = 0)]
     pub prefill_chunk_positions: usize,
+    /// `ServingConfig::prefill`'s `assemble`: ordered stages that build a request's starting cache; empty keeps prefix reuse, plus shifted-chunk reuse when the prompt cache allows it.
+    #[setting(resolve_with = "from_json", default_str = "[]")]
+    #[builder(default)]
+    pub prefill_assemble: Vec<AssembleStep>,
     /// `ServingConfig::cached_attention_fusion`: fuse the cached attention step.
     #[setting(default = true)]
     #[builder(default = true)]
@@ -486,6 +491,9 @@ impl ServingSettings {
             gpu_correctness_fallback: self.gpu_correctness_fallback,
             prefill_one_evaluation: self.prefill_one_evaluation,
             prefill_chunk_positions: self.prefill_chunk_positions,
+            prefill: PrefillConfig {
+                assemble: &self.prefill_assemble,
+            },
             cached_attention_fusion: self.cached_attention_fusion,
             gated_delta_net_fusion: self.gated_delta_net_fusion,
             moe_topk_fusion: self.moe_topk_fusion,
@@ -588,6 +596,124 @@ mod tests {
             assert_eq!(lowered.ubatch_size, ServingConfig::default().ubatch_size);
             assert_eq!(lowered.ubatch_size, 512, "llama.cpp's own -ub default");
         }
+    }
+
+    fn cpu_chat_settings() -> ServingSettings {
+        ServingSettings::builder()
+            .model_path("/models/qwen3-8b-q4_k_m.gguf".into())
+            .context_length(8192)
+            .parallel_sequences(4)
+            .batch_size(2048)
+            .ubatch_size(512)
+            .gpu_layers(0)
+            .temperature(0.7)
+            .top_k(20)
+            .top_p(0.8)
+            .seed(42)
+            .build()
+    }
+
+    fn long_context_gpu_settings() -> ServingSettings {
+        ServingSettings::builder()
+            .model_path("/models/gemma-4-e2b-q8_0.gguf".into())
+            .context_length(131_072)
+            .context_extrapolate(true)
+            .gpu_layers(-1)
+            .gpu_memory_limit_bytes(6_442_450_944)
+            .prefill_assemble(vec![AssembleStep::Prefix, AssembleStep::Shift])
+            .prefill_one_evaluation(true)
+            .prefill_chunk_positions(256)
+            .build()
+    }
+
+    fn round_trip_through_json(settings: &ServingSettings) -> ServingSettings {
+        let encoded = serde_json::to_string(settings).expect("settings serialize to json");
+        serde_json::from_str(&encoded).expect("serialized settings parse back")
+    }
+
+    #[test]
+    fn default_settings_survive_a_serde_round_trip() {
+        let defaults = ServingSettings::default();
+        assert_eq!(round_trip_through_json(&defaults), defaults);
+    }
+
+    #[test]
+    fn cpu_chat_settings_survive_a_serde_round_trip() {
+        let settings = cpu_chat_settings();
+        assert_eq!(round_trip_through_json(&settings), settings);
+    }
+
+    #[test]
+    fn long_context_gpu_settings_survive_a_serde_round_trip() {
+        let settings = long_context_gpu_settings();
+        assert_eq!(round_trip_through_json(&settings), settings);
+    }
+
+    #[test]
+    fn default_settings_lower_to_the_default_serving_config() {
+        let defaults = ServingSettings::default();
+        assert_eq!(defaults.as_serving_config(&[]), ServingConfig::default());
+    }
+
+    #[test]
+    fn cpu_chat_settings_lower_to_the_hand_built_serving_config() {
+        let hand_built = ServingConfig {
+            model_path: "/models/qwen3-8b-q4_k_m.gguf",
+            context_length: ContextLength::Within(8192),
+            parallel_sequences: 4,
+            batch_size: 2048,
+            ubatch_size: 512,
+            gpu_layers: 0,
+            temperature: 0.7,
+            top_k: 20,
+            top_p: 0.8,
+            seed: 42,
+            ..ServingConfig::default()
+        };
+        assert_eq!(cpu_chat_settings().as_serving_config(&[]), hand_built);
+    }
+
+    #[test]
+    fn long_context_gpu_settings_lower_to_the_hand_built_serving_config() {
+        let assemble = [AssembleStep::Prefix, AssembleStep::Shift];
+        let hand_built = ServingConfig {
+            model_path: "/models/gemma-4-e2b-q8_0.gguf",
+            context_length: ContextLength::Extrapolate(131_072),
+            gpu_layers: -1,
+            gpu_memory_limit_bytes: Some(6_442_450_944),
+            prefill_one_evaluation: true,
+            prefill_chunk_positions: 256,
+            prefill: PrefillConfig {
+                assemble: &assemble,
+            },
+            ..ServingConfig::default()
+        };
+        assert_eq!(long_context_gpu_settings().as_serving_config(&[]), hand_built);
+    }
+
+    #[test]
+    fn prefill_assemble_steps_lower_in_their_written_order() {
+        let settings = long_context_gpu_settings();
+        let lowered = settings.as_serving_config(&[]);
+        assert_eq!(
+            lowered.prefill.assemble,
+            [AssembleStep::Prefix, AssembleStep::Shift]
+        );
+    }
+
+    #[test]
+    fn unknown_prefill_assemble_kind_is_rejected_at_load() {
+        let rejected = conflaguration::from_toml_str::<ServingSettings>(
+            "prefill_assemble = [{ kind = \"interleave\" }]",
+        );
+        assert!(rejected.is_err(), "an unknown assemble kind must not load");
+    }
+
+    #[test]
+    fn default_settings_pass_validation() {
+        ServingSettings::default()
+            .validate()
+            .expect("the shipped defaults are a valid serving section");
     }
 
     #[test]

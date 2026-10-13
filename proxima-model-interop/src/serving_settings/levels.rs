@@ -1,10 +1,10 @@
 use bon::Builder;
-use conflaguration::Settings;
+use conflaguration::{Settings, Validate};
 use serde::{Deserialize, Serialize};
 
 use crate::serving::{AdmissionSchedule, ExpertResidencySchedule, PhaseSchedule};
 
-#[derive(Debug, Clone, PartialEq, Eq, Builder, Deserialize, Serialize, Settings)]
+#[derive(Debug, Clone, PartialEq, Eq, Builder, Deserialize, Serialize, Settings, Validate)]
 #[builder(derive(Clone, Debug))]
 #[serde(default)]
 pub struct AdmissionScheduleSettings {
@@ -28,7 +28,7 @@ impl AdmissionScheduleSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Builder, Deserialize, Serialize, Settings)]
+#[derive(Debug, Clone, PartialEq, Eq, Builder, Deserialize, Serialize, Settings, Validate)]
 #[builder(derive(Clone, Debug))]
 #[serde(default)]
 pub struct PhaseScheduleSettings {
@@ -52,7 +52,7 @@ impl PhaseScheduleSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Builder, Deserialize, Serialize, Settings)]
+#[derive(Debug, Clone, PartialEq, Eq, Builder, Deserialize, Serialize, Settings, Validate)]
 #[builder(derive(Clone, Debug))]
 #[serde(default)]
 pub struct ExpertResidencyScheduleSettings {
