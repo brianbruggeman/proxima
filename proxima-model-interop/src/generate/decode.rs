@@ -4967,24 +4967,30 @@ did not hold every cached position)",
                         NodeId,
                         Vec<proxima_tensor::cpu::ExpertEntry<'_>>,
                     )> = Vec::new();
-                    let expert_sources =
-                        expert_slab_guard.sources_for_step(&mut expert_entries_scratch)?;
-                    // the slab keys its sources by the decode program's nodes; a
-                    // verify program numbers the same weight leaves differently
-                    let expert_sources = if recurrent_verify.is_some() {
-                        expert_sources
-                            .into_iter()
-                            .map(|(node, source)| {
-                                let name = self
-                                    .program
-                                    .get(node.0 as usize)
-                                    .and_then(Op::name)
-                                    .ok_or(InteropError::MissingEvaluatedNode { node })?;
-                                Ok((find_input_node(active_program, name)?, source))
-                            })
-                            .collect::<Result<BTreeMap<_, _>, InteropError>>()?
+                    // a GPU engine never substitutes these sources (see the
+                    // `expert_source_substitutions` arm below), so skip the build
+                    let expert_sources = if runtime.uses_gpu() {
+                        None
                     } else {
-                        expert_sources
+                        let expert_sources =
+                            expert_slab_guard.sources_for_step(&mut expert_entries_scratch)?;
+                        // the slab keys its sources by the decode program's nodes; a
+                        // verify program numbers the same weight leaves differently
+                        Some(if recurrent_verify.is_some() {
+                            expert_sources
+                                .into_iter()
+                                .map(|(node, source)| {
+                                    let name = self
+                                        .program
+                                        .get(node.0 as usize)
+                                        .and_then(Op::name)
+                                        .ok_or(InteropError::MissingEvaluatedNode { node })?;
+                                    Ok((find_input_node(active_program, name)?, source))
+                                })
+                                .collect::<Result<BTreeMap<_, _>, InteropError>>()?
+                        } else {
+                            expert_sources
+                        })
                     };
                     #[cfg(feature = "gpu")]
                     let mut all_low_expert_scratch = Vec::new();
@@ -5058,13 +5064,11 @@ did not hold every cached position)",
                     #[cfg(feature = "gpu")]
                     let expert_source_substitutions = if monolithic_all_low {
                         all_low_expert_sources.as_ref()
-                    } else if runtime.uses_gpu() {
-                        None
                     } else {
-                        Some(&expert_sources)
+                        expert_sources.as_ref()
                     };
                     #[cfg(not(feature = "gpu"))]
-                    let expert_source_substitutions = Some(&expert_sources);
+                    let expert_source_substitutions = expert_sources.as_ref();
 
                     let current_sources = RefCell::new(CurrentExpertSources::new());
                     // Own the Arc-backed sidecar handle inside the callback so
