@@ -329,6 +329,14 @@ struct OwnedGraph {
     inputs: OwnedGpuInputs,
 }
 
+/// The plan-shaping options that travel together into `register_graph`.
+#[derive(Clone, Copy)]
+pub struct CudaPlanOptions<'config> {
+    pub numeric_policy: NumericPolicy,
+    pub exact_activations: bool,
+    pub omega_runtime: Option<&'config RuntimeConfig>,
+}
+
 pub(crate) fn validate_cuda_plan_options(
     numeric_policy: NumericPolicy,
     exact_activations: bool,
@@ -373,7 +381,8 @@ pub(crate) struct FakePlanInputs {
 }
 
 enum RegisteredPlan {
-    Cuda(omega::CudaPlan),
+    // boxed: the plan is 352 bytes against the fake variant's few words, which trips clippy's large_enum_variant.
+    Cuda(Box<omega::CudaPlan>),
     #[cfg(test)]
     Fake {
         program: Vec<Op>,
@@ -883,15 +892,14 @@ impl CudaGpuService<()> {
             while let Some(command) = owner_commands.recv_blocking() {
                 match command {
                     OwnerCommand::DeviceSnapshot { reply } => {
-                        let result = (|| {
-                            if driver.is_none() {
-                                driver = Some(omega::CudaDriver::new(0)?);
+                        let result = match driver.take().map_or_else(|| omega::CudaDriver::new(0), Ok) {
+                            Ok(created) => {
+                                let snapshot = created.device_snapshot();
+                                driver = Some(created);
+                                snapshot
                             }
-                            driver
-                                .as_ref()
-                                .expect("cuda driver was created above")
-                                .device_snapshot()
-                        })();
+                            Err(error) => Err(error),
+                        };
                         let _ = reply.send(result);
                     }
                     OwnerCommand::RegisterGraph { graph, reply } => {
@@ -943,7 +951,7 @@ impl CudaGpuService<()> {
                                 )?,
                             };
                             plans
-                                .register(RegisteredPlan::Cuda(plan))
+                                .register(RegisteredPlan::Cuda(Box::new(plan)))
                                 .map_err(CudaPlanRegistrationError::from)
                         })();
                         if let Err(Ok(lease)) = reply.send(result) {
@@ -951,7 +959,7 @@ impl CudaGpuService<()> {
                         }
                     }
                     OwnerCommand::RegisterPlan { plan, reply } => {
-                        let result = plans.register(RegisteredPlan::Cuda(plan));
+                        let result = plans.register(RegisteredPlan::Cuda(Box::new(plan)));
                         if let Err(Ok(lease)) = reply.send(result) {
                             let _ = plans.retire(&lease);
                         }
@@ -1077,7 +1085,7 @@ where
     pub fn register_cuda_plan(
         &self,
         plan: omega::CudaPlan,
-    ) -> Result<impl Future<Output = Result<CudaPlanLease, CudaPlanRegistryError>>, omega::CudaPlan>
+    ) -> Result<impl Future<Output = Result<CudaPlanLease, CudaPlanRegistryError>>, Box<omega::CudaPlan>>
     {
         let (reply, response) = oneshot::channel();
         let command = OwnerCommand::RegisterPlan { plan, reply };
@@ -1088,7 +1096,7 @@ where
                     .unwrap_or(Err(CudaPlanRegistryError::OwnerStopped))
             }),
             Err(error) => match error.into_inner() {
-                OwnerCommand::RegisterPlan { plan, .. } => Err(plan),
+                OwnerCommand::RegisterPlan { plan, .. } => Err(Box::new(plan)),
                 OwnerCommand::DeviceSnapshot { .. }
                 | OwnerCommand::RegisterGraph { .. }
                 | OwnerCommand::RetirePlan { .. }
@@ -1106,11 +1114,14 @@ where
         program: &[Op],
         symbols: &[u64],
         outputs: &[NodeId],
-        numeric_policy: NumericPolicy,
-        exact_activations: bool,
-        omega_runtime: Option<&RuntimeConfig>,
+        options: CudaPlanOptions<'_>,
         inputs: &OwnedGpuInputs,
     ) -> Result<CudaPlanLease, CudaPlanRegistrationError> {
+        let CudaPlanOptions {
+            numeric_policy,
+            exact_activations,
+            omega_runtime,
+        } = options;
         validate_cuda_plan_options(numeric_policy, exact_activations, omega_runtime)?;
         let (reply, response) = oneshot::channel();
         let graph = OwnedGraph {
@@ -1313,8 +1324,10 @@ mod tests {
         service.shutdown().await.expect("owner should drain");
     }
 
+    type CaptureQueue = CommandSender<(AdmittedGpuJob, Sender<Result<usize, GpuPipeError>>)>;
+
     struct CaptureExecution {
-        queue: Arc<CommandSender<(AdmittedGpuJob, Sender<Result<usize, GpuPipeError>>)>>,
+        queue: Arc<CaptureQueue>,
     }
 
     impl Pipe for CaptureExecution {
@@ -1330,11 +1343,12 @@ mod tests {
                     Ok(()) => response.await.unwrap_or(Err(GpuPipeError::Execution(
                         CudaExecutionError::OwnerStopped,
                     ))),
-                    Err(error) => match error.into_inner() {
-                        (job, _) => Err(GpuPipeError::Execution(
+                    Err(error) => {
+                        let (job, _) = error.into_inner();
+                        Err(GpuPipeError::Execution(
                             CudaExecutionError::ServiceClosedWithInput(job.job),
-                        )),
-                    },
+                        ))
+                    }
                 }
             }
         }
@@ -1381,7 +1395,6 @@ mod tests {
         drop(reply);
         drop(job);
         assert_eq!(gate.available(), 1);
-        drop(call);
 
         let closed_gate = CreditGate::new(ReservationSink, 1).expect("valid job capacity");
         let held = closed_gate.acquire(1).await.expect("hold job capacity");
@@ -1428,7 +1441,6 @@ mod tests {
         assert_eq!(gate.available(), 0);
         drop(job);
         assert_eq!(gate.available(), 1);
-        drop(call);
 
         let (reply, response) = super::oneshot::channel();
         reply
@@ -1450,7 +1462,6 @@ mod tests {
         let pending = poll_fn(|context| Poll::Ready(call.as_mut().poll(context))).await;
         assert!(matches!(pending, Poll::Pending));
         assert_eq!(gate.available(), 0);
-        drop(call);
 
         let (job, reply) = receiver
             .recv()
@@ -1506,7 +1517,6 @@ mod tests {
         assert!(matches!(result, Poll::Ready(Ok(109))));
         drop(accepted_job);
         assert_eq!(gate.available(), 1);
-        drop(call);
     }
 
     #[proxima::test]

@@ -10,8 +10,8 @@ use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op};
 use std::sync::Arc;
 
 use super::{
-    CudaExecutionError, CudaGpuService, CudaPlanLease, DEFAULT_OWNED_HOST_BYTES, GpuAdmissionError,
-    GpuPipeError, OwnedBlock, OwnedGpuInputs, OwnedInputError,
+    CudaExecutionError, CudaGpuService, CudaPlanLease, CudaPlanOptions, DEFAULT_OWNED_HOST_BYTES,
+    GpuAdmissionError, GpuPipeError, OwnedBlock, OwnedGpuInputs, OwnedInputError,
 };
 
 async fn failing_inputs<Owner>(service: &CudaGpuService<Owner>) -> OwnedGpuInputs
@@ -40,9 +40,11 @@ where
             &graph,
             &[],
             &[NodeId(0)],
-            NumericPolicy::bit_exact(),
-            false,
-            None,
+            CudaPlanOptions {
+                numeric_policy: NumericPolicy::bit_exact(),
+                exact_activations: false,
+                omega_runtime: None,
+            },
             &inputs,
         )
         .await
