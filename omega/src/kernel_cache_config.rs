@@ -1,15 +1,16 @@
 //! Configuration for the on-disk CUDA PTX cache, loaded through conflaguration.
 //!
-//! Defaults come from `$HOME`, `PROXIMA_CUDA_KERNEL_CACHE_DIR` overlays them
-//! when set, and the result is validated before any consumer sees it.
+//! The derive owns the default through `default_str`: an unset
+//! `PROXIMA_CUDA_KERNEL_CACHE_DIR` resolves to `~/.cache/proxima/cuda-ptx`, and
+//! the parse fn expands the leading `~/` against `$HOME`. Use the `Settings`
+//! trait path to load; there is no second loader.
 
 use conflaguration::{Settings, Validate};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::convert::Infallible;
-use std::ffi::OsStr;
 use std::path::PathBuf;
 
-const DEFAULT_RELATIVE_PATH: &str = ".cache/proxima/cuda-ptx";
+const DEFAULT_KERNEL_CACHE_DIR: &str = "~/.cache/proxima/cuda-ptx";
 
 /// Where compiled CUDA PTX is kept between processes.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Settings, Validate)]
@@ -19,7 +20,10 @@ pub struct KernelCacheConfig {
     /// Directory holding one PTX file per kernel cache key, such as
     /// `/home/bix/.cache/proxima/cuda-ptx`. `None` keeps kernels in memory only;
     /// the env spelling of `None` is an empty value.
-    #[setting(resolve_with = "parse_kernel_cache_dir")]
+    #[setting(
+        resolve_with = "parse_kernel_cache_dir",
+        default_str = "~/.cache/proxima/cuda-ptx"
+    )]
     #[serde(deserialize_with = "deserialize_kernel_cache_dir")]
     pub kernel_cache_dir: Option<PathBuf>,
 }
@@ -27,25 +31,12 @@ pub struct KernelCacheConfig {
 impl Default for KernelCacheConfig {
     fn default() -> Self {
         Self {
-            kernel_cache_dir: default_kernel_cache_dir(std::env::var_os("HOME").as_deref()),
+            kernel_cache_dir: parse_kernel_cache_dir(DEFAULT_KERNEL_CACHE_DIR).unwrap_or(None),
         }
     }
 }
 
 impl KernelCacheConfig {
-    /// Defaults overlaid by `PROXIMA_CUDA_*` values that are set, then validated.
-    ///
-    /// # Errors
-    ///
-    /// Returns the conflaguration error when an overlaid value fails validation.
-    pub fn from_env() -> conflaguration::Result<Self> {
-        conflaguration::builder()
-            .value(Self::default())
-            .env()
-            .validate()
-            .build()
-    }
-
     /// Replaces the cache directory; `None` disables the on-disk cache.
     #[must_use]
     pub fn with_kernel_cache_dir(mut self, value: Option<PathBuf>) -> Self {
@@ -54,22 +45,24 @@ impl KernelCacheConfig {
     }
 }
 
-fn default_kernel_cache_dir(home: Option<&OsStr>) -> Option<PathBuf> {
-    let Some(home) = home else {
+fn parse_kernel_cache_dir(value: &str) -> Result<Option<PathBuf>, Infallible> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let Some(relative) = value.strip_prefix("~/") else {
+        return Ok(Some(PathBuf::from(value)));
+    };
+    Ok(home_relative(relative))
+}
+
+fn home_relative(relative: &str) -> Option<PathBuf> {
+    let Some(home) = std::env::var_os("HOME") else {
         proxima_telemetry::warn!(
             "HOME is unset; kernel disk cache disabled until PROXIMA_CUDA_KERNEL_CACHE_DIR is set"
         );
         return None;
     };
-    Some(PathBuf::from(home).join(DEFAULT_RELATIVE_PATH))
-}
-
-fn parse_kernel_cache_dir(value: &str) -> Result<Option<PathBuf>, Infallible> {
-    Ok(if value.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(value))
-    })
+    Some(PathBuf::from(home).join(relative))
 }
 
 fn deserialize_kernel_cache_dir<'de, D>(deserializer: D) -> Result<Option<PathBuf>, D::Error>
@@ -82,12 +75,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::KernelCacheConfig;
+    use conflaguration::Settings;
     use std::path::PathBuf;
 
     const CACHE_VAR: &str = "PROXIMA_CUDA_KERNEL_CACHE_DIR";
 
     #[test]
-    fn kernel_cache_config_default_is_under_home_cache() {
+    fn derive_path_unset_gives_home_cache_default() {
         let home = tempfile::tempdir().expect("tempdir for home");
         temp_env::with_vars(
             [
@@ -95,7 +89,7 @@ mod tests {
                 ("HOME", Some(home.path().to_str().expect("utf8 home"))),
             ],
             || {
-                let config = KernelCacheConfig::from_env().expect("defaults load");
+                let config = KernelCacheConfig::from_env().expect("unset env loads defaults");
                 assert_eq!(
                     config.kernel_cache_dir,
                     Some(home.path().join(".cache/proxima/cuda-ptx"))
@@ -105,19 +99,37 @@ mod tests {
     }
 
     #[test]
-    fn kernel_cache_config_without_home_is_disabled() {
+    fn derive_path_without_home_is_disabled() {
         temp_env::with_vars([(CACHE_VAR, None::<&str>), ("HOME", None::<&str>)], || {
-            let config = KernelCacheConfig::from_env().expect("defaults load");
+            let config = KernelCacheConfig::from_env().expect("unset env loads defaults");
             assert_eq!(config.kernel_cache_dir, None);
         });
     }
 
     #[test]
-    fn kernel_cache_config_empty_env_disables_the_cache() {
+    fn derive_path_empty_env_gives_none() {
         temp_env::with_vars([(CACHE_VAR, Some(""))], || {
             let config = KernelCacheConfig::from_env().expect("empty env loads");
             assert_eq!(config.kernel_cache_dir, None);
         });
+    }
+
+    #[test]
+    fn derive_path_tilde_env_expands_under_home() {
+        let home = tempfile::tempdir().expect("tempdir for home");
+        temp_env::with_vars(
+            [
+                (CACHE_VAR, Some("~/custom/ptx")),
+                ("HOME", Some(home.path().to_str().expect("utf8 home"))),
+            ],
+            || {
+                let config = KernelCacheConfig::from_env().expect("tilde env loads");
+                assert_eq!(
+                    config.kernel_cache_dir,
+                    Some(home.path().join("custom/ptx"))
+                );
+            },
+        );
     }
 
     #[test]

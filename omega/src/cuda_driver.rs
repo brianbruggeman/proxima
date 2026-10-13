@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use conflaguration::Settings;
 use cudarc::driver::sys as cuda_sys;
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DriverError, LaunchConfig,
