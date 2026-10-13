@@ -55,6 +55,7 @@
 //!   with no CUDA `wmma`/tensor-core port here yet. Every packed op renders
 //!   through the generic per-element unpack accessor instead.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -275,6 +276,47 @@ pub fn emit_cuda_with_policy(
     })
 }
 
+/// Emits a whole bound program, moving a previous kernel across unchanged when
+/// the bound op for the same node is equal to the one it was emitted from.
+/// Returns the kernels in `resolved` order and how many were reused. On a
+/// failed emit the error carries the failing op's node, as the cold path does.
+///
+/// Teaching pointer: [`emit_cuda_with_policy`] is a pure function of
+/// `(resolved, packed_operands, numeric_policy)`, so an equal `BoundOp` under
+/// the same packed operands and policy emits identical text. Equality is taken
+/// over the whole op, not over a guessed subset of text-reaching fields, because
+/// the entry name omits packed extents and cannot stand in for the source.
+/// The caller owns the "same packed operands and policy" half of that premise.
+pub fn emit_cuda_reusing(
+    previous_bound: &[BoundOp],
+    previous_kernels: Vec<CudaKernel>,
+    resolved: &[BoundOp],
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+) -> Result<(Vec<CudaKernel>, usize), (NodeId, EmitError)> {
+    let mut previous: BTreeMap<NodeId, (&BoundOp, Option<CudaKernel>)> = previous_bound
+        .iter()
+        .zip(previous_kernels)
+        .map(|(bound, kernel)| (bound.node, (bound, Some(kernel))))
+        .collect();
+    let mut reused = 0;
+    let mut kernels = Vec::with_capacity(resolved.len());
+    for bound in resolved {
+        let unchanged = previous
+            .get_mut(&bound.node)
+            .filter(|(old, _)| *old == bound)
+            .and_then(|(_, kernel)| kernel.take());
+        kernels.push(match unchanged {
+            Some(kernel) => {
+                reused += 1;
+                kernel
+            }
+            None => emit_cuda_with_policy(bound, packed_operands, numeric_policy)
+                .map_err(|error| (bound.node, error))?,
+        });
+    }
+    Ok((kernels, reused))
+}
 /// Packs the runtime ABI for the f32 elementwise CUDA kernels.
 ///
 /// CUDA's emitted `Uniforms` uses native-width `long` fields, so this is

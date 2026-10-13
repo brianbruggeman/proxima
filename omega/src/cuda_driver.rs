@@ -169,10 +169,11 @@ pub struct CudaPlan {
     kernels: Vec<CudaKernel>,
     uniforms: Vec<Vec<u8>>,
     block_nodes: Vec<NodeId>,
-    outputs: Vec<NodeId>,
+    outputs: Box<[NodeId]>,
     arena: CudaF32Arena,
+    numeric_policy: NumericPolicy,
     packed_operands: PackedOperands,
-    // sorted; boxed slice keeps CudaPlan under clippy's large_enum_variant gap against the cpu plan
+    // resident_nodes is sorted; boxed slices keep CudaPlan under clippy's large_enum_variant gap against the cpu plan
     resident_nodes: Box<[NodeId]>,
 }
 
@@ -425,6 +426,7 @@ impl CudaDriver {
             &packed_operands,
             numeric_policy,
             unfused,
+            None,
         )?;
         let plan = CudaPlan {
             constraints: config.map(|value| value.constraints.clone()),
@@ -439,8 +441,9 @@ impl CudaDriver {
             kernels,
             uniforms,
             block_nodes,
-            outputs: outputs.to_vec(),
+            outputs: outputs.into(),
             arena: self.new_arena(),
+            numeric_policy,
             packed_operands,
             resident_nodes: Box::default(),
         };
@@ -958,8 +961,15 @@ impl CudaDriver {
 
 type LoweredOps = (Vec<BoundOp>, Vec<CudaKernel>, Vec<Vec<u8>>, LowerMicros);
 
+/// Kernels of the previous binding, moved into the next one wherever the bound op is unchanged.
+struct PriorKernels<'plan> {
+    bound: &'plan [BoundOp],
+    kernels: Vec<CudaKernel>,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct LowerMicros {
+    reused: usize,
     bind: u64,
     emit: u64,
     pack: u64,
@@ -972,6 +982,7 @@ fn bind_and_emit(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
     unfused: bool,
+    prior: Option<PriorKernels<'_>>,
 ) -> Result<LoweredOps, CudaDriverError> {
     let bind_started = Instant::now();
     let bound = if unfused {
@@ -994,18 +1005,21 @@ fn bind_and_emit(
         ..LowerMicros::default()
     };
     let emit_started = Instant::now();
-    let kernels = resolved
-        .iter()
-        .map(|bound| {
-            crate::emit_cuda_with_policy(bound, packed_operands, numeric_policy).map_err(|error| {
-                CudaDriverError::Emit {
-                    node: bound.node,
-                    error: error.to_string(),
-                }
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let (prior_bound, prior_kernels) =
+        prior.map_or((&[][..], Vec::new()), |prior| (prior.bound, prior.kernels));
+    let (kernels, reused) = crate::emit_cuda_reusing(
+        prior_bound,
+        prior_kernels,
+        &resolved,
+        packed_operands,
+        numeric_policy,
+    )
+    .map_err(|(node, error)| CudaDriverError::Emit {
+        node,
+        error: error.to_string(),
+    })?;
     micros.emit = emit_started.elapsed().as_micros() as u64;
+    micros.reused = reused;
     let pack_started = Instant::now();
     let uniforms = resolved
         .iter()
@@ -1140,6 +1154,12 @@ impl CudaPlan {
                 reason: "shape inference failed",
             })?;
         let infer_micros = infer_started.elapsed().as_micros() as u64;
+        let same_policy = numeric_policy == self.numeric_policy;
+        let previous_bound = std::mem::take(&mut self.resolved);
+        let prior = same_policy.then(|| PriorKernels {
+            bound: &previous_bound,
+            kernels: std::mem::take(&mut self.kernels),
+        });
         let (resolved, kernels, uniforms, micros) = bind_and_emit(
             &self.program,
             &shapes,
@@ -1147,7 +1167,9 @@ impl CudaPlan {
             &self.packed_operands,
             numeric_policy,
             false,
+            prior,
         )?;
+        self.numeric_policy = numeric_policy;
         self.shapes = shapes;
         self.resolved = resolved;
         self.kernels = kernels;
@@ -1156,6 +1178,7 @@ impl CudaPlan {
             infer_us = infer_micros,
             bind_us = micros.bind,
             emit_us = micros.emit,
+            emit_reused = micros.reused,
             pack_us = micros.pack,
             op_count = self.resolved.len(),
             "cuda plan refit phases"
