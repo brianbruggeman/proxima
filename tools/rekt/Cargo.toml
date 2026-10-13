@@ -1,5 +1,5 @@
 [package]
-name = "rekt"
+name = "proxima-rekt"
 version = "0.1.0"
 edition = "2024"
 description = "command your rest api to get wrecked — a load tester on proxima"
