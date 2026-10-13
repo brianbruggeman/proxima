@@ -2,12 +2,13 @@
 #![allow(clippy::expect_used)]
 
 use alloc::vec::Vec;
+use core::ops::ControlFlow;
 
 use proxima_tensor::DType;
 use proxima_tensor::LoopCdMode;
 use proxima_tokenizer::Vocab;
 
-use super::LoadedModel;
+use super::{BackendRuntime, LoadedModel, LogitsSink, NodeValuesSink};
 use crate::bind::ModelHparams;
 use crate::error::InteropError;
 use crate::recurrent_config::RecurrentConfig;
@@ -235,6 +236,35 @@ fn teacher_forcing_refuses_recurrence_an_ordinary_model_cannot_run() {
         assert!(
             matches!(rows, Err(InteropError::UnsupportedRecurrentConfig { .. })),
             "{rows:?}"
+        );
+    });
+}
+
+#[test]
+fn an_empty_prompt_is_refused_before_any_prefill() {
+    with_dense_model(|model| {
+        let config = ServingConfig::default();
+        let mut runtime = BackendRuntime::new(&config);
+
+        let outcome = model.run_decode_loop_observed_seeded(
+            "",
+            4,
+            &config,
+            &mut runtime,
+            None,
+            &mut LogitsSink::Discard,
+            &mut NodeValuesSink::Discard,
+            &mut |_event| ControlFlow::Continue(()),
+            None,
+            false,
+            None,
+            None,
+        );
+
+        assert!(
+            matches!(outcome, Err(InteropError::EmptyForwardTokens)),
+            "an empty prompt must be refused with EmptyForwardTokens, got {:?}",
+            outcome.as_ref().map(|_| ())
         );
     });
 }

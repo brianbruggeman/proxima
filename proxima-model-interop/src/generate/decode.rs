@@ -3153,6 +3153,9 @@ impl<'file> LoadedModel<'file> {
                 self.vocab.add_eos_token().unwrap_or(false),
             )?
         };
+        if ids.is_empty() && seed.is_none() {
+            return Err(InteropError::EmptyForwardTokens);
+        }
         self.run_decode_loop_through_cache(
             ids,
             &[],
@@ -4246,7 +4249,10 @@ only the single-row decode kernel reads the half-width device cache",
                     // (`spec.rs`'s own doc on that leaf: an in-graph-computed
                     // index is a named `NotLowerable` gap on the typed
                     // evaluator, not a silently-guessed execution path).
-                    let lm_head_row_scalar = [(new_count - 1) as f32];
+                    let lm_head_row = new_count
+                        .checked_sub(1)
+                        .ok_or(InteropError::EmptyForwardTokens)?;
+                    let lm_head_row_scalar = [lm_head_row as f32];
 
                     // KV-cache HOST -> DEVICE traffic: every named block below is the
                     // FULL accumulated history (`LayerCache::append` only grows these,
@@ -7204,7 +7210,10 @@ did not hold every cached position)",
                 // See the sibling decode loop's own comment on
                 // `lm_head_row` above -- same leaf, same host-supplied
                 // reason, this step's own last new row.
-                let lm_head_row_scalar = [(new_count - 1) as f32];
+                let lm_head_row = new_count
+                    .checked_sub(1)
+                    .ok_or(InteropError::EmptyForwardTokens)?;
+                let lm_head_row_scalar = [lm_head_row as f32];
                 named_blocks.push(("lm_head_row", QuantizedBlock::Float32(&lm_head_row_scalar)));
                 #[cfg(feature = "instrument")]
                 let named_blocks_weights_ticks = elapsed_ticks(named_blocks_weights_started);
