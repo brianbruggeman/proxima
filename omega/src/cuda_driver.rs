@@ -197,6 +197,8 @@ impl CudaDriver {
             ));
         }
         let context = CudaContext::new(ordinal)?;
+        // every launch runs on this one default stream, so per-buffer read/write events order nothing and cost two cuEventCreate per buffer
+        unsafe { context.disable_event_tracking() };
         let stream = context.default_stream();
         Ok(Self {
             context,
