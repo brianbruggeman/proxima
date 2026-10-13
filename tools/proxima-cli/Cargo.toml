@@ -9,6 +9,10 @@ repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
 
+[lib]
+name = "proxima_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "proxima"
 path = "src/main.rs"
@@ -29,13 +33,15 @@ futures.workspace = true
 tokio-util = { workspace = true, features = ["compat"] }
 proxima-telemetry = { workspace = true, features = ["emit", "std"] }
 proxima-model-interop = { version = "0.1.0", path = "../../proxima-model-interop", features = ["std"] }
-proxima-tensor.workspace = true
+proxima-tensor = { workspace = true, features = ["std", "config"] }
+proxima-safetensors = { version = "0.1.0", path = "../../proxima-safetensors" }
 
 [dev-dependencies]
 proxima = { workspace = true, features = ["test-support-tokio"] }
 tempfile.workspace = true
 time.workspace = true
 bytes.workspace = true
+proxima-tensor = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

@@ -4256,6 +4256,7 @@ dependencies = [
  "postcard",
  "proxima",
  "proxima-model-interop",
+ "proxima-safetensors",
  "proxima-telemetry",
  "proxima-tensor",
  "serde_json",
