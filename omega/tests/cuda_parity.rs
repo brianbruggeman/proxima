@@ -1795,6 +1795,212 @@ fn int32_typed_route_reduce_runs_on_cuda_with_gathered_rows_equal_to_cpu() {
     );
 }
 
+fn gathered_matvec_reduce_program(experts: u32, rows: u32, width: u32, tokens: u32) -> Vec<Op> {
+    use proxima_tensor::{AxisIndex, AxisTerm, IndexPattern};
+
+    let mut program = Vec::new();
+    let table = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![
+                Extent::Static(experts),
+                Extent::Static(rows),
+                Extent::Static(width),
+            ],
+            name: Some("experts".into()),
+        },
+    );
+    let route = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Int32,
+            shape: vec![Extent::Static(tokens)],
+            name: Some("route".into()),
+        },
+    );
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(tokens), Extent::Static(width)],
+            name: Some("activation".into()),
+        },
+    );
+    let gathered_map = IndexMap::Computed {
+        indices: route,
+        index_map: projection(3, &[0]),
+        base: IndexPattern {
+            iter_rank: 3,
+            axes: vec![
+                AxisIndex::default(),
+                AxisIndex {
+                    terms: vec![AxisTerm::projection(1)].into(),
+                    offset: 0,
+                    len: None,
+                },
+                AxisIndex {
+                    terms: vec![AxisTerm::projection(2)].into(),
+                    offset: 0,
+                    len: None,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (table, gathered_map),
+                (activation, IndexMap::Affine(map::projection(3, &[0, 2]))),
+            ],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some("gathered_matvec".into()),
+        }),
+    );
+    program
+}
+
+#[test]
+fn gathered_matvec_reduce_runs_on_cuda_cooperative_at_cpu_parity() {
+    let (experts, rows, width, tokens) = (8usize, 64usize, 256usize, 5usize);
+    let program =
+        gathered_matvec_reduce_program(experts as u32, rows as u32, width as u32, tokens as u32);
+    let expert_data: Vec<f32> = (0..experts * rows * width)
+        .map(|value| (value % 7) as f32)
+        .collect();
+    let route_data = [3i32, 0, 7, 2, 5];
+    let activation_data: Vec<f32> = (0..tokens * width)
+        .map(|value| (value % 5) as f32)
+        .collect();
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("experts", QuantizedBlock::Float32(&expert_data)),
+        ("route", QuantizedBlock::Int32(&route_data)),
+        ("activation", QuantizedBlock::Float32(&activation_data)),
+    ];
+
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::llama_relaxed(),
+    )
+    .expect("omega::backend plans the gathered matvec reduce on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named)
+        .expect("omega::backend runs the gathered matvec reduce on cpu");
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::llama_relaxed(),
+    )
+    .expect("omega::backend plans the gathered matvec reduce on cuda");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend runs the gathered matvec reduce on a real cuda device");
+
+    let expected = cpu.root();
+    assert_eq!(
+        expected.len(),
+        tokens * rows,
+        "the gathered matvec must produce one output per (token, row)"
+    );
+    assert!(
+        expected.iter().any(|&value| value != 0.0),
+        "an all-zero cpu result would make parity vacuous"
+    );
+    assert_eq!(
+        cuda.root(),
+        expected,
+        "a gathered matvec reduced cooperatively on cuda must equal the cpu result for integer-valued inputs"
+    );
+}
+
+#[test]
+fn an_out_of_range_gathered_matvec_index_faults_on_cuda_cooperative_path() {
+    let (experts, rows, width, tokens) = (8usize, 64usize, 256usize, 5usize);
+    let program =
+        gathered_matvec_reduce_program(experts as u32, rows as u32, width as u32, tokens as u32);
+    let expert_data: Vec<f32> = (0..experts * rows * width)
+        .map(|value| (value % 7) as f32)
+        .collect();
+    let route_data = [3i32, 0, 999, 2, 5];
+    let activation_data: Vec<f32> = (0..tokens * width)
+        .map(|value| (value % 5) as f32)
+        .collect();
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("experts", QuantizedBlock::Float32(&expert_data)),
+        ("route", QuantizedBlock::Int32(&route_data)),
+        ("activation", QuantizedBlock::Float32(&activation_data)),
+    ];
+
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::llama_relaxed(),
+    )
+    .expect("omega::backend plans the gathered matvec reduce on cpu");
+    let cpu_error = execute_plan_named(&mut cpu_plan, &named)
+        .expect_err("cpu must fault on an out-of-range gathered matvec index");
+    let cpu_node = match cpu_error {
+        BackendError::Tensor(proxima_tensor::TensorError::GatherIndexOutOfRange {
+            node,
+            index: 999,
+            ..
+        }) => node,
+        other => panic!("expected a cpu GatherIndexOutOfRange at index 999, got {other:?}"),
+    };
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::llama_relaxed(),
+    )
+    .expect("omega::backend plans the gathered matvec reduce on cuda");
+    let cuda_error = execute_plan_named(&mut cuda_plan, &named)
+        .expect_err("an out-of-range gathered matvec index must fault on cuda, not clamp");
+    match cuda_error {
+        BackendError::Cuda(omega::CudaDriverError::GatherIndexOutOfRange {
+            node,
+            index: 999,
+            ..
+        }) => assert_eq!(
+            node, cpu_node,
+            "cuda must name the same gathered node as the cpu oracle"
+        ),
+        other => panic!("expected a cuda GatherIndexOutOfRange at index 999, got {other:?}"),
+    }
+}
+
 #[cfg(feature = "moe-topk-fusion")]
 mod moe_topk {
     use super::*;
