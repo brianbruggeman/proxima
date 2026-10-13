@@ -92,3 +92,9 @@ crate regardless of whether `FrameStore`'s own path (`primitives` +
 now builds clean on the embedded cliff, not just the modules `FrameStore`
 touches. `scripts/thumbv7m-cliff-gate.sh` is the CI gate that proves this
 holds for the full no_std + alloc floor tier, not just this one crate.
+
+## License
+
+Licensed under MIT OR Apache-2.0, at your option.
+
+Repository: <https://github.com/brianbruggeman/proxima>
