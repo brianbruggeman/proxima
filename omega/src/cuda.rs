@@ -260,7 +260,26 @@ pub fn emit_cuda_with_policy(
             });
         }
     };
-    let cooperative = reduce_is_cooperative(resolved, &quantized, numeric_policy);
+    let (grid, extra_outputs) = extent_fields(resolved, &quantized, numeric_policy)?;
+    Ok(CudaKernel {
+        source,
+        entry,
+        bindings: bindings(resolved),
+        grid,
+        extra_outputs,
+        prologue: Vec::new(),
+    })
+}
+
+/// The `CudaKernel` fields that follow the op's extents rather than its text:
+/// the launch grid and the extra output buffers. Shared by a fresh emit and by
+/// a reused kernel, so a reused kernel carries exactly what a fresh one would.
+fn extent_fields(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+) -> Result<(CudaGridSpec, Vec<(NodeId, usize)>), EmitError> {
+    let cooperative = reduce_is_cooperative(resolved, quantized, numeric_policy);
     let grid = CudaGridSpec {
         threads: grid_threads(resolved, cooperative)?,
         block_width: match &resolved.kind {
@@ -275,16 +294,10 @@ pub fn emit_cuda_with_policy(
             limit: MAX_GRID_BLOCKS * grid.block_width_or_default(),
         });
     }
-    Ok(CudaKernel {
-        source,
-        entry,
-        bindings: bindings(resolved),
-        grid,
-        extra_outputs: resolved
-            .kind
-            .moe_topk_extra_outputs(resolved.extents.iter().product::<u64>() as usize),
-        prologue: Vec::new(),
-    })
+    let extra_outputs = resolved
+        .kind
+        .moe_topk_extra_outputs(resolved.extents.iter().product::<u64>() as usize);
+    Ok((grid, extra_outputs))
 }
 
 /// one warp lane per element, so a block is exactly one warp wide.
@@ -359,16 +372,16 @@ pub fn emit_q8_1_quantize(
     })
 }
 
-/// Emits a whole bound program, moving a previous kernel across unchanged when
-/// the bound op for the same node is equal to the one it was emitted from.
+/// Emits a whole bound program, moving a previous kernel across when the op
+/// for the same node has the same text-reaching fields (`dtype` and `kind`).
+/// A reused kernel keeps its source, entry and bindings and takes its grid and
+/// extra outputs from the new op, so it equals a fresh emit field for field.
 /// Returns the kernels in `resolved` order and how many were reused. On a
 /// failed emit the error carries the failing op's node, as the cold path does.
 ///
-/// Teaching pointer: [`emit_cuda_with_policy`] is a pure function of
-/// `(resolved, packed_operands, numeric_policy)`, so an equal `BoundOp` under
-/// the same packed operands and policy emits identical text. Equality is taken
-/// over the whole op, not over a guessed subset of text-reaching fields, because
-/// the entry name omits packed extents and cannot stand in for the source.
+/// Teaching pointer: [`emit_cuda_with_policy`] takes its text from
+/// `(dtype, kind, packed_operands, numeric_policy)`; extents reach the kernel
+/// only through the uniforms and the launch grid, which are recomputed here.
 /// The caller owns the "same packed operands and policy" half of that premise.
 pub fn emit_cuda_reusing(
     previous_bound: &[BoundOp],
@@ -387,18 +400,115 @@ pub fn emit_cuda_reusing(
     for bound in resolved {
         let unchanged = previous
             .get_mut(&bound.node)
-            .filter(|(old, _)| *old == bound)
+            .filter(|(old, _)| same_emitted_text(old, bound, packed_operands))
             .and_then(|(_, kernel)| kernel.take());
         kernels.push(match unchanged {
             Some(kernel) => {
                 reused += 1;
-                kernel
+                refit_extent_fields(kernel, bound, packed_operands, numeric_policy)
+                    .map_err(|error| (bound.node, error))?
             }
             None => emit_cuda_with_policy(bound, packed_operands, numeric_policy)
                 .map_err(|error| (bound.node, error))?,
         });
     }
     Ok((kernels, reused))
+}
+
+/// Whether two ops emit the same CUDA C text. Layout stride and base values go
+/// to uniforms, so only each stride's zero pattern reaches the text. Extents
+/// reach the text only through packed-operand addressing, so an op that reads
+/// a packed operand also has to match on extents.
+fn same_emitted_text(old: &BoundOp, new: &BoundOp, packed: &PackedOperands) -> bool {
+    old.dtype == new.dtype
+        && project_text_kind(&old.kind) == project_text_kind(&new.kind)
+        && (old.extents == new.extents || !(reads_packed(old, packed) || reads_packed(new, packed)))
+}
+
+fn reads_packed(resolved: &BoundOp, packed: &PackedOperands) -> bool {
+    resolved
+        .all_read_sources()
+        .any(|(node, _, _)| packed.contains_key(node))
+}
+
+/// The kind with every stride and base value replaced by its text-relevant
+/// shape, so two kinds that differ only in those values compare equal.
+fn project_text_kind(kind: &BoundOpKind) -> BoundOpKind {
+    let mut projected = kind.clone();
+    match &mut projected {
+        BoundOpKind::CachedAttention { operands, .. }
+        | BoundOpKind::GatedDeltaNet { operands, .. }
+        | BoundOpKind::MoeTopK { operands, .. }
+        | BoundOpKind::TopFractionSelect { operands, .. }
+        | BoundOpKind::Elementwise { operands, .. }
+        | BoundOpKind::ElementwiseTwin { operands, .. }
+        | BoundOpKind::CachedSoftmaxWeights { operands, .. } => project_operands(operands),
+        BoundOpKind::Reduce {
+            operands,
+            out_layout,
+            out_scatter,
+            epilogue_operands,
+            ..
+        }
+        | BoundOpKind::RoundBatchedReduce {
+            operands,
+            out_layout,
+            out_scatter,
+            epilogue_operands,
+            ..
+        } => {
+            project_operands(operands);
+            project_operands(epilogue_operands);
+            *out_layout = text_layout(out_layout);
+            if let Some(lookup) = out_scatter {
+                *lookup = text_lookup(lookup);
+            }
+        }
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } => {}
+    }
+    projected
+}
+
+fn project_operands(operands: &mut [(NodeId, Layout, Option<Lookup>)]) {
+    for (_, layout, gather) in operands {
+        *layout = text_layout(layout);
+        if let Some(lookup) = gather {
+            *lookup = text_lookup(lookup);
+        }
+    }
+}
+
+fn text_layout(layout: &Layout) -> Layout {
+    Layout {
+        base: 0,
+        strides: layout
+            .strides
+            .iter()
+            .map(|stride| i64::from(*stride != 0))
+            .collect(),
+    }
+}
+
+fn text_lookup(lookup: &Lookup) -> Lookup {
+    Lookup {
+        indices: lookup.indices,
+        index_layout: text_layout(&lookup.index_layout),
+        element_stride: lookup.element_stride,
+        extent: lookup.extent,
+    }
+}
+
+fn refit_extent_fields(
+    mut kernel: CudaKernel,
+    bound: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+) -> Result<CudaKernel, EmitError> {
+    let quantized = operand_codecs(bound, packed_operands);
+    let (grid, extra_outputs) = extent_fields(bound, &quantized, numeric_policy)?;
+    kernel.grid = grid;
+    kernel.extra_outputs = extra_outputs;
+    Ok(kernel)
 }
 /// Packs the runtime ABI for the f32 elementwise CUDA kernels.
 ///
@@ -3035,6 +3145,55 @@ mod tests {
         let large = emit_cuda(&elementwise_tanh_op(4096), &no_packed()).expect("emit succeeds");
         assert_eq!(small.source, large.source);
         assert_ne!(small.grid.threads, large.grid.threads);
+    }
+
+    #[test]
+    fn emit_text_equal_across_kv_extents() {
+        let short = emit_cuda(&row_sum_plus_bias_op(4, 8), &no_packed()).expect("emit succeeds");
+        let long = emit_cuda(&row_sum_plus_bias_op(4, 16), &no_packed()).expect("emit succeeds");
+        assert_eq!(short.source, long.source);
+        assert_eq!(short.entry, long.entry);
+    }
+
+    #[test]
+    fn reuse_matches_fresh_emit_for_every_op() {
+        let pairs = [
+            (elementwise_tanh_op(4), elementwise_tanh_op(4096)),
+            (row_sum_plus_bias_op(4, 8), row_sum_plus_bias_op(4, 16)),
+            (scan_op(8), scan_op(64)),
+        ];
+        for (previous, resolved) in pairs {
+            let previous_kernel = emit_cuda(&previous, &no_packed()).expect("emit succeeds");
+            let (kernels, reused) = emit_cuda_reusing(
+                core::slice::from_ref(&previous),
+                vec![previous_kernel],
+                core::slice::from_ref(&resolved),
+                &no_packed(),
+                NumericPolicy::default(),
+            )
+            .expect("reuse succeeds");
+            let fresh = emit_cuda(&resolved, &no_packed()).expect("emit succeeds");
+            assert_eq!(reused, 1, "extent-only change must reuse the kernel");
+            assert_eq!(kernels, vec![fresh]);
+        }
+    }
+
+    #[test]
+    fn reuse_refuses_a_kind_change_at_the_same_node() {
+        let previous = matmul_reduce_op(4, 8, ScalarOp::Add);
+        let resolved = matmul_reduce_op(4, 8, ScalarOp::Maximum);
+        let previous_kernel = emit_cuda(&previous, &no_packed()).expect("emit succeeds");
+        let (kernels, reused) = emit_cuda_reusing(
+            core::slice::from_ref(&previous),
+            vec![previous_kernel],
+            core::slice::from_ref(&resolved),
+            &no_packed(),
+            NumericPolicy::default(),
+        )
+        .expect("reuse succeeds");
+        let fresh = emit_cuda(&resolved, &no_packed()).expect("emit succeeds");
+        assert_eq!(reused, 0);
+        assert_eq!(kernels, vec![fresh]);
     }
 
     fn matmul_reduce_op(rows: u32, cols: u32, reduce_op: ScalarOp) -> BoundOp {
