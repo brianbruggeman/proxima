@@ -828,10 +828,11 @@ fn assert_packed_codec_parity(
     quantize: fn(&[f32], &mut [u8]) -> Result<(), proxima_gguf::quant::QuantError>,
     dequantize: fn(&[u8], &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError>,
     to_block: fn(&[u8]) -> QuantizedBlock<'_>,
+    rows: u32,
+    blocks_per_row: usize,
+    cuda_policy: NumericPolicy,
     tolerance: f32,
 ) {
-    let rows: u32 = 3;
-    let blocks_per_row = 2usize;
     let k = (block_elements * blocks_per_row) as u32;
 
     let activation: Vec<f32> = random_vec(31, k as usize)
@@ -871,7 +872,7 @@ fn assert_packed_codec_parity(
         &[],
         &named,
         &[packed_sum],
-        NumericPolicy::default(),
+        cuda_policy,
     )
     .expect("omega::backend plans the packed matmul on cuda");
     let cuda = execute_plan_named(&mut cuda_plan, &named)
@@ -939,6 +940,9 @@ fn packed_q4k_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
             codec: Codec::Q4K,
             bytes,
         },
+        3,
+        2,
+        NumericPolicy::default(),
         1e-5,
     );
 }
@@ -956,6 +960,9 @@ fn packed_q5k_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
             codec: Codec::Q5K,
             bytes,
         },
+        3,
+        2,
+        NumericPolicy::default(),
         1e-5,
     );
 }
@@ -973,6 +980,49 @@ fn packed_q6k_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
             codec: Codec::Q6K,
             bytes,
         },
+        3,
+        2,
+        NumericPolicy::default(),
+        1e-5,
+    );
+}
+
+#[test]
+fn packed_q6k_matmul_cooperative_reduce_matches_the_dequantized_f32_cpu_path_on_cuda() {
+    use proxima_gguf::quant::q6_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    assert_packed_codec_parity(
+        "q6_k cooperative",
+        BLOCK_BYTES,
+        QK_K,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Packed {
+            codec: Codec::Q6K,
+            bytes,
+        },
+        33,
+        6,
+        NumericPolicy::bit_exact().with_reassociation(true),
+        1e-5,
+    );
+}
+
+#[test]
+fn packed_f16_matmul_cooperative_reduce_matches_the_dequantized_f32_cpu_path_on_cuda() {
+    use proxima_gguf::quant::f16::{BLOCK_BYTES, QK_F16, dequantize, quantize};
+    assert_packed_codec_parity(
+        "f16 cooperative",
+        BLOCK_BYTES,
+        QK_F16,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Packed {
+            codec: Codec::Float16,
+            bytes,
+        },
+        33,
+        1536,
+        NumericPolicy::bit_exact().with_reassociation(true),
         1e-5,
     );
 }
@@ -990,6 +1040,9 @@ fn packed_q8_0_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
             codec: Codec::Q8_0,
             bytes,
         },
+        3,
+        2,
+        NumericPolicy::default(),
         1e-5,
     );
 }
@@ -1007,6 +1060,9 @@ fn packed_q4_0_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
             codec: Codec::Q4_0,
             bytes,
         },
+        3,
+        2,
+        NumericPolicy::default(),
         1e-5,
     );
 }
