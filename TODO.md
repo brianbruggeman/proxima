@@ -288,3 +288,46 @@ Owner: "from a gguf or from a onnx or any other format - the point here is inter
 Pipe/FSM shape today: the transforms are sans-IO functions (`In = ParsedGguf -> Out = MlxExport`, and the inverse), composed by callers; they are not yet expressed as proxima pipes with an FSM over the stages (parse, bind, transform, pack, assemble, write). That expression is the next structural slice for the formats layer and is what makes a new door a config composition rather than a new crate.
 
 Goals the owner attached to the frame (2026-10-11): (1) GENERIC fuses: fusion is a pass over the algebra (producer/consumer composition through the indexing maps, the Linalg shape), never a recognizer that matches a familiar fragment; round four's attention fusion lands as a recognizer-gap finding (`proxima-tensor/specs/decode-prefill-parity/SPEC.md`, round four) and is the example of what this replaces; (2) meet or beat the incumbents on every door and cell, ideally beat: llama.cpp for GGUF decode and prefill (recorded numbers, never re-run), mlx-lm for the MLX directories (load and generate as the oracle), and the vendor runtime for each NPU lane; a door that cannot be measured against its incumbent is not finished.
+
+## Constrained decoding and parallel constrained decoding (2026-10-13)
+
+Status: **roadmap, owner-requested, not designed yet.** No spec, no slice.
+
+### Goal
+- [ ] (a) Constrained decoding. A grammar, JSON schema or regex constrains
+      generated tokens by masking the logits at each step, so output is
+      guaranteed valid.
+- [ ] (b) Parallel constrained decoding. Constraints hold across many sequences
+      and candidates at once: batched requests with different grammars,
+      speculative and tree-verify candidates, and beams. Mask computation
+      overlaps the GPU step instead of serializing with it.
+
+### Where it fits
+- `proxima-tensor/specs/decode-as-data`: the propose / shape / accept / commit
+  pipes. The constraint is data the shape and accept stages consume: a per-step
+  token mask, plus grammar state advanced on commit.
+- A grammar is a sans-IO enum FSM over the tokenizer vocabulary, transitions
+  consuming the old state. The constraint spec is conflaguration config.
+- No model-specific code: a constraint is model-agnostic data over the vocab.
+
+### Performance constraints to honour
+- Mask lookup is O(1) per state: a precomputed token mask per grammar state,
+  stored sparse (CSR) or as bitsets. Zero allocations per decode step.
+- The mask is applied on device for GPU backends. Parallel means masks for N
+  sequences per step, without host serialization.
+
+### Incumbents (to read before designing; no performance claims)
+- [ ] to read: llama.cpp GBNF grammar sampling; XGrammar; Outlines
+      (regex and JSON-schema FSM); llguidance; SGLang compressed FSM and
+      jump-forward decoding
+
+### Open questions
+- [ ] grammar formalism: CFG, or a regex / FSM subset
+- [ ] how tokenizer merges interact with grammar states
+- [ ] jump-forward over forced spans
+- [ ] interaction with speculative accept: rejecting draft tokens that violate the grammar
+- [ ] per-sequence grammar state in batched serving
+
+### Next action
+- [ ] after reading the incumbents, write a spec under
+      `proxima-tensor/specs/constrained-decoding` via `/spec-first`
