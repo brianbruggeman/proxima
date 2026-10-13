@@ -22,6 +22,8 @@ use proxima_telemetry::error;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
+mod tensor_run;
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -132,7 +134,7 @@ async fn serve(
     let plane = Arc::new(FsPipelineControlPlane::open(&state_dir, recording_spigot).await?);
     let dyn_plane: DynPipelineControlPlane = plane.clone();
     let pipe = PipelineControlPlanePipe::new(dyn_plane);
-    let handle = into_handle(pipe);
+    let handle = tensor_run::mount(into_handle(pipe));
     if stdio {
         return serve_stdio(handle).await;
     }
