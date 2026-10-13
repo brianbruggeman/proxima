@@ -323,7 +323,7 @@ Status: **roadmap, owner-requested, not designed yet.** No spec, no slice.
   (`Cargo.toml:220`, used by `proxima-config`'s `schema-std` feature), and
   conflaguration 2.0 already overlays config files through it
   (`src/file.rs:57` `file_to_value`, `:104` `merge_value`), so a grammar
-  layered across defaults, files and env merges with no extra code.
+  layered over defaults from config files merges with no extra code.
 - Parity: every grammar in llama.cpp's `grammars/` directory parses, and for
   the same vocabulary and the same accepted prefix yields the identical
   allowed-token set as llama.cpp's grammar sampler at every step. The mask is
