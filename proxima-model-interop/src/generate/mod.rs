@@ -107,8 +107,11 @@ use omega::backend::mark_plan_time_constants_resident;
 #[cfg(feature = "gpu")]
 use omega::backend::{
     Engine, Plan, clear_expert_source_cache, execute_plan_named_with_expert_sources, mark_resident,
-    plan_named, plan_named_exact, release_resident_names, unregister_checkpoint_mapping,
+    plan_named, plan_named_exact,
 };
+// only the metal-gated `SharedWeights` drop calls these; ungated, they are unused on cuda-only builds.
+#[cfg(feature = "metal")]
+use omega::backend::{release_resident_names, unregister_checkpoint_mapping};
 // `set_math_mode` (unlike `mark_resident` above) takes `metal::MathMode` in
 // its own signature, so unlike the ungated import above it needs the same
 // `metal`+macos gate that type itself lives behind.
