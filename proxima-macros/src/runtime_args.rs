@@ -52,6 +52,28 @@ pub fn extract_usize_lit(expr: &Expr, field: &str) -> Result<usize, Error> {
     }
 }
 
+/// Parses a `timeout = "<n>ms" | "<n>s" | "<n>m"` value into milliseconds.
+pub fn parse_timeout_millis(value: &Expr) -> Result<u64, Error> {
+    let text = extract_str_lit(value, "timeout")?;
+    let bad = || {
+        Error::new_spanned(
+            value,
+            format!(
+                "invalid timeout `{text}`; expected a positive whole number with a unit, e.g. \"200ms\", \"90s\" or \"5m\""
+            ),
+        )
+    };
+    let (digits, unit_millis) = [("ms", 1u64), ("s", 1_000), ("m", 60_000)]
+        .iter()
+        .find_map(|(suffix, millis)| text.strip_suffix(suffix).map(|digits| (digits, *millis)))
+        .ok_or_else(bad)?;
+    let count = digits.parse::<u64>().map_err(|_| bad())?;
+    match count.checked_mul(unit_millis) {
+        Some(millis) if millis > 0 => Ok(millis),
+        _ => Err(bad()),
+    }
+}
+
 pub fn extract_bool_lit(expr: &Expr, field: &str) -> Result<bool, Error> {
     match expr {
         Expr::Lit(ExprLit {

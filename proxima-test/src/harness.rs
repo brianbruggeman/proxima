@@ -18,7 +18,7 @@ use std::task::{Context, Poll};
 use std::sync::OnceLock;
 #[cfg(feature = "test-prime")]
 use std::sync::mpsc::{RecvTimeoutError, sync_channel};
-#[cfg(feature = "test-prime")]
+#[cfg(any(feature = "test-prime", feature = "tokio-driver"))]
 use std::time::Duration;
 
 #[cfg(feature = "test-prime")]
@@ -207,17 +207,23 @@ impl<F: Future> Future for CatchUnwind<F> {
 // runtime entry points
 // ---------------------------------------------------------------------------
 
+/// Runs `body` on the adaptive default driver. `body_timeout` is the author's
+/// `#[proxima::test(timeout = "..")]` bound; `PROXIMA_TEST_TIMEOUT_MS`, when
+/// set, overrides it, and 60 s applies when neither is given. The bound is
+/// enforced by the prime driver only (see `drive_prime`).
 #[cfg(feature = "test-prime")]
-pub fn run<Body, Fut>(cassette: Option<CassetteSpec>, body: Body)
+pub fn run<Body, Fut>(cassette: Option<CassetteSpec>, body_timeout: Option<Duration>, body: Body)
 where
     Body: FnOnce(TestCtx) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + 'static,
 {
-    finish(drive_prime(cassette.as_ref(), body));
+    finish(drive_prime(cassette.as_ref(), body_timeout, body));
 }
 
+/// Tokio fallback of `run`: this driver enforces no body bound, so
+/// `_body_timeout` is accepted for signature parity and not applied.
 #[cfg(all(not(feature = "test-prime"), feature = "tokio-driver"))]
-pub fn run<Body, Fut>(cassette: Option<CassetteSpec>, body: Body)
+pub fn run<Body, Fut>(cassette: Option<CassetteSpec>, _body_timeout: Option<Duration>, body: Body)
 where
     Body: FnOnce(TestCtx) -> Fut,
     Fut: Future<Output = ()>,
@@ -226,12 +232,16 @@ where
 }
 
 #[cfg(feature = "test-prime")]
-pub fn run_prime<Body, Fut>(cassette: Option<CassetteSpec>, body: Body)
+pub fn run_prime<Body, Fut>(
+    cassette: Option<CassetteSpec>,
+    body_timeout: Option<Duration>,
+    body: Body,
+)
 where
     Body: FnOnce(TestCtx) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + 'static,
 {
-    finish(drive_prime(cassette.as_ref(), body));
+    finish(drive_prime(cassette.as_ref(), body_timeout, body));
 }
 
 #[cfg(feature = "tokio-driver")]
@@ -369,7 +379,11 @@ fn shared_prime_runtime() -> &'static PrimeRuntime {
 }
 
 #[cfg(feature = "test-prime")]
-fn drive_prime<Body, Fut>(cassette: Option<&CassetteSpec>, body: Body) -> Option<CapturedPanic>
+fn drive_prime<Body, Fut>(
+    cassette: Option<&CassetteSpec>,
+    body_timeout: Option<Duration>,
+    body: Body,
+) -> Option<CapturedPanic>
 where
     Body: FnOnce(TestCtx) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + 'static,
@@ -426,7 +440,7 @@ where
 
     // phase 2 — the body is genuinely running now, so this clock measures
     // actual execution and only actual execution: a real hang still fails.
-    match receiver.recv_timeout(body_timeout()) {
+    match receiver.recv_timeout(resolve_body_timeout(body_timeout)) {
         Ok(BodyProgress::Done(outcome)) => outcome,
         Ok(BodyProgress::Started) => failed("worker reported a second start signal"),
         Err(RecvTimeoutError::Timeout) => failed("body did not complete within the timeout"),
@@ -443,8 +457,11 @@ enum BodyProgress {
 }
 
 #[cfg(feature = "test-prime")]
-fn body_timeout() -> Duration {
-    duration_from_env("PROXIMA_TEST_TIMEOUT_MS", Duration::from_secs(60))
+fn resolve_body_timeout(declared: Option<Duration>) -> Duration {
+    duration_from_env(
+        "PROXIMA_TEST_TIMEOUT_MS",
+        declared.unwrap_or(Duration::from_secs(60)),
+    )
 }
 
 /// Generous by design (default: 5 minutes) — this phase absorbs machine-wide
@@ -494,15 +511,63 @@ mod tests {
     #[cfg(feature = "test-prime")]
     #[test]
     fn prime_reports_passing_body() {
-        assert!(drive_prime(None, |_cx| async {}).is_none());
+        assert!(drive_prime(None, None, |_cx| async {}).is_none());
     }
 
     #[cfg(feature = "test-prime")]
     #[test]
     fn prime_reports_panicking_body_with_message() {
-        let captured = drive_prime(None, |_cx| async { panic!("boom-prime") })
+        let captured = drive_prime(None, None, |_cx| async { panic!("boom-prime") })
             .expect("a panicking body must be reported as failed");
         assert!(captured.message.contains("boom-prime"));
+    }
+
+    #[cfg(feature = "test-prime")]
+    #[test]
+    fn a_body_finishing_inside_its_declared_timeout_passes() {
+        let outcome = temp_env::with_var("PROXIMA_TEST_TIMEOUT_MS", None::<&str>, || {
+            drive_prime(None, Some(Duration::from_secs(2)), |_cx| async {})
+        });
+        assert!(outcome.is_none(), "a body inside its bound must pass");
+    }
+
+    #[cfg(feature = "test-prime")]
+    #[test]
+    fn a_body_outliving_its_declared_timeout_fails_with_the_timeout_message() {
+        let captured = temp_env::with_var("PROXIMA_TEST_TIMEOUT_MS", None::<&str>, || {
+            drive_prime(None, Some(Duration::from_millis(200)), |_cx| async {
+                std::future::pending::<()>().await;
+            })
+        })
+        .expect("a body past its declared bound must be reported as failed");
+        assert!(
+            captured
+                .message
+                .contains("body did not complete within the timeout"),
+            "got: {}",
+            captured.message
+        );
+    }
+
+    #[cfg(feature = "test-prime")]
+    #[test]
+    fn the_env_var_overrides_the_declared_timeout() {
+        let resolved = temp_env::with_var("PROXIMA_TEST_TIMEOUT_MS", Some("1500"), || {
+            resolve_body_timeout(Some(Duration::from_secs(600)))
+        });
+        assert_eq!(resolved, Duration::from_millis(1500));
+    }
+
+    #[cfg(feature = "test-prime")]
+    #[test]
+    fn the_declared_timeout_replaces_the_sixty_second_default() {
+        let declared = temp_env::with_var("PROXIMA_TEST_TIMEOUT_MS", None::<&str>, || {
+            (
+                resolve_body_timeout(Some(Duration::from_secs(600))),
+                resolve_body_timeout(None),
+            )
+        });
+        assert_eq!(declared, (Duration::from_secs(600), Duration::from_secs(60)));
     }
 
     // mirrors `proxima_primitives::pipe::Pipe::call` (base rung, no `Send`
@@ -533,7 +598,7 @@ mod tests {
     #[cfg(feature = "test-prime")]
     #[test]
     fn prime_drives_a_non_send_refcell_backed_pipe_future() {
-        let outcome = drive_prime(None, |_cx| async move {
+        let outcome = drive_prime(None, None, |_cx| async move {
             let pipe = RefCellPipe {
                 state: RefCell::new(0),
             };

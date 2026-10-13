@@ -65,6 +65,24 @@ pub fn fixture(args: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
+/// # Body timeout
+///
+/// `timeout = "<n>ms" | "<n>s" | "<n>m"` bounds the body, as rstest's
+/// `#[timeout]` does. Without it the body gets 60 s. Precedence, strongest
+/// first: the `PROXIMA_TEST_TIMEOUT_MS` environment variable (the operator's
+/// override, e.g. to hunt a hang or to loosen a slow CI box), then this
+/// argument (the author's declared need, e.g. a cold `cargo build` fixture),
+/// then the 60 s default. Declaring it on one test leaves every other test's
+/// hang detection at the default. The bound is enforced by the default and
+/// prime drivers; combining it with `runtime = "tokio"`, `flavor`,
+/// `worker_threads` or `start_paused` is a compile error, as is a malformed or
+/// zero value.
+///
+/// ```
+/// #[proxima_macros::test(timeout = "90s")]
+/// async fn finishes_inside_its_declared_bound() { assert_eq!(1 + 1, 2); }
+/// ```
+///
 /// # Scheduling metadata
 ///
 /// A test declares how an external runner (nextest, `cargo val`) may
