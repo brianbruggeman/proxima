@@ -1,0 +1,139 @@
+# y = (x @ w).silu().softmax(-1) with x: 2x4, w: 4x3 bound at run time.
+version = 1
+
+[[bind]]
+name = "x"
+node = "n0"
+
+[[bind]]
+name = "w"
+node = "n1"
+
+[[output]]
+name = "softmax"
+node = "n13"
+
+[exec]
+
+[[node]]
+op = "input"
+id = "n0"
+dtype = "float32"
+shape = [2, 4]
+name = "x"
+
+[[node]]
+op = "input"
+id = "n1"
+dtype = "float32"
+shape = [4, 3]
+name = "w"
+
+[[node]]
+op = "elementwise"
+id = "n2"
+dtype = "float32"
+body = "multiply"
+inputs = ["n0", "n1"]
+maps = ["ac->abc", "cb->abc"]
+
+[[node]]
+op = "reduce"
+id = "n3"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "n2"
+in_map = "abc->abc"
+out_map = "ab->abc"
+keep = "reduce"
+name = "matmul"
+
+[[node]]
+op = "elementwise"
+id = "n4"
+dtype = "float32"
+body = "negate"
+inputs = ["n3"]
+maps = ["ab->ab"]
+
+[[node]]
+op = "elementwise"
+id = "n5"
+dtype = "float32"
+body = "exponential"
+inputs = ["n4"]
+maps = ["ab->ab"]
+
+[[node]]
+op = "constant"
+id = "n6"
+dtype = "float32"
+shape = []
+value = 1.0
+
+[[node]]
+op = "elementwise"
+id = "n7"
+dtype = "float32"
+body = "add"
+inputs = ["n5", "n6"]
+maps = ["ab->ab", "->ab"]
+
+[[node]]
+op = "elementwise"
+id = "n8"
+dtype = "float32"
+body = "divide"
+inputs = ["n3", "n7"]
+maps = ["ab->ab", "ab->ab"]
+name = "silu"
+
+[[node]]
+op = "reduce"
+id = "n9"
+dtype = "float32"
+body = "maximum"
+init = "negative_infinity"
+input = "n8"
+in_map = "ab->ab"
+out_map = "a->ab"
+keep = "reduce"
+name = "row_max"
+
+[[node]]
+op = "elementwise"
+id = "n10"
+dtype = "float32"
+body = "subtract"
+inputs = ["n8", "n9"]
+maps = ["ab->ab", "a->ab"]
+
+[[node]]
+op = "elementwise"
+id = "n11"
+dtype = "float32"
+body = "exponential"
+inputs = ["n10"]
+maps = ["ab->ab"]
+
+[[node]]
+op = "reduce"
+id = "n12"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "n11"
+in_map = "ab->ab"
+out_map = "a->ab"
+keep = "reduce"
+name = "row_sum"
+
+[[node]]
+op = "elementwise"
+id = "n13"
+dtype = "float32"
+body = "divide"
+inputs = ["n11", "n12"]
+maps = ["ab->ab", "a->ab"]
+name = "softmax"
