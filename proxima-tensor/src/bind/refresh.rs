@@ -211,6 +211,28 @@ fn recover_window(
     }
 }
 
+/// Narrows each retire set to nodes whose FIRST use is that same position: a
+/// node read by an earlier consumer was materialized there (not fusable at
+/// its last use), so the original bind never held it at the last use.
+fn fusable_retires(program: &[Op], retires: Vec<Vec<NodeId>>) -> Vec<Vec<NodeId>> {
+    let mut first_use: Vec<Option<usize>> = alloc::vec![None; program.len()];
+    for (position, op) in program.iter().enumerate() {
+        for used in crate::live::uses(op) {
+            first_use[used.0 as usize].get_or_insert(position);
+        }
+    }
+    retires
+        .into_iter()
+        .enumerate()
+        .map(|(position, dying)| {
+            dying
+                .into_iter()
+                .filter(|node| first_use[node.0 as usize] == Some(position))
+                .collect()
+        })
+        .collect()
+}
+
 /// `ones`/`values` — the SAME per-position bookkeeping
 /// [`super::builder_compose_window::BoundOpBuilder::push`] builds
 /// incrementally, rebuilt here in one pass over the whole (symbol-independent)
@@ -249,7 +271,7 @@ pub fn refresh_bound_ops(
     changed_symbols: u64,
     numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, RefreshRefusal> {
-    let retires = live::annotate(program, outputs);
+    let retires = fusable_retires(program, live::annotate(program, outputs));
     let (ones, values) = constant_tables(program);
     let mut refreshed = Vec::with_capacity(resolved.len());
     for (position, bound_op) in resolved.iter().enumerate() {
