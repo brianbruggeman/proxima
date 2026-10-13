@@ -4,7 +4,7 @@
 //! recorder, native exporter, config) are structural -- always-on at their
 //! tier (see Tiers below). those primitives were built in a numbered
 //! sequence (c1..c15, e.g. `clock`'s "C9/C13" note) tracked per-component in
-//! `benches/RESULTS_bench-proxima-telemetry_m1.md`.
+//! the workspace-root `benches/RESULTS_bench-proxima-telemetry_m1.md`.
 //!
 //! optional features, each default-off except `std` (what each one gates):
 //!
@@ -24,9 +24,11 @@
 //! - `tee-generic` -- implies `std`; gates no library code, only the `bench_tee_generic` and `bench_shared_ring_tee` benches.
 //! - `loom` -- swaps the ring's atomics for loom's so `tests/loom_ring.rs` can model-check it; test-only.
 //!
-//! `legacy` carries the pre-component proxima Metrics/Labels/TelemetryHandle
-//! surface that production code still uses; new code emits via the `emit`
-//! macros (`info!`/`debug!`/`warn!`/`error!`/`trace!`) and the
+//! `legacy` is a private, `std`-only module: it carries the pre-component
+//! proxima Metrics/Labels/TelemetryHandle surface that production code still
+//! uses, re-exported at the crate root (`proxima_telemetry::Metrics`, `Labels`,
+//! `TelemetryHandle`, ...; there is no public `legacy` path). new code emits
+//! via the `emit` macros (`info!`/`debug!`/`warn!`/`error!`/`trace!`) and the
 //! `recorder`/`trace`/`metric`/`log` primitives directly.
 //!
 //! Tiers: `std` (default) is the full runtime — recorder (per-core TLS + drainer

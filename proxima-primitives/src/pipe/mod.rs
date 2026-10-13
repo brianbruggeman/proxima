@@ -154,7 +154,7 @@ pub use proxima_core::{ProximaError, ProximaResult};
 
 // Top-level re-exports matching the existing `proxima` umbrella's plugin-facing
 // surface. Lets plugin crates write `use proxima_primitives::pipe::{Pipe, Request,
-// Body, ...}` without deeper nested module paths.
+// Response, HeaderList, ...}` without deeper nested module paths.
 #[cfg(feature = "alloc")]
 pub use body::{ChunkStream, RequestStream, ResponseStream};
 #[cfg(feature = "alloc")]

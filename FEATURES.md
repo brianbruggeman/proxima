@@ -295,11 +295,11 @@ The telemetry layer is built on the same `Pipe` primitive as every other proxima
 - `Labels` for dimensional labeling; `MetricsSnapshot` for export
 - `NoopTelemetry` for tests
 
-### Capture (`recording::capture`)
-- `CaptureContext` per-request: Pipe-attached key/value pairs ride with recorded frames
+### Capture (`proxima_recording::pipe::capture`)
+- `CaptureContext` (trait, `proxima_primitives::pipe::capture_surface`) per-request: Pipe-attached key/value pairs ride with recorded frames; `LiveCaptureContext` is the concrete impl
 - Lock-free via `SegQueue<(String, Bytes)>`
-- Last-write-wins per key on `drain()` into `FrameMetadata`
-- Drained at frame-emission boundaries by `RecordUpstream::ChunkRecorder`
+- Last-write-wins per key on `drain()` into `FrameMetadata` (a `BTreeMap<String, Bytes>`)
+- Drained at frame-emission boundaries by `RecordUpstream`'s private `ChunkRecorder` (`src/upstreams/record.rs`)
 
 ### Causal (`causality` module)
 - `CausalIndex` — byte-range edge graph (per-thread sharded `Vec<Mutex<Vec<CausalEdge>>>`, Stage 3c)
