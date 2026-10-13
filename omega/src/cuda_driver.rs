@@ -25,6 +25,7 @@ use proxima_primitives::sync::blocking::Mutex;
 use crate::config::{ResourceConstraints, RuntimeConfig};
 use crate::cuda::{CudaGridSpec, CudaKernel};
 use crate::msl::{Binding, Codec, PackedOperands, gather_count};
+use proxima_tensor::bind::{RefreshRefusal, refresh_bound_ops, touches_changed};
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, Keep, NodeId, NumericPolicy, Op, QuantizedBlock,
     Shapes, bind_unfused, bind_with_fusion, block_node_ids, correct_packed_matmul_layouts, infer,
@@ -1076,21 +1077,37 @@ fn bind_and_emit(
     })?;
     let mut resolved = prune_dead(bound, outputs);
     correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
-    for bound in &resolved {
-        validate_cuda_dtype(bound)?;
-    }
-    reject_unsupported_kinds(&resolved)?;
+    validate_resolved(&resolved)?;
     let mut micros = LowerMicros {
         bind: bind_started.elapsed().as_micros() as u64,
         ..LowerMicros::default()
     };
+    let (kernels, uniforms) =
+        emit_and_pack(&resolved, prior, packed_operands, numeric_policy, &mut micros)?;
+    Ok((resolved, kernels, uniforms, micros))
+}
+
+fn validate_resolved(resolved: &[BoundOp]) -> Result<(), CudaDriverError> {
+    for bound in resolved {
+        validate_cuda_dtype(bound)?;
+    }
+    reject_unsupported_kinds(resolved)
+}
+
+fn emit_and_pack(
+    resolved: &[BoundOp],
+    prior: Option<PriorKernels<'_>>,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    micros: &mut LowerMicros,
+) -> Result<(Vec<CudaKernel>, Vec<Vec<u8>>), CudaDriverError> {
     let emit_started = Instant::now();
     let (prior_bound, prior_kernels) =
         prior.map_or((&[][..], Vec::new()), |prior| (prior.bound, prior.kernels));
     let (kernels, reused) = crate::emit_cuda_reusing(
         prior_bound,
         prior_kernels,
-        &resolved,
+        resolved,
         packed_operands,
         numeric_policy,
     )
@@ -1111,7 +1128,52 @@ fn bind_and_emit(
         })
         .collect::<Result<Vec<_>, _>>()?;
     micros.pack = pack_started.elapsed().as_micros() as u64;
-    Ok((resolved, kernels, uniforms, micros))
+    Ok((kernels, uniforms))
+}
+
+fn refresh_refusal_name(refusal: RefreshRefusal) -> &'static str {
+    match refusal {
+        RefreshRefusal::PositionOutOfRange { .. } => "position out of range",
+        RefreshRefusal::MatcherFusedKind { .. } => "matcher fused kind",
+        RefreshRefusal::EpilogueFusionNotLocal { .. } => "epilogue fusion not local",
+        RefreshRefusal::OpKindMismatch { .. } => "op kind mismatch",
+        RefreshRefusal::RecomposedBodyMismatch { .. } => "recomposed body mismatch",
+        RefreshRefusal::RecomposedOperandsDiffer { .. } => "recomposed operands differ",
+        RefreshRefusal::ShapeError { .. } => "shape error",
+    }
+}
+
+/// Re-derives only the KV-touched ops from `program` at `shapes`, keeping every
+/// other retained op as-is. Returns the refreshed set and the touched count.
+fn refresh_bound_resolved(
+    previous: &[BoundOp],
+    previous_shapes: &Shapes,
+    program: &[Op],
+    outputs: &[NodeId],
+    shapes: &Shapes,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+) -> Result<(Vec<BoundOp>, usize), RefreshRefusal> {
+    let changed: BTreeSet<NodeId> = (0..program.len())
+        .map(|position| NodeId(position as u32))
+        .filter(|node| previous_shapes.of(*node) != shapes.of(*node))
+        .collect();
+    let masks: Vec<u64> = previous
+        .iter()
+        .map(|bound| u64::from(touches_changed(bound, program, &changed)))
+        .collect();
+    let touched = masks.iter().filter(|mask| **mask != 0).count();
+    let mut refreshed = refresh_bound_ops(
+        previous,
+        program,
+        outputs,
+        shapes,
+        &masks,
+        1,
+        numeric_policy,
+    )?;
+    correct_packed_matmul_layouts(&mut refreshed, &packed_operands.keys().copied().collect());
+    Ok((refreshed, touched))
 }
 
 fn cuda_supports_kind(kind: &BoundOpKind) -> bool {
@@ -1241,19 +1303,58 @@ impl CudaPlan {
         let infer_micros = infer_started.elapsed().as_micros() as u64;
         let same_policy = numeric_policy == self.numeric_policy;
         let previous_bound = std::mem::take(&mut self.resolved);
-        let prior = same_policy.then(|| PriorKernels {
-            bound: &previous_bound,
-            kernels: std::mem::take(&mut self.kernels),
-        });
-        let (resolved, kernels, uniforms, micros) = bind_and_emit(
-            &self.program,
-            &shapes,
-            &self.outputs,
-            &self.packed_operands,
-            numeric_policy,
-            false,
-            prior,
-        )?;
+        let refresh_started = Instant::now();
+        let refresh = if same_policy {
+            refresh_bound_resolved(
+                &previous_bound,
+                &self.shapes,
+                &self.program,
+                &self.outputs,
+                &shapes,
+                &self.packed_operands,
+                numeric_policy,
+            )
+            .map_err(refresh_refusal_name)
+        } else {
+            Err("numeric policy changed")
+        };
+        let (bind_path, touched, refused, resolved, kernels, uniforms, micros) = match refresh {
+            Ok((resolved, touched)) => {
+                let mut micros = LowerMicros {
+                    bind: refresh_started.elapsed().as_micros() as u64,
+                    ..LowerMicros::default()
+                };
+                validate_resolved(&resolved)?;
+                let prior = PriorKernels {
+                    bound: &previous_bound,
+                    kernels: std::mem::take(&mut self.kernels),
+                };
+                let (kernels, uniforms) = emit_and_pack(
+                    &resolved,
+                    Some(prior),
+                    &self.packed_operands,
+                    numeric_policy,
+                    &mut micros,
+                )?;
+                ("refresh", touched, "none", resolved, kernels, uniforms, micros)
+            }
+            Err(refused) => {
+                let prior = same_policy.then(|| PriorKernels {
+                    bound: &previous_bound,
+                    kernels: std::mem::take(&mut self.kernels),
+                });
+                let (resolved, kernels, uniforms, micros) = bind_and_emit(
+                    &self.program,
+                    &shapes,
+                    &self.outputs,
+                    &self.packed_operands,
+                    numeric_policy,
+                    false,
+                    prior,
+                )?;
+                ("full", 0, refused, resolved, kernels, uniforms, micros)
+            }
+        };
         self.numeric_policy = numeric_policy;
         self.shapes = shapes;
         self.resolved = resolved;
@@ -1266,6 +1367,9 @@ impl CudaPlan {
             emit_reused = micros.reused,
             pack_us = micros.pack,
             op_count = self.resolved.len(),
+            bind_path = bind_path,
+            bind_touched = touched as u64,
+            bind_refused = refused,
             "cuda plan refit phases"
         );
         Ok(true)
