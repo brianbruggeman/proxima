@@ -30,6 +30,9 @@ proxima = { workspace = true, features = ["test-support-tokio"] }
 # to resolve against in a doctest — token-shape unit tests alone are what let
 # a `::std::…` path ship into an alloc-tier derive.
 proxima-config = { workspace = true, features = ["schema"] }
+proxima-core.workspace = true
+proxima-primitives.workspace = true
+proxima-telemetry.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 trybuild = { workspace = true }
