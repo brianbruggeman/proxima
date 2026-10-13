@@ -1,9 +1,115 @@
+use core::future::Future;
 use core::ops::ControlFlow;
+use core::task::{Context, Poll, Waker};
 
 use proxima_core::{ServingFsmError, ServingState};
 
 use super::drafter::{DrafterSet, draft_limit_for_step};
 use super::*;
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+use crate::cuda_async::CudaGpuService;
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+use crate::generate::CudaGraphRequest;
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+use proxima_core::ProximaError;
+
+struct DecodeStepEvaluation<'step, 'name, 'block, 'source> {
+    program: &'step [Op],
+    symbols: &'step [u64],
+    named: &'step [(&'name str, QuantizedBlock<'block>)],
+    outputs: &'step [NodeId],
+    resident_names: &'step BTreeSet<&'name str>,
+    expert_sources: Option<&'step BTreeMap<NodeId, ExpertSource<'source>>>,
+}
+
+trait DecodeStepEvaluator {
+    async fn evaluate_step(
+        &mut self,
+        runtime: &mut BackendRuntime,
+        step: DecodeStepEvaluation<'_, '_, '_, '_>,
+    ) -> Result<Evaluated, InteropError>;
+}
+
+struct SyncDecodeTokenProducer<'callback> {
+    callback: &'callback mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
+}
+
+impl AsyncTokenProducer for SyncDecodeTokenProducer<'_> {
+    async fn produce(&mut self, event: TokenEvent<'_>) -> ControlFlow<(), ()> {
+        (self.callback)(event)
+    }
+}
+
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+struct ContinueDecodeTokenProducer;
+
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+impl AsyncTokenProducer for ContinueDecodeTokenProducer {
+    async fn produce(&mut self, _event: TokenEvent<'_>) -> ControlFlow<(), ()> {
+        ControlFlow::Continue(())
+    }
+}
+
+struct SyncDecodeStepEvaluator;
+
+impl DecodeStepEvaluator for SyncDecodeStepEvaluator {
+    async fn evaluate_step(
+        &mut self,
+        runtime: &mut BackendRuntime,
+        step: DecodeStepEvaluation<'_, '_, '_, '_>,
+    ) -> Result<Evaluated, InteropError> {
+        runtime.evaluate(
+            step.program,
+            step.symbols,
+            step.named,
+            step.outputs,
+            step.resident_names,
+            step.expert_sources,
+        )
+    }
+}
+
+fn poll_ready_decode<Output>(
+    future: impl Future<Output = Result<Output, InteropError>>,
+) -> Result<Output, InteropError> {
+    let mut future = core::pin::pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(result) => result,
+        Poll::Pending => Err(InteropError::SyncDecodePending),
+    }
+}
+
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+struct AsyncCudaDecodeStepEvaluator<'service, Owner> {
+    service: &'service CudaGpuService<Owner>,
+}
+
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+impl<Owner> DecodeStepEvaluator for AsyncCudaDecodeStepEvaluator<'_, Owner>
+where
+    Owner: Future<Output = Result<(), ProximaError>> + Send,
+{
+    async fn evaluate_step(
+        &mut self,
+        runtime: &mut BackendRuntime,
+        step: DecodeStepEvaluation<'_, '_, '_, '_>,
+    ) -> Result<Evaluated, InteropError> {
+        runtime
+            .evaluate_async(
+                self.service,
+                CudaGraphRequest {
+                    program: step.program,
+                    symbols: step.symbols,
+                    named: step.named,
+                    outputs: step.outputs,
+                },
+                step.resident_names,
+                step.expert_sources,
+            )
+            .await
+    }
+}
 
 /// A verify step's evaluation kept past its readout: the nodes evaluated, how
 /// many positions the program ran, how many the caches advanced by, and per
@@ -2241,6 +2347,133 @@ impl<'file> LoadedModel<'file> {
         self.run_decode_loop(prompt, max_tokens, &serving_config, &mut runtime)
     }
 
+    /// Generate through the caller's shared CUDA owner, awaiting each forward
+    /// evaluation so this request yields while the device work is pending.
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    pub async fn generate_async_with_serving_config<Owner>(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        serving_config: ServingConfig<'_>,
+        service: &CudaGpuService<Owner>,
+    ) -> Result<(Vec<u32>, String, bool), InteropError>
+    where
+        Owner: Future<Output = Result<(), ProximaError>> + Send,
+    {
+        let mut token_producer = ContinueDecodeTokenProducer;
+        self.generate_async_with_token_producer(
+            prompt,
+            max_tokens,
+            serving_config,
+            service,
+            &mut token_producer,
+        )
+        .await
+    }
+
+    /// Generate while awaiting a statically dispatched async producer for
+    /// each prefill/token event. Returning `Break(())` stops after that event.
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    pub async fn generate_async_streaming_with_serving_config<Owner, Producer>(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        serving_config: ServingConfig<'_>,
+        service: &CudaGpuService<Owner>,
+        token_producer: &mut Producer,
+    ) -> Result<(Vec<u32>, String, bool), InteropError>
+    where
+        Owner: Future<Output = Result<(), ProximaError>> + Send,
+        Producer: AsyncTokenProducer,
+    {
+        self.generate_async_with_token_producer(
+            prompt,
+            max_tokens,
+            serving_config,
+            service,
+            token_producer,
+        )
+        .await
+    }
+
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    async fn generate_async_with_token_producer<Owner, Producer>(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        mut serving_config: ServingConfig<'_>,
+        service: &CudaGpuService<Owner>,
+        token_producer: &mut Producer,
+    ) -> Result<(Vec<u32>, String, bool), InteropError>
+    where
+        Owner: Future<Output = Result<(), ProximaError>> + Send,
+        Producer: AsyncTokenProducer,
+    {
+        if serving_config.gpu_layers != GPU_LAYERS_ALL {
+            return Err(InteropError::AsyncCudaRequiresGpu);
+        }
+        if serving_config.prompt_cache.is_enabled() {
+            return Err(InteropError::AsyncCudaGenerationUnsupported {
+                mode: "prompt cache",
+            });
+        }
+        if !serving_config.speculative.speculative_types.is_empty() {
+            return Err(InteropError::AsyncCudaGenerationUnsupported {
+                mode: "speculative decoding",
+            });
+        }
+        if serving_config.moe_pre_gather || self.ffn_routing != FfnRouting::Dense {
+            return Err(InteropError::AsyncCudaGenerationUnsupported {
+                mode: "routed expert evaluation",
+            });
+        }
+        if !serving_config.cached_attention_fusion
+            || !serving_config.gated_delta_net_fusion
+            || !serving_config.moe_topk_fusion
+        {
+            return Err(InteropError::AsyncCudaGenerationUnsupported {
+                mode: "per-request fusion environment overrides",
+            });
+        }
+        #[cfg(feature = "gpu")]
+        if serving_config.omega_runtime.is_some() {
+            return Err(InteropError::AsyncCudaGenerationUnsupported {
+                mode: "configured omega runtime",
+            });
+        }
+
+        self.apply_command_buffer_chunks_default(&mut serving_config);
+        let ids = proxima_tokenizer::encode_with_bos_eos(
+            prompt,
+            &self.vocab,
+            wants_bos(&self.vocab),
+            self.vocab.add_eos_token().unwrap_or(false),
+        )?;
+        let mut runtime = BackendRuntime::new(&serving_config);
+        let mut logits_sink = LogitsSink::Discard;
+        let mut node_values_sink = NodeValuesSink::Discard;
+        let mut evaluator = AsyncCudaDecodeStepEvaluator { service };
+        let (generated_ids, text, stopped_by_eos, _) = self
+            .drive_serving_loop(
+                ids,
+                max_tokens,
+                &serving_config,
+                &mut runtime,
+                None,
+                &mut logits_sink,
+                &mut node_values_sink,
+                token_producer,
+                None,
+                true,
+                None,
+                None,
+                None,
+                &mut evaluator,
+            )
+            .await?;
+        Ok((generated_ids, text, stopped_by_eos))
+    }
+
     /// The [`BackendRuntime`] a generation on this model runs with. On Metal
     /// it resumes the decode plans an earlier generation on this thread left
     /// resident ([`super::resident_plans`]); anywhere else it is
@@ -2975,9 +3208,9 @@ impl<'file> LoadedModel<'file> {
     ///
     /// Like every public `generate*` entry point, a request that drafted
     /// anything emits exactly one request-level `info!` event from the
-    /// serving loop ([`Self::drive_serving_loop`]); `speculative_stats` may
+    /// serving loop (`Self::drive_serving_loop`); `speculative_stats` may
     /// be reused across requests, the event carries only this request's own
-    /// counts ([`SpeculativeDecodeStats::since`]).
+    /// counts (`SpeculativeDecodeStats::since`).
     pub fn generate_streaming_with_speculative_stats(
         &self,
         prompt: &str,
@@ -3197,8 +3430,9 @@ impl<'file> LoadedModel<'file> {
         speculative_stats: Option<&mut SpeculativeDecodeStats>,
         forced_draft_width: Option<u16>,
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
+        let mut token_producer = SyncDecodeTokenProducer { callback: on_token };
         let outcome = self.with_draft_model(serving_config, |model_proposer| {
-            self.drive_serving_loop(
+            poll_ready_decode(self.drive_serving_loop(
                 ids,
                 max_tokens,
                 serving_config,
@@ -3206,13 +3440,14 @@ impl<'file> LoadedModel<'file> {
                 token_override,
                 logits_sink,
                 node_values_sink,
-                on_token,
+                &mut token_producer,
                 seed,
                 force_two_range,
                 speculative_stats,
                 forced_draft_width,
                 model_proposer,
-            )
+                &mut SyncDecodeStepEvaluator,
+            ))
         });
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if should_release_monolithic_sources(
@@ -3245,21 +3480,22 @@ impl<'file> LoadedModel<'file> {
     /// evaluation settled into the state and each settled token delivered
     /// through [`deliver_token`].
     #[allow(clippy::too_many_arguments)] // the seeded loop's own parameter list, split at the tokenization
-    fn drive_serving_loop(
+    async fn drive_serving_loop<Evaluator: DecodeStepEvaluator, Producer: AsyncTokenProducer>(
         &self,
         ids: Vec<u32>,
         max_tokens: usize,
-        serving_config: &ServingConfig,
+        serving_config: &ServingConfig<'_>,
         runtime: &mut BackendRuntime,
         token_override: Option<&[u32]>,
-        logits_sink: &mut LogitsSink,
-        node_values_sink: &mut NodeValuesSink,
-        on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
+        logits_sink: &mut LogitsSink<'_>,
+        node_values_sink: &mut NodeValuesSink<'_>,
+        token_producer: &mut Producer,
         seed: Option<PrefixState>,
         force_two_range: bool,
         speculative_stats: Option<&mut SpeculativeDecodeStats>,
         forced_draft_width: Option<u16>,
         mut model_proposer: Option<&mut ModelProposer<'_>>,
+        evaluator: &mut Evaluator,
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
         let mut local_speculative_stats = SpeculativeDecodeStats::default();
         let speculative_stats = speculative_stats.unwrap_or(&mut local_speculative_stats);
@@ -3507,7 +3743,8 @@ impl<'file> LoadedModel<'file> {
                     *even_odd_row,
                     layer,
                     "rotary key",
-                )?;
+                )
+                .await?;
                 let pass_byte_length = dense_attention_placed_byte_length(
                     self.family(),
                     dense_attention_positions,
@@ -5367,14 +5604,19 @@ did not hold every cached position)",
                         #[cfg(not(feature = "instrument"))]
                         unreachable!("the profiler is compiled out without instrumentation")
                     } else {
-                        runtime.evaluate(
-                            active_program,
-                            &symbols,
-                            &named_blocks,
-                            &roots,
-                            &resident_names,
-                            expert_source_substitutions,
-                        )?
+                        evaluator
+                            .evaluate_step(
+                                runtime,
+                                DecodeStepEvaluation {
+                                    program: active_program,
+                                    symbols: &symbols,
+                                    named: &named_blocks,
+                                    outputs: &roots,
+                                    resident_names: &resident_names,
+                                    expert_sources: expert_source_substitutions,
+                                },
+                            )
+                            .await?
                     };
                     #[cfg(all(
                         feature = "metal-output-placement",
@@ -5423,14 +5665,19 @@ did not hold every cached position)",
                             &mut before_moe_gather,
                         )?
                     } else {
-                        runtime.evaluate(
-                            active_program,
-                            &symbols,
-                            &named_blocks,
-                            &roots,
-                            &resident_names,
-                            expert_source_substitutions,
-                        )?
+                        evaluator
+                            .evaluate_step(
+                                runtime,
+                                DecodeStepEvaluation {
+                                    program: active_program,
+                                    symbols: &symbols,
+                                    named: &named_blocks,
+                                    outputs: &roots,
+                                    resident_names: &resident_names,
+                                    expert_sources: expert_source_substitutions,
+                                },
+                            )
+                            .await?
                     };
                     if std::env::var_os("PROXIMA_DEBUG_GDN_ALL_DIGEST").is_some() && step == 0 {
                         for (layer, diagnostic) in self.moe_layer_diagnostics.iter().enumerate() {
@@ -6887,7 +7134,7 @@ did not hold every cached position)",
                 }
                 let elapsed_ms =
                     u64::try_from(loop_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                let delivery = deliver_token(
+                let delivery = deliver_token_async(
                     &self.vocab,
                     token_id,
                     step,
@@ -6896,8 +7143,9 @@ did not hold every cached position)",
                     &mut pending_bytes,
                     &mut unigram_leading_space_trimmed,
                     &mut generated_ids,
-                    on_token,
-                )?;
+                    token_producer,
+                )
+                .await?;
                 if let ControlFlow::Break(by_eos) = delivery {
                     stopped_by_eos = by_eos;
                     undelivered = settled_tokens.len() - offset - 1;
@@ -7735,7 +7983,7 @@ did not hold every cached position)",
     /// The ids are the ones a frozen prefix names, so a diagnostic compares
     /// token for token; the config carries the backend, the numeric policy and
     /// the recurrent policy the graph must have been lowered under
-    /// ([`Self::admit_recurrent`]).
+    /// (`Self::admit_recurrent`).
     ///
     /// # Errors
     ///

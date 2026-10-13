@@ -1,5 +1,6 @@
 #[cfg(feature = "gpu")]
 use conflaguration::Validate;
+use core::future::Future;
 use core::ops::ControlFlow;
 #[cfg(feature = "gpu")]
 use omega::config::{RuntimeConfig, SelectionMode};
@@ -5649,6 +5650,7 @@ pub(super) fn decode_until_stop_or_budget(
 /// [`ControlFlow::Break`] carries whether the stop was the model's own
 /// end-of-sequence (`true`) or the caller's `on_token` breaking (`false`).
 #[allow(clippy::too_many_arguments)] // the policy state is three caller-owned locals, not a type
+#[cfg(any(test, all(feature = "metal-output-placement", target_os = "macos")))]
 pub(super) fn deliver_token(
     vocab: &Vocab,
     token_id: u32,
@@ -5713,13 +5715,107 @@ pub(super) fn deliver_token(
     })
 }
 
+/// Statically dispatched async sink for generation token events.
+///
+/// `LoadedModel::generate_async_streaming_with_serving_config` awaits each
+/// event before advancing the token loop; `Break(())` stops the request after
+/// the current event without allocating a boxed future.
+pub trait AsyncTokenProducer {
+    fn produce(&mut self, event: TokenEvent<'_>) -> impl Future<Output = ControlFlow<(), ()>>;
+}
+
+/// Asynchronous form of [`deliver_token`], with static producer dispatch so
+/// event delivery adds no boxed future to the per-token loop.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn deliver_token_async<Producer: AsyncTokenProducer>(
+    vocab: &Vocab,
+    token_id: u32,
+    step: usize,
+    prompt_token_count: usize,
+    elapsed_ms: u64,
+    pending_bytes: &mut Vec<u8>,
+    unigram_leading_space_trimmed: &mut bool,
+    generated_ids: &mut Vec<u32>,
+    producer: &mut Producer,
+) -> Result<ControlFlow<bool, ()>, InteropError> {
+    let is_eos = vocab.eos_token_id() == Some(token_id);
+    let is_control = vocab.token_type(token_id) == Some(TokenType::Control);
+    let mut text_piece = if is_eos || is_control {
+        String::new()
+    } else {
+        decode_streamed_piece(vocab, token_id, pending_bytes)?
+    };
+    if !*unigram_leading_space_trimmed && vocab.is_unigram() && !text_piece.is_empty() {
+        *unigram_leading_space_trimmed = true;
+        if text_piece.starts_with(' ') {
+            text_piece.remove(0);
+        }
+    }
+    if step == 0 {
+        let control = producer
+            .produce(TokenEvent {
+                token_id,
+                text_piece: &text_piece,
+                phase: Phase::Prefill {
+                    prompt_tokens: prompt_token_count,
+                },
+                step,
+                elapsed_ms,
+            })
+            .await;
+        if control == ControlFlow::Break(()) {
+            return Ok(ControlFlow::Break(false));
+        }
+    }
+    if is_eos {
+        return Ok(ControlFlow::Break(true));
+    }
+    generated_ids.push(token_id);
+    let control = producer
+        .produce(TokenEvent {
+            token_id,
+            text_piece: &text_piece,
+            phase: Phase::Token,
+            step,
+            elapsed_ms,
+        })
+        .await;
+    Ok(match control {
+        ControlFlow::Break(()) => ControlFlow::Break(false),
+        ControlFlow::Continue(()) => ControlFlow::Continue(()),
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod decode_control_suppression_tests {
     use alloc::string::String;
+    use alloc::vec::Vec;
+    use core::future::Future;
     use core::ops::ControlFlow;
 
-    use super::{Phase, TokenEvent, TokenType, Vocab, decode_until_stop_or_budget};
+    use super::{
+        AsyncTokenProducer, Phase, TokenEvent, TokenType, Vocab, decode_until_stop_or_budget,
+        deliver_token_async,
+    };
+
+    struct AsyncEventCollector {
+        events: Vec<(u32, String, Phase, usize)>,
+    }
+
+    impl AsyncTokenProducer for AsyncEventCollector {
+        fn produce(&mut self, event: TokenEvent<'_>) -> impl Future<Output = ControlFlow<(), ()>> {
+            async move {
+                self.events.push((
+                    event.token_id,
+                    String::from(event.text_piece),
+                    event.phase,
+                    event.step,
+                ));
+                ControlFlow::Continue(())
+            }
+        }
+    }
 
     /// A small vocab with one [`TokenType::Control`] entry (`"<turn|>"`,
     /// the sliding-pattern family's real turn-boundary marker) among ordinary text tokens --
@@ -5787,6 +5883,36 @@ mod decode_control_suppression_tests {
         assert!(
             !text.contains("<turn|>"),
             "no literal control marker leaks into decoded text"
+        );
+    }
+
+    #[proxima::test]
+    async fn async_token_delivery_reports_eos_and_does_not_record_it() {
+        let vocab = Vocab::new(alloc::vec![String::from("<eos>")], &[], None, Some(0), None)
+            .expect("single eos vocabulary builds");
+        let mut producer = AsyncEventCollector { events: Vec::new() };
+        let mut pending_bytes = Vec::new();
+        let mut trimmed = false;
+        let mut generated_ids = Vec::new();
+        let delivery = deliver_token_async(
+            &vocab,
+            0,
+            0,
+            1,
+            0,
+            &mut pending_bytes,
+            &mut trimmed,
+            &mut generated_ids,
+            &mut producer,
+        )
+        .await
+        .expect("async eos delivery succeeds");
+
+        assert_eq!(delivery, ControlFlow::Break(true));
+        assert!(generated_ids.is_empty());
+        assert_eq!(
+            producer.events,
+            [(0, String::new(), Phase::Prefill { prompt_tokens: 1 }, 0)]
         );
     }
 }
