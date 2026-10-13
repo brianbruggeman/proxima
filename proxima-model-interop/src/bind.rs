@@ -1336,7 +1336,7 @@ pub(crate) fn codec_byte_len_for(
 /// `Q4_K`/`Q5_K`/`Q6_K`/`Q8_0` bind packed and zero-copy here, exactly like
 /// [`bind_matmul_weight_as`]'s own packed arm. `F16` widens to an owned f32
 /// copy: only a leaf the program reads through a data-dependent gather (the
-/// embedding, see [`bind_gathered_as`]) keeps `F16` packed, so a norm never
+/// embedding, see `bind_gathered_as`) keeps `F16` packed, so a norm never
 /// pays the packed-f16 decode path it has no row-gather reason to take. The
 /// dequantize fallback covers a borrow refused for a misaligned base pointer
 /// and the decodable-but-not-borrowable `GgmlType`s (`Q4_0`/`Q5_0`/`BF16`).

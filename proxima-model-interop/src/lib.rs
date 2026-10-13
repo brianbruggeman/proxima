@@ -50,6 +50,8 @@ pub mod expert_slab;
 mod generate;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 pub use generate::BackendRuntime;
+#[cfg(all(feature = "std", feature = "cuda", feature = "interop-bgpool"))]
+pub use generate::CudaServingPipe;
 #[cfg(feature = "std")]
 mod hf_bind;
 mod hf_config;
@@ -137,9 +139,9 @@ pub use expert_slab::{
 };
 #[cfg(feature = "std")]
 pub use generate::{
-    CachePath, CacheReport, ColdTier, DecodeMetrics, EvictionRule, LoadedModel, MissReason, Phase,
-    PrefixState, PrewarmReport, PrewarmSkip, SpeculativeDecodeStats, SpeculativeTypeStats,
-    TokenEvent,
+    AsyncTokenProducer, CachePath, CacheReport, ColdTier, DecodeMetrics, EvictionRule, LoadedModel,
+    MissReason, Phase, PrefixState, PrewarmReport, PrewarmSkip, SpeculativeDecodeStats,
+    SpeculativeTypeStats, TokenEvent,
 };
 #[cfg(feature = "std")]
 pub use hf_bind::{

@@ -2683,7 +2683,7 @@ impl<'file> LoadedModel<'file> {
     /// [`crate::recurrent_descriptor`], so a depth or guidance change is a
     /// different lowered graph over the same weights. The model resolves the
     /// policy once here; every serving call must name the same one
-    /// ([`Self::admit_recurrent`]).
+    /// (`Self::admit_recurrent`).
     ///
     /// # Errors
     ///

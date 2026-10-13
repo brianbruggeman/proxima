@@ -55,7 +55,6 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::future::Future;
 use core::marker::PhantomData;
 use core::ops::Range;
 
@@ -235,6 +234,10 @@ mod chunk_shift;
 mod chunked_prefill_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod cpu_forward_tests;
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+mod cuda_serving_pipe;
+#[cfg(all(test, feature = "cuda", feature = "interop-bgpool"))]
+mod cuda_serving_pipe_tests;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 mod device_kv;
 #[cfg(test)]
@@ -298,6 +301,8 @@ mod verify_bound_tests;
 #[cfg(test)]
 mod recurrent_hf_tests;
 mod warm_buffers;
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+pub use cuda_serving_pipe::CudaServingPipe;
 use decode::*;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use device_kv::{DeviceKv, KvLeafNodes, kv_leaf_nodes};
