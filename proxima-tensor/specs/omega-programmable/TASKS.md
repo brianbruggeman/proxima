@@ -8,20 +8,20 @@ and payloads before integrating; no commit or publish is authorized.
 
 | Slice | Owner / files | Depends on | AC | Validation command |
 |---|---|---|---|---|
-| S1 config | Luna; config packet plus numeric Settings derive and existing sizing files | admission | AC1 | `cargo nextest run -p omega --lib -E 'test(runtime_config_)'` |
+| S1 config | Luna; config packet plus numeric Settings derive and existing sizing files | admission | AC1 | `cargo nextest run -p proxima-omega --lib -E 'test(runtime_config_)'` |
 | S2 binder/CPU policy | Sol; binding packet | admission | AC2 | `cargo nextest run -p proxima-tensor --lib -E 'test(programmable_binding_)'` |
-| S3 configured execution/resources/selection | Sol; execution packet, existing backend driver prepare/allocation paths | S1,S2 | AC3 | `cargo nextest run -p omega --lib -E 'test(config_plan_)'` |
-| S3b CPU allocation assertions | Sol; execution packet CPU tests | S3 | AC3b | `cargo nextest run -p omega --lib -E 'test(config_cpu_budget_)'` |
-| S3c selection assertions | Sol; execution packet selector tests | S3 | AC3c | `cargo nextest run -p omega --lib -E 'test(config_selection_)'` |
-| S3d Metal allocation assertions | Sol; execution packet Metal tests | S3 | AC3d | `cargo nextest run -p omega --lib -E 'test(config_metal_)'` |
-| S4 tiled storage/policy | Luna; tiled packet, including existing identity and grid consumers | S1 sizing gate | AC4 | `env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=1 cargo nextest run -p omega --features metal-tiled-gemm --lib -E 'test(programmable_tiled_)' --no-capture` |
-| S4b compile-off assertion | Luna; tiled packet | S4 | AC5 | `env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=0 cargo nextest run -p omega --features metal-tiled-gemm --lib -E 'test(programmable_tiled_)' --no-capture` |
-| S5 real execution | root source; Luna runs omega/tests/programmable_execution_vectors.rs | S3,S4 | AC6 | `env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=1 cargo nextest run -p omega --features metal-tiled-gemm --test programmable_execution_vectors --no-capture` |
+| S3 configured execution/resources/selection | Sol; execution packet, existing backend driver prepare/allocation paths | S1,S2 | AC3 | `cargo nextest run -p proxima-omega --lib -E 'test(config_plan_)'` |
+| S3b CPU allocation assertions | Sol; execution packet CPU tests | S3 | AC3b | `cargo nextest run -p proxima-omega --lib -E 'test(config_cpu_budget_)'` |
+| S3c selection assertions | Sol; execution packet selector tests | S3 | AC3c | `cargo nextest run -p proxima-omega --lib -E 'test(config_selection_)'` |
+| S3d Metal allocation assertions | Sol; execution packet Metal tests | S3 | AC3d | `cargo nextest run -p proxima-omega --lib -E 'test(config_metal_)'` |
+| S4 tiled storage/policy | Luna; tiled packet, including existing identity and grid consumers | S1 sizing gate | AC4 | `env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=1 cargo nextest run -p proxima-omega --features metal-tiled-gemm --lib -E 'test(programmable_tiled_)' --no-capture` |
+| S4b compile-off assertion | Luna; tiled packet | S4 | AC5 | `env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=0 cargo nextest run -p proxima-omega --features metal-tiled-gemm --lib -E 'test(programmable_tiled_)' --no-capture` |
+| S5 real execution | root source; Luna runs omega/tests/programmable_execution_vectors.rs | S3,S4 | AC6 | `env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=1 cargo nextest run -p proxima-omega --features metal-tiled-gemm --test programmable_execution_vectors --no-capture` |
 | S5b enabled microbench | root source; Luna runs existing performance example | S5 | AC10 | `env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=1 OMEGA_TILED_GEMM_MIN_TOKENS=1 cargo run --release --example ouro_loopcd_lab --features proxima-tensor,omega/metal-tiled-gemm -- --performance --microbench --backend metal --samples 5 --omega-config proxima-tensor/specs/omega-programmable/relaxed-metal.toml --output proxima-tensor/specs/omega-programmable/results/micro-enabled` |
 | S5c disabled microbench | root source; Luna runs existing performance example | S5 | AC10b | `env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=0 OMEGA_TILED_GEMM_MIN_TOKENS=1 cargo run --release --example ouro_loopcd_lab --features proxima-tensor,omega/metal-tiled-gemm -- --performance --microbench --backend metal --samples 5 --omega-config proxima-tensor/specs/omega-programmable/relaxed-metal.toml --output proxima-tensor/specs/omega-programmable/results/micro-disabled` |
 | S6 caller/evidence | root integration with delegated runs; evidence packet | S3,S4,S5 | AC9 | Run both commands: `env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=1 OMEGA_TILED_GEMM_MIN_TOKENS=1 cargo run --release --example ouro_loopcd_lab --features proxima-tensor,omega/metal-tiled-gemm -- --performance --backend metal --samples 5 --omega-config proxima-tensor/specs/omega-programmable/relaxed-metal.toml --output proxima-tensor/specs/omega-programmable/results/ouro-configured`; `env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=0 OMEGA_TILED_GEMM_MIN_TOKENS=1 cargo run --release --example ouro_loopcd_lab --features proxima-tensor,omega/metal-tiled-gemm -- --performance --backend metal --samples 5 --omega-config proxima-tensor/specs/omega-programmable/relaxed-metal.toml --output proxima-tensor/specs/omega-programmable/results/ouro-configured-control` |
-| S7 alloc-tier build | Luna; combined tree | S3,S4 | AC7 | `cargo check -p omega --no-default-features --features alloc --message-format=json` |
-| S8 CPU/std build | Luna; combined tree | S3,S4 | AC8 | `cargo check -p omega --no-default-features --features std,cpu --message-format=json` |
+| S7 alloc-tier build | Luna; combined tree | S3,S4 | AC7 | `cargo check -p proxima-omega --no-default-features --features alloc --message-format=json` |
+| S8 CPU/std build | Luna; combined tree | S3,S4 | AC8 | `cargo check -p proxima-omega --no-default-features --features std,cpu --message-format=json` |
 
 ## Integration protocol
 

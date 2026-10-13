@@ -596,11 +596,11 @@ other bench of mine active.
 ### re-prove
 
 ```
-cargo nextest run -p omega --features metal --cargo-profile gate                      # 581 tests
+cargo nextest run -p proxima-omega --features metal --cargo-profile gate                      # 581 tests
 cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate  # 709
 cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate \
   -E 'test(llama_parity_) or test(generic_verify_llama_parity_) or test(prefill_width_parity_with_llama_granite_moe)'  # 13
-cargo run --release -p omega --example expert_grouped_gemm_speed_probe --features metal,instrument
+cargo run --release -p proxima-omega --example expert_grouped_gemm_speed_probe --features metal,instrument
 decode_arms --prompt-file prompt1k.txt --processes 3 --runs 7 --arm base=<f76b4a97 binary> \
   --arm tip=<final binary> --arm tipcopy=<copy of tip> --llama-server <llama-server f1ea20621> \
   --case granite_moe=<granite blob> --case gemma4_e2b=<E2B blob>
@@ -893,13 +893,13 @@ through xctrace (recorded, undecoded).
 ### re-prove
 
 ```
-cargo nextest run -p omega --features metal --cargo-profile gate                                   # 592 tests
-cargo nextest run -p omega --features metal --cargo-profile gate -E 'test(mm_layout)'              # 11
-cargo clippy -p proxima-tensor -p proxima-model-interop -p omega --features proxima-model-interop/std,proxima-model-interop/metal,omega/metal --all-targets -- -D warnings
+cargo nextest run -p proxima-omega --features metal --cargo-profile gate                                   # 592 tests
+cargo nextest run -p proxima-omega --features metal --cargo-profile gate -E 'test(mm_layout)'              # 11
+cargo clippy -p proxima-tensor -p proxima-model-interop -p proxima-omega --features proxima-model-interop/std,proxima-model-interop/metal,omega/metal --all-targets -- -D warnings
 cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate   # 709
 cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate \
   -E 'test(llama_parity_) or test(generic_verify_llama_parity_) or test(prefill_width_parity_with_llama_granite_moe)'   # 13
-cargo run --release -p omega --example tiled_gemm_q4_0_speed_probe --features metal,instrument
+cargo run --release -p proxima-omega --example tiled_gemm_q4_0_speed_probe --features metal,instrument
   # HEAD kernels: PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE=0 PROXIMA_TILED_GEMM_GRID2D=0; row-major layout: PROXIMA_TILED_GEMM_MM_LAYOUT=0
 gemma4_decode_kernel_census with M0_CAPTURE_STEPS=0 M0_MAX_TOKENS=2 PROXIMA_PROMPT_FILE=prompt1k.txt (same two env pins for HEAD)
 attribution_rank rank --census DIR --llama evidence/slice0/llama_ops/e2b_ops.tsv --ntok 512,455,4 --requests 3 --floor-us 4.0
@@ -1331,14 +1331,14 @@ they are not the lever.
 ### re-prove
 
 ```
-cargo nextest run -p omega --features metal --cargo-profile gate                                   # 599 tests
-cargo nextest run -p omega --features metal --cargo-profile gate -E 'binary(tiled_gemm_mm_layout_parity)'   # 13
-cargo clippy -p proxima-tensor -p proxima-model-interop -p omega --features proxima-model-interop/std,proxima-model-interop/metal,omega/metal --all-targets -- -D warnings
+cargo nextest run -p proxima-omega --features metal --cargo-profile gate                                   # 599 tests
+cargo nextest run -p proxima-omega --features metal --cargo-profile gate -E 'binary(tiled_gemm_mm_layout_parity)'   # 13
+cargo clippy -p proxima-tensor -p proxima-model-interop -p proxima-omega --features proxima-model-interop/std,proxima-model-interop/metal,omega/metal --all-targets -- -D warnings
 cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate   # 710
 cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate \
   -E 'test(llama_parity_) or test(generic_verify_llama_parity_) or test(prefill_width_parity_with_llama)'   # 14
 LADDER_ROWS=12288 LADDER_K=1536 LADDER_TOKENS=971 LADDER_VARIANTS=<variant.metal,...> LADDER_DUMP=<dir>/prod.metal \
-  cargo run --release -p omega --example mm_kernel_ladder --features metal    # needs a llama.cpp f1ea20621 checkout at LADDER_GGML_DIR
+  cargo run --release -p proxima-omega --example mm_kernel_ladder --features metal    # needs a llama.cpp f1ea20621 checkout at LADDER_GGML_DIR
 xcrun -sdk macosx metal -std=metal3.0 -fmetal-math-mode=relaxed -O2 -S -emit-llvm -w -o out.ll <source>   # IR counts
 gemma4_decode_kernel_census with M0_CAPTURE_STEPS=0 M0_MAX_TOKENS=2 PROXIMA_PROMPT_FILE=prompt1k.txt   # switches pinned off: PROXIMA_TILED_GEMM_{WIDE_WEIGHT_STAGE,GRID2D,MM_LAYOUT,DIRECT_STORE,DYNAMIC_TGMEM}=0
 attribution_rank rank --census DIR --llama evidence/slice0/llama_ops/e2b_ops.tsv --ntok 512,455,4 --requests 3 --floor-us 4.0
@@ -1532,7 +1532,7 @@ Prefill passes the control in every long run (copy difference 0.96 ms in run 1, 
   (`run2_short_hippo/decode_arms.out`, `process=1`). The driver flags 4 of HEAD's 5 outliers and all 4 of the copy's
   outliers in process 1; HEAD CoV 15.4% and copy CoV 20.8% in run 2.
 - External compiles contaminated run 5, processes 2 and 3: `cargo doc --workspace` (pid 69181) and
-  `cargo test -p proxima ...` (pid 69849) were running from about 13:21Z (`run5_probe/box_samples.txt`, the 13:23:18Z
+  `cargo test -p proxima-lib ...` (pid 69849) were running from about 13:21Z (`run5_probe/box_samples.txt`, the 13:23:18Z
   sample lists `rustc` at 20% each; `ps` at 13:24Z); prefill in those processes rose to 2800-3415 ms
   (`run5_probe/decode_arms.out`). The 0b, probe and 0c comparison above uses processes 0 and 1 only.
 - Mechanism of the per-process slow state: not traced. The instrument that would show it (GPU and CPU clocks via
@@ -1956,7 +1956,7 @@ was not tried.
 ### three checks
 
 1. Correctness (tests, run under the GPU lock for the Metal ones; logs in `evidence/r8/land/gate/`).
-   - `cargo nextest run -p omega --features metal --cargo-profile gate`: 613 tests run, 613 passed, 16 skipped
+   - `cargo nextest run -p proxima-omega --features metal --cargo-profile gate`: 613 tests run, 613 passed, 16 skipped
      (`nextest_omega.head_tail.txt`; 613 PASS lines, 0 FAIL lines in the full log). The last count recorded in this spec is 599 (slice 2 fix); this slice adds 14, which makes 613:
      5 integration cases in `omega/tests/packed_row_single_token_epilogue.rs` (rows 6, 1536, 3, 5 and 7 over Q4_0 and Q6_K
      lane masking) and 9 unit cases in `omega/src/msl/tests.rs`. The 16 skipped are `#[ignore]`d probes and golden recorders
@@ -1967,11 +1967,11 @@ was not tried.
      `upload_path_totals_report_after_the_full_parity_suite` and
      `metal_matmul_on_real_ffn_up_q3k_bytes_matches_the_dequantized_f32_cpu_path` (a real-checkpoint test, skipped by
      `#[ignore]`; it is not run by this gate and was not run here).
-   - `cargo nextest run -p omega --features metal,instrument --cargo-profile gate -E 'binary(captured_dispatch_replay)'`:
+   - `cargo nextest run -p proxima-omega --features metal,instrument --cargo-profile gate -E 'binary(captured_dispatch_replay)'`:
      3 run, 3 passed (`nextest_replay.log`); the default gate does not build those three because they need `instrument`.
    - `cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate`: 710 run,
      710 passed, 124 skipped (`nextest_interop_slice_gate.head_tail.txt`; 710 PASS, 0 FAIL).
-   - `cargo clippy -p proxima-tensor -p proxima-model-interop -p omega --features
+   - `cargo clippy -p proxima-tensor -p proxima-model-interop -p proxima-omega --features
      proxima-model-interop/std,proxima-model-interop/metal,omega/metal --all-targets -- -D warnings`: exit 0
      (`clippy.log`); with `omega/instrument` and `proxima-model-interop/instrument` added for omega and interop: exit 0
      (`clippy_instr.log`).
@@ -2017,8 +2017,8 @@ decode_arms --prompt-file prompt1k.txt --processes 2 --runs 3 --arm base=<land/b
   --arm tipcopy=<land/bin/tipcopy> --llama-server <llama-server f1ea20621> --ignore-ollama \
   --case gemma4_e2b=<E2B blob> --case granite_moe=<granite blob>               # land/long
 decode_arms --prompt-file prompt_short_hippo.txt --new-tokens 64 ... (same arms)   # land/short
-cargo nextest run -p omega --features metal --cargo-profile gate                                # 613 passed, 16 skipped
-cargo nextest run -p omega --features metal,instrument --cargo-profile gate -E 'binary(captured_dispatch_replay)'   # 3
+cargo nextest run -p proxima-omega --features metal --cargo-profile gate                                # 613 passed, 16 skipped
+cargo nextest run -p proxima-omega --features metal,instrument --cargo-profile gate -E 'binary(captured_dispatch_replay)'   # 3
 cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate           # 710
 cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate \
   -E 'test(llama_parity_) or test(generic_verify_llama_parity_) or test(prefill_width_parity_with_llama)'          # 14
@@ -2088,8 +2088,8 @@ artifact named beside it.
 ### run after
 
 ```
-cargo nextest run -p omega --features metal -E 'binary(packed_row_attn_output_shape_parity) or binary(packed_row_blocked_s1_byte_identity) or binary(packed_row_single_token_epilogue)'
-cargo nextest run -p omega --features metal -E 'test(a_plain_matvec_finishes_each_row) or test(a_fused_epilogue_finishes_each_row)'
+cargo nextest run -p proxima-omega --features metal -E 'binary(packed_row_attn_output_shape_parity) or binary(packed_row_blocked_s1_byte_identity) or binary(packed_row_single_token_epilogue)'
+cargo nextest run -p proxima-omega --features metal -E 'test(a_plain_matvec_finishes_each_row) or test(a_fused_epilogue_finishes_each_row)'
 cargo nextest run -p proxima-model-interop --features std,metal --run-ignored all -E 'test(gemma4_decode_holds_one_per_layer_input_norm)'
 ```
 
@@ -2239,13 +2239,13 @@ prints the kind histogram).
 ```
 cargo nextest run -p proxima-tensor --features reduce-epilogue-fusion,cached-attention-streaming -E 'test(projection_output_rmsnorm)'   # 2
 cargo nextest run -p proxima-model-interop --features std,metal -E 'test(default_numeric_policy)'                                      # 2, both new
-cargo nextest run -p omega --features metal -E 'binary(rmsnorm_epilogue_bit_identity)'                                                  # 2
+cargo nextest run -p proxima-omega --features metal -E 'binary(rmsnorm_epilogue_bit_identity)'                                                  # 2
 cargo nextest run -p proxima-model-interop --features std,metal -E 'test(llama_parity_) or test(generic_verify_llama_parity_)'          # 12
 cargo nextest run -p proxima-model-interop --features std,metal -E 'test(epilogue_sources_drift)' --run-ignored all                      # needs the E2B gguf
 PROXIMA_EPILOGUE_SOURCES=0|1 decode_gbps_baseline / gemma4_decode_kernel_census   # off and on arms; the census reads the norm family 446 -> ?
 cargo nextest run -p proxima-tensor -E 'test(twin_elementwise_tests)'                                                                   # 8: CPU parity per pairing, swapped-body control, no-merge cases
-cargo nextest run -p omega --features metal -E 'test(twin_elementwise_tests)'                                                           # 6: kernel source, extra-output buffer index
-cargo nextest run -p omega --features metal -E 'binary(elementwise_twin_dispatch)'                                                      # 9: Metal vs CPU, twin vs two-dispatch bits, placed KV outputs
+cargo nextest run -p proxima-omega --features metal -E 'test(twin_elementwise_tests)'                                                           # 6: kernel source, extra-output buffer index
+cargo nextest run -p proxima-omega --features metal -E 'binary(elementwise_twin_dispatch)'                                                      # 9: Metal vs CPU, twin vs two-dispatch bits, placed KV outputs
 cargo nextest run -p proxima-model-interop --features std,metal -E 'test(gemma4_rope_twin_census)' --run-ignored all                   # needs the E2B gguf: 50 twins, 100 -> 50
 PROXIMA_DISABLE_TWIN_ELEMENTWISE_FUSION=1|unset decode_gbps_baseline / gemma4_decode_kernel_census   # off and on arms for the rope fold
 ```
@@ -2393,7 +2393,7 @@ pipeline; r2's stacked strategy reaches nothing by default.
 ### re-prove
 
 ```
-cargo nextest run -p omega --features metal --cargo-profile gate --no-fail-fast                      # 763 passed, 16 skipped
+cargo nextest run -p proxima-omega --features metal --cargo-profile gate --no-fail-fast                      # 763 passed, 16 skipped
 cargo nextest run -p proxima-tensor --cargo-profile gate --no-fail-fast                               # 798 passed, 8 skipped
 cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate --no-fail-fast -E 'not test(~gemma4_26b) and not (binary(arch_data_baseline) and (test(~openchat) or test(~qwen) or test(~lfm2)))'   # 716 passed, 143 skipped
 decode_arms --prompt-file prompt1k.txt --processes 3 --runs 7 --arm base=<ab69ec03 build> --arm tip=<tip build> --arm control=<byte copy of tip> --case gemma4_e2b=<gguf> --case granite_moe=<gguf>
@@ -2628,10 +2628,10 @@ RSS does not separate from its 250 MB per-arm spread.
 
 | gate | result |
 |---|---|
-| clippy `-p proxima-tensor -p proxima-model-interop --features .../std,.../metal --all-targets -D warnings`; `-p omega --features metal` and `metal,instrument` | exit 0 (4 invocations) |
-| `cargo check -p proxima-tensor --no-default-features --features alloc`; `-p proxima-model-interop --no-default-features`; `-p omega --no-default-features` | exit 0 (the arena modules are `metal` and macOS only, so no restricted-tier module was built) |
+| clippy `-p proxima-tensor -p proxima-model-interop --features .../std,.../metal --all-targets -D warnings`; `-p proxima-omega --features metal` and `metal,instrument` | exit 0 (4 invocations) |
+| `cargo check -p proxima-tensor --no-default-features --features alloc`; `-p proxima-model-interop --no-default-features`; `-p proxima-omega --no-default-features` | exit 0 (the arena modules are `metal` and macOS only, so no restricted-tier module was built) |
 | nextest `-p proxima-tensor --cargo-profile gate` | 800 passed, 8 skipped |
-| nextest `-p omega --features metal --cargo-profile gate` | 773 passed, 16 skipped (763 + the 10 new tests) |
+| nextest `-p proxima-omega --features metal --cargo-profile gate` | 773 passed, 16 skipped (763 + the 10 new tests) |
 | omega `--features metal,instrument` | 826 run, 823 passed, 3 failed: `q4_0_two_token_index32_dispatch_classifies_as_packed_row_blocked`, `rmsnorm_fused_epilogue_air_division_count_decode_shape`, `..._prefill_shape` (the same three as `evidence/combine/gates.md`) |
 | omega gated features (`binary(step_buffer_allocations)` and 6 other alloc and parity binaries) | 20 passed |
 | interop `slice-gate` | 736 passed, 124 skipped |
@@ -2652,8 +2652,8 @@ RSS does not separate from its 250 MB per-arm spread.
 ### re-prove
 
 ```
-cargo nextest run -p omega --features metal --cargo-profile gate -E 'test(arena_layout) or test(arena_tests)'      # 18 passed
-cargo nextest run -p omega --features metal,instrument,moe-topk-fusion --cargo-profile gate -E 'binary(step_buffer_allocations)'   # 3 passed
+cargo nextest run -p proxima-omega --features metal --cargo-profile gate -E 'test(arena_layout) or test(arena_tests)'      # 18 passed
+cargo nextest run -p proxima-omega --features metal,instrument,moe-topk-fusion --cargo-profile gate -E 'binary(step_buffer_allocations)'   # 3 passed
 cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate           # 736 passed, 124 skipped
 cargo build --release -p proxima-model-interop --example decode_gbps_baseline --features std,metal,instrument
 RUST_LOG=debug PROXIMA_DECODE_MODEL_GGUF=<granite> PROXIMA_PROMPT="$(cat evidence/memfix/bench/prompt1k.txt)" PROXIMA_MAX_TOKENS=4 PROXIMA_RUNS=1 decode_gbps_baseline   # grep 'buffer arena'
@@ -2812,7 +2812,7 @@ The three failures listed in the gates table of the memory section and in `evide
 asserted the spelling `q4_0_element(wblk0`; the two-token Q4_0 kernel now reads its weight through `device const uchar *wblk0 = in0 + ...` and per-row `blk0..blk3` pointers (printed from the emitted source), and `classify_kind` still returns
 `reduce-packed-row-blocked` for it, so only the precondition string changed (`b1e102a0`). `rmsnorm_fused_epilogue_air_division_count_{decode,prefill}_shape` rewrote the emitted `%`/`/` coordinate pair into `full_coord[1] = r;` to count AIR division instructions; the emitter
 now writes `full_coord[1] = r;` itself (the emitted source has no `remaining_r`), so the test restores the pair, compiles both forms to AIR, and asserts the emitted form has strictly fewer division-class instructions (`3fdc667d`).
-After both: `cargo nextest run -p omega --features metal,instrument --cargo-profile gate --no-fail-fast` 826 run, 826 passed, 22 skipped (`evidence/attr2/omega_instrument_after_test_fixes.log`); clippy `-p omega --features metal,instrument --all-targets -D warnings` exit 0.
+After both: `cargo nextest run -p proxima-omega --features metal,instrument --cargo-profile gate --no-fail-fast` 826 run, 826 passed, 22 skipped (`evidence/attr2/omega_instrument_after_test_fixes.log`); clippy `-p proxima-omega --features metal,instrument --all-targets -D warnings` exit 0.
 
 ## moe combine (written, not yet run)
 
@@ -2839,14 +2839,14 @@ Conflicts: 1 textual in `omega/build.rs` (rope and e2bdecode each append a sizin
 |---|---|---|---|
 | tensor tests | `nextest run -p proxima-tensor` | 803 passed, 8 skipped | `final_nextest_tensor.log` |
 | tensor, combine feature | `... --features moe-stacked-combine` (before the test added by `94adb2da`) | 803 passed, 8 skipped | `nextest_tensor_combine.log` |
-| omega | `nextest run -p omega --features metal` | 809 passed, 16 skipped | `final_nextest_omega_metal.log` |
+| omega | `nextest run -p proxima-omega --features metal` | 809 passed, 16 skipped | `final_nextest_omega_metal.log` |
 | omega instrument | `... --features metal,instrument` | 862 passed, 22 skipped | `final_nextest_omega_instrument.log` |
 | omega feature-gated binaries | `... --features metal,metal-buffer-pool,metal-moe-mul-mat-id,moe-topk-fusion,top-fraction-fusion,alloc-count` | 830 passed, 16 skipped | `final_nextest_omega_gated_a.log` |
 | omega split-k | `... --features metal,metal-q4k-split-k` | tip: 801 run, 793 passed, **8 failed**; 9015ad1a: 765 run, 758 passed, **7 failed** | `nextest_omega_gated_b.log`, `base_omega_gated_b.log` |
 | interop slice-gate, 26B excluded | `nextest run -p proxima-model-interop --features std,metal --profile slice-gate -E 'not test(/gemma4_26b/)'` | 741 passed, 128 skipped | `final_nextest_interop_slice.log` |
 | interop descriptor tests | `... --features std,metal,conflaguration` on `model_config_roundtrip_`, `serving_fsm_drives_`, `zero_rust_variant_`, `window_ring_layers_`, `swa_rope_from_metadata`, `generic_binder_`, E2B and granite only | 10 passed | `nextest_interop_conflaguration.log` |
 | clippy `-D warnings --all-targets` | tensor+interop (std,metal), omega metal, omega metal+instrument, omega metal+buffer-pool+alloc-count, interop std,metal,instrument, the example; earlier also interop and tensor with `moe-stacked-combine` | exit 0 each | `clippy_final_*.log`, `clippy_*combine.log` |
-| tiers | `check -p proxima-tensor --no-default-features --features alloc` (it builds none of the changed code: the CPU fold and the graph builder are std-side and omega is metal-gated), `-p proxima-model-interop --no-default-features`, `-p omega --no-default-features`, `--workspace --all-targets` | exit 0 each | `check_final_*.log`, `check_omega_nodefault.log` |
+| tiers | `check -p proxima-tensor --no-default-features --features alloc` (it builds none of the changed code: the CPU fold and the graph builder are std-side and omega is metal-gated), `-p proxima-model-interop --no-default-features`, `-p proxima-omega --no-default-features`, `--workspace --all-targets` | exit 0 each | `check_final_*.log`, `check_omega_nodefault.log` |
 | AC4 | the `git grep ... \| wc -l` of the architecture-as-data table | 0 (1 before `7906a909`) | session |
 | AC5 first command, AC11 grep | `git grep` counts | 0, 0 | session |
 
@@ -2931,9 +2931,9 @@ Granite decode and prefill: tip is below base on both (-0.207 ms/token, -107.5 m
 
 ```
 cargo nextest run -p proxima-tensor --cargo-profile gate                                                     # 803
-cargo nextest run -p omega --features metal --cargo-profile gate                                              # 809
-cargo nextest run -p omega --features metal,instrument --cargo-profile gate                                   # 862
-cargo nextest run -p omega --features metal,metal-buffer-pool,metal-moe-mul-mat-id,moe-topk-fusion,top-fraction-fusion,alloc-count --cargo-profile gate   # 830
+cargo nextest run -p proxima-omega --features metal --cargo-profile gate                                              # 809
+cargo nextest run -p proxima-omega --features metal,instrument --cargo-profile gate                                   # 862
+cargo nextest run -p proxima-omega --features metal,metal-buffer-pool,metal-moe-mul-mat-id,moe-topk-fusion,top-fraction-fusion,alloc-count --cargo-profile gate   # 830
 cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate -E 'not test(/gemma4_26b/)'   # 741
 decode_arms --prompt-file prompt1k.txt --processes 3 --runs 7 --arm base=<9015ad1a binary> --arm tip=<256c9d23 binary> --arm control=<copy of tip> --case gemma4_e2b=<E2B blob> --case granite_moe=<granite blob>
 decode_arms --prompt-file prompt_short_hippo.txt ... --case gemma4_e2b=<E2B blob>
@@ -2978,7 +2978,7 @@ The cap's own doc in the toml now records that 512 costs 0.18 ms/token and 6 ms 
 
 ### 2. the 8 omega tests under `--features metal-q4k-split-k` (`356e44e4`)
 
-Before: `nextest run -p omega --features metal,metal-q4k-split-k` on the 8 names printed 15 run, 7 passed, 8 failed (`gates/splitk_8_before.log`). The route the classifier selects when the feature is on is the split-aware body: `packed_row_dispatch` returns `(groups, split)` with `split = target_simdgroups(2048) / base_simdgroups` held to `max_split(8)` and to `split_k_max_rows(4096)`, `use_q4_0_native` and the ggml-port bodies require split-k off (`packed_row_blocked_ggml.rs:176,204,219`), the `ib` walk is strided by `sgitg` and `split`, and the tail is `push_packed_row_combine_and_write`'s split arm: `partial_sums` in threadgroup memory, a barrier, simdgroup 0 lane 0 adds the partials. Each test now asserts that route when the feature is on and its previous expectation when it is off; none was skipped, no assertion was removed:
+Before: `nextest run -p proxima-omega --features metal,metal-q4k-split-k` on the 8 names printed 15 run, 7 passed, 8 failed (`gates/splitk_8_before.log`). The route the classifier selects when the feature is on is the split-aware body: `packed_row_dispatch` returns `(groups, split)` with `split = target_simdgroups(2048) / base_simdgroups` held to `max_split(8)` and to `split_k_max_rows(4096)`, `use_q4_0_native` and the ggml-port bodies require split-k off (`packed_row_blocked_ggml.rs:176,204,219`), the `ib` walk is strided by `sgitg` and `split`, and the tail is `push_packed_row_combine_and_write`'s split arm: `partial_sums` in threadgroup memory, a barrier, simdgroup 0 lane 0 adds the partials. Each test now asserts that route when the feature is on and its previous expectation when it is off; none was skipped, no assertion was removed:
 
 | test | feature off (unchanged) | feature on (new) |
 |---|---|---|
@@ -2999,7 +2999,7 @@ Not asserted for the feature-on route: that the generic body carries the unroll 
 | clippy | omega `metal`; omega `metal,metal-q4k-split-k` | exit 0 each | `clippy_omega_metal.log`, `clippy_omega_splitk.log` |
 | tiers | `check -p proxima-tensor --no-default-features --features alloc` (builds none of the changed code); `check -p proxima-model-interop --no-default-features` | exit 0 each | `gate_check_alloc.log`, `gate_check_interop_nd.log` |
 | tensor | `nextest run -p proxima-tensor --cargo-profile gate` | 803 passed, 8 skipped | `gate_nextest_tensor.log` |
-| omega metal | `nextest run -p omega --features metal --cargo-profile gate` | 809 passed, 16 skipped | `nextest_omega_metal.log` |
+| omega metal | `nextest run -p proxima-omega --features metal --cargo-profile gate` | 809 passed, 16 skipped | `nextest_omega_metal.log` |
 | omega split-k | `... --features metal,metal-q4k-split-k` | run 1: 801 run, 800 passed, **1 failed** (`packed_row_multi_row_unroll_ab::q8_0_tokens600_k12288_rows1536`: `CommandBufferFailed` `0000000e`); run 2: 801 passed, 16 skipped; the failed test alone: 2 run, 2 passed | `nextest_omega_splitk.log`, `nextest_omega_splitk_run2.log`, `rerun_q8_alone.log` |
 | interop slice-gate, 26B excluded | `nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate -E 'not test(/gemma4_26b/)'` | 741 passed, 128 skipped | `gate_nextest_interop_slice.log` |
 | parity, E2B and granite | `llama_parity_`, `generic_verify_llama_parity_`, `prefill_width_parity_with_llama_` for `gemma4_e2b` and `granite_moe` | 6 of 6 passed | `gate_parity.log` |
@@ -3009,8 +3009,8 @@ The one split-k failure is the `0000000e` command-buffer failure the round two s
 ### re-prove
 
 ```
-cargo nextest run -p omega --features metal --cargo-profile gate                                   # 809
-cargo nextest run -p omega --features metal,metal-q4k-split-k --cargo-profile gate                 # 801
+cargo nextest run -p proxima-omega --features metal --cargo-profile gate                                   # 809
+cargo nextest run -p proxima-omega --features metal,metal-q4k-split-k --cargo-profile gate                 # 801
 OMEGA_WIDE_COOPERATIVE_REDUCE_BROADCAST_MAX_WIDTH=512 cargo build --release -p proxima-model-interop --example decode_gbps_baseline --features std,metal   # base arm
 cargo build --release -p proxima-model-interop --example decode_gbps_baseline --features std,metal                                                          # tip arm
 decode_arms --prompt-file prompt1k.txt --processes 3 --runs 7 --arm base=<512 binary> --arm tip=<256 binary> --arm control=<copy of tip> --case gemma4_e2b=<E2B blob> --case granite_moe=<granite blob>
@@ -3164,18 +3164,18 @@ Integration commits, one change each: `7e7aa0db` lib tests compile at the std ti
 | gate | command | N | source |
 |---|---|---|---|
 | tensor | `nextest run -p proxima-tensor` | 803 run, 803 passed, 8 skipped | `y1_tensor.log` |
-| omega | `-p omega --features metal` | 850 run, 850 passed, 16 skipped | `v2_omega_metal.log` |
+| omega | `-p proxima-omega --features metal` | 850 run, 850 passed, 16 skipped | `v2_omega_metal.log` |
 | omega instrument | `... --features metal,instrument` | 903 run, 903 passed, 22 skipped | `v3_omega_instr.log` |
 | omega feature-gated | `... metal,metal-buffer-pool,metal-moe-mul-mat-id,moe-topk-fusion,top-fraction-fusion,alloc-count` | 871 run, 871 passed, 16 skipped | `v4_omega_gated_a.log` |
 | omega split-k | `... metal,metal-q4k-split-k` | 842 run, 842 passed, 16 skipped (801 at 56d7d21d) | `v5_omega_splitk.log` |
-| omega std tier | `-p omega --no-default-features --features std --lib` | 151 run, 151 passed, 1 skipped (did not compile at 0688ae5b: 16 errors) | `v6_omega_std.log` |
+| omega std tier | `-p proxima-omega --no-default-features --features std --lib` | 151 run, 151 passed, 1 skipped (did not compile at 0688ae5b: 16 errors) | `v6_omega_std.log` |
 | omega std + metal-core | `... --features std,metal-core --lib` | 160 run, 160 passed, 1 skipped | `g6b_omega_metalcore.log` |
 | omega, route mode `segments` (env `OMEGA_GROUPED_GEMM_ROUTE_MODE`) | `... --features metal` | 850 run, 850 passed | `y7_segments_omega_metal.log` |
 | omega, route mode `compacted` (before it became the default) | `... metal`, `... metal,instrument` | 850 and 903 passed | `k1`, `k2` |
 | interop slice gate, 26B excluded | `nextest run -p proxima-model-interop --features std,metal --profile slice-gate -E 'not test(/gemma4_26b/)'` | 741 run, 741 passed, 128 skipped | `y8_interop_slice.log` |
 | interop descriptor tests, E2B and granite | `... std,metal,conflaguration`, 8 name filters | 10 run, 10 passed, 859 skipped | `y9_interop_descriptor.log` |
 | clippy `-D warnings --all-targets` | tensor+interop (std,metal); omega metal; omega metal+instrument; omega gated set; interop std,metal,instrument; the two arms examples; omega `std,metal-core`, `std,metal-tiled-gemm`, `std,metal-grouped-gemm` (lib and tests) | exit 0 each | `x1`-`x5`, `v7`, `v8`, `c6`, `c7`, `combo_*` |
-| tiers | `check -p proxima-tensor --no-default-features --features alloc`; `-p proxima-model-interop --no-default-features`; `-p omega --no-default-features --features alloc`; `--workspace --all-targets` | exit 0 each | `xt1`-`xt4`, `v9_check_ws.log` |
+| tiers | `check -p proxima-tensor --no-default-features --features alloc`; `-p proxima-model-interop --no-default-features`; `-p proxima-omega --no-default-features --features alloc`; `--workspace --all-targets` | exit 0 each | `xt1`-`xt4`, `v9_check_ws.log` |
 | model-name grep (AC4 pattern, `combine3/ac4_pattern.txt`) | `git grep -nIiP` over the four crates' non-test source | 0 at the tip, 0 at 0688ae5b; 0 added lines in `git diff 0688ae5b..HEAD` outside the spec | session |
 
 AC mapping inside the 741 and the 10: `arch_data_digest_` 7 passed (gemma4 E2B, granite moe, openchat, qwen2, qwen3, qwen35, qwen35moe); `generic_verify_llama_parity_` E2B and granite 2 passed; `llama_parity_` E2B and granite 2 passed; `generic_binder_` E2B and granite 2 passed. Digests: none moved. No fixture file is in `git diff 0688ae5b..HEAD`; the graph is unchanged by head chunk (a submission policy), capture (instrument-only), fold and router (rendered kernel text, not `bind.ops`) and the route series (kernel text and an extra dispatch, not the graph). Not run: the 16 large-checkpoint tests of the round-two list and every 26B test.
@@ -3280,11 +3280,11 @@ These are census processes (capture and telemetry on), not the bench binaries; t
 
 ```
 cargo nextest run -p proxima-tensor --cargo-profile gate                                                        # 803
-cargo nextest run -p omega --features metal --cargo-profile gate                                                 # 850
-cargo nextest run -p omega --features metal,instrument --cargo-profile gate                                      # 903
-cargo nextest run -p omega --features metal,metal-buffer-pool,metal-moe-mul-mat-id,moe-topk-fusion,top-fraction-fusion,alloc-count --cargo-profile gate   # 871
-cargo nextest run -p omega --features metal,metal-q4k-split-k --cargo-profile gate                               # 842
-cargo nextest run -p omega --no-default-features --features std --lib --cargo-profile gate                       # 151
+cargo nextest run -p proxima-omega --features metal --cargo-profile gate                                                 # 850
+cargo nextest run -p proxima-omega --features metal,instrument --cargo-profile gate                                      # 903
+cargo nextest run -p proxima-omega --features metal,metal-buffer-pool,metal-moe-mul-mat-id,moe-topk-fusion,top-fraction-fusion,alloc-count --cargo-profile gate   # 871
+cargo nextest run -p proxima-omega --features metal,metal-q4k-split-k --cargo-profile gate                               # 842
+cargo nextest run -p proxima-omega --no-default-features --features std --lib --cargo-profile gate                       # 151
 cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate -E 'not test(/gemma4_26b/)'   # 741
 decode_arms --prompt-file prompt1k.txt --processes 3 --runs 7 --arm base=<0688ae5b + arms-bench commit, own target dir> --arm tip=<tip> --arm control=<copy of tip> --case gemma4_e2b=<E2B blob> --case granite_moe=<granite blob>
 OMEGA_GROUPED_GEMM_ROUTE_SEGMENTS=<1|4|8> or OMEGA_GROUPED_GEMM_ROUTE_MODE=<segments|compacted> cargo build --release -p proxima-model-interop --example decode_gbps_baseline --features std,metal   # one binary per setting
@@ -3298,7 +3298,7 @@ Missing for CI: no job runs the Metal tests, the arms bench or the censuses; eve
 
 Evidence root: `evidence/attr4/` (`census/` four decode censuses and one granite prefill census, `timeline/` per-chunk tables and step-23 timelines, `seb/` the zero-encode runs, `pq/` the queueing toggles, `ab/` every variant run with its box files, `summaries/` the medians and CoV the tables below quote, `probes/` base emitted sources plus one diff per variant, `sample/` the `sample` reports, `cpu/` the host cpu comparison, `rank/` the attribution tables, `tools/` the Rust summarizers). Raw logs, the 18 MB telemetry logs and the release binaries (sha256 of the binaries the runs used in `evidence/attr4/bin_measured.sha256` and `bin_measured_early.sha256`; the example binaries were rebuilt as the tooling commits landed, so the gemm-only and prepass-only runs used the build after `b6032d00`/`d3f3931d`; sha256 of the builds at `d3f3931d` in `bin_head.sha256`) are under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/`. Test models: gemma4 E2B (blob `sha256-3646b4c1...`) and granite 3.1 moe 1b (blob `sha256-cd60b3e8...`); Ollama did not run; llama.cpp was not run (the llama side is `evidence/slice0/llama_ops/*.tsv`, `evidence/slice0/ac1/decode_arms.out`, recorded 2026-10-07 on another box state). Nothing in this section is a verdict.
 
-Tooling commits on top of `fc5da99b` (each one change, clippy `-D warnings` and `nextest -p omega --features metal,instrument` 903 run / 903 passed, `--features metal` 850 / 850): `9a001991` capture the route prepass buffer for replay; `536e8d78` expose replay resources and an f16 copy of a dispatch; `f2dc0fbb` report resources per arm in the kernel variant tool; `8ea05220` step encode bound and prefill queueing examples; `b6032d00` refill the compaction buffer with the prepass alone (the first gemm-only runs replayed all 72 pairs to fill the compaction buffers and the replays overwrote arena slots that later gemms read as activations, so gemm-only arms ran on zeroed activations and their bit compare was void; the reported gemm-only tables are the rerun after this fix, 3 runs); `06829981` and `d3f3931d` read back and poison a bound buffer, and compare the route compaction of prepass variants.
+Tooling commits on top of `fc5da99b` (each one change, clippy `-D warnings` and `nextest -p proxima-omega --features metal,instrument` 903 run / 903 passed, `--features metal` 850 / 850): `9a001991` capture the route prepass buffer for replay; `536e8d78` expose replay resources and an f16 copy of a dispatch; `f2dc0fbb` report resources per arm in the kernel variant tool; `8ea05220` step encode bound and prefill queueing examples; `b6032d00` refill the compaction buffer with the prepass alone (the first gemm-only runs replayed all 72 pairs to fill the compaction buffers and the replays overwrote arena slots that later gemms read as activations, so gemm-only arms ran on zeroed activations and their bit compare was void; the reported gemm-only tables are the rerun after this fix, 3 runs); `06829981` and `d3f3931d` read back and poison a bound buffer, and compare the route compaction of prepass variants.
 
 Cell columns. Every timed cell carries wall, process CPU (`getrusage` user+sys, all threads), CPU % of wall, peak RSS, physical footprint (`proc_pid_rusage`), Metal allocated bytes (`MTLDevice.currentAllocatedSize`) and the one-minute load average before and after (`examples/cell_resources/cell.rs`); a variant arm adds its static threadgroup bytes (`staticThreadgroupMemoryLength`) and the bytes of the buffers it binds (sum of length minus offset over bound buffers under 256 MiB; the checkpoint mapping is excluded and the bytes a kernel touches are DERIVED where stated). Per-arm cells are 50 back-to-back replays of one dispatch (`AB_RESOURCE_ITERS`), so their CPU is the host cost of submitting and waiting, not the kernel. Processes: `/usr/bin/time -l` peak RSS and peak footprint are in each run's `time_summary.txt`. The time columns are medians of 3 processes x 30 interleaved rounds unless noted, CoV across the 3 process medians in brackets.
 Box. Load average 3.0 to 5.9 at launch for every timed run except the two `sample` runs of row 5 (17.1 and 12.7: a stray `find /` of mine was still draining; those runs are used only for frame counts and the row 5 cpu comparison was rerun, `cpu/settled/`, at 3.3 to 3.9). GPU `Device Utilization %` first sample after idle read 80 to 98 on 72 of the 73 box files and was discarded (the 73rd read 0); the two settled samples read 0 and 0 on 72 of 73 files (`ab/norm/step_r2/box_before.txt` read 71 and 0: that run is the noisy one of the step replay). A peer `sccache` server process (pid in each box file) was resident, idle. The instrument builds differ from the release bench binaries (capture hooks off when `PROXIMA_CAPTURE_NODES` is unset, a `getenv` per dispatch remains): the live arm below reads 11.07 ms/token in the instrument census process against 11.16 in the round three release bench for E2B.
@@ -3704,16 +3704,16 @@ Integration commits, one change each: `8a04ec27` the std-tier lib tests compile 
 | gate | command | N | source |
 |---|---|---|---|
 | tensor | `nextest run -p proxima-tensor` | 803 run, 803 passed, 8 skipped | `z1_tensor.log` |
-| omega | `-p omega --features metal` | 875 run, 875 passed, 16 skipped (850 at b6463985) | `z2_omega_metal.log` |
+| omega | `-p proxima-omega --features metal` | 875 run, 875 passed, 16 skipped (850 at b6463985) | `z2_omega_metal.log` |
 | omega instrument | `... metal,instrument` | 929 run, 929 passed, 22 skipped (903) | `z3_omega_instr.log` |
 | omega feature-gated | `... metal,metal-buffer-pool,metal-moe-mul-mat-id,moe-topk-fusion,top-fraction-fusion,alloc-count` | 896 run, 896 passed, 16 skipped (871) | `z4_omega_gated.log` |
 | omega split-k | `... metal,metal-q4k-split-k` | 867 run, 867 passed, 16 skipped (842) | `z5_omega_splitk.log` |
-| omega std tier | `-p omega --no-default-features --features std --lib` | 151 run, 151 passed, 1 skipped (151) | `z6_omega_std.log` |
+| omega std tier | `-p proxima-omega --no-default-features --features std --lib` | 151 run, 151 passed, 1 skipped (151) | `z6_omega_std.log` |
 | attention goldens | inside the omega metal run: `msl::attn_split_tests::golden_identity::attention_sources_match_the_recorded_main_goldens` plus 40 other `attn_split_tests` / `attn_rows_tests` | passed (41 of 41 in the filtered run, `m1_attn_tests_after_revert.log`) | `z2_omega_metal.log` |
 | interop slice gate, 26B excluded | `nextest run -p proxima-model-interop --features std,metal --profile slice-gate -E 'not test(/gemma4_26b/)'` | 746 run, 746 passed, 128 skipped (741; +5 `warm_buffers` tests) | `z7_interop_slice.log` |
 | interop descriptor tests, E2B and granite | `... std,metal,conflaguration`, 10 `test(=name)` filters | 10 run, 10 passed, 864 skipped | `z8_interop_descriptor.log` |
 | clippy `-D warnings --all-targets` | tensor+interop (std,metal); omega metal; omega metal+instrument; omega gated set; interop std,metal,instrument; omega `std,metal-core`, `std,metal-tiled-gemm`, `std,metal-grouped-gemm` | exit 0 each (the last was re-run after `touch omega/src/lib.rs`: `Checking omega`, exit 0) | `z9`-`z16` |
-| tiers | `check -p proxima-tensor --no-default-features --features alloc`; `-p proxima-model-interop --no-default-features`; `-p omega --no-default-features --features alloc`; `--workspace --all-targets` | exit 0 each | `z17`-`z20` |
+| tiers | `check -p proxima-tensor --no-default-features --features alloc`; `-p proxima-model-interop --no-default-features`; `-p proxima-omega --no-default-features --features alloc`; `--workspace --all-targets` | exit 0 each | `z17`-`z20` |
 | model-name grep (`combine3/ac4_pattern.txt`) | `git diff b6463985..HEAD -- . ':!proxima-tensor/specs'`, added lines only | 0 of 1623 added lines | `logs/added_lines_final.txt` |
 | census invariant (captured dispatches plus the route prepasses replayed inside their records = the step's physical dispatches), granite 1000-token prefill, final tip | `gemma4_decode_kernel_census` (instrument build) | 383 captured + 48 prepass dispatches = 431 physical (24 owner records x 2 dispatches); at b6463985 383 + 72 = 455; replay failures 0; unreplayable groups 0 (at round three the 72 compacted gemms were unreplayable) | `census/census_granite_prefill/stdout.log`, `census/base_granite_prefill/stdout.log` |
 | census invariant, granite and E2B decode step 23, E2B prefill | same | 398 = 398, 653 = 653, 842 = 842; failures 0 | `census/census_{granite_decode,e2b_decode,e2b_prefill}/stdout.log` |
@@ -3857,11 +3857,11 @@ The GPU work in the chunk shrank by 36.0 ms and the last GPU end by 30.8 ms; the
 
 ```
 cargo nextest run -p proxima-tensor --cargo-profile gate                                                        # 803
-cargo nextest run -p omega --features metal --cargo-profile gate                                                 # 875
-cargo nextest run -p omega --features metal,instrument --cargo-profile gate                                      # 929
-cargo nextest run -p omega --features metal,metal-buffer-pool,metal-moe-mul-mat-id,moe-topk-fusion,top-fraction-fusion,alloc-count --cargo-profile gate   # 896
-cargo nextest run -p omega --features metal,metal-q4k-split-k --cargo-profile gate                               # 867
-cargo nextest run -p omega --no-default-features --features std --lib --cargo-profile gate                       # 151
+cargo nextest run -p proxima-omega --features metal --cargo-profile gate                                                 # 875
+cargo nextest run -p proxima-omega --features metal,instrument --cargo-profile gate                                      # 929
+cargo nextest run -p proxima-omega --features metal,metal-buffer-pool,metal-moe-mul-mat-id,moe-topk-fusion,top-fraction-fusion,alloc-count --cargo-profile gate   # 896
+cargo nextest run -p proxima-omega --features metal,metal-q4k-split-k --cargo-profile gate                               # 867
+cargo nextest run -p proxima-omega --no-default-features --features std --lib --cargo-profile gate                       # 151
 cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate -E 'not test(/gemma4_26b/)'   # 746
 decode_arms --prompt-file prompt1k.txt --log launches.log --processes 3 --runs 5 --new-tokens 128 --arm base=<b6463985 export, own target dir> --arm tip=<tip> --arm control=<copy of tip> --arm tipconc=<copy of tip> --arm-env tipconc:PROXIMA_DISPATCH=concurrent --case gemma4_e2b=<E2B blob> --case granite_moe=<granite blob>
 fresh TTFT: env -i PATH=/usr/bin:/bin HOME=$HOME PROXIMA_GEMMA4_E2B_GGUF=<blob> PROXIMA_DECODE_MODEL_GGUF=<blob> PROXIMA_SPECULATIVE_TYPES=none PROXIMA_PROMPT="$(cat prompt)" PROXIMA_MAX_TOKENS=8 PROXIMA_RUNS=1 [PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD=false] /usr/bin/time -l decode_gbps_baseline
@@ -4040,9 +4040,9 @@ Which dispatches carry the in-stream cost (`floor/e2b_floor/tables/group_rollup.
 #### re-prove
 
 ```
-cargo nextest run -p omega --features metal --cargo-profile gate                      # 877
-cargo nextest run -p omega --features metal,instrument --cargo-profile gate           # 931
-cargo nextest run -p omega --no-default-features --features std --lib                 # 151
+cargo nextest run -p proxima-omega --features metal --cargo-profile gate                      # 877
+cargo nextest run -p proxima-omega --features metal,instrument --cargo-profile gate           # 931
+cargo nextest run -p proxima-omega --no-default-features --features std --lib                 # 151
 cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate -E 'not test(/gemma4_26b/)'   # 746
 clippy -D warnings --all-targets: omega metal; omega metal,instrument; omega std; proxima-tensor std; proxima-model-interop std,metal; proxima-model-interop std,metal,instrument   # exit 0 each
 decode_arms --prompt-file prompt1k.txt --processes 3 --runs 5 --new-tokens 128 --arm base=<8f6678f0 export + example patch> --arm tip=<release> --arm control=<copy of tip> --case gemma4_e2b=<E2B blob>
@@ -4202,12 +4202,12 @@ Drafter off minus on: E2B +0.021 ms/token (+0.19 %), granite +0.038 (+0.57 %), i
 #### re-prove
 
 ```
-cargo clippy -p omega --features metal,instrument --all-targets -- -D warnings                 # exit 0
-cargo clippy -p omega --features metal --all-targets -- -D warnings                            # exit 0
-cargo clippy -p omega --no-default-features --features std --lib -- -D warnings                # exit 0
+cargo clippy -p proxima-omega --features metal,instrument --all-targets -- -D warnings                 # exit 0
+cargo clippy -p proxima-omega --features metal --all-targets -- -D warnings                            # exit 0
+cargo clippy -p proxima-omega --no-default-features --features std --lib -- -D warnings                # exit 0
 cargo clippy -p proxima-model-interop --features std,metal,instrument --example dispatch_floor --example decode_gbps_baseline -- -D warnings   # exit 0
 cargo clippy -p proxima-model-interop --features std,metal --example decode_gbps_baseline --example decode_arms -- -D warnings                  # exit 0
-cargo nextest run -p omega --features metal,instrument --cargo-profile gate                    # 931 run, 931 passed, 22 skipped (gates/nextest_omega_metal_instrument.txt)
+cargo nextest run -p proxima-omega --features metal,instrument --cargo-profile gate                    # 931 run, 931 passed, 22 skipped (gates/nextest_omega_metal_instrument.txt)
 DF_MODE=stamped DF_ROUNDS=21 DF_OUT_DIR=<dir> DF_ISOLATED_TABLE=evidence/round4fix/floor/<model>_floor/tables/dispatch_table.csv [PROXIMA_SPECULATIVE_TYPES=none] PROXIMA_DECODE_MODEL_GGUF=<blob> PROXIMA_PROMPT_FILE=prompt1k.txt dispatch_floor      # built --features std,metal,instrument; 3 processes per cell
 DF_MODE=stamped DF_ROUNDS=2 DF_STAMPED_ISOLATED=0 DF_STAMP_EVENTS_FILE=<path> ... dispatch_floor      # the events cell
 decode_arms --prompt-file prompt1k.txt --processes 3 --runs 5 --new-tokens 128 --arm drafter-on=<decode_gbps_baseline> --arm drafter-off=<decode_gbps_baseline> --arm-env drafter-on:PROXIMA_SPECULATIVE_TYPES=ngram-simple --arm-env drafter-off:PROXIMA_SPECULATIVE_TYPES=none --case gemma4_e2b=<blob> --case granite=<blob>
@@ -4674,16 +4674,16 @@ Long prompt resources (peak RSS, peak footprint, steady RSS, steady footprint, p
 
 ### 5. gates (MEASURED, `gates/*.tail.txt`) and what is red
 
-- `cargo nextest run -p omega --features metal --cargo-profile gate --no-fail-fast`: 899 tests run, 892 passed, 7 failed, 16 skipped. With `metal,instrument`: 953 run, 946 passed, the same 7 failed. With `metal,metal-attn-variants`: 937 run, 930 passed, the same 7. The 7: six `attn_rows_tests` that pin row-tiled kernel text (`the_float_setting_multiplies_float_fragments_and_names_no_half_type`, `the_half_setting_narrows_the_operands_and_keeps_scores_accumulators_and_softmax_float`, `the_kernel_source_carries_the_tile_decode_the_band_and_the_interleaved_store`, `the_row_tiled_kernel_stages_the_query_tile_once_and_keeps_its_four_barriers` (9 barriers read against 4 pinned), `the_row_tiled_softmax_is_one_online_pass_per_vector_with_one_max_and_one_sum_reduction`, `the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads`) and `packed_row_blocked_s1_byte_identity`; none renders the decode split or the merge, and this change touches only those two renderers and the preamble golden. On the `32f21d65` export with only the two build repairs it needs to compile its tests (the cfg gate of `5433575d` and the test-module gating of `79e6173f`), the same six `attn_rows_tests` fail (30 tests run in the lib filter, 24 passed, 6 failed, `gates/gate_base_failing7.tail.txt`) and `packed_row_blocked_s1_byte_identity` fails (1 run, 1 failed, `gates/gate_base_packed.tail.txt`): all seven fail without this change. The earlier counts in this thread (881, 935) were not reproduced: at `32f21d65` the `metal` test targets did not compile (section 6).
+- `cargo nextest run -p proxima-omega --features metal --cargo-profile gate --no-fail-fast`: 899 tests run, 892 passed, 7 failed, 16 skipped. With `metal,instrument`: 953 run, 946 passed, the same 7 failed. With `metal,metal-attn-variants`: 937 run, 930 passed, the same 7. The 7: six `attn_rows_tests` that pin row-tiled kernel text (`the_float_setting_multiplies_float_fragments_and_names_no_half_type`, `the_half_setting_narrows_the_operands_and_keeps_scores_accumulators_and_softmax_float`, `the_kernel_source_carries_the_tile_decode_the_band_and_the_interleaved_store`, `the_row_tiled_kernel_stages_the_query_tile_once_and_keeps_its_four_barriers` (9 barriers read against 4 pinned), `the_row_tiled_softmax_is_one_online_pass_per_vector_with_one_max_and_one_sum_reduction`, `the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads`) and `packed_row_blocked_s1_byte_identity`; none renders the decode split or the merge, and this change touches only those two renderers and the preamble golden. On the `32f21d65` export with only the two build repairs it needs to compile its tests (the cfg gate of `5433575d` and the test-module gating of `79e6173f`), the same six `attn_rows_tests` fail (30 tests run in the lib filter, 24 passed, 6 failed, `gates/gate_base_failing7.tail.txt`) and `packed_row_blocked_s1_byte_identity` fails (1 run, 1 failed, `gates/gate_base_packed.tail.txt`): all seven fail without this change. The earlier counts in this thread (881, 935) were not reproduced: at `32f21d65` the `metal` test targets did not compile (section 6).
 - Attention golden tests (`golden_identity::attention_sources_match_the_recorded_main_goldens`, `attn_split_tests::decode_split::*`): pass in all three runs; 10 fixtures re-recorded with `record_main_goldens` (`omega/tests/fixtures/attn_split_decode/`, the preamble in its own commit `88b6a5b1`, the other nine in `7f5d39e1`); the five base-feature fixtures are unchanged.
 - llama parity, `arch_data_baseline` (`gates/gate_llama_parity.tail.txt`, `gate_prefill_width.tail.txt`): `generic_verify_llama_parity_gemma4_e2b`, `generic_verify_llama_parity_granite_moe`, `llama_parity_gemma4_e2b`, `llama_parity_granite_moe` passed; `prefill_width_parity_with_llama_granite_moe` passed in its own run (1 test run, 1 passed). In the same filtered run, `llama_parity_lfm2` failed (3 divergences from llama at first index 0, proxima emitting token 18 repeatedly) and cancelled the rest; with `OMEGA_ATTENTION_DECODE_INDEX_BITS=64` it fails the same way (3 divergences, `gates/gate_lfm2_bits64.tail.txt`), so the 32-bit arithmetic is not what moves it; its cause was not traced.
-- `cargo nextest run -p omega --no-default-features --features std --lib`: does not compile at `32f21d65` (11 errors under `-D warnings`: unused imports, variables and functions in `msl/mod.rs`, `signature_tokens_prelude.rs`, `cached_attention_render.rs`, `emit_and_classify.rs`; `gates/gate_omega_std_lib.tail.txt`); the 151 count was not reached. Not changed here.
-- `cargo clippy -D warnings --all-targets`: `-p omega --features metal --no-deps` 9 errors (`too_many_arguments` in `pipeline_buffers_upload.rs`, eight `expect_used` in `execute_and_hazards.rs`); with `instrument` one more (`unnecessary_cast` at `arena_encode_dispatch_finish.rs:1528`); without `--no-deps` the dependency `proxima-tensor` fails first (11 errors in `spec/short_conv_delta_net.rs`). None of the flagged lines is in this change. The tensor + interop `std,metal` clippy gate was not run.
+- `cargo nextest run -p proxima-omega --no-default-features --features std --lib`: does not compile at `32f21d65` (11 errors under `-D warnings`: unused imports, variables and functions in `msl/mod.rs`, `signature_tokens_prelude.rs`, `cached_attention_render.rs`, `emit_and_classify.rs`; `gates/gate_omega_std_lib.tail.txt`); the 151 count was not reached. Not changed here.
+- `cargo clippy -D warnings --all-targets`: `-p proxima-omega --features metal --no-deps` 9 errors (`too_many_arguments` in `pipeline_buffers_upload.rs`, eight `expect_used` in `execute_and_hazards.rs`); with `instrument` one more (`unnecessary_cast` at `arena_encode_dispatch_finish.rs:1528`); without `--no-deps` the dependency `proxima-tensor` fails first (11 errors in `spec/short_conv_delta_net.rs`). None of the flagged lines is in this change. The tensor + interop `std,metal` clippy gate was not run.
 - Model-name grep over the added lines of `omega/build.rs`, `omega-runtime.toml`, `omega/src`, and the two test files: 0 model names (one hit, the existing `NumericPolicy::llama_relaxed()` API name in a test).
 
 ### 6. repairs this round made to the tree so the gates build (one commit each)
 
-`5433575d` gates `AttentionRowSchedule::simdgroup_count` with `metal-attn-variants`, its only caller's feature (without it `cargo check -p omega --features metal,instrument` fails under `-D warnings`); `79e6173f` gates the variants-only helpers of `attention_scratch_len_tests` and the row-tiled parity test on `metal-attn-variants` (with `--features metal` the parity test target had 96 compile errors and the test module had unused imports); `0f8b1490` adds `BFloat8`, `Bf8E5M2`, `Bf4E2M1` to the unreachable arm of `lowering_census.rs`; `8871d410` adds the `ShortConv` arm to the five census/parity tests and two examples that matched `LayerCacheRoots` exhaustively; `88b6a5b1` refreshes the decode split preamble golden (it lacked the `bf8_e5m2_element` and `bf4_e2m1_element` helpers the preamble now carries). The tooling commit `9268fa3b` (instrument-gated) adds `with_narrowed_buffers`, pair mode (`AB_PAIR_SHA`), `AB_SPAN_ELEMENTS`, scratch-output replay and the f64 decode reference to the a/b tool.
+`5433575d` gates `AttentionRowSchedule::simdgroup_count` with `metal-attn-variants`, its only caller's feature (without it `cargo check -p proxima-omega --features metal,instrument` fails under `-D warnings`); `79e6173f` gates the variants-only helpers of `attention_scratch_len_tests` and the row-tiled parity test on `metal-attn-variants` (with `--features metal` the parity test target had 96 compile errors and the test module had unused imports); `0f8b1490` adds `BFloat8`, `Bf8E5M2`, `Bf4E2M1` to the unreachable arm of `lowering_census.rs`; `8871d410` adds the `ShortConv` arm to the five census/parity tests and two examples that matched `LayerCacheRoots` exhaustively; `88b6a5b1` refreshes the decode split preamble golden (it lacked the `bf8_e5m2_element` and `bf4_e2m1_element` helpers the preamble now carries). The tooling commit `9268fa3b` (instrument-gated) adds `with_narrowed_buffers`, pair mode (`AB_PAIR_SHA`), `AB_SPAN_ELEMENTS`, scratch-output replay and the f64 decode reference to the a/b tool.
 
 ### 7. not explained or not measured
 
@@ -4799,12 +4799,12 @@ Tests (`omega/src/msl/index_narrowing_tests.rs`, `omega/tests/fixtures/index32/`
 
 ### 6. gates (MEASURED, `evidence/idx6/gates/`; N is the count the log prints)
 
-- `cargo nextest run -p omega --features metal --cargo-profile gate --no-fail-fast`: at the renderer commit 899 tests run, 892 passed, 7 failed, 16 skipped (the base count); with the test commit 918 run, 911 passed, 7 failed, 16 skipped. The 7 are the six `attn_rows_tests` and `packed_row_blocked_s1_byte_identity` of the base. A first run with the whole-body pass also on gathered reduces failed 14 (the 7 plus `a_gather_kernel_binds_and_declares_the_fault_buffer` after the intended text change, `expert_codec_declared_once_when_both_substitution_markers_fire`, `routed_q4k_reduce_uses_cooperative_gather_fetch` and 4 `mixed_expert_metal_execution` tests); the second run after narrowing the family and updating the one pin is the count above.
+- `cargo nextest run -p proxima-omega --features metal --cargo-profile gate --no-fail-fast`: at the renderer commit 899 tests run, 892 passed, 7 failed, 16 skipped (the base count); with the test commit 918 run, 911 passed, 7 failed, 16 skipped. The 7 are the six `attn_rows_tests` and `packed_row_blocked_s1_byte_identity` of the base. A first run with the whole-body pass also on gathered reduces failed 14 (the 7 plus `a_gather_kernel_binds_and_declares_the_fault_buffer` after the intended text change, `expert_codec_declared_once_when_both_substitution_markers_fire`, `routed_q4k_reduce_uses_cooperative_gather_fetch` and 4 `mixed_expert_metal_execution` tests); the second run after narrowing the family and updating the one pin is the count above.
 - `--features metal,instrument`: 972 run, 965 passed, 7 failed, 22 skipped (the same 7; base 953 run).
-- `cargo clippy -p omega --features metal --all-targets --no-deps -- -D warnings`: red, errors in files this change does not touch (`pipeline_buffers_upload.rs` `too_many_arguments`; with `instrument` also an `unnecessary_cast`); with those two lints allowed on the command line it still reports 107 and 9 errors in the integration test targets `packed_brain_float_moe_training_metal` and `packed_brain_float_moe_metal`, and 6 in `execute_and_hazards.rs` with `instrument`. Diagnostics naming any file of this change: 0 in all four logs. The `metal` lib test target compiled clean under clippy with those two lints allowed (the instrument lib test target stops on the 6 `execute_and_hazards.rs` errors).
+- `cargo clippy -p proxima-omega --features metal --all-targets --no-deps -- -D warnings`: red, errors in files this change does not touch (`pipeline_buffers_upload.rs` `too_many_arguments`; with `instrument` also an `unnecessary_cast`); with those two lints allowed on the command line it still reports 107 and 9 errors in the integration test targets `packed_brain_float_moe_training_metal` and `packed_brain_float_moe_metal`, and 6 in `execute_and_hazards.rs` with `instrument`. Diagnostics naming any file of this change: 0 in all four logs. The `metal` lib test target compiled clean under clippy with those two lints allowed (the instrument lib test target stops on the 6 `execute_and_hazards.rs` errors).
 - llama parity (`arch_data_baseline`, one test thread): `generic_verify_llama_parity_gemma4_e2b`, `generic_verify_llama_parity_granite_moe`, `llama_parity_gemma4_e2b`, `llama_parity_granite_moe`: 4 run, 4 passed; `prefill_width_parity_with_llama_granite_moe`: 1 run, 1 passed. The whole `proxima-model-interop` test build does not compile under `-D warnings` (`capability_matrix` dead code, 4 errors), so the runs name `--test arch_data_baseline`.
 - Model-name grep over the added lines of the three commits and over the new file names: 0 hits (`gemma`, `granite`, `llama`, `qwen`, `ollama`, `e2b`, case-insensitive); the fixtures are named by shape.
-- `cargo nextest run -p omega --no-default-features --features std --lib` (the std tier) was not run: its compile error is being repaired by the gate fixer.
+- `cargo nextest run -p proxima-omega --no-default-features --features std --lib` (the std tier) was not run: its compile error is being repaired by the gate fixer.
 
 ### 7. bench (`bench_long/`, `bench_short/`; `decode_arms`, 3 processes x (1 warm-up + 5 runs) = 15 per arm, 128 generated tokens, drafter off by the driver, arms base / tip / control interleaved per process; `tip` and `control` are one binary (sha256 prefix `1cf8336baac7935c`), `base` is the `8417f133` export (`e4270bc2d964df42`); `decode_arms` `9c6f11b086efa06c`)
 
@@ -4825,7 +4825,7 @@ Why 64-bit integer multiply and divide cost what they cost on this GPU: no ISA o
 
 ### re-prove
 
-`evidence/idx6/commands.txt` lists every command. Mechanically re-provable in CI without a GPU: the 19 tests of `index_narrowing_tests.rs` (`cargo nextest run -p omega --features metal --cargo-profile gate -E 'test(index_narrowing_tests)'`: 19 tests; the vendored fixtures are real captured kernels); the byte equality of renderer and measured variant needs the captured MSL (9.4 MB, under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/raw/caps`, `tipcaps`) and is re-run with `tools/render_equal.rs`. The timing rows (sections 2, 3, 4, 7) need the GPU and the lock; the saved outputs are in the evidence directories and no CI job runs them: they are unsealed in the sense of the discipline log until a bench job and a saved baseline exist.
+`evidence/idx6/commands.txt` lists every command. Mechanically re-provable in CI without a GPU: the 19 tests of `index_narrowing_tests.rs` (`cargo nextest run -p proxima-omega --features metal --cargo-profile gate -E 'test(index_narrowing_tests)'`: 19 tests; the vendored fixtures are real captured kernels); the byte equality of renderer and measured variant needs the captured MSL (9.4 MB, under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/idx6/raw/caps`, `tipcaps`) and is re-run with `tools/render_equal.rs`. The timing rows (sections 2, 3, 4, 7) need the GPU and the lock; the saved outputs are in the evidence directories and no CI job runs them: they are unsealed in the sense of the discipline log until a bench job and a saved baseline exist.
 
 ## round six: warm prefill timeline and attention loads (measured 2026-10-10 to 2026-10-11 on `8417f133` plus the three tooling commits below; evidence under `evidence/pf7/`, cell B raw outputs and the binaries under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/pf7/raw/cellB/` and `.../bin/`, the cell A raw telemetry logs (245 MB, 1.9 MB per process) deleted after summarizing so only the tables in `evidence/pf7/cellA/` remain; the preceding section is the 32-bit index class section, which was appended while this one was being measured and is not repeated here: its commits `ed9fa81a` and `39946655` narrow index arithmetic in other kernels (its fixture list names combine, embedding, expert down and norm epilogues, no attention kernel), and cell B below was measured on the `8417f133` kernel text and not re-run at `777510e1`)
 
@@ -5021,7 +5021,7 @@ The sum of the single-piece removals in b2b (scores read 21.1, mask 76.5, weight
 
 No library change was landed. The rule asks for an arm that wins outside the bound; the only arm below base is `b32` (-19.9 us, -1.7 %, DERIVED -0.48 ms over 24 layers against a same-binary granite prefill spread of 0.893 ms in the round-five simdgroups and mma precision section), it is not bit-identical, and the 32-key block is the global `keys_per_block` which measured +33.3 % at head dim 512 in the round-five simdgroups and mma precision section (`kpb64`). The text-hash, llama-parity, E2B and `decode_arms` bench steps of the landing rule were therefore not run; the hashes that exist are the 30 generations of `aff93fd561a93eff` above.
 
-Gates for the tooling commits (MEASURED, `evidence/pf7/gates/`): `cargo nextest run -p omega --features metal,instrument --cargo-profile gate --no-fail-fast`: **953 tests run, 946 passed, 7 failed, 22 skipped** (the known 7: six `attn_rows_tests` that pin row-tiled kernel text and `packed_row_blocked_s1_byte_identity`; counts as in the `32f21d65` section: 953 run, 946 passed), 69.349 s. `cargo clippy -p omega --features metal,instrument --no-deps --all-targets -- -D warnings`: 2 errors (`too_many_arguments` in `pipeline_buffers_upload.rs`, `unnecessary_cast` in `arena_encode_dispatch_finish.rs`), none in `env_flags.rs` or `placements_execute_named.rs`. `cargo clippy -p proxima-model-interop --features std,metal,instrument --no-deps -- -D warnings`: 1 error (`hf_config.rs:177-178`, `double_must_use`), none in `decode.rs`. The `std,metal` release build (instrument code compiled out) printed 0 warnings. The omega `metal` (no instrument) nextest, the E2B suite and the llama parity tests were not run (the tooling commits touch only `instrument`-gated code).
+Gates for the tooling commits (MEASURED, `evidence/pf7/gates/`): `cargo nextest run -p proxima-omega --features metal,instrument --cargo-profile gate --no-fail-fast`: **953 tests run, 946 passed, 7 failed, 22 skipped** (the known 7: six `attn_rows_tests` that pin row-tiled kernel text and `packed_row_blocked_s1_byte_identity`; counts as in the `32f21d65` section: 953 run, 946 passed), 69.349 s. `cargo clippy -p proxima-omega --features metal,instrument --no-deps --all-targets -- -D warnings`: 2 errors (`too_many_arguments` in `pipeline_buffers_upload.rs`, `unnecessary_cast` in `arena_encode_dispatch_finish.rs`), none in `env_flags.rs` or `placements_execute_named.rs`. `cargo clippy -p proxima-model-interop --features std,metal,instrument --no-deps -- -D warnings`: 1 error (`hf_config.rs:177-178`, `double_must_use`), none in `decode.rs`. The `std,metal` release build (instrument code compiled out) printed 0 warnings. The omega `metal` (no instrument) nextest, the E2B suite and the llama parity tests were not run (the tooling commits touch only `instrument`-gated code).
 
 ### 6. the abandoned designs and what the constraints changed
 
@@ -5118,7 +5118,7 @@ Text hash equal across all five arms in the short cells and all three in the lon
 - `cargo nextest run -p proxima-model-interop --features std,metal --lib -E 'test(~device_kv) or test(~resident_plans) or test(~serving_settings) or test(~prompt_cache) or test(~kv_buffer_source)'`: 160 run, 160 passed, 0 failed; 5 are new (`device_kv::tests::buffers_one_generation_gives_back_serve_the_next_and_are_zeroed_past_its_rows`, four `resident_plans::tests` for take and keep), and the config/builder/env parity fixture carries `resident_kv_bytes`.
 - `cargo nextest run -p proxima-model-interop --features std,metal --test arch_data_baseline -E 'test(/llama_parity/)'`: the filter matches 12 tests, not 4 (the seven `llama_parity_*` and five `generic_verify_llama_parity_*`); 12 run, 11 passed, 1 failed. The failure is `llama_parity_lfm2`: 3 divergences from llama.cpp at index 0 on 3 prompts, proxima emits token 18 repeated. The same test on a `git archive 097e9736` tree (own target dir) fails the same way (3 divergences, 120.9 s), so it is not caused by the lever-1 commit; HYPOTHESIS: lfm2 does not reach `DeviceKv::adopt` (`device_kv_eligible` requires attention and shared layers only, `decode.rs:3660`); not traced, and not investigated further here. Logs: `evidence/r7/gates/nextest_parity_l1.log`, `nextest_parity_base_lfm2.log`.
 - after `git rebase origin/main` (`db615bf0`, 42 commits past `097e9736`; one conflict, a doc-comment line in `pregather.rs`, resolved to main's wording plus this commit's sentence): the lib filter above, 160 run, 160 passed (`gates/nextest_lib_after_rebase.log`); `llama_parity` filter, 12 run, 12 passed, `llama_parity_lfm2` included (111.9 s; `gates/nextest_parity_after_rebase.log`). The lfm2 failure above is therefore a property of the `097e9736` tree that `db615bf0` does not show; which upstream commit changed it was not traced. The omega suite line was measured before the rebase and was not re-run after it.
-- omega metal suite (`-p omega --features metal --cargo-profile gate --no-fail-fast`, lever-1 tree, under the lock): 918 run, 911 passed, 7 failed, 16 skipped. The 7 failures are six `msl::attn_rows_tests::*` source-text assertions and `packed_row_blocked_s1_byte_identity single_activation_row_q4k_matvec_emits_byte_identical_msl_to_the_pre_fold_body` (`gates/nextest_omega_l1.log`); the suite on `097e9736` was not re-run here, so "unchanged" rests on the count of 7 matching the brief and on this commit adding one accessor to omega and changing no kernel text.
+- omega metal suite (`-p proxima-omega --features metal --cargo-profile gate --no-fail-fast`, lever-1 tree, under the lock): 918 run, 911 passed, 7 failed, 16 skipped. The 7 failures are six `msl::attn_rows_tests::*` source-text assertions and `packed_row_blocked_s1_byte_identity single_activation_row_q4k_matvec_emits_byte_identical_msl_to_the_pre_fold_body` (`gates/nextest_omega_l1.log`); the suite on `097e9736` was not re-run here, so "unchanged" rests on the count of 7 matching the brief and on this commit adding one accessor to omega and changing no kernel text.
 - clippy `-D warnings` on the files touched: clean. After the rebase onto `db615bf0`, the interop `--lib --examples` run with `-D warnings` and features `std,metal,instrument` exits 0 (`gates/clippy_interop_after_rebase.log`); the omega run was not repeated after the rebase. Before the rebase, on `097e9736`, the crate-wide runs failed on files this work does not touch: `hf_config.rs:178` (`double_must_use`), `omega/src/metal/pipeline_buffers_upload.rs:343` (too many arguments), `arena_encode_dispatch_finish.rs:1528` (unnecessary cast), and the `--all-targets` runs add `pinned_source.rs`, `hf_bind/matrix_lfm_bind.rs` (`expect_used`) and `tests/support/trial.rs` (dead code).
 
 ### 5. unexplained, unmeasured, assumed

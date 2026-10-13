@@ -36,8 +36,8 @@ Use the existing Proxima numeric and Metal abstractions. Do not introduce num-tr
 
 | id | command | expected |
 |---|---|---|
-| AC15a | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_15_v_reuse)'` | filter selects 2 tests; 2 passed; F32/F16 and BF16/BF8 source paths are inspected, and the accumulator-budget decline is typed |
-| AC15b | `cargo nextest run -p omega --features metal,metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_15_v_reuse_device)'` | filter selects 1 Metal test; 1 passed; Legacy, SharedK, and SharedKv outputs agree with the CPU reference, two rows differ, and padded-V `+Inf` leaves output bits unchanged |
+| AC15a | `cargo nextest run -p proxima-omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_15_v_reuse)'` | filter selects 2 tests; 2 passed; F32/F16 and BF16/BF8 source paths are inspected, and the accumulator-budget decline is typed |
+| AC15b | `cargo nextest run -p proxima-omega --features metal,metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_15_v_reuse_device)'` | filter selects 1 Metal test; 1 passed; Legacy, SharedK, and SharedKv outputs agree with the CPU reference, two rows differ, and padded-V `+Inf` leaves output bits unchanged |
 
 A zero-test match or a checker that does not open its fixture is failure. Run this local command after the edit. The expected count is part of the criterion.
 

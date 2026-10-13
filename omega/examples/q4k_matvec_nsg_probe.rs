@@ -55,12 +55,12 @@
 //!
 //! Run baseline (current geometry, one simdgroup per 4-row group):
 //! ```sh
-//! CARGO_TARGET_DIR=<scratch>/target cargo run -p omega --release \
+//! CARGO_TARGET_DIR=<scratch>/target cargo run -p proxima-omega --release \
 //!   --features metal,cpu --example q4k_matvec_nsg_probe
 //! ```
 //! Run the `nsg=2` geometry under test:
 //! ```sh
-//! CARGO_TARGET_DIR=<scratch>/target cargo run -p omega --release \
+//! CARGO_TARGET_DIR=<scratch>/target cargo run -p proxima-omega --release \
 //!   --features metal,cpu,metal-packed-row-nsg2 --example q4k_matvec_nsg_probe
 //! ```
 
@@ -416,7 +416,7 @@ fn run() {
              this number is a real computation over real samples but the samples \
              themselves were captured on a loaded box and are not a sealed claim. \
              Re-prove with the box lock held and load < 1.0: \
-             CARGO_TARGET_DIR=<scratch>/target cargo run -p omega --release \
+             CARGO_TARGET_DIR=<scratch>/target cargo run -p proxima-omega --release \
              --features metal,cpu,instrument --example q4k_matvec_nsg_probe"
         );
     }

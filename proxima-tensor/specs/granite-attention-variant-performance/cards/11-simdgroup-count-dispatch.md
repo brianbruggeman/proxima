@@ -33,8 +33,8 @@ The call site is synchronous: `AttentionMmaSelection::from_variant` takes `Atten
 Run the feature build and exactly five focused CPU tests:
 
 ```sh
-CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo check -p omega --features metal,metal-attn-variants,metal-attn-split-rows
-CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo nextest run -p omega --lib --features std,metal,metal-attn-split-rows,metal-attn-variants -E 'test(explicit_four_simdgroup_dispatch_preserves_row_and_key_tiles) | test(explicit_simdgroup_count_rejects_a_non_row_tiled_shape) | test(explicit_simdgroup_count_updates_merge_admission_at_one_split) | test(explicit_simdgroup_count_keeps_partial_scratch_and_both_uniforms_aligned) | test(card_20_dispatch_matrix_exposes_legacy_and_eight_one_factor_flips)' -j 1 --success-output immediate
+CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo check -p proxima-omega --features metal,metal-attn-variants,metal-attn-split-rows
+CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTC_WRAPPER= cargo nextest run -p proxima-omega --lib --features std,metal,metal-attn-split-rows,metal-attn-variants -E 'test(explicit_four_simdgroup_dispatch_preserves_row_and_key_tiles) | test(explicit_simdgroup_count_rejects_a_non_row_tiled_shape) | test(explicit_simdgroup_count_updates_merge_admission_at_one_split) | test(explicit_simdgroup_count_keeps_partial_scratch_and_both_uniforms_aligned) | test(card_20_dispatch_matrix_exposes_legacy_and_eight_one_factor_flips)' -j 1 --success-output immediate
 ```
 
 | criterion | required observation |

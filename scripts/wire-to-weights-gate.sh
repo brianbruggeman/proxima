@@ -65,7 +65,7 @@ export PROXIMA_MNIST_ONNX="${fixtures}/mnist.onnx"
 export PROXIMA_MNIST_DIR="${fixtures}/mnist"
 
 printf '\n-- wire_to_weights_smoke --\n'
-nextest_output="$(cargo nextest run --color never -p proxima --test wire_to_weights_smoke --features wire-to-weights-demo 2>&1)"
+nextest_output="$(cargo nextest run --color never -p proxima-lib --test wire_to_weights_smoke --features wire-to-weights-demo 2>&1)"
 printf '%s\n' "${nextest_output}"
 passed_count="$(printf '%s\n' "${nextest_output}" | grep -oE '[0-9]+ tests? run: [0-9]+ passed' | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | tail -1)"
 if [ "${passed_count:-}" != "1" ]; then

@@ -1,5 +1,5 @@
 [package]
-name = "omega"
+name = "proxima-omega"
 description = "MSL kernel emission from the proxima-tensor Nest descriptor — the emit half of the GPU backend; the device driver composes on top"
 version.workspace = true
 edition.workspace = true
@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
+
+[lib]
+name = "omega"
 
 [features]
 # `metal` is default because the objc2 deps live in a macOS target section, so
@@ -95,7 +98,7 @@ cpu = ["std", "proxima-tensor/std"]
 # `kernel_dispatch_shape`, plus every unconditional `classify_*`/
 # `packed_row_*` function they call) with none of `metal`'s objc2/Metal
 # driver dependencies -- alloc-tier pure string/`BoundOp` logic, so it builds
-# on any target, including non-macOS (`cargo check -p omega
+# on any target, including non-macOS (`cargo check -p proxima-omega
 # --no-default-features --features metal-core --target
 # x86_64-unknown-linux-gnu`). `metal` below depends on this rather than
 # duplicating it, so the driver-only build still sees the same emitter.
@@ -108,7 +111,7 @@ metal-core = ["alloc"]
 # winners of the 2026-09-04 sweep 3 arm B1 (43.052 ms/token, CoV 0.56%,
 # 2.443x vs llama.cpp; op_count 938; text identical): `metal-output-placement`
 # and `metal-wide-cooperative-reduce` fold in here too, so `cargo nextest run
-# -p omega --features metal` exercises the same default decode path as
+# -p proxima-omega --features metal` exercises the same default decode path as
 # proxima-model-interop's `metal` feature.
 # The paired-nibble/paired-lane decode body (`msl.rs`'s `q4k_pair_dot`/
 # `q5k_pair_dot`/`q6k_pair_dot`) is selected for `Q4_K`/`Q5_K`/`Q6_K` by

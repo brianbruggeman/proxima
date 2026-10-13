@@ -39,7 +39,7 @@ Use the existing Proxima numeric and Metal abstractions. Do not introduce num-tr
 
 | id | command | expected |
 |---|---|---|
-| AC20 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_20_dispatch_matrix)'` | filter selects 2 tests; 2 passed; legacy dispatch matches base emitter; manifest exposes all axes, form, codec, F32 accumulator, entry, grid and identity; seven flips from admitted control change one typed axis each; false selector is rejected and cache mismatch refuses |
+| AC20 | `cargo nextest run -p proxima-omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_20_dispatch_matrix)'` | filter selects 2 tests; 2 passed; legacy dispatch matches base emitter; manifest exposes all axes, form, codec, F32 accumulator, entry, grid and identity; seven flips from admitted control change one typed axis each; false selector is rejected and cache mismatch refuses |
 
 A zero-test match or a checker that does not open its fixture is failure. Run this local command after the edit. The expected count is part of the criterion.
 

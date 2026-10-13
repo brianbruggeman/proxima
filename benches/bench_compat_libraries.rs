@@ -26,8 +26,8 @@
 //! handler future executes on the sister OS thread.
 //!
 //! ```bash
-//! cargo bench -p proxima --features "..." --bench bench_compat_libraries
-//! cargo bench -p proxima --features "..." --bench bench_compat_libraries -- hyper
+//! cargo bench -p proxima-lib --features "..." --bench bench_compat_libraries
+//! cargo bench -p proxima-lib --features "..." --bench bench_compat_libraries -- hyper
 //! ```
 
 #![allow(

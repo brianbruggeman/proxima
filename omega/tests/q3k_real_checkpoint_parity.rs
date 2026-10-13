@@ -11,7 +11,7 @@
 //!
 //! Gated `#[ignore]`: the checkpoint (an `openchat-3.5-1210.Q3_K_M.gguf`
 //! requantized with llama.cpp `llama-quantize`) is not in the repo. Run with
-//! `PROXIMA_Q3K_GGUF=<path> cargo nextest run -p omega --features metal
+//! `PROXIMA_Q3K_GGUF=<path> cargo nextest run -p proxima-omega --features metal
 //! --run-ignored only --test q3k_real_checkpoint_parity`; a missing or
 //! wrong-typed file fails the test instead of skipping.
 

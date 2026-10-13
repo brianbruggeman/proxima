@@ -83,7 +83,7 @@ cargo nextest run -p "${crate}" --features otlp-http
 # tests (../tests/otlp_send_prime_e2e.rs) — it composes the facade (proxima::test +
 # proxima H1ClientUpstream/PrimeTcpUpstream + proxima::telemetry) so it belongs to
 # the proxima crate's prime test lane, not this codec-only telemetry gate. Run:
-#   cargo test -p proxima --features \
+#   cargo test -p proxima-lib --features \
 #     "test-prime,otlp-http,http-prime,runtime-prime-executor,runtime-prime-inbox-alloc,runtime-prime-reactor,runtime-prime-bgpool,tcp" \
 #     --test otlp_send_prime_e2e
 

@@ -14,7 +14,7 @@
 //! # Run
 //! ```sh
 //! CARGO_TARGET_DIR=<scratch>/target-attn-fuse \
-//!     cargo run -p omega --release --features metal --example attn_node_gate
+//!     cargo run -p proxima-omega --release --features metal --example attn_node_gate
 //! ```
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]

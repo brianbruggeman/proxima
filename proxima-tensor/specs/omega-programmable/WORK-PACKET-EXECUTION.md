@@ -200,21 +200,21 @@ Hardware driver group, **4 tests per available driver**, prefixes `config_metal_
 Hardware tests are gated by the actual feature/target and report absent hardware as an availability result, not a skip masquerading as execution. CPU-only tests simulate unavailable arms. CUDA compilation does not claim CUDA runtime hardware. NPU has zero hardware tests because it has no driver.
 
 ```text
-cargo nextest run -p omega --lib -E 'test(config_plan_)'
+cargo nextest run -p proxima-omega --lib -E 'test(config_plan_)'
 expected: 12 passed, 0 failed, 0 skipped
-cargo nextest run -p omega --lib -E 'test(config_cpu_budget_)'
+cargo nextest run -p proxima-omega --lib -E 'test(config_cpu_budget_)'
 expected: 5 passed, 0 failed, 0 skipped
-cargo nextest run -p omega --lib -E 'test(config_selection_)'
+cargo nextest run -p proxima-omega --lib -E 'test(config_selection_)'
 expected: 5 passed, 0 failed, 0 skipped
-cargo nextest run -p omega --lib --features metal -E 'test(config_metal_)'
+cargo nextest run -p proxima-omega --lib --features metal -E 'test(config_metal_)'
 expected on macOS Metal host: 4 passed, 0 failed, 0 skipped
-cargo nextest run -p omega --lib --features wgpu-backend -E 'test(config_wgpu_)'
+cargo nextest run -p proxima-omega --lib --features wgpu-backend -E 'test(config_wgpu_)'
 expected on available wgpu host: 4 passed, 0 failed, 0 skipped
-cargo nextest run -p omega --lib --features cuda-driver -E 'test(config_cuda_)'
+cargo nextest run -p proxima-omega --lib --features cuda-driver -E 'test(config_cuda_)'
 expected on available CUDA host: 4 passed, 0 failed, 0 skipped
 ```
 
-Run native build checks after tests: `cargo check -p omega --all-targets`, `cargo check -p omega --no-default-features --features std,cpu`, `cargo check -p omega --no-default-features --features alloc,cuda`, and `cargo clippy -p omega --lib -- -D warnings`. These are compile/lint supplements, not count-bearing behavior acceptance criteria. Root will assign build/test execution to a bounded worker. Do not write or run shell/Python/Perl gate scripts. Actual example/doctest commands and their nonzero counts must be admitted after inspecting existing assertions; do not invent a count for an unopened target.
+Run native build checks after tests: `cargo check -p proxima-omega --all-targets`, `cargo check -p proxima-omega --no-default-features --features std,cpu`, `cargo check -p proxima-omega --no-default-features --features alloc,cuda`, and `cargo clippy -p proxima-omega --lib -- -D warnings`. These are compile/lint supplements, not count-bearing behavior acceptance criteria. Root will assign build/test execution to a bounded worker. Do not write or run shell/Python/Perl gate scripts. Actual example/doctest commands and their nonzero counts must be admitted after inspecting existing assertions; do not invent a count for an unopened target.
 
 ## Dependency order and file ownership
 

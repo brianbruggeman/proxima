@@ -14,7 +14,7 @@ slow-timeout = { period = "10s", terminate-after = 2 }
 retries = 0
 
 [[profile.default.overrides]]
-filter = 'package(proxima) and binary(concurrent_accept)'
+filter = 'package(proxima-lib) and binary(concurrent_accept)'
 test-group = "heavy-runtime"
 
 # fs control-plane tests each spawn a real /bin/sh pipeline subprocess plus a
@@ -25,7 +25,7 @@ test-group = "heavy-runtime"
 # starvation from the rest of the suite (a real hang still fails every attempt,
 # a load-starved run passes once the batch drains).
 [[profile.default.overrides]]
-filter = 'package(proxima) and test(pipelines::fs_control_plane::tests::)'
+filter = 'package(proxima-lib) and test(pipelines::fs_control_plane::tests::)'
 test-group = "heavy-runtime"
 retries = 3
 
@@ -38,7 +38,7 @@ retries = 3
 # other test in flight rather than on smaller shapes that no longer cover
 # the prefill case the test exists for.
 [[profile.default.overrides]]
-filter = 'package(omega) and binary(packed_row_multi_row_index32_ab)'
+filter = 'package(proxima-omega) and binary(packed_row_multi_row_index32_ab)'
 threads-required = "num-test-threads"
 
 # the selection-fold prefill chunk (120 tokens x 128 rows x 8 selected x k 256) is one serial-body
@@ -46,7 +46,7 @@ threads-required = "num-test-threads"
 # in flight the driver fails the command buffer ("Internal Error (0000000e)", status 5), the same
 # contention the index32 A/B above records, so it runs with no other test in flight.
 [[profile.default.overrides]]
-filter = 'package(omega) and binary(selection_fold_parity)'
+filter = 'package(proxima-omega) and binary(selection_fold_parity)'
 threads-required = "num-test-threads"
 
 # the qwen35 ssm mixer real-dims oracle runs production gdn shapes on the cpu:
@@ -87,12 +87,12 @@ test-group = 'real-checkpoint'
 
 # the bge parity cells each hold the 133 MB model decoded to f32 plus one arena per pin set (about 1 GB at four pin sets); together they pressure the shared box's memory, so they serialise with the other real-checkpoint tests.
 [[profile.default.overrides]]
-filter = 'package(omega) and binary(onnx_door_bge) and test(/bge_.*_parity_/)'
+filter = 'package(proxima-omega) and binary(onnx_door_bge) and test(/bge_.*_parity_/)'
 test-group = 'real-checkpoint'
 
 # the mnist cells run a thousand door calls each, one of them on the GPU; they serialise with the other real-checkpoint tests so no two Metal cells share the device.
 [[profile.default.overrides]]
-filter = 'package(omega) and binary(onnx_door_generic) and test(/onnx_door_generic_mnist_/)'
+filter = 'package(proxima-omega) and binary(onnx_door_generic) and test(/onnx_door_generic_mnist_/)'
 test-group = 'real-checkpoint'
 
 # per-slice architecture-as-data gate: everything in the package except the tests that bind, decode or

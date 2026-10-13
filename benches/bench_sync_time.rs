@@ -16,9 +16,9 @@
 //!
 //! Run:
 //! ```bash
-//! cargo bench -p proxima --bench bench_sync_time
-//! cargo bench -p proxima --bench bench_sync_time -- sleep_short
-//! cargo bench -p proxima --bench bench_sync_time -- concurrent
+//! cargo bench -p proxima-lib --bench bench_sync_time
+//! cargo bench -p proxima-lib --bench bench_sync_time -- sleep_short
+//! cargo bench -p proxima-lib --bench bench_sync_time -- concurrent
 //! ```
 
 #![allow(

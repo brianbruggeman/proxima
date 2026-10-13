@@ -16,7 +16,7 @@
 //!
 //! ```sh
 //! PROBE_HEAD_DIM=512 PROBE_ROWS=971 PROBE_CACHED_ROWS=992 \
-//!     cargo run -p omega --release --example attn_prefill_probe
+//!     cargo run -p proxima-omega --release --example attn_prefill_probe
 //! ```
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]

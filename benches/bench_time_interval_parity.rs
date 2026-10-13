@@ -25,9 +25,9 @@
 //!
 //! Run:
 //! ```bash
-//! cargo bench -p proxima --features sync-wrappers --bench bench_time_interval_parity
-//! cargo bench -p proxima --features sync-wrappers --bench bench_time_interval_parity -- maintenance
-//! cargo bench -p proxima --features sync-wrappers --bench bench_time_interval_parity -- tight
+//! cargo bench -p proxima-lib --features sync-wrappers --bench bench_time_interval_parity
+//! cargo bench -p proxima-lib --features sync-wrappers --bench bench_time_interval_parity -- maintenance
+//! cargo bench -p proxima-lib --features sync-wrappers --bench bench_time_interval_parity -- tight
 //! ```
 
 #![allow(

@@ -1,7 +1,7 @@
 name: prime-serve
 
 # Gate for the prime-default serve runtime (docs/prime-serve/discipline.md).
-# The default `cargo build -p proxima` runs the serve stack on prime; tokio
+# The default `cargo build -p proxima-lib` runs the serve stack on prime; tokio
 # is a first-class opt-out (runtime-tokio / http-hyper). This workflow proves
 # the default flip holds, the opt-out still builds, and the parity +
 # reactor-absence proofs pass.
@@ -65,7 +65,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p proxima ${{ matrix.flags }}
+      - run: cargo build -p proxima-lib ${{ matrix.flags }}
 
   # Compare-bench (prime-serve vs tokio-serve). Records the baseline; does
   # NOT seal the discipline row (that's a manual read of the CoV). Runs

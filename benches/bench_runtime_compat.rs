@@ -25,8 +25,8 @@
 //!   that compat doesn't make it worse.
 //!
 //! ```bash
-//! cargo bench -p proxima --bench bench_runtime_compat
-//! cargo bench -p proxima --bench bench_runtime_compat -- w1_per_core_spawn
+//! cargo bench -p proxima-lib --bench bench_runtime_compat
+//! cargo bench -p proxima-lib --bench bench_runtime_compat -- w1_per_core_spawn
 //! ```
 
 #![allow(

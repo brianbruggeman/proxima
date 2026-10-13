@@ -48,7 +48,7 @@ pub mod ring;
 #[cfg(feature = "alloc")]
 pub mod serving_state;
 // per-worker BytesMut reservoir; std-only (thread_local has no no_std
-// analog). folded in from the former proxima-io satellite crate.
+// analog). folded in from the former proxima-lib satellite crate.
 #[cfg(feature = "alloc")]
 pub mod batch;
 #[cfg(feature = "std")]

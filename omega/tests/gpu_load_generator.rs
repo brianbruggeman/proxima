@@ -176,7 +176,7 @@ fn dispatch_once(
 /// (that test's own doc comment names the exact companion invocation):
 ///
 /// ```text
-/// cargo test -p omega --release --features metal --no-default-features \
+/// cargo test -p proxima-omega --release --features metal --no-default-features \
 ///   --features metal gpu_load_generator -- --ignored --nocapture
 /// ```
 #[test]

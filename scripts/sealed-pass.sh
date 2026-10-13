@@ -234,11 +234,11 @@ fi
 if nanofix_missing_reason="$(require_optional_worktree_file "$NANOFIX_WORKTREE" \
   "omega/examples/q4k_matvec_nsg_probe.rs")"; then
   run_cell "07-q4k-nano-probe-baseline" "$NANOFIX_WORKTREE" \
-    cargo run -p omega --release --features metal,cpu,instrument \
+    cargo run -p proxima-omega --release --features metal,cpu,instrument \
     --example q4k_matvec_nsg_probe
 
   run_cell "08-q4k-nano-probe-packed-row-nsg2" "$NANOFIX_WORKTREE" \
-    cargo run -p omega --release --features metal,cpu,instrument,metal-packed-row-nsg2 \
+    cargo run -p proxima-omega --release --features metal,cpu,instrument,metal-packed-row-nsg2 \
     --example q4k_matvec_nsg_probe
 else
   skip_cell "07-q4k-nano-probe-baseline" "$nanofix_missing_reason"

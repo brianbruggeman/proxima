@@ -25,7 +25,7 @@ fn effective_attention_row_schedule(
 
 /// `PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES` -- a `std`-only escape knob
 /// (env reads do not exist on the alloc-only `metal-core` tier build,
-/// `cargo check -p omega --no-default-features --features metal-core
+/// `cargo check -p proxima-omega --no-default-features --features metal-core
 /// --target x86_64-unknown-linux-gnu`). The non-`std` path returns the
 /// structural default: the knob is never set, so every caller falls through
 /// to the row-blocked/tiled-gemm classification it would take on a `std`

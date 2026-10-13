@@ -13,8 +13,8 @@
 //!
 //! Run:
 //! ```bash
-//! cargo bench -p proxima --bench bench_sync_compat
-//! cargo bench -p proxima --bench bench_sync_compat -- mpsc
+//! cargo bench -p proxima-lib --bench bench_sync_compat
+//! cargo bench -p proxima-lib --bench bench_sync_compat -- mpsc
 //! ```
 
 #![allow(

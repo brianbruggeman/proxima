@@ -20,7 +20,7 @@
 //!
 //! ```sh
 //! PROBE_HEAD_DIM=512 PROBE_LIVE=1030 PROBE_CHUNKS=4 PROBE_BATCH=2 \
-//!     cargo run -p omega --release --features metal --example attn_decode_split_probe
+//!     cargo run -p proxima-omega --release --features metal --example attn_decode_split_probe
 //! ```
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]

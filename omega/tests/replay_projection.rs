@@ -8,7 +8,7 @@
 //! Ignored by default: this test reads a specific captured production dump
 //! from `REPLAY_DUMP_DIR`, not a fixture this repo ships -- run explicitly
 //! after a capture (`prefill599/replay/capture.log`'s own run) with
-//! `REPLAY_DUMP_DIR=<dir> cargo test --release -p omega --features
+//! `REPLAY_DUMP_DIR=<dir> cargo test --release -p proxima-omega --features
 //! metal,instrument --test replay_projection -- --ignored --nocapture`.
 
 #![cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]

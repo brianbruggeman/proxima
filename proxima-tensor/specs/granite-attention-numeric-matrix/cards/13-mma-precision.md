@@ -37,7 +37,7 @@ Route `mma_precision=legacy|f32|f16` to the row-tiled renderer at dispatch time.
 
 | id | command | expected |
 |---|---|---|
-| AC13 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_13_mma_precision)'` | filter selects 2 tests; 2 passed; F32/F16 operand choice flips independently of F32/BF16/BF8 cache storage, executed F16/F32 output bits agree on the F16-exact fixture, and accumulation/softmax stay F32 |
+| AC13 | `cargo nextest run -p proxima-omega --features metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_13_mma_precision)'` | filter selects 2 tests; 2 passed; F32/F16 operand choice flips independently of F32/BF16/BF8 cache storage, executed F16/F32 output bits agree on the F16-exact fixture, and accumulation/softmax stay F32 |
 
 A zero-test match is failure. Inspect rendered MSL for each selected operand and accumulator type.
 

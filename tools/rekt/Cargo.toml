@@ -39,7 +39,7 @@ bon = "3.9.1"
 # are the supported config; its lib.rs re-exports them unconditionally, so a
 # default-features=false slim build does not compile. add only test-prime for the
 # `#[proxima::test]` harness on top of the defaults.
-proxima = { path = "../..", optional = true, features = ["test-prime", "h3-native-upstream"] }
+proxima = { package = "proxima-lib", path = "../..", optional = true, features = ["test-prime", "h3-native-upstream"] }
 # the adaptive per-core concurrency knob + controller. lives in proxima-runtime
 # so one crate carries the primitive; the `concurrency` feature is default-off.
 proxima-runtime = { path = "../../proxima-runtime", optional = true, features = ["concurrency"] }

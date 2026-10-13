@@ -13,7 +13,7 @@
 //! two builds or two environments can be compared byte for byte.
 //!
 //! ```sh
-//! cargo run --release -p omega --example tiled_gemm_q4_0_speed_probe \
+//! cargo run --release -p proxima-omega --example tiled_gemm_q4_0_speed_probe \
 //!   --features metal,instrument
 //! ```
 

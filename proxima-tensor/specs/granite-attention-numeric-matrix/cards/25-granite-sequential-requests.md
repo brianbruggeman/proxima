@@ -37,7 +37,7 @@ Card 24 used a fresh process for each established Granite prompt because a prior
 
 | id | command | exact tests and expected output |
 |---|---|---|
-| AC25a | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants,metal-grouped-gemm --lib -E 'test(~the_route_prepass_and_the_locating_gemm_render_for_the_compacted_mode_only)'` | Filter selects exactly 1 test and reports 1 passed. Token counts 300 and 301 have identical launch grids but distinct pipeline identities. |
+| AC25a | `cargo nextest run -p proxima-omega --features metal-attn-split-rows,metal-attn-variants,metal-grouped-gemm --lib -E 'test(~the_route_prepass_and_the_locating_gemm_render_for_the_compacted_mode_only)'` | Filter selects exactly 1 test and reports 1 passed. Token counts 300 and 301 have identical launch grids but distinct pipeline identities. |
 | AC25b | `PROXIMA_TEST_TIMEOUT_MS=900000 cargo nextest run -p proxima-model-interop --features std,metal,instrument,metal-attn-split-rows,metal-attn-variants --test granite_attention_variant_prefill -E 'test(~card_25_granite_sequential_public_requests_complete_on_one_model)' -j 1 --success-output immediate` | Filter selects exactly 1 test and reports 1 passed. One loaded Granite model completes ten sequential public calls: the 128-token fixture legacy/selected pair matches all recorded IDs, followed by four legacy/selected viability pairs with identical nonempty IDs and text. Output includes semantic predicates and full per-prompt payloads. A failure retains its exact prompt, arm, and error. |
 
 Read each printed response and predicate. Passing request completion is not a semantic-quality verdict; each predicate result is reported independently.

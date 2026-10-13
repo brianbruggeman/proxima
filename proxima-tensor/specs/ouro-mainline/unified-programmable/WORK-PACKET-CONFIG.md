@@ -47,7 +47,7 @@ Use existing mainline compatibility commands before the unified runner is
 executable; use its dense/MoE controls thereafter and the full final matrix.
 
 **Validation:** AC1 and AC12 in `SPEC.md`. Also run the existing Omega config
-test selection and `cargo check -p omega --no-default-features --features
+test selection and `cargo check -p proxima-omega --no-default-features --features
 alloc --message-format=json`. Record exact counts and changed source lines.
 
 **Negative controls:** mutate one override source so the resolved worker count

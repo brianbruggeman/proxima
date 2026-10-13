@@ -57,7 +57,7 @@ doctests_ran_and_passed() {
 # reproduced on a real ubuntu host with CARGO_TERM_COLOR=always set.
 macro_smoke_ran_and_passed() {
     local output
-    if ! output="$(cargo nextest run -p proxima --test e2e \
+    if ! output="$(cargo nextest run -p proxima-lib --test e2e \
         --features test-prime,http-hyper,http3-quinn-compat \
         -E 'test(proxima_test_smoke)' --no-fail-fast --color never 2>&1)"; then
         printf '%s\n' "$output"

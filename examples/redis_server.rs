@@ -15,7 +15,7 @@
 //! SUBSCRIBE/PSUBSCRIBE/UNSUBSCRIBE/PUBLISH) is answered by the driver
 //! itself, never reaching the handler.
 //!
-//! Run with: `cargo run -p proxima --example redis_server --features redis-listener`
+//! Run with: `cargo run -p proxima-lib --example redis_server --features redis-listener`
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

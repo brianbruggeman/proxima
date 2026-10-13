@@ -35,7 +35,7 @@ Use the existing Proxima numeric and Metal abstractions. Do not introduce num-tr
 
 | id | command | expected |
 |---|---|---|
-| AC06 | `cargo nextest run -p omega --features metal-attn-split-decode --test cached_attention_decode_split_parity -E 'test(~card_06_bf16_decode)'` | filter selects 2 tests; 2 passed; the Metal output bits match the same F32-cache decode dispatch |
+| AC06 | `cargo nextest run -p proxima-omega --features metal-attn-split-decode --test cached_attention_decode_split_parity -E 'test(~card_06_bf16_decode)'` | filter selects 2 tests; 2 passed; the Metal output bits match the same F32-cache decode dispatch |
 
 A zero-test match or a checker that does not open its fixture is failure. Run this local command after the edit. The expected count is part of the criterion.
 

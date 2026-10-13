@@ -9,7 +9,7 @@
 //! `mil-writer`.
 //!
 //! ```text
-//! cargo run -p omega --features onnx-door,cpu --example onnx_door_walkthrough
+//! cargo run -p proxima-omega --features onnx-door,cpu --example onnx_door_walkthrough
 //! ```
 
 #[path = "../tests/door_support/mod.rs"]

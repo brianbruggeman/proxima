@@ -11,5 +11,5 @@ name = "hello-rest"
 path = "main.rs"
 
 [dependencies]
-proxima = { path = "../../../.." }
+proxima = { package = "proxima-lib", path = "../../../.." }
 tokio = { version = "1", features = ["full"] }

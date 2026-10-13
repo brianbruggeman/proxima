@@ -8,7 +8,7 @@
 //! enters the emit, package and verify stages the ONNX one never reaches.
 //!
 //! ```text
-//! cargo run -p omega --features onnx-door,cpu,mil-writer --example door_walkthrough -- mil
+//! cargo run -p proxima-omega --features onnx-door,cpu,mil-writer --example door_walkthrough -- mil
 //! ```
 
 #[path = "../tests/door_support/mod.rs"]

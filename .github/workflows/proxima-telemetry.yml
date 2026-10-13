@@ -93,7 +93,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: |
-          cargo test -p proxima --test otlp_send_prime_e2e --features \
+          cargo test -p proxima-lib --test otlp_send_prime_e2e --features \
             "test-prime,otlp-http,http-prime,runtime-prime-executor,runtime-prime-inbox-alloc,runtime-prime-reactor,runtime-prime-bgpool,tcp"
 
   # Compare-bench (native encode vs OTLP protobuf). Records the baseline; does

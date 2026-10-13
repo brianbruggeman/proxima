@@ -23,7 +23,7 @@
 # CELL 3 -- "default set minus each default-on flag" -- is only PARTIALLY
 # reachable. Cargo features are a pure union: once anything in the resolved
 # graph requires a feature, it is on, and there is no subtraction operator.
-# Probed directly (`cargo build -p omega --no-default-features --features
+# Probed directly (`cargo build -p proxima-omega --no-default-features --features
 # metal -v`, grepped for `feature="..."` in rustc's invocation): every one
 # of the 5 flags `metal` folds in on its own line (`metal-output-placement`,
 # `metal-wide-cooperative-reduce`, `metal-q5k-pair-dot`,
@@ -209,7 +209,7 @@ skip_cell "cell3: default minus std" \
     "UNREACHABLE: both metal and cpu (the other two members of default) re-add std unconditionally (metal = [\"std\", ...], cpu = [\"std\", ...]); Cargo features are additive-only"
 for forced_flag in metal-output-placement metal-wide-cooperative-reduce metal-q5k-pair-dot metal-plan-stable-buffers cached-attention-streaming; do
     skip_cell "cell3: default minus ${forced_flag}" \
-        "UNREACHABLE: metal's own [features] entry hardwires ${forced_flag} into every build that selects metal; probed via 'cargo build -p omega --no-default-features --features metal -v', ${forced_flag} appeared in the resolved feature set regardless of entry point"
+        "UNREACHABLE: metal's own [features] entry hardwires ${forced_flag} into every build that selects metal; probed via 'cargo build -p proxima-omega --no-default-features --features metal -v', ${forced_flag} appeared in the resolved feature set regardless of entry point"
 done
 
 # ---------------------------------------------------------------------

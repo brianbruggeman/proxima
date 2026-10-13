@@ -415,7 +415,7 @@ targets. Each one runs 3 vendored prompts.
     from its prefix gives prompt ids equal to llama's `prompt_ids` for the whole prompt.
   - Control: absent.
 - **AC18, consistency (R18).**
-  - Command: `cargo nextest run -p omega --features metal,metal-tiled-gemm -E 'test(/threshold_both_sides_/)'`.
+  - Command: `cargo nextest run -p proxima-omega --features metal,metal-tiled-gemm -E 'test(/threshold_both_sides_/)'`.
   - Expected: 3 passed, one each for cached attention form, tiled GEMM and cooperative
     reduce. Each runs at threshold-1 and at threshold against the CPU reference.
   - Control: absent.
