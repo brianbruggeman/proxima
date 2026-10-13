@@ -72,6 +72,10 @@ use proxima_primitives::stream::{
     DatagramFactory, DatagramSocket, PeerInfo, StreamConnection, TcpAcceptor,
 };
 use proxima_primitives::sync::blocking::{Mutex, MutexGuard};
+#[cfg(all(unix, feature = "uds-listener"))]
+use proxima_net::prime::PrimeUnixListener;
+#[cfg(all(unix, feature = "uds-listener"))]
+use proxima_primitives::stream::StreamListenerExt;
 
 use crate::http1::serve::HttpListenerSpec;
 use crate::http1::serve::serve_connection as serve_h1_connection_shared;
@@ -1260,14 +1264,7 @@ async fn serve_uds(
     ready_signal: Option<ReadySignal>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Result<(), ProximaError> {
-    if path.exists() {
-        std::fs::remove_file(&path).map_err(|err| {
-            ProximaError::Io(std::io::Error::other(format!(
-                "remove stale uds socket: {err}"
-            )))
-        })?;
-    }
-    let listener = tokio::net::UnixListener::bind(&path)
+    let listener = PrimeUnixListener::bind(path.clone())
         .map_err(|err| ProximaError::Io(std::io::Error::other(format!("bind uds: {err}"))))?;
     if let Some(perm_bits) = mode {
         use std::os::unix::fs::PermissionsExt;
@@ -1283,9 +1280,22 @@ async fn serve_uds(
     let mut core = ListenerCore::new(proxima_listen::DispatchPolicy::Inline);
     let admission = ConnAdmission::unbounded();
     loop {
-        tokio::select! {
-            outcome = listener.accept() => match outcome {
-                Ok((socket, _peer)) => {
+        futures::select_biased! {
+            _ = (&mut shutdown).fuse() => {
+                // Serial accept loop: `classify_and_drive` below is always
+                // awaited to completion before the loop returns to this
+                // `select_biased!`, so nothing is ever concurrently in flight
+                // here — `begin_drain` always reports `ClosedImmediately` and
+                // `admission.in_flight()` is always 0. Still call both (not
+                // just drop the sockets) so the SAME admission contract UDS
+                // shares with the TCP path is exercised uniformly.
+                admission.begin_drain();
+                let _ = core.begin_drain();
+                let _ = std::fs::remove_file(&path);
+                return Ok(());
+            },
+            outcome = listener.accept().fuse() => match outcome {
+                Ok(socket) => {
                     let peer_ip = proxima_listen::peer_ip(None);
                     // Blacklist gate BEFORE `core.admit` — same discipline
                     // as the TCP accept loops in `serve_via_factory`.
@@ -1296,22 +1306,17 @@ async fn serve_uds(
                     };
                     match decision {
                     Admission::Admit { handle, .. } => {
-                        let stream: Box<dyn proxima_primitives::stream::StreamConnection> =
-                            Box::new(UdsStream(tokio_util::compat::TokioAsyncReadCompatExt::compat(socket)));
-                        let candidates_for_conn = candidates.clone();
-                        let handlers_for_conn = handlers.clone();
-                        let on_reject_for_conn = on_reject.clone();
-                        let spec_for_conn = spec.clone();
-                        let admission_for_conn = admission.clone();
+                        // one concrete connection type, boxed at the open `AnyProtocol` boundary.
+                        let stream: Box<dyn StreamConnection> = Box::new(socket);
                         classify_and_drive(
                             stream,
-                            candidates_for_conn,
+                            candidates.clone(),
                             global_cap,
                             read_chunk_len,
-                            handlers_for_conn,
-                            on_reject_for_conn,
-                            spec_for_conn,
-                            admission_for_conn,
+                            handlers.clone(),
+                            on_reject.clone(),
+                            spec.clone(),
+                            admission.clone(),
                             #[cfg(feature = "tls")]
                             None,
                         )
@@ -1326,64 +1331,7 @@ async fn serve_uds(
                 }
                 Err(error) => warn!(?error, "uds accept failed"),
             },
-            _ = &mut shutdown => {
-                // Serial accept loop: `classify_and_drive` above is always
-                // awaited to completion before the loop returns to this
-                // `select!`, so nothing is ever concurrently in flight here
-                // — `begin_drain` always reports `ClosedImmediately` and
-                // `admission.in_flight()` is always 0. Still call both (not
-                // just drop the sockets) so the SAME admission contract UDS
-                // shares with the TCP path is exercised uniformly.
-                admission.begin_drain();
-                let _ = core.begin_drain();
-                let _ = std::fs::remove_file(&path);
-                return Ok(());
-            }
         }
-    }
-}
-
-/// Wraps a tokio-compat UDS stream as a boxable [`StreamConnection`] with
-/// no peer address (UDS has none) — the same "collapse onto loopback"
-/// convention [`proxima_listen::peer_ip`] already documents for non-TCP
-/// transports.
-#[cfg(all(unix, feature = "uds-listener"))]
-struct UdsStream<S>(S);
-
-#[cfg(all(unix, feature = "uds-listener"))]
-impl<S: AsyncRead + Unpin> AsyncRead for UdsStream<S> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
-    }
-}
-
-#[cfg(all(unix, feature = "uds-listener"))]
-impl<S: AsyncWrite + Unpin> AsyncWrite for UdsStream<S> {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.get_mut().0).poll_flush(cx)
-    }
-
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.get_mut().0).poll_close(cx)
-    }
-}
-
-#[cfg(all(unix, feature = "uds-listener"))]
-impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> StreamConnection for UdsStream<S> {
-    fn peer(&self) -> Option<PeerInfo> {
-        Some(PeerInfo::Unix(None))
     }
 }
 
@@ -2111,58 +2059,79 @@ mod tests {
             .await;
     }
 
-    // Regression for the feature-gate mistake: `serve_uds`/`UdsStream` used
-    // to be gated on `http1` (hyper + the legacy tokio client stack), so
-    // every non-HTTP `.any()` consumer (redis/kafka/pgwire/mqtt/amqp/
-    // memcached/dns) could never bind over a unix socket even without ever
-    // turning `http1` on — root `Cargo.toml`'s `any-listener` doc already
-    // promised these consumers need only `http-listener`. `uds-listener` is
-    // the minimal tokio + tokio-util pair the bind actually needs; this
-    // test (gated the same way) proves the bind reaches the real
-    // `UnixListener::bind` syscall — never returning the
-    // "requires the `uds-listener` feature" config error, and leaving a
-    // real socket file on disk — rather than failing immediately.
+    // Regression for the feature-gate mistake: `serve_uds` used to be gated
+    // on `http1` (hyper + the legacy tokio client stack), so every non-HTTP
+    // `.any()` consumer (redis/kafka/pgwire/mqtt/amqp/memcached/dns) could
+    // never bind over a unix socket. `uds-listener` is now tokio-free
+    // (`PrimeUnixListener`); this test runs the whole serve on a prime worker
+    // — no tokio runtime exists in the process — binds, accepts a real
+    // HTTP/1.1 request over the socket, answers it, and drains on shutdown.
     #[cfg(all(unix, feature = "uds-listener"))]
-    #[proxima::test(runtime = "tokio")]
-    async fn any_listener_uds_bind_reaches_the_real_bind_without_http1() {
+    #[test]
+    fn any_listener_uds_serves_http_over_prime_without_tokio() {
+        use futures::io::AsyncWriteExt;
+        use prime::os::core_shard;
+        use proxima_net::prime::PrimeUnixUpstream;
+        use proxima_primitives::stream::StreamUpstreamExt;
+        use proxima_runtime::CoreId;
+
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let socket_path = temp_dir.path().join("any-listener-uds-regression.sock");
+        let socket_path = temp_dir.path().join("any-listener-uds-prime.sock");
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<String, String>>();
+        let handle = core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
+        let path_for_factory = socket_path.clone();
 
-        let mut handlers = std::collections::BTreeMap::new();
-        handlers.insert("h1".to_string(), erase_handler(into_handle(ConstantOk)));
-        let candidates: Arc<[Arc<dyn AnyProtocol>]> =
-            Arc::from(vec![Arc::new(H1AnyProtocol::new()) as Arc<dyn AnyProtocol>]);
-        let protocol = AnyListenProtocol::from_candidates(candidates, Arc::new(handlers));
+        handle
+            .dispatch_factory(Box::new(move || {
+                let path = path_for_factory;
+                Box::pin(async move {
+                    let mut handlers = std::collections::BTreeMap::new();
+                    handlers.insert("h1".to_string(), erase_handler(into_handle(ConstantOk)));
+                    let candidates: Arc<[Arc<dyn AnyProtocol>]> =
+                        Arc::from(vec![Arc::new(H1AnyProtocol::new()) as Arc<dyn AnyProtocol>]);
+                    let protocol = AnyListenProtocol::from_candidates(candidates, Arc::new(handlers));
+                    let mut spec = serde_json::Map::new();
+                    spec.insert(
+                        "path".to_string(),
+                        Value::String(path.to_string_lossy().into_owned()),
+                    );
+                    let context = ServeContext::new(
+                        proxima_primitives::pipe::telemetry_surface::NoopTelemetry::handle(),
+                    );
+                    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+                    let bind: SocketAddr = "127.0.0.1:0".parse().expect("parse bind addr");
+                    let serve =
+                        protocol.serve(bind, into_handle(ConstantOk), &Value::Object(spec), context, shutdown_rx);
 
-        let mut spec = serde_json::Map::new();
-        spec.insert(
-            "path".to_string(),
-            Value::String(socket_path.to_string_lossy().into_owned()),
-        );
+                    // `join` polls `serve` first, so the bind has run before the client dials.
+                    let client = async move {
+                        let upstream = PrimeUnixUpstream::new(path);
+                        let mut conn = upstream.connect().await.map_err(|err| format!("connect: {err}"))?;
+                        conn.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                            .await
+                            .map_err(|err| format!("write: {err}"))?;
+                        conn.flush().await.map_err(|err| format!("flush: {err}"))?;
+                        let mut response = Vec::new();
+                        futures::AsyncReadExt::read_to_end(&mut conn, &mut response)
+                            .await
+                            .map_err(|err| format!("read: {err}"))?;
+                        let _ = shutdown_tx.send(());
+                        Ok::<String, String>(String::from_utf8_lossy(&response).into_owned())
+                    };
+                    let (served, response) = futures::future::join(serve, client).await;
+                    let _ = result_tx.send(served.map_err(|err| format!("serve: {err}")).and_then(|()| response));
+                }) as Pin<Box<dyn Future<Output = ()> + 'static>>
+            }))
+            .expect("dispatch_factory");
 
-        let context =
-            ServeContext::new(proxima_primitives::pipe::telemetry_surface::NoopTelemetry::handle());
-        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
-        let dispatch = into_handle(ConstantOk);
-        let bind: SocketAddr = "127.0.0.1:0".parse().expect("parse bind addr");
+        let response = result_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("serve/client never completed")
+            .expect("uds round trip");
+        handle.shutdown_and_join().expect("shutdown");
 
-        let serve = protocol.serve(bind, dispatch, &Value::Object(spec), context, shutdown_rx);
-        futures::pin_mut!(serve);
-
-        // The real bind is a synchronous syscall on `serve`'s first poll,
-        // completed before the loop ever suspends on its accept select —
-        // racing a short timeout against it distinguishes "failed
-        // immediately with the feature-gate error" from "bound and now
-        // parked in the accept loop".
-        let raced = tokio::time::timeout(std::time::Duration::from_millis(200), &mut serve).await;
-        match raced {
-            Ok(Ok(())) => panic!("serve must not resolve Ok before shutdown fires"),
-            Ok(Err(error)) => panic!("uds bind must not fail under `uds-listener`: {error}"),
-            Err(_) => {}
-        }
-        assert!(
-            socket_path.exists(),
-            "a real UDS socket file must exist after `serve_uds` binds"
-        );
+        assert!(response.starts_with("HTTP/1.1 200"), "status line missing: {response:?}");
+        assert!(response.ends_with("ok"), "body must be the handler's `ok`: {response:?}");
+        assert!(!socket_path.exists(), "serve must unlink the socket on shutdown");
     }
 }

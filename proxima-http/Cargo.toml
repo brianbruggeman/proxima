@@ -224,20 +224,18 @@ http-listener = [
     "proxima-protocols/proxy_protocol-std",
     "uds-listener",
 ]
-# `AnyListenProtocol::serve`'s UDS bind path (`serve_uds`/`UdsStream` in
+# `AnyListenProtocol::serve`'s UDS bind path (`serve_uds` in
 # `any_listener.rs`) — used by EVERY `.any()`-family consumer (h1, pgwire,
 # redis, kafka, mqtt, amqp, memcached, dns) whenever the bind spec carries a
 # unix-socket `path`, regardless of whether that consumer speaks HTTP.
-# `AcceptorFactory` was never extended to unix sockets for this listener, so
-# the bind still goes through a hardcoded `tokio::net::UnixListener` — a
-# real, unavoidable dependency, but on raw tokio + the `tokio-util` compat
-# bridge only, not on `http1`'s hyper/legacy-client stack. This feature pulls
-# exactly that minimal pair, so a non-HTTP `.any()` consumer's UDS bind works
-# without dragging hyper in (previously it was gated on `http1` itself,
-# which meant e.g. `--features pgwire` alone could never bind pgwire over a
-# unix socket — see root `Cargo.toml`'s `any-listener` doc, which already
-# states these protocols need only `http-listener`, never `http1`).
-uds-listener = ["dep:tokio", "dep:tokio-util"]
+# `AcceptorFactory` was never extended to unix sockets, so the bind goes
+# straight to `proxima_net::prime::PrimeUnixListener` (a `StreamListener`
+# over the prime reactor) — tokio-free, same trio `http1-stream-client` uses.
+uds-listener = [
+    "dep:proxima-net",
+    "proxima-net/prime",
+    "proxima-net/runtime-prime-inbox-alloc",
+]
 # TLS termination for the `listener` module (folded from the former
 # `proxima-listeners-http` crate's own `tls` feature).
 tls = [
