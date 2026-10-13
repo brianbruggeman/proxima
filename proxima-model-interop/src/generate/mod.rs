@@ -68,7 +68,10 @@ use proxima_gguf::GgmlType;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_primitives::pipe::Pipe;
 use proxima_primitives::sync::blocking::Mutex;
-#[cfg(any(not(feature = "gpu"), all(feature = "instrument", target_os = "macos")))]
+#[cfg(any(
+    not(feature = "gpu"),
+    all(feature = "instrument", feature = "metal", target_os = "macos")
+))]
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch_and_experts;
 use proxima_tensor::cpu::{
     Evaluated, ExpertSource, QuantizedBlock,
