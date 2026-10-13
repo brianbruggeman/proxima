@@ -1088,6 +1088,7 @@ fn shuffle_combine_expr(
 /// the cache identity a driver keys compiled modules on, and this text changed
 /// for every kernel at every size when the 32-bit multiply was widened, so a
 /// module compiled from the earlier text can never be served for this one.
+/// `_gid64c8` marks the revision whose cooperative reduce hoists Q6_K chunks.
 fn entry_name(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
@@ -1113,7 +1114,7 @@ fn entry_name(
     } else {
         ""
     };
-    format!("{identity}{activation_token}_gid64")
+    format!("{identity}{activation_token}_gid64c8")
 }
 
 /// The `(weight, activation)` operand slots of a Q4_0-weight matvec that the
@@ -2025,6 +2026,22 @@ fn push_q4_0_chunk_decode(source: &mut String, index: usize) {
     ));
 }
 
+fn push_q6k_chunk_decode(source: &mut String, index: usize) {
+    source.push_str(&format!("        float q6k_chunk{index}[8];\n"));
+    source.push_str(&format!(
+        "        if ((off{index} & 7) == 0 && chunk + 8 <= u.reduction_total) {{\n\
+         \x20           q6k_chunk8(in{index} + (off{index} / {Q4K_BLOCK_ELEMENTS}) * {Q6K_BLOCK_BYTES}, \
+         (unsigned int)(off{index} % {Q4K_BLOCK_ELEMENTS}), q6k_chunk{index});\n\
+         \x20       }} else {{\n\
+         \x20           for (int slot = 0; slot < 8 && chunk + slot < u.reduction_total; slot++) {{\n\
+         \x20               long element = off{index} + slot;\n\
+         \x20               q6k_chunk{index}[slot] = q6k_element(in{index} + (element / {Q4K_BLOCK_ELEMENTS}) * {Q6K_BLOCK_BYTES}, \
+         (unsigned int)(element % {Q4K_BLOCK_ELEMENTS}));\n\
+         \x20           }}\n\
+         \x20       }}\n"
+    ));
+}
+
 fn push_q8_0_chunk_decode(source: &mut String, index: usize) {
     source.push_str(&format!("        float q8_0_chunk{index}[8];\n"));
     source.push_str(&format!(
@@ -2136,7 +2153,14 @@ fn push_cooperative_reduce_body(
     } else {
         Vec::new()
     };
-    let chunk_hoisted_index = |index: usize| q4_0_slots.contains(&index) || q8_0_slots.contains(&index);
+    let q6k_slots = if chunk_hoisted {
+        codec_slots(quantized, Codec::Q6K)
+    } else {
+        Vec::new()
+    };
+    let chunk_hoisted_index = |index: usize| {
+        q4_0_slots.contains(&index) || q8_0_slots.contains(&index) || q6k_slots.contains(&index)
+    };
 
     if packed_chunked {
         source.push_str(&format!(
@@ -2147,7 +2171,7 @@ fn push_cooperative_reduce_body(
             push_reduction_coord_decompose(source, "chunk", reduce_rank, reduce_rank_len, "        ");
         }
         if chunk_hoisted {
-            if !q4_0_slots.is_empty() || !q8_0_slots.is_empty() {
+            if !q4_0_slots.is_empty() || !q8_0_slots.is_empty() || !q6k_slots.is_empty() {
                 source.push_str("        long r = chunk;\n");
             }
             for &index in &q4_0_slots {
@@ -2161,6 +2185,12 @@ fn push_cooperative_reduce_body(
                 push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
                 push_gather_base_add(source, resolved, index, "        ");
                 push_q8_0_chunk_decode(source, index);
+            }
+            for &index in &q6k_slots {
+                let (_, layout, _) = &resolved.operands()[index];
+                push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
+                push_gather_base_add(source, resolved, index, "        ");
+                push_q6k_chunk_decode(source, index);
             }
         }
         source.push_str("        for (long inner = 0; inner < 8 && chunk + inner < u.reduction_total; inner++) {\n");
@@ -2211,6 +2241,10 @@ fn push_cooperative_reduce_body(
         }
         if q8_0_slots.contains(&index) {
             source.push_str(&format!("        scratch[{index}] = q8_0_chunk{index}[inner];\n"));
+            continue;
+        }
+        if q6k_slots.contains(&index) {
+            source.push_str(&format!("        scratch[{index}] = q6k_chunk{index}[inner];\n"));
             continue;
         }
         source.push_str(&format!(
@@ -2680,6 +2714,34 @@ __device__ __forceinline__ float q6k_element(const unsigned char *block, unsigne
     float scale = (float)(signed char)scale_byte;
     float quant = (float)level - 32.0f;
     return d * scale * quant;
+}
+__device__ __forceinline__ void q6k_chunk8(const unsigned char *block, unsigned int index, float *out) {
+    unsigned short d_bits = (unsigned short)((unsigned int)block[208] | ((unsigned int)block[209] << 8));
+    float d = __half2float(__ushort_as_half(d_bits));
+
+    unsigned int half_index = index / 128u;
+    unsigned int local = index % 128u;
+    unsigned int l = local % 32u;
+    unsigned int lane = local / 32u;
+    unsigned int sub_block_in_half = l / 16u;
+
+    const unsigned short *ql_pairs = (const unsigned short *)(block + half_index * 64u + (lane % 2u) * 32u + l);
+    const unsigned short *qh_pairs = (const unsigned short *)(block + 128u + half_index * 32u + l);
+    float scale = (float)(signed char)block[192u + half_index * 8u + sub_block_in_half + lane * 2u];
+    #pragma unroll
+    for (int pair = 0; pair < 4; pair++) {
+        unsigned int ql_word = (unsigned int)ql_pairs[pair];
+        unsigned int qh_word = (unsigned int)qh_pairs[pair];
+        #pragma unroll
+        for (int byte = 0; byte < 2; byte++) {
+            unsigned int ql_byte = (ql_word >> (8u * byte)) & 0xFFu;
+            unsigned int qh_byte = (qh_word >> (8u * byte)) & 0xFFu;
+            unsigned int nibble = (lane < 2u) ? (ql_byte & 0x0Fu) : (ql_byte >> 4u);
+            unsigned int high2 = (qh_byte >> (lane * 2u)) & 0x03u;
+            unsigned int level = nibble | (high2 << 4u);
+            out[2 * pair + byte] = d * scale * ((float)level - 32.0f);
+        }
+    }
 }
 ";
 
@@ -3239,7 +3301,7 @@ mod tests {
         assert_eq!(
             flag_off,
             format!(
-                "{}_gid64",
+                "{}_gid64c8",
                 crate::identity::kernel_identity(
                     crate::identity::KernelLanguage::Cuda,
                     &bound,
@@ -3621,6 +3683,30 @@ mod tests {
         assert!(lane_loop < gather_add && gather_add < chunk_call);
         assert!(kernel.source.contains("q8_0_element(in0"));
         assert!(kernel.source.contains("scratch[0] = q8_0_chunk0[inner];"));
+    }
+
+    #[test]
+    fn q6k_cooperative_reduce_emits_chunk8_decode_after_gather_base() {
+        let bound = gathered_reduce_op(16, 64, 4, false);
+        let mut packed = BTreeMap::new();
+        packed.insert(bound.operands()[0].0, Codec::Q6K);
+        let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
+            .expect("emit succeeds");
+        let gather_add = kernel
+            .source
+            .find("off0 += gather_base0;")
+            .expect("hoisted gather base is added to the packed offset");
+        let chunk_call = kernel
+            .source
+            .find("q6k_chunk8(in0")
+            .expect("aligned chunk decode is emitted");
+        let lane_loop = kernel
+            .source
+            .find("for (long chunk = (long)lane * 8;")
+            .expect("chunked lane loop is emitted");
+        assert!(lane_loop < gather_add && gather_add < chunk_call);
+        assert!(kernel.source.contains("q6k_element(in0"));
+        assert!(kernel.source.contains("scratch[0] = q6k_chunk0[inner];"));
     }
 
     #[test]
@@ -4050,7 +4136,7 @@ mod tests {
     fn the_entry_name_carries_the_index_form_so_a_stale_module_cannot_be_served() {
         let kernel = emit_cuda(&elementwise_tanh_op(8), &no_packed()).expect("emits");
 
-        assert!(kernel.entry.ends_with("_gid64"), "{}", kernel.entry);
+        assert!(kernel.entry.ends_with("_gid64c8"), "{}", kernel.entry);
         assert!(
             kernel.source.contains(&kernel.entry),
             "the name a driver keys its compiled module on is the name the source declares"
