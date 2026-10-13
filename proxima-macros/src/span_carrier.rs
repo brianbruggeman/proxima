@@ -137,15 +137,26 @@ mod tests {
     }
 
     // both emitted paths go through `crate_path::resolve`, so the derive is
-    // reachable from `proxima-telemetry` itself and from a crate that depends
-    // on it directly — not only through the `proxima` umbrella. Resolved here
-    // to the umbrella because that is this crate's own dev-dependency; the
-    // other two arms are pinned in `crate_path`'s own tests.
+    // reachable from `proxima-telemetry` itself, from a crate that depends on
+    // it directly, and through the `proxima` umbrella. Which arm applies
+    // depends on what this test binary links, so the expectation is the
+    // resolver's own output for the same tails; the arms themselves are pinned
+    // with an explicit dependency view in `crate_path`'s tests.
     #[test]
     fn emitted_paths_go_through_the_shared_resolver() {
         let expanded = expand_ok("struct Envelope { span_id: Option<SpanId> }");
-        assert!(expanded.contains(":: proxima :: telemetry :: trace :: SpanCarrier"));
-        assert!(expanded.contains(":: proxima :: telemetry :: id :: SpanId"));
+        let carrier_trait = crate_path::resolve(
+            "proxima-telemetry",
+            &quote!(trace::SpanCarrier),
+            &quote!(telemetry::trace::SpanCarrier),
+        );
+        let span_id_type = crate_path::resolve(
+            "proxima-telemetry",
+            &quote!(id::SpanId),
+            &quote!(telemetry::id::SpanId),
+        );
+        assert!(expanded.contains(&carrier_trait.to_string()));
+        assert!(expanded.contains(&span_id_type.to_string()));
     }
 
     #[test]
