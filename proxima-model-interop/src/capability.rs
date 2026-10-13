@@ -270,13 +270,14 @@ pub fn supported_dense_cpu_codecs() -> Vec<GgmlType> {
 /// gaining a 30th codec fails this crate's own build before it can silently
 /// fail to appear here.
 ///
-/// `Codec` carries 32 variants; only 14 have a CPU decode/matmul path
-/// (`proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type` returns
-/// `Some`, mirrored by `ALL_CODECS`'s `cpu_supported` field below) -- the
-/// other 18 are recognized (this table names every one) but no construction
-/// site in this crate or `proxima_tensor` ever builds a
-/// [`proxima_tensor::cpu::QuantizedBlock::Packed`] carrying one, matching
-/// `codec_to_decodable_ggml_type`'s own doc for why. This mirrors the CPU
+/// `Codec` carries 32 variants; 17 have a CPU decode/matmul path: the 14 that
+/// `proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type` maps to
+/// `Some`, plus `Bf8E5M2`, `Bf4E2M1` and `Fp6E3M2`, which
+/// `QuantizedBlock::block_layout`, `codec_matmul_f32_kernel` and
+/// `codec_dequantize_fn` handle directly. The other 15 are recognized (this
+/// table names every one) but no construction site in this crate or
+/// `proxima_tensor` ever builds a
+/// [`proxima_tensor::cpu::QuantizedBlock::Packed`] carrying one. This mirrors the CPU
 /// kernel's own support boundary only -- it does not claim anything about
 /// `omega`'s GPU emitters, which this module no longer reads (`omega::msl`'s
 /// own former codec identity enum was folded onto this same `Codec`, see
@@ -331,12 +332,12 @@ pub mod quant_format {
         }
     }
 
-    /// `true` for exactly the 14 [`Codec`] variants
-    /// `proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type` maps to
-    /// `Some` (a CPU decode path exists); `false` for the other 18, which
-    /// that same function maps to `None` -- no construction site in this
-    /// crate or `proxima_tensor` ever builds a `QuantizedBlock::Packed`
-    /// carrying one of them.
+    /// `true` for exactly the 17 [`Codec`] variants with a CPU decode path:
+    /// the 14 `proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type`
+    /// maps to `Some`, plus `Bf8E5M2`, `Bf4E2M1` and `Fp6E3M2`, which
+    /// `codec_matmul_f32_kernel` dispatches to dedicated kernels. `false` for
+    /// the other 15 -- no construction site in this crate or `proxima_tensor`
+    /// ever builds a `QuantizedBlock::Packed` carrying one of them.
     const fn cpu_kernel_supported(codec: Codec) -> bool {
         matches!(
             codec,
@@ -354,6 +355,9 @@ pub mod quant_format {
                 | Codec::Iq3Xxs
                 | Codec::Float16
                 | Codec::BFloat16
+                | Codec::Bf8E5M2
+                | Codec::Bf4E2M1
+                | Codec::Fp6E3M2
         )
     }
 
@@ -512,6 +516,24 @@ mod quant_format_tests {
             q5_1_row,
             Some("| Q5_1 | supported |"),
             "Q5_1 has a CPU matmul kernel (matmul_q5_1_f32)"
+        );
+    }
+
+    #[test]
+    fn float_layout_rows_are_cpu_supported_through_their_dedicated_kernels() {
+        let rendered = render_markdown();
+        let rows: Vec<&str> = ["| BF8_E5M2 ", "| BF4_E2M1 ", "| FP6_E3M2 "]
+            .iter()
+            .filter_map(|prefix| rendered.lines().find(|line| line.starts_with(prefix)))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "| BF8_E5M2 | supported |",
+                "| BF4_E2M1 | supported |",
+                "| FP6_E3M2 | supported |"
+            ],
+            "codec_matmul_f32_kernel maps all three to matmul_*_f32"
         );
     }
 
