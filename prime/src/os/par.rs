@@ -32,6 +32,8 @@
 
 use std::future::Future;
 use std::marker::PhantomData;
+#[cfg(feature = "runtime-prime-bgpool-async")]
+use std::ops::Range;
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -335,8 +337,7 @@ where
     par_reduce_async_range(
         pool.clone(),
         slice,
-        0,
-        len,
+        0..len,
         identity,
         work,
         reduce,
@@ -349,8 +350,7 @@ where
 fn par_reduce_async_range<Item, Acc, Work, Fut, Reduce, Identity>(
     pool: Arc<ProximaBackgroundPool>,
     slice: Arc<[Item]>,
-    start: usize,
-    end: usize,
+    range: Range<usize>,
     identity: Identity,
     work: Work,
     reduce: Reduce,
@@ -365,6 +365,7 @@ where
     Identity: Fn() -> Acc + Send + Sync + 'static + Clone,
 {
     Box::pin(async move {
+        let Range { start, end } = range;
         let len = end - start;
         if len <= chunk_threshold {
             let slice_for_leaf = slice.clone();
@@ -386,8 +387,7 @@ where
         let left_future = par_reduce_async_range(
             pool.clone(),
             slice.clone(),
-            start,
-            mid,
+            start..mid,
             identity.clone(),
             work.clone(),
             reduce.clone(),
@@ -396,8 +396,7 @@ where
         let right_future = par_reduce_async_range(
             pool,
             slice,
-            mid,
-            end,
+            mid..end,
             identity,
             work.clone(),
             reduce.clone(),
