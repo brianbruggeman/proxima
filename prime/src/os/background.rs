@@ -55,8 +55,8 @@ enum Job {
         sender: oneshot::Sender<Result<Box<dyn Any + Send>, ProximaError>>,
     },
     /// produced by `spawn_async`: an already-pinned future whose body
-    /// captures its own sender. workers `block_on` this on their per-thread
-    /// tokio current_thread runtime.
+    /// captures its own sender. workers `block_on` this on their own thread,
+    /// parking between polls.
     #[cfg(feature = "runtime-prime-bgpool-async")]
     Async(Pin<Box<dyn Future<Output = ()> + Send + 'static>>),
 }
@@ -164,13 +164,12 @@ impl ProximaBackgroundPool {
 
     /// typed async spawn. takes any `Future<Output = Result<T, ProximaError>>`
     /// and returns a Future that completes when the inner future is
-    /// driven to completion by a worker's per-thread tokio current_thread
-    /// runtime. structurally mirrors [`Self::spawn`] (which is sync) but
+    /// driven to completion by a worker thread that parks between polls
+    /// (no tokio runtime). structurally mirrors [`Self::spawn`] (which is sync) but
     /// the leaf runs on a polling worker instead of being executed inline.
     ///
     /// only available when the `runtime-prime-bgpool-async` feature is on;
-    /// without it, workers are sync-only and never construct a tokio
-    /// runtime (one less allocation per worker).
+    /// without it, workers are sync-only and never poll futures.
     #[cfg(feature = "runtime-prime-bgpool-async")]
     pub fn spawn_async<F, T>(
         &self,
@@ -278,21 +277,33 @@ impl Drop for ProximaBackgroundPool {
     }
 }
 
-fn worker(inner: Arc<Inner>, parker: Parker) {
-    // per-worker tokio current_thread runtime, built only when the async
-    // feature is on. drives `Job::Async` futures via `block_on`. each worker
-    // owns its own — async state never escapes the worker that started it.
-    // a build failure is rare (FD exhaustion or OOM); on failure the worker
-    // exits silently and the pool runs with one fewer concurrent slot.
-    #[cfg(feature = "runtime-prime-bgpool-async")]
-    let async_runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(_) => return,
-    };
+#[cfg(feature = "runtime-prime-bgpool-async")]
+struct UnparkWaker(Unparker);
 
+#[cfg(feature = "runtime-prime-bgpool-async")]
+impl std::task::Wake for UnparkWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
+    }
+}
+
+// drives one `Job::Async` future to completion on the worker thread, parking
+// between polls; the waker unparks this worker. no reactor or timer exists
+// here, so the future must be woken by its own channels or yields.
+#[cfg(feature = "runtime-prime-bgpool-async")]
+fn block_on_parked(mut future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>, parker: &Parker) {
+    let waker = std::task::Waker::from(Arc::new(UnparkWaker(parker.unparker().clone())));
+    let mut context = Context::from_waker(&waker);
+    while future.as_mut().poll(&mut context).is_pending() {
+        parker.park();
+    }
+}
+
+fn worker(inner: Arc<Inner>, parker: Parker) {
     loop {
         // fast path: steal from injector. `steal` retries internally on
         // contention; we treat `Empty` as the signal to park.
@@ -305,7 +316,7 @@ fn worker(inner: Arc<Inner>, parker: Parker) {
                     }
                     #[cfg(feature = "runtime-prime-bgpool-async")]
                     Job::Async(future) => {
-                        async_runtime.block_on(future);
+                        block_on_parked(future, &parker);
                     }
                 }));
                 let _ = unwind;
@@ -398,11 +409,11 @@ mod tests {
     async fn spawn_async_runs_future_on_worker() {
         let pool = Arc::new(ProximaBackgroundPool::with_threads(2).expect("build pool"));
         // exercise the polling-worker path: the future yields (via
-        // tokio::task::yield_now) so we know the worker's runtime is
+        // yield_now) so we know the worker is
         // actually driving it as a future, not just block_on'ing a
         // ready-immediately leaf.
         let handle = pool.spawn_async(async move {
-            tokio::task::yield_now().await;
+            proxima_primitives::sync::task::yield_now().await;
             Ok::<u32, ProximaError>(123)
         });
         let value = handle.await.expect("async result");
@@ -416,7 +427,7 @@ mod tests {
         let mut handles = Vec::new();
         for index in 0..16_u32 {
             handles.push(pool.spawn_async(async move {
-                tokio::task::yield_now().await;
+                proxima_primitives::sync::task::yield_now().await;
                 Ok::<u32, ProximaError>(index * 3)
             }));
         }
