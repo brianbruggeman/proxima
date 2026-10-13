@@ -722,6 +722,11 @@ required-features = ["std"]
 name = "mlx_plain_export"
 required-features = ["std"]
 
+# imports `memmap2`, which only the `memmap2` feature pulls in.
+[[example]]
+name = "gguf_codec_inventory"
+required-features = ["memmap2"]
+
 # offline codec conversion: mmap's the source checkpoint, `convert_codec` is `std`-gated.
 [[example]]
 name = "convert_codec"
