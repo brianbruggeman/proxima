@@ -1490,6 +1490,115 @@ fn embedding_lookup_runs_on_cuda_at_cpu_parity_for_int32_token_blocks() {
     );
 }
 
+fn int32_route_gather_program(vocab: u32, dim: u32, seq: u32, candidates: u32) -> Vec<Op> {
+    use proxima_tensor::{AxisIndex, AxisTerm, IndexPattern};
+
+    let mut program = Vec::new();
+    let table = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(vocab), Extent::Static(dim)],
+            name: Some("table".into()),
+        },
+    );
+    let scored = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(seq), Extent::Static(candidates)],
+            name: Some("candidates".into()),
+        },
+    );
+    let route = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Int32,
+            body: ScalarOp::Maximum,
+            init: ReduceInit::NegativeInfinity,
+            operand: scored,
+            in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+            out_map: IndexMap::Affine(map::projection(2, &[0])),
+            keep: Keep::Reduce,
+            name: Some("route".into()),
+        }),
+    );
+    let gathered_map = IndexMap::Computed {
+        indices: route,
+        index_map: projection(2, &[0]),
+        base: IndexPattern {
+            iter_rank: 2,
+            axes: vec![
+                AxisIndex::default(),
+                AxisIndex {
+                    terms: vec![AxisTerm::projection(1)].into(),
+                    offset: 0,
+                    len: None,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: vec![(table, gathered_map)],
+            name: None,
+        },
+    );
+    program
+}
+
+#[test]
+fn int32_typed_route_reduce_runs_on_cuda_with_gathered_rows_equal_to_cpu() {
+    let (vocab, dim, seq, candidates) = (256usize, 8usize, 5usize, 8usize);
+    let program =
+        int32_route_gather_program(vocab as u32, dim as u32, seq as u32, candidates as u32);
+    let table_data: Vec<f32> = (0..vocab * dim).map(|value| (value % 97) as f32).collect();
+    let candidate_data: Vec<f32> = (0..seq * candidates)
+        .map(|value| ((value * 37 + 11) % vocab) as f32)
+        .collect();
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("table", QuantizedBlock::Float32(&table_data)),
+        ("candidates", QuantizedBlock::Float32(&candidate_data)),
+    ];
+
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the int32 route gather on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named)
+        .expect("omega::backend runs the int32 route gather on cpu");
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans an int32-typed route reduce on cuda");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend runs an int32-typed route reduce on a real cuda device");
+
+    assert_eq!(cuda.root().len(), seq * dim);
+    assert_eq!(
+        cuda.root(),
+        cpu.root(),
+        "rows gathered by an int32-typed route reduce must be element-equal on cuda and cpu"
+    );
+}
+
 #[cfg(feature = "moe-topk-fusion")]
 mod moe_topk {
     use super::*;
