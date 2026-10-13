@@ -2250,6 +2250,7 @@ fn add_one_kernel(input: NodeId, output: NodeId, elements: usize) -> CudaKernel 
             block_width: None,
         },
         extra_outputs: Vec::new(),
+        prologue: Vec::new(),
     }
 }
 
