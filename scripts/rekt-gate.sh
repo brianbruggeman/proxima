@@ -3,7 +3,7 @@
 # Mechanical gate for tools/rekt (the load tester on proxima: the engine,
 # scenario, and report modules, plus the scheduler/client-protocol features
 # that pull proxima in). No gate script existed for this crate before --
-# `cargo nextest run -p rekt` and `cargo test --doc` both exit 0 whether
+# `cargo nextest run -p proxima-rekt` and `cargo test --doc` both exit 0 whether
 # they ran real work or nothing, so this asserts the nonzero count
 # explicitly instead of trusting the exit code alone.
 #
@@ -26,7 +26,7 @@ set -euo pipefail
 # for every invocation in this script, present and future.
 export CARGO_TERM_COLOR=never
 
-crate="rekt"
+crate="proxima-rekt"
 pkg="-p ${crate}"
 
 printf '\n== %s gate ==\n' "${crate}"

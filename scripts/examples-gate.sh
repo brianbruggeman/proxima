@@ -57,7 +57,7 @@ feats_for() {
     proxima-redis)      echo "client" ;;
     proxima-tensor)     echo "instrument,config,ggml-bench" ;;
     proxima-telemetry)  echo "instrument-metrics,macros,elevation" ;;
-    rekt)               echo "scheduler" ;;
+    proxima-rekt)       echo "scheduler" ;;
     *)                  echo "" ;;
   esac
 }

@@ -12,7 +12,7 @@ thresholds. The raw H1 `rekt_load` path is a specialized closed-loop benchmark
 for rekt-vs-wrk work; H2/H3 bench examples live beside it.
 
 ```bash
-cargo run -p rekt --features scheduler --bin rek -- tools/rekt/rek.toml
+cargo run -p proxima-rekt --features scheduler --bin rek -- tools/rekt/rek.toml
 ```
 
 ## what it competes with
