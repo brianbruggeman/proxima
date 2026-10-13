@@ -1137,7 +1137,9 @@ test-support = ["macros"]
 # driver as a side effect of pulling in much more; this exists for crates
 # that need exactly the driver and nothing else.
 test-support-tokio = ["test-support", "proxima-test/tokio-driver"]
-test-prime   = ["test-support", "prime-tokio-compat", "prime/prime-tokio-compat", "proxima-test/test-prime"]
+test-prime   = ["test-support", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "proxima-test/test-prime"]
+# additive: the tokio-backed sister runtime for prime tests (tokio-named)
+test-prime-tokio-compat = ["test-prime", "prime-tokio-compat", "proxima-test/test-prime-tokio-compat"]
 runtime-prime-full    = ["proxima-primitives/runtime-prime-full", "proxima-runtime/runtime-prime-full", "prime?/runtime-prime-full", "proxima-net/runtime-prime-full"]
 # perf knobs (compose with sub-flags)
 simd-hex     = []

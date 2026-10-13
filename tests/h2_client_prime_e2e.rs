@@ -8,8 +8,6 @@
 #![cfg(all(feature = "http-prime", any(target_os = "linux", target_os = "macos")))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 
 use proxima::PrimeTcpUpstream;
