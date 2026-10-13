@@ -84,7 +84,8 @@ use proxima_tensor::{
     feature = "std",
     any(
         all(feature = "metal", target_os = "macos"),
-        feature = "wgpu-backend"
+        feature = "wgpu-backend",
+        feature = "cuda-driver"
     )
 ))]
 use proxima_tensor::QuantizedBlock;

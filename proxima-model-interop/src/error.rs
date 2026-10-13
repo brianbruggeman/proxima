@@ -25,6 +25,36 @@ pub enum InteropError {
     /// ordinary forward.
     #[error("model {family:?} does not support recurrent configuration")]
     UnsupportedRecurrentConfig { family: String },
+    #[error("synchronous decode evaluator suspended before completion")]
+    SyncDecodePending,
+
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    #[error("async cuda evaluation requires the gpu engine")]
+    AsyncCudaRequiresGpu,
+
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    #[error("async cuda evaluation cannot bind {source_count} expert source tables")]
+    AsyncCudaExpertSourcesUnsupported { source_count: usize },
+
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    #[error("async cuda generation does not support {mode}")]
+    AsyncCudaGenerationUnsupported { mode: &'static str },
+
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    #[error(transparent)]
+    AsyncCudaInput(#[from] crate::cuda_async::OwnedInputError),
+
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    #[error(transparent)]
+    AsyncCudaRegistration(#[from] crate::cuda_async::CudaPlanRegistrationError),
+
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    #[error(transparent)]
+    AsyncCudaRegistry(#[from] crate::cuda_async::CudaPlanRegistryError),
+
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    #[error(transparent)]
+    AsyncCudaExecution(#[from] crate::cuda_async::GpuPipeError),
 
     /// `tensor`'s `GgmlType` has no safetensors dtype counterpart — either
     /// it's block-quantized (packs multiple elements per scale/bias, which

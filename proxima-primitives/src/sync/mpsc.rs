@@ -14,6 +14,7 @@
 //! - [`TrySendError`] is split into `Full(T)` / `Closed(T)` rather than
 //!   tokio's enum with the same discriminants; existing callers that
 //!   match on variants port verbatim.
+
 //!
 //! # Non-coverage
 //!
@@ -53,6 +54,9 @@
 //! **Unbounded variant**
 //! - Mirrors the bounded gaps. `UnboundedReceiver::try_recv` and
 //!   `recv_many` likewise absent.
+
+#[cfg(feature = "std")]
+use futures::executor::block_on;
 
 /// Returned by [`Sender::send`] / [`UnboundedSender::send`] when the
 /// receiver has been dropped. The unsent value is returned so callers
@@ -124,6 +128,11 @@ impl<T> Sender<T> {
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
+
+    /// Close the channel while allowing the receiver to drain accepted values.
+    pub fn close(&self) -> bool {
+        self.inner.close()
+    }
 }
 
 /// Bounded receiver. Drop it to close the channel for all senders.
@@ -137,6 +146,12 @@ impl<T> Receiver<T> {
     /// dropped and the buffer is drained.
     pub async fn recv(&mut self) -> Option<T> {
         self.inner.recv().await.ok()
+    }
+
+    /// Wait for the next value on a dedicated synchronous worker.
+    #[cfg(all(feature = "std", not(target_family = "wasm")))]
+    pub fn recv_blocking(&self) -> Option<T> {
+        block_on(self.inner.recv()).ok()
     }
 
     pub fn close(&mut self) -> bool {
@@ -249,6 +264,38 @@ mod tests {
                 Ok(()) => panic!("send to dropped receiver should error"),
             }
         });
+    }
+
+    #[test]
+    fn mpsc_sender_close_returns_pending_send_and_drains_accepted_values() {
+        let (sender, mut receiver) = channel::<u32>(1);
+        sender.try_send(11).expect("first value should be accepted");
+
+        block_on(async move {
+            let mut pending_send = core::pin::pin!(sender.send(22));
+            let first_poll = futures::future::poll_fn(|context| {
+                core::task::Poll::Ready(pending_send.as_mut().poll(context))
+            })
+            .await;
+            assert!(matches!(first_poll, core::task::Poll::Pending));
+
+            assert!(sender.close());
+            match pending_send.await {
+                Err(error) => assert_eq!(error.into_inner(), 22),
+                Ok(()) => panic!("close should return a send that was waiting for capacity"),
+            }
+            assert_eq!(receiver.recv().await, Some(11));
+            assert_eq!(receiver.recv().await, None);
+        });
+    }
+
+    #[test]
+    fn mpsc_receiver_blocking_drains_after_sender_close() {
+        let (sender, receiver) = channel::<u32>(1);
+        sender.try_send(31).expect("value should be accepted");
+        assert!(sender.close());
+        assert_eq!(receiver.recv_blocking(), Some(31));
+        assert_eq!(receiver.recv_blocking(), None);
     }
 
     #[test]

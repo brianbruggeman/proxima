@@ -50,6 +50,8 @@ pub mod capture_surface;
 #[cfg(feature = "alloc")]
 pub mod chaos;
 #[cfg(feature = "alloc")]
+pub mod credit_gate;
+#[cfg(feature = "alloc")]
 pub mod delay;
 pub mod primitives;
 pub mod sans_io;
@@ -248,6 +250,10 @@ pub use batch::Batch;
 pub use bounded::{BoundedQueue, EnqueueOutcome, FailMode};
 #[cfg(feature = "alloc")]
 pub use chaos::{ChaosBuilder, ChaosConfig, LatencyFault, chaos};
+#[cfg(feature = "alloc")]
+pub use credit_gate::{
+    CreditAcquireError, CreditCapacityError, CreditGate, CreditGateError, CreditInput, CreditLease,
+};
 #[cfg(feature = "std")]
 pub use delay::DelayFactory;
 #[cfg(feature = "alloc")]

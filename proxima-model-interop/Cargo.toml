@@ -55,7 +55,7 @@ std = [
 # (proxima-tensor/Cargo.toml:45): `dep:prime` pulls in OS threads, so it
 # stays out of the alloc-only floor even though every current `std` build
 # wants it (loader::prefault is the only std-gated consumer today).
-interop-bgpool = ["dep:prime", "dep:proxima-core"]
+interop-bgpool = ["dep:prime", "dep:proxima-core", "proxima-primitives/std"]
 # passthrough to `proxima-tensor/instrument` -- opt-in so the acceptance
 # forward-pass test (`bind::real_openchat_file`) can also be built and run
 # WITHOUT the per-chunk/per-node tick counters compiled in at all, to answer
@@ -385,6 +385,7 @@ tempfile.workspace = true
 temp-env.workspace = true
 proptest.workspace = true
 sha2 = { version = "0.10.9", default-features = false }
+prime = { path = "../prime", features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor"] }
 
 [[bin]]
 name = "granite-cold-quantize"
