@@ -82,6 +82,7 @@ fn poll_ready_decode<Output>(
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 struct AsyncCudaDecodeStepEvaluator<'service, Owner> {
     service: &'service CudaGpuService<Owner>,
+    resident_owner: Arc<()>,
 }
 
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
@@ -95,7 +96,7 @@ where
         step: DecodeStepEvaluation<'_, '_, '_>,
     ) -> Result<Evaluated, InteropError> {
         runtime
-            .evaluate_async(
+            .evaluate_async_with_resident_owner(
                 self.service,
                 CudaGraphRequest {
                     program: step.program,
@@ -105,6 +106,7 @@ where
                 },
                 step.resident_names,
                 None,
+                Some(&self.resident_owner),
             )
             .await
     }
@@ -2451,7 +2453,10 @@ impl<'file> LoadedModel<'file> {
         let mut runtime = BackendRuntime::new(&serving_config);
         let mut logits_sink = LogitsSink::Discard;
         let mut node_values_sink = NodeValuesSink::Discard;
-        let mut evaluator = AsyncCudaDecodeStepEvaluator { service };
+        let mut evaluator = AsyncCudaDecodeStepEvaluator {
+            service,
+            resident_owner: self.weights.resident_identity(),
+        };
         let (generated_ids, text, stopped_by_eos, _) = self
             .drive_serving_loop(
                 ids,

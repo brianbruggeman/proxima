@@ -1,0 +1,136 @@
+resident payload comparison baseline measurement
+
+status: measured, synthetic isolated comparator workloads; not an end-to-end model measurement
+source commit: b5230178b138a9dc1e21d680e4f172966d361c39
+host: Versailles; Intel Core i7-9700K, 8 cores, x86_64; RTX 2070 is present but not used by this CPU-only comparator benchmark
+benchmark: exact equality check in proxima-model-interop/src/generate/residency_caches.rs::resident_payload_matches
+harness: temporary test module, removed after measurement; sizes 4 KiB, 512 KiB, 8 MiB, 64 MiB; variants f32 bit-exact, i32 exact, packed Q4K byte exact; 5 samples per process run; 200 calls/sample through 8 MiB and 20 calls/sample at 64 MiB; allocations and initialization outside timed region; mismatch control flips the final element after timings
+execution: release test binary; CARGO_PROFILE_RELEASE_LTO=false CODEGEN_UNITS=16 DEBUG=1 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0; taskset -c 7; perf stat -r 5; five whole-process repetitions
+load context: uptime/loadavg before and after are included below; six logged users; perf reported zero context switches and zero CPU migrations for the repeated process-level measurement
+
+raw per-process test stdout follows:
+
+running 1 test
+test generate::residency_caches::resident_payload_match_measurement::measure_resident_payload_match_baseline ... resident_match_baseline label=f32 payload_bytes=4096 repetitions=200 sample_ns_per_call=[469, 469, 1032, 469, 1055]
+resident_match_baseline label=i32 payload_bytes=4096 repetitions=200 sample_ns_per_call=[56, 55, 72, 55, 55]
+resident_match_baseline label=packed payload_bytes=4096 repetitions=200 sample_ns_per_call=[58, 57, 57, 57, 62]
+resident_match_baseline label=f32 payload_bytes=524288 repetitions=200 sample_ns_per_call=[62925, 54473, 88845, 40798, 85571]
+resident_match_baseline label=i32 payload_bytes=524288 repetitions=200 sample_ns_per_call=[16878, 16835, 16839, 16846, 16840]
+resident_match_baseline label=packed payload_bytes=524288 repetitions=200 sample_ns_per_call=[16872, 16838, 16833, 16858, 16842]
+resident_match_baseline label=f32 payload_bytes=8388608 repetitions=200 sample_ns_per_call=[826470, 811447, 1440042, 807853, 1441519]
+resident_match_baseline label=i32 payload_bytes=8388608 repetitions=200 sample_ns_per_call=[523461, 525768, 522380, 525291, 524067]
+resident_match_baseline label=packed payload_bytes=8388608 repetitions=200 sample_ns_per_call=[518575, 510229, 514310, 515631, 519113]
+resident_match_baseline label=f32 payload_bytes=67108864 repetitions=20 sample_ns_per_call=[8087707, 8010686, 11838899, 7943908, 11935493]
+resident_match_baseline label=i32 payload_bytes=67108864 repetitions=20 sample_ns_per_call=[5832485, 5730785, 5724300, 5632961, 5650140]
+resident_match_baseline label=packed payload_bytes=67108864 repetitions=20 sample_ns_per_call=[5792720, 5741969, 5721674, 5757242, 5624435]
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 920 filtered out; finished in 4.39s
+
+
+running 1 test
+test generate::residency_caches::resident_payload_match_measurement::measure_resident_payload_match_baseline ... resident_match_baseline label=f32 payload_bytes=4096 repetitions=200 sample_ns_per_call=[299, 299, 658, 300, 664]
+resident_match_baseline label=i32 payload_bytes=4096 repetitions=200 sample_ns_per_call=[36, 35, 35, 35, 35]
+resident_match_baseline label=packed payload_bytes=4096 repetitions=200 sample_ns_per_call=[37, 37, 36, 36, 36]
+resident_match_baseline label=f32 payload_bytes=524288 repetitions=200 sample_ns_per_call=[40719, 40849, 82250, 39359, 83131]
+resident_match_baseline label=i32 payload_bytes=524288 repetitions=200 sample_ns_per_call=[16616, 16572, 16584, 16553, 16582]
+resident_match_baseline label=packed payload_bytes=524288 repetitions=200 sample_ns_per_call=[16665, 16585, 16634, 16799, 16589]
+resident_match_baseline label=f32 payload_bytes=8388608 repetitions=200 sample_ns_per_call=[834396, 829384, 1436165, 833644, 1442146]
+resident_match_baseline label=i32 payload_bytes=8388608 repetitions=200 sample_ns_per_call=[529037, 528130, 527331, 526439, 528806]
+resident_match_baseline label=packed payload_bytes=8388608 repetitions=200 sample_ns_per_call=[496008, 490604, 486714, 487307, 489369]
+resident_match_baseline label=f32 payload_bytes=67108864 repetitions=20 sample_ns_per_call=[8042427, 7997680, 11934483, 8050428, 11885221]
+resident_match_baseline label=i32 payload_bytes=67108864 repetitions=20 sample_ns_per_call=[5816615, 5780898, 5716003, 5697386, 5642081]
+resident_match_baseline label=packed payload_bytes=67108864 repetitions=20 sample_ns_per_call=[5886225, 5644250, 5628316, 5642881, 5598465]
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 920 filtered out; finished in 4.36s
+
+
+running 1 test
+test generate::residency_caches::resident_payload_match_measurement::measure_resident_payload_match_baseline ... resident_match_baseline label=f32 payload_bytes=4096 repetitions=200 sample_ns_per_call=[300, 300, 658, 300, 663]
+resident_match_baseline label=i32 payload_bytes=4096 repetitions=200 sample_ns_per_call=[36, 35, 35, 35, 35]
+resident_match_baseline label=packed payload_bytes=4096 repetitions=200 sample_ns_per_call=[37, 36, 36, 36, 37]
+resident_match_baseline label=f32 payload_bytes=524288 repetitions=200 sample_ns_per_call=[42766, 41644, 81930, 39360, 82310]
+resident_match_baseline label=i32 payload_bytes=524288 repetitions=200 sample_ns_per_call=[16627, 16590, 16591, 16640, 16583]
+resident_match_baseline label=packed payload_bytes=524288 repetitions=200 sample_ns_per_call=[16698, 16761, 16756, 16746, 16740]
+resident_match_baseline label=f32 payload_bytes=8388608 repetitions=200 sample_ns_per_call=[820588, 809738, 1461333, 841976, 1451065]
+resident_match_baseline label=i32 payload_bytes=8388608 repetitions=200 sample_ns_per_call=[528692, 527395, 536031, 524528, 526571]
+resident_match_baseline label=packed payload_bytes=8388608 repetitions=200 sample_ns_per_call=[545112, 543404, 545307, 541870, 555409]
+resident_match_baseline label=f32 payload_bytes=67108864 repetitions=20 sample_ns_per_call=[8119605, 8404986, 12099860, 8055552, 12316942]
+resident_match_baseline label=i32 payload_bytes=67108864 repetitions=20 sample_ns_per_call=[6102097, 5719407, 5639430, 5701751, 5648095]
+resident_match_baseline label=packed payload_bytes=67108864 repetitions=20 sample_ns_per_call=[5841265, 5759828, 5603351, 5820393, 5725857]
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 920 filtered out; finished in 4.46s
+
+
+running 1 test
+test generate::residency_caches::resident_payload_match_measurement::measure_resident_payload_match_baseline ... resident_match_baseline label=f32 payload_bytes=4096 repetitions=200 sample_ns_per_call=[306, 306, 693, 306, 672]
+resident_match_baseline label=i32 payload_bytes=4096 repetitions=200 sample_ns_per_call=[36, 35, 36, 36, 35]
+resident_match_baseline label=packed payload_bytes=4096 repetitions=200 sample_ns_per_call=[38, 37, 37, 37, 37]
+resident_match_baseline label=f32 payload_bytes=524288 repetitions=200 sample_ns_per_call=[41062, 42793, 83864, 39896, 83654]
+resident_match_baseline label=i32 payload_bytes=524288 repetitions=200 sample_ns_per_call=[16807, 16740, 16739, 16824, 16747]
+resident_match_baseline label=packed payload_bytes=524288 repetitions=200 sample_ns_per_call=[16805, 16752, 16733, 16779, 16754]
+resident_match_baseline label=f32 payload_bytes=8388608 repetitions=200 sample_ns_per_call=[824422, 815449, 1443833, 816243, 1448973]
+resident_match_baseline label=i32 payload_bytes=8388608 repetitions=200 sample_ns_per_call=[525785, 523837, 527552, 529354, 525775]
+resident_match_baseline label=packed payload_bytes=8388608 repetitions=200 sample_ns_per_call=[480516, 480470, 485753, 470899, 479969]
+resident_match_baseline label=f32 payload_bytes=67108864 repetitions=20 sample_ns_per_call=[8031426, 7928861, 11847338, 8012965, 11927097]
+resident_match_baseline label=i32 payload_bytes=67108864 repetitions=20 sample_ns_per_call=[5831875, 5731870, 5694079, 5701698, 5732837]
+resident_match_baseline label=packed payload_bytes=67108864 repetitions=20 sample_ns_per_call=[5798518, 6041708, 5668969, 5596263, 5683498]
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 920 filtered out; finished in 4.35s
+
+
+running 1 test
+test generate::residency_caches::resident_payload_match_measurement::measure_resident_payload_match_baseline ... resident_match_baseline label=f32 payload_bytes=4096 repetitions=200 sample_ns_per_call=[300, 299, 852, 299, 751]
+resident_match_baseline label=i32 payload_bytes=4096 repetitions=200 sample_ns_per_call=[104, 35, 35, 35, 35]
+resident_match_baseline label=packed payload_bytes=4096 repetitions=200 sample_ns_per_call=[37, 37, 37, 36, 36]
+resident_match_baseline label=f32 payload_bytes=524288 repetitions=200 sample_ns_per_call=[41656, 41303, 84067, 41973, 84911]
+resident_match_baseline label=i32 payload_bytes=524288 repetitions=200 sample_ns_per_call=[17317, 16933, 17194, 16730, 16928]
+resident_match_baseline label=packed payload_bytes=524288 repetitions=200 sample_ns_per_call=[16872, 16734, 16878, 16746, 16743]
+resident_match_baseline label=f32 payload_bytes=8388608 repetitions=200 sample_ns_per_call=[903720, 816811, 1464042, 814181, 1434618]
+resident_match_baseline label=i32 payload_bytes=8388608 repetitions=200 sample_ns_per_call=[544975, 543922, 542941, 555452, 542071]
+resident_match_baseline label=packed payload_bytes=8388608 repetitions=200 sample_ns_per_call=[516054, 541478, 511786, 529829, 512528]
+resident_match_baseline label=f32 payload_bytes=67108864 repetitions=20 sample_ns_per_call=[8070703, 8017978, 12166094, 8011485, 11946648]
+resident_match_baseline label=i32 payload_bytes=67108864 repetitions=20 sample_ns_per_call=[5824550, 5791812, 5667635, 5764682, 5619657]
+resident_match_baseline label=packed payload_bytes=67108864 repetitions=20 sample_ns_per_call=[5802295, 5689284, 5621089, 5624820, 5601056]
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 920 filtered out; finished in 4.43s
+
+
+perf stat -r 5 output follows:
+# started on Tue Oct 13 07:48:32 2026
+
+
+ Performance counter stats for '/home/bix/target/resident-match-measure/release/deps/proxima_model_interop-4464c46e816968ad --exact generate::residency_caches::resident_payload_match_measurement::measure_resident_payload_match_baseline --nocapture' (5 runs):
+
+           4398.69 msec task-clock:u                                                            ( +-  0.46% )
+       20740222468      cycles:u                                                                ( +-  0.28% )
+       27919250678      instructions:u                                                          ( +-  0.00% )
+                 0      context-switches:u
+                 0      cpu-migrations:u
+              6487      page-faults:u                                                           ( +-  1.57% )
+
+       4.399715822 +- 0.020109111 seconds time elapsed  ( +-  0.46% )
+
+
+host load samples follow:
+ 07:48:32 up 2 days, 4 min,  6 users,  load average: 1.16, 3.93, 4.66
+ 07:48:54 up 2 days, 5 min,  6 users,  load average: 1.33, 3.75, 4.58
+
+Derived sample summary: each row groups 25 inner samples from five independent process invocations. Median/min/max and population coefficient of variation were computed from those raw values; no process-level samples were discarded.
+
+label=f32 bytes=4096 repetitions=200 samples=25 median_ns=469 min_ns=299 max_ns=1055 cov_percent=46.91
+label=i32 bytes=4096 repetitions=200 samples=25 median_ns=35 min_ns=35 max_ns=104 cov_percent=37.20
+label=packed bytes=4096 repetitions=200 samples=25 median_ns=37 min_ns=36 max_ns=62 cov_percent=21.19
+label=f32 bytes=524288 repetitions=200 samples=25 median_ns=42793 min_ns=39359 max_ns=88845 cov_percent=34.38
+label=i32 bytes=524288 repetitions=200 samples=25 median_ns=16740 min_ns=16553 max_ns=17317 cov_percent=1.12
+label=packed bytes=524288 repetitions=200 samples=25 median_ns=16754 min_ns=16585 max_ns=16878 cov_percent=0.48
+label=f32 bytes=8388608 repetitions=200 samples=25 median_ns=834396 min_ns=807853 max_ns=1464042 cov_percent=28.28
+label=i32 bytes=8388608 repetitions=200 samples=25 median_ns=527395 min_ns=522380 max_ns=555452 cov_percent=1.57
+label=packed bytes=8388608 repetitions=200 samples=25 median_ns=512528 min_ns=470899 max_ns=555409 cov_percent=4.81
+label=f32 bytes=67108864 repetitions=20 samples=25 median_ns=8087707 min_ns=7928861 max_ns=12316942 cov_percent=20.08
+label=i32 bytes=67108864 repetitions=20 samples=25 median_ns=5719407 min_ns=5619657 max_ns=6102097 cov_percent=1.71
+label=packed bytes=67108864 repetitions=20 samples=25 median_ns=5689284 min_ns=5596263 max_ns=6041708 cov_percent=1.88
