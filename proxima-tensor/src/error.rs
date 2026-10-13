@@ -138,6 +138,10 @@ pub enum TensorError {
     #[error("extent `{0}` is not a number or a `?n` symbol")]
     MalformedExtent(alloc::string::String),
 
+    #[cfg(feature = "config")]
+    #[error("op {node} has no spec form: {reason}")]
+    NoConfigFace { node: NodeId, reason: &'static str },
+
     #[error(
         "node {node} gathers indices from a node with dtype {dtype:?}, which is not an integer type"
     )]

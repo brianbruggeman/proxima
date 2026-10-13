@@ -361,3 +361,256 @@ pub(super) fn lookup(
         .copied()
         .ok_or_else(|| TensorError::UnknownNode(reference.to_string()))
 }
+
+impl TryFrom<&[Op]> for ProgramSpec {
+    type Error = TensorError;
+
+    fn try_from(program: &[Op]) -> Result<Self, Self::Error> {
+        let node = program
+            .iter()
+            .enumerate()
+            .map(|(index, expr)| node_from_op(index, expr))
+            .collect::<Result<Vec<NodeSpec>, TensorError>>()?;
+        Ok(Self { node })
+    }
+}
+
+fn node_id(index: usize) -> String {
+    format!("n{index}")
+}
+
+fn reference(index: usize, node: NodeId) -> Result<String, TensorError> {
+    let target = node.0 as usize;
+    if target < index {
+        Ok(node_id(target))
+    } else {
+        Err(TensorError::UnknownNode(node_id(target)))
+    }
+}
+
+fn expressed(index: usize, notation: Option<String>) -> Result<String, TensorError> {
+    notation.ok_or(TensorError::NoConfigFace {
+        node: NodeId(index as u32),
+        reason: "index map is not expressible in the spec notation",
+    })
+}
+
+fn node_from_op(index: usize, expr: &Op) -> Result<NodeSpec, TensorError> {
+    match expr {
+        Op::Input { dtype, shape, name } => Ok(NodeSpec::Input {
+            id: node_id(index),
+            dtype: *dtype,
+            shape: extents_to_spec(shape),
+            name: name.clone(),
+        }),
+        Op::Elementwise {
+            dtype,
+            body,
+            operands,
+            name,
+        } => elementwise_to_spec(index, *dtype, *body, operands, name.clone()),
+        Op::Reduce(reduce) => reduce_to_spec(index, reduce),
+        Op::Iota { dtype, extent } => Ok(NodeSpec::Iota {
+            id: node_id(index),
+            dtype: *dtype,
+            extent: extent_to_spec(*extent),
+        }),
+        Op::Constant {
+            dtype,
+            shape,
+            value,
+        } => Ok(NodeSpec::Constant {
+            id: node_id(index),
+            dtype: *dtype,
+            shape: extents_to_spec(shape),
+            value: *value,
+        }),
+    }
+}
+
+fn extent_to_spec(extent: Extent) -> ExtentSpec {
+    match extent {
+        Extent::Static(size) => ExtentSpec::Static(size),
+        Extent::Symbolic(symbol) => ExtentSpec::Symbolic(format!("?{symbol}")),
+    }
+}
+
+fn extents_to_spec(extents: &[Extent]) -> Vec<ExtentSpec> {
+    extents.iter().copied().map(extent_to_spec).collect()
+}
+
+fn elementwise_to_spec(
+    index: usize,
+    dtype: DType,
+    body: ScalarOp,
+    operands: &[(NodeId, IndexMap)],
+    name: Option<String>,
+) -> Result<NodeSpec, TensorError> {
+    let inputs = operands
+        .iter()
+        .map(|(node, _)| reference(index, *node))
+        .collect::<Result<Vec<String>, TensorError>>()?;
+    let maps = operands
+        .iter()
+        .map(|(_, map)| map_to_spec(index, map))
+        .collect::<Result<Vec<MapSpec>, TensorError>>()?;
+    Ok(NodeSpec::Elementwise {
+        id: node_id(index),
+        dtype,
+        body,
+        inputs,
+        maps,
+        name,
+    })
+}
+
+fn reduce_to_spec(index: usize, reduce: &Reduce) -> Result<NodeSpec, TensorError> {
+    let (IndexMap::Affine(in_pattern), IndexMap::Affine(out_pattern)) =
+        (&reduce.in_map, &reduce.out_map)
+    else {
+        return Err(TensorError::NoConfigFace {
+            node: NodeId(index as u32),
+            reason: "data-dependent reduce index map has no spec form",
+        });
+    };
+    Ok(NodeSpec::Reduce {
+        id: node_id(index),
+        dtype: reduce.dtype,
+        body: reduce.body,
+        init: reduce.init,
+        input: reference(index, reduce.operand)?,
+        in_map: expressed(index, operand_notation(in_pattern))?,
+        out_map: expressed(index, projection_notation(out_pattern))?,
+        keep: reduce.keep,
+        name: reduce.name.clone(),
+    })
+}
+
+fn map_to_spec(index: usize, map: &IndexMap) -> Result<MapSpec, TensorError> {
+    match map {
+        IndexMap::Affine(pattern) => Ok(MapSpec::Projection(expressed(
+            index,
+            operand_notation(pattern),
+        )?)),
+        IndexMap::Computed {
+            indices,
+            index_map,
+            base,
+            gathered_dim,
+        } => gather_to_spec(index, *indices, index_map, base, *gathered_dim),
+    }
+}
+
+fn gather_to_spec(
+    index: usize,
+    indices: NodeId,
+    index_map: &IndexPattern,
+    base: &IndexPattern,
+    dim: u16,
+) -> Result<MapSpec, TensorError> {
+    let base_rest = without_gathered_axis(base, dim).ok_or(TensorError::NoConfigFace {
+        node: NodeId(index as u32),
+        reason: "gather base has no gathered axis at its gathered position",
+    })?;
+    Ok(MapSpec::Gather {
+        gather: reference(index, indices)?,
+        index_map: expressed(index, projection_notation(index_map))?,
+        map: expressed(index, projection_notation(&base_rest))?,
+        dim,
+    })
+}
+
+fn without_gathered_axis(base: &IndexPattern, dim: u16) -> Option<IndexPattern> {
+    let position = dim as usize;
+    if base.axes.get(position)? != &AxisIndex::default() {
+        return None;
+    }
+    let mut rest = base.clone();
+    rest.axes.remove(position);
+    Some(rest)
+}
+
+fn letter_for(axis: u16) -> Option<char> {
+    u8::try_from(axis)
+        .ok()
+        .filter(|position| *position < 26)
+        .map(|position| char::from(b'a' + position))
+}
+
+fn iteration_notation(iter_rank: u16) -> Option<String> {
+    (0..iter_rank).map(letter_for).collect()
+}
+
+fn term_notation(leading: bool, term: &AxisTerm) -> Option<String> {
+    let letter = letter_for(term.axis)?;
+    let sign = match (term.coeff < 0, leading) {
+        (true, _) => "-",
+        (false, true) => "",
+        (false, false) => "+",
+    };
+    let magnitude = term.coeff.unsigned_abs();
+    if magnitude == 1 && !(leading && term.coeff < 0) {
+        Some(format!("{sign}{letter}"))
+    } else {
+        Some(format!("{sign}{magnitude}*{letter}"))
+    }
+}
+
+fn axis_notation(axis: &AxisIndex) -> Option<String> {
+    let terms = axis
+        .terms
+        .iter()
+        .enumerate()
+        .map(|(position, term)| term_notation(position == 0, term))
+        .collect::<Option<String>>()?;
+    let mut text = if terms.is_empty() {
+        axis.offset.to_string()
+    } else if axis.offset == 0 {
+        terms
+    } else {
+        format!("{terms}{:+}", axis.offset)
+    };
+    match axis.len {
+        None => {}
+        Some(Extent::Static(size)) => text.push_str(&format!("@{size}")),
+        Some(Extent::Symbolic(_)) => return None,
+    }
+    Some(text)
+}
+
+fn operand_notation(pattern: &IndexPattern) -> Option<String> {
+    let operand = pattern
+        .axes
+        .iter()
+        .map(axis_notation)
+        .collect::<Option<Vec<String>>>()?
+        .join(",");
+    let notation = format!("{operand}->{}", iteration_notation(pattern.iter_rank)?);
+    parse_operand_pattern(&notation)
+        .ok()
+        .filter(|parsed| parsed == pattern)
+        .map(|_| notation)
+}
+
+fn plain_axis(axis: &AxisIndex) -> Option<u16> {
+    match axis.terms.as_slice() {
+        [term] if term.coeff == 1 && axis.offset == 0 && axis.len.is_none() => Some(term.axis),
+        _ => None,
+    }
+}
+
+fn projection_notation(pattern: &IndexPattern) -> Option<String> {
+    let projected = pattern
+        .axes
+        .iter()
+        .map(plain_axis)
+        .collect::<Option<Vec<u16>>>()?;
+    let operand = projected
+        .iter()
+        .copied()
+        .map(letter_for)
+        .collect::<Option<String>>()?;
+    let notation = format!("{operand}->{}", iteration_notation(pattern.iter_rank)?);
+    let (rank, parsed) = parse_projection(&notation).ok()?;
+    (map::projection(rank, &parsed) == *pattern).then_some(notation)
+}
