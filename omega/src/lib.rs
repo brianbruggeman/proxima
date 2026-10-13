@@ -48,6 +48,8 @@ pub mod config;
 pub mod coreml;
 #[cfg(feature = "cuda")]
 pub mod cuda;
+#[cfg(feature = "cuda")]
+mod cuda_cached_attention;
 #[cfg(all(feature = "cuda", feature = "float-layout-dtype"))]
 pub mod cuda_layout;
 #[cfg(feature = "cuda-driver")]
