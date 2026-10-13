@@ -1,7 +1,8 @@
 //! Greedy-decode comparison of the CPU oracle against the CUDA backend.
 //!
-//! Usage: `decode_compare <model.gguf> [prompt] [tokens]` (default prompt
-//! `The capital of France is`, default 16 tokens).
+//! Usage: `decode_compare <model.gguf> [prompt] [tokens] [backends]` (default prompt
+//! `The capital of France is`, default 16 tokens, `backends` is `both` or `cuda`,
+//! default `both`; `cuda` skips the CPU oracle and prints `matched=n/a`).
 //!
 //! Loads the checkpoint once, runs `LoadedModel::generate_with_serving_config`
 //! with `gpu_layers: 0` and with `GPU_LAYERS_ALL`, prints one line per position,
@@ -40,7 +41,7 @@ const DEFAULT_TOKENS: usize = 16;
 
 #[derive(Debug, thiserror::Error)]
 enum ExampleError {
-    #[error("usage: decode_compare <model.gguf> [prompt] [tokens]")]
+    #[error("usage: decode_compare <model.gguf> [prompt] [tokens] [both|cuda]")]
     Usage,
     #[error("{path}: {source}")]
     Io {
@@ -53,6 +54,8 @@ enum ExampleError {
     Interop(#[from] InteropError),
     #[error("tokenizer: {0}")]
     Tokenizer(#[from] TokenizerError),
+    #[error("backends {0:?} is not one of both, cuda")]
+    BadBackends(String),
     #[error("token count {0:?} is not a number")]
     BadCount(String),
     #[error("{backend} produced no logits row at position {position}")]
@@ -60,6 +63,12 @@ enum ExampleError {
         backend: &'static str,
         position: usize,
     },
+}
+
+#[derive(Clone, Copy)]
+enum Backends {
+    Both,
+    Cuda,
 }
 
 struct Top2 {
@@ -152,7 +161,7 @@ fn decode(
     prompt: &str,
     tokens: usize,
     gpu_layers: i32,
-) -> Result<(Vec<u32>, Timing), InteropError> {
+) -> Result<(Vec<u32>, String, Timing), InteropError> {
     let mut timing = Timing {
         prefill_ms: 0.0,
         step_ms: Vec::new(),
@@ -169,9 +178,9 @@ fn decode(
         }
         ControlFlow::Continue(())
     };
-    let (ids, _text, _stopped) =
+    let (ids, text, _stopped) =
         model.generate_streaming(prompt, tokens, config(gpu_layers), &mut on_token)?;
-    Ok((ids, timing))
+    Ok((ids, text, timing))
 }
 
 fn first_divergence(cpu: &[u32], cuda: &[u32]) -> Option<usize> {
@@ -209,7 +218,7 @@ fn report_margins(
     Ok(())
 }
 
-fn run(path: &str, prompt: &str, tokens: usize) -> Result<(), ExampleError> {
+fn run(path: &str, prompt: &str, tokens: usize, backends: Backends) -> Result<(), ExampleError> {
     let io_error = |source| ExampleError::Io {
         path: path.to_owned(),
         source,
@@ -223,11 +232,39 @@ fn run(path: &str, prompt: &str, tokens: usize) -> Result<(), ExampleError> {
     })?;
     let vocab = vocab_from_metadata(&parsed)?;
     let model = LoadedModel::load(&parsed, &mapping)?;
-    let (cpu, cpu_timing) = decode(&model, prompt, tokens, 0)?;
-    let (cuda, cuda_timing) = decode(&model, prompt, tokens, GPU_LAYERS_ALL)?;
-    cpu_timing.report("cpu");
+    println!("prompt_ids {:?}", prompt_ids(&vocab, prompt)?);
+    let cpu = match backends {
+        Backends::Both => Some(decode(&model, prompt, tokens, 0)?),
+        Backends::Cuda => None,
+    };
+    let (cuda, cuda_text, cuda_timing) = decode(&model, prompt, tokens, GPU_LAYERS_ALL)?;
+    if let Some((_, _, cpu_timing)) = &cpu {
+        cpu_timing.report("cpu");
+    }
     cuda_timing.report("cuda");
-    summarize(&model, &vocab, path, prompt, &cpu, &cuda)
+    println!("decode_text backend=cuda ids={cuda:?} text={cuda_text:?}");
+    match cpu {
+        Some((cpu_ids, cpu_text, _)) => {
+            println!("decode_text backend=cpu ids={cpu_ids:?} text={cpu_text:?}");
+            summarize(&model, &vocab, path, prompt, &cpu_ids, &cuda)
+        }
+        None => {
+            println!(
+                "decode_compare model={} tokens={} matched=n/a first_divergence=n/a",
+                model_label(&model, path),
+                cuda.len()
+            );
+            Ok(())
+        }
+    }
+}
+
+fn model_label(model: &LoadedModel, path: &str) -> String {
+    model.model_name().map(str::to_owned).unwrap_or_else(|| {
+        Path::new(path)
+            .file_stem()
+            .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned())
+    })
 }
 
 fn summarize(
@@ -253,11 +290,7 @@ fn summarize(
         );
     }
     let divergence = first_divergence(cpu, cuda);
-    let name = model.model_name().map(str::to_owned).unwrap_or_else(|| {
-        Path::new(path)
-            .file_stem()
-            .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned())
-    });
+    let name = model_label(model, path);
     let rendered = divergence.map_or("none".to_owned(), |position| position.to_string());
     println!(
         "decode_compare model={name} tokens={produced} matched={matched} first_divergence={rendered}"
@@ -276,7 +309,14 @@ fn main() -> ExitCode {
         let tokens = args.next().map_or(Ok(DEFAULT_TOKENS), |text| {
             text.parse().map_err(|_| ExampleError::BadCount(text))
         })?;
-        run(&path, &prompt, tokens)
+        let backends = args
+            .next()
+            .map_or(Ok(Backends::Both), |text| match text.as_str() {
+                "both" => Ok(Backends::Both),
+                "cuda" => Ok(Backends::Cuda),
+                _ => Err(ExampleError::BadBackends(text)),
+            })?;
+        run(&path, &prompt, tokens, backends)
     });
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
