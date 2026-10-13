@@ -1725,6 +1725,62 @@ fn push_serial_reduce_body(
     Ok(())
 }
 
+fn logical_packed_address() -> bool {
+    #[cfg(feature = "std")]
+    {
+        std::env::var_os("PROXIMA_CUDA_LOGICAL_PACKED_ADDRESS").is_some()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        false
+    }
+}
+
+fn push_reduction_coord_decompose(
+    source: &mut String,
+    from: &str,
+    reduce_rank: usize,
+    reduce_rank_len: usize,
+    indent: &str,
+) {
+    source.push_str(&format!("{indent}long reduction_coord[{reduce_rank_len}];\n"));
+    source.push_str(&format!("{indent}long remaining_r = {from};\n"));
+    for index in (0..reduce_rank).rev() {
+        source.push_str(&format!(
+            "{indent}reduction_coord[{index}] = remaining_r % u.reduction_extents[{index}]; \
+             remaining_r /= u.reduction_extents[{index}];\n"
+        ));
+    }
+}
+
+fn push_reduction_coord_carry(source: &mut String, reduce_rank: usize) {
+    source.push_str("            reduction_coord[");
+    source.push_str(&format!("{}]++;\n", reduce_rank - 1));
+    for index in (1..reduce_rank).rev() {
+        source.push_str(&format!(
+            "            if (reduction_coord[{index}] == u.reduction_extents[{index}]) {{ \
+             reduction_coord[{index}] = 0; reduction_coord[{}]++; }}\n",
+            index - 1
+        ));
+    }
+}
+
+fn push_q4_0_chunk_decode(source: &mut String, index: usize) {
+    source.push_str(&format!("        float q4_0_chunk{index}[8];\n"));
+    source.push_str(&format!(
+        "        if ((off{index} & 7) == 0 && chunk + 8 <= u.reduction_total) {{\n\
+         \x20           q4_0_chunk8(in{index} + (off{index} / {Q4_0_BLOCK_ELEMENTS}) * {Q4_0_BLOCK_BYTES}, \
+         (unsigned int)(off{index} % {Q4_0_BLOCK_ELEMENTS}), q4_0_chunk{index});\n\
+         \x20       }} else {{\n\
+         \x20           for (int slot = 0; slot < 8 && chunk + slot < u.reduction_total; slot++) {{\n\
+         \x20               long element = off{index} + slot;\n\
+         \x20               q4_0_chunk{index}[slot] = q4_0_element(in{index} + (element / {Q4_0_BLOCK_ELEMENTS}) * {Q4_0_BLOCK_BYTES}, \
+         (unsigned int)(element % {Q4_0_BLOCK_ELEMENTS}));\n\
+         \x20           }}\n\
+         \x20       }}\n"
+    ));
+}
+
 /// The warp-shuffle cooperative fold — the CUDA counterpart of
 /// `crate::msl::push_cooperative_reduce_body`'s non-tiled, non-row-blocked
 /// arm (this module has no port of either fast path; see the module doc).
@@ -1803,11 +1859,32 @@ fn push_cooperative_reduce_body(
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
 
+    let q4_0_slots: Vec<usize> = quantized
+        .iter()
+        .enumerate()
+        .filter(|(_, codec)| matches!(codec, Some(Codec::Q4_0)))
+        .map(|(index, _)| index)
+        .collect();
+    let q4_0_hoisted = packed_chunked && !logical_packed_address();
+
     if packed_chunked {
         source.push_str(&format!(
             "    for (long chunk = (long)lane * 8; chunk < u.reduction_total; chunk += {} * 8) {{\n",
             WARP_SIZE
         ));
+        if reduce_rank > 0 {
+            push_reduction_coord_decompose(source, "chunk", reduce_rank, reduce_rank_len, "        ");
+        }
+        if q4_0_hoisted {
+            if !q4_0_slots.is_empty() {
+                source.push_str("        long r = chunk;\n");
+            }
+            for &index in &q4_0_slots {
+                let (_, layout, _) = &resolved.operands()[index];
+                push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
+                push_q4_0_chunk_decode(source, index);
+            }
+        }
         source.push_str("        for (long inner = 0; inner < 8 && chunk + inner < u.reduction_total; inner++) {\n");
         source.push_str("            long r = chunk + inner;\n");
     } else {
@@ -1815,17 +1892,10 @@ fn push_cooperative_reduce_body(
             "    for (long r = (long)lane; r < u.reduction_total; r += {WARP_SIZE}) {{\n"
         ));
     }
+    if reduce_rank > 0 && !packed_chunked {
+        push_reduction_coord_decompose(source, "r", reduce_rank, reduce_rank_len, "        ");
+    }
     if reduce_rank > 0 {
-        source.push_str(&format!(
-            "        long reduction_coord[{reduce_rank_len}];\n"
-        ));
-        source.push_str("        long remaining_r = r;\n");
-        for index in (0..reduce_rank).rev() {
-            source.push_str(&format!(
-                "        reduction_coord[{index}] = remaining_r % u.reduction_extents[{index}]; \
-                 remaining_r /= u.reduction_extents[{index}];\n"
-            ));
-        }
         for (index, dim) in reduce_dims.iter().enumerate() {
             source.push_str(&format!(
                 "        full_coord[{dim}] = reduction_coord[{index}];\n"
@@ -1834,10 +1904,12 @@ fn push_cooperative_reduce_body(
     }
 
     for (index, &codec) in quantized.iter().enumerate() {
-        if let Some(codec) = codec {
+        if q4_0_hoisted && q4_0_slots.contains(&index) {
+            continue;
+        }
+        if codec.is_some() {
             let (_, layout, _) = &resolved.operands()[index];
             push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
-            let _ = codec;
         } else {
             source.push_str(&format!(
                 "        long off{index} = u.operand_base[{index}];\n"
@@ -1854,6 +1926,10 @@ fn push_cooperative_reduce_body(
         operand_count.max(1)
     ));
     for (index, &codec) in quantized.iter().enumerate() {
+        if q4_0_hoisted && q4_0_slots.contains(&index) {
+            source.push_str(&format!("        scratch[{index}] = q4_0_chunk{index}[inner];\n"));
+            continue;
+        }
         source.push_str(&format!(
             "        scratch[{index}] = {};\n",
             operand_read(resolved.node, index, &format!("off{index}"), codec)?
@@ -1866,6 +1942,9 @@ fn push_cooperative_reduce_body(
         "        accumulator = seeded ? {combine_expr} : value;\n"
     ));
     source.push_str("        seeded = true;\n");
+    if packed_chunked && reduce_rank > 0 {
+        push_reduction_coord_carry(source, reduce_rank);
+    }
     source.push_str("    }\n");
     if packed_chunked {
         source.push_str("    }\n");
@@ -2381,6 +2460,21 @@ __device__ __forceinline__ float q4_0_element(const unsigned char *block, unsign
     unsigned char byte = block[2u + (index % 16u)];
     int nibble = (index < 16u) ? (int)(byte & 0x0Fu) : (int)(byte >> 4u);
     return (float)(nibble - 8) * d;
+}
+__device__ __forceinline__ void q4_0_chunk8(const unsigned char *block, unsigned int index, float *out) {
+    const unsigned short *halves = (const unsigned short *)block;
+    float d = __half2float(__ushort_as_half(halves[0]));
+    const unsigned short *pairs = halves + 1u + (index % 16u) / 2u;
+    #pragma unroll
+    for (int pair = 0; pair < 4; pair++) {
+        unsigned int word = (unsigned int)pairs[pair];
+        unsigned int low = word & 0xFFu;
+        unsigned int high = word >> 8u;
+        int low_nibble = (index < 16u) ? (int)(low & 0x0Fu) : (int)(low >> 4u);
+        int high_nibble = (index < 16u) ? (int)(high & 0x0Fu) : (int)(high >> 4u);
+        out[2 * pair] = (float)(low_nibble - 8) * d;
+        out[2 * pair + 1] = (float)(high_nibble - 8) * d;
+    }
 }
 ";
 
