@@ -3,7 +3,7 @@
 # Mechanical gate for omega (MSL kernel emission from the proxima-tensor
 # BoundOp descriptor -- the GPU half of the bound-addressing seam, plus the
 # macOS-only Metal execution driver behind the `metal` feature). No gate
-# script existed for this crate before -- `cargo nextest run -p omega` and
+# script existed for this crate before -- `cargo nextest run -p proxima-omega` and
 # `cargo test --doc` both exit 0 whether they ran real work or nothing, so
 # this asserts the nonzero count explicitly instead of trusting the exit
 # code alone.

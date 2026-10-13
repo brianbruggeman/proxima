@@ -25,7 +25,7 @@
 #      determinism) runs under http1-native, the feature it needs to even
 #      compile — step 5 alone silently never builds it, let alone runs it
 #   7. doctests must be fully green on default features — the command a
-#      contributor actually runs (`cargo test --doc -p proxima`) never
+#      contributor actually runs (`cargo test --doc -p proxima-lib`) never
 #      shows red for a known, accepted gap; doctests whose backing
 #      feature is off are `ignore`d at the source (`#[cfg_attr]` on the
 #      fence), not silently failing
@@ -55,7 +55,7 @@ prime_feats="runtime-prime-executor,runtime-prime-inbox-alloc,runtime-prime-reac
 # `.http()`/`.https()`/`.tcp()`/`.grpc()` doc examples can actually serve.
 doctest_feats="http1-native,http2"
 
-# runs `cargo test --doc -p proxima` (plus any extra args), then fails
+# runs `cargo test --doc -p proxima-lib` (plus any extra args), then fails
 # loudly if the reported passed count is zero or absent — `cargo test --doc`
 # exits 0 on a vacuous "0 passed" run (verified empirically), which is
 # exactly how a feature-gating mistake hides as green.
@@ -64,7 +64,7 @@ doctest_check() {
     shift
     printf '\n-- doctests (%s) --\n' "${label}"
     local doctest_output
-    doctest_output="$(cargo test --doc -p proxima "$@" 2>&1)"
+    doctest_output="$(cargo test --doc -p proxima-lib "$@" 2>&1)"
     printf '%s\n' "${doctest_output}"
     local passed_count
     passed_count="$(printf '%s\n' "${doctest_output}" | grep -oE '^test result: ok\. [0-9]+ passed' | grep -oE '[0-9]+' | tail -1)"
@@ -75,7 +75,7 @@ doctest_check() {
     printf 'doctests passed (%s): %s\n' "${label}" "${passed_count}"
 }
 
-# runs an `-E`-filtered `cargo nextest run -p proxima` (plus any extra
+# runs an `-E`-filtered `cargo nextest run -p proxima-lib` (plus any extra
 # args), then fails loudly if the reported passed count is zero or absent.
 # Verified empirically: with nextest's current default (`--no-tests=warn`),
 # a filter matching zero tests still exits 0 ("warning: no tests to run --
@@ -94,7 +94,7 @@ nextest_filter_check() {
     # --color never: nextest force-colours when it detects CI, and the escape codes
     # land between the count and the word ("3<ESC>[0m <ESC>[32;1mpassed"), so the
     # summary grep below matches locally and silently fails on a CI runner.
-    nextest_output="$(cargo nextest run --color never -p proxima -E "${filter}" "$@" 2>&1)"
+    nextest_output="$(cargo nextest run --color never -p proxima-lib -E "${filter}" "$@" 2>&1)"
     printf '%s\n' "${nextest_output}"
     local passed_count
     passed_count="$(printf '%s\n' "${nextest_output}" | grep -oE '[0-9]+ tests? run: [0-9]+ passed' | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | tail -1)"
@@ -108,25 +108,25 @@ nextest_filter_check() {
 printf '\n== prime-serve gate ==\n'
 
 printf '\n-- 1. default build = prime --\n'
-cargo build -p proxima
-cargo clippy -p proxima --all-targets
+cargo build -p proxima-lib
+cargo clippy -p proxima-lib --all-targets
 
 printf '\n-- 2. tokio opt-out builds --\n'
-cargo build -p proxima --no-default-features \
+cargo build -p proxima-lib --no-default-features \
     --features "runtime-tokio,http-hyper,tcp,udp,http1,http2,histogram,macros"
 
 # a thin prime build (no tls/udp/http3). bare --no-default-features is a
 # pre-existing umbrella gap (lib.rs imports proxima_h2 unconditionally) and
 # is out of scope for this gate.
 printf '\n-- 3. lean prime build (h1+h2, no tls/udp/http3) compiles --\n'
-cargo build -p proxima --no-default-features \
+cargo build -p proxima-lib --no-default-features \
     --features "serve-prime,tcp,http1,http2,histogram,macros"
 
 printf '\n-- 4. serve_parity: byte-parity + streaming-on-prime + reactor-absence --\n'
-cargo nextest run -p proxima --test serve_parity --features "${prime_feats}"
+cargo nextest run -p proxima-lib --test serve_parity --features "${prime_feats}"
 
 printf '\n-- 4b. stream_listen_prime_parity: asserted count 1 --\n'
-stream_output="$(cargo nextest run --color never -p proxima --test stream_listen_prime_parity --features "${prime_feats},tcp" 2>&1)"
+stream_output="$(cargo nextest run --color never -p proxima-lib --test stream_listen_prime_parity --features "${prime_feats},tcp" 2>&1)"
 printf '%s\n' "${stream_output}"
 stream_count="$(printf '%s\n' "${stream_output}" | grep -oE '[0-9]+ tests? run: [0-9]+ passed' | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | tail -1)"
 if [ "${stream_count:-}" != "1" ]; then
@@ -136,7 +136,7 @@ fi
 printf 'stream_listen_prime_parity passed: %s\n' "${stream_count}"
 
 printf '\n-- 5. full umbrella suite on the prime default --\n'
-cargo nextest run -p proxima
+cargo nextest run -p proxima-lib
 
 printf '\n-- 6. determinism proof (requires http1-native; step 5 alone never compiles it) --\n'
 nextest_filter_check "record::tests::determinism, http1-native" 'test(record::tests::determinism)' --features http1-native

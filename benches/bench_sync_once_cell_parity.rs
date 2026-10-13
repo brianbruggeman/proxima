@@ -19,8 +19,8 @@
 //!
 //! run:
 //! ```bash
-//! cargo bench -p proxima --features sync-wrappers --bench bench_sync_once_cell_parity
-//! cargo bench -p proxima --features sync-wrappers --bench bench_sync_once_cell_parity -- warm_get
+//! cargo bench -p proxima-lib --features sync-wrappers --bench bench_sync_once_cell_parity
+//! cargo bench -p proxima-lib --features sync-wrappers --bench bench_sync_once_cell_parity -- warm_get
 //! ```
 
 #![allow(

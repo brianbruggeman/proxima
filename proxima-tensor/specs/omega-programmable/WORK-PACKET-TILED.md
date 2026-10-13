@@ -157,8 +157,8 @@ The enabled build must print exactly `8 passed`; the disabled build exactly
 `1 passed`:
 
 ```text
-env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=1 cargo nextest run -p omega --features metal-tiled-gemm --lib -E 'test(programmable_tiled_)' --no-capture
-env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=0 cargo nextest run -p omega --features metal-tiled-gemm --lib -E 'test(programmable_tiled_)' --no-capture
+env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=1 cargo nextest run -p proxima-omega --features metal-tiled-gemm --lib -E 'test(programmable_tiled_)' --no-capture
+env OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=0 cargo nextest run -p proxima-omega --features metal-tiled-gemm --lib -E 'test(programmable_tiled_)' --no-capture
 ```
 
 These are count-bearing acceptance commands, not claims already run. Do not add

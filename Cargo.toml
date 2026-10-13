@@ -94,7 +94,7 @@ manual_async_fn = "allow"
 
 [workspace.dependencies]
 prime = { package = "proxima-prime", path = "prime", version = "0.1.0" }
-proxima = { path = "." }
+proxima = { package = "proxima-lib", path = ".", version = "0.1.0" }
 proxima-amqp = { path = "proxima-amqp" }
 proxima-auth = { path = "proxima-auth", default-features = false }
 proxima-build = { path = "proxima-build" }
@@ -272,7 +272,7 @@ incremental = true
 
 # ===== umbrella `proxima` package (formerly rust/Cargo.toml) =====
 [package]
-name = "proxima"
+name = "proxima-lib"
 description = "A sans-IO core where everything is a Pipe — one async In -> Result<Out, Err> trait worn four ways (transform, source, sink, observe), composed into proxies, gateways, caches, codecs and telemetry pipelines. Config-driven, runtime-agnostic: the same pipe runs on the from-scratch Prime per-core runtime, on tokio, or on no_std bare metal."
 version.workspace = true
 edition.workspace = true
@@ -280,6 +280,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+
+[lib]
+name = "proxima"
 
 [dependencies]
 proxima-macros = { workspace = true, optional = true }
@@ -491,7 +494,7 @@ proc-macro-crate = "3.5.0"
 proxima-model-interop = { path = "proxima-model-interop", features = ["std", "metal", "instrument", "moe-expert-prefetch", "moe-linked-suffix"] }
 proxima-gguf = { path = "proxima-gguf" }
 memmap2 = "0.9.11"
-omega = { path = "omega", features = ["metal", "instrument"] }
+omega = { package = "proxima-omega", path = "omega", version = "0.1.0", features = ["metal", "instrument"] }
 # examples/openai_serve_gguf.rs builds its own Vocab from the parsed GGUF
 # metadata (proxima_tokenizer::gguf::vocab_from_metadata, the same call
 # LoadedModel::load makes internally) to count prompt tokens for the

@@ -42,9 +42,9 @@ jobs:
       - name: QUIC upstream ownership
         run: cargo nextest run -p proxima-quic --lib --features tokio-compat -E 'test(stream_listener::tests::quic_upstream_and_listener_exchange_one_stream)' --no-tests=fail --test-threads 1 --retries 0
       - name: root default runtime facades
-        run: cargo nextest run -p proxima --test windows_port --no-tests=fail --test-threads 1 --retries 0
+        run: cargo nextest run -p proxima-lib --test windows_port --no-tests=fail --test-threads 1 --retries 0
       - name: root HTTP-enabled runtime facades
-        run: cargo nextest run -p proxima --test windows_port --features http1-native --no-tests=fail --test-threads 1 --retries 0
+        run: cargo nextest run -p proxima-lib --test windows_port --features http1-native --no-tests=fail --test-threads 1 --retries 0
       - name: process host grounds
         run: cargo nextest run -p proxima-process --test host_grounds --no-tests=fail --test-threads 1 --retries 0
       - name: Windows timing
@@ -58,6 +58,6 @@ jobs:
       - name: Windows command environment and cwd
         run: cargo nextest run -p proxima-process --test windows_command --no-tests=fail --test-threads 1 --retries 0
       - name: exercise doctests and example
-        run: cargo test -p proxima --doc
+        run: cargo test -p proxima-lib --doc
       - name: run independent Windows network example
-        run: cargo run -p proxima --example windows_port --features http1-native
+        run: cargo run -p proxima-lib --example windows_port --features http1-native

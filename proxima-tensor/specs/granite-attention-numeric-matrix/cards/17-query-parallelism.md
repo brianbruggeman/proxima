@@ -40,8 +40,8 @@ Use the existing Proxima numeric and Metal abstractions. Do not introduce num-tr
 
 | id | command | expected |
 |---|---|---|
-| AC17 | `cargo nextest run -p omega --features metal-attn-split-decode,metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_17_query_parallelism)'` | filter selects 2 tests; 2 passed; row coverage plus explicit one-row decline and legacy decode-split control |
-| AC17b | `cargo nextest run -p omega --features metal,metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_17_query_parallelism_plan)'` | filter selects 1 test; 1 passed; selected SharedKv/Rows8/query-parallel pipeline executes and its output payload compares with the CPU reference |
+| AC17 | `cargo nextest run -p proxima-omega --features metal-attn-split-decode,metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_17_query_parallelism)'` | filter selects 2 tests; 2 passed; row coverage plus explicit one-row decline and legacy decode-split control |
+| AC17b | `cargo nextest run -p proxima-omega --features metal,metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_17_query_parallelism_plan)'` | filter selects 1 test; 1 passed; selected SharedKv/Rows8/query-parallel pipeline executes and its output payload compares with the CPU reference |
 
 A zero-test match or a checker that does not open its fixture is failure. Run this local command after the edit. The expected count is part of the criterion.
 

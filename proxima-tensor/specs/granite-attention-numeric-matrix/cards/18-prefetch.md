@@ -38,8 +38,8 @@ Use the existing Proxima numeric and Metal abstractions. Do not introduce num-tr
 
 | id | command | expected |
 |---|---|---|
-| AC18 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_18_prefetch)'` | filter selects 2 tests; 2 passed; F16 K/V buffers emitted, F32 memory overflow declined, partial final-block prefetch guard present |
-| AC18b | `cargo nextest run -p omega --features metal,metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_18_prefetch_plan)'` | filter selects 1 test; 1 passed; Metal F16-prefetch output bits equal the same F16 SharedKv plan with prefetch off on a 31-row live cache in a 32-row capacity bucket |
+| AC18 | `cargo nextest run -p proxima-omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_18_prefetch)'` | filter selects 2 tests; 2 passed; F16 K/V buffers emitted, F32 memory overflow declined, partial final-block prefetch guard present |
+| AC18b | `cargo nextest run -p proxima-omega --features metal,metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_18_prefetch_plan)'` | filter selects 1 test; 1 passed; Metal F16-prefetch output bits equal the same F16 SharedKv plan with prefetch off on a 31-row live cache in a 32-row capacity bucket |
 
 A zero-test match or a checker that does not open its fixture is failure. Run this local command after the edit. The expected count is part of the criterion.
 

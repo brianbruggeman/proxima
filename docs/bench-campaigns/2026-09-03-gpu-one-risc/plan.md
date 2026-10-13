@@ -244,7 +244,7 @@ tensor's byte length before any GB/s row is written from it.
 
 The owner overrode §8.1 and ordered every unmerged branch and dirty worktree merged. Ninety
 commits landed on main between `4be2f3a` and `f2d5094`, every one behind the five gates plus
-`cargo nextest run -p omega --all-features` and the six-step `scripts/omega-gate.sh`; every perf
+`cargo nextest run -p proxima-omega --all-features` and the six-step `scripts/omega-gate.sh`; every perf
 feature landed default-off, then two interleaved sweeps against `llama-bench` on a quiet box
 decided the defaults. Raw logs: `tournament/../sweep-logs` in the session scratchpad; the
 discipline row that carries the tables is the one the flip commit adds after ROW 270.
@@ -1228,7 +1228,7 @@ git diff --cached --name-only | grep -c discipline.md    # must be 0, else RED
 
 **G12 — provenance.** Every number cites its ledger section; computed numbers are tagged **DERIVED** and never anchor a mechanism claim (§18). MEMORY figures appear only as "MEMORY, superseded by R13". R2's "KV re-upload ~3.3%" has no counterpart in R13 and may not anchor a prediction. R1's `228.9 GB/s` is MEMORY and may not be a kill threshold until 0.6 measures a ceiling. **A number measured on another tree is labelled cross-tree and may not be called "a MEASURED card delta" until a card on this tree re-earns it** [crit residual on 4.3].
 
-**G13 — commits and CI.** Conventional, lowercase, imperative, <72 chars, one logical change, **every commit a green bisect point**. Behaviour-changing cards ship a default-off feature (or a build-time profile key) and `#[cfg]`-pair any assertion the change invalidates. **Every new cargo feature or `rustc-cfg` value is added to `.github/workflows/proxima-tensor.yml`'s omega jobs in the same commit that introduces it, or the card names it as deliberately out of CI with the reason** — two macOS jobs exist (`omega-gate` running `scripts/omega-gate.sh`, and `omega-compare-bench` running `cargo bench -p omega --features metal --bench metal_vs_cpu -- --quick`, whose comment reads "Smoke-runs the incumbent bench so it can never again sit registered-but-unexecuted") and a feature invisible to them is a level failure the workspace has recorded before [crit HC-C]. **Nothing lands on `main` without owner authorization, per phase, at that phase's judge card.** Inside a `risc/*` worktree branch the cards DO commit — the cherry-picks (1.3), the green bisect points, the ON/OFF arms built from the previous commit (3.2) and the phase-branch bases all require it — and that is the one authorization this plan asks for up front: **the owner's acceptance of this plan authorizes local commits on `risc/*` branches inside `proxima-wt-risc<NN>` worktrees, and the creation of those fourteen worktrees, and nothing else.** Until that acceptance is recorded, every card ends at `git add` with its message written to `<worktree>/runs/<card>.commitmsg`, and the report says so.
+**G13 — commits and CI.** Conventional, lowercase, imperative, <72 chars, one logical change, **every commit a green bisect point**. Behaviour-changing cards ship a default-off feature (or a build-time profile key) and `#[cfg]`-pair any assertion the change invalidates. **Every new cargo feature or `rustc-cfg` value is added to `.github/workflows/proxima-tensor.yml`'s omega jobs in the same commit that introduces it, or the card names it as deliberately out of CI with the reason** — two macOS jobs exist (`omega-gate` running `scripts/omega-gate.sh`, and `omega-compare-bench` running `cargo bench -p proxima-omega --features metal --bench metal_vs_cpu -- --quick`, whose comment reads "Smoke-runs the incumbent bench so it can never again sit registered-but-unexecuted") and a feature invisible to them is a level failure the workspace has recorded before [crit HC-C]. **Nothing lands on `main` without owner authorization, per phase, at that phase's judge card.** Inside a `risc/*` worktree branch the cards DO commit — the cherry-picks (1.3), the green bisect points, the ON/OFF arms built from the previous commit (3.2) and the phase-branch bases all require it — and that is the one authorization this plan asks for up front: **the owner's acceptance of this plan authorizes local commits on `risc/*` branches inside `proxima-wt-risc<NN>` worktrees, and the creation of those fourteen worktrees, and nothing else.** Until that acceptance is recorded, every card ends at `git add` with its message written to `<worktree>/runs/<card>.commitmsg`, and the report says so.
 
 **G14 — no time estimates, no verdicts.** Cards produce evidence rows.
 
@@ -1836,7 +1836,7 @@ mkdir -p /Users/brianbruggeman/repos/slot-0/proxima-wt-risc00/runs
 4.
 ```
 cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc00 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc00/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 \
-  bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo run --release -p omega --features metal,cpu,instrument --example membw_probe \
+  bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo run --release -p proxima-omega --features metal,cpu,instrument --example membw_probe \
   2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc00/runs/0.6-probe.log; echo "EXIT=${PIPESTATUS[0]}"
 ```
 
@@ -1869,7 +1869,7 @@ copy-arm CoV > 5% over 21 runs ⇒ raise both sizes 4× and re-run once; still >
 `gpu_device_ms` per arm, `readback_bytes == 0`, both GB/s columns with CoV.
 
 ##### reprove
-`cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc00 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc00/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo run --release -p omega --features metal,cpu,instrument --example membw_probe`
+`cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc00 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc00/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo run --release -p proxima-omega --features metal,cpu,instrument --example membw_probe`
 
 ##### row
 ```
@@ -1888,7 +1888,7 @@ copy-arm CoV > 5% over 21 runs ⇒ raise both sizes 4× and re-run once; still >
 **Census:** readback_bytes==0 assertion per arm; both GB/s columns.
 **Home-turf arm:** the CPU multi-thread streaming triad (69.95/81.21 GB/s, ROW 176) as the floor check, not a decode-cell comparison.
 **Principles engaged and what each changed:** §III G7 (the bench ladder, micro rung); §VIII item 16 (a spec-sheet figure ruled out, this card is the real probe instead); §IX Q5. **Abandoned:** substituting a spec-sheet GPU bandwidth figure (§VIII item 16).
-**Re-prove:** `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc00 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc00/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo run --release -p omega --features metal,cpu,instrument --example membw_probe`.
+**Re-prove:** `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc00 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc00/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo run --release -p proxima-omega --features metal,cpu,instrument --example membw_probe`.
 ```
 
 ##### report skeleton
@@ -1900,7 +1900,7 @@ numbers: <read_only_gbs, traffic_gbs per size, marginal delta_ms, CoV>
 predict vs observed:
 files: omega/examples/membw_probe.rs, rooflines.md  diff --stat:
 row: <see above>
-reprove: cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc00 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc00/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo run --release -p omega --features metal,cpu,instrument --example membw_probe
+reprove: cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc00 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc00/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo run --release -p proxima-omega --features metal,cpu,instrument --example membw_probe
 open:
 ```
 
@@ -2200,7 +2200,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc00 && bash ai_docs/query.sh
 ```
 cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc00 && git status --porcelain | wc -l
 ```
-13. (e) open `.github/workflows/proxima-tensor.yml:176-205` (the `omega-gate.sh` job and the `omega-compare-bench` job that runs `cargo bench -p omega --features metal --bench metal_vs_cpu -- --quick` on `macos-latest`) and record in `row-protocol.md` the rule: every feature this plan declares (`metal-kv-resident`, `kv-capacity-bucket`, `metal-plan-stable-buffers`, `kv-scatter-write`, `attention-single-range`, `metal-wide-reduce`, `metal-packed-split-k`) and the `omega_q4k_body` cfg is added to the CI matrix by the card that lands it — the CI job-set is not the gate-glob (memory: hand-picked gates miss CI's config) [round-4 fix F4]
+13. (e) open `.github/workflows/proxima-tensor.yml:176-205` (the `omega-gate.sh` job and the `omega-compare-bench` job that runs `cargo bench -p proxima-omega --features metal --bench metal_vs_cpu -- --quick` on `macos-latest`) and record in `row-protocol.md` the rule: every feature this plan declares (`metal-kv-resident`, `kv-capacity-bucket`, `metal-plan-stable-buffers`, `kv-scatter-write`, `attention-single-range`, `metal-wide-reduce`, `metal-packed-split-k`) and the `omega_q4k_body` cfg is added to the CI matrix by the card that lands it — the CI job-set is not the gate-glob (memory: hand-picked gates miss CI's config) [round-4 fix F4]
 
 ##### expect
 - N1 four exhaustive-match tests compile with no wildcard; `grep -c "The four generators" proxima-tensor/src/op.rs == 0`
@@ -2389,7 +2389,7 @@ feature: none       default: n/a
 10. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc01 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc01/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- bash scripts/omega-gate.sh 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc01/runs/1.2-gate.log; echo "EXIT=${PIPESTATUS[0]}"`
 11. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc01 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc01/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo nextest run --release -p proxima-model-interop --features metal,instrument \
   --run-ignored all --no-capture -E 'test(runs_one_real_forward_pass_and_greedy_picks_a_real_token)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc01/runs/1.2-oracle.log; echo "EXIT=${PIPESTATUS[0]}"`
-12. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc01 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc01/target CARGO_TERM_COLOR=never bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo run --release -p omega --features metal,cpu,instrument --example q4k_matvec_probe 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc01/runs/1.2-q4k-probe.log; echo "EXIT=${PIPESTATUS[0]}"`
+12. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc01 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc01/target CARGO_TERM_COLOR=never bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo run --release -p proxima-omega --features metal,cpu,instrument --example q4k_matvec_probe 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc01/runs/1.2-q4k-probe.log; echo "EXIT=${PIPESTATUS[0]}"`
 13. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc01 && pgrep -fl 'cargo|rustc|llama|criterion|nextest'; sysctl -n vm.loadavg`
 
 ##### expect
@@ -2601,7 +2601,7 @@ feature: `instrument` (existing feature; gates the two new `pub` accessors)     
 9. edit: `omega/src/metal.rs:859-864` — add `#[cfg(feature="instrument")] pub fn bound_ops(&self) -> &[BoundOp]` on `Plan`.
 10. edit: `proxima-tensor/src/cpu.rs:280` — add the CPU-side equivalent `#[cfg(feature="instrument")] pub fn bound_ops(&self) -> &[BoundOp]` on `Prepared<'block>`.
 11. edit: new test file — build the real cached-forward program with real symbols and real blocks, capture each backend's ops **after that backend's own rewrites** (Metal after `metal.rs:1013`, CPU after `cpu.rs:358`), compare vector to vector, report the differing node ids. Land `#[ignore]`d with a `// EXPECTED RED, see R16 / metal.rs:1013` marker, plus a companion always-green test asserting the differing node set == `packed_operands.keys()`.
-12. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc03 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc03/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p omega --features metal,cpu,instrument --run-ignored all -E 'test(plan_fingerprint)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc03/runs/2.1-fingerprint.log; echo "EXIT=${PIPESTATUS[0]}"`
+12. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc03 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc03/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p proxima-omega --features metal,cpu,instrument --run-ignored all -E 'test(plan_fingerprint)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc03/runs/2.1-fingerprint.log; echo "EXIT=${PIPESTATUS[0]}"`
 13. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc03 && pgrep -fl 'cargo|rustc|llama|criterion|nextest'; sysctl -n vm.loadavg`
 
 ##### expect
@@ -2625,7 +2625,7 @@ the test **FAILS**, naming every differing op's node id and both `Layout{base,st
 ##### observe
 the two op-vectors and the differing node set (**NEW**, the test's own output).
 ##### reprove
-`cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc03 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc03/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p omega --features metal,cpu,instrument --run-ignored all -E 'test(plan_fingerprint)'`
+`cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc03 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc03/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p proxima-omega --features metal,cpu,instrument --run-ignored all -E 'test(plan_fingerprint)'`
 
 ##### row
 ```
@@ -2640,7 +2640,7 @@ the two op-vectors and the differing node set (**NEW**, the test's own output).
 **Census:** the two per-op fingerprint vectors; the differing node-id set == packed_operands.keys() (companion always-green test).
 **Home-turf arm:** none — structural test, no timed cell.
 **Principles engaged and what each changed:** §VIII item 11 — a single u64 plan fingerprint was ruled out (crit e: three separate requirements need node identities), so this is a per-op Vec<u64> plus the pub accessors crit RS-5 requires. **Abandoned:** a single u64 plan fingerprint (§VIII.11).
-**Re-prove:** cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc03 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc03/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p omega --features metal,cpu,instrument --run-ignored all -E 'test(plan_fingerprint)'.
+**Re-prove:** cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc03 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc03/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p proxima-omega --features metal,cpu,instrument --run-ignored all -E 'test(plan_fingerprint)'.
 ```
 
 ##### report skeleton
@@ -2874,9 +2874,9 @@ feature: none — `route::of` is **not** feature-gated (a gated route means two 
 7. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04 && pgrep -fl 'cargo|rustc|llama|criterion|nextest'; sysctl -n vm.loadavg`
 8. edit: new `omega/src/route.rs` — the `Route`/`DeclineReason` enum and `route::of`, per the design above.
 9. edit: `omega/src/msl.rs:673-697,731-775,3164-3187,797,1517-1560,824,1235,1450,1487` — `emit`, `kernel_cache_key`, `kernel_dispatch_shape`/`grid_threads`, and `push_cooperative_reduce_body` all consume `route::of` instead of their own re-derivations.
-10. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo build -p omega --no-default-features --features alloc 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/runs/3.1-alloc-build.log; echo "EXIT=${PIPESTATUS[0]}"`
+10. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo build -p proxima-omega --no-default-features --features alloc 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/runs/3.1-alloc-build.log; echo "EXIT=${PIPESTATUS[0]}"`
 11. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- bash scripts/omega-gate.sh 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/runs/3.1-gate.log; echo "EXIT=${PIPESTATUS[0]}"`
-12. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p omega --all-features -E 'test(route) + test(emit_is_deterministic_byte_equal)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/runs/3.1-route-tests.log; echo "EXIT=${PIPESTATUS[0]}"`
+12. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p proxima-omega --all-features -E 'test(route) + test(emit_is_deterministic_byte_equal)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/runs/3.1-route-tests.log; echo "EXIT=${PIPESTATUS[0]}"`
 13. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04 && pgrep -fl 'cargo|rustc|llama|criterion|nextest'; sysctl -n vm.loadavg`
 
 ##### expect
@@ -3056,7 +3056,7 @@ feature: none       default: n/a
 5. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04 && pgrep -fl 'cargo|rustc|llama|criterion|nextest'; sysctl -n vm.loadavg`
 6. edit: `omega/src/wgsl.rs`, `omega/src/cuda.rs` — `route::of` moves to the shared surface; `wgsl` and `cuda` each return a `Route` for every `BoundOpKind`.
 7. edit: `omega/src/cuda.rs:146-183` — CUDA's `CudaUnsupportedOpKind` rejection of Iota/Constant becomes `Route::Declined(BackendLacksKind)` — a recorded, censused coverage hole, not a silent `Err`.
-8. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p omega --all-features -E 'test(backend_route_coverage)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/runs/3.3-coverage.log; echo "EXIT=${PIPESTATUS[0]}"`
+8. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p proxima-omega --all-features -E 'test(backend_route_coverage)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/runs/3.3-coverage.log; echo "EXIT=${PIPESTATUS[0]}"`
 9. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04 && pgrep -fl 'cargo|rustc|llama|criterion|nextest'; sysctl -n vm.loadavg`
 
 ##### expect
@@ -3079,7 +3079,7 @@ the matrix disagrees with the pre-registration ⇒ R5's coverage claim is stale;
 ##### observe
 the 15-cell matrix; per-backend decline reasons.
 ##### reprove
-`cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p omega --all-features -E 'test(backend_route_coverage)'`
+`cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p proxima-omega --all-features -E 'test(backend_route_coverage)'`
 
 ##### row
 ```
@@ -3094,7 +3094,7 @@ the 15-cell matrix; per-backend decline reasons.
 **Census:** 15-cell matrix (3 backends x 4 BoundOpKind + Keep::Scan); per-backend decline reasons.
 **Home-turf arm:** none — no decode driver on WGSL/CUDA.
 **Principles engaged and what each changed:** brief item 4 (every backend covers every kind, or a censused Route::Declined(reason), never a silent Err). **Abandoned:** none this card.
-**Re-prove:** cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p omega --all-features -E 'test(backend_route_coverage)'.
+**Re-prove:** cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc04 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc04/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p proxima-omega --all-features -E 'test(backend_route_coverage)'.
 ```
 
 ##### report skeleton
@@ -3229,7 +3229,7 @@ target_dir: `/Users/brianbruggeman/repos/slot-0/proxima-wt-risc05/target`       
 feature: none — build-time profile key `[q4k] body` (never a cargo feature, conflict 4)       default: n/a
 
 ##### opens
-- `scripts/omega-gate.sh` step **[2/6]** `cargo build -p omega --all-targets --all-features` — the constraint that forbids two exclusive features
+- `scripts/omega-gate.sh` step **[2/6]** `cargo build -p proxima-omega --all-targets --all-features` — the constraint that forbids two exclusive features
 - `scripts/omega-gate.sh` step **[3/6]** `nextest --all-features`
 - `omega/omega-runtime.toml` — gains the `[q4k]` section
 - `omega/build.rs:16` `require_nonzero`
@@ -3277,7 +3277,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc05 && CARGO_TARGET_DIR=/Use
 8.
 ```
 cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc05 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc05/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 OMEGA_Q4K_BODY=nonsense \
-  bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo build -p omega --all-targets --all-features \
+  bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo build -p proxima-omega --all-targets --all-features \
   2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc05/runs/4.1-build-nonsense.log; echo "EXIT=${PIPESTATUS[0]}"
 ```
 
@@ -3605,7 +3605,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc06 && CARGO_TARGET_DIR=/Use
 9.
 ```
 cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc06 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc06/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 \
-  bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 900 -- cargo nextest run -p omega --release \
+  bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 900 -- cargo nextest run -p proxima-omega --release \
   --features metal,cpu,instrument --run-ignored all -E 'test(host_span_slot_exhaustion)' \
   2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc06/runs/5.1-negative-path.log; echo "EXIT=${PIPESTATUS[0]}"
 ```
@@ -4316,7 +4316,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc07 && grep -oE 'UNIFORM_BUF
 ```
 3. `edit: COMMIT 1 of two — omega/src/metal.rs — the UNIFORM_BUFFERS bound: a capacity from a new [spans] uniform_cache_entries key via emit_sizing_consts, LRU eviction over the existing get (:2074) / insert (:2092) pair (no recency field exists today, so this is a data-structure change on the upload path); this is a LEAK REPAIR riding inside a performance card and gets its own N, test and rollback line — it is kept regardless of whether commit 2 lands [round-4 judge J2]`
 3a. `edit: COMMIT 2 of two — omega/src/metal.rs — hang a BufferArena off the cached Plan, built once when the plan is built; encode_op binds rather than allocates. Uniforms are NOT written in place through UNIFORM_BUFFERS and NOT left to the content cache: UNIFORM_BUFFERS (metal.rs:2055-2078) is a content-keyed dedup cache, BTreeMap<Vec<u8>, MetalBuffer> keyed by the uniform bytes and shared across ops with identical bytes, so writing through it in place would corrupt every co-keyed op. This card instead adds a plan-owned Vec<MetalBuffer> of one uniform buffer per plan position (PlanUniforms), allocated once with the plan, written by encode_op at its own index, bypassing upload_uniforms entirely on the plan path [round-4 fix F13] [round-4 synth S23]. Recover 0.7's all-tracked.patch metal-buffer-pool hunk as REFERENCE ONLY and rewrite against the stable Plan. Feature metal-plan-stable-buffers, default-off, forwarded.`
-3b. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc07 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc07/target CARGO_TERM_COLOR=never bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 900 -- cargo nextest run -p omega --release --features metal,cpu,instrument --run-ignored all -E 'test(uniform_cache_bounded)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc07/runs/6.5-uniform-cache-bound.log; echo "EXIT=${PIPESTATUS[0]}"` — commit 1's own test: inserts `capacity + 1` distinct uniform blobs and asserts `UNIFORM_CACHE_LEN == capacity` and the evicted entry's buffer is released [round-4 judge J2]
+3b. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc07 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc07/target CARGO_TERM_COLOR=never bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 900 -- cargo nextest run -p proxima-omega --release --features metal,cpu,instrument --run-ignored all -E 'test(uniform_cache_bounded)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc07/runs/6.5-uniform-cache-bound.log; echo "EXIT=${PIPESTATUS[0]}"` — commit 1's own test: inserts `capacity + 1` distinct uniform blobs and asserts `UNIFORM_CACHE_LEN == capacity` and the evicted entry's buffer is released [round-4 judge J2]
 4.
 ```
 cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc07 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc07/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 \
@@ -4335,7 +4335,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc07 && CARGO_TARGET_DIR=/Use
 6.
 ```
 cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc07 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc07/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 \
-  bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p omega --release \
+  bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p proxima-omega --release \
   --features metal,cpu,instrument,metal-plan-stable-buffers --run-ignored all -E 'test(pooled_equals_unpooled) + test(no_rebind_before_last_consumer) + test(output_never_in_free_list) + test(extent_change_forces_realloc) + test(uniform_contents_change_buffer_stable) + test(live_buffer_count_bounded) + test(distinct_uniform_bytes_get_distinct_plan_buffers)' \
   2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc07/runs/6.5-arena-tests.log; echo "EXIT=${PIPESTATUS[0]}"
 ```
@@ -4534,8 +4534,8 @@ Only POLICY consts move: `[packed_row_block] rows_per_group, lanes_per_block` an
 4. edit: `omega/build.rs:16,35,43,59,79,85,105` — route each of the FOUR policy keys through `resolve_int` + a cross-axis validator + `emit_sizing_consts`: `lanes_per_block` must divide `SIMD_WIDTH`, `rows_per_group` nonzero (a `div_ceil` denominator at `:1552`) [round-4 synth S25]
 5. edit: `omega/src/msl.rs:1017,2516,2527,3172,3190-3193` — replace the FOUR bare policy consts/local with the emitted sizing consts (NOT `:1030`/`:1046`, which stay bare exceptions); add each key's measurement record on the consuming const's doc in `sized.rs`, per that file's convention [round-4 synth S25]
 6. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 900 -- grep -rnE '^ *(pub )?const [A-Z_]+ *: *(usize|u64|u32) *= *[0-9]' omega/src/ 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/runs/7.1-const-grep.log; echo "EXIT=${PIPESTATUS[0]}"`
-7. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p omega --features metal,cpu,instrument -E 'test(sizing_config)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/runs/7.1-sizing-tests.log; echo "EXIT=${PIPESTATUS[0]}"`
-8. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/target CARGO_TERM_COLOR=never OMEGA_PACKED_ROW_BLOCK_ROWS_PER_GROUP=99999999 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo build -p omega --features metal 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/runs/7.1-negative-value.log; echo "EXIT=${PIPESTATUS[0]}"`
+7. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p proxima-omega --features metal,cpu,instrument -E 'test(sizing_config)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/runs/7.1-sizing-tests.log; echo "EXIT=${PIPESTATUS[0]}"`
+8. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/target CARGO_TERM_COLOR=never OMEGA_PACKED_ROW_BLOCK_ROWS_PER_GROUP=99999999 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo build -p proxima-omega --features metal 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/runs/7.1-negative-value.log; echo "EXIT=${PIPESTATUS[0]}"`
 9. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- bash scripts/omega-gate.sh 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/runs/7.1-gate.log; echo "EXIT=${PIPESTATUS[0]}"`
 
 ##### expect
@@ -4624,9 +4624,9 @@ feature: metal-wide-reduce, forwarded from `proxima-tensor` through `omega`   de
   --run-ignored all --no-capture -E 'test(profiles_one_real_decode_step_by_per_op_gpu_time)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/runs/7.2-milli-pre.log; echo "EXIT=${PIPESTATUS[0]}"` — first, **re-measure the mechanism**: the current `Route::ReduceCooperative` time on 6.6's tree, before any body change [crit m]. This is a **5-token cell**: `profiles_one_real_decode_step_by_per_op_gpu_time` hardcodes `max_tokens = 5` (`proxima-model-interop/src/bind.rs:3103`) and sets `PROXIMA_METAL_OP_PROFILE_STEP=3` itself (`:3122`, removed at `:3131`), so `PROXIMA_MAX_TOKENS=8` is inert on this rung — milli budget 5, bench budget 8, the two rungs are never read as the same cell [round-4 judge J4]
 3. edit: `omega/src/msl.rs:1517-1560,3164-3196` — a two-level tree: threads-per-output = `min(next_pow2(reduction_len / vec_width), COOPERATIVE_REDUCE_MAX_THREADS)`, floored at `SIMD_WIDTH`, clamped against the pipeline's own `maxTotalThreadsPerThreadgroup`, never against a constant; float4 loads when the extent is a multiple of 4; both consts from 7.1's `[cooperative_reduce]`; behind `#[cfg(feature="metal-wide-reduce")]`
 4. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p proxima-tensor --features std,metal-wide-reduce -E "test(cpu_oracle_reduce_extents)" 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/runs/7.2-cpu-oracle.log; echo "EXIT=${PIPESTATUS[0]}"` — CPU-oracle parity at reduction extents `{31, 32, 33, 127, 128, 4096}`, 6 cases
-5. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p omega --features metal,cpu,metal-wide-reduce -E "test(metal_parity)" 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/runs/7.2-metal-parity.log; echo "EXIT=${PIPESTATUS[0]}"`
-6. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/target CARGO_TERM_COLOR=never OMEGA_COOPERATIVE_REDUCE_MAX_THREADS=32 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 900 -- cargo build -p omega --features metal,metal-wide-reduce 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/runs/7.2-golden-32.log; echo "EXIT=${PIPESTATUS[0]}"`
-7. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/target CARGO_TERM_COLOR=never OMEGA_COOPERATIVE_REDUCE_MAX_THREADS=1024 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 900 -- cargo build -p omega --features metal,metal-wide-reduce 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/runs/7.2-golden-1024.log; echo "EXIT=${PIPESTATUS[0]}"` — the override-changes-golden-MSL test, 32 vs 1024
+5. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p proxima-omega --features metal,cpu,metal-wide-reduce -E "test(metal_parity)" 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/runs/7.2-metal-parity.log; echo "EXIT=${PIPESTATUS[0]}"`
+6. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/target CARGO_TERM_COLOR=never OMEGA_COOPERATIVE_REDUCE_MAX_THREADS=32 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 900 -- cargo build -p proxima-omega --features metal,metal-wide-reduce 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/runs/7.2-golden-32.log; echo "EXIT=${PIPESTATUS[0]}"`
+7. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/target CARGO_TERM_COLOR=never OMEGA_COOPERATIVE_REDUCE_MAX_THREADS=1024 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 900 -- cargo build -p proxima-omega --features metal,metal-wide-reduce 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/runs/7.2-golden-1024.log; echo "EXIT=${PIPESTATUS[0]}"` — the override-changes-golden-MSL test, 32 vs 1024
 8. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo nextest run --release -p proxima-model-interop --features metal,instrument,metal-wide-reduce \
   --run-ignored all --no-capture -E 'test(profiles_one_real_decode_step_by_per_op_gpu_time)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08/runs/7.2-milli-on.log; echo "EXIT=${PIPESTATUS[0]}"` — ON/OFF interleaved MILLI pair (this ON, step 2 was OFF)
 9. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc08 && pgrep -fl 'cargo|rustc|llama|criterion|nextest'; sysctl -n vm.loadavg`
@@ -4816,14 +4816,14 @@ feature: none — CUDA is an existing backend feature, not a new one   default: 
 ##### commands
 1. `WT=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09`; `TD=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target`; `LOCK=/Users/brianbruggeman/repos/slot-0/.gpu-measure.lock`; `mkdir -p /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/runs` (same worktree as 8.1; no new worktree block)
 2. edit (commit 1): `omega/src/cuda.rs:146-183` — implement `Iota` and `Constant` emission, referencing `msl.rs:2044-2103`'s `render_iota`/`render_constant`; **do not delete `CudaUnsupportedOpKind` in this commit** — land the implementation first, green, so rollback is one small revert rather than an unwind through downstream exhaustive matches
-3. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p omega --features cuda,cpu 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/runs/8.2-cuda-impl.log; echo "EXIT=${PIPESTATUS[0]}"`
+3. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p proxima-omega --features cuda,cpu 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/runs/8.2-cuda-impl.log; echo "EXIT=${PIPESTATUS[0]}"`
 4. edit (commit 2): `omega/src/cuda.rs`, `omega/src/error.rs` — remove the now-unreachable `CudaUnsupportedOpKind` variant; update 3.3's coverage-matrix pre-registration in this same commit
 5. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 900 -- grep -c CudaUnsupportedOpKind omega/src/cuda.rs 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/runs/8.2-variant-grep.log; echo "EXIT=${PIPESTATUS[0]}"`
-6. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p omega --all-features -E 'test(backend_route_coverage)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/runs/8.2-coverage-matrix.log; echo "EXIT=${PIPESTATUS[0]}"`
+6. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p proxima-omega --all-features -E 'test(backend_route_coverage)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/runs/8.2-coverage-matrix.log; echo "EXIT=${PIPESTATUS[0]}"`
 
 ##### expect
 - ≥2 emit tests per kind (`Iota`, `Constant`)
-- `cargo nextest run -p omega --features cuda,cpu` runs a **non-zero** count (`cuda` is not in `default` — the N==0 trap)
+- `cargo nextest run -p proxima-omega --features cuda,cpu` runs a **non-zero** count (`cuda` is not in `default` — the N==0 trap)
 - `grep -c CudaUnsupportedOpKind omega/src/cuda.rs == 0` after the second commit
 - 3.3's matrix moves from CUDA 2/4 to **4/4** and the test asserts the new pre-registration
 - N==0 is RED.
@@ -4848,7 +4848,7 @@ revert the second commit (restores the variant), then the first.
 the coverage matrix; per-backend route census.
 
 ##### reprove
-`cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p omega --all-features -E 'test(backend_route_coverage)'`
+`cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p proxima-omega --all-features -E 'test(backend_route_coverage)'`
 
 ##### row
 ```
@@ -4864,7 +4864,7 @@ the coverage matrix; per-backend route census.
 **Census:** 15-cell coverage matrix (3 backends x 4 BoundOpKind + Keep::Scan); CUDA moves 2/4 -> 4/4.
 **Home-turf arm:** none — no timed cell.
 **Principles engaged and what each changed:** §4 (every backend covers every kind, or names the hole); §11 (sans-IO emission is testable as text without a toolchain). **Abandoned:** none.
-**Re-prove:** `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p omega --all-features -E 'test(backend_route_coverage)'`.
+**Re-prove:** `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p proxima-omega --all-features -E 'test(backend_route_coverage)'`.
 ```
 
 ##### report skeleton
@@ -4876,7 +4876,7 @@ numbers: <matrix table, CUDA 2/4 -> 4/4>
 predict vs observed: <one line; if miss: category + work item>
 files: omega/src/cuda.rs:146-183; omega/src/error.rs   diff --stat: <...>
 row: <see above>
-reprove: `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p omega --all-features -E 'test(backend_route_coverage)'`
+reprove: `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 1800 -- cargo nextest run -p proxima-omega --all-features -E 'test(backend_route_coverage)'`
 open: <anything the card could not do, by name>
 ```
 
@@ -4903,8 +4903,8 @@ The continuation gate is decided in this row, not deferred: the remaining kinds 
 1. `WT=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09`; `TD=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target`; `LOCK=/Users/brianbruggeman/repos/slot-0/.gpu-measure.lock`; `mkdir -p /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/runs` (same worktree as 8.1/8.2; no new worktree block)
 2. edit: `omega/src/msl.rs:2104-2177` and its wgsl/cuda twins — move the structural half of `Elementwise` emission to the new core module per 8.1's classification; implement the touched `Dialect` methods three times (MSL, WGSL, CUDA); delete the duplicates. One commit, green.
 3. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- bash scripts/omega-gate.sh 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/runs/8.3-gate.log; echo "EXIT=${PIPESTATUS[0]}"`
-4. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target CARGO_TERM_COLOR=never bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 900 -- cargo build -p omega --no-default-features --features alloc 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/runs/8.3-alloc-tier.log; echo "EXIT=${PIPESTATUS[0]}"` — states which modules it built
-5. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo nextest run -p omega --all-features -E 'test(golden_source)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/runs/8.3-golden-source.log; echo "EXIT=${PIPESTATUS[0]}"`
+4. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target CARGO_TERM_COLOR=never bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 900 -- cargo build -p proxima-omega --no-default-features --features alloc 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/runs/8.3-alloc-tier.log; echo "EXIT=${PIPESTATUS[0]}"` — states which modules it built
+5. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo nextest run -p proxima-omega --all-features -E 'test(golden_source)' 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/runs/8.3-golden-source.log; echo "EXIT=${PIPESTATUS[0]}"`
 6. `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && wc -l omega/src/msl.rs omega/src/wgsl.rs omega/src/cuda.rs 2>&1 | tee /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/runs/8.3-line-counts.log`
 
 ##### expect
@@ -4934,7 +4934,7 @@ the `Elementwise` paths in all three emitters + the new core module. Deliberatel
 line counts, golden hash per route per backend, per-op `gpu_ns`.
 
 ##### reprove
-`cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo nextest run -p omega --all-features -E 'test(golden_source)'` + the welded gate.
+`cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo nextest run -p proxima-omega --all-features -E 'test(golden_source)'` + the welded gate.
 
 ##### row
 ```
@@ -4951,7 +4951,7 @@ line counts, golden hash per route per backend, per-op `gpu_ns`.
 **Census:** deleted-STRUCTURE count vs 8.1's 423-line count for Elementwise (msl 148 + wgsl 137 + cuda 138); measured `wc -l` delta recorded as a fact beside it, not a threshold [round-4 synth S27].
 **Home-turf arm:** none — this card's claim is emission-text identity, not a timed cell.
 **Principles engaged and what each changed:** §11 (sans-IO emitter core, generic over a closed `Dialect` set); round-2 j4 (no unevidenced threshold — the STRUCTURE-row count is pre-registered per kind and measured, not assumed) [round-4 fix F15] [round-4 synth S27]. **Abandoned:** the full three-backend reorganisation as a mandatory phase [§VIII.19]; the "within 10%"/"≥600" continuation gates [round-4 fix F15] [round-4 synth S27].
-**Re-prove:** `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo nextest run -p omega --all-features -E 'test(golden_source)'` + the welded gate.
+**Re-prove:** `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo nextest run -p proxima-omega --all-features -E 'test(golden_source)'` + the welded gate.
 ```
 
 ##### report skeleton
@@ -4963,7 +4963,7 @@ numbers: <line-count delta table> <per-op gpu_ns before/after>
 predict vs observed: <one line; if miss: category + work item>
 files: omega/src/msl.rs:2104-2177 + wgsl/cuda twins; new core module   diff --stat: <...>
 row: <see above>
-reprove: `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo nextest run -p omega --all-features -E 'test(golden_source)'` + the welded gate
+reprove: `cd /Users/brianbruggeman/repos/slot-0/proxima-wt-risc09 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-risc09/target bash scripts/gpu-measure-lock.sh /Users/brianbruggeman/repos/slot-0/.gpu-measure.lock --wait 5400 -- cargo nextest run -p proxima-omega --all-features -E 'test(golden_source)'` + the welded gate
 open: continuation to the remaining kinds (Reduce incl. every route, Iota/Constant, Keep::Scan) — gated on this card's N1 and N4 (deleted-STRUCTURE count == 8.1's count, `wc -l` fall in [300,423]) [round-4 fix F15] [round-4 synth S27], not scheduled by this card
 ```
 

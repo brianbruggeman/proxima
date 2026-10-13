@@ -2028,7 +2028,7 @@ dependencies = [
  "proxima-h1",
  "proxima-h2",
  "proxima-h3",
- "proxima-io",
+ "proxima-lib",
  "proxima-kv",
  "proxima-listen",
  "proxima-listeners-http",
@@ -2349,7 +2349,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "proxima-io"
+name = "proxima-lib"
 version = "0.1.0"
 dependencies = [
  "bytes",

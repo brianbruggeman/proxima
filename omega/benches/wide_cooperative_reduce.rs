@@ -11,9 +11,9 @@
 //! compared via saved criterion baselines:
 //!
 //! ```sh
-//! CARGO_TARGET_DIR=<scratch> cargo bench -p omega --bench wide_cooperative_reduce \
+//! CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-omega --bench wide_cooperative_reduce \
 //!   --features metal -- --save-baseline off
-//! CARGO_TARGET_DIR=<scratch> cargo bench -p omega --bench wide_cooperative_reduce \
+//! CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-omega --bench wide_cooperative_reduce \
 //!   --features metal,metal-wide-cooperative-reduce -- --save-baseline on --baseline off
 //! ```
 //!

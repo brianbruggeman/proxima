@@ -35,7 +35,7 @@
 //! taken right now, CoV 0.3% -> 53% is the measured cost of that). Run with:
 //!
 //! ```sh
-//! CARGO_TARGET_DIR=<scratch>/target-metal cargo bench -p omega --bench metal_vs_cpu --features metal
+//! CARGO_TARGET_DIR=<scratch>/target-metal cargo bench -p proxima-omega --bench metal_vs_cpu --features metal
 //! ```
 //!
 //! on a quiet tree (check `uptime` / `ps -eo pcpu,comm` first — no other

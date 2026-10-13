@@ -13,8 +13,8 @@
 //!
 //! Run:
 //! ```bash
-//! cargo bench -p proxima --features sync-wrappers --bench bench_time_instant_parity
-//! cargo bench -p proxima --features sync-wrappers --bench bench_time_instant_parity -- timeout
+//! cargo bench -p proxima-lib --features sync-wrappers --bench bench_time_instant_parity
+//! cargo bench -p proxima-lib --features sync-wrappers --bench bench_time_instant_parity -- timeout
 //! ```
 
 #![allow(

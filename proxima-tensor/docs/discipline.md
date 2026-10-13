@@ -199,7 +199,7 @@ with the ROW 0 captures only, not these timing-only runs.
 **Kept.** Correctness confirmed on the exact post-tweak binary:
 `cargo nextest run -p proxima-tensor` → **128/128** (matches pre-tweak
 baseline exactly), `--features config` → **144/144**, `cargo test -p
-proxima-tensor --doc` → **1/1**, `cargo nextest run -p omega --features
+proxima-tensor --doc` → **1/1**, `cargo nextest run -p proxima-omega --features
 metal` (real Metal device) → **25/25**. Numerical GEMM output is byte-for-
 byte reused by the same `evaluate()` call the pre-existing
 `fused_matmul_matches_a_naive_triple_loop` / `matmul_binds_a_symbolic_
@@ -387,7 +387,7 @@ body.
 **KEPT.** Correctness: `cargo nextest run -p proxima-tensor` → **128/128**
 (post-ROW-2 binary, matches ROW 1's 128/128 exactly, includes the
 hand-written triple-loop GEMM parity tests). Remaining gates (`--features
-config`, `cargo nextest run -p omega --features metal`, `cargo test -p
+config`, `cargo nextest run -p proxima-omega --features metal`, `cargo test -p
 proxima-tensor --doc`) run once at the end of ROW 3 rather than duplicated
 after every row, per budget — flagged here so it isn't silently skipped.
 
@@ -454,7 +454,7 @@ orthogonal to ROW 2's fix.
 **Correctness:** `cargo nextest run -p proxima-tensor` → **128/128**
 (includes the hand-written triple-loop GEMM parity tests — `root[0]=18370`,
 `root_len=1048576`, byte-identical to ROW 0/1/2's output on every run).
-`--features config` → **144/144**. `cargo nextest run -p omega --features
+`--features config` → **144/144**. `cargo nextest run -p proxima-omega --features
 metal` (real Metal device) → **25/25**. `cargo test -p proxima-tensor
 --doc` → **1/1**. All four run again, clean, after reverting the temporary
 verification `eprintln!` — the numbers above are the post-revert binary's.
@@ -655,7 +655,7 @@ outside the loop) was sufficient for LLVM's autovectorizer to vectorize
 the loop, with no `std::simd`/intrinsics needed.
 
 **KEPT.** Correctness: `cargo nextest run -p proxima-tensor` -> **128/128**,
-`--features config` -> **144/144**, `cargo nextest run -p omega --features
+`--features config` -> **144/144**, `cargo nextest run -p proxima-omega --features
 metal` (real Metal device) -> **25/25**, `cargo test -p proxima-tensor
 --doc` -> **1/1**. All four green on the exact binary the timing numbers
 above came from. `cargo clippy -p proxima-tensor --lib --features config
@@ -828,7 +828,7 @@ correctly labeled as such). Correctness on the exact binary the numbers
 above came from: `cargo nextest run -p proxima-tensor` -> **128/128**,
 `--features config` -> **144/144** (re-run a second time after the
 stash-pop round-trip to confirm the restore was clean -> **144/144**
-again), `cargo nextest run -p omega --features metal` (real Metal
+again), `cargo nextest run -p proxima-omega --features metal` (real Metal
 device) -> **25/25**, `cargo test -p proxima-tensor --doc` -> **1/1**.
 `cargo clippy -p proxima-tensor --lib --features config -- -D warnings`
 -> clean, 0 warnings.
@@ -915,7 +915,7 @@ and passes.
 **KEPT.** `cargo nextest run -p proxima-tensor -E
 'test(execute_composes_through_pipe_ext)'` -> **1/1**. Full gates on the
 same binary: `cargo nextest run -p proxima-tensor --features config` ->
-**144/144**, `cargo nextest run -p omega --features metal` (real Metal
+**144/144**, `cargo nextest run -p proxima-omega --features metal` (real Metal
 device) -> **25/25**, `cargo test -p proxima-tensor --doc` -> **1/1**.
 `cargo clippy -p proxima-tensor --lib --tests --features config -- -D
 warnings` -> clean, 0 warnings.
@@ -971,7 +971,7 @@ begin with).
   (the true, current types) with the category noun dropped.
 
 **KEPT.** `cargo nextest run -p proxima-tensor --features config` ->
-**144/144**, `cargo nextest run -p omega --features metal` (real Metal
+**144/144**, `cargo nextest run -p proxima-omega --features metal` (real Metal
 device) -> **25/25**, `cargo test -p proxima-tensor --doc` -> **1/1**,
 `cargo clippy -p proxima-tensor --lib --tests --features config -- -D
 warnings` -> clean, 0 warnings (doc-only edits, no intra-doc link
@@ -1279,7 +1279,7 @@ session.
 **KEPT.** Correctness on the exact binary the timing numbers above came
 from: `cargo nextest run -p proxima-tensor` -> **129/129** (128 prior +
 this row's new transposed-RHS parity test), `--features config` -> **145/145**,
-`cargo nextest run -p omega --features metal` (real Metal device) ->
+`cargo nextest run -p proxima-omega --features metal` (real Metal device) ->
 **25/25**, `cargo test -p proxima-tensor --doc` -> **1/1**. `cargo clippy -p
 proxima-tensor --lib --tests --features config -- -D warnings` -> clean, 0
 warnings (the `DotFold` bundle was needed specifically to stay under
@@ -1528,7 +1528,7 @@ measured is large and real regardless of the exact instruction shape.
 **KEPT.** Correctness, exact binary the timing/error numbers above came
 from: `cargo nextest run -p proxima-tensor` -> **130/130** (129 + this
 row's new k=1024 tolerance test), `--features config` -> **146/146**
-(145 + 1), `cargo nextest run -p omega --features metal` (real Metal
+(145 + 1), `cargo nextest run -p proxima-omega --features metal` (real Metal
 device) -> **25/25**, `cargo test -p proxima-tensor --doc` -> **1/1**.
 `cargo clippy -p proxima-tensor --lib --tests --features config -- -D
 warnings` -> clean, 0 warnings.
@@ -5661,7 +5661,7 @@ silent fallback to the other backend.
 The trap above is now held by a test rather than a comment:
 
 ```
-cargo nextest run -p omega --no-default-features --features std,metal
+cargo nextest run -p proxima-omega --no-default-features --features std,metal
   -> 43 tests run: 43 passed
      PASS backend::tests::requesting_cpu_without_the_feature_errors_naming_it
 ```
@@ -5769,7 +5769,7 @@ clippy `-D warnings` clean on `omega --features std,cpu,metal` and
 **Re-prove command (gate 16), today, from the artifact alone:**
 
 ```
-cargo nextest run -p omega
+cargo nextest run -p proxima-omega
 cargo nextest run -p proxima-tensor --features std
 cargo nextest run -p proxima-tensor --features std,instrument
 cargo nextest run -p proxima-model-interop --features std
@@ -6236,7 +6236,7 @@ including the new `real_forward_packed_probe` example).
 **Re-prove command (gate 16):**
 
 ```
-cargo nextest run -p omega
+cargo nextest run -p proxima-omega
 cargo nextest run -p proxima-tensor --features std,instrument
 cargo nextest run -p proxima-model-interop --features metal,instrument
 PROXIMA_MAX_TOKENS=16 cargo test -p proxima-model-interop \
@@ -6332,12 +6332,12 @@ shape," it does not close the 21x.
 ### Gate
 
 Read-plus-emit only; no existing test suite exercises this new example.
-`cargo run -p omega --example real_forward_packed_probe --features metal`
+`cargo run -p proxima-omega --example real_forward_packed_probe --features metal`
 exits 0 and asserts `reduce_with_packed_operand != 0` (a degenerate-probe
 guard, N==0 would be RED). Re-provable now:
 
 ```
-cargo run -p omega --example real_forward_packed_probe --features metal
+cargo run -p proxima-omega --example real_forward_packed_probe --features metal
 ```
 
 ## ROW 86 — CORRECTION to ROW 84's read: `gpu_exec` did NOT move. The experiment answered, and the answer was "no".
@@ -6562,7 +6562,7 @@ No new kernel path, no new type — one predicate widened, reusing the SAME
 
 ### Correctness — the incumbent (CPU oracle) still agrees, byte for byte
 
-`cargo nextest run -p omega --features metal,instrument` -> **53 passed, 1
+`cargo nextest run -p proxima-omega --features metal,instrument` -> **53 passed, 1
 skipped** (unchanged before/after). `metal_real_forward` (bit-exact vs
 `proxima_tensor::cpu`) is in that count. Real 24-token greedy decode, same
 prompt, same checkpoint, before AND after the fix:
@@ -6641,11 +6641,11 @@ reflects BEFORE's own CoV, not AFTER's).
 
 | gate | result |
 |---|---|
-| `cargo nextest run -p omega --features metal,instrument` | **53 passed, 1 skipped** |
+| `cargo nextest run -p proxima-omega --features metal,instrument` | **53 passed, 1 skipped** |
 | `cargo nextest run -p proxima-tensor --features std,instrument` | **363 passed, 4 skipped** |
 | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed, 6 skipped** |
-| `cargo clippy -p omega --features std,cpu,metal -- -D warnings` | clean |
-| `cargo clippy -p omega --features std,cpu,metal,instrument -- -D warnings` | clean |
+| `cargo clippy -p proxima-omega --features std,cpu,metal -- -D warnings` | clean |
+| `cargo clippy -p proxima-omega --features std,cpu,metal,instrument -- -D warnings` | clean |
 | generated text | `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\`"` |
 
 `cargo clippy -p proxima-model-interop --features metal,instrument -- -D
@@ -6659,7 +6659,7 @@ is a different function's error-handling shape, not this row's claim.
 ### Re-provable now
 
 ```
-cargo run -p omega --example real_forward_packed_probe --features metal,instrument
+cargo run -p proxima-omega --example real_forward_packed_probe --features metal,instrument
 cargo nextest run -p proxima-model-interop --features metal,instrument --run-ignored ignored-only \
   -E 'test(profiles_one_real_decode_step_by_per_op_gpu_time)' --success-output immediate
 ```
@@ -6945,7 +6945,7 @@ it, not a retraction of ROW 89's own (correctness-only) claims.
 | `cargo nextest run -p proxima-tensor --features std` | **359 passed** (366 minus the 7 tests the two reverted commits added) |
 | `cargo nextest run -p proxima-tensor --features std,instrument` | **363 passed** (370 minus 7) |
 | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed** (unaffected — different crate) |
-| `cargo nextest run -p omega` | **53 passed** (unaffected) |
+| `cargo nextest run -p proxima-omega` | **53 passed** (unaffected) |
 | clippy `-D warnings` | clean on `proxima-tensor --features std,instrument`, `omega --features std,cpu,metal`, `proxima-model-interop --features metal,instrument` |
 
 ### Re-provable now
@@ -7185,18 +7185,18 @@ session wants the exact Q5_K-only number.
 
 | gate | result |
 |---|---|
-| `cargo nextest run -p omega --features metal,instrument` | **60 passed, 1 skipped** (53 baseline + 8 new: `q6k_at_float32`/`q6k_at_float16`, `metal_matmul_on_packed_q6k_weights_...`, 4x `q6k_unpack` module, 1x `q6k_real_checkpoint_parity` — minus 1: `q6_k` case deleted from `metal_rejects_a_codec_with_no_unpack_kernel_and_names_it` since `Q6_K` is no longer unsupported) |
+| `cargo nextest run -p proxima-omega --features metal,instrument` | **60 passed, 1 skipped** (53 baseline + 8 new: `q6k_at_float32`/`q6k_at_float16`, `metal_matmul_on_packed_q6k_weights_...`, 4x `q6k_unpack` module, 1x `q6k_real_checkpoint_parity` — minus 1: `q6_k` case deleted from `metal_rejects_a_codec_with_no_unpack_kernel_and_names_it` since `Q6_K` is no longer unsupported) |
 | `cargo nextest run -p proxima-tensor --features std,instrument` | **363 passed, 4 skipped** (unchanged — this row never touches `proxima-tensor`) |
 | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed, 6 skipped** (unchanged) |
-| `cargo clippy -p omega --features std,cpu,metal -- -D warnings` | clean |
+| `cargo clippy -p proxima-omega --features std,cpu,metal -- -D warnings` | clean |
 | `cargo clippy -p proxima-model-interop --features metal,instrument -- -D warnings` | clean (the two pre-existing `clippy::expect_used` sites the prior row named are no longer present) |
 | generated text | `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\`"` |
 
 ### Re-provable now
 
 ```
-cargo nextest run -p omega --features metal,instrument
-cargo test -p omega --features metal,instrument --test q6k_real_checkpoint_parity -- --nocapture
+cargo nextest run -p proxima-omega --features metal,instrument
+cargo test -p proxima-omega --features metal,instrument --test q6k_real_checkpoint_parity -- --nocapture
 cargo test -p proxima-model-interop --release --features metal,instrument --lib -- \
   --ignored --exact --nocapture \
   bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
@@ -7531,18 +7531,18 @@ once diluted by every other op that did not change.
 
 | gate | result |
 |---|---|
-| `cargo nextest run -p omega --features metal,instrument` | **67 passed, 1 skipped** (60 baseline + 7 new: 4x `q5k_unpack`, 1x `q5k_real_checkpoint_parity`, `metal_matmul_on_packed_q5k_weights_...`, 2x `q5k_at_float32`/`q5k_at_float16` -- minus 1: `q5_k` case deleted from `metal_rejects_a_codec_with_no_unpack_kernel_and_names_it` since `Q5_K` is no longer unsupported; 60+4+1+3-1=67) |
+| `cargo nextest run -p proxima-omega --features metal,instrument` | **67 passed, 1 skipped** (60 baseline + 7 new: 4x `q5k_unpack`, 1x `q5k_real_checkpoint_parity`, `metal_matmul_on_packed_q5k_weights_...`, 2x `q5k_at_float32`/`q5k_at_float16` -- minus 1: `q5_k` case deleted from `metal_rejects_a_codec_with_no_unpack_kernel_and_names_it` since `Q5_K` is no longer unsupported; 60+4+1+3-1=67) |
 | `cargo nextest run -p proxima-tensor --features std,instrument` | **363 passed, 4 skipped** (unchanged — this row never touches `proxima-tensor`) |
 | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed, 6 skipped** (unchanged) |
-| `cargo clippy -p omega --features std,cpu,metal -- -D warnings` | clean |
+| `cargo clippy -p proxima-omega --features std,cpu,metal -- -D warnings` | clean |
 | `cargo clippy -p proxima-model-interop --features metal,instrument -- -D warnings` | clean (the dead-code the deletion above forced ahead of is what this gate would have caught) |
 | generated text | `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\`"` |
 
 ### Re-provable now
 
 ```
-cargo nextest run -p omega --features metal,instrument
-cargo test -p omega --features metal,instrument --test q5k_real_checkpoint_parity -- --nocapture
+cargo nextest run -p proxima-omega --features metal,instrument
+cargo test -p proxima-omega --features metal,instrument --test q5k_real_checkpoint_parity -- --nocapture
 cargo test -p proxima-model-interop --release --features metal,instrument --lib -- \
   --ignored --exact --nocapture \
   bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
@@ -7761,7 +7761,7 @@ no separate revert to log because nothing broken was ever shipped.
 
 ### Gates, actual numbers
 
-- `cargo nextest run -p omega --features std,cpu,metal` -> **73 passed**, 1
+- `cargo nextest run -p proxima-omega --features std,cpu,metal` -> **73 passed**, 1
   skipped (67 pre-existing + 6 new: `distinct_output_rank_...`,
   `distinct_output_axis_set_...`, `output_axis_order_...`,
   `distinct_packed_codec_...`, `distinct_dtype_...`,
@@ -7772,7 +7772,7 @@ no separate revert to log because nothing broken was ever shipped.
 - `cargo nextest run -p proxima-model-interop --features metal,instrument` ->
   **24 passed**, 6 skipped (the host-local-checkpoint-gated tests; unchanged
   count from before this row)
-- `cargo clippy -p omega --features std,cpu,metal -- -D warnings` -> clean
+- `cargo clippy -p proxima-omega --features std,cpu,metal -- -D warnings` -> clean
 - `cargo clippy -p proxima-model-interop --features metal,instrument -- -D
   warnings` -> clean
 - generated text, all 6 timed runs (3 BEFORE, 3 AFTER), byte-identical:
@@ -7798,7 +7798,7 @@ requires the host-local checkpoint at `ServingConfig::DEFAULT_MODEL_PATH`
 (`serving.rs`) and a real Metal device; parse `token_breakdown`/
 `token_breakdown_metal`/`metal_decode_summary` lines from stdout. The
 `source_len`/`entry_len` probe re-runs as `cargo run --release --example
-real_forward_emit_probe -p omega --features std,cpu,metal` against the
+real_forward_emit_probe -p proxima-omega --features std,cpu,metal` against the
 UNMODIFIED (in-tree) probe — no fixture required, needs no checkpoint.
 
 ## ROW 94 — fresh per-op split at the CURRENT 55.5 ms denominator: 71.6% is the packed-weight sweep at its known in-situ rate, 15.6% is dispatch-count-bound on tiny attention/KV-cache reduces, 12.5% is elementwise near its own bandwidth. No cheap structural fix found; not landed.
@@ -8059,20 +8059,20 @@ multi-run measurement confirms the denominator did not move.
 
 | gate | result |
 |---|---|
-| `cargo nextest run -p omega --features std,cpu,metal` | **73 passed, 1 skipped** (unchanged from ROW93 — no source touched) |
+| `cargo nextest run -p proxima-omega --features std,cpu,metal` | **73 passed, 1 skipped** (unchanged from ROW93 — no source touched) |
 | `cargo nextest run -p proxima-tensor --features std,instrument` | **363 passed, 4 skipped** (unchanged) |
 | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed, 6 skipped** (unchanged) |
-| `cargo clippy -p omega --features std,cpu,metal -- -D warnings` | clean |
+| `cargo clippy -p proxima-omega --features std,cpu,metal -- -D warnings` | clean |
 | `cargo clippy -p proxima-model-interop --features metal,instrument -- -D warnings` | clean |
 | generated text, all 3 timed decode runs this row | byte-identical: `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\`"` |
 
 ### Re-provable now (guiding-principle 16)
 
 ```
-cargo nextest run -p omega --features std,cpu,metal
+cargo nextest run -p proxima-omega --features std,cpu,metal
 cargo nextest run -p proxima-tensor --features std,instrument
 cargo nextest run -p proxima-model-interop --features metal,instrument
-cargo clippy -p omega --features std,cpu,metal -- -D warnings
+cargo clippy -p proxima-omega --features std,cpu,metal -- -D warnings
 cargo clippy -p proxima-model-interop --features metal,instrument -- -D warnings
 
 cargo build --release --tests -p proxima-model-interop --features metal,instrument
@@ -8081,7 +8081,7 @@ cargo build --release --tests -p proxima-model-interop --features metal,instrume
 <built test binary> --ignored --exact \
   bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache --nocapture
 
-cargo run --release --example q4k_matvec_probe -p omega --features std,cpu,metal
+cargo run --release --example q4k_matvec_probe -p proxima-omega --features std,cpu,metal
 ```
 The first ignored test's `op_profile`/`op_profile_bucket`/`op_profile_top`/
 `op_profile_family` lines are Task 1's full attribution (repeat 3x for the
@@ -8360,10 +8360,10 @@ resolved.
 
 | gate | result |
 |---|---|
-| `cargo nextest run -p omega` | **73 passed, 1 skipped** |
+| `cargo nextest run -p proxima-omega` | **73 passed, 1 skipped** |
 | `cargo nextest run -p proxima-tensor --features std,instrument` | **363 passed, 4 skipped** |
 | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed, 6 skipped** |
-| `cargo clippy -p omega --features std,cpu,metal -- -D warnings` | clean |
+| `cargo clippy -p proxima-omega --features std,cpu,metal -- -D warnings` | clean |
 | `cargo clippy -p proxima-model-interop --features metal,instrument -- -D warnings` | clean |
 | generated text | `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\`"` — byte-identical, re-confirmed this row |
 | `git diff --stat` / `git status --porcelain` at row close | both empty — nothing landed |
@@ -8371,10 +8371,10 @@ resolved.
 ### Re-provable now (guiding-principle 16)
 
 ```
-cargo nextest run -p omega
+cargo nextest run -p proxima-omega
 cargo nextest run -p proxima-tensor --features std,instrument
 cargo nextest run -p proxima-model-interop --features metal,instrument
-cargo clippy -p omega --features std,cpu,metal -- -D warnings
+cargo clippy -p proxima-omega --features std,cpu,metal -- -D warnings
 cargo clippy -p proxima-model-interop --features metal,instrument -- -D warnings
 
 cargo build --release --tests -p proxima-model-interop --features metal,instrument
@@ -8499,7 +8499,7 @@ pass unchanged.
 | `cargo nextest run -p proxima-tensor --features std,instrument` | **363 passed** (unchanged, same reason) |
 | `cargo nextest run -p proxima-tensor --features std,instrument,cohort-staged-graph` | **363 passed** — same count as the feature-off run above: no test is gated behind `cohort-staged-graph` alone (`StagedRound`'s 3 unit tests were already `cfg(test)` and now additionally compile under the feature; the widened cfg is `any(test, feature = ...)`, so they run in both configurations) |
 | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed** (unaffected — different crate, feature off) |
-| `cargo nextest run -p omega` | **73 passed** (unaffected; one unrelated pre-existing clippy lint fixed in `omega/tests/q6k_unpack.rs`, see below) |
+| `cargo nextest run -p proxima-omega` | **73 passed** (unaffected; one unrelated pre-existing clippy lint fixed in `omega/tests/q6k_unpack.rs`, see below) |
 | clippy `-D warnings` | clean on `proxima-tensor --features std,instrument`, `proxima-tensor --features std,instrument,cohort-staged-graph`, `omega --features std,cpu,metal`, `proxima-model-interop --features metal,instrument` |
 
 One pre-existing, unrelated clippy failure was fixed in the course of this
@@ -8640,7 +8640,7 @@ cargo nextest run -p proxima-tensor --features std
 cargo nextest run -p proxima-tensor --features std,instrument
 cargo clippy -p proxima-tensor --features std,instrument,cohort-staged-graph --all-targets -- -D warnings
 cargo nextest run -p proxima-model-interop --features metal,instrument
-cargo nextest run -p omega
+cargo nextest run -p proxima-omega
 PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS=8 \
   cargo test -p proxima-model-interop --release --features std,instrument --lib -- \
   --exact --nocapture --ignored \
@@ -8696,7 +8696,7 @@ Added: `MatmulRowDotFn` (type alias, not a new trait), `dot_fn_for` (one `match`
 | `cargo nextest run -p proxima-tensor --features std,instrument` | **364 passed** (was 363 — same +1) |
 | `cargo nextest run -p proxima-tensor --features std,instrument,cohort-staged-graph` | **364 passed** |
 | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed** |
-| `cargo nextest run -p omega` | **73 passed** |
+| `cargo nextest run -p proxima-omega` | **73 passed** |
 | clippy `-D warnings` | clean on `proxima-tensor --features std,instrument`, `proxima-tensor --features std,instrument,cohort-staged-graph`, `omega --features std,cpu,metal`, `proxima-model-interop --features metal,instrument` (one `clippy::type_complexity` hit on the bare `fn(&[u8],&[u8])->Result<f32,TensorError>` type — fixed by naming it `MatmulRowDotFn`, not by `#[allow]`) |
 
 ### Bench — decode and prefill, `w=8`, load-matched (both sides captured back-to-back in the same noisier window, NOT compared against the quieter session-open numbers)
@@ -8749,7 +8749,7 @@ cargo nextest run -p proxima-tensor --features std,instrument
 cargo nextest run -p proxima-tensor --features std,instrument,cohort-staged-graph
 cargo clippy -p proxima-tensor --features std,instrument,cohort-staged-graph --all-targets -- -D warnings
 cargo nextest run -p proxima-model-interop --features metal,instrument
-cargo nextest run -p omega
+cargo nextest run -p proxima-omega
 PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS=8 \
   cargo test -p proxima-model-interop --release --features std,instrument --lib -- \
   --exact --nocapture --ignored \
@@ -8817,7 +8817,7 @@ Citing this crate's own already-measured fixed cost (`sized.rs`'s `MIN_QUANTIZE_
 | `cargo nextest run -p proxima-tensor --features std` | **361 passed** (was 360 — +1, explained above) |
 | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed** (was 364 — same +1) |
 | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed** (unchanged) |
-| `cargo nextest run -p omega` | **73 passed** (unchanged) |
+| `cargo nextest run -p proxima-omega` | **73 passed** (unchanged) |
 | clippy `-D warnings` | clean on `proxima-tensor --features std,instrument`, `proxima-tensor --features std,instrument,cohort-staged-graph`, `omega --features std,cpu,metal`, `proxima-model-interop --features metal,instrument` |
 | env-override mechanical proof | `PROXIMA_TENSOR_STAGED_BATCH_MIN_LEN=3` rebuild -> test fails `left: 3, right: 2`; unset -> rebuild -> test passes |
 | default-composition proof | plain `--features std,instrument` (no feature named) -> `cohort_summary rounds=4668`, `node_kind=staged_batch` present |
@@ -8832,10 +8832,10 @@ None — both landed changes (sizing-config threading, feature-default flip) are
 - `cargo nextest run -p proxima-tensor --features std,instrument`
 - `cargo clippy -p proxima-tensor --features std,instrument --all-targets -- -D warnings`
 - `cargo clippy -p proxima-tensor --features std,instrument,cohort-staged-graph --all-targets -- -D warnings`
-- `cargo clippy -p omega --features std,cpu,metal --all-targets -- -D warnings`
+- `cargo clippy -p proxima-omega --features std,cpu,metal --all-targets -- -D warnings`
 - `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -- -D warnings`
 - `cargo nextest run -p proxima-model-interop --features metal,instrument`
-- `cargo nextest run -p omega`
+- `cargo nextest run -p proxima-omega`
 - `PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS=8` env with a release build of `proxima-model-interop --features std,instrument`, driving the `bind::real_openchat_file` acceptance test's greedy-decode-loop-and-report-per-token-wall-clock case, `--ignored --exact --nocapture`
 
 The last command now reproduces the AFTER column by default (no extra feature flag needed) — this is the mechanical proof the flip is live, re-runnable at any time without dev memory.
@@ -8956,7 +8956,7 @@ The exact non-instrument release binary (`--features std`, no `instrument`), qui
 | `cargo nextest run -p proxima-tensor --features std` | **361 passed, 4 skipped** |
 | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed, 4 skipped** |
 | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed, 6 skipped** |
-| `cargo nextest run -p omega` | **73 passed, 1 skipped** |
+| `cargo nextest run -p proxima-omega` | **73 passed, 1 skipped** |
 | clippy `-D warnings` | clean on `proxima-tensor --features std,instrument`, `proxima-tensor --features std,instrument,cohort-staged-graph`, `omega --features std,cpu,metal`, `proxima-model-interop --features metal,instrument` |
 
 ### Rollback rows
@@ -8970,10 +8970,10 @@ cargo nextest run -p proxima-tensor --features std
 cargo nextest run -p proxima-tensor --features std,instrument
 cargo clippy -p proxima-tensor --features std,instrument --all-targets -- -D warnings
 cargo clippy -p proxima-tensor --features std,instrument,cohort-staged-graph --all-targets -- -D warnings
-cargo clippy -p omega --features std,cpu,metal --all-targets -- -D warnings
+cargo clippy -p proxima-omega --features std,cpu,metal --all-targets -- -D warnings
 cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -- -D warnings
 cargo nextest run -p proxima-model-interop --features metal,instrument
-cargo nextest run -p omega
+cargo nextest run -p proxima-omega
 PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS={1,2,4,8} \
   cargo test -p proxima-model-interop --release --features std,instrument --lib -- \
   --exact --nocapture --ignored \
@@ -9421,7 +9421,7 @@ avoid the foreign in-flight diff described above
 | `cargo nextest run -p proxima-tensor --features std` | **361 passed** |
 | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed** |
 | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed** |
-| `cargo nextest run -p omega` | **73 passed** |
+| `cargo nextest run -p proxima-omega` | **73 passed** |
 | clippy `-D warnings` | clean on `proxima-tensor --features std,instrument`, `omega --features std,cpu,metal`, `proxima-model-interop --features metal,instrument` |
 
 ### Rollback rows
@@ -9437,10 +9437,10 @@ not conflate the two when a future row cites this one.
 cargo nextest run -p proxima-tensor --features std
 cargo nextest run -p proxima-tensor --features std,instrument
 cargo clippy -p proxima-tensor --features std,instrument --all-targets -- -D warnings
-cargo clippy -p omega --features std,cpu,metal --all-targets -- -D warnings
+cargo clippy -p proxima-omega --features std,cpu,metal --all-targets -- -D warnings
 cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -- -D warnings
 cargo nextest run -p proxima-model-interop --features metal,instrument
-cargo nextest run -p omega
+cargo nextest run -p proxima-omega
 PROXIMA_COHORT_SPIN_POLLS={2000,1000,250,0} PROXIMA_MATMUL_WORKERS={8,1} \
   PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 \
   cargo test -p proxima-model-interop --release --features std,instrument --lib -- \
@@ -9761,7 +9761,7 @@ rather than inferring it from a numeric coincidence:
   the negative control proving the guard actually gates on `reduce_op`, not
   just on codec.
 
-Both pass. Re-prove: `cargo nextest run -p omega -- q4k_row_blocked`.
+Both pass. Re-prove: `cargo nextest run -p proxima-omega -- q4k_row_blocked`.
 
 Reordering unscaled-accumulate-then-scale-once is NOT bit-identical to
 scale-per-element — floating point does not associate. Measured relative
@@ -9779,7 +9779,7 @@ The `Float16` case is the honest one to watch — reordering visibly moved its
 error (`half`'s narrower mantissa makes the reassociation observable where
 `f32`'s doesn't), and it grew rather than shrank. Reported as measured, not
 rounded to "still passes": +10.9% on the error metric itself, still comfortably
-bounded. Re-prove: `cargo nextest run -p omega --no-capture -- q4k metal_matmul_on_packed_q4k`.
+bounded. Re-prove: `cargo nextest run -p proxima-omega --no-capture -- q4k metal_matmul_on_packed_q4k`.
 
 Real-checkpoint acceptance: the fibonacci decode text
 (`proxima-model-interop`'s `runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`,
@@ -9849,11 +9849,11 @@ arithmetic per element regardless of what today's noisy host could resolve.
 
 | gate | command | result |
 |---|---|---|
-| omega tests | `cargo nextest run -p omega` | **75 passed** (73 pre-existing + 2 new codegen-pinning tests above), 1 skipped — unchanged skip count |
+| omega tests | `cargo nextest run -p proxima-omega` | **75 passed** (73 pre-existing + 2 new codegen-pinning tests above), 1 skipped — unchanged skip count |
 | proxima-tensor tests | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed**, 4 skipped |
 | proxima-model-interop tests | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed**, 6 skipped |
-| omega lib build | `cargo build -p omega --features std,cpu,metal --lib` | exit 0 |
-| clippy | `cargo clippy -p omega --features std,cpu,metal --lib -- -D warnings` (also ran `--all-targets`, also clean) | exit 0, zero warnings |
+| omega lib build | `cargo build -p proxima-omega --features std,cpu,metal --lib` | exit 0 |
+| clippy | `cargo clippy -p proxima-omega --features std,cpu,metal --lib -- -D warnings` (also ran `--all-targets`, also clean) | exit 0, zero warnings |
 
 ### Notes — host loadout and an obstruction this row had to route around
 
@@ -9966,14 +9966,14 @@ Per principle 1/guiding-principles: could [`push_packed_row_blocked_body`](omega
 
 | gate | command | result |
 |---|---|---|
-| omega tests, default | `cargo nextest run -p omega` | **76 passed** (75 prior + 1 new: `tiled_gemm_never_triggers_without_the_metal_tiled_gemm_feature`), 1 skipped |
-| omega tests, `metal-tiled-gemm` | `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm` | **80 passed** (76 minus the feature-off-only test, plus 5: `decode_shape_stays_on_the_row_blocked_path_with_tiled_gemm_compiled_in`, `many_token_matmul_takes_the_tiled_gemm_path`, `non_q4k_codec_never_takes_the_tiled_gemm_path`, `multi_head_shaped_matmul_stays_on_the_row_blocked_path_regardless_of_token_count`, `metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_tile_scale`), 1 skipped |
+| omega tests, default | `cargo nextest run -p proxima-omega` | **76 passed** (75 prior + 1 new: `tiled_gemm_never_triggers_without_the_metal_tiled_gemm_feature`), 1 skipped |
+| omega tests, `metal-tiled-gemm` | `cargo nextest run -p proxima-omega --features std,cpu,metal,metal-tiled-gemm` | **80 passed** (76 minus the feature-off-only test, plus 5: `decode_shape_stays_on_the_row_blocked_path_with_tiled_gemm_compiled_in`, `many_token_matmul_takes_the_tiled_gemm_path`, `non_q4k_codec_never_takes_the_tiled_gemm_path`, `multi_head_shaped_matmul_stays_on_the_row_blocked_path_regardless_of_token_count`, `metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_tile_scale`), 1 skipped |
 | proxima-tensor | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed**, 4 skipped (unaffected by this row) |
 | proxima-model-interop | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed**, 6 skipped (unaffected by this row) |
-| omega lib build | `cargo build -p omega --features std,cpu,metal --lib` | exit 0 |
-| omega lib build, `metal-tiled-gemm` | `cargo build -p omega --features std,cpu,metal,metal-tiled-gemm --lib` | exit 0 |
-| clippy, default | `cargo clippy -p omega --features std,cpu,metal --all-targets -- -D warnings` | exit 0, zero warnings |
-| clippy, `metal-tiled-gemm` | `cargo clippy -p omega --features std,cpu,metal,metal-tiled-gemm --all-targets -- -D warnings` | exit 0, zero warnings |
+| omega lib build | `cargo build -p proxima-omega --features std,cpu,metal --lib` | exit 0 |
+| omega lib build, `metal-tiled-gemm` | `cargo build -p proxima-omega --features std,cpu,metal,metal-tiled-gemm --lib` | exit 0 |
+| clippy, default | `cargo clippy -p proxima-omega --features std,cpu,metal --all-targets -- -D warnings` | exit 0, zero warnings |
+| clippy, `metal-tiled-gemm` | `cargo clippy -p proxima-omega --features std,cpu,metal,metal-tiled-gemm --all-targets -- -D warnings` | exit 0, zero warnings |
 
 ### Notes — host loadout, and a second obstruction routed around without touching it
 
@@ -9987,10 +9987,10 @@ Timed runs polled `uptime` before/after every rep; several polls exceeded the ~4
 
 ### Re-provable now
 
-- `cargo nextest run -p omega`
-- `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm`
-- `cargo clippy -p omega --features std,cpu,metal --all-targets -- -D warnings`
-- `cargo clippy -p omega --features std,cpu,metal,metal-tiled-gemm --all-targets -- -D warnings`
+- `cargo nextest run -p proxima-omega`
+- `cargo nextest run -p proxima-omega --features std,cpu,metal,metal-tiled-gemm`
+- `cargo clippy -p proxima-omega --features std,cpu,metal --all-targets -- -D warnings`
+- `cargo clippy -p proxima-omega --features std,cpu,metal,metal-tiled-gemm --all-targets -- -D warnings`
 - `cargo nextest run -p proxima-tensor --features std,instrument`
 - `cargo nextest run -p proxima-model-interop --features metal,instrument`
 - `PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24` against a `--release --features metal,instrument[,omega/metal-tiled-gemm]` build of `proxima-model-interop`'s `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (`--ignored --exact --nocapture`), reading `step=0`'s `step_wall_ms` for prefill and the mean of `step=1..23` for decode — reproduces both columns of this row's own table.
@@ -10463,14 +10463,14 @@ out to matter — unmeasured, not assumed).
 
 | gate | command | result |
 |---|---|---|
-| omega tests, default | `cargo nextest run -p omega` | **76 passed**, 1 skipped |
-| omega tests, `metal-tiled-gemm` | `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm` | **80 passed**, 1 skipped |
+| omega tests, default | `cargo nextest run -p proxima-omega` | **76 passed**, 1 skipped |
+| omega tests, `metal-tiled-gemm` | `cargo nextest run -p proxima-omega --features std,cpu,metal,metal-tiled-gemm` | **80 passed**, 1 skipped |
 | proxima-tensor | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed**, 4 skipped |
-| omega lib build | `cargo build -p omega --features std,cpu,metal --lib` | exit 0 |
-| omega lib build, `metal-tiled-gemm` | `cargo build -p omega --features std,cpu,metal,metal-tiled-gemm --lib` | exit 0 |
-| clippy, default | `cargo clippy -p omega --features std,cpu,metal --all-targets -- -D warnings` | exit 0, zero warnings |
-| clippy, `metal-tiled-gemm` | `cargo clippy -p omega --features std,cpu,metal,metal-tiled-gemm --all-targets -- -D warnings` | exit 0, zero warnings |
-| cross-axis validation | `OMEGA_TILED_GEMM_BLOCK_M=50 cargo build -p omega --features std,cpu,metal,metal-tiled-gemm --lib` | exit 101, `tiled_gemm.block_m must be a multiple of 16; got 50` |
+| omega lib build | `cargo build -p proxima-omega --features std,cpu,metal --lib` | exit 0 |
+| omega lib build, `metal-tiled-gemm` | `cargo build -p proxima-omega --features std,cpu,metal,metal-tiled-gemm --lib` | exit 0 |
+| clippy, default | `cargo clippy -p proxima-omega --features std,cpu,metal --all-targets -- -D warnings` | exit 0, zero warnings |
+| clippy, `metal-tiled-gemm` | `cargo clippy -p proxima-omega --features std,cpu,metal,metal-tiled-gemm --all-targets -- -D warnings` | exit 0, zero warnings |
+| cross-axis validation | `OMEGA_TILED_GEMM_BLOCK_M=50 cargo build -p proxima-omega --features std,cpu,metal,metal-tiled-gemm --lib` | exit 101, `tiled_gemm.block_m must be a multiple of 16; got 50` |
 
 ### Notes — host loadout
 
@@ -10481,7 +10481,7 @@ Quieter session than ROW 107: 1-min load 2.29-4.25 across every timed rep
 Sibling agents were active elsewhere in the shared worktree
 (`proxima-listen/`, `proxima-http/`, `src/app.rs`, `proxima-model-interop/`,
 root `Cargo.toml` per this task's own brief) but this row touched only
-`omega/` and this file, and every gate command scoped to `-p omega`/
+`omega/` and this file, and every gate command scoped to `-p proxima-omega`/
 `-p proxima-tensor` never depended on those in-flight files.
 
 ### Cleanup
@@ -10494,14 +10494,14 @@ kept, citable record.
 
 ### Re-provable now
 
-- `cargo nextest run -p omega`
-- `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm`
-- `cargo build -p omega --features std,cpu,metal --lib`
-- `cargo build -p omega --features std,cpu,metal,metal-tiled-gemm --lib`
-- `cargo clippy -p omega --features std,cpu,metal --all-targets -- -D warnings`
-- `cargo clippy -p omega --features std,cpu,metal,metal-tiled-gemm --all-targets -- -D warnings`
+- `cargo nextest run -p proxima-omega`
+- `cargo nextest run -p proxima-omega --features std,cpu,metal,metal-tiled-gemm`
+- `cargo build -p proxima-omega --features std,cpu,metal --lib`
+- `cargo build -p proxima-omega --features std,cpu,metal,metal-tiled-gemm --lib`
+- `cargo clippy -p proxima-omega --features std,cpu,metal --all-targets -- -D warnings`
+- `cargo clippy -p proxima-omega --features std,cpu,metal,metal-tiled-gemm --all-targets -- -D warnings`
 - `cargo nextest run -p proxima-tensor --features std,instrument`
-- `OMEGA_TILED_GEMM_BLOCK_M=50 cargo build -p omega --features std,cpu,metal,metal-tiled-gemm --lib` (expect exit 101, the multiple-of-16 message)
+- `OMEGA_TILED_GEMM_BLOCK_M=50 cargo build -p proxima-omega --features std,cpu,metal,metal-tiled-gemm --lib` (expect exit 101, the multiple-of-16 message)
 - `PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24` against a `--release --features
   metal,instrument[,omega/metal-tiled-gemm]` build of
   `proxima-model-interop`'s `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`
@@ -10715,10 +10715,10 @@ named here as the open item, not silently closed.**
 
 | gate | command | result |
 |---|---|---|
-| omega tests, default | `cargo nextest run -p omega` | **76 passed**, 1 skipped |
-| omega tests, `metal-tiled-gemm` | `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm` | **80 passed**, 1 skipped |
+| omega tests, default | `cargo nextest run -p proxima-omega` | **76 passed**, 1 skipped |
+| omega tests, `metal-tiled-gemm` | `cargo nextest run -p proxima-omega --features std,cpu,metal,metal-tiled-gemm` | **80 passed**, 1 skipped |
 | proxima-tensor | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed**, 4 skipped |
-| omega lib build | `cargo build -p omega --features std,cpu,metal --lib` | exit 0 |
+| omega lib build | `cargo build -p proxima-omega --features std,cpu,metal --lib` | exit 0 |
 | clippy | `cargo clippy -p proxima-model-interop --features metal,instrument,metal-tiled-gemm --all-targets -- -D warnings` | exit 0, zero warnings |
 | generated text, decode control (3 runs) | `op_profile_run` line, `--ignored profiles_one_real_decode_step_by_per_op_gpu_time` | `"Here is a simple Python"`, byte-identical all 3 runs |
 | generated text, prefill row-blocked (3 runs) | `--ignored profiles_one_real_prefill_step_by_per_op_gpu_time` | `"Here"`, byte-identical all 3 runs, and identical to decode control's own first token |
@@ -10747,10 +10747,10 @@ tables are the kept, citable record.
 
 ### Re-provable now
 
-- `cargo nextest run -p omega`
-- `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm`
+- `cargo nextest run -p proxima-omega`
+- `cargo nextest run -p proxima-omega --features std,cpu,metal,metal-tiled-gemm`
 - `cargo nextest run -p proxima-tensor --features std,instrument`
-- `cargo build -p omega --features std,cpu,metal --lib`
+- `cargo build -p proxima-omega --features std,cpu,metal --lib`
 - `cargo clippy -p proxima-model-interop --features metal,instrument,metal-tiled-gemm --all-targets -- -D warnings`
 - `cargo test -p proxima-model-interop --features metal,instrument --lib -- --ignored profiles_one_real_decode_step_by_per_op_gpu_time --nocapture` (decode control, `step=3`, reproduces ROW 94's 1.0000x)
 - `cargo test -p proxima-model-interop --features metal,instrument --lib -- --ignored profiles_one_real_prefill_step_by_per_op_gpu_time --nocapture` (prefill, row-blocked, `step=0`)
@@ -11016,12 +11016,12 @@ own captures, unbroken by this row's change.
 
 | gate | command | result |
 |---|---|---|
-| omega tests, default | `cargo nextest run -p omega` | **76 passed**, 1 skipped |
-| omega tests, `metal-tiled-gemm` | `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm` | **80 passed**, 1 skipped |
+| omega tests, default | `cargo nextest run -p proxima-omega` | **76 passed**, 1 skipped |
+| omega tests, `metal-tiled-gemm` | `cargo nextest run -p proxima-omega --features std,cpu,metal,metal-tiled-gemm` | **80 passed**, 1 skipped |
 | proxima-tensor | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed**, 4 skipped |
-| omega lib build | `cargo build -p omega --features std,cpu,metal --lib` | exit 0 |
+| omega lib build | `cargo build -p proxima-omega --features std,cpu,metal --lib` | exit 0 |
 | clippy, `metal-tiled-gemm` | `cargo clippy -p proxima-model-interop --features metal,instrument,metal-tiled-gemm --all-targets -- -D warnings` | **BLOCKED — see below, not this row's defect** |
-| clippy, default | `cargo clippy -p omega --lib -- -D warnings` | **BLOCKED — same cause** |
+| clippy, default | `cargo clippy -p proxima-omega --lib -- -D warnings` | **BLOCKED — same cause** |
 
 **The clippy gate did not pass, and this is reported rather than hidden.**
 `cargo clippy ... -D warnings` fails with `error: could not compile
@@ -11052,11 +11052,11 @@ own tables are the kept, citable record.
 
 ### Re-provable now
 
-- `cargo nextest run -p omega`
-- `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm`
+- `cargo nextest run -p proxima-omega`
+- `cargo nextest run -p proxima-omega --features std,cpu,metal,metal-tiled-gemm`
 - `cargo nextest run -p proxima-tensor --features std,instrument`
-- `cargo build -p omega --features std,cpu,metal --lib`
-- `cargo test -p omega --features std,cpu,metal,metal-tiled-gemm --test metal_parity -- metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_tile_scale --nocapture` (parity, 3.318e-5)
+- `cargo build -p proxima-omega --features std,cpu,metal --lib`
+- `cargo test -p proxima-omega --features std,cpu,metal,metal-tiled-gemm --test metal_parity -- metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_tile_scale --nocapture` (parity, 3.318e-5)
 - `cargo test -p proxima-model-interop --features metal,instrument,metal-tiled-gemm --lib -- --ignored profiles_one_real_prefill_step_by_per_op_gpu_time --nocapture` (scaling curve, vary `PROXIMA_PROMPT`/`PROXIMA_MAX_TOKENS=1` for `new_count`)
 - `cargo test -p proxima-model-interop --features metal,metal-tiled-gemm --release --lib -- --exact --nocapture --ignored bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (production-shaped prefill/decode/generated-text, with `PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24`)
 - `cargo clippy -p proxima-gguf --all-targets -- -D warnings` (reproduces the pre-existing, out-of-scope block in isolation)
@@ -11299,32 +11299,32 @@ re-derived from a different row's number).
 
 ### Gates, actual numbers
 
-- `cargo nextest run -p omega` -> **76 passed**, 1 skipped
-- `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm` ->
+- `cargo nextest run -p proxima-omega` -> **76 passed**, 1 skipped
+- `cargo nextest run -p proxima-omega --features std,cpu,metal,metal-tiled-gemm` ->
   **82 passed** (80 baseline + this row's 2 new tests in
   `attn_multi_axis_tiled_gemm_parity.rs`), 1 skipped
 - `cargo nextest run -p proxima-tensor --features std,instrument` -> **365
   passed**, 4 skipped
-- `cargo build -p omega --features std,cpu,metal --lib` -> exit 0
+- `cargo build -p proxima-omega --features std,cpu,metal --lib` -> exit 0
 - `cargo clippy --workspace --all-targets -- -D warnings` -> **0 errors**
   (Task 1's own gate, re-confirmed after Task 2's diff)
-- `cargo clippy -p omega --all-targets --features
+- `cargo clippy -p proxima-omega --all-targets --features
   std,cpu,metal,metal-tiled-gemm -- -D warnings` -> 0 errors
-- `cargo clippy -p omega --all-targets --features
+- `cargo clippy -p proxima-omega --all-targets --features
   std,cpu,metal,instrument,metal-tiled-gemm -- -D warnings` -> 0 errors
 
 ### Re-provable now
 
-- `cargo nextest run -p omega`
-- `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm`
+- `cargo nextest run -p proxima-omega`
+- `cargo nextest run -p proxima-omega --features std,cpu,metal,metal-tiled-gemm`
 - `cargo nextest run -p proxima-tensor --features std,instrument`
-- `cargo build -p omega --features std,cpu,metal --lib`
+- `cargo build -p proxima-omega --features std,cpu,metal --lib`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo run -p omega --example attention_tiled_gemm_probe --features
+- `cargo run -p proxima-omega --example attention_tiled_gemm_probe --features
   std,cpu,metal,instrument,metal-tiled-gemm` (step 1's rejection table +
   step 2's post-fix table, symbols hardcoded to the decode shape in the
   example; edit the `symbols` binding to `[31, 0]` for the prefill shape)
-- `cargo test -p omega --test attn_multi_axis_tiled_gemm_parity --features
+- `cargo test -p proxima-omega --test attn_multi_axis_tiled_gemm_parity --features
   std,cpu,metal,metal-tiled-gemm -- --nocapture` (parity 5.48e-5 + the
   decode-shape codegen assertion)
 - `cargo test -p proxima-model-interop --features
@@ -11638,8 +11638,8 @@ the task brief, not made here.**
 
 ### Gates, actual numbers
 
-- `cargo nextest run -p omega` → **76 tests run: 76 passed, 1 skipped**
-- `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm` → **82 tests run: 82 passed, 1 skipped**
+- `cargo nextest run -p proxima-omega` → **76 tests run: 76 passed, 1 skipped**
+- `cargo nextest run -p proxima-omega --features std,cpu,metal,metal-tiled-gemm` → **82 tests run: 82 passed, 1 skipped**
 - `cargo nextest run -p proxima-tensor --features std,instrument` → **365 tests run: 365 passed, 4 skipped**
 - `cargo clippy --workspace --all-targets -- -D warnings` → **0 errors** (one unrelated future-incompat warning from `proc-macro-error2`, a transitive dep, not this row's code)
 
@@ -11867,7 +11867,7 @@ ROW 116's standing 1.445x decode gap on its own. Handed off, not built.
 - `cargo nextest run -p proxima-tensor --features std` → **361 tests run: 361 passed, 4 skipped**
 - `cargo nextest run -p proxima-tensor --features std,instrument` → **365 tests run: 365 passed, 4 skipped**
 - `cargo nextest run -p proxima-model-interop --features metal,instrument` → **24 tests run: 24 passed, 7 skipped**
-- `cargo nextest run -p omega` → **76 tests run: 76 passed, 1 skipped**
+- `cargo nextest run -p proxima-omega` → **76 tests run: 76 passed, 1 skipped**
 - `cargo clippy --workspace --all-targets -- -D warnings` → **0 errors** (same unrelated `proc-macro-error2` future-incompat warning ROW 116 also noted, not this row's code)
 - Generated text, all three `MAX_TOKENS=24` reps: `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```"`
 
@@ -12048,7 +12048,7 @@ Every bench arm asserts `max_abs_diff < 0.5` against ggml's own output on the SA
 | `cargo nextest run -p proxima-tensor --features std` | **361 passed, 4 skipped** |
 | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed, 4 skipped** |
 | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed, 7 skipped** |
-| `cargo nextest run -p omega` | **76 passed, 1 skipped** |
+| `cargo nextest run -p proxima-omega` | **76 passed, 1 skipped** |
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean, 0 errors |
 | `cargo clippy -p proxima-tensor --benches --features ggml-bench -- -D warnings` | clean, 0 errors (covers this row's own bench edit; `ggml-bench` is not a default feature so the workspace-wide gate above does not compile this file) |
 
@@ -12062,7 +12062,7 @@ None. The one on-disk change (bench row selector) is additive and default-preser
 cargo nextest run -p proxima-tensor --features std
 cargo nextest run -p proxima-tensor --features std,instrument
 cargo nextest run -p proxima-model-interop --features metal,instrument
-cargo nextest run -p omega
+cargo nextest run -p proxima-omega
 cargo clippy --workspace --all-targets -- -D warnings
 GGML_BUILD_DIR=<built ggml>/ggml cargo clippy -p proxima-tensor --benches --features ggml-bench -- -D warnings
 
@@ -12199,7 +12199,7 @@ This worktree's own branch (`feat/tensor-consolidated`) is shared with other con
 | `cargo nextest run -p proxima-tensor --features std` | **361 passed, 4 skipped** |
 | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed, 4 skipped** |
 | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed, 7 skipped** |
-| `cargo nextest run -p omega` | **76 passed, 1 skipped** |
+| `cargo nextest run -p proxima-omega` | **76 passed, 1 skipped** |
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean, 0 errors (same unrelated `proc-macro-error2` future-incompat notice prior rows also saw) |
 | `cargo clippy -p proxima-tensor --benches --features ggml-bench,q5k-int8-dot,q6k-int8-dot -- -D warnings` | clean, 0 errors (covers the three bench files, landed via `3a58a51`) |
 | Generated text, `MAX_TOKENS=24` | `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\`"` |
@@ -12210,7 +12210,7 @@ This worktree's own branch (`feat/tensor-consolidated`) is shared with other con
 cargo nextest run -p proxima-tensor --features std
 cargo nextest run -p proxima-tensor --features std,instrument
 cargo nextest run -p proxima-model-interop --features metal,instrument
-cargo nextest run -p omega
+cargo nextest run -p proxima-omega
 cargo clippy --workspace --all-targets -- -D warnings
 GGML_BUILD_DIR=<built ggml>/ggml cargo clippy -p proxima-tensor --benches \
   --features ggml-bench,q5k-int8-dot,q6k-int8-dot -- -D warnings
@@ -12347,13 +12347,13 @@ Also landed (mirroring the existing `q4k`/`q5k`/`q6k_unpack.rs` posture): `omega
 
 | gate | count | command |
 |---|---|---|
-| `cargo nextest run -p omega` | **83 passed** (was 77 pre-session: +2 `q8_0_at_float32/16` cases, -1 retired `metal_rejects_a_codec_with_no_unpack_kernel_and_names_it`, +1 `q8_0_real_checkpoint_parity`, +4 `q8_0_unpack.rs` = 77+2-1+1+4=83), 1 skipped (pre-existing `#[ignore]`, unrelated to this row) | `cargo nextest run -p omega` |
+| `cargo nextest run -p proxima-omega` | **83 passed** (was 77 pre-session: +2 `q8_0_at_float32/16` cases, -1 retired `metal_rejects_a_codec_with_no_unpack_kernel_and_names_it`, +1 `q8_0_real_checkpoint_parity`, +4 `q8_0_unpack.rs` = 77+2-1+1+4=83), 1 skipped (pre-existing `#[ignore]`, unrelated to this row) | `cargo nextest run -p proxima-omega` |
 | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed**, 4 skipped — UNCHANGED, this row touched no `proxima-tensor` source (CPU already executed `Q8_0`) | same |
 | `cargo nextest run -p proxima-gguf --features std` | **96 passed**, 3 skipped — UNCHANGED, this row touched no `proxima-gguf` source | same |
 | `cargo build --workspace --lib` | **BLOCKED** — `proxima-model-interop` fails to compile (`bind.rs:33`, unused imports `discover_experts`/`plan_stack`/`restack_into`); `git status` confirms `bind.rs`/`generate.rs`/`serving.rs` are uncommitted, dirty, and out of this row's file boundary (a concurrent sampling-implementation agent's WIP in this shared worktree). `cargo build --workspace --lib --exclude proxima-model-interop` -> **exit 0** | see log excerpt below |
 | `cargo clippy --workspace --all-targets -- -D warnings` | **BLOCKED** — same `proxima-model-interop` failure, plus `proxima-tokenizer/src/sample.rs` (2 clippy lint errors, also dirty/uncommitted, also another agent's concurrent WIP). `cargo clippy --workspace --all-targets --exclude proxima-model-interop --exclude proxima-tokenizer -- -D warnings` -> **exit 0** (one benign upstream `proc-macro-error2` future-incompat notice, unrelated) | same |
-| `cargo clippy -p omega -p proxima-gguf -p proxima-tensor --all-targets --all-features -- -D warnings` (this row's own files, narrow) | **exit 0** | |
-| `cargo clippy -p omega --all-targets --features metal,cpu,std,instrument,metal-tiled-gemm -- -D warnings` (tiled-GEMM feature combination) | **exit 0** | |
+| `cargo clippy -p proxima-omega -p proxima-gguf -p proxima-tensor --all-targets --all-features -- -D warnings` (this row's own files, narrow) | **exit 0** | |
+| `cargo clippy -p proxima-omega --all-targets --features metal,cpu,std,instrument,metal-tiled-gemm -- -D warnings` (tiled-GEMM feature combination) | **exit 0** | |
 
 **Uncovered, named rather than buried:**
 
@@ -12367,11 +12367,11 @@ Also landed (mirroring the existing `q4k`/`q5k`/`q6k_unpack.rs` posture): `omega
 
 ```sh
 cd <this worktree>
-cargo nextest run -p omega
+cargo nextest run -p proxima-omega
 cargo nextest run -p proxima-tensor --features std,instrument
 cargo nextest run -p proxima-gguf --features std
-cargo test -p omega --test q8_0_real_checkpoint_parity -- --nocapture   # relative= line
-cargo clippy -p omega -p proxima-gguf -p proxima-tensor --all-targets --all-features -- -D warnings
+cargo test -p proxima-omega --test q8_0_real_checkpoint_parity -- --nocapture   # relative= line
+cargo clippy -p proxima-omega -p proxima-gguf -p proxima-tensor --all-targets --all-features -- -D warnings
 ```
 
 ### Cleanup
@@ -12530,11 +12530,11 @@ library type (pipe question: nothing here is composed by a caller; it is a
 
 | gate | result |
 |---|---|
-| `cargo build --release --example membw_probe -p omega` | exit 0, clean, no warnings (`build1.log`) |
-| `cargo clippy --release --example membw_probe -p omega -- -D warnings` | exit 0, clean (`clippy1.log`) |
+| `cargo build --release --example membw_probe -p proxima-omega` | exit 0, clean, no warnings (`build1.log`) |
+| `cargo clippy --release --example membw_probe -p proxima-omega -- -D warnings` | exit 0, clean (`clippy1.log`) |
 | `cargo nextest run -p proxima-tensor --features std` | **361 passed** (8 slow), 4 skipped — unchanged from ROW122's own baseline; this row added no `proxima-tensor` source |
 | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed** (8 slow), 4 skipped — unchanged |
-| `cargo nextest run -p omega` (default features std,cpu,metal) | **83 passed**, 1 skipped — unchanged from ROW122's own tip |
+| `cargo nextest run -p proxima-omega` (default features std,cpu,metal) | **83 passed**, 1 skipped — unchanged from ROW122's own tip |
 | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0, 0 errors (one benign upstream `proc-macro-error2` future-incompat notice, unrelated, pre-existing) |
 
 **NOT executed for a timed number** — the Metal arm's correctness is
@@ -12549,7 +12549,7 @@ reportable measurement, not merely as an inconvenience.
 ### Explicitly deferred — named, not guessed at
 
 - **The MEASURED CPU and Metal bandwidth ceilings.** Re-prove command:
-  `cargo run --release --example membw_probe -p omega` on a host with two
+  `cargo run --release --example membw_probe -p proxima-omega` on a host with two
   consecutive `uptime` 1-minute readings at or below ~4, sixty seconds
   apart.
 - **The real fraction-of-ceiling per path** (packed Q4_K in-situ / Q5_K /
@@ -12581,14 +12581,14 @@ concurrently on this shared 10-core box for the duration of this row.
 
 ```sh
 cd <this worktree>
-cargo build --release --example membw_probe -p omega
-cargo clippy --release --example membw_probe -p omega -- -D warnings
+cargo build --release --example membw_probe -p proxima-omega
+cargo clippy --release --example membw_probe -p proxima-omega -- -D warnings
 cargo nextest run -p proxima-tensor --features std
 cargo nextest run -p proxima-tensor --features std,instrument
-cargo nextest run -p omega
+cargo nextest run -p proxima-omega
 cargo clippy --workspace --all-targets -- -D warnings
 # deferred, requires a quiet host (two consecutive `uptime` <= ~4, 60s apart):
-cargo run --release --example membw_probe -p omega
+cargo run --release --example membw_probe -p proxima-omega
 ```
 
 ### Cleanup
@@ -12621,14 +12621,14 @@ All four ROW 121 citations verified from source before any code changed (`cpu.rs
 
 **A real safetensors file, reachable and used:** `Qwen3-30B-A3B-MLX-4bit/model-00001-of-00004.safetensors`'s header (read directly via `dd`/byte-offset math, not assumed) reports **300 `BF16` tensors, 120 `U32`** (MLX's packed-4-bit format; the `bf16` tensors are the per-group `scales`/`biases` plus norm weights). New test `proxima-safetensors/tests/bf16_real_checkpoint_parity.rs` reads `model.layers.0.mlp.gate.biases` (real `[128,32]` bf16 bytes, byte offset computed from the REAL header) through `proxima_tensor::cpu::matmul_bf16_f32`, checked against an independent by-hand `half::bf16::from_le_bytes` decode — `max_diff=0` (bit-exact on this real 32-wide row). **A real defect caught and fixed while building this test:** the first version silently returned "file not found" even though the file exists, because `SafetensorsParser::finish()` validates that every declared tensor-data byte was COUNTED (not just the header) — the test hadn't fed the (5.3 GB) data section, so `finish()` correctly errored and the test's `?`-chained `.ok()?` turned that into a silent skip. This is the exact N==0 failure mode (a real-file test whose skip path fires unconditionally, reporting green for a test that never ran) — caught by demanding `--nocapture` output and reading the printed reason rather than trusting the PASS. Fixed by pushing zero-filled dummy chunks (content is never inspected, only counted, per this crate's own module doc) up to the declared total before calling `finish()`. Proven-can-fail the same way: perturbed the reference by `+999.0` — FAILED (`relative=0.9959962`) — reverted.
 
-**GGUF path unchanged:** `cargo nextest run -p omega` — **77 passed, 1 skipped**, same count as this row's own stated baseline; every `q4k`/`q5k`/`q6k_real_checkpoint_parity` and `metal_real_forward` test (the closest in-tree proxy for the openchat forward-pass byte-identity claim) passed unchanged. The literal CLI scenario producing the Fibonacci completion string was not reachable in this worktree within this session's budget — no example/bin driving it was found under `proxima-model-interop` or `tools/`; named here as the one unclosed verification, not silently dropped.
+**GGUF path unchanged:** `cargo nextest run -p proxima-omega` — **77 passed, 1 skipped**, same count as this row's own stated baseline; every `q4k`/`q5k`/`q6k_real_checkpoint_parity` and `metal_real_forward` test (the closest in-tree proxy for the openchat forward-pass byte-identity claim) passed unchanged. The literal CLI scenario producing the Fibonacci completion string was not reachable in this worktree within this session's budget — no example/bin driving it was found under `proxima-model-interop` or `tools/`; named here as the one unclosed verification, not silently dropped.
 
 **Gate counts, actual numbers:**
 - `cargo nextest run -p proxima-tensor --features std` -> **371 passed** (361 baseline + 10 new half-precision cases; 4 skipped, unchanged from baseline).
 - `cargo nextest run -p proxima-tensor --features std,instrument` -> **375 passed** (365 baseline + 10 new; 4 skipped).
 - `cargo nextest run -p proxima-safetensors` -> **69 passed** (68 pre-existing + 1 new real-file test), 0 skipped.
 - `cargo nextest run -p proxima-gguf` (this row's own new modules only) -> **12 passed** (`quant::f16`/`quant::bf16`).
-- `cargo nextest run -p omega` -> **77 passed, 1 skipped** (unchanged).
+- `cargo nextest run -p proxima-omega` -> **77 passed, 1 skipped** (unchanged).
 - `cargo build --workspace --lib` -> exit 0.
 - `cargo clippy --workspace --all-targets -- -D warnings` -> exit 0, 0 errors.
 
@@ -12662,16 +12662,16 @@ ROW 124 left Metal as a typed `unsupported_gpu_codec` on four exhaustive-match s
 
 **Why this matters beyond the codec:** Mixtral's 32 MoE router weights are F16. Before this the GPU path could not run that model at all — not slowly, not at reduced precision, not at all. This is the second of the two blockers ROW 124's MoE work named; the remaining one (packed-operand gather in the interpreter, since `run_reduce_quantized` never reads `Lookup`) is unchanged and still open.
 
-**Gate counts, task-reported:** `cargo nextest run -p omega` 90 -> **94 passed**, 1 skipped (+2 rejection cases, +2 real-checkpoint tests). `cargo test -p omega --doc` **1 passed** — a pre-existing doctest drift was found and fixed while gating (`emit()`'s doctest passed one argument; the signature has taken `&PackedOperands` since that type landed). `proxima-tensor --features std,instrument` 379 and `proxima-model-interop --features metal,instrument` 61, both unchanged. `cargo build --workspace --lib` exit 0. `cargo clippy --workspace --all-targets -- -D warnings` exit 0.
+**Gate counts, task-reported:** `cargo nextest run -p proxima-omega` 90 -> **94 passed**, 1 skipped (+2 rejection cases, +2 real-checkpoint tests). `cargo test -p proxima-omega --doc` **1 passed** — a pre-existing doctest drift was found and fixed while gating (`emit()`'s doctest passed one argument; the signature has taken `&PackedOperands` since that type landed). `proxima-tensor --features std,instrument` 379 and `proxima-model-interop --features metal,instrument` 61, both unchanged. `cargo build --workspace --lib` exit 0. `cargo clippy --workspace --all-targets -- -D warnings` exit 0.
 
 **Unmeasured and named, not hidden:** no benchmark was run for either codec. There is no throughput number, no comparison against narrowing to f32 up front, and no allocation count. ROW 124's identical gap (gate points 5/6/13) therefore remains open for half precision on BOTH backends. Correctness is the only claim this row supports.
 
 **Still not reachable:** the literal byte-identical Fibonacci-completion CLI scenario. No example or bin drives GGUF-load -> forward -> tokenizer-decode end to end. ROW 124 named this; it is unclosed, and this is now the third row to name it.
 
 **Re-prove commands:**
-- `cargo nextest run -p omega f16_real_checkpoint_parity bf16_real_checkpoint_parity -- --nocapture`
-- `cargo nextest run -p omega never_takes_the_row_blocked_path`
-- `cargo test -p omega --doc`
+- `cargo nextest run -p proxima-omega f16_real_checkpoint_parity bf16_real_checkpoint_parity -- --nocapture`
+- `cargo nextest run -p proxima-omega never_takes_the_row_blocked_path`
+- `cargo test -p proxima-omega --doc`
 
 ## ROW 126 — write placement is NOT missing; scatter is a v1 gate whose stated reason may be narrower than the condition it enforces, and it blocks three separate demands at once — **HEADLINE REFUTED, see ROW 127**
 
@@ -13222,7 +13222,7 @@ peak RSS = 4.80 GB          (previously ~180 GiB dequantised; kernel SIGKILL at 
 
 **Re-prove commands:**
 - `cargo check --workspace --lib --target x86_64-unknown-linux-gnu`
-- `cargo check -p proxima-tensor -p omega -p prime -p proxima-primitives --lib --target aarch64-unknown-linux-gnu`
+- `cargo check -p proxima-tensor -p proxima-omega -p prime -p proxima-primitives --lib --target aarch64-unknown-linux-gnu`
 - `cargo nextest run -p proxima-model-interop --features std attempts_a_real_mixtral --run-ignored all -- --nocapture`
 - `cargo clippy -p proxima-model-interop --all-targets --features std,instrument -- -D warnings` (the features matter; without them it skips the examples entirely)
 
@@ -13283,7 +13283,7 @@ Commits `a1ef0dd` (`prime`: leader kernel/setup/spin nanosecond counters), `97b2
 - `cargo nextest run -p prime --features runtime-prime-cohort,cohort-instrument os::cohort::tests::leader_kernel_ticks_are_a_bounded_subset_of_leader_compute_ticks -- --nocapture` (the new sanity-gate test: kernel <= compute, reset zeroes both)
 - `PROXIMA_MAX_TOKENS=8 cargo test -p proxima-model-interop --features std,instrument --release --lib -- --ignored --nocapture runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock` (prints one `token_attribution` line per decode step; `step=4` is this row's representative)
 - `sed -n '150,205p' proxima-tensor/proxima-tensor-runtime.toml` (confirms `min_macs_per_chunk = 500000`, the rolled-back state)
-- `cargo nextest run -p proxima-tensor --features std,instrument` (413), `cargo nextest run -p proxima-model-interop --features std` (73), `cargo nextest run -p omega` (94), `cargo nextest run --workspace --no-fail-fast` (5747)
+- `cargo nextest run -p proxima-tensor --features std,instrument` (413), `cargo nextest run -p proxima-model-interop --features std` (73), `cargo nextest run -p proxima-omega` (94), `cargo nextest run --workspace --no-fail-fast` (5747)
 
 ## ROW 140 — redundant Q8_K activation quantization CONFIRMED (225 calls / 129 distinct nodes, 96 redundant = 42.7%), cached in the staged-batch path with an `Arc<[u8]>`, cache-hit count and generated-text bit-exactness both re-provable; `residual_ms` moved -0.9 to -1.1 ms (clears both sides' CoV bands) but `evaluate_ms`/`kernel_ms` could NOT be cleanly read this session — the host hit load average 42-59 mid-measurement
 
@@ -13317,7 +13317,7 @@ Commits: instrumentation (`proxima-tensor/src/instrument.rs`, `proxima-tensor/sr
 
 **Allocation budget, as stated and as measured.** Stated (before implementation): a cache hit should be allocation-**reducing** relative to today's unconditional-fresh-`Vec` baseline (which already allocates once per call regardless, 225 allocations/step) — replacing up to 96 of those 225 allocations with an `Arc` clone (an atomic increment, no allocation) rather than a fresh heap buffer. Not separately re-measured via a tracking allocator this row (the existing `instrument` feature has no allocation-counting facility for this path); the claim rests on the mechanism (`Arc::clone` is documented, standard-library behavior, not a fresh allocation) rather than a counted number, and is flagged as such rather than asserted as measured.
 
-**Gate re-verification after landing (fix live, A/B toggle fully reverted — confirmed via `grep -n "TEMP A/B" proxima-tensor/src/cpu.rs` returning no match and `git diff --stat -- proxima-tensor/src/cpu.rs` showing only the intended field/signature changes):** `cargo build --workspace --lib` exit 0. `cargo nextest run -p proxima-tensor --features std,instrument` **413**. `cargo nextest run -p proxima-model-interop --features std` **73**. `cargo nextest run -p omega` **94**. `cargo clippy --workspace --all-targets -- -D warnings` exit 0 (one unrelated pre-existing `proc-macro-error2` future-incompatibility warning, not from this row's diff). `cargo nextest run --workspace` (no filter, no `--no-fail-fast` needed this run): **5747 tests run: 5747 passed (2 slow), 10 skipped** — exact match to the stated gate, on the same heavily-loaded host (load 55-59 at launch), completed in 110.43s.
+**Gate re-verification after landing (fix live, A/B toggle fully reverted — confirmed via `grep -n "TEMP A/B" proxima-tensor/src/cpu.rs` returning no match and `git diff --stat -- proxima-tensor/src/cpu.rs` showing only the intended field/signature changes):** `cargo build --workspace --lib` exit 0. `cargo nextest run -p proxima-tensor --features std,instrument` **413**. `cargo nextest run -p proxima-model-interop --features std` **73**. `cargo nextest run -p proxima-omega` **94**. `cargo clippy --workspace --all-targets -- -D warnings` exit 0 (one unrelated pre-existing `proc-macro-error2` future-incompatibility warning, not from this row's diff). `cargo nextest run --workspace` (no filter, no `--no-fail-fast` needed this run): **5747 tests run: 5747 passed (2 slow), 10 skipped** — exact match to the stated gate, on the same heavily-loaded host (load 55-59 at launch), completed in 110.43s.
 
 **Re-prove commands:**
 - `cargo nextest run -p prime --features runtime-prime-cohort,cohort-instrument` and `cargo nextest run -p proxima-tensor --features std,instrument` (413) — confirms the fix compiles and passes under the exact gate features
@@ -13333,7 +13333,7 @@ Flagged mid-task by the coordinating agent reading ROW 140's own diff: `MatmulSt
 
 **Fix 2 (the instrument-only diagnostic counter, `QUANTIZE_ACTIVATION_CALLS_BY_NODE`, `instrument.rs`).** Confirmed live in the exact measured configuration before touching it: every measurement this row and ROW 139/140 report runs `--features std,instrument`, and `record_quantize_activation_call` (the `Mutex<BTreeMap>` writer) sits *inside* `STAGED_MATMUL_QUANTIZE_TICKS`'s own timed span (`cpu.rs:3233` reads ticks before the call at `3239`, `3242-3245` reads elapsed after `quantize_row_q8k_dispatch` returns) — so its own cost (mutex lock + BTreeMap insert) was folded into `residual_ms` on every one of ROW 140's 129 post-fix miss calls/step, not free background bookkeeping. `Mutex<BTreeMap<NodeId, u64>>` → `Mutex<Vec<u64>>`, grown once (`resize(index + 1, 0)`) to cover the largest node id seen, zeroed (not reallocated) on `reset_step`. The `Mutex` itself stays — both call sites (`build_matmul_stage_plan`, `run_reduce_quantized`) run on the leader thread only, serially, strictly before any cohort round opens, so there is never real contention to eliminate, only the O(log n) traversal — replacing it with an `UnsafeCell` single-writer invariant would trade a proven-uncontended lock for an unsafe invariant this diagnostic has no reason to take on.
 
-**Build/lint/test gates, same features as every prior row in this series.** `cargo check -p proxima-tensor --features std,instrument,cohort-staged-graph` exit 0. `cargo nextest run -p proxima-tensor --features std,instrument` **413** (unchanged). `cargo nextest run -p proxima-model-interop --features std` **73** (unchanged). `cargo nextest run -p omega` **94** (unchanged). `cargo build --workspace --lib` exit 0. `cargo clippy --workspace --all-targets -- -D warnings` exit 0 (same pre-existing `proc-macro-error2` future-incompat warning as every prior row, not from this diff). `cargo nextest run --workspace --no-fail-fast`: first pass **5745 passed, 2 failed** (`proxima-autograd::language_model adam_training_overfits_the_real_corpus_toward_near_zero_loss`, `proxima-autograd::sparse_ffn_pruning pruned_ffn_bands_degrade_loss_then_recover_with_fine_tuning`, both hit their own internal 60s timeout under `uptime` load 41-56 — this repo's own shared box had a SECOND agent's concurrent workload on it this session, process-table-confirmed via `ps aux` showing a sibling `wakatime-cli --entity gpu-token-rate-measurement` and three other live `claude` processes); rerun of just those two tests alone (`-E 'test(adam_training...) or test(pruned_ffn...)'`) at load 38.69 → **2 passed**, zero diff from this row, same shape as ROW 139's own documented `proxima-autograd` timeout flake. Workspace gate: **5747** (5745 + the 2 confirmed-flaky reruns), matching the stated target.
+**Build/lint/test gates, same features as every prior row in this series.** `cargo check -p proxima-tensor --features std,instrument,cohort-staged-graph` exit 0. `cargo nextest run -p proxima-tensor --features std,instrument` **413** (unchanged). `cargo nextest run -p proxima-model-interop --features std` **73** (unchanged). `cargo nextest run -p proxima-omega` **94** (unchanged). `cargo build --workspace --lib` exit 0. `cargo clippy --workspace --all-targets -- -D warnings` exit 0 (same pre-existing `proc-macro-error2` future-incompat warning as every prior row, not from this diff). `cargo nextest run --workspace --no-fail-fast`: first pass **5745 passed, 2 failed** (`proxima-autograd::language_model adam_training_overfits_the_real_corpus_toward_near_zero_loss`, `proxima-autograd::sparse_ffn_pruning pruned_ffn_bands_degrade_loss_then_recover_with_fine_tuning`, both hit their own internal 60s timeout under `uptime` load 41-56 — this repo's own shared box had a SECOND agent's concurrent workload on it this session, process-table-confirmed via `ps aux` showing a sibling `wakatime-cli --entity gpu-token-rate-measurement` and three other live `claude` processes); rerun of just those two tests alone (`-E 'test(adam_training...) or test(pruned_ffn...)'`) at load 38.69 → **2 passed**, zero diff from this row, same shape as ROW 139's own documented `proxima-autograd` timeout flake. Workspace gate: **5747** (5745 + the 2 confirmed-flaky reruns), matching the stated target.
 
 **Measured — min-of-7, release profile, same harness/protocol as ROW 139/140 (`runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock`, `PROXIMA_MAX_TOKENS=8`, representative `step=4`).** First attempt (7 runs) landed while a second agent's workspace-wide nextest run was still building/executing concurrently on this box (`uptime` 45-97 during capture) — `evaluate_ms` read 300-1560 ms, 6-25x ROW 139's own baseline, unusable and NOT used for any delta claim, discarded rather than cherry-picked. Second attempt, after that concurrent job finished (`uptime` settled to 29-31):
 
@@ -13351,7 +13351,7 @@ Flagged mid-task by the coordinating agent reading ROW 140's own diff: `MatmulSt
 
 **Re-prove commands:**
 - `grep -n "struct NodeId" -A3 proxima-tensor/src/op.rs` (confirms `NodeId(pub u32)` is a plain positional index, the fact this row's fix rests on)
-- `cargo nextest run -p proxima-tensor --features std,instrument` (413), `cargo nextest run -p proxima-model-interop --features std` (73), `cargo nextest run -p omega` (94)
+- `cargo nextest run -p proxima-tensor --features std,instrument` (413), `cargo nextest run -p proxima-model-interop --features std` (73), `cargo nextest run -p proxima-omega` (94)
 - `cargo clippy --workspace --all-targets -- -D warnings` (exit 0)
 - `PROXIMA_MAX_TOKENS=8 cargo test -p proxima-model-interop --features std,instrument --release --lib -- --ignored --nocapture runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock` (prints `token_attribution`/`token_quantize_calls` per step; `step=4`'s `residual_ms` and `cache_hits=96`/`total_calls=129` are this row's own re-proof)
 
@@ -13405,7 +13405,7 @@ Flagged mid-task by the coordinating agent reading ROW 140's own diff: `MatmulSt
 
 **Correctness.** `generated_text="Here is a simple Python function that returns"` identical across all 36 runs (9 x 4 values), no arm deviated.
 
-**Gates, unchanged (no source diff this row):** `cargo nextest run -p proxima-tensor --features std,instrument` 413, `cargo nextest run -p proxima-model-interop --features std` 73, `cargo nextest run -p omega` 94, `cargo build --workspace --lib` exit 0, `cargo clippy --workspace --all-targets -- -D warnings` exit 0 — all re-confirmed after rebuilding back to the default (unset override) configuration.
+**Gates, unchanged (no source diff this row):** `cargo nextest run -p proxima-tensor --features std,instrument` 413, `cargo nextest run -p proxima-model-interop --features std` 73, `cargo nextest run -p proxima-omega` 94, `cargo build --workspace --lib` exit 0, `cargo clippy --workspace --all-targets -- -D warnings` exit 0 — all re-confirmed after rebuilding back to the default (unset override) configuration.
 
 **Re-prove commands:**
 - `PROXIMA_TENSOR_PARALLEL_ROW_OVERSUBSCRIBE=<1|2|4|8> PROXIMA_MAX_TOKENS=8 cargo test -p proxima-model-interop --features std,instrument --release --lib --no-run` then run the produced binary `--ignored --nocapture runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock`, grep `token_attribution step=4`
@@ -13439,7 +13439,7 @@ Flagged mid-task by the coordinating agent reading ROW 140's own diff: `MatmulSt
 
 **Is the mutex/Parker-Unparker removal worth landing on its own merits? Reasoned, not measured — named as such, not overstated.** The BEFORE per-slot data itself shows the same monotonic first-claim skew by slot ROW 143 already documented (`first_claim_ms` 0.0111 → 0.0248 across slots 0→7 in the representative pair above), consistent with the sequential `for unparker in &control.unparkers { .. }` wake-order effect a broadcast `wake_all` would plausibly remove. A "futex-wake-only" variant — broadcast wake, but keeping the OLD shared-cursor claim, no `WorkAssignment`/`BoundedQueue` — was never built or measured this session (building it is itself the forbidden redesign-adjacent work the task scoped out, since untangling the bundle requires touching the same file's claim mechanism to hold it constant). **This is named as a plausible, unmeasured next step, not claimed as a win**: principle 18 forbids stating it as fact without a bench number, and none exists.
 
-**Bar / gates, HEAD unchanged, all re-confirmed after the revert (not assumed from ROW 143):** `cargo nextest run -p prime --features runtime-prime-cohort,cohort-instrument` **157 passed** (prime's own baseline, stated before and unchanged after, since no prime source diff landed). `cargo nextest run -p proxima-tensor --features std,instrument` **413**. `cargo nextest run -p proxima-model-interop --features std` **73**. `cargo nextest run -p omega` **94**. `cargo build --workspace --lib` exit 0. `cargo clippy --workspace --all-targets -- -D warnings` exit 0 (same pre-existing `proc-macro-error2` future-incompat notice as every prior row, not from this session). `cargo nextest run --workspace --no-fail-fast`: **5747 passed, 0 failed, 10 skipped**, clean on the first pass (no flaky reruns needed this session).
+**Bar / gates, HEAD unchanged, all re-confirmed after the revert (not assumed from ROW 143):** `cargo nextest run -p prime --features runtime-prime-cohort,cohort-instrument` **157 passed** (prime's own baseline, stated before and unchanged after, since no prime source diff landed). `cargo nextest run -p proxima-tensor --features std,instrument` **413**. `cargo nextest run -p proxima-model-interop --features std` **73**. `cargo nextest run -p proxima-omega` **94**. `cargo build --workspace --lib` exit 0. `cargo clippy --workspace --all-targets -- -D warnings` exit 0 (same pre-existing `proc-macro-error2` future-incompat notice as every prior row, not from this session). `cargo nextest run --workspace --no-fail-fast`: **5747 passed, 0 failed, 10 skipped**, clean on the first pass (no flaky reruns needed this session).
 
 **Correctness.** `generated_text` prefix `"Here is a simple Python function that returns"` byte-identical across all 28 runs this row (7 before-sequential, 7 after-sequential-contaminated-and-discarded, 7 before-interleaved, 7 after-interleaved) — no arm deviated.
 
@@ -13447,7 +13447,7 @@ Flagged mid-task by the coordinating agent reading ROW 140's own diff: `MatmulSt
 - `git diff prime/src/os/cohort.rs prime/Cargo.toml Cargo.lock` — must return nothing at HEAD (this row's revert is the current state)
 - `grep -n "RawFutexMutex\|fn wait\b" proxima-primitives/src/sync/blocking/futex.rs` and `grep -n "Ordering::" proxima-core/src/park.rs` — re-derive the ordering mismatch this row's dependency-reuse argument rests on
 - `PROXIMA_MAX_TOKENS=8 cargo test -p proxima-model-interop --features std,instrument --release --lib --no-run`, run the produced binary `--ignored --nocapture runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock` at HEAD, `grep 'token_attribution step=4\|^cohort_slot'` — reproduces the BEFORE column and the per-slot skew this row cites
-- `cargo nextest run -p prime --features runtime-prime-cohort,cohort-instrument` (157), `-p proxima-tensor --features std,instrument` (413), `-p proxima-model-interop --features std` (73), `-p omega` (94), `cargo nextest run --workspace --no-fail-fast` (5747)
+- `cargo nextest run -p prime --features runtime-prime-cohort,cohort-instrument` (157), `-p proxima-tensor --features std,instrument` (413), `-p proxima-model-interop --features std` (73), `-p proxima-omega` (94), `cargo nextest run --workspace --no-fail-fast` (5747)
 
 ## ROW 145 — rung 0 sealed: the mnist f32 inference-lane bench lands, and the roofline denominator is 322x, not 13x
 
@@ -13565,7 +13565,7 @@ Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-perf`, branch `perf/conv-st
 3. **The iteration space cannot be affected.** `build_reduce_op`/`build_elementwise_op` compute `extents = shapes.of(node).to_vec()` from the NODE's own already-resolved shape (from `shape::infer`, which runs strictly before `bind::bind`) — independent of what `compose`/`compose_operand` do to the body. Confirmed by reading both call sites: `extents` is computed BEFORE `compose(...)`/`compose_fused_operands(...)` ever runs, from a wholly separate data source. Eliminating a body operand cannot change a node's output shape.
 4. **Numerical exactness.** `x * 1.0 == x` bit-for-bit for every finite, `+-inf` (the `ReduceInit::NegativeInfinity` `MaxPool` padding case specifically named in `lower.rs`'s own doc as relying on this), and quiet-NaN `f32` value under IEEE 754 — the one stated caveat is signaling-NaN quieting on multiply, irrelevant to any real image/weight/activation this crate ever binds (MEASURED as a non-issue: no test corpus or the sealed bench's real MNIST bytes carry an sNaN).
 5. **A real bug the audit caught before landing, not after:** the first implementation (elimination only in `compose_operand`) fully eliminates `MaxPool`/`AveragePool`'s `windowed` node when it is `reduce.operand` DIRECTLY (no further `Multiply` wraps it, unlike `Conv`'s `product`), leaving `ComposedBody.steps` EMPTY. `apply_body`'s `step_values[body.steps.len() - 1]` (`cpu.rs:10367`) then underflows in a debug build ("attempt to subtract with overflow"), caught immediately by `proxima-onnx`'s own `lower::tests::averagepool_padded_count_include_pad_zero_excludes_padding_from_the_divisor` (and 4 sibling AveragePool/MaxPool tests) going red on the first `cargo nextest run -p proxima-onnx --all-features` after the change — not discovered later, not shipped and rolled back. Fixed by having `compose_fused_operands` (and, after the second fix below, `compose`) guarantee at least one step, matching the existing `ComposedBody::leaf(ScalarOp::Identity)` convention the no-fusion branch already uses.
-6. **omega's parity suite is part of the oracle set** (per task) since omega executes the same `BoundOp`s: `cargo nextest run -p omega --all-features --no-fail-fast` — 138 run, 135 passed, 3 failed. **All 3 failures reproduced BIT-IDENTICAL on the unmodified baseline** via `git stash`/`git stash pop` A-B (same `max_relative_diff=0.07260467` for the wgpu f16 test, same `cpu=0.16142446` vs `reference=0.1850988` for the Metal tiled-gemm test) — pre-existing Metal/wgpu f16-precision parity gaps, unrelated to this bind-time change, not newly introduced. Reported, not buried.
+6. **omega's parity suite is part of the oracle set** (per task) since omega executes the same `BoundOp`s: `cargo nextest run -p proxima-omega --all-features --no-fail-fast` — 138 run, 135 passed, 3 failed. **All 3 failures reproduced BIT-IDENTICAL on the unmodified baseline** via `git stash`/`git stash pop` A-B (same `max_relative_diff=0.07260467` for the wgpu f16 test, same `cpu=0.16142446` vs `reference=0.1850988` for the Metal tiled-gemm test) — pre-existing Metal/wgpu f16-precision parity gaps, unrelated to this bind-time change, not newly introduced. Reported, not buried.
 
 **Mechanism finding (the negative/mixed result — the number did NOT move commensurately, profiled per the task's own instruction, not hand-waved).** A temporary, since-removed `eprintln!` instrument (verified removed via `git diff` before commit) traced the actual composed body for mnist's 4 conv/pool-shaped reduce folds (`node_kind=reduce_f32_dense`, 3-dim reduction over `ci×kh×kw`):
 
@@ -13599,17 +13599,17 @@ Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-perf`, branch `perf/conv-st
 
 **Allocation budget.** Bind-time only (once per program compile, not per inference call) — zero additional hot-path (per-inference) allocations. `ones: RefCell<Vec<bool>>` grows by one `bool` per node during `bind::bind`'s single pass (O(program length), a setup-path cost, not measured separately this row since it is several orders of magnitude below the per-image inference cost this row's bench already brackets).
 
-**Bar / gates.** `cargo build -p proxima-tensor --lib` exit 0. `cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings` exit 0 (clean, no new `#[allow]`). `cargo nextest run -p proxima-tensor --features std,instrument`: **446 passed, 0 failed, 4 skipped**. `cargo nextest run -p proxima-onnx --all-features`: **82 passed, 0 failed, 3 skipped**. `cargo nextest run -p omega --all-features --no-fail-fast`: **135 passed, 3 failed (pre-existing, reproduced identically on baseline via git-stash A/B), 1 skipped**. `bash scripts/proxima-tensor-gate.sh`: **completed this session — 21 cells, 21 passed, 0 failed, "proxima-tensor-gate: all green."**
+**Bar / gates.** `cargo build -p proxima-tensor --lib` exit 0. `cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings` exit 0 (clean, no new `#[allow]`). `cargo nextest run -p proxima-tensor --features std,instrument`: **446 passed, 0 failed, 4 skipped**. `cargo nextest run -p proxima-onnx --all-features`: **82 passed, 0 failed, 3 skipped**. `cargo nextest run -p proxima-omega --all-features --no-fail-fast`: **135 passed, 3 failed (pre-existing, reproduced identically on baseline via git-stash A/B), 1 skipped**. `bash scripts/proxima-tensor-gate.sh`: **completed this session — 21 cells, 21 passed, 0 failed, "proxima-tensor-gate: all green."**
 
 **Not rolled back — landed.** Net effect: strictly non-negative (never worse than baseline on any measured axis; the `windowed` materialization is cheaper and nothing regressed), but smaller than the initiative's real target, with the actual remaining blocker now named and precise instead of the ROW 146 hypothesis it supersedes.
 
 **Re-prove commands:**
 - `git diff 6e273771806451a6ecde4c1288012ad21799c6d7 -- proxima-tensor/src/bind.rs` — the entire fix (no other file changed)
-- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` (446), `-p proxima-onnx --all-features` (82), `-p omega --all-features --no-fail-fast` (135/3-pre-existing-failed/1-skipped)
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` (446), `-p proxima-onnx --all-features` (82), `-p proxima-omega --all-features --no-fail-fast` (135/3-pre-existing-failed/1-skipped)
 - `CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings`
 - `CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-onnx --bench mnist_f32_lane --features mnist-f32-bench -- --save-baseline stamp-fix` — reproduces accuracy=0.9900, roofline, manual sweep, criterion numbers (host loadout will differ; re-check `uptime`/`pgrep` and mark accordingly); this row's own two baselines are saved under `stamp-fix` and `stamp-fix-run2`
 - `CARGO_TARGET_DIR=<scratch> cargo run --release -p proxima-onnx --example mnist_diag --features mnist-diag`, grep `"path kinds"` / `"DIAG nsper reduce_f32_dense"` / `"DIAG nsper elementwise_monomorphic"` — reproduces the unchanged `reduce_f32_dense` cost and the cheaper `elementwise_monomorphic` cost
-- `git stash && cargo nextest run -p omega --all-features --no-fail-fast -E 'test(matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle) or test(metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two_axis_feature_group) or test(f16_matmul_runs_on_wgpu_within_the_metal_parity_f16_epsilon_or_names_its_rejection)' && git stash pop` — reproduces the 3 pre-existing omega failures on baseline, proving this row did not introduce them
+- `git stash && cargo nextest run -p proxima-omega --all-features --no-fail-fast -E 'test(matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle) or test(metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two_axis_feature_group) or test(f16_matmul_runs_on_wgpu_within_the_metal_parity_f16_epsilon_or_names_its_rejection)' && git stash pop` — reproduces the 3 pre-existing omega failures on baseline, proving this row did not introduce them
 
 ## ROW 148 — a genuinely NEW, deeper blocker found for `Conv` (the tile's own single-shared-leading-axis assumption, not just the stride gate ROW 147 named); the narrower, provably-safe multi-dim-reduction case that DOES qualify lands and moves `reduce_f32_dense` measurably, but total ms/image barely moves because `Conv` — 3 of the 4 still-`Generic` folds — stays out of scope for BOTH existing NEON tiles regardless of the reduction-stride fix
 
@@ -13639,7 +13639,7 @@ Axis order for the 3 `Conv` rows is `(n,co,oy,ox,ci,ky,kx)`; for the FC row, `(n
 
 **Correctness reasoning.** `reduction_is_fully_flat` is a pure stride-pattern predicate over already-resolved `View`/`extents` data — it cannot itself produce a wrong VALUE, only a wrong ELIGIBILITY decision, and a false-positive there would only be caught by a genuinely different physical layout satisfying the row-major chain by coincidence while not actually being one contiguous span, which is impossible by construction (the chain check IS the definition of row-major contiguity — `expected` is recomputed from the SAME `resolved.extents` the `View`'s own strides were built against, not a separate source that could drift). Every downstream consumer (`neon_tile_plan`'s own `reduction_strides[index] != 1` check, `reduce_dot_fast`'s `OperandSpan{stride: reduction_strides[index] as usize}`) already existed and is unmodified; they were built for a `stride == 1` flat span, and `reduction_is_fully_flat`'s only job is to correctly widen WHICH shapes get to claim `1`. No change to `Op`/`ScalarOp`/`IndexMap`, no change to `bind.rs`/`lower.rs` — the fix is confined to `run_reduce`'s own local gate.
 
-**Full oracle set, all re-run this row, not cited from ROW 147.** `cargo build -p proxima-tensor --lib` exit 0. `cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings` exit 0 (clean, no new `#[allow]`). `cargo nextest run -p proxima-tensor --features std,instrument`: **446 passed, 0 failed, 4 skipped**. `cargo nextest run -p proxima-onnx --all-features`: **82 passed, 0 failed, 3 skipped**. `cargo nextest run -p omega --all-features --no-fail-fast`: **135 passed, 3 failed, 1 skipped** — the same 3 named in ROW 147 (`matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle`, `metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two_axis_feature_group`, `f16_matmul_runs_on_wgpu_within_the_metal_parity_f16_epsilon_or_names_its_rejection`), independently reproduced BIT-IDENTICAL on unmodified HEAD this session (`max_relative_diff=0.07260467` for the wgpu f16 test, same as ROW 147's own citation) via `git stash`/`git stash pop` A-B, confirming pre-existing and not newly introduced. `cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture`: **0.9900 (990/1000)**, bit-identical to ROW 145/147. `bash scripts/proxima-tensor-gate.sh`: **completed this session — 21 cells, 21 passed, 0 failed** (feature-matrix + `x86_64-unknown-linux-gnu` cross-compile clippy + doctest-count + example-runs), sealed alongside the 4 named oracle gates.
+**Full oracle set, all re-run this row, not cited from ROW 147.** `cargo build -p proxima-tensor --lib` exit 0. `cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings` exit 0 (clean, no new `#[allow]`). `cargo nextest run -p proxima-tensor --features std,instrument`: **446 passed, 0 failed, 4 skipped**. `cargo nextest run -p proxima-onnx --all-features`: **82 passed, 0 failed, 3 skipped**. `cargo nextest run -p proxima-omega --all-features --no-fail-fast`: **135 passed, 3 failed, 1 skipped** — the same 3 named in ROW 147 (`matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle`, `metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two_axis_feature_group`, `f16_matmul_runs_on_wgpu_within_the_metal_parity_f16_epsilon_or_names_its_rejection`), independently reproduced BIT-IDENTICAL on unmodified HEAD this session (`max_relative_diff=0.07260467` for the wgpu f16 test, same as ROW 147's own citation) via `git stash`/`git stash pop` A-B, confirming pre-existing and not newly introduced. `cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture`: **0.9900 (990/1000)**, bit-identical to ROW 145/147. `bash scripts/proxima-tensor-gate.sh`: **completed this session — 21 cells, 21 passed, 0 failed** (feature-matrix + `x86_64-unknown-linux-gnu` cross-compile clippy + doctest-count + example-runs), sealed alongside the 4 named oracle gates.
 
 **NEON tile invocation counts (`mnist_diag`, `path kinds` line, aggregated over 20 real MNIST images — MEASURED, not derived).**
 
@@ -13685,7 +13685,7 @@ Delta: **-1.321 ms, -7.4%** on the criterion cross-run mean. This session's own 
 
 **Re-prove commands:**
 - `git show 6be2cbb343739fd923f4848a5d16d8927753f3e7 -- proxima-tensor/src/cpu.rs` — the entire fix (one file, `reduction_is_fully_flat` + the two `reduction_strides`/`reduction_fast_path` lines it feeds)
-- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` (446), `-p proxima-onnx --all-features` (82), `-p omega --all-features --no-fail-fast` (135/3-pre-existing-failed/1-skipped)
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` (446), `-p proxima-onnx --all-features` (82), `-p proxima-omega --all-features --no-fail-fast` (135/3-pre-existing-failed/1-skipped)
 - `CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings`
 - `CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture` — reproduces 0.9900
 - `CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-onnx --bench mnist_f32_lane --features mnist-f32-bench -- --save-baseline <name>` — reproduces accuracy, roofline, manual sweep, criterion numbers (host loadout will differ; re-check `uptime`/`pgrep` and mark accordingly); this row's own two runs are saved under `row148-after` and `row148-after-run2`
@@ -13719,7 +13719,7 @@ Every field matches ROW 148's own raw `operand_strides` dump bit-for-bit once tr
 
 **Correctness reasoning.** `axes_flat_chain` is a pure stride-pattern predicate over already-resolved `View`/`extents` data (same category as ROW 148's own `reduction_is_fully_flat` argument): it cannot produce a wrong VALUE, only a wrong ELIGIBILITY decision, and a false positive would require a physical layout that satisfies the row-major chain by coincidence while not actually being one contiguous span — impossible by construction, since `expected` is recomputed from the SAME `resolved.extents` the `View`'s own strides were built against. `max_flat_reduction_suffix_len`'s refactor from `reduction_is_fully_flat` is behavior-preserving by inspection (identical loop body; the bool became `len == reduction_dims.len()`) and re-confirmed by the full existing test suite staying green (446/446, no new failure). The kernel itself (`gemm_tile_neon`) is unmodified. No change to `Op`/`ScalarOp`/`IndexMap`, no change to `bind.rs`/`lower.rs` — every new symbol is `cpu.rs`-internal (`ConvGemmContext`, `ConvGemmTilePlan`, `conv_gemm_tile_plan`, `try_conv_gemm_assignment`, `axes_flat_chain`, `run_conv_gemm_tile`, `conv_gemm_row_block`, all `#[cfg(target_arch = "aarch64")]`, none `pub`) plus one new `instrument::Path::ConvTile` variant + `PATH_CONV_TILE` counter for path-kind visibility, mirroring `Path::DotFast`/`Path::WidthFast` exactly.
 
-**Full oracle set, all re-run this row.** `cargo build -p proxima-tensor --lib --features std,instrument` exit 0. `cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings` exit 0 (clean, no new `#[allow]`; one `collapsible_if` fixed with a let-chain during development, not suppressed). `cargo nextest run -p proxima-tensor --features std,instrument`: **446 passed, 0 failed, 4 skipped** — identical N to ROW 148. `cargo nextest run -p proxima-onnx --all-features`: **82 passed, 0 failed, 3 skipped** — identical N. `cargo nextest run -p omega --all-features --no-fail-fast`: **138 passed, 0 failed, 1 skipped** — the repin task's own stated expectation ("NO acceptable pre-existing failures anymore") holds; the 3 tests ROW 147/148 named as pre-existing failures now pass outright. `cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture`: **0.9900 (990/1000)**, bit-identical to ROW 145/147/148, over the FULL real `t10k` split, not a subset. `bash scripts/proxima-tensor-gate.sh`: **21 cells, 21 passed, 0 failed** — `proxima-tensor-gate: all green`, run twice this session (once before, once after the final cleanup edit), both green.
+**Full oracle set, all re-run this row.** `cargo build -p proxima-tensor --lib --features std,instrument` exit 0. `cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings` exit 0 (clean, no new `#[allow]`; one `collapsible_if` fixed with a let-chain during development, not suppressed). `cargo nextest run -p proxima-tensor --features std,instrument`: **446 passed, 0 failed, 4 skipped** — identical N to ROW 148. `cargo nextest run -p proxima-onnx --all-features`: **82 passed, 0 failed, 3 skipped** — identical N. `cargo nextest run -p proxima-omega --all-features --no-fail-fast`: **138 passed, 0 failed, 1 skipped** — the repin task's own stated expectation ("NO acceptable pre-existing failures anymore") holds; the 3 tests ROW 147/148 named as pre-existing failures now pass outright. `cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture`: **0.9900 (990/1000)**, bit-identical to ROW 145/147/148, over the FULL real `t10k` split, not a subset. `bash scripts/proxima-tensor-gate.sh`: **21 cells, 21 passed, 0 failed** — `proxima-tensor-gate: all green`, run twice this session (once before, once after the final cleanup edit), both green.
 
 **Path-kind counts (`mnist_diag`, `path kinds` line, 20 real MNIST images — MEASURED).**
 
@@ -13780,7 +13780,7 @@ Layer2's `conv_tile` CoV (4.3%) is the one arm near the 5% honesty threshold —
 
 **Re-prove commands:**
 - `git show <this row's commit> -- proxima-tensor/src/cpu.rs proxima-tensor/src/instrument.rs proxima-onnx/examples/mnist_diag.rs proxima-tensor/benches/bench_conv_gemm_tile.rs proxima-tensor/Cargo.toml` — the entire change
-- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` (446), `-p proxima-onnx --all-features` (82), `-p omega --all-features --no-fail-fast` (138/0-failed/1-skipped)
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` (446), `-p proxima-onnx --all-features` (82), `-p proxima-omega --all-features --no-fail-fast` (138/0-failed/1-skipped)
 - `CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings`
 - `CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture` — reproduces 0.9900
 - `CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-tensor --bench bench_conv_gemm_tile -- --save-baseline <name>` — reproduces the 4-shape `conv_tile`-vs-`generic` micro table, including the in-bench correctness self-check (panics on divergence)
@@ -13876,7 +13876,7 @@ State machine: N/A (a straight-line odometer loop, not a protocol state machine)
 ### Re-prove commands
 
 - `git show <this row's commit> -- proxima-tensor/src/cpu.rs proxima-tensor/src/instrument.rs` — the entire diff
-- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` (446), `-p proxima-onnx --all-features` (82), `-p omega --all-features --no-fail-fast` (138/0-failed/1-skipped)
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` (446), `-p proxima-onnx --all-features` (82), `-p proxima-omega --all-features --no-fail-fast` (138/0-failed/1-skipped)
 - `CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings`
 - `CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture` — reproduces 0.9900
 - `CARGO_TARGET_DIR=<scratch> cargo run --release -p proxima-onnx --example mnist_diag --features mnist-diag`, grep `"DIAG nsper elementwise_monomorphic"` / `"DIAG reduce_path_ticks"` — reproduces the per-phase profile table and the mechanism-level ns/element delta
@@ -13932,7 +13932,7 @@ Landed (then rolled back) as a NEW, disjoint sibling path rather than a rewrite 
 
 ### Rolled back — cleanly, completely, nothing landed on the sealed tree
 
-`git checkout -- proxima-tensor/src/bind.rs proxima-tensor/src/cpu.rs proxima-tensor/benches/bench_conv_gemm_tile.rs && rm -f proxima-tensor/tests/conv_gemm_tile_streamed_matches_materialized.rs` — `git status --short` / `git diff --stat` both empty against `50d46c3` afterward, confirmed. Every oracle below re-run AFTER the rollback, against the literal ROW 150 sealed tree, not cited: `cargo nextest run -p proxima-tensor --features std,instrument`: **446 passed, 0 failed, 4 skipped**. `-p proxima-onnx --all-features`: **82 passed, 0 failed, 3 skipped**. `-p omega --all-features --no-fail-fast`: **138 passed, 0 failed, 1 skipped**. `cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings`: clean. `bash scripts/proxima-tensor-gate.sh`: **21 cells, 21 passed, 0 failed**.
+`git checkout -- proxima-tensor/src/bind.rs proxima-tensor/src/cpu.rs proxima-tensor/benches/bench_conv_gemm_tile.rs && rm -f proxima-tensor/tests/conv_gemm_tile_streamed_matches_materialized.rs` — `git status --short` / `git diff --stat` both empty against `50d46c3` afterward, confirmed. Every oracle below re-run AFTER the rollback, against the literal ROW 150 sealed tree, not cited: `cargo nextest run -p proxima-tensor --features std,instrument`: **446 passed, 0 failed, 4 skipped**. `-p proxima-onnx --all-features`: **82 passed, 0 failed, 3 skipped**. `-p proxima-omega --all-features --no-fail-fast`: **138 passed, 0 failed, 1 skipped**. `cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings`: clean. `bash scripts/proxima-tensor-gate.sh`: **21 cells, 21 passed, 0 failed**.
 
 ### Alternatives considered, not attempted this session (honest scope, not guessed at)
 
@@ -13948,7 +13948,7 @@ N/A for this row: nothing landed. The design's own opt-sweep, for the record (ma
 
 - `git log --oneline -3` — confirms this row's own commit is docs-only; `git show <this row's commit>` touches only `proxima-tensor/docs/discipline.md`
 - `git diff 50d46c3 HEAD -- proxima-tensor/src proxima-tensor/benches proxima-tensor/tests` — empty, proves the rollback is complete
-- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` (446), `-p proxima-onnx --all-features` (82), `-p omega --all-features --no-fail-fast` (138/0-failed/1-skipped) — reproduces the post-rollback oracle set
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` (446), `-p proxima-onnx --all-features` (82), `-p proxima-omega --all-features --no-fail-fast` (138/0-failed/1-skipped) — reproduces the post-rollback oracle set
 - `CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings`
 - `bash scripts/proxima-tensor-gate.sh` — 21/21
 - The attempted design's own diff and the differential-test source are preserved at `/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/7f296db5-2f93-416b-8be0-1e516900b72c/scratchpad/row151-evidence/` for this session only (scratchpad, not durable) — re-create from this row's own description to re-run the micro-bench/differential-test numbers above; they are not on the sealed tree.
@@ -14105,7 +14105,7 @@ State machine: N/A (a straight-line row-copy loop, not a protocol state machine)
 ### Re-prove commands
 
 - `git show <this row's commit> -- proxima-tensor/src/cpu.rs proxima-tensor/src/instrument.rs proxima-tensor/benches/bench_window_copy.rs proxima-tensor/Cargo.toml` — the entire diff
-- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` (446), `-p proxima-onnx --all-features` (82, including the 2 `MaxPool` `Indices` tests this row's own bugfix re-greened), `-p omega --all-features --no-fail-fast` (138/0-failed/1-skipped)
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` (446), `-p proxima-onnx --all-features` (82, including the 2 `MaxPool` `Indices` tests this row's own bugfix re-greened), `-p proxima-omega --all-features --no-fail-fast` (138/0-failed/1-skipped)
 - `CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings`
 - `CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture` — reproduces 0.9900
 - `CARGO_TARGET_DIR=<scratch> cargo run --release -p proxima-onnx --example mnist_diag --features mnist-diag`, grep `"DIAG nsper elementwise_window_copy"` — reproduces the mechanism-level ns/element delta
@@ -14138,7 +14138,7 @@ Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-anchor`, branch `perf/maske
 - `cargo nextest run -p proxima-tensor`: **446 passed, 0 failed, 4 skipped** (450 total; matches ROW 152's own cited N; 3 new bind.rs unit/decline/value tests added, net count unchanged from ROW 152 because ROW 152 cited the unmodified-tree number, not a prior attempt's inflated one).
 - `cargo nextest run -p proxima-onnx --all-features`: **82 passed, 0 failed, 3 skipped** — identical N.
 - `cargo nextest run -p proxima-autograd --features std,config`: **120 passed, 0 failed, 0 skipped** (114 + 6 new `conv::tests` this row: `forward_only_stride_two_matches_hand_computed_values`, `stacked_forward_only_multichannel_stride_two_matches_a_brute_force_reference`, `stacked_forward_only_small_with_bias_on_first_layer_matches_a_brute_force_reference`, `stacked_forward_only_at_real_mnist_dimensions_matches_a_brute_force_reference`, `single_layer_forward_only_with_bias_at_real_mnist_dimensions_matches_a_brute_force_reference`, `stacked_conv2d_with_stride_two_on_both_layers_matches_central_difference`) — 2 slow (both real-MNIST training tests, ~115s/~290s, expected).
-- `cargo nextest run -p omega --all-features`: **138 passed, 0 failed, 1 skipped** — identical N.
+- `cargo nextest run -p proxima-omega --all-features`: **138 passed, 0 failed, 1 skipped** — identical N.
 - `cargo clippy -p proxima-tensor -p proxima-onnx -p proxima-autograd --all-targets --all-features -- -D warnings`: clean, exit 0 (one lint fixed mid-session: `needless_range_loop` in a NEW test-only `add_bias` helper, not suppressed).
 - `bash scripts/proxima-tensor-gate.sh`: **21 cells, 21 passed, 0 failed** — `proxima-tensor-gate: all green` (first run caught a real gap: `alloc tier check`/`alloc tier clippy` both failed on `f32::fract`, a `std`-only libm method used in the in-bounds stride check; fixed by an exact integer round-trip (`stride_u64 as f32 == stride_value`) instead, no libm dependency added — re-run green after the fix).
 - `bash scripts/proxima-autograd-gate.sh`: **15 cells, 15 passed, 0 failed** — `proxima-autograd-gate: all green`.
@@ -14154,7 +14154,7 @@ Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-anchor`, branch `perf/maske
 
 **Re-prove commands:**
 - `git show <this row's commit> -- proxima-tensor/src/bind.rs proxima-autograd/src/conv.rs` — the entire diff
-- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor` (446/0/4), `-p proxima-onnx --all-features` (82/0/3), `-p proxima-autograd --features std,config` (120/0/0), `-p omega --all-features` (138/0/1)
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor` (446/0/4), `-p proxima-onnx --all-features` (82/0/3), `-p proxima-autograd --features std,config` (120/0/0), `-p proxima-omega --all-features` (138/0/1)
 - `bash scripts/proxima-tensor-gate.sh` (21/21), `bash scripts/proxima-autograd-gate.sh` (15/15)
 - Re-derive the mac_ops table: temporarily add `"instrument"` to `proxima-tensor`'s `[dev-dependencies]` feature list in `proxima-autograd/Cargo.toml`, call `proxima_tensor::cpu::evaluate_named` once on `network.program` (outputs `[loss]`) and once on `differentiated.program` (outputs all 6 gradients) with He-initialized synthetic data, read the `DIAG nsper reduce_f32_dense mac_ops=` line each prints — no scratch file preserves this session's exact temporary test body, re-derive from this row's own method description
 
@@ -14268,7 +14268,7 @@ State machine: **DONE** -- `ConvReluStage`'s ring is the state, exhaustively dri
 
 - `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-onnx --all-features` -- 84 passed, 3 skipped (includes this row's own 2 new differential tests)
 - `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` -- 446 passed, 4 skipped (unchanged from ROW 154, this row touches no `proxima-tensor` source)
-- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p omega --all-features --no-fail-fast` -- 138 passed, 1 skipped (unchanged from ROW 154)
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-omega --all-features --no-fail-fast` -- 138 passed, 1 skipped (unchanged from ROW 154)
 - `CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings` -- clean, exit 0
 - `bash scripts/proxima-tensor-gate.sh` -- exited 0 this session (captured via a background task's own stdout after a concurrent sibling agent's scratchpad cleanup deleted this row's own redirected log file mid-run, a genuine environment hazard named above, not the script's own failure); re-run for the full per-cell breakdown
 - `CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test tile_pipeline_differential --features tile-pipeline-bench -- --nocapture` -- reproduces both differential tests, including the 0.9900 full-split accuracy line
@@ -14440,7 +14440,7 @@ The literal `4` in `window.as_chunks::<4>()` / `weight_row.as_chunks::<4>()` is 
 
 - `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-onnx --all-features` -- 84 passed, 3 skipped (unchanged count from ROW 156, includes both tile-pipeline differential tests)
 - `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` -- 450 passed, 4 skipped this session (unaffected by this row, `proxima-tensor/src` untouched -- diff `git diff a1e0437 HEAD -- proxima-tensor/src` is empty)
-- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p omega --all-features --no-fail-fast` -- 143 passed, 1 skipped this session (unaffected, same reason)
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-omega --all-features --no-fail-fast` -- 143 passed, 1 skipped this session (unaffected, same reason)
 - `CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings` -- clean, exit 0
 - `CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test tile_pipeline_differential --features tile-pipeline-bench -- --nocapture` -- reproduces both differential tests, including the 0.9900 full-split accuracy line and the 990/1000 count
 - `CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-onnx --bench tile_pipeline --features tile-pipeline-bench -- --save-baseline <name>` -- reproduces the whole-forward table and the allocation-count printout (341/229/197); host loadout will differ, re-check `uptime`/`pgrep` and mark accordingly, p50-over->=5-runs per this row's own convention
@@ -14988,7 +14988,7 @@ Micro-vet, n=1, marked (folded into the 5-run reseal below rather than benched s
 - `bash scripts/proxima-autograd-gate.sh` -- **15/15 passed, 0 failed**.
 - `cargo nextest run -p proxima-tensor --no-fail-fast` -- **448 passed, 0 failed, 4 skipped** (452 collected, satisfies the row's own "450+" bar).
 - `cargo nextest run -p proxima-autograd --all-features` -- **139 passed, 0 failed, 0 skipped**, including all four `real_mnist_*` tests (the ones that exercise the rewired `fit` end to end) and the two `train.rs`-local unit tests.
-- `cargo nextest run -p omega --all-features --no-fail-fast` -- **143 passed, 0 failed, 1 skipped** (tensor's pub surface changed this row: `arena_output`/`arena_named_input`/`evaluate_named_with_arena_in_place` added, nothing removed or resignatured -- omega's own `training_step_parity` suite, which independently exercises rebind-shaped training steps on Metal/wgpu, stayed green with no changes on omega's own side).
+- `cargo nextest run -p proxima-omega --all-features --no-fail-fast` -- **143 passed, 0 failed, 1 skipped** (tensor's pub surface changed this row: `arena_output`/`arena_named_input`/`evaluate_named_with_arena_in_place` added, nothing removed or resignatured -- omega's own `training_step_parity` suite, which independently exercises rebind-shaped training steps on Metal/wgpu, stayed green with no changes on omega's own side).
 - `cargo clippy -p proxima-tensor --all-features --all-targets -- -D warnings` -- clean.
 - `cargo clippy -p proxima-autograd --all-features --all-targets -- -D warnings` -- clean.
 
@@ -15008,7 +15008,7 @@ Same domain framing as ROW 159-164: executor-internal graph-construction/executi
 - `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor -E 'test(evaluate_named_with_arena)'` -- reproduces 2/0/450
 - `CARGO_TARGET_DIR=<scratch> bash scripts/proxima-tensor-gate.sh` -- reproduces 21/21
 - `CARGO_TARGET_DIR=<scratch> bash scripts/proxima-autograd-gate.sh` -- reproduces 15/15
-- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p omega --all-features --no-fail-fast` -- reproduces 143/0/1
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-omega --all-features --no-fail-fast` -- reproduces 143/0/1
 - `CARGO_TARGET_DIR=<scratch> cargo build --release -p proxima-autograd --bench train_step_lane --features train-step-bench && for i in 1 2 3 4 5; do <binary> --bench; done` -- reproduces the 5-run table above (host loadout WILL differ; re-characterize before citing as a sealed claim on a different host)
 
 ## ROW 166 -- elementwise-fusion lever measured, attempted, and ROLLED BACK: `bind.rs`'s existing held/fuses mechanism (ROW147/155's own precedent) already collapses the ENTIRE per-param Adam chain (15 elementwise nodes, this crate's own doc "Adam is nine elementwise nodes" undercounts it) down to exactly 3 materialized passes per param -- CONFIRMED still true at the current 2.824ms/230-node composition, no further Adam-chain fusion opportunity exists; the real unfused mass is layer1's backward pass, where a per-NodeId probe (ROW161's own method, extended to the arena path which `evaluate_quantized`'s `diag_kind_ticks` never covers) found THREE elementwise/constant nodes summing to **56.6% of the sealed step** (89=25.06%, 87=24.19%, 86=7.44%), and a direct program scan proved node 89 is dead code -- zero consumers, not a requested output, executed every step for nothing, because `differentiate_elementwise`'s `Multiply` arm builds BOTH operands' contributions unconditionally before `route_contribution`'s own `is_unwanted_input` check ever runs. The mechanically-obvious fix (skip building the contribution when the destination is itself an unwanted leaf, one `is_unwanted_input` check reused from `route_contribution`'s own gate) is CORRECT (bit-identical gradients, 27/27 targeted tests green) and REGRESSES THE STEP ~14.5x (2.82ms -> 41.4ms) -- removing the dead sibling makes its LIVE sibling (node 87) newly eligible for `bind.rs`'s recursive `compose_operand` fusion into the downstream reduce, and the resulting multi-level composed body knocks that reduce off whatever fast dispatch path it held, onto (by elimination, not directly instrumented this session) a slow generic per-element loop over 3.2M elements. ROLLED BACK IN FULL, zero source diff landed.
@@ -15910,7 +15910,7 @@ Built and verified in this order, on the position-outer tree (commit not made; w
 - `cargo nextest run -p proxima-tensor --features std,instrument` -- **463 passed, 0 failed, 4 skipped**, IDENTICAL N to ROW 176, including `elementwise_width_generic_matches_scalar_apply_body::{swiglu,rmsnorm,rope_add,rope_subtract}` and `elementwise_width_generic_matches_scalar_apply_body_for_a_rope_shaped_stride_two_operand` (the RoPE stride-2 lock ROW 176 named as the correctness bar) -- all green, bit-identical
 - `cargo clippy -p proxima-tensor -p proxima-autograd --features std,instrument --all-targets -- -D warnings` -- clean, exit 0 (no new `#[allow]`)
 - `cargo nextest run -p proxima-autograd --features std,instrument` -- **139 passed, 0 failed, 0 skipped** (3 real-MNIST tests SLOW-flagged, all passed on a full, un-truncated run), including `real_mnist_mlp_trains_and_classifies_at_reference_accuracy`, `real_mnist_conv_trains_and_classifies`, `real_mnist_conv_norm_trains_and_classifies`
-- `cargo nextest run -p omega` -- **97 passed, 0 failed, 1 skipped**
+- `cargo nextest run -p proxima-omega` -- **97 passed, 0 failed, 1 skipped**
 - `cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture` -- **0.9900 (990/1000)**, the full `t10k` split, bit-for-bit unchanged from ROW 154 onward
 - `cargo test --release -p proxima-onnx --test tile_pipeline_differential --features tile-pipeline-bench -- --nocapture` -- all 3 passed: `pipeline_logits_match_sealed_executor_within_reassociation_bound` (**60/60**, the 20-images x 3-band-granularities differential bound ROW 158+ established), `direct_call_arm_is_bit_identical_to_andthen_composed_pipeline`, `pipeline_full_test_split_accuracy_is_exactly_0_9900` (**990/1000 = 0.9900 exactly**)
 - `train_step_lane`'s own in-bench gate: `arena vs baseline bit-identical over 3 consecutive real steps (loss + all 12 rebind outputs)` printed on every one of the 3 timed runs below, `to_bits()` exact per the bench's own `assert_eq!`
@@ -15980,7 +15980,7 @@ This session's own measurement is on node 132's real shape (128 elements/call, 7
 
 - `cargo nextest run -p proxima-tensor --features std,instrument` -- **463 passed, 0 failed, 4 skipped**
 - `cargo nextest run -p proxima-autograd --features std,instrument` -- **139 passed, 0 failed, 0 skipped** (3 real-MNIST tests SLOW-flagged, full un-truncated run)
-- `cargo nextest run -p omega` -- **97 passed, 0 failed, 1 skipped**
+- `cargo nextest run -p proxima-omega` -- **97 passed, 0 failed, 1 skipped**
 - `cargo nextest run -p proxima-tensor -p proxima-autograd -E 'test(central_difference) or test(differentiate_wanted) or test(evaluate_named_with_arena)'` -- **21 passed, 0 failed, 581 skipped** (602 total in these 2 packages this session, matching 463+139)
 - `cargo clippy -p proxima-tensor -p proxima-autograd --features std,instrument --all-targets -- -D warnings` -- clean, exit 0
 - `cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture` -- **0.9900 (990/1000)**
@@ -15997,7 +15997,7 @@ Executor-internal graph-execution code, not sans-IO -- principle Section-11's ax
 - `git diff main -- proxima-tensor/src proxima-autograd/src proxima-autograd/benches proxima-autograd/Cargo.toml` -- empty, proves the rollback is complete (this row lands zero net source diff, docs-only)
 - `cargo nextest run -p proxima-tensor --features std,instrument` -- reproduces 463/0/4
 - `cargo nextest run -p proxima-autograd --features std,instrument` -- reproduces 139/0/0 (full run, budget >=3 minutes for the 3 real-MNIST tests)
-- `cargo nextest run -p omega` -- reproduces 97/0/1
+- `cargo nextest run -p proxima-omega` -- reproduces 97/0/1
 - `cargo clippy -p proxima-tensor -p proxima-autograd --features std,instrument --all-targets -- -D warnings` -- reproduces clean, exit 0
 - `cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture` -- reproduces 0.9900 (990/1000)
 - `cargo test --release -p proxima-onnx --test tile_pipeline_differential --features tile-pipeline-bench -- --nocapture` -- reproduces 60/60 + 990/1000
@@ -16365,7 +16365,7 @@ Hot path (per element, per call): **zero** -- the dedicated kernel (`elementwise
 - `cargo nextest run -p proxima-tensor --features std,instrument` -- **463 passed, 0 failed, 4 skipped**, identical N to ROW 178, including `elementwise_width_generic_matches_scalar_apply_body_for_a_rope_shaped_stride_two_operand` (the RoPE stride-2 lock this row's new `BodyShape` variant does not touch -- `detect_adam_update_roles` rejects a 2-operand/1-step RoPE body immediately, since it never matches the fixed 16-step shape)
 - `cargo nextest run -p proxima-autograd --features std,instrument` -- **139 passed, 0 failed, 0 skipped** (3 real-MNIST tests SLOW-flagged, full un-truncated run)
 - `cargo nextest run -p proxima-autograd --all-features` -- **145 passed (3 slow), 0 skipped, 0 failed**
-- `cargo nextest run -p omega` -- **97 passed, 0 failed, 1 skipped**
+- `cargo nextest run -p proxima-omega` -- **97 passed, 0 failed, 1 skipped**
 - `cargo clippy -p proxima-tensor -p proxima-autograd --features std,instrument --all-targets -- -D warnings` -- clean, exit 0, no new `#[allow]`
 - `cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture` -- **0.9900 (990/1000)**, bit-for-bit unchanged
 - `cargo test --release -p proxima-onnx --test tile_pipeline_differential --features tile-pipeline-bench -- --nocapture` -- **3 passed**: `pipeline_logits_match_sealed_executor_within_reassociation_bound` **60/60**, `direct_call_arm_is_bit_identical_to_andthen_composed_pipeline`, `pipeline_full_test_split_accuracy_is_exactly_0_9900` (**990/1000 = 0.9900 exactly**) -- this differential's own forward passes exercise every `Generic`-shaped node in a 20-image x 3-band sweep, so the fused-Adam path is not itself exercised (it is train-only, not inference-only), but the shared `BodyShape` classification machinery is
@@ -16415,7 +16415,7 @@ See Correctness section above -- every oracle this task named as the correctness
 - `git diff main -- proxima-tensor/src/cpu.rs proxima-tensor/src/instrument.rs` -- the whole landed diff (two files)
 - `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` -- reproduces 463/0/4
 - `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-autograd --all-features` -- reproduces 145/0/0 (3 slow)
-- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p omega` -- reproduces 97/0/1
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-omega` -- reproduces 97/0/1
 - `CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-tensor -p proxima-autograd --features std,instrument --all-targets -- -D warnings` -- reproduces clean, exit 0
 - `CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture` -- reproduces 0.9900 (990/1000)
 - `CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test tile_pipeline_differential --features tile-pipeline-bench -- --nocapture` -- reproduces 60/60 + 990/1000
@@ -16458,7 +16458,7 @@ Correctness: every LIVE block's output bit-identical between the dense and spars
 
 **Residual, not measured this session:** the skip-set derivation cost (mask read + `BTreeSet` build) is bounded ABOVE by the measured net win (break-even holds) but was never ISOLATED as its own arm (e.g. a dense-with-full-mask-consulted-but-nothing-skipped control) -- the DERIVED A~=360ns/block figure folds dispatch overhead and any derivation cost together and cannot separate them without that control arm. A genuinely DRAM-cold arm (working set forced past L2/L3, e.g. per-step-regenerated or `madvise`d-out block data) was not built; without it, this row's own measured curve cannot be read as validating OR refuting the bandwidth-wall prediction for the regime the prediction was actually written for -- it validates the mechanism (per-step masking is real, monotonic, correctness-preserving, execution-level-only) and REFUTES the specific numeric curve for the CACHE-RESIDENT regime this harness happened to measure.
 
-**Host loadout:** `uptime` load averages 7.75/11.18/13.44 (NOT quiet -- other users' processes active on this shared host) at the time of the 4 measurement runs; `pgrep -fl cargo` showed no other `cargo build`/`cargo check` process during any of the 4 runs (the lock-sync agent's background `cargo check -p omega` from earlier in the session had already exited). Despite the load, cross-run CoV stayed <=1.37% in every cell -- criterion's own per-call sampling absorbed the host noise here, so the numbers above are trusted as reported, not re-run on a quieter box.
+**Host loadout:** `uptime` load averages 7.75/11.18/13.44 (NOT quiet -- other users' processes active on this shared host) at the time of the 4 measurement runs; `pgrep -fl cargo` showed no other `cargo build`/`cargo check` process during any of the 4 runs (the lock-sync agent's background `cargo check -p proxima-omega` from earlier in the session had already exited). Despite the load, cross-run CoV stayed <=1.37% in every cell -- criterion's own per-call sampling absorbed the host noise here, so the numbers above are trusted as reported, not re-run on a quieter box.
 
 **Re-prove:**
 - `CARGO_TARGET_DIR=<scratch> cargo build --release -p proxima-tensor --features dynamic-elision-probe --bench bench_dynamic_elision`
@@ -16822,7 +16822,7 @@ Precedent reused verbatim: `proxima-protocols/tests/pgwire_codec_integration/all
 - `cargo clippy -p proxima-tensor --all-targets --all-features -- -D warnings` -- clean, exit 0
 - `cargo clippy -p proxima-tensor --all-targets -- -D warnings` (default features) -- clean, exit 0
 - `cargo check -p proxima-tensor --no-default-features --features alloc` -- clean, exit 0; `cpu` (and therefore every fusion symbol this row touched) is `#[cfg(feature = "std")]` in `lib.rs` and was NEVER reachable at this tier before or after this row -- the alloc-only tier build compiles `align`/`bind`/`convert`/`dtype`/`error`/`live`/`map`/`op`/`partition`/`shape`/`sized`, same module set as every prior row that ran this gate, unchanged by this promotion
-- `cargo check -p omega --all-features` -- clean, exit 0
+- `cargo check -p proxima-omega --all-features` -- clean, exit 0
 - `cargo doc -p proxima-tensor --no-deps --all-features` -- clean, exit 0 (same pre-existing, unrelated `ggml-bench`/`GGML_BUILD_DIR` warning ROW 182-185 already named)
 
 ### Paired confirmation (temporary example, added and reverted this session -- `git status --porcelain proxima-onnx/examples/` shows zero net diff after removal, same convention ROW 184/185's own temporary `eprintln!`s used)
@@ -17312,7 +17312,7 @@ git diff a4bdabf HEAD -- proxima-tensor/src/cpu.rs   # empty -- confirms this ro
 
 The only pre-existing GPU-side bandwidth citation on this box, read before running anything new: `omega/examples/q4k_matvec_probe.rs`'s own docstring bar, **214.7 GB/s** (llama.cpp Metal, 3.784 GB / 17.62 ms/token, an older-day citation). Predicted ns/mac from that bar at Q4_K's 0.5625 B/MAC: 0.5625 / 214.7 = **2.62e-3 ns/mac**. No pre-existing GPU-**kernel-only** ceiling citation existed for OUR arm before this session (the gap this row's `rooflines.md` addition closes) -- the CPU lane's own kernel figure (147.72-150.60 GMAC/s, ROW 116) was the only anchor, with no stated basis to predict whether Metal would sit above or below it.
 
-**GPU streaming bandwidth ceiling, attempted:** `cargo run --release --example membw_probe -p omega` (built + run this session, `EXIT=0`). Its Metal arm uses a reduce-to-scalar (`Add`) pattern, not a trivial streaming copy, and returned **0.3-0.4 GB/s** -- three orders of magnitude below any plausible M1 Max figure. This is a MEASURED number, tagged **not a bandwidth ceiling**: the reduce-to-scalar shape is almost certainly dispatch/serialization-bound (single accumulator across the whole grid), not a memory-bandwidth probe, and this row's own host was never near the "two consecutive `uptime` readings <=~4" precondition the prior row (`discipline.md:12512`) named for a trustworthy run. **GPU streaming bandwidth ceiling remains DEBT** -- reported honestly rather than substituted with the ASSUMED ~400 GB/s chip-wide spec figure as a measurement.
+**GPU streaming bandwidth ceiling, attempted:** `cargo run --release --example membw_probe -p proxima-omega` (built + run this session, `EXIT=0`). Its Metal arm uses a reduce-to-scalar (`Add`) pattern, not a trivial streaming copy, and returned **0.3-0.4 GB/s** -- three orders of magnitude below any plausible M1 Max figure. This is a MEASURED number, tagged **not a bandwidth ceiling**: the reduce-to-scalar shape is almost certainly dispatch/serialization-bound (single accumulator across the whole grid), not a memory-bandwidth probe, and this row's own host was never near the "two consecutive `uptime` readings <=~4" precondition the prior row (`discipline.md:12512`) named for a trustworthy run. **GPU streaming bandwidth ceiling remains DEBT** -- reported honestly rather than substituted with the ASSUMED ~400 GB/s chip-wide spec figure as a measurement.
 
 ### Full-decode paired cell (fresh, today)
 
@@ -17351,7 +17351,7 @@ No GPU-side per-shape bench harness exists as a standalone criterion bench (`ben
 | gate | result |
 |---|---|
 | `cargo nextest run -p proxima-tensor` | **459 passed, 4 skipped**, exit 0 |
-| `cargo clippy -p omega --features std,cpu,metal --all-targets -- -D warnings` (this row touched zero source lines; run as a repo-health check on the crate this row exercised) | exit 0, clean |
+| `cargo clippy -p proxima-omega --features std,cpu,metal --all-targets -- -D warnings` (this row touched zero source lines; run as a repo-health check on the crate this row exercised) | exit 0, clean |
 | `cargo doc -p proxima-tensor --no-deps --all-features` | exit 0, generated `proxima_tensor/index.html`; one pre-existing unrelated warning (`ggml-bench` / `GGML_BUILD_DIR` unset, not this row's concern) |
 
 ### Rollback rows
@@ -17362,8 +17362,8 @@ None -- zero source changed this row. Two doc files touched: this row (`discipli
 
 ```sh
 cd <this worktree, bench/gpu-quant-cell>
-CARGO_TARGET_DIR=<scratch> cargo build --release --example membw_probe --example q4k_matvec_probe -p omega --features std,cpu,metal
-CARGO_TARGET_DIR=<scratch> cargo run --release --example membw_probe -p omega  # GPU arm: expect a NON-ceiling number, see caveat above
+CARGO_TARGET_DIR=<scratch> cargo build --release --example membw_probe --example q4k_matvec_probe -p proxima-omega --features std,cpu,metal
+CARGO_TARGET_DIR=<scratch> cargo run --release --example membw_probe -p proxima-omega  # GPU arm: expect a NON-ceiling number, see caveat above
 /Users/brianbruggeman/repos/others/llama.cpp/build/bin/llama-bench \
   -m /Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf \
   -p 0 -n 32 -r 5 -b 2048 -ub 512 -t 8 -o md
@@ -18465,7 +18465,7 @@ A clean apples-to-apples dispatch count for llama.cpp is **UNMEASURED**: `llama-
 
 **THE LANE-LEVEL CONTRAST worth carrying forward: CPU/BGE and GPU/decode have OPPOSITE diagnoses.** On CPU the kernel is at its NEON ceiling and the deficit is elsewhere (ROW 222); on GPU the kernel is 83% of the step and orchestration is fine. Do not import one lane's lever into the other.
 
-**Gates.** proxima-tensor `std,instrument` **477 passed**/6 skipped; clippy on proxima-tensor and on omega both clean; `cargo doc -p omega` clean. `cargo nextest run -p omega --features metal,cpu,instrument`: **95 passed, 2 FAILED, 1 skipped (N=97 asserted)**. Branch `perf/gpu-decode-ladder`, commits `0fecd5a` + `7e58f6b`, not pushed.
+**Gates.** proxima-tensor `std,instrument` **477 passed**/6 skipped; clippy on proxima-tensor and on omega both clean; `cargo doc -p proxima-omega` clean. `cargo nextest run -p proxima-omega --features metal,cpu,instrument`: **95 passed, 2 FAILED, 1 skipped (N=97 asserted)**. Branch `perf/gpu-decode-ladder`, commits `0fecd5a` + `7e58f6b`, not pushed.
 
 **A REAL CORRECTNESS FAILURE FOUND ON MAIN, verified pre-existing by stashing and re-running against `3076d81`:** `omega::backend_parity::the_wrapper_agrees_with_itself_across_cpu_and_metal` and `omega::metal_real_forward::metal_runs_the_real_forward_graph_and_agrees_with_the_cpu` both fail with the IDENTICAL signature `relative=1.3264047 max_diff=6.9346437`. **Our CPU and Metal backends disagree by 133% on the real forward graph.** Identical relative error in two independently-written tests implies ONE root cause in the shared wrapper path; 133% is structural (stride, transposed operand, wrong axis), not precision drift. **Every GPU throughput number in this row and in ROW 193 may be timing wrong arithmetic.** The decode measurements went through `generate.rs`'s `runtime.evaluate`, a different path, and that path was NOT independently verified unaffected this session. Under diagnosis on `fix/omega-backend-parity`; that answer decides whether this lane's numbers stand.
 
@@ -18523,7 +18523,7 @@ All four heads collapsed onto head 0. Confirmed at the `BoundOp` level: unfused 
 
 **WHY OUR OWN SUITE RAN GREEN ALL SESSION, and this is the lesson: BGE has no parity test.** The bug lives in `proxima-tensor`, on the exact function this session widened four times (60/96 -> 72 -> 84 -> 96/96), and every proxima-tensor and proxima-onnx gate stayed green throughout. It surfaced in `omega` only because omega's `backend_parity` is the one test in this workspace that compares two INDEPENDENT implementations of the same graph. BGE's own correctness rests on a cosine oracle against onnxruntime/torch (6.5e-8, ROW 195) -- which is why BGE was unaffected (its `b` operands are genuinely row-invariant weights) and also why a BGE-shaped instance of this bug would have been caught, but a decode-shaped one was not. **Emitted work item: a CPU-vs-reference parity test for the decode path, not just the embedding path.**
 
-**Gates (N asserted).** `cargo nextest run -p omega --features metal,cpu,instrument`: **97 run, 97 passed**, 1 skipped (was 95 passed / 2 FAILED). `cargo nextest run -p proxima-tensor --features std,instrument`: **478 passed**, 6 skipped (477 + the new regression test). clippy on both crates clean. Branch `fix/omega-backend-parity`, commit `edcbf4e`, not pushed.
+**Gates (N asserted).** `cargo nextest run -p proxima-omega --features metal,cpu,instrument`: **97 run, 97 passed**, 1 skipped (was 95 passed / 2 FAILED). `cargo nextest run -p proxima-tensor --features std,instrument`: **478 passed**, 6 skipped (477 + the new regression test). clippy on both crates clean. Branch `fix/omega-backend-parity`, commit `edcbf4e`, not pushed.
 
 ## ROW 224 -- `main` was pushed RED: four CI jobs failing, one of them a real compile error, and every local gate this session was the wrong configuration.
 
@@ -18635,7 +18635,7 @@ Cold absolute: 33.780-47.960 GMAC/s. **MISS on latency-bound, HIT on the issue-l
 proxima-quic:       error: method `pooled_connection_count` is never used
 proxima-primitives: error[E0432]: unresolved import
                     `proxima_primitives::sync::AtomicPermitPool`  (bench "atomic_permits")
-omega:              cargo bench -p omega --features metal --bench metal_vs_cpu -- --quick
+omega:              cargo bench -p proxima-omega --features metal --bench metal_vs_cpu -- --quick
                     error: bench failed  (exit 101; underlying cause NOT captured by
                     `gh run view --log-failed`, which showed only the wrapper)
 ```
@@ -19803,10 +19803,10 @@ experiment) — redirecting further effort away from occupancy tuning.
 `OMEGA_PACKED_ROW_BLOCK_SIMDGROUPS` build-time axis stays in the tree as a now-measured,
 now-negative dial — future work does not need to re-derive whether this lever works.
 
-**Gates:** `cargo build -p omega --release` clean (default and `--features metal-tiled-gemm`);
-`cargo clippy -p omega --all-targets` clean, exit 0; `cargo nextest run -p omega -p
+**Gates:** `cargo build -p proxima-omega --release` clean (default and `--features metal-tiled-gemm`);
+`cargo clippy -p proxima-omega --all-targets` clean, exit 0; `cargo nextest run -p proxima-omega -p
 proxima-tensor -p proxima-model-interop`: **629 tests run, 629 passed, 8 skipped**, exit 0.
-Re-prove: `CARGO_TARGET_DIR=<scratch> cargo nextest run -p omega -p proxima-tensor -p
+Re-prove: `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-omega -p proxima-tensor -p
 proxima-model-interop` from `proxima-wt-geo`.
 
 **Re-prove the sweep:** `OMEGA_PACKED_ROW_BLOCK_SIMDGROUPS=<N> cargo build --release --example
@@ -20022,7 +20022,7 @@ if packed_row_block(resolved, quantized).is_some() {
 ```
 `PACKED_ROW_NSG: usize = 2` is a bare feature-gated `const` (`msl.rs`), matching the existing unwired `PACKED_ROWS_PER_GROUP: usize = 4` (`msl.rs:1017`) local-const style rather than routing through the sizing-config generated-constants mechanism (§12) -- **named residual, not silently punted**: neither constant is build-time-configurable today; wiring both through `omega-runtime.toml`/`build.rs` the way `TILED_GEMM_MIN_TOKENS` already is (`build.rs:125`) is unclaimed follow-up work, not done here.
 
-**CORRECTNESS GATE, before any timing number, per task principle 14/18.** `cargo nextest run -p omega --features metal,metal-packed-row-nsg2,cpu -E 'test(q4k) + test(metal_parity) + binary(metal_parity) + binary(q4k_matmul_layout) + binary(q4k_real_checkpoint_parity)'`: **44 passed, 0 failed** (54 skipped by the filter, not by a broken gate -- every skip is a non-Q4_K/non-metal_parity test outside this row's scope), including `metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path`, all six `metal_matmul_parity_across_codec_and_dtype::{q4k,q5k,q6k}_at_{float16,float32}` cases, `axis_reduce_parity_holds_for_every_cooperative_reduce_body`, the real-checkpoint gate, and `q4k_matmul_layout.rs`'s reduction-axis-first gate. Baseline (no `metal-packed-row-nsg2`) build+full-suite `cargo test -p omega --features metal,cpu --test metal_parity` also verified: the one apparent failure (`page_aligned_input_takes_the_no_copy_metal_upload_path`) is a PRE-EXISTING, unrelated, order-dependent flake (a global upload-counter test that only passes under `cargo test`'s default parallel-shared-process execution when run in isolation; passes cleanly under `nextest`'s per-test process isolation both with and without this row's feature) -- confirmed by reproducing the identical failure on baseline `metal` alone with no code from this row in the build.
+**CORRECTNESS GATE, before any timing number, per task principle 14/18.** `cargo nextest run -p proxima-omega --features metal,metal-packed-row-nsg2,cpu -E 'test(q4k) + test(metal_parity) + binary(metal_parity) + binary(q4k_matmul_layout) + binary(q4k_real_checkpoint_parity)'`: **44 passed, 0 failed** (54 skipped by the filter, not by a broken gate -- every skip is a non-Q4_K/non-metal_parity test outside this row's scope), including `metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path`, all six `metal_matmul_parity_across_codec_and_dtype::{q4k,q5k,q6k}_at_{float16,float32}` cases, `axis_reduce_parity_holds_for_every_cooperative_reduce_body`, the real-checkpoint gate, and `q4k_matmul_layout.rs`'s reduction-axis-first gate. Baseline (no `metal-packed-row-nsg2`) build+full-suite `cargo test -p proxima-omega --features metal,cpu --test metal_parity` also verified: the one apparent failure (`page_aligned_input_takes_the_no_copy_metal_upload_path`) is a PRE-EXISTING, unrelated, order-dependent flake (a global upload-counter test that only passes under `cargo test`'s default parallel-shared-process execution when run in isolation; passes cleanly under `nextest`'s per-test process isolation both with and without this row's feature) -- confirmed by reproducing the identical failure on baseline `metal` alone with no code from this row in the build.
 
 **A SEPARATE, NEW correctness finding, surfaced by this row's own bisection and reported here as data for `fix/metal-cpu-disagreement` (`proxima-wt-gpufix`), not chased further:** `examples/q4k_bisect_probe.rs` (in_dim=512 fixed, out_dim swept 3/4/8/32/64/128/512/1024/4096, against an independent from-scratch dequantize+dot oracle) shows **CPU's own `cpu::evaluate_quantized` int8-dot path**, not Metal, is what diverges at scale: `max_metal_rel` stays <=1.5e-3 at every out_dim up to 4096, while `max_cpu_rel` grows to **8.72 (872%)** at out_dim>=1024. This is a DIFFERENT call site than the already-known `relative=1.3264047` on the real forward graph, but the same class (CPU-side divergence at scale) -- both point at `proxima_tensor::cpu`'s quantized-dot path, not at Metal or at this row's geometry change. Because of this, this row's own nano probe (`examples/q4k_matvec_nsg_probe.rs`) gates Metal against the SAME independent dequantize+dot reference, not against CPU, with epsilon scaled `5e-4 * sqrt(k)` (the same reassociation-tolerant scaling `metal_vs_cpu.rs`'s `assert_checksum_agrees` already documents) -- both arms passed at every shape (`max_metal_relative` 8.7e-3 to 1.5e-2, well inside epsilon 3.2e-2/6.0e-2 at k=4096/14336 respectively).
 
@@ -20055,16 +20055,16 @@ Multiple-of-incumbent: **not computable this row.** ROW 221's 70.76 GB/s / 125.8
 
 **Negative result, recorded plainly:** the geometry change does NOT uniformly help, and at 2 of 3 real decode shapes it is flat-to-negative within a few percent. **This row does NOT recommend flipping `metal-packed-row-nsg2` to default-on.** It stays default-off, gated, and the mixed nano result is the reason, not a placeholder.
 
-**Gates.** `cargo build -p omega --features metal,cpu` and `--features metal,cpu,metal-packed-row-nsg2`: both **exit 0** (`CARGO_TARGET_DIR=<scratch>/gpuker/target`). `cargo clippy -p omega --features metal,cpu,metal-packed-row-nsg2 --examples --all-targets`: **clean, exit 0**. `cargo nextest run` Q4_K/metal_parity filter: **44 passed, 0 failed** under nsg2 (command in the correctness section above, re-runnable verbatim). Branch `perf/metal-simdgroup-geometry`, worktree `proxima-wt-gpuker`, not pushed, not merged.
+**Gates.** `cargo build -p proxima-omega --features metal,cpu` and `--features metal,cpu,metal-packed-row-nsg2`: both **exit 0** (`CARGO_TARGET_DIR=<scratch>/gpuker/target`). `cargo clippy -p proxima-omega --features metal,cpu,metal-packed-row-nsg2 --examples --all-targets`: **clean, exit 0**. `cargo nextest run` Q4_K/metal_parity filter: **44 passed, 0 failed** under nsg2 (command in the correctness section above, re-runnable verbatim). Branch `perf/metal-simdgroup-geometry`, worktree `proxima-wt-gpuker`, not pushed, not merged.
 
 **Re-prove command (principle 16):**
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima-wt-gpuker
 export CARGO_TARGET_DIR=<scratch>/gpuker/target
-cargo nextest run -p omega --features metal,metal-packed-row-nsg2,cpu \
+cargo nextest run -p proxima-omega --features metal,metal-packed-row-nsg2,cpu \
   -E 'test(q4k) + test(metal_parity) + binary(metal_parity) + binary(q4k_matmul_layout) + binary(q4k_real_checkpoint_parity)'
-cargo run -p omega --release --features metal,cpu --example q4k_matvec_nsg_probe
-cargo run -p omega --release --features metal,cpu,metal-packed-row-nsg2 --example q4k_matvec_nsg_probe
+cargo run -p proxima-omega --release --features metal,cpu --example q4k_matvec_nsg_probe
+cargo run -p proxima-omega --release --features metal,cpu,metal-packed-row-nsg2 --example q4k_matvec_nsg_probe
 ```
 Timing numbers will differ from the table above on a different box load -- the correctness gate (44/44) and the qualitative paired-delta SHAPE (win at fewest-threadgroups, flat/negative at more-threadgroups) are what this command re-proves; the absolute GB/s figures are this row's specific loaded-box sample, not a pinned baseline (no `--save-baseline` exists for this ad hoc probe -- named residual: wiring this into a criterion-tracked bench with a saved baseline is unclaimed follow-up, not done here).
 
@@ -20138,7 +20138,7 @@ Defect 2 (`BLOCK_UPLOAD_BYTES`, fired unconditionally before the upload-path mat
 | ours | MILLI (op-profile step 3, `profiles_one_real_decode_step_by_per_op_gpu_time`) | 938 ops, 8 families | n/a (single real-device run) | quiet |
 | ours | BENCH (cached decode loop, `runs_the_cached_decode_loop...`) | 8 steps | n/a (single real-device run) | quiet |
 
-**Gates:** `cargo build --workspace --lib` PASS; `cargo nextest run -p omega --features metal` 106/106 passed, 1 skipped; `cargo nextest run -p proxima-tensor --features std,instrument` 513/513 passed, 7 skipped; `cargo nextest run -p proxima-model-interop --features metal,instrument` 95/95 passed, 25 skipped; `cargo clippy --workspace --all-targets -- -D warnings` PASS; `cargo nextest run -p omega --all-features` 158/158 passed, 1 skipped (includes the 4 new `operand_tensor_bytes_tests`); `bash scripts/omega-gate.sh` PASS, `tests run: 158`, doctests 2/2.
+**Gates:** `cargo build --workspace --lib` PASS; `cargo nextest run -p proxima-omega --features metal` 106/106 passed, 1 skipped; `cargo nextest run -p proxima-tensor --features std,instrument` 513/513 passed, 7 skipped; `cargo nextest run -p proxima-model-interop --features metal,instrument` 95/95 passed, 25 skipped; `cargo clippy --workspace --all-targets -- -D warnings` PASS; `cargo nextest run -p proxima-omega --all-features` 158/158 passed, 1 skipped (includes the 4 new `operand_tensor_bytes_tests`); `bash scripts/omega-gate.sh` PASS, `tests run: 158`, doctests 2/2.
 **Parity:** n/a -- instrument-only change; no oracle drift asserted here. `dense_metal_*` capability-matrix parity tests (which exercise `run_decode_loop_placed_kv`, the loop this row also added a `PROXIMA_METAL_OP_PROFILE_STEP` branch to) stayed green.
 **Census:** N1 partition identity `BLOCK_COPIED_BYTES + BLOCK_NOCOPY_BOUND_BYTES + BLOCK_OFFSET_BOUND_BYTES == BLOCK_OFFERED_BYTES` held on every one of 8 steps in the welded harness, e.g. step 3: `524 + 0 + 4139650112 = 4139650636` (exact). N3: 8-of-8 named families present in the per-op profile at step 3, `ffn_up` 33.05 MB/layer (`1057488896/32`), `ffn_down` 34.00 MB/layer (`1088159744/32`), `attn_q` 9.45 MB/layer (`302514176/32`), `output.weight` 107.54 MB (`107543104`) -- all within 1% of R13's shape-derived column, and NOT 4.14 GB. N4: `total_operand_bytes=4169081436` (4.169 GB), within 2.4% of the ~4.07 GB/step prediction (< 5% kill threshold).
 **Home-turf arm:** none -- this card is accounting-only, no llama.cpp cell.
@@ -20224,7 +20224,7 @@ past it. Both re-provable now:
 ```
 cd /Users/brianbruggeman/repos/slot-0/proxima-wt-splitkrows && \
 CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-splitkrows/target \
-cargo nextest run -p omega --features metal,metal-q4k-split-k \
+cargo nextest run -p proxima-omega --features metal,metal-q4k-split-k \
   -E 'test(split_k) + test(row_ceiling)'
 ```
 Result: 4 tests run: 4 passed (2 unit + 2 real-tensor parity, next row).
@@ -20240,16 +20240,16 @@ Both passed at `relative < 1e-5` against the dequantized f32 CPU oracle:
 ```
 cd /Users/brianbruggeman/repos/slot-0/proxima-wt-splitkrows && \
 CARGO_TARGET_DIR=.../target CARGO_TERM_COLOR=never \
-cargo nextest run -p omega --features metal,metal-q4k-split-k
+cargo nextest run -p proxima-omega --features metal,metal-q4k-split-k
 ```
 Result: **110 tests run: 110 passed, 1 skipped** (the 64-row baseline parity
 test is unconditional and also present). All-features:
 ```
-cargo nextest run -p omega --all-features
+cargo nextest run -p proxima-omega --all-features
 ```
 Result: **158 tests run: 158 passed, 1 skipped**.
 
-**Lint:** `cargo clippy -p omega --all-features --all-targets -- -D warnings`
+**Lint:** `cargo clippy -p proxima-omega --all-features --all-targets -- -D warnings`
 → EXIT=0, zero warnings.
 
 **Gate script:** `bash scripts/omega-gate.sh` → `== omega gate: PASS ==`,
@@ -20445,9 +20445,9 @@ bake-off binaries, and are the mechanically-CI-able part of this row.
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima-wt-land-nsg2
 CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-nsg2/target \
-cargo nextest run -p omega --features metal,metal-packed-row-nsg2 -E 'test(packed_row_nsg2)'
+cargo nextest run -p proxima-omega --features metal,metal-packed-row-nsg2 -E 'test(packed_row_nsg2)'
 ```
-Result: 1 test run: 1 passed (`packed_row_nsg2_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul`). Feature-off twin passes under plain `--features metal` (1 passed, 107 skipped). Full `-p omega --features metal,metal-packed-row-nsg2`: 107 tests run, 107 passed, 1 skipped. `--all-features` (nsg2 + split-K compiled in together, `packed_row_nsg_factor` correctly falls back to `1`): 162 tests run, 162 passed, 1 skipped. `cargo clippy -p omega --all-targets --features metal,metal-packed-row-nsg2 -- -D warnings` and `--all-features`: both EXIT=0, zero warnings. `bash scripts/omega-gate.sh`: `== omega gate: PASS ==`, EXIT=0.
+Result: 1 test run: 1 passed (`packed_row_nsg2_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul`). Feature-off twin passes under plain `--features metal` (1 passed, 107 skipped). Full `-p proxima-omega --features metal,metal-packed-row-nsg2`: 107 tests run, 107 passed, 1 skipped. `--all-features` (nsg2 + split-K compiled in together, `packed_row_nsg_factor` correctly falls back to `1`): 162 tests run, 162 passed, 1 skipped. `cargo clippy -p proxima-omega --all-targets --features metal,metal-packed-row-nsg2 -- -D warnings` and `--all-features`: both EXIT=0, zero warnings. `bash scripts/omega-gate.sh`: `== omega gate: PASS ==`, EXIT=0.
 
 **Bake-off (quiet box, M1 Max, 10 cores, macOS 15.8, release; `pgrep -fl 'cargo|rustc|nextest'` confirmed empty of non-self processes before the run):** two release test binaries (`cargo test --release --no-run -p proxima-model-interop`), own `CARGO_TARGET_DIR`s (`target-default`, `target-nsg2`) -- `default` = `metal,instrument`; `nsg2` = `metal,instrument,metal-packed-row-nsg2` (passthrough added to `proxima-model-interop/Cargo.toml`, own commit, same style as its `metal-q4k-*` neighbours). 3 interleaved rounds (llama-bench, then default, then nsg2, repeated 3x), plus one per-op profile run per arm (`profiles_one_real_decode_step_by_per_op_gpu_time`, `PROXIMA_METAL_OP_PROFILE_STEP=3` set internally by that test). `generated_text` identical across every arm/round ("Here is a simple Python function that returns").
 
@@ -20549,7 +20549,7 @@ Rebuilding at `min_len=0` (the shipped default, no env override needed) reproduc
 
 **Bug found and fixed in the same landing:** the `#[cfg(feature = "instrument")]` op-profiler's `classify_kind` (`omega/src/metal.rs`) labels a `Reduce` kernel `"reduce-packed-row-blocked"` by grepping its emitted source for this crate's own decode-helper call sites (`q4k_pair_dot(blk`, `q4k_run8(blk`, `q5k_value(blk`, `q6k_value(blk`); `push_q4k_ggml_port_body` calls none of them (transcribing ggml's math directly is the entire point of the port) and, like every other row-blocked body, ends in a `simd_sum(` combine, so it fell through to the `"reduce-cooperative"` arm below. Found by this landing's own bake-off: the per-op profile showed `reduce-packed-row-blocked` op_count drop from 225 (default) to 9 (port) and `reduce-cooperative` grow from 225 to 441, while every packed family's own `row_blocked_count` (the `packed_row_block` classifier's independent per-family counter) stayed at 32 on both arms -- proving dispatch was always correct and only this profiler label was wrong. Fixed by adding an `acc1_0` marker check (unique to this body's accumulator naming) to both `classify_kind` and `classify_packed_kernel_variant` (which named the same kernels `"other"`). Instrument-only; no effect on emitted kernel source, dispatch geometry, or any non-instrumented build.
 
-**Gates (own `CARGO_TARGET_DIR`, `CARGO_TERM_COLOR=never`):** `cargo build --workspace --lib` EXIT=0. `cargo nextest run -p omega --features metal`: 113 passed, 1 skipped. `cargo nextest run -p omega --features metal,metal-q4k-ggml-port`: 116 passed, 1 skipped (includes the new `ggml_port_doubles_the_threadgroup_width...` reachability test and the two `q4k_ggml_port_parity` real-checkpoint parity tests). `cargo nextest run -p omega --all-features`: 171 passed, 1 skipped. `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped. `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped. `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0. `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` asserts 171 tests run/171 passed non-zero, `[6/6]` asserts 2 doctests passed non-zero, `== omega gate: PASS ==`.
+**Gates (own `CARGO_TARGET_DIR`, `CARGO_TERM_COLOR=never`):** `cargo build --workspace --lib` EXIT=0. `cargo nextest run -p proxima-omega --features metal`: 113 passed, 1 skipped. `cargo nextest run -p proxima-omega --features metal,metal-q4k-ggml-port`: 116 passed, 1 skipped (includes the new `ggml_port_doubles_the_threadgroup_width...` reachability test and the two `q4k_ggml_port_parity` real-checkpoint parity tests). `cargo nextest run -p proxima-omega --all-features`: 171 passed, 1 skipped. `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped. `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped. `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0. `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` asserts 171 tests run/171 passed non-zero, `[6/6]` asserts 2 doctests passed non-zero, `== omega gate: PASS ==`.
 
 **Bake-off (quiet box, M1 Max, 10 cores, macOS 15.8, release; `pgrep -fl 'cargo|rustc|nextest'` confirmed empty of non-self processes before the run and re-checked before each measurement phase):** two release test binaries (`cargo test --release --no-run -p proxima-model-interop --lib`), own `CARGO_TARGET_DIR`s (`target-default`, `target-port`) -- `default` = `metal,instrument`; `port` = `metal,instrument,metal-q4k-ggml-port`. 3 interleaved rounds (llama-bench, then default, then port, repeated 3x), plus one per-op profile run per arm after the `classify_kind` fix landed (both binaries rebuilt). `generated_text` identical across every arm/round ("Here is a simple Python function that returns").
 
@@ -20598,7 +20598,7 @@ ggml-port is **10.0% slower** on steady-state `step_wall_ms` and **11.6% slower*
 **Re-prove:**
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima
-CARGO_TARGET_DIR=<own target dir> cargo nextest run -p omega --features metal,metal-q4k-ggml-port
+CARGO_TARGET_DIR=<own target dir> cargo nextest run -p proxima-omega --features metal,metal-q4k-ggml-port
 CARGO_TARGET_DIR=<own target dir>-default cargo test --release --no-run -p proxima-model-interop --lib --features metal,instrument
 CARGO_TARGET_DIR=<own target dir>-port cargo test --release --no-run -p proxima-model-interop --lib --features metal,instrument,metal-q4k-ggml-port
 PROXIMA_MAX_TOKENS=8 <binary> --exact --nocapture --ignored \
@@ -20618,7 +20618,7 @@ Compare `step_wall_ms` (steps 1..7 mean) and the `reduce-packed-row-blocked` `op
 
 **Card:** `perf/q5k-pair-dot`. **Worktree/branch/commit:** `proxima-wt-s6e2-q5k`/`perf/q5k-pair-dot` @ `3c94368`, landed via `proxima-wt-land-q5k`/`land/q5k`. **Feature:** `metal-q5k-pair-dot`, default: ON (folded into the `metal` feature in both `omega/Cargo.toml` and `proxima-model-interop/Cargo.toml`, mirroring ROW-273/`9f6a878`'s `metal-output-placement`/`metal-wide-cooperative-reduce`/`kv-capacity-bucket` flips).
 
-**The body.** `Q5K_PAIR_DOT_MSL` (`omega/src/msl.rs`) is `Q4_K`'s paired-nibble, two-word-load `plain_product` body extended with `Q5_K`'s `qh` high-bit plane (one extra byte load, mask select, no shift), mirroring ggml's `kernel_mul_mv_q5_K_f32_impl` (`ggml-metal.metal:5209-5324`) lane assignment. It replaces the fully scalar per-element `q5k_value` loop the row-blocked packed path (`push_packed_row_blocked_body`'s `PackedCodec::Q5K` arm) previously fell back to for every `Q5_K` weight. A real-checkpoint parity test against `blk.0.ffn_down.weight` (`omega/tests/q5k_real_checkpoint_parity.rs`) is the oracle; it now runs under `cargo nextest run -p omega --features metal` alone (no extra flag needed) since the feature is in the default set.
+**The body.** `Q5K_PAIR_DOT_MSL` (`omega/src/msl.rs`) is `Q4_K`'s paired-nibble, two-word-load `plain_product` body extended with `Q5_K`'s `qh` high-bit plane (one extra byte load, mask select, no shift), mirroring ggml's `kernel_mul_mv_q5_K_f32_impl` (`ggml-metal.metal:5209-5324`) lane assignment. It replaces the fully scalar per-element `q5k_value` loop the row-blocked packed path (`push_packed_row_blocked_body`'s `PackedCodec::Q5K` arm) previously fell back to for every `Q5_K` weight. A real-checkpoint parity test against `blk.0.ffn_down.weight` (`omega/tests/q5k_real_checkpoint_parity.rs`) is the oracle; it now runs under `cargo nextest run -p proxima-omega --features metal` alone (no extra flag needed) since the feature is in the default set.
 
 **Per-op measurement.** `q5k-scalar` (default-off arm) 202,083 ns/op -> `q5k-paired` (this landing) 124,265 ns/op on the 8 real `Q5_K` ops in the decode graph -- **1.63x**. Family total (`blk.{0..3}.ffn_down.weight`, the tensor the parity test itself binds against): 6.275 ms -> 5.725 ms.
 
@@ -20633,7 +20633,7 @@ Flat within this cell's own noise band -- **0.6 ms is inside the noise**, not a 
 
 **Correctness:** parity against the dequantized f32 CPU path on real `blk.0.ffn_down.weight` bytes < 1e-4. Generated text identical across every arm/round ("Here is a simple Python function that returns" / "Here is a simple Python" at 5 tokens for the op-profile run).
 
-**Gates (own `CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-q5k/target`, `CARGO_TERM_COLOR=never`):** `cargo build --workspace --lib` EXIT=0. `cargo nextest run -p omega --features metal`: 115 passed, 1 skipped (includes `q5k_pair_dot_matmul_on_real_ffn_down_q5k_bytes_matches_the_dequantized_f32_cpu_path`, now reachable under `metal` alone). `cargo nextest run -p omega --all-features`: 173 passed, 1 skipped. `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped. `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped. `cargo nextest run -p proxima-model-interop --features std`: 82 passed, 22 skipped. `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0. `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` asserts 173 tests run/173 passed non-zero, `[6/6]` asserts 2 doctests passed non-zero, `== omega gate: PASS ==`.
+**Gates (own `CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-q5k/target`, `CARGO_TERM_COLOR=never`):** `cargo build --workspace --lib` EXIT=0. `cargo nextest run -p proxima-omega --features metal`: 115 passed, 1 skipped (includes `q5k_pair_dot_matmul_on_real_ffn_down_q5k_bytes_matches_the_dequantized_f32_cpu_path`, now reachable under `metal` alone). `cargo nextest run -p proxima-omega --all-features`: 173 passed, 1 skipped. `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped. `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped. `cargo nextest run -p proxima-model-interop --features std`: 82 passed, 22 skipped. `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0. `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` asserts 173 tests run/173 passed non-zero, `[6/6]` asserts 2 doctests passed non-zero, `== omega gate: PASS ==`.
 
 **Default decode oracle** (`PROXIMA_MAX_TOKENS=8`, release, `metal,instrument`): `step_wall_ms` mean over steps 1..7 = 40.521 ms (43.671, 41.974, 38.978, 40.365, 38.963, 38.905, 40.791), `plan_hits=5` (> 0), `generated_text="Here is a simple Python function that returns"`.
 
@@ -20644,7 +20644,7 @@ Flat within this cell's own noise band -- **0.6 ms is inside the noise**, not a 
 **Re-prove:**
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima
-CARGO_TARGET_DIR=<own target dir> cargo nextest run -p omega --features metal
+CARGO_TARGET_DIR=<own target dir> cargo nextest run -p proxima-omega --features metal
 CARGO_TARGET_DIR=<own target dir> PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
   bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
 CARGO_TARGET_DIR=<own target dir> PROXIMA_MAX_TOKENS=8 PROXIMA_METAL_OP_PROFILE_STEP=3 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
@@ -20668,9 +20668,9 @@ Confirm `q5k-paired` appears in the `op_profile_variant` lines and `q5k-scalar` 
 **The tests.** `omega/src/metal.rs`'s `uniform_cache_tests` module (real-Metal-device gated, skips headless): `filling_past_capacity_evicts_the_least_recently_used_entry` fills to `UNIFORM_CACHE_ENTRIES`, touches key 0 (refreshing its tick), inserts one more distinct blob to force an eviction, then asserts key 0 survived (cache hit) and key 1 (the actual LRU victim) missed. `a_cache_hit_refreshes_the_use_tick` asserts a hit's tick strictly increases. `uniform_buffer_reuses_still_counts_hits` asserts the pre-existing `UNIFORM_BUFFER_REUSES` counter semantics (miss on first upload, hit on re-upload of identical bytes) are unchanged by the eviction path. A `#[cfg(test)]` `reset_uniform_cache_for_test` clears both the map and the clock between tests since the std test harness reuses threads and both are thread-locals.
 
 **Gates (own `CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-ucache/target`, `CARGO_TERM_COLOR=never`):**
-- `cargo nextest run -p omega --features metal`: EXIT=0, 118 passed, 1 skipped.
-- `cargo nextest run -p omega --all-features`: EXIT=0, 176 passed, 1 skipped.
-- `cargo nextest run -p omega --features metal -E 'test(uniform_cache_tests)'`: EXIT=0, 3 passed, 116 skipped (the three tests named above).
+- `cargo nextest run -p proxima-omega --features metal`: EXIT=0, 118 passed, 1 skipped.
+- `cargo nextest run -p proxima-omega --all-features`: EXIT=0, 176 passed, 1 skipped.
+- `cargo nextest run -p proxima-omega --features metal -E 'test(uniform_cache_tests)'`: EXIT=0, 3 passed, 116 skipped (the three tests named above).
 - `bash scripts/omega-gate.sh`: EXIT=0, `== omega gate: PASS ==` (6/6 steps incl. doctests: 2 passed).
 - Default decode oracle (`PROXIMA_MAX_TOKENS=8`, release, `metal,instrument`, `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`): EXIT=0, `generated_text="Here is a simple Python function that returns"` (unchanged from ROW 278's oracle text). Per-step `uniform_cache_len`: step0=23, step1=43, step2=50, step3=50, step4=50, step5=50, step6=50, step7=50 -- **plateaus at 50**, well under the 4096 cap, confirming the growth this cache exhibits on a plan-stable decode is bounded far below the new eviction threshold; the bound is a leak-prevention fix for workloads with varying uniform shapes, not a change to this default workload's behavior.
 
@@ -20686,7 +20686,7 @@ Confirm `q5k-paired` appears in the `op_profile_variant` lines and `q5k-scalar` 
 
 **Correctness fix found by the parity suite.** The full omega parity run turned up a `live_bytes` underflow in the arena's free-list bookkeeping (a buffer being retired twice against the same liveness range); fixed in this landing before any measurement below was taken.
 
-**7 arena tests** (`omega::metal::arena_tests`, all pass under `cargo nextest run -p omega --features metal`, reachable without any extra flag since the feature is in the default set): `a_programs_output_buffer_is_never_in_the_free_list`, `live_buffer_count_bounded_in_steady_state`, `an_extent_change_forces_a_documented_realloc`, `a_pooled_slot_is_never_rebound_before_its_last_consumers_position`, `uniform_contents_change_per_step_while_the_buffer_identity_does_not`, `two_ops_with_identical_uniform_bytes_get_distinct_plan_owned_buffers`, `pooled_output_equals_the_cpu_oracle_on_a_real_forward`.
+**7 arena tests** (`omega::metal::arena_tests`, all pass under `cargo nextest run -p proxima-omega --features metal`, reachable without any extra flag since the feature is in the default set): `a_programs_output_buffer_is_never_in_the_free_list`, `live_buffer_count_bounded_in_steady_state`, `an_extent_change_forces_a_documented_realloc`, `a_pooled_slot_is_never_rebound_before_its_last_consumers_position`, `uniform_contents_change_per_step_while_the_buffer_identity_does_not`, `two_ops_with_identical_uniform_bytes_get_distinct_plan_owned_buffers`, `pooled_output_equals_the_cpu_oracle_on_a_real_forward`.
 
 **Noisy-box decode wall** (measured on the source branch before this landing; `PROXIMA_MAX_TOKENS=8`, `runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `step_wall_ms` mean over steps 1..7, ms/token):
 
@@ -20709,7 +20709,7 @@ CoV across the 3 rounds: OFF 1.05%, ON 3.5%. ON <= OFF every round. Round 3's fi
 
 **Correctness:** all 7 arena tests pass; the parity-suite-found `live_bytes` underflow is fixed; `pooled_output_equals_the_cpu_oracle_on_a_real_forward` holds the pooled path to the CPU oracle.
 
-**Gates (own `CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-arena/target`, `CARGO_TERM_COLOR=never`, re-run after a same-day rebase onto a newer `main`):** `cargo build --workspace --lib` EXIT=0. `cargo nextest run -p omega --features metal`: 122 passed, 1 skipped (includes all 7 `arena_tests`, reachable under `metal` alone). `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped. `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped. `cargo nextest run -p proxima-model-interop --features std`: 82 passed, 22 skipped. `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0 (only an unrelated `proc-macro-error2` future-incompat note). `cargo nextest run -p omega --all-features`: 180 passed, 1 skipped. `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 180 tests run/180 passed, `[6/6]` 2 doctests passed.
+**Gates (own `CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-arena/target`, `CARGO_TERM_COLOR=never`, re-run after a same-day rebase onto a newer `main`):** `cargo build --workspace --lib` EXIT=0. `cargo nextest run -p proxima-omega --features metal`: 122 passed, 1 skipped (includes all 7 `arena_tests`, reachable under `metal` alone). `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped. `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped. `cargo nextest run -p proxima-model-interop --features std`: 82 passed, 22 skipped. `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0 (only an unrelated `proc-macro-error2` future-incompat note). `cargo nextest run -p proxima-omega --all-features`: 180 passed, 1 skipped. `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 180 tests run/180 passed, `[6/6]` 2 doctests passed.
 
 **Not done.** This landing's source branch was cut before ROW 279's uniform-cache LRU bound existed; the two land independently of each other (this row touches `BufferArena`/`PlanUniforms`, ROW 279 touches `UNIFORM_BUFFERS`) and the merge conflict between them (both added a `#[cfg(test)]` module at the same point in `omega/src/metal.rs`) was resolved by keeping both test modules intact side by side -- `uniform_cache_tests` (ROW 279) and `arena_tests` (this row). No further uniform-cache work is open after this row lands.
 
@@ -20718,7 +20718,7 @@ CoV across the 3 rounds: OFF 1.05%, ON 3.5%. ON <= OFF every round. Round 3's fi
 **Re-prove:**
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima
-CARGO_TARGET_DIR=<own target dir> cargo nextest run -p omega --features metal
+CARGO_TARGET_DIR=<own target dir> cargo nextest run -p proxima-omega --features metal
 CARGO_TARGET_DIR=<own target dir> PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
   bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
 ```
@@ -20773,7 +20773,7 @@ ON's `cached-attention` bucket carries exactly 32 ops (one fused step per layer,
 
 **Correctness:** `bind::tests` 31/31 pass under `cached-attention-streaming` (includes the new gathered-source-abort test and the openchat 939/619/32 regression gate); `cached_attention_single_range_fused_matches_the_unfused_program` holds `max_error <= 1e-5` at all three bucket paddings tested; `generated_text` identical between OFF and ON across all 3 bake-off rounds.
 
-**Gates (own `CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-fattn/target`, `CARGO_TERM_COLOR=never`):** `cargo build --workspace --lib` EXIT=0. `cargo nextest run -p omega --features metal`: 125 passed, 1 skipped. `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped. `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped. `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0 (only an unrelated `proc-macro-error2` future-incompat note). `cargo nextest run -p proxima-tensor --features std,instrument,cached-attention-streaming`: 518 passed, 7 skipped. `cargo nextest run -p omega --features metal,cached-attention-streaming`: 125 passed, 1 skipped. `cargo nextest run -p omega --all-features`: 183 passed, 1 skipped. `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 183 tests run/183 passed, `[6/6]` 2 doctests passed. `bash scripts/proxima-tensor-gate.sh`: 21 cells green (504 tests passed/7 skipped on the plain feature-matrix cell, examples ran, 1 doctest asserted). `cargo nextest run -p proxima-model-interop --features metal,instrument,cached-attention-streaming`: 95 passed, 25 skipped.
+**Gates (own `CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-fattn/target`, `CARGO_TERM_COLOR=never`):** `cargo build --workspace --lib` EXIT=0. `cargo nextest run -p proxima-omega --features metal`: 125 passed, 1 skipped. `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped. `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped. `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0 (only an unrelated `proc-macro-error2` future-incompat note). `cargo nextest run -p proxima-tensor --features std,instrument,cached-attention-streaming`: 518 passed, 7 skipped. `cargo nextest run -p proxima-omega --features metal,cached-attention-streaming`: 125 passed, 1 skipped. `cargo nextest run -p proxima-omega --all-features`: 183 passed, 1 skipped. `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 183 tests run/183 passed, `[6/6]` 2 doctests passed. `bash scripts/proxima-tensor-gate.sh`: 21 cells green (504 tests passed/7 skipped on the plain feature-matrix cell, examples ran, 1 doctest asserted). `cargo nextest run -p proxima-model-interop --features metal,instrument,cached-attention-streaming`: 95 passed, 25 skipped.
 
 **Decision.** Land the matcher and the band fix (both are pure correctness/capability additions, gated behind the still-default-off `cached-attention-streaming` feature, so main's default build is untouched by them). Do **not** flip `cached-attention-streaming` into the `metal` feature list: the bake-off's own decision rule required ON <= OFF beyond both arms' CoVs, and the measured delta (0.07% of the OFF mean) is an order of magnitude smaller than either arm's CoV (2.33% / 4.76%) -- a real GPU-side saving exists (`total_gpu_ms` -8.2% in the per-op profile) but it does not clear the wall-clock noise floor on this box across 3 rounds, so this landing keeps the feature default-off per the stated rule rather than claiming a win the wall-clock data does not support.
 
@@ -20812,7 +20812,7 @@ metal_decode_summary tokens_generated=8 stopped_by_eos=false total_wall_clock_ms
 ```
 `emit_calls=616` on every step (steps 0-7, not 938); `plan_hits=5` (steps 3-7 hit the plan cache); `step_wall_ms` for steps 1..7 (step 0 is prefill and excluded, matching ROW 281's own convention): 52.454, 50.938, 32.548, 35.799, 33.541, 37.815, 34.966 -- mean 39.723 ms/token. This single run is informational only (no bake-off re-run; ROW 281's 3-round bake-off is the standing evidence for the wall-clock claim), consistent with ROW 281's ON arm.
 
-**Correctness:** all five gates plus the two extra (`omega --all-features`, `bash scripts/omega-gate.sh`, `bash scripts/proxima-tensor-gate.sh`) pass unchanged in test count from ROW 281's own baseline, now exercised as the *default* build rather than an opt-in feature: `cargo build --workspace --lib` EXIT=0; `cargo nextest run -p omega --features metal`: 125 passed, 1 skipped; `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped; `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped; `cargo nextest run -p proxima-model-interop --features std`: 82 passed, 22 skipped; `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0 (same pre-existing `proc-macro-error2` future-incompat note as ROW 281); `cargo nextest run -p omega --all-features`: 183 passed, 1 skipped; `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 183 tests run/183 passed, `[6/6]` 2 doctests passed; `bash scripts/proxima-tensor-gate.sh`: 21 cells green, 504 tests passed/7 skipped on the plain feature-matrix cell. No test in either crate was pinned to the unfused 938/939 op count under default features -- `bind::tests`' 939/619 regression gate calls `bind_with_fusion(.., false)` explicitly (`proxima-tensor/src/bind.rs:2625,2898,2903`) and is therefore independent of this flip.
+**Correctness:** all five gates plus the two extra (`omega --all-features`, `bash scripts/omega-gate.sh`, `bash scripts/proxima-tensor-gate.sh`) pass unchanged in test count from ROW 281's own baseline, now exercised as the *default* build rather than an opt-in feature: `cargo build --workspace --lib` EXIT=0; `cargo nextest run -p proxima-omega --features metal`: 125 passed, 1 skipped; `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped; `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped; `cargo nextest run -p proxima-model-interop --features std`: 82 passed, 22 skipped; `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0 (same pre-existing `proc-macro-error2` future-incompat note as ROW 281); `cargo nextest run -p proxima-omega --all-features`: 183 passed, 1 skipped; `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 183 tests run/183 passed, `[6/6]` 2 doctests passed; `bash scripts/proxima-tensor-gate.sh`: 21 cells green, 504 tests passed/7 skipped on the plain feature-matrix cell. No test in either crate was pinned to the unfused 938/939 op count under default features -- `bind::tests`' 939/619 regression gate calls `bind_with_fusion(.., false)` explicitly (`proxima-tensor/src/bind.rs:2625,2898,2903`) and is therefore independent of this flip.
 
 **Decision.** Flip `cached-attention-streaming` into the default `metal` feature list in both `omega/Cargo.toml` and `proxima-model-interop/Cargo.toml`, and note the now-redundant explicit mention in `omega`'s dev-dependency feature list and `proxima-tensor/Cargo.toml`'s own feature doc comment. The feature stays individually selectable in every crate that exposes it.
 
@@ -20838,9 +20838,9 @@ Confirm `emit_calls=616` (not 938), `plan_hits=5`, and `generated_text="Here is 
 **Parity.** New test `omega/tests/cached_attention_coop_load_parity.rs` (`the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding`) is the Metal-vs-CPU gate the task asked for that `metal_real_forward.rs` cannot give: it drives `gqa_single_range_cached_forward_program` (the NINE-operand dynamic-`cached_len` fused kind, not the eight-operand two-range kind `metal_real_forward.rs`'s own fixture produces) through a new `real_single_range_forward_fixture_with_padding` support builder, at `kv-capacity-bucket` paddings **0, 1, 5** (real `cached_len + new_count` rows of random K/V per `kv_cache.*` block, zero-filled past that to the padded shape, `cached_len` fed as its own real scalar -- reproducing `spec.rs`'s own `max_error_for_padding` shape on the REAL op set instead of the 4-vocab CPU-only toy). Measured: `relative` = **5.29e-7** identically at every padding (`max_diff=3.99e-6`, `max_magnitude=7.555`), four orders of magnitude under the `1e-4` gate. `fused.operands().len() == 9` asserted at every padding (confirms the single-range candidate fired, not the two-range one).
 
 **Gates, own `CARGO_TARGET_DIR=<worktree>/target-new`, `CARGO_TERM_COLOR=never`, post-rebase onto `main`@`0808811`:**
-- `cargo nextest run -p omega --features metal,cached-attention-streaming`: 126 passed, 1 skipped (EXIT=0).
-- `cargo nextest run -p omega --all-features`: 184 passed, 1 skipped (EXIT=0).
-- `cargo clippy -p omega --all-features --all-targets -- -D warnings`: EXIT=0, zero warnings.
+- `cargo nextest run -p proxima-omega --features metal,cached-attention-streaming`: 126 passed, 1 skipped (EXIT=0).
+- `cargo nextest run -p proxima-omega --all-features`: 184 passed, 1 skipped (EXIT=0).
+- `cargo clippy -p proxima-omega --all-features --all-targets -- -D warnings`: EXIT=0, zero warnings.
 - `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 184/184, `[6/6]` 2 doctests (EXIT=0).
 - `cargo nextest run -p proxima-model-interop --features metal,instrument,cached-attention-streaming`: 95 passed, 25 skipped (EXIT=0).
 
@@ -20858,7 +20858,7 @@ One pre-existing unit test (`msl::tests::cached_attention_emits_one_online_softm
 
 **The `cached-attention` `op_profile_bucket` itself (32 ops/step), 3 interleaved rounds plus the OLD/NEW pair from the gate-verification run above (`PROXIMA_METAL_OP_PROFILE_STEP=3`):** OLD `{6.192, 3.597, 3.669, 5.851}` ms, mean **4.827**, CoV **24.9%**. NEW `{5.145, 2.132, 4.545, 3.367}` ms, mean **3.797**, CoV **30.4%**. Ratio of means 1.271x (NEW lower), consistent in DIRECTION with the low-noise `gpu_exec_ms` aggregate above, but **this specific 32-op bucket does not resolve at this sample size** -- CoV on both arms is 5x the skill's own 5% trust threshold, and one round (round 2: OLD 3.669 -> NEW 4.545) inverts the direction. Mechanism for the noise, not hand-waved: the orthogonal `reduce-packed-row-blocked` bucket (225 Q4_K/Q5_K/Q6_K matmul ops, untouched by this row) swings by the SAME magnitude across the SAME rounds for BOTH arms -- OLD `{25.028, 25.774, 42.724}` ms, NEW `{25.738, 60.140, 42.236}` ms -- confirming the swings are host-scheduling noise on this per-op-serialized profiling path (`PROXIMA_METAL_OP_PROFILE_STEP` times each op as its own GPU dispatch, per ROW 247's own doc on why that path is far more exposed to contention than the one-command-buffer decode path `gpu_exec_ms` above measures), not a property of either kernel. Task's own stated pre-change baseline of "3.73 ms" for this bucket sits inside OLD's own measured range (3.597-6.192) and matches its two least-contended rounds (3.597, 3.669) closely -- corroborating, not contradicting, this row's data.
 
-**Host loadout.** Box was NOT quiet for the full duration: `pgrep -fl 'cargo|rustc|nextest'` showed a single foreign process (another worktree's `cargo nextest run -p omega --features metal` finishing up) immediately before the bake-off started, dropping to zero non-excluded processes at the moment the first round launched; a sibling worktree (`proxima-wt-s6e2-concurrent`) resumed a `cargo build --release`/`cargo clippy --workspace` cycle partway through the interleaved rounds (confirmed via the correlated `reduce-packed-row-blocked` swings above, not merely inferred). This is recorded, not hidden, per this skill's own "record the host loadout" clause -- the `gpu_exec_ms` aggregate signal survives it (CoV stayed under 1.3% on every arm); the 32-op micro-bucket and the wall-clock signal do not.
+**Host loadout.** Box was NOT quiet for the full duration: `pgrep -fl 'cargo|rustc|nextest'` showed a single foreign process (another worktree's `cargo nextest run -p proxima-omega --features metal` finishing up) immediately before the bake-off started, dropping to zero non-excluded processes at the moment the first round launched; a sibling worktree (`proxima-wt-s6e2-concurrent`) resumed a `cargo build --release`/`cargo clippy --workspace` cycle partway through the interleaved rounds (confirmed via the correlated `reduce-packed-row-blocked` swings above, not merely inferred). This is recorded, not hidden, per this skill's own "record the host loadout" clause -- the `gpu_exec_ms` aggregate signal survives it (CoV stayed under 1.3% on every arm); the 32-op micro-bucket and the wall-clock signal do not.
 
 **Honest read.** The change is a real, reproducible win on the metric it should move most directly (`gpu_exec_ms`, the GPU-timed aggregate over the one serialized command buffer the real decode step dispatches): -4.4%, zero round-to-round overlap between arms, low CoV on both. It is directionally consistent on the specific 32-op `cached-attention` bucket the task named as the target metric, but that specific measurement does not clear this skill's own 5%-CoV trust bar at 3-4 samples on a shared box -- reported as a negative/inconclusive result at THIS sample size, not suppressed. Text is byte-identical across every arm and round. `emit_calls` is unchanged (this row does not reduce op count, only per-op cost), so it does not independently qualify under the owner's "less-work" rule from ROW 282 on dispatch count alone -- the qualifying signal here is GPU time, which the `gpu_exec_ms` data supports at low noise.
 
@@ -20869,7 +20869,7 @@ One pre-existing unit test (`msl::tests::cached_attention_emits_one_online_softm
 **Re-prove:**
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima
-CARGO_TARGET_DIR=<own target dir> cargo nextest run -p omega --features metal,cached-attention-streaming --test cached_attention_coop_load_parity
+CARGO_TARGET_DIR=<own target dir> cargo nextest run -p proxima-omega --features metal,cached-attention-streaming --test cached_attention_coop_load_parity
 CARGO_TARGET_DIR=<own target dir>-old cargo test --release --no-run -p proxima-model-interop --features metal,instrument,cached-attention-streaming
 CARGO_TARGET_DIR=<own target dir>-new cargo test --release --no-run -p proxima-model-interop --features metal,instrument,cached-attention-streaming
 PROXIMA_MAX_TOKENS=8 <binary> --exact --nocapture --ignored \
@@ -20902,7 +20902,7 @@ Compare `gpu_exec_ms` (steps 1..7 mean) between the two binaries; confirm `relat
 
 **Decision, under the owner's less-work rule (ROW 282):** output is text-identical between before and after; the work metric drops sharply (readback bytes -67.2% at step 0, -67.2% steady-state; readback calls 97 -> 1, a 96-copy-and-allocation reduction per token on the CPU critical path after `waitUntilCompleted`); wall clock cannot rise from removing post-wait memcpys that nothing downstream consumed, so no bake-off was run to confirm a wall-clock win -- the mechanism (fewer allocations and copies strictly subtracted from the critical path, nothing added) makes a regression structurally impossible, which is the case the owner's rule is for. This landing keeps `step_wall_ms` from this single oracle run as informational only, matching ROW 282's own convention for changes it does not re-bake-off.
 
-**Correctness:** `cargo build --workspace --lib` EXIT=0; `cargo nextest run -p omega --features metal`: 125 passed, 1 skipped; `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped; `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped; `cargo nextest run -p proxima-model-interop --features std`: 82 passed, 22 skipped; `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0 (same pre-existing `proc-macro-error2` future-incompat note as ROW 281/282); `cargo nextest run -p omega --all-features`: 183 passed, 1 skipped; `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 183 tests run/183 passed, `[6/6]` 2 doctests passed.
+**Correctness:** `cargo build --workspace --lib` EXIT=0; `cargo nextest run -p proxima-omega --features metal`: 125 passed, 1 skipped; `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped; `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped; `cargo nextest run -p proxima-model-interop --features std`: 82 passed, 22 skipped; `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0 (same pre-existing `proc-macro-error2` future-incompat note as ROW 281/282); `cargo nextest run -p proxima-omega --all-features`: 183 passed, 1 skipped; `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 183 tests run/183 passed, `[6/6]` 2 doctests passed.
 
 **Re-prove:**
 ```sh
@@ -20946,7 +20946,7 @@ Per steady decode step this emitted 419 explicit barriers for 616 total ops -- f
 
 **Decision, under the owner's rule (ROW 282):** `generated_text` is identical across every OFF and ON run; the work metric this row is decided on, `gpu_exec_ms` (the single command buffer's commit-to-completed GPU time), fell 29.267 -> 27.258 ms (-6.9%), a gap far larger than either arm's CoV (0.84% / 1.05% of their own means, i.e. ~0.25-0.29 ms bands) -- ON beats OFF in every one of 3 rounds with no overlap. Wall clock (`step_wall_ms`) is not worse beyond CoV: ON's mean (34.725) sits below OFF's mean plus OFF's own CoV band (36.556 + 3.04 = 39.60), and ON beats OFF outright in all 3 rounds. Both conditions of the owner's rule hold (`gpu_exec_ms` down beyond both CoVs, wall not worse beyond CoV), so `metal-concurrent-dispatch` flips into `metal`'s default feature list.
 
-**Correctness (post-flip, `metal` now implies `metal-concurrent-dispatch`):** `cargo build --workspace --lib` EXIT=0; `cargo nextest run -p omega --features metal`: 128 passed, 1 skipped; `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped; `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped; `cargo nextest run -p proxima-model-interop --features std`: 82 passed, 22 skipped; `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0 (same pre-existing `proc-macro-error2` future-incompat note as prior rows); `cargo nextest run -p omega --all-features`: 186 passed, 1 skipped; `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 186 tests run/186 passed, `[6/6]` 2 doctests passed; `cargo nextest run -p proxima-model-interop --features metal,instrument,metal-concurrent-dispatch`: 95 passed, 25 skipped.
+**Correctness (post-flip, `metal` now implies `metal-concurrent-dispatch`):** `cargo build --workspace --lib` EXIT=0; `cargo nextest run -p proxima-omega --features metal`: 128 passed, 1 skipped; `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped; `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped; `cargo nextest run -p proxima-model-interop --features std`: 82 passed, 22 skipped; `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0 (same pre-existing `proc-macro-error2` future-incompat note as prior rows); `cargo nextest run -p proxima-omega --all-features`: 186 passed, 1 skipped; `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 186 tests run/186 passed, `[6/6]` 2 doctests passed; `cargo nextest run -p proxima-model-interop --features metal,instrument,metal-concurrent-dispatch`: 95 passed, 25 skipped.
 
 **Re-prove:**
 ```sh
@@ -21059,9 +21059,9 @@ ATTN and COOP's CoV exceeds the 5% threshold at 3 rounds -- both are named as a 
 **Gates (worktree `proxima-wt-s6e2-ablation`, own `CARGO_TARGET_DIR`):**
 ```
 cargo build --workspace --lib                                                          EXIT=0
-cargo nextest run -p omega --features metal                                            128 passed, 1 skipped
-cargo nextest run -p omega --all-features                                              186 passed, 1 skipped
-cargo clippy -p omega -p proxima-model-interop --all-targets --all-features -- -D warnings   EXIT=0
+cargo nextest run -p proxima-omega --features metal                                            128 passed, 1 skipped
+cargo nextest run -p proxima-omega --all-features                                              186 passed, 1 skipped
+cargo clippy -p proxima-omega -p proxima-model-interop --all-targets --all-features -- -D warnings   EXIT=0
 bash scripts/omega-gate.sh                                                              PASS (6/6 steps, 186 tests, 2 doctests)
 cargo nextest run -p proxima-model-interop --features metal,instrument                  95 passed, 25 skipped
 ```
@@ -21294,7 +21294,7 @@ no lane math to disagree on). `metal::pipeline_for` gained a `debug!(cache_key, 
 cache lookup")` event on both the hit and miss branches so a collision's cache key is visible in
 telemetry going forward, not just inferable from a wrong number.
 
-**Re-prove:** `cargo nextest run -p omega --features metal,metal-wide-cooperative-reduce
+**Re-prove:** `cargo nextest run -p proxima-omega --features metal,metal-wide-cooperative-reduce
 wide_cooperative_reduce_key_collision` (real Metal device required; both assertions -- distinct
 cache keys, and the narrow call's post-fix parity with the cpu oracle -- are in one test).
 
@@ -21366,13 +21366,13 @@ Best per (source, size), run 2: 1GB nocopy=79.70 (wide, 45.75%), 1GB fresh=91.90
 
 The honest read on the second ratio: this synthetic, compute-free streaming-reduce ceiling sits **at parity with, to about 10% above,** llama.cpp's own achieved aggregate bandwidth on this host -- it is not a wide-open headroom number. Read one direction, llama.cpp is already extracting most of what this raw-bandwidth probe can find on this box under today's contention; read the other, a synthetic microbenchmark with no compute and no cross-kernel scheduling overhead should have MORE headroom than a full production decode loop, and finding it within noise of parity (run 2) rather than clearly above (run 1) is itself informative about how contended this host was during measurement, not about llama.cpp's efficiency. Both readings are held open; resolving them needs a quiet box, which this session did not have.
 
-**Gates.** No code changed beyond the harness landed at `a8d9c06` (`test(omega): add the device streaming ceiling harness`), which the prior session's own commit message and this session's clean `--no-run` release build (`cargo test --release -p omega --features metal --test device_streaming_ceiling --no-run`, exit 0, `Finished release profile [optimized] target(s) in 8m 24s`) both confirm compiles clean under `metal` on this host; no `cargo build`/`clippy`/`nextest` re-run beyond that was performed this session since no source outside the already-gated test file changed.
+**Gates.** No code changed beyond the harness landed at `a8d9c06` (`test(omega): add the device streaming ceiling harness`), which the prior session's own commit message and this session's clean `--no-run` release build (`cargo test --release -p proxima-omega --features metal --test device_streaming_ceiling --no-run`, exit 0, `Finished release profile [optimized] target(s) in 8m 24s`) both confirm compiles clean under `metal` on this host; no `cargo build`/`clippy`/`nextest` re-run beyond that was performed this session since no source outside the already-gated test file changed.
 
 **Re-prove** (from the artifact alone):
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-ceiling
 CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-ceiling/target CARGO_TERM_COLOR=never \
-cargo test --release -p omega --features metal --test device_streaming_ceiling -- --ignored --nocapture \
+cargo test --release -p proxima-omega --features metal --test device_streaming_ceiling -- --ignored --nocapture \
   device_streaming_ceiling_across_three_sources_and_two_sizes
 ```
 Confirm the gate `pgrep -l 'llama-bench|proxima_model_interop-'` is empty immediately before running; record `pgrep -l 'cargo|rustc|nextest' | wc -l` before and after regardless of its value. Re-run at least once and report the range if the best arm's CoV exceeds 5% (it did, both times, on this host).
@@ -21443,7 +21443,7 @@ CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-accept/targe
 
 **Re-prove command:**
 ```
-cd /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-hybrid && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-hybrid/target CARGO_TERM_COLOR=never cargo test --release -p omega --features metal --test device_streaming_ceiling -- --ignored --nocapture
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-hybrid && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-hybrid/target CARGO_TERM_COLOR=never cargo test --release -p proxima-omega --features metal --test device_streaming_ceiling -- --ignored --nocapture
 ```
 Confirm `pgrep -l 'llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest'` is empty (not just the narrower three-term check that missed the decode test this run) and `uptime` load average is near the core count before running; re-run at least once and report the range if any arm's CoV exceeds 5%.
 ### Changelog
@@ -21495,9 +21495,9 @@ Mean `step_wall_ms` steps 3..7: OFF 33.275, ON 31.700 (ON lower, but this is a s
 **proxima-tensor's own `default`/`std`:** unchanged. `cached-attention-streaming` (the other fusion feature named as the mirror check) is NOT in `proxima-tensor`'s own `std`/`default` list (`Cargo.toml:26`, `std = ["alloc", "thiserror/std", "tensor-bgpool", "tensor-cohort", "cohort-staged-graph", "dep:libc"]`) -- it only becomes reachable by default one level up, through `omega`'s and `proxima-model-interop`'s own `metal` feature. `reduce-epilogue-fusion` follows the identical shape: left off `proxima-tensor`'s own `default`, folded into `metal`'s default shape in `omega/Cargo.toml` and `proxima-model-interop/Cargo.toml` only.
 
 **Gates, this worktree's own `CARGO_TARGET_DIR`, `CARGO_TERM_COLOR=never`:**
-- `cargo nextest run -p omega --features metal`: 130 passed, 1 skipped (EXIT=0).
-- `cargo nextest run -p omega --all-features`: 188 passed, 1 skipped (EXIT=0).
-- `cargo clippy -p omega -p proxima-model-interop -p proxima-tensor --all-targets --all-features -- -D warnings`: EXIT=0, zero warnings.
+- `cargo nextest run -p proxima-omega --features metal`: 130 passed, 1 skipped (EXIT=0).
+- `cargo nextest run -p proxima-omega --all-features`: 188 passed, 1 skipped (EXIT=0).
+- `cargo clippy -p proxima-omega -p proxima-model-interop -p proxima-tensor --all-targets --all-features -- -D warnings`: EXIT=0, zero warnings.
 - `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 188/188, `[6/6]` 2 doctests (EXIT=0).
 - `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped (EXIT=0).
 - `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed (8 slow), 7 skipped (EXIT=0).
@@ -21509,7 +21509,7 @@ Mean `step_wall_ms` steps 3..7: OFF 33.275, ON 31.700 (ON lower, but this is a s
 cd /Users/brianbruggeman/repos/slot-0/proxima
 CARGO_TARGET_DIR=<own target dir> CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
   bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
-CARGO_TARGET_DIR=<own target dir> cargo test --release -p omega --features metal --test reduce_epilogue_fusion_parity -- --nocapture
+CARGO_TARGET_DIR=<own target dir> cargo test --release -p proxima-omega --features metal --test reduce_epilogue_fusion_parity -- --nocapture
 ```
 Confirm `emit_calls=520` (not 616), `barriers=323` (not 419), `plan_hits=5`, `generated_text="Here is a simple Python function that returns"` -- `--features metal,instrument` alone now carries the fused epilogue, no `reduce-epilogue-fusion` needed on the command line. Confirm `relative=0.0000005285906` at paddings 0, 1, 5 in the parity test.
 
@@ -21669,10 +21669,10 @@ this repo's shared worktree fleet building concurrently throughout, never quiesc
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-ladder
 CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-ladder/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal --test matvec_roofline_ladder --no-run
+  cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder --no-run
 pgrep -l 'llama-bench|proxima_model_interop-|device_streaming|llama-cli'   # must be empty
 CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-ladder/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal --test matvec_roofline_ladder -- \
+  cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder -- \
   --ignored --nocapture matvec_roofline_ladder_l0_through_l3_and_shape_sweep
 ```
 Requires `PROXIMA_BENCH_GGUF_PATH` (defaults to a host-local openchat-3.5-1210 Q4_K_S checkpoint)
@@ -21852,7 +21852,7 @@ of a `BoundOp` -- it has no reason to know about a Metal compile option. `pipeli
 (`omega/src/metal.rs`) is the one place a cache key turns into a `PIPELINE_CACHE` lookup, so the mode
 is folded in there: `format!("{cache_key}{}", math_mode.cache_token())`, `cache_token` returning `'S'`/
 `'R'`. A unit test (`math_mode_cache_key_tests::safe_and_relaxed_produce_distinct_pipeline_cache_keys`)
-asserts the two tokens never collide, and `cargo nextest run -p omega --features metal -E
+asserts the two tokens never collide, and `cargo nextest run -p proxima-omega --features metal -E
 'test(/byte_identi/)'` (3 tests, all pass) proves the MSL text itself is unchanged -- the mode is a
 compile OPTION, never a source-text variant.
 
@@ -21864,14 +21864,14 @@ omega::MathMode::Safe, .. }` for production callers, or `PROXIMA_METAL_MATH_MODE
 `Engine::from_env`/`PROXIMA_MATMUL_WORKERS` env-knob idiom this crate already uses) for a one-off
 bake-off without a second code path.
 
-**Gates.** `cargo nextest run -p omega --features metal`: 172 tests, 172 passed, 0 failed, at the new
+**Gates.** `cargo nextest run -p proxima-omega --features metal`: 172 tests, 172 passed, 0 failed, at the new
 `Relaxed` default -- every parity test (`metal_matmul_parity_across_codec_and_dtype`,
 `packed_row_multi_activation_parity`, `q3k`/`q4k`/`q5k`/`q6k`/`q8_0_real_checkpoint_parity`, etc.) holds
 at the same tolerances it held under `Safe`. `cargo nextest run -p proxima-model-interop --features
 metal,instrument`: 110 tests, 110 passed, 0 failed (27 skipped -- gated on fixtures/features this run
 did not need), including every `capability_matrix::metal_backend::*` CPU-parity case. `bash
-scripts/omega-gate.sh`: PASS, 8/8 steps, step 5's `cargo nextest run -p omega --all-features` ran 240
-tests, 240 passed. `cargo clippy -p omega -p proxima-model-interop --all-targets --features metal -- -D
+scripts/omega-gate.sh`: PASS, 8/8 steps, step 5's `cargo nextest run -p proxima-omega --all-features` ran 240
+tests, 240 passed. `cargo clippy -p proxima-omega -p proxima-model-interop --all-targets --features metal -- -D
 warnings`: clean (one `#[allow(clippy::too_many_arguments)]` added to `encode_op`, now 8 parameters,
 matching the existing allow on its sibling `execute_op_timed`).
 
@@ -22133,7 +22133,7 @@ against current main at both math modes.
 **Revert scope.** `omega/src/msl.rs`: `q4k_pair_dot`'s `word_low`/`word_high` `ushort` pointer loads
 restored to the pre-`e142f51` two-byte `uchar` | `uchar<<8` form; `q5k_pair_dot`'s `q1_word`/`q2_word`/
 `h_word` `ulong` loads restored to the pre-`e142f51` per-`l` `uchar` loads. `q3k_pair_dot`/`q6k_pair_dot`
-were never touched by `e142f51` and are unchanged. `cargo nextest run -p omega --features metal` on the
+were never touched by `e142f51` and are unchanged. `cargo nextest run -p proxima-omega --features metal` on the
 reverted body: 115 passed, 1 failed (`omega::packed_row_blocked_s1_byte_identity
 single_activation_row_q4k_matvec_emits_byte_identical_msl_to_the_pre_fold_body`) -- expected, the MSL
 text changed and this fixture pins it byte-for-byte; every q4k/q5k metal-parity test passed. The fixture
@@ -22387,13 +22387,13 @@ Run 2's 50/50 cell is void for magnitude (72.22% CoV, consistent with the same c
 **D0c -- does concurrent CPU+GPU streaming exceed GPU-alone?** NO. Best concurrent aggregate across both runs and all three splits: **291.85 GB/s** (70/30, run 2, CoV 1.55%). Best solo GPU-alone ceiling: **381.88 GB/s** (run 2). 291.85 GB/s is **23.6% below** the solo GPU ceiling, far outside the <=3.7% CoV any trusted concurrent cell carries -- adding a CPU reader on a disjoint byte range does not add bandwidth, it takes a share of one shared memory-controller ceiling the GPU alone already saturates more efficiently. This is a real, mechanism-consistent result (unified memory, one physical bandwidth budget, contended not additive), reproduced across two independent quiet runs with the same direction and magnitude. **Per the task brief's gate, this kills the mixed-engine placement design card (design-final.md §B.4): D0c does not clear, so concurrent CPU+GPU streaming is not a viable path to exceed the GPU-alone ceiling on this host.**
 
 **Gates (code changed: the amortization commit):**
-- `cargo test -p omega --release --features metal --test device_streaming_ceiling --no-run`: EXIT=0.
-- `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT=0, zero warnings.
-- `cargo nextest run -p omega --features metal`: 172 tests run, 172 passed, 3 skipped, EXIT=0.
+- `cargo test -p proxima-omega --release --features metal --test device_streaming_ceiling --no-run`: EXIT=0.
+- `cargo clippy -p proxima-omega --all-targets --features metal -- -D warnings`: EXIT=0, zero warnings.
+- `cargo nextest run -p proxima-omega --features metal`: 172 tests run, 172 passed, 3 skipped, EXIT=0.
 
 **Re-prove command:**
 ```
-cd /Users/brianbruggeman/repos/slot-0/proxima-wt-m3 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-m3/target CARGO_TERM_COLOR=never cargo test -p omega --release --features metal --test device_streaming_ceiling -- --ignored --nocapture --test-threads=1
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-m3 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-m3/target CARGO_TERM_COLOR=never cargo test -p proxima-omega --release --features metal --test device_streaming_ceiling -- --ignored --nocapture --test-threads=1
 ```
 Confirm the `pgrep -l` gate above is empty and `uptime` load-1 is under 10 immediately before running; run twice and report both if any arm's CoV exceeds 5% after discarding its first (cold) repeat.
 
@@ -22429,18 +22429,18 @@ Confirm the `pgrep -l` gate above is empty and `uptime` load-1 is under 10 immed
 `generated_text` identical both runs (`"Here is a simple Python function that returns"`), `plan_hits=5`/`plan_misses=3` identical both runs. Single runs each, not a bake-off with repeats -- timing is informational per this row's own task brief (the allocation-count test above is the gate); `uptime` load-1 was 22.93 at run time (other slices building concurrently on this shared host per the load average, though the quiet-gate's own process-name check matched none of them), so the ~27.7ms/22.9ms wall figures here run slightly high against ROW 288's quiet-box 28.54/host 1.3 baseline and should not be read as a new scoreboard entry.
 
 **Gates:**
-- `cargo build -p omega --lib --features metal,instrument`: EXIT=0.
-- `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`: EXIT=0, zero warnings.
-- `cargo clippy -p omega --all-targets --features metal,instrument,alloc-count -- -D warnings`: EXIT=0, zero warnings.
-- `cargo nextest run -p omega --features metal,instrument`: 178 tests run, 178 passed, 3 skipped, EXIT=0.
-- `cargo nextest run -p omega --features metal,instrument,alloc-count`: 178 tests run, 178 passed, 3 skipped, EXIT=0.
+- `cargo build -p proxima-omega --lib --features metal,instrument`: EXIT=0.
+- `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings`: EXIT=0, zero warnings.
+- `cargo clippy -p proxima-omega --all-targets --features metal,instrument,alloc-count -- -D warnings`: EXIT=0, zero warnings.
+- `cargo nextest run -p proxima-omega --features metal,instrument`: 178 tests run, 178 passed, 3 skipped, EXIT=0.
+- `cargo nextest run -p proxima-omega --features metal,instrument,alloc-count`: 178 tests run, 178 passed, 3 skipped, EXIT=0.
 - `cargo nextest run -p proxima-model-interop --features metal,instrument`: 110 tests run, 110 passed, 27 skipped, EXIT=0.
 - `bash scripts/omega-gate.sh`: 8/8 steps PASS, 242 tests run, 242 passed, 3 skipped, EXIT=0.
 - `metal::math_mode_cache_key_tests::safe_and_relaxed_produce_distinct_pipeline_cache_keys`: PASS (Safe/Relaxed pipeline-cache-key distinctness unaffected by this row).
 
 **Re-prove command:**
 ```
-cd /Users/brianbruggeman/repos/slot-0/proxima-wt-h0 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-h0/target CARGO_TERM_COLOR=never cargo nextest run -p omega --features metal,instrument,alloc-count --test plan_pipeline_alloc_count --no-capture
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-h0 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-h0/target CARGO_TERM_COLOR=never cargo nextest run -p proxima-omega --features metal,instrument,alloc-count --test plan_pipeline_alloc_count --no-capture
 ```
 
 ### Changelog
@@ -22659,19 +22659,19 @@ re-export unchanged. Every generated default equals the value it replaced (`172_
 `2`, `64`) -- confirmed by inspecting the generated `omega_sized.rs` after a clean build, not
 asserted.
 
-**Env-override proof.** `OMEGA_ARENA_TRANSIENT_CAP=99999999 cargo check -p omega --features
+**Env-override proof.** `OMEGA_ARENA_TRANSIENT_CAP=99999999 cargo check -p proxima-omega --features
 metal-plan-stable-buffers` recompiles and the generated `omega_sized.rs` reads `pub const
 ARENA_TRANSIENT_CAP: usize = 99999999;`; unsetting the var and rebuilding reverts the same file to
 `pub const ARENA_TRANSIENT_CAP: usize = 172812125;` (byte-for-byte the TOML default) -- confirmed by
 reading both generated files, not inferred from exit codes.
 
 **Gates** (`CARGO_TARGET_DIR`/`CARGO_TERM_COLOR` per `land-brief.md`):
-`cargo build -p omega --no-default-features --features alloc` EXIT=0;
-`cargo build -p omega --features metal` EXIT=0;
-`cargo build -p omega --features metal,metal-buffer-pool,metal-plan-stable-buffers,metal-packed-row-nsg2,wgpu-backend` EXIT=0;
-`cargo clippy -p omega --all-targets --all-features -- -D warnings` EXIT=0;
-`cargo nextest run -p omega --features metal` EXIT=0, 172 passed, 3 skipped;
-`cargo nextest run -p omega --all-features` EXIT=0, 242 passed, 3 skipped;
+`cargo build -p proxima-omega --no-default-features --features alloc` EXIT=0;
+`cargo build -p proxima-omega --features metal` EXIT=0;
+`cargo build -p proxima-omega --features metal,metal-buffer-pool,metal-plan-stable-buffers,metal-packed-row-nsg2,wgpu-backend` EXIT=0;
+`cargo clippy -p proxima-omega --all-targets --all-features -- -D warnings` EXIT=0;
+`cargo nextest run -p proxima-omega --features metal` EXIT=0, 172 passed, 3 skipped;
+`cargo nextest run -p proxima-omega --all-features` EXIT=0, 242 passed, 3 skipped;
 `bash scripts/omega-gate.sh` EXIT=0, all 8 steps PASS (242 tests, 2 doctests);
 `cargo nextest run -p proxima-model-interop --features metal` EXIT=0, 110 passed, 25 skipped.
 
@@ -22762,8 +22762,8 @@ Fixed in `f89b7ac` (`fix(omega): kind filter speaks the classifier's names`): a 
 adding the exact live kind-string enumeration to `KindFilter`'s own doc comment
 (`omega/src/metal.rs:1094`), so a future caller reads the current strings directly off the type
 instead of carrying forward a stale convention from an old ROW's prose. No behavior changed --
-`cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings` EXIT=0,
-`cargo nextest run -p omega --features metal,instrument` 176 tests run, 176 passed, 3 skipped.
+`cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings` EXIT=0,
+`cargo nextest run -p proxima-omega --features metal,instrument` 176 tests run, 176 passed, 3 skipped.
 
 **Second drift found the same way, also verified by dry run, not fixed (out of this row's scope):
 `emit_calls` no longer counts what ROW 287 used it for.** ROW 303's per-position pipeline
@@ -22847,8 +22847,8 @@ getting one.
 
 **Gates** (this row's own worktree, own `CARGO_TARGET_DIR`):
 ```
-cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings   EXIT=0
-cargo nextest run -p omega --features metal,instrument                          176 tests run, 176 passed, 3 skipped
+cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings   EXIT=0
+cargo nextest run -p proxima-omega --features metal,instrument                          176 tests run, 176 passed, 3 skipped
 ```
 
 **Re-prove:**
@@ -22911,7 +22911,7 @@ minted: the per-position record is `OpGpuTiming`, the same type
 `execute_plan_with_placements_op_timed` already returns; the only new
 tuple is a private `DispatchMeta` type ALIAS (not a struct) clippy's
 `type_complexity` lint required for readability. The `instrument`-off path
-is untouched (`cargo build -p omega --lib --features metal`: EXIT 0, no
+is untouched (`cargo build -p proxima-omega --lib --features metal`: EXIT 0, no
 new field on `Plan`, no new code compiled in).
 
 **Finding, reported plainly because it is the number that hurts:** the
@@ -22978,11 +22978,11 @@ OTHER branch this same function already implements (one shared encoder,
 untested here for lack of such a device, compiled and gated identically.
 
 **Gates:**
-- `cargo build -p omega --lib --features metal,instrument`: EXIT=0.
-- `cargo build -p omega --lib --features metal` (instrument-off): EXIT=0.
-- `cargo clippy -p omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT=0, zero warnings.
-- `cargo nextest run -p omega --features metal,instrument`: 177 tests run, 177 passed, 3 skipped, EXIT=0.
-- `cargo nextest run -p omega --features metal` (instrument-off): 172 tests run, 172 passed, 3 skipped, EXIT=0.
+- `cargo build -p proxima-omega --lib --features metal,instrument`: EXIT=0.
+- `cargo build -p proxima-omega --lib --features metal` (instrument-off): EXIT=0.
+- `cargo clippy -p proxima-omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT=0, zero warnings.
+- `cargo nextest run -p proxima-omega --features metal,instrument`: 177 tests run, 177 passed, 3 skipped, EXIT=0.
+- `cargo nextest run -p proxima-omega --features metal` (instrument-off): 172 tests run, 172 passed, 3 skipped, EXIT=0.
 - `cargo nextest run -p proxima-model-interop --features metal,instrument`: 110 tests run, 110 passed, 28 skipped, EXIT=0.
 - `bash scripts/omega-gate.sh`: 8/8 steps PASS, 243 tests run, 243 passed, 3 skipped, EXIT=0.
 
@@ -23111,9 +23111,9 @@ row here does, which plausibly explains its own low 41.63 GB/s (10.92% of ceilin
 the largest of any family in this table.
 
 **Gates:**
-- `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`: EXIT=0.
-- `cargo nextest run -p omega --features metal,instrument`: 180 tests run, 180 passed, 3 skipped, EXIT=0 (+3 vs ROW 309's 177: `kind_filter_family_ablation`'s three tests).
-- `cargo nextest run -p omega --features metal` (instrument-off): 172 tests run, 172 passed, 3 skipped, EXIT=0 (unchanged from ROW 309 -- the new test file is `instrument`-gated off).
+- `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings`: EXIT=0.
+- `cargo nextest run -p proxima-omega --features metal,instrument`: 180 tests run, 180 passed, 3 skipped, EXIT=0 (+3 vs ROW 309's 177: `kind_filter_family_ablation`'s three tests).
+- `cargo nextest run -p proxima-omega --features metal` (instrument-off): 172 tests run, 172 passed, 3 skipped, EXIT=0 (unchanged from ROW 309 -- the new test file is `instrument`-gated off).
 - `cargo nextest run -p proxima-model-interop --features metal,instrument`: 110 tests run, 110 passed, 28 skipped, EXIT=0 (unchanged from ROW 309).
 - `bash scripts/omega-gate.sh`: 8/8 steps PASS, 246 tests run, 246 passed, 3 skipped, EXIT=0 (+3 vs ROW 309's 243).
 
@@ -23178,8 +23178,8 @@ Derived matvec-only GB/s (`4.169 GB / (gpu_exec_mean - 3.9048 ms non-matvec resi
 **s1 byte-identity fixture.** `omega/tests/packed_row_blocked_s1_byte_identity.rs` gates itself off under `not(any(... feature = "metal-packed-row-nsg2" ...)))]` (its own doc, lines 1-27) -- with nsg2 now permanently on whenever `metal` is on, this test's own cfg-exclusion mechanism retires it (it no longer compiles under any `metal` build), which is the "refreshed by the mechanism its test documents" case, not a bytes update.
 
 **Gates (this row's own worktree, own `CARGO_TARGET_DIR`), run against the flipped default:**
-- `cargo clippy -p omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT=0.
-- `cargo nextest run -p omega --features metal`: 171 tests run, 171 passed, 3 skipped, EXIT=0.
+- `cargo clippy -p proxima-omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT=0.
+- `cargo nextest run -p proxima-omega --features metal`: 171 tests run, 171 passed, 3 skipped, EXIT=0.
 - `cargo nextest run -p proxima-model-interop --features metal,instrument`: 110 tests run, 110 passed, 28 skipped, EXIT=0.
 - `bash scripts/omega-gate.sh`: 8/8 steps PASS, EXIT=0.
 - `bash scripts/omega-feature-matrix.sh`: 21 cells, EXIT=0.
@@ -23222,8 +23222,8 @@ ROW 311 reported arm C (`computeCommandEncoder()`, no `memoryBarrierWithScope`) 
 **What this row DOES land, independent of the flip:** `DispatchType` is now a first-class runtime `Plan`/`ServingConfig` value (same shape as `MathMode`), so a caller who wants `Serial` (a different device, a different op graph, a future kernel set where the answer might flip) sets it without a rebuild, and no cargo feature encodes a build-time choice that used to be structurally unreachable in the other direction.
 
 **Gates (this row's own worktree, own `CARGO_TARGET_DIR`):**
-- `cargo clippy -p omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT=0.
-- `cargo nextest run -p omega --features metal`: see gate log for N.
+- `cargo clippy -p proxima-omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT=0.
+- `cargo nextest run -p proxima-omega --features metal`: see gate log for N.
 - `cargo nextest run -p proxima-model-interop --features metal,instrument`: see gate log for N.
 - `grep -rn 'metal-concurrent-dispatch' omega proxima-model-interop scripts`: empty (feature and every reference removed; `scripts/omega-feature-matrix.sh`'s cell 5 and both `forced_flag` lists updated to drop it).
 
@@ -23430,7 +23430,7 @@ Quiet gate (names-only, `|oracle-` included, load-1 < 10) immediately before eve
 
 **Byte-identity proof (Q4_K emit unchanged).** A temporary test (`emit(&matmul_op(4,256,5), &q4k).source`, the same fixture `q4k_row_blocked_matmul_uses_paired_nibble_decode` uses) dumped the full generated MSL source to a file before the edit and again after, on the same `Q4_K` shape; `diff` between the two dumps is empty (`DIFF_EXIT=0`). The temporary test was removed before committing -- it exists only in this row's log capture, not in the tree.
 
-**Gates** (`CARGO_TARGET_DIR`/`CARGO_TERM_COLOR` per `land-brief.md`): `cargo check -p omega --lib --features metal,instrument`: EXIT=0. `cargo nextest run -p omega --features metal -E 'test(q6k)'`: **15 tests run: 15 passed** (parity, unpack, and MSL-assembly tests). `cargo nextest run -p omega --features metal -E 'test(packed_row) or test(q4k) or test(q5k)'`: **35 tests run: 35 passed** (`Q4_K`/`Q5_K` row-blocked/parity/split-K-width regressions, unaffected since their `rows_per_simdgroup()` still returns `4`). `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`: EXIT=0. Re-ran the `q6k` nextest set again after rebasing onto `main` `5aca198`: still 15/15.
+**Gates** (`CARGO_TARGET_DIR`/`CARGO_TERM_COLOR` per `land-brief.md`): `cargo check -p proxima-omega --lib --features metal,instrument`: EXIT=0. `cargo nextest run -p proxima-omega --features metal -E 'test(q6k)'`: **15 tests run: 15 passed** (parity, unpack, and MSL-assembly tests). `cargo nextest run -p proxima-omega --features metal -E 'test(packed_row) or test(q4k) or test(q5k)'`: **35 tests run: 35 passed** (`Q4_K`/`Q5_K` row-blocked/parity/split-K-width regressions, unaffected since their `rows_per_simdgroup()` still returns `4`). `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings`: EXIT=0. Re-ran the `q6k` nextest set again after rebasing onto `main` `5aca198`: still 15/15.
 
 **Bench.** Quiet gate (`pgrep -l 'proxima_model_i|llama-bench|oracle-|^cargo$|^rustc$|nextest|cargo-nextest'`, load-1 < 10) was loud (load-1 20.7-32.1, other slices' `cargo`/`rustc`/`oracle-*` active) for the first ~9 of the allotted 10 minutes, then cleared. Two release oracle binaries built `--no-run` (`cargo test -p proxima-model-interop --release --features metal,instrument --no-run`), Arm A from a detached `main`@`5aca198` worktree, Arm B from this branch post-rebase -- both produced the identical binary fingerprint `proxima_model_interop-4bb37202b0aa38df`, confirming a source-only diff. Copied to `oracle-A`/`oracle-B`. Oracle: `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `PROXIMA_MAX_TOKENS=8`, `--exact --ignored --nocapture --test-threads=1`. 3 interleaved rounds (A,B,A,B,A,B), quiet gate re-checked before every invocation, `gpu_exec_ms` mean/CoV over steps 3..7 (5 datapoints/arm/round):
 
@@ -23457,7 +23457,7 @@ Quiet gate (names-only, `|oracle-` included, load-1 < 10) immediately before eve
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima-wt-q6rows
 CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-q6rows/target CARGO_TERM_COLOR=never \
-  cargo nextest run -p omega --features metal -E 'test(q6k)'
+  cargo nextest run -p proxima-omega --features metal -E 'test(q6k)'
 CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-q6rows/target CARGO_TERM_COLOR=never \
   cargo test --release -p proxima-model-interop --features metal,instrument --no-run
 ```
@@ -23507,11 +23507,11 @@ cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
 git worktree add ../proxima-wt-race-repro -b docs/row-318-repro main
 cd ../proxima-wt-race-repro
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal --test gpu_load_generator --no-run
+  cargo test -p proxima-omega --release --features metal --test gpu_load_generator --no-run
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
   cargo test -p proxima-model-interop --release --features metal,instrument --no-run
 CARGO_TARGET_DIR=$(pwd)/target PROXIMA_LOAD_SECONDS=600 nohup \
-  cargo test -p omega --release --features metal --test gpu_load_generator -- --ignored --nocapture &
+  cargo test -p proxima-omega --release --features metal --test gpu_load_generator -- --ignored --nocapture &
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
   PROXIMA_DISPATCH=concurrent PROXIMA_MAX_TOKENS=32 PROXIMA_DETERMINISM_RUNS=10 \
   cargo test -p proxima-model-interop --release --features metal,instrument \
@@ -23642,7 +23642,7 @@ PROXIMA_DISPATCH=concurrent PROXIMA_MAX_TOKENS=32 PROXIMA_DETERMINISM_RUNS=20 "$
 
 **Gate.** `pgrep -l 'proxima_model_i|llama-bench|oracle-|gpu_load_genera|matvec_roofline|^cargo$|^rustc$|nextest|cargo-nextest'` was loud for the first ~10 of 20 allotted minutes (a determinism experiment's `proxima_model_i` load generator, load-1 55.69 -> 2.73 as it wound down), cleared at load-1 2.73 with zero matching processes, re-checked clean (2.67) immediately before the timed run. Build (`--no-run`, release, `metal` feature) took 1m45s wall, done before the wait so the gate window was spent with the binary ready.
 
-**Run.** `cargo test -p omega --release --features metal --test matvec_roofline_ladder -- --ignored --nocapture q6k_head_and_layer_shape_roofline_ladder`. The test panicked on the head arm's own parity assertion before the layer arm ever started -- both shapes run sequentially inside one `#[test]` function (`run_q6k_shape_arm` called twice in `q6k_head_and_layer_shape_roofline_ladder`), and `assert_parity` panics on failure rather than returning a result, so **no layer-shape numbers exist from this run.**
+**Run.** `cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder -- --ignored --nocapture q6k_head_and_layer_shape_roofline_ladder`. The test panicked on the head arm's own parity assertion before the layer arm ever started -- both shapes run sequentially inside one `#[test]` function (`run_q6k_shape_arm` called twice in `q6k_head_and_layer_shape_roofline_ladder`), and `assert_parity` panics on failure rather than returning a result, so **no layer-shape numbers exist from this run.**
 
 | shape | rows | tensors | mean GB/s | CoV% | samples (GB/s) | max_abs_error | ratio to ROW 319 (45 GB/s) | ratio to device ceiling (381.24) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -23659,7 +23659,7 @@ PROXIMA_DISPATCH=concurrent PROXIMA_MAX_TOKENS=32 PROXIMA_DETERMINISM_RUNS=20 "$
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima-wt-r321
 CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-r321/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal --test matvec_roofline_ladder \
+  cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder \
   -- --ignored --nocapture q6k_head_and_layer_shape_roofline_ladder
 ```
 (expected: `test result: FAILED`, exit 101, head arm's line printed before the panic.)
@@ -23701,7 +23701,7 @@ Q6K_head batch_peak_abs=17379.0879 max_abs_error=0.0293 relative_to_peak=0.00000
 
 The head shape's own CPU-oracle outputs peak near 17379 (a 4096-term dot product over `Q6_K`-quantized weights in `[-2,2]`-scaled synthetic data); `max_abs_error=0.029296875` is 2e-6 relative to that peak -- six-decimal-digit agreement, and smaller than float32's own representable ULP at that magnitude (~17379 * 1.19e-7 ≈ 0.002). The fixed 1e-4 *absolute* gate cannot pass at this output magnitude regardless of kernel correctness; ROW 321's hypothesis (1) -- "a threshold bug, not a kernel bug" -- is the one the numbers support. Not resolved here (changing the shared threshold is out of scope), but now measured rather than argued.
 
-**Fresh quiet-gate measurement (one round, as budgeted).** Quiet gate (names-only `pgrep`, load-1<10) held clean immediately before build and immediately before the run (`uptime` load-1 7.58, then re-checked 9.86 after a transient spike to 14.31 cleared in one 20s poll). Build: `cargo test -p omega --release --features metal --test matvec_roofline_ladder --no-run`, 1m21s, clean. Run: the built binary directly, `q6k_head_and_layer_shape_roofline_ladder --ignored --nocapture`.
+**Fresh quiet-gate measurement (one round, as budgeted).** Quiet gate (names-only `pgrep`, load-1<10) held clean immediately before build and immediately before the run (`uptime` load-1 7.58, then re-checked 9.86 after a transient spike to 14.31 cleared in one 20s poll). Build: `cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder --no-run`, 1m21s, clean. Run: the built binary directly, `q6k_head_and_layer_shape_roofline_ladder --ignored --nocapture`.
 
 | shape | rows | tensors | mean GB/s (5 samples) | mean GB/s (samples 2-5 only) | CoV% (5) / CoV% (2-5) | samples (GB/s) | max_abs_error | ratio to ROW 319 (45) | ratio to device ceiling (381.24) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -23716,7 +23716,7 @@ The head shape's own CPU-oracle outputs peak near 17379 (a 4096-term dot product
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima-wt-q6align
 CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-q6align/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal --test matvec_roofline_ladder \
+  cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder \
   -- --ignored --nocapture q6k_head_and_layer_shape_roofline_ladder
 ```
 (expected: `test result: FAILED`, exit 101, head arm's two printed lines before the panic; the added `relative_to_peak` line shows the failure is a magnitude/threshold mismatch, not divergent output.)
@@ -23755,7 +23755,7 @@ let hazard_inputs = resolve_hazard_inputs(
 )?;
 ```
 
-(was `bound.operands().iter().map(|(operand, _, _)| *operand)`). Build: `cargo build -p omega --features metal,instrument`, EXIT 0.
+(was `bound.operands().iter().map(|(operand, _, _)| *operand)`). Build: `cargo build -p proxima-omega --features metal,instrument`, EXIT 0.
 
 **Verify.** Same protocol as ROW 320: contention generator `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (`PROXIMA_MAX_TOKENS=64`) looped in the background (`proxima_model_i`, expected in this slice's quiet gate), harness `decode_text_is_deterministic_across_repeated_runs` (`PROXIMA_DISPATCH=concurrent PROXIMA_MAX_TOKENS=32 PROXIMA_DETERMINISM_RUNS=20`), release binary, `--test-threads=1`.
 
@@ -23765,7 +23765,7 @@ let hazard_inputs = resolve_hazard_inputs(
 
 `distinct_texts=1` across all 20 loaded runs (vs ROW 320's `distinct_texts=3` pre-fix under the identical contention protocol). `generated_text` matches ROW 320's own canonical text ("Here is a simple Python function that returns the nth Fibonacci number using recursion:..."). **Barriers/run rose from ROW 320's 10336 to 11360** -- the fix inserts new barriers exactly where the epilogue-operand RAW was previously invisible, the direct evidence this is the hazard that was missing, not a coincidental change.
 
-**Gates.** `cargo clippy -p omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT 0. `cargo nextest run -p omega --features metal`: `180 tests run: 180 passed, 5 skipped` (includes `reduce_epilogue_fusion_parity::the_fused_epilogue_is_byte_identical_across_twenty_dispatches` and `::the_fused_epilogue_holds_parity_at_every_kv_capacity_bucket_padding`, both green). Both re-run clean after rebasing onto `main`@`5ab6247` (ROW 322 landed concurrently, touching `omega/src/msl.rs`'s Q6_K loads -- no conflict, disjoint file).
+**Gates.** `cargo clippy -p proxima-omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT 0. `cargo nextest run -p proxima-omega --features metal`: `180 tests run: 180 passed, 5 skipped` (includes `reduce_epilogue_fusion_parity::the_fused_epilogue_is_byte_identical_across_twenty_dispatches` and `::the_fused_epilogue_holds_parity_at_every_kv_capacity_bucket_padding`, both green). Both re-run clean after rebasing onto `main`@`5ab6247` (ROW 322 landed concurrently, touching `omega/src/msl.rs`'s Q6_K loads -- no conflict, disjoint file).
 
 ## ROW 325 -- the output head's 1.9-2.4 ms unaccounted cost is NOT OS/GPU page residency: four residency arms land within 1% of each other
 
@@ -23932,7 +23932,7 @@ One `PROXIMA_METAL_KIND_FILTER='!family:output'` ablation on B (both the real he
 
 **Residual, named not hidden.** Two mechanisms are now on the table together and this row does not adjudicate between them: (a) the mis-keyed kernel itself may render genuinely different (possibly less efficient) MSL for production's axis layout than `msl.rs`'s row-blocked body renders for the ladder's layout -- not read here, `push_packed_row_blocked_body`'s actual generated source for each key was not diffed; (b) the ~1.78 ms first-touch cost visible in the A-minus-ablation/duplicate-delta arithmetic could be Metal-side per-command-buffer resource-residency or argument-table setup for a buffer referenced exactly once, a layer ROW 325's OS/GPU page-residency arms (`mlock`, `madvise`) cannot see or move, since it is scoped to the command buffer, not the process. Next slice: diff the two kernels' actual rendered MSL bodies for the two keys above, and/or reorder the head to a NON-terminal, NON-first position (rather than duplicating it) to separate "first reference to this specific buffer" from "first reference in program order" as the more precise mechanism.
 
-**Gates.** `cargo check -p proxima-tensor -p omega -p proxima-model-interop --release --features metal,instrument,std --all-targets`: EXIT 0. `cargo clippy -p proxima-tensor -p omega -p proxima-model-interop --release --features metal,instrument,std --all-targets -- -D warnings`: EXIT 0 (after adding `#[allow(clippy::too_many_arguments)]` with a stated reason, matching this file's own existing convention at seven other call sites, and a `SingleRangeForwardProgram` type alias for the now-4-wide return tuple). `cargo nextest run -p proxima-tensor --release`: 509 passed, 8 skipped. `cargo nextest run -p omega --release --features metal`: 182 passed, 5 skipped. `cargo nextest run -p proxima-model-interop --release --features metal,instrument,std`: 110 passed, 29 skipped (the real-checkpoint `#[ignore]`d tests, including this row's own oracle, correctly excluded from the default sweep).
+**Gates.** `cargo check -p proxima-tensor -p proxima-omega -p proxima-model-interop --release --features metal,instrument,std --all-targets`: EXIT 0. `cargo clippy -p proxima-tensor -p proxima-omega -p proxima-model-interop --release --features metal,instrument,std --all-targets -- -D warnings`: EXIT 0 (after adding `#[allow(clippy::too_many_arguments)]` with a stated reason, matching this file's own existing convention at seven other call sites, and a `SingleRangeForwardProgram` type alias for the now-4-wide return tuple). `cargo nextest run -p proxima-tensor --release`: 509 passed, 8 skipped. `cargo nextest run -p proxima-omega --release --features metal`: 182 passed, 5 skipped. `cargo nextest run -p proxima-model-interop --release --features metal,instrument,std`: 110 passed, 29 skipped (the real-checkpoint `#[ignore]`d tests, including this row's own oracle, correctly excluded from the default sweep).
 
 **Second, unrelated bug noticed in passing:** `q6k_head_and_layer_shape_roofline_ladder`'s "layer" arm (rows=4096) failed its own parity gate on one of two runs in this session (`relative_error=0.0681405` vs the `1e-5` threshold, first run only; the immediate re-run passed at `1.39e-6`) -- nondeterministic parity failure in that arm, not investigated further here, out of this row's scope.
 
@@ -23991,7 +23991,7 @@ The STEADY-STATE column is clean of both contaminants (`tensor_count=19`, one co
 
 **Residual, named not hidden.** (1) This ladder cannot cleanly reproduce ROW 326's specific 2.19 ms because every arm here either starts from a cold OS page cache (real, unmeasured-before-now magnitude: 430 ms) or a cold Metal pipeline JIT compile (17.5 ms / 2.92 ms) -- both one-time costs absent from production's steady per-token loop. (2) The `real_no_copy` steady-state numbers (227.96 / 243.86 GB/s) are themselves HIGHER than the `synthesized` arms' (192.39 / 197.89 GB/s), the opposite of what a naive "no-copy is slower to fault in" story would predict -- not explained here; a plausible mechanism is that the real tensor's actual row count (32,002) and the specific page-aligned offset within the registered mapping differ enough from the synthesized arms' freshly `StorageModeShared`-allocated buffers to change DMA/cache behavior, but this was not profiled.
 
-**Gates.** `cargo test -p omega --test matvec_roofline_ladder --features metal --no-run`: EXIT 0. `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0. `cargo test -p omega --test matvec_roofline_ladder --features metal --release -- --ignored --exact head_buffer_kind_by_kernel_variant --nocapture --test-threads=1`: `test result: ok. 1 passed; 0 failed`.
+**Gates.** `cargo test -p proxima-omega --test matvec_roofline_ladder --features metal --no-run`: EXIT 0. `cargo clippy -p proxima-omega --all-targets --features metal -- -D warnings`: EXIT 0. `cargo test -p proxima-omega --test matvec_roofline_ladder --features metal --release -- --ignored --exact head_buffer_kind_by_kernel_variant --nocapture --test-threads=1`: `test result: ok. 1 passed; 0 failed`.
 
 **Re-prove command:**
 ```sh
@@ -23999,7 +23999,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
 git worktree add ../proxima-wt-row327-repro -b docs/row-327-repro main
 cd ../proxima-wt-row327-repro
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --test matvec_roofline_ladder --features metal --release \
+  cargo test -p proxima-omega --test matvec_roofline_ladder --features metal --release \
   -- --ignored --exact head_buffer_kind_by_kernel_variant --nocapture --test-threads=1
 ```
 
@@ -24039,7 +24039,7 @@ CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 
 **Residual, named not hidden.** (1) Arm P's position-vs-first-touch question remains OPEN; the honest read of this row's own data is "cannot resolve with available instrumentation," not a lean toward either branch of the brief's own decision rule. (2) Each arm's ablation ran ONCE, not 3x, so the "head cost" column's subtracted term carries no CoV of its own -- only the arm mean it is subtracted from does. (3) Pre-existing, unrelated bug found on `main`@`9684b3f` while running this row's own regression gate: `bind::tests::single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape` (523 vs expected 619) and `bind::tests::cached_attention_rewrite_replaces_the_bound_attention_subgraph` (23 vs expected 26) both already fail on unmodified `main` -- reproduced via `git stash` before touching either file, confirmed unrelated to this row's `spec.rs`/`bind.rs` edits, left unfixed and out of this row's own scope.
 
-**Gates.** `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings`: EXIT 0. `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument,cached-attention-streaming,metal-output-placement -- -D warnings`: EXIT 0. `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0. `cargo test --release -p proxima-model-interop --lib --features metal,instrument,cached-attention-streaming,metal-output-placement`: `80 passed; 0 failed; 19 ignored`. `cargo test -p proxima-tensor --lib --features cached-attention-streaming,reduce-epilogue-fusion`: `494 passed; 2 failed (pre-existing on main, see Residual); 7 ignored`.
+**Gates.** `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings`: EXIT 0. `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument,cached-attention-streaming,metal-output-placement -- -D warnings`: EXIT 0. `cargo clippy -p proxima-omega --all-targets --features metal -- -D warnings`: EXIT 0. `cargo test --release -p proxima-model-interop --lib --features metal,instrument,cached-attention-streaming,metal-output-placement`: `80 passed; 0 failed; 19 ignored`. `cargo test -p proxima-tensor --lib --features cached-attention-streaming,reduce-epilogue-fusion`: `494 passed; 2 failed (pre-existing on main, see Residual); 7 ignored`.
 
 **Re-prove command:**
 ```sh
@@ -24085,7 +24085,7 @@ test), `proxima-model-interop/src/generate.rs` (`PROXIMA_METAL_ENCODER_SPLIT_AT`
 **Mechanism verified before measuring.** `encoder_split_reports_two_nonzero_encoder_spans_and_zeroes_per_op_gpu_ns`
 (a synthetic 4-dispatch program, `PASS` on the real M1 Max) proves the split itself works: two real,
 nonzero GPU-timestamp-derived encoder spans, every per-position `OpGpuTiming::gpu_ns` reading `0`
-(never fabricated from the wrong sample layout). `cargo nextest run -p omega --features metal,instrument`:
+(never fabricated from the wrong sample layout). `cargo nextest run -p proxima-omega --features metal,instrument`:
 196 passed (was 177 pre-ROW-309-baseline plus this row's own two). Applying `set_encoder_split_at`
 had to move OUT of `evaluate_dispatch_timed_with_placements`'s own build closure and onto the
 resolved plan unconditionally: a `debug!` trace (`plan_encoder_split_at=None` reaching
@@ -24158,9 +24158,9 @@ is no longer the FIRST short encoder opened after 519 dispatches' worth of GPU q
 duplicate-head arm B's `op_count=521` (vs 520) was verified directly from this run's own
 `op_profile: ... op_count=521` line, not assumed.
 
-**Gates:** `cargo clippy -p omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT 0, zero warnings.
-`cargo nextest run -p omega --features metal,instrument`: 196 tests run, 196 passed, 7 skipped, EXIT 0.
-`cargo nextest run -p omega --features metal` (instrument-off): 187 tests run, 187 passed, 7 skipped, EXIT 0.
+**Gates:** `cargo clippy -p proxima-omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT 0, zero warnings.
+`cargo nextest run -p proxima-omega --features metal,instrument`: 196 tests run, 196 passed, 7 skipped, EXIT 0.
+`cargo nextest run -p proxima-omega --features metal` (instrument-off): 187 tests run, 187 passed, 7 skipped, EXIT 0.
 
 **Re-prove command** (release oracle, one measurer, quiet gate `pgrep -l` names-only confirmed empty
 immediately before each launch; host load-1 not clean this run, see Residual):
@@ -24220,7 +24220,7 @@ The run's own final assertion: `test result: FAILED ... parity failed for 8 arm(
 
 **Residual, named not hidden.** (1) Part 1's 8-of-10 parity failure is a materially larger, previously unmeasured surface than the single `layer`-arm flake `ladder-parity-flake-read.md` and ROW 326 characterized -- this row does not root-cause it, only measures and reports it plainly. (2) `ffn_down`'s own failure as a first-of-its-activation-size call argues against a clean pairwise-collision explanation for every failing arm; some other or additional mechanism may be at play for the `k=14336` pair, not investigated here. (3) No fresh-process comparison was run for `layer` this row (only within-process repeats) -- whether `layer` is ALSO 100% reproducible on a fresh process invocation, or only stable within a process once one has occurred, is unmeasured. (4) The `RESIDENT_BUFFERS` `cache_hit` instrumentation candidate 2's own read names as the closing step was not added. (5) `attn_v_q5k`/`ffn_down_q5k` have no ROW 310 in-program comparator (not in that table) -- their isolated numbers stand alone.
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0.
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal -- -D warnings`: EXIT 0.
 
 **Re-prove command:**
 ```sh
@@ -24228,12 +24228,12 @@ cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
 git worktree add ../proxima-wt-row331-repro -b docs/row-331-repro main
 cd ../proxima-wt-row331-repro
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal --test matvec_roofline_ladder --no-run
+  cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder --no-run
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal --test matvec_roofline_ladder \
+  cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder \
   -- --ignored --nocapture decode_shape_roofline_ladder
 PROXIMA_LADDER_REPEAT=20 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal --test matvec_roofline_ladder \
+  cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder \
   -- --ignored --nocapture q6k_head_and_layer_shape_roofline_ladder
 ```
 (expected: both tests `FAILED`, exit 101; `decode_shape_roofline_ladder` lists 8 failing arms; the repeat run's `layer` arm prints identical divergent-row values across all 20 `PROXIMA_LADDER_REPEAT` iterations.)
@@ -24264,7 +24264,7 @@ PROXIMA_LADDER_REPEAT=20 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 
 **Residual, named not hidden.** (1) This row's verification replays `DECODE_SHAPES`' real order and real per-arm shapes but a SMALL fixed tensor count (4), not ROW 331's own amortization-floor counts (19-848/arm, ~26 minutes wall for the full ladder) -- a full-scale re-run of `decode_shape_roofline_ladder` itself with this fix, to directly re-produce ROW 331's own table post-fix, was not executed this row (time-boxed) and is the direct next-slice re-proof. (2) `ffn_down`'s specific real-scale failure (ROW 331: 0.0549641) is NOT reproduced by this row's small-scale harness even with the PRE-FIX code (0.0000042138645, clean, both standalone and directly after `ffn_up`) -- meaning ROW 331's `ffn_down` failure has a cause this row's mechanism does not explain, most plausibly scale-dependent (a real 61-tensor arm's own address/allocator pressure, distinct from the 4-tensor replay) and NOT the resident-cache name collision fixed here. This is the one arm where "8 of 10 fixed" is not yet proven at ROW 331's own scale; the fix is expected to still be necessary but may not be sufficient for `ffn_down` specifically until a full-scale re-run confirms or a second mechanism is found.
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`: EXIT 0. `cargo nextest run -p omega --features metal`: 187 tests run, 187 passed, 7 skipped, EXIT 0.
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings`: EXIT 0. `cargo nextest run -p proxima-omega --features metal`: 187 tests run, 187 passed, 7 skipped, EXIT 0.
 
 **Re-prove command:**
 ```sh
@@ -24272,7 +24272,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
 git worktree add ../proxima-wt-row332-repro -b docs/row-332-repro main
 cd ../proxima-wt-row332-repro
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal --test matvec_roofline_ladder \
+  cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder \
   -- --ignored --nocapture decode_shape_roofline_ladder
 ```
 (expected, post-fix: `test result: ok` -- all 10 arms pass `check_parity`; each arm's printed `relative_error` lands in the `~1e-6` to `~1e-5` band, none above `PARITY_MAX_REL_ERROR=1e-5` except the unresolved `ffn_down` real-scale residual named above, which this command will surface if still present.)
@@ -24308,7 +24308,7 @@ Test harness result: `parity failed for 4 arm(s)` (`attn_v`, `attn_output`, `ffn
 
 **Residual, named not hidden.** (1) `ffn_down`'s failure is confirmed real and scale-dependent, per ROW 332's own prediction, but its mechanism is still not identified -- becomes its own slice (per this task's own instruction), targeting: instrument the WEIGHT-block resident-cache path (not just activation), and re-run with `PROXIMA_LADDER_REPEAT` set to get per-row divergent dumps at real scale. (2) `attn_v`, `attn_output`, `ffn_up` are a NEWLY discovered residual this row surfaced that ROW 332 did not predict and does not explain -- same slice as (1), since all four share the "fails at real tensor count, passes at tensor_count=4" signature. (3) This row made no code changes and did not set `PROXIMA_LADDER_REPEAT`; the per-row divergent-row evidence the original brief asked for (`attn_v`/`attn_output`/`ffn_up`/`ffn_down`'s specific divergent rows) was not captured and is the most direct piece of missing evidence for the next slice.
 
-**Gates.** `cargo test -p omega --release --features metal --test matvec_roofline_ladder --no-run`: EXIT 0 (build only, no source changes this row). `decode_shape_roofline_ladder` itself: EXIT 101 (4 parity failures, expected given the residual above -- this row's deliverable is the measurement, not a passing gate).
+**Gates.** `cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder --no-run`: EXIT 0 (build only, no source changes this row). `decode_shape_roofline_ladder` itself: EXIT 101 (4 parity failures, expected given the residual above -- this row's deliverable is the measurement, not a passing gate).
 
 **Re-prove command:**
 ```sh
@@ -24316,7 +24316,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
 git worktree add ../proxima-wt-row333-repro -b docs/row-333-repro main
 cd ../proxima-wt-row333-repro
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal --test matvec_roofline_ladder \
+  cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder \
   -- --ignored --nocapture decode_shape_roofline_ladder
 ```
 (expected, at `main` >= `883390c`: `test decode_shape_roofline_ladder ... FAILED` with 4 arms in the panic message -- `attn_v`, `attn_output`, `ffn_up`, `ffn_down` -- each above `PARITY_MAX_REL_ERROR=0.00001`; the other 6 arms print `relative_error` in the `~1e-6` to `~1e-5` band.)
@@ -24355,7 +24355,7 @@ All four land in the same `~2-4e-6` band the six already-passing arms occupied i
 
 **Residual, named not hidden.** This row's two verification passes cover 6 of the 10 `DECODE_SHAPES` arms (`attn_q`, `attn_v`, `attn_output`, `ffn_up`, `ffn_down`, plus `attn_k`/`ffn_gate` as unavoidable predecessors) at real scale; a full 10-arm re-run of `decode_shape_roofline_ladder` itself, to re-produce ROW 333's own table end to end post-fix, was not executed this row (out of this row's 30-minute time-box; the two targeted real-scale passes above are the direct evidence this fix clears the named mechanism) and is the direct next-slice re-proof. GB/s is not re-measured or claimed clean for any arm this row -- this row is a correctness fix, not a bandwidth slice (this task's own instruction: parity runs only).
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`: EXIT 0. `cargo nextest run -p omega --features metal`: 193 tests run, 193 passed, 9 skipped, EXIT 0.
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings`: EXIT 0. `cargo nextest run -p proxima-omega --features metal`: 193 tests run, 193 passed, 9 skipped, EXIT 0.
 
 **Re-prove command:**
 ```sh
@@ -24363,7 +24363,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
 git worktree add ../proxima-wt-row334-repro -b docs/row-334-repro main
 cd ../proxima-wt-row334-repro
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal,instrument --test matvec_roofline_ladder \
+  cargo test -p proxima-omega --release --features metal,instrument --test matvec_roofline_ladder \
   -- --ignored --nocapture row334_four_failing_arms_real_scale
 ```
 (expected, post-fix: `test result: ok`; every `stage_totals` line prints `nocopy_reuses=0`, and every `relative_error` lands in the `~2-4e-6` band, none above `PARITY_MAX_REL_ERROR=0.00001`.)
@@ -24382,7 +24382,7 @@ CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 
 **Change.** Two new functions, no new types (guiding-principles §1 -- a struct held only the five numbers every arm already computed field-by-field): `SampleStats` (mean/median/min/max/cov_pct, `sample_stats(samples: &[f64])`) replaces `mean_and_cov`; `warmed_up_samples<F: FnMut() -> Duration>(dispatch_once: F) -> Vec<Duration>` calls `dispatch_once` once (discarded) then `REPEATS` times, collecting. Every one of the 8 timed-repeat call sites in the file (`L0_streaming`, `L1_header_decode`, `L2_dequant`, `L3_baseline`, the `L3_shape` sweep's 18-cell inner loop, the `empty` floor arm, `run_shape_arm`, `run_head_arm`) now calls `warmed_up_samples` instead of hand-rolling its own `for _ in 0..REPEATS` loop, and reports `stats.median`/`stats.mean`/`stats.min`/`stats.max`/`stats.cov_pct` instead of the old `(mean, cov)` pair; `ladder_gbps` (the L0-L3 ratio table) and `run_shape_arm`'s ROW 310 in-program comparison now key on the median. `REPEATS` raised from 5 to 7. The `empty` arm keeps its ns/dispatch floor semantics -- only the discipline (warm-up + 7 + median/min/max/cov/mean) is now shared, not the unit.
 
-**Build.** `cargo test -p omega --test matvec_roofline_ladder --features metal --no-run`: EXIT 0 (debug). The two real-checkpoint-dependent gates below both ran the **release** profile instead: `decode_shape_roofline_ladder`'s own CPU-bound `Q4_K`/`Q5_K`/`Q6_K` quantize-encode synthesis (`synth_weight_bytes`, up to 848 tensors/arm) cost 30+ minutes of wall time for the FIRST of 10 arms alone in a debug binary (confirmed live, then killed) -- release cut the full 10-arm run to 1508s end to end. This changes wall-clock cost only; the GPU dispatch geometry, weight bytes, and every measured GB/s number are identical in either profile (`synth_weight_bytes`/`compile_pipeline` are never `#[cfg(debug_assertions)]`-gated).
+**Build.** `cargo test -p proxima-omega --test matvec_roofline_ladder --features metal --no-run`: EXIT 0 (debug). The two real-checkpoint-dependent gates below both ran the **release** profile instead: `decode_shape_roofline_ladder`'s own CPU-bound `Q4_K`/`Q5_K`/`Q6_K` quantize-encode synthesis (`synth_weight_bytes`, up to 848 tensors/arm) cost 30+ minutes of wall time for the FIRST of 10 arms alone in a debug binary (confirmed live, then killed) -- release cut the full 10-arm run to 1508s end to end. This changes wall-clock cost only; the GPU dispatch geometry, weight bytes, and every measured GB/s number are identical in either profile (`synth_weight_bytes`/`compile_pipeline` are never `#[cfg(debug_assertions)]`-gated).
 
 **Quiet gate.** `pgrep -l 'proxima_model_i|llama-bench|oracle-|gpu_load_genera|matvec_roofline|^cargo$|^rustc$|nextest|cargo-nextest'` EMPTY and load-1 < 10 confirmed immediately before each of the two measured runs below (waited ~90s once for load-1 to drop from 21.94 to 8.89 before the first).
 
@@ -24419,7 +24419,7 @@ This is the real, `Q4_K`, 64-real-distinct-tensor `ffn_up`/`ffn_gate` batch the 
 
 **Residual, named not hidden.** `attn_q`/`attn_output`'s CoV (23.53%/14.65%) did not clear this row's own de-noising target even with the warm-up -- both are the smallest-`tensor_count` `Q4_K` shapes in `DECODE_SHAPES`; a larger `tensor_count` or more repeats is the direct next-slice candidate, not executed this row (out of this row's own scope: land the timing discipline, not chase every residual CoV to zero). `q6k_head_and_layer_shape_roofline_ladder`, `head_buffer_kind_by_kernel_variant`, `row334_attn_q_then_attn_output_real_scale`, and `row334_four_failing_arms_real_scale` were not re-run this row (all four call the same `run_shape_arm`/`run_head_arm` this row changed, so the same discipline applies to them by construction, but this row's own 40-minute budget covered the two gates the brief named, not every `#[ignore]`d test in the file).
 
-**Gates.** `cargo test -p omega --test matvec_roofline_ladder --features metal --no-run`: EXIT 0. `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0 (see commit below).
+**Gates.** `cargo test -p proxima-omega --test matvec_roofline_ladder --features metal --no-run`: EXIT 0. `cargo clippy -p proxima-omega --all-targets --features metal -- -D warnings`: EXIT 0 (see commit below).
 
 **Re-prove command:**
 ```sh
@@ -24427,7 +24427,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
 git worktree add ../proxima-wt-row335-repro -b docs/row-335-repro main
 cd ../proxima-wt-row335-repro
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal --test matvec_roofline_ladder \
+  cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder \
   -- --ignored --nocapture decode_shape_roofline_ladder matvec_roofline_ladder_l0_through_l3_and_shape_sweep
 ```
 (expected: both `test result: ok`; every arm's printed line carries `median_gbps`/`mean_gbps`/`min_gbps`/`max_gbps`/`cov_pct` -- or `median_ns_per_dispatch`/... for `empty` -- and every `samples=[...]` list has exactly 7 entries, none of them the arm's own cold-first-dispatch outlier.)
@@ -24448,7 +24448,7 @@ CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 
 **Assertion, not just a faster wall time.** Under `--features instrument`, `run_shape_arm` now reads `omega::metal::metal_stage_totals()` once per `warmed_up_samples` call (index 0 is the untimed warm-up, indices 1.. are the timed repeats it exists to prove clean) and asserts, for every TIMED repeat: `nocopy_uploads == nocopy_reuses` (every no-copy weight touch this repeat was a cache HIT, zero fresh device-buffer creations) and `resident_uploads == 0` (the misaligned/copy-path counterpart never re-copies). The two counters are NOT symmetric and this row found that out the direct way: `upload_block_as_float`/`upload_packed_bytes` fire `nocopy_uploads` unconditionally, before the hit/miss branch, so a naive `nocopy_uploads == 0` assertion false-failed on `attn_q`'s very first timed repeat (`left: 212, right: 0`) even though every one of those 212 touches was in fact a cache hit; `resident_uploads` (`upload_resident_copy`'s own counter site) fires ONLY inside the miss branch, so `== 0` is correct there. Both forms are documented in-line at the assertion site so the fix does not need rediscovering.
 
-**Build.** `cargo check -p omega --tests --features metal`: EXIT 0. `cargo check -p omega --tests --features metal,instrument`: EXIT 0. `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0. `cargo test -p omega --release --features metal,instrument --test matvec_roofline_ladder --no-run`: EXIT 0.
+**Build.** `cargo check -p proxima-omega --tests --features metal`: EXIT 0. `cargo check -p proxima-omega --tests --features metal,instrument`: EXIT 0. `cargo clippy -p proxima-omega --all-targets --features metal -- -D warnings`: EXIT 0. `cargo test -p proxima-omega --release --features metal,instrument --test matvec_roofline_ladder --no-run`: EXIT 0.
 
 **Quiet gate.** `pgrep -l 'llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest'` EMPTY and load-1 < 10 confirmed immediately before the measured run below (waited ~90s once for load-1 to drop from 11.09 to 4.49 before launch; `uptime` before 2.45, after 3.08).
 
@@ -24486,7 +24486,7 @@ Every `Q4_K`/`Q5_K` family in this row's table now sits inside or just under the
 
 **Residual, named not hidden.** `q6k_head_and_layer_shape_roofline_ladder`, `row334_attn_q_then_attn_output_real_scale`, and `row334_four_failing_arms_real_scale` were not re-run this row (all three call the same `run_shape_arm` this row fixed, so the same fix and the same per-repeat assertion apply to them by construction, but this row's own budget covered the one gate the brief named). `head`'s 5.572x isolated-over-in-program ratio is reported, not explained beyond the existing ROW 310/314/327 pointers -- a genuinely new finding this row did not have budget to chase.
 
-**Gates.** `cargo check -p omega --tests --features metal`: EXIT 0. `cargo check -p omega --tests --features metal,instrument`: EXIT 0. `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0.
+**Gates.** `cargo check -p proxima-omega --tests --features metal`: EXIT 0. `cargo check -p proxima-omega --tests --features metal,instrument`: EXIT 0. `cargo clippy -p proxima-omega --all-targets --features metal -- -D warnings`: EXIT 0.
 
 **Re-prove command:**
 ```sh
@@ -24494,7 +24494,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
 git worktree add ../proxima-wt-row336-repro -b docs/row-336-repro main
 cd ../proxima-wt-row336-repro
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal,instrument --test matvec_roofline_ladder \
+  cargo test -p proxima-omega --release --features metal,instrument --test matvec_roofline_ladder \
   -- --ignored --nocapture decode_shape_roofline_ladder
 ```
 (expected: `test result: ok`, no `assert_eq!` panic from any arm's per-repeat upload check, and every arm's own `stage_totals`/`per_call_uploads` line shows `(N, 0)` for every entry after the first.)
@@ -24539,7 +24539,7 @@ Every `attn_k` cell's own parity check reports the SAME `relative_error=1.77e-6`
 
 **Residual, named not hidden.** `attn_q`, `ffn_up`, `ffn_down` are entirely unmeasured by this row -- not "assumed similar to `attn_k`", not "expected to follow ROW 335's ffn single-shape numbers" (ROW 335 measured `dispatchThreads`+`dispatchThreadgroups` both, `safe`/`relaxed`/`fast`, nsg={1,2,4} on the ffn shape ONLY, under a DIFFERENT kernel entry point's compiled variant -- not restated as a stand-in for `ffn_up`/`ffn_down` here). Whether the ~2.75% `attn_k` gain generalizes to the FFN shapes (higher per-dispatch parallelism already, ROW 336's own read: "bandwidth rises with row count") is unmeasured, not a small number -- a future row's first job, not a small number safe to interpolate from `attn_k`'s own 1024-row shape.
 
-**Gates.** `cargo test -p omega --test matvec_roofline_ladder --features metal --no-run`: EXIT 0. `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0.
+**Gates.** `cargo test -p proxima-omega --test matvec_roofline_ladder --features metal --no-run`: EXIT 0. `cargo clippy -p proxima-omega --all-targets --features metal -- -D warnings`: EXIT 0.
 
 **Re-prove command:**
 ```sh
@@ -24547,7 +24547,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
 git worktree add ../proxima-wt-row337-repro -b docs/row-337-repro main
 cd ../proxima-wt-row337-repro
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --test matvec_roofline_ladder --features metal \
+  cargo test -p proxima-omega --test matvec_roofline_ladder --features metal \
   -- --ignored --exact decode_shape_nsg_math_sweep --nocapture
 ```
 (expected: ~4.5 minutes for `attn_k` alone on a host comparable to this row's M1 Max; the full 4-shape run's own wall time is unmeasured by this row -- budget accordingly before running unattended.)
@@ -24597,7 +24597,7 @@ DERIVED, extrapolated to all three FFN matrices (`ffn_up`+`ffn_gate`+`ffn_down`,
 
 **Residual, named not hidden.** `attn_k` (ROW 337), `attn_q`, `ffn_down` remain unmeasured by any row to date under this sweep; `ffn_gate` has never been dispatched under this sweep at all. The three-matrix extrapolation above is DERIVED under an explicit, unverified assumption, not a measurement -- a future row's job is to run `ffn_gate`/`ffn_down` through this same filter, not to treat this row's number as covering them.
 
-**Gates.** `cargo test -p omega --release --test matvec_roofline_ladder --no-run`: EXIT 0. `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0.
+**Gates.** `cargo test -p proxima-omega --release --test matvec_roofline_ladder --no-run`: EXIT 0. `cargo clippy -p proxima-omega --all-targets --features metal -- -D warnings`: EXIT 0.
 
 **Re-prove command:**
 ```sh
@@ -24605,7 +24605,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
 git worktree add ../proxima-wt-row338-repro -b docs/row-338-repro main
 cd ../proxima-wt-row338-repro
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  PROXIMA_SWEEP_SHAPE=ffn_up cargo test -p omega --release --test matvec_roofline_ladder --features metal \
+  PROXIMA_SWEEP_SHAPE=ffn_up cargo test -p proxima-omega --release --test matvec_roofline_ladder --features metal \
   -- --ignored --exact decode_shape_nsg_math_sweep --nocapture
 ```
 (expected: well under a minute for `ffn_up` alone on a host comparable to this row's M1 Max -- `ffn_up`'s own 61-tensor synthesis at `MIN_TIMED_BYTES` is far smaller than `attn_k`'s 848 tensors, ROW 337's own doc.)
@@ -24641,7 +24641,7 @@ Arm B's delta: switching ONLY the compiled kernel's dispatch geometry (nsg 1->4)
 
 **Residual, named not hidden.** This arm's weights are synthesized, not the real checkpoint (guiding-principles §9's documented fallback, same posture as `DECODE_SHAPES`'s own `Q5_K` variants) -- a real-checkpoint run would additionally pay 4 real `Q5_K` layers' own shape, unmeasured here. Output is never read back, so this row makes no parity claim for the whole-token sequence (each op's own kernel already carries parity elsewhere: ROW 336/337/338 for the per-shape cells this row's kernels are lifted from verbatim). Arm B's `nsg=4`/`fast` cell is ROW 337/338's own per-shape "best cell," not a from-scratch search across this row's own whole-token sequence -- a finer sweep over the whole token is unmeasured by this row.
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0. `cargo test -p omega --release --features metal --test matvec_roofline_ladder -- --ignored whole_token_matvec_sequence_bare --nocapture`: EXIT 0, `test result: ok. 1 passed`.
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal -- -D warnings`: EXIT 0. `cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder -- --ignored whole_token_matvec_sequence_bare --nocapture`: EXIT 0, `test result: ok. 1 passed`.
 
 **Re-prove command:**
 ```sh
@@ -24649,7 +24649,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
 git worktree add ../proxima-wt-row339-repro -b docs/row-339-repro main
 cd ../proxima-wt-row339-repro
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --test matvec_roofline_ladder --features metal \
+  cargo test -p proxima-omega --release --test matvec_roofline_ladder --features metal \
   -- --ignored --exact whole_token_matvec_sequence_bare --nocapture
 ```
 (expected: ~1m30s release build + ~1 minute run on a host comparable to this row's M1 Max -- 225 distinct real-shaped `Q4_K`/`Q6_K` tensors synthesized via the rayon-parallel path, then 2 arms x 8 command buffers (1 warm-up + 7 timed) each.)
@@ -24683,7 +24683,7 @@ CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 
 **Residual, named not hidden.** Same residuals as ROW 339: synthesized weights, not the real checkpoint's 4-of-32 `Q5_K` layers; output never read back, no whole-token parity claim (per-shape parity lives in ROW 336/337/338). This row does not re-run production's own in-program path with production's machinery restored at nsg=2/relaxed -- confirming the 22.64 ms in-program figure specifically at this cell (rather than assuming ROW 308's number, which was measured at whatever cell was default when ROW 308 ran) is unmeasured here and would close the loop fully.
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0. `cargo test -p omega --release --features metal --test matvec_roofline_ladder -- --ignored --exact whole_token_matvec_sequence_bare --nocapture`: EXIT 0, `test result: ok. 1 passed`.
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal -- -D warnings`: EXIT 0. `cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder -- --ignored --exact whole_token_matvec_sequence_bare --nocapture`: EXIT 0, `test result: ok. 1 passed`.
 
 **Re-prove command:**
 ```sh
@@ -24691,7 +24691,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
 git worktree add ../proxima-wt-row340-repro -b docs/row-340-repro main
 cd ../proxima-wt-row340-repro
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --test matvec_roofline_ladder --features metal \
+  cargo test -p proxima-omega --release --test matvec_roofline_ladder --features metal \
   -- --ignored --exact whole_token_matvec_sequence_bare --nocapture
 ```
 (expected: ~1m30s release build + ~1 minute run on a host comparable to this row's M1 Max -- 4 arms x 8 command buffers (1 warm-up + 7 timed) each.)
@@ -24877,7 +24877,7 @@ PROXIMA_MAX_TOKENS=64 PROXIMA_METAL_KIND_FILTER='!cached_attention' "$BIN" bind:
 
 **Residual, named not hidden.** (1) A from-scratch first attempt at arm E (bind + emit with no `correct_packed_matmul_layouts` call) measured ~1244 ms/token bare -- ~71x arm C, ~3.24 GB/s -- which is not a genuine "emitted body is 71x slower" result: `correct_packed_matmul_layouts` rewrites the packed weight operand's `Layout` from `bind()`'s default (row-major over the DECLARED axis order) to the layout its packed bytes actually have on disk (`proxima_tensor::bind::correct_packed_matmul_layouts`'s own doc), and `omega::metal::prepare` always applies it before `emit` inside `plan()`/`execute_plan()` (which is why `run_shape_arm`/`run_head_arm` never needed to call it explicitly). Skipping it dropped the emitted kernel off whatever fast packed-row path it otherwise takes; adding the missing call is what produced this row's 21.214 ms number. Named here so nobody re-derives the same 71x wrong number from a bind+emit reproduction that skips this step. (2) No disassembly/instruction-count evidence backs the nsg-occupancy hypothesis above -- a direct read of the emitted kernel's `packed_row_block_shape_token`/resolved simdgroup count is the natural next row. (3) One round only (no repeat-round CoV cross-check the way ROW 343 ran 3 interleaved rounds) -- within-round CoV is low (0.86% worst case) but a second round was not run this session.
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal -- -D warnings` -- exit 0. `cargo check -p omega --tests --features metal,instrument` -- exit 0. No `nextest` run (this is an `#[ignore]`d Metal-hardware timing test, run directly via the release test binary per this file's own convention for `whole_token_matvec_sequence_bare`'s sibling rows).
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal -- -D warnings` -- exit 0. `cargo check -p proxima-omega --tests --features metal,instrument` -- exit 0. No `nextest` run (this is an `#[ignore]`d Metal-hardware timing test, run directly via the release test binary per this file's own convention for `whole_token_matvec_sequence_bare`'s sibling rows).
 
 **Re-prove command:**
 ```sh
@@ -24885,7 +24885,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
 git worktree add ../proxima-wt-row344-repro -b test/row-344-repro main
 cd ../proxima-wt-row344-repro
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal,instrument --test matvec_roofline_ladder \
+  cargo test -p proxima-omega --release --features metal,instrument --test matvec_roofline_ladder \
   -- --ignored --exact whole_token_matvec_sequence_bare --nocapture
 ```
 (expected: one release build, one run printing arms A-E's own `arm=... median_ms=... median_gbps=...` lines.)
@@ -24896,7 +24896,7 @@ CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 
 **Question this row answers.** 81f3e6d splits `render_cached_attention`'s key range across `context_chunks` simdgroups with an online-softmax merge, `context_chunks = clamp(ceil(context / keys_per_chunk), 1, cap)` (`omega/src/msl.rs:2932`, config at `omega/omega-runtime.toml:203-218`). The shipped default `keys_per_chunk = 64` gives `chunks = 1` for every step at or below 64 keys -- i.e. the split never engages inside ROW 342's own 64-token oracle window, which measured `cached_attention` alone carrying +1.885 ms of growth from steps 3..7 to 32..63 there. Does lowering `keys_per_chunk` to 16 (engaging chunks 1->4 as context grows 16->64 within the same window) reduce that per-token cost, and does the cross-simdgroup merge change output?
 
-**Method.** Same harness as ROW 324/341/342/343 (`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `--features metal,instrument`, `PROXIMA_MAX_TOKENS=64`, `--exact --ignored --nocapture`). Two release test binaries built from the same tree (`cargo test -p proxima-model-interop --release --features metal,instrument --no-run`), differing only in the env vars `build.rs` consults (`omega/build.rs:281-293`): A = default (`OMEGA_ATTENTION_CONTEXT_CHUNKS_KEYS_PER_CHUNK` unset, `keys_per_chunk=64`, chunks=1 throughout); B = `OMEGA_ATTENTION_CONTEXT_CHUNKS_KEYS_PER_CHUNK=16 OMEGA_ATTENTION_CONTEXT_CHUNKS_CAP=4` (chunks 1->4 as context crosses 16/32/48/64 keys). `omega/build.rs` touched between builds to force the build script to rerun since `cargo clean -p omega` reported 0 files removed; the resulting binaries differ byte-for-byte (`cmp` on the two 3,848,720-byte binaries reports a difference) confirming the override took effect, since the only input that changed between the two builds was the env var. Binaries copied to `r345-logs/oracle-A`/`oracle-B`. 3 rounds interleaved A, B, A, B, A, B.
+**Method.** Same harness as ROW 324/341/342/343 (`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `--features metal,instrument`, `PROXIMA_MAX_TOKENS=64`, `--exact --ignored --nocapture`). Two release test binaries built from the same tree (`cargo test -p proxima-model-interop --release --features metal,instrument --no-run`), differing only in the env vars `build.rs` consults (`omega/build.rs:281-293`): A = default (`OMEGA_ATTENTION_CONTEXT_CHUNKS_KEYS_PER_CHUNK` unset, `keys_per_chunk=64`, chunks=1 throughout); B = `OMEGA_ATTENTION_CONTEXT_CHUNKS_KEYS_PER_CHUNK=16 OMEGA_ATTENTION_CONTEXT_CHUNKS_CAP=4` (chunks 1->4 as context crosses 16/32/48/64 keys). `omega/build.rs` touched between builds to force the build script to rerun since `cargo clean -p proxima-omega` reported 0 files removed; the resulting binaries differ byte-for-byte (`cmp` on the two 3,848,720-byte binaries reports a difference) confirming the override took effect, since the only input that changed between the two builds was the env var. Binaries copied to `r345-logs/oracle-A`/`oracle-B`. 3 rounds interleaved A, B, A, B, A, B.
 
 **Quiet gate.** `pgrep -l cargo`, `pgrep -l matvec_roofline`, `pgrep -l proxima_model_interop` all empty immediately before setup and again immediately before the first timed round -- PASSED both checks; no ladder measurer (`matvec_roofline`, ROW 344) was running at any point in this session.
 
@@ -25090,7 +25090,7 @@ Every other named lever is confirmed at parity or absent; the one genuine, prova
 
 **Residual, named not hidden.** (1) No GPU occupancy/register-spill/disassembly evidence was taken this row either -- the natural next instrumentation to close item 3 for good is a Metal System Trace or `air-lldb`/`metal-shaderconverter` disassembly of `push_q4k_ggml_port_body`'s compiled AIR comparing live VGPR count against `q4k_pair_dot`'s. (2) One round, 7 repeats -- same posture as ROW 344, no repeat-round CoV cross-check. (3) Per the brief's own stop condition ("within 3% of C or 4 cycles spent"), only 1 of the budgeted 4 edit cycles was spent: the source-level diff above showed every OTHER named lever already at parity or absent for this shape before a second cycle would have been attempted, so the remaining 3 cycles were not spent chasing edits the diff already ruled out.
 
-**Gates.** `cargo check -p omega --features metal --tests` -- exit 0. `cargo clippy -p omega --all-targets --features metal -- -D warnings` -- exit 0. `cargo nextest run -p omega --features metal -E 'test(byte_identical) or test(q4k) or test(q5k) or test(q6k) or test(packed_row)'` -- **52/52 passed, 0 failed, 160 skipped** (the byte-identity fixture was refreshed by the documented mechanism: a temporary `std::fs::write` before the `assert_eq!`, run twice -- once to write, once to pick up the new `include_str!` content -- then removed before commit; `git diff` on the fixture shows exactly the one predicted line).
+**Gates.** `cargo check -p proxima-omega --features metal --tests` -- exit 0. `cargo clippy -p proxima-omega --all-targets --features metal -- -D warnings` -- exit 0. `cargo nextest run -p proxima-omega --features metal -E 'test(byte_identical) or test(q4k) or test(q5k) or test(q6k) or test(packed_row)'` -- **52/52 passed, 0 failed, 160 skipped** (the byte-identity fixture was refreshed by the documented mechanism: a temporary `std::fs::write` before the `assert_eq!`, run twice -- once to write, once to pick up the new `include_str!` content -- then removed before commit; `git diff` on the fixture shows exactly the one predicted line).
 
 **Re-prove command:**
 ```sh
@@ -25098,7 +25098,7 @@ cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
 git worktree add ../proxima-wt-row348-repro -b test/row-348-repro main
 cd ../proxima-wt-row348-repro
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal,instrument --test matvec_roofline_ladder \
+  cargo test -p proxima-omega --release --features metal,instrument --test matvec_roofline_ladder \
   -- --ignored --exact whole_token_matvec_sequence_bare --nocapture
 ```
 (expected: arm E's `median_ms` unchanged from ROW 344's 21.214 within CoV.)
@@ -25109,7 +25109,7 @@ CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 
 **Question this row answers.** ROW 344/348 measured arm E (production's own emitted body, `metal-q4k-ggml-port` ON in the default `metal` feature list) at 21.181-21.215 ms against arm C's hand-written `q4k_pair_dot` at 17.408-17.447 ms (1.21-1.23x), and ROW 348's statement-level diff found no scaffolding difference -- the residual was attributed to body identity (the ggml-port body's `sumy0..3`/`acc1_0..3`/`acc2_0..3`/`sc16_0..3`/`sc8_0..7` temporaries, live across the whole reduce loop). This row tests that attribution directly: rebuild `omega` with `metal-q4k-ggml-port` removed from the `metal` feature array (transient edit to `omega/Cargo.toml`, reverted before this commit; every other `metal` sub-feature, including `metal-packed-row-nsg2`, stays on) and re-measure arm E. If the port body IS the whole 3.8 ms gap, arm E(off) should land near arm C (~17.4 ms).
 
-**Method.** Two builds of `omega/tests/matvec_roofline_ladder.rs`'s `whole_token_matvec_sequence_bare` (`#[ignore]`d, `--features metal,instrument`, release): (1) as shipped on `main` (port ON), reused/re-run this session; (2) `omega/Cargo.toml`'s `metal` array with the `"metal-q4k-ggml-port"` line removed, `cargo test -p omega --no-run` to force a targeted `omega`-only recompile (16-17s, confirms no other crate depends on that exact feature string), then the same timed run. A third, throwaway instrumentation pass (temporary `println!`/`std::fs::write` in `production_reduce_kernel`, reverted before commit, `git diff --stat` confirmed clean) dumped the ACTUAL emitted MSL for the `ffn_up` shape (rows=14336, k=4096, Q4_K) from both builds and diffed them byte-for-byte.
+**Method.** Two builds of `omega/tests/matvec_roofline_ladder.rs`'s `whole_token_matvec_sequence_bare` (`#[ignore]`d, `--features metal,instrument`, release): (1) as shipped on `main` (port ON), reused/re-run this session; (2) `omega/Cargo.toml`'s `metal` array with the `"metal-q4k-ggml-port"` line removed, `cargo test -p proxima-omega --no-run` to force a targeted `omega`-only recompile (16-17s, confirms no other crate depends on that exact feature string), then the same timed run. A third, throwaway instrumentation pass (temporary `println!`/`std::fs::write` in `production_reduce_kernel`, reverted before commit, `git diff --stat` confirmed clean) dumped the ACTUAL emitted MSL for the `ffn_up` shape (rows=14336, k=4096, Q4_K) from both builds and diffed them byte-for-byte.
 
 **Data -- measured (V2 evidence), all from `time_bare_dispatch_sequence`'s 225-dispatch bare token, 7 repeats/arm:**
 
@@ -25139,7 +25139,7 @@ git worktree add ../proxima-wt-row349-repro -b test/row-349-repro main
 cd ../proxima-wt-row349-repro
 # comment out "metal-q4k-ggml-port" in omega/Cargo.toml's `metal` array, then:
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal,instrument --test matvec_roofline_ladder \
+  cargo test -p proxima-omega --release --features metal,instrument --test matvec_roofline_ladder \
   -- --ignored --exact whole_token_matvec_sequence_bare --nocapture
 ```
 (expected: arm E's `median_ms` near 22.7, NOT near arm C's 17.4.)
@@ -25172,7 +25172,7 @@ Arm C (ladder, unaffected either way): 17.43-17.45 ms (ROW 349). Rewrite cell la
 
 **Smallest emitter fix for the next slice (not landed here).** `omega/src/msl.rs`'s row-blocked reduce body generator (`push_packed_row_blocked_body`, the `plain_product`/generic `else` arm starting at `msl.rs:4239`, specifically the per-`q` preamble around `msl.rs:4280-4307` that this row's rewrite targeted) should detect, at bind time from `resolved.extents`/`out_layout`, when every axis but one has extent 1 (the matvec/reduce-to-vector shape every one of `production_head_program`'s callers produces) and emit the direct single-axis form instead of the generic `coord_q_cache` decomposition -- generic to every row-blocked reduce, not gated to this test's specific shapes.
 
-**Gates.** `omega/tests/matvec_roofline_ladder.rs` gained [`row350_direct_addressing_rewrite`] + the `ROW350_CELL` knob, shipped default-`0` (inert, byte-identical to `main`'s emitted output) -- `cargo clippy -p omega --tests --features metal,instrument -- -D warnings` clean. The `omega/Cargo.toml` "port off" feature-list edit used to reach the baseline/rewrite cells was reverted before commit (`git diff --stat` against `main` shows only the test file and this docs file).
+**Gates.** `omega/tests/matvec_roofline_ladder.rs` gained [`row350_direct_addressing_rewrite`] + the `ROW350_CELL` knob, shipped default-`0` (inert, byte-identical to `main`'s emitted output) -- `cargo clippy -p proxima-omega --tests --features metal,instrument -- -D warnings` clean. The `omega/Cargo.toml` "port off" feature-list edit used to reach the baseline/rewrite cells was reverted before commit (`git diff --stat` against `main` shows only the test file and this docs file).
 
 **Re-prove command (rewrite cell):**
 ```sh
@@ -25182,7 +25182,7 @@ cd ../proxima-wt-row350-repro
 sed -i '' '/"metal-q4k-ggml-port",/d' omega/Cargo.toml   # transient, do not commit
 sed -i '' 's/const ROW350_CELL: u32 = 0;/const ROW350_CELL: u32 = 1;/' omega/tests/matvec_roofline_ladder.rs
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal --test matvec_roofline_ladder \
+  cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder \
   -- --ignored --exact whole_token_matvec_sequence_bare --nocapture
 ```
 (expected: arm E's `median_ms` near 17.67, not near 22.7.)
@@ -25200,11 +25200,11 @@ CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 **Bare arm E, one round, quiet gate PASSED (names-only pgrep empty, `while true` pgrep empty, load-1 3.72-4.89) immediately before build and again before the timed run:** E (production's own emitted body, direct addressing now default-on) = 16.378 ms median (CoV 0.30%, 246.27 GB/s) vs C (ladder, hand-written) = 17.477 ms median (CoV 0.08%, 230.78 GB/s) -- **E is now 6.3% FASTER than C**, not merely within 3% of it. This beats ROW 350's own post-emit string-rewrite cell (17.670 ms) by a further 1.29 ms: the emitter's hoisted `weight_row_stride`/`other_row_stride` locals (computed once outside the `q` loop) are a strictly smaller edit than the rewrite's own per-`q` inline expression, and the emitter also carries every other already-landed hoist (blk_step/blk_ptr pointer-increment, `other_stride_is_one` stride-free arm) that the standalone rewrite test never combined with this one in the same body before.
 
 **Parity, all default features, quiet run:**
-- `cargo nextest run -p omega --features metal -E 'test(byte_identical) or test(q4k) or test(q5k) or test(q6k) or test(q3k) or test(packed_row)'` -- 57 tests run: 57 passed, 154 skipped.
+- `cargo nextest run -p proxima-omega --features metal -E 'test(byte_identical) or test(q4k) or test(q5k) or test(q6k) or test(q3k) or test(packed_row)'` -- 57 tests run: 57 passed, 154 skipped.
 - `cargo nextest run -p proxima-model-interop --features metal,instrument` -- 111 tests run: 111 passed, 32 skipped.
 - `cargo nextest run -p proxima-model-interop --features std` (tier check) -- 96 tests run: 96 passed, 25 skipped.
 - Decode fixture (`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `--release --features metal,instrument --lib`, `PROXIMA_MAX_TOKENS=8`): `generated_text="Here is a simple Python function that returns"` -- byte-identical to every prior row's own fixture string.
-- `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings` -- clean.
+- `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings` -- clean.
 
 **Residual, named not hidden.** (1) `push_q4k_single_fetch_body` (the `metal-q4k-single-fetch` default-off arm) is fully self-contained and does NOT route through `push_packed_row_group_bases` -- it never paid the generic decomposition cost in the first place (own doc: "fully self-contained, not routed through the lane-spread preamble"), so this fix does not touch it; not a gap, a pre-existing exclusion this row did not widen. (2) Q6_K's head kernel (ROW 350's own residual item 3) DOES route through the shared preamble (`push_q6k_ggml_port_body` is called after the same `weight_base`/`other_base` setup, unlike ROW 350's post-emit string rewrite which explicitly excluded it for text-pattern reasons) -- this fix reaches it structurally, but no isolated Q6_K-only bare-token cell was measured this row to confirm its own gap closed the same way arm E's whole-sequence number implies. (3) 1 round, 7 repeats/arm; no repeat-round cross-check on this exact build. (4) The `metal-q4k-split-k`/`metal-q4k-mask-fma` non-default arms were not separately re-measured with direct addressing on -- they still call into `push_packed_row_group_bases` (structural, not behind those features), so the byte-identity fixture's own exclusion of those features (unrelated to this change) is unaffected, but no bare-token number exists for that combination.
 
@@ -25212,7 +25212,7 @@ CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main (>= a8f5c02, this row's commit)
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal --test matvec_roofline_ladder \
+  cargo test -p proxima-omega --release --features metal --test matvec_roofline_ladder \
   -- --ignored --exact whole_token_matvec_sequence_bare --nocapture
 ```
 (expected: arm E's `median_ms` at or below arm C's ~17.4, not near 22.7 or 17.67.)
@@ -25333,7 +25333,7 @@ PROXIMA_MAX_TOKENS=64 PROXIMA_MATH_MODE=fast r352-logs/oracle-A \
 
 **Question this row answers.** ROW 351 rewrote `push_packed_row_group_bases` to emit direct single-axis row addressing, dropping arm E (production's own emitted body) from 22.71 ms to 16.38 ms. That sweep never revisited `nsg` (`omega::sized::PACKED_ROW_NSG`, `metal-packed-row-nsg2`/`metal-q4k-ggml-port`'s shared width) itself -- the production default of 2 simdgroups/threadgroup was chosen by ROW 296/302's sweep against the OLD generic-decomposition preamble. With the preamble gone, is nsg=2 still the best cell for the emitted body, bare?
 
-**Method.** `whole_token_matvec_sequence_bare` (`omega/tests/matvec_roofline_ladder.rs`) already builds arm E from `production_reduce_kernel` -- production's real `infer`/`bind`/`correct_packed_matmul_layouts`/`omega::emit` path, whose `nsg` is the build-time constant `PACKED_ROW_NSG` (`omega/build.rs`, overridable per-build via `OMEGA_PACKED_ROW_NSG_WIDTH` without touching `omega-runtime.toml`, `require_power_of_two_le_32`-checked). Two test-file changes, both additive and default-inert: (1) `ROW354_EMITTED_ONLY=1` skips arms A-D's hand-written-kernel loop so each sweep cell times only arm E's 225-dispatch sequence, not five; (2) arm E's own log line now names its actual compiled `PACKED_ROW_NSG` (`arm=E_production_emitted_body_nsg{N}_relaxed`) instead of a hardcoded `nsg2`, so a build's own output self-documents which cell it ran. Four separate `cargo test -p omega --release --features metal,instrument --test matvec_roofline_ladder -- --ignored --nocapture whole_token_matvec_sequence_bare` invocations, each with a distinct `OMEGA_PACKED_ROW_NSG_WIDTH` (1, 2, 4, 8) forcing a fresh `build.rs` run (env-var-changed rerun, not a feature toggle), warm-up + median-of-7 every cell, same reporting (ms/CoV/GB/s) `whole_token_matvec_sequence_bare` already emits.
+**Method.** `whole_token_matvec_sequence_bare` (`omega/tests/matvec_roofline_ladder.rs`) already builds arm E from `production_reduce_kernel` -- production's real `infer`/`bind`/`correct_packed_matmul_layouts`/`omega::emit` path, whose `nsg` is the build-time constant `PACKED_ROW_NSG` (`omega/build.rs`, overridable per-build via `OMEGA_PACKED_ROW_NSG_WIDTH` without touching `omega-runtime.toml`, `require_power_of_two_le_32`-checked). Two test-file changes, both additive and default-inert: (1) `ROW354_EMITTED_ONLY=1` skips arms A-D's hand-written-kernel loop so each sweep cell times only arm E's 225-dispatch sequence, not five; (2) arm E's own log line now names its actual compiled `PACKED_ROW_NSG` (`arm=E_production_emitted_body_nsg{N}_relaxed`) instead of a hardcoded `nsg2`, so a build's own output self-documents which cell it ran. Four separate `cargo test -p proxima-omega --release --features metal,instrument --test matvec_roofline_ladder -- --ignored --nocapture whole_token_matvec_sequence_bare` invocations, each with a distinct `OMEGA_PACKED_ROW_NSG_WIDTH` (1, 2, 4, 8) forcing a fresh `build.rs` run (env-var-changed rerun, not a feature toggle), warm-up + median-of-7 every cell, same reporting (ms/CoV/GB/s) `whole_token_matvec_sequence_bare` already emits.
 
 **Quiet gate.** THREE-check gate (names-only `pgrep -l 'llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest'`, `pgrep -fl 'while true' | grep -v pgrep`, load-1 < 10) run once before setup (both pgrep empty, load-1 1.63), and again before each of the 4 timed cells (one 30s retry cleared load-1 each of the 3 times it briefly cleared 10 between back-to-back builds -- all self-inflicted by this brief's own prior build, no foreign process observed either pgrep pattern at any check).
 
@@ -25356,7 +25356,7 @@ PROXIMA_MAX_TOKENS=64 PROXIMA_MATH_MODE=fast r352-logs/oracle-A \
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main (>= this row's commit)
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never OMEGA_PACKED_ROW_NSG_WIDTH=8 ROW354_EMITTED_ONLY=1 \
-  cargo test -p omega --release --features metal,instrument --test matvec_roofline_ladder \
+  cargo test -p proxima-omega --release --features metal,instrument --test matvec_roofline_ladder \
   -- --ignored --nocapture whole_token_matvec_sequence_bare
 ```
 (expected: `arm=E_production_emitted_body_nsg8_relaxed` median_ms near 15.58, below nsg2's ~15.85; swap `OMEGA_PACKED_ROW_NSG_WIDTH` for 1/2/4 to reproduce the other rows of the table above.)
@@ -25661,7 +25661,7 @@ Two invocations, one round each (no CoV; `test-backend-ops` perf mode reports on
 
 Reverted: `git checkout -- tests/test-backend-ops.cpp`, rebuilt the target (exit 0), `git status --porcelain tests/test-backend-ops.cpp` empty again (pasted below). No commit in llama.cpp.
 
-**(B) our bare kernel, current emitted body.** `decode_shape_roofline_ladder` (`omega/tests/matvec_roofline_ladder.rs:2295`) already carries all eight required families (plus `attn_v_q5k`/`ffn_down_q5k`, the checkpoint's real mixed-codec variants for those two -- no missing shape, no harness edit needed). Quiet gate (names-only pgrep empty, `while true` pgrep empty, load-1 4.47) passed once before the run; `CARGO_TARGET_DIR=.../proxima-wt-r360/target cargo test -p omega --release --features metal,instrument --test matvec_roofline_ladder -- --ignored --nocapture decode_shape_roofline_ladder`, `test result: ok. 1 passed`, all 10 arms parity-clean (`relative_error` 1.7e-6 to 4.3e-6 against the CPU oracle, same band ROW 335/336 report), 1527.38s wall, median-of-7 per arm per the harness's own warm-up-then-`REPEATS=7` discipline (ROW 335). Full log: `r360-logs/decode_shape_roofline_ladder.log`.
+**(B) our bare kernel, current emitted body.** `decode_shape_roofline_ladder` (`omega/tests/matvec_roofline_ladder.rs:2295`) already carries all eight required families (plus `attn_v_q5k`/`ffn_down_q5k`, the checkpoint's real mixed-codec variants for those two -- no missing shape, no harness edit needed). Quiet gate (names-only pgrep empty, `while true` pgrep empty, load-1 4.47) passed once before the run; `CARGO_TARGET_DIR=.../proxima-wt-r360/target cargo test -p proxima-omega --release --features metal,instrument --test matvec_roofline_ladder -- --ignored --nocapture decode_shape_roofline_ladder`, `test result: ok. 1 passed`, all 10 arms parity-clean (`relative_error` 1.7e-6 to 4.3e-6 against the CPU oracle, same band ROW 335/336 report), 1527.38s wall, median-of-7 per arm per the harness's own warm-up-then-`REPEATS=7` discipline (ROW 335). Full log: `r360-logs/decode_shape_roofline_ladder.log`.
 
 **Per-shape table -- both programs MEASURED, same host, same session:**
 
@@ -25705,7 +25705,7 @@ cmake --build build --target test-backend-ops -j8
 git checkout -- tests/test-backend-ops.cpp && cmake --build build --target test-backend-ops -j8
 
 cd /Users/brianbruggeman/repos/slot-0/proxima
-CARGO_TARGET_DIR=/tmp/proxima-r360-reprove cargo test -p omega --release --features metal,instrument \
+CARGO_TARGET_DIR=/tmp/proxima-r360-reprove cargo test -p proxima-omega --release --features metal,instrument \
   --test matvec_roofline_ladder -- --ignored --nocapture decode_shape_roofline_ladder
 ```
 (expected: llama's `k=4096` invocation prints 6 distinct MUL_MAT lines plus the head's Q6_K line spliced by Metal teardown logging; the `k=14336` invocation's `q5_K,m=4096` line near 144 us/run; `decode_shape_roofline_ladder` prints `test result: ok. 1 passed`, 10 arms, each `median_gbps` within its own CoV band of this row's table.)
@@ -25803,12 +25803,12 @@ The wall-clock CoV in the 32..63 window (13-21%) is far noisier than its own gpu
 
 **Residuals, named not hidden.** (1) The same-tensor control's own working-set hypothesis is falsified for `attn_k` (measured worse, not better) and only weakly supported for `ffn_gate` (4.5%, within noise reach of this cell's own 11-14% CoV) -- ROW 360's small-shape ratios remain UNEXPLAINED by a benchmark-working-set mismatch; the mechanism is still open. (2) `head`'s 3.03x ratio under bare encoding vs 1.17x under `plan`/`execute_plan` is itself unexplained at the level this row can resolve -- GPU time alone (1173.63 us) is still 3x llama's 387.47 us, so this is not purely a host-encode artifact; a per-dispatch-mechanism difference in the compiled kernel's own dispatch parameters between the two paths was not ruled out. (3) Quiet gate load-1 stayed above 10 after the one allowed retry (13.48); no contending measurement process was found by the names-only/`while true` checks, so the elevated load is host background noise, not a competing benchmark, but this was not independently confirmed. (4) `attn_q`/`attn_v`/`o`/`up` are unmeasured under this row's bare-arm-E, GPU-time-split construction -- direct next-row scope if a fuller per-shape table under this construction is wanted.
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`, exit 0 (`r361-logs/clippy3.log`; an intermediate `unused_mut` finding from this row's own first draft was fixed before this pass, `r361-logs/clippy2.log`). Harness-only change (`omega/tests/matvec_roofline_ladder.rs`), no production source touched; no `nextest` gate applies (this file's tests are `#[ignore]`d, real-Metal-device arms, same posture as every other row that only edits this file).
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings`, exit 0 (`r361-logs/clippy3.log`; an intermediate `unused_mut` finding from this row's own first draft was fixed before this pass, `r361-logs/clippy2.log`). Harness-only change (`omega/tests/matvec_roofline_ladder.rs`), no production source touched; no `nextest` gate applies (this file's tests are `#[ignore]`d, real-Metal-device arms, same posture as every other row that only edits this file).
 
 **Re-prove command (each cell):**
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima
-CARGO_TARGET_DIR=/tmp/proxima-r361-reprove cargo test -p omega --release --features metal,instrument \
+CARGO_TARGET_DIR=/tmp/proxima-r361-reprove cargo test -p proxima-omega --release --features metal,instrument \
   --test matvec_roofline_ladder --no-run
 BIN=/tmp/proxima-r361-reprove/release/deps/matvec_roofline_ladder-<hash>
 ROW361_FAMILY=k "$BIN" --ignored --nocapture whole_token_matvec_sequence_bare
@@ -25832,7 +25832,7 @@ ROW361_FAMILY=head "$BIN" --ignored --nocapture whole_token_matvec_sequence_bare
 
 **What changed and why it is a RISC primitive, not a bag of per-rewrite flags.** `proxima_tensor::numeric` (`proxima-tensor/src/numeric.rs:1-99`) adds `NumericPolicy` -- a `#[non_exhaustive]`, `Ord`-derived total order `BitExact < FusedNoReassociation < ReassociationPermitted < FastMath` (`NumericPolicy::default()` is `BitExact`, the most conservative rung: `numeric.rs:22-29`) -- and `NumericRewrite`, one variant per rewrite class this crate or a GPU backend applies that changes which float bits come out (`IdentityElimination`/`ChainFusion`/`ReduceEpilogueFusion` at `BitExact`, `FmaContraction` at `FusedNoReassociation`, `TreeReduce`/`ContextChunkMerge`/`DequantScaleFactoring` at `ReassociationPermitted`, `FastMathApprox` at `FastMath`; `NumericRewrite::minimum_level`, `numeric.rs:66-80`). `admit(policy, rewrite)` (`numeric.rs:89-99`) is the one gate every rewrite site calls: `Err(TensorError::NumericPolicyTooStrict { rewrite, minimum, granted })` when `policy < rewrite.minimum_level()`, `Ok(())` otherwise -- a typed error at bind/plan time, never a silent numerics change and never a second parallel boolean check per rewrite (`op.rs`'s `is_associative` had exactly one caller before this row, `numeric.rs`'s own module doc). This is the RISC answer to "should this fusion/reassociation fire": one enum, one order, one admission function, reused by every future bit-changing rewrite rather than a per-rewrite `bool` flag threaded through every call site that wants to gate it.
 
-**Where it binds today: the attention context-chunk merge.** `omega::msl::context_chunks_for(context_length, policy)` (`omega/src/msl.rs:2978-2985`) now takes the policy: `admit(policy, NumericRewrite::ContextChunkMerge).is_err()` falls back to `1` (the single-pass kernel `render_cached_attention` already renders for `chunks<=1`) rather than failing the plan, the same "reject/fallback at bind time" shape `fuse_cached_attention: false` already gives wgpu/cuda. Below `ReassociationPermitted` the cross-simdgroup merge (a reassociation of the online-softmax reduce, ROW 362's own `keys_per_chunk` sizing) never fires; at or above it, `context_length.div_ceil(ATTENTION_CONTEXT_KEYS_PER_CHUNK).clamp(1, ATTENTION_CONTEXT_CHUNK_CAP)` runs exactly as ROW 362 shipped it. Proven directly by `omega::msl::context_chunk_merge_is_gated_by_numeric_policy_for_a_real_64_key_context` (`msl.rs:8429-8444`): `context_chunks_for(64, BitExact) == 1`, `context_chunks_for(64, ReassociationPermitted) > 1` -- and by `render_cached_attention_omits_the_merge_block_under_bit_exact_policy` (`msl.rs:8452+`), which checks the rendered MSL source itself, not just the chunk count. Both passed in this row's own `-p omega` gate (211/211, see Gates below).
+**Where it binds today: the attention context-chunk merge.** `omega::msl::context_chunks_for(context_length, policy)` (`omega/src/msl.rs:2978-2985`) now takes the policy: `admit(policy, NumericRewrite::ContextChunkMerge).is_err()` falls back to `1` (the single-pass kernel `render_cached_attention` already renders for `chunks<=1`) rather than failing the plan, the same "reject/fallback at bind time" shape `fuse_cached_attention: false` already gives wgpu/cuda. Below `ReassociationPermitted` the cross-simdgroup merge (a reassociation of the online-softmax reduce, ROW 362's own `keys_per_chunk` sizing) never fires; at or above it, `context_length.div_ceil(ATTENTION_CONTEXT_KEYS_PER_CHUNK).clamp(1, ATTENTION_CONTEXT_CHUNK_CAP)` runs exactly as ROW 362 shipped it. Proven directly by `omega::msl::context_chunk_merge_is_gated_by_numeric_policy_for_a_real_64_key_context` (`msl.rs:8429-8444`): `context_chunks_for(64, BitExact) == 1`, `context_chunks_for(64, ReassociationPermitted) > 1` -- and by `render_cached_attention_omits_the_merge_block_under_bit_exact_policy` (`msl.rs:8452+`), which checks the rendered MSL source itself, not just the chunk count. Both passed in this row's own `-p proxima-omega` gate (211/211, see Gates below).
 
 **Where the policy is admitted, plumbed, and folded into cache identity.** `omega::metal::Plan::set_numeric_policy` (`omega/src/metal.rs:676`) stores it on the `Plan`; `Plan::set_math_mode` (`metal.rs:660`) narrows `numeric_policy` to `MathMode`'s own coarser projection UNLESS the caller calls `set_numeric_policy` afterward, so `build_placed_plan` (below) calls `set_math_mode` then `set_numeric_policy` in that order -- the caller's own declared policy wins over `math_mode`'s narrower guess, not the reverse (this row's fix commit `f60b98e`, "relaxed math projects to reassociation permitted; identity folds the policy"). `omega::identity::numeric_policy_cache_token` (`identity.rs:135-142`) maps each of the four rungs to one cache-key character (`'B'`/`'N'`/`'R'`/`'F'`, wildcard `'F'` for any future rung above `FastMath`), and `MetalOnlyExtras::numeric_policy_token` folds that single character into `kernel_identity`'s cache-key string (`identity.rs:415-423`) -- this REPLACES the coarser `MathMode` token the pipeline cache used before, so two `Plan`s that agree on every structural field but disagree on numeric policy never collide on one `PIPELINE_CACHE` entry (`all_four_rungs_produce_distinct_tokens`, `identity.rs:441+`, part of this row's 211-test omega pass). `resolve_steps` (`metal.rs:5987`) and the plan's own `numeric_policy` field are the two places a caller can observe what's bound; `kernel_cache_key` (`msl.rs`, called from `metal.rs:795`) folds the policy into the structural cache key the same way.
 
@@ -25847,7 +25847,7 @@ ROW361_FAMILY=head "$BIN" --ignored --nocapture whole_token_matvec_sequence_bare
 | step 3..7 (n=5/round) | 20.427, 19.915 | 19.969, 20.471 | 21.150, 20.755 | 20.768, 21.199 |
 | step 32..63 (n=32/round) | 21.066, 20.880 | 20.988, 20.891 | 23.113, 22.131 | 22.205, 22.194 |
 
-The two rounds' ranges overlap at both windows: step 3..7 gpu_exec spans A 19.915-20.427 ms and B 19.969-20.471 ms; step 32..63 gpu_exec spans A 20.880-21.066 ms and B 20.891-20.988 ms (full table above). Overlapping ranges alone do not establish non-regression; no combined-CoV comparison across rounds was computed, and none is claimed here. **Text identity:** `grep -o 'generated_text="[^"]*"'` on all four round logs (`round1-A.log`, `round1-B.log`, `round2-A.log`, `round2-B.log`) and `md5`-summed -- all four produce the identical hash `84c7519e6bffea98476fefd9d545a0fc` (64 greedy-decoded tokens, the same Fibonacci-function completion). **Chunk merge activation is a configuration claim, not an observation of the live decode -- named precisely, not as a substitute for the missing measurement:** the test harness's `install_stdout_telemetry` hardcodes its `EnvFilter` to `"debug"` (`bind.rs:3146-3148`, ignores `RUST_LOG`), so the `trace!(cache_key = ..)` line at `metal.rs:4202`/`4207` that would show the `'R'` policy token inside a live pipeline cache key never surfaces from either oracle binary without a source change this row declines to make (would itself be a behavior change to the artifact under test). What was actually observed: the A/B decode text is byte-identical across all four logs and `gpu_exec_ms` sits inside normal round-to-round spread (both above); `context_chunk_merge_is_gated_by_numeric_policy_for_a_real_64_key_context` (`msl.rs:8429`) -- part of this row's own 211-test `-p omega` pass below -- asserts `context_chunks_for(64, ReassociationPermitted) > 1` as a standalone unit test of the sizing function, not against a captured plan from either oracle run; and `ServingConfig::default().numeric_policy == ReassociationPermitted` is inspected as the config both oracle binaries construct, not read back from a resolved plan mid-decode. None of these three observations is a captured per-plan chunk count from the live decode pipeline -- no such capture was taken this row, and this evidence supports the intended configuration, not an observation of chunk activation during decode. It also does not establish that chunking regressed: the A/B parity above holds regardless of which chunk count fired.
+The two rounds' ranges overlap at both windows: step 3..7 gpu_exec spans A 19.915-20.427 ms and B 19.969-20.471 ms; step 32..63 gpu_exec spans A 20.880-21.066 ms and B 20.891-20.988 ms (full table above). Overlapping ranges alone do not establish non-regression; no combined-CoV comparison across rounds was computed, and none is claimed here. **Text identity:** `grep -o 'generated_text="[^"]*"'` on all four round logs (`round1-A.log`, `round1-B.log`, `round2-A.log`, `round2-B.log`) and `md5`-summed -- all four produce the identical hash `84c7519e6bffea98476fefd9d545a0fc` (64 greedy-decoded tokens, the same Fibonacci-function completion). **Chunk merge activation is a configuration claim, not an observation of the live decode -- named precisely, not as a substitute for the missing measurement:** the test harness's `install_stdout_telemetry` hardcodes its `EnvFilter` to `"debug"` (`bind.rs:3146-3148`, ignores `RUST_LOG`), so the `trace!(cache_key = ..)` line at `metal.rs:4202`/`4207` that would show the `'R'` policy token inside a live pipeline cache key never surfaces from either oracle binary without a source change this row declines to make (would itself be a behavior change to the artifact under test). What was actually observed: the A/B decode text is byte-identical across all four logs and `gpu_exec_ms` sits inside normal round-to-round spread (both above); `context_chunk_merge_is_gated_by_numeric_policy_for_a_real_64_key_context` (`msl.rs:8429`) -- part of this row's own 211-test `-p proxima-omega` pass below -- asserts `context_chunks_for(64, ReassociationPermitted) > 1` as a standalone unit test of the sizing function, not against a captured plan from either oracle run; and `ServingConfig::default().numeric_policy == ReassociationPermitted` is inspected as the config both oracle binaries construct, not read back from a resolved plan mid-decode. None of these three observations is a captured per-plan chunk count from the live decode pipeline -- no such capture was taken this row, and this evidence supports the intended configuration, not an observation of chunk activation during decode. It also does not establish that chunking regressed: the A/B parity above holds regardless of which chunk count fired.
 
 **Flip decision: FLIPPED.** `NumericPolicy`/`admit` land as the permission-ladder primitive; `ServingConfig::numeric_policy` lands as its explicit per-invocation default; the correction commit removes the `#[allow]` this row introduced. Behavior at the shipped default is unchanged (text byte-identical, gpu_exec at parity across two A/B rounds) -- the row adds the gate and the explicit declaration, it does not change what the gate currently permits.
 
@@ -25855,7 +25855,7 @@ The two rounds' ranges overlap at both windows: step 3..7 gpu_exec spans A 19.91
 
 **Residuals, named not hidden.** (1) The cache-key policy-token grep the original brief asked for could not be produced from either oracle binary's own log because the test harness's telemetry filter is hardcoded to `"debug"` and never reads `RUST_LOG` -- confirmed via a fifth, non-timed diagnostic invocation (`trace-B-diagnostic.log`) that produced zero `trace!`-level lines at any filter string tried; the unit-test proof (`msl.rs:8429`) substitutes for it but is one level removed from a live pipeline-cache key observed in a real decode. (2) `FusedNoReassociation` and `FastMath` are not yet reached by any shipped rewrite site (`FmaContraction` and `FastMathApprox` exist as `NumericRewrite` variants with no caller today) -- the ladder is proven at its `BitExact`/`ReassociationPermitted` boundary only, the boundary ROW 362's chunk merge actually exercises. (3) `admit`'s cost is one `Ord` comparison per rewrite site per call, not cached or hoisted -- unmeasured whether this matters at any rewrite site hotter than the per-decode-step context-chunk-merge gate (called once per plan build, not once per token).
 
-**Gates.** `cargo clippy -p omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`, exit 0. `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings`, exit 0. `cargo nextest run -j 2 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion` -> 542 tests run, 542 passed, 8 skipped. `cargo nextest run -j 2 -p omega --features metal,instrument` -> 211 tests run, 211 passed, 11 skipped (includes both `context_chunk_merge_is_gated_by_numeric_policy_for_a_real_64_key_context` and `all_four_rungs_produce_distinct_tokens`). `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -> 115 tests run, 115 passed, 32 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features std` -> 98 tests run, 98 passed, 25 skipped. `cargo check -p proxima-tensor --no-default-features --features alloc`, exit 0 (`numeric.rs` compiles at the `alloc` tier: no heap allocation in `NumericPolicy`/`NumericRewrite`/`admit`, all three are `Copy`/const-shaped).
+**Gates.** `cargo clippy -p proxima-omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`, exit 0. `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings`, exit 0. `cargo nextest run -j 2 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion` -> 542 tests run, 542 passed, 8 skipped. `cargo nextest run -j 2 -p proxima-omega --features metal,instrument` -> 211 tests run, 211 passed, 11 skipped (includes both `context_chunk_merge_is_gated_by_numeric_policy_for_a_real_64_key_context` and `all_four_rungs_produce_distinct_tokens`). `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -> 115 tests run, 115 passed, 32 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features std` -> 98 tests run, 98 passed, 25 skipped. `cargo check -p proxima-tensor --no-default-features --features alloc`, exit 0 (`numeric.rs` compiles at the `alloc` tier: no heap allocation in `NumericPolicy`/`NumericRewrite`/`admit`, all three are `Copy`/const-shaped).
 
 **Re-prove command:**
 ```sh
@@ -25895,7 +25895,7 @@ RUST_LOG=info PROXIMA_MAX_TOKENS=64 "$BIN" \
 
 **Residuals, named not hidden.** (1) **The oracle guard (A/B on real decode text + gpu_exec) was not run.** Between the rebase and the gate window, `pgrep` twice found live `cargo`/`cargo-nextest`/`rustc` processes belonging to other agents' worktrees (`proxima-wt-rms`, `proxima-wt-kv`) and load-1 at 13-19 -- measured, not assumed (both pgrep outputs and `uptime` captured live during this row). The THERMAL RULE's "never more than ONE agent running cargo at a time" and this row's own 30-minute hard budget made a two-sided release build (main baseline + rebased branch, each `cargo test --release -p proxima-model-interop --features metal,instrument --no-run`, both several minutes cold) incompatible with waiting out the contention. The static gates (clippy x2, nextest x5, check x2, all below) are the only evidence this row carries for correctness; no gpu_exec range, no text-identity md5, and no A/B table are claimed. This is a gap, not a "not worse" verdict — a future row should re-run the guard once the box is quiet. (2) `fold_iteration_extents`'s reduce-level gap (residual (see above): a reduce operand's iteration axis cannot narrow via `len`) is typed and tested but not closed; the fix threads no symbol table into `bind.rs`. (3) `len`'s only shipped caller today is `RopePairing::SplitHalf`'s rewritten address; no other spec site was migrated off an equivalent address trick this row, because none was found using the same `grep -n '+0\*'` sweep across `spec.rs` (unverified beyond that one grep; a broader sweep for other narrowing-via-address-shape tricks was not performed).
 
-**Gates.** `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings`, exit 0. `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`, exit 0. `cargo nextest run -j 2 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion` -> 554 tests run, 554 passed, 8 skipped. `cargo nextest run -j 2 -p omega --features metal,instrument` -> 211 tests run, 211 passed, 11 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -> 115 tests run, 115 passed, 32 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features std` -> 98 tests run, 98 passed, 25 skipped. `cargo check -p proxima-tensor --no-default-features --features alloc`, exit 0. `cargo check -p proxima-onnx -p proxima-autograd --all-targets`, exit 0.
+**Gates.** `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings`, exit 0. `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings`, exit 0. `cargo nextest run -j 2 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion` -> 554 tests run, 554 passed, 8 skipped. `cargo nextest run -j 2 -p proxima-omega --features metal,instrument` -> 211 tests run, 211 passed, 11 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -> 115 tests run, 115 passed, 32 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features std` -> 98 tests run, 98 passed, 25 skipped. `cargo check -p proxima-tensor --no-default-features --features alloc`, exit 0. `cargo check -p proxima-onnx -p proxima-autograd --all-targets`, exit 0.
 
 ## ROW 366 -- merged-KV attention was iterating a fabricated cached half and a doubled capacity; the bind now declares that half empty, and the stride loop's own bound tracks the live key count, not the compiled capacity
 
@@ -25936,7 +25936,7 @@ Dispatch count unchanged (520, matching ROW 358's own census) — this row chang
 
 **Residuals, named not hidden.** (1) No decode fixture at a context length large enough to make the 78-vs-39 (or a wider capacity-vs-live gap) partitioning difference measurable was run this row — the real openchat fixture's `kv-capacity-bucket` keeps live and bucketed capacity close (32-39) at these early steps; a synthetic fixture with a much wider bucket than its live length would be needed to measure the fabricated-capacity cost in isolation, and was not built. (2) The dual-range (non-single-range) `CachedAttention` candidate (`bind.rs:2376-2388`) was not touched and does not use `kv-capacity-bucket`'s padding the same way; this row's fix and its live-bound loop change apply only where the ninth (dynamic `cached_len`) operand is present, i.e. only the single-range fusion path. (3) `context_chunks_for`'s own chunk-sizing input is still the compiled capacity, per this row's own brief (item 3) — a shape with a much wider capacity-to-live-length gap than this fixture's would still compile a larger chunk count than the live length needs; closing that is out of this row's scope.
 
-**Gates.** `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings`, exit 0. `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`, exit 0 (both re-run on the rebased tip). `cargo nextest run -j 2 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion` -> pre-rebase 542 passed / 8 skipped, rebased-tip 556 passed / 8 skipped (0 failed both). `cargo nextest run -j 2 -p omega --features metal,instrument` -> 211 tests run, 211 passed, 11 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -> 115 tests run, 115 passed, 32 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features std` -> 98 tests run, 98 passed, 25 skipped.
+**Gates.** `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings`, exit 0. `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings`, exit 0 (both re-run on the rebased tip). `cargo nextest run -j 2 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion` -> pre-rebase 542 passed / 8 skipped, rebased-tip 556 passed / 8 skipped (0 failed both). `cargo nextest run -j 2 -p proxima-omega --features metal,instrument` -> 211 tests run, 211 passed, 11 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -> 115 tests run, 115 passed, 32 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features std` -> 98 tests run, 98 passed, 25 skipped.
 
 ## ROW 367 -- an RMSNorm's post-reduce tail fuses INTO the reduce as a broadcast epilogue, instead of a separate `Reduce` + `Elementwise` pair; the fold this row's own gate caught first, a refcount bug that rejected production SiLU as "read by another consumer"
 
@@ -25978,7 +25978,7 @@ No combined-CoV comparison is computed here and no "not worse" claim is made -- 
 
 **Residuals, named not hidden.** (1) The exact per-op accounting of the non-RMSNorm 3 of the 6 removed BoundOps (softmax-tail fusions newly enabled by the refcount fix) was not hand-traced line-by-line in this row; the aggregate count (34 -> 28) and the RMSNorm sites specifically are confirmed, the remainder is attributed by elimination against the full per-index logs, not independently re-derived. (2) No decode fixture at a shape where the fold's removed per-op dispatch overhead (not the epilogue's own arithmetic, which is unchanged either way) would be large enough relative to total step time to produce a measurable latency delta was run or is claimed to exist -- this row's value is BoundOp-count and dispatch-count reduction (fewer ops to schedule, encode, and track), not a demonstrated speedup at this fixture's scale. (3) WGSL/CUDA correctness for a program that WOULD exercise `epilogue_broadcast_axes` was not re-verified this row beyond the typed-rejection path itself; no WGSL/CUDA RMSNorm decode fixture was run.
 
-**Gates (rebased tip, `d44ec07`).** `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings`, exit 0. `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`, exit 0. `cargo nextest run -j 2 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion` -> 556 tests run, 556 passed, 10 skipped. `cargo nextest run -j 2 -p omega --features metal,instrument` -> 213 tests run, 213 passed, 11 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -> 115 tests run, 115 passed, 32 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features std` -> 98 tests run, 98 passed, 25 skipped. `cargo check -p proxima-tensor --no-default-features --features alloc`, exit 0.
+**Gates (rebased tip, `d44ec07`).** `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings`, exit 0. `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings`, exit 0. `cargo nextest run -j 2 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion` -> 556 tests run, 556 passed, 10 skipped. `cargo nextest run -j 2 -p proxima-omega --features metal,instrument` -> 213 tests run, 213 passed, 11 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -> 115 tests run, 115 passed, 32 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features std` -> 98 tests run, 98 passed, 25 skipped. `cargo check -p proxima-tensor --no-default-features --features alloc`, exit 0.
 
 
 ## ROW 369 -- a KV-bucket-boundary reshape's brand-new `Plan` re-walked all 291 resident weight blocks through the offer path every ~32 decode steps; it now resolves them from the process-global name-keyed caches instead, and a second counter defect in the same loop (bytes counted "copied" before the lookup that could avoid the copy) is fixed alongside it
@@ -25995,7 +25995,7 @@ No combined-CoV comparison is computed here and no "not worse" claim is made -- 
 
 **Tests.** `omega/src/metal.rs`, `cross_plan_resident_reuse_tests` (3 new): a checkpoint-mapped block resolves from the global cache without an offer (asserts `PLAN_HANDOFF_REUSES` increments, the correct byte offset is returned); a host range no global cache has ever seen returns `Ok(None)` (falls through, never errors); a resident name rebound to different bytes under the SAME name is rejected (`MetalError::ResidentNameRebound`), never silently reused, even through this fast path. `resident_buffer_cache_tests::a_resident_cache_hit_adds_no_bytes_to_the_copied_counter` (1 new): a genuine copy (cache miss) adds its own byte length to `BLOCK_COPIED_BYTES`; the immediately following cache-hit call adds zero. All four are GPU-gated (`device_and_queue()` early-return) like their siblings in the same file, not full `Plan`/program integration tests -- see Residuals.
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`, exit 0. `cargo nextest run -j 2 -p omega --features metal,instrument` -> 217 tests run, 217 passed, 11 skipped (includes the 4 new tests, all passing). `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`, exit 0. `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -> 117 tests run, 117 passed, 35 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features std` -> 100 tests run, 100 passed, 25 skipped.
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings`, exit 0. `cargo nextest run -j 2 -p proxima-omega --features metal,instrument` -> 217 tests run, 217 passed, 11 skipped (includes the 4 new tests, all passing). `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`, exit 0. `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -> 117 tests run, 117 passed, 35 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features std` -> 100 tests run, 100 passed, 25 skipped.
 
 **Residuals, named not hidden.** (1) **No step-34 before/after A/B observation was run this session.** The land brief called for a release+instrument 64-token real-openchat decode run on this branch, compared against `main`'s `r364-logs/oracle-A/round-1.log:83-84` step-34 line -- the box had another agent holding `cargo`/`rustc`/`cargo-nextest` for the full remainder of this session's time budget (the thermal rule's "never more than one agent running cargo at a time" bound this out), and the referenced `run-arm.sh`'s prebuilt binary (`proxima-wt-serial/target/...`) no longer exists (that worktree is gone). The fix is proven at the mechanism level (the tests above exercise `cross_plan_resident_reuse` and the corrected counter directly, GPU-present) and at the gate level (whole-crate suites green), not yet at the end-to-end step-34 wall-clock level -- that observation is still owed. (2) The `prepare_ms`/wall-clock MAGNITUDE of the fix (how much of the ~11.26 ms `prepare_ms` the global-cache-lookup fast path removes, versus the residual cost of 291 `BTreeMap<String,_>` lookups plus `Retained` clones it still pays) is UNMEASURED -- this row lands the correctness/class fix (an offer no longer double-counts as an upload, and a rebind is still typed-rejected), not a demonstrated latency number. (3) The per-bucket PSO compile (`pipeline_compile_ms=17.52` at the same step 34, a NEW `MTLComputePipelineState` for the reshaped op) is untouched by this row -- it is a separate cost (a genuinely new pipeline object for a genuinely new dispatch shape, not a residency-cache question) and remains the larger of the two named costs at a bucket boundary. (4) The bucketing policy itself (`kv_bucket_tokens`, default 32, `serving.rs:160,240`) is unchanged -- reshapes still happen every ~32 steps; this row makes each reshape cheaper, not less frequent, which is a deliberate scope choice (`kv-reupload.md`'s own two-class fix list names widening/removing the bucket as a serving-policy tradeoff, not a correctness fix, and out of scope here).
 
@@ -26058,7 +26058,7 @@ for (long r = (long)lane; r < u.reduction_total; r += 256) {
 
 **Residuals, named not hidden.** (1) One round, one machine (M1 Max), no cross-round CoV bound -- CoV language above is descriptive of what was measured, not a pass/fail threshold. (2) The AIR read used the decode-shape kernel's source directly (`[1,4096]`); the `[7,4096]` AIR count was independently compiled and confirmed identical (both structural, seq-independent), not assumed from the decode number. (3) `sdiv`/`srem` counts were read from the WHOLE compiled translation unit (the kernel plus every unused-but-declared quant helper function `omega::msl::emit`'s preamble carries regardless of op kind) filtered by function-level dead-code elimination (`-Wunused-function` on 14 helpers not in this op's own call graph) -- not hand-isolated to only the write-loop's own basic block; the loop-invariant-recompute mechanism named above was read from the kernel's own source text (16 literal `epi_stepN` re-declarations per call site), not independently confirmed in the AIR by basic-block. (4) No GPU-only (`GPUStartTime`/`GPUEndTime`) timing was taken for these arms -- `execute_plan_named`'s wall bracket (`commit()`-`waitUntilCompleted()`) is what is reported; isolating host-encode from device-execution for this shape would need either exposing `omega::metal`'s private `encode_op`/`pack_reduce_uniforms` to a test, or a full hand-replicated uniform-buffer layout, both judged too risky to hand-roll correctly in this slice and left as a named gap rather than a guessed number.
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`, exit 0.
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings`, exit 0.
 
 ## ROW 371 -- every `BodyStep` a bind mints now goes through one canonicalizing constructor, and its identity-elimination fold is split by whether it is bit-exact for every `f32`
 
@@ -26082,7 +26082,7 @@ for (long r = (long)lane; r < u.reduction_total; r += 256) {
 
 **Residual, named not hidden: the release-oracle A/B (real openchat decode, `PROXIMA_MAX_TOKENS=64`, text-identity md5 against `84c7519e6bffea98476fefd9d545a0fc`) and the 8-token `PROXIMA_METAL_OP_PROFILE_STEP=3` per-kind dispatch line this landing's own brief called for were NOT run.** The box carried sustained load-1 15-32 from other agents' `cargo`/`rustc`/GPU processes for the full session (three-check quiet gate never cleared at the release-build/measurement step, only briefly at the debug-gate steps above), and this crate's own gates plus Part 2's correctness fix took priority within the session's time budget. Since Part 1 (canonical mint) and Part 2 (NumericPolicy gating) are both behavior-preserving under every current production call path (Part 2's own residual above: no caller opts above `BitExact` today, so neither fix changes any value a real caller observes), the debug-mode whole-crate suites above are the load-bearing evidence for landing; the release-mode wall-clock oracle remains an owed regression check, not a correctness gate.
 
-**Gates (final, after both fixes).** `cargo check -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion`, exit 0. `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings`, exit 0. `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`, exit 0. `cargo nextest run -j 2 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion` -> 573 tests run, 573 passed, 10 skipped (includes the 5 new tests: 1 structural graft test + 2 numeric-policy counterexample tests + 2 `numeric.rs` ladder tests). `cargo nextest run -j 2 -p omega --features metal,instrument` -> 221 tests run, 221 passed, 11 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -> 117 tests run, 117 passed, 35 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features std` -> 100 tests run, 100 passed, 25 skipped. `cargo check -p proxima-tensor --no-default-features --features alloc`, exit 0.
+**Gates (final, after both fixes).** `cargo check -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion`, exit 0. `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings`, exit 0. `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings`, exit 0. `cargo nextest run -j 2 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion` -> 573 tests run, 573 passed, 10 skipped (includes the 5 new tests: 1 structural graft test + 2 numeric-policy counterexample tests + 2 `numeric.rs` ladder tests). `cargo nextest run -j 2 -p proxima-omega --features metal,instrument` -> 221 tests run, 221 passed, 11 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -> 117 tests run, 117 passed, 35 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features std` -> 100 tests run, 100 passed, 25 skipped. `cargo check -p proxima-tensor --no-default-features --features alloc`, exit 0.
 
 ## ROW 372 -- a broadcast epilogue's loop-invariant steps (the fold scalar, plus any epilogue operand whose stride is zero across the reduction axes) are hoisted out of the per-lane write loop; AIR-confirmed, whole-token oracle held, landed
 
@@ -26167,7 +26167,7 @@ Quiet gate passed before the timed run (names-only pgrep empty, `while true` pgr
 
 **What the cells show.** The fused arm's GPU time is now AT OR BELOW the unfused arm's at both shapes (decode: 21.5 vs 44.3 us/instance, ~2x; prefill: 24.2 vs 23.8 us/instance, roughly even, though `c_unfused_prefill`'s 39% CoV -- one 51.6us outlier against a 21.4us floor -- makes its own median untrustworthy; the min-to-min comparison, 21.4 vs 23.8, is the more honest prefill read and shows the fused kernel within noise of the unfused one). This reverses ROW 370's finding (fused arm slower, +13.5%/+6.4%): the loop-invariant `sqrt`/`fdiv` this row hoists were the dominant per-lane cost the earlier row diagnosed and did not yet fix.
 
-**Correctness (N, not a metric).** `cargo nextest run -j 2 -p omega --features metal,instrument`: **221 tests run, 221 passed, 11 skipped**, including `reduce_epilogue_fusion_parity::the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width` ([7,4096] Metal-vs-CPU) and `the_fused_epilogue_is_byte_identical_across_twenty_dispatches`. `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument`: **117 tests run, 117 passed, 35 skipped**. `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`: exit 0. `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings`: exit 0 (`msl.rs` gates on `feature = "alloc"`, not `feature = "metal"`, `omega/src/lib.rs:52`, so this row's new code compiles under `wgpu-backend,cuda` regardless of Metal).
+**Correctness (N, not a metric).** `cargo nextest run -j 2 -p proxima-omega --features metal,instrument`: **221 tests run, 221 passed, 11 skipped**, including `reduce_epilogue_fusion_parity::the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width` ([7,4096] Metal-vs-CPU) and `the_fused_epilogue_is_byte_identical_across_twenty_dispatches`. `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument`: **117 tests run, 117 passed, 35 skipped**. `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings`: exit 0. `cargo clippy -p proxima-omega --all-targets --features wgpu-backend,cuda -- -D warnings`: exit 0 (`msl.rs` gates on `feature = "alloc"`, not `feature = "metal"`, `omega/src/lib.rs:52`, so this row's new code compiles under `wgpu-backend,cuda` regardless of Metal).
 
 **Whole-token oracle.** A = main `e388498` (ROW 371 canonical-steps + NaN-safe identity elimination), B = this branch, both `cargo test --release -p proxima-model-interop --features metal,instrument --no-run`, each its own `CARGO_TARGET_DIR`. Three rounds A/B/A/B/A/B, `PROXIMA_MAX_TOKENS=64`, `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `--test-threads=1`. `generated_text` md5 identical across all six runs: `84c7519e6bffea98476fefd9d545a0fc` (also the owed regression check for ROW 371's canonical-steps landing and the same-day qwen3 routing change -- both hold this token-for-token).
 
@@ -26186,7 +26186,7 @@ B's `3..7` range is at or below A's in every round (round 1: 20.472..20.902 vs 2
 
 **Step-34 pipeline compile numbers (ROW 371's own 16ms question).** All six runs show `pipeline_hits=454 pipeline_misses=1` and `pipeline_compile_ms` in `0.36..0.44`: round1 A=0.382291 B=0.434291; round2 A=0.394208 B=0.362583; round3 A=0.395333 B=0.443708. Both arms land in the same sub-millisecond band on this quiet box -- ROW 369's earlier 16.8ms reading of this same field is, on this evidence, attributable to box contention at measurement time, not to anything either arm's own code does differently. Stated as an observation, not re-derived as a mechanism (no profiler trace of the earlier 16.8ms run exists to compare against).
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`: exit 0. `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings`: exit 0. `cargo nextest run -j 2 -p omega --features metal,instrument`: 221 passed, 11 skipped, 0 failed. `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument`: 117 passed, 35 skipped, 0 failed.
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings`: exit 0. `cargo clippy -p proxima-omega --all-targets --features wgpu-backend,cuda -- -D warnings`: exit 0. `cargo nextest run -j 2 -p proxima-omega --features metal,instrument`: 221 passed, 11 skipped, 0 failed. `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument`: 117 passed, 35 skipped, 0 failed.
 
 **Disposition.** Lands on `main`: same text (six-of-six md5 match) for less GPU work (fused at or below unfused at both shapes; oracle's `3..7` window never regresses). Branch `perf/hoist-epilogue-invariants` merges fast-forward.
 ## ROW 373 -- the placed-KV single-range builder omits qk-norm AND hard-codes interleaved rope pairing; a qk-norm/split-half checkpoint got neither, and the class fix makes the builder itself reject that whole checkpoint class instead of the caller tracking it in a flag list
@@ -26250,15 +26250,15 @@ The first 5 tokens (`12095, 13, 576, 6722, 315` -- `" Paris. The capital of"`) a
 
 **Gates.**
 - `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings` -- exit 0.
-- `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings` -- exit 0.
+- `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings` -- exit 0.
 - `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings` -- exit 0.
 - `cargo clippy -p proxima-model-interop --all-targets --features std -- -D warnings` -- exit 0.
 - `cargo nextest run -j 2 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion` -- 576 tests run: 576 passed, 10 skipped.
-- `cargo nextest run -j 2 -p omega --features metal,instrument` -- 226 tests run: 226 passed, 11 skipped.
+- `cargo nextest run -j 2 -p proxima-omega --features metal,instrument` -- 226 tests run: 226 passed, 11 skipped.
 - `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -- 118 tests run: 118 passed, 35 skipped.
 - `cargo nextest run -j 2 -p proxima-model-interop --features std` -- 100 tests run: 100 passed, 25 skipped.
 - `cargo check -p proxima-tensor --no-default-features --features alloc` -- exit 0.
-- `cargo check -p omega --features wgpu-backend,cuda` -- exit 0.
+- `cargo check -p proxima-omega --features wgpu-backend,cuda` -- exit 0.
 
 **Residuals, named not hidden.** (1) **No release+instrument decode observation was run this session.** The brief called for an 8-token qwen3 decode (`PROXIMA_MAX_TOKENS=8 PROXIMA_METAL_OP_PROFILE_STEP=3`) via `run-arm.sh`, and a 64-token main-vs-branch A/B at `gpu_exec` steps 3..7 -- `run-arm.sh` is not a repo-committed script (this workspace's own precedent, ROW 364's residual: it is a per-worktree convenience wrapper over a prebuilt release binary a prior agent's now-deleted `proxima-wt-serial` worktree held), and no equivalent prebuilt release+instrument binary exists in this worktree. Building one from scratch (a real GGUF load, a real Metal device run) was not pursued in this row's remaining budget. The fix is proven at the mechanism level (the tests above exercise the exact bound-expression and plan-construction behavior directly, GPU-present for the omega/interop suites) and at the whole-crate gate level (all four suites green, N stated per suite above), not yet at the end-to-end decode wall-clock/executable-structure level -- that observation is still owed. (2) The `[u8; 2]` per-step cache-token encoding (identity.rs) is NOT folded to a single plan-level fold the way the design's own stated simplification describes -- kept per-step because every step in a `Plan` shares one immutable bound policy by construction, so the redundancy costs nothing beyond the two extra bytes already-fixed-size in the identity string; the plan-level fold is deferred, not incorrect. (3) `TreeReduce`/`FmaContraction`/`DequantScaleFactoring`/`FastMathApprox` have declared `required_permissions()` but zero `admit()` call sites in the corpus (confirmed by grep, matching the design's own residual-risk note) -- forward declarations for rewrites not yet implemented, unchanged by this row.
 
@@ -26306,13 +26306,13 @@ llama's own per-key cost is flat (~254-255 GB/s across a 2x kv change), consiste
 
 **Residual, named not hidden.** (1) This row's own bare per-op reading (702-710us) is 13-20x ROW 358's own reading of the SAME `execute_plan_named_op_timed`/op-profile mechanism (53.1us) against the real checkpoint at a similar context -- not resolved this row. Candidate causes named, none confirmed: this row's synthetic fixture may bind a different codec/threadgroup shape than the real checkpoint's own weights (this fixture's KV cache and Q/K/V weights are plain `Float32`, matching the real checkpoint's own KV-cache dtype but not necessarily every codec detail of `attn_q`/`attn_k`/`attn_v` weights, which are quantized in production); this row's `feed_forward=256`/`vocab=64` shrink could change buffer layout/allocator behavior versus the real 14336/32000 checkpoint in a way that inflates a shared fixed cost; or the two invocations genuinely measure different things despite the shared function name (this row's own `attention_positions` filter sums 32 op timings from ONE `execute_plan_named_op_timed` call across the WHOLE 32-layer forward's resolved list, while ROW 358's own diagnostic runs its op-profile step in isolation -- a structural difference in what else is resolved alongside the filtered ops was not checked). (2) llama's own 0.515ms/token figure is a 102x-below-measured-range linear extrapolation assuming its GB/s holds at ~1/100th the smallest kv it was ever measured at -- both programs are known (ROW 360, matvecs) to shift from bandwidth-bound to fixed-cost-bound behavior as tensor/read size shrinks, and this extrapolation has no data point in that regime for llama at all. (3) `test-backend-ops`' perf mode reports one number per shape, no repeat/CoV control exposed via this CLI (same limitation ROW 359/360 already named). (4) No hardware-counter or per-dispatch decomposition of either kernel's own body (register pressure, occupancy, threadgroup memory) was attempted -- both sides remain opaque bare-kernel numbers.
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings` -- exit 0, no warnings (new harness file only). No `nextest` run: the new file's two cells are `#[ignore]`d timed GPU cells invoked directly by binary path (the convention every `omega/tests/*_ladder.rs`/`*_cost.rs` timed-cell file in this crate already uses -- `nextest`/`cargo test` would otherwise run them under a shared test binary's default thread pool, contending with warm-up discipline).
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings` -- exit 0, no warnings (new harness file only). No `nextest` run: the new file's two cells are `#[ignore]`d timed GPU cells invoked directly by binary path (the convention every `omega/tests/*_ladder.rs`/`*_cost.rs` timed-cell file in this crate already uses -- `nextest`/`cargo test` would otherwise run them under a shared test binary's default thread pool, contending with warm-up discipline).
 
 **Re-prove command (each measurement):**
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main (>= bfee13c)
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal,instrument --test row_375_cached_attention_bare --no-run
+  cargo test -p proxima-omega --release --features metal,instrument --test row_375_cached_attention_bare --no-run
 BIN=$(find target/release/deps -name 'row_375_cached_attention_bare-*' -type f -perm +111)
 "$BIN" cached_attention_bare_context_40 --exact --ignored --nocapture --test-threads=1
 "$BIN" cached_attention_bare_context_512 --exact --ignored --nocapture --test-threads=1
@@ -26360,10 +26360,10 @@ const fn numeric_policy_as_metal_math_mode(policy: NumericPolicy) -> MathMode {
 **(3) Premise correction, for the record.** `llama_relaxed()` grants `contraction`+`reassociation` only. At `proxima-tensor` BIND time (`bind.rs:3008`, `bind_with_fusion`), the three rewrites this crate ships (`IdentityElimination`, `ChainFusion`, `ReduceEpilogueFusion`) all require `NumericPolicy::bit_exact()` (no permission) and admit under ANY policy including `bit_exact()` itself -- `llama_relaxed()` grants them nothing they did not already have. The split eliminations that DO need a permission (`IdentityEliminationSignedZero` needs `signed_zero`, `IdentityEliminationNanAssumption` needs `nan_assumptions`) are both withheld by `llama_relaxed()`. So `llama_relaxed()` enables NO bind-time rewrite in `proxima-tensor::bind` beyond what `bit_exact()` already admits. (`NumericRewrite::ContextChunkMerge`, which DOES fire under `llama_relaxed()`'s `reassociation` grant per ROW 374's own "Owed observation" section, is an `omega`-side GPU-LOWERING-time chunking choice inside `msl::emit`, not a `proxima-tensor::bind`-time rewrite -- the two are at different pipeline stages and the owner's claim is scoped to the latter.) Grepped ROW 374 and `proxima-tensor/src/numeric.rs`'s own doc comments for a sentence that frames the `ServingConfig.numeric_policy` default's change to `llama_relaxed()` as a new optimization: found none -- ROW 374's own "Interop wiring" paragraph already states it is "the same measured, already-shipping behavior... made honest under the corrected representation," which is the correctness/contract framing the owner asked to confirm, not retract. No sentence required correction under this finding; the check is recorded here per the owner's instruction to state it either way.
 
 **Gates.**
-- `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings` -- exit 0.
-- `cargo nextest run -j 2 -p omega --features metal,instrument` -- 228 tests run: 228 passed, 13 skipped (includes both new tests: `numeric_policy_projection_never_grants_more_than_the_policy_allows`, `narrowing_math_mode_forces_a_genuine_pipeline_cache_miss_not_a_stale_hit`).
+- `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings` -- exit 0.
+- `cargo nextest run -j 2 -p proxima-omega --features metal,instrument` -- 228 tests run: 228 passed, 13 skipped (includes both new tests: `numeric_policy_projection_never_grants_more_than_the_policy_allows`, `narrowing_math_mode_forces_a_genuine_pipeline_cache_miss_not_a_stale_hit`).
 - `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -- 118 tests run: 118 passed, 35 skipped.
-- `cargo check -p omega --features wgpu-backend,cuda` -- exit 0.
+- `cargo check -p proxima-omega --features wgpu-backend,cuda` -- exit 0.
 - `proxima-tensor` clippy/nextest not run: `numeric.rs` was read, not modified (defect (3) found nothing to fix there).
 
 **Residual.** `cargo nextest run -p proxima-model-interop --features std` (the std-tier compile the brief's own interop convention calls for) was not run this row -- neither defect touches `proxima-model-interop` source, and the two crates this row DID change (`omega`, and `proxima-tensor/docs/discipline.md` only, no `proxima-tensor` source) are covered above.
@@ -26409,13 +26409,13 @@ const fn numeric_policy_as_metal_math_mode(policy: NumericPolicy) -> MathMode {
 
 **Residual, named not hidden.** (1) The batched (whole-plan) number's own FFN/embedding/projection share is not decomposed by this row -- ROW 358's own kind-count table (32 cached_attention, 194 elementwise, 66 reduce-cooperative, 224 reduce-packed-row-blocked, 2 constant, 2 iota at a real checkpoint) is the closest existing per-kind breakdown, but it is a different plan (real 4096-wide checkpoint, not this row's synthetic 256-wide FFN/64-wide vocab fixture) and is not re-derived here. (2) The remaining ~1.38x gap between this row's kind-validated 1.510ms/token and ROW 358's 1.094ms ablation delta is not resolved -- candidates named, none confirmed: an ablation delta and a direct per-op sum are not the same quantity even when both are correctly attributed (the ablation delta also nets out any barrier/hazard-overhead change from removing 32 dispatches, which a per-op sum cannot see either way), and this row's synthetic fixture's context (~40 keys exactly) is not proven identical to ROW 358's real-checkpoint step-3 context (named as "~34-40 keys", not exact). (3) The ~10x kernel/access-pattern gap beyond the f32/f16 byte factor is named, not isolated to a specific loop or instruction -- no AIR/instruction-count read of the `cached_attention` kernel body was attempted this row (the ROW 368 method: `xcrun metal -S -emit-llvm` over the emitted MSL, ROW 368/`msl.rs`'s own emitter -- a natural next row). (4) `execute_plan_named_timed` (the new whole-plan-timed function) has no dedicated unit test of its own beyond this integration-shaped GPU cell; it duplicates `execute_plan`'s encode loop by construction (same reasoning `execute_plan_op_timed` already uses for its own per-op duplication) and does not handle the `metal-buffer-pool` feature's reclaim path (unexercised by this test's feature set; a caller building under `metal-buffer-pool` gets ordinary buffer drops, not pool reclaim, from this diagnostic-only function).
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings` (below). Renamed `row_375_cached_attention_bare.rs` to `row_376_cached_attention_batched.rs` in place (`git mv`) rather than adding a second harness file for the same question, per this row's own brief.
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings` (below). Renamed `row_375_cached_attention_bare.rs` to `row_376_cached_attention_batched.rs` in place (`git mv`) rather than adding a second harness file for the same question, per this row's own brief.
 
 **Re-prove command (each cell):**
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main (>= 943b099)
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal,instrument,cached-attention-streaming \
+  cargo test -p proxima-omega --release --features metal,instrument,cached-attention-streaming \
   --test row_376_cached_attention_batched --no-run
 BIN=$(find target/release/deps -name 'row_376_cached_attention_batched-*' -type f -perm +111)
 "$BIN" cached_attention_batched_context_40 --exact --ignored --nocapture --test-threads=1
@@ -26486,12 +26486,12 @@ Identical to ROW 373's own before/after text (first 5 tokens `12095, 13, 576, 67
 - `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings` -- exit 0.
 - `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings` -- exit 0.
 - `cargo clippy -p proxima-model-interop --all-targets --features std -- -D warnings` -- exit 0.
-- `cargo clippy -p omega --features metal,instrument -- -D warnings` -- exit 0 (touched crate, not in this row's mandatory list, checked anyway).
+- `cargo clippy -p proxima-omega --features metal,instrument -- -D warnings` -- exit 0 (touched crate, not in this row's mandatory list, checked anyway).
 - `cargo check -p proxima-tensor --no-default-features --features alloc` -- exit 0.
 - `cargo nextest run -j 2 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion` -- 579 tests run: 579 passed, 10 skipped.
 - `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -- 120 tests run: 120 passed, 35 skipped.
 - `cargo nextest run -j 2 -p proxima-model-interop --features std` -- 102 tests run: 102 passed, 25 skipped.
-- `cargo nextest run -j 2 -p omega --features metal,instrument --test backend_parity` -- 2 tests run: 2 passed (Engine::Cpu call sites unaffected by the additive `CpuPlan` field).
+- `cargo nextest run -j 2 -p proxima-omega --features metal,instrument --test backend_parity` -- 2 tests run: 2 passed (Engine::Cpu call sites unaffected by the additive `CpuPlan` field).
 - `cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --ignored --test-threads=1 quality::real_openchat_file::metal_vs_cpu_reports_real_drift` -- 1 test run: 1 passed.
 
 **Follow-up (2026-09-07): the `quality_summary` numbers residual (1) above is closed.** `cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --ignored --test-threads=1 --nocapture` against the four named tests -- debug-profile `cargo nextest` was tried first and was abandoned mid-run at >1200s on one test (`exact_activations` skips the fast `q4k-int8-dot`/`q5k-int8-dot`/`q6k-int8-dot` path and falls through to a dense f32 dequant-fold per activation; unoptimized that path did not finish in tractable time), so this run used the same `--release` invocation as ROW 378's own gate line above. All four passed (`test result: ok. 4 passed; 0 failed`, `finished in 328.49s`). Note: the qwen3 run also carries ROW 373's routing fix and ROW 377's placed-KV path, both landed between ROW 378 and this follow-up, so the qwen3 delta below mixes three changes (exact-activation reference, routing fix, placed-KV), not exact-activation alone.
@@ -26551,8 +26551,8 @@ Static threadgroup memory is `qg * cap * bw * 4` (`ss[]`) `+ 2 * qg * cap * 4` (
 Consolidated: A's `3..7` range across all three rounds is `20.541-20.872`; B's is `20.050-20.826` -- B's max does not exceed A's max in any pairing (B1 `20.826 < 20.818`+noise/`20.872`, B2 `20.815 < 20.831`, B3 `20.653 < 20.872`), and `8..31`/`32..63` show the same no-regression shape (B's `32..63` max `21.813`/`21.657`/`21.589` never exceeds A's `21.793`/`21.900`/`22.194`). `generated_text` md5 identical across all six rounds: `84c7519e6bffea98476fefd9d545a0fc`. Landing rule (md5 identical AND B's `3..7` gpu_exec not above A's) is satisfied -- landed.
 
 **Gates.**
-- `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings` -- exit 0.
-- `cargo nextest run -j 2 -p omega --features metal,instrument` -- 235 tests run: 235 passed, 14 skipped.
+- `cargo clippy -p proxima-omega --all-targets --features metal,instrument -- -D warnings` -- exit 0.
+- `cargo nextest run -j 2 -p proxima-omega --features metal,instrument` -- 235 tests run: 235 passed, 14 skipped.
 - `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -- 120 tests run: 120 passed, 35 skipped.
 
 ### Changelog
@@ -26599,9 +26599,9 @@ Consolidated: A's `3..7` range across all three rounds is `20.541-20.872`; B's i
 `generated_text` md5 identical across all six runs: `84c7519e6bffea98476fefd9d545a0fc`. Mean `gpu_exec_ms` at `3..7`: A `20.545`, B `20.576` (+0.15%, inside both arms' own ~1.35% CoV, and the per-round sign flips: B1 < A1, B2 > A2 by 0.03, B3 > A3 by 0.16) -- not a systematic regression. **Caveat, named not hidden:** this fixture's context length tops out at 95 over 64 decode steps (`context_length=95` max observed), below `keys_per_split=128`, so `splits_for` never exceeds 1 here -- this oracle exercises the common (`grid_splits=1`) path's lack of regression, not the split path the bug lived in. The split path's own correctness and no-crash proof is the 21-repeat reproduction above plus `block_staged_attention_holds_parity_at_context_512`, which DOES cross the threshold (`splits_for(512)=4`) and holds `relative < 1e-4` parity against the bit-exact sequential kernel post-fix (gate run below).
 
 **Gates.**
-- `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` -- exit 0.
-- `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings` -- exit 0.
-- `cargo nextest run -j 2 -p omega --features metal,instrument` -- 244 tests run: 244 passed, 14 skipped (includes `block_staged_attention_holds_parity_at_context_512`, PASS).
+- `cargo clippy -p proxima-omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` -- exit 0.
+- `cargo clippy -p proxima-omega --all-targets --features wgpu-backend,cuda -- -D warnings` -- exit 0.
+- `cargo nextest run -j 2 -p proxima-omega --features metal,instrument` -- 244 tests run: 244 passed, 14 skipped (includes `block_staged_attention_holds_parity_at_context_512`, PASS).
 - `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -- 120 tests run: 120 passed, 36 skipped.
 - `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (openchat text fixture): PASS, both A and B, all 3 rounds.
 - `quality::real_qwen3_file::qwen3_split_half_rope_cpu_and_metal_greedy_decode_match` (qwen3 fixture): PASS, CPU/Metal ids match exactly (`[12095, 13, 576, 6722, 315, 279, 3639, 4180]`).
@@ -26646,8 +26646,8 @@ Consolidated: A's `3..7` range across all three rounds is `20.541-20.872`; B's i
 **Flip decision: FLIPPED.** `keys_per_split=16` lands.
 
 **Gates.**
-- `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` -- exit 0.
-- `cargo nextest run -j 2 -p omega --features metal,instrument -E 'test(attention) or test(cached) or test(split)'` -- 21 tests run: 21 passed, 0 failed (includes both rewritten split-assertion tests and the `row_376` parity fixtures at context 40/512/4096).
+- `cargo clippy -p proxima-omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` -- exit 0.
+- `cargo nextest run -j 2 -p proxima-omega --features metal,instrument -E 'test(attention) or test(cached) or test(split)'` -- 21 tests run: 21 passed, 0 failed (includes both rewritten split-assertion tests and the `row_376` parity fixtures at context 40/512/4096).
 - `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -- 120 tests run: 120 passed, 36 skipped.
 
 **Residual, named not hidden.** (1) Only ONE A/B round was run, not the three the brief asked for -- the 30-minute hard budget was already consumed by: waiting out a concurrent GPU measurement from `proxima-wt-vacc` (~4 min), the two ladder rebuilds, and diagnosing the correct env-var name and test module path (`bind::real_openchat_file::...`, not `bind::tests::real_openchat_file::...`). One round's md5-identical text plus a `gpu_exec` range that does not overlap A's (entirely below, not just "not above") is the evidence available; two more rounds were not run. (2) The two `#[ignore]`d real-checkpoint fixture tests the brief also asked for (`real_smollm2_checkpoint`, `real_lfm2_checkpoint`) were started and killed after >300s on a single LFM2 test case -- unrelated to attention-split sizing (a full CPU decode of a different architecture's checkpoint) and would have consumed the remaining budget alone; not run. The standard `proxima-model-interop` nextest gate (120 passed) and the openchat oracle round above are the interop-level regression evidence in their place. (3) The brief's literal env var name, `OMEGA_ATTENTION_SPLIT_KEYS_PER_SPLIT`, does not match the actual override name; corrected to `OMEGA_ATTENTION_SPLITS_KEYS_PER_SPLIT` and verified against the generated `omega_sized.rs` constant after each build, not assumed from the brief's text.
@@ -26712,9 +26712,9 @@ simdgroup_barrier(mem_flags::mem_threadgroup);
 **Decision rule applied (md5 identical AND B's `gpu_exec` at 3..7 not above A's range): met on the combined range; NOT met on the single round-3 pair taken alone.** Both readings are reported; no verdict is rendered here.
 
 **Gates.**
-- `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` -- exit 0.
-- `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings` -- exit 0.
-- `cargo nextest run -j 2 -p omega --features metal,instrument` -- 246 tests run: 246 passed, 14 skipped.
+- `cargo clippy -p proxima-omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` -- exit 0.
+- `cargo clippy -p proxima-omega --all-targets --features wgpu-backend,cuda -- -D warnings` -- exit 0.
+- `cargo nextest run -j 2 -p proxima-omega --features metal,instrument` -- 246 tests run: 246 passed, 14 skipped.
 - `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -- 120 tests run: 120 passed, 36 skipped.
 
 **Tiers.** `omega` is `std`-only (Metal/wgpu/cuda backends all require the platform); this change is confined to `omega/src/msl.rs`'s MSL text generation, entirely inside the existing `std`-gated `feature = "metal"` surface -- no new tier surface, no `no_std`/`alloc` claim made or applicable.
@@ -26784,9 +26784,9 @@ splits = clamp(ceil(len / divisor(len)), 1, max)
 **Decision rule applied: NOT met on gpu_exec alone (B above A), but the split computation is provably identical at this fixture's window by construction, so the decision rule's premise (comparing two different kernels) does not apply here** -- this oracle is a sanity check that the decode window is untouched, not a bake-off, and the identical-divisor argument is the stronger evidence.
 
 **Gates.**
-- `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` -- exit 0.
-- `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings` -- exit 0.
-- `cargo nextest run -j 2 -p omega --features metal,instrument -E 'test(attention) or test(cached) or test(split)'` -- 22 tests run: 22 passed, 0 failed, 239 skipped.
+- `cargo clippy -p proxima-omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` -- exit 0.
+- `cargo clippy -p proxima-omega --all-targets --features wgpu-backend,cuda -- -D warnings` -- exit 0.
+- `cargo nextest run -j 2 -p proxima-omega --features metal,instrument -E 'test(attention) or test(cached) or test(split)'` -- 22 tests run: 22 passed, 0 failed, 239 skipped.
 - `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -- 120 tests run: 120 passed, 0 failed, 36 skipped.
 - `cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --ignored --test-threads=1 --nocapture` against `real_openchat_file`'s decode-loop fixture and `quality::real_qwen3_file::qwen3_split_half_rope_cpu_and_metal_greedy_decode_match` -- both PASS; qwen3 CPU/Metal ids match exactly, `[12095, 13, 576, 6722, 315, 279, 3639, 4180]` (matches ROW 378's own reference).
 
@@ -26878,7 +26878,7 @@ The four-shape summed gap (7.1ms) is larger than the entire measured steady-stat
 
 **Tests.** `forty_key_plan_stays_one_kernel_under_bit_exact_but_splits_under_llama_relaxed` (ROW 381's own two-dispatch assertion, now inverted by the merge-needed gate) rewritten to `forty_key_plan_uses_the_per_query_head_grid_with_no_merge_under_either_policy`: a 40-key context never engages `attn_scratch` and never needs a companion merge dispatch under EITHER `bit_exact()` or `llama_relaxed()`, and its rendered source decodes `group` off `tgid`. New: `per_query_head_grid_narrows_threadgroup_width_without_changing_total_threads` -- at `query_groups=4`, a below-the-knee (40-key) and an at-the-knee (256-key) `CachedAttention` op differ by exactly 4x in `tiled_gemm_threadgroup_width` but produce IDENTICAL `grid_threads` totals, the one source of truth that the reshape is real and not a total-thread-count regression.
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings`: clean, 0 warnings. `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings`: clean, 0 warnings. `cargo nextest run -j 2 -p omega --features metal,instrument`: **248 tests run: 248 passed, 14 skipped** (includes `row_376_cached_attention_batched` parity at context 40/512/4096, both rewritten/new msl.rs unit tests). `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument`: **120 tests run: 120 passed, 36 skipped**. `cargo nextest run -j 2 -p proxima-model-interop --features std`: **102 tests run: 102 passed, 26 skipped** (std tier compiles and passes). Real-checkpoint fixtures (`--ignored`, both host-local, both present): `bind::real_openchat_file::decode_text_is_deterministic_across_repeated_runs` -- 10 runs, `distinct_texts=1`. `quality::real_qwen3_file::qwen3_split_half_rope_metal_vs_cpu_reports_real_drift` (`PROXIMA_QUALITY_PROMPTS=5`, release) -- `exact_match_rate=1.0`, `top1_agreement_rate=1.0`, `kl_mean≈0`, `max_abs_logit_delta=0.0000267`.
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings`: clean, 0 warnings. `cargo clippy -p proxima-omega --all-targets --features wgpu-backend,cuda -- -D warnings`: clean, 0 warnings. `cargo nextest run -j 2 -p proxima-omega --features metal,instrument`: **248 tests run: 248 passed, 14 skipped** (includes `row_376_cached_attention_batched` parity at context 40/512/4096, both rewritten/new msl.rs unit tests). `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument`: **120 tests run: 120 passed, 36 skipped**. `cargo nextest run -j 2 -p proxima-model-interop --features std`: **102 tests run: 102 passed, 26 skipped** (std tier compiles and passes). Real-checkpoint fixtures (`--ignored`, both host-local, both present): `bind::real_openchat_file::decode_text_is_deterministic_across_repeated_runs` -- 10 runs, `distinct_texts=1`. `quality::real_qwen3_file::qwen3_split_half_rope_metal_vs_cpu_reports_real_drift` (`PROXIMA_QUALITY_PROMPTS=5`, release) -- `exact_match_rate=1.0`, `top1_agreement_rate=1.0`, `kl_mean≈0`, `max_abs_logit_delta=0.0000267`.
 
 **Bare cell, `row_376_cached_attention_batched::cached_attention_batched_context_40`, `per_op_timed_kind_validated_us_per_dispatch: median`, release, three independent median-of-7 invocations (21 samples total):**
 
@@ -26929,9 +26929,9 @@ All six rounds' `generated_text` (64 greedy tokens) are md5-identical to each ot
 
 `push_packed_row_blocked_body`'s `use_ggml_port` dispatch (`omega/src/msl.rs:5019-5027`) extends its codec match from `Q4K | Q6K` to `Q4K | Q5K | Q6K` and adds a `Q5K` arm calling the new body; the doc comment records the found hazard (before this row, `plain_product` alone was not codec-specific, so `metal-q4k-ggml-port` silently routed `Q5_K` through `Q4_K`'s body -- caught by `metal_matmul_on_packed_q5k_weights_matches_the_dequantized_f32_cpu_path`, relative=0.977, the qh plane never read). `q5k_pair_dot` is kept, unchanged, for `metal-q4k-ggml-port`-off builds.
 
-**Tests.** 16 Q5_K parity tests (host CPU-dequant vs `push_q5k_ggml_port_body`'s Metal output, port-on) green, plus the existing packed-row Q5_K suite unaffected (port-off path untouched). `cargo nextest run -j 2 -p omega --features metal,instrument`: **248 tests run: 248 passed, 14 skipped** (unchanged count from ROW 385 -- this row adds parity coverage under the already-counted `metal-q4k-ggml-port` feature gate, not a new default-on suite). `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument`: **120 tests run: 120 passed, 36 skipped**.
+**Tests.** 16 Q5_K parity tests (host CPU-dequant vs `push_q5k_ggml_port_body`'s Metal output, port-on) green, plus the existing packed-row Q5_K suite unaffected (port-off path untouched). `cargo nextest run -j 2 -p proxima-omega --features metal,instrument`: **248 tests run: 248 passed, 14 skipped** (unchanged count from ROW 385 -- this row adds parity coverage under the already-counted `metal-q4k-ggml-port` feature gate, not a new default-on suite). `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument`: **120 tests run: 120 passed, 36 skipped**.
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings`: clean, 0 warnings. `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings`: clean, 0 warnings.
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings`: clean, 0 warnings. `cargo clippy -p proxima-omega --all-targets --features wgpu-backend,cuda -- -D warnings`: clean, 0 warnings.
 
 **Fixtures (real checkpoints, release, `metal,instrument`, this branch = B).** `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (`PROXIMA_MAX_TOKENS=8`): `generated_text="Here is a simple Python function that returns"` -- byte-identical to the port-off text; the Q5_K reorder did not move this checkpoint's 8 Q5_K tensors' output. `quality::real_qwen3_file::qwen3_split_half_rope_cpu_and_metal_greedy_decode_match`: CPU and Metal greedy ids identical across the full 8-token window (`[12095, 13, 576, 6722, 315, 279, 3639, 4180]`, text `" Paris. The capital of the United States"`) -- stronger than the test's own 5-token bar (ROW 371's int8-drift carve-out on tokens 6-8 did not fire this run).
 
@@ -27036,11 +27036,11 @@ Dispatch counts sum to 455, matching `encode_dispatch_calls=455` in the same ste
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main (>= this row's commit)
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never ROW354_EMITTED_ONLY=1 \
-  cargo test -p omega --release --features metal,instrument --test matvec_roofline_ladder \
+  cargo test -p proxima-omega --release --features metal,instrument --test matvec_roofline_ladder \
   -- --ignored --nocapture whole_token_matvec_sequence_bare
 
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
-  cargo test -p omega --release --features metal,instrument --test row_376_cached_attention_batched \
+  cargo test -p proxima-omega --release --features metal,instrument --test row_376_cached_attention_batched \
   -- --ignored --nocapture --exact --test-threads=1 cached_attention_batched_context_40
 
 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=64 \
@@ -27200,7 +27200,7 @@ BIN=$(find target/release/deps -name 'proxima_model_interop-*' -type f -perm +11
 
 **Which prior rows are affected -- read from the log, not inferred.** Grepping `discipline.md` from ROW 374 forward for the genuinely-broken call sites' own function/test names (`decode_shape_roofline_ladder`, `run_shape_arm`, `run_head_arm`, `q6k_head_and_layer_shape_roofline_ladder`, `head_buffer_kind_by_kernel_variant`) finds **zero matches** in ROWs 375-388. Every attention row in that range (376/379/385) used `row_376_cached_attention_batched.rs`, which was already correct. Every small/whole-token matvec row in that range (354 predates 374; 384/386/387) used `whole_token_matvec_sequence_bare`'s `ROW361_FAMILY` mode, i.e. `production_reduce_kernel` -- the arm with the hardcoded-Relaxed compile override, so its FINAL math mode was already `Relaxed` despite the wrong emit-time policy (named above as a second, independent, functionally-compensating bug). **No landed discipline.md row's numbers were produced by the actually-broken, non-compensated code path** (`run_shape_arm`/`run_head_arm`/`decode_shape_roofline_ladder`/`q6k_head_and_layer_shape_roofline_ladder`) -- those tests are `#[ignore]`d (real GGUF checkpoint + real Metal device) and this session finds no discipline-log row that ever un-ignored and ran them post-374. The defect was real and latent in source since ROW 374; it did not corrupt any number this repo has already reported.
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings`: clean. `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings`: clean (this feature set compiles no `metal`-gated test, per the OMEGA GATE RULE's own note). `cargo nextest run -j 2 -p omega --features metal,instrument -E 'binary(matvec_roofline_ladder) or binary(rmsnorm_fused_epilogue_cost) or binary(row_376_cached_attention_batched)'`: 7 run, 7 passed (11 skipped -- the real-GGUF/real-device-only arms stay `#[ignore]`d by design; `matvec_roofline_ladder`'s own 8 tests are ALL `#[ignore]`d, so this binary contributes 0 to the 7). `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument -E 'test(numeric_policy) or test(serving)'`: 18 run, 18 passed.
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings`: clean. `cargo clippy -p proxima-omega --all-targets --features wgpu-backend,cuda -- -D warnings`: clean (this feature set compiles no `metal`-gated test, per the OMEGA GATE RULE's own note). `cargo nextest run -j 2 -p proxima-omega --features metal,instrument -E 'binary(matvec_roofline_ladder) or binary(rmsnorm_fused_epilogue_cost) or binary(row_376_cached_attention_batched)'`: 7 run, 7 passed (11 skipped -- the real-GGUF/real-device-only arms stay `#[ignore]`d by design; `matvec_roofline_ladder`'s own 8 tests are ALL `#[ignore]`d, so this binary contributes 0 to the 7). `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument -E 'test(numeric_policy) or test(serving)'`: 18 run, 18 passed.
 
 **Residual, named not hidden.** (1) The brief's own two-cell Safe-vs-Relaxed timed A/B (`decode_shape_roofline_ladder`, `ffn_gate` shape, median-of-7 GPU time) was NOT run this row. Mechanism for why: the artifact-register grep above (V2/V3-shaped) shows the defect never reached a landed number, so the timed cells would characterize a latent bug's magnitude rather than correct a reported one -- lower value than the fix itself, and this row's own time budget was consumed by the nextest filter defect below. This is a real gap, not a decision made FOR the reader: if a future row wants the magnitude, `decode_shape_roofline_ladder` restricted to one `DECODE_SHAPES` entry (no `PROXIMA_SWEEP_SHAPE` filter exists on this particular test -- that env var belongs to `decode_shape_nsg_math_sweep`, a different function) is the way to get it. (2) A second, unrelated defect surfaced while gating this row: the brief's own suggested nextest filters (`test(ladder)`, `test(epilogue_cost)`, `test(row_376)`) match ZERO tests, because none of the three files' actual `#[test]` FUNCTION names contain those substrings (nextest's `test()` predicate matches the test name, not the binary/file name) -- the correct filter is `binary(...)`, used above. Not fixed in this row (it is a one-off filter string in a landing brief, not source); named so the next agent does not repeat the same N==0 dead end.
 
@@ -27263,7 +27263,7 @@ All three PASS at steady state with NEGATIVE residual (the derived sum slightly 
 
 **The three one-line answers, and the ladder's own headline.** **1.7B:** 1.61 GB device / ~210 MB host RSS, isolated -- NOT the ~4.16 GB the owner cited; that number was very likely a multi-model-per-process artifact (see mechanism above), not this model's own cost. **8B:** 5.26 GB device (steady state) / ~226 MB host RSS -- tracks its own 5.23 GB file almost exactly (ratio 1.006x), the checkpoint-mapping no-copy buffer dominating as designed. **openchat (reference):** 4.70 GB device (step 0; not separately steady-stated this row) against its own 4.14 GB file (ratio 1.13x, consistent with ROWs 240-243/274-275's own historical ~4.14-4.2 GB figures for this exact checkpoint). **The dominant class, for every model measured, is the SINGLE checkpoint-mapping no-copy buffer wrapping the whole mmap'd file** (`omega/src/metal.rs:5496-5519`) -- device memory tracks FILE SIZE almost 1:1 at steady state, not a fixed floor and not the dequantized f32 parameter count; KV/arena/uniforms are all sub-30 MB, three orders of magnitude below the weights class for every size measured.
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings`: clean. `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: clean (not in the brief's own gate list, run anyway since this row's only source change lives in that crate). `cargo nextest run -j 2 -p omega --features metal,instrument -E 'test(memory) or test(arena) or test(resident)'`: 22 run, 22 passed (240 skipped). `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument`: 120 run, 120 passed (36 skipped).
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings`: clean. `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: clean (not in the brief's own gate list, run anyway since this row's only source change lives in that crate). `cargo nextest run -j 2 -p proxima-omega --features metal,instrument -E 'test(memory) or test(arena) or test(resident)'`: 22 run, 22 passed (240 skipped). `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument`: 120 run, 120 passed (36 skipped).
 
 **Residual, named not hidden.** (1) `weights_offset_bytes` (the `BLOCK_OFFSET_BOUND_BYTES` counter) systematically UNDER-reports the true weights class: it sums each individual tensor's own `byte_length` on the offer that creates the cache entry, not the underlying buffer's page-rounded TOTAL size (`metal.rs:5509` increments by `byte_length`, the per-tensor request, while the real allocation at `metal.rs:5511-5516` is sized to the WHOLE `mapping_length`) -- so the by-class log line's own `weights_offset_bytes` field (175-350 MB across these runs) is NOT the weights class's true device cost; the true weights cost is `device_allocated_bytes` minus KV/arena/uniforms, i.e. the derived-budget table's page-rounded file size, not the counter this row added. A future row could fix this by reading `mapping_length` directly (the value is already in `CHECKPOINT_MAPPING`, `metal.rs:5439`, just not currently exposed) rather than composing the existing per-tensor counter, which was the reuse-first (principle 1) choice this row made and turned out to be the wrong composition for this one class. (2) openchat was not run through the exact same steady-state (steps 1-7) isolation as the three qwen3 sizes -- its own table row uses the step-0 figure, consistent with how it has always been reported in ROWs 240-243/274-275, but not apples-to-apples with this row's own qwen3 steady-state column; a future row should re-run it with the SAME steps-1-7 read. (3) The Qwen3.8-27B freeze's own root cause is unmeasured (named above, not investigated this row -- the checkpoint is gone from this host and the owner's instruction was explicit not to force it back).
 
@@ -27374,7 +27374,7 @@ Arrays sized by `cap` force Metal to reserve that much thread/private storage fo
 
 **Tests.** `omega/tests/encoder_guard_survives_mid_loop_error.rs` (`execute_plan_survives_an_error_encoded_after_the_first_op`, `metal,instrument`, real process not `#[cfg(test)]` so a `SIGTRAP` would actually kill it rather than reading as one more failed nextest case) builds a plan whose first op succeeds and whose last op requests an impossible-sized output buffer (a `300_000^2`-element two-axis broadcast product), reproducing the exact mid-loop-`?` shape the crash needed. `metal::attention_scratch_len_tests::decode_dispatch_still_reserves_the_compiled_split_maximum` and `::prefill_dispatch_sizes_scratch_by_the_real_split_count_not_the_compiled_max` (pure-CPU, no device needed) pin decode's unchanged behavior and assert the prefill byte count against the real-split-count formula plus the exact reduction it predicts (`splits_for(1024, ..) == 8` vs compiled max `32`, a 4x reduction) -- tying the byte count to the mechanism, not just to a smaller number.
 
-**Gates.** `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings`: clean. `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings`: clean. `cargo nextest run -j 1 -p omega --features metal,instrument`: 257 passed, 14 skipped (includes all 3 new tests above). `cargo nextest run -j 1 -p proxima-model-interop --features metal,instrument`: 120 passed, 36 skipped.
+**Gates.** `cargo clippy -p proxima-omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings`: clean. `cargo clippy -p proxima-omega --all-targets --features wgpu-backend,cuda -- -D warnings`: clean. `cargo nextest run -j 1 -p proxima-omega --features metal,instrument`: 257 passed, 14 skipped (includes all 3 new tests above). `cargo nextest run -j 1 -p proxima-model-interop --features metal,instrument`: 120 passed, 36 skipped.
 
 **Residual, named not hidden.** No timed re-run of the real 900-row prefill against this fix on this box (no crashing checkpoint reproduced here) -- the two unit tests above pin the formula and the encoder lifecycle by construction rather than by re-triggering the original 17 GB allocation live. The `EncoderGuard::clone_inner` alias path is gated identically to `execute_plan_with_placements_dispatch_timed` (`metal-output-placement,instrument`) and was not exercised by this landing's gate matrix, which does not enable `metal-output-placement`.
 
@@ -27434,7 +27434,7 @@ Arrays sized by `cap` force Metal to reserve that much thread/private storage fo
 
 **Parity test.** `plan_query_rows_tests::thousand_row_prefill_shape_fits_the_scaled_cap` reproduces the incident's exact `production_peak_bytes = 984_110_552` at `query_rows = 1100`, asserts it now fits under the scaled cap, and asserts it would NOT have fit under the old unscaled `ARENA_TRANSIENT_CAP` alone -- so the test only passes if the fix is both necessary and sufficient for this incident. `no_attention_op_defaults_to_one_row` and `cap_scales_linearly_with_the_plans_own_query_rows` (`query_rows` in {1, 31, 1100}) cover the fallback and the linear-scaling arithmetic. All three are pure CPU -- `plan_query_rows` never touches a device -- and run on any host without a GPU.
 
-**Gates:** `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` clean; `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings` clean; `cargo nextest run -j 1 -p omega --features metal,instrument`: 260 passed, 14 skipped; `cargo nextest run -j 1 -p proxima-model-interop --features metal,instrument`: 122 passed, 36 skipped.
+**Gates:** `cargo clippy -p proxima-omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` clean; `cargo clippy -p proxima-omega --all-targets --features wgpu-backend,cuda -- -D warnings` clean; `cargo nextest run -j 1 -p proxima-omega --features metal,instrument`: 260 passed, 14 skipped; `cargo nextest run -j 1 -p proxima-model-interop --features metal,instrument`: 122 passed, 36 skipped.
 
 **Residual, named not hidden.** No live Metal-device run against a real ~1100-row checkpoint in this landing -- the parity tests reproduce the incident's byte counts exactly but do not re-run the original failing request end to end against real weights; that reproduction is unmeasured here.
 
@@ -27470,7 +27470,7 @@ Only the two kernel sites moved; the allocator, the uniforms, and the dispatch g
 
 **Proof.** `m_greater_than_one_prefill_holds_parity_past_the_split_knee` (`omega/tests/cached_attention_coop_load_parity.rs`) reproduces the incident's exact shape -- `cached_len=600`, `new_count=64`, `production_numeric_policy()` (the policy `ServingConfig::default()` actually runs, which is what admits `ContextSplitMerge` and engages the split+merge kernels at all; `NumericPolicy::default()`'s bit-exact policy never does). Against main's pre-fix formula this reproduction measured relative error 0.598 (max_diff 5.155) -- the `!!!!`-class corruption; after the fix it holds `relative < 1e-4`. `assert_parity_at_padding` was generalized into `assert_parity_at_shape(cached_len, new_count, padding, policy)` so the new M>1 case shares the existing M=1 cooperative-load body instead of duplicating it.
 
-**Gates:** `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` clean; `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings` clean; `cargo nextest run -j 1 -p omega --features metal,instrument`: 261 passed, 14 skipped (incl. `m_greater_than_one_prefill_holds_parity_past_the_split_knee`).
+**Gates:** `cargo clippy -p proxima-omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` clean; `cargo clippy -p proxima-omega --all-targets --features wgpu-backend,cuda -- -D warnings` clean; `cargo nextest run -j 1 -p proxima-omega --features metal,instrument`: 261 passed, 14 skipped (incl. `m_greater_than_one_prefill_holds_parity_past_the_split_knee`).
 
 **Residual, named not hidden.** Prefill still reserves split scratch at all -- splits are fundamentally a decode-time mechanism (splitting one row's long context across threadgroups), and a prefill dispatch of many rows paying that same per-row split/merge overhead is unexamined here; that reshaping is the next cut, not this one.
 
@@ -27546,7 +27546,7 @@ Only the two kernel sites moved; the allocator, the uniforms, and the dispatch g
 
 **Proof.** `memory_fit::tests` (7 tests, `--features std`, no metal): `kv_row_bytes_matches_the_placed_kv_capacity_formula`, `budget_matches_hand_computed_formula_for_the_fixture_shape`, `fits_within_a_generous_limit_without_reducing_context`, `reduces_context_length_to_the_largest_value_that_fits`, `errors_with_every_class_when_weights_alone_exceed_the_limit` -- pure arithmetic against hand-computed fixtures, no device. `generate::memory_fit_gate_tests` (2 tests, `metal,instrument`, real Metal device required): `gate_off_leaves_an_otherwise_infeasible_context_length_untouched` (an explicit opt-out leaves `context_length = u32::MAX` untouched), `gate_on_leaves_a_generously_fitting_context_length_unchanged` (this box's real device limit comfortably fits a 1 MB fixture checkpoint's budget, `context_length` unchanged) -- the one real-device probe this landing runs, no model.
 
-**Gates:** `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` clean; `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings` clean; `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings` clean; `cargo nextest run -j 1 -p omega --features metal,instrument`: 261 passed, 14 skipped; `cargo nextest run -j 1 -p proxima-model-interop --features metal,instrument`: 131 passed, 37 skipped (incl. both new gate tests, every real-checkpoint capability-matrix/metal-backend test still green); `cargo nextest run -j 1 -p proxima-model-interop --features std`: 111 passed, 26 skipped. Invariant grep: `gpu_memory_fit: false` remains in exactly one place in `serving.rs` (`fully_supported_config_applies_without_error`'s own independent literal, not a `Default`-mirror test) -- both mirror tests now read `true`.
+**Gates:** `cargo clippy -p proxima-omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` clean; `cargo clippy -p proxima-omega --all-targets --features wgpu-backend,cuda -- -D warnings` clean; `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings` clean; `cargo nextest run -j 1 -p proxima-omega --features metal,instrument`: 261 passed, 14 skipped; `cargo nextest run -j 1 -p proxima-model-interop --features metal,instrument`: 131 passed, 37 skipped (incl. both new gate tests, every real-checkpoint capability-matrix/metal-backend test still green); `cargo nextest run -j 1 -p proxima-model-interop --features std`: 111 passed, 26 skipped. Invariant grep: `gpu_memory_fit: false` remains in exactly one place in `serving.rs` (`fully_supported_config_applies_without_error`'s own independent literal, not a `Default`-mirror test) -- both mirror tests now read `true`.
 
 **Residual, named not hidden.** `LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES` is a fixed constant (this budget runs before any forward exists to measure a real peak); ROW 396's `plan_query_rows`-scaled `ARENA_TRANSIENT_CAP` is the RUNTIME counterpart that catches what this load-time estimate cannot -- a prefill whose row count blows past the fixed allowance still fails at `build_buffer_arena`'s own gate, one layer deeper than this one. `HostMemoryLimit::available_bytes` never accounts for `currentAllocatedSize` (bytes another already-loaded model has claimed) -- this gate prices a cold load, not a multi-model host; a follow-up serving multiple checkpoints on one device would need to subtract that field, which `SystemMemoryFacts` already carries but `apply_memory_fit_gate` does not yet read.
 
@@ -27573,7 +27573,7 @@ Only the two kernel sites moved; the allocator, the uniforms, and the dispatch g
 
 **GPU-side coverage (this branch's fix commit).** `omega/src/metal.rs` and `omega/src/wgpu_driver.rs`'s `QuantizedBlock` matches were non-exhaustive against the four new variants until this fix: `block_identity_key`/`block_byte_len`/every `execute_plan*` upload arm now list all four alongside the existing packed codecs (byte-slice access only, unconditional), and `packed_operands_of` on both drivers routes them to `None` explicitly (with a comment naming why) rather than falling through a wildcard -- same "no `PackedCodec` unpack-kernel entry yet" rejection `Float32`/`Q3K` already take, so a caller hits `reject_unsupported_gpu_dtype`'s ordinary error instead of an unmatched-pattern compile failure or a silent wrong-shape upload.
 
-**N per gate, this landing.** `cargo nextest run -j 1 -p proxima-gguf`: 149 passed, 4 skipped. `cargo nextest run -j 1 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion`: 585 passed, 10 skipped. `cargo nextest run -j 1 -p omega --features metal,instrument`: N passed. `cargo nextest run -j 1 -p proxima-model-interop --features metal,instrument`: N passed. `cargo clippy -p proxima-gguf -p proxima-tensor -p omega --all-targets --features metal,instrument -- -D warnings`: clean, EXIT 0. `cargo clippy -p proxima-gguf --no-default-features --features alloc -- -D warnings` (CI alloc tier): clean, EXIT 0 -- the four new modules and their table modules compile under `alloc` with no `std` leak (no new `f16`/table-lookup code depends on ambient platform facilities).
+**N per gate, this landing.** `cargo nextest run -j 1 -p proxima-gguf`: 149 passed, 4 skipped. `cargo nextest run -j 1 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion`: 585 passed, 10 skipped. `cargo nextest run -j 1 -p proxima-omega --features metal,instrument`: N passed. `cargo nextest run -j 1 -p proxima-model-interop --features metal,instrument`: N passed. `cargo clippy -p proxima-gguf -p proxima-tensor -p proxima-omega --all-targets --features metal,instrument -- -D warnings`: clean, EXIT 0. `cargo clippy -p proxima-gguf --no-default-features --features alloc -- -D warnings` (CI alloc tier): clean, EXIT 0 -- the four new modules and their table modules compile under `alloc` with no `std` leak (no new `f16`/table-lookup code depends on ambient platform facilities).
 
 **Residual, named not hidden.** (1) No Metal decode bodies for any of the four codecs -- they run CPU-only; a GPU-resident Flash-Next load still needs those kernels or a CPU-side pre-decode-to-resident-codec step, unmeasured and undesigned here. (2) No i-quant *encoders* -- `IQ2_XS`/`IQ3_XXS`/`IQ4_NL` are decode-only because their encode path needs an importance matrix (calibration data), which nothing in this landing computes or consumes; proxima can read these checkpoints, not produce them. (3) No measurement against the actual Flash-Next checkpoint in this landing -- the census's byte/tier numbers above are read from GGUF headers only (`pipe::parse_complete`), not from a load-and-run; the four decoders are exercised here only by their own unit tests' synthetic blocks, not the real 28.8 GB PLE table or a real DeltaNet `Q5_1` tensor.
 
@@ -27615,9 +27615,9 @@ Only the two kernel sites moved; the allocator, the uniforms, and the dispatch g
 
 **Proof.** 3 new `omega` unit tests (`metal,instrument`, real Metal device): `checkpoint_mapping_release_tests::unregister_only_clears_the_currently_registered_identity` (the drop-ordering hazard above), `release_resident_names_evicts_only_the_named_resident_copy`, `release_resident_names_evicts_only_the_named_entry` (both prove eviction is by-name, never a blanket cache clear). `proxima-model-interop::generate::tests::release_on_drop_real_model` (1 new test, `#[ignore]`d host-local real-checkpoint fixture, run explicitly this landing): `dropping_a_loaded_model_releases_its_device_buffers` -- 1 passed, 0 failed, prints the three before/after/drop pairs above.
 
-**Gates:** `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` clean; `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings` clean; `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings` clean; `cargo nextest run -j 1 -p omega --features metal,instrument`: 264 passed, 14 skipped (261 + the 3 new: `unregister_only_clears_the_currently_registered_identity`, `release_resident_names_evicts_only_the_named_resident_copy`, `release_resident_names_evicts_only_the_named_entry`); `cargo nextest run -j 1 -p proxima-model-interop --features metal,instrument`: 131 passed, 38 skipped; `cargo nextest run -j 1 -p proxima-model-interop --features std`: 111 passed, 26 skipped; `cargo test -p omega --doc --features metal,instrument`: 1 passed, 0 failed (see the doctest fix below -- this run was RED before it, 0 passed/1 failed). Invariant grep: `Drop::drop` reads `self.checkpoint_mapping` (the renamed `&'file [u8]` view), never `self.checkpoint_bytes` (main's unrelated `usize` byte count, read only by its own `checkpoint_bytes()` accessor) -- the two fields coexist on the struct with no call site confusing one for the other.
+**Gates:** `cargo clippy -p proxima-omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` clean; `cargo clippy -p proxima-omega --all-targets --features wgpu-backend,cuda -- -D warnings` clean; `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings` clean; `cargo nextest run -j 1 -p proxima-omega --features metal,instrument`: 264 passed, 14 skipped (261 + the 3 new: `unregister_only_clears_the_currently_registered_identity`, `release_resident_names_evicts_only_the_named_resident_copy`, `release_resident_names_evicts_only_the_named_entry`); `cargo nextest run -j 1 -p proxima-model-interop --features metal,instrument`: 131 passed, 38 skipped; `cargo nextest run -j 1 -p proxima-model-interop --features std`: 111 passed, 26 skipped; `cargo test -p proxima-omega --doc --features metal,instrument`: 1 passed, 0 failed (see the doctest fix below -- this run was RED before it, 0 passed/1 failed). Invariant grep: `Drop::drop` reads `self.checkpoint_mapping` (the renamed `&'file [u8]` view), never `self.checkpoint_bytes` (main's unrelated `usize` byte count, read only by its own `checkpoint_bytes()` accessor) -- the two fields coexist on the struct with no call site confusing one for the other.
 
-**Also landed, its own commit:** `fix(omega): import numeric policy in the q3k unpack doc example` -- a pre-existing doctest failure this landing's own `cargo test -p omega --doc` gate surfaced (not introduced by this branch, but this landing's gate is what caught it, so it lands here rather than being punted): `omega/src/msl.rs`'s `emit` doctest used the bare `NumericPolicy::default()` at its second call site while its first call site three lines earlier fully-qualified the same type as `proxima_tensor::NumericPolicy::default()` -- no `use` import brought the bare name into the doctest's own scope. Fixed by qualifying the second call site to match the first. Doctest count: 0 passed/1 failed before, 1 passed/0 failed after.
+**Also landed, its own commit:** `fix(omega): import numeric policy in the q3k unpack doc example` -- a pre-existing doctest failure this landing's own `cargo test -p proxima-omega --doc` gate surfaced (not introduced by this branch, but this landing's gate is what caught it, so it lands here rather than being punted): `omega/src/msl.rs`'s `emit` doctest used the bare `NumericPolicy::default()` at its second call site while its first call site three lines earlier fully-qualified the same type as `proxima_tensor::NumericPolicy::default()` -- no `use` import brought the bare name into the doctest's own scope. Fixed by qualifying the second call site to match the first. Doctest count: 0 passed/1 failed before, 1 passed/0 failed after.
 
 **Residual, named not hidden.** `HostMemoryLimit::available_bytes` (ROW 400) still never subtracts `currentAllocatedSize` when sizing a NEW load's budget -- this landing makes that number shrink back down correctly on drop, but a fit-gate check racing between two live models on one device still prices against a stale, too-generous ceiling; unifying the two remains open. `phys_footprint_bytes` staying elevated after drop is read, not chased -- see the real-facts paragraph above for why chasing it further would be measuring the allocator, not this landing's own device-buffer contract.
 
@@ -27645,7 +27645,7 @@ Only the two kernel sites moved; the allocator, the uniforms, and the dispatch g
 - `proxima-tensor/src/bind.rs`: `cached_attention_candidates` was appending the ninth operand whenever the `"cached_len"` leaf existed, with NO guard on the compiled `cached_key_rows` itself -- at the very first decode step (no tokens cached yet) a two-range op's compiled `cached_key_rows` is genuinely `0`, colliding with the single-range discriminator at the type level (both structurally 9-operand, `cached_key_rows == 0`). Gated the push on `cached_key_shape[0] > 0`: an empty cached range has no padding to exclude and stays 8-operand, matching pre-fix behavior exactly for that one step.
 - Test fixtures: `omega/src/msl.rs`'s `cached_attention_op_dynamic` (used by ~11 single-range-dynamic tests) constructed fixtures with a nonzero `cached_key_rows` under the PRE-fix assumption that 9 operands alone meant single-range; folded both constructor arguments into `new_key_rows` (`cached_key_rows: 0` always) so the fixture matches the real single-range invariant while preserving every test's own context-length total. `omega/tests/support/mod.rs`'s shared `real_forward_fixture_with_cached_len` fed the new `"cached_len"` leaf a RANDOM value (the generic unnamed-input fallback, written before the WIP added that leaf) instead of the real length -- silently correct on CPU (which never reads it) and silently wrong on the fused Metal path, exactly the divergence the gate below caught. `proxima-tensor/src/spec.rs`'s `a_cached_decode_step_matches_the_uncached_forward_pass_exactly`/`a_single_range_decode_step_matches_the_two_range_decode_step`/`_with_qk_norm` never bound `"cached_len"` at all (`UnboundInputName`), predating the leaf.
 
-**Gate.** `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings`: clean. `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings`: clean. `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: clean. `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings`: clean. `cargo nextest run -j 1 -p omega --features metal,instrument`: 261 passed, 14 skipped, including `fused_cached_attention_root_agrees_between_cpu_and_metal` (the exact regression ROW 392's mask node introduced). `cargo nextest run -j 1 -p proxima-model-interop --features metal,instrument`: 138 passed, 37 skipped, including `two_range_plan_cache_buckets_cached_len_without_changing_generated_tokens`. `cargo nextest run -j 1 -p proxima-model-interop --features std`: 117 passed, 26 skipped. `cargo nextest run -j 1 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion`: 587 passed, 10 skipped.
+**Gate.** `cargo clippy -p proxima-omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings`: clean. `cargo clippy -p proxima-omega --all-targets --features wgpu-backend,cuda -- -D warnings`: clean. `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: clean. `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings`: clean. `cargo nextest run -j 1 -p proxima-omega --features metal,instrument`: 261 passed, 14 skipped, including `fused_cached_attention_root_agrees_between_cpu_and_metal` (the exact regression ROW 392's mask node introduced). `cargo nextest run -j 1 -p proxima-model-interop --features metal,instrument`: 138 passed, 37 skipped, including `two_range_plan_cache_buckets_cached_len_without_changing_generated_tokens`. `cargo nextest run -j 1 -p proxima-model-interop --features std`: 117 passed, 26 skipped. `cargo nextest run -j 1 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion`: 587 passed, 10 skipped.
 
 **Measured, `two_range_plan_cache_buckets_cached_len_without_changing_generated_tokens` (a synthetic one-layer MoE fixture, 8-token greedy decode, no real device attached, `OUTPUT_BUFFER_ALLOCATIONS` counter).** `kv_bucket_tokens=1` (unbucketed, ROW 392's pre-fix shape): `plan_misses=8 plan_hits=0`, one fresh miss every step, exactly the shape ROW 392 measured. `kv_bucket_tokens=32` (bucketed): `plan_misses=2 plan_hits=6` -- the SAME 8-step run now misses only when a step crosses a bucket boundary, hitting the cached `Plan` the other 6 steps. `output_buffer_allocations` measured `0` on both arms in this sandbox (no real Metal device, the Gpu-arm allocation counter never fires here at all) -- non-strict signal only, the `plan_hits`/`plan_misses` split is this test's load-bearing, environment-independent proof. Both arms produced IDENTICAL generated token ids (`bucketed.0 == unbucketed.0`), the numerics claim the whole redesign depends on: a bucket's own zero-padded tail rows must be invisible to softmax regardless of which mechanism (mask node or runtime bound) excludes them.
 
@@ -27735,7 +27735,7 @@ Only the two kernel sites moved; the allocator, the uniforms, and the dispatch g
 
 **Fix.** `cached_attention_merge_needed` now takes `kind: &BoundOpKind` instead of a bare `context_length: u64`, destructures `BoundOpKind::CachedAttention { operands, cached_key_rows, new_key_rows, .. }`, and computes `single_range_dynamic = operands.len() == 9 && *cached_key_rows == 0` -- the SAME discriminator `render_cached_attention` (`:3414`) and `grid_threads` (`:2477`) already used, so all four call sites (`emit`, `kernel_dispatch_shape`, `grid_threads`, `render_cached_attention`/`emit_cached_attention_merge`) now agree by construction rather than by convention. Non-`single_range_dynamic` kinds (including every two-range op regardless of context length) return `false` before `splits_for` is ever consulted. The now-redundant `cached_attention_context_length` helper (context length alone, no shape discriminator) is deleted -- keeping it around beside the new kind-aware function would have left exactly the stale, semantically-thinner form this fix exists to remove.
 
-**Gate.** `cargo clippy -p proxima-gguf --all-targets -- -D warnings`: clean. `cargo clippy -p proxima-gguf --all-targets --no-default-features --features alloc -- -D warnings`: clean. `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion,test-support -- -D warnings`: clean. `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion,cached-attention-streaming -- -D warnings`: clean (required adding a `QuantizedBlock::Q2K` arm to omega's own exhaustive match sites -- ROW's own q2_k codec landing added a ninth CPU-only `QuantizedBlock` variant this crate's metal-upload matches had to cover, grouped with the other CPU-only-so-far codecs `Q5_1`/`Iq4Nl`/`Iq2Xs`/`Iq3Xxs`). `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: clean. `cargo nextest run -j 1 -p proxima-gguf`: 195 passed, 5 skipped. `cargo nextest run -j 1 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion`: 596 passed, 10 skipped. `cargo nextest run -j 1 -p omega --features metal,instrument,cached-attention-streaming`: 266 passed, 14 skipped, including both `qwen3_gqa_qk_norm_two_range_parity` tests and `cached_attention_coop_load_parity`'s two cases. `cargo nextest run -j 1 -p proxima-model-interop --features metal,instrument`: 140 passed, 40 skipped. `cargo check --workspace --all-targets`: clean.
+**Gate.** `cargo clippy -p proxima-gguf --all-targets -- -D warnings`: clean. `cargo clippy -p proxima-gguf --all-targets --no-default-features --features alloc -- -D warnings`: clean. `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion,test-support -- -D warnings`: clean. `cargo clippy -p proxima-omega --all-targets --features metal,instrument,reduce-epilogue-fusion,cached-attention-streaming -- -D warnings`: clean (required adding a `QuantizedBlock::Q2K` arm to omega's own exhaustive match sites -- ROW's own q2_k codec landing added a ninth CPU-only `QuantizedBlock` variant this crate's metal-upload matches had to cover, grouped with the other CPU-only-so-far codecs `Q5_1`/`Iq4Nl`/`Iq2Xs`/`Iq3Xxs`). `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: clean. `cargo nextest run -j 1 -p proxima-gguf`: 195 passed, 5 skipped. `cargo nextest run -j 1 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion`: 596 passed, 10 skipped. `cargo nextest run -j 1 -p proxima-omega --features metal,instrument,cached-attention-streaming`: 266 passed, 14 skipped, including both `qwen3_gqa_qk_norm_two_range_parity` tests and `cached_attention_coop_load_parity`'s two cases. `cargo nextest run -j 1 -p proxima-model-interop --features metal,instrument`: 140 passed, 40 skipped. `cargo check --workspace --all-targets`: clean.
 
 **Measured, `qwen3_gqa_qk_norm_two_range_parity`/`_production_policy` (metal vs CPU oracle, qwen3 GQA+QK-norm fixture, `max_diff` = largest per-element absolute difference).** Before this fix (test's own doc comment, `NumericPolicy::llama_relaxed()`, this exact fixture): `cached_len=200, new_count=1` `max_diff=12.626673`; `cached_len=700, new_count=1` `max_diff=10.351054` -- the merge kernel's garbage overwrite, an order-of-magnitude-plus divergence from the CPU oracle. After this fix, same fixture, same policy: `cached_len=200, new_count=1` `max_diff=0.00000333786` (3.3e-6); `cached_len=700, new_count=1` `max_diff=0.0000046491623` (4.7e-6) -- both back to ordinary floating-point noise. Single-range cells (`cached_len=0/5/33`, all `new_count` values) were unaffected before and after: `max_diff` stayed in the `4e-6`-to-`8e-6` band across both runs, since `single_range_dynamic` was already true for those and the discriminator change does not alter its answer.
 
@@ -27781,7 +27781,7 @@ Only the two kernel sites moved; the allocator, the uniforms, and the dispatch g
 
 **Test.** Three tokens route to three DISTINCT experts (`route = [2, 0, 1]`), asymmetric weight magnitudes (1x/5x/20x) -- the same "wrong expert reads as a gross factor" design `cpu.rs`'s own `evaluate_quantized_gathered_moe_weight_matches_the_routed_experts_own_matmul` uses. `moe_gather_parity_f32_bit_exact_on_metal`: CPU oracle (`evaluate_quantized_named_with_scratch`) vs Metal (`plan_named`/`execute_plan_named`), asserts `path_totals().op_kind_gathered_expert >= 1` then `max_abs_diff == 0.0` -- a pure gather+multiply+reduce over 32 elements has no reduction-order excuse and none was observed. `moe_gather_parity_q8_0_within_measured_tolerance_on_metal`: same routing, `Q8_0`-packed experts; measured `max_abs_diff = 2.44e-4` (`2^-12` exactly), asserted `<= 3e-4` -- ABOVE the brief's `<= 1e-5` target. Root-caused only partially in the time available: per-element dequant is identical on both evaluators (same bytes, same unpack), so the residual is in the separate 32-wide `Reduce`'s summation order (CPU strict left-to-right vs Metal's `push_serial_reduce_body` accumulation order) interacting with the 20x expert-scale spread; the exact differing add was not walked. Tightening this back to `1e-5` is named, open follow-up, not silently dropped.
 
-**Gates.** `cargo clippy -j 2 -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion,cached-attention-streaming -- -D warnings`: clean. `cargo clippy -j 2 -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion,test-support,instrument -- -D warnings`: clean. `cargo nextest run -j 1 -p omega --features metal,instrument,cached-attention-streaming -E 'test(moe_gather) or test(parity)'`: 45 passed, 0 failed, 237 skipped (both new tests renamed to carry `parity`/`moe_gather` in their names so this exact filter catches them). `cargo nextest run -j 1 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion`: 597 passed, 10 skipped (meets the `>= 597` gate).
+**Gates.** `cargo clippy -j 2 -p proxima-omega --all-targets --features metal,instrument,reduce-epilogue-fusion,cached-attention-streaming -- -D warnings`: clean. `cargo clippy -j 2 -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion,test-support,instrument -- -D warnings`: clean. `cargo nextest run -j 1 -p proxima-omega --features metal,instrument,cached-attention-streaming -E 'test(moe_gather) or test(parity)'`: 45 passed, 0 failed, 237 skipped (both new tests renamed to carry `parity`/`moe_gather` in their names so this exact filter catches them). `cargo nextest run -j 1 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion`: 597 passed, 10 skipped (meets the `>= 597` gate).
 
 **Measured, per-token cost -- explicitly NOT a bench.** This fixture is 3 tokens x 4 rows x 32-wide reduce, run once each; wall time was not isolated from plan/compile overhead (`0.16s`-`0.24s` total nextest-reported per test, dominated by Metal pipeline setup on a cold cache, not steady-state per-token cost). No throughput or per-token-cost number is asserted here; a real bench arm (16/1K/8K token counts, warm pipeline cache) is unbuilt.
 
@@ -27807,7 +27807,7 @@ Proved with a count, not a read: `BackendRuntime::plan_hits + BackendRuntime::pl
 
 **Test.** `proxima-model-interop/src/generate.rs`'s `generate::tests::prefix_state_real_model::prefill_evaluations_per_prompt_token`, `#[ignore]`d (host-local qwen3 gguf blob), asserts `prompt_token_count > 200` (fixture strength check) and `program_evaluations == 1`, and prints both. Run against `~/.ollama/models/blobs/sha256-3d0b790534fe4b79525fc3692950408dca41171676ed7e21db57af5c65ef6ab6` (the exact blob the brief names): `prompt_token_count=243 program_evaluations=1`, `PASS [19.537s]` (wall time dominated by mmap+load+plan-build on a cold pipeline cache, not isolated as a bench number -- explicitly not a throughput claim).
 
-**Gates.** `cargo clippy -j 2 -p proxima-model-interop -p omega --all-targets --features std,metal,instrument -- -D warnings`: clean, EXIT 0. `cargo nextest run -j 1 -p proxima-model-interop --features std,metal,instrument -E 'test(prefix) or test(prefill) or test(decode)'`: 25 passed, 0 failed, 174 skipped (the new test is `#[ignore]`d so it is not in this N; it is covered separately below). `cargo nextest run -j 1 -p proxima-model-interop --features std,metal,instrument --run-ignored ignored-only -E 'test(prefill_evaluations_per_prompt_token)'`: 1 passed, 0 failed, 198 skipped, real Metal device, real checkpoint.
+**Gates.** `cargo clippy -j 2 -p proxima-model-interop -p proxima-omega --all-targets --features std,metal,instrument -- -D warnings`: clean, EXIT 0. `cargo nextest run -j 1 -p proxima-model-interop --features std,metal,instrument -E 'test(prefix) or test(prefill) or test(decode)'`: 25 passed, 0 failed, 174 skipped (the new test is `#[ignore]`d so it is not in this N; it is covered separately below). `cargo nextest run -j 1 -p proxima-model-interop --features std,metal,instrument --run-ignored ignored-only -E 'test(prefill_evaluations_per_prompt_token)'`: 1 passed, 0 failed, 198 skipped, real Metal device, real checkpoint.
 
 **Residual, named not hidden.** (1) No TTFT sequential-vs-batched comparison table exists, because there is no sequential arm to compare against -- the brief's Step 3 assumed a baseline that measurement shows was never built. (2) The actual mechanism behind 59ms/token is UNMEASURED past this row: is the single evaluation's cost linear in `new_count` (expected, and possibly fine), superlinear (a real bug), or dominated by per-row GPU dispatch serialization inside one command buffer (a real bug, fixable)? Not walked. (3) No 850-token TTFT was re-measured this row (the 30-minute budget went to proving the call-count mechanism first, per the brief's own Step 1 instruction to prove-before-fixing) -- the 50.3s/59ms-per-token number in the brief stands as the only measured TTFT so far, MEASURED not re-derived here.
 
@@ -28175,7 +28175,7 @@ PROXIMA_QWEN3_GGUF=... "$BIN_TILED" \
 
 **Residual, separately confirmed.** The parity sweep's own absolute `1e-3` diff threshold flagged benign floating variance (max abs diff ~0.003-0.03 on logits around 1e4, i.e. ~1e-6 relative) at 6 of 9 shapes once the crash was fixed -- switched the assertion to relative error (denominator floored at `1e-6`), a test-tolerance fix, not a numeric-correctness one. **Unrelated pre-existing failure named, not fixed:** `proxima-model-interop::external_expert_paging::evicting_every_expert_of_a_layer_fails_the_next_decode` fails identically with this fix stashed out (confirmed via `git stash` against this same worktree) -- a distinct expert-paging defect, out of this row's scope.
 
-**Gate.** `cargo clippy -j 2 -p omega --all-targets --features metal,instrument -- -D warnings`: EXIT 0. `cargo nextest run -j 1 -p omega --features metal,instrument -E 'test(moe) or test(parity) or test(topk)'`: 48/48 passed. `cargo nextest run -j 1 -p proxima-model-interop --features std,metal,instrument -E 'test(decode) or test(parity)'`: 16/17 passed, 1 pre-existing unrelated failure (above). `moe_topk_fused_fold_parity_sweep_on_metal` itself: 9/9 shapes green (experts in {8,32,128} x top_k in {2,4,8}).
+**Gate.** `cargo clippy -j 2 -p proxima-omega --all-targets --features metal,instrument -- -D warnings`: EXIT 0. `cargo nextest run -j 1 -p proxima-omega --features metal,instrument -E 'test(moe) or test(parity) or test(topk)'`: 48/48 passed. `cargo nextest run -j 1 -p proxima-model-interop --features std,metal,instrument -E 'test(decode) or test(parity)'`: 16/17 passed, 1 pre-existing unrelated failure (above). `moe_topk_fused_fold_parity_sweep_on_metal` itself: 9/9 shapes green (experts in {8,32,128} x top_k in {2,4,8}).
 
 ## ROW 422 -- a `Reduce` carrying `bind::bind`'s own sigmoid epilogue was silently stranded by `law 6∘5` width-tile packing, not by any raw-op/elementwise-chain absorption in `bind::bind`
 
@@ -28205,7 +28205,7 @@ PROXIMA_QWEN3_GGUF=... "$BIN_TILED" \
 
 **Card.** `gqa_cached_forward_program_with_experts_and_layer_taps` (`proxima-tensor/src/spec.rs`) gained a `last_row_only: bool` parameter: `true` gathers `normed_final` down to its last row (a host-supplied `lm_head_row` `Op::Input`, the same `IndexMap::Computed` gather shape `embedding_lookup` already proves correct, chosen over an in-graph-derived index because `cpu.rs`'s own `evaluate_typed_names_a_computed_gather_index_node_as_not_yet_supported` test proves an in-program-computed gather index a named `NotLowerable` gap on the typed evaluator) before the `output.weight` matmul ever runs, so that matmul computes 1 row instead of `new_count`. `false` (the plain `gqa_cached_forward_program_with_experts` wrapper, every caller not touched this row) reproduces the prior per-row-logits program byte-for-byte -- no new node, no new required binding. Every production caller of the layer-taps variant (`DenseArch::bind` in `dense.rs`, both `LoadedModel` decode-loop program builders and the one-shot `forward_node_values_on_backend` builder in `generate.rs`) now passes `true` and supplies `lm_head_row = new_count - 1` (or `ids.len() - 1` for the one-shot prompt-only path) as a per-step host block, and every logits reader was narrowed from `logits[(new_count-1)*vocab..new_count*vocab]` to `logits[..vocab]` to match the now-single-row `logits_root`. The test-only `StepInputArch` fixture (`external_architecture_step_inputs.rs`) was updated to supply one `aux_rows` gathered row (the step's last position) instead of one per `new_count`, matching the new default.
 
-**Gates, rebased onto `main` `5f91d8f5` (ROW 422's own tip), this row's own diff unchanged through rebase: 5 files, `bind.rs`/`dense.rs`/`generate.rs`/`external_architecture_step_inputs.rs`/`spec.rs`.** `cargo clippy -j 2 -p proxima-model-interop -p omega --all-targets --features std,metal,instrument -- -D warnings`: EXIT 0. `cargo nextest run -p proxima-model-interop --features std,metal,instrument`: **164 tests run, 162 passed, 2 failed, 53 skipped.** Both failures are pre-existing and unrelated to this diff, confirmed by running the identical command against the untouched sibling worktree `proxima-wt-verify30b` at `e29a6465` (this row's own base commit, no cherry-pick, no stash): `evicting_every_expert_of_a_layer_fails_the_next_decode` (already named as in-flight elsewhere) and `q2k_paging_actually_changes_the_decoded_ids` (baseline run: identical panic, identical decoded ids `ids_a=[172, 26, 171, 42] ids_b=[172, 26, 171, 42]`, at `external_expert_paging.rs:333`) -- neither test's own file is touched by this diff. `cargo check --workspace --all-targets`: EXIT 0. `RUSTDOCFLAGS='-D warnings' cargo doc -p proxima-model-interop --no-deps`: **EXIT 101, reproduced identically on the untouched `proxima-wt-verify30b` baseline** (`error.rs:409`, `unresolved link to proxima_tensor::spec::Qwen35LayerRoots` -- `error.rs` is not part of this diff; `proxima-tensor`'s `spec` module is gated behind its own `config` feature, which the bare `-p proxima-model-interop --no-deps` doc invocation never enables regardless of this row's change) -- a pre-existing gap in the gate command itself, not a regression. `proxima-tensor` full gate (`scripts/proxima-tensor-gate.sh`, run because `spec.rs` was touched): **21/21 cells passed, 592/592 unit tests passed.**
+**Gates, rebased onto `main` `5f91d8f5` (ROW 422's own tip), this row's own diff unchanged through rebase: 5 files, `bind.rs`/`dense.rs`/`generate.rs`/`external_architecture_step_inputs.rs`/`spec.rs`.** `cargo clippy -j 2 -p proxima-model-interop -p proxima-omega --all-targets --features std,metal,instrument -- -D warnings`: EXIT 0. `cargo nextest run -p proxima-model-interop --features std,metal,instrument`: **164 tests run, 162 passed, 2 failed, 53 skipped.** Both failures are pre-existing and unrelated to this diff, confirmed by running the identical command against the untouched sibling worktree `proxima-wt-verify30b` at `e29a6465` (this row's own base commit, no cherry-pick, no stash): `evicting_every_expert_of_a_layer_fails_the_next_decode` (already named as in-flight elsewhere) and `q2k_paging_actually_changes_the_decoded_ids` (baseline run: identical panic, identical decoded ids `ids_a=[172, 26, 171, 42] ids_b=[172, 26, 171, 42]`, at `external_expert_paging.rs:333`) -- neither test's own file is touched by this diff. `cargo check --workspace --all-targets`: EXIT 0. `RUSTDOCFLAGS='-D warnings' cargo doc -p proxima-model-interop --no-deps`: **EXIT 101, reproduced identically on the untouched `proxima-wt-verify30b` baseline** (`error.rs:409`, `unresolved link to proxima_tensor::spec::Qwen35LayerRoots` -- `error.rs` is not part of this diff; `proxima-tensor`'s `spec` module is gated behind its own `config` feature, which the bare `-p proxima-model-interop --no-deps` doc invocation never enables regardless of this row's change) -- a pre-existing gap in the gate command itself, not a regression. `proxima-tensor` full gate (`scripts/proxima-tensor-gate.sh`, run because `spec.rs` was touched): **21/21 cells passed, 592/592 unit tests passed.**
 
 **Measurement: UNMEASURED this row.** Gate execution alone (clippy + nextest + full workspace check + doc + the 21-cell tensor gate, the last of which alone ran ~66s of test wall time plus a 60s neon slow test) consumed the majority of this row's 30-minute hard budget; the release build, `memory_pressure` check, `model.lock` acquisition, and the real-Qwen3-1.7B `prefill_ttft_850`/`prefill_step_zero_op_profile` pair from ROW 418 were not attempted rather than attempted and rushed. **Re-prove command (identical to ROW 418's own, unaltered by this row's change since it targets the same test names and env var):**
 ```sh
@@ -28351,7 +28351,7 @@ Next lever (ROW 418 ranking): the Q6K `ffn_down` reduce-cooperative at M=915 (28
 
 **Residual (named, real, confirmed NOT this row's regression).** Five `omega::wgpu_parity` tests fail both before AND after every commit in this row, with byte-identical `relative`/`max_diff` numbers in each case (confirmed by `git stash` isolating this row's changes and re-running each failing test against the untouched baseline): `mistral_cached_forward_at_real_qwen3_scale_with_qk_norm_matches_cpu` (`relative=1`, `max_diff=39.66`), `mistral_cached_forward_at_real_qwen_scale_with_packed_q8_0_weights_matches_cpu` (`relative=0.997`, `max_diff=42.55`), `mistral_cached_forward_at_real_qwen_scale_multi_position_with_real_rope_matches_cpu` (`relative=1`, `max_diff=49.26`), `mistral_cached_forward_at_real_qwen_scale_with_synthetic_f32_weights_matches_cpu` (`relative=1.0001`, `max_diff=42.69`, notably using SYNTHETIC, unquantized F32 weights -- ruling out any packed-codec mechanism as its cause), and `the_full_mistral_cached_forward_runs_on_wgpu_at_cpu_parity` (`relative=1.166`, `max_diff=6.14`). All five build their own program via `mistral_cached_forward_program`/`mistral_cached_forward_program_with_experts` directly (not `LoadedModel::load`) with either synthetic random or synthetically-quantized data, at Qwen2.5/Qwen3-shaped dims, `new_count=12` (multi-position, real RoPE angles). This is a SEPARATE, real, currently open defect -- not fixed, not investigated further this row (out of this row's scope: the real end-to-end deliverable, verified above via the actual `LoadedModel`/real-checkpoint path, already passes). Two candidate discriminators worth checking first in a future slice: (a) every one of these five tests exercises `new_count > 1` with non-degenerate RoPE angles in a hand-built SYNTHETIC program, while `diag_logits_compare`'s real-checkpoint walk (also `new_count=12`, also real RoPE) passes cleanly -- so the discriminator is either something about `LoadedModel::load`'s own program construction differing from these tests' direct calls to `mistral_cached_forward_program*`, or something about SYNTHETIC (uncorrelated random) weight/activation values specifically; (b) the synthetic-F32-weights case proves whatever this is, it is independent of any packed codec entirely.
 
-**Gate.** `cargo nextest run -p proxima-tensor --release`: 599/599, 6 skipped (both before and after the final fix). `cargo clippy -p proxima-tensor --release --all-targets -- -D warnings`: EXIT 0. `cargo clippy -p omega --release --all-targets --features cpu,wgpu-backend,reduce-epilogue-fusion -- -D warnings`: EXIT 0. `cargo nextest run -p omega --release --features cpu,wgpu-backend,reduce-epilogue-fusion --test wgpu_parity --test wgsl_reduce_epilogue_fusion_parity`: 13/18 (the 5 pre-existing failures named above, confirmed via git-stash A/B on this exact tree, not a regression from this row). Full real-checkpoint verification per the section above.
+**Gate.** `cargo nextest run -p proxima-tensor --release`: 599/599, 6 skipped (both before and after the final fix). `cargo clippy -p proxima-tensor --release --all-targets -- -D warnings`: EXIT 0. `cargo clippy -p proxima-omega --release --all-targets --features cpu,wgpu-backend,reduce-epilogue-fusion -- -D warnings`: EXIT 0. `cargo nextest run -p proxima-omega --release --features cpu,wgpu-backend,reduce-epilogue-fusion --test wgpu_parity --test wgsl_reduce_epilogue_fusion_parity`: 13/18 (the 5 pre-existing failures named above, confirmed via git-stash A/B on this exact tree, not a regression from this row). Full real-checkpoint verification per the section above.
 
 **Axes (principle 8).** Numeric -- none new. Structural -- `proxima-tensor::cpu`: one function generalized from single-axis to a multi-axis-capable set (`packed_operand_row_shape`), no new type. `omega`: two new small helper functions (`packed_contraction_axes_elementwise`, `packed_contraction_axes_reduce`) plus one generalized (`packed_row_shape`), two new per-operand uniform arrays declared conditionally in the WGSL `Uniforms` struct, no new type. **Sans-IO opt-sweep (principle 11):** N/A by classification -- a compile-time program-shape/uniform-packing fix, not a wire codec.
 
@@ -28379,7 +28379,7 @@ Separately worth noting for whoever picks this up: this exact class of defect (a
 
 **CPU baseline reconciliation, also opened and not closed this row.** Measured CPU decode (same model/prompt/`ServingConfig`, same code path CUDA shares) at 0.128–0.132 tok/s, reproduced twice at near-zero system load (`/proc/loadavg` 0.15–0.89 on an 8-core box), ruling out CPU contention as an explanation for a separately-reported 1.865–1.975 tok/s figure on the same model. A fixed per-call cost (~18s, measured via two token-count data points) is real but only explains a small fraction of the gap (asymptotic steady-state ≈0.138 tok/s either way). The two numbers were not reconciled; the difference likely traces to a different prompt/`context_length`/token-count/harness on whichever side produced 1.865–1.975, not measurement noise.
 
-**Gate.** `cargo nextest run -p omega --no-default-features --features cpu,cuda-backend,reduce-epilogue-fusion --test cuda_parity`: 18/18 green. `cargo nextest run -p omega --features cpu,cuda-backend --test cuda_parity`: 18/18 green (the named coordinator gate). `cargo clippy -p omega --no-default-features --features cpu,cuda-backend,reduce-epilogue-fusion --all-targets -- -D warnings`: EXIT 0. `cargo nextest run -p omega --features cpu,cuda-backend --test lowering_census`: 1 pre-existing, unrelated failure (`decode_m1_every_weight_family_takes_the_packed_row_blocked_pair_dot_body`, pure `omega::msl::emit`/Metal-codegen branch-marker check, reproduces without `reduce-epilogue-fusion` and without touching anything this row changed) — named, not fixed, out of this row's scope.
+**Gate.** `cargo nextest run -p proxima-omega --no-default-features --features cpu,cuda-backend,reduce-epilogue-fusion --test cuda_parity`: 18/18 green. `cargo nextest run -p proxima-omega --features cpu,cuda-backend --test cuda_parity`: 18/18 green (the named coordinator gate). `cargo clippy -p proxima-omega --no-default-features --features cpu,cuda-backend,reduce-epilogue-fusion --all-targets -- -D warnings`: EXIT 0. `cargo nextest run -p proxima-omega --features cpu,cuda-backend --test lowering_census`: 1 pre-existing, unrelated failure (`decode_m1_every_weight_family_takes_the_packed_row_blocked_pair_dot_body`, pure `omega::msl::emit`/Metal-codegen branch-marker check, reproduces without `reduce-epilogue-fusion` and without touching anything this row changed) — named, not fixed, out of this row's scope.
 
 **Axes (principle 8).** Numeric — the `bound_output_len` fix changes allocated buffer size for any broadcast-reduce-epilogue `Keep::Reduce` on CUDA (from `output_axes` product to full `extents` product); no change to any value computed, only to whether the buffer receiving it is large enough. Structural — none new (no new type). **Sans-IO opt-sweep (principle 11):** N/A by classification — a device-buffer-sizing fix and an open real-checkpoint numeric defect, not a wire codec.
 
@@ -28750,7 +28750,7 @@ only when capacity is sufficient and its contents pointer does not alias the
 previous host vector; aliased no-copy buffers still take the safe upload path.
 The new `expert_source_buffer_reuses` counter is exposed through
 `MetalStageTotals` at `omega/src/metal.rs:6437` and `6559-6605`.
-`cargo check -p omega --features metal,instrument`, the focused four
+`cargo check -p proxima-omega --features metal,instrument`, the focused four
 expert-source tests, and `cargo check -p proxima-model-interop
 --features instrument,metal` passed. The 120-miss/732-upload production run
 has not yet been repeated, so memory and latency impact are unmeasured.
@@ -28816,7 +28816,7 @@ ordinary upload volume.
 `MetalStageTotals` now exposes the current expert-source cache entry count and
 the no-copy buffer cache entry count. The per-step Metal debug event includes
 both alongside upload bytes and handoff counters, so retained-cache growth can
-be compared directly with process RSS. `cargo check -p omega --features
+be compared directly with process RSS. `cargo check -p proxima-omega --features
 metal,instrument` passes; a rebuilt 35B capture is required for the values.
 
 ## ROW 465 -- one-token transfer split is mostly no-copy mapped weight access
@@ -28837,7 +28837,7 @@ The regular Metal execution path now checks `cross_plan_resident_reuse` before
 offering each ordinary block for upload. A cached name/address/length binds the
 existing device buffer directly; only a miss reaches the upload counters. This
 extends the previously placed-KV-only handoff to the Qwen35 router/gather
-segments. `cargo check -p omega --features metal,instrument` and the three
+segments. `cargo check -p proxima-omega --features metal,instrument` and the three
 cross-plan resident-reuse tests pass. A rebuilt 35B run is required before
 latency or RSS impact is reported.
 
@@ -31026,15 +31026,15 @@ requested output reads; previously bound as dead weight, now never bound.
   gated-delta-net-fusion,test-support,instrument -j 4` -- 642/642 passed, 8
   skipped.
 - `cargo clippy -p proxima-tensor --all-targets -j 4` -- 0 warnings.
-- `cargo nextest run -p omega --features metal,instrument -j 4` -- 312/312
+- `cargo nextest run -p proxima-omega --features metal,instrument -j 4` -- 312/312
   passed, 12 skipped.
-- `cargo clippy -p omega --all-targets --features metal,instrument -j 4` --
+- `cargo clippy -p proxima-omega --all-targets --features metal,instrument -j 4` --
   0 warnings.
 - `cargo check -p proxima-model-interop --features metal,instrument
   --examples -j 4` -- clean.
 - `cargo nextest run -p proxima-model-interop --features metal,instrument
   --test-threads 2 -E 'test(qwen35)'` -- 20/20 passed.
-- `cargo test --doc -p omega --features metal,instrument` and `--features
+- `cargo test --doc -p proxima-omega --features metal,instrument` and `--features
   cuda` -- both doctests pass (`msl::Q3K_UNPACK_MSL`, `cuda::emit_cuda`).
 
 **Real model, ONE run** (`gguf_generate`, qwen35moe on Metal, `PROXIMA_TEMPERATURE=0
@@ -31134,7 +31134,7 @@ groups only gate/up, the half ROW 537/538 already showed admits
   `[.., feed_forward, embedding]`/`[.., embedding, feed_forward]` gathered-
   product shape. PASSED (289.9 s -- dominated by quantizing three real
   256-expert Q4_K stacks, not kernel time).
-- `cargo nextest run -p omega --features metal,instrument -j 4`: 313/313
+- `cargo nextest run -p proxima-omega --features metal,instrument -j 4`: 313/313
   passed, 12 skipped.
 - `cargo check -p proxima-model-interop --features metal,instrument --examples -j 4`:
   clean; `cargo nextest run -p proxima-model-interop --features metal,instrument -E 'test(qwen35)'`:
@@ -31234,12 +31234,12 @@ sites (`execute_op_timed`, `resolve_op_metas`'s per-position loop, and the
 own `Option<Lookup>` through. New test
 `gathered_q4k_operand_reports_selected_rows_not_the_whole_stack`
 (`metal.rs`, `operand_tensor_bytes_tests`) asserts `8 selected rows * 512
-elements * 144/256 bytes`, not the 256-expert stack. `cargo test -p omega
+elements * 144/256 bytes`, not the 256-expert stack. `cargo test -p proxima-omega
 --features metal,instrument --lib metal::operand_tensor_bytes_tests`: 5/5
-passed. `cargo test -p omega --features metal,instrument --lib
+passed. `cargo test -p proxima-omega --features metal,instrument --lib
 metal::classify_kind_packed_row_marker_tests`: 3/3 passed, 1 ignored
-(pre-existing, unrelated to this fix). `cargo clippy -p omega --features
-metal,instrument --all-targets`: clean. `cargo check -p omega --features
+(pre-existing, unrelated to this fix). `cargo clippy -p proxima-omega --features
+metal,instrument --all-targets`: clean. `cargo check -p proxima-omega --features
 wgpu-backend,cuda --all-targets`: clean.
 
 **Residual, left open:** this fix corrects the byte-accounting counter; it
@@ -31294,12 +31294,12 @@ rows_per_simdgroup != 0` check never collide in the pipeline cache --
 without this, the two would share a `kernel_cache_key` (both have
 `packed_row_block_direct_axis == None`) while emitting different MSL.
 
-**Gates:** `cargo nextest run -p omega --features metal,instrument
+**Gates:** `cargo nextest run -p proxima-omega --features metal,instrument
 --test-threads 4`: 314/314 passed, 12 skipped (including the
 `qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down`
 census test, 289 s, dominated by quantizing three 256-expert Q4_K stacks).
-`cargo clippy -p omega --features metal,instrument --all-targets`: 0
-warnings. `cargo check -p omega --features wgpu-backend,cuda
+`cargo clippy -p proxima-omega --features metal,instrument --all-targets`: 0
+warnings. `cargo check -p proxima-omega --features wgpu-backend,cuda
 --all-targets`: clean. Committed as `perf(omega): direct row addressing
 for grouped selected-expert packed reduces` (main).
 
@@ -31548,7 +31548,7 @@ fixture test, and re-measure the real decode loop.
   gated-delta-net-fusion -j 4`: clean (one `#[allow(clippy::too_many_arguments)]`
   on `run_node_into_with_gdn_state`, one-line why: it mirrors
   `run_node_into`'s own seven plus the one seam this function adds).
-- `cargo check -p omega --features metal,instrument,gated-delta-net-fusion
+- `cargo check -p proxima-omega --features metal,instrument,gated-delta-net-fusion
   --all-targets` and `cargo clippy` with the same features: clean.
 - `cargo check -p proxima-model-interop --features metal,instrument,
   gated-delta-net-fusion --all-targets`: clean.
@@ -31634,15 +31634,15 @@ runs, and the reuse branch above finds it before falling back to a fresh
 allocation.
 
 **Gates -- MEASURED:**
-- `cargo check -p omega --features metal,instrument,gated-delta-net-fusion
+- `cargo check -p proxima-omega --features metal,instrument,gated-delta-net-fusion
   --tests -j 4`: clean.
-- `cargo nextest run -p omega --features metal,instrument,
+- `cargo nextest run -p proxima-omega --features metal,instrument,
   gated-delta-net-fusion --test gated_delta_net_parity --test-threads 4`:
   `2 tests run: 2 passed, 0 skipped` -- both cases now also assert
   `state_out` Metal == CPU (same relative-error bound as `out`) and that
   `state_in`'s own buffer reads back byte-identical to what was uploaded
   (proving the kernel never touches it).
-- `cargo nextest run -p omega --features metal,instrument,
+- `cargo nextest run -p proxima-omega --features metal,instrument,
   gated-delta-net-fusion --test-threads 4` (full crate, once):
   `316 tests run: 316 passed (1 slow), 12 skipped` -- the one slow test is
   `classify_kind_packed_row_marker_tests::qwen35moe_shaped_append_moe_ffn_
@@ -31651,7 +31651,7 @@ allocation.
   a regression from this change; re-run with that test excluded (`-E 'not
   test(qwen35moe_shaped_append_moe_ffn)'`) for confirmation: `315 tests run:
   315 passed, 13 skipped` in 84s.
-- `cargo clippy -p omega --features metal,instrument,gated-delta-net-fusion
+- `cargo clippy -p proxima-omega --features metal,instrument,gated-delta-net-fusion
   --all-targets -j 4`: clean. One incidental fix the compiler forced:
   `encode_op`'s own `hazard` parameter needed `mut` and its merge-block use
   changed from a consuming tuple match (`(hazard, scratch)`) to a reborrow
@@ -31662,7 +31662,7 @@ allocation.
   is the form clippy accepts and the one that keeps the merge block's own
   behavior identical (an extra layer of `&mut` on `tracker`, transparent to
   every method call through it).
-- `cargo check -p omega --features wgpu-backend,cuda --all-targets -j 4`:
+- `cargo check -p proxima-omega --features wgpu-backend,cuda --all-targets -j 4`:
   clean -- `wgsl`/`cuda` still reject `BoundOpKind::GatedDeltaNet` outright
   (`EmitError::GatedDeltaNetNotSupported`), unaffected by this row.
 
@@ -31718,8 +31718,8 @@ Both runs' `token_breakdown_metal step=8` line: `encode_dispatch_calls=4264 barr
 **Next instrumentation to close the gap:** log `current_identity`/`block_identity[index]`/`device_buffers.contains_key(node)` (`omega/src/metal.rs:3267-3278`) per named block per step, and force the `checkpoint_mapping_offset` path independently of git commit (e.g. by evicting `plan.device_buffers` between steps, or running under genuine low-memory pressure) to test whether IT, not any commit, is what zeroes `hazard_state`'s recorded hazards for that step -- if reproducible on `a1a2d7c4` too, this is a pre-existing residency-path hazard gap, not a regression from any of the six commits examined.
 
 **Gates -- MEASURED, on the clean tree (no source change landed this row):**
-- `cargo nextest run -p omega --features metal,instrument -j 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: `313 tests run: 313 passed, 13 skipped`. (`qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down` excluded per its own ~5-minute Q4_K quantization cost, ROW 548's own note.)
-- `cargo clippy -p omega --features metal,instrument --all-targets -j 4`: clean.
+- `cargo nextest run -p proxima-omega --features metal,instrument -j 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: `313 tests run: 313 passed, 13 skipped`. (`qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down` excluded per its own ~5-minute Q4_K quantization cost, ROW 548's own note.)
+- `cargo clippy -p proxima-omega --features metal,instrument --all-targets -j 4`: clean.
 
 **Landed this slice:** this doc entry only. No source change -- the suspected regression did not reproduce, so there is nothing on the examined commits to revert.
 
@@ -31754,8 +31754,8 @@ Every `mapping_rebound_block:` debug record in (b) and (c) names a NON-resident,
 **Residual, next instrumentation to close the gap:** (1) capture the git SHA and `RUST_LOG` value inside `off-1.log`/`gguf_run.log`/`gen1.log`'s own capture session if still available -- neither this row nor ROW 550 could establish whether those captures even ran the current `checkpoint_mapping_offset`/`cross_plan_resident_reuse` code path. (2) Reproduce under genuine memory pressure (a co-resident second large allocation holding physical memory below the ~19-22% free band `mapping_residency.rs`'s own doc cites for ROW 542) rather than a forced rung -- the ladder's own doc names memory pressure, not rung choice, as what defeats prefault/retry. (3) Trace the barrier-count mechanism itself: read `encode_op`'s hazard-recording call for the offset-bound path (`checkpoint_mapping_offset` return value is a `(MetalBuffer, usize)` tuple identical in shape to every other upload path's return, so hazard recording should not distinguish it -- confirm by instrumenting `hazard_step`'s own read-set with the buffer's resolved identity, not the tensor's node, and checking whether the whole-mapping buffer's shared identity across 593 tensors collapses distinct nodes into one hazard-tracker key that then falsely dedups against itself).
 
 **Gates -- MEASURED:**
-- `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: `313 tests run: 313 passed, 13 skipped`.
-- `cargo clippy -p omega --features metal,instrument --all-targets -j 4`: clean.
+- `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: `313 tests run: 313 passed, 13 skipped`.
+- `cargo clippy -p proxima-omega --features metal,instrument --all-targets -j 4`: clean.
 - `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 2 -E 'test(residen) or test(qwen35)'`: `36 tests run: 36 passed, 260 skipped`.
 - (`-j 4` and `--test-threads 4` are the SAME nextest flag -- `cargo nextest run --help`: `-j, --test-threads <N>`. The brief's gate command passing both errors `cannot be used multiple times`; ran with `--test-threads 4` alone.)
 
@@ -31828,7 +31828,7 @@ This matches ROW 550/551's own good-state reading (`block_upload_calls=76`, `map
 
 **Gates (all passed with allowed failures only):**
 - `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 2 --no-fail-fast`: EXIT=100, summary failures match allowed list: `capability_matrix::dense_cpu_unrepresentable_codec_load_returns_a_typed_error::{q2_k,q4_0,q5_0}`, `external_expert_paging::q2k_paging_actually_changes_the_decoded_ids`, 4× `external_architecture_hybrid_cache`. No regressions.
-- `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: Summary `313 tests run: 313 passed, 13 skipped`. All pass.
+- `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: Summary `313 tests run: 313 passed, 13 skipped`. All pass.
 - `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0.
 
 **Build:** `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (45.97 s).
@@ -31954,8 +31954,8 @@ gpu_exec_ms=41.559958 plan_hits=21 plan_misses=2`.
 **Gates:**
 - `cargo nextest run -p proxima-model-interop --features metal,instrument,gated-delta-net-fusion --test-threads 2 -E 'test(qwen35)'`: `20 tests run: 20 passed, 278 skipped`.
 - `cargo nextest run -p proxima-model-interop --no-default-features --features metal,instrument --test-threads 2 -E 'test(qwen35)'`: `20 tests run: 20 passed, 278 skipped` (feature off).
-- `cargo nextest run -p omega --features metal,instrument,gated-delta-net-fusion --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: `315 tests run: 315 passed, 13 skipped`.
-- `cargo clippy -p omega -p proxima-model-interop --features metal,instrument,gated-delta-net-fusion --all-targets`: exit 0.
+- `cargo nextest run -p proxima-omega --features metal,instrument,gated-delta-net-fusion --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: `315 tests run: 315 passed, 13 skipped`.
+- `cargo clippy -p proxima-omega -p proxima-model-interop --features metal,instrument,gated-delta-net-fusion --all-targets`: exit 0.
 - `cargo clippy -p proxima-tensor --features cached-attention-streaming,gated-delta-net-fusion --all-targets`: exit 0.
 - `cargo check --workspace --all-targets` (default features): exit 0 -- catches the `bind.rs` exhaustiveness gap the default-on flip exposed.
 
@@ -32091,7 +32091,7 @@ above, committed separately.
   `625 tests run: 625 passed, 8 skipped`.
 - `cargo clippy -p proxima-tensor --all-targets --features
   cached-attention-streaming -j 4`: exit 0.
-- `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E
+- `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 -E
   'not test(qwen35moe_shaped_append_moe_ffn)'`: `313 tests run: 313 passed, 13
   skipped`.
 - `cargo nextest run -p proxima-model-interop --features metal,instrument
@@ -32139,7 +32139,7 @@ map) set `rotary_dim: head_dim` -- byte-identical to today's only shape;
 `omega/src/metal.rs`/`omega/src/msl.rs`'s own six test-fixture builders same;
 `omega`'s ~15 other destructure sites already carried `..` and needed no
 change (Rust's own exhaustiveness check, not a grep, is what proved this --
-`cargo check -p omega --features metal,instrument --all-targets` is the
+`cargo check -p proxima-omega --features metal,instrument --all-targets` is the
 oracle, not a search for the string `CachedAttention {`).
 
 **CPU executor (`proxima-tensor/src/cpu.rs::run_cached_attention`):**
@@ -32213,17 +32213,17 @@ measured, for the same reason (see residual below).
   cached-attention-streaming -j 4`: exit 0, 0 warnings (after bundling
   `CachedAttentionRotary`/`CachedAttentionScore` to clear
   `clippy::too_many_arguments` on the widened kernel signature).
-- `cargo check -p omega --features metal,instrument`: exit 0.
-- `cargo check -p omega --features metal,instrument --all-targets`: exit 0
+- `cargo check -p proxima-omega --features metal,instrument`: exit 0.
+- `cargo check -p proxima-omega --features metal,instrument --all-targets`: exit 0
   (after adding `rotary_dim` alongside every test-fixture mutation of
   `head_dim` that shared a base fixture -- eight `*head_dim = N;` sites in
   `omega/src/msl.rs`'s own test module needed a matching `*rotary_dim = N;`
   or they inherited a stale `rotary_dim: 4` from their base fixture and
   tripped the new partial-rotary rejection on an op that was never about
   partial rotary).
-- `cargo clippy -p omega --features metal,instrument --lib -j 4`: exit 0, 0
+- `cargo clippy -p proxima-omega --features metal,instrument --lib -j 4`: exit 0, 0
   warnings.
-- `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E
+- `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 -E
   'not test(qwen35moe_shaped_append_moe_ffn)'`: `313 tests run: 313 passed,
   13 skipped` (ROW 556's own `313` baseline, unchanged -- run twice,
   identical both times).
@@ -32380,7 +32380,7 @@ either way, but the end-to-end 145/0 -> N number was not re-measured here.
   cached-attention-streaming -j 4`: exit 0, 0 warnings (after aliasing
   `AttentionScoreSources` and `#[allow(clippy::type_complexity)]` on the new
   test fixture's own multi-field return tuple).
-- `cargo check -p omega --features metal,instrument --all-targets -j 4`:
+- `cargo check -p proxima-omega --features metal,instrument --all-targets -j 4`:
   exit 0.
 - `cargo check -p proxima-model-interop --features metal,instrument
   --examples -j 4`: exit 0.
@@ -32806,7 +32806,7 @@ outside both.
 - `cargo check --workspace --all-targets -j 4`: exit 0 (the same
   pre-existing, unrelated `proc-macro-error2` future-incompatibility warning
   every prior row already noted).
-- `cargo nextest run -p omega --features metal,instrument -E 'not
+- `cargo nextest run -p proxima-omega --features metal,instrument -E 'not
   test(qwen35moe_shaped_append_moe_ffn)'`: `313 tests run: 313 passed, 13
   skipped` (unchanged from ROW 559's own baseline; `cpu.rs`'s
   `neon_tile_plan` is a production path this gate exercises directly).
@@ -33017,7 +33017,7 @@ RUST_LOG=proxima_tensor=debug PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH=concurrent 
 
 **Plumbing, proven by `git diff`, not read-and-inferred.** ROW 282 (`9631661a`, 2026-09-04) folded `"cached-attention-streaming"` into the default `metal` feature list in BOTH `omega/Cargo.toml` and `proxima-model-interop/Cargo.toml`, exactly where ROW 562's task description guessed the break might be. Commit `98cba8f6` ("feat: add configurable local inference backends", 2026-09-11), an unrelated CUDA/wgpu-driver landing, silently removed the `"cached-attention-streaming",` line from both `metal = [...]` arrays while adding `vulkan`/`cuda-driver` features nearby -- `git show 98cba8f6 -- omega/Cargo.toml` shows the bare `-    "cached-attention-streaming",` hunk with nothing else touching that array; same shape in `proxima-model-interop/Cargo.toml`. The doc comment directly above each array (`"cached-attention-streaming" joins per the owner's less-work rule (ROW 282)"`) survived the deletion verbatim, so the code and its own adjacent comment disagreed from `98cba8f6` onward -- `omega/Cargo.toml:132-151` and `proxima-model-interop/Cargo.toml:110-122` on `main`@`f6f5772f` both list `metal-plan-stable-buffers`/`reduce-epilogue-fusion`/`gated-delta-net-fusion` but not `cached-attention-streaming`. This alone fully explains ROW 562's "op_profile_kind never shows cached_attention" and ROW 563's need to pass `cached-attention-streaming` explicitly on the command line: building `--features metal,instrument` alone (ROW 282's own re-prove command) has not carried the fusion since `98cba8f6`.
 
-**Fix:** re-add `"cached-attention-streaming",` to both `metal` arrays, same position ROW 282 originally placed it (`omega/Cargo.toml:147`, `proxima-model-interop/Cargo.toml:117`). Confirmed with a plain `cargo build -p omega -p proxima-model-interop --features proxima-model-interop/metal,proxima-model-interop/instrument`: EXIT=0, and the resulting `target/release/examples/gguf_generate` binary is byte-identical in build inputs to one built with `cached-attention-streaming` named explicitly (cargo's feature union resolves to the same set either way -- confirmed by the release build finishing in 0.55s, reusing the fingerprint from a prior explicit build).
+**Fix:** re-add `"cached-attention-streaming",` to both `metal` arrays, same position ROW 282 originally placed it (`omega/Cargo.toml:147`, `proxima-model-interop/Cargo.toml:117`). Confirmed with a plain `cargo build -p proxima-omega -p proxima-model-interop --features proxima-model-interop/metal,proxima-model-interop/instrument`: EXIT=0, and the resulting `target/release/examples/gguf_generate` binary is byte-identical in build inputs to one built with `cached-attention-streaming` named explicitly (cargo's feature union resolves to the same set either way -- confirmed by the release build finishing in 0.55s, reusing the fingerprint from a prior explicit build).
 
 **Re-ran ROW 563's own France 4-token repro** (`RUST_LOG=proxima_tensor=debug,omega=debug`, real `qwen3.6:35b-a3b` checkpoint, `--features metal,instrument` only, no explicit `cached-attention-streaming`) with ROW 563's decline instrumentation intact, plus 10 NEW `debug!` sites this row adds at the previously-bare `continue`s in the score-source decomposition chain (`bind.rs`, `not_online_softmax_add` through `not_new_score_subtract`, matching the file's own `#[cfg(feature = "instrument")]` convention). Two `bind()` calls fire (prefill, then decode step 1; steps 2-4 reuse the cached plan, matching ROW 282's `plan_hits` mechanism):
 
@@ -33036,7 +33036,7 @@ call#2 (decode 1) strict accepted:     8763,7268,5773,4278,2783,1288            
 
 **One unrelated pre-existing failure noted in passing, not this row's to fix:** `cargo nextest run -p proxima-model-interop --features metal,instrument` has 3 failures unchanged by this row's edits -- `dense_cpu_unrepresentable_codec_load_returns_a_typed_error::{q2_k,q4_0,q5_0}` (`capability_matrix.rs:200`) fails identically with this row's changes reverted via `git apply -R` and reapplied via `git apply`, confirming it predates this row and is unrelated to feature plumbing or `bind.rs`.
 
-**Gates run, own `CARGO_TARGET_DIR=/tmp/cargo_target`:** `cargo build -p omega -p proxima-model-interop --features proxima-model-interop/metal,proxima-model-interop/instrument`: EXIT=0. `cargo nextest run -p proxima-tensor --features std,instrument`: 639 passed, 8 skipped (EXIT=0). `cargo nextest run -p omega --features metal`: 289 passed, 11 skipped (EXIT=0). `cargo nextest run -p proxima-model-interop --features metal,instrument`: 207 passed, 3 failed (pre-existing, see above), 46 skipped -- same 3 failures reproduce on unmodified `main`. `cargo clippy -p proxima-tensor -p omega -p proxima-model-interop --features proxima-model-interop/metal,proxima-model-interop/instrument --all-targets -- -D warnings`: EXIT=0, zero warnings.
+**Gates run, own `CARGO_TARGET_DIR=/tmp/cargo_target`:** `cargo build -p proxima-omega -p proxima-model-interop --features proxima-model-interop/metal,proxima-model-interop/instrument`: EXIT=0. `cargo nextest run -p proxima-tensor --features std,instrument`: 639 passed, 8 skipped (EXIT=0). `cargo nextest run -p proxima-omega --features metal`: 289 passed, 11 skipped (EXIT=0). `cargo nextest run -p proxima-model-interop --features metal,instrument`: 207 passed, 3 failed (pre-existing, see above), 46 skipped -- same 3 failures reproduce on unmodified `main`. `cargo clippy -p proxima-tensor -p proxima-omega -p proxima-model-interop --features proxima-model-interop/metal,proxima-model-interop/instrument --all-targets -- -D warnings`: EXIT=0, zero warnings.
 
 **Re-prove commands:**
 
@@ -33072,7 +33072,7 @@ PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH=concurrent PROXIMA_METAL_OP_PROFILE_STEP=
 
 **Odell 128-token task item (3): reproduces identically under both dispatch arms, unrelated to this row's fix.** `PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH=concurrent` and `PROXIMA_DISPATCH=serial` both produced the BYTE-IDENTICAL degenerate completion: `"<think>\n\n</think>\n\nThe air is thick with anticipation.\n\nIt seems like it's just here.\n\n\n\n\n\n..."` (two short sentences then several hundred bare newlines to the 128-token budget). Identical output across both dispatch arms rules out a dispatch-order race as the cause; this is a separate, pre-existing greedy-decoding degeneration on this specific long prompt, unrelated to `cached_attention`/`bind_with_fusion` -- named in passing, not this row's to fix.
 
-**Gates run, own `CARGO_TARGET_DIR=/tmp/cargo_target`:** `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 326 tests run, 326 passed, 16 skipped, EXIT=0. `cargo clippy -p proxima-tensor -p omega -p proxima-model-interop --features proxima-model-interop/metal,proxima-model-interop/instrument --all-targets -- -D warnings`: EXIT=0, zero warnings (one `clippy::needless_return` introduced by this row's own first draft of the `after_reduce_epilogue_fusion` debug, fixed in the same row before landing).
+**Gates run, own `CARGO_TARGET_DIR=/tmp/cargo_target`:** `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 326 tests run, 326 passed, 16 skipped, EXIT=0. `cargo clippy -p proxima-tensor -p proxima-omega -p proxima-model-interop --features proxima-model-interop/metal,proxima-model-interop/instrument --all-targets -- -D warnings`: EXIT=0, zero warnings (one `clippy::needless_return` introduced by this row's own first draft of the `after_reduce_epilogue_fusion` debug, fixed in the same row before landing).
 
 **Residual, unmeasured this row:** `encode_dispatch_calls` for the single-range decode path (named above, not obtained). The Odell degeneration's own root cause (unrelated to this row) is untraced.
 
@@ -33096,11 +33096,11 @@ RUST_LOG=omega=debug,proxima_tensor=debug PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH
 **What did NOT land, named rather than deferred silently.** The encode-loop consumption (`execute_plan_with_placements_inner`'s per-position loop skipping merged members and encoding one `grid.z` dispatch instead), the MSL kernel itself (a `base_table[tgid.z]`-indexed variant of `push_packed_row_blocked_body`, `omega/src/msl.rs:6521` -- a ~12,000-token string-templated code generator whose `weight_base`/`other_base`/output-coordinate arithmetic is threaded through several hundred lines and was not something this session could responsibly rewrite and self-verify for silent-data-race correctness within the slice's own 45-minute ceiling), and the hazard-loop change over real merged dispatches (design note §4's per-member `hazard.written.insert` loop -- written and tested in isolation against synthetic `HazardTracker<&str>` data above, never against a real merged `encode_op` call because none exists yet). Consequently: **no parity test, no bare-kernel ladder measurement, and no real-model decision were produced** -- there is no merged GPU dispatch yet for any of those three to measure. Landing the MSL kernel change unverified against a real parity oracle, under time pressure, is exactly the "silent data race" failure mode the design note's own Risks section names (`HazardTracker` sees 8 outputs, not 1; arena liveness per z-slice; cache-key collision across N) -- shipping it without that verification would violate this project's own incumbent-correctness and no-punt discipline more than reporting the gap plainly.
 
 **Gates run, own `CARGO_TARGET_DIR=/tmp/cargo_target`:**
-- `cargo check -p omega --features metal,instrument,metal-horizontal-merge --all-targets -j 4`: EXIT=0.
-- `cargo nextest run -p omega --features metal,instrument,metal-horizontal-merge --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 330 tests run, 330 passed, 16 skipped, EXIT=0.
-- `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'` (feature OFF): 327 tests run, 327 passed, 16 skipped, EXIT=0 -- the 3-test delta is exactly `horizontal_merge_grouping_tests`, confirming the feature gate is real.
-- `cargo clippy -p omega --features metal,instrument,metal-horizontal-merge --all-targets -j 4`: EXIT=0, zero warnings.
-- `cargo check -p omega --features wgpu-backend,cuda --all-targets -j 4`: EXIT=0.
+- `cargo check -p proxima-omega --features metal,instrument,metal-horizontal-merge --all-targets -j 4`: EXIT=0.
+- `cargo nextest run -p proxima-omega --features metal,instrument,metal-horizontal-merge --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 330 tests run, 330 passed, 16 skipped, EXIT=0.
+- `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'` (feature OFF): 327 tests run, 327 passed, 16 skipped, EXIT=0 -- the 3-test delta is exactly `horizontal_merge_grouping_tests`, confirming the feature gate is real.
+- `cargo clippy -p proxima-omega --features metal,instrument,metal-horizontal-merge --all-targets -j 4`: EXIT=0, zero warnings.
+- `cargo check -p proxima-omega --features wgpu-backend,cuda --all-targets -j 4`: EXIT=0.
 - `cargo check -p proxima-model-interop --features metal,instrument,metal-horizontal-merge --examples -j 4`: EXIT=0.
 
 **Residual, unmeasured this row:** the entire GPU-side merge (encode loop, MSL kernel, live hazard loop over a real merged dispatch), the parity test against the qwen35moe-shaped MoE block, the bare-kernel `matvec_roofline_ladder` 8-separate-vs-1-merged comparison, and the real-model France run/decision. All four are blocked on the MSL kernel rewrite, not on anything landed this row -- that rewrite is the next slice's whole scope, starting from `push_packed_row_blocked_body` (`omega/src/msl.rs:6521`) and `execute_plan_with_placements_inner`'s per-position loop (`omega/src/metal.rs:3173`-ish, re-grep before trusting that line number).
@@ -33110,7 +33110,7 @@ RUST_LOG=omega=debug,proxima_tensor=debug PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima
 export CARGO_TARGET_DIR=/tmp/cargo_target
-cargo nextest run -p omega --features metal,instrument,metal-horizontal-merge --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'
+cargo nextest run -p proxima-omega --features metal,instrument,metal-horizontal-merge --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'
 # confirm: 330 tests run, 330 passed (327 + the 3 horizontal_merge_grouping_tests cases)
 ```
 
@@ -33125,11 +33125,11 @@ cargo nextest run -p omega --features metal,instrument,metal-horizontal-merge --
 **What did NOT land, named rather than deferred silently -- unchanged from ROW 566's own list, minus item (2).** The encode-loop consumption (`execute_plan_with_placements_inner`'s per-position loop skipping merged members and encoding one `grid.z` dispatch calling `splice_horizontal_merge_base_table`'s output kernel), the driver-side `base_table` buffer binding (a new plan-owned `Binding` variant, not `NodeId`-keyed -- deliberately NOT added to the shared `Binding` enum this row, since that enum is matched exhaustively by `cuda_driver.rs`/`wgpu_driver.rs`/`msl.rs` and adding an unused variant there would force every other backend to handle a case with no present caller), the live hazard loop over a real merged dispatch, the parity test against the qwen35moe-shaped MoE block, the bare-kernel ladder measurement, and the real-model France run/decision. All five remain blocked on the encode-loop wiring, which is gate (2)/(3) of the design note and did not fit this slice's 45-minute ceiling on top of gate (1)'s own verification cost.
 
 **Gates run, own `CARGO_TARGET_DIR=/tmp/cargo_target`:**
-- `cargo check -p omega --features metal,metal-horizontal-merge --tests -j 4`: EXIT=0.
-- `cargo nextest run -p omega --features metal,instrument,metal-horizontal-merge --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 332 tests run, 332 passed, 16 skipped, EXIT=0.
-- `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'` (feature OFF): 327 tests run, 327 passed, 16 skipped, EXIT=0 -- the 5-test delta is exactly `horizontal_merge_grouping_tests` (3, ROW 566) plus this row's 2 new `horizontal_merge_base_table_splice_tests`.
-- `cargo clippy -p omega --features metal,metal-horizontal-merge --all-targets -j 4`: EXIT=0, zero warnings.
-- `cargo check -p omega --features wgpu-backend,cuda --all-targets -j 4`: EXIT=0.
+- `cargo check -p proxima-omega --features metal,metal-horizontal-merge --tests -j 4`: EXIT=0.
+- `cargo nextest run -p proxima-omega --features metal,instrument,metal-horizontal-merge --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 332 tests run, 332 passed, 16 skipped, EXIT=0.
+- `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'` (feature OFF): 327 tests run, 327 passed, 16 skipped, EXIT=0 -- the 5-test delta is exactly `horizontal_merge_grouping_tests` (3, ROW 566) plus this row's 2 new `horizontal_merge_base_table_splice_tests`.
+- `cargo clippy -p proxima-omega --features metal,metal-horizontal-merge --all-targets -j 4`: EXIT=0, zero warnings.
+- `cargo check -p proxima-omega --features wgpu-backend,cuda --all-targets -j 4`: EXIT=0.
 
 **Residual, unmeasured this row:** everything ROW 566 already named as residual, still true -- the parity test, the bare ladder, and the real-model decision all require the encode loop this row does not add. No GPU dispatch of the merged kernel has ever run; `splice_horizontal_merge_base_table`'s output kernel has been proven correct as TEXT (structurally, via the round-trip test) but never compiled by the Metal toolchain or executed, since nothing binds `base_table` yet.
 
@@ -33138,7 +33138,7 @@ cargo nextest run -p omega --features metal,instrument,metal-horizontal-merge --
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima
 export CARGO_TARGET_DIR=/tmp/cargo_target
-cargo nextest run -p omega --features metal,instrument,metal-horizontal-merge --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'
+cargo nextest run -p proxima-omega --features metal,instrument,metal-horizontal-merge --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'
 # confirm: 332 tests run, 332 passed (330 from ROW 566 + this row's 2 splice tests)
 ```
 
@@ -33157,12 +33157,12 @@ cargo nextest run -p omega --features metal,instrument,metal-horizontal-merge --
 **The new test, `eight_independent_matvecs_run_unmerged_today`, is landed `#[ignore]`** (not deleted, not silently passing) with the exact finding in its own `#[ignore = "..."]` reason string -- a standing, already-proven repro for whoever roots this out next, rather than a fresh build from scratch.
 
 **Gates run, own `CARGO_TARGET_DIR=/tmp/cargo_target`:**
-- `cargo check -p omega --features metal,instrument,metal-horizontal-merge --all-targets -j 4`: EXIT=0.
-- `cargo check -p omega --features metal,metal-horizontal-merge --all-targets -j 4` (instrument OFF): EXIT=0.
-- `cargo nextest run -p omega --features metal,instrument,metal-horizontal-merge --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 332 tests run, 332 passed, 17 skipped, EXIT=0 -- the extra skip vs ROW 567's 16 is this row's own `#[ignore]`d test.
-- `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'` (feature OFF): 327 tests run, 327 passed, 17 skipped, EXIT=0 -- same +1 skip, no regression.
-- `cargo clippy -p omega --features metal,instrument,metal-horizontal-merge --all-targets -j 4`: EXIT=0, zero warnings.
-- `cargo check -p omega --features wgpu-backend,cuda --all-targets -j 4`: EXIT=0.
+- `cargo check -p proxima-omega --features metal,instrument,metal-horizontal-merge --all-targets -j 4`: EXIT=0.
+- `cargo check -p proxima-omega --features metal,metal-horizontal-merge --all-targets -j 4` (instrument OFF): EXIT=0.
+- `cargo nextest run -p proxima-omega --features metal,instrument,metal-horizontal-merge --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 332 tests run, 332 passed, 17 skipped, EXIT=0 -- the extra skip vs ROW 567's 16 is this row's own `#[ignore]`d test.
+- `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'` (feature OFF): 327 tests run, 327 passed, 17 skipped, EXIT=0 -- same +1 skip, no regression.
+- `cargo clippy -p proxima-omega --features metal,instrument,metal-horizontal-merge --all-targets -j 4`: EXIT=0, zero warnings.
+- `cargo check -p proxima-omega --features wgpu-backend,cuda --all-targets -j 4`: EXIT=0.
 
 **Not attempted this row:** parity against the qwen35moe-shaped MoE block, the bare-kernel ladder, the real-model France run/lock/decision, and any default-on flip -- all five explicitly blocked on the placed-offset defect above, not on anything else.
 
@@ -33171,18 +33171,18 @@ cargo nextest run -p omega --features metal,instrument,metal-horizontal-merge --
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima
 export CARGO_TARGET_DIR=/tmp/cargo_target
-cargo test -p omega --test horizontal_merge_dispatch --features metal,instrument -- --ignored --nocapture
+cargo test -p proxima-omega --test horizontal_merge_dispatch --features metal,instrument -- --ignored --nocapture
 # confirm: round 0 passes, round 1 fails byte comparison against the independent reference
 # (the test's own write-side readback assertion passes for every round first)
 ```
 
 ## ROW 570 -- horizontal packed-row merge: ROW 568's own defect was a test-fixture unit bug (byte offset passed as an element count), not production; gate (2) proven with 2 real production fixes found along the way; real-model run shows ZERO measured effect -- feature stays default-off
 
-ROW 568's "nonzero placed-offset misreads" root-caused to `omega/tests/horizontal_merge_dispatch.rs`'s own `read_placed_buffer_f32(&output_buffer, round * OUT_DIM, OUT_DIM)` call passing an ELEMENT count where that function's own signature takes a BYTE offset (`round * OUT_DIM * size_of::<f32>()`); fixed, the pre-existing test passes both feature settings, no production code changed for that fix. Writing gate (2)'s own end-to-end cases against a REAL device then found two genuine production defects, both fixed this row: (1) `splice_horizontal_merge_base_table` added a second `uint3 ... [[threadgroup_position_in_grid]]` parameter alongside the existing scalar `uint gid [[thread_position_in_grid]]`, which Metal's compiler rejects outright ("expecting input declarations with either all scalar types or all vector types") -- fixed by widening the existing `gid` parameter to `uint3` instead of adding a second one; (2) `handle_merged_position` never registered a merged member's own output NodeId in `device_buffers`, so a later position reading that member's output (`MetalError::UnresolvedHazardOperand`) could never resolve it even though the bytes were written correctly -- fixed by registering every member (leader and z>0) the same way the ordinary `encode_op` path always does. Four new end-to-end cases (`dispatch_and_hazard_counts_match_the_design_note`, `mixed_buffer_member_does_not_merge`, `raw_split_member_forces_its_own_dispatch`, plus the pre-existing baseline; a fifth, `ladder_eight_dispatches_vs_one_merged_dispatch_gpu_time`, is `#[ignore]`d as a perf ladder, not a correctness gate) all pass under BOTH `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'` (331 tests run, 331 passed, 0 failed, 17 skipped) and the same with `,metal-horizontal-merge` added (336 tests run, 336 passed, 0 failed, 17 skipped): dispatch count 8 (off) vs 1 (on) for the 8-independent-matvec case, 8 (off) vs 2 (on, 7 merged + 1 refused) for the mixed-buffer case, 4 (off) vs 2 (on, 3 merged + 1 excluded) for the RAW-split case, `HAZARD_STEP_CALLS` (new counter, `omega/src/metal.rs`) reading 8 in every case regardless of dispatch count; `cargo clippy` on both feature sets and `cargo check -p omega --features wgpu-backend,cuda --all-targets` all EXIT=0. Gate (2)'s own "byte-identical output" claim is proven, not argued: the 8-round fixture's full 4,096-`f32`/16,384-byte output, dumped from a `metal,instrument` build and a `metal,instrument,metal-horizontal-merge` build of the SAME test, are `cmp`-identical (exit 0). The ladder (0.59 MB `weight_bytes_per_round` slab, 2 warmup + 7 timed calls to `execute_plan_named_with_placements`, wall-clock including `waitUntilCompleted`): off samples_us=[409.708, 451.625, 508.375, 400.667, 381.542, 396.042, 396.709] median 400.667; on samples_us=[321.250, 291.125, 292.459, 309.792, 287.667, 295.291, 303.042] median 295.291 -- the merged dispatch is ~1.36x faster on this synthetic shape. The real-model run (`gguf_generate`, qwen3.6:35b-a3b, "What is the capital of France?", 16 tokens, `PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH=concurrent`, unprofiled, 2 runs each) generated "Paris" every time and reported `ttnt_mean_ms` 52.273/51.273 (off) vs 51.273/51.182 (on) -- `on < off` by the letter of the decision rule, but the profiled run (`PROXIMA_METAL_OP_PROFILE_STEP=8`, `metal-horizontal-merge` ON) reports `encode_dispatch_calls=2704` on EVERY decode step (0 through 7) and `op_profile step=8 op_count=2704`, byte-identical to the OFF baseline's own 2,704 -- proof, not inference, that ZERO dispatches actually merged in the real qwen35moe decode graph (the model's MoE experts route through `execute_plan_named_with_placements_and_expert_sources`'s gather/expert-source mechanism, a structurally different dispatch shape from this row's independent-per-round matvec fixture, and never form a `group_mergeable_positions` candidate). The `on < off` ttnt delta (roughly 1 ms across 2 samples each) is therefore noise on an unchanged dispatch count, not a measured win, and does NOT satisfy the decision rule's own intent ("Paris and on < off" was written assuming a real dispatch-count reduction) -- **`metal-horizontal-merge` is NOT flipped default-on this row**; no confirming run, no `feat(interop)` commit, no push of that flag. Lock acquired on first `mkdir` try (no contention), `ollama ps` empty throughout, released via `kill "$(cat "$LOCK/pid")"; rm -rf "$LOCK"` immediately after the profiled run. **Not attempted this row:** parity against the qwen35moe-shaped 256-expert/k=8 MoE block -- correctly exercising `execute_plan_named_with_placements_and_expert_sources`'s own gather/expert-source plan shape at that scale was judged too large to build correctly inside this row's remaining time budget alongside items (1)/(3)/(4), and a rushed version risked a false parity pass on the wrong expert-routing shape; left for a dedicated row.
+ROW 568's "nonzero placed-offset misreads" root-caused to `omega/tests/horizontal_merge_dispatch.rs`'s own `read_placed_buffer_f32(&output_buffer, round * OUT_DIM, OUT_DIM)` call passing an ELEMENT count where that function's own signature takes a BYTE offset (`round * OUT_DIM * size_of::<f32>()`); fixed, the pre-existing test passes both feature settings, no production code changed for that fix. Writing gate (2)'s own end-to-end cases against a REAL device then found two genuine production defects, both fixed this row: (1) `splice_horizontal_merge_base_table` added a second `uint3 ... [[threadgroup_position_in_grid]]` parameter alongside the existing scalar `uint gid [[thread_position_in_grid]]`, which Metal's compiler rejects outright ("expecting input declarations with either all scalar types or all vector types") -- fixed by widening the existing `gid` parameter to `uint3` instead of adding a second one; (2) `handle_merged_position` never registered a merged member's own output NodeId in `device_buffers`, so a later position reading that member's output (`MetalError::UnresolvedHazardOperand`) could never resolve it even though the bytes were written correctly -- fixed by registering every member (leader and z>0) the same way the ordinary `encode_op` path always does. Four new end-to-end cases (`dispatch_and_hazard_counts_match_the_design_note`, `mixed_buffer_member_does_not_merge`, `raw_split_member_forces_its_own_dispatch`, plus the pre-existing baseline; a fifth, `ladder_eight_dispatches_vs_one_merged_dispatch_gpu_time`, is `#[ignore]`d as a perf ladder, not a correctness gate) all pass under BOTH `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'` (331 tests run, 331 passed, 0 failed, 17 skipped) and the same with `,metal-horizontal-merge` added (336 tests run, 336 passed, 0 failed, 17 skipped): dispatch count 8 (off) vs 1 (on) for the 8-independent-matvec case, 8 (off) vs 2 (on, 7 merged + 1 refused) for the mixed-buffer case, 4 (off) vs 2 (on, 3 merged + 1 excluded) for the RAW-split case, `HAZARD_STEP_CALLS` (new counter, `omega/src/metal.rs`) reading 8 in every case regardless of dispatch count; `cargo clippy` on both feature sets and `cargo check -p proxima-omega --features wgpu-backend,cuda --all-targets` all EXIT=0. Gate (2)'s own "byte-identical output" claim is proven, not argued: the 8-round fixture's full 4,096-`f32`/16,384-byte output, dumped from a `metal,instrument` build and a `metal,instrument,metal-horizontal-merge` build of the SAME test, are `cmp`-identical (exit 0). The ladder (0.59 MB `weight_bytes_per_round` slab, 2 warmup + 7 timed calls to `execute_plan_named_with_placements`, wall-clock including `waitUntilCompleted`): off samples_us=[409.708, 451.625, 508.375, 400.667, 381.542, 396.042, 396.709] median 400.667; on samples_us=[321.250, 291.125, 292.459, 309.792, 287.667, 295.291, 303.042] median 295.291 -- the merged dispatch is ~1.36x faster on this synthetic shape. The real-model run (`gguf_generate`, qwen3.6:35b-a3b, "What is the capital of France?", 16 tokens, `PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH=concurrent`, unprofiled, 2 runs each) generated "Paris" every time and reported `ttnt_mean_ms` 52.273/51.273 (off) vs 51.273/51.182 (on) -- `on < off` by the letter of the decision rule, but the profiled run (`PROXIMA_METAL_OP_PROFILE_STEP=8`, `metal-horizontal-merge` ON) reports `encode_dispatch_calls=2704` on EVERY decode step (0 through 7) and `op_profile step=8 op_count=2704`, byte-identical to the OFF baseline's own 2,704 -- proof, not inference, that ZERO dispatches actually merged in the real qwen35moe decode graph (the model's MoE experts route through `execute_plan_named_with_placements_and_expert_sources`'s gather/expert-source mechanism, a structurally different dispatch shape from this row's independent-per-round matvec fixture, and never form a `group_mergeable_positions` candidate). The `on < off` ttnt delta (roughly 1 ms across 2 samples each) is therefore noise on an unchanged dispatch count, not a measured win, and does NOT satisfy the decision rule's own intent ("Paris and on < off" was written assuming a real dispatch-count reduction) -- **`metal-horizontal-merge` is NOT flipped default-on this row**; no confirming run, no `feat(interop)` commit, no push of that flag. Lock acquired on first `mkdir` try (no contention), `ollama ps` empty throughout, released via `kill "$(cat "$LOCK/pid")"; rm -rf "$LOCK"` immediately after the profiled run. **Not attempted this row:** parity against the qwen35moe-shaped 256-expert/k=8 MoE block -- correctly exercising `execute_plan_named_with_placements_and_expert_sources`'s own gather/expert-source plan shape at that scale was judged too large to build correctly inside this row's remaining time budget alongside items (1)/(3)/(4), and a rushed version risked a false parity pass on the wrong expert-routing shape; left for a dedicated row.
 
 ## ROW 571 -- root cause of "zero groups on the real graph" measured directly: `split_by_shared_buffers` requires activation AND output already resolved in `device_buffers`/`output_placed`, and a real decode plan's own intermediate hidden states never are at `ensure_merged_dispatches`'s one-time, up-front call point -- NOT a false hazard edge; not fixed, feature stays default-off
 
-Instrumented `ensure_merged_dispatches` with a temporary per-position `eprintln!` (node, kernel identity, weight/activation/output buffer pointer+offset, refusal reason), ran it against the real qwen35moe decode plan (France 16, `metal-horizontal-merge` on) under the lock protocol, and read the printed payload rather than reasoning about the design: of 1,121 packed-row candidates in one decode-plan call (positions classified `is_packed_row` = 2 operands, weight tagged in `plan.packed_operands`), **100% were refused with `activation=None` and `output=None`, 0% ever reached `build_merged_dispatch`, 0% were excluded by a hazard/dataflow edge** (`group_mergeable_positions`'s own RAW-edge exclusion never fired here -- there is no false edge to break). Printed lines for one representative group (candidate 41, identity `omega_reduce_r3_ax0_2_n2_multiply_add_zero_g10_wide_c4fB1_da2_w6403`, 6 positions: 42, 45, 48, 51, 54, 57): every one reports the identical weight pointer `0x10162f6f0` (the ONE shared resident-mapping buffer, confirming the coordinator's own hypothesis that the no-copy mapping already gives a single shared buffer per-tensor with distinct byte offsets: 247234368 here, 16736064/12009280/26173248/400920384 for sibling candidates) but `activation=None activation=None ... output=None output=None ...` on every line, reason `buffer mismatch (candidate N, refused or split by split_by_shared_buffers)`. The mechanism: `ensure_merged_dispatches` runs EXACTLY ONCE per `Plan` (`if plan.merged.borrow().is_some() { return Ok(()); }`), at the very start of `execute_plan_with_placements_inner`, BEFORE the per-position encode loop that would otherwise populate `device_buffers[activation_node]`/`device_buffers[bound.node]` as each op actually executes. Weight IS resolved at that point because it is an `Op::Input` checkpoint leaf, loaded up front; activation and output are NOT, because they are intermediate hidden states the arena materializes lazily, at encode time, one position later than the position that needs them for grouping -- and production's own decode loop never places an intermediate through `output_placements` at all (that mechanism exists only for a caller-supplied final buffer, e.g. this crate's own synthetic test fixture, which is why `metal_output_placement.rs` and `horizontal_merge_dispatch.rs` never hit this arm: every operand there is a placed `Op::Input`/caller-placed output, resolved before grouping runs). Making the admission true for production therefore needs the arena to PRE-ALLOCATE one contiguous, group-sized output region for a whole structural candidate before ANY member of it encodes (today allocation is lazy and per-position, exactly the shape ROW 568 already flagged as unsafe for `base_table.output_base` without a stability guarantee) plus a second pass so activation identity is known before the grouping decision -- a real `BufferArena`-level redesign, not a one-line fix, and not attempted this row given the documented history (ROW 566/567/568) of declining exactly this shortcut under time pressure. Two new counters landed as PERMANENT, `instrument`-gated telemetry for whoever takes the redesign on: `MERGE_CANDIDATE_UNRESOLVED_ACTIVATION` and `MERGE_CANDIDATE_UNPLACED_OUTPUT` (plus `MERGE_CANDIDATE_UNRESOLVED_WEIGHT` for symmetry, essentially always zero in practice) in `omega/src/metal.rs`'s `split_by_shared_buffers`; the temporary per-position `eprintln!` was reverted, not landed. Gates: `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'` 331 passed, 0 failed, 17 skipped; same with `,metal-horizontal-merge` 336 passed, 0 failed, 17 skipped; `cargo clippy` both feature sets EXIT=0; `cargo check -p omega --features wgpu-backend,cuda --all-targets` EXIT=0. Real run (France 16, same lock protocol, `ollama ps` empty throughout): the profiled on-run (`PROXIMA_METAL_OP_PROFILE_STEP=8`) reports `encode_dispatch_calls=2704` on every one of steps 0-12 and `op_profile step=8 op_count=2704` -- unchanged from ROW 570, confirming (not assuming) that no admission-gate change landed this row and no groups form; unprofiled TTNTs, two runs each, all four generated "Paris": off 50.727/50.727, on 50.545/50.909. Decision rule this row was "dispatch count reduced AND on <= off -> default-on"; dispatch count is NOT reduced (2,704 both ways), so the compound condition is false regardless of the ttnt comparison -- **`metal-horizontal-merge` is NOT flipped default-on**, no confirming run, no commit of that flag, no push of it.
+Instrumented `ensure_merged_dispatches` with a temporary per-position `eprintln!` (node, kernel identity, weight/activation/output buffer pointer+offset, refusal reason), ran it against the real qwen35moe decode plan (France 16, `metal-horizontal-merge` on) under the lock protocol, and read the printed payload rather than reasoning about the design: of 1,121 packed-row candidates in one decode-plan call (positions classified `is_packed_row` = 2 operands, weight tagged in `plan.packed_operands`), **100% were refused with `activation=None` and `output=None`, 0% ever reached `build_merged_dispatch`, 0% were excluded by a hazard/dataflow edge** (`group_mergeable_positions`'s own RAW-edge exclusion never fired here -- there is no false edge to break). Printed lines for one representative group (candidate 41, identity `omega_reduce_r3_ax0_2_n2_multiply_add_zero_g10_wide_c4fB1_da2_w6403`, 6 positions: 42, 45, 48, 51, 54, 57): every one reports the identical weight pointer `0x10162f6f0` (the ONE shared resident-mapping buffer, confirming the coordinator's own hypothesis that the no-copy mapping already gives a single shared buffer per-tensor with distinct byte offsets: 247234368 here, 16736064/12009280/26173248/400920384 for sibling candidates) but `activation=None activation=None ... output=None output=None ...` on every line, reason `buffer mismatch (candidate N, refused or split by split_by_shared_buffers)`. The mechanism: `ensure_merged_dispatches` runs EXACTLY ONCE per `Plan` (`if plan.merged.borrow().is_some() { return Ok(()); }`), at the very start of `execute_plan_with_placements_inner`, BEFORE the per-position encode loop that would otherwise populate `device_buffers[activation_node]`/`device_buffers[bound.node]` as each op actually executes. Weight IS resolved at that point because it is an `Op::Input` checkpoint leaf, loaded up front; activation and output are NOT, because they are intermediate hidden states the arena materializes lazily, at encode time, one position later than the position that needs them for grouping -- and production's own decode loop never places an intermediate through `output_placements` at all (that mechanism exists only for a caller-supplied final buffer, e.g. this crate's own synthetic test fixture, which is why `metal_output_placement.rs` and `horizontal_merge_dispatch.rs` never hit this arm: every operand there is a placed `Op::Input`/caller-placed output, resolved before grouping runs). Making the admission true for production therefore needs the arena to PRE-ALLOCATE one contiguous, group-sized output region for a whole structural candidate before ANY member of it encodes (today allocation is lazy and per-position, exactly the shape ROW 568 already flagged as unsafe for `base_table.output_base` without a stability guarantee) plus a second pass so activation identity is known before the grouping decision -- a real `BufferArena`-level redesign, not a one-line fix, and not attempted this row given the documented history (ROW 566/567/568) of declining exactly this shortcut under time pressure. Two new counters landed as PERMANENT, `instrument`-gated telemetry for whoever takes the redesign on: `MERGE_CANDIDATE_UNRESOLVED_ACTIVATION` and `MERGE_CANDIDATE_UNPLACED_OUTPUT` (plus `MERGE_CANDIDATE_UNRESOLVED_WEIGHT` for symmetry, essentially always zero in practice) in `omega/src/metal.rs`'s `split_by_shared_buffers`; the temporary per-position `eprintln!` was reverted, not landed. Gates: `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'` 331 passed, 0 failed, 17 skipped; same with `,metal-horizontal-merge` 336 passed, 0 failed, 17 skipped; `cargo clippy` both feature sets EXIT=0; `cargo check -p proxima-omega --features wgpu-backend,cuda --all-targets` EXIT=0. Real run (France 16, same lock protocol, `ollama ps` empty throughout): the profiled on-run (`PROXIMA_METAL_OP_PROFILE_STEP=8`) reports `encode_dispatch_calls=2704` on every one of steps 0-12 and `op_profile step=8 op_count=2704` -- unchanged from ROW 570, confirming (not assuming) that no admission-gate change landed this row and no groups form; unprofiled TTNTs, two runs each, all four generated "Paris": off 50.727/50.727, on 50.545/50.909. Decision rule this row was "dispatch count reduced AND on <= off -> default-on"; dispatch count is NOT reduced (2,704 both ways), so the compound condition is false regardless of the ttnt comparison -- **`metal-horizontal-merge` is NOT flipped default-on**, no confirming run, no commit of that flag, no push of it.
 
 ## ROW 572 -- I1 expert_prefetch_advisory: ServingConfig.qwen35moe_expert_prefetch measured on/off through the real field; zero measured effect on France-16, dispatch count unchanged
 
@@ -33237,11 +33237,11 @@ Searched the whole tree (`grep -rln "grouped_gate_up\|per_route\|ProjectionStrat
 **Mechanism landed (real, not a stub):** `Plan::mark_plan_time_constants_resident` (`omega/src/metal/device_buffers_arena_plan.rs`) extends the SAME `resident_nodes: BTreeSet<NodeId>` `Plan::mark_resident` already uses for checkpoint weights, with every `BoundOpKind::Iota`/`BoundOpKind::Constant` node in `prepared.resolved`. That one set already had two runtime consumers that needed no new code: (1) the retirement loop in `execute_plan_with_placements_inner` already skips dropping a resident node's `device_buffers` entry across calls (`placements_execute_named.rs:524`, pre-existing); (2) `arena_placement`'s one-time `BufferArena` build now goes through a new `resident_pinned_retires(plan)` (`device_buffers_arena_plan.rs`) that strips every resident node out of every position's retire list before `build_buffer_arena` runs, so a resident leaf's arena slot is never handed back to a later position -- the correctness gate this row would otherwise have needed a `node_retirement`-API change for. The actual dispatch skip is a new `resident_skip` branch in the per-position loop (`placements_execute_named.rs`, sibling of the existing `ablation_skip`/`merged_this_position` arms): true only when the node is resident, is an `Iota`/`Constant`, is not caller output-placed, and `device_buffers` already holds its entry from a prior call -- the plan's FIRST call still dispatches it for real; every call after skips both the kernel dispatch and all hazard bookkeeping (a resident leaf has no operands and is never rewritten, so no WAW/WAR edge can exist for it).
 
 **Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`:**
-- `cargo check -p omega --features metal,metal-output-placement,instrument --all-targets -j 4`: EXIT=0.
+- `cargo check -p proxima-omega --features metal,metal-output-placement,instrument --all-targets -j 4`: EXIT=0.
 - `cargo check -p proxima-model-interop --features metal,metal-output-placement,instrument --all-targets -j 4`: EXIT=0.
 - `cargo check -p proxima-tensor --no-default-features --features alloc -j 4` (tier alloc gate): EXIT=0.
-- `cargo clippy -p omega --features metal,metal-output-placement,instrument --all-targets -j 4`: EXIT=101, 158 `clippy::expect_used` errors, ALL in `omega/src/msl/tests.rs` (`render_cached_attention`/`tiled_gemm_threadgroup_width`/`grid_threads` call sites) -- a file this row never touched (`git diff --stat` shows only `arena_encode_dispatch_finish.rs`, `device_buffers_arena_plan.rs`, `placements_execute_named.rs` under `omega/src`); pre-existing on main, not chased.
-- `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 174/339 run, 172 passed, 2 failed (`cached_attention_coop_load_parity::{m_greater_than_one_prefill_holds_parity_past_the_split_knee,the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding}`) -- exactly the 2 known reds this step's own brief named, no new failure.
+- `cargo clippy -p proxima-omega --features metal,metal-output-placement,instrument --all-targets -j 4`: EXIT=101, 158 `clippy::expect_used` errors, ALL in `omega/src/msl/tests.rs` (`render_cached_attention`/`tiled_gemm_threadgroup_width`/`grid_threads` call sites) -- a file this row never touched (`git diff --stat` shows only `arena_encode_dispatch_finish.rs`, `device_buffers_arena_plan.rs`, `placements_execute_named.rs` under `omega/src`); pre-existing on main, not chased.
+- `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 174/339 run, 172 passed, 2 failed (`cached_attention_coop_load_parity::{m_greater_than_one_prefill_holds_parity_past_the_split_knee,the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding}`) -- exactly the 2 known reds this step's own brief named, no new failure.
 - `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 -E 'not test(real_)'`: 201/235 run, 198 passed, 3 failed (`capability_matrix::dense_cpu_unrepresentable_codec_load_returns_a_typed_error::{q2_k,q4_0,q5_0}`) -- the identical 3 tests ROW 572 already logged pre-existing on main under this same command; no new failure from this row's diff.
 
 **NOT completed this row, honestly:** the real-checkpoint France-16 on/off GPU run (ttnt/ttft, profiled `encode_dispatch_calls` before vs after) that would prove the 2,704 -> ~2,545 dispatch-count claim. The model lock/drain protocol plus a release build plus a profiled run does not fit inside this row's 20-minute hard cap alongside landing and gating the code itself -- reported as unmeasured rather than fabricated. `plan_time_constants` stays default `false`; no confirming run, no default-on flip.
@@ -33270,7 +33270,7 @@ PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH=concurrent PROXIMA_METAL_OP_PROFILE_STEP=
 
 **What was read, not guessed:** every `BoundOpKind::MoeTopK` match arm across `omega/src` (identity.rs kernel-identity naming, msl/emit_and_classify.rs `render_moe_topk` dispatch, cuda.rs, wgsl.rs, wgpu_driver.rs, metal/*) and every operand-construction site in `proxima-tensor/src/bind/{builder_compose_window.rs,gdn_moe_fusion_apply.rs}` that builds a `Lookup`/`Layout` for a gathered operand -- none of them match on the OPERAND's PRODUCING `BoundOpKind` (only on `resolved.kind`, the current op, or on structural `Layout`/`IndexMap` shape); `classify_packed_row_block`'s seven gates (`PackedRowBlockRejection`) and `reduce_is_cooperative`'s three gates are producer-kind-blind by construction. This means either (a) the decline is structural (a `Layout`/stride/extent mismatch introduced by the fused `MoeTopK` output's shape, not a missing enum arm), or (b) the decline site is somewhere not yet located.
 
-**Attempted to observe directly, blocked by time, not code:** ran the existing census test above under `cargo test -p omega --lib --features metal,instrument,moe-topk-fusion qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down -- --nocapture`. Build finished in 12.82s; the single test itself did not complete inside a 280-second `timeout` (`EXIT=124`, test still printing "has been running for over 60 seconds" in nextest's own status line) -- at `EXPERT_COUNT=256`/`FEED_FORWARD=2048` this fixture's per-reduce `classify_kind` call renders a full MSL kernel body (`crate::msl::emit`) for every `Keep::Reduce` op in the bound program, and `moe-topk-fusion` ON changes which/how many reduces exist; whether the slowdown is the fusion path itself doing something newly expensive (a real defect worth its own row) or just this synthetic fixture's shape was not distinguished -- killed via `timeout`, no process left running (`pgrep` after clean).
+**Attempted to observe directly, blocked by time, not code:** ran the existing census test above under `cargo test -p proxima-omega --lib --features metal,instrument,moe-topk-fusion qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down -- --nocapture`. Build finished in 12.82s; the single test itself did not complete inside a 280-second `timeout` (`EXIT=124`, test still printing "has been running for over 60 seconds" in nextest's own status line) -- at `EXPERT_COUNT=256`/`FEED_FORWARD=2048` this fixture's per-reduce `classify_kind` call renders a full MSL kernel body (`crate::msl::emit`) for every `Keep::Reduce` op in the bound program, and `moe-topk-fusion` ON changes which/how many reduces exist; whether the slowdown is the fusion path itself doing something newly expensive (a real defect worth its own row) or just this synthetic fixture's shape was not distinguished -- killed via `timeout`, no process left running (`pgrep` after clean).
 
 **Not attempted this row:** a smaller/faster repro (shrinking `EXPERT_COUNT`/`FEED_FORWARD` to isolate whether the hang is fusion-caused or fixture-scale-caused), reading `diagnose_packed_row_block`'s printed `PackedRowBlockRejection` for the touching-expert-weight reduces (the direct oracle for "why declined"), and any edit to `classify_packed_row_block`/`reduce_is_cooperative` -- none of these fit inside the time already spent locating the candidate call sites above.
 
@@ -33286,7 +33286,7 @@ export CARGO_TARGET_DIR=/tmp/cargo_target_wf
 # first: shrink the fixture (EXPERT_COUNT=8, FEED_FORWARD=64) in a throwaway copy of
 # omega/src/metal/dispatch_timed_and_classify.rs:1881's test to isolate hang vs scale;
 # then read diagnose_packed_row_block's printed PackedRowBlockRejection per expert reduce:
-cargo test -p omega --lib --features metal,instrument,moe-topk-fusion \
+cargo test -p proxima-omega --lib --features metal,instrument,moe-topk-fusion \
   qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down -- --nocapture
 ```
 
@@ -33304,10 +33304,10 @@ cargo test -p omega --lib --features metal,instrument,moe-topk-fusion \
 
 **Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`:**
 - `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0.
-- `cargo check -p proxima --example gguf_generate --example stream_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (both call sites use `..ServingConfig::default()`, so the 4 new fields needed no edit there).
+- `cargo check -p proxima-lib --example gguf_generate --example stream_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (both call sites use `..ServingConfig::default()`, so the 4 new fields needed no edit there).
 - `cargo check -p proxima-tensor --no-default-features --features alloc -j 4` (tier alloc gate): EXIT=0.
 - `cargo nextest run -p proxima-tensor --lib --features std -j 4`: 616/616 passed, 0 failed, 7 skipped.
-- `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 339 run, 337 passed, 2 failed (`cached_attention_coop_load_parity::{m_greater_than_one_prefill_holds_parity_past_the_split_knee,the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding}`) -- exactly the 2 known reds this step's brief named, no new failure; omega has zero diff this row.
+- `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 339 run, 337 passed, 2 failed (`cached_attention_coop_load_parity::{m_greater_than_one_prefill_holds_parity_past_the_split_knee,the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding}`) -- exactly the 2 known reds this step's brief named, no new failure; omega has zero diff this row.
 - `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 247 run, 239 passed, 8 failed (`capability_matrix::dense_cpu_unrepresentable_codec_load_returns_a_typed_error::{q2_k,q4_0,q5_0}`, `external_architecture_hybrid_cache::{a_foreign_architecture_with_no_step_state_override_still_decodes,a_foreign_architecture_with_no_step_state_override_still_decodes_ssm_layer,a_foreign_hybrid_architecture_decodes_with_no_missing_step_input,a_mistagged_layer_roots_entry_is_rejected_before_any_step_runs}`, `external_expert_paging::q2k_paging_actually_changes_the_decoded_ids`) -- exactly the 8 known reds this step's brief named, no new failure.
 - `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=101, 22 `clippy::expect_used` errors, ALL in `proxima-model-interop/src/serving_fsm.rs` (a file this row never touched -- `git diff --name-only` shows only `error.rs`, `generate/decode.rs`, `memory_fit.rs`, `serving.rs`); pre-existing on main, not chased.
 
@@ -33339,7 +33339,7 @@ on (=true) France-16 gpu: ttnt_mean_ms run1=BLANK run2=BLANK; ttft_ms=BLANK.
 off (=false): ttnt_mean_ms run1=BLANK run2=BLANK; ttft_ms=BLANK.
 profiled on-run encode_dispatch_calls=BLANK.
 Block, measured not assumed: probe run at unix 1789500130 (`PROXIMA_GATED_DELTA_NET_FUSION=true`) exited with `WEIGHT LOAD FAILED: MappingNotResident { bytes_missing: 5935775744, bytes_total: 23938321664 }`; `ollama ps` at +172s/+208s/+339s each showed `qwen3.6:35b-a3b` 29GB + `qwen3:0.6b` 5.6GB both 100% GPU, never draining; instruction forbids stopping/killing ollama, so this is a real access blocker, not skipped.
-Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`: `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (77s). `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0. `cargo check -p proxima --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0.
+Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`: `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (77s). `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0. `cargo check -p proxima-lib --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0.
 Not sealed: 3 of 3 measurement cells blank.
 Re-prove: `cd /Users/brianbruggeman/repos/slot-0/proxima && export CARGO_TARGET_DIR=/tmp/cargo_target_wf`; wait for `ollama ps` to print only its header line, take the model lock, then `PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH=concurrent PROXIMA_GATED_DELTA_NET_FUSION=<true|false> /tmp/cargo_target_wf/release/examples/gguf_generate /Users/brianbruggeman/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d "What is the capital of France?" 16 gpu`, twice per value for `ttnt_mean_ms`/`ttft_ms`, plus one `=true` run with `PROXIMA_METAL_OP_PROFILE_STEP=8` for `encode_dispatch_calls`.
 
@@ -33351,7 +33351,7 @@ on (=true) France-16 gpu: ttnt_mean_ms run1=BLANK run2=BLANK; ttft_ms=BLANK.
 off (=false): ttnt_mean_ms run1=BLANK run2=BLANK; ttft_ms=BLANK.
 profiled on-run encode_dispatch_calls=BLANK.
 Block, measured not assumed: same probe run and `ollama ps` evidence as ROW 578 (unix 1789500130 `MappingNotResident { bytes_missing: 5935775744, bytes_total: 23938321664 }`, 29GB+5.6GB models 100% GPU across all three polls); one shared GPU, one blocker for all three flags this session.
-Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`: `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (77s, shared build artifact with ROW 578). `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0. `cargo check -p proxima --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0.
+Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`: `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (77s, shared build artifact with ROW 578). `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0. `cargo check -p proxima-lib --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0.
 Not sealed: 3 of 3 measurement cells blank.
 Re-prove: same command shape as ROW 578 with `PROXIMA_CACHED_ATTENTION_FUSION=<true|false>` in place of the gated-delta-net env var, twice per value plus one profiled `=true` run.
 
@@ -33363,7 +33363,7 @@ on (=true) France-16 gpu: ttnt_mean_ms run1=BLANK run2=BLANK; ttft_ms=BLANK.
 off (=false): ttnt_mean_ms run1=BLANK run2=BLANK; ttft_ms=BLANK.
 profiled on-run encode_dispatch_calls=BLANK.
 Block, measured not assumed: same probe run and `ollama ps` evidence as ROW 578/579 (unix 1789500130 `MappingNotResident { bytes_missing: 5935775744, bytes_total: 23938321664 }`, 29GB+5.6GB models 100% GPU across all three polls).
-Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`: `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (77s, shared build artifact with ROW 578/579). `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0. `cargo check -p proxima --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0.
+Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`: `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (77s, shared build artifact with ROW 578/579). `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0. `cargo check -p proxima-lib --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0.
 Not sealed: 3 of 3 measurement cells blank.
 Re-prove: same command shape as ROW 578 with `PROXIMA_MOE_TOPK_FUSION=<true|false>` in place of the gated-delta-net env var, twice per value plus one profiled `=true` run.
 
@@ -33374,7 +33374,7 @@ Field: `ServingConfig::plan_time_constants: bool`, default `false` (`proxima-mod
 on (=true) France-16 gpu: ttnt_mean_ms run1=65.000 run2=65.400; ttft_ms run1=2972 run2=2940.
 off (=false): ttnt_mean_ms run1=65.267 run2=65.600; ttft_ms run1=3445 run2=2985.
 profiled on-run encode_dispatch_calls=2545 (off-run, same profile step: 2545 and 2704 respectively -- see below).
-Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`: `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (36s). `cargo check -p proxima --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0. `cargo nextest run -p proxima-tensor --lib --features std -j 4`: 616/616 passed, 0 failed, 7 skipped. `cargo check -p proxima-tensor --no-default-features --features alloc -j 4` (tier alloc gate): EXIT=0. `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 174/339 run, 172 passed, 2 failed (`cached_attention_coop_load_parity::{m_greater_than_one_prefill_holds_parity_past_the_split_knee,the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding}`) -- the identical 2 known reds ROW 575 recorded, no new failure. `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 251 run, 243 passed, 8 failed (`capability_matrix::dense_cpu_unrepresentable_codec_load_returns_a_typed_error::{q2_k,q4_0,q5_0}`, `external_architecture_hybrid_cache::{a_foreign_architecture_with_no_step_state_override_still_decodes,a_foreign_architecture_with_no_step_state_override_still_decodes_ssm_layer,a_foreign_hybrid_architecture_decodes_with_no_missing_step_input,a_mistagged_layer_roots_entry_is_rejected_before_any_step_runs}`, `external_expert_paging::q2k_paging_actually_changes_the_decoded_ids`) -- the identical 8 known reds ROW 575 recorded, no new failure. `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0, 0 errors (ROW 575's own 22 pre-existing `expect_used` errors in `serving_fsm.rs` are gone -- fixed on main since by an unrelated commit, `3de7d23a`). `cargo clippy -p omega --features metal,metal-output-placement,instrument --all-targets -j 4`: EXIT=0, 0 errors (ROW 575's own 158 pre-existing errors likewise gone).
+Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`: `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (36s). `cargo check -p proxima-lib --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0. `cargo nextest run -p proxima-tensor --lib --features std -j 4`: 616/616 passed, 0 failed, 7 skipped. `cargo check -p proxima-tensor --no-default-features --features alloc -j 4` (tier alloc gate): EXIT=0. `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 174/339 run, 172 passed, 2 failed (`cached_attention_coop_load_parity::{m_greater_than_one_prefill_holds_parity_past_the_split_knee,the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding}`) -- the identical 2 known reds ROW 575 recorded, no new failure. `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 251 run, 243 passed, 8 failed (`capability_matrix::dense_cpu_unrepresentable_codec_load_returns_a_typed_error::{q2_k,q4_0,q5_0}`, `external_architecture_hybrid_cache::{a_foreign_architecture_with_no_step_state_override_still_decodes,a_foreign_architecture_with_no_step_state_override_still_decodes_ssm_layer,a_foreign_hybrid_architecture_decodes_with_no_missing_step_input,a_mistagged_layer_roots_entry_is_rejected_before_any_step_runs}`, `external_expert_paging::q2k_paging_actually_changes_the_decoded_ids`) -- the identical 8 known reds ROW 575 recorded, no new failure. `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0, 0 errors (ROW 575's own 22 pre-existing `expect_used` errors in `serving_fsm.rs` are gone -- fixed on main since by an unrelated commit, `3de7d23a`). `cargo clippy -p proxima-omega --features metal,metal-output-placement,instrument --all-targets -j 4`: EXIT=0, 0 errors (ROW 575's own 158 pre-existing errors likewise gone).
 Real numbers, not fabricated: two release runs each side (`PROXIMA_DISPATCH=concurrent PROXIMA_TEMPERATURE=0`, prompt "What is the capital of France?", 16 tokens, `gpu` backend) plus one `RUST_LOG=info PROXIMA_METAL_OP_PROFILE_STEP=8` run per side read directly for `encode_dispatch_calls=`; model lock held for the whole window (`ollama ps` showed a clean header with no rows before the lock and after release), released immediately after the profiled runs. `2704 - 2545 = 159`, exactly the ROW 569-cited `92 iota + 67 constant` count; ttnt_mean_ms is flat (65.0-65.6 both sides, within run-to-run noise) and ttft_ms is noisy but never worse on (2940-2972 on vs 2985-3445 off) -- consistent with a leaf-dispatch elision that removes fixed per-token overhead without touching the decode-heavy matmul/attention path.
 `plan_time_constants` stays default `false` pending an owner decision to flip it -- this row proves the mechanism, it does not promote the default.
 Residual, unchanged from ROW 575, not re-verified this row: (1) whether `expert_index`'s Iota still reaches `encode_op` unabsorbed after `moe_topk_fusion` -- the measured 159-dispatch drop is consistent with it doing so but this row did not trace `prepared.resolved` node-by-node to confirm; (2) whether any Iota/Constant leaf can carry `Extent::Symbolic` (KV-length-dependent), which `mark_plan_time_constants_resident` does not filter by variant -- the France-16 fixture never exercises that shape, so this run cannot rule the concern in or out.
@@ -33388,8 +33388,8 @@ Op-kind table, real production shape `EXPERT_COUNT=256/EXPERT_USED_COUNT=8/EMBED
 Mechanism read, not guessed: `build_operand`/`build_reduce_op` (`proxima-tensor/src/bind/builder_compose_window.rs:651-710`) compute a gather's `Lookup.index_layout` from the pre-fusion program `IndexMap` and `shapes`, never from the operand's producing `BoundOpKind` -- `apply_moe_topk_fusion` runs strictly after `bind_plain`/shape inference and only deletes absorbed routing nodes from the bound-op list, so a downstream consumer's `Lookup.indices` NodeId and `index_layout` are structurally identical fused vs unfused; `run_moe_topk` (`proxima-tensor/src/cpu/run_node.rs:762`) writes `routes[1..]`/`weights`/`weight_total` into their ORIGINAL per-round NodeId buffer slots as side effects of the one fused op, so no downstream operand reference is dangling or rewritten. Both gates (`classify_packed_row_block`, `reduce_is_cooperative`/`gather_is_reduction_invariant`) are confirmed producer-kind-blind, matching ROW 576's own read, and the probe above shows this blindness does not (at these shapes) cause a decline either.
 Not reproduced, not chased further this row: EMBEDDING=512/FEED_FORWARD=2048 multi-block real dims (the checkpoint's actual weight extents), which the probe never varied -- the 90-reduce delta may require a multi-Q4K-block row (`ExtentNotBlockMultiple`/`axes_fold_contiguously` folding a wider reduce dim) or may sit on reduces outside the FFN projection entirely (leftover unfused routing-chain `Maximum` reduces, or an unrelated program-wide bind-order shift from `apply_moe_topk_fusion`'s node deletion changing which OTHER reduces `bind_plain`'s ordinary chain-fusion inlines) -- `qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down` at the real `EMBEDDING=512/FEED_FORWARD=2048` shape still exceeds a 180s timeout under `--features moe-topk-fusion` (reconfirming ROW 576's own hang, not re-run this row past the first attempt).
 No code changed: scratch probe test added to `omega/src/metal/dispatch_timed_and_classify.rs`, run to produce the tables above, then `git checkout -- omega/src/metal/dispatch_timed_and_classify.rs`. `git status --short` before and after this row: only the pre-existing untracked `agents.tsv`/`todo-2026-09-07.md`.
-Gates: `cargo check -p omega -p proxima-tensor --lib`: EXIT=0 (post-revert, confirms main still compiles). No nextest/clippy run this row (no diff to gate).
-Re-prove / continue from here: reinsert a probe test shaped like the one above but with `EMBEDDING=512, FEED_FORWARD=2048, EXPERT_COUNT=256, EXPERT_USED_COUNT=8` (the real qwen35moe dims) in `omega/src/metal/dispatch_timed_and_classify.rs`, run `cd /Users/brianbruggeman/repos/slot-0/proxima && export CARGO_TARGET_DIR=/tmp/cargo_target_wf && timeout 280 cargo test -p omega --lib --features metal,instrument,moe-topk-fusion <probe_name> -- --nocapture` against `cargo test ... --features metal,instrument` (fusion off) as the baseline, diffing `classify_kind`/`diagnose_packed_row_block` per node; if it still does not reproduce, widen the search to non-FFN reduces (attention, routing-chain remainder) via a full-graph `classify_kind` census diffed fused vs unfused rather than the expert-weight-only filter this probe used.
+Gates: `cargo check -p proxima-omega -p proxima-tensor --lib`: EXIT=0 (post-revert, confirms main still compiles). No nextest/clippy run this row (no diff to gate).
+Re-prove / continue from here: reinsert a probe test shaped like the one above but with `EMBEDDING=512, FEED_FORWARD=2048, EXPERT_COUNT=256, EXPERT_USED_COUNT=8` (the real qwen35moe dims) in `omega/src/metal/dispatch_timed_and_classify.rs`, run `cd /Users/brianbruggeman/repos/slot-0/proxima && export CARGO_TARGET_DIR=/tmp/cargo_target_wf && timeout 280 cargo test -p proxima-omega --lib --features metal,instrument,moe-topk-fusion <probe_name> -- --nocapture` against `cargo test ... --features metal,instrument` (fusion off) as the baseline, diffing `classify_kind`/`diagnose_packed_row_block` per node; if it still does not reproduce, widen the search to non-FFN reduces (attention, routing-chain remainder) via a full-graph `classify_kind` census diffed fused vs unfused rather than the expert-weight-only filter this probe used.
 Re-prove: `cd /Users/brianbruggeman/repos/slot-0/proxima && export CARGO_TARGET_DIR=/tmp/cargo_target_wf && cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`; wait for `ollama ps` to print only its header, take the model lock exactly as the brief specifies; then for `PLAN in false true`, run `PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH=concurrent PROXIMA_PLAN_TIME_CONSTANTS=$PLAN /tmp/cargo_target_wf/release/examples/gguf_generate /Users/brianbruggeman/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d "What is the capital of France?" 16 gpu` twice (`ttnt_mean_ms`/`ttft_ms`), plus once more with `RUST_LOG=info PROXIMA_METAL_OP_PROFILE_STEP=8` and grep `encode_dispatch_calls=`.
 
 ## ROW 583 -- epilogue_fusion_by_stage (generic elementwise-into-reduce-epilogue bind pass, ROW 540/542): NOT SEALED, no code changed, real second-slot gap found and pinned
@@ -33410,7 +33410,7 @@ Mechanism read, not guessed, for why the bound already holds: the production ful
 on (`PROXIMA_MAX_COMMAND_BUFFERS_PER_TOKEN=2`) France-16 gpu: ttnt_mean_ms run1=66.067 run2=65.733; ttft_ms run1=2982 run2=3004; no `TooManyCommandBuffers` error on either run (`grep -in TooManyCommandBuffers` empty both logs).
 off (`PROXIMA_MAX_COMMAND_BUFFERS_PER_TOKEN` unset, default 0, check disabled) France-16 gpu: ttnt_mean_ms run1=66.200 run2=65.667; ttft_ms run1=3022 run2=2951.
 profiled on-run (`RUST_LOG=info PROXIMA_METAL_OP_PROFILE_STEP=8`, limit=2): `gpu_exec_calls=1` on every one of the 16 `token_breakdown_metal` lines (steady state and the profiled step alike) -- 1 command buffer/token, inside the <=2 ROW 531 bound with headroom to spare; `encode_dispatch_calls=2704` per step (matches ROW 581's own reading at this exact fixture/shape, confirming no unrelated dispatch-count drift). ttnt is flat within noise on vs off (65.7-66.2 ms both sides) and ttft is noisy but overlapping (2951-3022 off vs 2982-3004 on) -- expected, since the check is a comparison against an already-populated counter, not a new dispatch or allocation.
-Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`: `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (34.98s). `cargo nextest run -p proxima-tensor --lib --features std -j 4`: 616/616 passed, 0 failed, 7 skipped. `cargo check -p proxima-tensor --no-default-features --features alloc -j 4` (tier alloc gate): EXIT=0. `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 173/339 run (fail-fast stopped after the 2nd failure, 166 not run), 171 passed, 2 failed (`cached_attention_coop_load_parity::{m_greater_than_one_prefill_holds_parity_past_the_split_knee,the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding}`) -- the identical 2 known reds ROW 575/581 recorded, no new failure. `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 251 run, 243 passed, 8 failed (`capability_matrix::dense_cpu_unrepresentable_codec_load_returns_a_typed_error::{q2_k,q4_0,q5_0}`, `external_architecture_hybrid_cache::{a_foreign_architecture_with_no_step_state_override_still_decodes,a_foreign_architecture_with_no_step_state_override_still_decodes_ssm_layer,a_foreign_hybrid_architecture_decodes_with_no_missing_step_input,a_mistagged_layer_roots_entry_is_rejected_before_any_step_runs}`, `external_expert_paging::q2k_paging_actually_changes_the_decoded_ids`) -- the identical 8 known reds ROW 575/581 recorded, no new failure. `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0, 0 errors. `cargo clippy -p omega --features metal,metal-output-placement,instrument --all-targets -j 4`: EXIT=0, 0 errors.
+Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`: `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (34.98s). `cargo nextest run -p proxima-tensor --lib --features std -j 4`: 616/616 passed, 0 failed, 7 skipped. `cargo check -p proxima-tensor --no-default-features --features alloc -j 4` (tier alloc gate): EXIT=0. `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 173/339 run (fail-fast stopped after the 2nd failure, 166 not run), 171 passed, 2 failed (`cached_attention_coop_load_parity::{m_greater_than_one_prefill_holds_parity_past_the_split_knee,the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding}`) -- the identical 2 known reds ROW 575/581 recorded, no new failure. `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 251 run, 243 passed, 8 failed (`capability_matrix::dense_cpu_unrepresentable_codec_load_returns_a_typed_error::{q2_k,q4_0,q5_0}`, `external_architecture_hybrid_cache::{a_foreign_architecture_with_no_step_state_override_still_decodes,a_foreign_architecture_with_no_step_state_override_still_decodes_ssm_layer,a_foreign_hybrid_architecture_decodes_with_no_missing_step_input,a_mistagged_layer_roots_entry_is_rejected_before_any_step_runs}`, `external_expert_paging::q2k_paging_actually_changes_the_decoded_ids`) -- the identical 8 known reds ROW 575/581 recorded, no new failure. `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0, 0 errors. `cargo clippy -p proxima-omega --features metal,metal-output-placement,instrument --all-targets -j 4`: EXIT=0, 0 errors.
 Real numbers, not fabricated: two release runs each side (`PROXIMA_DISPATCH=concurrent PROXIMA_TEMPERATURE=0`, prompt "What is the capital of France?", 16 tokens, `gpu` backend) plus one `RUST_LOG=info PROXIMA_METAL_OP_PROFILE_STEP=8` on-side run read directly for `gpu_exec_calls=`/`encode_dispatch_calls=`; model lock held for the whole window (`ollama ps` printed only its header before the lock was taken and no rows were running throughout), released immediately after the profiled run. Logs: `/Users/brianbruggeman/.claude/projects/-Users-brianbruggeman-repos-slot-0/scratch/wf-two-command-buffers/{build,off_run1,off_run2,on_run1,on_run2,profiled_on,nextest_tensor,nextest_omega,nextest_interop,clippy_interop,clippy_omega}.log`.
 `max_command_buffers_per_token` stays default `0` pending an owner decision on what production limit to ship -- this row proves the invariant already holds at the measured shape and that the guard mechanism does not misfire when armed at the ROW 531 bound (`=2`); it does not flip the shipped default.
 Residual: this row measured ONE fixture (France-16, steady-state decode, `gpu_exec_calls=1` throughout, never touching the `=2` ceiling) -- it does not prove no *other* shape (multi-request batching, a future full-graph regression, prefill's own path) ever needs the second command buffer ROW 531's own invariant allows for; `execute_plan_timed`'s per-op path was read from source, not exercised, to confirm it is unreachable from `run_decode_loop_placed_kv` -- no test asserts that unreachability, so a future call-site addition could silently regress this to N-per-token without tripping any gate in this row.
@@ -33456,7 +33456,7 @@ Idea/claim (unchanged from ROW 577): ROW 501/I2's four per-class caps (`dense_we
 - `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (twice -- once before, once after the `generate_streaming` fix).
 - `cargo check -p proxima-tensor --no-default-features --features alloc -j 4` (tier alloc gate): EXIT=0.
 - `cargo nextest run -p proxima-tensor --lib --features std -j 4`: 616/616 passed, 0 failed, 7 skipped -- matches ROW 577/585 baseline exactly.
-- `cargo nextest run -p omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 339 run, 337 passed, 2 failed (`cached_attention_coop_load_parity::{m_greater_than_one_prefill_holds_parity_past_the_split_knee,the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding}`) -- exactly ROW 577's 2 known reds, no new failure.
+- `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 339 run, 337 passed, 2 failed (`cached_attention_coop_load_parity::{m_greater_than_one_prefill_holds_parity_past_the_split_knee,the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding}`) -- exactly ROW 577's 2 known reds, no new failure.
 - `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 251 run, 243 passed, 8 failed, 64 skipped -- the failing set is the SAME 8 named tests ROW 577 recorded (`capability_matrix::dense_cpu_unrepresentable_codec_load_returns_a_typed_error::{q2_k,q4_0,q5_0}`, `external_architecture_hybrid_cache::{a_foreign_architecture_with_no_step_state_override_still_decodes,a_foreign_architecture_with_no_step_state_override_still_decodes_ssm_layer,a_foreign_hybrid_architecture_decodes_with_no_missing_step_input,a_mistagged_layer_roots_entry_is_rejected_before_any_step_runs}`, `external_expert_paging::q2k_paging_actually_changes_the_decoded_ids`); the raw `N run`/`N passed` totals differ from ROW 577's `247`/`239` because main gained tests from unrelated commits between the two rows -- the failure SET, not the count, is the baseline comparison this gate proves.
 - `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0, 0 errors -- ROW 577's own 22 `clippy::expect_used` errors in `serving_fsm.rs` are gone; `git log` shows they were fixed by `2f320eff` (`fix(interop): allow expect_used in serving_fsm's own test module`), unrelated to this row.
 
@@ -33501,7 +33501,7 @@ on/off ttnt_mean_ms/ttft_ms/encode_dispatch_calls: NOT MEASURED -- no overlap co
 - `cargo clippy -p proxima-tensor --features std --all-targets -j 4`: EXIT=0, 0 errors.
 - `cargo nextest run -p proxima-tensor --lib --features std -j 4`: 616 run, 616 passed, 0 failed, 7 skipped -- matches ROW 586 baseline exactly.
 - `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 251 run, 243 passed, 8 failed, 64 skipped -- same 8 named failures as ROW 586, no new failure.
-- `cargo nextest run -p omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 339 run, 337 passed, 2 failed, 17 skipped -- same 2 named failures as ROW 586, no new failure.
+- `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 339 run, 337 passed, 2 failed, 17 skipped -- same 2 named failures as ROW 586, no new failure.
 
 **Reused, no new harness:** the `ServingConfig`/`GenerateConfig`/`supported_serving_config` conflaguration edge (extended by one field, mirroring `plan_time_constants`'s exact shape); no new trace, bench, or fixture written.
 
@@ -33516,7 +33516,7 @@ cargo check -p proxima-model-interop --features metal,instrument --all-targets -
 cargo check --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4
 cargo nextest run -p proxima-tensor --lib --features std -j 4
 cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast
-cargo nextest run -p omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'
+cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'
 ```
 
 ## ROW 588 -- I9 prefill_chunk_positions (Sarathi/chunked prefill): already landed at 9ef6ad42, unmeasured; real-checkpoint run finds width 0 and 64 CRASH, only 32 succeeds
@@ -33525,7 +33525,7 @@ Idea/claim: `prefill_chunk_positions` splits one-evaluation prefill into fixed-w
 
 on/off, 126-token France prompt (91 words), GPU, `max_tokens=1`: chunk **0**: `METAL RUN FAILED node %3677/%2921: one push readied more BoundOps than the no-alloc batch capacity allows`, CPU fallback fails identically -- ttft_ms/peak_bytes unmeasurable (crash precedes `build_buffer_arena`'s own debug line). chunk **32**: SUCCEEDS, `ttft_ms=20501` (also `16963` at 99 tokens/73 words), `peak_bytes=128,975,116` (query_rows=32, `reuse_factor=33.07x`) at RUST_LOG=debug. chunk **64**: `METAL RUN FAILED node %1941`, identical crash to chunk 0 -- capacity ceiling sits strictly between 32 and 64 query rows on this checkpoint, independent of `cached_len` (confirmed: a 32-chunked 126-token run with `cached_len` reaching 96+ never crashes).
 
-Gates, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`: `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0. `cargo check -p proxima-tensor --no-default-features --features alloc -j 4`: EXIT=0. `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0. `cargo nextest run -p proxima-tensor --lib --features std -j 4`: 616 run, 616 passed, 0 failed. `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 251 run, 243 passed, 8 failed (same named set as ROW 587). `cargo nextest run -p omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 339 run, 337 passed, 2 failed (same named set as ROW 587).
+Gates, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`: `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0. `cargo check -p proxima-tensor --no-default-features --features alloc -j 4`: EXIT=0. `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0. `cargo nextest run -p proxima-tensor --lib --features std -j 4`: 616 run, 616 passed, 0 failed. `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 251 run, 243 passed, 8 failed (same named set as ROW 587). `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 339 run, 337 passed, 2 failed (same named set as ROW 587).
 
 Reused: existing `ServingConfig`/`GenerateConfig`/`supported_serving_config` edge (unmodified, field already wired); `gguf_generate` example unmodified; no new harness, fixture, or type. Not a 190-token prompt (91 words/126 tokens) -- time cap; the crash-vs-succeed finding is prompt-length-independent (reproduced at 73 words/99 tokens too). encode_dispatch_calls profiled run NOT taken (crash makes it moot for 0/64; not attempted for 32 inside the cap).
 
@@ -33567,7 +33567,7 @@ on/off ttnt_mean_ms/ttft_ms/encode_dispatch_calls: NOT MEASURED. `ollama ps` sho
 - `cargo clippy -p proxima-tensor --features std --all-targets -j 4`: EXIT=0, 0 errors.
 - `cargo nextest run -p proxima-tensor --lib --features std -j 4`: 616 run, 616 passed, 0 failed, 7 skipped -- matches ROW 587/588 baseline exactly.
 - `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 251 run, 243 passed, 8 failed, 64 skipped -- same 8 named failures as ROW 587 (`dense_cpu_unrepresentable_codec_load_returns_a_typed_error::{q2_k,q4_0,q5_0}`, four `external_architecture_hybrid_cache` cases, `external_expert_paging::q2k_paging_actually_changes_the_decoded_ids`), no new failure.
-- `cargo nextest run -p omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 339 run, 337 passed, 2 failed, 17 skipped -- same 2 named failures as ROW 587 (`cached_attention_coop_load_parity::{m_greater_than_one_prefill_holds_parity_past_the_split_knee,the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding}`), no new failure.
+- `cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 339 run, 337 passed, 2 failed, 17 skipped -- same 2 named failures as ROW 587 (`cached_attention_coop_load_parity::{m_greater_than_one_prefill_holds_parity_past_the_split_knee,the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding}`), no new failure.
 
 **Reused, no new harness:** the existing `ServingConfig` struct and its `apply_serving_config`/`decode.rs` consulting sites (all pre-existing from `73f968e6`); the existing `scheduling_levels_are_independent` unit test (pre-existing, re-run not rewritten); the same nextest/clippy/check gate commands as ROW 587/588. No new type, no new test, no new fixture added this row.
 
@@ -33584,7 +33584,7 @@ cargo clippy -p proxima-model-interop --features metal,instrument --all-targets 
 cargo clippy -p proxima-tensor --features std --all-targets -j 4
 cargo nextest run -p proxima-tensor --lib --features std -j 4
 cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast
-cargo nextest run -p omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'
+cargo nextest run -p proxima-omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'
 ```
 
 ## ROW 590 -- prefill_one_evaluation default-path regression: France checkpoint garbage/EmptyLogits on main; GPU replay blocked by Ollama residency contention; fupan + fallback to default false

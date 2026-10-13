@@ -13,7 +13,7 @@ readme.workspace = true
 default = ["std"]
 # buffer::BufferPool leans on thread_local::ThreadLocal (OS thread identity),
 # so it rides the std feature rather than its own toggle (folded in from
-# the former proxima-io satellite crate).
+# the former proxima-lib satellite crate).
 std = [
     "alloc",
     "thiserror/std",

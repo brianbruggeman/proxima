@@ -21,7 +21,7 @@
 //! # Run
 //! ```sh
 //! CARGO_TARGET_DIR=<scratch>/target-attn-fuse \
-//!     cargo run -p omega --release --features metal --example attn_partial_fusion_chain \
+//!     cargo run -p proxima-omega --release --features metal --example attn_partial_fusion_chain \
 //!     -- --nodes-dir <R9>/nodes --vectors-dir <R9>/vectors_relaxed --math-mode relaxed \
 //!        --label "layer0_c32"
 //! ```

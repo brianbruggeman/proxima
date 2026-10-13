@@ -96,6 +96,6 @@ and the existing omega sizing files. Other workers own backend/binder/emitter.
     constants; default sizing input resolves literal 1 warmup/5 samples.
 
 Use tempfile for file fixtures and temp_env::with_vars for environment cases.
-Command: `cargo nextest run -p omega --lib -E 'test(runtime_config_)'`;
+Command: `cargo nextest run -p proxima-omega --lib -E 'test(runtime_config_)'`;
 expected exactly 12 tests. Also run the SPEC's CPU/std and alloc checks; the
 alloc check excludes runtime I/O deliberately, while compiling the emitter.

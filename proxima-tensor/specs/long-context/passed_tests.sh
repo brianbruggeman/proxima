@@ -24,7 +24,7 @@ interop_features() {
 }
 
 run_nextest() {
-    cargo nextest run -p proxima-model-interop -p proxima-tensor -p omega \
+    cargo nextest run -p proxima-model-interop -p proxima-tensor -p proxima-omega \
         --features "$(interop_features)" \
         --no-fail-fast --status-level pass --final-status-level none 2>&1 || {
         local status=$?

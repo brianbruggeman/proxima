@@ -92,7 +92,7 @@ Deleted: `Qwen35DenseAttentionBuffers`, `Qwen35DenseAttentionPlacement`,
 | 8.1 | `PlacedKv` (f32) replaces the qwen35 types; full-graph arm passes the placements; no pad scratch for placed layers | qwen35 full-graph metal test plus a new test (layer-3 dense rows nonzero after step 1; device == host logits); AC23 comm | all pass; `0` |
 | 8.2 | gemma4 full layers placed; hidden `--host-kv` control | ring parity vs `gemma4_base_tokens.txt`; niah `--decode-steps 16` at 8192 and 32768 | 256/256 twice; 16/16 steps `kv_host_copy_bytes == 12582912` at both contexts; the control grows by 301,989,888 B |
 | 8.3 | `GgmlType::row_bytes`; dtype-aware `kv_row_bytes`, `MemoryBudget`, `PlacedKv`; harness `kv_bytes` from `device_bytes()` | `kv_row_bytes_by_storage`, `memory_budget_gemma4_storage` | 9 + 3 passed |
-| 8.4 | omega: a placed Packed{F16,Q8_0} input reduces identically to f32 widened; typed EmitError if fused `CachedAttention` gets a packed operand | `cargo nextest run -p omega --features metal placed_packed_kv` | 4 passed |
+| 8.4 | omega: a placed Packed{F16,Q8_0} input reduces identically to f32 widened; typed EmitError if fused `CachedAttention` gets a packed operand | `cargo nextest run -p proxima-omega --features metal placed_packed_kv` | 4 passed |
 | 8.5 | F16 storage end to end; default F16; qwen3.6 narrow storage rejected until 10.1 | AC16; `default_kv_is_f16 serving_default_admission` | B == A, B >= Y, Y > 0; 3 passed |
 | 9.0 | `quantize_row_q8_0` in proxima_tensor::cpu | `q8_0_kv_roundtrip` | 4 passed (error <= amax/254) |
 | 9.1 | Q8_0 for gemma4 | AC18 | C >= Y, Y > 0 |

@@ -1571,7 +1571,7 @@ fn page_aligned_input_takes_the_no_copy_metal_upload_path() {
 /// per-program assertion (see the other tests for that), just the number
 /// this task's report is required to cite. Sorts alphabetically last in
 /// this file (`u` after `t`), so a single-process, single-threaded run
-/// (`cargo test -p omega --features metal --test metal_parity --
+/// (`cargo test -p proxima-omega --features metal --test metal_parity --
 /// --test-threads=1`) executes it after every other test in the binary has
 /// already incremented these same process-global counters — printed here,
 /// not asserted to an exact value, since which other tests ran (and how

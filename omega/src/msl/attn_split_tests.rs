@@ -43,7 +43,7 @@ mod golden_identity {
             let path = golden_dir().join(format!("{GOLDEN_PREFIX}{name}.msl"));
             let golden = std::fs::read_to_string(&path).unwrap_or_else(|error| {
                 panic!(
-                    "no recorded main golden at {}: {error}; record it with `cargo test -p omega \
+                    "no recorded main golden at {}: {error}; record it with `cargo test -p proxima-omega \
                      --lib record_main_goldens -- --ignored` on an unpatched export of main that \
                      carries attn_golden_tests.rs (RUSTFLAGS=\"--cap-lints warn\")",
                     path.display()

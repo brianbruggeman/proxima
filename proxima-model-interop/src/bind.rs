@@ -5203,7 +5203,7 @@ mod real_openchat_file {
     /// Run under load (two commands; repeat the second with
     /// `PROXIMA_DISPATCH=serial` to cover the other encoder):
     /// ```text
-    /// nohup cargo test -p omega --release --features metal \
+    /// nohup cargo test -p proxima-omega --release --features metal \
     ///   gpu_load_generator -- --ignored --nocapture &
     /// PROXIMA_DISPATCH=concurrent PROXIMA_MAX_TOKENS=32 PROXIMA_DETERMINISM_RUNS=10 \
     ///   cargo test -p proxima-model-interop --release --features metal,instrument \

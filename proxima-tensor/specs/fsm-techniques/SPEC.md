@@ -484,7 +484,7 @@ A capability AC's control is "absent", meaning 0 tests run, which counts as fail
   - Control: absent.
 - **AC7** (R9a, R9b, R9c; worked).
   - Command: `cargo nextest run -p proxima-tensor -E 'test(/top_fraction_/)'`, then
-    `cargo nextest run -p omega --features metal -E 'test(/top_fraction_/)'`.
+    `cargo nextest run -p proxima-omega --features metal -E 'test(/top_fraction_/)'`.
   - Expected: 2 passed, then 4 passed:
     - proxima-tensor: the CPU evaluation of W7 at M = min_rows - 1 and at M = min_rows
       selects W7's hand-derived set (R9b);

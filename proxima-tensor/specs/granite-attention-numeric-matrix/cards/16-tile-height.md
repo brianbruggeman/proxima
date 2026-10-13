@@ -44,8 +44,8 @@ Use the existing Proxima numeric and Metal abstractions. Do not introduce num-tr
 
 | id | command | expected |
 |---|---|---|
-| AC16 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_16_tile_height)'` | filter selects 2 tests; 2 passed; captured Granite rows_16 changes kernel identity and grid, rows_4 returns the exact whole-unit decline, and `[16,1,8,64]` returns the typed 35,840-vs-32,768-byte budget decline |
-| AC16b | `cargo nextest run -p omega --features metal,metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_16_tile_height_plan)'` | filter selects 1 Metal test; 1 passed; Plan kernel identity contains the selected tile token and executed rows16 output is compared against the CPU payload |
+| AC16 | `cargo nextest run -p proxima-omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_16_tile_height)'` | filter selects 2 tests; 2 passed; captured Granite rows_16 changes kernel identity and grid, rows_4 returns the exact whole-unit decline, and `[16,1,8,64]` returns the typed 35,840-vs-32,768-byte budget decline |
+| AC16b | `cargo nextest run -p proxima-omega --features metal,metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_16_tile_height_plan)'` | filter selects 1 Metal test; 1 passed; Plan kernel identity contains the selected tile token and executed rows16 output is compared against the CPU payload |
 
 A zero-test match or a checker that does not open its fixture is failure. Run this local command after the edit. The expected count is part of the criterion.
 

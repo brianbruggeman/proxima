@@ -40,7 +40,7 @@ brotli = "8.0.3"
 proxima-telemetry = { workspace = true, features = ["emit", "std"] }
 
 [dev-dependencies]
-proxima = { path = "..", features = ["http1", "tcp", "test-support", "tokio"] }
+proxima = { package = "proxima-lib", path = "..", features = ["http1", "tcp", "test-support", "tokio"] }
 criterion = { workspace = true, features = ["html_reports", "async_tokio"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

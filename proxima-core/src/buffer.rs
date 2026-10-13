@@ -1,5 +1,5 @@
 //! `BufferPool`/`PooledBuf` — per-worker byte-buffer reservoir. Folded in
-//! from the former `proxima-io` satellite crate: BufferPool leans on
+//! from the former `proxima-lib` satellite crate: BufferPool leans on
 //! `thread_local::ThreadLocal` for its per-worker routing, which has no
 //! no_std/alloc analog (it resolves OS thread identity), so the whole
 //! pool is std-only; alloc-only builds carry no public API here.

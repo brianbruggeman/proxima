@@ -100,7 +100,7 @@ fi
 run_doctests() {
   LOG="$1"
   RUSTDOCFLAGS="${RUSTDOCFLAGS:-} --cfg tutorial_gate" \
-  cargo test -p proxima --doc --features "$ROOT_UNION" > "$LOG" 2>&1
+  cargo test -p proxima-lib --doc --features "$ROOT_UNION" > "$LOG" 2>&1
   return $?
 }
 

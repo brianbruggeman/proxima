@@ -13,7 +13,7 @@
 //! # Run
 //! ```sh
 //! CARGO_TARGET_DIR=<scratch>/target-attn-fuse ATTN_FIXTURE_MANIFEST=<r3>/fixture/manifest.txt \
-//!     cargo run -p omega --release --features metal --example attn_fused_replay
+//!     cargo run -p proxima-omega --release --features metal --example attn_fused_replay
 //! ```
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]

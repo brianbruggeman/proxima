@@ -84,7 +84,7 @@ old-to-new id map:
    (FT3.9).
 2. The exhaustive matches over `BoundOpKind` are larger than the old list, and part of them compile only under
    non-default features. `cargo check -p proxima-tensor --all-features --all-targets`,
-   `cargo check -p omega --all-targets --features instrument,cuda,wgpu-backend` and
+   `cargo check -p proxima-omega --all-targets --features instrument,cuda,wgpu-backend` and
    `cargo check -p proxima-model-interop --features std --all-targets` print every one as an E0004. proxima-tensor
    needs arms in `types_layout_boundop.rs` (six), `refresh.rs`, `quantized_eval.rs`, `run_node.rs`, `typed_eval.rs`
    (three), `identity_copy_alias.rs` (feature `identity-copy-alias`), `repeat_nodes.rs` (two, feature `instrument`),
@@ -340,9 +340,9 @@ The row-count threshold used by the Metal and kernel-count cards is the producti
      }
      ```
 - test: `selection_min_rows_is_the_toml_value` in `omega/src/sized.rs` asserting `SELECTION_TOP_FRACTION_MIN_ROWS == 256`.
-- validate: `CARGO_TARGET_DIR=/private/tmp/cargo_target_ft3_3 cargo nextest run -p omega -E 'test(/selection_min_rows_is_the_toml_value/)'`; then `grep -l "OMEGA_SELECTION_TOP_FRACTION_MIN_ROWS" /private/tmp/cargo_target_ft3_3/debug/build/omega-*/output | wc -l` (the build script's `rerun-if-env-changed` line; the fresh target directory holds exactly one omega build output)
+- validate: `CARGO_TARGET_DIR=/private/tmp/cargo_target_ft3_3 cargo nextest run -p proxima-omega -E 'test(/selection_min_rows_is_the_toml_value/)'`; then `grep -l "OMEGA_SELECTION_TOP_FRACTION_MIN_ROWS" /private/tmp/cargo_target_ft3_3/debug/build/omega-*/output | wc -l` (the build script's `rerun-if-env-changed` line; the fresh target directory holds exactly one omega build output)
 - expect: `1 passed`; the grep pipeline prints `1`
-- also green: `cargo clippy -p omega --all-targets`
+- also green: `cargo clippy -p proxima-omega --all-targets`
 - stage: `omega/omega-runtime.toml`, `omega/build.rs`, `omega/src/sized.rs`
 - commit: `feat(omega): add selection row threshold sizing key`
 - done when: the expect line printed, clippy clean, `git diff --cached --stat` equals the stage list, and the commit landed with that message
@@ -498,18 +498,18 @@ The row-count threshold used by the Metal and kernel-count cards is the producti
       assert_eq!(grid_threads(&plain, &[], policy, false).expect("grid resolves"), 1024);
   }
   ```
-- validate: `CARGO_TARGET_DIR=/private/tmp/cargo_target_ft3_4 cargo nextest run -p proxima-tensor -p omega -E 'test(/top_fraction_select_reports_its_name_and_reads_every_operand/) + test(/rank_select_entry_and_grid_follow_rows_and_keep_flag/)'`
+- validate: `CARGO_TARGET_DIR=/private/tmp/cargo_target_ft3_4 cargo nextest run -p proxima-tensor -p proxima-omega -E 'test(/top_fraction_select_reports_its_name_and_reads_every_operand/) + test(/rank_select_entry_and_grid_follow_rows_and_keep_flag/)'`
 - expect: `2 passed` (`top_fraction_select_reports_its_name_and_reads_every_operand` and `rank_select_entry_and_grid_follow_rows_and_keep_flag` named); and the build table below, each row printing the two lines `count_build` prints with the stated library count and `1 "success":true`. Run `mkdir -p "$LOG"` first and define `count_build` once (recipe at the top of this file).
 
   | label | command | crate_name | lib targets |
   |---|---|---|---|
   | tensor_default | `cargo check -p proxima-tensor --all-targets` | proxima_tensor | 2 |
   | tensor_all | `cargo check -p proxima-tensor --all-features --all-targets` | proxima_tensor | 2 |
-  | omega_default | `cargo check -p omega --all-targets` | omega | 2 |
-  | omega_ext | `cargo check -p omega --all-targets --features instrument,cuda,wgpu-backend` | omega | 2 |
-  | omega_linux | `cargo check -p omega --no-default-features --features metal-core --target x86_64-unknown-linux-gnu` | omega | 1 |
+  | omega_default | `cargo check -p proxima-omega --all-targets` | omega | 2 |
+  | omega_ext | `cargo check -p proxima-omega --all-targets --features instrument,cuda,wgpu-backend` | omega | 2 |
+  | omega_linux | `cargo check -p proxima-omega --no-default-features --features metal-core --target x86_64-unknown-linux-gnu` | omega | 1 |
   | interop_std | `cargo check -p proxima-model-interop --features std --all-targets` | proxima_model_interop | 2 |
-- also green: `cargo clippy -p proxima-tensor --all-targets`, `cargo clippy -p proxima-tensor --all-features --all-targets`, `cargo clippy -p omega --all-targets`
+- also green: `cargo clippy -p proxima-tensor --all-targets`, `cargo clippy -p proxima-tensor --all-features --all-targets`, `cargo clippy -p proxima-omega --all-targets`
 - stage: `proxima-tensor/src/bind/types_layout_boundop.rs`, `proxima-tensor/src/bind/refresh.rs`, `proxima-tensor/src/bind/repeat_nodes.rs`, `proxima-tensor/src/bind/identity_copy_alias.rs`, `proxima-tensor/src/bind/tests.rs`, `proxima-tensor/src/cpu/arena.rs`, `proxima-tensor/src/cpu/quantized_eval.rs`, `proxima-tensor/src/cpu/typed_eval.rs`, `proxima-tensor/src/cpu/run_node.rs`, `proxima-tensor/src/spec/tests.rs`, `proxima-tensor/examples/scaling.rs`, `omega/src/identity.rs`, `omega/src/cuda.rs`, `omega/src/wgsl.rs`, `omega/src/wgpu_driver.rs`, `omega/src/metal/prepare_uniforms_pack.rs`, `omega/src/metal/dispatch_timed_and_classify.rs`, `omega/src/msl/signature_tokens_prelude.rs`, `omega/src/msl/emit_and_classify.rs`, `omega/src/msl/tests.rs`, `proxima-model-interop/tests/real_qwen35moe_registry_probe.rs`
 - commit: `feat(tensor): add top-fraction select bound op across all backends`
 - done when: the expect line printed, the six build rows printed their counts, clippy clean, `git diff --cached --stat` equals the stage list, and the commit landed with that message
@@ -1258,9 +1258,9 @@ The row-count threshold used by the Metal and kernel-count cards is the producti
       assert!(unioned.source.contains("device float* out [[buffer(3)]]"));
   }
   ```
-- validate: `CARGO_TARGET_DIR=/private/tmp/cargo_target_ft3_8 cargo nextest run -p omega -E 'test(/rank_select_render_/)'`
+- validate: `CARGO_TARGET_DIR=/private/tmp/cargo_target_ft3_8 cargo nextest run -p proxima-omega -E 'test(/rank_select_render_/)'`
 - expect: `2 passed` (`rank_select_render_emits_kernel_entry_bindings_and_grid` and `rank_select_render_declares_four_passes` named)
-- also green: `cargo clippy -p omega --all-targets`
+- also green: `cargo clippy -p proxima-omega --all-targets`
 - stage: `omega/src/msl/selection_render.rs`, `omega/src/msl/mod.rs`, `omega/src/msl/emit_and_classify.rs`, `omega/src/msl/tests.rs`
 - commit: `feat(omega): render radix-select kernel for top-fraction select`
 - done when: the expect line printed, clippy clean, `git diff --cached --stat` equals the stage list, and the commit landed with that message
@@ -1482,17 +1482,17 @@ The row-count threshold used by the Metal and kernel-count cards is the producti
   }
   ```
   The first test is the hand-derived check on the kernel and compares the kernel with the plain expression run on the CPU; the second is the same set on the plain expression running on Metal, one row below the threshold; the third checks the union; the fourth uses 3000 and 4097 rows so each thread owns more than one row (the per-thread tie-count path), against a sort-based reference; the fifth runs a keep count of zero with and without flags.
-- validate: `CARGO_TARGET_DIR=/private/tmp/cargo_target_ft3_9 cargo nextest run -p omega --features metal,instrument,top-fraction-fusion -j 1 --test top_fraction_select_metal`
+- validate: `CARGO_TARGET_DIR=/private/tmp/cargo_target_ft3_9 cargo nextest run -p proxima-omega --features metal,instrument,top-fraction-fusion -j 1 --test top_fraction_select_metal`
 - expect: `5 passed` (`selection_kernel_matches_hand_derived_set_at_threshold`, `plain_expression_matches_hand_derived_set_below_threshold`, `selection_kernel_unions_keep_rows`, `selection_kernel_breaks_ties_by_index_across_thread_chunks` and `selection_kernel_keeps_only_flagged_rows_when_the_count_is_zero` named); and the build table below (define `count_build` once, recipe at the top of this file; `mkdir -p "$LOG"` first), each row printing its library count and `1 "success":true`:
 
   | label | command | crate_name | lib targets |
   |---|---|---|---|
-  | omega_default | `cargo check -p omega --all-targets` | omega | 2 |
-  | omega_feature | `cargo check -p omega --features top-fraction-fusion --all-targets` | omega | 2 |
-  | omega_ext_feature | `cargo check -p omega --all-targets --features instrument,cuda,wgpu-backend,top-fraction-fusion` | omega | 2 |
-  | omega_linux_off | `cargo check -p omega --no-default-features --features metal-core --target x86_64-unknown-linux-gnu` | omega | 1 |
-  | omega_linux_on | `cargo check -p omega --no-default-features --features metal-core,top-fraction-fusion --target x86_64-unknown-linux-gnu` | omega | 1 |
-- also green: `cargo clippy -p omega --features metal,instrument,top-fraction-fusion --all-targets`; `cargo clippy -p omega --all-targets` (feature off)
+  | omega_default | `cargo check -p proxima-omega --all-targets` | omega | 2 |
+  | omega_feature | `cargo check -p proxima-omega --features top-fraction-fusion --all-targets` | omega | 2 |
+  | omega_ext_feature | `cargo check -p proxima-omega --all-targets --features instrument,cuda,wgpu-backend,top-fraction-fusion` | omega | 2 |
+  | omega_linux_off | `cargo check -p proxima-omega --no-default-features --features metal-core --target x86_64-unknown-linux-gnu` | omega | 1 |
+  | omega_linux_on | `cargo check -p proxima-omega --no-default-features --features metal-core,top-fraction-fusion --target x86_64-unknown-linux-gnu` | omega | 1 |
+- also green: `cargo clippy -p proxima-omega --features metal,instrument,top-fraction-fusion --all-targets`; `cargo clippy -p proxima-omega --all-targets` (feature off)
 - stage: `omega/Cargo.toml`, `omega/src/metal/mod.rs`, `omega/src/metal/prepare_uniforms_pack.rs`, `omega/tests/top_fraction_select_metal.rs`
 - commit: `feat(omega): lower top-fraction masks to the selection kernel on metal`
 - done when: the expect line printed, the five build rows printed their counts, clippy clean, `git diff --cached --stat` equals the stage list, and the commit landed with that message
@@ -1581,9 +1581,9 @@ The row-count threshold used by the Metal and kernel-count cards is the producti
       assert!(fused.len() < plain.len());
   }
   ```
-- validate: `CARGO_TARGET_DIR=/private/tmp/cargo_target_ft3_10 cargo nextest run -p omega --features top-fraction-fusion --test top_fraction_kernel_count`
+- validate: `CARGO_TARGET_DIR=/private/tmp/cargo_target_ft3_10 cargo nextest run -p proxima-omega --features top-fraction-fusion --test top_fraction_kernel_count`
 - expect: `2 passed` (`no_selection_kernel_below_the_configured_row_threshold` and `one_selection_kernel_at_the_configured_row_threshold` named)
-- also green: `cargo clippy -p omega --features top-fraction-fusion --all-targets`
+- also green: `cargo clippy -p proxima-omega --features top-fraction-fusion --all-targets`
 - stage: `omega/tests/top_fraction_kernel_count.rs`
 - commit: `test(omega): count selection kernels around the row threshold`
 - done when: the expect line printed, clippy clean, `git diff --cached --stat` equals the stage list, and the commit landed with that message
@@ -1607,9 +1607,9 @@ Each item: where the older spec text says one thing and the cards do another, wi
 
 - Commands, in order, each at the stated count (all on one checkout with every card landed):
   1. `cargo nextest run -p proxima-tensor --features top-fraction-fusion -E 'test(/top_fraction_cpu_worked_/) + test(/rank_select_/) + test(/top_fraction_select_reports_its_name_and_reads_every_operand/)'` prints `14 passed` (2 expression worked, 1 union expression, 1 CPU reference, 1 CPU runner, 4 recognizer, 4 fusion, 1 kind introspection).
-  2. `cargo nextest run -p omega --features top-fraction-fusion -E 'test(/rank_select_/) + test(/selection_min_rows_is_the_toml_value/)'` prints `4 passed` (1 entry and grid, 2 render, 1 threshold).
-  3. `cargo nextest run -p omega --features top-fraction-fusion --test top_fraction_kernel_count` prints `2 passed`.
-  4. `cargo nextest run -p omega --features metal,instrument,top-fraction-fusion -j 1 --test top_fraction_select_metal` prints `5 passed` (one GPU run, quiet box).
+  2. `cargo nextest run -p proxima-omega --features top-fraction-fusion -E 'test(/rank_select_/) + test(/selection_min_rows_is_the_toml_value/)'` prints `4 passed` (1 entry and grid, 2 render, 1 threshold).
+  3. `cargo nextest run -p proxima-omega --features top-fraction-fusion --test top_fraction_kernel_count` prints `2 passed`.
+  4. `cargo nextest run -p proxima-omega --features metal,instrument,top-fraction-fusion -j 1 --test top_fraction_select_metal` prints `5 passed` (one GPU run, quiet box).
 - Builds, counted with the recipe at the top of this file; every row prints its library count and `1 "success":true`:
 
   | label | command | crate_name | lib targets |
@@ -1618,11 +1618,11 @@ Each item: where the older spec text says one thing and the cards do another, wi
   | tensor_feature | `cargo check -p proxima-tensor --features top-fraction-fusion --all-targets` | proxima_tensor | 2 |
   | tensor_all | `cargo check -p proxima-tensor --all-features --all-targets` | proxima_tensor | 2 |
   | tensor_noalloc | `cargo check -p proxima-tensor --no-default-features --features alloc` | proxima_tensor | 1 |
-  | omega_default | `cargo check -p omega --all-targets` | omega | 2 |
-  | omega_feature | `cargo check -p omega --features top-fraction-fusion --all-targets` | omega | 2 |
-  | omega_ext_feature | `cargo check -p omega --all-targets --features instrument,cuda,wgpu-backend,top-fraction-fusion` | omega | 2 |
-  | omega_linux_off | `cargo check -p omega --no-default-features --features metal-core --target x86_64-unknown-linux-gnu` | omega | 1 |
-  | omega_linux_on | `cargo check -p omega --no-default-features --features metal-core,top-fraction-fusion --target x86_64-unknown-linux-gnu` | omega | 1 |
+  | omega_default | `cargo check -p proxima-omega --all-targets` | omega | 2 |
+  | omega_feature | `cargo check -p proxima-omega --features top-fraction-fusion --all-targets` | omega | 2 |
+  | omega_ext_feature | `cargo check -p proxima-omega --all-targets --features instrument,cuda,wgpu-backend,top-fraction-fusion` | omega | 2 |
+  | omega_linux_off | `cargo check -p proxima-omega --no-default-features --features metal-core --target x86_64-unknown-linux-gnu` | omega | 1 |
+  | omega_linux_on | `cargo check -p proxima-omega --no-default-features --features metal-core,top-fraction-fusion --target x86_64-unknown-linux-gnu` | omega | 1 |
   | interop_std | `cargo check -p proxima-model-interop --features std --all-targets` | proxima_model_interop | 2 |
 
   The two omega all-targets rows with the feature on also build `omega/tests/top_fraction_select_metal.rs` and `omega/tests/top_fraction_kernel_count.rs`; their library counts stay 2 because the count names the library target only.

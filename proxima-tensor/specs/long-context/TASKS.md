@@ -593,7 +593,7 @@ REBOOT LOSS, 2026-09-30.
   - The ring-parity oracle is now the vendored file, compared up to and including the
     first 106.
 - **AC23 Metal regression at 27d88bdf (2026-09-30, after the 14:01 kernel panic):**
-  - Run: `cargo nextest run -p proxima-model-interop -p proxima-tensor -p omega --features
+  - Run: `cargo nextest run -p proxima-model-interop -p proxima-tensor -p proxima-omega --features
     proxima-model-interop/std,proxima-model-interop/metal --no-fail-fast`. nextest 0.9.146;
     model tests serialized by the resident-model lock.
   - Result: 1544 run, 1542 passed, 2 failed, 91 skipped. `before.txt` holds 1410 passes; the

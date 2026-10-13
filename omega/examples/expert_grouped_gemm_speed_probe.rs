@@ -24,7 +24,7 @@
 //! and between builds are the readable part.
 //!
 //! ```sh
-//! cargo run --release -p omega --example expert_grouped_gemm_speed_probe \
+//! cargo run --release -p proxima-omega --example expert_grouped_gemm_speed_probe \
 //!   --features metal,metal-grouped-gemm,instrument
 //! ```
 

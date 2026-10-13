@@ -15,7 +15,7 @@
 //!
 //! ```sh
 //! LADDER_ROWS=12288 LADDER_K=1536 LADDER_TOKENS=971 LADDER_VARIANTS=a.metal,b.metal \
-//!   cargo run --release -p omega --example mm_kernel_ladder --features metal
+//!   cargo run --release -p proxima-omega --example mm_kernel_ladder --features metal
 //! ```
 
 fn main() -> anyhow::Result<()> {

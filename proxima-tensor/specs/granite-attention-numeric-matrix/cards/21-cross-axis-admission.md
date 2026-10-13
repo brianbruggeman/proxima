@@ -37,7 +37,7 @@ Using the public selector and manifest from card 20, use the captured Granite sh
 
 | id | command | expected |
 |---|---|---|
-| AC21 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_21_cross_axis)'` | filter selects 2 tests; 2 passed; selected multi-axis manifest, and typed F32 `prefetch` decline reports exactly 52,608 required / 32,768 available bytes |
+| AC21 | `cargo nextest run -p proxima-omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_21_cross_axis)'` | filter selects 2 tests; 2 passed; selected multi-axis manifest, and typed F32 `prefetch` decline reports exactly 52,608 required / 32,768 available bytes |
 
 A zero-test match is failure. Inspect the selected manifest and decline payload, not merely the runner summary.
 

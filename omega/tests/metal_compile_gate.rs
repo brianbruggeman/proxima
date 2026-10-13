@@ -1,7 +1,7 @@
 //! The compile gate: every emitted kernel must actually assemble under the
 //! real Metal toolchain, not just "look like" MSL. An integration test (not
 //! a `#[cfg(test)]` unit test) so it always links std/tempfile regardless of
-//! which feature set `-p omega`'s own unit tests are built with.
+//! which feature set `-p proxima-omega`'s own unit tests are built with.
 //!
 //! If `xcrun`/`metal` is unavailable, this test FAILS with a clear message —
 //! a missing toolchain is a red gate here, never a silent skip.

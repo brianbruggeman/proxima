@@ -20,7 +20,7 @@ cross-target check; none is native Windows runtime evidence.
 | AC11 gRPC TLS factory propagation | 1 test passed: configured missing custom CA fails before dialing and the error includes its path | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-grpc-factory.stdout` |
 | AC11 listener mTLS custom roots | 1 test passed: required client-CA bundle path round-trips through the listener TLS spec and builds a client-certificate verifier | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-listener.stdout` |
 | AC7–AC11 full TLS library after facade wiring | 37 passed, 0 failed, 0 skipped | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-tls-full.stdout` |
-| AC11 Proxima Windows MSVC all-target check | `cargo xwin check -p proxima --all-targets --target x86_64-pc-windows-msvc` finished with exit 0 in 5m10s | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-windows-xwin.stdout` |
+| AC11 Proxima Windows MSVC all-target check | `cargo xwin check -p proxima-lib --all-targets --target x86_64-pc-windows-msvc` finished with exit 0 in 5m10s | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-windows-xwin.stdout` |
 | AC11 Hyper feature Windows MSVC all-target check | `cargo xwin check -p proxima-http --all-targets --features http1-stream-client,http1-tls --target x86_64-pc-windows-msvc` finished with exit 0 in 1m51s | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-http-windows-xwin.stdout` |
 | AC11 universal Listener TLS forwarding | 1 test passed, 0 failed/skipped; `TlsListenProtocol` forwards `required_files` and `client-ca.pem` to the wrapped protocol spec | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-listener-facade.stdout` |
 
@@ -39,7 +39,7 @@ Root policy, verifier, and protocol versions remain the configured rustls values
 
 | contract | observation | raw artifact |
 |---|---|---|
-| AC12a Windows `http-hyper` + Prime alias cfg | `cargo xwin check -p proxima --lib --features http-hyper --target x86_64-pc-windows-msvc` finished with exit 0; compiles the Windows alias registration and its factory type | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-12-alias-xwin.stdout` |
+| AC12a Windows `http-hyper` + Prime alias cfg | `cargo xwin check -p proxima-lib --lib --features http-hyper --target x86_64-pc-windows-msvc` finished with exit 0; compiles the Windows alias registration and its factory type | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-12-alias-xwin.stdout` |
 | AC12b Hyper TLS ALPN ownership | 1 regression test passed; URL-aware TLS config starts with ALPN set and `with_client_tls_config` constructs `hyper-rustls` successfully after clearing it | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-12-hyper-alpn.stdout` |
 | AC12b Hyper without TLS feature | `cargo check -p proxima-http --lib --features http1` finished with exit 0, with no unused-field or unused-mut diagnostics | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-12-hyper-no-tls.stdout` |
 | Native Windows CI for `f2e26b1bf0080fcad8080e3102a744c1e501084d` | GitHub Actions run [37542940589](https://github.com/brianbruggeman/proxima/actions/runs/37542940589) completed with failure in `windows-port` at “compile every workspace target” (exit 1). Public annotations identify the failed step but provide no compiler diagnostic; fetching job logs returned HTTP 403 (`Must have admin rights to Repository`), and the Actions page requires sign-in. The compile failure mechanism is therefore unexplained by accessible artifacts. | https://api.github.com/repos/brianbruggeman/proxima/actions/runs/37542940589/jobs |
@@ -49,8 +49,8 @@ Root policy, verifier, and protocol versions remain the configured rustls values
 The universal facade acceptance commands are:
 
 ```text
-cargo nextest run -p proxima --lib --features http-prime-deps -E 'test(tls_client_settings_are_carried_by_the_universal_client_spec) + test(canonical_http_forwards_transport_now)' --no-tests=fail --test-threads 1 --retries 0
-cargo nextest run -p proxima --lib --features http-prime,http2 -E 'test(grpc_factory_applies_client_tls_root_settings)' --no-tests=fail --test-threads 1 --retries 0
+cargo nextest run -p proxima-lib --lib --features http-prime-deps -E 'test(tls_client_settings_are_carried_by_the_universal_client_spec) + test(canonical_http_forwards_transport_now)' --no-tests=fail --test-threads 1 --retries 0
+cargo nextest run -p proxima-lib --lib --features http-prime,http2 -E 'test(grpc_factory_applies_client_tls_root_settings)' --no-tests=fail --test-threads 1 --retries 0
 cargo nextest run -p proxima-http --lib --features http1-stream-client,http1-tls -E 'test(factory_applies_client_tls_root_settings_before_dial) + test(hyper_factory_applies_client_tls_root_settings)' --no-tests=fail --test-threads 1 --retries 0
 cargo nextest run -p proxima-tls --lib --features futures-io -E 'test(listener_client_auth_bundle_paths_round_trip_and_build)' --no-tests=fail --test-threads 1 --retries 0
 ```
@@ -312,8 +312,8 @@ has not been triggered.
 ## current host workflow commands
 
 On Darwin arm64, the current worktree ran the workflow's
-`cargo test -p proxima --doc`: 21 passed, 0 failed, 14 ignored. It also ran
-`cargo run -p proxima --example windows_port --features http1-native` with
+`cargo test -p proxima-lib --doc`: 21 passed, 0 failed, 14 ignored. It also ran
+`cargo run -p proxima-lib --example windows_port --features http1-native` with
 process exit 0. The example printed incumbent/TCP/UDP/multiworker payload
 matches of 2/1/1/1. These are host execution observations; they do not stand in
 for the Windows runner's execution.

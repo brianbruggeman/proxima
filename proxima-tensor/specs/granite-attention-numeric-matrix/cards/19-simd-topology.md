@@ -40,8 +40,8 @@ Use the existing Proxima numeric and Metal abstractions. Do not introduce num-tr
 
 | id | command | expected |
 |---|---|---|
-| AC19 | `cargo nextest run -p omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_19_simd_topology)'` | filter selects 2 tests; 2 passed |
-| AC19b | `cargo nextest run -p omega --features metal,metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_19_simd_topology_plan)'` | filter selects 1 test; 1 passed; per-head and grouped-query outputs each compare against the CPU payload while MMA, reuse, tile height and query parallelism stay fixed |
+| AC19 | `cargo nextest run -p proxima-omega --features metal-attn-split-rows,metal-attn-variants --lib -E 'test(~card_19_simd_topology)'` | filter selects 2 tests; 2 passed |
+| AC19b | `cargo nextest run -p proxima-omega --features metal,metal-attn-split-rows,metal-attn-variants --test cached_attention_row_tiled_parity -E 'test(~card_19_simd_topology_plan)'` | filter selects 1 test; 1 passed; per-head and grouped-query outputs each compare against the CPU payload while MMA, reuse, tile height and query parallelism stay fixed |
 
 A zero-test match or a checker that does not open its fixture is failure. Run this local command after the edit. The expected count is part of the criterion.
 

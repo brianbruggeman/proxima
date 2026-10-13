@@ -22,8 +22,8 @@
 //!
 //! Run:
 //! ```bash
-//! cargo bench -p proxima --bench bench_task_join_set_parity
-//! cargo bench -p proxima --bench bench_task_join_set_parity -- newtype_overhead
+//! cargo bench -p proxima-lib --bench bench_task_join_set_parity
+//! cargo bench -p proxima-lib --bench bench_task_join_set_parity -- newtype_overhead
 //! ```
 
 #![allow(

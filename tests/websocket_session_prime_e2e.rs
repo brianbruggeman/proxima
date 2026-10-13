@@ -12,7 +12,7 @@
 //!
 //! Verify the build has no tokio:
 //!
-//!   cargo tree -p proxima --no-default-features \
+//!   cargo tree -p proxima-lib --no-default-features \
 //!     --features "websocket-session,http1-native,serve-prime,macros" \
 //!     -e normal -i tokio
 //!   # -> "warning: nothing to print" (empty result)
