@@ -524,3 +524,36 @@ pub fn qwen35_partial_rotary_forward_fixture(
     ];
     (program, symbols, roots, named)
 }
+
+/// The qk-norm forward bound at a capacity bucket of `capacity` cache rows
+/// while the live `cached_len` is smaller, so the cache blocks carry
+/// `capacity - cached_len` pad rows set to `pad_value`. Returns the program,
+/// both the padded run (symbol 1 = `capacity`) and the live
+/// reference run (symbol 1 = `cached_len`, cache blocks truncated to their
+/// first `cached_len` rows). Rows are row-major, so the reference rows are
+/// exactly the padded run's live prefix. The named `cached_len` scalar is the
+/// true `cached_len` in both runs.
+pub fn qwen3_gqa_qk_norm_padded_cache_fixture(
+    cached_len: u64,
+    capacity: u64,
+    pad_value: f32,
+) -> (RealForwardFixture, RealForwardFixture) {
+    let (program, padded_symbols, roots, padded_source) = qwen3_gqa_qk_norm_forward_fixture(1, capacity);
+    let (_, reference_symbols, _, _) = qwen3_gqa_qk_norm_forward_fixture(1, cached_len);
+    let mut padded = padded_source.clone();
+    let mut reference = padded_source;
+    for ((name, padded_data), (_, reference_data)) in padded.iter_mut().zip(reference.iter_mut()) {
+        if name == "cached_len" {
+            *padded_data = vec![cached_len as f32];
+            *reference_data = vec![cached_len as f32];
+        } else if name.starts_with("kv_cache.") || name.ends_with("_cache") {
+            let row_stride = padded_data.len() / capacity as usize;
+            let live = cached_len as usize * row_stride;
+            padded_data[live..].iter_mut().for_each(|value| *value = pad_value);
+            reference_data.truncate(live);
+        }
+    }
+    let padded_run = (program.clone(), padded_symbols, roots.clone(), padded);
+    let reference_run = (program, reference_symbols, roots, reference);
+    (reference_run, padded_run)
+}
