@@ -1,28 +1,39 @@
-//! Wave D Phase 3 primitives merge: `proxima-pipe` + `proxima-stream` +
-//! `proxima-sync` + `proxima-transport` folded into one crate.
+//! The pipe algebra and the runtime-agnostic primitives beneath it.
 //!
-//! Folding transport in here (rather than into stream first) dissolves the
-//! former pipe<->stream<->transport dependency cycle (stream depended on pipe
-//! for `BindAddr`/`PeerInfo`; pipe depended on transport for `Replay`/
-//! `tap_complete` in `pipe::diff`/`pipe::retry`) into intra-crate module
-//! references — `crate::pipe`, `crate::stream`, `crate::sync`,
-//! `crate::transport` all resolve within this one crate, no Cargo dependency
-//! edges between them.
+//! One trait, [`pipe::Pipe`], carries typed `In -> Out` with an associated
+//! `Err`; picking `In` or `Out` as `()` gives the four forms (transform,
+//! source, sink, observe). Everything else here composes over it or sits
+//! under it.
 //!
-//! - [`pipe`] — the async `Pipe`/`SendPipe` form family, `Handler`
-//!   (Request->Response), `SourcePipe` (Signal->()), the payload types `Carry`,
-//!   `ResponseStream` and `RequestStream` (buffered bodies are plain `Bytes`),
-//!   `HeaderList`,
-//!   the telemetry/capture trait surfaces, `UpgradeHandler`, endpoint
-//!   metadata. Plugin authors' primary surface.
-//! - [`stream`] — sans-IO byte-stream traits (`StreamConnection`/
-//!   `Listener`/`Upstream` over `futures::io`), shared by every wire-protocol
-//!   stack (h1, h2, h3, quic, tls, websocket, framing-json).
-//! - [`sync`] — runtime-agnostic concurrency primitives shaped like
+//! - [`pipe`] -- [`pipe::Pipe`] and its additive `Send` form
+//!   [`pipe::SendPipe`], the [`PipeExt`] combinator sugar
+//!   (`.and_then`/`.filter`/`.fanout`/`.fanin`), `Request`/`Response`
+//!   envelopes over `Bytes`, `HeaderList`, the streaming bodies
+//!   (`ResponseStream`/`RequestStream` over `ChunkStream`) and the in-process
+//!   `Carry` payload, `Handler` (`Request<Bytes> -> Response<Bytes>`),
+//!   `SourcePipe`, and the resilience, rate-limit, retry, routing and
+//!   telemetry/capture surfaces. Plugin authors' primary surface.
+//! - [`sync`] -- runtime-agnostic concurrency primitives shaped like
 //!   `tokio::sync` (`Mutex`, `Notify`, `mpsc`, `oneshot`, `watch`,
-//!   `broadcast`, `blocking`, `task`, `shutdown`).
-//! - [`transport`] — `Replay` (record-and-replay), the `tap_complete` taps,
-//!   and the `GenericStream` seam, below [`pipe`].
+//!   `broadcast`, plus `blocking`, `task`, `shutdown`), so no pipe needs
+//!   tokio to coordinate.
+//! - [`stream`] -- byte-stream and datagram traits (`StreamConnection`,
+//!   `StreamListener`, `StreamUpstream`, `DatagramSocket`) built on
+//!   `futures::io`, shared by every wire-protocol stack above them.
+//! - [`transport`] -- `Replay` (record-and-replay of a stream with fan-out
+//!   sinks), the `tap_complete` taps and the `GenericStream` seam; sits below
+//!   [`pipe`].
+//! - [`driver`] -- [`block_on`], the no-runtime way to drive one future to
+//!   completion.
+//! - [`codec`], [`block_layout`], [`float_layout`] -- data descriptions of
+//!   packed numeric storage: [`Codec`] names a packed byte layout,
+//!   `BlockLayout` describes a block of stored numbers, `FloatLayout` one
+//!   stored float.
+//!
+//! The crate is `no_std` unless the default `std` feature is on. `pipe`
+//! splits further: the pipe forms compile with no allocator, most of the
+//! envelope and combinator surface needs `alloc`, and registries and
+//! lifecycle helpers need `std`. Each item's own doc names its tier.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 

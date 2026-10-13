@@ -124,10 +124,10 @@ pub type BackgroundHandle<R> = Pin<Box<dyn Future<Output = Result<R, ProximaErro
 /// handle is `Send` so the per-core caller can await it across the
 /// chain-runtime / pool boundary.
 ///
-/// Default: `tokio::task::spawn_blocking` (already wired into
-/// `TokioPerCoreRuntime::spawn_background_blocking` — good for
-/// I/O-blocking work, scales to 512 threads). Alternative:
-/// `RayonBackgroundPool` (feature `rayon`) — work-
+/// Default: `tokio::task::spawn_blocking` (what `Runtime::spawn_background_blocking`
+/// does in `TokioPerCoreRuntime`, feature `tokio`, when no pool is installed
+/// with `TokioPerCoreRuntime::with_background_pool` — good for I/O-blocking
+/// work). Alternative: `RayonBackgroundPool` (feature `rayon`) — work-
 /// stealing across a fixed thread count, the right shape for
 /// CPU-bound parallel compute.
 #[cfg(feature = "alloc")]
