@@ -236,8 +236,7 @@ pub fn run_prime<Body, Fut>(
     cassette: Option<CassetteSpec>,
     body_timeout: Option<Duration>,
     body: Body,
-)
-where
+) where
     Body: FnOnce(TestCtx) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + 'static,
 {
@@ -567,7 +566,10 @@ mod tests {
                 resolve_body_timeout(None),
             )
         });
-        assert_eq!(declared, (Duration::from_secs(600), Duration::from_secs(60)));
+        assert_eq!(
+            declared,
+            (Duration::from_secs(600), Duration::from_secs(60))
+        );
     }
 
     // mirrors `proxima_primitives::pipe::Pipe::call` (base rung, no `Send`

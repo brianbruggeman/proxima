@@ -442,9 +442,7 @@ fn reject_unsupported_test_shape(func: &ItemFn) -> Result<(), Error> {
         {
             return Err(Error::new_spanned(
                 attr,
-                format!(
-                    "#[{name}] is unsupported under #[proxima::test]; await inside the body"
-                ),
+                format!("#[{name}] is unsupported under #[proxima::test]; await inside the body"),
             ));
         }
     }
@@ -506,12 +504,14 @@ fn cassette_spec(cassette: Option<&str>, case: &str) -> TokenStream {
     }
 }
 
-fn entry_call(runtime: &RuntimeKind, start_paused: bool, timeout_millis: Option<u64>) -> TokenStream {
+fn entry_call(
+    runtime: &RuntimeKind,
+    start_paused: bool,
+    timeout_millis: Option<u64>,
+) -> TokenStream {
     let timeout_arg = timeout_millis.map_or_else(
         || quote!(::core::option::Option::None),
-        |millis| {
-            quote!(::core::option::Option::Some(::core::time::Duration::from_millis(#millis)))
-        },
+        |millis| quote!(::core::option::Option::Some(::core::time::Duration::from_millis(#millis))),
     );
     match (runtime, start_paused) {
         (RuntimeKind::TokioMultiThread { workers }, paused) => {
@@ -1056,7 +1056,8 @@ mod tests {
     fn timeout_units_expand_to_a_duration_in_milliseconds() {
         for (spelled, millis) in [("200ms", 200u64), ("90s", 90_000), ("5m", 300_000)] {
             let expanded = expand_ok(&format!("timeout = \"{spelled}\""), PLAIN);
-            let expected = format!("Some (:: core :: time :: Duration :: from_millis ({millis}u64))");
+            let expected =
+                format!("Some (:: core :: time :: Duration :: from_millis ({millis}u64))");
             assert!(expanded.contains(&expected), "{spelled}: {expanded}");
         }
     }
@@ -1074,7 +1075,17 @@ mod tests {
 
     #[test]
     fn a_malformed_timeout_is_a_compile_error() {
-        for bad in ["soon", "", "10", "s", "ms", "-5s", "1.5s", "0s", "99999999999999999999m"] {
+        for bad in [
+            "soon",
+            "",
+            "10",
+            "s",
+            "ms",
+            "-5s",
+            "1.5s",
+            "0s",
+            "99999999999999999999m",
+        ] {
             let message = expand_err(&format!("timeout = \"{bad}\""), PLAIN);
             assert!(message.contains("invalid timeout"), "{bad:?}: {message}");
         }
@@ -1099,7 +1110,10 @@ mod tests {
             "start_paused = true, timeout = \"1s\"",
         ] {
             let message = expand_err(args, PLAIN);
-            assert!(message.contains("enforce no body bound"), "{args}: {message}");
+            assert!(
+                message.contains("enforce no body bound"),
+                "{args}: {message}"
+            );
         }
     }
 }
