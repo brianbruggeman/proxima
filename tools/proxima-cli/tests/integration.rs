@@ -16,6 +16,8 @@ mod scenario_isolated;
 mod serve_cli;
 #[path = "integration/serve_formats.rs"]
 mod serve_formats;
+#[path = "integration/tensor_run.rs"]
+mod tensor_run;
 #[path = "integration/todos.rs"]
 mod todos;
 #[path = "integration/uds_serve.rs"]

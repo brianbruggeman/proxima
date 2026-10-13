@@ -1,5 +1,6 @@
 mod model;
 mod pipeline;
+mod tensor;
 
 use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
@@ -19,6 +20,7 @@ use proxima::{
 use proxima_telemetry::emit::{EnvFilter, global};
 use proxima_telemetry::error;
 use serde_json::Value;
+use tensor::TensorArgs;
 #[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
@@ -149,6 +151,9 @@ enum Command {
     /// or json spec; the CLI talks to proximad over either a local UDS
     /// or `ssh <host> proximad serve --stdio`.
     Pipeline(PipelineArgs),
+    /// Evaluate a tensor plan on a running `proximad` over its UDS and
+    /// print or save the outputs, e.g. `tensor run --socket <uds> plan.toml`.
+    Tensor(TensorArgs),
     /// Model-file conversions, e.g. `model export-mlx` writes an mlx-lm
     /// directory from a GGUF.
     Model(ModelArgs),
@@ -357,6 +362,7 @@ async fn main() -> ExitCode {
             record,
         } => run_load(scenario, name, json, rps, duration, remote, record).await,
         Command::Model(args) => model::run(args),
+        Command::Tensor(args) => tensor::run(args).await,
         other => match run(Cli { command: other }).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -402,8 +408,9 @@ async fn run(cli: Cli) -> Result<(), ProximaError> {
         Command::Verify { .. }
         | Command::Replay { .. }
         | Command::Load { .. }
-        | Command::Model(_) => {
-            unreachable!("Verify/Replay/Load/Model dispatched in main for custom exit codes")
+        | Command::Model(_)
+        | Command::Tensor(_) => {
+            unreachable!("Verify/Replay/Load/Model/Tensor dispatched in main for custom exit codes")
         }
     }
 }
