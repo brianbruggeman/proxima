@@ -119,11 +119,9 @@ cohort-instrument         = ["runtime-prime-cohort"]
 runtime-prime-bgpool      = ["runtime-prime", "std", "dep:core_affinity"]
 runtime-prime-bgpool-rayon = ["runtime-prime-bgpool", "dep:rayon"]
 runtime-prime-bgpool-par   = ["runtime-prime-bgpool"]
-# the async job arm's per-worker tokio current-thread runtime
-# (background.rs) needs `dep:tokio` — carried by `prime-tokio-compat`
-# rather than unconditionally, so the default `runtime-prime-bgpool`
-# combo (the sync fast path + typed spawn) stays tokio-free.
-runtime-prime-bgpool-async = ["runtime-prime-bgpool", "prime-tokio-compat"]
+# the async job arm parks the worker thread between polls (background.rs
+# `block_on_parked`); no tokio runtime, so this stays tokio-free.
+runtime-prime-bgpool-async = ["runtime-prime-bgpool"]
 runtime-prime-config       = ["runtime-prime", "dep:toml"]
 # promotes `os::core_shard::StdClock::Virtual` (and the `launch_with_virtual_clock`
 # constructor) from `#[cfg(test)]`-only to a real, downstream-reachable surface: a

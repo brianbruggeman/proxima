@@ -288,8 +288,8 @@ where
 /// future. each leaf folds its slice serially (item by item, awaiting
 /// each future before reducing into the accumulator); splits join two
 /// halves via `futures::join!`. only available with the
-/// `runtime-prime-bgpool-async` feature, which gives the BackgroundPool
-/// workers their per-thread tokio runtime.
+/// `runtime-prime-bgpool-async` feature, which lets BackgroundPool
+/// workers poll futures on their own threads.
 #[cfg(feature = "runtime-prime-bgpool-async")]
 pub async fn par_reduce_async<Item, Acc, Work, Fut, Reduce, Identity>(
     pool: &Arc<ProximaBackgroundPool>,
@@ -870,7 +870,7 @@ impl<Item: Sync + Send + Clone + 'static> ProximaParBuilder<Item> {
 }
 
 /// lazy async-map builder. terminals here lower into `par_reduce_async`
-/// / `par_each_async` and the per-worker tokio runtime drives the
+/// / `par_each_async` and the parked worker thread drives the
 /// resulting futures.
 #[cfg(feature = "runtime-prime-bgpool-async")]
 pub struct ProximaParMapAsync<Item, Output, F, Fut> {
@@ -947,8 +947,8 @@ where
     }
 
     /// gather every mapped output into a `Vec<Output>` in input order.
-    /// async sibling of [`ProximaParMap::collect`]; the per-worker tokio
-    /// runtime drives each per-item future before appending to the leaf's
+    /// async sibling of [`ProximaParMap::collect`]; the parked worker
+    /// thread drives each per-item future before appending to the leaf's
     /// local Vec.
     pub async fn collect(self) -> Vec<Output> {
         par_map_collect_async_with_threshold(&self.pool, self.slice, self.map_fn, self.threshold)
@@ -1118,8 +1118,8 @@ where
         let this = unsafe { self.get_unchecked_mut() };
         // refill: top up in_flight to `concurrency`, pulling items by
         // index from the slice. each push spawns one future on the
-        // BackgroundPool via spawn_async; the worker's per-thread tokio
-        // runtime drives the future to completion.
+        // BackgroundPool via spawn_async; the worker thread
+        // drives the future to completion.
         while this.in_flight.len() < this.concurrency && this.next_index < this.slice.len() {
             let item = this.slice[this.next_index].clone();
             this.next_index += 1;
@@ -2061,7 +2061,7 @@ mod tests {
             data,
             || 0u64,
             |item| async move {
-                tokio::task::yield_now().await;
+                proxima_primitives::sync::task::yield_now().await;
                 u64::from(item)
             },
             |left, right| left + right,
@@ -2102,7 +2102,7 @@ mod tests {
             move |_item: u32| {
                 let counter = counter_for_work.clone();
                 async move {
-                    tokio::task::yield_now().await;
+                    proxima_primitives::sync::task::yield_now().await;
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
             },
@@ -2114,7 +2114,7 @@ mod tests {
 
     /// trait: `.par_iter(&pool).map_async(async fn).sum().await` end-to-end.
     /// closure receives item by value (Item: Clone), returns future, the
-    /// per-worker tokio runtime drives it.
+    /// parked worker thread drives it.
     #[cfg(feature = "runtime-prime-bgpool-async")]
     #[proxima::test]
     async fn par_iter_map_async_sum() {
@@ -2124,7 +2124,7 @@ mod tests {
         let sum: u64 = data
             .par_iter(&pool)
             .map_async(|item| async move {
-                tokio::task::yield_now().await;
+                proxima_primitives::sync::task::yield_now().await;
                 u64::from(item) * 2
             })
             .sum()
@@ -2143,7 +2143,7 @@ mod tests {
             .par_iter(&pool)
             .with_threshold(4)
             .map_async(|item| async move {
-                tokio::task::yield_now().await;
+                proxima_primitives::sync::task::yield_now().await;
                 item
             })
             .reduce(|| 0u32, u32::max)
@@ -2164,7 +2164,7 @@ mod tests {
         let total_for_sink = total.clone();
         data.par_iter(&pool)
             .map_async(|item| async move {
-                tokio::task::yield_now().await;
+                proxima_primitives::sync::task::yield_now().await;
                 item as usize * 3
             })
             .for_each(move |tripled| {
@@ -2189,7 +2189,7 @@ mod tests {
             .for_each_async(move |_item: u32| {
                 let counter = counter_for_work.clone();
                 async move {
-                    tokio::task::yield_now().await;
+                    proxima_primitives::sync::task::yield_now().await;
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
             })
@@ -2211,7 +2211,7 @@ mod tests {
         let outputs: Vec<u64> = data
             .par_stream(&pool, 8)
             .then(|item| async move {
-                tokio::task::yield_now().await;
+                proxima_primitives::sync::task::yield_now().await;
                 u64::from(item) * 2
             })
             .collect()
@@ -2251,7 +2251,7 @@ mod tests {
         let outputs: Vec<u32> = data
             .par_stream(&pool, 1)
             .then(|item| async move {
-                tokio::task::yield_now().await;
+                proxima_primitives::sync::task::yield_now().await;
                 item
             })
             .collect()
@@ -2373,7 +2373,7 @@ mod tests {
         let result: Vec<u64> = data
             .par_iter(&pool)
             .map_async(|item| async move {
-                tokio::task::yield_now().await;
+                proxima_primitives::sync::task::yield_now().await;
                 u64::from(item) * 3
             })
             .collect()
@@ -2412,7 +2412,9 @@ mod tests {
             .par_stream(&pool, 8)
             .then_ordered(|item| async move {
                 let delay_us = u64::from(LEN - item);
-                tokio::time::sleep(std::time::Duration::from_micros(delay_us)).await;
+                for _ in 0..delay_us {
+                    proxima_primitives::sync::task::yield_now().await;
+                }
                 item
             })
             .collect()
