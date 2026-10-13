@@ -113,7 +113,7 @@ pub use dead_code_cached_attention::*;
 pub use gdn_moe_fusion_apply::*;
 #[cfg(feature = "identity-copy-alias")]
 use identity_copy_alias::apply_identity_copy_alias;
-pub use refit_cached_attention::refit_cached_attention_rows;
+pub use refit_cached_attention::{refit_cached_attention_rows, touches_changed};
 pub use refresh::{RefreshRefusal, refresh_bound_ops};
 #[cfg(feature = "instrument")]
 pub use repeat_nodes::{RepeatNodeRefusal, apply_repeat_nodes};

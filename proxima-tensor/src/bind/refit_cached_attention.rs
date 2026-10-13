@@ -58,7 +58,8 @@ pub fn refit_cached_attention_rows(
     Some(patches)
 }
 
-fn touches_changed(bound: &BoundOp, program: &[Op], changed: &BTreeSet<NodeId>) -> bool {
+/// exposed so a caller can measure which ops a shape diff touches before refreshing them.
+pub fn touches_changed(bound: &BoundOp, program: &[Op], changed: &BTreeSet<NodeId>) -> bool {
     let reads = read_nodes(bound);
     changed.contains(&bound.node)
         || reads.iter().any(|node| changed.contains(node))
