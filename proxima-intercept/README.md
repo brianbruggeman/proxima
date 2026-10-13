@@ -39,3 +39,9 @@ CA wired into a live TCP/QUIC listener.
 - `delta-tee` — source-level cfg for the delta-tee capture path
 
 Part of the [proxima](..) workspace.
+
+## License
+
+Licensed under MIT OR Apache-2.0, at your option.
+
+Repository: <https://github.com/brianbruggeman/proxima>
