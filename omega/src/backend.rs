@@ -391,15 +391,15 @@ type MetalPlanHandle = metal::Plan;
 /// variant that mixes them. Placement of individual ops ACROSS engines in one
 /// pass is a later card (design §B.4) and is not this type's job.
 pub enum Plan {
+    // plans are built once per graph, never per op; the largest variant differs by feature set, so each large payload is boxed to keep clippy::large_enum_variant quiet in all of them.
     #[cfg(feature = "cpu")]
-    // boxed: the cpu plan is ~216 bytes and would size every variant of the enum
     Cpu(Box<CpuPlan>),
     #[cfg(all(feature = "metal", target_os = "macos"))]
     Metal(MetalPlanHandle),
     #[cfg(feature = "wgpu-backend")]
     Wgpu(wgpu_driver::WgpuPlan),
     #[cfg(feature = "cuda-driver")]
-    Cuda(crate::cuda_driver::CudaPlan),
+    Cuda(Box<crate::cuda_driver::CudaPlan>),
 }
 
 /// Raw cold and synchronized execution observations for one candidate.
@@ -795,11 +795,11 @@ fn plan_configured_gpu(
             }
         }
         #[cfg(feature = "cuda-driver")]
-        GpuDriver::Cuda => Ok(Plan::Cuda(
+        GpuDriver::Cuda => Ok(Plan::Cuda(Box::new(
             cuda_driver()?
                 .plan_with_config(program, symbols, outputs, named, config)
                 .map_err(map_cuda_configuration_error)?,
-        )),
+        ))),
     }
 }
 
@@ -1789,13 +1789,13 @@ fn plan_named_cuda(
     outputs: &[NodeId],
     numeric_policy: NumericPolicy,
 ) -> Result<Plan, BackendError> {
-    Ok(Plan::Cuda(cuda_driver()?.plan(
+    Ok(Plan::Cuda(Box::new(cuda_driver()?.plan(
         program,
         symbols,
         outputs,
         numeric_policy,
         named,
-    )?))
+    )?)))
 }
 
 #[cfg(feature = "cuda-driver")]
