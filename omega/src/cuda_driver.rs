@@ -993,16 +993,21 @@ fn reject_unsupported_kinds(resolved: &[BoundOp]) -> Result<(), CudaDriverError>
 }
 
 fn validate_cuda_dtype(bound: &BoundOp) -> Result<(), CudaDriverError> {
-    // the route reduce is typed Int32 in the program but every device buffer, like the cpu interpreter's, holds f32
-    let routes_as_f32 =
-        bound.dtype == DType::Int32 && matches!(bound.kind, BoundOpKind::MoeTopK { .. });
-    if bound.dtype != DType::Float32 && !routes_as_f32 {
-        return Err(CudaDriverError::UnsupportedDtype {
-            node: bound.node,
-            dtype: bound.dtype,
-        });
+    // integer dtypes are carried as integer-valued f32 on device, exactly as the cpu interpreter's f32 pipeline holds them
+    if bound.dtype == DType::Float32 || cuda_integer_dtype(bound.dtype) {
+        return Ok(());
     }
-    Ok(())
+    Err(CudaDriverError::UnsupportedDtype {
+        node: bound.node,
+        dtype: bound.dtype,
+    })
+}
+
+fn cuda_integer_dtype(dtype: DType) -> bool {
+    matches!(
+        dtype,
+        DType::Bool | DType::Int8 | DType::UInt8 | DType::Int32 | DType::UInt32
+    )
 }
 
 /// Compiles generated CUDA C with an explicit header search path when the
@@ -1853,7 +1858,7 @@ mod tests {
     fn non_f32_bound_op_reports_node_and_dtype() {
         let bound = BoundOp {
             node: NodeId(157),
-            dtype: DType::Int32,
+            dtype: DType::Float16,
             extents: vec![1],
             kind: BoundOpKind::Constant { value: 0.0 },
         };
@@ -1863,11 +1868,34 @@ mod tests {
                 validate_cuda_dtype(&bound),
                 Err(CudaDriverError::UnsupportedDtype {
                     node: NodeId(157),
-                    dtype: DType::Int32,
+                    dtype: DType::Float16,
                 })
             ),
-            "integer output must be rejected"
+            "half output must be rejected"
         );
+    }
+
+    #[test]
+    fn integer_bound_ops_are_accepted_as_integer_valued_f32() {
+        for dtype in [
+            DType::Bool,
+            DType::Int8,
+            DType::UInt8,
+            DType::Int32,
+            DType::UInt32,
+        ] {
+            let bound = BoundOp {
+                node: NodeId(109),
+                dtype,
+                extents: vec![1],
+                kind: BoundOpKind::Constant { value: 0.0 },
+            };
+
+            assert!(
+                validate_cuda_dtype(&bound).is_ok(),
+                "{dtype:?} must be accepted"
+            );
+        }
     }
 
     const ALTERNATIONS: u64 = 8;
