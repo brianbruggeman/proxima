@@ -83,11 +83,11 @@ workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 temp-env.workspace = true
-proxima-tensor = { features = ["std", "test-support"], path = "../proxima-tensor", default-features = false }
+proxima-tensor = { features = ["std", "test-support"], path = "../proxima-tensor", version = "0.1.0", default-features = false }
 criterion.workspace = true
-proxima-core = { path = "../proxima-core", default-features = false, features = ["alloc"] }
+proxima-core = { path = "../proxima-core", version = "0.1.0", default-features = false, features = ["alloc"] }
 hdrhistogram.workspace = true
-proxima-gguf = { path = "../proxima-gguf" }
+proxima-gguf = { path = "../proxima-gguf", version = "0.1.0" }
 
 [[bench]]
 name = "mnist_f32_lane"

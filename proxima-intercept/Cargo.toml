@@ -13,8 +13,8 @@ readme.workspace = true
 bytes.workspace = true
 proxima-core = { workspace = true, features = ["alloc"] }
 proxima-protocols = { workspace = true, default-features = false, features = ["websocket_frame", "http1_codec-alloc"] }
-proxima-primitives = { path = "../proxima-primitives" }
-proxima-tls = { path = "../proxima-tls", features = ["std"] }
+proxima-primitives = { path = "../proxima-primitives", version = "0.1.0" }
+proxima-tls = { path = "../proxima-tls", version = "0.1.0", features = ["std"] }
 pem = "3"
 rcgen = { workspace = true, features = ["aws_lc_rs", "pem", "x509-parser"] }
 rustls = { workspace = true }
@@ -40,7 +40,7 @@ brotli = "8.0.3"
 proxima-telemetry = { workspace = true, features = ["emit", "std"] }
 
 [dev-dependencies]
-proxima = { package = "proxima-lib", path = "..", features = ["http1", "tcp", "test-support", "tokio"] }
+proxima = { package = "proxima-lib", path = "..", version = "0.1.0", features = ["http1", "tcp", "test-support", "tokio"] }
 criterion = { workspace = true, features = ["html_reports", "async_tokio"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

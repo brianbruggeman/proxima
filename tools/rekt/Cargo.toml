@@ -39,12 +39,12 @@ bon = "3.9.1"
 # are the supported config; its lib.rs re-exports them unconditionally, so a
 # default-features=false slim build does not compile. add only test-prime for the
 # `#[proxima::test]` harness on top of the defaults.
-proxima = { package = "proxima-lib", path = "../..", optional = true, features = ["test-prime", "h3-native-upstream"] }
+proxima = { package = "proxima-lib", path = "../..", version = "0.1.0", optional = true, features = ["test-prime", "h3-native-upstream"] }
 # the adaptive per-core concurrency knob + controller. lives in proxima-runtime
 # so one crate carries the primitive; the `concurrency` feature is default-off.
-proxima-runtime = { path = "../../proxima-runtime", optional = true, features = ["concurrency"] }
+proxima-runtime = { path = "../../proxima-runtime", version = "0.1.0", optional = true, features = ["concurrency"] }
 # prime acceptor factory for serving h2c on prime (the bench_server_h2 example)
-proxima-net = { path = "../../proxima-net", optional = true, default-features = false }
+proxima-net = { path = "../../proxima-net", version = "0.1.0", optional = true, default-features = false }
 rustls = { version = "0.23", optional = true }
 # `Observed` carries the sent bytes for the dump arm; already in the tree.
 bytes = "1"

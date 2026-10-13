@@ -23,7 +23,7 @@ bytes = { workspace = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
 proxima-codec = { workspace = true, features = ["alloc"] }
 proxima-primitives = { workspace = true, features = ["alloc"] }
-proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
+proxima-tensor = { path = "../proxima-tensor", version = "0.1.0", default-features = false, features = ["alloc"] }
 serde = { workspace = true, features = ["derive"], optional = true }
 serde_json.workspace = true
 thiserror.workspace = true
@@ -37,7 +37,7 @@ proxima = { workspace = true, features = ["test-support"] }
 # dequantization is this crate's job), but exercising the actual matmul
 # kernel a real bf16 tensor reaches needs proxima-tensor's std-gated
 # cpu.rs -- dev-only, so a default build's dependency graph is unaffected.
-proxima-tensor = { path = "../proxima-tensor", features = ["std", "config", "test-support"] }
+proxima-tensor = { path = "../proxima-tensor", version = "0.1.0", features = ["std", "config", "test-support"] }
 half = { version = "2.7.1", default-features = false }
 
 [lints]
