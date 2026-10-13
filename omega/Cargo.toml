@@ -549,7 +549,7 @@ proxima-telemetry = { workspace = true, optional = true }
 # per-codec block byte/element geometry `msl.rs`'s `Codec` reads --
 # the one place those numbers are defined; alloc-tier only, `msl.rs` never
 # needs proxima-gguf's std-only parser/config surface.
-proxima-gguf = { path = "../proxima-gguf", default-features = false, features = ["alloc"] }
+proxima-gguf = { path = "../proxima-gguf", version = "0.1.0", default-features = false, features = ["alloc"] }
 serde = { workspace = true, features = ["derive"], optional = true }
 thiserror = { workspace = true, default-features = false }
 # `wgsl`: this crate emits WGSL, never SPIR-V/HLSL text, so no other shader
@@ -753,10 +753,10 @@ half = { version = "2.7.1", default-features = false }
 moe_test_json = { version = "1.0.151", package = "serde_json", default-features = false, features = ["alloc"] }
 naga = { version = "30.0.1", features = ["wgsl-in"] }
 proxima = { workspace = true, features = ["test-support", "test-support-tokio"] }
-proxima-autograd = { path = "../proxima-autograd" }
-proxima-gguf = { path = "../proxima-gguf", features = ["std"] }
-proxima-onnx = { path = "../proxima-onnx" }
-proxima-safetensors = { path = "../proxima-safetensors" }
+proxima-autograd = { path = "../proxima-autograd", version = "0.1.0" }
+proxima-gguf = { path = "../proxima-gguf", version = "0.1.0", features = ["std"] }
+proxima-onnx = { path = "../proxima-onnx", version = "0.1.0" }
+proxima-safetensors = { path = "../proxima-safetensors", version = "0.1.0" }
 proxima-telemetry = { workspace = true, features = ["alloc"] }
 # `test-support` pulls in `proxima_tensor::test_support::Lcg`, the same
 # deterministic PRNG proxima-tensor's own examples share — see that crate's
@@ -764,8 +764,8 @@ proxima-telemetry = { workspace = true, features = ["alloc"] }
 # is named explicitly here too, now redundant with `metal`'s own default per
 # ROW 282 but kept so `omega/tests/metal_real_forward.rs` still builds under
 # any feature set that drops `metal` but keeps `test-support`.
-proxima-tensor = { path = "../proxima-tensor", features = ["config", "test-support", "cached-attention-streaming"] }
-proxima-test = { path = "../proxima-test", features = ["alloc-count"] }
+proxima-tensor = { path = "../proxima-tensor", version = "0.1.0", features = ["config", "test-support", "cached-attention-streaming"] }
+proxima-test = { path = "../proxima-test", version = "0.1.0", features = ["alloc-count"] }
 rayon.workspace = true
 rustix.workspace = true
 temp-env.workspace = true

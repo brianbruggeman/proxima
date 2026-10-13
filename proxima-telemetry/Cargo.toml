@@ -79,7 +79,7 @@ crossbeam-queue = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 flume = { workspace = true }
 rand.workspace = true
-proxima-test = { path = "../proxima-test", features = ["alloc-count"] }
+proxima-test = { path = "../proxima-test", version = "0.1.0", features = ["alloc-count"] }
 
 [features]
 default = ["std"]

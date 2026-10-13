@@ -95,36 +95,36 @@ manual_async_fn = "allow"
 [workspace.dependencies]
 prime = { package = "proxima-prime", path = "prime", version = "0.1.0" }
 proxima = { package = "proxima-lib", path = ".", version = "0.1.0" }
-proxima-amqp = { path = "proxima-amqp" }
-proxima-auth = { path = "proxima-auth", default-features = false }
-proxima-build = { path = "proxima-build" }
-proxima-clock = { path = "proxima-clock", default-features = false }
-proxima-codec = { path = "proxima-codec", default-features = false }
-proxima-config = { path = "proxima-config", default-features = false }
-proxima-core = { path = "proxima-core", default-features = false }
-proxima-dns = { path = "proxima-dns", default-features = false }
-proxima-gguf = { path = "proxima-gguf", default-features = false }
-proxima-http = { path = "proxima-http", default-features = false }
-proxima-kafka = { path = "proxima-kafka", default-features = false }
-proxima-listen = { path = "proxima-listen" }
-proxima-macros = { path = "proxima-macros" }
-proxima-memcached = { path = "proxima-memcached", default-features = false }
-proxima-mqtt = { path = "proxima-mqtt", default-features = false }
-proxima-onnx = { path = "proxima-onnx", default-features = false }
-proxima-patterns = { path = "proxima-patterns", default-features = false }
-proxima-test = { path = "proxima-test" }
-proxima-net = { path = "proxima-net", default-features = false }
-proxima-pgwire = { path = "proxima-pgwire" }
-proxima-primitives = { path = "proxima-primitives", default-features = false }
-proxima-process = { path = "proxima-process", default-features = false }
-proxima-protocols = { path = "proxima-protocols", default-features = false }
-proxima-quic = { path = "proxima-quic", default-features = false }
-proxima-recording = { path = "proxima-recording" }
-proxima-redis = { path = "proxima-redis" }
-proxima-runtime = { path = "proxima-runtime", default-features = false }
-proxima-telemetry = { path = "proxima-telemetry", default-features = false }
-proxima-tensor = { path = "proxima-tensor", default-features = false }
-proxima-tls = { path = "proxima-tls" }
+proxima-amqp = { path = "proxima-amqp", version = "0.1.0" }
+proxima-auth = { path = "proxima-auth", version = "0.1.0", default-features = false }
+proxima-build = { path = "proxima-build", version = "0.1.0" }
+proxima-clock = { path = "proxima-clock", version = "0.1.0", default-features = false }
+proxima-codec = { path = "proxima-codec", version = "0.1.0", default-features = false }
+proxima-config = { path = "proxima-config", version = "0.1.0", default-features = false }
+proxima-core = { path = "proxima-core", version = "0.1.0", default-features = false }
+proxima-dns = { path = "proxima-dns", version = "0.1.0", default-features = false }
+proxima-gguf = { path = "proxima-gguf", version = "0.1.0", default-features = false }
+proxima-http = { path = "proxima-http", version = "0.1.0", default-features = false }
+proxima-kafka = { path = "proxima-kafka", version = "0.1.0", default-features = false }
+proxima-listen = { path = "proxima-listen", version = "0.1.0" }
+proxima-macros = { path = "proxima-macros", version = "0.1.0" }
+proxima-memcached = { path = "proxima-memcached", version = "0.1.0", default-features = false }
+proxima-mqtt = { path = "proxima-mqtt", version = "0.1.0", default-features = false }
+proxima-onnx = { path = "proxima-onnx", version = "0.1.0", default-features = false }
+proxima-patterns = { path = "proxima-patterns", version = "0.1.0", default-features = false }
+proxima-test = { path = "proxima-test", version = "0.1.0" }
+proxima-net = { path = "proxima-net", version = "0.1.0", default-features = false }
+proxima-pgwire = { path = "proxima-pgwire", version = "0.1.0" }
+proxima-primitives = { path = "proxima-primitives", version = "0.1.0", default-features = false }
+proxima-process = { path = "proxima-process", version = "0.1.0", default-features = false }
+proxima-protocols = { path = "proxima-protocols", version = "0.1.0", default-features = false }
+proxima-quic = { path = "proxima-quic", version = "0.1.0", default-features = false }
+proxima-recording = { path = "proxima-recording", version = "0.1.0" }
+proxima-redis = { path = "proxima-redis", version = "0.1.0" }
+proxima-runtime = { path = "proxima-runtime", version = "0.1.0", default-features = false }
+proxima-telemetry = { path = "proxima-telemetry", version = "0.1.0", default-features = false }
+proxima-tensor = { path = "proxima-tensor", version = "0.1.0", default-features = false }
+proxima-tls = { path = "proxima-tls", version = "0.1.0" }
 
 amq-protocol = "7"
 arc-swap = { version = "1.7", default-features = false }
@@ -148,7 +148,7 @@ bumpalo = { version = "3.16", default-features = false }
 bytes = { version = "1.7", default-features = false }
 cel-interpreter = "0.10.0"
 clap = "4.5"
-conflaguration = { version = "2.0.0", git = "https://github.com/brianbruggeman/conflaguration.git", rev = "3eb325d84fc291df35528e6781b5b814884e2d28" }
+conflaguration = { version = "2.0.0" }
 core_affinity = "0.8.3"
 criterion = { version = "0.8.2", default-features = false }
 crossbeam-deque = "0.8.6"
@@ -491,8 +491,8 @@ proc-macro2.workspace = true
 syn = { workspace = true, features = ["full"] }
 quote.workspace = true
 proc-macro-crate = "3.5.0"
-proxima-model-interop = { path = "proxima-model-interop", features = ["std", "metal", "instrument", "moe-expert-prefetch", "moe-linked-suffix"] }
-proxima-gguf = { path = "proxima-gguf" }
+proxima-model-interop = { path = "proxima-model-interop", version = "0.1.0", features = ["std", "metal", "instrument", "moe-expert-prefetch", "moe-linked-suffix"] }
+proxima-gguf = { path = "proxima-gguf", version = "0.1.0" }
 memmap2 = "0.9.11"
 omega = { package = "proxima-omega", path = "omega", version = "0.1.0", features = ["metal", "instrument"] }
 # examples/openai_serve_gguf.rs builds its own Vocab from the parsed GGUF
@@ -501,10 +501,10 @@ omega = { package = "proxima-omega", path = "omega", version = "0.1.0", features
 # OpenAI usage block -- LoadedModel keeps its vocab private, so this
 # mirrors bind.rs's own real_openchat_file test rather than adding an
 # accessor to the in-flight generate.rs surface.
-proxima-tokenizer = { path = "proxima-tokenizer", default-features = false, features = ["gguf"] }
+proxima-tokenizer = { path = "proxima-tokenizer", version = "0.1.0", default-features = false, features = ["gguf"] }
 libtest-mimic = "0.8.2"
 proxima-tensor = { workspace = true, features = ["std"] }
-proxima-safetensors = { path = "proxima-safetensors" }
+proxima-safetensors = { path = "proxima-safetensors", version = "0.1.0" }
 serde_json = { version = "1.0.151", default-features = false, features = ["alloc", "float_roundtrip"] }
 
 [lints]
