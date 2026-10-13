@@ -679,6 +679,10 @@ name = "reduction_literal_prefill_speed_probe"
 required-features = ["metal", "metal-reduction-literal", "instrument"]
 
 [[test]]
+name = "cached_attention_row_tiled_parity"
+required-features = ["metal", "metal-attn-split-rows", "metal-attn-variants"]
+
+[[test]]
 name = "q2k_unpack"
 required-features = ["alloc"]
 

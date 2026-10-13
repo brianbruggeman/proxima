@@ -392,7 +392,8 @@ type MetalPlanHandle = metal::Plan;
 /// pass is a later card (design §B.4) and is not this type's job.
 pub enum Plan {
     #[cfg(feature = "cpu")]
-    Cpu(CpuPlan),
+    // boxed: the cpu plan is ~216 bytes and would size every variant of the enum
+    Cpu(Box<CpuPlan>),
     #[cfg(all(feature = "metal", target_os = "macos"))]
     Metal(MetalPlanHandle),
     #[cfg(feature = "wgpu-backend")]
@@ -729,7 +730,7 @@ fn plan_configured_candidate(
                     });
                 }
             }
-            return Ok(Plan::Cpu(CpuPlan {
+            return Ok(Plan::Cpu(Box::new(CpuPlan {
                 program: program.to_vec(),
                 symbols: symbols.to_vec(),
                 outputs: outputs.to_vec(),
@@ -738,7 +739,7 @@ fn plan_configured_candidate(
                 exact_activations: config.exact_activations,
                 execution_config: Some(execution),
                 input_contract,
-            }));
+            })));
         }
         #[cfg(not(feature = "cpu"))]
         return Err(BackendError::NotCompiled {
@@ -1603,7 +1604,7 @@ fn plan_named_cpu(
             ));
         }
     }
-    Ok(Plan::Cpu(CpuPlan {
+    Ok(Plan::Cpu(Box::new(CpuPlan {
         program: program.to_vec(),
         symbols: symbols.to_vec(),
         outputs: outputs.to_vec(),
@@ -1612,7 +1613,7 @@ fn plan_named_cpu(
         exact_activations: false,
         execution_config: None,
         input_contract: Vec::new(),
-    }))
+    })))
 }
 
 /// [`plan_named_cpu`]'s exact-activation counterpart -- the ONLY
@@ -1632,7 +1633,7 @@ fn plan_named_cpu_exact(
     outputs: &[NodeId],
 ) -> Result<Plan, BackendError> {
     resolve_named_blocks(program, named)?;
-    Ok(Plan::Cpu(CpuPlan {
+    Ok(Plan::Cpu(Box::new(CpuPlan {
         program: program.to_vec(),
         symbols: symbols.to_vec(),
         outputs: outputs.to_vec(),
@@ -1641,7 +1642,7 @@ fn plan_named_cpu_exact(
         exact_activations: true,
         execution_config: None,
         input_contract: Vec::new(),
-    }))
+    })))
 }
 
 /// [`plan_named`]'s exact-CPU-activation counterpart: identical for every
