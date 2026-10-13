@@ -1,6 +1,7 @@
 use conflaguration::Validate;
 
 use super::*;
+use crate::test_support::Lcg;
 
 fn round_trip_through_toml(program: &[Op]) -> Vec<Op> {
     let spec = ProgramSpec::try_from(program).expect("program built from ops has a spec form");
@@ -401,5 +402,50 @@ fn plan_envelope_rejects_unknown_top_level_field() {
     assert!(
         error.to_string().contains("unknown field `bogus_field`"),
         "error names the unknown field: {error}"
+    );
+}
+
+#[test]
+fn fluent_and_toml_built_matmul_silu_softmax_run_bit_identical() {
+    let fluent = matmul_silu_softmax_builder_spec();
+    let text = toml::to_string(&fluent).expect("fluent spec serialises to toml");
+    let parsed: ProgramSpec = toml::from_str(&text).expect("serialised spec parses back");
+    parsed
+        .validate()
+        .expect("round-tripped spec is a sound plan");
+
+    let fluent_program = Vec::<Op>::try_from(&fluent).expect("fluent spec lowers");
+    let toml_program = Vec::<Op>::try_from(&parsed).expect("toml spec lowers");
+    assert_eq!(
+        toml_program, fluent_program,
+        "the toml-loaded plan must lower to the same op vector as the fluent one"
+    );
+
+    let mut lcg = Lcg(0x5eed_0003);
+    let x: Vec<f32> = (0..8).map(|_| lcg.next_unit() - 0.5).collect();
+    let w: Vec<f32> = (0..12).map(|_| lcg.next_unit() - 0.5).collect();
+    let root = NodeId(
+        u32::try_from(fluent_program.len() - 1).expect("program length fits a node id"),
+    );
+    let run = |program: &[Op]| {
+        crate::cpu::evaluate_named(program, &[], &[("x", &x), ("w", &w)], &[root])
+            .expect("matmul-silu-softmax evaluates on cpu")
+    };
+    let fluent_run = run(&fluent_program);
+    let toml_run = run(&toml_program);
+    let (fluent_values, fluent_shape) = fluent_run.get(root).expect("fluent output present");
+    let (toml_values, toml_shape) = toml_run.get(root).expect("toml output present");
+
+    assert_eq!(fluent_shape, [2, 3], "output is the 2x3 product shape");
+    assert_eq!(toml_shape, fluent_shape, "both runs report the same shape");
+    assert_eq!(fluent_values.len(), 6, "six output elements are compared");
+    let max_abs_diff = fluent_values
+        .iter()
+        .zip(toml_values)
+        .map(|(fluent_value, toml_value)| (fluent_value - toml_value).abs())
+        .fold(0.0_f32, f32::max);
+    assert_eq!(
+        max_abs_diff, 0.0,
+        "fluent and toml plans must run bit-identically: {fluent_values:?} vs {toml_values:?}"
     );
 }
