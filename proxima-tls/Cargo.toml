@@ -49,6 +49,7 @@ std = [
     "dep:rcgen",
     "dep:rustls",
     "dep:serde_json",
+    "serde_json/std",
 ]
 # Forwarded from the umbrella so ALPN advertises h1/h2 only when those
 # protocols are actually enabled downstream.
