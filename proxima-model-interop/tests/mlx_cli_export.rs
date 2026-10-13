@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::fs::{File, create_dir_all, metadata, read, read_dir, write};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::UNIX_EPOCH;
 
 use memmap2::Mmap;
@@ -62,19 +62,31 @@ fn agrees(actual: usize, expected: usize) -> Result<(), String> {
 
 fn proxima_binary() -> PathBuf {
     let built = Command::new(env!("CARGO"))
-        .args(["build", "-p", "proxima-cli", "--bin", "proxima", "-j2"])
-        .status()
+        .args([
+            "build",
+            "-p",
+            "proxima-cli",
+            "--bin",
+            "proxima",
+            "-j2",
+            "--message-format=json-render-diagnostics",
+        ])
+        .stderr(Stdio::inherit())
+        .output()
         .expect("spawn cargo to build the proxima cli");
     assert!(
-        built.success(),
-        "cargo build -p proxima-cli failed: {built}"
+        built.status.success(),
+        "cargo build -p proxima-cli failed: {}",
+        built.status
     );
-    let test_binary = std::env::current_exe().expect("test binary path");
-    let profile_dir = test_binary
-        .parent()
-        .and_then(Path::parent)
-        .expect("profile directory above deps");
-    profile_dir.join("proxima")
+    String::from_utf8(built.stdout)
+        .expect("cargo json messages are utf-8")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|message| message["reason"] == "compiler-artifact")
+        .filter(|message| message["target"]["name"] == "proxima")
+        .find_map(|message| message["executable"].as_str().map(PathBuf::from))
+        .expect("cargo reported no executable for the proxima bin")
 }
 
 fn fingerprint(binary: &Path) -> String {
