@@ -65,6 +65,7 @@ use proxima_tensor::{
     ReduceInit, ScalarOp, StepArg,
 };
 
+use crate::cuda_cached_attention::{cached_attention_entry_name, render_cached_attention_cuda};
 use crate::error::EmitError;
 use crate::grid::checked_product;
 use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
@@ -211,7 +212,10 @@ pub fn emit_cuda_with_policy(
 ) -> Result<CudaKernel, EmitError> {
     validate(resolved)?;
     let quantized = operand_codecs(resolved, packed_operands);
-    let entry = entry_name(resolved, packed_operands, &quantized, numeric_policy);
+    let entry = match cuda_cached_attention_class(&resolved.kind) {
+        Some(class) => cached_attention_entry_name(resolved, class)?,
+        None => entry_name(resolved, packed_operands, &quantized, numeric_policy),
+    };
     let source = match &resolved.kind {
         BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, &quantized)?,
         BoundOpKind::Reduce {
@@ -222,12 +226,13 @@ pub fn emit_cuda_with_policy(
         } => render_scan(resolved, &entry, &quantized)?,
         BoundOpKind::Iota => render_leaf(resolved, &entry, None)?,
         BoundOpKind::Constant { value } => render_leaf(resolved, &entry, Some(*value))?,
-        BoundOpKind::CachedAttention { .. } => {
+        BoundOpKind::CachedAttention { .. } if quantized.iter().any(Option::is_some) => {
             return Err(EmitError::CudaUnsupportedOpKind {
                 node: resolved.node,
-                kind: "cached_attention",
+                kind: "cached_attention_packed_operand",
             });
         }
+        BoundOpKind::CachedAttention { .. } => render_cached_attention_cuda(resolved, &entry)?,
         BoundOpKind::GatedDeltaNet { .. } => {
             return Err(EmitError::CudaUnsupportedOpKind {
                 node: resolved.node,
@@ -436,8 +441,17 @@ fn reads_packed(resolved: &BoundOp, packed: &PackedOperands) -> bool {
 fn project_text_kind(kind: &BoundOpKind) -> BoundOpKind {
     let mut projected = kind.clone();
     match &mut projected {
-        BoundOpKind::CachedAttention { operands, .. }
-        | BoundOpKind::GatedDeltaNet { operands, .. }
+        BoundOpKind::CachedAttention {
+            operands,
+            cached_key_rows,
+            ..
+        } => {
+            project_operands(operands);
+            if cuda_cached_attention_class(kind) == Some(CudaAttentionClass::CachedBound) {
+                *cached_key_rows = 1;
+            }
+        }
+        BoundOpKind::GatedDeltaNet { operands, .. }
         | BoundOpKind::MoeTopK { operands, .. }
         | BoundOpKind::TopFractionSelect { operands, .. }
         | BoundOpKind::Elementwise { operands, .. }
@@ -712,8 +726,13 @@ pub(crate) fn pack_cuda_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitErro
         BoundOpKind::Iota | BoundOpKind::Constant { .. } | BoundOpKind::MoeTopK { .. } => {
             push_cuda_i64(&mut bytes, resolved.extents.iter().product::<u64>() as i64);
         }
-        BoundOpKind::CachedAttention { .. }
-        | BoundOpKind::GatedDeltaNet { .. }
+        BoundOpKind::CachedAttention {
+            query_rows,
+            kv_heads,
+            query_groups,
+            ..
+        } => push_cuda_i64(&mut bytes, (query_rows * kv_heads * query_groups) as i64),
+        BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
         | BoundOpKind::CachedSoftmaxWeights { .. }
@@ -868,7 +887,7 @@ fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String, EmitError>
     Ok(source)
 }
 
-fn cuda_float_literal(value: f32) -> String {
+pub(crate) fn cuda_float_literal(value: f32) -> String {
     if value.is_nan() {
         "NAN".to_string()
     } else if value == f32::INFINITY {
@@ -1084,13 +1103,21 @@ fn grid_threads(resolved: &BoundOp, cooperative: bool) -> Result<u64, EmitError>
                 moe_block_width(*expert_count),
             ],
         ),
+        BoundOpKind::CachedAttention {
+            query_rows,
+            kv_heads,
+            query_groups,
+            ..
+        } => checked_product(
+            resolved.node,
+            [*query_rows, *kv_heads, *query_groups, WARP_SIZE],
+        ),
         BoundOpKind::Iota
         | BoundOpKind::Constant { .. }
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
         | BoundOpKind::CachedSoftmaxWeights { .. }
-        | BoundOpKind::CachedAttention { .. }
         | BoundOpKind::ElementwiseTwin { .. } => extents_product(),
     }
 }
@@ -1444,7 +1471,7 @@ __device__ __forceinline__ float proxima_erf(float x) {
 }
 ";
 
-fn preamble(source: &mut String, element_type: &str) {
+pub(crate) fn preamble(source: &mut String, element_type: &str) {
     // The packed-codec helpers use CUDA's half bit-conversion intrinsics even
     // when the graph's materialized element type is f32.  Keeping this header
     // unconditional makes the emitted translation unit self-contained for
@@ -2964,14 +2991,12 @@ __device__ __forceinline__ float bf16_element(const unsigned char *block, unsign
 }
 ";
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CudaAttentionClass {
     Static,
     CachedBound,
 }
 
-#[cfg(test)]
 pub(crate) fn cuda_cached_attention_class(kind: &BoundOpKind) -> Option<CudaAttentionClass> {
     let BoundOpKind::CachedAttention {
         operands,
@@ -3076,6 +3101,85 @@ mod tests {
         assert_eq!(cuda_cached_attention_class(&partial_rotary), None);
         assert_eq!(cuda_cached_attention_class(&unexpected_count), None);
         assert_eq!(cuda_cached_attention_class(&elementwise), None);
+    }
+
+    fn attention_op_with(kind: BoundOpKind) -> BoundOp {
+        BoundOp {
+            node: NodeId(9),
+            dtype: DType::Float32,
+            extents: vec![1, 1, 8, 256],
+            kind,
+        }
+    }
+
+    #[test]
+    fn cached_bound_kernel_bindings_are_nine_inputs_output_uniforms() {
+        let cached = attention_op_with(attention_kind(9, 5, 256, 256));
+        let static_op = attention_op_with(attention_kind(8, 5, 256, 256));
+
+        let cached_kernel = emit_cuda(&cached, &no_packed()).expect("two-range form emits");
+        let static_kernel = emit_cuda(&static_op, &no_packed()).expect("static form emits");
+
+        let inputs = |count: u32| -> Vec<Binding> {
+            (0..count).map(|index| Binding::Input(NodeId(index))).collect()
+        };
+        let mut nine = inputs(9);
+        nine.extend([Binding::Output(NodeId(9)), Binding::Uniforms]);
+        let mut eight = inputs(8);
+        eight.extend([Binding::Output(NodeId(9)), Binding::Uniforms]);
+        assert_eq!(cached_kernel.bindings, nine);
+        assert_eq!(static_kernel.bindings, eight);
+    }
+
+    #[test]
+    fn cached_bound_entry_name_is_independent_of_bucket_capacity() {
+        let bucket_32 = attention_op_with(attention_kind(9, 32, 256, 256));
+        let bucket_64 = attention_op_with(attention_kind(9, 64, 256, 256));
+
+        let kernel_32 = emit_cuda(&bucket_32, &no_packed()).expect("bucket 32 emits");
+        let kernel_64 = emit_cuda(&bucket_64, &no_packed()).expect("bucket 64 emits");
+
+        assert_eq!(kernel_32.entry, kernel_64.entry);
+        assert_eq!(kernel_32.source, kernel_64.source);
+    }
+
+    #[test]
+    fn entry_name_differs_when_head_dim_differs() {
+        let head_64 = attention_op_with(attention_kind(9, 32, 64, 64));
+        let head_256 = attention_op_with(attention_kind(9, 32, 256, 256));
+
+        let kernel_64 = emit_cuda(&head_64, &no_packed()).expect("head 64 emits");
+        let kernel_256 = emit_cuda(&head_256, &no_packed()).expect("head 256 emits");
+
+        assert_ne!(kernel_64.entry, kernel_256.entry);
+    }
+
+    #[test]
+    fn cached_bound_uniforms_hold_total_rows() {
+        let mut kind = attention_kind(9, 5, 256, 256);
+        let BoundOpKind::CachedAttention { query_rows, .. } = &mut kind else {
+            unreachable!("attention_kind always builds a CachedAttention kind");
+        };
+        *query_rows = 3;
+        let op = attention_op_with(kind);
+
+        let bytes = pack_cuda_uniforms(&op).expect("uniforms pack");
+        let total = i64::from_le_bytes(bytes.as_slice().try_into().expect("8 bytes"));
+
+        assert_eq!(bytes.len(), 8);
+        assert_eq!(total, 3 * 8);
+    }
+
+    #[test]
+    fn cached_bound_source_reads_cached_len_and_rescales_online_softmax() {
+        let op = attention_op_with(attention_kind(9, 5, 256, 256));
+
+        let kernel = emit_cuda(&op, &no_packed()).expect("two-range form emits");
+
+        assert!(kernel.source.contains("(long)in8[0]"));
+        assert!(kernel.source.contains("expf(maximum - next_max)"));
+        assert!(kernel.source.contains("weighted[local_dimension] * rescale"));
+        assert!(kernel.source.contains("__shfl_xor_sync(0xffffffffu, partial, offset)"));
     }
 
     #[cfg(feature = "metal-attn-split-decode")]
