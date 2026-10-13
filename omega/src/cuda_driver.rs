@@ -9,6 +9,7 @@
 //! the full graph binding layer is connected.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -24,6 +25,8 @@ use proxima_primitives::sync::blocking::Mutex;
 
 use crate::config::{ResourceConstraints, RuntimeConfig};
 use crate::cuda::{CudaGridSpec, CudaKernel};
+use crate::cuda_kernel_cache::{CacheKey, decode_entry, encode_entry};
+use crate::cuda_ptx_store::PtxStore;
 use crate::msl::{Binding, Codec, PackedOperands, gather_count};
 use proxima_tensor::bind::{RefreshRefusal, refresh_bound_ops, touches_changed};
 use proxima_tensor::{
@@ -56,6 +59,8 @@ pub enum CudaDriverError {
     Nvrtc(String),
     #[error("CUDA header `{header}` not found; tried: {tried}")]
     CudaHeaderNotFound { header: String, tried: String },
+    #[error("CUDA header `{path}` could not be read: {error}")]
+    CudaHeaderUnreadable { path: String, error: String },
     #[error("CUDA smoke input is too large for the launch ABI: {0} elements")]
     InputTooLarge(usize),
     #[error("CUDA launch of {threads} threads needs more blocks than the launch index holds")]
@@ -119,11 +124,25 @@ fn cuda_input_contract(
     ))
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct CompileCounters {
     compilations: AtomicU64,
     nvrtc_micros: AtomicU64,
     load_micros: AtomicU64,
+    disk_cache_hits: AtomicU64,
+    disk_store: PtxStore,
+}
+
+impl CompileCounters {
+    fn new(disk_store: PtxStore) -> Self {
+        Self {
+            compilations: AtomicU64::new(0),
+            nvrtc_micros: AtomicU64::new(0),
+            load_micros: AtomicU64::new(0),
+            disk_cache_hits: AtomicU64::new(0),
+            disk_store,
+        }
+    }
 }
 
 /// One CUDA context and stream owned by a caller's inference runtime.
@@ -248,7 +267,7 @@ impl CudaDriver {
             stream,
             modules: Arc::new(Mutex::new(BTreeMap::new())),
             resident_buffers: Arc::new(Mutex::new(BTreeMap::new())),
-            compile_counters: Arc::new(CompileCounters::default()),
+            compile_counters: Arc::new(CompileCounters::new(kernel_disk_store())),
             packed_upload_bytes: Arc::new(AtomicU64::new(0)),
             graph_uploads: Arc::new(AtomicU64::new(0)),
             graph_launches: Arc::new(AtomicU64::new(0)),
@@ -277,6 +296,16 @@ impl CudaDriver {
     #[must_use]
     pub fn kernel_compilations(&self) -> u64 {
         self.compile_counters.compilations.load(Ordering::Relaxed)
+    }
+
+    /// Kernels whose PTX was loaded from the on-disk cache instead of NVRTC.
+    /// A warm run with unchanged keys stops increasing `kernel_compilations`
+    /// and grows this instead.
+    #[must_use]
+    pub fn disk_cache_hits(&self) -> u64 {
+        self.compile_counters
+            .disk_cache_hits
+            .load(Ordering::Relaxed)
     }
 
     /// Cumulative wall-clock microseconds spent in NVRTC source-to-PTX
@@ -320,22 +349,52 @@ impl CudaDriver {
 
     fn function_for(&self, kernel: &CudaKernel) -> Result<CudaFunction, CudaDriverError> {
         self.cached_function(&kernel.entry, &kernel.entry, &kernel.source, || {
-            // nvrtc has the same panic-on-missing-library loader contract.
-            if !unsafe { nvrtc_sys::is_culib_present() } {
-                return Err(CudaDriverError::Nvrtc("nvrtc library unavailable".into()));
-            }
-            let nvrtc_started = Instant::now();
-            let ptx = compile_cuda_source(&kernel.source)?;
-            let nvrtc_us = elapsed_micros(nvrtc_started);
-            let load_started = Instant::now();
-            let module = self.context.load_module(ptx)?;
-            let load_us = elapsed_micros(load_started);
-            self.record_compile(&kernel.entry, kernel.source.len(), nvrtc_us, load_us);
-            Ok(module)
+            self.build_kernel_module(kernel)
         })
     }
 
+    // nvrtc has the same panic-on-missing-library loader contract; a disk hit skips nvrtc and counts no compilation.
+    fn build_kernel_module(&self, kernel: &CudaKernel) -> Result<Arc<CudaModule>, CudaDriverError> {
+        if !unsafe { nvrtc_sys::is_culib_present() } {
+            return Err(CudaDriverError::Nvrtc("nvrtc library unavailable".into()));
+        }
+        let header_dir = cuda_header_dir(&kernel.source)?;
+        let options = nvrtc_options(header_dir.as_deref());
+        let header = cuda_header_bytes(header_dir.as_deref())?;
+        let key = self.kernel_cache_key(&kernel.source, header.as_deref(), &options)?;
+        if let Some(text) = cached_ptx(&self.compile_counters.disk_store, &key) {
+            self.compile_counters
+                .disk_cache_hits
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(self.context.load_module(Ptx::from_src(text))?);
+        }
+        let nvrtc_started = Instant::now();
+        let ptx = compile_ptx_with_opts(&kernel.source, options)
+            .map_err(|error| CudaDriverError::Nvrtc(error.to_string()))?;
+        let nvrtc_us = elapsed_micros(nvrtc_started);
+        store_ptx(&self.compile_counters.disk_store, &key, &ptx);
+        let load_started = Instant::now();
+        let module = self.context.load_module(ptx)?;
+        let load_us = elapsed_micros(load_started);
+        self.record_compile(&kernel.entry, kernel.source.len(), nvrtc_us, load_us);
+        Ok(module)
+    }
+
+    fn kernel_cache_key(
+        &self,
+        source: &str,
+        header: Option<&[u8]>,
+        options: &CompileOptions,
+    ) -> Result<CacheKey, CudaDriverError> {
+        let nvrtc = nvrtc_version()?;
+        let capability = self.context.compute_capability()?;
+        Ok(CacheKey::new(source, header, nvrtc, options, capability))
+    }
+
     fn record_compile(&self, entry: &str, source_bytes: usize, nvrtc_us: u64, load_us: u64) {
+        self.compile_counters
+            .compilations
+            .fetch_add(1, Ordering::Relaxed);
         self.compile_counters
             .nvrtc_micros
             .fetch_add(nvrtc_us, Ordering::Relaxed);
@@ -370,13 +429,7 @@ impl CudaDriver {
         let module = match cached {
             Some((_, Some(function))) => return Ok(function),
             Some((module, None)) => module,
-            None => {
-                let module = build_module()?;
-                self.compile_counters
-                    .compilations
-                    .fetch_add(1, Ordering::Relaxed);
-                module
-            }
+            None => build_module()?,
         };
         let function = module.load_function(entry)?;
         self.store_function(cache_key, source, entry, module, function.clone());
@@ -419,7 +472,11 @@ impl CudaDriver {
     ) -> Result<CudaFunction, CudaDriverError> {
         let cache_key = format!("ptx:{module_key}");
         self.cached_function(&cache_key, entry, ptx_source, || {
-            Ok(self.context.load_module(Ptx::from_src(ptx_source))?)
+            let module = self.context.load_module(Ptx::from_src(ptx_source))?;
+            self.compile_counters
+                .compilations
+                .fetch_add(1, Ordering::Relaxed);
+            Ok(module)
         })
     }
 
@@ -1312,17 +1369,85 @@ fn elapsed_micros(started: Instant) -> u64 {
 /// include directory.  Resolution order: `PROXIMA_CUDA_INCLUDE_PATH`,
 /// `CUDA_PATH/include`, `CUDA_HOME/include`, `/usr/local/cuda/include`,
 /// `/opt/cuda/include`; the first one that contains the header wins.
-fn compile_cuda_source(source: &str) -> Result<Ptx, CudaDriverError> {
+fn cuda_header_dir(source: &str) -> Result<Option<PathBuf>, CudaDriverError> {
+    if !source.contains(CUDA_REQUIRED_HEADER) {
+        return Ok(None);
+    }
+    resolve_cuda_include_dir(CUDA_REQUIRED_HEADER, &CUDA_SYSTEM_INCLUDE_DIRS).map(Some)
+}
+
+fn cuda_header_bytes(header_dir: Option<&Path>) -> Result<Option<Vec<u8>>, CudaDriverError> {
+    let Some(dir) = header_dir else {
+        return Ok(None);
+    };
+    let path = dir.join(CUDA_REQUIRED_HEADER);
+    std::fs::read(&path)
+        .map(Some)
+        .map_err(|error| CudaDriverError::CudaHeaderUnreadable {
+            path: path.display().to_string(),
+            error: error.to_string(),
+        })
+}
+
+fn nvrtc_options(header_dir: Option<&Path>) -> CompileOptions {
     let mut options = CompileOptions::default();
-    if source.contains(CUDA_REQUIRED_HEADER) {
-        let include_dir =
-            resolve_cuda_include_dir(CUDA_REQUIRED_HEADER, &CUDA_SYSTEM_INCLUDE_DIRS)?;
+    if let Some(dir) = header_dir {
         options
             .include_paths
-            .push(include_dir.to_string_lossy().into_owned());
+            .push(dir.to_string_lossy().into_owned());
     }
-    compile_ptx_with_opts(source, options)
-        .map_err(|error| CudaDriverError::Nvrtc(error.to_string()))
+    options
+}
+
+fn nvrtc_version() -> Result<(i32, i32), CudaDriverError> {
+    let mut major = 0;
+    let mut minor = 0;
+    match unsafe { nvrtc_sys::nvrtcVersion(&mut major, &mut minor) } {
+        nvrtc_sys::nvrtcResult::NVRTC_SUCCESS => Ok((major, minor)),
+        status => Err(CudaDriverError::Nvrtc(format!(
+            "nvrtcVersion failed: {status:?}"
+        ))),
+    }
+}
+
+fn kernel_disk_store() -> PtxStore {
+    PtxStore::from_env().unwrap_or_else(|error| {
+        proxima_telemetry::warn!(
+            error = %error,
+            "kernel disk cache disabled; kernels compile in memory only"
+        );
+        PtxStore::Disabled
+    })
+}
+
+fn cached_ptx(store: &PtxStore, key: &CacheKey) -> Option<String> {
+    let PtxStore::Directory(dir) = store else {
+        return None;
+    };
+    let name = key.to_hex();
+    let path = dir.join(&name);
+    let entry = match store.get(&name) {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return None,
+        Err(error) => {
+            proxima_telemetry::warn!(path = %path.display(), error = %error, "kernel cache read failed; compiling");
+            return None;
+        }
+    };
+    match decode_entry(key, &entry) {
+        Ok(text) => Some(text.to_owned()),
+        Err(error) => {
+            proxima_telemetry::warn!(path = %path.display(), error = %error, "kernel cache entry rejected; recompiling");
+            None
+        }
+    }
+}
+
+fn store_ptx(store: &PtxStore, key: &CacheKey, ptx: &Ptx) {
+    let name = key.to_hex();
+    if let Err(error) = store.put(&name, &encode_entry(key, &ptx.to_src())) {
+        proxima_telemetry::warn!(file = %name, error = %error, "kernel cache write failed; kernel stays uncached");
+    }
 }
 
 impl CudaPlan {
@@ -2184,12 +2309,17 @@ fn launch_blocks(grid: &CudaGridSpec) -> Result<u32, CudaDriverError> {
 mod tests {
     use super::{
         CudaDriver, CudaDriverError, CudaFunction, LaunchConfig, PRECOMPILED_ADD_ONE_PTX,
-        PushKernelArg, add_one_kernel, launch_blocks, packed_bytes, packed_codec,
-        resolve_cuda_include_dir, validate_cuda_dtype,
+        PushKernelArg, add_one_kernel, cached_ptx, launch_blocks, packed_bytes, packed_codec,
+        resolve_cuda_include_dir, store_ptx, validate_cuda_dtype,
     };
     use crate::cuda::CudaGridSpec;
+    use crate::cuda_kernel_cache::CacheKey;
+    use crate::cuda_ptx_store::PtxStore;
     use crate::msl::Codec;
+    use cudarc::nvrtc::{CompileOptions, Ptx};
     use proxima_tensor::{BoundOp, BoundOpKind, DType, NodeId, QuantizedBlock};
+
+    const KERNEL_CACHE_DIR_VAR: &str = "PROXIMA_CUDA_KERNEL_CACHE_DIR";
 
     const CUDA_UNPACKABLE: [Codec; 20] = [
         Codec::Q5_1,
@@ -2362,8 +2492,11 @@ mod tests {
 
     #[test]
     fn nvrtc_sources_sharing_an_entry_name_compile_once_each_and_keep_their_own_function() {
-        let driver =
-            CudaDriver::new(0).expect("a cuda device is required for the module cache gate");
+        let cache = tempfile::tempdir().expect("tempdir");
+        let driver = temp_env::with_var(KERNEL_CACHE_DIR_VAR, Some(cache.path()), || {
+            CudaDriver::new(0)
+        })
+        .expect("a cuda device is required for the module cache gate");
         let add_one = add_one_kernel(NodeId(0), NodeId(1), INPUT.len());
         let add_two = add_two_kernel();
         assert_eq!(
@@ -2437,6 +2570,59 @@ mod tests {
             driver.kernel_compilations(),
             2,
             "one load per distinct ptx source, not per alternation"
+        );
+    }
+
+    #[test]
+    fn kernel_cache_key_is_stable_for_identical_inputs() {
+        let header = b"#define HALF 1";
+        let key = |source: &str| {
+            CacheKey::new(
+                source,
+                Some(header),
+                (13, 0),
+                &CompileOptions::default(),
+                (8, 9),
+            )
+        };
+        assert_eq!(
+            key("__global__ void add_one() {}"),
+            key("__global__ void add_one() {}"),
+            "identical kernel inputs must map to one cache entry"
+        );
+        assert_ne!(
+            key("__global__ void add_one() {}"),
+            key("__global__ void add_two() {}"),
+            "a source change must map to a different cache entry"
+        );
+    }
+
+    #[test]
+    fn cached_ptx_returns_the_stored_text_and_none_for_a_corrupt_entry() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let store = PtxStore::Directory(root.path().to_path_buf());
+        let key = CacheKey::new(
+            "__global__ void add_one() {}",
+            None,
+            (13, 0),
+            &CompileOptions::default(),
+            (8, 9),
+        );
+        assert_eq!(cached_ptx(&store, &key), None, "an empty store is a miss");
+
+        store_ptx(&store, &key, &Ptx::from_src(PRECOMPILED_ADD_ONE_PTX));
+        assert_eq!(
+            cached_ptx(&store, &key).as_deref(),
+            Some(PRECOMPILED_ADD_ONE_PTX),
+            "a stored entry must return the exact ptx text"
+        );
+
+        std::fs::write(root.path().join(key.to_hex()), b"PXKC truncated")
+            .expect("corrupt the entry");
+        assert_eq!(
+            cached_ptx(&store, &key),
+            None,
+            "a corrupt entry must be a miss, never a load"
         );
     }
 
