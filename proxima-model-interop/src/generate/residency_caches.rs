@@ -7,13 +7,25 @@ use omega::config::{RuntimeConfig, SelectionMode};
 use super::*;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 use crate::cuda_async::{
-    CudaGpuService, CudaPlanLease, OwnedBlock, OwnedGpuInputs, validate_cuda_plan_options,
+    CudaGpuService, CudaPlanLease, CudaPlanOptions, OwnedBlock, OwnedGpuInputs,
+    validate_cuda_plan_options,
 };
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 use proxima_core::ProximaError;
 use proxima_core::ServingState;
 #[cfg(all(feature = "instrument", feature = "gpu"))]
 use proxima_telemetry::metric::Counter;
+
+/// One CUDA graph to evaluate: the program, its shape symbols, its named
+/// inputs, and its requested outputs. Grouped so `evaluate_async` stays within
+/// the argument limit while every caller still names each piece.
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+pub struct CudaGraphRequest<'request> {
+    pub program: &'request [Op],
+    pub symbols: &'request [u64],
+    pub named: &'request [(&'request str, QuantizedBlock<'request>)],
+    pub outputs: &'request [NodeId],
+}
 
 #[cfg(feature = "gpu")]
 pub(crate) fn validate_omega_runtime_config(config: &ServingConfig) -> Result<(), InteropError> {
@@ -3067,10 +3079,7 @@ impl BackendRuntime {
     pub async fn evaluate_async<Owner>(
         &mut self,
         service: &CudaGpuService<Owner>,
-        program: &[Op],
-        symbols: &[u64],
-        named: &[(&str, QuantizedBlock<'_>)],
-        outputs: &[NodeId],
+        request: CudaGraphRequest<'_>,
         resident_names: &BTreeSet<&str>,
         expert_sources: Option<
             &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
@@ -3079,6 +3088,12 @@ impl BackendRuntime {
     where
         Owner: Future<Output = Result<(), ProximaError>> + Send,
     {
+        let CudaGraphRequest {
+            program,
+            symbols,
+            named,
+            outputs,
+        } = request;
         if self.engine != Engine::Gpu {
             return Err(InteropError::AsyncCudaRequiresGpu);
         }
@@ -3195,9 +3210,11 @@ impl BackendRuntime {
                         program,
                         symbols,
                         outputs,
-                        self.numeric_policy,
-                        self.exact_activations,
-                        self.omega_runtime.as_ref(),
+                        CudaPlanOptions {
+                            numeric_policy: self.numeric_policy,
+                            exact_activations: self.exact_activations,
+                            omega_runtime: self.omega_runtime.as_ref(),
+                        },
                         &inputs,
                     )
                     .await?;
@@ -4660,11 +4677,13 @@ mod omega_async_serving_tests {
     #[proxima::test]
     async fn test_omega_async_plan_config_forwards_configured_cuda_inputs() {
         let service = CudaGpuService::start_fake().expect("fake owner should start");
-        let mut configured = RuntimeConfig::default();
-        configured.engine = String::from("gpu");
-        configured.gpu_driver = String::from("cuda");
-        configured.allow_fusion = true;
-        configured.exact_activations = false;
+        let mut configured = RuntimeConfig {
+            engine: String::from("gpu"),
+            gpu_driver: String::from("cuda"),
+            allow_fusion: true,
+            exact_activations: false,
+            ..RuntimeConfig::default()
+        };
         configured.constraints.max_host_tensor_bytes = Some(4096);
         let serving_config = ServingConfig {
             gpu_layers: GPU_LAYERS_ALL,
@@ -4680,10 +4699,12 @@ mod omega_async_serving_tests {
         let async_result = async_runtime
             .evaluate_async(
                 &service,
-                &graph,
-                &[2, 1],
-                &named,
-                &[NodeId(1)],
+                CudaGraphRequest {
+                    program: &graph,
+                    symbols: &[2, 1],
+                    named: &named,
+                    outputs: &[NodeId(1)],
+                },
                 &BTreeSet::new(),
                 None,
             )
@@ -4748,10 +4769,12 @@ mod omega_async_serving_tests {
             let async_result = async_runtime
                 .evaluate_async(
                     &service,
-                    &graph,
-                    &[2, 1],
-                    &named,
-                    &[NodeId(1)],
+                    CudaGraphRequest {
+                        program: &graph,
+                        symbols: &[2, 1],
+                        named: &named,
+                        outputs: &[NodeId(1)],
+                    },
                     &BTreeSet::new(),
                     None,
                 )
@@ -4796,9 +4819,11 @@ mod omega_async_serving_tests {
     #[proxima::test]
     async fn test_omega_async_plan_config_refuses_unsupported_modes_before_owner_work() {
         let service = CudaGpuService::start_fake().expect("fake owner should start");
-        let mut configured = RuntimeConfig::default();
-        configured.engine = String::from("gpu");
-        configured.gpu_driver = String::from("cuda");
+        let configured = RuntimeConfig {
+            engine: String::from("gpu"),
+            gpu_driver: String::from("cuda"),
+            ..RuntimeConfig::default()
+        };
         let mut measured = configured.clone();
         measured.selection.mode = SelectionMode::MinimumMeasuredWallTime;
         let mut other_driver = configured.clone();
@@ -4829,10 +4854,12 @@ mod omega_async_serving_tests {
             let result = runtime
                 .evaluate_async(
                     &service,
-                    &graph,
-                    &[2, 1],
-                    &named,
-                    &[NodeId(1)],
+                    CudaGraphRequest {
+                        program: &graph,
+                        symbols: &[2, 1],
+                        named: &named,
+                        outputs: &[NodeId(1)],
+                    },
                     &BTreeSet::new(),
                     None,
                 )
@@ -4879,10 +4906,12 @@ mod omega_async_serving_tests {
                     let result = backend
                         .evaluate_async(
                             &service,
-                            &program(),
-                            &[2, 1],
-                            &[("values", QuantizedBlock::Float32(&values))],
-                            &[NodeId(1)],
+                            CudaGraphRequest {
+                                program: &program(),
+                                symbols: &[2, 1],
+                                named: &[("values", QuantizedBlock::Float32(&values))],
+                                outputs: &[NodeId(1)],
+                            },
                             &BTreeSet::new(),
                             None,
                         )
@@ -4948,10 +4977,12 @@ mod omega_async_serving_tests {
             let actual = runtime
                 .evaluate_async(
                     &service,
-                    &program,
-                    &[2, 1],
-                    &named,
-                    &[NodeId(1)],
+                    CudaGraphRequest {
+                        program: &program,
+                        symbols: &[2, 1],
+                        named: &named,
+                        outputs: &[NodeId(1)],
+                    },
                     &BTreeSet::new(),
                     None,
                 )
@@ -4968,10 +4999,12 @@ mod omega_async_serving_tests {
             let actual = runtime
                 .evaluate_async(
                     &service,
-                    &program,
-                    &[2, 1],
-                    &[("values", QuantizedBlock::Float32(&resident_values))],
-                    &[NodeId(1)],
+                    CudaGraphRequest {
+                        program: &program,
+                        symbols: &[2, 1],
+                        named: &[("values", QuantizedBlock::Float32(&resident_values))],
+                        outputs: &[NodeId(1)],
+                    },
                     &residents,
                     None,
                 )
@@ -4984,10 +5017,12 @@ mod omega_async_serving_tests {
         let changed = runtime
             .evaluate_async(
                 &service,
-                &program,
-                &[2, 1],
-                &[("values", QuantizedBlock::Float32(&resident_values))],
-                &[NodeId(1)],
+                CudaGraphRequest {
+                    program: &program,
+                    symbols: &[2, 1],
+                    named: &[("values", QuantizedBlock::Float32(&resident_values))],
+                    outputs: &[NodeId(1)],
+                },
                 &residents,
                 None,
             )
@@ -5004,10 +5039,12 @@ mod omega_async_serving_tests {
         let replaced = runtime
             .evaluate_async(
                 &service,
-                &program,
-                &[2, 1],
-                &[("values", QuantizedBlock::Float32(&replacement))],
-                &[NodeId(1)],
+                CudaGraphRequest {
+                    program: &program,
+                    symbols: &[2, 1],
+                    named: &[("values", QuantizedBlock::Float32(&replacement))],
+                    outputs: &[NodeId(1)],
+                },
                 &residents,
                 None,
             )
@@ -5038,10 +5075,12 @@ mod omega_async_serving_tests {
         let result = runtime
             .evaluate_async(
                 &service,
-                &program(),
-                &[2, 1],
-                &[("values", QuantizedBlock::Float32(&values))],
-                &[NodeId(1)],
+                CudaGraphRequest {
+                    program: &program(),
+                    symbols: &[2, 1],
+                    named: &[("values", QuantizedBlock::Float32(&values))],
+                    outputs: &[NodeId(1)],
+                },
                 &BTreeSet::new(),
                 None,
             )
@@ -5065,10 +5104,12 @@ mod omega_async_serving_tests {
         runtime
             .evaluate_async(
                 &service,
-                &program,
-                &[2, 1],
-                &[("values", QuantizedBlock::Float32(&first))],
-                &[NodeId(1)],
+                CudaGraphRequest {
+                    program: &program,
+                    symbols: &[2, 1],
+                    named: &[("values", QuantizedBlock::Float32(&first))],
+                    outputs: &[NodeId(1)],
+                },
                 &BTreeSet::new(),
                 None,
             )
@@ -5084,10 +5125,12 @@ mod omega_async_serving_tests {
         let actual = runtime
             .evaluate_async(
                 &service,
-                &program,
-                &[3, 1],
-                &[("values", QuantizedBlock::Float32(&second))],
-                &[NodeId(1)],
+                CudaGraphRequest {
+                    program: &program,
+                    symbols: &[3, 1],
+                    named: &[("values", QuantizedBlock::Float32(&second))],
+                    outputs: &[NodeId(1)],
+                },
                 &BTreeSet::new(),
                 None,
             )
@@ -5116,10 +5159,12 @@ mod omega_async_serving_tests {
         let refreshed = runtime
             .evaluate_async(
                 &service,
-                &program,
-                &[3, 1],
-                &[("values", QuantizedBlock::Float32(&second))],
-                &[NodeId(1)],
+                CudaGraphRequest {
+                    program: &program,
+                    symbols: &[3, 1],
+                    named: &[("values", QuantizedBlock::Float32(&second))],
+                    outputs: &[NodeId(1)],
+                },
                 &BTreeSet::new(),
                 None,
             )
@@ -5156,10 +5201,12 @@ mod omega_async_serving_tests {
         let changed = runtime
             .evaluate_async(
                 &service,
-                &changed_program,
-                &[3, 1],
-                &[("values", QuantizedBlock::Float32(&second))],
-                &[NodeId(1)],
+                CudaGraphRequest {
+                    program: &changed_program,
+                    symbols: &[3, 1],
+                    named: &[("values", QuantizedBlock::Float32(&second))],
+                    outputs: &[NodeId(1)],
+                },
                 &BTreeSet::new(),
                 None,
             )

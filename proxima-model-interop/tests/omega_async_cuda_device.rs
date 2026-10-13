@@ -6,13 +6,15 @@ use core::task::Poll;
 use std::string::String;
 
 use omega::CudaDriver;
-use proxima_model_interop::cuda_async::{CudaGpuService, OwnedInputError};
+use proxima_model_interop::cuda_async::{CudaGpuService, CudaPlanOptions, OwnedInputError};
 use proxima_primitives::pipe::CreditAcquireError;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock, ScalarOp};
 
 fn required_driver() -> CudaDriver {
-    CudaDriver::new(0).expect("AC13 requires a visible CUDA device at ordinal 0")
+    CudaDriver::new(0).unwrap_or_else(|error| {
+        panic!("AC13 requires a visible CUDA device at ordinal 0: {error}")
+    })
 }
 
 fn negate_program() -> Vec<Op> {
@@ -73,9 +75,11 @@ async fn cuda_device_name_and_literal_sync_async_output_match() {
             &program,
             &[2],
             &[NodeId(1)],
-            NumericPolicy::default(),
-            true,
-            None,
+            CudaPlanOptions {
+                numeric_policy: NumericPolicy::default(),
+                exact_activations: true,
+                omega_runtime: None,
+            },
             &owned,
         )
         .await
@@ -141,9 +145,11 @@ async fn cuda_device_completions_follow_submission_order() {
             &program,
             &[2],
             &[NodeId(1)],
-            NumericPolicy::default(),
-            true,
-            None,
+            CudaPlanOptions {
+                numeric_policy: NumericPolicy::default(),
+                exact_activations: true,
+                omega_runtime: None,
+            },
             &first_owned,
         )
         .await
@@ -154,32 +160,32 @@ async fn cuda_device_completions_follow_submission_order() {
         let mut third_call = pin!(service.execute_cuda_recorded(&lease, third_owned));
         let mut outputs: [Option<(Vec<f32>, u64)>; 3] = std::array::from_fn(|_| None);
         poll_fn(|context| {
-            if outputs[0].is_none() {
-                if let Poll::Ready(result) = first_call.as_mut().poll(context) {
-                    let receipt = result.expect("first execution");
-                    outputs[0] = Some((
-                        receipt.evaluated.root().to_vec(),
-                        receipt.completion_sequence,
-                    ));
-                }
+            if outputs[0].is_none()
+                && let Poll::Ready(result) = first_call.as_mut().poll(context)
+            {
+                let receipt = result.expect("first execution");
+                outputs[0] = Some((
+                    receipt.evaluated.root().to_vec(),
+                    receipt.completion_sequence,
+                ));
             }
-            if outputs[1].is_none() {
-                if let Poll::Ready(result) = second_call.as_mut().poll(context) {
-                    let receipt = result.expect("second execution");
-                    outputs[1] = Some((
-                        receipt.evaluated.root().to_vec(),
-                        receipt.completion_sequence,
-                    ));
-                }
+            if outputs[1].is_none()
+                && let Poll::Ready(result) = second_call.as_mut().poll(context)
+            {
+                let receipt = result.expect("second execution");
+                outputs[1] = Some((
+                    receipt.evaluated.root().to_vec(),
+                    receipt.completion_sequence,
+                ));
             }
-            if outputs[2].is_none() {
-                if let Poll::Ready(result) = third_call.as_mut().poll(context) {
-                    let receipt = result.expect("third execution");
-                    outputs[2] = Some((
-                        receipt.evaluated.root().to_vec(),
-                        receipt.completion_sequence,
-                    ));
-                }
+            if outputs[2].is_none()
+                && let Poll::Ready(result) = third_call.as_mut().poll(context)
+            {
+                let receipt = result.expect("third execution");
+                outputs[2] = Some((
+                    receipt.evaluated.root().to_vec(),
+                    receipt.completion_sequence,
+                ));
             }
             if outputs.iter().all(Option::is_some) {
                 Poll::Ready(())
