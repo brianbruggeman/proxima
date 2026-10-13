@@ -491,10 +491,10 @@ proc-macro2.workspace = true
 syn = { workspace = true, features = ["full"] }
 quote.workspace = true
 proc-macro-crate = "3.5.0"
-proxima-model-interop = { path = "proxima-model-interop", version = "0.1.0", features = ["std", "metal", "instrument", "moe-expert-prefetch", "moe-linked-suffix"] }
+proxima-model-interop = { path = "proxima-model-interop", features = ["std", "metal", "instrument", "moe-expert-prefetch", "moe-linked-suffix"] }
 proxima-gguf = { path = "proxima-gguf", version = "0.1.0" }
 memmap2 = "0.9.11"
-omega = { package = "proxima-omega", path = "omega", version = "0.1.0", features = ["metal", "instrument"] }
+omega = { package = "proxima-omega", path = "omega", features = ["metal", "instrument"] }
 # examples/openai_serve_gguf.rs builds its own Vocab from the parsed GGUF
 # metadata (proxima_tokenizer::gguf::vocab_from_metadata, the same call
 # LoadedModel::load makes internally) to count prompt tokens for the
@@ -504,7 +504,7 @@ omega = { package = "proxima-omega", path = "omega", version = "0.1.0", features
 proxima-tokenizer = { path = "proxima-tokenizer", version = "0.1.0", default-features = false, features = ["gguf"] }
 libtest-mimic = "0.8.2"
 proxima-tensor = { workspace = true, features = ["std"] }
-proxima-safetensors = { path = "proxima-safetensors", version = "0.1.0" }
+proxima-safetensors = { path = "proxima-safetensors" }
 serde_json = { version = "1.0.151", default-features = false, features = ["alloc", "float_roundtrip"] }
 
 [lints]
