@@ -104,6 +104,9 @@ pub struct CudaKernel {
     /// list is `BoundOpKind::moe_topk_extra_outputs`, the one layout the CPU
     /// interpreter's extra sink and the Metal backend follow too.
     pub extra_outputs: Vec<(NodeId, usize)>,
+    /// Kernels the driver launches, in order, on the same stream before this one.
+    /// Empty for every kernel `emit_cuda_with_policy` produces today.
+    pub prologue: Vec<CudaKernel>,
 }
 
 /// How many threads a driver must launch, and — for a cooperative reduce —
@@ -280,6 +283,79 @@ pub fn emit_cuda_with_policy(
         extra_outputs: resolved
             .kind
             .moe_topk_extra_outputs(resolved.extents.iter().product::<u64>() as usize),
+        prologue: Vec::new(),
+    })
+}
+
+/// one warp lane per element, so a block is exactly one warp wide.
+const Q8_1_BLOCK_ELEMENTS: u64 = 32;
+
+const Q8_1_QUANTIZE_ENTRY: &str = "omega_cuda_q8_1_quantize";
+
+const Q8_1_QUANTIZE_SOURCE: &str = r#"#include <cuda_fp16.h>
+extern "C" __global__ void omega_cuda_q8_1_quantize(const float *in, float *out, const int *u) {
+    long gid = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    long block = gid / 32;
+    unsigned int lane = (unsigned int)(gid & 31);
+    if (block >= u[0]) return;
+    float x = in[block * 32 + lane];
+    float amax = fabsf(x);
+    for (int offset = 16; offset > 0; offset >>= 1) { amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, offset)); }
+    float d = amax / 127.0f;
+    int q = amax == 0.0f ? 0 : (int)roundf(x / d);
+    int qsum = q;
+    for (int offset = 16; offset > 0; offset >>= 1) { qsum += __shfl_xor_sync(0xffffffffu, qsum, offset); }
+    unsigned char *bytes = (unsigned char *)out + block * 36;
+    if (lane == 0) {
+        unsigned short d_bits = __half_as_ushort(__float2half(d));
+        unsigned short s_bits = __half_as_ushort(__float2half(d * (float)qsum));
+        bytes[0] = (unsigned char)(d_bits & 0xffu);
+        bytes[1] = (unsigned char)(d_bits >> 8);
+        bytes[2] = (unsigned char)(s_bits & 0xffu);
+        bytes[3] = (unsigned char)(s_bits >> 8);
+    }
+    bytes[4 + lane] = (unsigned char)(signed char)q;
+}
+"#;
+
+/// The activation quantize that feeds a dp4a matvec body (S3): one warp per
+/// 32-element block, written as `block_q8_1` bytes into `scratch`. Emitted but
+/// not yet called from `emit_cuda_with_policy`; the driver launches it through
+/// [`CudaKernel::prologue`].
+pub fn emit_q8_1_quantize(
+    activation: NodeId,
+    scratch: NodeId,
+    element_count: u64,
+) -> Result<CudaKernel, EmitError> {
+    if element_count == 0 || !element_count.is_multiple_of(Q8_1_BLOCK_ELEMENTS) {
+        return Err(EmitError::CudaUnsupportedOpKind {
+            node: activation,
+            kind: "q8_1_quantize_length_not_block_multiple",
+        });
+    }
+    let block_count = element_count / Q8_1_BLOCK_ELEMENTS;
+    let grid = CudaGridSpec {
+        threads: checked_product(activation, [block_count, WARP_SIZE])?,
+        block_width: Some(WARP_SIZE),
+    };
+    if grid.blocks() > MAX_GRID_BLOCKS {
+        return Err(EmitError::GridExceedsThreadIndex {
+            node: activation,
+            threads: grid.threads,
+            limit: MAX_GRID_BLOCKS * grid.block_width_or_default(),
+        });
+    }
+    Ok(CudaKernel {
+        source: String::from(Q8_1_QUANTIZE_SOURCE),
+        entry: String::from(Q8_1_QUANTIZE_ENTRY),
+        bindings: vec![
+            Binding::Input(activation),
+            Binding::Output(scratch),
+            Binding::Uniforms,
+        ],
+        grid,
+        extra_outputs: Vec::new(),
+        prologue: Vec::new(),
     })
 }
 
@@ -2729,6 +2805,7 @@ mod tests {
     };
 
     use super::*;
+    use proxima_tensor::test_support::Lcg;
 
     fn no_packed() -> PackedOperands {
         BTreeMap::new()
@@ -3079,6 +3156,71 @@ mod tests {
             None,
             "an activation with a non-zero row stride is not broadcast and is rejected"
         );
+    }
+
+    fn activation_vector(k: usize) -> Vec<f32> {
+        let mut lcg = Lcg(0x5eed_1536);
+        (0..k).map(|_| lcg.next_unit()).collect()
+    }
+
+    #[test]
+    fn q8_1_quantize_emits_one_warp_block_per_32_elements() {
+        let activation = activation_vector(1536);
+        let kernel = emit_q8_1_quantize(NodeId(0), NodeId(1), activation.len() as u64)
+            .expect("1536 is a whole number of q8_1 blocks");
+
+        assert_eq!(kernel.grid.threads, 48 * WARP_SIZE);
+        assert_eq!(kernel.grid.block_width, Some(WARP_SIZE));
+        assert_eq!(
+            kernel.bindings,
+            vec![
+                Binding::Input(NodeId(0)),
+                Binding::Output(NodeId(1)),
+                Binding::Uniforms,
+            ]
+        );
+        assert_eq!(kernel.entry, "omega_cuda_q8_1_quantize");
+        assert!(kernel.source.contains("__shfl_xor_sync"));
+        assert!(kernel.source.contains("cuda_fp16.h"));
+        assert!(kernel.prologue.is_empty());
+    }
+
+    #[test]
+    fn q8_1_quantize_rejects_a_length_that_is_not_a_block_multiple() {
+        for length in [0_u64, 1537] {
+            let error = emit_q8_1_quantize(NodeId(0), NodeId(1), length)
+                .expect_err("a length that is not a 32-element block multiple is rejected");
+            assert!(matches!(
+                error,
+                EmitError::CudaUnsupportedOpKind {
+                    node: NodeId(0),
+                    ..
+                }
+            ));
+        }
+        assert!(emit_q8_1_quantize(NodeId(0), NodeId(1), 1536).is_ok());
+    }
+
+    #[test]
+    fn emit_cuda_with_policy_leaves_prologue_empty_for_the_q4_0_matvec_flag_on_and_off() {
+        let (bound, weight) = q4_0_matvec_op(8, 64, true);
+        let packed = q4_0_packed(weight);
+        let flag_off = emit_cuda_with_policy(&bound, &packed, NumericPolicy::default())
+            .expect("q4_0 matvec emits with the flag off");
+        let flag_on = emit_cuda_with_policy(
+            &bound,
+            &packed,
+            NumericPolicy::default().with_activation_quantization(true),
+        )
+        .expect("q4_0 matvec emits with the flag on");
+
+        assert!(flag_off.prologue.is_empty());
+        assert!(flag_on.prologue.is_empty());
+        assert_eq!(
+            flag_on.source.replace(&flag_on.entry, &flag_off.entry),
+            flag_off.source,
+        );
+        assert_ne!(flag_on.entry, flag_off.entry);
     }
 
     #[test]
