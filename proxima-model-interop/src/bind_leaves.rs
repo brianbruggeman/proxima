@@ -40,7 +40,7 @@ use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{Extent, Op, Reduce, ScalarOp};
 
 use crate::bind::{
-    BoundWeights, aligned_f32_view, as_block, bind_dense_as, bind_matmul_weight_as,
+    BoundWeights, aligned_f32_view, as_block, bind_dense_as, bind_gathered_as, bind_matmul_weight_as,
     bind_matmul_weight_paired, bind_matmul_weight_transposed_f32, bind_matmul_weight_triple,
     bind_moe_expert_weights, bind_moe_stacked_experts, bind_native_f32, codec_from_ggml_type,
     reinterpret_f32,
@@ -151,6 +151,7 @@ pub(crate) fn bind_missing_leaves<'file>(
             name: leaf,
             shape,
             role: role_of(program, &consumers, index, leaf, shape)?,
+            gathered: is_gathered_table(program, &consumers, index),
         };
         match resolve(&directory, binding, leaf.name) {
             Some(source) => bind_leaf(parsed, file_bytes, binding, &leaf, &source, state)?,
@@ -170,6 +171,8 @@ struct Leaf<'program> {
     name: &'program str,
     shape: &'program [Extent],
     role: Role,
+    /// Read one row per token id through a data-dependent map (the embedding).
+    gathered: bool,
 }
 
 impl Leaf<'_> {
@@ -291,6 +294,9 @@ fn bind_direct<'file>(
             state,
         ),
         (_, true) => bind_native_f32(parsed, file_bytes, &tensor.name, leaf.name.into(), state),
+        (Role::Native, false) if leaf.gathered => {
+            bind_gathered_as(parsed, file_bytes, &tensor.name, leaf.name.into(), state)
+        }
         (_, false) => bind_dense_as(parsed, file_bytes, &tensor.name, leaf.name.into(), state),
     }
 }
@@ -459,6 +465,24 @@ pub(crate) fn consumers_of(program: &[Op]) -> Vec<Vec<usize>> {
         }
     }
     consumers
+}
+
+/// Whether any op reads `leaf_index` through a data-dependent map under a
+/// non-`Multiply` body, e.g. the `embedding_lookup` `Identity` gather. `role_of`
+/// reads only `Multiply` consumers, so it reports those leaves as `Native`.
+pub(crate) fn is_gathered_table(
+    program: &[Op],
+    consumers: &[Vec<usize>],
+    leaf_index: usize,
+) -> bool {
+    consumers[leaf_index]
+        .iter()
+        .any(|&consumer| match &program[consumer] {
+            Op::Elementwise { operands, .. } => operands
+                .iter()
+                .any(|(node, map)| node.0 as usize == leaf_index && map.is_data_dependent()),
+            _ => false,
+        })
 }
 
 pub(crate) fn role_of(
