@@ -119,6 +119,13 @@ fn cuda_input_contract(
     ))
 }
 
+#[derive(Debug, Default)]
+struct CompileCounters {
+    compilations: AtomicU64,
+    nvrtc_micros: AtomicU64,
+    load_micros: AtomicU64,
+}
+
 /// One CUDA context and stream owned by a caller's inference runtime.
 #[derive(Debug, Clone)]
 pub struct CudaDriver {
@@ -127,7 +134,7 @@ pub struct CudaDriver {
     // synchronous ffi callers share these short cache mutations; compilation and dispatch happen outside the guard.
     modules: Arc<Mutex<BTreeMap<String, Vec<CachedCudaModule>>>>,
     resident_buffers: Arc<Mutex<ResidentBuffers>>,
-    kernel_compilations: Arc<AtomicU64>,
+    compile_counters: Arc<CompileCounters>,
     packed_upload_bytes: Arc<AtomicU64>,
     graph_uploads: Arc<AtomicU64>,
     graph_launches: Arc<AtomicU64>,
@@ -241,7 +248,7 @@ impl CudaDriver {
             stream,
             modules: Arc::new(Mutex::new(BTreeMap::new())),
             resident_buffers: Arc::new(Mutex::new(BTreeMap::new())),
-            kernel_compilations: Arc::new(AtomicU64::new(0)),
+            compile_counters: Arc::new(CompileCounters::default()),
             packed_upload_bytes: Arc::new(AtomicU64::new(0)),
             graph_uploads: Arc::new(AtomicU64::new(0)),
             graph_launches: Arc::new(AtomicU64::new(0)),
@@ -269,7 +276,22 @@ impl CudaDriver {
     /// of each distinct kernel identity.
     #[must_use]
     pub fn kernel_compilations(&self) -> u64 {
-        self.kernel_compilations.load(Ordering::Relaxed)
+        self.compile_counters.compilations.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative wall-clock microseconds spent in NVRTC source-to-PTX
+    /// compilation across this driver's `kernel_compilations`.
+    #[must_use]
+    pub fn nvrtc_micros(&self) -> u64 {
+        self.compile_counters.nvrtc_micros.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative wall-clock microseconds spent in `cuModuleLoadData` (PTX to
+    /// device module, including driver JIT) across this driver's
+    /// `kernel_compilations`.
+    #[must_use]
+    pub fn load_micros(&self) -> u64 {
+        self.compile_counters.load_micros.load(Ordering::Relaxed)
     }
 
     /// Host-to-device bytes of packed weights uploaded by this driver. A
@@ -302,9 +324,31 @@ impl CudaDriver {
             if !unsafe { nvrtc_sys::is_culib_present() } {
                 return Err(CudaDriverError::Nvrtc("nvrtc library unavailable".into()));
             }
+            let nvrtc_started = Instant::now();
             let ptx = compile_cuda_source(&kernel.source)?;
-            Ok(self.context.load_module(ptx)?)
+            let nvrtc_us = elapsed_micros(nvrtc_started);
+            let load_started = Instant::now();
+            let module = self.context.load_module(ptx)?;
+            let load_us = elapsed_micros(load_started);
+            self.record_compile(&kernel.entry, kernel.source.len(), nvrtc_us, load_us);
+            Ok(module)
         })
+    }
+
+    fn record_compile(&self, entry: &str, source_bytes: usize, nvrtc_us: u64, load_us: u64) {
+        self.compile_counters
+            .nvrtc_micros
+            .fetch_add(nvrtc_us, Ordering::Relaxed);
+        self.compile_counters
+            .load_micros
+            .fetch_add(load_us, Ordering::Relaxed);
+        proxima_telemetry::debug!(
+            entry = %entry,
+            source_bytes = source_bytes,
+            nvrtc_us = nvrtc_us,
+            load_us = load_us,
+            "kernel compiled"
+        );
     }
 
     /// Looks a function up by `(cache_key, source)`, so distinct sources that
@@ -328,7 +372,9 @@ impl CudaDriver {
             Some((module, None)) => module,
             None => {
                 let module = build_module()?;
-                self.kernel_compilations.fetch_add(1, Ordering::Relaxed);
+                self.compile_counters
+                    .compilations
+                    .fetch_add(1, Ordering::Relaxed);
                 module
             }
         };
@@ -1256,6 +1302,10 @@ fn resolve_cuda_include_dir(
                 .join(", "),
         }),
     }
+}
+
+fn elapsed_micros(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
 /// NVRTC does not ship `cuda_fp16.h`, so the emitted source needs a toolkit
