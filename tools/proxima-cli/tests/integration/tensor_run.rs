@@ -37,13 +37,18 @@ impl Drop for Daemon {
     }
 }
 
-fn spawn_daemon(socket: &Path, state_dir: &Path) -> Daemon {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_proximad"))
+fn spawn_daemon(socket: &Path, state_dir: &Path, telemetry_file: Option<&Path>) -> Daemon {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_proximad"));
+    command
         .arg("serve")
         .arg("--unix")
         .arg(socket)
         .arg("--state-dir")
-        .arg(state_dir)
+        .arg(state_dir);
+    if let Some(path) = telemetry_file {
+        command.arg("--telemetry-file").arg(path);
+    }
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
@@ -126,12 +131,103 @@ fn socket_in(dir: &TempDir) -> PathBuf {
     dir.path().join("proximad.sock")
 }
 
+fn stop_with_sigterm(daemon: &mut Daemon) {
+    let pid = daemon.child.id();
+    let sent = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .expect("kill binary runs");
+    assert!(sent.success(), "kill -TERM delivers to proximad pid {pid}");
+    let exit = daemon.child.wait().expect("proximad exits after SIGTERM");
+    assert!(exit.success(), "proximad exits 0 after SIGTERM, got {exit}");
+}
+
+fn tensor_run_records(telemetry: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(telemetry)
+        .expect("telemetry file exists after proximad exits")
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .expect("every telemetry line is one JSON object")
+        })
+        .filter(|record| record["tags"]["event"].as_str() == Some("tensor_run"))
+        .collect()
+}
+
+#[test]
+fn tensor_run_logs_one_served_request() {
+    let state = tempdir().expect("state dir");
+    let sockets = tempdir().expect("socket dir");
+    let socket = socket_in(&sockets);
+    let telemetry = sockets.path().join("proximad.jsonl");
+    let mut daemon = spawn_daemon(&socket, state.path(), Some(&telemetry));
+    await_listener(&socket);
+    let inputs_path = sockets.path().join("inputs.safetensors");
+    let output_path = sockets.path().join("outputs.safetensors");
+    let (x, w) = matmul_inputs();
+    write_inputs(&inputs_path, &x, &w);
+    let output = run_cli(&[
+        "tensor",
+        "run",
+        "--socket",
+        socket.to_str().expect("socket path is utf-8"),
+        PLAN_PATH,
+        "--inputs",
+        inputs_path.to_str().expect("inputs path is utf-8"),
+        "--output",
+        output_path.to_str().expect("output path is utf-8"),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "cli exits 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    stop_with_sigterm(&mut daemon);
+
+    let records = tensor_run_records(&telemetry);
+    assert_eq!(
+        records.len(),
+        1,
+        "one served request logs one tensor_run record"
+    );
+    assert_eq!(
+        records[0]["tags"]["requests_served"].as_u64(),
+        Some(1),
+        "the record carries requests_served = 1"
+    );
+}
+
+#[test]
+fn tensor_run_log_count_is_zero_without_a_request() {
+    let state = tempdir().expect("state dir");
+    let sockets = tempdir().expect("socket dir");
+    let socket = socket_in(&sockets);
+    let telemetry = sockets.path().join("proximad.jsonl");
+    let mut daemon = spawn_daemon(&socket, state.path(), Some(&telemetry));
+    await_listener(&socket);
+
+    stop_with_sigterm(&mut daemon);
+
+    assert!(
+        telemetry.exists(),
+        "the file sink creates its file at startup"
+    );
+    assert_eq!(
+        tensor_run_records(&telemetry).len(),
+        0,
+        "no request means no tensor_run record"
+    );
+}
+
 #[test]
 fn tensor_run_returns_softmax_bit_equal_to_in_process() {
     let state = tempdir().expect("state dir");
     let sockets = tempdir().expect("socket dir");
     let socket = socket_in(&sockets);
-    let _daemon = spawn_daemon(&socket, state.path());
+    let _daemon = spawn_daemon(&socket, state.path(), None);
     await_listener(&socket);
     let inputs_path = sockets.path().join("inputs.safetensors");
     let output_path = sockets.path().join("outputs.safetensors");
@@ -186,7 +282,7 @@ fn tensor_run_version_two_plan_exits_nonzero_with_named_error() {
     let state = tempdir().expect("state dir");
     let sockets = tempdir().expect("socket dir");
     let socket = socket_in(&sockets);
-    let _daemon = spawn_daemon(&socket, state.path());
+    let _daemon = spawn_daemon(&socket, state.path(), None);
     await_listener(&socket);
     let original = plan_text();
     let version_two = original.replace("version = 1", "version = 2");
