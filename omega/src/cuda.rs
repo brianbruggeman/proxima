@@ -902,11 +902,28 @@ fn grid_threads(resolved: &BoundOp, cooperative: bool) -> Result<u64, EmitError>
     }
 }
 
+/// Whether every gathered operand selects the same index across the
+/// reduction. A zero index-layout stride on each reduction dim means one
+/// fetched index serves all lanes; any other stride selects a different
+/// row per reduction element and must stay serial. Mirrors
+/// `crate::msl::gather_is_reduction_invariant`.
+fn gather_is_reduction_invariant(resolved: &BoundOp, output_axes: &[u16]) -> bool {
+    let reduce_dims = reduction_dims(resolved, output_axes);
+    resolved.operands().iter().all(|(_, _, lookup)| {
+        lookup.as_ref().is_none_or(|lookup| {
+            reduce_dims
+                .iter()
+                .all(|&dim| lookup.index_layout.stride(dim) == 0)
+        })
+    })
+}
+
 /// Whether `resolved` is a `Keep::Reduce` fold whose `reduce_op` is
-/// associative and commutative with no gathered operand — the same set
-/// `crate::msl::reduce_is_cooperative` picks for a SIMD-group cooperative
-/// fold, ported unchanged: `Subtract`/`Divide` are not associative, so
-/// reordering their combination across lanes is wrong, not merely imprecise.
+/// associative and commutative and whose gathered operands (if any) are
+/// invariant over the reduction — the same set `crate::msl::reduce_is_cooperative`
+/// picks for a SIMD-group cooperative fold: `Subtract`/`Divide` are not
+/// associative, so reordering their combination across lanes is wrong, not
+/// merely imprecise.
 fn reduce_is_cooperative(
     resolved: &BoundOp,
     _quantized: &[Option<Codec>],
@@ -916,6 +933,7 @@ fn reduce_is_cooperative(
         BoundOpKind::Reduce {
             keep: Keep::Reduce,
             reduce_op,
+            output_axes,
             ..
         } => {
             // Bit-exact mode retains the reference accumulation order for
@@ -924,7 +942,7 @@ fn reduce_is_cooperative(
             // f32 accumulation is a numeric-policy decision rather than an
             // unconditional backend rewrite.
             numeric_policy.reassociation
-                && gather_count(resolved) == 0
+                && gather_is_reduction_invariant(resolved, output_axes)
                 && is_cooperative_reduce_op(*reduce_op)
         }
         _ => false,
@@ -1380,6 +1398,46 @@ fn push_gather_fetch(
     source.push_str(&format!(
         "    {offset_var} += fetched{operand_index} * u.gather_element_stride[{gather_slot}];\n"
     ));
+}
+
+/// Once-per-output gather fetch for a reduction-invariant gathered operand:
+/// every lane loads the same index (one broadcast transaction), lane 0 alone
+/// records a fault, and the element offset is kept as `gather_base{index}`
+/// for the lane loop to add. Mirrors `push_cooperative_gather_fetch` in MSL.
+fn push_hoisted_gather_fetch(
+    source: &mut String,
+    operand_index: usize,
+    gather_slot: usize,
+    rank: usize,
+) {
+    source.push_str(&format!(
+        "    long gather_off{operand_index} = u.gather_index_base[{gather_slot}];\n"
+    ));
+    for dim in 0..rank {
+        source.push_str(&format!(
+            "    gather_off{operand_index} += full_coord[{dim}] * u.gather_index_strides[{gather_slot}][{dim}];\n"
+        ));
+    }
+    source.push_str(&format!(
+        "    long fetched{operand_index} = (long)gather_idx{gather_slot}[gather_off{operand_index}];\n"
+    ));
+    source.push_str("    if (lane == 0u && u.reduction_total > 0) {\n");
+    push_gather_fault_check(source, operand_index, gather_slot, "        ");
+    source.push_str("    }\n");
+    source.push_str(&format!(
+        "    fetched{operand_index} = max((long)0, min(fetched{operand_index}, u.gather_extent[{gather_slot}] - 1));\n"
+    ));
+    source.push_str(&format!(
+        "    long gather_base{operand_index} = fetched{operand_index} * u.gather_element_stride[{gather_slot}];\n"
+    ));
+}
+
+/// Adds the hoisted gather base to a gathered operand's element offset, so
+/// the lane loop reads the selected row. Ungathered operands emit nothing.
+fn push_gather_base_add(source: &mut String, resolved: &BoundOp, index: usize, indent: &str) {
+    if resolved.operands()[index].2.is_some() {
+        source.push_str(&format!("{indent}off{index} += gather_base{index};\n"));
+    }
 }
 
 /// How operand `index` is READ, given the element-offset expression the
@@ -1889,6 +1947,12 @@ fn push_cooperative_reduce_body(
         }
     }
 
+    for (index, slot) in gather_slots(resolved).into_iter().enumerate() {
+        if let Some(gather_slot) = slot {
+            push_hoisted_gather_fetch(source, index, gather_slot, rank);
+        }
+    }
+
     let (init_expr, seeded_init) = fold_init_tokens(init);
     let identity = cooperative_identity_token(resolved.node, reduce_op)?;
     source.push_str(&format!("    {element_type} accumulator;\n"));
@@ -1924,6 +1988,7 @@ fn push_cooperative_reduce_body(
             for &index in &q4_0_slots {
                 let (_, layout, _) = &resolved.operands()[index];
                 push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
+                push_gather_base_add(source, resolved, index, "        ");
                 push_q4_0_chunk_decode(source, index);
             }
         }
@@ -1962,6 +2027,7 @@ fn push_cooperative_reduce_body(
                 ));
             }
         }
+        push_gather_base_add(source, resolved, index, "        ");
     }
     source.push_str(&format!(
         "        {element_type} scratch[{}];\n",
@@ -2962,6 +3028,160 @@ mod tests {
         let kernel = emit_cuda(&bound, &packed).expect("emit succeeds");
         assert!(kernel.source.contains("q4k_element(in0"));
         assert!(kernel.source.contains(&format!("* {Q4K_BLOCK_BYTES}")));
+    }
+
+    /// `Σ_k table[ids[s], k]` over iteration space `(s, k)`. With
+    /// `index_depends_on_reduction` the index also varies with `k`, so its
+    /// stride on the reduction dim is nonzero and the reduce must stay serial.
+    fn gathered_reduce_op(vocab: u32, width: u32, seq: u32, index_depends_on_reduction: bool) -> BoundOp {
+        let mut program = Vec::new();
+        let table = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(vocab), Extent::Static(width)],
+                name: None,
+            },
+        );
+        let (index_shape, index_map) = if index_depends_on_reduction {
+            (
+                vec![Extent::Static(seq), Extent::Static(width)],
+                map::projection(2, &[0, 1]),
+            )
+        } else {
+            (vec![Extent::Static(seq)], map::projection(2, &[0]))
+        };
+        let ids = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Int32,
+                shape: index_shape,
+                name: None,
+            },
+        );
+        let gathered_map = IndexMap::Computed {
+            indices: ids,
+            index_map,
+            base: map::IndexPattern {
+                iter_rank: 2,
+                axes: vec![
+                    map::AxisIndex::default(),
+                    map::AxisIndex {
+                        terms: vec![AxisTerm::projection(1)].into(),
+                        offset: 0,
+                        len: None,
+                    },
+                ],
+            },
+            gathered_dim: 0,
+        };
+        let activation = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(seq), Extent::Static(width)],
+                name: None,
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (table, gathered_map),
+                    (activation, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                out_map: IndexMap::Affine(map::projection(2, &[0])),
+                keep: Keep::Reduce,
+                name: Some("gathered_row_reduce".into()),
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("gathered reduce infers");
+        bind(
+            &program,
+            &shapes,
+            &[NodeId((program.len() - 1) as u32)],
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("gathered reduce lowers")
+        .into_iter()
+        .next()
+        .expect("one bound emitted")
+    }
+
+    #[test]
+    fn reduction_invariant_gathered_reduce_is_cooperative_with_hoisted_fetch() {
+        let bound = gathered_reduce_op(16, 64, 4, false);
+        let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
+            .expect("emit succeeds");
+        assert_eq!(kernel.grid.block_width, Some(WARP_SIZE));
+        assert_eq!(kernel.grid.threads, 4 * WARP_SIZE);
+        assert!(kernel.source.contains("__shfl_down_sync"));
+        let fetch = kernel
+            .source
+            .find("long fetched0 =")
+            .expect("hoisted fetch is emitted");
+        let lane_loop = kernel
+            .source
+            .find("for (long r = (long)lane;")
+            .expect("cooperative lane loop is emitted");
+        assert!(fetch < lane_loop, "index fetch must precede the lane loop");
+        assert!(kernel.source.contains("gather_base0"));
+    }
+
+    #[test]
+    fn gathered_reduce_with_nonzero_reduction_stride_stays_serial() {
+        let bound = gathered_reduce_op(16, 64, 4, true);
+        let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
+            .expect("emit succeeds");
+        assert!(kernel.grid.block_width.is_none());
+        assert_eq!(kernel.grid.threads, 4);
+        assert!(!kernel.source.contains("__shfl_down_sync"));
+    }
+
+    #[test]
+    fn reduction_invariant_gathered_reduce_under_bit_exact_policy_stays_serial() {
+        let bound = gathered_reduce_op(16, 64, 4, false);
+        let kernel = emit_cuda(&bound, &no_packed()).expect("emit succeeds");
+        assert!(kernel.grid.block_width.is_none());
+        assert_eq!(kernel.grid.threads, 4);
+        assert!(!kernel.source.contains("__shfl_down_sync"));
+    }
+
+    #[test]
+    fn q8_0_gathered_reduce_adds_hoisted_gather_base_to_packed_offset() {
+        let bound = gathered_reduce_op(16, 64, 4, false);
+        let mut packed = BTreeMap::new();
+        packed.insert(bound.operands()[0].0, Codec::Q8_0);
+        let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
+            .expect("emit succeeds");
+        assert_eq!(kernel.grid.block_width, Some(WARP_SIZE));
+        assert!(kernel.source.contains("off0 += gather_base0;"));
+    }
+
+    #[test]
+    fn logical_packed_address_toggle_still_adds_hoisted_gather_base() {
+        let bound = gathered_reduce_op(16, 64, 4, false);
+        let kernel = temp_env::with_vars(
+            [("PROXIMA_CUDA_LOGICAL_PACKED_ADDRESS", Some("1"))],
+            || emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed()),
+        )
+        .expect("emit succeeds");
+        assert_eq!(kernel.grid.block_width, Some(WARP_SIZE));
+        assert!(kernel.source.contains("gather_base0"));
+        assert!(kernel.source.contains("off0 += gather_base0;"));
     }
 
     #[test]
