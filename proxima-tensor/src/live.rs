@@ -72,7 +72,7 @@ pub fn reachable(program: &[Op], outputs: &[NodeId]) -> BTreeSet<NodeId> {
     visited
 }
 
-fn uses(expr: &Op) -> Vec<NodeId> {
+pub(crate) fn uses(expr: &Op) -> Vec<NodeId> {
     match expr {
         Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => Vec::new(),
         Op::Elementwise { operands, .. } => operands

@@ -249,3 +249,87 @@ fn cuda_bind_refresh_census_across_kv_6_to_7() {
         "every touched op is either refreshed or refused"
     );
 }
+
+
+fn touched_positions(
+    resolved: &[BoundOp],
+    program: &[Op],
+    previous: &Shapes,
+    next: &Shapes,
+) -> Vec<usize> {
+    let changed = changed_nodes(previous, next, program.len());
+    resolved
+        .iter()
+        .enumerate()
+        .filter(|(_, bound)| touches_changed(bound, program, &changed))
+        .map(|(position, _)| position)
+        .collect()
+}
+
+fn refresh_touched(
+    resolved: &[BoundOp],
+    program: &[Op],
+    logits: NodeId,
+    shapes: &Shapes,
+    touched: &[usize],
+) -> Result<Vec<BoundOp>, RefreshRefusal> {
+    let mut masks = vec![0_u64; resolved.len()];
+    for &position in touched {
+        masks[position] = 1;
+    }
+    refresh_bound_ops(
+        resolved,
+        program,
+        &[logits],
+        shapes,
+        &masks,
+        1,
+        NumericPolicy::default(),
+    )
+}
+
+#[test]
+fn refreshed_ops_equal_a_fresh_bind_position_by_position_kv_6_to_7() {
+    let (program, logits) = decode_program();
+    let previous = shapes_at(&program, 6);
+    let next = shapes_at(&program, 7);
+    let resolved = bind_resolved(&program, &previous, logits);
+    let fresh = bind_resolved(&program, &next, logits);
+    let touched = touched_positions(&resolved, &program, &previous, &next);
+
+    let refreshed = refresh_touched(&resolved, &program, logits, &next, &touched)
+        .expect("every touched op refreshes at kv 6 -> 7");
+
+    assert!(!touched.is_empty(), "no op touched by a kv 6->7 shape change");
+    assert_eq!(refreshed.len(), fresh.len(), "refresh preserves the op count");
+    for (position, (refreshed_op, fresh_op)) in refreshed.iter().zip(&fresh).enumerate() {
+        assert_eq!(
+            refreshed_op, fresh_op,
+            "position {position} (touched: {}) differs from a fresh bind at kv 7",
+            touched.contains(&position)
+        );
+    }
+}
+
+#[test]
+fn refresh_against_stale_shapes_differs_from_a_fresh_bind_control() {
+    let (program, logits) = decode_program();
+    let previous = shapes_at(&program, 6);
+    let next = shapes_at(&program, 7);
+    let resolved = bind_resolved(&program, &previous, logits);
+    let fresh = bind_resolved(&program, &next, logits);
+    let touched = touched_positions(&resolved, &program, &previous, &next);
+
+    let stale = refresh_touched(&resolved, &program, logits, &previous, &touched)
+        .expect("touched ops refresh against the old shapes");
+
+    let differing = stale
+        .iter()
+        .zip(&fresh)
+        .filter(|(stale_op, fresh_op)| stale_op != fresh_op)
+        .count();
+    assert!(
+        differing > 0,
+        "refreshing against kv 6 shapes must not equal a fresh kv 7 bind"
+    );
+}
