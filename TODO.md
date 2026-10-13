@@ -313,6 +313,11 @@ Status: **roadmap, owner-requested, not designed yet.** No spec, no slice.
   door on the door FSM; its sans-IO parser lowers the text into the grammar
   IR. JSON schema and regex are peer doors lowering into the same IR, so
   nothing downstream knows which form the grammar arrived in.
+- Further doors on the same IR: a pest (`.pest`, PEG) grammar, and a serde
+  shape (constrain output to what a `Deserialize` type or a serde value tree
+  accepts — structured output from a Rust type). The IR itself is serde data,
+  so a grammar can also live directly in conflaguration config and be built
+  fluently, with fluent == config parity.
 - Parity: every grammar in llama.cpp's `grammars/` directory parses, and for
   the same vocabulary and the same accepted prefix yields the identical
   allowed-token set as llama.cpp's grammar sampler at every step. The mask is
@@ -334,6 +339,14 @@ Status: **roadmap, owner-requested, not designed yet.** No spec, no slice.
 - [ ] grammar IR: GBNF is a CFG (rules, alternation, repetition, character
       classes), so the IR is at least CFG; whether regex / JSON schema doors
       lower to a cheaper FSM subset of it
+- [ ] PEG vs CFG: pest's ordered choice and `&`/`!` lookahead are not CFG
+      semantics; a prefix viable under a later alternative can be killed
+      once an earlier one matches. Decide whether the pest door supports
+      full PEG prefix-viability or rejects grammars outside the CFG-equivalent
+      subset
+- [ ] serde door: `Deserialize` is visitor-driven with no static shape, so
+      the type's shape has to come from somewhere (a derive, a traced format,
+      or a JSON schema); pick the source
 - [ ] how tokenizer merges interact with grammar states
 - [ ] jump-forward over forced spans
 - [ ] interaction with speculative accept: rejecting draft tokens that violate the grammar
