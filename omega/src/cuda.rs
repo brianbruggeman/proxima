@@ -1865,6 +1865,15 @@ fn push_reduction_coord_carry(source: &mut String, reduce_rank: usize) {
     }
 }
 
+fn codec_slots(quantized: &[Option<Codec>], codec: Codec) -> Vec<usize> {
+    quantized
+        .iter()
+        .enumerate()
+        .filter(|(_, slot_codec)| **slot_codec == Some(codec))
+        .map(|(index, _)| index)
+        .collect()
+}
+
 fn push_q4_0_chunk_decode(source: &mut String, index: usize) {
     source.push_str(&format!("        float q4_0_chunk{index}[8];\n"));
     source.push_str(&format!(
@@ -1876,6 +1885,22 @@ fn push_q4_0_chunk_decode(source: &mut String, index: usize) {
          \x20               long element = off{index} + slot;\n\
          \x20               q4_0_chunk{index}[slot] = q4_0_element(in{index} + (element / {Q4_0_BLOCK_ELEMENTS}) * {Q4_0_BLOCK_BYTES}, \
          (unsigned int)(element % {Q4_0_BLOCK_ELEMENTS}));\n\
+         \x20           }}\n\
+         \x20       }}\n"
+    ));
+}
+
+fn push_q8_0_chunk_decode(source: &mut String, index: usize) {
+    source.push_str(&format!("        float q8_0_chunk{index}[8];\n"));
+    source.push_str(&format!(
+        "        if ((off{index} & 7) == 0 && chunk + 8 <= u.reduction_total) {{\n\
+         \x20           q8_0_chunk8(in{index} + (off{index} / {Q8_0_BLOCK_ELEMENTS}) * {Q8_0_BLOCK_BYTES}, \
+         (unsigned int)(off{index} % {Q8_0_BLOCK_ELEMENTS}), q8_0_chunk{index});\n\
+         \x20       }} else {{\n\
+         \x20           for (int slot = 0; slot < 8 && chunk + slot < u.reduction_total; slot++) {{\n\
+         \x20               long element = off{index} + slot;\n\
+         \x20               q8_0_chunk{index}[slot] = q8_0_element(in{index} + (element / {Q8_0_BLOCK_ELEMENTS}) * {Q8_0_BLOCK_BYTES}, \
+         (unsigned int)(element % {Q8_0_BLOCK_ELEMENTS}));\n\
          \x20           }}\n\
          \x20       }}\n"
     ));
@@ -1965,13 +1990,18 @@ fn push_cooperative_reduce_body(
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
 
-    let q4_0_slots: Vec<usize> = quantized
-        .iter()
-        .enumerate()
-        .filter(|(_, codec)| matches!(codec, Some(Codec::Q4_0)))
-        .map(|(index, _)| index)
-        .collect();
-    let q4_0_hoisted = packed_chunked && !logical_packed_address();
+    let chunk_hoisted = packed_chunked && !logical_packed_address();
+    let q4_0_slots = if chunk_hoisted {
+        codec_slots(quantized, Codec::Q4_0)
+    } else {
+        Vec::new()
+    };
+    let q8_0_slots = if chunk_hoisted {
+        codec_slots(quantized, Codec::Q8_0)
+    } else {
+        Vec::new()
+    };
+    let chunk_hoisted_index = |index: usize| q4_0_slots.contains(&index) || q8_0_slots.contains(&index);
 
     if packed_chunked {
         source.push_str(&format!(
@@ -1981,8 +2011,8 @@ fn push_cooperative_reduce_body(
         if reduce_rank > 0 {
             push_reduction_coord_decompose(source, "chunk", reduce_rank, reduce_rank_len, "        ");
         }
-        if q4_0_hoisted {
-            if !q4_0_slots.is_empty() {
+        if chunk_hoisted {
+            if !q4_0_slots.is_empty() || !q8_0_slots.is_empty() {
                 source.push_str("        long r = chunk;\n");
             }
             for &index in &q4_0_slots {
@@ -1990,6 +2020,12 @@ fn push_cooperative_reduce_body(
                 push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
                 push_gather_base_add(source, resolved, index, "        ");
                 push_q4_0_chunk_decode(source, index);
+            }
+            for &index in &q8_0_slots {
+                let (_, layout, _) = &resolved.operands()[index];
+                push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
+                push_gather_base_add(source, resolved, index, "        ");
+                push_q8_0_chunk_decode(source, index);
             }
         }
         source.push_str("        for (long inner = 0; inner < 8 && chunk + inner < u.reduction_total; inner++) {\n");
@@ -2011,7 +2047,7 @@ fn push_cooperative_reduce_body(
     }
 
     for (index, &codec) in quantized.iter().enumerate() {
-        if q4_0_hoisted && q4_0_slots.contains(&index) {
+        if chunk_hoisted_index(index) {
             continue;
         }
         if codec.is_some() {
@@ -2034,8 +2070,12 @@ fn push_cooperative_reduce_body(
         operand_count.max(1)
     ));
     for (index, &codec) in quantized.iter().enumerate() {
-        if q4_0_hoisted && q4_0_slots.contains(&index) {
+        if q4_0_slots.contains(&index) {
             source.push_str(&format!("        scratch[{index}] = q4_0_chunk{index}[inner];\n"));
+            continue;
+        }
+        if q8_0_slots.contains(&index) {
+            source.push_str(&format!("        scratch[{index}] = q8_0_chunk{index}[inner];\n"));
             continue;
         }
         source.push_str(&format!(
@@ -2552,6 +2592,14 @@ __device__ __forceinline__ float q8_0_element(const unsigned char *block, unsign
     float d = __half2float(__ushort_as_half(d_bits));
     signed char level = (signed char)block[2u + index];
     return (float)level * d;
+}
+__device__ __forceinline__ void q8_0_chunk8(const unsigned char *block, unsigned int index, float *out) {
+    unsigned short d_bits = (unsigned short)((unsigned int)block[0] | ((unsigned int)block[1] << 8));
+    float d = __half2float(__ushort_as_half(d_bits));
+    #pragma unroll
+    for (int slot = 0; slot < 8; slot++) {
+        out[slot] = (float)((signed char)block[2u + index + slot]) * d;
+    }
 }
 ";
 
@@ -3169,6 +3217,39 @@ mod tests {
             .expect("emit succeeds");
         assert_eq!(kernel.grid.block_width, Some(WARP_SIZE));
         assert!(kernel.source.contains("off0 += gather_base0;"));
+    }
+
+    #[test]
+    fn q8_0_cooperative_reduce_emits_chunk8_decode_after_gather_base() {
+        let bound = gathered_reduce_op(16, 64, 4, false);
+        let mut packed = BTreeMap::new();
+        packed.insert(bound.operands()[0].0, Codec::Q8_0);
+        let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
+            .expect("emit succeeds");
+        let gather_add = kernel
+            .source
+            .find("off0 += gather_base0;")
+            .expect("hoisted gather base is added to the packed offset");
+        let chunk_call = kernel
+            .source
+            .find("q8_0_chunk8(in0")
+            .expect("aligned chunk decode is emitted");
+        let lane_loop = kernel
+            .source
+            .find("for (long chunk = (long)lane * 8;")
+            .expect("chunked lane loop is emitted");
+        assert!(lane_loop < gather_add && gather_add < chunk_call);
+        assert!(kernel.source.contains("q8_0_element(in0"));
+        assert!(kernel.source.contains("scratch[0] = q8_0_chunk0[inner];"));
+    }
+
+    #[test]
+    fn q8_0_chunk_decode_is_absent_without_a_packed_operand() {
+        let bound = gathered_reduce_op(16, 64, 4, false);
+        let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
+            .expect("emit succeeds");
+        assert!(!kernel.source.contains("float q8_0_chunk0[8];"));
+        assert!(!kernel.source.contains("q8_0_chunk8(in0"));
     }
 
     #[test]
