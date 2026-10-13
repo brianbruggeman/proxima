@@ -52,6 +52,8 @@ pub enum CudaDriverError {
     Driver(String),
     #[error("CUDA NVRTC: {0}")]
     Nvrtc(String),
+    #[error("CUDA header `{header}` not found; tried: {tried}")]
+    CudaHeaderNotFound { header: String, tried: String },
     #[error("CUDA smoke input is too large for the launch ABI: {0} elements")]
     InputTooLarge(usize),
     #[error("CUDA launch of {threads} threads needs more blocks than the launch index holds")]
@@ -250,8 +252,7 @@ impl CudaDriver {
             if !unsafe { nvrtc_sys::is_culib_present() } {
                 return Err(CudaDriverError::Nvrtc("nvrtc library unavailable".into()));
             }
-            let ptx = compile_cuda_source(&kernel.source)
-                .map_err(|error| CudaDriverError::Nvrtc(error.to_string()))?;
+            let ptx = compile_cuda_source(&kernel.source)?;
             Ok(self.context.load_module(ptx)?)
         })
     }
@@ -1010,28 +1011,52 @@ fn cuda_integer_dtype(dtype: DType) -> bool {
     )
 }
 
-/// Compiles generated CUDA C with an explicit header search path when the
-/// runtime distribution does not install headers in NVRTC's default search
-/// list.  `PROXIMA_CUDA_INCLUDE_PATH` is the deployment escape hatch for
-/// toolkit/container layouts; `CUDA_PATH` and the conventional Linux path are
-/// harmless fallbacks.
-fn compile_cuda_source(source: &str) -> Result<Ptx, cudarc::nvrtc::CompileError> {
+const CUDA_REQUIRED_HEADER: &str = "cuda_fp16.h";
+const CUDA_SYSTEM_INCLUDE_DIRS: [&str; 2] = ["/usr/local/cuda/include", "/opt/cuda/include"];
+
+fn cuda_include_candidates(system_dirs: &[&str]) -> Vec<std::path::PathBuf> {
+    let explicit = std::env::var_os("PROXIMA_CUDA_INCLUDE_PATH").map(std::path::PathBuf::from);
+    let rooted = ["CUDA_PATH", "CUDA_HOME"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(|root| std::path::PathBuf::from(root).join("include"));
+    let system = system_dirs.iter().map(std::path::PathBuf::from);
+    explicit.into_iter().chain(rooted).chain(system).collect()
+}
+
+fn resolve_cuda_include_dir(
+    header: &str,
+    system_dirs: &[&str],
+) -> Result<std::path::PathBuf, CudaDriverError> {
+    let candidates = cuda_include_candidates(system_dirs);
+    match candidates.iter().find(|dir| dir.join(header).is_file()) {
+        Some(dir) => Ok(dir.clone()),
+        None => Err(CudaDriverError::CudaHeaderNotFound {
+            header: header.to_owned(),
+            tried: candidates
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        }),
+    }
+}
+
+/// NVRTC does not ship `cuda_fp16.h`, so the emitted source needs a toolkit
+/// include directory.  Resolution order: `PROXIMA_CUDA_INCLUDE_PATH`,
+/// `CUDA_PATH/include`, `CUDA_HOME/include`, `/usr/local/cuda/include`,
+/// `/opt/cuda/include`; the first one that contains the header wins.
+fn compile_cuda_source(source: &str) -> Result<Ptx, CudaDriverError> {
     let mut options = CompileOptions::default();
-    let include_path = std::env::var_os("PROXIMA_CUDA_INCLUDE_PATH")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("CUDA_PATH").map(|path| std::path::PathBuf::from(path).join("include"))
-        })
-        .or_else(|| {
-            let path = std::path::Path::new("/usr/local/cuda/include");
-            path.is_dir().then(|| path.to_owned())
-        });
-    if let Some(path) = include_path {
+    if source.contains(CUDA_REQUIRED_HEADER) {
+        let include_dir =
+            resolve_cuda_include_dir(CUDA_REQUIRED_HEADER, &CUDA_SYSTEM_INCLUDE_DIRS)?;
         options
             .include_paths
-            .push(path.to_string_lossy().into_owned());
+            .push(include_dir.to_string_lossy().into_owned());
     }
     compile_ptx_with_opts(source, options)
+        .map_err(|error| CudaDriverError::Nvrtc(error.to_string()))
 }
 
 impl CudaPlan {
@@ -1759,7 +1784,7 @@ mod tests {
     use super::{
         CudaDriver, CudaDriverError, CudaFunction, LaunchConfig, PRECOMPILED_ADD_ONE_PTX,
         PushKernelArg, add_one_kernel, launch_blocks, packed_bytes, packed_codec,
-        validate_cuda_dtype,
+        resolve_cuda_include_dir, validate_cuda_dtype,
     };
     use crate::cuda::CudaGridSpec;
     use crate::msl::Codec;
@@ -2011,6 +2036,94 @@ mod tests {
             driver.kernel_compilations(),
             2,
             "one load per distinct ptx source, not per alternation"
+        );
+    }
+
+    fn toolkit_with_header(root: &std::path::Path) -> std::path::PathBuf {
+        let include = root.join("include");
+        std::fs::create_dir_all(&include).expect("create toolkit include dir");
+        std::fs::write(include.join("cuda_fp16.h"), b"// header").expect("write header");
+        include
+    }
+
+    fn resolve(system: &[&str]) -> Result<std::path::PathBuf, CudaDriverError> {
+        resolve_cuda_include_dir("cuda_fp16.h", system)
+    }
+
+    #[test]
+    fn explicit_proxima_path_wins_over_cuda_path() {
+        let proxima = tempfile::tempdir().expect("tempdir");
+        let cuda = tempfile::tempdir().expect("tempdir");
+        let proxima_include = toolkit_with_header(proxima.path());
+        toolkit_with_header(cuda.path());
+        temp_env::with_vars(
+            [
+                (
+                    "PROXIMA_CUDA_INCLUDE_PATH",
+                    Some(proxima_include.as_os_str()),
+                ),
+                ("CUDA_PATH", Some(cuda.path().as_os_str())),
+                ("CUDA_HOME", None),
+            ],
+            || assert_eq!(resolve(&[]).expect("resolves"), proxima_include),
+        );
+    }
+
+    #[test]
+    fn cuda_home_is_used_when_cuda_path_lacks_the_header() {
+        let empty = tempfile::tempdir().expect("tempdir");
+        let home = tempfile::tempdir().expect("tempdir");
+        let home_include = toolkit_with_header(home.path());
+        temp_env::with_vars(
+            [
+                ("PROXIMA_CUDA_INCLUDE_PATH", None),
+                ("CUDA_PATH", Some(empty.path().as_os_str())),
+                ("CUDA_HOME", Some(home.path().as_os_str())),
+            ],
+            || assert_eq!(resolve(&[]).expect("resolves"), home_include),
+        );
+    }
+
+    #[test]
+    fn system_dir_is_the_last_resort() {
+        let system = tempfile::tempdir().expect("tempdir");
+        let system_include = toolkit_with_header(system.path());
+        let system_str = system_include.to_string_lossy().into_owned();
+        temp_env::with_vars(
+            [
+                ("PROXIMA_CUDA_INCLUDE_PATH", None::<&str>),
+                ("CUDA_PATH", None),
+                ("CUDA_HOME", None),
+            ],
+            || assert_eq!(resolve(&[&system_str]).expect("resolves"), system_include),
+        );
+    }
+
+    #[test]
+    fn missing_header_error_names_every_path_tried() {
+        let empty = tempfile::tempdir().expect("tempdir");
+        let home = tempfile::tempdir().expect("tempdir");
+        temp_env::with_vars(
+            [
+                ("PROXIMA_CUDA_INCLUDE_PATH", Some(empty.path().as_os_str())),
+                ("CUDA_PATH", Some(empty.path().as_os_str())),
+                ("CUDA_HOME", Some(home.path().as_os_str())),
+            ],
+            || {
+                let message = resolve(&["/nonexistent/cuda/include"])
+                    .expect_err("no dir holds the header")
+                    .to_string();
+                assert!(message.contains("cuda_fp16.h"), "{message}");
+                assert!(
+                    message.contains(&empty.path().display().to_string()),
+                    "{message}"
+                );
+                assert!(
+                    message.contains(&home.path().join("include").display().to_string()),
+                    "{message}"
+                );
+                assert!(message.contains("/nonexistent/cuda/include"), "{message}");
+            },
         );
     }
 }
