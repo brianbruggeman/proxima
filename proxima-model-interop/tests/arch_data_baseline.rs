@@ -1760,12 +1760,7 @@ fn zero_rust_variant_full_attention_gemma4_e2b_lowers_and_runs() {
     assert_llama_ids(&GEMMA4_E2B, &parsed, &model);
 }
 
-fn generated_ids_diverge_from_llama(checkpoint: &Checkpoint, config: &ModelDescriptor) -> bool {
-    let mapping = checkpoint.open();
-    let file_bytes: &[u8] = &mapping;
-    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
-    let model = load_from_config(&parsed, file_bytes, config);
-    let case = &llama_cases(checkpoint)[0];
+fn first_llama_divergence_step(model: &LoadedModel<'_>, case: &LlamaCase) -> Option<usize> {
     let serving = ServingConfig {
         prompt_cache: PromptCacheConfig::off(),
         ..ServingConfig::default()
@@ -1776,38 +1771,48 @@ fn generated_ids_diverge_from_llama(checkpoint: &Checkpoint, config: &ModelDescr
             &case.prompt_ids,
             LLAMA_GENERATED_TOKENS,
             &serving,
-            &mut |_event| ControlFlow::Continue(()),
+            &mut |event| match case.generated_ids.get(event.step) {
+                Some(&expected) if expected != event.token_id => ControlFlow::Break(()),
+                _ => ControlFlow::Continue(()),
+            },
         )
         .expect("the edited config runs");
 
     let compared = &generated[..generated.len().min(case.generated_ids.len())];
-    first_divergence(&case.generated_ids, compared).is_some()
+    first_divergence(&case.generated_ids, compared)
 }
 
-fn cases_diverging_from_llama(checkpoint: &Checkpoint, config: &ModelDescriptor) -> usize {
+fn generated_ids_diverge_from_llama(checkpoint: &Checkpoint, config: &ModelDescriptor) -> bool {
     let mapping = checkpoint.open();
     let file_bytes: &[u8] = &mapping;
     let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
     let model = load_from_config(&parsed, file_bytes, config);
-    let serving = ServingConfig {
-        prompt_cache: PromptCacheConfig::off(),
-        ..ServingConfig::default()
-    };
+    let case = &llama_cases(checkpoint)[0];
+
+    let step = first_llama_divergence_step(&model, case);
+    eprintln!(
+        "{}: first divergence from llama at prompt_index=0 step={step:?}",
+        checkpoint.name
+    );
+    step.is_some()
+}
+
+fn any_case_diverges_from_llama(checkpoint: &Checkpoint, config: &ModelDescriptor) -> bool {
+    let mapping = checkpoint.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+    let model = load_from_config(&parsed, file_bytes, config);
     llama_cases(checkpoint)
         .iter()
-        .filter(|case| {
-            let (generated, _text, _stopped) = model
-                .generate_from_ids(
-                    &case.prompt_ids,
-                    LLAMA_GENERATED_TOKENS,
-                    &serving,
-                    &mut |_event| ControlFlow::Continue(()),
-                )
-                .expect("the edited config runs");
-            let compared = &generated[..generated.len().min(case.generated_ids.len())];
-            first_divergence(&case.generated_ids, compared).is_some()
+        .enumerate()
+        .any(|(prompt_index, case)| {
+            let step = first_llama_divergence_step(&model, case);
+            eprintln!(
+                "{}: first divergence from llama at prompt_index={prompt_index} step={step:?}",
+                checkpoint.name
+            );
+            step.is_some()
         })
-        .count()
 }
 
 #[test]
@@ -1931,10 +1936,8 @@ fn model_config_edit_to_the_lfm2_rope_pairing_diverges_from_llama_on_at_least_on
         ..header
     };
 
-    let diverging = cases_diverging_from_llama(&LFM2, &edited);
-
     assert!(
-        diverging >= 1,
+        any_case_diverges_from_llama(&LFM2, &edited),
         "interleaved rope pairing reproduced llama's ids on every prompt, so the oracle cannot tell the pairing the profile claims from the one llama.cpp's rope-type table says"
     );
 }
