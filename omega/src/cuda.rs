@@ -2965,6 +2965,35 @@ __device__ __forceinline__ float bf16_element(const unsigned char *block, unsign
 ";
 
 #[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CudaAttentionClass {
+    Static,
+    CachedBound,
+}
+
+#[cfg(test)]
+pub(crate) fn cuda_cached_attention_class(kind: &BoundOpKind) -> Option<CudaAttentionClass> {
+    let BoundOpKind::CachedAttention {
+        operands,
+        cached_key_rows,
+        head_dim,
+        rotary_dim,
+        ..
+    } = kind
+    else {
+        return None;
+    };
+    if rotary_dim < head_dim {
+        return None;
+    }
+    match operands.len() {
+        8 => Some(CudaAttentionClass::Static),
+        9 if *cached_key_rows > 0 => Some(CudaAttentionClass::CachedBound),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use alloc::collections::BTreeMap;
@@ -2977,10 +3006,92 @@ mod tests {
     };
 
     use super::*;
+    use crate::msl::{CachedAttentionForm, cached_attention_form};
     use proxima_tensor::test_support::Lcg;
 
     fn no_packed() -> PackedOperands {
         BTreeMap::new()
+    }
+
+    fn attention_kind(
+        operand_count: u32,
+        cached_key_rows: u64,
+        head_dim: u64,
+        rotary_dim: u64,
+    ) -> BoundOpKind {
+        BoundOpKind::CachedAttention {
+            operands: (0..operand_count)
+                .map(|index| {
+                    (
+                        NodeId(index),
+                        Layout {
+                            base: 0,
+                            strides: vec![1_i64].into(),
+                        },
+                        None,
+                    )
+                })
+                .collect(),
+            query_rows: 1,
+            cached_key_rows,
+            new_key_rows: 1,
+            kv_heads: 1,
+            query_groups: 8,
+            head_dim,
+            rotary_dim,
+            scale: 1.0,
+            cached_lower_inclusive: i64::MIN,
+            new_upper_inclusive: 0,
+        }
+    }
+
+    #[test]
+    fn classifier_accepts_eight_operand_as_static() {
+        let kind = attention_kind(8, 5, 256, 256);
+
+        assert_eq!(
+            cuda_cached_attention_class(&kind),
+            Some(CudaAttentionClass::Static)
+        );
+    }
+
+    #[test]
+    fn classifier_accepts_nine_operand_nonzero_cached_as_cached_bound() {
+        let kind = attention_kind(9, 5, 256, 256);
+
+        assert_eq!(
+            cuda_cached_attention_class(&kind),
+            Some(CudaAttentionClass::CachedBound)
+        );
+    }
+
+    #[test]
+    fn classifier_declines_single_range_and_partial_rotary_and_non_attention() {
+        let single_range = attention_kind(9, 0, 256, 256);
+        let partial_rotary = attention_kind(11, 5, 256, 128);
+        let unexpected_count = attention_kind(11, 5, 256, 256);
+        let elementwise = elementwise_tanh_op(4).kind;
+
+        assert_eq!(cuda_cached_attention_class(&single_range), None);
+        assert_eq!(cuda_cached_attention_class(&partial_rotary), None);
+        assert_eq!(cuda_cached_attention_class(&unexpected_count), None);
+        assert_eq!(cuda_cached_attention_class(&elementwise), None);
+    }
+
+    #[cfg(feature = "metal-attn-split-decode")]
+    #[test]
+    fn classifier_does_not_follow_metal_form_selection() {
+        let kind = attention_kind(9, 32, 256, 256);
+        let metal_form = cached_attention_form(&kind, NumericPolicy::llama_relaxed());
+
+        assert!(
+            matches!(metal_form, Some(CachedAttentionForm::TwoRangeDecodeSplit { .. })),
+            "control needs metal to select DecodeSplit, got {metal_form:?}"
+        );
+        assert_eq!(
+            cuda_cached_attention_class(&kind),
+            Some(CudaAttentionClass::CachedBound)
+        );
     }
 
     fn elementwise_tanh_op(extent: u32) -> BoundOp {
