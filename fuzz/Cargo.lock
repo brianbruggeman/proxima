@@ -174,11 +174,12 @@ dependencies = [
 [[package]]
 name = "conflaguration"
 version = "2.0.0"
-source = "git+https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28#3eb325d84fc291df35528e6781b5b814884e2d28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9145383355edcdaa0e4c6d2b42bafdd244ab5e7049aced3431f28d0dedcf26c"
 dependencies = [
+ "conflaguration-core",
  "conflaguration-derive",
  "environs",
- "memchr",
  "serde",
  "serde-value",
  "thiserror",
@@ -186,9 +187,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "conflaguration-core"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e4bdfdcd92a26cae034943805e906d528e4617c378cacbcd14aa20c79e885b"
+
+[[package]]
 name = "conflaguration-derive"
 version = "2.0.0"
-source = "git+https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28#3eb325d84fc291df35528e6781b5b814884e2d28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a60de5c78c5e03d8f928a66c78245819db6420587dbb234eef1bac58bff114b4"
 dependencies = [
  "proc-macro2",
  "quote",
