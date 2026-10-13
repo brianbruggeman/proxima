@@ -58,6 +58,6 @@ Generated from `src/capability.rs`'s own tables by `examples/generate_compatibil
 | Q1_0 | unsupported |
 | Q2_0 | unsupported |
 | BF8 | unsupported |
-| BF8_E5M2 | unsupported |
-| BF4_E2M1 | unsupported |
-| FP6_E3M2 | unsupported |
+| BF8_E5M2 | supported |
+| BF4_E2M1 | supported |
+| FP6_E3M2 | supported |
