@@ -189,6 +189,7 @@ pub fn sliding_pattern_descriptor_from_gguf(
         gated_attention: false,
         recurrence: None,
         loopcd: LoopCdConfig::default(),
+        network: None,
     })
 }
 

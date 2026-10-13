@@ -3285,6 +3285,7 @@ pub fn recurrent_interval_forward_program_with_last_row(
         gated_attention: true,
         recurrence: None,
         loopcd: LoopCdConfig::default(),
+        network: None,
     };
     let ForwardProgram {
         program,
