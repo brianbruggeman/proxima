@@ -14,10 +14,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod support;
-use support::{as_named_blocks, qwen3_gqa_qk_norm_forward_fixture, real_forward_fixture};
+use support::{
+    as_named_blocks, qwen3_gqa_qk_norm_forward_fixture, qwen3_gqa_qk_norm_padded_cache_fixture,
+    real_forward_fixture,
+};
 
 use omega::Codec;
-use omega::backend::{BackendError, Engine, GpuDriver, execute_plan_named, plan_named};
+use omega::backend::{
+    BackendError, Engine, GpuDriver, cuda_kernel_identities, execute_plan_named, plan_named,
+};
 use proxima_tensor::NumericPolicy;
 use proxima_tensor::infer;
 use proxima_tensor::spec::qk_norm_cached_forward_program;
@@ -2524,5 +2529,93 @@ fn plan_execution_leaves_refit_counters_unchanged() {
     assert_eq!(
         after, before,
         "executing a plan is not a refit, re-emit or repack"
+    );
+}
+
+fn padded_cache_relative_error(
+    cached_len: u64,
+    pad_value: f32,
+    wrong_cached_len: Option<f32>,
+) -> (f32, Vec<String>) {
+    let (reference, mut padded) = qwen3_gqa_qk_norm_padded_cache_fixture(cached_len, 64, pad_value);
+    if let Some(wrong) = wrong_cached_len {
+        for (name, data) in padded.3.iter_mut() {
+            if name == "cached_len" {
+                *data = vec![wrong];
+            }
+        }
+    }
+    let reference_named = as_named_blocks(&reference.3);
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &reference.0,
+        &reference.1,
+        &reference_named,
+        &reference.2,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the live reference on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &reference_named)
+        .expect("omega::backend runs the live reference on cpu");
+
+    let padded_named = as_named_blocks(&padded.3);
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &padded.0,
+        &padded.1,
+        &padded_named,
+        &padded.2,
+        NumericPolicy::bit_exact().with_reassociation(true),
+    )
+    .expect("omega::backend plans the padded bucket on cuda");
+    let identities = cuda_kernel_identities(&cuda_plan).expect("cuda plan exposes its kernels");
+    let cuda = execute_plan_named(&mut cuda_plan, &padded_named)
+        .expect("omega::backend runs the padded bucket on a real cuda device");
+
+    let expected = cpu.root();
+    let actual = cuda.root();
+    assert_eq!(actual.len(), expected.len());
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(
+            got.is_finite(),
+            "cuda read a non-finite value from the padded bucket: {got} (a pad row leaked)"
+        );
+        max_diff = max_diff.max((got - want).abs());
+    }
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
+    (max_diff / max_magnitude.max(f32::MIN_POSITIVE), identities)
+}
+
+#[test]
+fn cuda_cached_attention_matches_cpu_at_two_cached_lens_in_one_bucket() {
+    for cached_len in [31_u64, 33] {
+        let (relative, identities) = padded_cache_relative_error(cached_len, f32::NAN, None);
+        eprintln!("cached_attention cached_len={cached_len} bucket=64 relative={relative}");
+        assert!(
+            identities
+                .iter()
+                .any(|identity| identity.contains("omega_cuda_cached_attention_")),
+            "fused cached attention absent from the cuda plan: {identities:?}"
+        );
+        assert!(
+            relative < 1e-4,
+            "cached_len={cached_len}: cuda vs cpu relative={relative}, tolerance 1e-4"
+        );
+    }
+}
+
+#[test]
+fn cuda_cached_attention_diverges_when_cached_len_is_wrong() {
+    let (relative, _) = padded_cache_relative_error(31, 0.5, Some(32.0));
+    eprintln!("cached_attention control: wrong cached_len=32 vs live 31, relative={relative}");
+    assert!(
+        relative >= 1e-4,
+        "a wrong cached_len must diverge beyond the tolerance, relative={relative}"
     );
 }

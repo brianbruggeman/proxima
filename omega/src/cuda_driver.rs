@@ -25,7 +25,7 @@ use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
 use proxima_primitives::sync::blocking::Mutex;
 
 use crate::config::{ResourceConstraints, RuntimeConfig};
-use crate::cuda::{CudaGridSpec, CudaKernel};
+use crate::cuda::{CudaGridSpec, CudaKernel, cuda_cached_attention_class};
 use crate::cuda_kernel_cache::{CacheKey, decode_entry, encode_entry};
 use crate::kernel_cache_config::KernelCacheConfig;
 use crate::cuda_ptx_store::PtxStore;
@@ -1184,7 +1184,13 @@ fn bind_and_emit(
     let bound = if unfused {
         bind_unfused(program, shapes, outputs, numeric_policy)
     } else {
-        bind_with_fusion(program, shapes, outputs, false, numeric_policy)
+        bind_with_fusion(
+            program,
+            shapes,
+            outputs,
+            numeric_policy.reassociation,
+            numeric_policy,
+        )
     }
     .map_err(|_| CudaDriverError::UnsupportedGraph {
         node: NodeId(0),
@@ -1192,7 +1198,7 @@ fn bind_and_emit(
     })?;
     let mut resolved = prune_dead(bound, outputs);
     correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
-    validate_resolved(&resolved)?;
+    validate_resolved(&resolved, numeric_policy)?;
     let mut micros = LowerMicros {
         bind: bind_started.elapsed().as_micros() as u64,
         ..LowerMicros::default()
@@ -1202,11 +1208,14 @@ fn bind_and_emit(
     Ok((resolved, kernels, uniforms, micros))
 }
 
-fn validate_resolved(resolved: &[BoundOp]) -> Result<(), CudaDriverError> {
+fn validate_resolved(
+    resolved: &[BoundOp],
+    numeric_policy: NumericPolicy,
+) -> Result<(), CudaDriverError> {
     for bound in resolved {
         validate_cuda_dtype(bound)?;
     }
-    reject_unsupported_kinds(resolved)
+    reject_unsupported_kinds(resolved, numeric_policy)
 }
 
 fn emit_and_pack(
@@ -1291,24 +1300,30 @@ fn refresh_bound_resolved(
     Ok((refreshed, touched))
 }
 
-fn cuda_supports_kind(kind: &BoundOpKind) -> bool {
-    matches!(
-        kind,
+fn cuda_supports_kind(kind: &BoundOpKind, numeric_policy: NumericPolicy) -> bool {
+    match kind {
+        BoundOpKind::CachedAttention { .. } => {
+            numeric_policy.reassociation && cuda_cached_attention_class(kind).is_some()
+        }
         BoundOpKind::Elementwise { .. }
-            | BoundOpKind::Reduce { .. }
-            | BoundOpKind::Iota
-            | BoundOpKind::Constant { .. }
-            | BoundOpKind::MoeTopK { .. }
-    )
+        | BoundOpKind::Reduce { .. }
+        | BoundOpKind::Iota
+        | BoundOpKind::Constant { .. }
+        | BoundOpKind::MoeTopK { .. } => true,
+        _ => false,
+    }
 }
 
 /// Rejects the whole graph at once, naming every unsupported kind with its
 /// node count, so a model's full gap list is one error rather than one node at a time.
-fn reject_unsupported_kinds(resolved: &[BoundOp]) -> Result<(), CudaDriverError> {
+fn reject_unsupported_kinds(
+    resolved: &[BoundOp],
+    numeric_policy: NumericPolicy,
+) -> Result<(), CudaDriverError> {
     let mut census: BTreeMap<&'static str, (usize, NodeId)> = BTreeMap::new();
     for bound in resolved
         .iter()
-        .filter(|bound| !cuda_supports_kind(&bound.kind))
+        .filter(|bound| !cuda_supports_kind(&bound.kind, numeric_policy))
     {
         census.entry(bound.kind.name()).or_insert((0, bound.node)).0 += 1;
     }
@@ -1514,7 +1529,7 @@ impl CudaPlan {
                     bind: refresh_started.elapsed().as_micros() as u64,
                     ..LowerMicros::default()
                 };
-                validate_resolved(&resolved)?;
+                validate_resolved(&resolved, numeric_policy)?;
                 let prior = PriorKernels {
                     bound: &previous_bound,
                     kernels: std::mem::take(&mut self.kernels),

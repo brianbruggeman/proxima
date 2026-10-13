@@ -1440,6 +1440,19 @@ pub fn cuda_refit_counters(plan: &Plan) -> Option<[u64; 4]> {
     }
 }
 
+/// Kernel identities of a CUDA plan, one per emitted kernel, or `None` for
+/// every other arm. The CUDA entry for a fused cached attention carries the
+/// `omega_cuda_cached_attention_` prefix, so a test can assert the fused form
+/// was actually emitted rather than a silent fallback to the unfused chain.
+#[cfg(feature = "cuda-driver")]
+#[must_use]
+pub fn cuda_kernel_identities(plan: &Plan) -> Option<Vec<String>> {
+    match plan {
+        Plan::Cuda(cuda_plan) => Some(cuda_plan.kernel_identities()),
+        _ => None,
+    }
+}
+
 /// Sets [`metal::DispatchType`] on [`Plan::Metal`] -- see that type's own
 /// doc for the measured rationale (`proxima-tensor/docs/discipline.md` ROW
 /// 311/312). A no-op on every other arm: `Plan::Cpu`'s interpreter has no
