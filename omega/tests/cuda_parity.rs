@@ -568,6 +568,202 @@ fn an_out_of_range_gather_index_faults_on_cuda_the_same_way_it_faults_on_cpu() {
     );
 }
 
+fn append_embedding_gather(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> NodeId {
+    use proxima_tensor::{AxisIndex, AxisTerm, IndexPattern};
+
+    let gathered_map = IndexMap::Computed {
+        indices: ids,
+        index_map: projection(2, &[0]),
+        base: IndexPattern {
+            iter_rank: 2,
+            axes: vec![
+                AxisIndex::default(),
+                AxisIndex {
+                    terms: vec![AxisTerm::projection(1)].into(),
+                    offset: 0,
+                    len: None,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: vec![(table, gathered_map)],
+            name: None,
+        },
+    )
+}
+
+fn append_input(program: &mut Vec<Op>, dtype: DType, shape: Vec<Extent>, name: &str) -> NodeId {
+    append(
+        program,
+        Op::Input {
+            dtype,
+            shape,
+            name: Some(name.into()),
+        },
+    )
+}
+
+/// two embedding gathers (`ids_a`, `ids_b` over one `table`), each row-summed by its own reduce node, added
+/// into the root; returns the program and the two kernel nodes that own the gathers.
+fn two_gather_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Op>, NodeId, NodeId) {
+    let mut program = Vec::new();
+    let table = append_input(
+        &mut program,
+        DType::Float32,
+        vec![Extent::Static(vocab), Extent::Static(dim)],
+        "table",
+    );
+    let ids_a = append_input(
+        &mut program,
+        DType::Int32,
+        vec![Extent::Static(seq)],
+        "ids_a",
+    );
+    let ids_b = append_input(
+        &mut program,
+        DType::Int32,
+        vec![Extent::Static(seq)],
+        "ids_b",
+    );
+    let first_gather = append_embedding_gather(&mut program, table, ids_a);
+    let first = append_row_sum(&mut program, first_gather);
+    let second_gather = append_embedding_gather(&mut program, table, ids_b);
+    let second = append_row_sum(&mut program, second_gather);
+    append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            operands: vec![
+                (first, IndexMap::Affine(map::projection(1, &[0]))),
+                (second, IndexMap::Affine(map::projection(1, &[0]))),
+            ],
+            name: None,
+        },
+    );
+    (program, first, second)
+}
+
+fn append_row_sum(program: &mut Vec<Op>, gathered: NodeId) -> NodeId {
+    append(
+        program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: gathered,
+            in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+            out_map: IndexMap::Affine(map::projection(2, &[0])),
+            keep: Keep::Reduce,
+            name: Some("row_sum".into()),
+        }),
+    )
+}
+
+fn faulting_node_for_two_gathers(
+    engine: Engine,
+    driver: Option<GpuDriver>,
+    ids_a: &[f32],
+    ids_b: &[f32],
+) -> (NodeId, NodeId, NodeId) {
+    let (vocab, dim, seq) = (16usize, 4usize, 2usize);
+    let (program, first, second) = two_gather_program(vocab as u32, dim as u32, seq as u32);
+    let table_data: Vec<f32> = (0..vocab * dim).map(|value| value as f32).collect();
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("table", QuantizedBlock::Float32(&table_data)),
+        ("ids_a", QuantizedBlock::Float32(ids_a)),
+        ("ids_b", QuantizedBlock::Float32(ids_b)),
+    ];
+    let mut plan = plan_named(
+        engine,
+        driver,
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans two gathers");
+    let error =
+        execute_plan_named(&mut plan, &named).expect_err("an out-of-range gather index must fault");
+    match error {
+        BackendError::Cuda(omega::CudaDriverError::GatherIndexOutOfRange { node, .. })
+        | BackendError::Tensor(proxima_tensor::TensorError::GatherIndexOutOfRange {
+            node, ..
+        }) => (node, first, second),
+        other => panic!("expected GatherIndexOutOfRange, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_fault_in_only_the_second_of_two_gathers_names_the_second_node() {
+    let (named_node, first, second) =
+        faulting_node_for_two_gathers(Engine::Gpu, Some(GpuDriver::Cuda), &[0.0, 3.0], &[1.0, 999.0]);
+    assert_ne!(first, second);
+    assert_eq!(named_node, second, "only the second gather faulted");
+}
+
+#[test]
+fn faults_in_both_gathers_name_the_same_node_on_cuda_as_on_cpu() {
+    let (ids_a, ids_b) = ([777.0, 3.0], [1.0, 999.0]);
+    let (cpu_node, _, _) = faulting_node_for_two_gathers(Engine::Cpu, None, &ids_a, &ids_b);
+    let (cuda_node, _, _) =
+        faulting_node_for_two_gathers(Engine::Gpu, Some(GpuDriver::Cuda), &ids_a, &ids_b);
+    assert_eq!(
+        cuda_node, cpu_node,
+        "the node a multi-fault graph names must match the cpu oracle"
+    );
+}
+
+#[test]
+fn a_single_gather_fault_names_the_gather_node() {
+    let (vocab, dim, seq) = (16usize, 4usize, 2usize);
+    let mut program = Vec::new();
+    let table = append_input(
+        &mut program,
+        DType::Float32,
+        vec![Extent::Static(vocab as u32), Extent::Static(dim as u32)],
+        "table",
+    );
+    let ids = append_input(
+        &mut program,
+        DType::Int32,
+        vec![Extent::Static(seq as u32)],
+        "ids",
+    );
+    let gather = append_embedding_gather(&mut program, table, ids);
+    let table_data: Vec<f32> = (0..vocab * dim).map(|value| value as f32).collect();
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("table", QuantizedBlock::Float32(&table_data)),
+        ("ids", QuantizedBlock::Float32(&[0.0, 999.0])),
+    ];
+    let mut plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the gather on cuda");
+    let error = execute_plan_named(&mut plan, &named).expect_err("must fault");
+    assert!(
+        matches!(
+            error,
+            BackendError::Cuda(omega::CudaDriverError::GatherIndexOutOfRange { node, index: 999, .. })
+                if node == gather
+        ),
+        "expected a fault naming {gather:?} at index 999, got {error:?}"
+    );
+}
+
 /// `weight[rows, k] * activation[k, 1]` summed over `k` -- the same program
 /// shape `wgpu_parity.rs::packed_matmul_program` runs against a packed wgpu
 /// weight, now exercising `cuda.rs`'s packed-operand codec table through the
