@@ -82,6 +82,8 @@ mod hybrid_forward;
 mod layer_runs;
 #[cfg(feature = "config")]
 mod program_spec;
+#[cfg(feature = "config")]
+mod run;
 mod recurrent_readout;
 #[cfg(all(test, feature = "config"))]
 #[allow(clippy::expect_used)]
