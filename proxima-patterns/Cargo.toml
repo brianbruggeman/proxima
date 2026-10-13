@@ -145,7 +145,7 @@ portable-atomic = { workspace = true, default-features = false, optional = true 
 proxima-build.workspace = true
 
 [dev-dependencies]
-proxima = { workspace = true, features = ["test-support-tokio"] }
+proxima = { package = "proxima-lib", path = "..", features = ["test-support-tokio"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util", "time", "sync"] }
 tempfile = { workspace = true }
 proxima-telemetry = { workspace = true }

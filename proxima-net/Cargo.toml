@@ -40,7 +40,7 @@ criterion = { workspace = true, features = ["cargo_bench_support"] }
 # forwarder for exactly that (`proxima-test/tokio-driver`, nothing more) —
 # see its doc there. This is a dev-only addition; it does not touch
 # proxima-net's own feature graph or production dependency closure.
-proxima = { workspace = true, features = ["test-support-tokio"] }
+proxima = { package = "proxima-lib", path = "..", features = ["test-support-tokio"] }
 proxima-runtime = { workspace = true }
 socket2 = { workspace = true }
 tempfile = { workspace = true }

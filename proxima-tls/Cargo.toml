@@ -31,7 +31,7 @@ rustls-platform-verifier = { version = "0.7.1", optional = true }
 # "tokio")]`, whose `run_tokio*` drivers live behind
 # `proxima-test/tokio-driver` — only reachable transitively through
 # `proxima`'s own `tokio` feature (mirrors proxima-kafka / proxima-mqtt).
-proxima = { workspace = true, features = ["test-support", "tokio"] }
+proxima = { package = "proxima-lib", path = "..", features = ["test-support", "tokio"] }
 proxima-net = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net"] }
 temp-env = { workspace = true }

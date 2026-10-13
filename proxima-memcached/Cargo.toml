@@ -105,7 +105,7 @@ proxima-net = { workspace = true, features = ["tokio"] }
 # behind `proxima-test/tokio-driver` — only reachable transitively through
 # `proxima`'s own `tokio` feature (mirrors `proxima-redis`'s identical
 # dev-dependency line for the same reason).
-proxima = { workspace = true, features = ["test-support", "tokio"] }
+proxima = { package = "proxima-lib", path = "..", features = ["test-support", "tokio"] }
 
 [[test]]
 name = "any_protocol_end_to_end"

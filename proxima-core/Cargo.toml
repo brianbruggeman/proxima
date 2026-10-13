@@ -98,8 +98,8 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"]
 loom = { workspace = true }
 # time/mod.rs tests use futures::executor::block_on (folded from proxima-time)
 futures = { workspace = true, features = ["std", "executor"] }
-proxima = { workspace = true, features = ["test-support"] }
-proxima-test = { path = "../proxima-test", version = "0.1.0", features = ["alloc-count"] }
+proxima = { package = "proxima-lib", path = "..", features = ["test-support"] }
+proxima-test = { path = "../proxima-test", features = ["alloc-count"] }
 temp-env.workspace = true
 
 [lints]

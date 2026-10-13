@@ -368,7 +368,7 @@ mqttbytes = { workspace = true }
 # echo-server tests pin `#[proxima::test(runtime = "tokio")]`, whose
 # `run_tokio*` drivers live behind `proxima-test/tokio-driver`. This is the
 # narrow forwarder for exactly that driver.
-proxima = { workspace = true, features = ["test-support", "test-support-tokio"] }
+proxima = { package = "proxima-lib", path = "..", features = ["test-support", "test-support-tokio"] }
 prost = { workspace = true, features = ["std", "derive"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tungstenite = { workspace = true }
@@ -376,7 +376,7 @@ stats_alloc = "0.1.10"
 proptest.workspace = true
 smoltcp = { version = "0.13.1", default-features = false, features = ["std", "socket-tcp", "proto-ipv4", "medium-ip"] }
 pgwire = { version = "0.28.0", default-features = false }
-proxima-net = { workspace = true, features = ["tokio"] }
+proxima-net = { path = "../proxima-net", default-features = false, features = ["tokio"] }
 redis-protocol.workspace = true
 rand_chacha = { version = "0.10.0", default-features = false }
 aws-lc-rs = { workspace = true, features = ["aws-lc-sys"] }

@@ -68,7 +68,7 @@ bon = { workspace = true, optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
 
 [dev-dependencies]
-proxima = { workspace = true, features = ["test-support-tokio"] }
+proxima = { package = "proxima-lib", path = "..", features = ["test-support-tokio"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "fs"] }
 # runtime-swap parity harness: drives the same seam against the prime backend

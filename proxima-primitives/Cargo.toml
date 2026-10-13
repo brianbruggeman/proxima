@@ -179,7 +179,7 @@ arrayvec.workspace = true
 async-lock = { workspace = true }
 futures = { workspace = true, features = ["std", "executor", "thread-pool"] }
 proxima-macros.workspace = true
-proxima-test = { path = "../proxima-test", version = "0.1.0", features = ["alloc-count"] }
+proxima-test = { path = "../proxima-test", features = ["alloc-count"] }
 
 [target."cfg(loom)".dependencies]
 async-lock = { workspace = true, features = ["loom"] }
@@ -203,7 +203,7 @@ tokio = { workspace = true, features = ["macros", "rt"], optional = true }
 # behind `proxima-test/tokio-driver` — only reachable transitively through
 # `proxima`'s own `tokio` feature (mirrors `proxima-listen`'s identical
 # dev-dependency line for the same reason).
-proxima = { workspace = true, features = ["test-support", "tokio"] }
+proxima = { package = "proxima-lib", path = "..", features = ["test-support", "tokio"] }
 proxima-runtime = { workspace = true, features = ["tokio"] }
 # tests use tokio::time::{sleep, timeout, advance, start_paused} for cancel-token
 # race + paused-clock interval tests, plus JoinSet/LocalSet swap-registry tests.
