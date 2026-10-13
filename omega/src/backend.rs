@@ -1894,9 +1894,9 @@ mod tests {
         DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, projection,
     };
 
-    use super::{BackendError, Engine, GpuDriver};
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use super::MetalError;
+    use super::{BackendError, Engine, GpuDriver};
 
     static ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
 
