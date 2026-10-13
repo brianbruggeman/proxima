@@ -13,20 +13,19 @@ use crate::generate::CudaGraphRequest;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 use proxima_core::ProximaError;
 
-struct DecodeStepEvaluation<'step, 'name, 'block, 'source> {
+struct DecodeStepEvaluation<'step, 'name, 'block> {
     program: &'step [Op],
     symbols: &'step [u64],
     named: &'step [(&'name str, QuantizedBlock<'block>)],
     outputs: &'step [NodeId],
     resident_names: &'step BTreeSet<&'name str>,
-    expert_sources: Option<&'step BTreeMap<NodeId, ExpertSource<'source>>>,
 }
 
 trait DecodeStepEvaluator {
     async fn evaluate_step(
         &mut self,
         runtime: &mut BackendRuntime,
-        step: DecodeStepEvaluation<'_, '_, '_, '_>,
+        step: DecodeStepEvaluation<'_, '_, '_>,
     ) -> Result<Evaluated, InteropError>;
 }
 
@@ -56,7 +55,7 @@ impl DecodeStepEvaluator for SyncDecodeStepEvaluator {
     async fn evaluate_step(
         &mut self,
         runtime: &mut BackendRuntime,
-        step: DecodeStepEvaluation<'_, '_, '_, '_>,
+        step: DecodeStepEvaluation<'_, '_, '_>,
     ) -> Result<Evaluated, InteropError> {
         runtime.evaluate(
             step.program,
@@ -64,7 +63,7 @@ impl DecodeStepEvaluator for SyncDecodeStepEvaluator {
             step.named,
             step.outputs,
             step.resident_names,
-            step.expert_sources,
+            None,
         )
     }
 }
@@ -93,7 +92,7 @@ where
     async fn evaluate_step(
         &mut self,
         runtime: &mut BackendRuntime,
-        step: DecodeStepEvaluation<'_, '_, '_, '_>,
+        step: DecodeStepEvaluation<'_, '_, '_>,
     ) -> Result<Evaluated, InteropError> {
         runtime
             .evaluate_async(
@@ -105,7 +104,7 @@ where
                     outputs: step.outputs,
                 },
                 step.resident_names,
-                step.expert_sources,
+                None,
             )
             .await
     }
@@ -3562,6 +3561,16 @@ impl<'file> LoadedModel<'file> {
             && serving_config.kv_cache_key_quant == GgmlType::F32
             && let Some(single_range) = &self.single_range
         {
+            let mut placed_token_error: Option<InteropError> = None;
+            let mut placed_on_token = |event: TokenEvent<'_>| {
+                match poll_ready_decode(async { Ok(token_producer.produce(event).await) }) {
+                    Ok(flow) => flow,
+                    Err(error) => {
+                        placed_token_error = Some(error);
+                        ControlFlow::Break(())
+                    }
+                }
+            };
             let (generated_ids, text, stopped_by_eos) = self.run_decode_loop_placed_kv(
                 single_range,
                 ids.clone(),
@@ -3574,8 +3583,11 @@ impl<'file> LoadedModel<'file> {
                 runtime,
                 token_override,
                 logits_sink,
-                on_token,
+                &mut placed_on_token,
             )?;
+            if let Some(error) = placed_token_error {
+                return Err(error);
+            }
             // No host-side `LayerCacheState` exists on this path -- the
             // KV cache never left the device (`SingleRangeProgram`'s own
             // doc) -- so there is nothing real to report here. Callers
@@ -3743,8 +3755,7 @@ impl<'file> LoadedModel<'file> {
                     *even_odd_row,
                     layer,
                     "rotary key",
-                )
-                .await?;
+                )?;
                 let pass_byte_length = dense_attention_placed_byte_length(
                     self.family(),
                     dense_attention_positions,
@@ -5166,13 +5177,10 @@ did not hold every cached position)",
                     if let (true, Some((_, _, _, logits_buffer))) = (greedy_step, &greedy_program) {
                         ssm_output_placements.push((active_logits_root, logits_buffer, 0));
                     }
-                    // The `StepGuard` (shadowing the lock below) closes this
+                    // The `StepGuard` (`step_guard`, below) closes this
                     // step on every exit -- normal return and an early `?`
                     // error alike -- so the source-snapshot boundary cannot
                     // remain open after a failed evaluation.
-                    let mut expert_slab_guard = self.expert_slab.lock();
-                    let mut expert_slab_guard = expert_slab_guard.begin_step();
-
                     // the routed segment plan `moe_pre_gather_plan` builds
                     // is sliced from `self.program`'s own node ids
                     // (`self.moe_layer_diagnostics`, `self.logits_root`);
@@ -5196,488 +5204,511 @@ did not hold every cached position)",
                     );
                     #[cfg(not(feature = "gpu"))]
                     let monolithic_all_low = false;
-                    if pre_gather {
-                        expert_slab_guard.clear_selected_experts_for_step();
-                    }
+                    #[cfg(feature = "instrument")]
+                    let root_select_ticks;
+                    #[cfg(feature = "instrument")]
+                    let evaluate_started;
+                    let evaluated_in_step: Option<Evaluated> = {
+                        let mut slab_lock = self.expert_slab.lock();
+                        let mut step_guard = slab_lock.begin_step();
+                        if pre_gather {
+                            step_guard.clear_selected_experts_for_step();
+                        }
 
-                    // This gather's own [`proxima_tensor::cpu::ExpertSource`]
-                    // snapshot -- built after the residency boundary and read by
-                    // `run_reduce_with_quantized_weights` under the SAME weight
-                    // `NodeId` [`crate::bind::build_expert_slab`] bound it under,
-                    // so a dense checkpoint's empty slab costs one `BTreeMap`
-                    // miss per gathered reduce and changes nothing else.
-                    let mut expert_entries_scratch: Vec<(
-                        NodeId,
-                        Vec<proxima_tensor::cpu::ExpertEntry<'_>>,
-                    )> = Vec::new();
-                    // a GPU engine never substitutes these sources (see the
-                    // `expert_source_substitutions` arm below), so skip the build
-                    let expert_sources = if runtime.uses_gpu() {
-                        None
-                    } else {
-                        let expert_sources =
-                            expert_slab_guard.sources_for_step(&mut expert_entries_scratch)?;
-                        // the slab keys its sources by the decode program's nodes; a
-                        // verify program numbers the same weight leaves differently
-                        Some(if recurrent_verify.is_some() {
-                            expert_sources
-                                .into_iter()
-                                .map(|(node, source)| {
-                                    let name = self
-                                        .program
-                                        .get(node.0 as usize)
-                                        .and_then(Op::name)
-                                        .ok_or(InteropError::MissingEvaluatedNode { node })?;
-                                    Ok((find_input_node(active_program, name)?, source))
-                                })
-                                .collect::<Result<BTreeMap<_, _>, InteropError>>()?
+                        // This gather's own [`proxima_tensor::cpu::ExpertSource`]
+                        // snapshot -- built after the residency boundary and read by
+                        // `run_reduce_with_quantized_weights` under the SAME weight
+                        // `NodeId` [`crate::bind::build_expert_slab`] bound it under,
+                        // so a dense checkpoint's empty slab costs one `BTreeMap`
+                        // miss per gathered reduce and changes nothing else.
+                        let mut expert_entries_scratch: Vec<(
+                            NodeId,
+                            Vec<proxima_tensor::cpu::ExpertEntry<'_>>,
+                        )> = Vec::new();
+                        // a GPU engine never substitutes these sources (see the
+                        // `expert_source_substitutions` arm below), so skip the build
+                        let expert_sources = if runtime.uses_gpu() {
+                            None
                         } else {
-                            expert_sources
-                        })
-                    };
-                    #[cfg(feature = "gpu")]
-                    let mut all_low_expert_scratch = Vec::new();
-                    #[cfg(feature = "gpu")]
-                    let mut layer_window_expert_scratch = Vec::new();
-                    #[cfg(feature = "gpu")]
-                    let all_low_expert_sources = if monolithic_all_low {
-                        let sidecar = self.expert_sidecar.as_ref().ok_or_else(|| {
-                            InteropError::PreGatherExecutionUnsupported {
-                                architecture: String::from(self.family()),
-                                reason: String::from(
-                                    "monolithic all-low execution requires an expert sidecar",
-                                ),
-                            }
-                        })?;
-                        if !sidecar.preserves_source_codecs() {
-                            return Err(InteropError::PreGatherExecutionUnsupported {
-                                architecture: String::from(self.family()),
-                                reason: String::from(
-                                    "monolithic all-low execution requires a byte-preserving sidecar",
-                                ),
-                            });
-                        }
-                        if let Some(memory_limit) = serving_config.gpu_memory_limit_bytes {
-                            let all_low_bytes = sidecar.all_low_bytes();
-                            if all_low_bytes > memory_limit {
-                                return Err(InteropError::PreGatherExecutionUnsupported {
+                            let expert_sources =
+                                step_guard.sources_for_step(&mut expert_entries_scratch)?;
+                            // the slab keys its sources by the decode program's nodes; a
+                            // verify program numbers the same weight leaves differently
+                            Some(if recurrent_verify.is_some() {
+                                expert_sources
+                                    .into_iter()
+                                    .map(|(node, source)| {
+                                        let name = self
+                                            .program
+                                            .get(node.0 as usize)
+                                            .and_then(Op::name)
+                                            .ok_or(InteropError::MissingEvaluatedNode { node })?;
+                                        Ok((find_input_node(active_program, name)?, source))
+                                    })
+                                    .collect::<Result<BTreeMap<_, _>, InteropError>>()?
+                            } else {
+                                expert_sources
+                            })
+                        };
+                        #[cfg(feature = "gpu")]
+                        let mut all_low_expert_scratch = Vec::new();
+                        #[cfg(feature = "gpu")]
+                        let mut layer_window_expert_scratch = Vec::new();
+                        #[cfg(feature = "gpu")]
+                        let all_low_expert_sources = if monolithic_all_low {
+                            let sidecar = self.expert_sidecar.as_ref().ok_or_else(|| {
+                                InteropError::PreGatherExecutionUnsupported {
                                     architecture: String::from(self.family()),
-                                    reason: alloc::format!(
-                                        "monolithic all-low source table is {all_low_bytes} bytes, above the configured memory limit {memory_limit}"
+                                    reason: String::from(
+                                        "monolithic all-low execution requires an expert sidecar",
                                     ),
-                                });
-                            }
-                        }
-                        Some(
-                            expert_slab_guard
-                                .all_low_sources_for_step(sidecar, &mut all_low_expert_scratch)?,
-                        )
-                    } else {
-                        None
-                    };
-                    // The packed checkpoint views carry the expert input's
-                    // shape and codec through plan resolution. They remain
-                    // borrowed mmap ranges: Metal's expert-source executor
-                    // excludes every substituted node from ordinary uploads,
-                    // then binds only the routed payload and descriptor tables.
-                    debug!(
-                        pre_gather,
-                        sidecar = self.expert_sidecar.is_some(),
-                        gpu = runtime.uses_gpu(),
-                        "moe_pre_gather_enabled"
-                    );
-                    if pre_gather
-                        && !monolithic_all_low
-                        && moe_pre_gather_plan.as_ref().is_none_or(|plan| {
-                            plan.symbols != symbols
-                                || plan.gdn_backend != serving_config.gdn_prefill_backend
-                                || plan.persistent_cuts != serving_config.moe_persistent_cuts
-                        })
-                    {
-                        moe_pre_gather_plan = Some(self.moe_pre_gather_plan(
-                            &symbols,
-                            serving_config.gdn_prefill_backend,
-                            serving_config.moe_persistent_cuts,
-                        )?);
-                    }
-                    // Ordinary Metal full-graph execution keeps the named
-                    // checkpoint stack. The explicit monolithic all-low arm
-                    // is the only exception, and its byte-preserving and
-                    // memory-limit guards run immediately above.
-                    #[cfg(feature = "gpu")]
-                    let expert_source_substitutions = if monolithic_all_low {
-                        all_low_expert_sources.as_ref()
-                    } else {
-                        expert_sources.as_ref()
-                    };
-                    #[cfg(not(feature = "gpu"))]
-                    let expert_source_substitutions = expert_sources.as_ref();
-
-                    let current_sources = RefCell::new(CurrentExpertSources::new());
-                    // Own the Arc-backed sidecar handle inside the callback so
-                    // its borrow is not tied to the short `&self` call.
-                    #[cfg(feature = "moe-expert-prefetch")]
-                    let expert_sidecar_for_gather = self.expert_sidecar.clone();
-                    let mut before_moe_gather =
-                        |layer: usize,
-                         position: u64,
-                         routes: &[crate::residency::RoutedExpert],
-                         expert_slab: &mut crate::expert_slab::ExpertSlab<'file>|
-                         -> Result<(), InteropError> {
-                            current_sources.borrow_mut().clear();
-                            let mut selected_experts = [0_u32; 16];
-                            if routes.len() > selected_experts.len() {
+                                }
+                            })?;
+                            if !sidecar.preserves_source_codecs() {
                                 return Err(InteropError::PreGatherExecutionUnsupported {
                                     architecture: String::from(self.family()),
                                     reason: String::from(
-                                        "router selected more experts than the fixed staging bound",
+                                        "monolithic all-low execution requires a byte-preserving sidecar",
                                     ),
                                 });
                             }
-                            for (index, route) in routes.iter().enumerate() {
-                                selected_experts[index] = route.expert as u32;
+                            if let Some(memory_limit) = serving_config.gpu_memory_limit_bytes {
+                                let all_low_bytes = sidecar.all_low_bytes();
+                                if all_low_bytes > memory_limit {
+                                    return Err(InteropError::PreGatherExecutionUnsupported {
+                                        architecture: String::from(self.family()),
+                                        reason: alloc::format!(
+                                            "monolithic all-low source table is {all_low_bytes} bytes, above the configured memory limit {memory_limit}"
+                                        ),
+                                    });
+                                }
                             }
-                            trace!(
-                                layer = layer as u64,
-                                position,
-                                experts = ?&selected_experts[..routes.len()],
-                                "moe_route"
-                            );
-                            #[cfg(feature = "moe-expert-prefetch")]
-                            if moe_expert_prefetch_enabled {
-                                if let Some(previous_history) = moe_route_history.get(layer) {
-                                    for predicted in
-                                        &previous_history.routes[..previous_history.len]
-                                    {
-                                        moe_prefetch_prediction_count += 1;
-                                        if routes
-                                            .iter()
-                                            .any(|route| route.expert == predicted.expert)
+                            Some(
+                                step_guard
+                                    .all_low_sources_for_step(sidecar, &mut all_low_expert_scratch)?,
+                            )
+                        } else {
+                            None
+                        };
+                        // The packed checkpoint views carry the expert input's
+                        // shape and codec through plan resolution. They remain
+                        // borrowed mmap ranges: Metal's expert-source executor
+                        // excludes every substituted node from ordinary uploads,
+                        // then binds only the routed payload and descriptor tables.
+                        debug!(
+                            pre_gather,
+                            sidecar = self.expert_sidecar.is_some(),
+                            gpu = runtime.uses_gpu(),
+                            "moe_pre_gather_enabled"
+                        );
+                        if pre_gather
+                            && !monolithic_all_low
+                            && moe_pre_gather_plan.as_ref().is_none_or(|plan| {
+                                plan.symbols != symbols
+                                    || plan.gdn_backend != serving_config.gdn_prefill_backend
+                                    || plan.persistent_cuts != serving_config.moe_persistent_cuts
+                            })
+                        {
+                            moe_pre_gather_plan = Some(self.moe_pre_gather_plan(
+                                &symbols,
+                                serving_config.gdn_prefill_backend,
+                                serving_config.moe_persistent_cuts,
+                            )?);
+                        }
+                        // Ordinary Metal full-graph execution keeps the named
+                        // checkpoint stack. The explicit monolithic all-low arm
+                        // is the only exception, and its byte-preserving and
+                        // memory-limit guards run immediately above.
+                        #[cfg(feature = "gpu")]
+                        let expert_source_substitutions = if monolithic_all_low {
+                            all_low_expert_sources.as_ref()
+                        } else {
+                            expert_sources.as_ref()
+                        };
+                        #[cfg(not(feature = "gpu"))]
+                        let expert_source_substitutions = expert_sources.as_ref();
+
+                        let current_sources = RefCell::new(CurrentExpertSources::new());
+                        // Own the Arc-backed sidecar handle inside the callback so
+                        // its borrow is not tied to the short `&self` call.
+                        #[cfg(feature = "moe-expert-prefetch")]
+                        let expert_sidecar_for_gather = self.expert_sidecar.clone();
+                        let mut before_moe_gather =
+                            |layer: usize,
+                             position: u64,
+                             routes: &[crate::residency::RoutedExpert],
+                             expert_slab: &mut crate::expert_slab::ExpertSlab<'file>|
+                             -> Result<(), InteropError> {
+                                current_sources.borrow_mut().clear();
+                                let mut selected_experts = [0_u32; 16];
+                                if routes.len() > selected_experts.len() {
+                                    return Err(InteropError::PreGatherExecutionUnsupported {
+                                        architecture: String::from(self.family()),
+                                        reason: String::from(
+                                            "router selected more experts than the fixed staging bound",
+                                        ),
+                                    });
+                                }
+                                for (index, route) in routes.iter().enumerate() {
+                                    selected_experts[index] = route.expert as u32;
+                                }
+                                trace!(
+                                    layer = layer as u64,
+                                    position,
+                                    experts = ?&selected_experts[..routes.len()],
+                                    "moe_route"
+                                );
+                                #[cfg(feature = "moe-expert-prefetch")]
+                                if moe_expert_prefetch_enabled {
+                                    if let Some(previous_history) = moe_route_history.get(layer) {
+                                        for predicted in
+                                            &previous_history.routes[..previous_history.len]
                                         {
-                                            moe_prefetch_hit_count += 1;
-                                        } else {
-                                            moe_prefetch_overfetch_count += 1;
+                                            moe_prefetch_prediction_count += 1;
+                                            if routes
+                                                .iter()
+                                                .any(|route| route.expert == predicted.expert)
+                                            {
+                                                moe_prefetch_hit_count += 1;
+                                            } else {
+                                                moe_prefetch_overfetch_count += 1;
+                                            }
+                                        }
+                                    }
+                                    if let (Some(policy), Some(sidecar)) =
+                                        (moe_residency.as_ref(), expert_sidecar_for_gather.as_ref())
+                                        && let Some(next_history) =
+                                            moe_route_history.get(layer.saturating_add(1))
+                                    {
+                                        let candidates = policy
+                                            .prefetch_candidates::<16>(
+                                                layer.saturating_add(1),
+                                                &next_history.routes[..next_history.len],
+                                                f32::NEG_INFINITY,
+                                            )
+                                            .map_err(|error| {
+                                                InteropError::PreGatherExecutionUnsupported {
+                                                    architecture: String::from(self.family()),
+                                                    reason: error.to_string(),
+                                                }
+                                            })?;
+                                        let mut advised_bytes = 0_u64;
+                                        for candidate in candidates.as_slice().iter().flatten() {
+                                            let candidate_bytes =
+                                                sidecar.advise_expert_low(candidate.address)?;
+                                            advised_bytes =
+                                                advised_bytes.saturating_add(candidate_bytes);
+                                            moe_prefetch_advised_bytes = moe_prefetch_advised_bytes
+                                                .saturating_add(candidate_bytes);
+                                        }
+                                        moe_prefetch_advice_events += 1;
+                                        if advised_bytes > 0 {
+                                            trace!(
+                                                layer = layer as u64,
+                                                next_layer = layer.saturating_add(1) as u64,
+                                                candidates = candidates.as_slice().len() as u64,
+                                                advised_bytes,
+                                                "moe_expert_prefetch"
+                                            );
                                         }
                                     }
                                 }
-                                if let (Some(policy), Some(sidecar)) =
-                                    (moe_residency.as_ref(), expert_sidecar_for_gather.as_ref())
-                                    && let Some(next_history) =
-                                        moe_route_history.get(layer.saturating_add(1))
+                                expert_slab
+                                    .add_selected_experts(layer, &selected_experts[..routes.len()]);
+                                #[cfg(feature = "moe-expert-prefetch")]
+                                if moe_expert_prefetch_enabled
+                                    && let Some(history) = moe_route_history.get_mut(layer)
                                 {
-                                    let candidates = policy
-                                        .prefetch_candidates::<16>(
-                                            layer.saturating_add(1),
-                                            &next_history.routes[..next_history.len],
-                                            f32::NEG_INFINITY,
-                                        )
-                                        .map_err(|error| {
-                                            InteropError::PreGatherExecutionUnsupported {
-                                                architecture: String::from(self.family()),
-                                                reason: error.to_string(),
-                                            }
-                                        })?;
-                                    let mut advised_bytes = 0_u64;
-                                    for candidate in candidates.as_slice().iter().flatten() {
-                                        let candidate_bytes =
-                                            sidecar.advise_expert_low(candidate.address)?;
-                                        advised_bytes =
-                                            advised_bytes.saturating_add(candidate_bytes);
-                                        moe_prefetch_advised_bytes = moe_prefetch_advised_bytes
-                                            .saturating_add(candidate_bytes);
-                                    }
-                                    moe_prefetch_advice_events += 1;
-                                    if advised_bytes > 0 {
-                                        trace!(
-                                            layer = layer as u64,
-                                            next_layer = layer.saturating_add(1) as u64,
-                                            candidates = candidates.as_slice().len() as u64,
-                                            advised_bytes,
-                                            "moe_expert_prefetch"
-                                        );
+                                    history.len = routes.len();
+                                    history.routes[..routes.len()].copy_from_slice(routes);
+                                }
+                                if let Some(policy) = moe_residency.as_mut() {
+                                    // Capture the precision decision before the
+                                    // gather. Retained-set reconciliation happens
+                                    // once after the whole token, never between
+                                    // layers of this token.
+                                    for route in routes {
+                                        let [decision] =
+                                            policy.observe(position, layer, [*route]).map_err(
+                                                |error| InteropError::PreGatherExecutionUnsupported {
+                                                    architecture: String::from(self.family()),
+                                                    reason: error.to_string(),
+                                                },
+                                            )?;
+                                        current_sources.borrow_mut().push(self.family(), decision)?;
                                     }
                                 }
-                            }
-                            expert_slab
-                                .add_selected_experts(layer, &selected_experts[..routes.len()]);
-                            #[cfg(feature = "moe-expert-prefetch")]
-                            if moe_expert_prefetch_enabled
-                                && let Some(history) = moe_route_history.get_mut(layer)
-                            {
-                                history.len = routes.len();
-                                history.routes[..routes.len()].copy_from_slice(routes);
-                            }
-                            if let Some(policy) = moe_residency.as_mut() {
-                                // Capture the precision decision before the
-                                // gather. Retained-set reconciliation happens
-                                // once after the whole token, never between
-                                // layers of this token.
-                                for route in routes {
-                                    let [decision] =
-                                        policy.observe(position, layer, [*route]).map_err(
-                                            |error| InteropError::PreGatherExecutionUnsupported {
-                                                architecture: String::from(self.family()),
-                                                reason: error.to_string(),
-                                            },
-                                        )?;
-                                    current_sources.borrow_mut().push(self.family(), decision)?;
-                                }
-                            }
-                            Ok(())
-                        };
+                                Ok(())
+                            };
 
-                    #[cfg(feature = "instrument")]
-                    let root_select_ticks = elapsed_ticks(root_select_started);
-                    #[cfg(feature = "instrument")]
-                    let evaluate_started = read_ticks();
-                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    #[cfg(feature = "instrument")]
-                    let monolithic_profile_target = std::env::var("PROXIMA_METAL_OP_PROFILE_STEP")
-                        .ok()
-                        .and_then(|value| value.parse::<usize>().ok())
-                        == Some(step);
-                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    #[cfg(not(feature = "instrument"))]
-                    let monolithic_profile_target = false;
-                    // `PROXIMA_METAL_DISPATCH_PROFILE_STEP`'s own reader for
-                    // THIS step's two-range/non-placed-KV shape -- the E2B checkpoint's
-                    // real forward (`KvCacheShape::Custom` excludes it from
-                    // `LoadedModel::single_range`, so it never reaches the
-                    // placed-KV branch above, and it is not recurrent-routed so it
-                    // never reaches `monolithic_profile_target` either) falls
-                    // through every arm above to plain `runtime.evaluate`
-                    // below. Same default-off, one-env-var-per-step
-                    // convention as `monolithic_profile_target` and the
-                    // single-range path's own `PROXIMA_METAL_DISPATCH_PROFILE_STEP`
-                    // reader (`Self::run_decode_loop_placed_kv`, this file
-                    // around line 4134).
-                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    #[cfg(feature = "instrument")]
-                    let dispatch_profile_target =
-                        std::env::var("PROXIMA_METAL_DISPATCH_PROFILE_STEP")
+                        #[cfg(feature = "instrument")]
+                        {
+                            root_select_ticks = elapsed_ticks(root_select_started);
+                            evaluate_started = read_ticks();
+                        }
+                        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                        #[cfg(feature = "instrument")]
+                        let monolithic_profile_target = std::env::var("PROXIMA_METAL_OP_PROFILE_STEP")
                             .ok()
                             .and_then(|value| value.parse::<usize>().ok())
                             == Some(step);
-                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    #[cfg(not(feature = "instrument"))]
-                    let dispatch_profile_target = false;
-                    // ROW 329: this step's encoder-split result, if
-                    // `dispatch_profile_target` below actually takes it --
-                    // declared here (not inside the match arm) so the
-                    // post-match `metal_stage` snapshot a few lines down can
-                    // read it out, same convention as
-                    // `run_decode_loop_placed_kv`'s own `encoder_split_ns`.
-                    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-                    let mut encoder_split_ns: Option<(u64, u64)> = None;
-                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    let evaluated = if monolithic_profile_target {
+                        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                        #[cfg(not(feature = "instrument"))]
+                        let monolithic_profile_target = false;
+                        // `PROXIMA_METAL_DISPATCH_PROFILE_STEP`'s own reader for
+                        // THIS step's two-range/non-placed-KV shape -- the E2B checkpoint's
+                        // real forward (`KvCacheShape::Custom` excludes it from
+                        // `LoadedModel::single_range`, so it never reaches the
+                        // placed-KV branch above, and it is not recurrent-routed so it
+                        // never reaches `monolithic_profile_target` either) falls
+                        // through every arm above to plain `runtime.evaluate`
+                        // below. Same default-off, one-env-var-per-step
+                        // convention as `monolithic_profile_target` and the
+                        // single-range path's own `PROXIMA_METAL_DISPATCH_PROFILE_STEP`
+                        // reader (`Self::run_decode_loop_placed_kv`, this file
+                        // around line 4134).
+                        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                         #[cfg(feature = "instrument")]
-                        {
-                            if let Some(expert_sources) = expert_source_substitutions {
-                                let (evaluated, timings) = runtime
-                                    .evaluate_op_timed_with_expert_sources(
-                                        active_program,
-                                        &symbols,
-                                        &named_blocks,
-                                        &roots,
-                                        &resident_names,
-                                        expert_sources,
-                                    )?;
-                                report_op_timings(step, &timings, active_program);
-                                evaluated
-                            } else {
-                                let (evaluated, timings, sampling_mode, _split_ns) = runtime
+                        let dispatch_profile_target =
+                            std::env::var("PROXIMA_METAL_DISPATCH_PROFILE_STEP")
+                                .ok()
+                                .and_then(|value| value.parse::<usize>().ok())
+                                == Some(step);
+                        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                        #[cfg(not(feature = "instrument"))]
+                        let dispatch_profile_target = false;
+                        // ROW 329: this step's encoder-split result, if
+                        // `dispatch_profile_target` below actually takes it --
+                        // declared here (not inside the match arm) so the
+                        // post-match `metal_stage` snapshot a few lines down can
+                        // read it out, same convention as
+                        // `run_decode_loop_placed_kv`'s own `encoder_split_ns`.
+                        #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                        let mut encoder_split_ns: Option<(u64, u64)> = None;
+                        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                        let evaluated_in_step: Option<Evaluated> = if monolithic_profile_target {
+                            #[cfg(feature = "instrument")]
+                            {
+                                if let Some(expert_sources) = expert_source_substitutions {
+                                    let (evaluated, timings) = runtime
+                                        .evaluate_op_timed_with_expert_sources(
+                                            active_program,
+                                            &symbols,
+                                            &named_blocks,
+                                            &roots,
+                                            &resident_names,
+                                            expert_sources,
+                                        )?;
+                                    report_op_timings(step, &timings, active_program);
+                                    Some(evaluated)
+                                } else {
+                                    let (evaluated, timings, sampling_mode, _split_ns) = runtime
+                                        .evaluate_dispatch_timed_with_placements(
+                                            active_program,
+                                            &symbols,
+                                            &named_blocks,
+                                            &roots,
+                                            &resident_names,
+                                            &ssm_input_placements,
+                                            &ssm_output_placements,
+                                        )?;
+                                    info!(
+                                        step = step as u64,
+                                        sampling_mode, "dispatch_profile: routed-expert full graph"
+                                    );
+                                    report_op_timings(step, &timings, active_program);
+                                    Some(evaluated)
+                                }
+                            }
+                            #[cfg(not(feature = "instrument"))]
+                            unreachable!("the profiler is compiled out without instrumentation")
+                        } else if pre_gather && !monolithic_all_low {
+                            let pre_gather_plan = moe_pre_gather_plan.as_ref().ok_or_else(|| {
+                                InteropError::PreGatherExecutionUnsupported {
+                                    architecture: String::from(self.family()),
+                                    reason: String::from("the routed segment plan was not prepared"),
+                                }
+                            })?;
+                            Some(self.evaluate_moe_pre_gather(
+                                runtime,
+                                pre_gather_plan,
+                                &symbols,
+                                // planning still needs the original expert input
+                                // metadata; execution replaces those bindings
+                                // with the selected source table before staging.
+                                PreGatherContext {
+                                    named: &named_blocks,
+                                    outputs: &roots,
+                                    resident_names: &resident_names,
+                                    expert_slab: step_guard.as_slab_mut(),
+                                    sidecar_read_scratch: &mut sidecar_read_scratch,
+                                    current_sources: &current_sources,
+                                    position_offset: cached_len,
+                                    layer_window: serving_config.moe_layer_window,
+                                    marker: PhantomData,
+                                    #[cfg(feature = "gpu")]
+                                    sidecar: self.expert_sidecar.as_ref(),
+                                    #[cfg(feature = "gpu")]
+                                    all_low_expert_scratch: &mut layer_window_expert_scratch,
+                                    #[cfg(all(
+                                        feature = "metal-output-placement",
+                                        target_os = "macos"
+                                    ))]
+                                    ssm_placement: Some(&SsmPlacement {
+                                        input_nodes: &ssm_state_input_nodes,
+                                        buffers: &ssm_state_buffers,
+                                        maximum_layer: ssm_placement_max_layer,
+                                        use_second_as_input: !cached_len.is_multiple_of(2),
+                                    }),
+                                    #[cfg(all(
+                                        feature = "metal-output-placement",
+                                        target_os = "macos"
+                                    ))]
+                                    dense_attention_placement: Some(&DenseAttentionPlacement {
+                                        input_nodes: &dense_attention_input_nodes,
+                                        buffers: &dense_attention_buffers,
+                                    }),
+                                },
+                                &mut before_moe_gather,
+                            )?)
+                        } else if use_metal_output_placements(
+                            !ssm_input_placements.is_empty() || !ssm_output_placements.is_empty(),
+                            monolithic_all_low,
+                        ) {
+                            Some(runtime.evaluate_with_placements(
+                                active_program,
+                                &symbols,
+                                &named_blocks,
+                                &roots,
+                                &resident_names,
+                                &ssm_input_placements,
+                                &ssm_output_placements,
+                                expert_source_substitutions,
+                            )?)
+                        } else if dispatch_profile_target {
+                            #[cfg(feature = "instrument")]
+                            {
+                                // Empty placement slices: `plan_named_with_placed_inputs`
+                                // with `placed_input_nodes: &[]` is byte-identical to
+                                // `plan_named` (`omega/src/metal/placements_execute_named.rs:594`
+                                // literally delegates to it with `&[]`), and
+                                // `execute_plan_with_placements_dispatch_timed` with
+                                // empty `input_placed`/`output_placed` maps takes the
+                                // same `upload_block` path every node takes in
+                                // `runtime.evaluate` below -- so this arm reuses the
+                                // placed-KV timed executor to time the SAME unplaced
+                                // shape the sliding-pattern family's two-range path actually runs, never a
+                                // fabricated placement.
+                                let (evaluated, timings, sampling_mode, split_ns) = runtime
                                     .evaluate_dispatch_timed_with_placements(
                                         active_program,
                                         &symbols,
                                         &named_blocks,
                                         &roots,
                                         &resident_names,
-                                        &ssm_input_placements,
-                                        &ssm_output_placements,
+                                        &[],
+                                        &[],
                                     )?;
                                 info!(
                                     step = step as u64,
-                                    sampling_mode, "dispatch_profile: routed-expert full graph"
+                                    sampling_mode, "dispatch_profile: two-range full graph"
                                 );
                                 report_op_timings(step, &timings, active_program);
-                                evaluated
+                                encoder_split_ns = split_ns;
+                                Some(evaluated)
                             }
-                        }
-                        #[cfg(not(feature = "instrument"))]
-                        unreachable!("the profiler is compiled out without instrumentation")
-                    } else if pre_gather && !monolithic_all_low {
-                        let pre_gather_plan = moe_pre_gather_plan.as_ref().ok_or_else(|| {
-                            InteropError::PreGatherExecutionUnsupported {
-                                architecture: String::from(self.family()),
-                                reason: String::from("the routed segment plan was not prepared"),
-                            }
-                        })?;
-                        self.evaluate_moe_pre_gather(
-                            runtime,
-                            pre_gather_plan,
-                            &symbols,
-                            // planning still needs the original expert input
-                            // metadata; execution replaces those bindings
-                            // with the selected source table before staging.
-                            PreGatherContext {
-                                named: &named_blocks,
-                                outputs: &roots,
-                                resident_names: &resident_names,
-                                expert_slab: expert_slab_guard.as_slab_mut(),
-                                sidecar_read_scratch: &mut sidecar_read_scratch,
-                                current_sources: &current_sources,
-                                position_offset: cached_len,
-                                layer_window: serving_config.moe_layer_window,
-                                marker: PhantomData,
-                                #[cfg(feature = "gpu")]
-                                sidecar: self.expert_sidecar.as_ref(),
-                                #[cfg(feature = "gpu")]
-                                all_low_expert_scratch: &mut layer_window_expert_scratch,
-                                #[cfg(all(
-                                    feature = "metal-output-placement",
-                                    target_os = "macos"
-                                ))]
-                                ssm_placement: Some(&SsmPlacement {
-                                    input_nodes: &ssm_state_input_nodes,
-                                    buffers: &ssm_state_buffers,
-                                    maximum_layer: ssm_placement_max_layer,
-                                    use_second_as_input: !cached_len.is_multiple_of(2),
-                                }),
-                                #[cfg(all(
-                                    feature = "metal-output-placement",
-                                    target_os = "macos"
-                                ))]
-                                dense_attention_placement: Some(&DenseAttentionPlacement {
-                                    input_nodes: &dense_attention_input_nodes,
-                                    buffers: &dense_attention_buffers,
-                                }),
-                            },
-                            &mut before_moe_gather,
-                        )?
-                    } else if use_metal_output_placements(
-                        !ssm_input_placements.is_empty() || !ssm_output_placements.is_empty(),
-                        monolithic_all_low,
-                    ) {
-                        runtime.evaluate_with_placements(
-                            active_program,
-                            &symbols,
-                            &named_blocks,
-                            &roots,
-                            &resident_names,
-                            &ssm_input_placements,
-                            &ssm_output_placements,
-                            expert_source_substitutions,
-                        )?
-                    } else if dispatch_profile_target {
-                        #[cfg(feature = "instrument")]
-                        {
-                            // Empty placement slices: `plan_named_with_placed_inputs`
-                            // with `placed_input_nodes: &[]` is byte-identical to
-                            // `plan_named` (`omega/src/metal/placements_execute_named.rs:594`
-                            // literally delegates to it with `&[]`), and
-                            // `execute_plan_with_placements_dispatch_timed` with
-                            // empty `input_placed`/`output_placed` maps takes the
-                            // same `upload_block` path every node takes in
-                            // `runtime.evaluate` below -- so this arm reuses the
-                            // placed-KV timed executor to time the SAME unplaced
-                            // shape the sliding-pattern family's two-range path actually runs, never a
-                            // fabricated placement.
-                            let (evaluated, timings, sampling_mode, split_ns) = runtime
-                                .evaluate_dispatch_timed_with_placements(
-                                    active_program,
-                                    &symbols,
-                                    &named_blocks,
-                                    &roots,
-                                    &resident_names,
-                                    &[],
-                                    &[],
-                                )?;
-                            info!(
-                                step = step as u64,
-                                sampling_mode, "dispatch_profile: two-range full graph"
+                            #[cfg(not(feature = "instrument"))]
+                            unreachable!("the profiler is compiled out without instrumentation")
+                        } else if let Some(sources) = expert_source_substitutions {
+                            Some(runtime.evaluate(
+                                active_program,
+                                &symbols,
+                                &named_blocks,
+                                &roots,
+                                &resident_names,
+                                Some(sources),
+                            )?)
+                        } else {
+                            None
+                        };
+                        #[cfg(all(
+                            feature = "metal-output-placement",
+                            feature = "instrument",
+                            target_os = "macos"
+                        ))]
+                        if let Some((_, output_buffer, _)) = ssm_output_placements.first() {
+                            debug!(
+                                step = (cached_len + batch_index) as u64,
+                                layer = 0_u64,
+                                state_out_placed_ptr =
+                                    omega::placed_buffer_identity(output_buffer) as u64,
+                                state_out_first4 = ?read_placed_buffer_f32(output_buffer, 0, 4),
+                                "row 555: interop layer-0 ssm placement post-dispatch"
                             );
-                            report_op_timings(step, &timings, active_program);
-                            encoder_split_ns = split_ns;
-                            evaluated
                         }
-                        #[cfg(not(feature = "instrument"))]
-                        unreachable!("the profiler is compiled out without instrumentation")
-                    } else {
-                        evaluator
-                            .evaluate_step(
+                        #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+                        let evaluated_in_step: Option<Evaluated> = if pre_gather && !monolithic_all_low {
+                            let pre_gather_plan = moe_pre_gather_plan.as_ref().ok_or_else(|| {
+                                InteropError::PreGatherExecutionUnsupported {
+                                    architecture: String::from(self.family()),
+                                    reason: String::from("the routed segment plan was not prepared"),
+                                }
+                            })?;
+                            Some(self.evaluate_moe_pre_gather(
                                 runtime,
-                                DecodeStepEvaluation {
-                                    program: active_program,
-                                    symbols: &symbols,
+                                pre_gather_plan,
+                                &symbols,
+                                // planning needs the original expert descriptors;
+                                // execution substitutes the selected source table.
+                                PreGatherContext {
                                     named: &named_blocks,
                                     outputs: &roots,
                                     resident_names: &resident_names,
-                                    expert_sources: expert_source_substitutions,
+                                    expert_slab: step_guard.as_slab_mut(),
+                                    sidecar_read_scratch: &mut sidecar_read_scratch,
+                                    current_sources: &current_sources,
+                                    position_offset: cached_len,
+                                    layer_window: serving_config.moe_layer_window,
+                                    marker: PhantomData,
+                                    #[cfg(feature = "gpu")]
+                                    sidecar: self.expert_sidecar.as_ref(),
+                                    #[cfg(feature = "gpu")]
+                                    all_low_expert_scratch: &mut layer_window_expert_scratch,
                                 },
-                            )
-                            .await?
+                                &mut before_moe_gather,
+                            )?)
+                        } else if let Some(sources) = expert_source_substitutions {
+                            Some(runtime.evaluate(
+                                active_program,
+                                &symbols,
+                                &named_blocks,
+                                &roots,
+                                &resident_names,
+                                Some(sources),
+                            )?)
+                        } else {
+                            None
+                        };
+                        drop(step_guard);
+                        drop(slab_lock);
+                        evaluated_in_step
                     };
-                    #[cfg(all(
-                        feature = "metal-output-placement",
-                        feature = "instrument",
-                        target_os = "macos"
-                    ))]
-                    if let Some((_, output_buffer, _)) = ssm_output_placements.first() {
-                        debug!(
-                            step = (cached_len + batch_index) as u64,
-                            layer = 0_u64,
-                            state_out_placed_ptr =
-                                omega::placed_buffer_identity(output_buffer) as u64,
-                            state_out_first4 = ?read_placed_buffer_f32(output_buffer, 0, 4),
-                            "row 555: interop layer-0 ssm placement post-dispatch"
-                        );
-                    }
-                    #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
-                    let evaluated = if pre_gather && !monolithic_all_low {
-                        let pre_gather_plan = moe_pre_gather_plan.as_ref().ok_or_else(|| {
-                            InteropError::PreGatherExecutionUnsupported {
-                                architecture: String::from(self.family()),
-                                reason: String::from("the routed segment plan was not prepared"),
-                            }
-                        })?;
-                        self.evaluate_moe_pre_gather(
-                            runtime,
-                            pre_gather_plan,
-                            &symbols,
-                            // planning needs the original expert descriptors;
-                            // execution substitutes the selected source table.
-                            PreGatherContext {
-                                named: &named_blocks,
-                                outputs: &roots,
-                                resident_names: &resident_names,
-                                expert_slab: expert_slab_guard.as_slab_mut(),
-                                sidecar_read_scratch: &mut sidecar_read_scratch,
-                                current_sources: &current_sources,
-                                position_offset: cached_len,
-                                layer_window: serving_config.moe_layer_window,
-                                marker: PhantomData,
-                                #[cfg(feature = "gpu")]
-                                sidecar: self.expert_sidecar.as_ref(),
-                                #[cfg(feature = "gpu")]
-                                all_low_expert_scratch: &mut layer_window_expert_scratch,
-                            },
-                            &mut before_moe_gather,
-                        )?
-                    } else {
-                        evaluator
-                            .evaluate_step(
-                                runtime,
-                                DecodeStepEvaluation {
-                                    program: active_program,
-                                    symbols: &symbols,
-                                    named: &named_blocks,
-                                    outputs: &roots,
-                                    resident_names: &resident_names,
-                                    expert_sources: expert_source_substitutions,
-                                },
-                            )
-                            .await?
+                    let evaluated = match evaluated_in_step {
+                        Some(value) => value,
+                        None => {
+                            evaluator
+                                .evaluate_step(
+                                    runtime,
+                                    DecodeStepEvaluation {
+                                        program: active_program,
+                                        symbols: &symbols,
+                                        named: &named_blocks,
+                                        outputs: &roots,
+                                        resident_names: &resident_names,
+                                    },
+                                )
+                                .await?
+                        }
                     };
                     if std::env::var_os("PROXIMA_DEBUG_GDN_ALL_DIGEST").is_some() && step == 0 {
                         for (layer, diagnostic) in self.moe_layer_diagnostics.iter().enumerate() {
