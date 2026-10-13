@@ -62,13 +62,20 @@ use alloc::vec::Vec;
 
 use proxima_tensor::{
     BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, NumericPolicy,
-    ReduceInit, ScalarOp,
+    ReduceInit, ScalarOp, StepArg,
 };
 
 use crate::error::EmitError;
 use crate::grid::checked_product;
 use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
 use crate::msl::{Binding, Codec, PackedOperands};
+
+/// Appended to a Q4_0 matvec's CUDA entry name only when
+/// `NumericPolicy::activation_quantization` is granted and the dp4a
+/// recogniser matches -- the int8-activation body is a different kernel from
+/// the f32 body for the same op, so the two must never share a compiled
+/// module.
+const ACTIVATION_QUANTIZED_MATVEC_TOKEN: &str = "_aq8dp4";
 
 /// Every lane of one NVIDIA warp — fixed at 32 on every CUDA-capable GPU
 /// generation to date, the same "hardware-family fact, never a policy knob"
@@ -200,8 +207,8 @@ pub fn emit_cuda_with_policy(
     numeric_policy: NumericPolicy,
 ) -> Result<CudaKernel, EmitError> {
     validate(resolved)?;
-    let entry = entry_name(resolved, packed_operands);
     let quantized = operand_codecs(resolved, packed_operands);
+    let entry = entry_name(resolved, packed_operands, &quantized, numeric_policy);
     let source = match &resolved.kind {
         BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, &quantized)?,
         BoundOpKind::Reduce {
@@ -1005,7 +1012,12 @@ fn shuffle_combine_expr(
 /// the cache identity a driver keys compiled modules on, and this text changed
 /// for every kernel at every size when the 32-bit multiply was widened, so a
 /// module compiled from the earlier text can never be served for this one.
-fn entry_name(resolved: &BoundOp, packed_operands: &PackedOperands) -> String {
+fn entry_name(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+) -> String {
     let identity = crate::identity::kernel_identity(
         crate::identity::KernelLanguage::Cuda,
         resolved,
@@ -1018,7 +1030,54 @@ fn entry_name(resolved: &BoundOp, packed_operands: &PackedOperands) -> String {
         // correct, not a placeholder.
         proxima_tensor::NumericPolicy::default(),
     );
-    format!("{identity}_gid64")
+    let activation_token = if numeric_policy.activation_quantization
+        && q4_0_matvec(resolved, quantized).is_some()
+    {
+        ACTIVATION_QUANTIZED_MATVEC_TOKEN
+    } else {
+        ""
+    };
+    format!("{identity}{activation_token}_gid64")
+}
+
+/// The `(weight, activation)` operand slots of a Q4_0-weight matvec that the
+/// int8-activation `dp4a` body can serve: one `Multiply` over exactly two
+/// operands, add-reduced from `Zero`, with no gather and no fused epilogue,
+/// the weight packed as Q4_0 and the activation unpacked and constant across
+/// every output row. Either operand order matches.
+fn q4_0_matvec(resolved: &BoundOp, quantized: &[Option<Codec>]) -> Option<(usize, usize)> {
+    let BoundOpKind::Reduce {
+        reduce_op: ScalarOp::Add,
+        init: ReduceInit::Zero,
+        keep: Keep::Reduce,
+        output_axes,
+        epilogue_body,
+        epilogue_operands,
+        operands,
+        ..
+    } = &resolved.kind
+    else {
+        return None;
+    };
+    let [only_step] = resolved.element_body().steps.as_slice() else {
+        return None;
+    };
+    let is_two_operand_multiply = only_step.op == ScalarOp::Multiply
+        && only_step.args == [StepArg::Operand(0), StepArg::Operand(1)];
+    let (weight_slot, activation_slot) = match quantized {
+        [Some(Codec::Q4_0), None] => (0, 1),
+        [None, Some(Codec::Q4_0)] => (1, 0),
+        _ => return None,
+    };
+    let (_, activation_layout, _) = operands.get(activation_slot)?;
+    let activation_is_broadcast = output_axes
+        .iter()
+        .all(|axis| activation_layout.stride(*axis) == 0);
+    (is_two_operand_multiply
+        && gather_count(resolved) == 0
+        && reduce_epilogue_is_identity(epilogue_body, epilogue_operands)
+        && activation_is_broadcast)
+        .then_some((weight_slot, activation_slot))
 }
 
 fn scalar_op_expr(op: ScalarOp, args: &[&str]) -> String {
@@ -2873,6 +2932,185 @@ mod tests {
         bound.into_iter().next().expect("one bound op")
     }
 
+    /// `weight[rows, k] * activation[k]` summed over `k`, with the weight
+    /// operand first or second. Returns the bound op and the weight's node.
+    fn q4_0_matvec_op(rows: u32, k: u32, weight_first: bool) -> (BoundOp, NodeId) {
+        let mut program = Vec::new();
+        let weight = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(rows), Extent::Static(k)],
+                name: None,
+            },
+        );
+        let activation = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(k)],
+                name: None,
+            },
+        );
+        let weight_map = IndexMap::Affine(map::projection(2, &[0, 1]));
+        let activation_map = IndexMap::Affine(map::projection(2, &[1]));
+        let operands = if weight_first {
+            vec![(weight, weight_map), (activation, activation_map)]
+        } else {
+            vec![(activation, activation_map), (weight, weight_map)]
+        };
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands,
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                out_map: IndexMap::Affine(map::projection(2, &[0])),
+                keep: Keep::Reduce,
+                name: Some("q4_0_matvec".into()),
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("infer succeeds");
+        let bound = bind(
+            &program,
+            &shapes,
+            &[NodeId((program.len() - 1) as u32)],
+            NumericPolicy::default(),
+        )
+        .expect("bind succeeds")
+        .into_iter()
+        .next()
+        .expect("one bound op");
+        (bound, weight)
+    }
+
+    fn q4_0_packed(weight: NodeId) -> PackedOperands {
+        let mut packed = PackedOperands::new();
+        packed.insert(weight, Codec::Q4_0);
+        packed
+    }
+
+    #[test]
+    fn q4_0_matvec_recogniser_matches_both_operand_orders() {
+        let (cf0, cf0_weight) = q4_0_matvec_op(8, 64, false);
+        let (c0f, c0f_weight) = q4_0_matvec_op(8, 64, true);
+
+        for (bound, weight) in [(&cf0, cf0_weight), (&c0f, c0f_weight)] {
+            let codecs = operand_codecs(bound, &q4_0_packed(weight));
+            let (weight_slot, activation_slot) =
+                q4_0_matvec(bound, &codecs).expect("a Q4_0 matvec is recognised in either order");
+            assert_eq!(
+                codecs[weight_slot],
+                Some(Codec::Q4_0),
+                "the recognised weight slot is the Q4_0-packed operand"
+            );
+            assert_eq!(
+                codecs[activation_slot], None,
+                "the recognised activation slot is the unpacked operand"
+            );
+        }
+    }
+
+    #[test]
+    fn q4_0_matvec_recogniser_rejects_q6k_two_q4_0_and_gathered_and_non_add() {
+        let (bound, weight) = q4_0_matvec_op(8, 64, true);
+        let q4_0_weight_f32_activation = operand_codecs(&bound, &q4_0_packed(weight));
+
+        let q6k_weight = [Some(Codec::Q6K), None];
+        assert_eq!(q4_0_matvec(&bound, &q6k_weight), None, "Q6_K weight rejected");
+
+        let two_q4_0 = [Some(Codec::Q4_0), Some(Codec::Q4_0)];
+        assert_eq!(q4_0_matvec(&bound, &two_q4_0), None, "two Q4_0 operands rejected");
+
+        let mut maximum = bound.clone();
+        if let BoundOpKind::Reduce { reduce_op, .. } = &mut maximum.kind {
+            *reduce_op = ScalarOp::Maximum;
+        }
+        assert_eq!(
+            q4_0_matvec(&maximum, &q4_0_weight_f32_activation),
+            None,
+            "non-Add reduce rejected"
+        );
+
+        let mut gathered = bound.clone();
+        if let BoundOpKind::Reduce { operands, .. } = &mut gathered.kind {
+            let (_, activation_layout, _) = operands[1].clone();
+            operands[1].2 = Some(Lookup {
+                indices: weight,
+                index_layout: activation_layout,
+                element_stride: 1,
+                extent: 1,
+            });
+        }
+        assert_eq!(
+            q4_0_matvec(&gathered, &q4_0_weight_f32_activation),
+            None,
+            "gathered operand rejected"
+        );
+    }
+
+    #[test]
+    fn q4_0_matvec_recogniser_rejects_an_activation_that_varies_across_rows() {
+        let (bound, weight) = q4_0_matvec_op(8, 64, true);
+        let codecs = operand_codecs(&bound, &q4_0_packed(weight));
+        assert_eq!(
+            q4_0_matvec(&bound, &codecs),
+            Some((0, 1)),
+            "control: the broadcast activation matches before the stride is touched"
+        );
+
+        let mut row_strided = bound.clone();
+        if let BoundOpKind::Reduce { operands, .. } = &mut row_strided.kind {
+            operands[1].1.strides[0] = 1;
+        }
+        assert_eq!(
+            q4_0_matvec(&row_strided, &codecs),
+            None,
+            "an activation with a non-zero row stride is not broadcast and is rejected"
+        );
+    }
+
+    #[test]
+    fn entry_name_is_unchanged_with_the_flag_off_and_differs_with_it_on() {
+        let (bound, weight) = q4_0_matvec_op(8, 64, true);
+        let packed = q4_0_packed(weight);
+        let quantized = operand_codecs(&bound, &packed);
+        let flag_off = entry_name(&bound, &packed, &quantized, NumericPolicy::default());
+        let flag_on = entry_name(
+            &bound,
+            &packed,
+            &quantized,
+            NumericPolicy::default().with_activation_quantization(true),
+        );
+
+        assert_eq!(
+            flag_off,
+            format!(
+                "{}_gid64",
+                crate::identity::kernel_identity(
+                    crate::identity::KernelLanguage::Cuda,
+                    &bound,
+                    &packed,
+                    crate::identity::MetalOnlyExtras::default(),
+                    NumericPolicy::default(),
+                )
+            ),
+            "with the flag off the entry name is the pre-existing identity"
+        );
+        assert_ne!(flag_off, flag_on, "the dp4a body must not share the f32 entry name");
+    }
+
     #[test]
     fn associative_reduce_emits_warp_shuffle_cooperative_kernel() {
         let bound = matmul_reduce_op(4, 4096, ScalarOp::Add);
@@ -3574,9 +3812,10 @@ mod tests {
         let fused = row_sum_plus_bias_op(4, 8);
         let bare = matmul_reduce_op(4, 8, ScalarOp::Add);
         let packed = no_packed();
+        let policy = NumericPolicy::default();
         assert_ne!(
-            entry_name(&fused, &packed),
-            entry_name(&bare, &packed),
+            entry_name(&fused, &packed, &[], policy),
+            entry_name(&bare, &packed, &[], policy),
             "a fused epilogue must never collide with the bare reduce's cache key \
              (crate::wgpu_driver::pipeline_for's own caching-by-name hazard)"
         );

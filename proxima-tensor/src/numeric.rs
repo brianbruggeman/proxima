@@ -76,6 +76,13 @@ pub struct NumericPolicy {
     #[cfg_attr(feature = "config", setting(default = false))]
     #[cfg_attr(feature = "config", serde(default))]
     pub epilogue_sources: bool,
+    /// Permits rounding the activation vector of a packed-weight matvec to
+    /// int8 (Q8_1-style, one scale per 32-element block) so the dot product
+    /// runs as integer `dp4a`. Changes bits in a way no other permission
+    /// names: the activation rounding is neither reassociation nor contraction.
+    #[cfg_attr(feature = "config", setting(default = false))]
+    #[cfg_attr(feature = "config", serde(default))]
+    pub activation_quantization: bool,
 }
 
 impl NumericPolicy {
@@ -89,6 +96,7 @@ impl NumericPolicy {
             signed_zero: false,
             approx_functions: false,
             epilogue_sources: false,
+            activation_quantization: false,
         }
     }
 
@@ -107,6 +115,7 @@ impl NumericPolicy {
             signed_zero: false,
             approx_functions: false,
             epilogue_sources: false,
+            activation_quantization: false,
         }
     }
 
@@ -121,6 +130,7 @@ impl NumericPolicy {
             signed_zero: true,
             approx_functions: true,
             epilogue_sources: false,
+            activation_quantization: false,
         }
     }
 
@@ -134,6 +144,7 @@ impl NumericPolicy {
             && (!required.signed_zero || self.signed_zero)
             && (!required.approx_functions || self.approx_functions)
             && (!required.epilogue_sources || self.epilogue_sources)
+            && (!required.activation_quantization || self.activation_quantization)
     }
 
     /// Fluent per-permission setters -- `#[non_exhaustive]` blocks a
@@ -178,6 +189,12 @@ impl NumericPolicy {
         self.epilogue_sources = epilogue_sources;
         self
     }
+
+    #[must_use]
+    pub const fn with_activation_quantization(mut self, activation_quantization: bool) -> Self {
+        self.activation_quantization = activation_quantization;
+        self
+    }
 }
 
 /// One rewrite class this crate or a GPU backend may apply, and the exact
@@ -216,6 +233,9 @@ pub enum NumericRewrite {
     /// round), which reaches RMSNorm tails whose first reduce operand is a
     /// multi-reader projection output. Needs `epilogue_sources` alone.
     WidenedReduceEpilogueFusion,
+    /// Rounding a packed-weight matvec's activation vector to int8 so the dot
+    /// product runs as integer `dp4a`. Needs `activation_quantization` alone.
+    ActivationQuantization,
     /// Merging a multiply and an add into one hardware FMA.
     FmaContraction,
     /// Reordering an associative reduction as a tree instead of a left fold.
@@ -253,6 +273,10 @@ impl NumericRewrite {
             },
             Self::WidenedReduceEpilogueFusion => NumericPolicy {
                 epilogue_sources: true,
+                ..NumericPolicy::bit_exact()
+            },
+            Self::ActivationQuantization => NumericPolicy {
+                activation_quantization: true,
                 ..NumericPolicy::bit_exact()
             },
             Self::FmaContraction => NumericPolicy {
@@ -367,6 +391,29 @@ mod tests {
         assert!(granted.grants(NumericPolicy::bit_exact().with_epilogue_sources(true)));
         assert!(
             !NumericPolicy::fast().grants(NumericPolicy::bit_exact().with_epilogue_sources(true))
+        );
+    }
+
+    #[test]
+    fn activation_quantization_is_granted_only_by_its_own_permission() {
+        assert!(
+            admit(
+                NumericPolicy::llama_relaxed(),
+                NumericRewrite::ActivationQuantization
+            )
+            .is_err(),
+            "llama_relaxed does not grant int8 activation rounding"
+        );
+
+        let granted = NumericPolicy::llama_relaxed().with_activation_quantization(true);
+        assert!(
+            admit(granted, NumericRewrite::ActivationQuantization).is_ok(),
+            "llama_relaxed with activation_quantization grants the rewrite"
+        );
+
+        assert!(
+            admit(NumericPolicy::bit_exact(), NumericRewrite::ActivationQuantization).is_err(),
+            "bit_exact does not grant int8 activation rounding"
         );
     }
 
