@@ -378,3 +378,76 @@ fn a_zero_scale_means_unset_like_llama_cpp() {
 
     assert_eq!(with_header_scales(input.clone(), &parsed, "llama"), input);
 }
+
+fn lfm2_moe_architecture() -> ModelHparams {
+    ModelHparams {
+        vocab: 65536,
+        embedding: 2048,
+        feed_forward: 1792,
+        query_heads: 32,
+        kv_heads: 8,
+        kv_heads_by_layer: vec![8; 24],
+        head_dim: 64,
+        block_count: 24,
+        expert_count: 32,
+        expert_used_count: 4,
+        rope_freq_base: 1_000_000.0,
+        rms_epsilon: 1e-5,
+        tied_embeddings: true,
+        family: "lfm2moe".to_string(),
+        sliding_rope: None,
+    }
+}
+
+#[test]
+fn a_hybrid_with_wider_dense_blocks_keeps_the_expert_width_in_its_architecture() {
+    let architecture = lfm2_moe_architecture();
+    let descriptor = ModelDescriptor {
+        feed_forward: 7168,
+        expert_feed_forward: 1792,
+        leading_dense_block_count: 2,
+        ..granite_input()
+    };
+    let descriptor = ModelDescriptor {
+        vocab: architecture.vocab,
+        embedding: architecture.embedding,
+        query_heads: architecture.query_heads,
+        block_count: architecture.block_count,
+        expert_count: architecture.expert_count,
+        expert_used_count: architecture.expert_used_count,
+        ..descriptor
+    };
+
+    let reshaped = architecture.reshaped_by(&descriptor);
+
+    assert_eq!(
+        reshaped.feed_forward, 1792,
+        "the expert slab cuts each expert at feed_forward rows, and the checkpoint's expert tensors hold 1792"
+    );
+}
+
+#[test]
+fn a_dense_config_takes_its_feed_forward_width_from_the_descriptor() {
+    let descriptor = ModelDescriptor {
+        feed_forward: 8192,
+        expert_feed_forward: 8192,
+        ..llama_input()
+    };
+
+    let reshaped = llama_architecture().reshaped_by(&descriptor);
+
+    assert_eq!(reshaped.feed_forward, 8192);
+}
+
+#[test]
+fn an_expert_config_with_no_separate_expert_width_uses_the_dense_width() {
+    let descriptor = ModelDescriptor {
+        feed_forward: 640,
+        expert_feed_forward: 0,
+        ..granite_input()
+    };
+
+    let reshaped = lfm2_moe_architecture().reshaped_by(&descriptor);
+
+    assert_eq!(reshaped.feed_forward, 640);
+}

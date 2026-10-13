@@ -509,8 +509,18 @@ impl ModelHparams {
     /// rotates fewer channels than the head holds) and KV-head count
     /// follow the config only when every layer agrees; a non-uniform schedule
     /// keeps the header's values, since one number cannot stand for it.
+    ///
+    /// `feed_forward` is the width the routed experts run at whenever the
+    /// config has experts, the header reader's own rule, so a hybrid whose
+    /// dense blocks run wider than its experts keeps the expert width here and
+    /// the slab binds each expert at the shape its bytes were cut for.
     #[must_use]
     pub fn reshaped_by(&self, descriptor: &ModelDescriptor) -> Self {
+        let feed_forward = if descriptor.expert_count > 0 && descriptor.expert_feed_forward > 0 {
+            descriptor.expert_feed_forward
+        } else {
+            descriptor.feed_forward
+        };
         let uniform = descriptor
             .layers
             .first()
@@ -524,7 +534,7 @@ impl ModelHparams {
         Self {
             vocab: descriptor.vocab,
             embedding: descriptor.embedding,
-            feed_forward: descriptor.feed_forward,
+            feed_forward,
             query_heads: descriptor.query_heads,
             kv_heads: uniform.map_or(self.kv_heads, |attention| attention.kv_heads),
             head_dim: uniform.map_or(self.head_dim, |attention| match attention.rope_pairing {
