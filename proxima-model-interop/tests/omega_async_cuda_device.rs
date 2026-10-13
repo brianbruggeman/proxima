@@ -1,3 +1,5 @@
+#![cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+
 use core::future::{Future, poll_fn};
 use core::pin::pin;
 use core::task::Poll;
