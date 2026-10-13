@@ -18,6 +18,9 @@ use proxima::{
 use proxima::{HttpListenProtocol, ListenProtocolFluent};
 use proxima_telemetry::emit::{EnvFilter, global};
 use proxima_telemetry::error;
+use proxima_telemetry::error::Error as TelemetryError;
+use proxima_telemetry::export::{Exporter, Formatter};
+use proxima_telemetry::recorder::Recorder;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -67,6 +70,10 @@ enum Command {
         /// `$HOME/.local/share/proximad/pipelines`.
         #[arg(long, value_name = "DIR")]
         state_dir: Option<PathBuf>,
+
+        /// Also write telemetry as JSON lines to this file; console output is kept.
+        #[arg(long, value_name = "PATH")]
+        telemetry_file: Option<PathBuf>,
     },
 }
 
@@ -75,19 +82,42 @@ async fn main() -> ExitCode {
     let directive =
         std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,proxima=info,proximad=info".to_string());
     global::install(EnvFilter::parse(&directive));
-    let Ok(_recorder) = proxima::init_telemetry() else {
-        eprintln!("proximad: failed to install console telemetry");
+    let cli = Cli::parse();
+    let telemetry_file = match &cli.command {
+        Command::Serve { telemetry_file, .. } => telemetry_file.clone(),
+    };
+    let Ok(recorder) = install_telemetry(telemetry_file) else {
+        eprintln!("proximad: failed to install telemetry");
         return ExitCode::from(1);
     };
 
-    let cli = Cli::parse();
-    match run(cli).await {
+    let outcome = run(cli).await;
+    recorder.drain();
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             error!(?error, "proximad exited with error");
             ExitCode::from(1)
         }
     }
+}
+
+/// Console-only unless `--telemetry-file` is given; then console plus a JSON-lines file.
+fn install_telemetry(telemetry_file: Option<PathBuf>) -> Result<Arc<Recorder>, TelemetryError> {
+    let Some(path) = telemetry_file else {
+        return proxima::init_telemetry();
+    };
+    let exporter = Exporter::fan(vec![
+        Exporter::std(),
+        Exporter::file(path).format(Formatter::Json),
+    ])?;
+    let recorder = Recorder::builder().export(exporter)?.install()?;
+    let pump = Arc::clone(&recorder);
+    std::thread::Builder::new()
+        .name("proximad-telemetry-drain".to_string())
+        .spawn(move || pump.run_drain_loop())
+        .map_err(|error| TelemetryError::ThreadSpawn(error.to_string()))?;
+    Ok(recorder)
 }
 
 async fn run(cli: Cli) -> Result<(), ProximaError> {
@@ -98,6 +128,7 @@ async fn run(cli: Cli) -> Result<(), ProximaError> {
             mcp_stdio,
             mcp_unix,
             state_dir,
+            telemetry_file: _,
         } => serve(unix, stdio, mcp_stdio, mcp_unix, state_dir).await,
     }
 }
