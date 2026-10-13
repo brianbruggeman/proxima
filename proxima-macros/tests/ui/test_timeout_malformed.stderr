@@ -1,0 +1,5 @@
+error: invalid timeout `soon`; expected a positive whole number with a unit, e.g. "200ms", "90s" or "5m"
+ --> tests/ui/test_timeout_malformed.rs:2:34
+  |
+2 | #[proxima_macros::test(timeout = "soon")]
+  |                                  ^^^^^^

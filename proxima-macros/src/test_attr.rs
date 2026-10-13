@@ -9,7 +9,7 @@ use syn::{
 
 use crate::runtime_args::{
     RuntimeKind, extract_bool_lit, extract_str_lit, extract_usize_lit, fold_flavor,
-    parse_runtime_value,
+    parse_runtime_value, parse_timeout_millis,
 };
 
 /// Scheduling needs a test declares for an external runner. `serial` and
@@ -25,6 +25,7 @@ struct TestArgs {
     runtime: RuntimeKind,
     cassette: Option<String>,
     start_paused: bool,
+    timeout_millis: Option<u64>,
     sched: Sched,
 }
 
@@ -76,6 +77,7 @@ fn parse_args(args: TokenStream) -> Result<TestArgs, Error> {
     let mut runtime = RuntimeKind::Default;
     let mut cassette = None;
     let mut start_paused = false;
+    let mut timeout_millis = None;
     let mut flavor: Option<String> = None;
     let mut worker_threads: Option<usize> = None;
     let mut sched = Sched {
@@ -89,6 +91,7 @@ fn parse_args(args: TokenStream) -> Result<TestArgs, Error> {
             runtime,
             cassette,
             start_paused,
+            timeout_millis,
             sched,
         });
     }
@@ -109,6 +112,12 @@ fn parse_args(args: TokenStream) -> Result<TestArgs, Error> {
                     }
                     Some("start_paused") => {
                         start_paused = extract_bool_lit(&nv.value, "start_paused")?;
+                    }
+                    Some("timeout") => {
+                        if timeout_millis.is_some() {
+                            return Err(Error::new_spanned(&nv.path, "duplicate `timeout` arg"));
+                        }
+                        timeout_millis = Some(parse_timeout_millis(&nv.value)?);
                     }
                     Some("cassette") => {
                         cassette = Some(extract_str_lit(&nv.value, "cassette")?);
@@ -131,7 +140,7 @@ fn parse_args(args: TokenStream) -> Result<TestArgs, Error> {
                         return Err(Error::new_spanned(
                             &nv.path,
                             format!(
-                                "unknown #[proxima::test] arg `{other}`; expected runtime, flavor, worker_threads, start_paused, cassette, group, or the bare flags serial and process"
+                                "unknown #[proxima::test] arg `{other}`; expected runtime, flavor, worker_threads, start_paused, cassette, timeout, group, or the bare flags serial and process"
                             ),
                         ));
                     }
@@ -169,17 +178,37 @@ fn parse_args(args: TokenStream) -> Result<TestArgs, Error> {
         ));
     }
 
+    require_prime_for_timeout(&runtime, start_paused, timeout_millis)?;
+
     Ok(TestArgs {
         runtime,
         cassette,
         start_paused,
+        timeout_millis,
         sched,
     })
 }
 
+// only the adaptive default driver and prime enforce a body bound; the explicit
+// tokio drivers have none, so accepting `timeout` there would be a silent no-op.
+fn require_prime_for_timeout(
+    runtime: &RuntimeKind,
+    start_paused: bool,
+    timeout_millis: Option<u64>,
+) -> Result<(), Error> {
+    let enforced = matches!(runtime, RuntimeKind::Default | RuntimeKind::Prime) && !start_paused;
+    if timeout_millis.is_some() && !enforced {
+        return Err(Error::new(
+            Span::call_site(),
+            "`timeout` bounds the body on the default and prime drivers only; the explicit tokio drivers (`runtime = \"tokio\"`, `flavor`, `worker_threads`, `start_paused`) enforce no body bound",
+        ));
+    }
+    Ok(())
+}
+
 /// rstest features that need an async-driving harness rstest controls;
 /// incompatible with our native sync-shell generation.
-const UNSUPPORTED_ATTRS: &[&str] = &["future", "awt", "timeout", "once"];
+const UNSUPPORTED_ATTRS: &[&str] = &["future", "awt", "once"];
 
 fn attr_name(attr: &Attribute) -> Option<String> {
     attr.path()
@@ -414,7 +443,7 @@ fn reject_unsupported_test_shape(func: &ItemFn) -> Result<(), Error> {
             return Err(Error::new_spanned(
                 attr,
                 format!(
-                    "#[{name}] is unsupported under #[proxima::test]; await inside the body or use PROXIMA_TEST_TIMEOUT_MS"
+                    "#[{name}] is unsupported under #[proxima::test]; await inside the body"
                 ),
             ));
         }
@@ -477,7 +506,13 @@ fn cassette_spec(cassette: Option<&str>, case: &str) -> TokenStream {
     }
 }
 
-fn entry_call(runtime: &RuntimeKind, start_paused: bool) -> TokenStream {
+fn entry_call(runtime: &RuntimeKind, start_paused: bool, timeout_millis: Option<u64>) -> TokenStream {
+    let timeout_arg = timeout_millis.map_or_else(
+        || quote!(::core::option::Option::None),
+        |millis| {
+            quote!(::core::option::Option::Some(::core::time::Duration::from_millis(#millis)))
+        },
+    );
     match (runtime, start_paused) {
         (RuntimeKind::TokioMultiThread { workers }, paused) => {
             let workers_arg = if let Some(count) = workers {
@@ -499,10 +534,10 @@ fn entry_call(runtime: &RuntimeKind, start_paused: bool) -> TokenStream {
             ))
         }
         (RuntimeKind::Default, false) => {
-            quote!(::proxima::test_support::run(cassette_arg, body_arg))
+            quote!(::proxima::test_support::run(cassette_arg, #timeout_arg, body_arg))
         }
         (RuntimeKind::Prime, _) => {
-            quote!(::proxima::test_support::run_prime(cassette_arg, body_arg))
+            quote!(::proxima::test_support::run_prime(cassette_arg, #timeout_arg, body_arg))
         }
         (RuntimeKind::Tokio, false) => {
             quote!(::proxima::test_support::run_tokio(cassette_arg, body_arg))
@@ -740,6 +775,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error
         runtime,
         cassette,
         start_paused,
+        timeout_millis,
         sched,
     } = test_args;
 
@@ -782,7 +818,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error
         other_attrs,
         inner_fn,
         prime_cfg,
-        entry_call: entry_call(&runtime, start_paused),
+        entry_call: entry_call(&runtime, start_paused, timeout_millis),
         cassette,
         sched,
     };
@@ -1012,5 +1048,58 @@ mod tests {
     fn serial_and_group_stay_rejected_when_process_is_also_present() {
         let message = expand_err("process, serial, group = \"gpu\"", PLAIN);
         assert!(message.contains("mutually exclusive"));
+    }
+
+    const NO_TIMEOUT: &str = "run (cassette_arg , :: core :: option :: Option :: None , body_arg)";
+
+    #[test]
+    fn timeout_units_expand_to_a_duration_in_milliseconds() {
+        for (spelled, millis) in [("200ms", 200u64), ("90s", 90_000), ("5m", 300_000)] {
+            let expanded = expand_ok(&format!("timeout = \"{spelled}\""), PLAIN);
+            let expected = format!("Some (:: core :: time :: Duration :: from_millis ({millis}u64))");
+            assert!(expanded.contains(&expected), "{spelled}: {expanded}");
+        }
+    }
+
+    #[test]
+    fn no_timeout_arg_passes_none_to_the_driver() {
+        assert!(expand_ok("", PLAIN).contains(NO_TIMEOUT));
+    }
+
+    #[test]
+    fn prime_runtime_accepts_a_timeout() {
+        let expanded = expand_ok("runtime = \"prime\", timeout = \"2s\"", PLAIN);
+        assert!(expanded.contains("run_prime (cassette_arg , :: core :: option :: Option :: Some"));
+    }
+
+    #[test]
+    fn a_malformed_timeout_is_a_compile_error() {
+        for bad in ["soon", "", "10", "s", "ms", "-5s", "1.5s", "0s", "99999999999999999999m"] {
+            let message = expand_err(&format!("timeout = \"{bad}\""), PLAIN);
+            assert!(message.contains("invalid timeout"), "{bad:?}: {message}");
+        }
+    }
+
+    #[test]
+    fn a_non_string_timeout_is_a_compile_error() {
+        assert!(expand_err("timeout = 5", PLAIN).contains("expected string literal for `timeout`"));
+    }
+
+    #[test]
+    fn a_duplicate_timeout_is_a_compile_error() {
+        let message = expand_err("timeout = \"1s\", timeout = \"2s\"", PLAIN);
+        assert!(message.contains("duplicate `timeout` arg"), "{message}");
+    }
+
+    #[test]
+    fn a_timeout_on_an_unbounded_tokio_driver_is_a_compile_error() {
+        for args in [
+            "runtime = \"tokio\", timeout = \"1s\"",
+            "flavor = \"multi_thread\", timeout = \"1s\"",
+            "start_paused = true, timeout = \"1s\"",
+        ] {
+            let message = expand_err(args, PLAIN);
+            assert!(message.contains("enforce no body bound"), "{args}: {message}");
+        }
     }
 }
