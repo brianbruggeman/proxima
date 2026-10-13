@@ -1,11 +1,28 @@
 //! core-native telemetry for proxima: traces, metrics, logs, events.
 //!
 //! the primitives below (ring, id, level, clock, tag, trace, metric, log,
-//! recorder, native exporter, config) are structural -- always-on. only
-//! consumer-facing toggles remain as features (`otlp-http`, `otlp-grpc`,
-//! `tracing-init`, `tee-generic`); those primitives were built in a numbered
+//! recorder, native exporter, config) are structural -- always-on at their
+//! tier (see Tiers below). those primitives were built in a numbered
 //! sequence (c1..c15, e.g. `clock`'s "C9/C13" note) tracked per-component in
 //! `benches/RESULTS_bench-proxima-telemetry_m1.md`.
+//!
+//! optional features, each default-off except `std` (what each one gates):
+//!
+//! - `alloc` -- the no_std + alloc data and primitive layer (tag, trace
+//!   records, log, metric instruments, sampler, ring, level, clock, propagation).
+//! - `std` (default) -- the runtime: recorder, config loading, native exporter, pipes.
+//! - `emit` -- the typed hierarchical emit-control and filtering surface (`emit` module).
+//! - `histogram` -- the `Histogram` instrument, the `histogram!` macro, and histogram data points in the exporters.
+//! - `instrument-metrics` -- a span's close also records its duration into a per-name histogram; implies `histogram`.
+//! - `deferred-metric-fold` -- moves that span-duration fold off the emit path onto the drainer, via a per-core ring; implies `instrument-metrics` and `lossless-backpressure`.
+//! - `lossless-backpressure` -- the elastic producer-assist path, so a full ring makes `OverflowPolicy::Block` drain a batch or park instead of degrading to drop.
+//! - `elevation` -- tail-sampled error elevation: an error in a sampled trace replays that trace's full tree at a configurable elevated verbosity to a separate exporter.
+//! - `macros` -- re-exports `SpanCarrier`, `instrument` and `span` from `proxima_macros`.
+//! - `otlp-http` -- the OTLP/HTTP exporter (`out::otlp_http`) and its resilient sink.
+//! - `otlp-grpc` -- the OTLP/gRPC exporter (`out::otlp_grpc`); implies `otlp-http`.
+//! - `tracing-init` -- `tracing_bridge`, the adapter that routes `tracing` events into the recorder.
+//! - `tee-generic` -- implies `std`; gates no library code, only the `bench_tee_generic` and `bench_shared_ring_tee` benches.
+//! - `loom` -- swaps the ring's atomics for loom's so `tests/loom_ring.rs` can model-check it; test-only.
 //!
 //! `legacy` carries the pre-component proxima Metrics/Labels/TelemetryHandle
 //! surface that production code still uses; new code emits via the `emit`

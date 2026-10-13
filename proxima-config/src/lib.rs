@@ -95,6 +95,14 @@ pub trait ConfigFormatFactory: Send + Sync + 'static {
     fn serialize(&self, value: &Value) -> Result<String, ProximaError>;
 }
 
+/// `Arc<dyn ConfigFormatFactory>`: a shared, type-erased handle to one config
+/// format. It is the element type the registry stores and returns, so use it
+/// when you hold a format whose concrete type you do not name (a format
+/// looked up by name or extension, or several different formats in one
+/// collection), and to hand a format to `ConfigFormatRegistry::register`
+/// (`std` feature). With a concrete format type in hand, call its
+/// `ConfigFormatFactory` methods directly; `dyn` is only needed once the type
+/// is erased. Requires the `alloc` feature.
 #[cfg(feature = "alloc")]
 pub type DynConfigFormatFactory = Arc<dyn ConfigFormatFactory>;
 

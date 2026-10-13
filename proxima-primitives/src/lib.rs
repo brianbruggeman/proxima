@@ -10,7 +10,9 @@
 //! edges between them.
 //!
 //! - [`pipe`] — the async `Pipe`/`SendPipe` form family, `Handler`
-//!   (Request->Response), `SourcePipe` (Signal->()), `Body`, `HeaderList`,
+//!   (Request->Response), `SourcePipe` (Signal->()), the payload types `Carry`,
+//!   `ResponseStream` and `RequestStream` (buffered bodies are plain `Bytes`),
+//!   `HeaderList`,
 //!   the telemetry/capture trait surfaces, `UpgradeHandler`, endpoint
 //!   metadata. Plugin authors' primary surface.
 //! - [`stream`] — sans-IO byte-stream traits (`StreamConnection`/
