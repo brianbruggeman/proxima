@@ -5208,6 +5208,14 @@ did not hold every cached position)",
                     let root_select_ticks;
                     #[cfg(feature = "instrument")]
                     let evaluate_started;
+                    // ROW 329: this step's encoder-split result, if
+                    // `dispatch_profile_target` below actually takes it --
+                    // declared here (not inside the match arm) so the
+                    // post-match `metal_stage` snapshot a few lines down can
+                    // read it out, same convention as
+                    // `run_decode_loop_placed_kv`'s own `encoder_split_ns`.
+                    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                    let mut encoder_split_ns: Option<(u64, u64)> = None;
                     let evaluated_in_step: Option<Evaluated> = {
                         let mut slab_lock = self.expert_slab.lock();
                         let mut step_guard = slab_lock.begin_step();
@@ -5477,14 +5485,6 @@ did not hold every cached position)",
                         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                         #[cfg(not(feature = "instrument"))]
                         let dispatch_profile_target = false;
-                        // ROW 329: this step's encoder-split result, if
-                        // `dispatch_profile_target` below actually takes it --
-                        // declared here (not inside the match arm) so the
-                        // post-match `metal_stage` snapshot a few lines down can
-                        // read it out, same convention as
-                        // `run_decode_loop_placed_kv`'s own `encoder_split_ns`.
-                        #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-                        let mut encoder_split_ns: Option<(u64, u64)> = None;
                         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                         let evaluated_in_step: Option<Evaluated> = if monolithic_profile_target {
                             #[cfg(feature = "instrument")]
