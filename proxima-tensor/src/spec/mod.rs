@@ -83,6 +83,9 @@ mod layer_runs;
 #[cfg(feature = "config")]
 mod program_spec;
 mod recurrent_readout;
+#[cfg(all(test, feature = "config"))]
+#[allow(clippy::expect_used)]
+mod roundtrip;
 mod two_block_attention;
 pub use crate::LoopCdMode;
 pub use crate::op::{SLIDING_CACHED_LEN_INPUT, SLIDING_KV_SYMBOL};
