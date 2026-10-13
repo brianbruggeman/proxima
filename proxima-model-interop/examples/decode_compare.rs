@@ -26,6 +26,7 @@ use std::fs::File;
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Instant;
 
 use memmap2::Mmap;
@@ -33,6 +34,9 @@ use proxima_gguf::parse_complete;
 use proxima_model_interop::{
     GPU_LAYERS_ALL, InteropError, LoadedModel, Phase, ServingConfig, TokenEvent,
 };
+use proxima_telemetry::emit::{EnvFilter, global};
+use proxima_telemetry::export::{Exporter, Formatter};
+use proxima_telemetry::recorder::Recorder;
 use proxima_tokenizer::gguf::vocab_from_metadata;
 use proxima_tokenizer::{TokenizerError, Vocab, encode_with_bos_eos};
 
@@ -56,6 +60,8 @@ enum ExampleError {
     Tokenizer(#[from] TokenizerError),
     #[error("backends {0:?} is not one of both, cuda")]
     BadBackends(String),
+    #[error("telemetry: {0}")]
+    Telemetry(String),
     #[error("token count {0:?} is not a number")]
     BadCount(String),
     #[error("{backend} produced no logits row at position {position}")]
@@ -302,6 +308,19 @@ fn summarize(
         })
 }
 
+fn install_telemetry() -> Result<Option<Arc<Recorder>>, ExampleError> {
+    let Ok(log_path) = env::var("DECODE_COMPARE_TELEMETRY") else {
+        return Ok(None);
+    };
+    global::install(EnvFilter::parse("proxima_model_interop=debug,omega=debug"));
+    let recorder = Recorder::builder()
+        .export(Exporter::file(&log_path).format(Formatter::Text))
+        .map_err(|error| ExampleError::Telemetry(error.to_string()))?
+        .install()
+        .map_err(|error| ExampleError::Telemetry(error.to_string()))?;
+    Ok(Some(recorder))
+}
+
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let outcome = args.next().ok_or(ExampleError::Usage).and_then(|path| {
@@ -316,7 +335,12 @@ fn main() -> ExitCode {
                 "cuda" => Ok(Backends::Cuda),
                 _ => Err(ExampleError::BadBackends(text)),
             })?;
-        run(&path, &prompt, tokens, backends)
+        let recorder = install_telemetry()?;
+        let result = run(&path, &prompt, tokens, backends);
+        if let Some(recorder) = recorder {
+            let _drained = recorder.drain();
+        }
+        result
     });
     match outcome {
         Ok(()) => ExitCode::SUCCESS,

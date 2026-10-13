@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use cudarc::driver::sys as cuda_sys;
 use cudarc::driver::{
@@ -416,39 +417,15 @@ impl CudaDriver {
                 }
             }
         }
-        let mut resolved = prune_dead(
-            if config.is_some_and(|value| !value.allow_fusion) {
-                bind_unfused(program, &shapes, outputs, numeric_policy)
-            } else {
-                bind_with_fusion(program, &shapes, outputs, false, numeric_policy)
-            }
-            .map_err(|_| CudaDriverError::UnsupportedGraph {
-                node: NodeId(0),
-                reason: "graph binding failed",
-            })?,
+        let unfused = config.is_some_and(|value| !value.allow_fusion);
+        let (resolved, kernels, uniforms, _) = bind_and_emit(
+            program,
+            &shapes,
             outputs,
-        );
-        correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
-        for bound in &resolved {
-            validate_cuda_dtype(bound)?;
-        }
-        reject_unsupported_kinds(&resolved)?;
-        let mut kernels = Vec::with_capacity(resolved.len());
-        let mut uniforms = Vec::with_capacity(resolved.len());
-        for bound in &resolved {
-            let kernel = crate::emit_cuda_with_policy(bound, &packed_operands, numeric_policy)
-                .map_err(|error| CudaDriverError::Emit {
-                    node: bound.node,
-                    error: error.to_string(),
-                })?;
-            let packed_uniforms =
-                crate::cuda::pack_cuda_uniforms(bound).map_err(|error| CudaDriverError::Emit {
-                    node: bound.node,
-                    error: error.to_string(),
-                })?;
-            kernels.push(kernel);
-            uniforms.push(packed_uniforms);
-        }
+            &packed_operands,
+            numeric_policy,
+            unfused,
+        )?;
         let plan = CudaPlan {
             constraints: config.map(|value| value.constraints.clone()),
             block_contract: blocks
@@ -979,6 +956,70 @@ impl CudaDriver {
     }
 }
 
+type LoweredOps = (Vec<BoundOp>, Vec<CudaKernel>, Vec<Vec<u8>>, LowerMicros);
+
+#[derive(Debug, Default, Clone, Copy)]
+struct LowerMicros {
+    bind: u64,
+    emit: u64,
+    pack: u64,
+}
+
+fn bind_and_emit(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    unfused: bool,
+) -> Result<LoweredOps, CudaDriverError> {
+    let bind_started = Instant::now();
+    let bound = if unfused {
+        bind_unfused(program, shapes, outputs, numeric_policy)
+    } else {
+        bind_with_fusion(program, shapes, outputs, false, numeric_policy)
+    }
+    .map_err(|_| CudaDriverError::UnsupportedGraph {
+        node: NodeId(0),
+        reason: "graph binding failed",
+    })?;
+    let mut resolved = prune_dead(bound, outputs);
+    correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
+    for bound in &resolved {
+        validate_cuda_dtype(bound)?;
+    }
+    reject_unsupported_kinds(&resolved)?;
+    let mut micros = LowerMicros {
+        bind: bind_started.elapsed().as_micros() as u64,
+        ..LowerMicros::default()
+    };
+    let emit_started = Instant::now();
+    let kernels = resolved
+        .iter()
+        .map(|bound| {
+            crate::emit_cuda_with_policy(bound, packed_operands, numeric_policy).map_err(|error| {
+                CudaDriverError::Emit {
+                    node: bound.node,
+                    error: error.to_string(),
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    micros.emit = emit_started.elapsed().as_micros() as u64;
+    let pack_started = Instant::now();
+    let uniforms = resolved
+        .iter()
+        .map(|bound| {
+            crate::cuda::pack_cuda_uniforms(bound).map_err(|error| CudaDriverError::Emit {
+                node: bound.node,
+                error: error.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    micros.pack = pack_started.elapsed().as_micros() as u64;
+    Ok((resolved, kernels, uniforms, micros))
+}
+
 fn cuda_supports_kind(kind: &BoundOpKind) -> bool {
     matches!(
         kind,
@@ -1079,6 +1120,49 @@ fn compile_cuda_source(source: &str) -> Result<Ptx, CudaDriverError> {
 }
 
 impl CudaPlan {
+    /// Moves this plan to new symbol values when its graph structure is unchanged,
+    /// re-binding extents and uniforms while keeping the device arena, resident
+    /// weights and compiled modules. `Ok(false)` when a resource-constrained plan
+    /// must be rebuilt. Teaching pointer: the same bind-and-emit step
+    /// `plan_with_options` runs, minus input resolution and arena creation.
+    pub fn refit_symbols(
+        &mut self,
+        symbols: &[u64],
+        numeric_policy: NumericPolicy,
+    ) -> Result<bool, CudaDriverError> {
+        if self.constraints.is_some() {
+            return Ok(false);
+        }
+        let infer_started = Instant::now();
+        let shapes =
+            infer(&self.program, symbols).map_err(|_| CudaDriverError::UnsupportedGraph {
+                node: NodeId(0),
+                reason: "shape inference failed",
+            })?;
+        let infer_micros = infer_started.elapsed().as_micros() as u64;
+        let (resolved, kernels, uniforms, micros) = bind_and_emit(
+            &self.program,
+            &shapes,
+            &self.outputs,
+            &self.packed_operands,
+            numeric_policy,
+            false,
+        )?;
+        self.shapes = shapes;
+        self.resolved = resolved;
+        self.kernels = kernels;
+        self.uniforms = uniforms;
+        proxima_telemetry::debug!(
+            infer_us = infer_micros,
+            bind_us = micros.bind,
+            emit_us = micros.emit,
+            pack_us = micros.pack,
+            op_count = self.resolved.len(),
+            "cuda plan refit phases"
+        );
+        Ok(true)
+    }
+
     pub fn scoped_reservation(&self) -> Result<(u64, u64, u64), CudaDriverError> {
         let mut total = 0_u64;
         let mut largest = 0_u64;
