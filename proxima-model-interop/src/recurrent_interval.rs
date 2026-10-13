@@ -378,6 +378,7 @@ pub fn descriptor_from_architecture(
         })
         .collect();
     Ok(ModelDescriptor {
+        network: None,
         vocab: architecture.vocab,
         embedding: architecture.embedding,
         feed_forward: architecture.feed_forward,

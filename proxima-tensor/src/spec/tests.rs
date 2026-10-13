@@ -16450,6 +16450,7 @@ mod gemma4_synthetic_parity {
             gated_attention: false,
             recurrence: None,
             loopcd: LoopCdConfig::default(),
+            network: None,
         };
 
         let ForwardProgram {
@@ -19171,6 +19172,7 @@ mod head_repeats {
             gated_attention: false,
             recurrence: None,
             loopcd: LoopCdConfig::default(),
+            network: None,
         }
     }
 
@@ -20578,6 +20580,7 @@ mod hybrid_dense_descriptor {
             gated_attention: true,
             recurrence: None,
             loopcd: LoopCdConfig::default(),
+            network: None,
         }
     }
 
@@ -20870,6 +20873,7 @@ mod hybrid_routed_descriptor {
             gated_attention: true,
             recurrence: None,
             loopcd: LoopCdConfig::default(),
+            network: None,
         }
     }
 

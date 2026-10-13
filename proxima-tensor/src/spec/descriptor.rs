@@ -293,6 +293,12 @@ pub struct ModelDescriptor {
     #[cfg_attr(feature = "config", builder(default))]
     #[serde(default)]
     pub loopcd: LoopCdConfig,
+    /// The block tree this model is declared as. `None` keeps the flat fields
+    /// above as the whole description, which is every model until a
+    /// network-declared path lands.
+    #[cfg_attr(feature = "config", setting(skip))]
+    #[serde(default)]
+    pub network: Option<blocks::Network>,
 }
 
 impl ModelDescriptor {
@@ -704,6 +710,7 @@ pub fn gqa_descriptor_from_shape(
         gated_attention: false,
         recurrence: None,
         loopcd: LoopCdConfig::default(),
+        network: None,
     }
 }
 
