@@ -990,7 +990,7 @@ tokio-rustls = ["tokio", "dep:tokio-rustls"]
 # the tokio-backed acceptor/unix-upstream/packet-listener factories from that
 # module unconditionally, so this feature must carry it rather than relying on
 # a caller to also enable the (unrelated) full `tokio` umbrella feature.
-runtime-tokio = ["tokio-runtime", "proxima-runtime/tokio", "proxima-net/tokio", "dep:core_affinity", "dep:flume"]
+runtime-tokio = ["tokio-runtime", "proxima-runtime/tokio", "proxima-net/tokio", "dep:core_affinity", "dep:flume", "dep:tokio"]
 
 # `io-uring` enables the completion-based io_uring backend on Linux ≥6.x.
 # Composes with either runtime feature; the active runtime selects the
