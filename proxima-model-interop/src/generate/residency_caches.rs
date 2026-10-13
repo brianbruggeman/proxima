@@ -2896,6 +2896,12 @@ impl BackendRuntime {
         } else {
             None
         };
+        #[cfg(feature = "cuda")]
+        Self::refit_near_cuda_plan(&mut self.plans, &shape, symbols, self.numeric_policy)?;
+        #[cfg(feature = "cuda")]
+        let misses_before = self.plan_misses;
+        #[cfg(feature = "cuda")]
+        let resolve_started = std::time::Instant::now();
         let plan = Self::resolve_cached_plan(
             &mut self.plans,
             &mut self.plan_hits,
@@ -2973,11 +2979,25 @@ impl BackendRuntime {
         {
             Self::emit_plan_footprint_diff(&previous_footprint, &previous_kernel_keys, metal_plan);
         }
-        Ok(execute_plan_named_with_expert_sources(
-            plan,
-            named,
-            expert_sources,
-        )?)
+        #[cfg(feature = "cuda")]
+        let plan_hit = self.plan_misses == misses_before;
+        #[cfg(feature = "cuda")]
+        let resolve_us = resolve_started.elapsed().as_micros() as u64;
+        let evaluated = execute_plan_named_with_expert_sources(plan, named, expert_sources)?;
+        #[cfg(feature = "cuda")]
+        debug!(
+            plan_hit = plan_hit,
+            symbol_0 = symbols[0],
+            symbol_1 = symbols[1],
+            output_count = outputs.len(),
+            resolve_us = resolve_us,
+            plan_allocations = match &*plan {
+                omega::backend::Plan::Cuda(cuda) => cuda.allocations(),
+                _ => 0,
+            },
+            "cuda decode plan resolved against the one-entry plan cache"
+        );
+        Ok(evaluated)
     }
 
     /// Evaluates one graph partition without allowing the ordinary
@@ -3918,7 +3938,7 @@ impl BackendRuntime {
     /// `refit_symbols` on it before building from scratch, which is what
     /// makes a bucket crossing cheaper than a plan build when only the
     /// attention key range moved.
-    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cuda"))]
     pub(super) fn take_near_plan<PlanType>(
         cache: &mut alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), PlanType>,
         shape: &(usize, usize, Vec<NodeId>, bool),
@@ -3931,6 +3951,26 @@ impl BackendRuntime {
             .find(|key| key.0 == shape.0 && key.2 == shape.2 && key.3 == shape.3)
             .cloned()?;
         cache.remove(&near)
+    }
+
+    /// Moves the cached CUDA plan whose key differs from `shape` only in the KV
+    /// length to `shape`'s symbols and re-keys it, so the lookup that follows is a
+    /// hit. The CUDA program runs the unfused chain, so every K/V-sized op changes
+    /// extents with the length but none changes structure.
+    #[cfg(feature = "cuda")]
+    pub(super) fn refit_near_cuda_plan(
+        cache: &mut alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), Plan>,
+        shape: &(usize, usize, Vec<NodeId>, bool),
+        symbols: &[u64],
+        numeric_policy: proxima_tensor::NumericPolicy,
+    ) -> Result<(), InteropError> {
+        let Some(mut near) = Self::take_near_plan(cache, shape) else {
+            return Ok(());
+        };
+        if omega::backend::refit_cuda_symbols(&mut near, symbols, numeric_policy)? {
+            cache.insert(shape.clone(), near);
+        }
+        Ok(())
     }
 
     #[cfg_attr(feature = "instrument", proxima_telemetry::instrument(level = "debug"))]

@@ -1408,6 +1408,25 @@ pub fn refit_symbols(plan: &mut Plan, symbols: &[u64]) -> Result<bool, metal::Me
     }
 }
 
+/// Moves a cached [`Plan::Cuda`] to `symbols` in place -- [`cuda_driver::CudaPlan::refit_symbols`]'s
+/// own doc has the contract. `Ok(false)` on every other arm, so the caller
+/// builds a fresh plan.
+///
+/// # Errors
+/// [`BackendError::Cuda`] when shape inference or kernel emission fails at `symbols`.
+#[cfg(feature = "cuda-driver")]
+pub fn refit_cuda_symbols(
+    plan: &mut Plan,
+    symbols: &[u64],
+    numeric_policy: NumericPolicy,
+) -> Result<bool, BackendError> {
+    match plan {
+        Plan::Cuda(cuda_plan) => Ok(cuda_plan.refit_symbols(symbols, numeric_policy)?),
+        #[allow(unreachable_patterns)]
+        _ => Ok(false),
+    }
+}
+
 /// Sets [`metal::DispatchType`] on [`Plan::Metal`] -- see that type's own
 /// doc for the measured rationale (`proxima-tensor/docs/discipline.md` ROW
 /// 311/312). A no-op on every other arm: `Plan::Cpu`'s interpreter has no
