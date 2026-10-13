@@ -127,7 +127,7 @@ pub type BackgroundHandle<R> = Pin<Box<dyn Future<Output = Result<R, ProximaErro
 /// Default: `tokio::task::spawn_blocking` (already wired into
 /// `TokioPerCoreRuntime::spawn_background_blocking` — good for
 /// I/O-blocking work, scales to 512 threads). Alternative:
-/// `RayonBackgroundPool` (feature `background-rayon`) — work-
+/// `RayonBackgroundPool` (feature `rayon`) — work-
 /// stealing across a fixed thread count, the right shape for
 /// CPU-bound parallel compute.
 #[cfg(feature = "alloc")]

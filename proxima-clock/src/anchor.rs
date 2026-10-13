@@ -12,14 +12,12 @@ use crate::unix_nanos::UnixNanos;
 /// pinned to wall-clock time by — anchored once, re-anchorable later (an
 /// NTP/PTP discipline loop calling [`AnchorCell::set`] on a schedule).
 ///
-/// This is not speculative: it replaces two independent hand-rolled
-/// versions already in the tree — `src/upstreams/record.rs` (main,
-/// `OffsetDateTime::now_utc()` and `Instant::now()` read as two unrelated
-/// values with no shared anchor) and `feat/determinism-proof`'s
-/// `RecordUpstream::with_clock` (`wall_epoch`/`epoch_nanos` pair, anchored
-/// once at construction, `wall_epoch + Duration::from_nanos(now_nanos -
-/// epoch_nanos)` computed per read) — promoted here as the general,
-/// tick-domain, `no_std` shape both were converging on.
+/// This is the general, tick-domain, `no_std` shape for correlating a
+/// monotonic counter with the wall clock. Two clocks read independently
+/// (say `Instant::now()` and a wall-clock read) share no anchor, so one
+/// `(ticks, unix_nanos)` pair is stored here and every conversion is
+/// measured from it. [`ToUnixNanos`] is the conversion; `AnchorConfig`
+/// (module `config`, feature `config`) is the serializable mirror of the initial pair.
 ///
 /// Seqlock-protected rather than set-once: a
 /// caller that never re-anchors pays nothing extra (one seqlock read costs

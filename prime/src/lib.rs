@@ -1,10 +1,23 @@
-//! From-scratch per-core async runtime. Umbrella-free: depends only
-//! on `proxima_core` and `proxima_runtime` (runtime ends at
-//! deps-only-`proxima-core` — see Wave D Phase 1). The
-//! umbrella's serve adapters (`PrimeServeExt::serve_http`,
-//! `serve_https_with_tls`) live in the umbrella because they pull
-//! `crate::listener` and `crate::listeners`, which are still
-//! umbrella-only today.
+//! From-scratch per-core async runtime. Umbrella-free: it does not depend on
+//! the `proxima` umbrella crate. Its proxima dependencies are `proxima_core`,
+//! `proxima_runtime` (the `Runtime` / `BackgroundPool` traits it implements),
+//! `proxima_primitives` (pipe and sync primitives), `proxima_clock` and
+//! `proxima_telemetry`. The umbrella's serve adapters
+//! (`PrimeServeExt::serve_http`, `serve_https_with_tls`) live in the umbrella
+//! because they pull its `listener` and `listeners` modules.
+//!
+//! `PrimeRuntime`, `PrimeConfig`, `CoreSelection` and `PoolKind` are the
+//! runtime's std entry points, and they are NOT compiled by the default
+//! features (`std`, `runtime-prime`). They need `std` plus all four of
+//! `runtime-prime-executor`, `runtime-prime-inbox-alloc`,
+//! `runtime-prime-reactor` and `runtime-prime-bgpool`:
+//!
+//! ```text
+//! cargo build -p prime --features runtime-prime-executor,runtime-prime-inbox-alloc,runtime-prime-reactor,runtime-prime-bgpool
+//! ```
+//!
+//! Without them `prime::core` (executor, inbox, timer wheel) still builds, but
+//! `prime::os::runtime::PrimeRuntime` does not exist.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
