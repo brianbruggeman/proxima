@@ -1877,7 +1877,7 @@ fn lfm2_header_descriptor_describes_the_hybrid_stack_and_round_trips_through_tom
             .program,
     );
     for expected in [
-        "blk.0.shortconv.in_proj.weight.b",
+        "blk.0.shortconv.in_proj.weight",
         "blk.0.ffn_gate.weight",
         "blk.2.attn_q.weight",
         "blk.2.ffn_gate_exps.weight",
@@ -1891,6 +1891,13 @@ fn lfm2_header_descriptor_describes_the_hybrid_stack_and_round_trips_through_tom
         !leaves.iter().any(|leaf| leaf == "blk.0.attn_q.weight"),
         "a convolution layer owns no attention weights"
     );
+    for split in ["b", "c", "x"] {
+        let split_leaf = format!("blk.0.shortconv.in_proj.weight.{split}");
+        assert!(
+            !leaves.contains(&split_leaf),
+            "{split_leaf} is a row view of the fused in_proj leaf, not a checkpoint tensor"
+        );
+    }
 }
 
 #[test]
