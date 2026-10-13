@@ -3376,7 +3376,7 @@ impl BackendRuntime {
     /// It resolves the identical cached segment plan and preserves its
     /// per-expert source substitutions, changing only command-buffer
     /// granularity so the caller can attribute GPU time to bound ops.
-    #[cfg(all(feature = "instrument", target_os = "macos"))]
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
     pub(super) fn evaluate_segment_op_timed(
         &mut self,
         program: &[Op],
@@ -4345,6 +4345,7 @@ impl BackendRuntime {
     /// `PROXIMA_METAL_OP_PROFILE_STEP` branch).
     #[cfg(all(
         feature = "instrument",
+        feature = "metal",
         target_os = "macos",
         not(feature = "metal-output-placement")
     ))]
@@ -4409,7 +4410,7 @@ impl BackendRuntime {
         Ok(execute_plan_named_metal_op_timed(plan, named, None)?)
     }
 
-    #[cfg(all(feature = "instrument", target_os = "macos"))]
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
     pub(super) fn evaluate_op_timed_with_expert_sources(
         &mut self,
         program: &[Op],
