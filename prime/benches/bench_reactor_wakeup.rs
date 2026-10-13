@@ -20,7 +20,7 @@
 //!     may spin the inbox before parking on the reactor.
 //!
 //! Run:
-//! `cargo bench -p prime --no-default-features --features
+//! `cargo bench -p proxima-prime --no-default-features --features
 //!  runtime-prime-reactor,runtime-prime-executor,runtime-prime-inbox-alloc
 //!  --bench bench_reactor_wakeup -- reactor_wakeup`
 //!

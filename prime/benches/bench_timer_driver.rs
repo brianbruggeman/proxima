@@ -22,7 +22,7 @@
 //! thread-spawn vs slab-insert and is honest on its own terms.
 //!
 //! Run:
-//!   cargo bench -p prime \
+//!   cargo bench -p proxima-prime \
 //!     --features runtime-prime-timer,runtime-prime-executor,runtime-prime-inbox-alloc,runtime-prime-reactor \
 //!     --bench bench_timer_driver \
 //!     -- --save-baseline timer-driver-$(date +%Y%m%d)

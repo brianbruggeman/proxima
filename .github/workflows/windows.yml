@@ -24,11 +24,11 @@ jobs:
       - name: compile every workspace target
         run: cargo check --workspace --all-targets --message-format short
       - name: Prime filesystem
-        run: cargo nextest run -p prime --test windows_fs --features runtime-prime-full,runtime-prime-virtual-clock,runtime-prime-bgpool,runtime-prime-config --no-tests=fail --test-threads 1 --retries 0
+        run: cargo nextest run -p proxima-prime --test windows_fs --features runtime-prime-full,runtime-prime-virtual-clock,runtime-prime-bgpool,runtime-prime-config --no-tests=fail --test-threads 1 --retries 0
       - name: Prime reactor and sockets
-        run: cargo nextest run -p prime --test windows_port --features runtime-prime-full,runtime-prime-virtual-clock,runtime-prime-bgpool,runtime-prime-config --no-tests=fail --test-threads 1 --retries 0
+        run: cargo nextest run -p proxima-prime --test windows_port --features runtime-prime-full,runtime-prime-virtual-clock,runtime-prime-bgpool,runtime-prime-config --no-tests=fail --test-threads 1 --retries 0
       - name: Prime IOCP port and AFD
-        run: cargo nextest run -p prime --lib --features runtime-prime-full,runtime-prime-virtual-clock,runtime-prime-bgpool,runtime-prime-config -E 'test(os::iocp::tests::) or test(os::afd::tests::)' --no-tests=fail --test-threads 1 --retries 0
+        run: cargo nextest run -p proxima-prime --lib --features runtime-prime-full,runtime-prime-virtual-clock,runtime-prime-bgpool,runtime-prime-config -E 'test(os::iocp::tests::) or test(os::afd::tests::)' --no-tests=fail --test-threads 1 --retries 0
       - name: proxima-net adapters
         run: cargo nextest run -p proxima-net --test windows_port --features prime,runtime-prime-inbox-alloc --no-tests=fail --test-threads 1 --retries 0
       - name: proxima-net upstream ownership

@@ -21,7 +21,7 @@
 //! file. Writing `#[cfg(not(feature = "std"))]` fallbacks would be dead
 //! arms describing a configuration that cannot be selected.
 //!
-//! `#[cfg(not(test))]`: `cargo test -p prime` dev-depends (transitively,
+//! `#[cfg(not(test))]`: `cargo test -p proxima-prime` dev-depends (transitively,
 //! through the `proxima` umbrella crate needed for the `#[proxima::test]`
 //! macro) on a second, normally-compiled copy of this same `prime` package
 //! alongside the `--test`-compiled crate under test — mirrors
