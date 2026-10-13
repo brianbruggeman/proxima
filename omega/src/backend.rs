@@ -1428,6 +1428,18 @@ pub fn refit_cuda_symbols(
     }
 }
 
+/// Cumulative `[refit calls, ops re-emitted, ops reused, ops repacked]` of a
+/// [`Plan::Cuda`]; `None` on every other arm. See
+/// [`cuda_driver::CudaPlan::refit_counters`].
+#[cfg(feature = "cuda-driver")]
+#[must_use]
+pub fn cuda_refit_counters(plan: &Plan) -> Option<[u64; 4]> {
+    match plan {
+        Plan::Cuda(cuda_plan) => Some(cuda_plan.refit_counters()),
+        _ => None,
+    }
+}
+
 /// Sets [`metal::DispatchType`] on [`Plan::Metal`] -- see that type's own
 /// doc for the measured rationale (`proxima-tensor/docs/discipline.md` ROW
 /// 311/312). A no-op on every other arm: `Plan::Cpu`'s interpreter has no

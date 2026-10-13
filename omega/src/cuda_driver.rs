@@ -215,6 +215,11 @@ pub struct CudaPlan {
     exact_activations: bool,
     // resident_nodes is sorted; boxed slices keep CudaPlan under clippy's large_enum_variant gap against the cpu plan
     resident_nodes: Box<[NodeId]>,
+    // cumulative per-plan totals; read by the decode path's per-step telemetry, never printed per dispatch.
+    refit_calls: u64,
+    emit_calls: u64,
+    emit_reused: u64,
+    pack_calls: u64,
 }
 
 /// Numeric and activation policy for one plan, plus the runtime config when the
@@ -622,6 +627,10 @@ impl CudaDriver {
             packed_operands,
             exact_activations,
             resident_nodes: Box::default(),
+            refit_calls: 0,
+            emit_calls: 0,
+            emit_reused: 0,
+            pack_calls: 0,
         };
         if config.is_some() {
             plan.validate_resources(&blocks, None)?;
@@ -1531,6 +1540,11 @@ impl CudaPlan {
                 ("full", 0, refused, resolved, kernels, uniforms, micros)
             }
         };
+        let op_count = resolved.len();
+        self.refit_calls += 1;
+        self.emit_calls += op_count.saturating_sub(micros.reused) as u64;
+        self.emit_reused += micros.reused as u64;
+        self.pack_calls += uniforms.len() as u64;
         self.numeric_policy = numeric_policy;
         self.shapes = shapes;
         self.resolved = resolved;
@@ -1542,13 +1556,28 @@ impl CudaPlan {
             emit_us = micros.emit,
             emit_reused = micros.reused,
             pack_us = micros.pack,
-            op_count = self.resolved.len(),
+            op_count = op_count,
             bind_path = bind_path,
             bind_touched = touched as u64,
             bind_refused = refused,
+            refit_total = self.refit_calls,
+            emit_total = self.emit_calls,
+            emit_reused_total = self.emit_reused,
+            pack_total = self.pack_calls,
             "cuda plan refit phases"
         );
         Ok(true)
+    }
+
+    /// Cumulative `[refit calls, ops re-emitted, ops reused, ops repacked]` since this plan was built.
+    #[must_use]
+    pub const fn refit_counters(&self) -> [u64; 4] {
+        [
+            self.refit_calls,
+            self.emit_calls,
+            self.emit_reused,
+            self.pack_calls,
+        ]
     }
 
     pub fn scoped_reservation(&self) -> Result<(u64, u64, u64), CudaDriverError> {
