@@ -89,6 +89,9 @@ pub enum TensorError {
     #[error("no binding supplied for input `{0}`")]
     UnboundInputName(alloc::string::String),
 
+    #[error("tensor plan rejected: {0}")]
+    InvalidPlan(alloc::string::String),
+
     #[error("node {node} input has {found} elements but its shape needs {expected}")]
     InputSizeMismatch {
         node: NodeId,
