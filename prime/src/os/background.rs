@@ -277,32 +277,6 @@ impl Drop for ProximaBackgroundPool {
     }
 }
 
-#[cfg(feature = "runtime-prime-bgpool-async")]
-struct UnparkWaker(Unparker);
-
-#[cfg(feature = "runtime-prime-bgpool-async")]
-impl std::task::Wake for UnparkWaker {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.unpark();
-    }
-}
-
-// drives one `Job::Async` future to completion on the worker thread, parking
-// between polls; the waker unparks this worker. no reactor or timer exists
-// here, so the future must be woken by its own channels or yields.
-#[cfg(feature = "runtime-prime-bgpool-async")]
-fn block_on_parked(mut future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>, parker: &Parker) {
-    let waker = std::task::Waker::from(Arc::new(UnparkWaker(parker.unparker().clone())));
-    let mut context = Context::from_waker(&waker);
-    while future.as_mut().poll(&mut context).is_pending() {
-        parker.park();
-    }
-}
-
 fn worker(inner: Arc<Inner>, parker: Parker) {
     loop {
         // fast path: steal from injector. `steal` retries internally on
@@ -316,7 +290,7 @@ fn worker(inner: Arc<Inner>, parker: Parker) {
                     }
                     #[cfg(feature = "runtime-prime-bgpool-async")]
                     Job::Async(future) => {
-                        block_on_parked(future, &parker);
+                        futures::executor::block_on(future);
                     }
                 }));
                 let _ = unwind;
