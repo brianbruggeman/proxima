@@ -14,7 +14,6 @@
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 use futures::io::{AsyncRead, AsyncWrite};
@@ -23,6 +22,7 @@ use proxima_primitives::stream::{
     BindAddr, ConnectFuture, PeerInfo, StreamConnection, StreamListener, StreamUpstream,
     UnixUpstreamFactory,
 };
+use proxima_primitives::sync::blocking::Mutex;
 
 /// prime-backed Unix-domain connection. wraps `prime::os::net::UnixStream`
 /// and carries the peer path (usually `None` — the common case is an
@@ -81,12 +81,13 @@ impl StreamConnection for PrimeUnixConnection {
 /// at `path` first — same fresh-bind-on-restart behavior as
 /// `TokioUnixListener::bind`.
 ///
-/// WHY the `Mutex`: `StreamListener::poll_accept` takes `&self` (the trait
-/// surface cannot allow `&mut self`), but the prime OS-layer
-/// `UnixListener::poll_accept` takes `Pin<&mut Self>` — interior mutability
-/// is required to get there. One accept loop per listener means the lock
-/// is uncontested in practice; cost is a single futex-free fast-path lock
-/// per accept, dwarfed by the syscall itself.
+/// WHY a lock at all: `StreamListener` requires `Sync` and `poll_accept(&self)`,
+/// while prime's `UnixListener::poll_accept` needs `Pin<&mut Self>` and the type
+/// is `!Sync` (reactor-owner state). Lock-free would need an `unsafe impl Sync`
+/// that trusts every caller to keep a single accept loop; the trait cannot
+/// enforce that, so the canonical [`Mutex`] (`proxima_primitives::sync::blocking`,
+/// the same choice `proxima-http`'s `AcceptSource` makes) hosts the `&mut`. One
+/// accept loop means it is never contended and never held across an `.await`.
 pub struct PrimeUnixListener {
     inner: Mutex<PrimeUnixListenerInner>,
     bind_path: PathBuf,
@@ -108,9 +109,7 @@ impl StreamListener for PrimeUnixListener {
     type Conn = PrimeUnixConnection;
 
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
-        let Ok(mut guard) = self.inner.lock() else {
-            return Poll::Ready(Err(io::Error::other("PrimeUnixListener: lock poisoned")));
-        };
+        let mut guard = self.inner.lock();
         match Pin::new(&mut *guard).poll_accept(cx) {
             Poll::Ready(Ok((stream, peer))) => {
                 Poll::Ready(Ok(PrimeUnixConnection::new(stream, peer)))
