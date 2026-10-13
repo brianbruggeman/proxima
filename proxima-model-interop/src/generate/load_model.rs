@@ -1230,6 +1230,8 @@ pub(super) fn fused_segment_experts_are_current_layer(
 /// are released once, when the last model over them goes.
 pub(super) struct SharedWeights<'file> {
     bound: BoundWeights<'file>,
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    resident_identity: Arc<()>,
     #[cfg_attr(
         not(feature = "metal"),
         allow(dead_code, reason = "only `Drop`, itself `metal`-gated, reads this")
@@ -1238,8 +1240,18 @@ pub(super) struct SharedWeights<'file> {
 }
 
 impl<'file> SharedWeights<'file> {
-    pub(super) const fn new(bound: BoundWeights<'file>, mapping: &'file [u8]) -> Self {
-        Self { bound, mapping }
+    pub(super) fn new(bound: BoundWeights<'file>, mapping: &'file [u8]) -> Self {
+        Self {
+            bound,
+            #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+            resident_identity: Arc::new(()),
+            mapping,
+        }
+    }
+
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    pub(super) fn resident_identity(&self) -> Arc<()> {
+        Arc::clone(&self.resident_identity)
     }
 }
 

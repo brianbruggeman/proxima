@@ -2599,6 +2599,12 @@ pub struct BackendRuntime {
     #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
     cuda_resident_source_identities: Vec<(usize, usize)>,
     #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    cuda_resident_owner: Option<Arc<()>>,
+    #[cfg(all(test, feature = "cuda", feature = "interop-bgpool"))]
+    resident_source_identity_materializations: usize,
+    #[cfg(all(test, feature = "cuda", feature = "interop-bgpool"))]
+    resident_payload_comparison_passes: usize,
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
     cuda_resident_inputs: Option<OwnedGpuInputs>,
     pub(super) engine: Engine,
     /// Warmup deliberately retains the monolithic all-low source snapshot so
@@ -2798,6 +2804,12 @@ impl BackendRuntime {
             cuda_resident_names: BTreeSet::new(),
             #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
             cuda_resident_source_identities: Vec::new(),
+            #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+            cuda_resident_owner: None,
+            #[cfg(all(test, feature = "cuda", feature = "interop-bgpool"))]
+            resident_source_identity_materializations: 0,
+            #[cfg(all(test, feature = "cuda", feature = "interop-bgpool"))]
+            resident_payload_comparison_passes: 0,
             #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
             cuda_resident_inputs: None,
             engine: select_backend(config),
@@ -3089,6 +3101,30 @@ impl BackendRuntime {
     where
         Owner: Future<Output = Result<(), ProximaError>> + Send,
     {
+        self.evaluate_async_with_resident_owner(
+            service,
+            request,
+            resident_names,
+            expert_sources,
+            None,
+        )
+        .await
+    }
+
+    #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+    pub(super) async fn evaluate_async_with_resident_owner<Owner>(
+        &mut self,
+        service: &CudaGpuService<Owner>,
+        request: CudaGraphRequest<'_>,
+        resident_names: &BTreeSet<&str>,
+        expert_sources: Option<
+            &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
+        >,
+        resident_owner: Option<&Arc<()>>,
+    ) -> Result<Evaluated, InteropError>
+    where
+        Owner: Future<Output = Result<(), ProximaError>> + Send,
+    {
         let CudaGraphRequest {
             program,
             symbols,
@@ -3122,35 +3158,72 @@ impl BackendRuntime {
         if !self.cuda_plans.contains_key(&shape) {
             self.invalidate_async_program();
         }
-        let resident = named
+        let resident_names_match = resident_names
             .iter()
             .copied()
-            .filter(|(name, _)| resident_names.contains(name))
-            .collect::<Vec<_>>();
-        let source_identities = resident
-            .iter()
-            .map(|(_, block)| resident_source_identity(*block))
-            .collect::<Vec<_>>();
+            .eq(self.cuda_resident_names.iter().map(String::as_str));
+        let same_resident_owner = resident_owner.is_some_and(|owner| {
+            self.cuda_resident_owner
+                .as_ref()
+                .is_some_and(|cached| Arc::ptr_eq(owner, cached))
+        });
+        let resident = if same_resident_owner && resident_names_match {
+            Vec::new()
+        } else {
+            named
+                .iter()
+                .copied()
+                .filter(|(name, _)| resident_names.contains(name))
+                .collect::<Vec<_>>()
+        };
+        let resident_owner_changed = match (resident_owner, self.cuda_resident_owner.as_ref()) {
+            (Some(owner), Some(cached)) => !Arc::ptr_eq(owner, cached),
+            (None, None) => false,
+            _ => true,
+        };
+        let source_identities = if resident_owner.is_some() {
+            Vec::new()
+        } else {
+            #[cfg(test)]
+            {
+                self.resident_source_identity_materializations += resident.len();
+            }
+            resident
+                .iter()
+                .map(|(_, block)| resident_source_identity(*block))
+                .collect::<Vec<_>>()
+        };
+        let compare_payloads =
+            resident_owner.is_none() && source_identities == self.cuda_resident_source_identities;
+        #[cfg(test)]
+        if compare_payloads {
+            self.resident_payload_comparison_passes += 1;
+        }
         let resident_changed = (!resident_names.is_empty() || !self.cuda_resident_names.is_empty())
             && (!resident_names
                 .iter()
                 .copied()
                 .eq(self.cuda_resident_names.iter().map(String::as_str))
-                || source_identities != self.cuda_resident_source_identities
-                || !self.cuda_resident_inputs.as_ref().is_some_and(|owned| {
-                    owned.blocks.len() == resident.len()
-                        && owned
-                            .blocks
-                            .iter()
-                            .zip(&resident)
-                            .all(|(cached, (name, block))| {
-                                cached.name.as_ref() == *name
-                                    && resident_payload_matches(&cached.block, *block)
-                            })
-                }));
+                || resident_owner_changed
+                || if same_resident_owner {
+                    false
+                } else {
+                    source_identities != self.cuda_resident_source_identities
+                        || !compare_payloads
+                        || !self.cuda_resident_inputs.as_ref().is_some_and(|owned| {
+                            owned.blocks.len() == resident.len()
+                                && owned.blocks.iter().zip(&resident).all(
+                                    |(cached, (name, block))| {
+                                        cached.name.as_ref() == *name
+                                            && resident_payload_matches(&cached.block, *block)
+                                    },
+                                )
+                        })
+                });
         if resident_changed {
             self.invalidate_async_program();
             self.cuda_resident_inputs = None;
+            self.cuda_resident_owner = None;
         }
         while let Some(lease) = self.pending_cuda_retire.pop() {
             let retirement = match service.retire_cuda_plan(&lease) {
@@ -3184,6 +3257,7 @@ impl BackendRuntime {
                 .collect();
             self.cuda_resident_source_identities = source_identities;
             self.cuda_resident_inputs = owned;
+            self.cuda_resident_owner = resident_owner.cloned();
         }
         let dynamic = named
             .iter()
@@ -5077,6 +5151,121 @@ mod omega_async_serving_tests {
         drop(previous_owned);
         assert_eq!(available_before - service.available_owned_host_bytes(), 14);
         assert_eq!((runtime.plan_misses, runtime.plan_hits), (4, 2));
+
+        let first_owner = Arc::new(());
+        let first_owner_weak = Arc::downgrade(&first_owner);
+        let owner_values = [11.0, -12.0];
+        let owner_named = [("values", QuantizedBlock::Float32(&owner_values))];
+        let owner_baseline = proxima_tensor::cpu::evaluate_quantized_named(
+            &program,
+            &[2, 1],
+            &owner_named,
+            &[NodeId(1)],
+        )
+        .expect("cpu owner graph should evaluate");
+        let owner_request = || CudaGraphRequest {
+            program: &program,
+            symbols: &[2, 1],
+            named: &owner_named,
+            outputs: &[NodeId(1)],
+        };
+        let first_owned_result = runtime
+            .evaluate_async_with_resident_owner(
+                &service,
+                owner_request(),
+                &residents,
+                None,
+                Some(&first_owner),
+            )
+            .await
+            .expect("first immutable owner graph should evaluate");
+        assert_eq!(first_owned_result.root(), &[-11.0, 12.0]);
+        assert_eq!(first_owned_result.root(), owner_baseline.root());
+        assert!(first_owner_weak.upgrade().is_some());
+        let identity_count_after_first_owner = runtime.resident_source_identity_materializations;
+        let comparison_count_after_first_owner = runtime.resident_payload_comparison_passes;
+        let owned_blocks = Arc::clone(
+            &runtime
+                .cuda_resident_inputs
+                .as_ref()
+                .expect("first owner resident copy")
+                .blocks,
+        );
+        let repeated_owned_result = runtime
+            .evaluate_async_with_resident_owner(
+                &service,
+                owner_request(),
+                &residents,
+                None,
+                Some(&first_owner),
+            )
+            .await
+            .expect("repeated immutable owner graph should evaluate");
+        assert_eq!(repeated_owned_result.root(), &[-11.0, 12.0]);
+        assert_eq!(repeated_owned_result.root(), owner_baseline.root());
+        assert!(Arc::ptr_eq(
+            &owned_blocks,
+            &runtime
+                .cuda_resident_inputs
+                .as_ref()
+                .expect("reused owner resident copy")
+                .blocks,
+        ));
+        assert_eq!(
+            runtime.resident_source_identity_materializations,
+            identity_count_after_first_owner
+        );
+        assert_eq!(
+            runtime.resident_payload_comparison_passes,
+            comparison_count_after_first_owner
+        );
+
+        let second_owner = Arc::new(());
+        let second_owner_values = [9.0, -10.0];
+        let second_owner_named = [("values", QuantizedBlock::Float32(&second_owner_values))];
+        let second_owner_baseline = proxima_tensor::cpu::evaluate_quantized_named(
+            &program,
+            &[2, 1],
+            &second_owner_named,
+            &[NodeId(1)],
+        )
+        .expect("cpu replacement owner graph should evaluate");
+        let second_owner_request = || CudaGraphRequest {
+            program: &program,
+            symbols: &[2, 1],
+            named: &second_owner_named,
+            outputs: &[NodeId(1)],
+        };
+        let replaced_owner_result = runtime
+            .evaluate_async_with_resident_owner(
+                &service,
+                second_owner_request(),
+                &residents,
+                None,
+                Some(&second_owner),
+            )
+            .await
+            .expect("replacement immutable owner graph should evaluate");
+        assert_eq!(replaced_owner_result.root(), &[-9.0, 10.0]);
+        assert_eq!(replaced_owner_result.root(), second_owner_baseline.root());
+        assert_eq!(
+            runtime.resident_source_identity_materializations,
+            identity_count_after_first_owner
+        );
+        assert_eq!(
+            runtime.resident_payload_comparison_passes,
+            comparison_count_after_first_owner
+        );
+        assert!(!Arc::ptr_eq(
+            &owned_blocks,
+            &runtime
+                .cuda_resident_inputs
+                .as_ref()
+                .expect("replacement owner resident copy")
+                .blocks,
+        ));
+        drop(first_owner);
+        assert!(first_owner_weak.upgrade().is_none());
         service.shutdown().await.expect("owner should drain");
     }
 
