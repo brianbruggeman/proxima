@@ -78,3 +78,9 @@ $ cargo build -p proxima-example-wasm --target wasm32-unknown-unknown
 
 Same source, two targets: one runs and asserts on the host, the other only
 needs to compile — there's no host on the other side to run it against yet.
+
+## License
+
+Licensed under MIT OR Apache-2.0, at your option.
+
+Repository: <https://github.com/brianbruggeman/proxima>
