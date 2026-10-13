@@ -342,9 +342,31 @@ Status: **roadmap, owner-requested, not designed yet.** No spec, no slice.
       jump-forward decoding
 
 ### Open questions
-- [ ] grammar IR: GBNF is a CFG (rules, alternation, repetition, character
-      classes), so the IR is at least CFG; whether regex / JSON schema doors
-      lower to a cheaper FSM subset of it
+- [ ] the generic form (proposal, 2026-10-13). Semantics and encoding are
+      separate axes:
+      - semantics: a CFG over byte-level terminals, plus a regex lexer layer
+        for terminals, plus a closed set of bounded context-sensitive
+        primitives (indent/dedent stack for YAML and Python, capture-and-match
+        for XML/HTML closing tags, counted repetition). Plain CFG cannot
+        express indentation or matched tag names, so GBNF alone is not
+        generic enough. GBNF has no lexer layer and works on characters, not
+        bytes. pest is PEG, which is the wrong semantics for masking.
+      - encoding: the IR is a serde-derived enum, stored in any format
+        conflaguration already loads (TOML, JSON, YAML), with
+        `serde_value::Value` as the interchange. serde is the container, not a
+        grammar language. RON would only be one more serde format, so it adds
+        a dependency and no expressiveness.
+      - doors: GBNF (lossless round-trip IR <-> text for the CFG subset),
+        tree-sitter `grammar.json` (already JSON data, with grammars for SQL,
+        YAML, TOML, XML, HTML and most programming languages; its C external
+        scanners must map onto the closed context-sensitive set or be
+        refused), Lark (llguidance's syntax), JSON schema, regex, pest (CFG
+        subset only), serde types.
+      - parity corpus: llama.cpp `grammars/` and tree-sitter test corpora.
+- [ ] enumerate the external-scanner behaviours across the tree-sitter grammar
+      set and decide the closed context-sensitive primitive set from that
+      census, not from a guess
+- [ ] whether regex and JSON-schema doors lower to a cheaper FSM subset of the IR
 - [ ] PEG vs CFG: pest's ordered choice and `&`/`!` lookahead are not CFG
       semantics; a prefix viable under a later alternative can be killed
       once an earlier one matches. Decide whether the pest door supports
