@@ -29,14 +29,73 @@ use std::time::Duration;
 
 use crossbeam_queue::SegQueue;
 
-#[cfg(windows)]
-use super::iocp;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::super::core::sized;
+#[cfg(windows)]
+use super::iocp;
 #[cfg(unix)]
 pub(crate) type OwnedSource = std::os::fd::OwnedFd;
 #[cfg(windows)]
 pub(crate) type OwnedSource = std::os::windows::io::OwnedSocket;
+
+/// compiled choice of which readiness bits wake a parked reader or writer.
+///
+/// [`Reactor`] stays non-generic; a caller picks the strategy per runtime via
+/// [`Reactor::turn_as`] or `run_on_this_thread_as` in `core_shard`, composing
+/// the same [`Reactor`] and `Readiness` primitives as the default runtime.
+/// [`Standard`] is what [`Reactor::turn`] uses. [`Hangup`] additionally wakes
+/// readers on EPOLLHUP/EPOLLRDHUP/EPOLLERR, which is what a reader parked on
+/// a child pipe needs: a pipe whose writer closed with no pending data
+/// reports EPOLLHUP only.
+///
+/// the masks are consulted only by the Linux epoll `turn_as`. kqueue and IOCP
+/// already wake readers on hangup, so their `turn_as` ignores the strategy:
+/// kqueue fires the read waker on every EVFILT_READ event regardless of
+/// EV_EOF (`Reactor::turn`, `event.filter == libc::EVFILT_READ` branch,
+/// reactor.rs:701), and AFD counts DISCONNECT as readable
+/// (`READABLE_EVENTS`, afd.rs:51). off Linux the mask values are 0.
+pub trait WakeStrategy: 'static {
+    /// event bits that fire the read waker.
+    const READ_MASK: u32;
+    /// event bits that fire the write waker.
+    const WRITE_MASK: u32;
+}
+
+#[cfg(target_os = "linux")]
+mod masks {
+    pub const STANDARD_READ: u32 = libc::EPOLLIN as u32;
+    pub const STANDARD_WRITE: u32 = libc::EPOLLOUT as u32;
+    pub const HANGUP_READ: u32 =
+        (libc::EPOLLIN | libc::EPOLLHUP | libc::EPOLLRDHUP | libc::EPOLLERR) as u32;
+    pub const HANGUP_WRITE: u32 = (libc::EPOLLOUT | libc::EPOLLERR) as u32;
+}
+
+#[cfg(not(target_os = "linux"))]
+mod masks {
+    pub const STANDARD_READ: u32 = 0;
+    pub const STANDARD_WRITE: u32 = 0;
+    pub const HANGUP_READ: u32 = 0;
+    pub const HANGUP_WRITE: u32 = 0;
+}
+
+/// wakes readers on EPOLLIN and writers on EPOLLOUT: the default runtime.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Standard;
+
+impl WakeStrategy for Standard {
+    const READ_MASK: u32 = masks::STANDARD_READ;
+    const WRITE_MASK: u32 = masks::STANDARD_WRITE;
+}
+
+/// also wakes readers on hangup and error: for a runtime whose readers must
+/// observe a closed peer that left no data, such as child-process pipes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Hangup;
+
+impl WakeStrategy for Hangup {
+    const READ_MASK: u32 = masks::HANGUP_READ;
+    const WRITE_MASK: u32 = masks::HANGUP_WRITE;
+}
 
 /// shared wake state. cheap to clone (shares an `Arc`). external threads
 /// `fire()` it to interrupt the owning worker's `Reactor::turn` call.
@@ -362,7 +421,9 @@ mod kqueue {
         pub fn register(&mut self, fd: RawFd, interest: Interest) -> io::Result<SourceKey> {
             let key = self.claim_slot(fd, interest, SlotKind::Descriptor);
             let udata = pack_udata(key.index, key.generation);
-            if let Err(error) = self.kevent_change(fd, interest, libc::EV_ADD | libc::EV_CLEAR, udata) {
+            if let Err(error) =
+                self.kevent_change(fd, interest, libc::EV_ADD | libc::EV_CLEAR, udata)
+            {
                 self.release_slot(key);
                 return Err(error);
             }
@@ -377,7 +438,9 @@ mod kqueue {
         pub fn register_process_exit(&mut self, pid: NonZeroI32) -> io::Result<SourceKey> {
             let key = self.claim_slot(pid.get(), Interest::Read, SlotKind::ProcessExit);
             let udata = pack_udata(key.index, key.generation);
-            if let Err(error) = self.process_change(pid, libc::EV_ADD | libc::EV_ONESHOT, libc::NOTE_EXIT, udata) {
+            if let Err(error) =
+                self.process_change(pid, libc::EV_ADD | libc::EV_ONESHOT, libc::NOTE_EXIT, udata)
+            {
                 self.release_slot(key);
                 return Err(error);
             }
@@ -573,6 +636,10 @@ mod kqueue {
             (slot.generation == key.generation).then_some(slot.write_ready_epoch)
         }
 
+        pub fn turn_as<S: WakeStrategy>(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
+            self.turn(timeout)
+        }
+
         pub fn turn(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
             self.drain_cancellations()?;
             let timespec = timeout.map(|duration| libc::timespec {
@@ -684,7 +751,14 @@ mod kqueue {
             };
             // SAFETY: one change, zero events requested; kq is owned and valid.
             let ret = unsafe {
-                libc::kevent(self.kq, &change, 1, core::ptr::null_mut(), 0, core::ptr::null())
+                libc::kevent(
+                    self.kq,
+                    &change,
+                    1,
+                    core::ptr::null_mut(),
+                    0,
+                    core::ptr::null(),
+                )
             };
             if ret < 0 {
                 return Err(io::Error::last_os_error());
@@ -1044,6 +1118,10 @@ mod epoll {
         }
 
         pub fn turn(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
+            self.turn_as::<Standard>(timeout)
+        }
+
+        pub fn turn_as<S: WakeStrategy>(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
             self.drain_cancellations()?;
             let timeout_ms: i32 = match timeout {
                 None => -1,
@@ -1111,7 +1189,7 @@ mod epoll {
                 // (see kqueue variant for full rationale.) Note: EPOLLIN
                 // and EPOLLOUT can BOTH be set on the same event; we fire
                 // each respective waker in sequence, NOT as an else-if.
-                if (event.events & libc::EPOLLIN as u32) != 0 {
+                if (event.events & S::READ_MASK) != 0 {
                     if let Some(waker) = slot.read_waker.as_ref() {
                         slot.read_ready_epoch = super::bump_generation(slot.read_ready_epoch);
                         #[cfg(feature = "runtime-prime-reactor-trace")]
@@ -1127,7 +1205,7 @@ mod epoll {
                         crate::trace::record_reactor_ignored_read();
                     }
                 }
-                if (event.events & libc::EPOLLOUT as u32) != 0 {
+                if (event.events & S::WRITE_MASK) != 0 {
                     if let Some(waker) = slot.write_waker.as_ref() {
                         slot.write_ready_epoch = super::bump_generation(slot.write_ready_epoch);
                         waker.wake_by_ref();
@@ -1137,7 +1215,7 @@ mod epoll {
                         crate::trace::record_reactor_ignored_write();
                     }
                 }
-                if (event.events & (libc::EPOLLIN | libc::EPOLLOUT) as u32) == 0 {
+                if (event.events & (S::READ_MASK | S::WRITE_MASK)) == 0 {
                     #[cfg(feature = "runtime-prime-reactor-trace")]
                     crate::trace::record_reactor_unknown_event();
                 }
@@ -1303,6 +1381,42 @@ mod tests {
         assert!(count.load(Ordering::Acquire) >= 1);
     }
 
+    fn pipe_fired_count<S: WakeStrategy>() -> usize {
+        let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: fds is a valid two-element array for pipe to fill.
+        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(rc, 0, "pipe must succeed");
+        for fd in fds {
+            // SAFETY: fd was just opened by pipe above.
+            let rc = unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) };
+            assert_eq!(rc, 0, "fcntl O_NONBLOCK must succeed");
+        }
+        let mut reactor = Reactor::new().expect("reactor");
+        let key = reactor
+            .register(fds[0], Interest::Read)
+            .expect("register read end");
+        let count = Arc::new(AtomicUsize::new(0));
+        assert!(reactor.set_read_waker(key, waker_for(&count)));
+        // SAFETY: fds[1] is the write end opened above, closed exactly once.
+        unsafe { libc::close(fds[1]) };
+        reactor.turn_as::<S>(Some(Duration::ZERO)).expect("turn_as");
+        let fired = count.load(Ordering::Acquire);
+        reactor.deregister(key).expect("deregister");
+        // SAFETY: fds[0] is the read end opened above, closed exactly once.
+        unsafe { libc::close(fds[0]) };
+        fired
+    }
+
+    #[test]
+    fn writer_closed_with_no_data_wakes_reader_only_under_hangup_strategy() {
+        let standard = pipe_fired_count::<Standard>();
+        let hangup = pipe_fired_count::<Hangup>();
+
+        #[cfg(target_os = "linux")]
+        assert_eq!((standard, hangup), (0, 1));
+        #[cfg(target_os = "macos")]
+        assert_eq!((standard, hangup), (1, 1));
+    }
     #[test]
     fn turn_with_zero_timeout_returns_immediately_when_idle() {
         let mut reactor = Reactor::new().expect("reactor");

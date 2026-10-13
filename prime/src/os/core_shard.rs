@@ -51,7 +51,7 @@ use super::super::core::sized;
 use super::super::core::timer::{Clock, Tick, TimerKey, TimerWheel};
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 use super::io_uring::reactor::drain_cqes_if_initialized;
-use super::reactor::{Reactor, Wakeup};
+use super::reactor::{Reactor, Standard, WakeStrategy, Wakeup};
 use inbox_impl::Producer;
 
 /// initial / busy-period spin count on an empty inbox before the worker
@@ -717,7 +717,7 @@ fn worker_main(
         setup,
         clock,
     };
-    drive_worker(parts, |_| {}, || false);
+    drive_worker::<Standard>(parts, |_| {}, || false);
 }
 
 /// Runs `root` with the CALLING thread as core `core`'s worker. This is the
@@ -737,6 +737,28 @@ where
     Root: Future + 'static,
     Root::Output: 'static,
 {
+    run_on_this_thread_as::<Standard, Root>(core, root)
+}
+
+/// [`run_on_this_thread`] with the reactor's wake strategy chosen at compile
+/// time. Composes the same [`Reactor`], `Readiness` and worker loop; only the
+/// `Reactor::turn_as` masks differ. Use it for a runtime whose readers must
+/// wake on hangup with no data pending, such as child-process pipes, with
+/// [`Hangup`](super::reactor::Hangup); the default runtime keeps
+/// [`Standard`] so nothing else pays for it.
+///
+/// # Errors
+/// As [`run_on_this_thread`].
+#[must_use = "the root future's output is the program's result"]
+pub fn run_on_this_thread_as<S, Root>(
+    core: CoreId,
+    root: Root,
+) -> Result<Root::Output, ProximaError>
+where
+    S: WakeStrategy,
+    Root: Future + 'static,
+    Root::Output: 'static,
+{
     // the producer stays alive so try_recv reports Empty, never Disconnected.
     let (producer, consumer) = new_inbox(1, sized::INBOX_CAPACITY);
     let reactor = Reactor::new()
@@ -752,7 +774,7 @@ where
         setup: None,
         clock: StdClock::real(),
     };
-    drive_worker(
+    drive_worker::<S>(
         parts,
         move |executor| {
             executor.spawn_local(async move {
@@ -793,7 +815,11 @@ fn new_inbox(
     }
 }
 
-fn drive_worker(parts: WorkerParts, seed: impl FnOnce(&LocalExecutor), until: impl Fn() -> bool) {
+fn drive_worker<S: WakeStrategy>(
+    parts: WorkerParts,
+    seed: impl FnOnce(&LocalExecutor),
+    until: impl Fn() -> bool,
+) {
     let WorkerParts {
         core_id,
         affinity,
@@ -925,7 +951,7 @@ fn drive_worker(parts: WorkerParts, seed: impl FnOnce(&LocalExecutor), until: im
                 busy_polls = 0;
                 timer.borrow_mut().advance(clock.now());
                 let turn_result =
-                    with_current_reactor(|reactor| reactor.turn(Some(Duration::ZERO)));
+                    with_current_reactor(|reactor| reactor.turn_as::<S>(Some(Duration::ZERO)));
                 if let Some(Err(err)) = turn_result
                     && err.kind() != std::io::ErrorKind::Interrupted
                 {
@@ -1152,7 +1178,7 @@ fn drive_worker(parts: WorkerParts, seed: impl FnOnce(&LocalExecutor), until: im
                 }
                 #[cfg(feature = "runtime-prime-reactor-trace")]
                 crate::trace::record_turn_enter();
-                let turn_result = with_current_reactor(|reactor| reactor.turn(timeout))
+                let turn_result = with_current_reactor(|reactor| reactor.turn_as::<S>(timeout))
                     .unwrap_or_else(|| Err(io::Error::other("worker reactor unavailable")));
                 #[cfg(feature = "runtime-prime-reactor-trace")]
                 crate::trace::record_turn_exit(turn_result.as_ref().map_or(0, |fired| *fired));
@@ -1536,7 +1562,15 @@ impl std::os::fd::AsRawFd for InvertedWakeFd {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[cfg(unix)]
+    use super::super::reactor::Hangup;
+    #[cfg(unix)]
+    use super::super::readiness::{Readiness, ReadyState};
     use super::*;
+    #[cfg(unix)]
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    #[cfg(unix)]
+    use std::pin::pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2384,6 +2418,64 @@ mod tests {
             waited >= 5,
             "timer fired after {waited} ticks, wanted at least 5"
         );
+    }
+    #[cfg(unix)]
+    fn nonblocking_pipe() -> (OwnedFd, OwnedFd) {
+        let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: fds is a valid two-element array for pipe to fill.
+        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(rc, 0, "pipe must succeed");
+        for fd in fds {
+            // SAFETY: fd was just opened by pipe above.
+            let rc = unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) };
+            assert_eq!(rc, 0, "fcntl O_NONBLOCK must succeed");
+            // SAFETY: fd was just opened by pipe above.
+            let rc = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+            assert_eq!(rc, 0, "fcntl FD_CLOEXEC must succeed");
+        }
+        // SAFETY: each fd is open, owned by no one else, and wrapped exactly once.
+        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
+    }
+
+    #[cfg(unix)]
+    fn reader_woke_before_deadline<S: WakeStrategy>() -> bool {
+        const DEADLINE_MILLIS: Tick = 300;
+        let (reader, writer) = nonblocking_pipe();
+
+        run_on_this_thread_as::<S, _>(CoreId(0), async move {
+            let mut gate = Readiness::new(reader.as_raw_fd());
+            let mut deadline = pin!(timer_at(current_tick() + DEADLINE_MILLIS));
+            let mut retries = 0_u32;
+            drop(writer);
+            std::future::poll_fn(|context| {
+                if deadline.as_mut().poll(context).is_ready() {
+                    return Poll::Ready(false);
+                }
+                loop {
+                    match gate.poll(context).expect("gate poll on a live pipe") {
+                        ReadyState::Retry => retries += 1,
+                        ReadyState::Parked | ReadyState::OffWorker => return Poll::Pending,
+                    }
+                    if retries >= 2 {
+                        return Poll::Ready(true);
+                    }
+                }
+            })
+            .await
+        })
+        .expect("root completes")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hangup_runtime_wakes_pipe_reader_standard_runtime_does_not() {
+        let standard = reader_woke_before_deadline::<Standard>();
+        let hangup = reader_woke_before_deadline::<Hangup>();
+
+        #[cfg(target_os = "linux")]
+        assert_eq!((standard, hangup), (false, true));
+        #[cfg(target_os = "macos")]
+        assert_eq!((standard, hangup), (true, true));
     }
 
     #[cfg(unix)]

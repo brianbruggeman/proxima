@@ -5,7 +5,8 @@ use std::os::windows::io::{
 use windows_sys::Win32::System::IO::{OVERLAPPED, OVERLAPPED_ENTRY};
 
 use super::{
-    Arc, AtomicBool, Duration, Interest, Ordering, SourceKey, Waker, Wakeup, WakeupInner, io,
+    Arc, AtomicBool, Duration, Interest, Ordering, SourceKey, WakeStrategy, Waker, Wakeup,
+    WakeupInner, io,
 };
 use crate::core::sized;
 use crate::os::afd::{Afd, AfdOutcome, AfdSlot};
@@ -562,6 +563,10 @@ impl Reactor {
 
     pub fn write_ready_epoch(&self, key: SourceKey) -> Option<u32> {
         self.sources.live(key).map(|slot| slot.write_ready_epoch)
+    }
+
+    pub fn turn_as<S: WakeStrategy>(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
+        self.turn(timeout)
     }
 
     pub fn turn(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
