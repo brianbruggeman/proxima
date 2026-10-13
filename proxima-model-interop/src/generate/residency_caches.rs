@@ -4202,8 +4202,20 @@ impl BackendRuntime {
         numeric_policy: proxima_tensor::NumericPolicy,
     ) -> Result<(), InteropError> {
         let Some(mut near) = Self::take_near_plan(cache, shape) else {
+            debug!(
+                new_count = shape.0 as u64,
+                kv_bound_extent = shape.1 as u64,
+                near_plan = false,
+                "decode step: no near cuda plan to refit"
+            );
             return Ok(());
         };
+        debug!(
+            new_count = shape.0 as u64,
+            kv_bound_extent = shape.1 as u64,
+            near_plan = true,
+            "decode step: refitting near cuda plan"
+        );
         if omega::backend::refit_cuda_symbols(&mut near, symbols, numeric_policy)? {
             cache.insert(shape.clone(), near);
         }

@@ -2453,3 +2453,76 @@ mod resident_weights {
         assert_eq!(upload_after_release, weight.len() as u64);
     }
 }
+
+fn two_layer_mlp_cuda_plan() -> (omega::backend::Plan, Vec<f32>, Vec<f32>, Vec<f32>) {
+    let (program, _root) = two_layer_mlp_fixture();
+    let x = random_vec(1, (BATCH * IN_FEATURES) as usize);
+    let w1 = random_vec(2, (IN_FEATURES * HIDDEN) as usize);
+    let w2 = random_vec(3, (HIDDEN * OUT_FEATURES) as usize);
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("x", QuantizedBlock::Float32(&x)),
+        ("w1", QuantizedBlock::Float32(&w1)),
+        ("w2", QuantizedBlock::Float32(&w2)),
+    ];
+    let plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the mlp on cuda");
+    (plan, x, w1, w2)
+}
+
+#[test]
+fn refit_symbols_increments_refit_calls_once_per_call() {
+    let (mut cuda_plan, _x, _w1, _w2) = two_layer_mlp_cuda_plan();
+    let before = omega::backend::cuda_refit_counters(&cuda_plan)
+        .expect("a cuda plan exposes its refit counters");
+    assert_eq!(
+        before,
+        [0, 0, 0, 0],
+        "a freshly built plan has no refit history"
+    );
+
+    let refitted =
+        omega::backend::refit_cuda_symbols(&mut cuda_plan, &[], NumericPolicy::default())
+            .expect("refit at unchanged symbols succeeds on cuda");
+    assert!(refitted, "the mlp plan refits in place");
+
+    let after = omega::backend::cuda_refit_counters(&cuda_plan)
+        .expect("a cuda plan exposes its refit counters");
+    let op_count = after[3];
+    assert!(
+        op_count > 0,
+        "a refit repacks at least one resolved op, got {op_count}"
+    );
+    assert_eq!(
+        after,
+        [1, 0, op_count, op_count],
+        "unchanged symbols re-emit nothing: every op is reused and repacked once"
+    );
+}
+
+#[test]
+fn plan_execution_leaves_refit_counters_unchanged() {
+    let (mut cuda_plan, x, w1, w2) = two_layer_mlp_cuda_plan();
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("x", QuantizedBlock::Float32(&x)),
+        ("w1", QuantizedBlock::Float32(&w1)),
+        ("w2", QuantizedBlock::Float32(&w2)),
+    ];
+    let before = omega::backend::cuda_refit_counters(&cuda_plan)
+        .expect("a cuda plan exposes its refit counters");
+    execute_plan_named(&mut cuda_plan, &named).expect("cuda runs the mlp plan");
+    execute_plan_named(&mut cuda_plan, &named).expect("cuda reruns the mlp plan");
+    let after = omega::backend::cuda_refit_counters(&cuda_plan)
+        .expect("a cuda plan exposes its refit counters");
+    assert_eq!(
+        after, before,
+        "executing a plan is not a refit, re-emit or repack"
+    );
+}
