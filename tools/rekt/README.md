@@ -324,3 +324,9 @@ edition-2018 hyper client are gone; proxima is the client. the `.http` grammar
 survives as a frontend, reworked off `unwrap`/`expect`. the engine, protocols,
 histograms, and replay come from proxima, so the job is teardown plus the IR,
 fsm, and report layers on top.
+
+## License
+
+Licensed under MIT OR Apache-2.0, at your option.
+
+Repository: <https://github.com/brianbruggeman/proxima>
