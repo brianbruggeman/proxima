@@ -60,3 +60,4 @@ Generated from `src/capability.rs`'s own tables by `examples/generate_compatibil
 | BF8 | unsupported |
 | BF8_E5M2 | unsupported |
 | BF4_E2M1 | unsupported |
+| FP6_E3M2 | unsupported |
