@@ -1122,7 +1122,7 @@ fn push_reduce_epilogue_write(
     source.push_str(&format!("{indent}out[{out_offset_expr}] = {epi_value};\n"));
 }
 
-/// `<math.h>` (via `<cuda_runtime.h>`) has no `erf` variant that matches the
+/// NVRTC builtin math has no `erf` variant that matches the
 /// CPU oracle's bit pattern exactly — the same Abramowitz & Stegun 7.1.26
 /// polynomial `crate::msl::PROXIMA_ERF_FN`/`crate::wgsl`'s
 /// `PROXIMA_ERF_FN_WGSL` port, restated in CUDA C so all three backends and
@@ -1139,7 +1139,6 @@ __device__ __forceinline__ float proxima_erf(float x) {
 ";
 
 fn preamble(source: &mut String, element_type: &str) {
-    source.push_str("#include <cuda_runtime.h>\n");
     // The packed-codec helpers use CUDA's half bit-conversion intrinsics even
     // when the graph's materialized element type is f32.  Keeping this header
     // unconditional makes the emitted translation unit self-contained for
