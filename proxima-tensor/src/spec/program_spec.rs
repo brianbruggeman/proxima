@@ -5,18 +5,79 @@ use bon::Builder;
 use conflaguration::{Settings, Validate, ValidationMessage};
 
 use super::*;
+use crate::config::TensorExecutionConfig;
 
-/// A declarative tensor program. Nodes are order-dependent: a node may only
-/// reference ids defined above it, which mirrors the program's
+/// The only plan format revision this build reads.
+pub const PLAN_VERSION: u32 = 1;
+
+fn default_plan_version() -> u32 {
+    PLAN_VERSION
+}
+
+/// A declarative tensor program plan. Nodes are order-dependent: a node may
+/// only reference ids defined above it, which mirrors the program's
 /// backwards-reference rule so the two representations cannot disagree.
-#[derive(Debug, Clone, Default, PartialEq, Builder, Deserialize, Serialize, Settings)]
+/// `output` names the results to return, `bind` names the leaves the caller
+/// supplies, and `exec` is the evaluation policy the plan runs under.
+#[derive(Debug, Clone, PartialEq, Builder, Deserialize, Serialize, Settings)]
 #[settings(prefix = "TENSOR")]
 #[builder(derive(Clone, Debug))]
+#[serde(deny_unknown_fields)]
 pub struct ProgramSpec {
+    #[setting(skip)]
+    #[serde(default = "default_plan_version")]
+    #[builder(default = PLAN_VERSION)]
+    pub version: u32,
     #[setting(skip)]
     #[serde(default)]
     #[builder(default)]
     pub node: Vec<NodeSpec>,
+    #[setting(skip)]
+    #[serde(default, rename = "output")]
+    #[builder(default)]
+    pub outputs: Vec<OutputSpec>,
+    #[setting(skip)]
+    #[serde(default, rename = "bind")]
+    #[builder(default)]
+    pub binds: Vec<BindSpec>,
+    #[setting(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub exec: TensorExecutionConfig,
+}
+
+impl Default for ProgramSpec {
+    fn default() -> Self {
+        Self {
+            version: PLAN_VERSION,
+            node: Vec::new(),
+            outputs: Vec::new(),
+            binds: Vec::new(),
+            exec: TensorExecutionConfig::default(),
+        }
+    }
+}
+
+/// One `[[output]]` entry: a result the plan returns, by its external `name`,
+/// taken from the node with id `node`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputSpec {
+    /// The key the caller reads the result under, e.g. `softmax`.
+    pub name: String,
+    /// The id of the node whose value is returned, e.g. `n13`.
+    pub node: String,
+}
+
+/// One `[[bind]]` entry: the caller supplies the tensor for the `Input` node
+/// `node` under the external key `name`, e.g. `x`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindSpec {
+    /// The key the caller's input map uses, e.g. `x`.
+    pub name: String,
+    /// The id of the `Input` node this key feeds, e.g. `n0`.
+    pub node: String,
 }
 
 /// One dimension of a leaf. A bare integer is static; `"?0"` is the zeroth
@@ -131,6 +192,7 @@ impl NodeSpec {
 impl Validate for ProgramSpec {
     fn validate(&self) -> conflaguration::Result<()> {
         let mut errors = Vec::new();
+        self.validate_envelope(&mut errors);
         let mut defined: BTreeMap<&str, ()> = BTreeMap::new();
 
         for entry in &self.node {
@@ -177,6 +239,41 @@ impl Validate for ProgramSpec {
             Ok(())
         } else {
             Err(conflaguration::Error::Validation { errors })
+        }
+    }
+}
+
+impl ProgramSpec {
+    fn validate_envelope(&self, errors: &mut Vec<ValidationMessage>) {
+        if self.version != PLAN_VERSION {
+            errors.push(ValidationMessage::new(
+                "version",
+                format!(
+                    "unsupported plan version {}; this build reads version {PLAN_VERSION}",
+                    self.version
+                ),
+            ));
+        }
+        for bind in &self.binds {
+            match self.node.iter().find(|entry| entry.id() == bind.node) {
+                Some(NodeSpec::Input { .. }) => {}
+                Some(_) => errors.push(ValidationMessage::new(
+                    &bind.name,
+                    "bind target is not an input node",
+                )),
+                None => errors.push(ValidationMessage::new(
+                    &bind.name,
+                    "bind target is not defined",
+                )),
+            }
+        }
+        for output in &self.outputs {
+            if !self.node.iter().any(|entry| entry.id() == output.node) {
+                errors.push(ValidationMessage::new(
+                    &output.name,
+                    "output node is not defined",
+                ));
+            }
         }
     }
 }
@@ -371,7 +468,10 @@ impl TryFrom<&[Op]> for ProgramSpec {
             .enumerate()
             .map(|(index, expr)| node_from_op(index, expr))
             .collect::<Result<Vec<NodeSpec>, TensorError>>()?;
-        Ok(Self { node })
+        Ok(Self {
+            node,
+            ..Self::default()
+        })
     }
 }
 
