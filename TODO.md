@@ -294,92 +294,30 @@ Goals the owner attached to the frame (2026-10-11): (1) GENERIC fuses: fusion is
 Status: **roadmap, owner-requested, not designed yet.** No spec, no slice.
 
 ### Goal
-- [ ] (a) Constrained decoding. A grammar, JSON schema or regex constrains
-      generated tokens by masking the logits at each step, so output is
-      guaranteed valid.
-- [ ] (b) Parallel constrained decoding. Constraints hold across many sequences
-      and candidates at once: batched requests with different grammars,
-      speculative and tree-verify candidates, and beams. Mask computation
-      overlaps the GPU step instead of serializing with it.
+- [ ] (a) Constrained decoding: a grammar masks the logits at each step, so
+      output is guaranteed to be in the language.
+- [ ] (b) Parallel constrained decoding: constraints hold across batched
+      requests with different grammars, speculative and tree-verify
+      candidates, and beams; mask computation overlaps the GPU step.
 
 ### Where it fits
-- `proxima-tensor/specs/decode-as-data`: the propose / shape / accept / commit
-  pipes. The constraint is data the shape and accept stages consume: a per-step
-  token mask, plus grammar state advanced on commit.
-- A grammar is a sans-IO enum FSM over the tokenizer vocabulary, transitions
-  consuming the old state. The constraint spec is conflaguration config.
-- Raw GBNF is a first-class input: the constraint config accepts GBNF text
-  verbatim (inline or by path), exactly as llama.cpp takes it. GBNF is one
-  door on the door FSM; its sans-IO parser lowers the text into the grammar
-  IR. JSON schema and regex are peer doors lowering into the same IR, so
-  nothing downstream knows which form the grammar arrived in.
-- Further doors on the same IR: a pest (`.pest`, PEG) grammar, and a serde
-  shape (constrain output to what a `Deserialize` type or a serde value tree
-  accepts — structured output from a Rust type). The IR itself is serde data,
-  so a grammar can also live directly in conflaguration config and be built
-  fluently, with fluent == config parity.
-- The IR's interchange value is `serde_value::Value` — no new type and no new
-  dependency. `serde-value` 0.7 is already a workspace dependency
-  (`Cargo.toml:220`, used by `proxima-config`'s `schema-std` feature), and
-  conflaguration 2.0 already overlays config files through it
-  (`src/file.rs:57` `file_to_value`, `:104` `merge_value`), so a grammar
-  layered over defaults from config files merges with no extra code.
-- Parity: every grammar in llama.cpp's `grammars/` directory parses, and for
-  the same vocabulary and the same accepted prefix yields the identical
-  allowed-token set as llama.cpp's grammar sampler at every step. The mask is
-  discrete, so parity is exact (incumbent wins on correctness).
-- No model-specific code: a constraint is model-agnostic data over the vocab.
+- `proxima-tensor/specs/decode-as-data`: the constraint is data the shape and
+  accept stages consume (a per-step token mask), with grammar state advanced
+  on commit. Model-agnostic; the constraint spec is conflaguration config.
+- One grammar form underneath, many input syntaxes as doors on the door FSM.
+  The form is the language class the engine executes, not a syntax: GBNF,
+  JSON schema, regex and others lower into it.
 
-### Performance constraints to honour
-- Mask lookup is O(1) per state: a precomputed token mask per grammar state,
-  stored sparse (CSR) or as bitsets. Zero allocations per decode step.
-- The mask is applied on device for GPU backends. Parallel means masks for N
-  sequences per step, without host serialization.
+### Performance constraints
+- O(1) mask lookup per grammar state, zero allocations per decode step, mask
+  applied on device; N sequences per step without host serialization.
 
-### Incumbents (to read before designing; no performance claims)
-- [ ] to read: llama.cpp GBNF grammar sampling; XGrammar; Outlines
-      (regex and JSON-schema FSM); llguidance; SGLang compressed FSM and
-      jump-forward decoding
-
-### Open questions
-- [ ] the generic form (proposal, 2026-10-13). Semantics and encoding are
-      separate axes:
-      - semantics: a CFG over byte-level terminals, plus a regex lexer layer
-        for terminals, plus a closed set of bounded context-sensitive
-        primitives (indent/dedent stack for YAML and Python, capture-and-match
-        for XML/HTML closing tags, counted repetition). Plain CFG cannot
-        express indentation or matched tag names, so GBNF alone is not
-        generic enough. GBNF has no lexer layer and works on characters, not
-        bytes. pest is PEG, which is the wrong semantics for masking.
-      - encoding: the IR is a serde-derived enum, stored in any format
-        conflaguration already loads (TOML, JSON, YAML), with
-        `serde_value::Value` as the interchange. serde is the container, not a
-        grammar language. RON would only be one more serde format, so it adds
-        a dependency and no expressiveness.
-      - doors: GBNF (lossless round-trip IR <-> text for the CFG subset),
-        tree-sitter `grammar.json` (already JSON data, with grammars for SQL,
-        YAML, TOML, XML, HTML and most programming languages; its C external
-        scanners must map onto the closed context-sensitive set or be
-        refused), Lark (llguidance's syntax), JSON schema, regex, pest (CFG
-        subset only), serde types.
-      - parity corpus: llama.cpp `grammars/` and tree-sitter test corpora.
-- [ ] enumerate the external-scanner behaviours across the tree-sitter grammar
-      set and decide the closed context-sensitive primitive set from that
-      census, not from a guess
-- [ ] whether regex and JSON-schema doors lower to a cheaper FSM subset of the IR
-- [ ] PEG vs CFG: pest's ordered choice and `&`/`!` lookahead are not CFG
-      semantics; a prefix viable under a later alternative can be killed
-      once an earlier one matches. Decide whether the pest door supports
-      full PEG prefix-viability or rejects grammars outside the CFG-equivalent
-      subset
-- [ ] serde door: `Deserialize` is visitor-driven with no static shape, so
-      the type's shape has to come from somewhere (a derive, a traced format,
-      or a JSON schema); pick the source
-- [ ] how tokenizer merges interact with grammar states
-- [ ] jump-forward over forced spans
-- [ ] interaction with speculative accept: rejecting draft tokens that violate the grammar
-- [ ] per-sequence grammar state in batched serving
-
-### Next action
-- [ ] after reading the incumbents, write a spec under
-      `proxima-tensor/specs/constrained-decoding` via `/spec-first`
+### Before designing
+- [ ] read the incumbents: llama.cpp GBNF sampling, XGrammar, llguidance,
+      Outlines, SGLang jump-forward
+- [ ] decide the grammar form from what they execute. Candidate (unverified):
+      a byte-level CFG with a regex lexer layer. Open: whether context-sensitive
+      targets (YAML/Python indentation, XML tag matching) are in scope, and how
+- [ ] tokenizer merges vs grammar states; jump-forward over forced spans;
+      rejecting speculative drafts that violate the grammar
+- [ ] then `/spec-first` under `proxima-tensor/specs/constrained-decoding`
