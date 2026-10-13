@@ -42,11 +42,11 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p prime
+      - run: cargo build -p proxima-prime
       # the default feature set compiles almost nothing (every submodule
       # except `sized` is behind a runtime-prime-* flag), so name the stack
       # that actually carries the scheduler or this step proves nothing.
-      - run: cargo test -p prime --lib --features runtime-prime-executor,runtime-prime-inbox-alloc,runtime-prime-reactor,runtime-prime-bgpool
+      - run: cargo test -p proxima-prime --lib --features runtime-prime-executor,runtime-prime-inbox-alloc,runtime-prime-reactor,runtime-prime-bgpool
 
   # nostd-gate.sh hygiene check — production code under prime/src/core/*
   # must stay std-import-free except for the allow-listed TLS sites
@@ -338,7 +338,7 @@ jobs:
       - name: cargo build (features=${{ matrix.features }})
         run: |
           if [ -z "${{ matrix.features }}" ]; then
-            cargo build -p prime --target ${{ matrix.target }} --no-default-features
+            cargo build -p proxima-prime --target ${{ matrix.target }} --no-default-features
           else
-            cargo build -p prime --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+            cargo build -p proxima-prime --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
           fi

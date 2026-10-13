@@ -478,7 +478,7 @@ cat <<'BLOCKER'
 ## Structural blocker — resolved in commit 73c6862
 
 DC5's discipline-log row originally documented a structural blocker:
-`cargo build --target thumbv7m-none-eabi -p prime --no-default-features
+`cargo build --target thumbv7m-none-eabi -p proxima-prime --no-default-features
 --features alloc` failed because `proxima-pipe`'s (now folded into
 `proxima-primitives`, commit `8cf44fcc`) default `std` feature activated
 `futures/std`, which requires std unconditionally.

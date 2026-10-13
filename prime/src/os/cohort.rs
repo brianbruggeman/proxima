@@ -52,7 +52,7 @@
 //! sides could miss (measured: 345 strands per 300,000 rounds on aarch64,
 //! where `load(Acquire)` lowers to RCpc `ldapr`). those four operations are
 //! SeqCst now and the strand does not reproduce in 18,000,000 rounds
-//! (`cargo nextest run -p prime --features runtime-prime-cohort`, cohort
+//! (`cargo nextest run -p proxima-prime --features runtime-prime-cohort`, cohort
 //! stress tests). the 50us bound was never load-bearing for correctness —
 //! it only masked the bug by re-polling `round` on a timer — and it cost a
 //! resident cohort roughly 6,600 spurious wakes per 330ms forward pass (one

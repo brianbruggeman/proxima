@@ -8,8 +8,8 @@ cross-compiled run.
 
 - Host: versailles
 - Kernel: Linux 7.2.6-zen2-1-zen
-- Acceptance command: cargo test -p prime --test child_reactor -- linux_exit_probe
-- Captured command: cargo test -p prime --test child_reactor linux_exit_probe -- --nocapture
+- Acceptance command: cargo test -p proxima-prime --test child_reactor -- linux_exit_probe
+- Captured command: cargo test -p proxima-prime --test child_reactor linux_exit_probe -- --nocapture
 - Process exit code: 0
 - Test result: 1 passed; 0 failed
 

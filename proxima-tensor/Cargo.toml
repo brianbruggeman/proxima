@@ -273,7 +273,7 @@ half = { version = "2.7.1", default-features = false }
 # rather than a hand-rolled `extern "C"` + `#[repr(C)] struct Timespec`.
 libc = { workspace = true, optional = true }
 libm = { version = "0.2.16", default-features = false }
-prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool-par", "runtime-prime-cohort"], optional = true }
+prime = { package = "proxima-prime", version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool-par", "runtime-prime-cohort"], optional = true }
 proxima-clock = { version = "0.1.0", path = "../proxima-clock", default-features = false, optional = true }
 # Q4_K block layout/dequant primitives for the quantized GEMM row source
 # (`cpu::dot_q4k_f32`/`cpu::matmul_q4k_f32`) — reuse-first: `proxima-gguf`

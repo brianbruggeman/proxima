@@ -1,5 +1,5 @@
 [package]
-name = "prime"
+name = "proxima-prime"
 description = "From-scratch per-core async runtime: bounded SPSC inbox, typed-future fast path, reactor + executor + timer + background pool primitives"
 version.workspace = true
 edition.workspace = true
@@ -9,6 +9,9 @@ repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
 build = "build.rs"
+
+[lib]
+name = "prime"
 
 [build-dependencies]
 toml = { workspace = true }
@@ -141,7 +144,7 @@ rayon = ["dep:rayon", "proxima-runtime/rayon"]
 # The single-core `LocalExecutor` runs `?Send` futures, which is the shape a
 # browser / wasi host wants. Drive I/O by pairing with a host reactor source
 # (wasi poll_oneoff, browser event loop) and a bound `proxima_core::time` clock.
-# Builds on wasm32-unknown-unknown: `cargo build -p prime
+# Builds on wasm32-unknown-unknown: `cargo build -p proxima-prime
 # --target wasm32-unknown-unknown --no-default-features --features wasm`.
 wasm = ["alloc", "runtime-prime-executor", "runtime-prime-inbox-alloc"]
 # the sole entry point for `dep:tokio` (see docs/pipe-to-metal/edges.md,

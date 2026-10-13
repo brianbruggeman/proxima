@@ -93,7 +93,7 @@ expect_used = "deny"
 manual_async_fn = "allow"
 
 [workspace.dependencies]
-prime = { path = "prime" }
+prime = { package = "proxima-prime", path = "prime", version = "0.1.0" }
 proxima = { path = "." }
 proxima-amqp = { path = "proxima-amqp" }
 proxima-auth = { path = "proxima-auth", default-features = false }
