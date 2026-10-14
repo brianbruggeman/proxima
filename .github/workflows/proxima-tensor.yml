@@ -94,6 +94,7 @@ jobs:
       # pinned public fixtures: immutable-revision URLs, sha256 verified before any test reads them.
       # llama.cpp 6307ec07d3ad730f21886fb484cdb4abe1e74091 ggml-vocab-llama-bpe.gguf (MIT, 7818140 bytes)
       # tracel-ai/burn 314db93b7f623b6e2bba69f1b5cfb69b4794acd6 mnist.onnx (MIT OR Apache-2.0, 1530828 bytes)
+      # HuggingFaceTB/SmolLM2-135M-Instruct 12fd25f77366fa6b3b4b768ec3050bf629380bac tokenizer_config.json (Apache-2.0, 3764 bytes)
       - name: fetch pinned fixtures
         run: |
           set -euo pipefail
@@ -101,11 +102,14 @@ jobs:
           mkdir -p "$dir"
           curl -fsSL -o "$dir/ggml-vocab-llama-bpe.gguf" https://raw.githubusercontent.com/ggml-org/llama.cpp/6307ec07d3ad730f21886fb484cdb4abe1e74091/models/ggml-vocab-llama-bpe.gguf
           curl -fsSL -o "$dir/mnist.onnx" https://raw.githubusercontent.com/tracel-ai/burn/314db93b7f623b6e2bba69f1b5cfb69b4794acd6/examples/onnx-inference/src/model/mnist.onnx
+          curl -fsSL -o "$dir/smollm2-tokenizer_config.json" https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/12fd25f77366fa6b3b4b768ec3050bf629380bac/tokenizer_config.json
           echo "97272e430d53bc7688f52d5e0ad8ea8f163ede9f1bbd1694feaa504797d5d96e  $dir/ggml-vocab-llama-bpe.gguf" > "$dir/sha256sums"
           echo "5de2936be8f335e42049fc72a268d951481c782b113846e8c0021d8af7b4b519  $dir/mnist.onnx" >> "$dir/sha256sums"
+          echo "4ec77d44f62efeb38d7e044a1db318f6a939438425312dfa333b8382dbad98df  $dir/smollm2-tokenizer_config.json" >> "$dir/sha256sums"
           sha256sum -c "$dir/sha256sums"
           echo "PROXIMA_FIXTURE_LLAMA_BPE_GGUF=$dir/ggml-vocab-llama-bpe.gguf" >> "$GITHUB_ENV"
           echo "PROXIMA_FIXTURE_MNIST_ONNX=$dir/mnist.onnx" >> "$GITHUB_ENV"
+          echo "PROXIMA_FIXTURE_SMOLLM2_TOKENIZER_CONFIG=$dir/smollm2-tokenizer_config.json" >> "$GITHUB_ENV"
       - run: bash scripts/proxima-tokenizer-gate.sh
 
   # The model-format crates. They are sans-IO parsers with a no_std + alloc
@@ -132,6 +136,7 @@ jobs:
       # pinned public fixtures: immutable-revision URLs, sha256 verified before any test reads them.
       # llama.cpp 6307ec07d3ad730f21886fb484cdb4abe1e74091 ggml-vocab-llama-bpe.gguf (MIT, 7818140 bytes)
       # tracel-ai/burn 314db93b7f623b6e2bba69f1b5cfb69b4794acd6 mnist.onnx (MIT OR Apache-2.0, 1530828 bytes)
+      # HuggingFaceTB/SmolLM2-135M-Instruct 12fd25f77366fa6b3b4b768ec3050bf629380bac tokenizer_config.json (Apache-2.0, 3764 bytes)
       - name: fetch pinned fixtures
         run: |
           set -euo pipefail
@@ -139,11 +144,14 @@ jobs:
           mkdir -p "$dir"
           curl -fsSL -o "$dir/ggml-vocab-llama-bpe.gguf" https://raw.githubusercontent.com/ggml-org/llama.cpp/6307ec07d3ad730f21886fb484cdb4abe1e74091/models/ggml-vocab-llama-bpe.gguf
           curl -fsSL -o "$dir/mnist.onnx" https://raw.githubusercontent.com/tracel-ai/burn/314db93b7f623b6e2bba69f1b5cfb69b4794acd6/examples/onnx-inference/src/model/mnist.onnx
+          curl -fsSL -o "$dir/smollm2-tokenizer_config.json" https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/12fd25f77366fa6b3b4b768ec3050bf629380bac/tokenizer_config.json
           echo "97272e430d53bc7688f52d5e0ad8ea8f163ede9f1bbd1694feaa504797d5d96e  $dir/ggml-vocab-llama-bpe.gguf" > "$dir/sha256sums"
           echo "5de2936be8f335e42049fc72a268d951481c782b113846e8c0021d8af7b4b519  $dir/mnist.onnx" >> "$dir/sha256sums"
+          echo "4ec77d44f62efeb38d7e044a1db318f6a939438425312dfa333b8382dbad98df  $dir/smollm2-tokenizer_config.json" >> "$dir/sha256sums"
           sha256sum -c "$dir/sha256sums"
           echo "PROXIMA_FIXTURE_LLAMA_BPE_GGUF=$dir/ggml-vocab-llama-bpe.gguf" >> "$GITHUB_ENV"
           echo "PROXIMA_FIXTURE_MNIST_ONNX=$dir/mnist.onnx" >> "$GITHUB_ENV"
+          echo "PROXIMA_FIXTURE_SMOLLM2_TOKENIZER_CONFIG=$dir/smollm2-tokenizer_config.json" >> "$GITHUB_ENV"
       - name: clippy + tests + rustdoc
         run: |
           if [ "${{ matrix.tier }}" = "alloc" ]; then

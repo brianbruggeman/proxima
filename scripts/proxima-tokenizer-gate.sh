@@ -53,6 +53,11 @@ declare -a cells=(
     # default cell above never reaches: `gguf` is off by default, so its
     # tests compile nowhere else in this script.
     "gguf tests|cargo nextest run -p proxima-tokenizer --no-default-features --features gguf --no-fail-fast"
+
+    # the hf feature: tokenizer.json / tokenizer_config.json readers, including
+    # the pinned SmolLM2 tokenizer_config.json test (PROXIMA_FIXTURE_SMOLLM2_TOKENIZER_CONFIG).
+    "hf alone clippy|cargo clippy -p proxima-tokenizer --all-targets --no-default-features --features hf -- -D warnings"
+    "hf tests|cargo nextest run -p proxima-tokenizer --no-default-features --features hf --no-fail-fast"
 )
 
 passed=0

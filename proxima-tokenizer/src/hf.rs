@@ -323,13 +323,14 @@ mod tests {
     /// module doc names -- confirms the genuine upstream quirk that started
     /// this work: SmolLM2's own config has no `add_bos_token` key at all
     /// (only `bos_token`, the token *string*), so `Option<bool>::None` is
-    /// the only honest thing this reader can report. `#[ignore]`d: depends
-    /// on a host-local model cache outside this repo.
+    /// the only honest thing this reader can report. Reads the pinned
+    /// HuggingFaceTB/SmolLM2-135M-Instruct revision 12fd25f7 (sha256
+    /// 4ec77d44...) that CI downloads and names in
+    /// `PROXIMA_FIXTURE_SMOLLM2_TOKENIZER_CONFIG`.
     #[test]
-
     fn real_smollm2_tokenizer_config_has_no_add_bos_token_key() {
         let fixture = std::env::var("PROXIMA_FIXTURE_SMOLLM2_TOKENIZER_CONFIG")
-            .expect("PROXIMA_FIXTURE_SMOLLM2_TOKENIZER_CONFIG must name SmolLM2-135M-Instruct tokenizer_config.json (host-fixtures)");
+            .expect("PROXIMA_FIXTURE_SMOLLM2_TOKENIZER_CONFIG must name the pinned SmolLM2-135M-Instruct tokenizer_config.json");
         let path = Path::new(&fixture);
         let bytes = std::fs::read(path).expect("read real smollm2 tokenizer_config.json");
         assert_eq!(
