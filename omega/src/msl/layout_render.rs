@@ -9,7 +9,7 @@
 //! element addressing (the scaled-block decoders in `scaled_float_render` do).
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use proxima_primitives::block_layout::{BlockLayout, Coded, Field, Plane};
