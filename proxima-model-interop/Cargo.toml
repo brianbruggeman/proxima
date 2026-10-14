@@ -48,6 +48,7 @@ std = [
     "bon",
     "toml",
     "memmap2",
+    "rustix",
     "dep:proxima-telemetry",
     "proxima-telemetry/std",
     "proxima-telemetry/emit",
@@ -134,6 +135,7 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # moe_topk_bare_dispatch_timing.rs`).
 metal = [
     "gpu",
+    "rustix",
     "omega/metal",
     "metal-output-placement",
     "metal-wide-cooperative-reduce",
@@ -326,6 +328,7 @@ bon = ["dep:bon"]
 toml = ["dep:toml"]
 proxima-autograd = ["dep:proxima-autograd"]
 qat = ["std", "metal", "proxima-autograd"]
+rustix = ["dep:rustix"]
 
 [dependencies]
 arrayvec.workspace = true
@@ -353,7 +356,7 @@ proxima-tensor = { path = "../proxima-tensor", version = "0.1.0", default-featur
 # -- optional, wired on only by this crate's own `std` feature above, so the
 # alloc-only floor never pulls it in.
 proxima-tokenizer = { path = "../proxima-tokenizer", version = "0.1.0", default-features = false, features = ["gguf", "hf"], optional = true }
-rustix = { version = "1.1", features = ["std", "mm"] }
+rustix = { version = "1.1", features = ["std", "mm"], optional = true }
 serde = { workspace = true, features = ["derive", "alloc"] }
 # `hf_config::HfConfig` deserializes a real HF config.json (alloc-tier, no
 # std needed -- `cargo add` rejects this crate's own "alloc" feature entry
