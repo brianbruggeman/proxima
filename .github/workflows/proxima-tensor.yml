@@ -34,6 +34,7 @@ jobs:
   # feature that only compiles next to its siblings cannot hide, and asserts a
   # nonzero doctest count rather than trusting `cargo test --doc`'s exit code.
   proxima-tensor-gate:
+    timeout-minutes: 60
     name: proxima-tensor-gate.sh
     needs: changes
     if: needs.changes.outputs.tensor == 'true'
@@ -55,6 +56,7 @@ jobs:
   # proxima-tensor before 6266aba. See scripts/proxima-autograd-gate.sh for
   # the full cell list and the nonzero-count doctest assertion.
   proxima-autograd-gate:
+    timeout-minutes: 60
     name: proxima-autograd-gate.sh
     needs: changes
     if: needs.changes.outputs.tensor == 'true'
@@ -79,6 +81,7 @@ jobs:
   # `--features gguf` run ever reaches. See scripts/proxima-tokenizer-gate.sh
   # for the full cell list and the nonzero-count assertion.
   proxima-tokenizer-gate:
+    timeout-minutes: 60
     name: proxima-tokenizer-gate.sh
     needs: changes
     if: needs.changes.outputs.tensor == 'true'
@@ -97,6 +100,7 @@ jobs:
   # floor, so the floor is the thing worth proving — a parser that quietly
   # needs std is a parser that cannot run at the tier it advertises.
   model-formats:
+    timeout-minutes: 60
     name: ${{ matrix.crate }} (${{ matrix.tier }})
     needs: changes
     if: needs.changes.outputs.tensor == 'true'
@@ -174,6 +178,7 @@ jobs:
   # `dpdk` (a real Linux-only system dependency) needs one excluded from its
   # gate.
   omega-gate:
+    timeout-minutes: 60
     name: omega-gate.sh (macos-latest)
     needs: changes
     if: needs.changes.outputs.tensor == 'true'
@@ -200,6 +205,7 @@ jobs:
   # Silicon, so every cell here compiles and runs rather than being an
   # unreachable local-only lane.
   omega-feature-matrix:
+    timeout-minutes: 60
     name: omega-feature-matrix.sh (macos-latest)
     needs: changes
     if: needs.changes.outputs.tensor == 'true'
@@ -220,6 +226,7 @@ jobs:
   # records a baseline rather than sealing a discipline row (that's a manual
   # read of the CoV).
   omega-compare-bench:
+    timeout-minutes: 60
     name: compare-bench (metal vs cpu)
     needs: changes
     if: needs.changes.outputs.tensor == 'true'

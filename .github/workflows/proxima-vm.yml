@@ -44,6 +44,7 @@ env:
 
 jobs:
   proxima-vm-gate:
+    timeout-minutes: 15
     name: proxima-vm-gate.sh (ubuntu-latest)
     runs-on: ubuntu-latest
     steps:

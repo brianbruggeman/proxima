@@ -24,6 +24,7 @@ jobs:
 
   # The full crate gate: build + clippy + tests + feature tiers + no_std marker.
   telemetry-gate:
+    timeout-minutes: 15
     name: telemetry-gate.sh (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.telemetry == 'true'
@@ -51,6 +52,7 @@ jobs:
   # producer-assist test now runs in the normal suite (telemetry-gate.sh) instead
   # of under tsan; the lock-free PRIMITIVE itself is what loom proves here.
   ring-loom:
+    timeout-minutes: 15
     name: ring — Loom model (MPSC + MPMC)
     needs: changes
     if: needs.changes.outputs.telemetry == 'true'
@@ -80,6 +82,7 @@ jobs:
   # recorder_drain_async_sends_over_prime_wire proves the manual drain_async path.
   # Without this lane the end-to-end export claim is unproven on push (principle 16).
   otlp-wire-e2e:
+    timeout-minutes: 15
     name: otlp over the prime wire (facade E2E)
     needs: changes
     if: needs.changes.outputs.telemetry == 'true'
@@ -100,6 +103,7 @@ jobs:
   # NOT seal the discipline row (that's a manual read of the CoV). --quick keeps
   # CI fast.
   compare-bench:
+    timeout-minutes: 15
     name: compare-bench (native vs otlp)
     needs: changes
     if: needs.changes.outputs.telemetry == 'true'
@@ -118,6 +122,7 @@ jobs:
   # not have: an incumbent-comparison bench that sat registered and never
   # ran. Records baselines; does not seal a discipline row (manual CoV read).
   compare-bench-otel-sdk:
+    timeout-minutes: 15
     name: compare-bench (native vs otel sdk)
     needs: changes
     if: needs.changes.outputs.telemetry == 'true'

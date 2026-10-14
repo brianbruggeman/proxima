@@ -24,6 +24,7 @@ jobs:
   # The full gate: default-prime build + clippy, tokio opt-out build,
   # minimal build, serve_parity proofs, and the full umbrella suite.
   prime-serve-gate:
+    timeout-minutes: 30
     name: prime-serve-gate.sh (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.prime_serve == 'true'
@@ -45,6 +46,7 @@ jobs:
   # Feature-combo build matrix — each cell must compile. Catches a flip
   # that builds default-prime but breaks an opt-out / minimal combo.
   feature-matrix:
+    timeout-minutes: 15
     name: build ${{ matrix.label }}
     needs: changes
     if: needs.changes.outputs.prime_serve == 'true'
@@ -71,6 +73,7 @@ jobs:
   # NOT seal the discipline row (that's a manual read of the CoV). Runs
   # --quick so CI stays fast.
   compare-bench:
+    timeout-minutes: 15
     name: compare-bench (prime vs tokio serve)
     needs: changes
     if: needs.changes.outputs.prime_serve == 'true'

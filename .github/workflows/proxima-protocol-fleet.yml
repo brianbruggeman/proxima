@@ -30,6 +30,7 @@ jobs:
   # The full per-crate gate: bare codec build + all-features build + clippy +
   # codec/client/listener tests, matrixed over the fleet.
   protocol-fleet-gate:
+    timeout-minutes: 15
     name: protocol-fleet-gate.sh (${{ matrix.crate }}, ${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.protocol_fleet == 'true'
@@ -69,6 +70,7 @@ jobs:
   # background contention on a shared box — too noisy to hard-gate on here,
   # doubly so on a shared CI runner.
   memcached-frame-ownership-bench:
+    timeout-minutes: 15
     name: memcached frame-ownership bench (smoke + alloc-count gate)
     needs: changes
     if: needs.changes.outputs.protocol_fleet == 'true'
@@ -87,6 +89,7 @@ jobs:
   # DPDK embedding contract) — same claim proxima-redis makes, extended to
   # the five new crates.
   tokio-gate:
+    timeout-minutes: 15
     name: no-default-features carries zero tokio (${{ matrix.crate }})
     needs: changes
     if: needs.changes.outputs.protocol_fleet == 'true'

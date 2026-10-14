@@ -23,6 +23,7 @@ jobs:
     uses: ./.github/workflows/affected.yml
 
   centauri-gate:
+    timeout-minutes: 45
     name: centauri-gate.sh (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.centauri == 'true'
@@ -51,6 +52,7 @@ jobs:
   # in the discipline log are smaller than the criterion spread that measured
   # them, and this is what resolves those honestly.
   cycle-counts:
+    timeout-minutes: 15
     name: callgrind instruction counts (linux)
     needs: changes
     if: needs.changes.outputs.centauri == 'true'
@@ -72,6 +74,7 @@ jobs:
   # in — so `getrandom` must not appear in the graph at any tier. This is a
   # structural claim the unit tests cannot make.
   sans-io-gate:
+    timeout-minutes: 15
     name: no getrandom in the centauri graph
     needs: changes
     if: needs.changes.outputs.centauri == 'true'
