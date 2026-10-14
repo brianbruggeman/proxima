@@ -1732,7 +1732,7 @@ pub(super) fn flush_pending_capture_dumps() {
 /// One dispatch of the captured decode step, kept LIVE (pipeline, real
 /// resolved buffers, uniform bytes) so a harness can re-encode it alone in
 /// its own command buffer -- the isolated-replay half of the per-kernel GPU
-/// time census. Recorded by [`capture_dispatch`] when `PROXIMA_CAPTURE_LIVE`
+/// time census. Recorded by `capture_dispatch` when `PROXIMA_CAPTURE_LIVE`
 /// is set, on top of the same `PROXIMA_CAPTURE_NODES`/`PROXIMA_CAPTURE_STEPS`
 /// selection the file dump uses; drained by [`take_captured_dispatches`].
 #[cfg(feature = "instrument")]
@@ -2777,7 +2777,7 @@ impl CapturedDispatch {
     /// compute encoder per dispatch, so each dispatch carries its own start
     /// and end GPU timestamp. With `sample` every encoder attaches a timestamp
     /// sample buffer at its stage boundary (the sampling point an Apple GPU
-    /// honors, see [`counter_sampling_mode`]); without it the encoders are
+    /// honors, see `counter_sampling_mode`); without it the encoders are
     /// split and nothing is sampled, the control that separates the cost of
     /// splitting from the cost of sampling. Returns the command buffer's GPU
     /// span in ns and, when sampled, `[start, end]` per dispatch in ns since the

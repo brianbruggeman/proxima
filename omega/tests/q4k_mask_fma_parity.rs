@@ -20,6 +20,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+use proxima_primitives::Codec;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
@@ -138,6 +139,7 @@ fn masked_fma_q4k_matvec_matches_the_dequantized_f32_cpu_path_across_every_sub_b
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
+        proxima_tensor::NumericPolicy::default(),
     )
     .expect("metal executes the masked-fma q4_k matmul");
 

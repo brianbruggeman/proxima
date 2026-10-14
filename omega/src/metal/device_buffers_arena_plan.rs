@@ -419,21 +419,21 @@ pub enum MetalError {
     /// (see [`Plan::numeric_policy`]'s own doc), so a rebind is not
     /// implementable in place -- the caller's only correct response is a
     /// fresh [`plan`]/[`plan_named`] call with `requested`.
-    /// `PROXIMA_METAL_NAN_CHECK`'s own stop condition -- [`check_op_output_finite`]
+    /// `PROXIMA_METAL_NAN_CHECK`'s own stop condition -- `check_op_output_finite`
     /// found this op's own output buffer holds a NaN/Inf, so
-    /// [`execute_op_timed`] stops the step here rather than running every
+    /// `execute_op_timed` stops the step here rather than running every
     /// remaining op past a value already known bad. Diagnostic-only, same
-    /// `instrument`-gated reachability as [`check_op_output_finite`] itself.
+    /// `instrument`-gated reachability as `check_op_output_finite` itself.
     #[cfg(feature = "instrument")]
     #[error("nan_check: op node={node} kind={kind} produced a non-finite output")]
     NonFiniteOpOutput { node: NodeId, kind: String },
-    /// `PROXIMA_METAL_COMPARE_CPU`'s own stop condition -- [`compare_op_output_to_cpu`]
+    /// `PROXIMA_METAL_COMPARE_CPU`'s own stop condition -- `compare_op_output_to_cpu`
     /// found this op's own Metal output disagrees with the same node's CPU
     /// reference value beyond the 1e-2 relative-diff floor, so
-    /// [`execute_op_timed`] stops the step at the FIRST divergent node
+    /// `execute_op_timed` stops the step at the FIRST divergent node
     /// rather than running every remaining op past a value already known
     /// wrong. Diagnostic-only, same `instrument`-gated reachability as
-    /// [`check_op_output_finite`].
+    /// `check_op_output_finite`.
     #[cfg(feature = "instrument")]
     #[error("cpu_compare: op node={node} kind={kind} max_rel_diff={max_rel_diff} exceeds 1e-2")]
     CpuMetalDivergence {
@@ -468,10 +468,10 @@ pub enum MetalError {
         requested: NumericPolicy,
     },
     /// `PROXIMA_PIPELINE_KEY_AUDIT=1`'s own stop condition: a
-    /// [`PIPELINE_CACHE`] hit re-emitted its source and the sha256 disagreed
-    /// with the hash [`PipelineCaptureRecord`] captured when that pipeline
+    /// `PIPELINE_CACHE` hit re-emitted its source and the sha256 disagreed
+    /// with the hash `PipelineCaptureRecord` captured when that pipeline
     /// was first compiled -- proof one of the 16 non-`reduction_literal`
-    /// axes [`crate::identity::kernel_identity`] folds into the key is
+    /// axes `crate::identity::kernel_identity` folds into the key is
     /// missing an axis two structurally-different ops actually differ on
     /// (`c4-7-reduction-literal.md`). Diagnostic-only, same
     /// `instrument`-gated reachability as [`CpuMetalDivergence`](Self::CpuMetalDivergence).
@@ -613,8 +613,8 @@ pub fn current_allocated_size() -> Option<u64> {
     Some(device.currentAllocatedSize() as u64)
 }
 
-/// Every distinct [`kernel_cache_key`](crate::msl::kernel_cache_key) string
-/// currently compiled on this thread's [`PIPELINE_CACHE`] -- a query-only
+/// Every distinct `kernel_cache_key` string
+/// currently compiled on this thread's `PIPELINE_CACHE` -- a query-only
 /// read of the same thread-local `pipeline_for` already maintains, for a test
 /// to confirm how many distinct pipelines two ops actually shared without
 /// re-deriving `pipeline_for`'s own hit/miss logic.
@@ -625,7 +625,7 @@ pub fn pipeline_cache_keys() -> Vec<String> {
 }
 
 /// `PROXIMA_PIPELINE_KEY_AUDIT=1`'s own tally, `(audited, mismatched)` --
-/// see [`PIPELINE_KEY_AUDIT_AUDITED`]/[`PIPELINE_KEY_AUDIT_MISMATCHED`]'s own
+/// see `PIPELINE_KEY_AUDIT_AUDITED`/`PIPELINE_KEY_AUDIT_MISMATCHED`'s own
 /// doc. `(0, 0)` when the audit never ran on this thread.
 #[cfg(feature = "instrument")]
 #[must_use]
@@ -653,7 +653,7 @@ pub fn pipeline_key_audit_counts() -> (u64, u64) {
 pub(super) static CAPTURE_STEP: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
-/// Mirrors the decode loop's own per-step counter into [`CAPTURE_STEP`] --
+/// Mirrors the decode loop's own per-step counter into `CAPTURE_STEP` --
 /// see that static's own doc. A no-op call on a non-`instrument` build costs
 /// nothing (compiled out); on `instrument`, one relaxed atomic store per
 /// decode step, off the per-dispatch hot path.
@@ -2452,7 +2452,7 @@ impl Plan {
     /// (a KV-bucket resize's own stride mover; `bind_matmul_weight`'s
     /// transpose is the only other one, and that never depends on token
     /// count) -- cheap enough to compute on every miss (`instrument`-gated,
-    /// never on the default decode path) without re-deriving [`kernel_keys`]'s
+    /// never on the default decode path) without re-deriving [`Self::kernel_keys`]'s
     /// own per-position cache-key derivation, which the caller reads
     /// separately for the "identical kernel" question this signature does
     /// not answer.
