@@ -48,15 +48,28 @@ set -uo pipefail
 export CARGO_TERM_COLOR=never
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
-crate="omega"
+crate="proxima-omega"
+lib_name="omega"
 cargo_toml="omega/Cargo.toml"
 
 # every top-level feature name declared in the `[features]` block
-mapfile -t all_features < <(
+all_features=()
+while IFS= read -r declared_feature; do
+    all_features+=("${declared_feature}")
+done < <(
     sed -n '/^\[features\]/,/^\[dependencies\]/p' "${cargo_toml}" \
         | grep -oE '^[a-zA-Z0-9_-]+ = \[' \
         | sed 's/ = \[//'
 )
+
+# every feature except `mlx-gdn`, whose build script panics without a
+# provisioned PROXIMA_MLX_PREFIX -- `--all-features` can never build on a stock runner
+buildable=""
+for feature_name in "${all_features[@]}"; do
+    if [ "${feature_name}" != "mlx-gdn" ]; then
+        buildable="${buildable:+${buildable},}${feature_name}"
+    fi
+done
 
 # the `metal-*` sub-flags, excluding the umbrella `metal` feature itself
 metal_flags=()
@@ -216,7 +229,7 @@ done
 # cell 4: --all-features
 # ---------------------------------------------------------------------
 printf '\n== [cell 4] --all-features ==\n'
-run_nextest_cell "cell4: all-features" --all-features
+run_nextest_cell "cell4: all-features" --features "${buildable}"
 
 # ---------------------------------------------------------------------
 # cell 5: metal-core builds emitter-only on a non-macOS target -- no metal
@@ -233,7 +246,7 @@ run_check_cell "cell5: metal-core linux" \
 # ---------------------------------------------------------------------
 printf '\n== [cell 6] clippy pedantic on cells 2 and 4 ==\n'
 run_clippy_cell "cell6: default clippy" --all-targets
-run_clippy_cell "cell6: all-features clippy" --all-targets --all-features
+run_clippy_cell "cell6: all-features clippy" --all-targets --features "${buildable}"
 
 printf '\n== omega-feature-matrix summary ==\n'
 printf '   passed: %d\n' "${passed}"
