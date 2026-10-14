@@ -100,9 +100,9 @@ jobs:
           set -euo pipefail
           dir="$RUNNER_TEMP/proxima-fixtures"
           mkdir -p "$dir"
-          curl -fsSL -o "$dir/ggml-vocab-llama-bpe.gguf" https://raw.githubusercontent.com/ggml-org/llama.cpp/6307ec07d3ad730f21886fb484cdb4abe1e74091/models/ggml-vocab-llama-bpe.gguf
-          curl -fsSL -o "$dir/mnist.onnx" https://raw.githubusercontent.com/tracel-ai/burn/314db93b7f623b6e2bba69f1b5cfb69b4794acd6/examples/onnx-inference/src/model/mnist.onnx
-          curl -fsSL -o "$dir/smollm2-tokenizer_config.json" https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/12fd25f77366fa6b3b4b768ec3050bf629380bac/tokenizer_config.json
+          curl -fsSL --retry 5 --retry-delay 10 -o "$dir/ggml-vocab-llama-bpe.gguf" https://raw.githubusercontent.com/ggml-org/llama.cpp/6307ec07d3ad730f21886fb484cdb4abe1e74091/models/ggml-vocab-llama-bpe.gguf
+          curl -fsSL --retry 5 --retry-delay 10 -o "$dir/mnist.onnx" https://raw.githubusercontent.com/tracel-ai/burn/314db93b7f623b6e2bba69f1b5cfb69b4794acd6/examples/onnx-inference/src/model/mnist.onnx
+          curl -fsSL --retry 5 --retry-delay 10 -o "$dir/smollm2-tokenizer_config.json" https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/12fd25f77366fa6b3b4b768ec3050bf629380bac/tokenizer_config.json
           echo "97272e430d53bc7688f52d5e0ad8ea8f163ede9f1bbd1694feaa504797d5d96e  $dir/ggml-vocab-llama-bpe.gguf" > "$dir/sha256sums"
           echo "5de2936be8f335e42049fc72a268d951481c782b113846e8c0021d8af7b4b519  $dir/mnist.onnx" >> "$dir/sha256sums"
           echo "4ec77d44f62efeb38d7e044a1db318f6a939438425312dfa333b8382dbad98df  $dir/smollm2-tokenizer_config.json" >> "$dir/sha256sums"
@@ -142,9 +142,9 @@ jobs:
           set -euo pipefail
           dir="$RUNNER_TEMP/proxima-fixtures"
           mkdir -p "$dir"
-          curl -fsSL -o "$dir/ggml-vocab-llama-bpe.gguf" https://raw.githubusercontent.com/ggml-org/llama.cpp/6307ec07d3ad730f21886fb484cdb4abe1e74091/models/ggml-vocab-llama-bpe.gguf
-          curl -fsSL -o "$dir/mnist.onnx" https://raw.githubusercontent.com/tracel-ai/burn/314db93b7f623b6e2bba69f1b5cfb69b4794acd6/examples/onnx-inference/src/model/mnist.onnx
-          curl -fsSL -o "$dir/smollm2-tokenizer_config.json" https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/12fd25f77366fa6b3b4b768ec3050bf629380bac/tokenizer_config.json
+          curl -fsSL --retry 5 --retry-delay 10 -o "$dir/ggml-vocab-llama-bpe.gguf" https://raw.githubusercontent.com/ggml-org/llama.cpp/6307ec07d3ad730f21886fb484cdb4abe1e74091/models/ggml-vocab-llama-bpe.gguf
+          curl -fsSL --retry 5 --retry-delay 10 -o "$dir/mnist.onnx" https://raw.githubusercontent.com/tracel-ai/burn/314db93b7f623b6e2bba69f1b5cfb69b4794acd6/examples/onnx-inference/src/model/mnist.onnx
+          curl -fsSL --retry 5 --retry-delay 10 -o "$dir/smollm2-tokenizer_config.json" https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/12fd25f77366fa6b3b4b768ec3050bf629380bac/tokenizer_config.json
           echo "97272e430d53bc7688f52d5e0ad8ea8f163ede9f1bbd1694feaa504797d5d96e  $dir/ggml-vocab-llama-bpe.gguf" > "$dir/sha256sums"
           echo "5de2936be8f335e42049fc72a268d951481c782b113846e8c0021d8af7b4b519  $dir/mnist.onnx" >> "$dir/sha256sums"
           echo "4ec77d44f62efeb38d7e044a1db318f6a939438425312dfa333b8382dbad98df  $dir/smollm2-tokenizer_config.json" >> "$dir/sha256sums"
