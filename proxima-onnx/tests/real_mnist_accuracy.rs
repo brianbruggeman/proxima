@@ -23,25 +23,22 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use std::vec::Vec;
 
-const MODEL_PATH: &str =
-    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
-const DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
+fn model_path() -> String {
+    std::env::var("PROXIMA_FIXTURE_MNIST_ONNX")
+        .expect("PROXIMA_FIXTURE_MNIST_ONNX must name the pinned mnist.onnx; the CI workflow downloads and verifies it")
+}
+fn dataset_dir() -> String {
+    std::env::var("PROXIMA_FIXTURE_MNIST_IDX_DIR")
+        .expect("PROXIMA_FIXTURE_MNIST_IDX_DIR must name the MNIST idx directory (host-fixtures)")
+}
 const TEST_IMAGES_COUNT: usize = 1000;
 
-fn checkpoint_present() -> bool {
-    Path::new(MODEL_PATH).exists()
-}
-
-fn dataset_present() -> bool {
-    test_images_path().exists() && test_labels_path().exists()
-}
-
 fn test_images_path() -> PathBuf {
-    Path::new(DATASET_DIR).join("test/t10k-images-idx3-ubyte")
+    Path::new(&dataset_dir()).join("test/t10k-images-idx3-ubyte")
 }
 
 fn test_labels_path() -> PathBuf {
-    Path::new(DATASET_DIR).join("test/t10k-labels-idx1-ubyte")
+    Path::new(&dataset_dir()).join("test/t10k-labels-idx1-ubyte")
 }
 
 /// Parses an idx3 (`u8` image) or idx1 (`u8` label) file's big-endian
@@ -109,16 +106,11 @@ fn argmax(values: &[f32]) -> usize {
 /// own doc calls for: "only checks the output is a finite distribution"
 /// becomes "matches the label".
 #[test]
-#[ignore = "depends on a real .onnx checkout and the real MNIST idx dataset outside this repo"]
+#[cfg_attr(
+    not(feature = "host-fixtures"),
+    ignore = "needs the host-fixtures feature: MNIST idx dataset"
+)]
 fn real_mnist_onnx_classifies_real_test_images_at_reference_accuracy() {
-    if !checkpoint_present() {
-        eprintln!("skipping: no host-local mnist.onnx checkout at {MODEL_PATH}");
-        return;
-    }
-    if !dataset_present() {
-        eprintln!("skipping: no host-local MNIST idx dataset under {DATASET_DIR}");
-        return;
-    }
     // ROW 188 accelerate-gemm oracle gate (temporary -- reverted before
     // commit, see discipline.md ROW 188): `PROXIMA_ACCELERATE_GEMM=1`
     // forces the Accelerate/AMX route on for this run so accuracy/timing is
@@ -130,7 +122,7 @@ fn real_mnist_onnx_classifies_real_test_images_at_reference_accuracy() {
         proxima_tensor::cpu::set_accelerate_gemm_enabled(true);
     }
 
-    let bytes = fs::read(MODEL_PATH).expect("read the real mnist.onnx checkpoint");
+    let bytes = fs::read(model_path()).expect("read the real mnist.onnx checkpoint");
     let model =
         proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
     let graph = model.graph.as_ref().expect("real mnist model has a graph");

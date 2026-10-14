@@ -496,13 +496,19 @@ mod real_file {
     use crate::quant::{q4_k, q5_k, q6_k, q8_0};
     use crate::types::GgmlType;
 
-    const FIXTURE_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
+    fn openchat_path() -> String {
+        std::env::var("PROXIMA_FIXTURE_OPENCHAT_GGUF").expect(
+            "PROXIMA_FIXTURE_OPENCHAT_GGUF must name openchat-3.5-1210.Q4_K_S.gguf (host-fixtures)",
+        )
+    }
 
     /// A Mixtral-8x7B checkpoint whose `attn_k`/`attn_v` tensors are
     /// stored as `Q8_0` (verified by inspection: `Q4_K_S` quantizes most
     /// tensors but leaves attention key/value projections at 8-bit),
-    /// unlike [`FIXTURE_PATH`]'s dense 7B model, which has none.
-    const Q8_0_FIXTURE_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO-GGUF/Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf";
+    /// unlike [`openchat_path`]'s dense 7B model, which has none.
+    fn mixtral_path() -> String {
+        std::env::var("PROXIMA_FIXTURE_MIXTRAL_GGUF").expect("PROXIMA_FIXTURE_MIXTRAL_GGUF must name Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf (host-fixtures)")
+    }
 
     /// Sample cap in bytes, rounded down to a whole number of `Q4_K`
     /// blocks: 2 MiB gives ~14.5k blocks, ~3.7M weights -- enough for a
@@ -510,12 +516,13 @@ mod real_file {
     const SAMPLE_CAP_BYTES: usize = 2 * 1024 * 1024;
 
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: multi-GB gguf"
+    )]
     fn dequantizes_a_real_q4_k_tensor_slice() {
-        let path = std::path::Path::new(FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local gguf fixture at {FIXTURE_PATH}");
-            return;
-        }
+        let fixture = openchat_path();
+        let path = std::path::Path::new(&fixture);
 
         let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
         let file_len = file.metadata().expect("stat gguf fixture").len();
@@ -606,12 +613,13 @@ mod real_file {
     const Q8_0_SAMPLE_CAP_BYTES: usize = 2 * 1024 * 1024;
 
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: multi-GB gguf"
+    )]
     fn dequantizes_a_real_q8_0_tensor_slice() {
-        let path = std::path::Path::new(Q8_0_FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local gguf fixture at {Q8_0_FIXTURE_PATH}");
-            return;
-        }
+        let fixture = mixtral_path();
+        let path = std::path::Path::new(&fixture);
 
         let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
         let file_len = file.metadata().expect("stat gguf fixture").len();
@@ -713,12 +721,13 @@ mod real_file {
     const Q6_K_SAMPLE_CAP_BYTES: usize = 2 * 1024 * 1024;
 
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: multi-GB gguf"
+    )]
     fn dequantizes_a_real_q6_k_tensor_slice() {
-        let path = std::path::Path::new(Q8_0_FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local gguf fixture at {Q8_0_FIXTURE_PATH}");
-            return;
-        }
+        let fixture = mixtral_path();
+        let path = std::path::Path::new(&fixture);
 
         let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
         let file_len = file.metadata().expect("stat gguf fixture").len();
@@ -809,12 +818,13 @@ mod real_file {
     const Q5_K_SAMPLE_CAP_BYTES: usize = 2 * 1024 * 1024;
 
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: multi-GB gguf"
+    )]
     fn dequantizes_a_real_q5_k_tensor_slice() {
-        let path = std::path::Path::new(Q8_0_FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local gguf fixture at {Q8_0_FIXTURE_PATH}");
-            return;
-        }
+        let fixture = mixtral_path();
+        let path = std::path::Path::new(&fixture);
 
         let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
         let file_len = file.metadata().expect("stat gguf fixture").len();
@@ -909,12 +919,13 @@ mod real_file {
     /// bytes. Reports the type histogram and the total so a future format
     /// gap shows up as a named, counted `GgmlType`, not a silent skip.
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: multi-GB gguf"
+    )]
     fn every_mixtral_tensor_has_a_codec_or_is_native() {
-        let path = std::path::Path::new(Q8_0_FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local gguf fixture at {Q8_0_FIXTURE_PATH}");
-            return;
-        }
+        let fixture = mixtral_path();
+        let path = std::path::Path::new(&fixture);
 
         let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
 
@@ -1141,13 +1152,15 @@ mod real_file {
     /// (`quant::policy`'s real-file coverage tests) doesn't contaminate
     /// the "plain `Q4_K`" sample for those two roles.
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: multi-GB gguf"
+    )]
     fn role_precision_error_vs_bytes_curve_from_real_tensors() {
-        let mixtral_path = std::path::Path::new(Q8_0_FIXTURE_PATH);
-        let openchat_path = std::path::Path::new(FIXTURE_PATH);
-        if !mixtral_path.exists() || !openchat_path.exists() {
-            eprintln!("skipping: host-local gguf fixtures not both present");
-            return;
-        }
+        let mixtral_fixture = mixtral_path();
+        let openchat_fixture = openchat_path();
+        let mixtral_path = std::path::Path::new(&mixtral_fixture);
+        let openchat_path = std::path::Path::new(&openchat_fixture);
 
         let mut mixtral_file = std::fs::File::open(mixtral_path).expect("open mixtral fixture");
         let mixtral_len = mixtral_file.metadata().expect("stat mixtral fixture").len();
@@ -1261,12 +1274,13 @@ mod real_file {
     /// the load-bearing check for a paired gate/up reduce over one
     /// concatenated weight buffer (zero-copy only if adjacent).
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: multi-GB gguf"
+    )]
     fn ffn_gate_and_up_adjacency_per_layer() {
-        let path = std::path::Path::new(FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local gguf fixture at {FIXTURE_PATH}");
-            return;
-        }
+        let fixture = openchat_path();
+        let path = std::path::Path::new(&fixture);
 
         let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
         let file_len = file.metadata().expect("stat gguf fixture").len();
@@ -1331,12 +1345,13 @@ mod real_file {
     /// only tensor-range validity, not the (false, for this checkpoint)
     /// adjacency/codec claim -- see `debug!`'s own fields for the numbers.
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: multi-GB gguf"
+    )]
     fn attn_q_k_v_adjacency_per_layer() {
-        let path = std::path::Path::new(FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local gguf fixture at {FIXTURE_PATH}");
-            return;
-        }
+        let fixture = openchat_path();
+        let path = std::path::Path::new(&fixture);
 
         let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
         let file_len = file.metadata().expect("stat gguf fixture").len();
@@ -1434,17 +1449,11 @@ mod real_models {
     use crate::types::GgmlType;
     use crate::value::{MetadataArray, MetadataValue};
 
-    const MODEL_PATHS: [&str; 4] = [
-        "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf",
-        "/Users/brianbruggeman/.lmstudio/models/TheBloke/deepseek-coder-33B-instruct-GGUF/deepseek-coder-33b-instruct.Q4_K_S.gguf",
-        "/Users/brianbruggeman/.lmstudio/models/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO-GGUF/Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf",
-        // LFM2.5-8B-A1B: hybrid conv/attention MoE (`Lfm2MoeForCausalLM`) --
-        // 18 of 24 layers are short-convolution, only 6 are attention, and
-        // the FFN is fine-grained MoE (top-4 of 32) on all but the first 2
-        // dense layers. The visible contrast case for `GROUP_PATTERNS`
-        // (built from dense/Mixtral names) and for `print_expert_layout`
-        // (Mixtral's stacked `ffn_gate_exps.weight` vs whatever this ships).
-        "/Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf",
+    const MODEL_PATH_ENVS: [&str; 4] = [
+        "PROXIMA_FIXTURE_OPENCHAT_GGUF",
+        "PROXIMA_FIXTURE_DEEPSEEK_CODER_33B_GGUF",
+        "PROXIMA_FIXTURE_MIXTRAL_GGUF",
+        "PROXIMA_FIXTURE_LFM2_GGUF",
     ];
 
     /// Growth ladder for the header-region read. A ~1000-tensor model's KV
@@ -1707,12 +1716,10 @@ mod real_models {
     #[test]
     #[ignore = "point-in-time report against host-local multi-GB gguf files; run with --ignored --nocapture"]
     fn reports_real_models() {
-        for path_str in MODEL_PATHS {
-            let path = Path::new(path_str);
-            if !path.exists() {
-                println!("\n==== SKIP {path_str} (not present on this host) ====");
-                continue;
-            }
+        for env_name in MODEL_PATH_ENVS {
+            let path_str = std::env::var(env_name)
+                .unwrap_or_else(|_| panic!("{env_name} must name the gguf to report on"));
+            let path = Path::new(&path_str);
             println!("\n======== {path_str} ========");
             let (file_len, parsed) = parse_header(path);
             println!(

@@ -11,6 +11,8 @@ readme.workspace = true
 
 [features]
 default = ["std"]
+# tests that read multi-GB model files from the host; ignored (and counted by the runner) when off, failing when on and the env var is unset
+host-fixtures = []
 alloc = []
 float-layout-dtype = []
 # runtime config surface ([`config::GgufParserConfig`]): conflaguration is

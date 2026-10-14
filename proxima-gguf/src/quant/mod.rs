@@ -14,9 +14,9 @@
 //! a widening convert composed from the existing `half` crate dependency.
 
 pub mod bf16;
-pub mod block_layout;
 pub mod bf4_e2m1;
 pub mod bf8_e5m2;
+pub mod block_layout;
 pub mod cold_float;
 pub mod dispatch;
 pub mod f16;
@@ -96,17 +96,11 @@ pub(crate) mod real_weights {
     use alloc::vec::Vec;
     use std::path::Path;
 
-    /// `Qwen/Qwen3-1.7B`, `Q4_K_M`, host-local (same fixture
-    /// `proxima-model-interop::test_support::qwen3_gguf_path` resolves by
-    /// default) -- overridable so a host without this exact blob can point
-    /// at any local `Q4_K_M`-class checkpoint with a `token_embd.weight`
-    /// (`Q4_K`) and `output.weight` (`Q6_K`) tensor.
+    /// `Qwen/Qwen3-1.7B`, `Q4_K_M`; the path comes from `PROXIMA_QWEN3_GGUF`
+    /// (host-fixtures tier -- tests using it are ignored without the feature).
     fn qwen3_path() -> std::string::String {
-        std::env::var("PROXIMA_QWEN3_GGUF").unwrap_or_else(|_| {
-            "/Users/brianbruggeman/.ollama/models/blobs/\
-             sha256-3d0b790534fe4b79525fc3692950408dca41171676ed7e21db57af5c65ef6ab6"
-                .into()
-        })
+        std::env::var("PROXIMA_QWEN3_GGUF")
+            .expect("PROXIMA_QWEN3_GGUF must name the Qwen3-1.7B Q4_K_M gguf (host-fixtures)")
     }
 
     /// Dequantizes `min_elements`-worth (rounded up to a whole number of

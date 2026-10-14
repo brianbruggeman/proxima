@@ -212,16 +212,16 @@ mod tests {
 
     #[cfg(feature = "std")]
     fn bge_model_path() -> alloc::string::String {
-        std::env::var("BGE_MODEL_PATH").unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            alloc::format!(
-                "{home}/.cache/huggingface/hub/models--BAAI--bge-small-en-v1.5/snapshots/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/onnx/model.onnx"
-            )
-        })
+        std::env::var("PROXIMA_FIXTURE_BGE_SMALL_ONNX")
+            .expect("PROXIMA_FIXTURE_BGE_SMALL_ONNX must name the bge-small-en-v1.5 model.onnx")
     }
 
     #[cfg(feature = "std")]
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: bge-small onnx (133 MB)"
+    )]
     fn onnx_census_bge_small_reports_1244_nodes_19_distinct_0_unlowerable() {
         let rendered = census_line_of(&bge_model_path());
 
@@ -232,10 +232,8 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn onnx_census_mnist_reports_13_nodes_6_distinct_0_unlowerable() {
-        let path = std::env::var("MNIST_MODEL").unwrap_or_else(|_| {
-            "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx"
-                .into()
-        });
+        let path = std::env::var("PROXIMA_FIXTURE_MNIST_ONNX")
+            .expect("PROXIMA_FIXTURE_MNIST_ONNX must name the pinned mnist.onnx");
 
         let rendered = census_line_of(&path);
 

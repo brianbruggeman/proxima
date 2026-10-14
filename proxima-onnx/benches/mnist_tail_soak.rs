@@ -86,9 +86,14 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const MODEL_PATH: &str =
-    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
-const DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
+fn model_path() -> String {
+    std::env::var("PROXIMA_FIXTURE_MNIST_ONNX")
+        .expect("PROXIMA_FIXTURE_MNIST_ONNX must name the pinned mnist.onnx")
+}
+fn dataset_dir() -> String {
+    std::env::var("PROXIMA_FIXTURE_MNIST_IDX_DIR")
+        .expect("PROXIMA_FIXTURE_MNIST_IDX_DIR must name the MNIST idx directory")
+}
 /// Real t10k split has 10,000 images; the task floor is >=5,000. We use the
 /// whole split once for the TAIL arm (no recycling needed there) and recycle
 /// it by modulo for the SOAK arm's much larger call count.
@@ -112,15 +117,15 @@ const DRIFT_BAND_PCT: f64 = 25.0;
 const ALLOC_BAND_PCT: f64 = 15.0;
 
 fn checkpoint_present() -> bool {
-    Path::new(MODEL_PATH).exists()
+    Path::new(&model_path()).exists()
 }
 
 fn test_images_path() -> PathBuf {
-    Path::new(DATASET_DIR).join("test/t10k-images-idx3-ubyte")
+    Path::new(&dataset_dir()).join("test/t10k-images-idx3-ubyte")
 }
 
 fn test_labels_path() -> PathBuf {
-    Path::new(DATASET_DIR).join("test/t10k-labels-idx1-ubyte")
+    Path::new(&dataset_dir()).join("test/t10k-labels-idx1-ubyte")
 }
 
 fn dataset_present() -> bool {
@@ -209,15 +214,21 @@ fn mean_stdev_cov(values: &[f64]) -> (f64, f64, f64) {
 
 fn main() {
     if !checkpoint_present() {
-        eprintln!("mnist_tail_soak: skipping, no host-local mnist.onnx checkout at {MODEL_PATH}");
+        eprintln!(
+            "mnist_tail_soak: skipping, no host-local mnist.onnx checkout at {}",
+            model_path()
+        );
         return;
     }
     if !dataset_present() {
-        eprintln!("mnist_tail_soak: skipping, no host-local MNIST idx dataset under {DATASET_DIR}");
+        eprintln!(
+            "mnist_tail_soak: skipping, no host-local MNIST idx dataset under {}",
+            dataset_dir()
+        );
         return;
     }
 
-    let bytes = fs::read(MODEL_PATH).expect("read the real mnist.onnx checkpoint");
+    let bytes = fs::read(model_path()).expect("read the real mnist.onnx checkpoint");
     let model =
         proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
     let graph = model.graph.as_ref().expect("real mnist model has a graph");

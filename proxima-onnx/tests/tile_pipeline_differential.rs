@@ -24,9 +24,14 @@ mod tile_pipeline;
 
 use tile_pipeline::{BandRows, MnistWeights, run_pipeline_forward, run_pipeline_forward_direct};
 
-const MODEL_PATH: &str =
-    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
-const DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
+fn model_path() -> String {
+    std::env::var("PROXIMA_FIXTURE_MNIST_ONNX")
+        .expect("PROXIMA_FIXTURE_MNIST_ONNX must name the pinned mnist.onnx; the CI workflow downloads and verifies it")
+}
+fn dataset_dir() -> String {
+    std::env::var("PROXIMA_FIXTURE_MNIST_IDX_DIR")
+        .expect("PROXIMA_FIXTURE_MNIST_IDX_DIR must name the MNIST idx directory (host-fixtures)")
+}
 const TEST_IMAGES_COUNT: usize = 1000;
 /// Bound per logit: the reassociation this pipeline introduces is a single
 /// reordering of an 11616-term sum (FC1) plus 3 small (<=144-term) conv
@@ -36,20 +41,12 @@ const TEST_IMAGES_COUNT: usize = 1000;
 /// channel order) would still trip it by orders of magnitude.
 const LOGIT_ABSOLUTE_TOLERANCE: f32 = 1e-3;
 
-fn checkpoint_present() -> bool {
-    Path::new(MODEL_PATH).exists()
-}
-
 fn test_images_path() -> PathBuf {
-    Path::new(DATASET_DIR).join("test/t10k-images-idx3-ubyte")
+    Path::new(&dataset_dir()).join("test/t10k-images-idx3-ubyte")
 }
 
 fn test_labels_path() -> PathBuf {
-    Path::new(DATASET_DIR).join("test/t10k-labels-idx1-ubyte")
-}
-
-fn dataset_present() -> bool {
-    test_images_path().exists() && test_labels_path().exists()
+    Path::new(&dataset_dir()).join("test/t10k-labels-idx1-ubyte")
 }
 
 fn idx_header(bytes: &[u8]) -> (usize, Vec<usize>) {
@@ -109,7 +106,7 @@ struct LoadedModel {
 }
 
 fn load_model() -> LoadedModel {
-    let bytes = fs::read(MODEL_PATH).expect("read the real mnist.onnx checkpoint");
+    let bytes = fs::read(model_path()).expect("read the real mnist.onnx checkpoint");
     let model =
         proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
     let graph = model.graph.as_ref().expect("real mnist model has a graph");
@@ -157,11 +154,11 @@ fn evaluate_named_logits(model: &LoadedModel, image: &[f32]) -> Vec<f32> {
 /// over the first 20 real `t10k` test images -- not a synthetic fixture,
 /// the same real held-out data `real_mnist_accuracy.rs` uses.
 #[test]
+#[cfg_attr(
+    not(feature = "host-fixtures"),
+    ignore = "needs the host-fixtures feature: MNIST idx dataset"
+)]
 fn pipeline_logits_match_sealed_executor_within_reassociation_bound() {
-    if !checkpoint_present() || !dataset_present() {
-        eprintln!("skipping: no host-local mnist.onnx checkout or MNIST idx dataset");
-        return;
-    }
     let model = load_model();
     let weights = MnistWeights::from_initializers(
         &model
@@ -201,11 +198,11 @@ fn pipeline_logits_match_sealed_executor_within_reassociation_bound() {
 /// this is the correctness precondition for treating the two arms' timing
 /// delta as pure dispatch overhead rather than a divergent computation.
 #[test]
+#[cfg_attr(
+    not(feature = "host-fixtures"),
+    ignore = "needs the host-fixtures feature: MNIST idx dataset"
+)]
 fn direct_call_arm_is_bit_identical_to_andthen_composed_pipeline() {
-    if !checkpoint_present() || !dataset_present() {
-        eprintln!("skipping: no host-local mnist.onnx checkout or MNIST idx dataset");
-        return;
-    }
     let model = load_model();
     let weights = MnistWeights::from_initializers(
         &model
@@ -233,11 +230,11 @@ fn direct_call_arm_is_bit_identical_to_andthen_composed_pipeline() {
 /// ROW-154-sealed bench both hit this session, over the real `t10k` test
 /// split.
 #[test]
+#[cfg_attr(
+    not(feature = "host-fixtures"),
+    ignore = "needs the host-fixtures feature: MNIST idx dataset"
+)]
 fn pipeline_full_test_split_accuracy_is_exactly_0_9900() {
-    if !checkpoint_present() || !dataset_present() {
-        eprintln!("skipping: no host-local mnist.onnx checkout or MNIST idx dataset");
-        return;
-    }
     let model = load_model();
     let weights = MnistWeights::from_initializers(
         &model

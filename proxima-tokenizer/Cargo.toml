@@ -11,6 +11,7 @@ readme.workspace = true
 
 [features]
 default = ["std"]
+host-fixtures = []
 alloc = []
 # runtime config surface (`config::TokenizerConfig`): conflaguration is
 # std-only, so it rides in only here -- the no_std+alloc floor never sees

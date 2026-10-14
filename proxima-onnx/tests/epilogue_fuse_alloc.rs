@@ -69,25 +69,18 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const MODEL_PATH: &str =
-    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
-const DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
+fn model_path() -> String {
+    std::env::var("PROXIMA_FIXTURE_MNIST_ONNX")
+        .expect("PROXIMA_FIXTURE_MNIST_ONNX must name the pinned mnist.onnx; the CI workflow downloads and verifies it")
+}
+fn dataset_dir() -> String {
+    std::env::var("PROXIMA_FIXTURE_MNIST_IDX_DIR")
+        .expect("PROXIMA_FIXTURE_MNIST_IDX_DIR must name the MNIST idx directory (host-fixtures)")
+}
 const IMAGE_COUNT: usize = 120;
 
-fn checkpoint_present() -> bool {
-    Path::new(MODEL_PATH).exists()
-}
-
 fn test_images_path() -> PathBuf {
-    Path::new(DATASET_DIR).join("test/t10k-images-idx3-ubyte")
-}
-
-fn test_labels_path() -> PathBuf {
-    Path::new(DATASET_DIR).join("test/t10k-labels-idx1-ubyte")
-}
-
-fn dataset_present() -> bool {
-    test_images_path().exists() && test_labels_path().exists()
+    Path::new(&dataset_dir()).join("test/t10k-images-idx3-ubyte")
 }
 
 fn idx_header(bytes: &[u8]) -> (usize, Vec<usize>) {
@@ -130,18 +123,12 @@ fn load_normalized_images(path: &Path, limit: usize) -> Vec<Vec<f32>> {
 /// epilogue fusion is default-on) the fusion hit/element totals for the
 /// SAME window.
 #[test]
-#[ignore = "depends on a real .onnx checkout and the real MNIST idx dataset outside this repo"]
+#[cfg_attr(
+    not(feature = "host-fixtures"),
+    ignore = "needs the host-fixtures feature: MNIST idx dataset"
+)]
 fn fused_eval_loop_allocation_count_over_100_plus_images() {
-    if !checkpoint_present() {
-        eprintln!("skipping: no host-local mnist.onnx checkout at {MODEL_PATH}");
-        return;
-    }
-    if !dataset_present() {
-        eprintln!("skipping: no host-local MNIST idx dataset under {DATASET_DIR}");
-        return;
-    }
-
-    let bytes = fs::read(MODEL_PATH).expect("read the real mnist.onnx checkpoint");
+    let bytes = fs::read(model_path()).expect("read the real mnist.onnx checkpoint");
     let model =
         proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
     let graph = model.graph.as_ref().expect("real mnist model has a graph");

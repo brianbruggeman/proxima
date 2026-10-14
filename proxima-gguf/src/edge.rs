@@ -73,22 +73,17 @@ mod tests {
         assert_eq!(parsed.version, 3);
     }
 
-    /// Looks for a real `.gguf` under `~/repos/others/llama.cpp/models` (the
-    /// vocab-only fixtures llama.cpp ships in-tree) and, if found, parses it
+    /// Parses the pinned llama.cpp `ggml-vocab-llama-bpe.gguf` fixture (path from
+    /// `PROXIMA_FIXTURE_LLAMA_BPE_GGUF`; MIT, see the workflow step that pins its sha256)
     /// and prints architecture, tensor count, and the first few tensor
-    /// names. `#[ignore]`d: it depends on a sibling checkout that may not
-    /// exist on every host, and the suite must not fail when it's absent.
+    /// names. Fails when the env var is unset: CI sets it
+    /// after verifying the artifact's sha256.
     #[test]
-    #[ignore = "depends on a real .gguf checkout outside this repo"]
     fn parses_a_real_gguf_file_if_one_is_present() {
-        let candidate = Path::new(
-            "/Users/brianbruggeman/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf",
+        let candidate = std::env::var("PROXIMA_FIXTURE_LLAMA_BPE_GGUF").expect(
+            "PROXIMA_FIXTURE_LLAMA_BPE_GGUF must name the pinned ggml-vocab-llama-bpe.gguf",
         );
-        if !candidate.exists() {
-            eprintln!("no real .gguf found at {candidate:?}, skipping");
-            return;
-        }
-        let (parsed, _bytes) = read_file(candidate).expect("parse real gguf file");
+        let (parsed, _bytes) = read_file(Path::new(&candidate)).expect("parse real gguf file");
         let architecture = parsed
             .metadata_value("general.architecture")
             .and_then(crate::value::MetadataValue::as_str)

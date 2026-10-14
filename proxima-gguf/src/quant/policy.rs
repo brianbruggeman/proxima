@@ -361,15 +361,13 @@ mod real_file {
 
     use super::{PrecisionPolicy, TensorRole};
 
-    const MIXTRAL_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO-GGUF/Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf";
-    const OPENCHAT_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
+    const MIXTRAL_ENV: &str = "PROXIMA_FIXTURE_MIXTRAL_GGUF";
+    const OPENCHAT_ENV: &str = "PROXIMA_FIXTURE_OPENCHAT_GGUF";
 
-    fn parse_metadata(path: &str, caps: &[usize]) -> Option<crate::pipe::ParsedGguf> {
-        let path = std::path::Path::new(path);
-        if !path.exists() {
-            eprintln!("skipping: no host-local gguf fixture at {}", path.display());
-            return None;
-        }
+    fn parse_metadata(env_name: &str, caps: &[usize]) -> crate::pipe::ParsedGguf {
+        let fixture = std::env::var(env_name)
+            .unwrap_or_else(|_| panic!("{env_name} must name the gguf fixture (host-fixtures)"));
+        let path = std::path::Path::new(&fixture);
         let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
         let mut header_buf = alloc::vec::Vec::new();
         for &cap in caps {
@@ -378,7 +376,7 @@ mod real_file {
             let read = file.read(&mut header_buf).expect("read gguf header region");
             header_buf.truncate(read);
             if let Ok(parsed) = parse_complete(&header_buf) {
-                return Some(parsed);
+                return parsed;
             }
         }
         panic!(
@@ -398,10 +396,12 @@ mod real_file {
     /// (224/256 = 87.5%) rather than 100%, with the exact miss count
     /// reported so the gap is visible, not hidden.
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: multi-GB gguf"
+    )]
     fn policy_matches_real_mixtral_tensor_types_by_role() {
-        let Some(parsed) = parse_metadata(MIXTRAL_PATH, &[16 << 20, 64 << 20, 128 << 20]) else {
-            return;
-        };
+        let parsed = parse_metadata(MIXTRAL_ENV, &[16 << 20, 64 << 20, 128 << 20]);
         let policy = PrecisionPolicy::llama_cpp_q4_k_s_moe_8_expert();
 
         let mut role_total: alloc::collections::BTreeMap<TensorRole, u32> =
@@ -459,10 +459,12 @@ mod real_file {
     /// each have a small layer-conditional minority llama.cpp bumps to
     /// `Q5_K`, reported rather than asserted at 100% for those two.
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: multi-GB gguf"
+    )]
     fn policy_matches_real_openchat_tensor_types_by_role() {
-        let Some(parsed) = parse_metadata(OPENCHAT_PATH, &[4 << 20, 16 << 20, 64 << 20]) else {
-            return;
-        };
+        let parsed = parse_metadata(OPENCHAT_ENV, &[4 << 20, 16 << 20, 64 << 20]);
         let policy = PrecisionPolicy::llama_cpp_q4_k_s();
 
         let mut role_total: alloc::collections::BTreeMap<TensorRole, u32> =

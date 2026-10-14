@@ -83,14 +83,16 @@ done
 # output is captured to a file, not a terminal. That silently breaks the
 # `grep -oE '[0-9]+ passed'` below (no match, count defaults to 0, RED) —
 # reproduced on a real ubuntu host with CARGO_TERM_COLOR=always set.
-printf '\n== gguf oracle fixtures, --ignored (count asserted nonzero) ==\n'
+printf '\n== gguf oracle fixtures, pinned tier (count asserted nonzero) ==\n'
 ignored_log="$(mktemp)"
-if cargo nextest run -p proxima-tokenizer --no-default-features --features gguf --run-ignored ignored-only --no-fail-fast --color never \
+if cargo nextest run -p proxima-tokenizer --no-default-features --features gguf --no-fail-fast --color never \
     > "$ignored_log" 2>&1; then
     cat "$ignored_log"
     ignored_count="$(grep -oE '[0-9]+ passed' "$ignored_log" | tail -1 | awk '{ print $1 }')"
     ignored_count="${ignored_count:-0}"
-    printf 'ignored tests run: %s\n' "$ignored_count"
+    printf 'tests run: %s\n' "$ignored_count"
+    skipped_count="$(grep -oE '[0-9]+ skipped' "$ignored_log" | tail -1 | awk '{ print $1 }')"
+    printf 'tests skipped for missing host-fixtures: %s\n' "${skipped_count:-0}"
     if [ "$ignored_count" -lt 1 ]; then
         printf 'RED: nextest ran %s ignored tests. an empty match exits 0 and reads as green.\n' "$ignored_count"
         failed=$((failed + 1))

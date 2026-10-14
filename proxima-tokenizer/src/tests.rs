@@ -312,10 +312,10 @@ mod real_fixture {
     }
 
     fn load_real_vocab() -> Vocab {
-        let candidate = Path::new(
-            "/Users/brianbruggeman/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf",
+        let candidate = std::env::var("PROXIMA_FIXTURE_LLAMA_BPE_GGUF").expect(
+            "PROXIMA_FIXTURE_LLAMA_BPE_GGUF must name the pinned ggml-vocab-llama-bpe.gguf",
         );
-        let (parsed, _bytes) = proxima_gguf::edge::read_file(candidate)
+        let (parsed, _bytes) = proxima_gguf::edge::read_file(Path::new(&candidate))
             .unwrap_or_else(|error| panic!("parse real gguf file {candidate:?}: {error:?}"));
         vocab_from_metadata(&parsed).expect("build vocab from real metadata")
     }
