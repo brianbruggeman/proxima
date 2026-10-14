@@ -1127,12 +1127,12 @@ pub static MERGE_CANDIDATE_UNRESOLVED_WEIGHT: Counter =
 /// [`BARRIERS_EMITTED`]'s own hazard-cause breakdown -- ROW 539's question:
 /// of the barriers a concurrent-dispatch step pays, how many are a genuine
 /// dataflow edge (RAW) versus an output identity collision (WAW/WAR), and of
-/// those, how many are a [`BufferArena`] slot handed to a new, unrelated node
+/// those, how many are a `BufferArena` slot handed to a new, unrelated node
 /// while a prior user of that same physical buffer has not yet been
 /// barriered off (a false dependency slot reuse manufactures) versus a
 /// persistent/output-placed identity that is genuinely written more than
 /// once. `instrument`-only: production only ever needed the boolean
-/// [`HazardTracker::needs_barrier`] already gives it.
+/// `HazardTracker::needs_barrier` already gives it.
 #[cfg(feature = "instrument")]
 pub static BARRIERS_RAW: Counter = Counter::new("omega.metal.concurrent.barriers_raw");
 #[cfg(feature = "instrument")]

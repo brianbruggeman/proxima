@@ -397,7 +397,7 @@ pub enum Plan {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     Metal(MetalPlanHandle),
     #[cfg(feature = "wgpu-backend")]
-    Wgpu(wgpu_driver::WgpuPlan),
+    Wgpu(Box<wgpu_driver::WgpuPlan>),
     #[cfg(feature = "cuda-driver")]
     Cuda(Box<crate::cuda_driver::CudaPlan>),
 }
@@ -576,7 +576,7 @@ fn candidate_is_better(candidate: &CandidateMeasurement, incumbent: &CandidateMe
         && candidate.execution_sum_ns < incumbent.execution_sum_ns
 }
 
-#[cfg(any(test, feature = "wgpu-backend", feature = "cuda-driver"))]
+#[cfg(any(all(test, feature = "cpu"), feature = "wgpu-backend", feature = "cuda-driver"))]
 pub(crate) fn checked_resource_sum(values: impl IntoIterator<Item = u64>) -> Option<u64> {
     values.into_iter().try_fold(0_u64, u64::checked_add)
 }
@@ -781,10 +781,10 @@ fn plan_configured_gpu(
         GpuDriver::Wgpu => {
             #[cfg(feature = "wgpu-backend")]
             {
-                Ok(Plan::Wgpu(
+                Ok(Plan::Wgpu(Box::new(
                     wgpu_driver::plan_named_with_config(config, program, symbols, named, outputs)
                         .map_err(map_wgpu_configuration_error)?,
-                ))
+                )))
             }
             #[cfg(not(feature = "wgpu-backend"))]
             {
@@ -1409,7 +1409,7 @@ pub fn refit_symbols(plan: &mut Plan, symbols: &[u64]) -> Result<bool, metal::Me
     }
 }
 
-/// Moves a cached [`Plan::Cuda`] to `symbols` in place -- [`cuda_driver::CudaPlan::refit_symbols`]'s
+/// Moves a cached [`Plan::Cuda`] to `symbols` in place -- [`crate::cuda_driver::CudaPlan::refit_symbols`]'s
 /// own doc has the contract. `Ok(false)` on every other arm, so the caller
 /// builds a fresh plan.
 ///
@@ -1430,7 +1430,7 @@ pub fn refit_cuda_symbols(
 
 /// Cumulative `[refit calls, ops re-emitted, ops reused, ops repacked]` of a
 /// [`Plan::Cuda`]; `None` on every other arm. See
-/// [`cuda_driver::CudaPlan::refit_counters`].
+/// [`crate::cuda_driver::CudaPlan::refit_counters`].
 #[cfg(feature = "cuda-driver")]
 #[must_use]
 pub fn cuda_refit_counters(plan: &Plan) -> Option<[u64; 4]> {
@@ -1793,7 +1793,7 @@ fn plan_named_wgpu(
 ) -> Result<Plan, BackendError> {
     let plan =
         wgpu_driver::plan_named_with_policy(program, symbols, named, outputs, numeric_policy)?;
-    Ok(Plan::Wgpu(plan))
+    Ok(Plan::Wgpu(Box::new(plan)))
 }
 
 #[cfg(feature = "wgpu-backend")]

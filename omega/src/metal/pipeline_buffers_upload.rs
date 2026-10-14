@@ -765,12 +765,12 @@ pub static PIPELINE_MISSES: Counter = Counter::new("omega.metal.pipeline_misses"
 pub static PIPELINE_COMPILE_TICKS: Counter = Counter::new("omega.metal.pipeline_compile_ticks");
 #[cfg(feature = "instrument")]
 pub static BLOCK_UPLOAD_CALLS: Counter = Counter::new("omega.metal.block_upload_calls");
-/// Counts a block-upload-loop position whose [`block_identity_key`] this step
-/// disagrees with what [`Plan::block_identity`] recorded for it last step --
+/// Counts a block-upload-loop position whose `block_identity_key` this step
+/// disagrees with what `Plan::block_identity` recorded for it last step --
 /// a REBIND, not a first-ever upload (`block_identity[index]` was already
-/// `Some`). ROW 551: the direct witness that [`block_buffer_reusable`]'s fast
+/// `Some`). ROW 551: the direct witness that `block_buffer_reusable`'s fast
 /// skip is missing every step for a resident weight block, forcing
-/// [`checkpoint_mapping_offset`] to re-bind it from the mmap every token
+/// `checkpoint_mapping_offset` to re-bind it from the mmap every token
 /// instead of reusing the prior step's `device_buffers` entry.
 #[cfg(feature = "instrument")]
 pub static MAPPING_REBOUND_BLOCKS: Counter = Counter::new("omega.metal.mapping_rebound_blocks");
@@ -913,20 +913,20 @@ pub static PREPARE_OPTIMIZE_TICKS: Counter = Counter::new("omega.metal.prepare_o
 pub static PREPARE_RETIRE_TICKS: Counter = Counter::new("omega.metal.prepare_retire_ticks");
 
 /// `build_plan_uniforms`'s own wall clock, timed at its sole lazy call site
-/// ([`arena_encode_dispatch_finish::plan_uniform_buffer`]) rather than inside
+/// (`arena_encode_dispatch_finish::plan_uniform_buffer`) rather than inside
 /// itself, since a warm call never re-enters the function at all (the
 /// `OnceCell` is already populated) -- the counter only ever advances on the
 /// same plan-cache-miss step [`PREPARE_TICKS`] does.
 #[cfg(feature = "instrument")]
 pub static BUILD_PLAN_UNIFORMS_TICKS: Counter =
     Counter::new("omega.metal.build_plan_uniforms_ticks");
-/// [`arena_encode_dispatch_finish::resolve_steps`]'s own wall clock, timed
+/// `arena_encode_dispatch_finish::resolve_steps`'s own wall clock, timed
 /// past its staleness check so a plan-cache HIT (the common case, an
 /// immediate `return Ok(())`) never advances this counter -- only a genuine
 /// miss or a `set_math_mode` change compiles pipelines and pays this.
 #[cfg(feature = "instrument")]
 pub static RESOLVE_STEPS_TICKS: Counter = Counter::new("omega.metal.resolve_steps_ticks");
-/// One `newBufferWithLength_options` call inside [`build_plan_uniforms`] per
+/// One `newBufferWithLength_options` call inside `build_plan_uniforms` per
 /// resolved position -- the uniform-buffer allocation count a bucket
 /// crossing pays once per fresh `Plan`, never again for that plan's
 /// lifetime.
@@ -1041,7 +1041,7 @@ pub struct MetalStageTotals {
     pub barriers_war: u64,
     /// [`BARRIERS_WAW_WAR_ARENA_RECYCLED`]'s own per-step delta -- of
     /// `barriers_waw + barriers_war`, how many collided on a
-    /// [`BufferArena`] slot shared with an earlier, unrelated position (a
+    /// `BufferArena` slot shared with an earlier, unrelated position (a
     /// false dependency slot reuse manufactured).
     pub barriers_waw_war_arena_recycled: u64,
     /// [`BARRIERS_WAW_WAR_PERSISTENT`]'s own per-step delta -- of

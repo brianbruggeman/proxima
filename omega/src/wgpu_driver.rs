@@ -55,7 +55,7 @@ use crate::error::EmitError;
 use crate::msl::{Binding, Codec, PackedOperands, gather_count};
 use crate::wgsl::{WgslCaps, WgslKernel, emit_wgsl_with_policy};
 
-/// How many adapter/device/queue triples [`acquire_device`] built — one per
+/// How many adapter/device/queue triples `acquire_device` built — one per
 /// [`WgpuPlan`]. A caller seeing this climb with the call count, rather than
 /// sitting at the plan count, is re-planning a program it could have reused.
 pub static DEVICE_ACQUISITIONS: Counter = Counter::new("omega.wgpu.device_acquisitions");
