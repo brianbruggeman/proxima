@@ -15,7 +15,7 @@
 
 use core::future::Future;
 use core::pin::Pin;
-use core::task::{Context, Poll};
+use core::task::{Context, Poll, Waker};
 use core::time::Duration;
 
 use futures::stream::Stream;
@@ -42,6 +42,30 @@ pub fn now() -> Instant {
     BOUND_DRIVER.now()
 }
 
+// registration bookkeeping shared by Sleep, Timeout and Tick: `registered` holds
+// the task address the driver was told about. a re-poll from the same task
+// refreshes (never a second entry; re-creates one the driver shed under
+// pressure), a poll from a different task moves the registration, and a drop
+// withdraws exactly what this future registered.
+fn rearm(deadline: Instant, registered: &mut Option<usize>, waker: &Waker) {
+    let task = waker.data().addr();
+    match *registered {
+        Some(previous) if previous == task => BOUND_DRIVER.refresh_wake(deadline, waker),
+        Some(previous) => {
+            BOUND_DRIVER.cancel_wake(deadline, previous);
+            BOUND_DRIVER.schedule_wake(deadline, waker.clone());
+        }
+        None => BOUND_DRIVER.schedule_wake(deadline, waker.clone()),
+    }
+    *registered = Some(task);
+}
+
+fn disarm(deadline: Instant, registered: &mut Option<usize>) {
+    if let Some(task) = registered.take() {
+        BOUND_DRIVER.cancel_wake(deadline, task);
+    }
+}
+
 /// Returned by [`timeout`] when the supplied duration passes before the
 /// wrapped future completes. Matches `tokio::time::error::Elapsed`.
 #[derive(Debug, thiserror::Error)]
@@ -52,13 +76,17 @@ pub struct Elapsed(());
 /// active driver's `now()` reaches `deadline`.
 pub struct Sleep {
     deadline: Instant,
+    registered: Option<usize>,
 }
 
 impl Sleep {
     /// Construct from an absolute deadline.
     #[must_use]
     pub fn until(deadline: Instant) -> Self {
-        Self { deadline }
+        Self {
+            deadline,
+            registered: None,
+        }
     }
 
     /// The deadline this `Sleep` is waiting on.
@@ -70,13 +98,20 @@ impl Sleep {
 
 impl Future for Sleep {
     type Output = ();
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
-        if BOUND_DRIVER.now() >= self.deadline {
-            Poll::Ready(())
-        } else {
-            BOUND_DRIVER.schedule_wake(self.deadline, context.waker().clone());
-            Poll::Pending
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
+        let deadline = self.deadline;
+        if BOUND_DRIVER.now() >= deadline {
+            disarm(deadline, &mut self.registered);
+            return Poll::Ready(());
         }
+        rearm(deadline, &mut self.registered, context.waker());
+        Poll::Pending
+    }
+}
+
+impl Drop for Sleep {
+    fn drop(&mut self) {
+        disarm(self.deadline, &mut self.registered);
     }
 }
 
@@ -105,6 +140,14 @@ pin_project! {
         #[pin]
         future: Fut,
         deadline: Instant,
+        registered: Option<usize>,
+    }
+
+    impl<Fut> PinnedDrop for Timeout<Fut> {
+        fn drop(this: Pin<&mut Self>) {
+            let this = this.project();
+            disarm(*this.deadline, this.registered);
+        }
     }
 }
 
@@ -114,14 +157,16 @@ impl<Fut: Future> Future for Timeout<Fut> {
         let this = self.project();
 
         if let Poll::Ready(value) = this.future.poll(context) {
+            disarm(*this.deadline, this.registered);
             return Poll::Ready(Ok(value));
         }
 
         if BOUND_DRIVER.now() >= *this.deadline {
+            disarm(*this.deadline, this.registered);
             return Poll::Ready(Err(Elapsed(())));
         }
 
-        BOUND_DRIVER.schedule_wake(*this.deadline, context.waker().clone());
+        rearm(*this.deadline, this.registered, context.waker());
         Poll::Pending
     }
 }
@@ -138,6 +183,7 @@ where
     Timeout {
         future,
         deadline: now() + duration,
+        registered: None,
     }
 }
 
@@ -150,7 +196,11 @@ pub fn timeout_at<Fut>(
 where
     Fut: Future,
 {
-    Timeout { future, deadline }
+    Timeout {
+        future,
+        deadline,
+        registered: None,
+    }
 }
 
 /// Stream + tick-future hybrid that yields every `period`, with the
@@ -162,6 +212,7 @@ pub fn interval(period: Duration) -> Interval {
     Interval {
         period,
         next_deadline: None,
+        registered: None,
         missed_tick_behavior: MissedTickBehavior::default(),
     }
 }
@@ -173,6 +224,7 @@ pub fn interval_at(start: Instant, period: Duration) -> Interval {
     Interval {
         period,
         next_deadline: Some(start),
+        registered: None,
         missed_tick_behavior: MissedTickBehavior::default(),
     }
 }
@@ -184,7 +236,16 @@ pub struct Interval {
     /// Absolute deadline of the next pending tick. `None` means
     /// "first tick should fire immediately" (post-construction state).
     next_deadline: Option<Instant>,
+    registered: Option<usize>,
     missed_tick_behavior: MissedTickBehavior,
+}
+
+impl Drop for Interval {
+    fn drop(&mut self) {
+        if let Some(deadline) = self.next_deadline {
+            disarm(deadline, &mut self.registered);
+        }
+    }
 }
 
 impl Interval {
@@ -233,9 +294,10 @@ impl Future for Tick<'_> {
         };
 
         if now < deadline {
-            BOUND_DRIVER.schedule_wake(deadline, context.waker().clone());
+            rearm(deadline, &mut interval.registered, context.waker());
             return Poll::Pending;
         }
+        interval.registered = None;
 
         // Tick has matured. Advance the deadline per missed-tick behavior.
         let fired_at = deadline;
