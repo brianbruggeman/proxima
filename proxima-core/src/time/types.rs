@@ -30,6 +30,25 @@ pub trait Driver: Sync {
     /// tolerant of multiple registrations from the same waker; `Waker::wake` is
     /// idempotent for already-pending tasks.
     fn schedule_wake(&self, deadline: Instant, waker: Waker);
+
+    /// Re-arm a registration this caller already made with [`schedule_wake`](Self::schedule_wake)
+    /// for the same `deadline`: replace the stored waker, never add a second
+    /// entry, and re-create the entry if the driver dropped it under pressure.
+    /// The default re-registers, which is correct for drivers that do not track
+    /// registrations.
+    fn refresh_wake(&self, deadline: Instant, waker: &Waker) {
+        self.schedule_wake(deadline, waker.clone());
+    }
+
+    /// Withdraw one registration for `deadline` made by the task identified by
+    /// `task` (`waker.data().addr()`), so a dropped timer leaves nothing behind.
+    /// A driver that tracks registrations counts one per `schedule_wake` for the
+    /// same (deadline, task) and removes the entry when the count reaches zero.
+    /// The default is a no-op: such a driver wakes a dead task at most once, at
+    /// the deadline.
+    fn cancel_wake(&self, deadline: Instant, task: usize) {
+        let _ = (deadline, task);
+    }
 }
 
 /// Monotonic point in time. Internally a `Duration` since the active driver's

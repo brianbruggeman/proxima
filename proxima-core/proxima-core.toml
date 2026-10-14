@@ -29,3 +29,17 @@ send_span_cap = 256
 # loop burst without spilling. A burst beyond N spills to a heap-allocated Vec
 # (unbounded, same as before this cap existed) — no waiter is ever refused.
 waiters_inline_cap = 4
+
+[timer]
+# Handoff ring capacity for the std fallback timer driver: wake/refresh/cancel
+# commands queued from any polling thread to the single timer-owner thread.
+# Rounded up to a power of two. A full ring is an explicit, counted outcome
+# (the waker is woken at once so the task re-polls) -- never unbounded growth.
+# Raise for bursts of timers armed faster than the owner drains; lower on
+# embedded hosts.
+submission_cap = 65536
+# Maximum live deadlines the owner holds, in storage reserved once at start.
+# Each slot is one (deadline, task) pair. A full table counts the overflow and
+# wakes the waker at once. 16384 covers a 10k-connection endpoint with one
+# timer each plus headroom.
+table_cap = 16384

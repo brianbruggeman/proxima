@@ -129,3 +129,6 @@ required-features = ["std"]
 [[test]]
 name = "loom_signal"
 required-features = ["loom", "std"]
+
+[target."cfg(unix)".dev-dependencies]
+libc.workspace = true
