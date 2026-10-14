@@ -25,10 +25,6 @@
 //! What remains is genuinely runtime deployment policy: which side of the
 //! handshake this process plays, and which SPI it announces.
 
-// this module only exists under `config`, which implies `std`; the crate is
-// `#![no_std]` so std's prelude macros must be named explicitly.
-use std::vec;
-
 use bon::Builder;
 use conflaguration::{Settings, Validate};
 use serde::{Deserialize, Serialize};
