@@ -34,8 +34,8 @@ alloc = ["time-alloc"]
 time-alloc = ["futures/alloc"]
 time-std = ["time-alloc", "futures/std"]
 time-driver-std-thread = ["time-std", "dep:futures-timer"]
-time-driver-mock = ["time-std"]
-time-driver-wasm = ["time-alloc"]
+time-driver-mock = ["time-std", "std"]
+time-driver-wasm = ["time-alloc", "alloc"]
 time-driver-prime-wheel = ["time-std"]
 # io-async: poll-based AsyncRead/AsyncWrite over an associated Error type — the
 # no_std + no_alloc async IO seam (futures::io is std via std::io::Error). Pure
