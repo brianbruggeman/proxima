@@ -13,7 +13,7 @@ pub type RepeatNodesOutcome = (
 
 /// One [`BoundOp`] the duplicate-dispatch attribution harness could not copy
 /// byte-identically — the caller's typed refusal instead of a silent partial
-/// duplication. `kind_name` is [`BoundOpKind::render_kind_name`]'s own label.
+/// duplication. `kind_name` is [`BoundOpKind::name`]'s own label.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepeatNodeRefusal {
     pub node: NodeId,
@@ -167,7 +167,7 @@ fn duplicate_bound_op(original: &BoundOp, fresh: &mut u32) -> Option<BoundOp> {
 ///
 /// Returns the extended program plus one [`RepeatNodeRefusal`] per requested
 /// target this pass declined (an unmatched `NodeId`, or a kind
-/// [`duplicate_bound_op`] does not support) — the caller decides whether an
+/// `duplicate_bound_op` does not support) — the caller decides whether an
 /// unmet target is fatal; this pass never panics or silently drops one.
 #[must_use]
 pub fn apply_repeat_nodes(
