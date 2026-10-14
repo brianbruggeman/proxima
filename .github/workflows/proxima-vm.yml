@@ -68,7 +68,7 @@ jobs:
       - name: vm_registry (root crate), nonzero count asserted
         run: |
           status=0
-          cargo nextest run --locked -p proxima-lib --features vm -E 'binary(vm_registry)' --no-fail-fast > vm_registry.log 2>&1 || status=$?
+          CARGO_TERM_COLOR=never cargo nextest run --locked -p proxima-lib --features vm -E 'binary(vm_registry)' --no-fail-fast > vm_registry.log 2>&1 || status=$?
           cat vm_registry.log
           if [ "${status}" -ne 0 ]; then
             echo "ERROR: vm_registry nextest exited ${status} (failures above)" >&2
