@@ -27,6 +27,7 @@ jobs:
   # The full stack gate: bare-metal codec build + all-features build + clippy
   # across the feature matrix + codec/facade tests + the tokio gate.
   pgwire-gate:
+    timeout-minutes: 35
     name: proxima-pgwire-gate.sh (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.pgwire == 'true'
@@ -57,6 +58,7 @@ jobs:
   # carry zero tokio (the bare-metal / DPDK embedding contract). A focused job
   # so a regression here is unmistakable in the checks list.
   tokio-gate:
+    timeout-minutes: 15
     name: no-default-features carries zero tokio
     needs: changes
     if: needs.changes.outputs.pgwire == 'true'
@@ -82,6 +84,7 @@ jobs:
   # live differential: the same tokio-postgres client must see an identical
   # protocol contract from our facade and from real PostgreSQL.
   realpg-differential:
+    timeout-minutes: 15
     name: real-postgres differential parity (G13)
     needs: changes
     if: needs.changes.outputs.pgwire == 'true'

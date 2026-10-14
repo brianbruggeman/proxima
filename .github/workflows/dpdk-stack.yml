@@ -26,6 +26,7 @@ jobs:
   # build + clippy + worked-example tests + the bare-metal no_std build, on
   # both Linux and macOS so the codec's host-independence is a checked fact.
   dpdk-stack-gate:
+    timeout-minutes: 15
     name: dpdk-stack-gate.sh (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.dpdk_stack == 'true'

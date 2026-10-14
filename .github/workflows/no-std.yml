@@ -30,6 +30,7 @@ jobs:
   # Floor: the linux-daemon profile must always build green. If this
   # breaks the whole cliff is dead.
   linux-daemon:
+    timeout-minutes: 15
     name: PROXIMA_PROFILE=linux-daemon
     needs: changes
     if: needs.changes.outputs.nostd == 'true'
@@ -52,6 +53,7 @@ jobs:
   # must stay std-import-free except for the allow-listed TLS sites
   # documented in the gate's allow-list.
   nostd-gate:
+    timeout-minutes: 15
     name: nostd-gate.sh
     needs: changes
     if: needs.changes.outputs.nostd == 'true'
@@ -71,6 +73,7 @@ jobs:
   # tokio-gate jobs, matrixed over the floor crate set instead of one
   # crate.
   tokio-free-floor:
+    timeout-minutes: 15
     name: tokio-free-floor.sh
     needs: changes
     if: needs.changes.outputs.nostd == 'true'
@@ -86,6 +89,7 @@ jobs:
   # under `--features alloc` on the host. Mirrors quic-h3-gate.sh's
   # thumbv7m cells, matrixed over the whole floor crate set.
   thumbv7m-cliff-gate:
+    timeout-minutes: 15
     name: thumbv7m-cliff-gate.sh
     needs: changes
     if: needs.changes.outputs.nostd == 'true'
@@ -103,6 +107,7 @@ jobs:
   # cliff. Per `proxima/docs/proxima-quic/discipline.md` A0 row.
   # Tokio-free facade check is staged in but disabled until C41 cutover.
   quic-h3-gate:
+    timeout-minutes: 15
     name: quic-h3-gate.sh
     needs: changes
     if: needs.changes.outputs.nostd == 'true'
@@ -125,6 +130,7 @@ jobs:
   # fan-out dedup, and the conflaguration bridge tests. Enforced — every one
   # of these is proven passing on the branch, so a regression is a real break.
   tier-lift-gate:
+    timeout-minutes: 130
     name: tier-lift-gate.sh
     needs: changes
     if: needs.changes.outputs.nostd == 'true'
@@ -146,6 +152,7 @@ jobs:
   # three quarters of the crate — were never gated at all. Runs the matrix:
   # default, --all-features, both no_std tiers, and each feature ALONE.
   proxima-runtime-gate:
+    timeout-minutes: 15
     name: proxima-runtime-gate.sh
     needs: changes
     if: needs.changes.outputs.nostd == 'true'
@@ -167,6 +174,7 @@ jobs:
   # not build their test target at all. Runs the matrix: default,
   # --all-features, both no_std tiers, rustdoc per tier, and each feature ALONE.
   proxima-config-gate:
+    timeout-minutes: 15
     name: proxima-config-gate.sh
     needs: changes
     if: needs.changes.outputs.nostd == 'true'
@@ -189,6 +197,7 @@ jobs:
   # driver ALONE (they select different `run` bodies), the bare cell, the
   # union, the doctest count, and RUNS the macro's own e2e smoke.
   proxima-test-gate:
+    timeout-minutes: 15
     name: proxima-test-gate.sh
     needs: changes
     if: needs.changes.outputs.nostd == 'true'
@@ -210,6 +219,7 @@ jobs:
   # Three folded-in former crates, two thirds of them invisible. Runs each
   # feature ALONE, the union, and actually RUNS the cow_walkthrough example.
   proxima-storage-gate:
+    timeout-minutes: 15
     name: proxima-storage-gate.sh
     needs: changes
     if: needs.changes.outputs.nostd == 'true'
@@ -233,6 +243,7 @@ jobs:
   # only place rustdoc runs on this crate (eleven broken links at default
   # features on the pre-audit tree).
   proxima-listen-gate:
+    timeout-minutes: 15
     name: proxima-listen-gate.sh
     needs: changes
     if: needs.changes.outputs.nostd == 'true'
@@ -256,6 +267,7 @@ jobs:
   # crate owns sat in the 24 that no gate ran. Also the only place rustdoc and
   # the doctest count run on this crate.
   proxima-auth-gate:
+    timeout-minutes: 15
     name: proxima-auth-gate.sh
     needs: changes
     if: needs.changes.outputs.nostd == 'true'
@@ -282,6 +294,7 @@ jobs:
   # intra-doc links. Also the only place rustdoc and the doctest count run on
   # this crate.
   proxima-recording-gate:
+    timeout-minutes: 15
     name: proxima-recording-gate.sh
     needs: changes
     if: needs.changes.outputs.nostd == 'true'
@@ -304,6 +317,7 @@ jobs:
   # call site in prime is already macos/linux-gated but whose Cargo
   # edge was not, and socket2 is a hard `compile_error!` on wasm32.
   no-std-matrix:
+    timeout-minutes: 15
     name: PROXIMA_PROFILE=${{ matrix.profile }} target=${{ matrix.target }}
     needs: changes
     if: needs.changes.outputs.nostd == 'true'

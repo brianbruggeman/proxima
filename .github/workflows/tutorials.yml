@@ -21,6 +21,7 @@ jobs:
     uses: ./.github/workflows/affected.yml
 
   tutorials-gate:
+    timeout-minutes: 15
     name: tutorials-gate.sh (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.tutorials == 'true'

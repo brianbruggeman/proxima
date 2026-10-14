@@ -9,7 +9,7 @@ on:
 jobs:
   windows-port:
     runs-on: windows-latest
-    timeout-minutes: 180
+    timeout-minutes: 55
     env:
       CARGO_TERM_COLOR: never
       RUST_BACKTRACE: 1

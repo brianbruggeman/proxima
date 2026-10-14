@@ -35,6 +35,7 @@ jobs:
   # other compare-bench jobs in this repo, this records a baseline rather
   # than sealing a discipline row (that's a manual read of the CoV).
   compare-bench-http-tail:
+    timeout-minutes: 20
     name: compare-bench (h1/h2 tail vs hyper+pingora)
     needs: changes
     if: needs.changes.outputs.prime_serve == 'true'
@@ -51,6 +52,7 @@ jobs:
   # bench's own module doc), so there is no `--quick` flag; the bench's own
   # iteration count is what CI runs.
   compare-bench-h3-native-vs-quinn:
+    timeout-minutes: 15
     name: compare-bench (h3 native vs quinn)
     needs: changes
     if: needs.changes.outputs.prime_serve == 'true'

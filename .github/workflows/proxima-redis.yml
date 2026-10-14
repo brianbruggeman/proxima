@@ -25,6 +25,7 @@ jobs:
   # The full stack gate: bare codec build + all-features build + clippy across
   # the feature matrix + codec/client tests + the tokio gate.
   redis-gate:
+    timeout-minutes: 15
     name: proxima-redis-gate.sh (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.redis == 'true'
@@ -46,6 +47,7 @@ jobs:
   # Tokio gate as its own fast job: the no-default-features codec graph must
   # carry zero tokio (the bare-metal / DPDK embedding contract).
   tokio-gate:
+    timeout-minutes: 15
     name: no-default-features carries zero tokio
     needs: changes
     if: needs.changes.outputs.redis == 'true'
@@ -70,6 +72,7 @@ jobs:
   # (principle 16 canary), then runs the live differential: the same client must
   # see an identical RESP contract from real redis and real valkey.
   real-redis-differential:
+    timeout-minutes: 15
     name: real redis/valkey differential parity
     needs: changes
     if: needs.changes.outputs.redis == 'true'
