@@ -226,18 +226,45 @@ fn ten_thousand_timers_polled_repeatedly_complete_on_one_owner_thread() {
 }
 
 #[test]
-fn full_table_counts_each_overflow_and_wakes_that_task_at_once() {
+fn saturated_table_defers_without_early_wakes_and_each_timer_wakes_once() {
     use proxima_core::sized::TIMER_TABLE_CAP;
+    let driver = StdThreadDriver::new();
+    let (sender, receiver) = channel();
+    let deadline = after(&driver, Duration::from_millis(200));
+    let total = TIMER_TABLE_CAP + 100;
+
+    for index in 0..total {
+        driver.schedule_wake(deadline, notifier(index, &sender));
+    }
+    let mut wakes_per_timer = vec![0_u32; total];
+    let first = wait_for(&receiver);
+    let woken_at = driver.now();
+    wakes_per_timer[first] += 1;
+    for _ in 1..total {
+        wakes_per_timer[wait_for(&receiver)] += 1;
+    }
+
+    assert!(woken_at >= deadline, "no registration woke before its deadline");
+    assert!(wakes_per_timer.iter().all(|wakes| *wakes == 1));
+    assert_eq!(driver.deferred_registrations(), 100);
+    assert_eq!(driver.table_overflows(), 0);
+}
+
+#[test]
+fn registrations_beyond_main_and_deferred_capacity_are_counted_and_woken_once_each() {
+    use proxima_core::sized::{TIMER_DEFER_CAP, TIMER_TABLE_CAP};
     let driver = StdThreadDriver::new();
     let (sender, receiver) = channel();
     let far = after(&driver, Duration::from_secs(3_600));
     let excess = 10;
 
-    for index in 0..TIMER_TABLE_CAP + excess {
+    for index in 0..TIMER_TABLE_CAP + TIMER_DEFER_CAP + excess {
         driver.schedule_wake(far, notifier(index, &sender));
     }
-    let woken: Vec<usize> = (0..excess).map(|_| wait_for(&receiver)).collect();
+    let mut woken: Vec<usize> = (0..excess).map(|_| wait_for(&receiver)).collect();
+    woken.sort_unstable();
+    woken.dedup();
 
+    assert_eq!(woken.len(), excess);
     assert_eq!(driver.table_overflows(), excess as u64);
-    assert!(woken.iter().all(|index| *index >= TIMER_TABLE_CAP - excess));
 }

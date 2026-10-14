@@ -3,14 +3,17 @@
 //! Polling threads never spawn: [`Driver::schedule_wake`], `refresh_wake` and
 //! `cancel_wake` push a command onto a lock-free [`Ring`] (the Vyukov MPMC ring
 //! in `proxima_core::ring`) and return. The single owner thread drains the ring
-//! into a fixed-capacity table of deadlines sorted so the earliest sits last
-//! (O(1) pop, O(log n) keyed lookup for dedup and cancel), wakes what is due,
-//! and parks until the earliest deadline or a submission that beats it.
+//! into a fixed-capacity indexed heap (O(log n) insert/remove/pop, O(1) keyed
+//! lookup for dedup and cancel), wakes what is due, and parks until the
+//! earliest deadline or a submission that beats it.
 //!
 //! Capacities come from `proxima-core.toml` `[timer]` (`submission_cap`,
-//! `table_cap`). A full ring or table is a counted outcome
-//! ([`StdThreadDriver::submission_overflows`], [`StdThreadDriver::table_overflows`]):
-//! the waker is woken at once, so the task re-polls instead of hanging.
+//! `table_cap`, `defer_cap`). Overflow policy: a registration the main table
+//! cannot hold waits in the deferred table (counted, [`StdThreadDriver::deferred_registrations`])
+//! and is promoted as slots free -- its task is not woken, so it cannot spin.
+//! Only past table_cap + defer_cap concurrent timers, or a full submission
+//! ring, is the task woken at once ([`StdThreadDriver::table_overflows`],
+//! [`StdThreadDriver::submission_overflows`]) so it re-polls instead of hanging.
 //!
 //! The right driver under heavy timer workloads on a per-core runtime is
 //! `prime-wheel`; this one keeps `proxima_core::time` usable on a plain host.
@@ -22,7 +25,8 @@ use std::thread::{self, Thread};
 use std::time::Duration;
 
 use crate::ring::Ring;
-use crate::sized::{TIMER_SUBMISSION_CAP, TIMER_TABLE_CAP};
+use crate::sized::{TIMER_DEFER_CAP, TIMER_SUBMISSION_CAP, TIMER_TABLE_CAP};
+use crate::time::drivers::deadline_table::{DeadlineTable, Entry};
 use crate::time::{Driver, Instant};
 
 /// Singleton driver instance -- referenced by the static binding emitted
@@ -42,13 +46,6 @@ enum Command {
     Cancel { deadline: Instant, task: usize },
 }
 
-struct Entry {
-    deadline: Instant,
-    task: usize,
-    waker: Waker,
-    refs: u32,
-}
-
 struct Shared {
     ring: Ring<Command>,
     owner: OnceLock<Thread>,
@@ -57,6 +54,7 @@ struct Shared {
     closed: AtomicBool,
     submission_overflows: AtomicU64,
     table_overflows: AtomicU64,
+    deferred_registrations: AtomicU64,
 }
 
 fn nanos(deadline: Instant) -> u64 {
@@ -84,6 +82,7 @@ impl Shared {
             closed: AtomicBool::new(false),
             submission_overflows: AtomicU64::new(0),
             table_overflows: AtomicU64::new(0),
+            deferred_registrations: AtomicU64::new(0),
         });
         let owned = Arc::clone(&shared);
         let spawned = thread::Builder::new()
@@ -118,15 +117,23 @@ impl Shared {
     }
 
     fn run(&self, epoch: std::time::Instant) {
-        let mut table: Vec<Entry> = Vec::with_capacity(TIMER_TABLE_CAP);
+        let mut table = DeadlineTable::with_capacity(TIMER_TABLE_CAP);
+        let mut deferred = DeadlineTable::with_capacity(TIMER_DEFER_CAP);
         while !self.closed.load(Ordering::Acquire) {
             while let Some(command) = self.ring.dequeue() {
-                self.apply(&mut table, command);
+                self.apply(&mut table, &mut deferred, command);
             }
             let now = u64::try_from(epoch.elapsed().as_nanos()).unwrap_or(u64::MAX);
             fire_due(&mut table, now);
-            self.live.store(table.len(), Ordering::Release);
-            let earliest = table.last().map_or(u64::MAX, |entry| nanos(entry.deadline));
+            fire_due(&mut deferred, now);
+            promote(&mut table, &mut deferred);
+            self.live.store(table.len() + deferred.len(), Ordering::Release);
+            let earliest = [table.earliest(), deferred.earliest()]
+                .into_iter()
+                .flatten()
+                .map(nanos)
+                .min()
+                .unwrap_or(u64::MAX);
             self.earliest_nanos.store(earliest, Ordering::SeqCst);
             fence(Ordering::SeqCst);
             if !self.ring.is_empty() {
@@ -139,82 +146,89 @@ impl Shared {
         }
     }
 
-    fn apply(&self, table: &mut Vec<Entry>, command: Command) {
+    fn apply(&self, table: &mut DeadlineTable, deferred: &mut DeadlineTable, command: Command) {
         match command {
             Command::Schedule { deadline, waker } => {
                 let task = waker.data().addr();
-                match locate(table, deadline, task) {
-                    Ok(index) => {
-                        let entry = &mut table[index];
-                        entry.refs = entry.refs.saturating_add(1);
-                        entry.rearm(waker);
-                    }
-                    Err(index) => self.insert(table, index, deadline, task, waker),
-                }
+                self.register(table, deferred, deadline, task, waker, true);
             }
             Command::Refresh { deadline, waker } => {
                 let task = waker.data().addr();
-                match locate(table, deadline, task) {
-                    Ok(index) => table[index].rearm(waker),
-                    Err(index) => self.insert(table, index, deadline, task, waker),
-                }
+                self.register(table, deferred, deadline, task, waker, false);
             }
             Command::Cancel { deadline, task } => {
-                if let Ok(index) = locate(table, deadline, task) {
-                    release(table, index);
+                for tier in [table, deferred] {
+                    if let Some(slot) = tier.find(deadline, task) {
+                        release(tier, slot);
+                        return;
+                    }
                 }
             }
         }
     }
 
-    fn insert(
+    // policy: a registration the main table cannot hold waits in the deferred
+    // table and is promoted on the owner's next pass as slots free, so its task
+    // is not woken (no re-poll churn). only when both tiers are full does the
+    // task get an immediate, counted wake.
+    fn register(
         &self,
-        table: &mut Vec<Entry>,
-        index: usize,
+        table: &mut DeadlineTable,
+        deferred: &mut DeadlineTable,
         deadline: Instant,
         task: usize,
         waker: Waker,
+        counted: bool,
     ) {
-        if table.len() >= TIMER_TABLE_CAP {
-            self.table_overflows.fetch_add(1, Ordering::Relaxed);
-            return waker.wake();
+        for tier in [&mut *table, &mut *deferred] {
+            if let Some(slot) = tier.find(deadline, task) {
+                if let Some(entry) = tier.entry_mut(slot) {
+                    entry.refs = entry.refs.saturating_add(u32::from(counted));
+                    entry.rearm(waker);
+                }
+                return;
+            }
         }
-        table.insert(
-            index,
-            Entry {
-                deadline,
-                task,
-                waker,
-                refs: 1,
-            },
-        );
+        let Err(entry) = table.insert(Entry::new(deadline, task, waker)) else {
+            return;
+        };
+        match deferred.insert(entry) {
+            Ok(()) => {
+                self.deferred_registrations.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(entry) => {
+                self.table_overflows.fetch_add(1, Ordering::Relaxed);
+                entry.waker.wake();
+            }
+        }
     }
 }
 
-impl Entry {
-    fn rearm(&mut self, waker: Waker) {
-        if !self.waker.will_wake(&waker) {
-            self.waker = waker;
+fn release(table: &mut DeadlineTable, slot: u32) {
+    let last = table.entry_mut(slot).is_none_or(|entry| {
+        entry.refs = entry.refs.saturating_sub(1);
+        entry.refs == 0
+    });
+    if last {
+        table.remove(slot);
+    }
+}
+
+fn promote(table: &mut DeadlineTable, deferred: &mut DeadlineTable) {
+    while table.has_room() {
+        let Some(entry) = deferred.pop_earliest() else {
+            return;
+        };
+        if let Err(entry) = table.insert(entry) {
+            let _ = deferred.insert(entry);
+            return;
         }
     }
 }
 
-fn locate(table: &[Entry], deadline: Instant, task: usize) -> Result<usize, usize> {
-    table.binary_search_by(|entry| (deadline, task).cmp(&(entry.deadline, entry.task)))
-}
-
-fn release(table: &mut Vec<Entry>, index: usize) {
-    match table[index].refs {
-        0 | 1 => {
-            table.remove(index);
-        }
-        _ => table[index].refs -= 1,
-    }
-}
-
-fn fire_due(table: &mut Vec<Entry>, now: u64) {
-    while table.last().is_some_and(|entry| nanos(entry.deadline) <= now) {
-        if let Some(entry) = table.pop() {
+fn fire_due(table: &mut DeadlineTable, now: u64) {
+    while table.earliest().is_some_and(|deadline| nanos(deadline) <= now) {
+        if let Some(entry) = table.pop_earliest() {
             entry.waker.wake();
         }
     }
@@ -256,6 +270,15 @@ impl StdThreadDriver {
         self.shared
             .get()
             .map_or(0, |shared| shared.table_overflows.load(Ordering::Relaxed))
+    }
+
+    /// Registrations that waited in the deferred table because the main table
+    /// was full; their tasks were not woken early.
+    #[must_use]
+    pub fn deferred_registrations(&self) -> u64 {
+        self.shared.get().map_or(0, |shared| {
+            shared.deferred_registrations.load(Ordering::Relaxed)
+        })
     }
 
     /// Live (task, deadline) registrations as of the owner's last drain.

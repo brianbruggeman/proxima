@@ -14,6 +14,9 @@
 pub mod unbound;
 
 #[cfg(feature = "time-driver-std-thread")]
+mod deadline_table;
+
+#[cfg(feature = "time-driver-std-thread")]
 pub mod std_thread;
 
 #[cfg(feature = "time-driver-mock")]

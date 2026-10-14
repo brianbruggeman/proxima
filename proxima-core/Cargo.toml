@@ -132,3 +132,8 @@ required-features = ["loom", "std"]
 
 [target."cfg(unix)".dev-dependencies]
 libc.workspace = true
+
+[[bench]]
+name = "bench_timer_owner"
+harness = false
+required-features = ["time-driver-std-thread"]

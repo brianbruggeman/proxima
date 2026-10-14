@@ -43,3 +43,8 @@ submission_cap = 65536
 # wakes the waker at once. 16384 covers a 10k-connection endpoint with one
 # timer each plus headroom.
 table_cap = 16384
+# Registrations the main table cannot hold wait here, are promoted as slots free,
+# and are NOT woken meanwhile (no re-poll churn). Only when main + deferred are
+# both full does a task get an immediate, counted wake. Total concurrent timers
+# before that is table_cap + defer_cap.
+defer_cap = 16384
