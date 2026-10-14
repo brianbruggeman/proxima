@@ -43,17 +43,25 @@ pub(crate) type OwnedSource = std::os::windows::io::OwnedSocket;
 /// [`Reactor`] stays non-generic; a caller picks the strategy per runtime via
 /// [`Reactor::turn_as`] or `run_on_this_thread_as` in `core_shard`, composing
 /// the same [`Reactor`] and `Readiness` primitives as the default runtime.
-/// [`Standard`] is what [`Reactor::turn`] uses. [`Hangup`] additionally wakes
-/// readers on EPOLLHUP/EPOLLRDHUP/EPOLLERR, which is what a reader parked on
-/// a child pipe needs: a pipe whose writer closed with no pending data
-/// reports EPOLLHUP only.
+/// [`Standard`] is what [`Reactor::turn`] uses.
+///
+/// read readiness means `read()` will not block: it returns data, EOF, or an
+/// error. so [`Standard`] wakes readers on EPOLLIN, EPOLLHUP and EPOLLERR, and
+/// writers on EPOLLOUT, EPOLLERR and EPOLLHUP (a `write()` after either fails
+/// rather than blocks). a pipe whose writer closed with nothing pending
+/// reports EPOLLHUP alone, and epoll reports HUP and ERR whatever interest
+/// mask was registered. [`Hangup`] adds EPOLLRDHUP on top. registration never
+/// subscribes to RDHUP, and the kernel sets EPOLLIN alongside it on sockets,
+/// so [`Hangup`] wakes exactly when [`Standard`] does today; it stays as the
+/// public name for a runtime that wants half-close named explicitly.
 ///
 /// the masks are consulted only by the Linux epoll `turn_as`. kqueue and IOCP
 /// already wake readers on hangup, so their `turn_as` ignores the strategy:
-/// kqueue fires the read waker on every EVFILT_READ event regardless of
-/// EV_EOF (`Reactor::turn`, `event.filter == libc::EVFILT_READ` branch,
+/// kqueue fires the read waker on every `EVFILT_READ` event regardless of
+/// `EV_EOF` (`Reactor::turn`, `event.filter == libc::EVFILT_READ` branch,
 /// reactor.rs:701), and AFD counts DISCONNECT as readable
-/// (`READABLE_EVENTS`, afd.rs:51). off Linux the mask values are 0.
+/// (`READABLE_EVENTS`, afd.rs:51). the `io_uring` reactor is completion-based
+/// and has no readiness mask. off Linux the mask values are 0.
 pub trait WakeStrategy: 'static {
     /// event bits that fire the read waker.
     const READ_MASK: u32;
@@ -63,11 +71,10 @@ pub trait WakeStrategy: 'static {
 
 #[cfg(target_os = "linux")]
 mod masks {
-    pub const STANDARD_READ: u32 = libc::EPOLLIN as u32;
-    pub const STANDARD_WRITE: u32 = libc::EPOLLOUT as u32;
-    pub const HANGUP_READ: u32 =
-        (libc::EPOLLIN | libc::EPOLLHUP | libc::EPOLLRDHUP | libc::EPOLLERR) as u32;
-    pub const HANGUP_WRITE: u32 = (libc::EPOLLOUT | libc::EPOLLERR) as u32;
+    pub const STANDARD_READ: u32 = (libc::EPOLLIN | libc::EPOLLHUP | libc::EPOLLERR) as u32;
+    pub const STANDARD_WRITE: u32 = (libc::EPOLLOUT | libc::EPOLLERR | libc::EPOLLHUP) as u32;
+    pub const HANGUP_READ: u32 = STANDARD_READ | libc::EPOLLRDHUP as u32;
+    pub const HANGUP_WRITE: u32 = STANDARD_WRITE;
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -78,7 +85,7 @@ mod masks {
     pub const HANGUP_WRITE: u32 = 0;
 }
 
-/// wakes readers on EPOLLIN and writers on EPOLLOUT: the default runtime.
+/// wakes readers on data, hangup or error and writers on space, hangup or error: the default runtime.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Standard;
 
@@ -87,8 +94,8 @@ impl WakeStrategy for Standard {
     const WRITE_MASK: u32 = masks::STANDARD_WRITE;
 }
 
-/// also wakes readers on hangup and error: for a runtime whose readers must
-/// observe a closed peer that left no data, such as child-process pipes.
+/// also wakes readers on EPOLLRDHUP: half-close named explicitly. redundant with
+/// [`Standard`] today because registration never subscribes to RDHUP.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Hangup;
 
@@ -1408,14 +1415,134 @@ mod tests {
     }
 
     #[test]
-    fn writer_closed_with_no_data_wakes_reader_only_under_hangup_strategy() {
+    fn writer_closed_with_no_data_wakes_reader_under_both_strategies() {
         let standard = pipe_fired_count::<Standard>();
         let hangup = pipe_fired_count::<Hangup>();
 
-        #[cfg(target_os = "linux")]
-        assert_eq!((standard, hangup), (0, 1));
-        #[cfg(target_os = "macos")]
         assert_eq!((standard, hangup), (1, 1));
+    }
+
+    #[cfg(target_os = "linux")]
+    const WAKE_DEADLINE: Duration = Duration::from_secs(2);
+
+    #[cfg(target_os = "linux")]
+    fn nonblocking_pipe() -> (std::fs::File, std::fs::File) {
+        use std::os::fd::{FromRawFd, OwnedFd};
+
+        let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: fds is a valid two-element array for pipe2 to fill.
+        let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
+        assert_eq!(rc, 0, "pipe2 must succeed");
+        // SAFETY: each fd was just opened by pipe2 and is wrapped exactly once.
+        let (reader, writer) =
+            unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        (std::fs::File::from(reader), std::fs::File::from(writer))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_some(source: &impl AsRawFd, buf: &mut [u8]) -> isize {
+        // SAFETY: buf is a valid writable slice for its whole length.
+        unsafe { libc::read(source.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn parked_reader(source: &impl AsRawFd) -> (Reactor, Arc<AtomicUsize>) {
+        let mut reactor = Reactor::new().expect("reactor");
+        let key = reactor
+            .register(source.as_raw_fd(), Interest::Read)
+            .expect("register read end");
+        let count = Arc::new(AtomicUsize::new(0));
+        assert!(reactor.set_read_waker(key, waker_for(&count)));
+        (reactor, count)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pipe_writer_closed_without_writing_wakes_parked_reader_to_read_eof() {
+        let (reader, writer) = nonblocking_pipe();
+        let (mut reactor, count) = parked_reader(&reader);
+        let mut buf = [0_u8; 64];
+        assert_eq!(read_some(&reader, &mut buf), -1, "empty pipe must park");
+
+        drop(writer);
+        let fired = reactor.turn(Some(WAKE_DEADLINE)).expect("turn");
+
+        assert_eq!(
+            (fired, count.load(Ordering::Acquire)),
+            (1, 1),
+            "a hup-only pipe must wake the reader within the deadline"
+        );
+        assert_eq!(read_some(&reader, &mut buf), 0, "woken reader must see eof");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pipe_closed_right_after_final_write_delivers_bytes_then_eof() {
+        let (reader, mut writer) = nonblocking_pipe();
+        let (mut reactor, count) = parked_reader(&reader);
+        let frame = b"HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n";
+
+        writer.write_all(frame).expect("final write");
+        drop(writer);
+        let fired = reactor.turn(Some(WAKE_DEADLINE)).expect("turn");
+
+        let mut buf = [0_u8; 128];
+        let bytes = read_some(&reader, &mut buf);
+        let eof = read_some(&reader, &mut buf);
+        assert!(
+            fired >= 1 && count.load(Ordering::Acquire) >= 1,
+            "reader must wake"
+        );
+        assert_eq!(bytes as usize, frame.len(), "final bytes arrive first");
+        assert_eq!(&buf[..frame.len()], &frame[..]);
+        assert_eq!(eof, 0, "eof follows the bytes");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socketpair_peer_shutdown_wakes_parked_reader_to_read_eof() {
+        let (left, right) = socketpair();
+        set_nonblocking(&left);
+        let (mut reactor, count) = parked_reader(&left);
+        let mut buf = [0_u8; 64];
+        assert_eq!(read_some(&left, &mut buf), -1, "idle socket must park");
+
+        right.shutdown(std::net::Shutdown::Both).expect("shutdown");
+        let fired = reactor.turn(Some(WAKE_DEADLINE)).expect("turn");
+
+        assert_eq!(
+            (fired, count.load(Ordering::Acquire)),
+            (1, 1),
+            "peer shutdown must wake the reader within the deadline"
+        );
+        assert_eq!(read_some(&left, &mut buf), 0, "woken reader must see eof");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pipe_reader_closed_wakes_parked_writer_to_see_epipe() {
+        let (reader, writer) = nonblocking_pipe();
+        let mut reactor = Reactor::new().expect("reactor");
+        let key = reactor
+            .register(writer.as_raw_fd(), Interest::Write)
+            .expect("register write end");
+        let count = Arc::new(AtomicUsize::new(0));
+        assert!(reactor.set_write_waker(key, waker_for(&count)));
+        reactor
+            .turn(Some(Duration::ZERO))
+            .expect("drain initial writable edge");
+        let before = count.load(Ordering::Acquire);
+
+        drop(reader);
+        reactor.turn(Some(WAKE_DEADLINE)).expect("turn");
+
+        assert!(
+            count.load(Ordering::Acquire) > before,
+            "writer must wake on error"
+        );
+        // SAFETY: writes one byte from a valid buffer to an open pipe.
+        let rc = unsafe { libc::write(writer.as_raw_fd(), [0_u8].as_ptr().cast(), 1) };
+        assert_eq!(rc, -1, "write to a reader-less pipe must fail");
     }
     #[test]
     fn turn_with_zero_timeout_returns_immediately_when_idle() {

@@ -742,10 +742,8 @@ where
 
 /// [`run_on_this_thread`] with the reactor's wake strategy chosen at compile
 /// time. Composes the same [`Reactor`], `Readiness` and worker loop; only the
-/// `Reactor::turn_as` masks differ. Use it for a runtime whose readers must
-/// wake on hangup with no data pending, such as child-process pipes, with
-/// [`Hangup`](super::reactor::Hangup); the default runtime keeps
-/// [`Standard`] so nothing else pays for it.
+/// `Reactor::turn_as` masks differ. [`Standard`] already wakes readers on hangup and error;
+/// [`Hangup`](super::reactor::Hangup) only adds EPOLLRDHUP on top.
 ///
 /// # Errors
 /// As [`run_on_this_thread`].
@@ -2468,13 +2466,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn hangup_runtime_wakes_pipe_reader_standard_runtime_does_not() {
+    fn both_runtimes_wake_a_pipe_reader_whose_writer_closed_with_no_data() {
         let standard = reader_woke_before_deadline::<Standard>();
         let hangup = reader_woke_before_deadline::<Hangup>();
 
-        #[cfg(target_os = "linux")]
-        assert_eq!((standard, hangup), (false, true));
-        #[cfg(target_os = "macos")]
         assert_eq!((standard, hangup), (true, true));
     }
 
