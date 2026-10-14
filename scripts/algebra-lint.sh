@@ -120,11 +120,14 @@ check_ex() { # pattern, why
     while IFS= read -r f; do finding "$f — $why"; done <<< "$hits"
   fi
 }
-# These examples must call unsafe OS mapping APIs: `memmap2` requires the
-# caller to keep the mapped file stable, and gguf_generate also uses libc
-# resource/madvise calls. Each call site documents that contract with SAFETY.
-# The lint still catches new unsafe example files until they are reviewed here.
-EXEMPT_UNSAFE_EXAMPLES='dump_tensors|gguf_generate|inspect_moe_header|openai_serve_gguf|stream_generate|write_qwen35_sidecar'
+# These examples must call unsafe OS and FFI APIs: `memmap2` requires the
+# caller to keep the mapped file stable, gguf_generate also uses libc
+# resource/madvise calls, and the ouro examples call libc flock/getrusage/
+# getloadavg, the mach task_info syscall and Accelerate cblas_sgemm, none of
+# which has a safe wrapper. Each call site documents that contract with a
+# safety comment. The lint still catches new unsafe example files until they
+# are reviewed here.
+EXEMPT_UNSAFE_EXAMPLES='dump_tensors|gguf_generate|inspect_moe_header|openai_serve_gguf|stream_generate|write_qwen35_sidecar|ouro_loopcd_lab/checkpoint|ouro_loopcd_lab/performance|ouro_native_oracle/math'
 while IFS= read -r unsafe_example; do
   if ! grep -qE "examples/(${EXEMPT_UNSAFE_EXAMPLES})\\.rs:" <<< "$unsafe_example"; then
     finding "$unsafe_example — unsafe in an example; configure it properly instead"

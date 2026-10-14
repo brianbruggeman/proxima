@@ -124,8 +124,8 @@ fn accelerated_product(
             .checked_mul(output_width)
             .ok_or_else(|| io::Error::other("output shape overflow"))?
     ];
+    // safety: validated extents and a fresh output make these row-major buffers non-aliasing.
     unsafe {
-        // validated extents and a fresh output make these row-major buffers non-aliasing.
         cblas_sgemm(
             101,
             111,
