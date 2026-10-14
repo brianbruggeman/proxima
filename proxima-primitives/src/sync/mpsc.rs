@@ -55,7 +55,7 @@
 //! - Mirrors the bounded gaps. `UnboundedReceiver::try_recv` and
 //!   `recv_many` likewise absent.
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", not(target_family = "wasm")))]
 use futures::executor::block_on;
 
 /// Returned by [`Sender::send`] / [`UnboundedSender::send`] when the
