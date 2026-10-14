@@ -2832,7 +2832,7 @@ pub enum PackedRowBlockRejection {
     /// asked: `row_block_extent_multiple` for the row-blocked kernel (the
     /// K-quant family plus [`Codec::Q8_0`]/[`Codec::Q4_0`], whose eight
     /// contiguous 32-element blocks span exactly one 256-element super-block, see
-    /// [`Q8_0_SUPER_ELEMENT_MSL`]/[`Q4_0_SUPER_ELEMENT_MSL`]), or the
+    /// `q8_0_super_element`/[`Q4_0_SUPER_ELEMENT_MSL`]), or the
     /// `tiled_decode` descriptions for the tiled and expert-grouped GEMM. Every
     /// other codec always takes the fully generic per-element path. Checked by
     /// WHITELISTING the admitted variants rather than blacklisting one codec by

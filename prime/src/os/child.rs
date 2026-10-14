@@ -1,9 +1,9 @@
 //! Single bounded OS calls that turn a child's exit signal into its status.
 //!
 //! The gate lives in [`Readiness`](super::readiness::Readiness): kqueue
-//! `EVFILT_PROC` on macOS ([`Readiness::process_exit`](super::readiness::Readiness::process_exit)),
-//! a pidfd on Linux ([`open_pidfd`] then [`Readiness::new`](super::readiness::Readiness::new)).
-//! On Windows the gate is [`Readiness::signaled`](super::readiness::Readiness::signaled) over
+//! `EVFILT_PROC` on macOS (`Readiness::process_exit`), a pidfd on Linux
+//! (`open_pidfd` then [`Readiness::new`](super::readiness::Readiness::new)).
+//! On Windows the gate is `Readiness::signaled` over
 //! the process handle and the read step is `exit_status`.
 //! A caller composes `gate.and_then(reap)`; these functions are the reap step and
 //! never park. Statuses are `std::process::ExitStatus`, so signals and core dumps

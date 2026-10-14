@@ -1176,7 +1176,7 @@ static inline float q5k_pair_dot(device const uchar *block, uint iq, uint ir, th
 /// element block (`push_packed_row_blocked_body`'s single-row `Codec::Q8_0`
 /// arm), so this takes that lane's already-loaded `acts[32]` run directly
 /// instead of re-deriving a `yl`/`yh` pair the way the K-quant paired-lane
-/// bodies do. [`Q8_0_SUPER_ELEMENT_MSL`]'s `q8_0_element` re-reads `d_bits`
+/// bodies do. `q8_0_super_element`'s `q8_0_element` re-reads `d_bits`
 /// from `block[0..2]` on EVERY call -- the per-element posture this body
 /// replaces -- so decoding `d` once here amortizes that redundant f16 load
 /// across all 32 elements, the same amortization `q4k_header_for` gives
@@ -1240,14 +1240,14 @@ static inline float q4_0_element(device const uchar *block, uint index) {
 "#;
 
 /// The row-blocked packed path's per-superblock-relative `Q4_0` accessor --
-/// mirrors [`Q8_0_SUPER_ELEMENT_MSL`] exactly, same posture: `Q4_0` has no
+/// mirrors `q8_0_super_element` exactly, same posture: `Q4_0` has no
 /// super-block of its own, but eight real 32-element `Q4_0` blocks (18 bytes
 /// each) sit contiguously in exactly the byte span one K-quant super-block
 /// ([`Q4K_BLOCK_ELEMENTS`] = 256 elements) occupies, so `index / 32` selects
 /// which of the eight real blocks packed into that span, and the remainder
 /// feeds [`Q4_0_UNPACK_MSL`]'s own per-block decode (`q4_0_element`)
 /// unchanged. `18` is [`Q4_0_BLOCK_BYTES`] and `32` is [`Q4_0_BLOCK_ELEMENTS`],
-/// both inlined as literals here the same way [`Q8_0_SUPER_ELEMENT_MSL`]
+/// both inlined as literals here the same way `q8_0_super_element`
 /// inlines its own fixed layout constants.
 pub const Q4_0_SUPER_ELEMENT_MSL: &str = r#"
 static inline float q4_0_super_element(device const uchar *superblock, uint index) {
@@ -1363,7 +1363,7 @@ pub const Q4_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_0::QK4_0;
 /// `Q5_1`: a flat 32-element block, one `f16` scale AND one `f16` min
 /// (unlike `Q4_0`'s single scale) plus a 5th bit per element split out into
 /// a separate `qh` plane -- same KIND-difference from the K-quant family
-/// [`Q8_0_UNPACK_MSL`]/[`Q4_0_UNPACK_MSL`] draw: no super-block, so this
+/// `q8_0_element`/[`Q4_0_UNPACK_MSL`] draw: no super-block, so this
 /// codec does not take the row-blocked (`classify_packed_row_block`) fast
 /// path; the tiled-GEMM (`classify_tiled_gemm`) fast path reads it through its
 /// `tiled_decode` description ([`Q5_1_DEQUANT_HALF16_MSL`]), and every other
@@ -1417,7 +1417,7 @@ pub const Q5_1_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_1::QK5_1;
 /// into a separate `qh` plane, same as `Q5_1`, but no per-block min:
 /// `x = d * (level - 16)`, a fixed midpoint recenter exactly like [`Q4_0_UNPACK_MSL`]
 /// except `level` is 5 bits wide instead of 4. Same KIND-difference from the
-/// K-quant family [`Q8_0_UNPACK_MSL`]/[`Q4_0_UNPACK_MSL`] draw: no
+/// K-quant family `q8_0_element`/[`Q4_0_UNPACK_MSL`] draw: no
 /// super-block, so this codec does not take the row-blocked
 /// (`classify_packed_row_block`) fast path; the tiled-GEMM
 /// (`classify_tiled_gemm`) fast path reads it through its `tiled_decode`
@@ -1643,7 +1643,7 @@ pub(crate) const fn codec_block_bytes(codec: Codec) -> usize {
 /// division assumes. Equal to [`codec_block_bytes`] for every K-quant codec,
 /// whose own block already IS that 256-element super-block. [`Codec::Q8_0`],
 /// [`Codec::Q4_0`] and [`Codec::Fp6E3M2`] are flat 32-element blocks, so their
-/// step is eight real blocks' worth of bytes -- see [`Q8_0_SUPER_ELEMENT_MSL`]/
+/// step is eight real blocks' worth of bytes -- see `q8_0_super_element`/
 /// [`Q4_0_SUPER_ELEMENT_MSL`]'s own docs for why eight contiguous blocks
 /// span exactly the same 256 elements. No other codec reaches this function
 /// (`classify_packed_row_block` whitelists only
