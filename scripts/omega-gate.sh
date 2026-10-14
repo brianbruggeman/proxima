@@ -24,9 +24,28 @@ set -euo pipefail
 # for every invocation in this script, present and future.
 export CARGO_TERM_COLOR=never
 
-crate="omega"
+crate="proxima-omega"
+lib_name="omega"
 
 printf '\n== %s gate ==\n' "${crate}"
+
+# the union of every declared feature except the ones whose build script
+# demands a provisioned external toolchain: `mlx-gdn` panics in omega/build.rs
+# without PROXIMA_MLX_PREFIX, so `--all-features` can never build on a stock
+# runner. Derived from Cargo.toml so a new flag joins the union automatically.
+external_features=" mlx-gdn "
+buildable=""
+while IFS= read -r declared_feature; do
+    case "${external_features}" in
+        *" ${declared_feature} "*) printf '   excluded from the all-features union (external toolchain): %s\n' "${declared_feature}" ;;
+        *) buildable="${buildable:+${buildable},}${declared_feature}" ;;
+    esac
+done < <(
+    sed -n '/^\[features\]/,/^\[dependencies\]/p' omega/Cargo.toml \
+        | grep -oE '^[a-zA-Z0-9_-]+ = \[' \
+        | sed 's/ = \[//'
+)
+printf '   all-features union: %s\n' "${buildable}"
 
 # Prints the count of rustc invocations FOR THIS CRATE under the given
 # feature flags -- a tier build that compiles zero of the crate's own
@@ -41,10 +60,14 @@ assert_tier_builds() {
     # zero "Running" lines below and read as a false N==0.
     cargo clean -p "${crate}" > /dev/null 2>&1
     local verbose_output
-    verbose_output="$(cargo build -p "${crate}" "$@" -v 2>&1)"
+    if ! verbose_output="$(cargo build -p "${crate}" "$@" -v 2>&1)"; then
+        printf '%s\n' "${verbose_output}"
+        printf 'ERROR: %s tier build of %s failed\n' "${label}" "${crate}" >&2
+        exit 1
+    fi
     printf '%s\n' "${verbose_output}"
     local rustc_count
-    rustc_count="$(printf '%s\n' "${verbose_output}" | grep -c "Running \`.*rustc.*${crate}")"
+    rustc_count="$(printf '%s\n' "${verbose_output}" | grep -c "Running \`.*rustc.*--crate-name ${lib_name} ")"
     if [ "${rustc_count}" -eq 0 ]; then
         printf 'ERROR: %s tier build compiled zero rustc invocations for %s\n' "${label}" "${crate}" >&2
         exit 1
@@ -62,10 +85,13 @@ printf '\n[3/8] std tier compiles (adds backend, no concrete driver)\n'
 assert_tier_builds std --no-default-features --features std
 
 printf '\n[4/8] all-features (std + metal) build\n'
-cargo build -p "${crate}" --all-targets --all-features
+cargo build -p "${crate}" --all-targets --features "${buildable}"
 
 printf '\n[5/8] all-features tests green, count asserted\n'
-nextest_output="$(cargo nextest run -p "${crate}" --all-features --no-fail-fast 2>&1)"
+if ! nextest_output="$(cargo nextest run -p "${crate}" --features "${buildable}" --no-fail-fast 2>&1)"; then
+    printf '%s\n' "${nextest_output}"
+    exit 1
+fi
 printf '%s\n' "${nextest_output}"
 ran_count="$(printf '%s\n' "${nextest_output}" | grep -oE '[0-9]+ tests run:' | grep -oE '[0-9]+' | tail -1)"
 if [ -z "${ran_count}" ] || [ "${ran_count}" -eq 0 ]; then
@@ -84,16 +110,19 @@ printf '\n[6/8] clippy pedantic clean (bare alloc + all-features)\n'
 # here would fail to compile those tests for lacking `metal`, which is a
 # feature-scope mismatch in the gate, not a source defect.
 cargo clippy -p "${crate}" --lib --no-default-features --features alloc -- -D warnings
-cargo clippy -p "${crate}" --all-targets --all-features -- -D warnings
+cargo clippy -p "${crate}" --all-targets --features "${buildable}" -- -D warnings
 
 printf '\n[7/8] rustdoc resolves (bare alloc + all-features)\n'
 cargo doc -p "${crate}" --no-deps --no-default-features --features alloc
-cargo doc -p "${crate}" --no-deps --all-features
+cargo doc -p "${crate}" --no-deps --features "${buildable}"
 
 # `cargo test --doc` exits 0 on a vacuous "0 passed" run, so grep for a
 # nonzero count explicitly instead of trusting the exit code alone.
 printf '\n[8/8] doctests (all-features), count asserted\n'
-doctest_output="$(cargo test --doc -p "${crate}" --all-features 2>&1)"
+if ! doctest_output="$(cargo test --doc -p "${crate}" --features "${buildable}" 2>&1)"; then
+    printf '%s\n' "${doctest_output}"
+    exit 1
+fi
 printf '%s\n' "${doctest_output}"
 passed_count="$(printf '%s\n' "${doctest_output}" | grep -oE '^test result: ok\. [0-9]+ passed' | grep -oE '[0-9]+' | tail -1)"
 if [ -z "${passed_count}" ] || [ "${passed_count}" -eq 0 ]; then
