@@ -5,7 +5,7 @@
 //! Single owner by construction: `admit` takes `self` or `&mut self`, so the
 //! recorder's driving task is the only holder and no lock exists (P21 level 1).
 //! Alloc tier; the session's appended keys live in a `BTreeMap`, off the
-//! per-request lookup path. Obtain one from [`RecordServing::open_ledger`];
+//! per-request lookup path. Obtain one from [`RecordServing::open_ledger`](crate::replay::fsm::RecordServing::open_ledger);
 //! the duplicate rule is the same [`DuplicatePolicy::resolve`] the loader uses.
 
 use alloc::collections::BTreeMap;
