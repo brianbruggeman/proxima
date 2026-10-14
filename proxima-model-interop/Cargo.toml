@@ -12,6 +12,8 @@ include = ["src/**", "Cargo.toml", "README.md", "LICENSE*"]
 
 [features]
 default = []
+# runs the tests that read multi-GB real checkpoints from the host; off, they are ignored.
+host-fixtures = []
 # joins the final routed gather to the logits suffix without crossing a router boundary.
 moe-linked-suffix = ["std"]
 # advisory one-layer-ahead mmap warming for the HOBBIT/DynaExq route

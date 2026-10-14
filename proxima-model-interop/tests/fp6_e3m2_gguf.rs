@@ -19,17 +19,11 @@ use proxima_primitives::float_layout::FloatLayout;
 use proxima_safetensors::{SafetensorsModel, TensorPayload as SafetensorsPayload};
 use proxima_tensor::DType;
 
-const GRANITE_DEFAULT: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
-     sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
 const TENSOR_NAME: &str = "blk.0.ffn_gate.weight";
 
 fn granite_q8_0_weights() -> Vec<f32> {
-    let path =
-        std::env::var("PROXIMA_ARCH_GRANITE_MOE_GGUF").unwrap_or_else(|_| GRANITE_DEFAULT.into());
-    assert!(
-        Path::new(&path).exists(),
-        "no granite gguf at {path}: set PROXIMA_ARCH_GRANITE_MOE_GGUF or stage the blob"
-    );
+    let path = std::env::var("PROXIMA_ARCH_GRANITE_MOE_GGUF")
+        .expect("PROXIMA_ARCH_GRANITE_MOE_GGUF must name the granite moe gguf (host-fixtures)");
     let (parsed, bytes) =
         proxima_gguf::edge::read_file(Path::new(&path)).expect("granite blob must parse as gguf");
     let tensor = parsed
@@ -63,6 +57,10 @@ fn e3m2_blocks(weights: &[f32]) -> Vec<u8> {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "host-fixtures"),
+    ignore = "needs the host-fixtures feature: granite moe gguf"
+)]
 fn fp6_e3m2_gguf_round_trip_bytes_identical() {
     let weights = granite_q8_0_weights();
     let blocks = e3m2_blocks(&weights);
