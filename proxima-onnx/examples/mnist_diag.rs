@@ -16,10 +16,12 @@ use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
-use proxima_tensor::{Keep, bind, infer, instrument};
+use proxima_tensor::{Keep, NumericPolicy, bind, infer, instrument};
 
-const MODEL_PATH: &str =
-    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
+fn model_path() -> String {
+    std::env::var("PROXIMA_FIXTURE_MNIST_ONNX")
+        .expect("PROXIMA_FIXTURE_MNIST_ONNX must name the pinned mnist.onnx")
+}
 
 /// Sum of `BoundOp::extents` over every `Keep::Reduce` fold in the bound
 /// program -- exactly the pre-reduction iteration space each such node
@@ -33,7 +35,8 @@ const MODEL_PATH: &str =
 /// this number, only for the cross-check and the path breakdown below.
 fn analytic_mac_count(program: &[proxima_tensor::Op], output: proxima_tensor::NodeId) -> u64 {
     let shapes = infer(program, &[]).expect("shape inference over the real mnist program");
-    let bound = bind::bind(program, &shapes, &[output]).expect("bind the real mnist program");
+    let bound = bind::bind(program, &shapes, &[output], NumericPolicy::bit_exact())
+        .expect("bind the real mnist program");
     bound
         .iter()
         .filter_map(|op| match &op.kind {
@@ -46,11 +49,11 @@ fn analytic_mac_count(program: &[proxima_tensor::Op], output: proxima_tensor::No
 }
 
 fn main() {
-    if !Path::new(MODEL_PATH).exists() {
+    if !Path::new(&model_path()).exists() {
         eprintln!("skipping: no host-local mnist.onnx checkout");
         return;
     }
-    let bytes = fs::read(MODEL_PATH).expect("read mnist.onnx");
+    let bytes = fs::read(model_path()).expect("read mnist.onnx");
     let model = proxima_onnx::pipe::parse_complete(&bytes).expect("parse");
     let graph = model.graph.as_ref().expect("graph");
     let lowered = proxima_onnx::lower::lower_graph(graph).expect("lower");

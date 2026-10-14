@@ -16,9 +16,6 @@ use std::path::PathBuf;
 use proxima_tokenizer::pretokenize::PreType;
 use proxima_tokenizer::{Vocab, encode, gguf::vocab_from_metadata};
 
-const LLAMA_BPE_VOCAB: &str =
-    "/Users/brianbruggeman/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf";
-const DEEPSEEK_CODER_33B_NO_PRE: &str = "/Users/brianbruggeman/.lmstudio/models/TheBloke/deepseek-coder-33B-instruct-GGUF/deepseek-coder-33b-instruct.Q4_K_S.gguf";
 const QWEN2_BLOB_SHA256: &str = "c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515";
 const QWEN3_BLOB_SHA256: &str = "a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa40d0b8e686f";
 const QWEN35_BLOB_SHA256: &str = "afb707b6b8fac6e475acc42bc8380fc0b8d2e0e4190be5a969fbf62fcc897db5";
@@ -28,8 +25,17 @@ const GRANITE_MOE_BLOB_SHA256: &str =
     "cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
 
 fn ollama_blob(sha256: &str) -> PathBuf {
-    let home = std::env::var("HOME").expect("HOME is set");
-    PathBuf::from(home).join(format!(".ollama/models/blobs/sha256-{sha256}"))
+    let dir = std::env::var("PROXIMA_FIXTURE_OLLAMA_BLOBS_DIR")
+        .expect("PROXIMA_FIXTURE_OLLAMA_BLOBS_DIR must name the ollama models/blobs directory (host-fixtures)");
+    PathBuf::from(dir).join(format!("sha256-{sha256}"))
+}
+
+fn llama_bpe_vocab() -> PathBuf {
+    PathBuf::from(
+        std::env::var("PROXIMA_FIXTURE_LLAMA_BPE_GGUF").expect(
+            "PROXIMA_FIXTURE_LLAMA_BPE_GGUF must name the pinned ggml-vocab-llama-bpe.gguf",
+        ),
+    )
 }
 
 fn load_vocab(path: &PathBuf) -> Vocab {
@@ -114,29 +120,45 @@ fn assert_family_matches_llama(vocab: &Vocab, expected_pre: PreType, cases: &[(&
 
 #[test]
 fn llama3_digits_group_in_threes_like_llama() {
-    let vocab = load_vocab(&PathBuf::from(LLAMA_BPE_VOCAB));
+    let vocab = load_vocab(&llama_bpe_vocab());
     assert_family_matches_llama(&vocab, PreType::GroupedDigits, &family_cases!("llama3"));
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "host-fixtures"),
+    ignore = "needs the host-fixtures feature: multi-GB model gguf"
+)]
 fn qwen2_digits_split_one_per_token_like_llama() {
     let vocab = load_vocab(&ollama_blob(QWEN2_BLOB_SHA256));
     assert_family_matches_llama(&vocab, PreType::SingleDigit, &family_cases!("qwen2"));
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "host-fixtures"),
+    ignore = "needs the host-fixtures feature: multi-GB model gguf"
+)]
 fn qwen3_digits_split_one_per_token_like_llama() {
     let vocab = load_vocab(&ollama_blob(QWEN3_BLOB_SHA256));
     assert_family_matches_llama(&vocab, PreType::SingleDigit, &family_cases!("qwen3"));
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "host-fixtures"),
+    ignore = "needs the host-fixtures feature: multi-GB model gguf"
+)]
 fn qwen35_digits_split_one_per_token_and_marks_join_words_like_llama() {
     let vocab = load_vocab(&ollama_blob(QWEN35_BLOB_SHA256));
     assert_family_matches_llama(&vocab, PreType::SingleDigitMarks, &family_cases!("qwen35"));
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "host-fixtures"),
+    ignore = "needs the host-fixtures feature: multi-GB model gguf"
+)]
 fn qwen35moe_digits_split_one_per_token_and_marks_join_words_like_llama() {
     let vocab = load_vocab(&ollama_blob(QWEN35MOE_BLOB_SHA256));
     assert_family_matches_llama(
@@ -147,6 +169,10 @@ fn qwen35moe_digits_split_one_per_token_and_marks_join_words_like_llama() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "host-fixtures"),
+    ignore = "needs the host-fixtures feature: multi-GB model gguf"
+)]
 fn granite_refact_vocabulary_isolates_digits_like_llama() {
     let vocab = load_vocab(&ollama_blob(GRANITE_MOE_BLOB_SHA256));
     assert_family_matches_llama(
@@ -157,8 +183,13 @@ fn granite_refact_vocabulary_isolates_digits_like_llama() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "host-fixtures"),
+    ignore = "needs the host-fixtures feature: multi-GB model gguf"
+)]
 fn deepseek_coder_without_a_pre_key_uses_the_default_split_like_llama() {
-    let path = PathBuf::from(DEEPSEEK_CODER_33B_NO_PRE);
+    let path = PathBuf::from(std::env::var("PROXIMA_FIXTURE_DEEPSEEK_CODER_33B_GGUF")
+        .expect("PROXIMA_FIXTURE_DEEPSEEK_CODER_33B_GGUF must name the deepseek-coder gguf (host-fixtures)"));
     let vocab = load_vocab(&path);
     assert_family_matches_llama(
         &vocab,

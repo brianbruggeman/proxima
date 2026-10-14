@@ -236,10 +236,9 @@ fn compare_q5_1(
 }
 
 fn main() -> CheckResult<()> {
-    let gguf_path = env::var("GEMMA4_GGUF").unwrap_or_else(|_| {
-        "/Users/brianbruggeman/.ollama/models/blobs/sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129"
-            .to_string()
-    });
+    let gguf_path = env::var("PROXIMA_FIXTURE_GEMMA4_GGUF").map_err(|error| {
+        format!("PROXIMA_FIXTURE_GEMMA4_GGUF must name the gemma4 gguf: {error}")
+    })?;
     let gguf_path = Path::new(&gguf_path);
     assert!(gguf_path.exists(), "gguf path {gguf_path:?} does not exist");
 

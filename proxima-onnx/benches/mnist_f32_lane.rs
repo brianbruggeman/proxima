@@ -29,9 +29,14 @@ use std::time::Instant;
 
 use criterion::Criterion;
 
-const MODEL_PATH: &str =
-    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
-const DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
+fn model_path() -> String {
+    std::env::var("PROXIMA_FIXTURE_MNIST_ONNX")
+        .expect("PROXIMA_FIXTURE_MNIST_ONNX must name the pinned mnist.onnx")
+}
+fn dataset_dir() -> String {
+    std::env::var("PROXIMA_FIXTURE_MNIST_IDX_DIR")
+        .expect("PROXIMA_FIXTURE_MNIST_IDX_DIR must name the MNIST idx directory")
+}
 const TEST_IMAGES_COUNT: usize = 1000;
 // measured this session (see discipline.md): 990/1000 = 0.9900 exactly.
 // asserted with margin below the exact ratio so an f64 rounding wobble on a
@@ -41,15 +46,15 @@ const TEST_IMAGES_COUNT: usize = 1000;
 const MIN_ACCURACY: f64 = 0.989;
 
 fn checkpoint_present() -> bool {
-    Path::new(MODEL_PATH).exists()
+    Path::new(&model_path()).exists()
 }
 
 fn test_images_path() -> PathBuf {
-    Path::new(DATASET_DIR).join("test/t10k-images-idx3-ubyte")
+    Path::new(&dataset_dir()).join("test/t10k-images-idx3-ubyte")
 }
 
 fn test_labels_path() -> PathBuf {
-    Path::new(DATASET_DIR).join("test/t10k-labels-idx1-ubyte")
+    Path::new(&dataset_dir()).join("test/t10k-labels-idx1-ubyte")
 }
 
 fn dataset_present() -> bool {
@@ -136,15 +141,21 @@ fn fma_roofline_macs_per_sec() -> f64 {
 
 fn main() {
     if !checkpoint_present() {
-        eprintln!("mnist_f32_lane: skipping, no host-local mnist.onnx checkout at {MODEL_PATH}");
+        eprintln!(
+            "mnist_f32_lane: skipping, no host-local mnist.onnx checkout at {}",
+            model_path()
+        );
         return;
     }
     if !dataset_present() {
-        eprintln!("mnist_f32_lane: skipping, no host-local MNIST idx dataset under {DATASET_DIR}");
+        eprintln!(
+            "mnist_f32_lane: skipping, no host-local MNIST idx dataset under {}",
+            dataset_dir()
+        );
         return;
     }
 
-    let bytes = fs::read(MODEL_PATH).expect("read the real mnist.onnx checkpoint");
+    let bytes = fs::read(model_path()).expect("read the real mnist.onnx checkpoint");
     let model =
         proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
     let graph = model.graph.as_ref().expect("real mnist model has a graph");

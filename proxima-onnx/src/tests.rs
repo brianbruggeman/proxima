@@ -636,19 +636,13 @@ fn unknown_field_numbers_are_skipped_gracefully() {
     assert_fixture_parsed(&model, &fixture);
 }
 
-// -- real-world file: best effort, never fails the suite if absent.
+// -- real-world file: pinned download, path from PROXIMA_FIXTURE_MNIST_ONNX.
 
 #[cfg(feature = "std")]
 #[test]
-#[ignore = "depends on a real .onnx checkout outside this repo"]
 fn parses_a_real_onnx_file_if_one_is_present() {
-    let candidate = std::path::Path::new(
-        "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx",
-    );
-    if !candidate.exists() {
-        eprintln!("no real .onnx found at {candidate:?}, skipping");
-        return;
-    }
+    let candidate = std::env::var("PROXIMA_FIXTURE_MNIST_ONNX")
+        .expect("PROXIMA_FIXTURE_MNIST_ONNX must name the pinned mnist.onnx");
     let bytes = std::fs::read(candidate).expect("read real onnx file");
     let model = parse_complete(&bytes).expect("parse real onnx file");
     let graph = model.graph.as_ref().expect("real model has a graph");

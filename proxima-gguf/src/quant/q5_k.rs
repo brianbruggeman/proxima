@@ -703,6 +703,10 @@ mod tests {
     /// Real weight data (principle 9), re-encoded through `Q5_K`.
     #[cfg(feature = "std")]
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: real model gguf"
+    )]
     fn quantize_dequantize_real_qwen3_weights_round_trip_error() {
         let input = crate::quant::real_weights::qwen3_token_embd_f32(QK_K * 32);
         let blocks = input.len() / QK_K;

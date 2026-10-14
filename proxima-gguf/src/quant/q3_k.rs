@@ -727,6 +727,10 @@ mod tests {
     /// error per element must stay under a loose sanity ceiling well
     /// inside `Q3_K`'s own ~3-bit-per-weight quantization step.
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: real model gguf"
+    )]
     #[cfg(feature = "std")]
     fn quantize_is_idempotent_at_the_codec_grid() {
         let input = crate::quant::real_weights::qwen3_token_embd_f32(QK_K * 4);
@@ -800,6 +804,10 @@ mod tests {
     /// "lo" target).
     #[cfg(feature = "std")]
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: real model gguf"
+    )]
     fn quantize_dequantize_real_qwen3_weights_round_trip_error() {
         let input = crate::quant::real_weights::qwen3_token_embd_f32(QK_K * 32);
         let blocks = input.len() / QK_K;

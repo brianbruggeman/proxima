@@ -435,6 +435,10 @@ mod tests {
     /// one full level short of ideal). Measured RMS logged, not hidden.
     #[cfg(feature = "std")]
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: real model gguf"
+    )]
     fn quantize_dequantize_real_qwen3_weights_round_trip_error() {
         let input = crate::quant::real_weights::qwen3_token_embd_f32(QK4_0 * 64);
         let blocks = input.len() / QK4_0;

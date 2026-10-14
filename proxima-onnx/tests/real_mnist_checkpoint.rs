@@ -12,11 +12,9 @@
 
 use std::vec::Vec;
 
-const MODEL_PATH: &str =
-    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
-
-fn checkpoint_present() -> bool {
-    std::path::Path::new(MODEL_PATH).exists()
+fn model_path() -> String {
+    std::env::var("PROXIMA_FIXTURE_MNIST_ONNX")
+        .expect("PROXIMA_FIXTURE_MNIST_ONNX must name the pinned mnist.onnx; the CI workflow downloads and verifies it")
 }
 
 /// Parses, lowers, AND evaluates the real checkpoint end to end against an
@@ -43,13 +41,8 @@ fn checkpoint_present() -> bool {
 /// convolution's own `h*stride + r*dilation` already uses, so
 /// `IndexMap::Affine`'s no-div/mod restriction is never touched.
 #[test]
-#[ignore = "depends on a real .onnx checkout outside this repo"]
 fn real_mnist_onnx_parses_lowers_and_evaluates_end_to_end() {
-    if !checkpoint_present() {
-        eprintln!("skipping: no host-local mnist.onnx checkout at {MODEL_PATH}");
-        return;
-    }
-    let bytes = std::fs::read(MODEL_PATH).expect("read the real mnist.onnx checkpoint");
+    let bytes = std::fs::read(model_path()).expect("read the real mnist.onnx checkpoint");
     let model =
         proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
     let graph = model.graph.as_ref().expect("real mnist model has a graph");

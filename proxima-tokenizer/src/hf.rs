@@ -326,15 +326,11 @@ mod tests {
     /// the only honest thing this reader can report. `#[ignore]`d: depends
     /// on a host-local model cache outside this repo.
     #[test]
-    #[ignore = "depends on a host-local tokenizer_config.json checkout outside this repo"]
+
     fn real_smollm2_tokenizer_config_has_no_add_bos_token_key() {
-        let path = Path::new(
-            "/Users/brianbruggeman/.lmstudio/models/HuggingFaceTB/SmolLM2-135M-Instruct/tokenizer_config.json",
-        );
-        if !path.exists() {
-            eprintln!("no real tokenizer_config.json found at {path:?}, skipping");
-            return;
-        }
+        let fixture = std::env::var("PROXIMA_FIXTURE_SMOLLM2_TOKENIZER_CONFIG")
+            .expect("PROXIMA_FIXTURE_SMOLLM2_TOKENIZER_CONFIG must name SmolLM2-135M-Instruct tokenizer_config.json (host-fixtures)");
+        let path = Path::new(&fixture);
         let bytes = std::fs::read(path).expect("read real smollm2 tokenizer_config.json");
         assert_eq!(
             bytes.len(),

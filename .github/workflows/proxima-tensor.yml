@@ -91,6 +91,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install nextest
         uses: taiki-e/install-action@nextest
+      # pinned public fixtures: immutable-revision URLs, sha256 verified before any test reads them.
+      # llama.cpp 6307ec07d3ad730f21886fb484cdb4abe1e74091 ggml-vocab-llama-bpe.gguf (MIT, 7818140 bytes)
+      # tracel-ai/burn 314db93b7f623b6e2bba69f1b5cfb69b4794acd6 mnist.onnx (MIT OR Apache-2.0, 1530828 bytes)
+      - name: fetch pinned fixtures
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/proxima-fixtures"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/ggml-vocab-llama-bpe.gguf" https://raw.githubusercontent.com/ggml-org/llama.cpp/6307ec07d3ad730f21886fb484cdb4abe1e74091/models/ggml-vocab-llama-bpe.gguf
+          curl -fsSL -o "$dir/mnist.onnx" https://raw.githubusercontent.com/tracel-ai/burn/314db93b7f623b6e2bba69f1b5cfb69b4794acd6/examples/onnx-inference/src/model/mnist.onnx
+          echo "97272e430d53bc7688f52d5e0ad8ea8f163ede9f1bbd1694feaa504797d5d96e  $dir/ggml-vocab-llama-bpe.gguf" > "$dir/sha256sums"
+          echo "5de2936be8f335e42049fc72a268d951481c782b113846e8c0021d8af7b4b519  $dir/mnist.onnx" >> "$dir/sha256sums"
+          sha256sum -c "$dir/sha256sums"
+          echo "PROXIMA_FIXTURE_LLAMA_BPE_GGUF=$dir/ggml-vocab-llama-bpe.gguf" >> "$GITHUB_ENV"
+          echo "PROXIMA_FIXTURE_MNIST_ONNX=$dir/mnist.onnx" >> "$GITHUB_ENV"
       - run: bash scripts/proxima-tokenizer-gate.sh
 
   # The model-format crates. They are sans-IO parsers with a no_std + alloc
@@ -114,6 +129,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install nextest
         uses: taiki-e/install-action@nextest
+      # pinned public fixtures: immutable-revision URLs, sha256 verified before any test reads them.
+      # llama.cpp 6307ec07d3ad730f21886fb484cdb4abe1e74091 ggml-vocab-llama-bpe.gguf (MIT, 7818140 bytes)
+      # tracel-ai/burn 314db93b7f623b6e2bba69f1b5cfb69b4794acd6 mnist.onnx (MIT OR Apache-2.0, 1530828 bytes)
+      - name: fetch pinned fixtures
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/proxima-fixtures"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/ggml-vocab-llama-bpe.gguf" https://raw.githubusercontent.com/ggml-org/llama.cpp/6307ec07d3ad730f21886fb484cdb4abe1e74091/models/ggml-vocab-llama-bpe.gguf
+          curl -fsSL -o "$dir/mnist.onnx" https://raw.githubusercontent.com/tracel-ai/burn/314db93b7f623b6e2bba69f1b5cfb69b4794acd6/examples/onnx-inference/src/model/mnist.onnx
+          echo "97272e430d53bc7688f52d5e0ad8ea8f163ede9f1bbd1694feaa504797d5d96e  $dir/ggml-vocab-llama-bpe.gguf" > "$dir/sha256sums"
+          echo "5de2936be8f335e42049fc72a268d951481c782b113846e8c0021d8af7b4b519  $dir/mnist.onnx" >> "$dir/sha256sums"
+          sha256sum -c "$dir/sha256sums"
+          echo "PROXIMA_FIXTURE_LLAMA_BPE_GGUF=$dir/ggml-vocab-llama-bpe.gguf" >> "$GITHUB_ENV"
+          echo "PROXIMA_FIXTURE_MNIST_ONNX=$dir/mnist.onnx" >> "$GITHUB_ENV"
       - name: clippy + tests + rustdoc
         run: |
           if [ "${{ matrix.tier }}" = "alloc" ]; then

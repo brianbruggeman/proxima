@@ -595,16 +595,19 @@ mod tests {
         use super::*;
         use crate::pipe::parse_complete;
 
-        const FIXTURE_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO-GGUF/Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf";
+        fn fixture_path() -> String {
+            std::env::var("PROXIMA_FIXTURE_MIXTRAL_GGUF")
+                .expect("PROXIMA_FIXTURE_MIXTRAL_GGUF must name the mixtral gguf (host-fixtures)")
+        }
 
         #[test]
-        #[ignore = "depends on a 25 GB host-local mixtral gguf checkout outside this repo"]
+        #[cfg_attr(
+            not(feature = "host-fixtures"),
+            ignore = "needs the host-fixtures feature: multi-GB gguf"
+        )]
         fn restacks_one_real_layers_ffn_gate_experts() {
-            let path = std::path::Path::new(FIXTURE_PATH);
-            if !path.exists() {
-                eprintln!("skipping: no host-local mixtral gguf fixture at {FIXTURE_PATH}");
-                return;
-            }
+            let fixture = fixture_path();
+            let path = std::path::Path::new(&fixture);
 
             let mut file = std::fs::File::open(path).expect("open host-local mixtral gguf fixture");
             let file_len = file.metadata().expect("stat gguf fixture").len();

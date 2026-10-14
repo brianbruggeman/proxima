@@ -166,15 +166,13 @@ mod tests {
     use crate::quant::q8_0;
     use crate::types::GgmlType;
 
-    const GRANITE_DEFAULT: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
-         sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
     const MAX_NORMAL_RATIO: f32 = 28.0;
     const SUBNORMAL_HALF_SPACING: f32 = 0.03125;
     const FLOAT_SLACK_ULPS: f32 = 4.0;
 
     fn granite_q8_0_rows_1024x512() -> Vec<f32> {
         let path = std::env::var("PROXIMA_ARCH_GRANITE_MOE_GGUF")
-            .unwrap_or_else(|_| GRANITE_DEFAULT.into());
+            .expect("PROXIMA_ARCH_GRANITE_MOE_GGUF must name the granite-moe gguf (host-fixtures)");
         assert!(
             Path::new(&path).exists(),
             "no granite gguf at {path}: set PROXIMA_ARCH_GRANITE_MOE_GGUF or stage the blob"
@@ -238,6 +236,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: real model gguf"
+    )]
     fn scaled_e3m2_block_round_trip_error_bound_1024x512() {
         let rows = granite_q8_0_rows_1024x512();
         assert_eq!(
@@ -286,6 +288,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: real model gguf"
+    )]
     fn scaled_e3m2_block_control_perturbed_code_exceeds_bound() {
         let rows = granite_q8_0_rows_1024x512();
         let source = rows
@@ -347,7 +353,10 @@ mod tests {
 
     fn mismatched_codes(source: &[f32; BLOCK_ELEMENTS], block: &[u8; BLOCK_BYTES]) -> usize {
         let scale = half::f16::from_f32(
-            source.iter().fold(0.0f32, |peak, value| peak.max(value.abs())) / MAX_NORMAL_RATIO,
+            source
+                .iter()
+                .fold(0.0f32, |peak, value| peak.max(value.abs()))
+                / MAX_NORMAL_RATIO,
         )
         .to_f32();
         assert_eq!(
@@ -368,6 +377,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: real model gguf"
+    )]
     fn scaled_e3m2_codes_match_independent_ocp_table4_encode_on_granite_rows() {
         let rows = granite_q8_0_rows_1024x512();
 
@@ -377,7 +390,10 @@ mod tests {
             .iter()
             .step_by(BLOCK_STRIDE)
             .fold((0usize, 0usize), |(blocks, mismatches), source| {
-                (blocks + 1, mismatches + mismatched_codes(source, &quantized(source)))
+                (
+                    blocks + 1,
+                    mismatches + mismatched_codes(source, &quantized(source)),
+                )
             });
 
         debug!(
@@ -385,10 +401,17 @@ mod tests {
             mismatches, "quant.scaled_float codes versus independent ocp table 4 encode"
         );
         assert!(blocks > 0, "the stride must sample at least one block");
-        assert_eq!(mismatches, 0, "codes differing from the OCP table 4 nearest-even encode");
+        assert_eq!(
+            mismatches, 0,
+            "codes differing from the OCP table 4 nearest-even encode"
+        );
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "host-fixtures"),
+        ignore = "needs the host-fixtures feature: real model gguf"
+    )]
     fn scaled_e3m2_independent_ocp_encode_control_flipped_code_is_detected() {
         let rows = granite_q8_0_rows_1024x512();
         let source = rows
@@ -398,7 +421,11 @@ mod tests {
             .find(|source| source[0].abs() > 0.0)
             .expect("a block with a non-zero first weight");
         let mut block = quantized(source);
-        assert_eq!(mismatched_codes(source, &block), 0, "unperturbed block agrees");
+        assert_eq!(
+            mismatched_codes(source, &block),
+            0,
+            "unperturbed block agrees"
+        );
 
         block[SCALE_BYTES] ^= 1 << (FIELD_BITS - 2);
 

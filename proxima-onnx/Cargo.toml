@@ -10,6 +10,7 @@ homepage.workspace = true
 readme = "README.md"
 
 [features]
+host-fixtures = []
 default = ["std"]
 alloc = []
 # runtime config surface ([`config::OnnxParserConfig`]): conflaguration is

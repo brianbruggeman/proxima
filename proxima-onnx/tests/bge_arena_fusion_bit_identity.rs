@@ -9,16 +9,14 @@
 //! arm C (arena + packing + fusion) carries all three landed optimizations
 //! at once and must still match arm A exactly.
 //!
-//! Skips cleanly (like `bge_eval.rs`) when `BGE_MODEL_PATH` is unset or the
-//! path does not exist -- this crate never hardcodes another repo's model
-//! path.
+//! Gated behind the `host-fixtures` feature; with it on, `PROXIMA_FIXTURE_BGE_SMALL_ONNX`
+//! must name the model or the test fails.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::path::Path;
 
 use proxima_tensor::cpu::{
     arena_packed_node_count, build_static_arena_with_constants, epilogue_fuse_reset,
@@ -26,7 +24,7 @@ use proxima_tensor::cpu::{
     rewrite_engine_depth_fires, rewrite_engine_reset,
 };
 
-const MODEL_PATH_ENV: &str = "BGE_MODEL_PATH";
+const MODEL_PATH_ENV: &str = "PROXIMA_FIXTURE_BGE_SMALL_ONNX";
 
 fn sentences() -> [(&'static str, Vec<i64>); 3] {
     [
@@ -79,17 +77,14 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "host-fixtures"),
+    ignore = "needs the host-fixtures feature: bge-small onnx (133 MB)"
+)]
 fn arena_fusion_matches_evaluate_named_fused_bit_for_bit_on_real_bge() {
-    let Ok(model_path) = env::var(MODEL_PATH_ENV) else {
-        eprintln!(
-            "skipping: set {MODEL_PATH_ENV} to a local BGE-small-en-v1.5 model.onnx checkout"
-        );
-        return;
-    };
-    if !Path::new(&model_path).exists() {
-        eprintln!("skipping: {MODEL_PATH_ENV}={model_path:?} does not exist");
-        return;
-    }
+    let model_path = env::var(MODEL_PATH_ENV).unwrap_or_else(|_| {
+        panic!("{MODEL_PATH_ENV} must name a local BGE-small-en-v1.5 model.onnx")
+    });
     let bytes = fs::read(&model_path).expect("read bge model.onnx");
     let model = proxima_onnx::pipe::parse_complete(&bytes).expect("parse");
     let graph = model.graph.as_ref().expect("graph");

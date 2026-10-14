@@ -12,7 +12,7 @@
 // Provenance
 // ----------
 // llama.cpp commit:  b25346221dadb9101aa9dda55431dde4d3596943
-//                     (`git -C /Users/brianbruggeman/repos/others/llama.cpp log -1 --format=%H`)
+//                     (`git -C <llama.cpp checkout> log -1 --format=%H`)
 // model file:         openchat-3.5-1210.Q4_K_S.gguf
 //                     (TheBloke/openchat-3.5-1210-GGUF), 4140385376 bytes
 //                     sha1 not pinned -- byte size + host path is the
