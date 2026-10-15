@@ -106,6 +106,8 @@ mod speculative_settings;
 pub mod task;
 #[cfg(all(test, feature = "std"))]
 mod test_support;
+#[cfg(all(test, feature = "std"))]
+mod test_support_tests;
 mod transform;
 
 #[cfg(feature = "std")]
