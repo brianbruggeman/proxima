@@ -12,6 +12,8 @@ include = ["src/**", "Cargo.toml", "README.md", "LICENSE*"]
 
 [features]
 default = []
+# the 250 mb codec saving only exists on the full checkpoint; minutes per run
+slow-tests = []
 # joins the final routed gather to the logits suffix without crossing a router boundary.
 moe-linked-suffix = ["std"]
 # advisory one-layer-ahead mmap warming for the HOBBIT/DynaExq route

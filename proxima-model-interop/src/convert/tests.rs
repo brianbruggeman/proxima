@@ -22,6 +22,7 @@ use crate::test_support::require_fixture;
 const GRANITE_ENV: &str = "PROXIMA_ARCH_GRANITE_MOE_GGUF";
 const GRANITE_DEFAULT: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
      sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
+#[cfg(feature = "slow-tests")]
 const SAVING_FLOOR_BYTES: usize = 250_000_000;
 const MAX_NORMAL_RATIO: f32 = 28.0;
 const SUBNORMAL_HALF_SPACING: f32 = 0.03125;
@@ -274,6 +275,7 @@ fn convert_codec_checkpoint_reloads_with_every_tensor_present() {
     }
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn convert_codec_checkpoint_moe_q8_0_saves_250mb() {
     let mapping = map_granite();
