@@ -7,6 +7,9 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_gguf::{GgufModel, parse_complete, write_complete};
 
+#[path = "../tests/support/fixtures.rs"]
+pub(crate) mod fixtures;
+
 /// `PROXIMA_MATH_MODE` read the same way every real-checkpoint decode test
 /// in this crate reads it: `"safe"` selects [`omega::MathMode::Safe`],
 /// `"fast"` selects [`omega::MathMode::Fast`], unset or `"relaxed"` selects

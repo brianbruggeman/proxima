@@ -17,11 +17,8 @@ use crate::bind::{
 use crate::codec_policy_settings::{CodecPolicySettings, CodecPolicyWeights};
 use crate::error::InteropError;
 use crate::gguf_tensor_as_f32;
-use crate::test_support::require_fixture;
+use crate::test_support::fixtures::fixture_path;
 
-const GRANITE_ENV: &str = "PROXIMA_ARCH_GRANITE_MOE_GGUF";
-const GRANITE_DEFAULT: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
-     sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
 #[cfg(feature = "slow-tests")]
 const SAVING_FLOOR_BYTES: usize = 250_000_000;
 const MAX_NORMAL_RATIO: f32 = 28.0;
@@ -53,9 +50,10 @@ fn fp6_policy() -> CodecPolicySettings {
 }
 
 fn granite_path() -> String {
-    let path = std::env::var(GRANITE_ENV).unwrap_or_else(|_| GRANITE_DEFAULT.into());
-    require_fixture(&path, Some(GRANITE_ENV));
-    path
+    fixture_path(5)
+        .expect("row 5 granite fixture")
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn map_granite() -> memmap2::Mmap {
