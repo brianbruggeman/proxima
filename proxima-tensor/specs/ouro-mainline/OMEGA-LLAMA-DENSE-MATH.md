@@ -80,12 +80,15 @@ That differs numerically from Omega's existing dense tile, which preserves
 F32 activation values in its F32 fragment, and from the fallback, whose
 accessor widens the stored BF16 weight value to F32 before multiplication.
 Llama's kernel source is a candidate lowering, not proof that the saved Llama
-TTFT run selected it. The saved run context identifies model, prompt, revision,
-and ubatch, but has no binary hash or selected pipeline. The available local
-llama build cache records `GGML_METAL_USE_BF16=OFF` at
-`/Users/brianbruggeman/repos/others/llama.cpp/CMakeCache.txt:501-502`, but is
-not tied to that run record. Neither that flag nor the source specialization
-can identify the pipeline used by the saved timing.
+TTFT run selected it. The pinned source sets `GGML_METAL_HAS_BF16` from the
+runtime device's `has_bfloat` capability when it creates the Metal library
+(`ggml-metal-device.m:446-460`). `has_bfloat` depends on reported Metal GPU
+families and can be disabled by `GGML_METAL_BF16_DISABLE`; when tensor API and
+BF16 are both enabled, Llama compiles a BF16 tensor-matmul probe and disables
+BF16 if that probe fails (`ggml-metal-device.m:1133-1147,1214-1260`). The
+saved TTFT context has no device capability fields, disable-environment values,
+binary hash, or selected pipeline, so neither the fragment specialization nor
+the tensor path is established as the kernel used for that timing.
 
 ## What the math settles, and what remains empirical
 
@@ -98,7 +101,9 @@ in llama.cpp source. The algebra itself does not require a new Ouro-specific
 operation.
 
 This derivation does not assign the end-to-end TTFT gap to either difference.
-The smallest causal comparison is three cells over one current-main captured
+First capture Llama's `has_simdgroup_mm`, `has_bfloat`, `has_tensor`, the two
+disable-environment values, and selected `get_pipeline_mul_mm` kernel for the
+timed graph. Then compare three Omega cells over one current-main captured
 BoundOp and identical stored operands:
 
 1. Current cooperative-reduction fallback.
