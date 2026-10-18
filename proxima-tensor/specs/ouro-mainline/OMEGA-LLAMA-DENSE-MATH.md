@@ -82,8 +82,10 @@ accessor widens the stored BF16 weight value to F32 before multiplication.
 Llama's kernel source is a candidate lowering, not proof that the saved Llama
 TTFT run selected it. The saved run context identifies model, prompt, revision,
 and ubatch, but has no binary hash or selected pipeline. The available local
-llama build cache is not tied to that run record, so its build flags cannot
-close this gap.
+llama build cache records `GGML_METAL_USE_BF16=OFF` at
+`/Users/brianbruggeman/repos/others/llama.cpp/CMakeCache.txt:501-502`, but is
+not tied to that run record. Neither that flag nor the source specialization
+can identify the pipeline used by the saved timing.
 
 ## What the math settles, and what remains empirical
 
