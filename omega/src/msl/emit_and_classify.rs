@@ -1,6 +1,18 @@
 use alloc::borrow::ToOwned;
+use proxima_primitives::float_layout::FloatLayout;
 
 use super::*;
+
+pub(crate) fn default_dense_mma_input_layout(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+) -> FloatLayout {
+    if operand_codecs(resolved, packed_operands).contains(&Some(Codec::BFloat16)) {
+        FloatLayout::BF16
+    } else {
+        FloatLayout::BF32
+    }
+}
 
 #[cfg(feature = "metal-attn-variants")]
 fn effective_attention_row_schedule(
@@ -203,6 +215,26 @@ pub(crate) fn emit_inner_with_mma_selection(
     mma_selection: AttentionMmaSelection,
     row_schedule: AttentionRowSchedule,
 ) -> Result<Kernel, EmitError> {
+    emit_inner_with_mma_selection_and_layout(
+        resolved,
+        packed_operands,
+        numeric_policy,
+        expert_source_mode,
+        mma_selection,
+        row_schedule,
+        default_dense_mma_input_layout(resolved, packed_operands),
+    )
+}
+
+pub(crate) fn emit_inner_with_mma_selection_and_layout(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    expert_source_mode: bool,
+    mma_selection: AttentionMmaSelection,
+    row_schedule: AttentionRowSchedule,
+    dense_mma_input_layout: FloatLayout,
+) -> Result<Kernel, EmitError> {
     validate(resolved)?;
     #[cfg(feature = "metal-attn-variants")]
     let row_schedule = effective_attention_row_schedule(resolved, numeric_policy, row_schedule);
@@ -230,7 +262,13 @@ pub(crate) fn emit_inner_with_mma_selection(
         expert_source_mode,
         row_schedule,
     )?;
-    let extras = metal_specialization(resolved, packed_operands, numeric_policy, &grid);
+    let extras = metal_specialization(
+        resolved,
+        packed_operands,
+        numeric_policy,
+        &grid,
+        dense_mma_input_layout,
+    );
     let source = match &resolved.kind {
         BoundOpKind::CachedAttention { .. } => cached_attention_kv_codec(resolved.node, &quantized)
             .and_then(|cached_kv_codec| {
@@ -1426,7 +1464,15 @@ pub(super) fn coord_index32_active(
     let body_family = quantized.iter().all(Option::is_none)
         && !epilogue_operands.is_empty()
         && gather_count(resolved) == 0
-        && dense_batched_gemm_block(resolved, quantized, numeric_policy, *reduce_op, *init, output_axes).is_none();
+        && dense_batched_gemm_block(
+            resolved,
+            quantized,
+            numeric_policy,
+            *reduce_op,
+            *init,
+            output_axes,
+        )
+        .is_none();
     coordinates_fit && (!body_family || body_reach_fits(resolved))
 }
 
@@ -1631,6 +1677,7 @@ pub(super) fn metal_specialization(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
     grid: &GridSpec,
+    dense_mma_input_layout: FloatLayout,
 ) -> crate::identity::MetalOnlyExtras {
     let quantized = operand_codecs(resolved, packed_operands);
     let reduction_literal = match &resolved.kind {
@@ -1640,6 +1687,7 @@ pub(super) fn metal_specialization(
         _ => None,
     };
     crate::identity::MetalOnlyExtras {
+        dense_mma_input_layout: Some(dense_mma_input_layout),
         cooperative_width: grid.threadgroup_width,
         packed_row_block_shape: Some(packed_row_block_shape_token(resolved, &quantized)),
         packed_row_block_stride_is_one: packed_row_block_stride_is_one(resolved, &quantized),
@@ -1690,16 +1738,23 @@ pub(super) fn metal_specialization(
                 init,
                 output_axes,
                 ..
-            } => dense_batched_gemm_block(resolved, &quantized, numeric_policy, *reduce_op, *init, output_axes)
-                .map(|block| {
-                    (
-                        *block.feature_axes.last().unwrap_or(&0),
-                        *block.token_axes.last().unwrap_or(&0),
-                        block.batch_axes,
-                        block.weight,
-                        block.other,
-                    )
-                }),
+            } => dense_batched_gemm_block(
+                resolved,
+                &quantized,
+                numeric_policy,
+                *reduce_op,
+                *init,
+                output_axes,
+            )
+            .map(|block| {
+                (
+                    *block.feature_axes.last().unwrap_or(&0),
+                    *block.token_axes.last().unwrap_or(&0),
+                    block.batch_axes,
+                    block.weight,
+                    block.other,
+                )
+            }),
             _ => None,
         },
         tiled_gemm_wide_act_load: match &resolved.kind {
@@ -1717,7 +1772,14 @@ pub(super) fn metal_specialization(
                 init,
                 output_axes,
                 ..
-            } => slim_tgmem_active(resolved, &quantized, numeric_policy, *reduce_op, *init, output_axes),
+            } => slim_tgmem_active(
+                resolved,
+                &quantized,
+                numeric_policy,
+                *reduce_op,
+                *init,
+                output_axes,
+            ),
             _ => false,
         },
         tiled_gemm_direct_store: match &resolved.kind {
@@ -1755,7 +1817,14 @@ pub(super) fn metal_specialization(
                 init,
                 output_axes,
                 ..
-            } => tiled_gemm_grid2d_active(resolved, &quantized, numeric_policy, *reduce_op, *init, output_axes),
+            } => tiled_gemm_grid2d_active(
+                resolved,
+                &quantized,
+                numeric_policy,
+                *reduce_op,
+                *init,
+                output_axes,
+            ),
             _ => false,
         },
         tiled_gemm_mm_layout: match &resolved.kind {
@@ -1773,7 +1842,14 @@ pub(super) fn metal_specialization(
                 init,
                 output_axes,
                 ..
-            } => dynamic_tgmem_active(resolved, &quantized, numeric_policy, *reduce_op, *init, output_axes),
+            } => dynamic_tgmem_active(
+                resolved,
+                &quantized,
+                numeric_policy,
+                *reduce_op,
+                *init,
+                output_axes,
+            ),
             _ => false,
         },
         wide_grid: matches!(
@@ -1786,7 +1862,7 @@ pub(super) fn metal_specialization(
     }
 }
 
-#[cfg(any(test, feature = "metal-core"))]
+#[cfg(test)]
 #[cfg_attr(
     not(all(feature = "metal", target_os = "macos")),
     allow(dead_code, reason = "sole caller is the macOS-only metal driver")
@@ -1817,6 +1893,23 @@ pub(crate) fn kernel_cache_key_for_grid(
     numeric_policy: NumericPolicy,
     grid: &GridSpec,
 ) -> Result<String, EmitError> {
+    kernel_cache_key_for_grid_with_layout(
+        resolved,
+        packed_operands,
+        numeric_policy,
+        grid,
+        default_dense_mma_input_layout(resolved, packed_operands),
+    )
+}
+
+#[cfg(any(test, feature = "metal-core"))]
+pub(crate) fn kernel_cache_key_for_grid_with_layout(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    grid: &GridSpec,
+    dense_mma_input_layout: FloatLayout,
+) -> Result<String, EmitError> {
     // Called for its unsupported-dtype rejection alone -- `kernel_identity`
     // reads `resolved.dtype` directly for the actual half/wide classing (the
     // same partition every renderer's own `type_token` match already makes),
@@ -1828,7 +1921,13 @@ pub(crate) fn kernel_cache_key_for_grid(
         crate::identity::KernelLanguage::Metal,
         resolved,
         packed_operands,
-        metal_specialization(resolved, packed_operands, numeric_policy, grid),
+        metal_specialization(
+            resolved,
+            packed_operands,
+            numeric_policy,
+            grid,
+            dense_mma_input_layout,
+        ),
         numeric_policy,
     );
     if let Some((_, _, _, tokens, experts)) =
@@ -1916,6 +2015,7 @@ pub(crate) fn kernel_dispatch_shape_with_schedule(
 /// # Errors
 /// [`grid_threads`]' and [`grid2d_for`]'s: a grid no launch form can cover.
 #[cfg(any(test, feature = "metal-core"))]
+#[cfg(test)]
 pub(super) fn grid_spec(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
@@ -3691,7 +3791,15 @@ pub(super) fn slim_tgmem_active(
         return false;
     }
     tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
-        || dense_batched_gemm_block(resolved, quantized, numeric_policy, reduce_op, init, output_axes).is_some()
+        || dense_batched_gemm_block(
+            resolved,
+            quantized,
+            numeric_policy,
+            reduce_op,
+            init,
+            output_axes,
+        )
+        .is_some()
 }
 
 #[cfg(not(feature = "metal-tiled-gemm"))]
@@ -3744,7 +3852,15 @@ pub(super) fn direct_store_active(
         return false;
     }
     tiled_gemm_dense_weight_block(resolved, quantized, reduce_op, init, output_axes).is_some()
-        || dense_batched_gemm_block(resolved, quantized, numeric_policy, reduce_op, init, output_axes).is_some()
+        || dense_batched_gemm_block(
+            resolved,
+            quantized,
+            numeric_policy,
+            reduce_op,
+            init,
+            output_axes,
+        )
+        .is_some()
 }
 
 /// see `docs/model-interop/discipline.md` ROW C4.12: `true` only when `PROXIMA_TILED_GEMM_WIDE_WEIGHT_
@@ -3796,7 +3912,15 @@ pub(super) fn tiled_gemm_grid2d_active(
         return false;
     }
     tiled_gemm_dense_weight_block(resolved, quantized, reduce_op, init, output_axes).is_some()
-        || dense_batched_gemm_block(resolved, quantized, numeric_policy, reduce_op, init, output_axes).is_some()
+        || dense_batched_gemm_block(
+            resolved,
+            quantized,
+            numeric_policy,
+            reduce_op,
+            init,
+            output_axes,
+        )
+        .is_some()
 }
 
 #[cfg(not(feature = "metal-tiled-gemm"))]
@@ -3860,8 +3984,22 @@ pub(super) fn dynamic_tgmem_active(
 ) -> bool {
     tiled_gemm_dynamic_tgmem_override()
         && tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
-        && slim_tgmem_active(resolved, quantized, numeric_policy, reduce_op, init, output_axes)
-        && tiled_gemm_grid2d_active(resolved, quantized, numeric_policy, reduce_op, init, output_axes)
+        && slim_tgmem_active(
+            resolved,
+            quantized,
+            numeric_policy,
+            reduce_op,
+            init,
+            output_axes,
+        )
+        && tiled_gemm_grid2d_active(
+            resolved,
+            quantized,
+            numeric_policy,
+            reduce_op,
+            init,
+            output_axes,
+        )
 }
 
 #[cfg(not(feature = "metal-tiled-gemm"))]
@@ -3894,7 +4032,14 @@ pub(super) fn tiled_gemm_grid2d_spec(
     init: ReduceInit,
     output_axes: &[u16],
 ) -> Result<Option<Grid2DSpec>, EmitError> {
-    if !tiled_gemm_grid2d_active(resolved, quantized, numeric_policy, reduce_op, init, output_axes) {
+    if !tiled_gemm_grid2d_active(
+        resolved,
+        quantized,
+        numeric_policy,
+        reduce_op,
+        init,
+        output_axes,
+    ) {
         return Ok(None);
     }
     let (feature_extent, token_extent) =
@@ -3911,9 +4056,14 @@ pub(super) fn tiled_gemm_grid2d_spec(
                     .map(|&axis| resolved.extents[axis as usize])
                     .product::<u64>(),
             )
-        } else if let Some(block) =
-            dense_batched_gemm_block(resolved, quantized, numeric_policy, reduce_op, init, output_axes)
-        {
+        } else if let Some(block) = dense_batched_gemm_block(
+            resolved,
+            quantized,
+            numeric_policy,
+            reduce_op,
+            init,
+            output_axes,
+        ) {
             (
                 block
                     .feature_axes
@@ -4000,8 +4150,14 @@ pub(super) fn grid2d_for(
         output_axes,
         ..
     } = &resolved.kind
-        && let Some(tiles) =
-            tiled_gemm_grid2d_spec(resolved, quantized, numeric_policy, *reduce_op, *init, output_axes)?
+        && let Some(tiles) = tiled_gemm_grid2d_spec(
+            resolved,
+            quantized,
+            numeric_policy,
+            *reduce_op,
+            *init,
+            output_axes,
+        )?
     {
         return Ok(Some(tiles));
     }
@@ -4056,7 +4212,15 @@ fn pinned_width_is_shape_neutral(
         return false;
     };
     if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
-        || dense_batched_gemm_block(resolved, quantized, numeric_policy, *reduce_op, *init, output_axes).is_some()
+        || dense_batched_gemm_block(
+            resolved,
+            quantized,
+            numeric_policy,
+            *reduce_op,
+            *init,
+            output_axes,
+        )
+        .is_some()
     {
         return false;
     }
@@ -4406,7 +4570,7 @@ pub(super) fn classify_dense_batched_gemm(
         }
         if quantized.iter().any(|codec| match codec {
             None => false,
-            Some(Codec::Float16 | Codec::BFloat16) => !cfg!(omega_dense_float_storage),
+            Some(Codec::Float16 | Codec::BFloat16) => false,
             Some(_) => true,
         }) {
             return Err(DenseBatchedGemmRejection::OperandIsPacked);
@@ -4415,6 +4579,19 @@ pub(super) fn classify_dense_batched_gemm(
             if admit(numeric_policy, rewrite).is_err() {
                 return Err(DenseBatchedGemmRejection::NumericPolicyDenied(rewrite));
             }
+        }
+        let rounds_wider_operand =
+            quantized.contains(&Some(Codec::BFloat16)) || numeric_policy.bf16_input_rounding;
+        let has_non_bf16_operand = quantized
+            .iter()
+            .any(|codec| *codec != Some(Codec::BFloat16));
+        if rounds_wider_operand
+            && has_non_bf16_operand
+            && admit(numeric_policy, NumericRewrite::Bf16InputRounding).is_err()
+        {
+            return Err(DenseBatchedGemmRejection::NumericPolicyDenied(
+                NumericRewrite::Bf16InputRounding,
+            ));
         }
         if reduce_op != ScalarOp::Add || init != ReduceInit::Zero {
             return Err(DenseBatchedGemmRejection::NotAddZeroReduce);
@@ -4528,6 +4705,36 @@ pub(super) fn classify_dense_batched_gemm(
     }
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub(crate) fn has_dense_bf16_mma_candidate(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+) -> bool {
+    let quantized = operand_codecs(resolved, packed_operands);
+    if !quantized.contains(&Some(Codec::BFloat16)) {
+        return false;
+    }
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        output_axes,
+        ..
+    } = &resolved.kind
+    else {
+        return false;
+    };
+    classify_dense_batched_gemm(
+        resolved,
+        &quantized,
+        numeric_policy.with_bf16_input_rounding(true),
+        *reduce_op,
+        *init,
+        output_axes,
+    )
+    .is_ok()
+}
+
 /// [`classify_dense_batched_gemm`]'s admission, `.ok()` -- mirrors
 /// [`tiled_gemm_block`]'s own accessor.
 pub(super) fn dense_batched_gemm_block(
@@ -4601,7 +4808,14 @@ pub(super) fn dense_batched_gemm_depth(
     else {
         return None;
     };
-    let block = dense_batched_gemm_block(resolved, quantized, numeric_policy, *reduce_op, *init, output_axes)?;
+    let block = dense_batched_gemm_block(
+        resolved,
+        quantized,
+        numeric_policy,
+        *reduce_op,
+        *init,
+        output_axes,
+    )?;
     Some(
         block
             .batch_axes

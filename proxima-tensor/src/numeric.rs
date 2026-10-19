@@ -11,9 +11,10 @@
 
 use crate::error::TensorError;
 
-/// Five independent float-bit-changing permissions a bind (or GPU plan) may
-/// grant, mirroring LLVM's own fast-math flags (`contract`, `reassoc`,
-/// `nnan`, `nsz`, `afn`/`arcp`) rather than a single total order. Default
+/// Eight independent float-bit-changing permissions a bind (or GPU plan) may
+/// grant. Five mirror LLVM's own fast-math flags (`contract`, `reassoc`,
+/// `nnan`, `nsz`, `afn`/`arcp`); the others name domain-specific rewrites.
+/// They form a permission set rather than a single total order. Default
 /// (all `false`) is bit-exact -- every rewrite this crate ships
 /// unconditionally today (identity elimination of `x*1`, chain fusion,
 /// reduce-epilogue fusion) needs none of these and is admitted regardless.
@@ -83,6 +84,12 @@ pub struct NumericPolicy {
     #[cfg_attr(feature = "config", setting(default = false))]
     #[cfg_attr(feature = "config", serde(default))]
     pub activation_quantization: bool,
+    /// Permits rounding a wider dense-MMA operand to BF16 fragments when the
+    /// selected plan input layout is BF16. This changes input bits before the
+    /// multiply and is independent of contraction or reduction order.
+    #[cfg_attr(feature = "config", setting(default = false))]
+    #[cfg_attr(feature = "config", serde(default))]
+    pub bf16_input_rounding: bool,
 }
 
 impl NumericPolicy {
@@ -97,6 +104,7 @@ impl NumericPolicy {
             approx_functions: false,
             epilogue_sources: false,
             activation_quantization: false,
+            bf16_input_rounding: false,
         }
     }
 
@@ -116,6 +124,7 @@ impl NumericPolicy {
             approx_functions: false,
             epilogue_sources: false,
             activation_quantization: false,
+            bf16_input_rounding: false,
         }
     }
 
@@ -131,6 +140,7 @@ impl NumericPolicy {
             approx_functions: true,
             epilogue_sources: false,
             activation_quantization: false,
+            bf16_input_rounding: false,
         }
     }
 
@@ -145,6 +155,7 @@ impl NumericPolicy {
             && (!required.approx_functions || self.approx_functions)
             && (!required.epilogue_sources || self.epilogue_sources)
             && (!required.activation_quantization || self.activation_quantization)
+            && (!required.bf16_input_rounding || self.bf16_input_rounding)
     }
 
     /// Fluent per-permission setters -- `#[non_exhaustive]` blocks a
@@ -195,6 +206,12 @@ impl NumericPolicy {
         self.activation_quantization = activation_quantization;
         self
     }
+
+    #[must_use]
+    pub const fn with_bf16_input_rounding(mut self, bf16_input_rounding: bool) -> Self {
+        self.bf16_input_rounding = bf16_input_rounding;
+        self
+    }
 }
 
 /// One rewrite class this crate or a GPU backend may apply, and the exact
@@ -236,6 +253,9 @@ pub enum NumericRewrite {
     /// Rounding a packed-weight matvec's activation vector to int8 so the dot
     /// product runs as integer `dp4a`. Needs `activation_quantization` alone.
     ActivationQuantization,
+    /// Rounding a wider dense-matrix operand to BF16 fragments before MMA.
+    /// Needs `bf16_input_rounding` alone.
+    Bf16InputRounding,
     /// Merging a multiply and an add into one hardware FMA.
     FmaContraction,
     /// Reordering an associative reduction as a tree instead of a left fold.
@@ -277,6 +297,10 @@ impl NumericRewrite {
             },
             Self::ActivationQuantization => NumericPolicy {
                 activation_quantization: true,
+                ..NumericPolicy::bit_exact()
+            },
+            Self::Bf16InputRounding => NumericPolicy {
+                bf16_input_rounding: true,
                 ..NumericPolicy::bit_exact()
             },
             Self::FmaContraction => NumericPolicy {
@@ -412,8 +436,30 @@ mod tests {
         );
 
         assert!(
-            admit(NumericPolicy::bit_exact(), NumericRewrite::ActivationQuantization).is_err(),
+            admit(
+                NumericPolicy::bit_exact(),
+                NumericRewrite::ActivationQuantization
+            )
+            .is_err(),
             "bit_exact does not grant int8 activation rounding"
+        );
+    }
+
+    #[test]
+    fn bf16_input_rounding_is_granted_only_by_its_own_permission() {
+        assert!(
+            admit(
+                NumericPolicy::llama_relaxed(),
+                NumericRewrite::Bf16InputRounding
+            )
+            .is_err()
+        );
+        assert!(
+            admit(
+                NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
+                NumericRewrite::Bf16InputRounding
+            )
+            .is_ok()
         );
     }
 

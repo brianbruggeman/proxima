@@ -129,7 +129,11 @@ pub mod layout_render;
 mod scaled_float_render;
 mod wide_grid;
 #[cfg(all(feature = "metal", target_os = "macos"))]
-pub(crate) use emit_and_classify::emit_inner_with_mma_selection;
+pub(crate) use emit_and_classify::emit_inner_with_mma_selection_and_layout;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub(crate) use emit_and_classify::has_dense_bf16_mma_candidate;
+#[cfg(feature = "metal-core")]
+pub(crate) use emit_and_classify::kernel_cache_key_for_grid_with_layout;
 #[cfg(feature = "metal-attn-variants")]
 pub(crate) use emit_and_classify::validate_attention_variant_storage;
 pub use emit_and_classify::*;
@@ -237,10 +241,10 @@ mod cooperative_fold_tests;
 mod index_narrowing_tests;
 #[cfg(all(test, feature = "float-layout-dtype"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod layout_render_tests;
+mod layout_int_tests;
 #[cfg(all(test, feature = "float-layout-dtype"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod layout_int_tests;
+mod layout_render_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod scaled_e3m2_render_tests;

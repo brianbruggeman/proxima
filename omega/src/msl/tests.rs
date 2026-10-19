@@ -1375,6 +1375,7 @@ mod horizontal_merge_base_table_splice_tests {
 
         let unmerged_extras = MetalOnlyExtras::default();
         let merged_extras = MetalOnlyExtras {
+            dense_mma_input_layout: None,
             merged_z: Some(8),
             ..MetalOnlyExtras::default()
         };
@@ -2526,7 +2527,7 @@ fn dense_batched_gemm_admission_is_switch_gated() {
                         init,
                         output_axes,
                     )
-                        .is_ok()
+                    .is_ok()
                 })
                 .count()
         })
@@ -2602,7 +2603,7 @@ fn dense_batched_gemm_grid_spec_matches_tiled_shape() {
                 init,
                 output_axes,
             )
-                .unwrap_or_else(|| panic!("{name} must admit to the dense-batched-gemm path"));
+            .unwrap_or_else(|| panic!("{name} must admit to the dense-batched-gemm path"));
             let _ = block;
 
             let row_tiles = u64::from(feature).div_ceil(crate::sized::TILED_GEMM_BLOCK_M);
@@ -2613,8 +2614,9 @@ fn dense_batched_gemm_grid_spec_matches_tiled_shape() {
             let cooperative_fallback_threads =
                 u64::from(feature) * u64::from(token) * u64::from(batch) * SIMD_WIDTH;
 
-            let grid_threads_total = grid_threads(&bound, &codecs, NumericPolicy::llama_relaxed(), false)
-                .unwrap_or_else(|err| panic!("{name}: grid_threads must not error: {err:?}"));
+            let grid_threads_total =
+                grid_threads(&bound, &codecs, NumericPolicy::llama_relaxed(), false)
+                    .unwrap_or_else(|err| panic!("{name}: grid_threads must not error: {err:?}"));
             assert_eq!(
                 grid_threads_total, expected_threads,
                 "{name}: grid_threads must dispatch the tiled-gemm x-count ({row_tiles} row \
@@ -2654,10 +2656,9 @@ fn dense_batched_gemm_grid_spec_matches_tiled_shape() {
     });
 }
 
-#[cfg(all(feature = "metal-tiled-gemm", omega_dense_float_storage))]
+#[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn programmable_tiled_float_storage_codec_pairs_admit_with_both_rewrites() {
-    const { assert!(crate::sized::DENSE_FLOAT_STORAGE_ENABLED) };
     let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 1, 16);
     let BoundOpKind::Reduce {
         reduce_op,
@@ -2678,7 +2679,7 @@ fn programmable_tiled_float_storage_codec_pairs_admit_with_both_rewrites() {
         let block = classify_dense_batched_gemm(
             &bound,
             &codecs,
-            NumericPolicy::llama_relaxed(),
+            NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
             reduce_op,
             init,
             output_axes,
@@ -2718,7 +2719,7 @@ fn programmable_tiled_float_storage_codec_pairs_admit_with_both_rewrites() {
     ));
 }
 
-#[cfg(all(feature = "metal-tiled-gemm", omega_dense_float_storage))]
+#[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn programmable_tiled_f16_renderer_uses_existing_float_tiles() {
     let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 1, 16);
@@ -2744,7 +2745,7 @@ fn programmable_tiled_f16_renderer_uses_existing_float_tiles() {
     assert!(kernel.source.contains("in1[aoff]"));
 }
 
-#[cfg(all(feature = "metal-tiled-gemm", omega_dense_float_storage))]
+#[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn programmable_tiled_unsupported_codec_is_rejected_by_dense_classifier() {
     let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 1, 16);
@@ -2782,7 +2783,7 @@ fn programmable_tiled_unsupported_codec_is_rejected_by_dense_classifier() {
     );
 }
 
-#[cfg(all(feature = "metal-tiled-gemm", omega_dense_float_storage))]
+#[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn programmable_tiled_ragged_k_and_feature_tail_keep_bounds_masks() {
     let bound = dense_batched_score_shaped_op(
@@ -2797,10 +2798,15 @@ fn programmable_tiled_ragged_k_and_feature_tail_keep_bounds_masks() {
         (operands[1].0, Codec::Float16),
     ]);
 
-    let kernel = emit(&bound, &packed, NumericPolicy::llama_relaxed())
-        .expect("ragged float-storage dense emits");
+    let kernel = emit(
+        &bound,
+        &packed,
+        NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
+    )
+    .expect("ragged float-storage dense emits");
 
-    assert!(kernel.source.contains("bf16_element"));
+    assert!(kernel.source.contains("simdgroup_bfloat8x8"));
+    assert!(!kernel.source.contains("bf16_element"));
     assert!(kernel.source.contains("k0 + w_k < u.reduction_total"));
     assert!(kernel.source.contains("a_k_global < u.reduction_total"));
     assert!(kernel.source.contains("if (w_feat < feature_extent)"));
@@ -2811,7 +2817,7 @@ fn programmable_tiled_ragged_k_and_feature_tail_keep_bounds_masks() {
     );
 }
 
-#[cfg(all(feature = "metal-tiled-gemm", omega_dense_float_storage))]
+#[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn programmable_tiled_numeric_policy_requires_both_rewrites() {
     let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 1, 16);
@@ -2854,9 +2860,61 @@ fn programmable_tiled_numeric_policy_requires_both_rewrites() {
         )
         .is_ok()
     );
+
+    let packed = [Some(Codec::BFloat16), None];
+    assert!(matches!(
+        classify_dense_batched_gemm(
+            &bound,
+            &packed,
+            NumericPolicy::llama_relaxed(),
+            reduce_op,
+            init,
+            output_axes,
+        ),
+        Err(DenseBatchedGemmRejection::NumericPolicyDenied(
+            NumericRewrite::Bf16InputRounding
+        ))
+    ));
+    assert!(
+        classify_dense_batched_gemm(
+            &bound,
+            &packed,
+            NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
+            reduce_op,
+            init,
+            output_axes,
+        )
+        .is_ok()
+    );
+
+    let mixed = [Some(Codec::BFloat16), Some(Codec::Float16)];
+    assert!(matches!(
+        classify_dense_batched_gemm(
+            &bound,
+            &mixed,
+            NumericPolicy::llama_relaxed(),
+            reduce_op,
+            init,
+            output_axes,
+        ),
+        Err(DenseBatchedGemmRejection::NumericPolicyDenied(
+            NumericRewrite::Bf16InputRounding
+        ))
+    ));
+    assert!(
+        classify_dense_batched_gemm(
+            &bound,
+            &mixed,
+            NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
+            reduce_op,
+            init,
+            output_axes,
+        )
+        .is_ok()
+    );
 }
 
-#[cfg(all(feature = "metal-tiled-gemm", omega_dense_float_storage))]
+#[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn programmable_tiled_grid_emit_and_cache_follow_one_admission() {
     let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 2, 16);
@@ -2865,18 +2923,35 @@ fn programmable_tiled_grid_emit_and_cache_follow_one_admission() {
         (bound.operands()[1].0, Codec::Float16),
     ]);
 
-    let admitted = emit(&bound, &packed, NumericPolicy::llama_relaxed()).expect("admitted emits");
-    assert!(admitted.source.contains("bf16_element"));
+    let admitted = emit(
+        &bound,
+        &packed,
+        NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
+    )
+    .expect("admitted emits");
+    assert!(admitted.source.contains("simdgroup_bfloat8x8"));
+    assert!(admitted.source.contains("as_type<bfloat>"));
+    assert!(!admitted.source.contains("bf16_element"));
     assert_eq!(admitted.grid.depth, 2);
     let admitted_extras = metal_specialization(
         &bound,
         &packed,
         NumericPolicy::llama_relaxed(),
         &admitted.grid,
+        FloatLayout::BF16,
     );
     assert!(admitted_extras.dense_batched_gemm_axes.is_some());
     let admitted_key = kernel_cache_key(&bound, &packed, NumericPolicy::llama_relaxed())
         .expect("admitted identity resolves");
+    let f32_layout_key = kernel_cache_key_for_grid_with_layout(
+        &bound,
+        &packed,
+        NumericPolicy::llama_relaxed(),
+        &admitted.grid,
+        FloatLayout::BF32,
+    )
+    .expect("explicit F32 identity resolves");
+    assert_ne!(admitted_key, f32_layout_key);
     let plain_key = kernel_cache_key(&bound, &BTreeMap::new(), NumericPolicy::llama_relaxed())
         .expect("plain identity resolves");
     assert_ne!(admitted_key, plain_key);
@@ -2890,14 +2965,19 @@ fn programmable_tiled_grid_emit_and_cache_follow_one_admission() {
             .grid2d
             .is_some_and(|grid| grid.form == Grid2DForm::TileCoordinates)
     );
-    let denied_extras =
-        metal_specialization(&bound, &packed, NumericPolicy::bit_exact(), &denied.grid);
+    let denied_extras = metal_specialization(
+        &bound,
+        &packed,
+        NumericPolicy::bit_exact(),
+        &denied.grid,
+        FloatLayout::BF16,
+    );
     assert!(denied_extras.dense_batched_gemm_axes.is_none());
     let denied_key = kernel_cache_key(&bound, &packed, NumericPolicy::bit_exact())
         .expect("denied identity resolves");
     assert_ne!(admitted_key, denied_key);
 }
-#[cfg(all(feature = "metal-tiled-gemm", omega_dense_float_storage))]
+#[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn programmable_tiled_classifier_follows_ownership_for_reversed_operand_order() {
     for reversed in [false, true] {
@@ -2927,7 +3007,7 @@ fn programmable_tiled_classifier_follows_ownership_for_reversed_operand_order() 
             let block = classify_dense_batched_gemm(
                 &bound,
                 &codecs,
-                NumericPolicy::llama_relaxed(),
+                NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
                 reduce_op,
                 init,
                 output_axes,
@@ -2945,7 +3025,7 @@ fn programmable_tiled_classifier_follows_ownership_for_reversed_operand_order() 
     }
 }
 
-#[cfg(all(feature = "metal-tiled-gemm", omega_dense_float_storage))]
+#[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn programmable_tiled_cache_key_role_suffix_separates_operand_order() {
     for same_codecs in [true, false] {
@@ -2974,7 +3054,10 @@ fn programmable_tiled_cache_key_role_suffix_separates_operand_order() {
 
         let original_role = original_key.rfind("_w").expect("weight role suffix exists");
         let reversed_role = reversed_key.rfind("_w").expect("weight role suffix exists");
-        assert_eq!(&original_key[..original_role], &reversed_key[..reversed_role]);
+        assert_eq!(
+            &original_key[..original_role],
+            &reversed_key[..reversed_role]
+        );
         assert!(original_key[original_role..].starts_with("_w0_o1"));
         assert!(reversed_key[reversed_role..].starts_with("_w1_o0"));
         assert_ne!(original_kernel.source, reversed_kernel.source);
@@ -2990,10 +3073,9 @@ fn programmable_tiled_cache_key_role_suffix_separates_operand_order() {
     }
 }
 
-#[cfg(all(feature = "metal-tiled-gemm", not(omega_dense_float_storage)))]
+#[cfg(feature = "metal-tiled-gemm")]
 #[test]
-fn programmable_tiled_float_storage_feature_off_declines() {
-    const { assert!(!crate::sized::DENSE_FLOAT_STORAGE_ENABLED) };
+fn programmable_tiled_float_storage_does_not_depend_on_build_gate() {
     let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 1, 16);
     let BoundOpKind::Reduce {
         reduce_op,
@@ -3010,7 +3092,7 @@ fn programmable_tiled_float_storage_feature_off_declines() {
         [None, Some(Codec::BFloat16)],
         [None, Some(Codec::Float16)],
     ] {
-        assert!(matches!(
+        assert!(
             classify_dense_batched_gemm(
                 &bound,
                 &codecs,
@@ -3018,9 +3100,9 @@ fn programmable_tiled_float_storage_feature_off_declines() {
                 reduce_op,
                 init,
                 output_axes,
-            ),
-            Err(DenseBatchedGemmRejection::OperandIsPacked)
-        ));
+            )
+            .is_ok()
+        );
     }
     assert!(
         classify_dense_batched_gemm(
@@ -8007,7 +8089,12 @@ mod flat_grid_form {
     fn a_grid_that_fits_a_32_bit_thread_index_keeps_the_linear_form() {
         let (bound, packed) = per_layer_projection_op(1872, 1536, 8960);
 
-        let kernel = emit(&bound, &packed, NumericPolicy::bit_exact().with_reassociation(true)).expect("emits");
+        let kernel = emit(
+            &bound,
+            &packed,
+            NumericPolicy::bit_exact().with_reassociation(true),
+        )
+        .expect("emits");
 
         assert_eq!(
             kernel.grid.threads,
@@ -8118,8 +8205,13 @@ mod flat_grid_form {
         let (bound, packed) = per_layer_projection_op(1873, 1536, 8960);
 
         let codecs = operand_codecs(&bound, &packed);
-        let threads =
-            grid_threads(&bound, &codecs, NumericPolicy::bit_exact().with_reassociation(true), true).expect("threads");
+        let threads = grid_threads(
+            &bound,
+            &codecs,
+            NumericPolicy::bit_exact().with_reassociation(true),
+            true,
+        )
+        .expect("threads");
 
         let refused = grid2d_for(
             &bound,
@@ -8253,7 +8345,8 @@ mod flat_grid_form {
         let bound = dense_batched_score_shaped_op(102_400, 200_000, 8, 128);
 
         temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("0"), || {
-            let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::llama_relaxed()).expect("emits");
+            let kernel =
+                emit(&bound, &BTreeMap::new(), NumericPolicy::llama_relaxed()).expect("emits");
 
             assert!(
                 kernel.grid.threads <= u64::from(u32::MAX),
@@ -11093,22 +11186,24 @@ mod expert_grouped_route_segments {
     }
 }
 
-#[cfg(all(feature = "metal-tiled-gemm", omega_dense_float_storage))]
+#[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn dense_bf16_weight_read_parenthesizes_the_compound_offset() {
     let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 1, 16);
     let operands = bound.operands();
     let packed = BTreeMap::from([(operands[0].0, Codec::BFloat16)]);
 
-    let kernel =
-        emit(&bound, &packed, NumericPolicy::llama_relaxed()).expect("bf16 dense weight emits");
+    let kernel = emit(
+        &bound,
+        &packed,
+        NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
+    )
+    .expect("bf16 dense weight emits");
 
-    let offset = "(row_base + (long)w_k * w_stride)";
     assert!(
-        kernel.source.contains(&format!(
-            "bf16_element(in0 + ({offset} / 1) * 2, (uint)({offset} % 1))"
-        )),
-        "the sub-block index must be zero for every offset expression\n{}",
+        kernel.source.contains("as_type<bfloat>(ushort("),
+        "dense bf16 weights stay native in the emitted fragment path\n{}",
         kernel.source,
     );
+    assert!(!kernel.source.contains("bf16_element(in0"));
 }

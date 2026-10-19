@@ -81,6 +81,7 @@ pub(super) fn plan_from_prepared(
         resident_nodes: BTreeSet::new(),
         math_mode: numeric_policy_as_metal_math_mode(numeric_policy),
         numeric_policy,
+        dense_mma_input_layout: None,
         attention_mma_selection: crate::msl::AttentionMmaSelection::Legacy,
         attention_row_schedule: crate::msl::AttentionRowSchedule::legacy(),
         dispatch_type: DispatchType::default(),

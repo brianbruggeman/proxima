@@ -1,4 +1,5 @@
 use super::*;
+use proxima_primitives::float_layout::FloatLayout;
 
 /// A live Metal buffer handle — the shape every device-buffer table and
 /// return value in this file traffics in.
@@ -298,10 +299,7 @@ pub enum MetalError {
     #[error("metal {field} reservation overflows")]
     ResourceOverflow { field: &'static str },
     #[error("metal input {node} changed: {reason}")]
-    InputContractChanged {
-        node: NodeId,
-        reason: &'static str,
-    },
+    InputContractChanged { node: NodeId, reason: &'static str },
     #[error("no Metal device available on this host")]
     NoDevice,
     #[error(
@@ -825,6 +823,8 @@ pub struct Plan {
     /// `msl::context_chunks_for` (the cross-simdgroup attention
     /// context-chunk merge) consults it via [`Plan::numeric_policy`].
     pub(super) numeric_policy: NumericPolicy,
+    /// Operand fragment format used by dense tiled matrix multiplication.
+    pub(super) dense_mma_input_layout: Option<proxima_primitives::float_layout::FloatLayout>,
     /// MMA selection that keys every attention pipeline this plan resolves.
     pub(super) attention_mma_selection: crate::msl::AttentionMmaSelection,
     /// Row schedule (K/V reuse and tile height) that keys every attention pipeline this plan resolves.
@@ -1269,7 +1269,7 @@ pub(super) fn build_merged_dispatch(
         "float",
         "float",
     )?;
-    let mut cache_key = kernel_cache_key_for_grid(
+    let mut cache_key = crate::msl::kernel_cache_key_for_grid(
         leader,
         &plan.packed_operands,
         plan.numeric_policy,
@@ -1774,6 +1774,7 @@ pub(super) fn handle_merged_position(
 /// look the same pipeline up again.
 pub(super) struct ResolvedStep {
     pub(super) pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    pub(super) dense_mma_input_layout: FloatLayout,
     pub(super) bindings: Vec<Binding>,
     pub(super) grid: GridSpec,
     /// Redesign §4c: `Some` exactly when [`crate::msl::
@@ -2432,7 +2433,32 @@ impl Plan {
             .resolved
             .iter()
             .map(|bound| {
-                kernel_cache_key(bound, &self.packed_operands, self.numeric_policy)
+                let (_, grid) = crate::msl::kernel_dispatch_shape_with_schedule(
+                    bound,
+                    &self.packed_operands,
+                    self.numeric_policy,
+                    self.attention_row_schedule,
+                )?;
+                let dense_mma_input_layout = self.dense_mma_input_layout.unwrap_or_else(|| {
+                    crate::msl::default_dense_mma_input_layout(bound, &self.packed_operands)
+                });
+                let cache_key = if self.dense_mma_input_layout.is_none() {
+                    crate::msl::kernel_cache_key_for_grid(
+                        bound,
+                        &self.packed_operands,
+                        self.numeric_policy,
+                        &grid,
+                    )
+                } else {
+                    crate::msl::kernel_cache_key_for_grid_with_layout(
+                        bound,
+                        &self.packed_operands,
+                        self.numeric_policy,
+                        &grid,
+                        dense_mma_input_layout,
+                    )
+                };
+                cache_key
                     .map(|mut key| {
                         key.push(self.math_mode.cache_token());
                         key.push_str(self.attention_mma_selection.cache_token_for(bound));
