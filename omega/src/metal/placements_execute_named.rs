@@ -608,10 +608,13 @@ pub(super) fn execute_plan_with_placements_inner(
     while_gpu_runs: impl FnOnce(),
 ) -> Result<Evaluated, MetalError> {
     plan.validate_configured_inputs(blocks)?;
+    validate_input_placements(plan, input_placements)?;
+    validate_output_placements(plan, output_placements)?;
     if plan.has_constraints() {
         if !input_placements.is_empty() || !output_placements.is_empty() || !recycle.is_empty() {
             return Err(MetalError::UnsupportedConstraint {
-                field: "constraints", reason: "external placements and readback pools have no bounded execution contract",
+                field: "constraints",
+                reason: "external placements and readback pools have no bounded execution contract",
             });
         }
         return execute_plan_inner(plan, blocks, expert_buffers);
@@ -2081,6 +2084,139 @@ pub(super) fn execute_plan_with_placements_inner(
         }
     }
     Ok(evaluated)
+}
+
+#[cfg(feature = "metal-output-placement")]
+fn validate_input_placements(
+    plan: &Plan,
+    input_placements: &[(NodeId, &PlacedBuffer, usize)],
+) -> Result<(), MetalError> {
+    let mut seen = BTreeSet::new();
+    for (node, buffer, offset) in input_placements {
+        if !seen.insert(*node) || !plan.prepared.block_nodes.contains(node) {
+            return Err(MetalError::InputContractChanged {
+                node: *node,
+                reason: "placed input node is duplicated or is not a program input",
+            });
+        }
+        let position = plan
+            .prepared
+            .block_nodes
+            .iter()
+            .position(|candidate| candidate == node)
+            .ok_or(MetalError::InputContractChanged {
+                node: *node,
+                reason: "placed input node has no block position",
+            })?;
+        let element_count = plan
+            .prepared
+            .shapes
+            .of(*node)
+            .iter()
+            .try_fold(1_u64, |count, extent| count.checked_mul(*extent))
+            .ok_or(MetalError::ResourceOverflow {
+                field: "placed_input_elements",
+            })?;
+        let required_bytes = match plan.packed_operands.get(node) {
+            Some(codec) => {
+                let block_bytes = crate::msl::codec_block_bytes(*codec) as u64;
+                let block_elements = crate::msl::codec_block_elements(*codec) as u64;
+                element_count
+                    .div_ceil(block_elements)
+                    .checked_mul(block_bytes)
+                    .and_then(|bytes| usize::try_from(bytes).ok())
+                    .ok_or(MetalError::ResourceOverflow {
+                        field: "placed_input_bytes",
+                    })?
+            }
+            None => {
+                let dtype = plan.block_dtypes[position];
+                usize::try_from(element_count)
+                    .ok()
+                    .and_then(|count| {
+                        count.checked_mul(super::prepare_uniforms_pack::device_element_bytes(dtype))
+                    })
+                    .ok_or(MetalError::ResourceOverflow {
+                        field: "placed_input_bytes",
+                    })?
+            }
+        };
+        let buffer_length = buffer.length();
+        if offset
+            .checked_add(required_bytes)
+            .is_none_or(|end| *offset > buffer_length || end > buffer_length)
+        {
+            return Err(MetalError::PlacedBufferRange {
+                byte_offset: *offset,
+                byte_length: required_bytes,
+                buffer_length,
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "metal-output-placement")]
+fn validate_output_placements(
+    plan: &Plan,
+    output_placements: &[(NodeId, &PlacedBuffer, usize)],
+) -> Result<(), MetalError> {
+    let mut seen = BTreeSet::new();
+    for (node, buffer, offset) in output_placements {
+        let is_program_node = plan.program.get(node.0 as usize).is_some();
+        let is_resolved_node = plan
+            .prepared
+            .resolved
+            .iter()
+            .any(|bound| bound.node == *node);
+        if !is_program_node && !is_resolved_node {
+            return Err(MetalError::InputContractChanged {
+                node: *node,
+                reason: "placed output node is not in the bound program",
+            });
+        }
+        if !seen.insert(*node) {
+            return Err(MetalError::InputContractChanged {
+                node: *node,
+                reason: "placed output node is duplicated",
+            });
+        }
+        let element_count = plan
+            .prepared
+            .shapes
+            .of(*node)
+            .iter()
+            .try_fold(1_u64, |count, extent| count.checked_mul(*extent))
+            .ok_or(MetalError::ResourceOverflow {
+                field: "placed_output_elements",
+            })?;
+        let dtype = gpu_dtype(
+            &plan.program,
+            &plan.prepared.index_nodes,
+            &plan.prepared.resolved,
+            *node,
+        );
+        let required_bytes = usize::try_from(element_count)
+            .ok()
+            .and_then(|count| {
+                count.checked_mul(super::prepare_uniforms_pack::device_element_bytes(dtype))
+            })
+            .ok_or(MetalError::ResourceOverflow {
+                field: "placed_output_bytes",
+            })?;
+        let buffer_length = buffer.length();
+        if offset
+            .checked_add(required_bytes)
+            .is_none_or(|end| *offset > buffer_length || end > buffer_length)
+        {
+            return Err(MetalError::PlacedBufferRange {
+                byte_offset: *offset,
+                byte_length: required_bytes,
+                buffer_length,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// [`plan`] against a name-keyed block set — the shape a model binds its

@@ -69,6 +69,33 @@ fn a_placed_input_can_be_planned_without_a_named_host_payload() {
     .expect("placed input is valid without a host-side placeholder");
     let output_buffer =
         omega::allocate_placed_buffer(BYTES).expect("allocates the caller-owned output buffer");
+    let output_range_error = omega::execute_plan_named_with_placements(
+        &plan,
+        &[],
+        &[(placed_input_node, &input_buffer, 0)],
+        &[(identity_node, &output_buffer, 1)],
+    )
+    .expect_err("rejects an output range that extends past the caller's buffer");
+    assert!(
+        output_range_error
+            .to_string()
+            .contains("placed buffer range"),
+        "reports the invalid output range before dispatch: {output_range_error}"
+    );
+    let input_range_error = omega::execute_plan_named_with_placements(
+        &plan,
+        &[],
+        &[(placed_input_node, &input_buffer, 1)],
+        &[(identity_node, &output_buffer, 0)],
+    )
+    .expect_err("rejects an input range that extends past the caller's buffer");
+    assert!(
+        input_range_error
+            .to_string()
+            .contains("placed buffer range"),
+        "reports the invalid input range before dispatch: {input_range_error}"
+    );
+
     omega::execute_plan_named_with_placements(
         &plan,
         &[],

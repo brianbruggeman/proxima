@@ -9,7 +9,7 @@ use super::{
     RuntimeConfig, SelectionConfig, SelectionMode, SpeculationStrategy, WeightConversionStrategy,
 };
 
-const CLEAN_ENVIRONMENT: [(&str, Option<&str>); 29] = [
+const CLEAN_ENVIRONMENT: [(&str, Option<&str>); 31] = [
     ("OMEGA_ENGINE", None),
     ("OMEGA_GPU_DRIVER", None),
     ("OMEGA_ALLOW_FUSION", None),
@@ -39,6 +39,8 @@ const CLEAN_ENVIRONMENT: [(&str, Option<&str>); 29] = [
     ("OMEGA_SPECULATION", None),
     ("OMEGA_WEIGHT_CONVERSION", None),
     ("OMEGA_MOE_GROUPING", None),
+    ("OMEGA_DENSE_MMA_INPUT_LAYOUT", None),
+    ("OMEGA_NUMERIC_BF16_INPUT_ROUNDING", None),
 ];
 
 fn validation_text(result: conflaguration::Result<RuntimeConfig>) -> String {
@@ -146,6 +148,11 @@ fn runtime_config_defaults_preserve_legacy_values() {
     assert!(!config.numeric.signed_zero);
     assert!(!config.numeric.approx_functions);
     assert!(!config.numeric.epilogue_sources);
+    assert!(!config.numeric.bf16_input_rounding);
+    assert_eq!(
+        config.dense_mma_input_layout,
+        super::DenseMmaInputLayout::Auto
+    );
     assert_eq!(config.constraints.max_host_tensor_bytes, None);
     assert_eq!(config.constraints.max_device_buffer_bytes, None);
     assert_eq!(config.constraints.max_single_device_buffer_bytes, None);
@@ -470,7 +477,8 @@ fn runtime_config_requires_measurement_samples() {
 
 #[test]
 fn runtime_config_numeric_permissions_round_trip_independently() {
-    let source = "[numeric]\ncontraction = true\napprox_functions = true\n";
+    let source =
+        "[numeric]\ncontraction = true\napprox_functions = true\nbf16_input_rounding = true\n";
     let from_serde: RuntimeConfig = toml::from_str(source).expect("numeric TOML deserializes");
     assert!(from_serde.numeric.contraction);
     assert!(!from_serde.numeric.reassociation);
@@ -478,6 +486,7 @@ fn runtime_config_numeric_permissions_round_trip_independently() {
     assert!(!from_serde.numeric.signed_zero);
     assert!(from_serde.numeric.approx_functions);
     assert!(!from_serde.numeric.epilogue_sources);
+    assert!(from_serde.numeric.bf16_input_rounding);
 
     let serialized = toml::to_string(&from_serde).expect("runtime config serializes");
     let serde_round_trip: RuntimeConfig =
@@ -487,6 +496,7 @@ fn runtime_config_numeric_permissions_round_trip_independently() {
     let mut environment = CLEAN_ENVIRONMENT;
     environment[4].1 = Some("true");
     environment[8].1 = Some("true");
+    environment[30].1 = Some("true");
     let scoped: Vec<_> = environment.into_iter().collect();
     temp_env::with_vars(scoped, || {
         let from_settings = RuntimeConfig::from_env().expect("numeric Settings parses");
@@ -497,7 +507,8 @@ fn runtime_config_numeric_permissions_round_trip_independently() {
         .with_numeric(
             NumericPolicy::bit_exact()
                 .with_contraction(true)
-                .with_approx_functions(true),
+                .with_approx_functions(true)
+                .with_bf16_input_rounding(true),
         )
         .build()
         .expect("numeric builder config validates");
