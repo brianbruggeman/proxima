@@ -676,9 +676,3 @@ parallel_sequences = 1
 max_in_flight = 1
 warmup_runs = 1
 measurement_runs = 5
-
-[experimental]
-# Default-off compile gate for native Float16/BFloat16 dense tiled lowering.
-# Set OMEGA_EXPERIMENTAL_DENSE_FLOAT_STORAGE=1 only for an explicitly enabled
-# experimental build.
-dense_float_storage = 0

@@ -218,9 +218,9 @@ use proxima_telemetry::trace;
 use objc2_metal::{MTLCounterSampleBuffer, MTLCounterSet};
 #[cfg(feature = "instrument")]
 use proxima_tensor::apply_repeat_nodes;
+use proxima_tensor::bind_unfused;
 #[cfg(not(feature = "top-fraction-fusion"))]
 use proxima_tensor::bind_with_fusion;
-use proxima_tensor::bind_unfused;
 #[cfg(feature = "top-fraction-fusion")]
 use proxima_tensor::bind_with_top_fraction;
 #[cfg(feature = "twin-elementwise-fusion")]
@@ -238,15 +238,15 @@ use proxima_tensor::{
     resolve_named_blocks,
 };
 
+use crate::config::{ResourceConstraints, RuntimeConfig};
 #[cfg(feature = "instrument")]
 use crate::emit;
-use crate::config::{ResourceConstraints, RuntimeConfig};
 use crate::error::EmitError;
 #[cfg(feature = "instrument")]
 use crate::msl::diagnose_packed_row_block;
 use crate::msl::{
-    device_scalar_token, gather_count, kernel_cache_key, kernel_cache_key_for_grid,
-    kernel_dispatch_shape, kernel_dispatch_shape_with_schedule, reduction_dims,
+    device_scalar_token, gather_count, kernel_dispatch_shape, kernel_dispatch_shape_with_schedule,
+    reduction_dims,
 };
 #[cfg(feature = "metal-plan-stable-buffers")]
 use crate::sized::ARENA_TRANSIENT_CAP;
@@ -257,7 +257,7 @@ use crate::{Binding, Codec, GridSpec, Kernel, PackedOperands};
 #[macro_use]
 mod device_buffers_arena_plan;
 mod configured;
-pub use configured::plan_named_with_config;
+pub use configured::{plan_named_with_config, plan_named_with_config_and_placed_inputs};
 #[macro_use]
 mod execute_and_hazards;
 #[macro_use]
@@ -271,8 +271,8 @@ mod pipeline_buffers_upload;
 mod pipeline_disk_cache;
 #[macro_use]
 mod resident_nocopy_cache;
-mod resident_context;
 mod env_flags;
+mod resident_context;
 mod warm_resident_buffers;
 #[macro_use]
 mod arena_encode_dispatch_finish;
@@ -290,11 +290,11 @@ pub use device_buffers_arena_plan::*;
 pub use dispatch_timed_and_classify::*;
 pub use execute_and_hazards::*;
 pub use pipeline_buffers_upload::*;
-pub use resident_context::{ResidentContext, ResidentContextGuard};
 use pipeline_disk_cache::*;
 pub use pipeline_disk_cache::{pipeline_disk_cache_counts, set_runtime_config};
 pub use placements_execute_named::*;
 use prepare_uniforms_pack::*;
+pub use resident_context::{ResidentContext, ResidentContextGuard};
 pub use resident_nocopy_cache::*;
 pub use warm_resident_buffers::warm_resident_buffers;
 

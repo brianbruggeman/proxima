@@ -12,21 +12,79 @@ pub fn plan_named_with_config(
     outputs: &[NodeId],
     config: &RuntimeConfig,
 ) -> Result<Plan, MetalError> {
+    plan_named_with_config_and_placed_inputs(
+        program,
+        symbols,
+        named,
+        outputs,
+        config,
+        &[],
+        false,
+        true,
+    )
+}
+
+/// prepares a configured plan whose selected inputs are already device resident.
+pub fn plan_named_with_config_and_placed_inputs(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+    config: &RuntimeConfig,
+    placed_input_nodes: &[NodeId],
+    has_output_placements: bool,
+    fuse_cached_attention: bool,
+) -> Result<Plan, MetalError> {
     config
         .validate()
         .map_err(|error| MetalError::CompileFailed {
             log: error.to_string(),
         })?;
-    let blocks = resolve_named_blocks(program, named)?;
+    let blocks = super::placements_execute_named::resolve_named_blocks_with_placed_nodes(
+        program,
+        named,
+        |node| placed_input_nodes.contains(&node),
+    )?;
+    if (!placed_input_nodes.is_empty() || has_output_placements)
+        && (config.constraints.max_host_tensor_bytes.is_some()
+            || config.constraints.max_device_buffer_bytes.is_some()
+            || config.constraints.max_single_device_buffer_bytes.is_some())
+    {
+        return Err(MetalError::UnsupportedConstraint {
+            field: "constraints",
+            reason: "configured placement plans require a physical census of caller-owned buffers",
+        });
+    }
+    let numeric_policy = match config.dense_mma_input_layout {
+        crate::config::DenseMmaInputLayout::Auto | crate::config::DenseMmaInputLayout::BF16 => {
+            config.numeric.with_bf16_input_rounding(true)
+        }
+        crate::config::DenseMmaInputLayout::F32 => config.numeric,
+    };
     let prepared = prepare_with_options(
         program,
         symbols,
         &blocks,
         outputs,
-        (config.numeric, true, config.allow_fusion),
-        &[],
+        (numeric_policy, fuse_cached_attention, config.allow_fusion),
+        placed_input_nodes,
     )?;
-    let mut plan = plan_from_prepared(program, symbols, prepared, config.numeric);
+    let mut plan = plan_from_prepared(program, symbols, prepared, numeric_policy);
+    let has_dense_bf16_candidate = plan.prepared.resolved.iter().any(|bound| {
+        crate::msl::has_dense_bf16_mma_candidate(bound, &plan.packed_operands, plan.numeric_policy)
+    });
+    if config.dense_mma_input_layout == crate::config::DenseMmaInputLayout::F32
+        && has_dense_bf16_candidate
+    {
+        return Err(MetalError::CompileFailed {
+            log: "dense_mma_input_layout=f32 cannot widen bfloat16 operands; select auto or bf16"
+                .to_string(),
+        });
+    }
+    plan.dense_mma_input_layout = match config.dense_mma_input_layout {
+        crate::config::DenseMmaInputLayout::Auto => None,
+        selected => Some(selected.float_layout()),
+    };
     plan.configured_input_contract = blocks
         .iter()
         .map(input_contract)

@@ -5,6 +5,7 @@
 //! and has no environment or file access.
 
 use conflaguration::{FromEnvStr, Settings, Validate, ValidationMessage};
+use proxima_primitives::float_layout::FloatLayout;
 use proxima_tensor::NumericPolicy;
 use serde::{Deserialize, Serialize};
 use std::error::Error as StdError;
@@ -85,6 +86,9 @@ pub struct RuntimeConfig {
     /// Existing numeric permissions shared with binding and emission, such as contraction for an MMA path.
     #[setting(nested)]
     pub numeric: NumericPolicy,
+    /// Dense matrix fragment layout; `auto` follows stored operands and grants BF16 input rounding through NumericPolicy.
+    #[setting(default)]
+    pub dense_mma_input_layout: DenseMmaInputLayout,
     /// Hard byte ceilings enforced by payload allocation owners, such as a 4 KiB device-buffer cap.
     #[setting(nested)]
     pub constraints: ResourceConstraints,
@@ -117,11 +121,63 @@ impl Default for RuntimeConfig {
             weight_conversion: WeightConversionStrategy::default(),
             moe_grouping: true,
             numeric: NumericPolicy::bit_exact(),
+            dense_mma_input_layout: DenseMmaInputLayout::default(),
             constraints: ResourceConstraints::default(),
             selection: SelectionConfig::default(),
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DenseMmaInputLayout {
+    #[default]
+    Auto,
+    F32,
+    BF16,
+}
+
+impl DenseMmaInputLayout {
+    #[must_use]
+    pub const fn float_layout(self) -> FloatLayout {
+        match self {
+            Self::Auto | Self::F32 => FloatLayout::BF32,
+            Self::BF16 => FloatLayout::BF16,
+        }
+    }
+}
+
+impl FromEnvStr for DenseMmaInputLayout {
+    type Err = DenseMmaInputLayoutParseError;
+
+    fn from_env_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "f32" => Ok(Self::F32),
+            "bf16" => Ok(Self::BF16),
+            _ => Err(DenseMmaInputLayoutParseError(value.to_owned())),
+        }
+    }
+
+    fn type_name() -> &'static str {
+        "DenseMmaInputLayout"
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DenseMmaInputLayoutParseError(String);
+
+impl fmt::Display for DenseMmaInputLayoutParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "unknown value '{}'; expected auto|f32|bf16",
+            self.0
+        )
+    }
+}
+
+impl StdError for DenseMmaInputLayoutParseError {}
 
 impl Validate for RuntimeConfig {
     fn validate(&self) -> conflaguration::Result<()> {
@@ -705,7 +761,7 @@ impl RuntimeConfigBuilder {
 mod tests {
     use super::*;
 
-    const POLICY_VARIABLES: [&str; 7] = [
+    const POLICY_VARIABLES: [&str; 8] = [
         "OMEGA_ENGINE",
         "OMEGA_GPU_DRIVER",
         "OMEGA_ALLOW_FUSION",
@@ -713,6 +769,7 @@ mod tests {
         "OMEGA_PIPELINE_CACHE",
         "OMEGA_PIPELINE_CACHE_DIR",
         "OMEGA_PIPELINE_CACHE_MAX_BYTES",
+        "OMEGA_DENSE_MMA_INPUT_LAYOUT",
     ];
 
     #[test]
@@ -755,6 +812,29 @@ mod tests {
         assert!(!loaded.pipeline_cache);
         assert_eq!(loaded.pipeline_cache_dir, "/var/cache/omega-pipelines");
         assert_eq!(loaded.pipeline_cache_max_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn dense_mma_input_layout_is_selected_from_omega_variables() {
+        let variables: Vec<(&str, Option<&str>)> = POLICY_VARIABLES
+            .iter()
+            .map(|name| {
+                if *name == "OMEGA_DENSE_MMA_INPUT_LAYOUT" {
+                    (*name, Some("bf16"))
+                } else {
+                    (*name, None)
+                }
+            })
+            .collect();
+
+        let loaded = temp_env::with_vars(variables, RuntimeConfig::from_env)
+            .expect("the dense MMA input layout must parse");
+
+        assert_eq!(loaded.dense_mma_input_layout, DenseMmaInputLayout::BF16);
+        assert_eq!(
+            loaded.dense_mma_input_layout.float_layout(),
+            FloatLayout::BF16
+        );
     }
 }
 

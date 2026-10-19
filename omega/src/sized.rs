@@ -94,8 +94,6 @@
 //! - [`RUNTIME_CPU_WORKERS`], [`RUNTIME_INDEPENDENT_OPS`],
 //!   [`RUNTIME_PARALLEL_SEQUENCES`] and [`RUNTIME_MAX_IN_FLIGHT`] — generated
 //!   resource floors shared by runtime configuration and alloc-tier callers.
-//! - `omega_dense_float_storage` — build-time cfg emitted only when
-//!   `[experimental].dense_float_storage` resolves to 1.
 //! - `CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES` (always compiled) —
 //!   Metal's per-threadgroup `threadgroup` memory ceiling; `crate::msl::
 //!   effective_context_chunk_cap` clamps `ATTENTION_CONTEXT_CHUNK_CAP`
