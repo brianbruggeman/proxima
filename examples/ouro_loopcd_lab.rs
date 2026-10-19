@@ -221,7 +221,6 @@ mod runner {
                 || samples > 5
                 || max_new_tokens != 1
                 || omega_config_path.is_none()
-                || panel.is_some()
                 || panel_cases.as_ref().is_none_or(|cases| cases.len() != 1)
                 || explicit_prefix
                 || method.is_some()
@@ -310,7 +309,7 @@ mod runner {
                 "panel mode cannot combine with original prefix, controls, inventory or backend comparison modes; --panel-cases requires --panel or --cached-probe",
             ));
         }
-        if panel.is_some() && samples < 2 {
+        if panel.is_some() && samples < 2 && !cached_probe {
             return Err(io::Error::other("panel mode requires at least two samples"));
         }
         if !matches!(backend.as_str(), "cpu" | "metal")
