@@ -1,4 +1,5 @@
 use super::*;
+use proxima_primitives::float_layout::FloatLayout;
 
 #[cfg(feature = "instrument")]
 use sha2::{Digest, Sha256};
@@ -269,6 +270,7 @@ fn audit_pipeline_key_on_hit(
     packed_operands: &PackedOperands,
     cache_key: &str,
     numeric_policy: NumericPolicy,
+    dense_mma_input_layout: FloatLayout,
     attention_mma_selection: crate::msl::AttentionMmaSelection,
     attention_row_schedule: crate::msl::AttentionRowSchedule,
 ) -> Result<(), MetalError> {
@@ -284,13 +286,14 @@ fn audit_pipeline_key_on_hit(
     let Some(recorded) = recorded else {
         return Ok(());
     };
-    let kernel = crate::msl::emit_inner_with_mma_selection(
+    let kernel = crate::msl::emit_inner_with_mma_selection_and_layout(
         bound,
         packed_operands,
         numeric_policy,
         false,
         attention_mma_selection,
         attention_row_schedule,
+        dense_mma_input_layout,
     )?;
     let recomputed_sha256 = sha256_hex(kernel.source.as_bytes());
     super::device_buffers_arena_plan::PIPELINE_KEY_AUDIT_AUDITED
@@ -357,6 +360,7 @@ pub(super) fn pipeline_for(
     cache_key: &str,
     math_mode: MathMode,
     numeric_policy: NumericPolicy,
+    dense_mma_input_layout: FloatLayout,
     attention_mma_selection: crate::msl::AttentionMmaSelection,
     attention_row_schedule: crate::msl::AttentionRowSchedule,
 ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
@@ -386,6 +390,7 @@ pub(super) fn pipeline_for(
             packed_operands,
             cache_key,
             numeric_policy,
+            dense_mma_input_layout,
             attention_mma_selection,
             attention_row_schedule,
         )?;
@@ -420,13 +425,14 @@ pub(super) fn pipeline_for(
     }
     #[cfg(feature = "instrument")]
     let compile_started = read_ticks();
-    let kernel = crate::msl::emit_inner_with_mma_selection(
+    let kernel = crate::msl::emit_inner_with_mma_selection_and_layout(
         bound,
         packed_operands,
         numeric_policy,
         false,
         attention_mma_selection,
         attention_row_schedule,
+        dense_mma_input_layout,
     )?;
     if env_flags::debug_metal_source() && env_flags::compare_bound_node() == Some(bound.node) {
         eprintln!(

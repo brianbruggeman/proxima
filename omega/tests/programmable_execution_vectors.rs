@@ -153,7 +153,7 @@ fn execute_literal(
         records[0].selected,
         "configured candidate must be identified"
     );
-    if backend == "metal" && cfg!(omega_dense_float_storage) {
+    if backend == "metal" && rows >= 160 {
         assert!(
             records[0]
                 .kernel_identities

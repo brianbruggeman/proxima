@@ -18,6 +18,7 @@
 //! codec into the name at all, so two operands differing only in codec would
 //! share one cached WGSL pipeline (`wgpu_driver::pipeline_for` keys on the
 //! entry string alone).
+
 //!
 //! [`kernel_identity`] is the one place that now folds in the WHOLE union of
 //! axes any renderer's body text can vary on: op kind, rank, operand count,
@@ -39,6 +40,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_primitives::Codec;
+use proxima_primitives::float_layout::FloatLayout;
 use proxima_tensor::{
     BoundOp, ComposedBody, Keep, Layout, Lookup, NodeId, NumericPolicy, ReduceInit, ScalarOp,
     StepArg,
@@ -88,6 +90,8 @@ pub(crate) enum KernelLanguage {
     expect(dead_code, reason = "fields feed kernel_identity, absent on this tier")
 )]
 pub(crate) struct MetalOnlyExtras {
+    /// Dense-MMA input layout that changes the generated operand fragments.
+    pub dense_mma_input_layout: Option<FloatLayout>,
     /// `tiled_gemm_threadgroup_width`'s return for this op — bakes literally
     /// into `render_reduce`'s lane-index/stride/tail-fold source text, so
     /// two ops agreeing on every other axis but picking a different width
@@ -132,7 +136,7 @@ pub(crate) struct MetalOnlyExtras {
     pub operand_aliases: Option<String>,
     /// [`numeric_policy_cache_token`] for the `Plan` compiling this op —
     /// folded in here instead of `MathMode::cache_token()` (what this field
-    /// held before): `NumericPolicy` is a 5-bit independent permission set,
+    /// held before): `NumericPolicy` is an independent permission set,
     /// not a total order, so no single `MathMode` value can stand in for
     /// it (`metal::numeric_policy_as_metal_math_mode` maps many distinct
     /// permission sets onto the same 3-rung `MathMode`). This subsumes the
@@ -358,7 +362,7 @@ pub(crate) struct MetalOnlyExtras {
 }
 
 /// `numeric_policy`'s two-hex-digit identity token — one bit per
-/// permission (`proxima_tensor::NumericPolicy`'s own five `pub bool`
+/// permission (`proxima_tensor::NumericPolicy`'s own eight `pub bool`
 /// fields), rendered via a const lookup table (no `alloc`, no `format!`) so
 /// two `Plan`s agreeing on every structural field but compiled under
 /// different permission sets never share a `PIPELINE_CACHE` entry
@@ -386,6 +390,15 @@ pub(crate) const fn numeric_policy_cache_token(policy: NumericPolicy) -> [u8; 2]
     }
     if policy.approx_functions {
         bits |= 0b0001_0000;
+    }
+    if policy.epilogue_sources {
+        bits |= 0b0010_0000;
+    }
+    if policy.activation_quantization {
+        bits |= 0b0100_0000;
+    }
+    if policy.bf16_input_rounding {
+        bits |= 0b1000_0000;
     }
     [HEX[(bits >> 4) as usize], HEX[(bits & 0x0f) as usize]]
 }
@@ -923,6 +936,13 @@ mod gated {
             identity.push_str(&weight_operand.to_string());
             identity.push_str("_o");
             identity.push_str(&other_operand.to_string());
+            if let Some(layout) = metal.dense_mma_input_layout {
+                identity.push_str(match layout {
+                    FloatLayout::BF32 => "_mma_f32",
+                    FloatLayout::BF16 => "_mma_bf16",
+                    _ => "_mma_other",
+                });
+            }
         }
         if metal.tiled_gemm_wide_act_load {
             identity.push_str("_wal");
@@ -1006,6 +1026,16 @@ mod numeric_policy_cache_token_tests {
         assert_ne!(
             numeric_policy_cache_token(contraction_only),
             numeric_policy_cache_token(NumericPolicy::bit_exact())
+        );
+    }
+
+    #[test]
+    fn bf16_input_rounding_permission_changes_the_cache_token() {
+        let exact = NumericPolicy::llama_relaxed();
+        let rounded = exact.with_bf16_input_rounding(true);
+        assert_ne!(
+            numeric_policy_cache_token(exact),
+            numeric_policy_cache_token(rounded)
         );
     }
 }

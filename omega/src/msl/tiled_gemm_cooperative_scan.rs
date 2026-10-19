@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(all(feature = "metal-tiled-gemm", target_os = "macos"))]
+use proxima_primitives::float_layout::FloatLayout;
 
 /// `simdgroup_matrix`-tiled Q4_K x F32 GEMM (`docs/discipline.md` ROW 109,
 /// superseding ROW 107's single-simdgroup design) -- ports
@@ -1455,12 +1457,18 @@ pub(super) fn push_dense_batched_gemm_body(
         source.push_str("    long col_half = sgitg >> 1;\n");
     }
     // see `push_tiled_gemm_body`'s own doc for why this aliasing is safe.
-    let dense_element_type = "float";
-    let dense_value_cast = "";
-    let dense_zero_literal = "0.0f";
-    let dense_simdgroup_type = "simdgroup_float8x8";
+    let bf16_mma = metal.dense_mma_input_layout == Some(FloatLayout::BF16);
+    let dense_element_type = if bf16_mma { "bfloat" } else { "float" };
+    let dense_value_cast = if bf16_mma { "bfloat(" } else { "" };
+    let dense_value_cast_close = if bf16_mma { ")" } else { "" };
+    let dense_zero_literal = if bf16_mma { "bfloat(0.0f)" } else { "0.0f" };
+    let dense_simdgroup_type = if bf16_mma {
+        "simdgroup_bfloat8x8"
+    } else {
+        "simdgroup_float8x8"
+    };
     let slim_tgmem_active = metal.tiled_gemm_slim_tgmem;
-    let dense_element_bytes = 4u64;
+    let dense_element_bytes = if bf16_mma { 2u64 } else { 4u64 };
     let weight_tile_bytes = weight_tile_elems * dense_element_bytes;
     let act_tile_bytes = act_tile_elems * dense_element_bytes;
     let out_tile_bytes = out_tile_elems * 4;
@@ -1521,9 +1529,18 @@ pub(super) fn push_dense_batched_gemm_body(
     source.push_str(&format!(
         "                for (int w_k = 0; w_k < {block_k}; ++w_k) {{\n"
     ));
+    let weight_read = if bf16_mma && weight_codec == Some(Codec::BFloat16) {
+        format!(
+            "as_type<bfloat>(ushort((ushort)in{weight}[((row_base + (long)w_k * w_stride) * 2)] | ((ushort)in{weight}[((row_base + (long)w_k * w_stride) * 2 + 1)] << 8)))"
+        )
+    } else {
+        format!(
+            "{dense_value_cast}{}{dense_value_cast_close}",
+            operand_read(weight, "(row_base + (long)w_k * w_stride)", weight_codec)
+        )
+    };
     source.push_str(&format!(
-        "                    w_regs[w_k] = (k0 + w_k < u.reduction_total) ? {dense_value_cast}{} : {dense_zero_literal};\n",
-        operand_read(weight, "(row_base + (long)w_k * w_stride)", weight_codec)
+        "                    w_regs[w_k] = (k0 + w_k < u.reduction_total) ? {weight_read} : {dense_zero_literal};\n"
     ));
     source.push_str("                }\n");
     source.push_str("                #pragma unroll\n");
@@ -1550,7 +1567,10 @@ pub(super) fn push_dense_batched_gemm_body(
         "            long a_tok = col_tile * {block_n} + a_col;\n"
     ));
     source.push_str("            long a_k_global = k0 + a_k;\n");
-    source.push_str("            float a_value = 0.0f;\n");
+    let activation_scalar_type = if bf16_mma { "bfloat" } else { "float" };
+    source.push_str(&format!(
+        "            {activation_scalar_type} a_value = {dense_zero_literal};\n"
+    ));
     // Same ragged-K guard as the weight tile load above -- `a_k_global` can
     // reach `u.reduction_total` on the last `k0` step when the dense reduce
     // extent is not a whole multiple of `block_k`.
@@ -1558,14 +1578,20 @@ pub(super) fn push_dense_batched_gemm_body(
     source.push_str(&format!(
         "                long aoff = u.operand_base[{other}] + dense_other_batch_base + a_tok * u.operand_strides[{other}][{token_axis}] + a_k_global * u.operand_strides[{other}][{reduce_dim}];\n"
     ));
-    source.push_str(&format!(
-        "                a_value = {};\n",
-        operand_read(other, "aoff", other_codec)
-    ));
+    if bf16_mma && other_codec == Some(Codec::BFloat16) {
+        source.push_str(&format!(
+            "                a_value = as_type<bfloat>(ushort((ushort)in{other}[aoff * 2] | ((ushort)in{other}[aoff * 2 + 1] << 8)));\n"
+        ));
+    } else {
+        source.push_str(&format!(
+            "                a_value = {dense_value_cast}{}{dense_value_cast_close};\n",
+            operand_read(other, "aoff", other_codec)
+        ));
+    }
     source.push_str("            }\n");
     let dense_act_index = format!("a_col * {block_k} + a_k");
     source.push_str(&format!(
-        "            act_tile[{dense_act_index}] = {dense_value_cast}a_value;\n"
+        "            act_tile[{dense_act_index}] = a_value;\n"
     ));
     source.push_str("        }\n");
     source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
@@ -1848,7 +1874,16 @@ pub(super) fn tiled_gemm_threadgroup_width_with_schedule(
         if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some() {
             return Some((TILED_GEMM_NSG as u64) * SIMD_WIDTH);
         }
-        if dense_batched_gemm_block(resolved, quantized, numeric_policy, *reduce_op, *init, output_axes).is_some() {
+        if dense_batched_gemm_block(
+            resolved,
+            quantized,
+            numeric_policy,
+            *reduce_op,
+            *init,
+            output_axes,
+        )
+        .is_some()
+        {
             return Some((TILED_GEMM_NSG as u64) * SIMD_WIDTH);
         }
         if let Some(block) = packed_row_block(resolved, quantized) {
@@ -2152,8 +2187,14 @@ pub(super) fn push_cooperative_reduce_body(
     // above by construction: `classify_dense_batched_gemm` requires BOTH
     // operands unquantized, `classify_tiled_gemm` requires exactly ONE
     // packed. Same preamble ownership as the arm above.
-    if let Some(block) = dense_batched_gemm_block(resolved, quantized, numeric_policy, reduce_op, init, output_axes)
-    {
+    if let Some(block) = dense_batched_gemm_block(
+        resolved,
+        quantized,
+        numeric_policy,
+        reduce_op,
+        init,
+        output_axes,
+    ) {
         push_dense_batched_gemm_body(
             source,
             resolved.node,

@@ -75,7 +75,11 @@ fn values(seed: u64, count: usize) -> Vec<f32> {
     (0..count)
         .map(|_| {
             let magnitude = 0.25 + 0.75 * lcg.next_unit().abs();
-            if lcg.next_unit() < 0.5 { -magnitude } else { magnitude }
+            if lcg.next_unit() < 0.5 {
+                -magnitude
+            } else {
+                magnitude
+            }
         })
         .collect()
 }
@@ -118,7 +122,8 @@ fn reference(weight: &[f32], activation: &[f32]) -> Vec<f64> {
         .map(|(token, feature)| {
             (0..k)
                 .map(|index| {
-                    f64::from(weight[feature * k + index]) * f64::from(activation[token * k + index])
+                    f64::from(weight[feature * k + index])
+                        * f64::from(activation[token * k + index])
                 })
                 .sum()
         })
@@ -155,7 +160,10 @@ fn run(policy: NumericPolicy, codecs: [Option<Codec>; 2]) -> (Vec<f32>, Vec<Stri
     let activation_bytes = codecs[1].map(|codec| pack(&activation, codec));
     let bindings = [
         ("weight", block(codecs[0], &weight_bytes, &weight)),
-        ("activation", block(codecs[1], &activation_bytes, &activation)),
+        (
+            "activation",
+            block(codecs[1], &activation_bytes, &activation),
+        ),
     ];
     let config = RuntimeConfig {
         engine: "gpu".into(),
@@ -176,14 +184,25 @@ fn assert_within_derived_bound(codecs: [Option<Codec>; 2]) {
     let weight = values(11, (FEATURES * REDUCTION) as usize);
     let activation = values(29, (TOKENS * REDUCTION) as usize);
     let expected = reference(&weight, &activation);
-    let bound = error_bound(&weight, &activation, codecs);
+    let effective_codecs = if codecs.contains(&Some(Codec::BFloat16)) {
+        [Some(Codec::BFloat16), Some(Codec::BFloat16)]
+    } else {
+        codecs
+    };
+    let bound = error_bound(&weight, &activation, effective_codecs);
 
     let (actual, identities) = run(NumericPolicy::llama_relaxed(), codecs);
-    let dense_tiled = identities.iter().any(|identity| identity.contains("_dbg"));
-    assert_eq!(
+    let expected_fragment = if codecs.contains(&Some(Codec::BFloat16)) {
+        "_mma_bf16"
+    } else {
+        "_mma_f32"
+    };
+    let dense_tiled = identities
+        .iter()
+        .any(|identity| identity.contains("_dbg") && identity.contains(expected_fragment));
+    assert!(
         dense_tiled,
-        cfg!(omega_dense_float_storage) || codecs == [None, None],
-        "dense tiled admission must follow the float-storage gate: {identities:?}"
+        "dense tiled admission must not depend on the build-time float-storage gate: {identities:?}"
     );
     let ratio = worst_ratio(&actual, &expected, &bound);
     println!(
@@ -247,5 +266,8 @@ fn programmable_tiled_bit_exact_policy_declines_the_tiled_kernel() {
         &reference(&weight, &activation),
         &error_bound(&weight, &activation, codecs),
     );
-    assert!(ratio <= 1.0, "fallback error exceeded the derived bound: {ratio}");
+    assert!(
+        ratio <= 1.0,
+        "fallback error exceeded the derived bound: {ratio}"
+    );
 }

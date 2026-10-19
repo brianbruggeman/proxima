@@ -1,6 +1,7 @@
 use super::*;
 #[cfg(feature = "instrument")]
 use objc2_metal::MTLBlitCommandEncoder;
+use proxima_primitives::float_layout::FloatLayout;
 #[cfg(feature = "instrument")]
 use std::borrow::Borrow;
 /// CARD 6.5: device output arena, hung off the cached [`Plan`] and built
@@ -894,6 +895,7 @@ pub(super) fn resolve_step(
     bound: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    configured_dense_mma_input_layout: Option<FloatLayout>,
     math_mode: MathMode,
     attention_mma_selection: crate::msl::AttentionMmaSelection,
     attention_row_schedule: crate::msl::AttentionRowSchedule,
@@ -904,7 +906,15 @@ pub(super) fn resolve_step(
         numeric_policy,
         attention_row_schedule,
     )?;
-    let mut cache_key = kernel_cache_key_for_grid(bound, packed_operands, numeric_policy, &grid)?;
+    let dense_mma_input_layout = configured_dense_mma_input_layout
+        .unwrap_or_else(|| crate::msl::default_dense_mma_input_layout(bound, packed_operands));
+    let mut cache_key = crate::msl::kernel_cache_key_for_grid_with_layout(
+        bound,
+        packed_operands,
+        numeric_policy,
+        &grid,
+        dense_mma_input_layout,
+    )?;
     cache_key.push(math_mode.cache_token());
     cache_key.push_str(attention_mma_selection.cache_token_for(bound));
     cache_key.push_str(&attention_row_schedule.cache_token_for(bound));
@@ -939,6 +949,7 @@ pub(super) fn resolve_step(
         &cache_key,
         math_mode,
         numeric_policy,
+        dense_mma_input_layout,
         attention_mma_selection,
         attention_row_schedule,
     )?;
@@ -979,6 +990,7 @@ pub(super) fn resolve_step(
     };
     Ok(ResolvedStep {
         pipeline,
+        dense_mma_input_layout,
         bindings,
         grid,
         merge,
@@ -1064,6 +1076,7 @@ fn refit_steps(
                 bound,
                 &plan.packed_operands,
                 plan.numeric_policy,
+                plan.dense_mma_input_layout,
                 plan.math_mode,
                 plan.attention_mma_selection,
                 plan.attention_row_schedule,
@@ -1149,6 +1162,7 @@ pub(super) fn resolve_steps(
             bound,
             &plan.packed_operands,
             plan.numeric_policy,
+            plan.dense_mma_input_layout,
             plan.math_mode,
             plan.attention_mma_selection,
             plan.attention_row_schedule,
@@ -2694,7 +2708,12 @@ impl CapturedDispatch {
     /// over the same pipeline and buffers, so the launch API is the only
     /// variable between this record and the one it was made from.
     #[must_use]
-    pub fn with_threadgroup_launch(mut self, threadgroups: u64, width_x: u64, width_y: u64) -> Self {
+    pub fn with_threadgroup_launch(
+        mut self,
+        threadgroups: u64,
+        width_x: u64,
+        width_y: u64,
+    ) -> Self {
         self.grid.grid2d = Some(crate::msl::Grid2DSpec {
             form: crate::msl::Grid2DForm::FlatThreadgroupIndex,
             threadgroups_x: threadgroups,
@@ -3527,6 +3546,10 @@ pub(super) fn encode_op(
     // route share the first one's compaction instead of each running a prepass.
     route_compactions: Option<&mut RouteCompactions>,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
+    let dense_mma_input_layout = resolved.map_or_else(
+        || crate::msl::default_dense_mma_input_layout(bound, packed_operands),
+        |step| step.dense_mma_input_layout,
+    );
     let expert_source_node = match expert_buffers {
         None => None,
         Some(expert_buffers) => bound
@@ -3596,8 +3619,13 @@ pub(super) fn encode_op(
         } else if let Some(source_node) = expert_source_node {
             let (binding_identity, grid) =
                 kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
-            let mut cache_key =
-                kernel_cache_key_for_grid(bound, packed_operands, numeric_policy, &grid)?;
+            let mut cache_key = crate::msl::kernel_cache_key_for_grid_with_layout(
+                bound,
+                packed_operands,
+                numeric_policy,
+                &grid,
+                dense_mma_input_layout,
+            )?;
             cache_key.push(math_mode.cache_token());
             cache_key.push_str(attention_mma_selection.cache_token_for(bound));
             cache_key.push_str(&attention_row_schedule.cache_token_for(bound));
@@ -3675,8 +3703,13 @@ pub(super) fn encode_op(
             // called; only a genuine miss inside `pipeline_for` pays for the
             // full render + compile.
             let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
-            let mut cache_key =
-                kernel_cache_key_for_grid(bound, packed_operands, numeric_policy, &grid)?;
+            let mut cache_key = crate::msl::kernel_cache_key_for_grid_with_layout(
+                bound,
+                packed_operands,
+                numeric_policy,
+                &grid,
+                dense_mma_input_layout,
+            )?;
             cache_key.push(math_mode.cache_token());
             cache_key.push_str(attention_mma_selection.cache_token_for(bound));
             cache_key.push_str(&attention_row_schedule.cache_token_for(bound));
@@ -3694,6 +3727,7 @@ pub(super) fn encode_op(
                 &cache_key,
                 math_mode,
                 numeric_policy,
+                dense_mma_input_layout,
                 attention_mma_selection,
                 attention_row_schedule,
             )?;
