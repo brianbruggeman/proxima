@@ -253,7 +253,7 @@ impl<'checkpoint> Model<'checkpoint> {
             "numeric_policy":"f32 activation arithmetic; author BF16 intermediate rounding not reproduced",
             "backend_numeric_policy":self.runtime_config.as_ref().map_or(NumericPolicy::bit_exact(), |config| config.numeric),
             "omega_config":self.runtime_config, "execution_owner":"proxima_model_interop::LoadedModel",
-            "build_dense_float_storage":omega::sized::DENSE_FLOAT_STORAGE_ENABLED,
+            "dense_mma_input_layout":self.runtime_config.as_ref().map(|config| format!("{:?}", config.dense_mma_input_layout)),
             "build_tiled_min_tokens":omega::sized::DENSE_TILED_MIN_TOKENS,
             "prefix_ids":self.prefix, "positions":self.prefix.len(), "depth":arm.depth,
             "strength":arm.strength(), "method":arm.guidance.name(), "arm":arm.name,

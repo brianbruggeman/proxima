@@ -171,10 +171,8 @@ mod configured_runtime_tests {
     }
 
     #[test]
-    fn configured_runtime_refuses_placements_and_wrong_identity() {
-        reject_configured_placements(None).expect("legacy placement");
+    fn configured_runtime_identity_rejects_wrong_backend_or_numeric_policy() {
         let config = RuntimeConfig::default();
-        assert!(reject_configured_placements(Some(&config)).is_err());
         let wrong = ServingConfig {
             gpu_layers: -1,
             omega_runtime: Some(&config),
@@ -229,12 +227,21 @@ mod configured_runtime_tests {
     }
 }
 
-#[cfg(any(test, all(feature = "metal-output-placement", target_os = "macos")))]
-#[cfg(feature = "gpu")]
-fn reject_configured_placements(config: Option<&RuntimeConfig>) -> Result<(), InteropError> {
-    if config.is_some() {
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+fn reject_bounded_placed_execution(
+    config: Option<&RuntimeConfig>,
+    input_placements: &[(NodeId, &PlacedBuffer, usize)],
+    output_placements: &[(NodeId, &PlacedBuffer, usize)],
+) -> Result<(), InteropError> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let bounded = config.constraints.max_host_tensor_bytes.is_some()
+        || config.constraints.max_device_buffer_bytes.is_some()
+        || config.constraints.max_single_device_buffer_bytes.is_some();
+    if bounded && (!input_placements.is_empty() || !output_placements.is_empty()) {
         return Err(InteropError::UnsupportedServingConfig(String::from(
-            "configured omega planning does not yet own external placement scratch; refusing before placed plan construction",
+            "configured omega resource ceilings cannot account for caller-owned placement buffers",
         )));
     }
     Ok(())
@@ -2546,7 +2553,7 @@ pub(super) fn select_backend(config: &ServingConfig) -> Engine {
 /// `too_many_arguments` threshold without an `#[allow]`.
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct PlanNumerics {
+pub(super) struct PlanNumerics<'config> {
     pub(super) math_mode: omega::metal::MathMode,
     pub(super) numeric_policy: proxima_tensor::NumericPolicy,
     pub(super) dispatch_type: omega::metal::DispatchType,
@@ -2567,6 +2574,7 @@ pub(super) struct PlanNumerics {
     /// [`PlanNumerics`] with `false` to render the unfused chain for the
     /// same program/outputs.
     pub(super) fuse_cached_attention: bool,
+    pub(super) omega_runtime: Option<&'config RuntimeConfig>,
 }
 
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -3588,10 +3596,14 @@ impl BackendRuntime {
         resident_names: &BTreeSet<&str>,
         bindings: &SegmentMetalBindings<'_, '_>,
     ) -> Result<Evaluated, InteropError> {
+        reject_bounded_placed_execution(
+            self.omega_runtime.as_ref(),
+            bindings.input_placements,
+            bindings.output_placements,
+        )?;
         let program_key = program.as_ptr() as usize;
         let new_count = symbols.first().copied().unwrap_or_default() as usize;
         let kv_bound_extent = symbols.get(1).copied().unwrap_or_default() as usize;
-        reject_configured_placements(self.omega_runtime.as_ref())?;
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -3601,6 +3613,7 @@ impl BackendRuntime {
             plan_time_constants: self.plan_time_constants,
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
+            omega_runtime: self.omega_runtime.as_ref(),
         };
         let plan = Self::resolve_segment_plan(
             &mut self.placed_segment_plans,
@@ -3621,6 +3634,7 @@ impl BackendRuntime {
                     outputs,
                     resident_names,
                     bindings.input_placements,
+                    bindings.output_placements,
                     &numerics,
                 )
             },
@@ -3652,6 +3666,11 @@ impl BackendRuntime {
             input_placements,
             output_placements,
         } = placements;
+        reject_bounded_placed_execution(
+            self.omega_runtime.as_ref(),
+            input_placements,
+            output_placements,
+        )?;
         let shape = (
             program.as_ptr() as usize,
             symbols.first().copied().unwrap_or_default() as usize,
@@ -3659,7 +3678,6 @@ impl BackendRuntime {
             outputs.to_vec(),
             self.numeric_policy.epilogue_sources,
         );
-        reject_configured_placements(self.omega_runtime.as_ref())?;
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -3669,6 +3687,7 @@ impl BackendRuntime {
             plan_time_constants: self.plan_time_constants,
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
+            omega_runtime: self.omega_runtime.as_ref(),
         };
         let plan = Self::resolve_segment_plan(
             &mut self.placed_segment_plans,
@@ -3683,6 +3702,7 @@ impl BackendRuntime {
                     outputs,
                     resident_names,
                     input_placements,
+                    output_placements,
                     &numerics,
                 )
             },
@@ -3722,13 +3742,17 @@ impl BackendRuntime {
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
         expert_sources: Option<&BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>>,
     ) -> Result<Evaluated, InteropError> {
+        reject_bounded_placed_execution(
+            self.omega_runtime.as_ref(),
+            input_placements,
+            output_placements,
+        )?;
         let shape = (
             symbols[0] as usize,
             symbols[1] as usize,
             outputs.to_vec(),
             self.numeric_policy.epilogue_sources,
         );
-        reject_configured_placements(self.omega_runtime.as_ref())?;
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -3738,6 +3762,7 @@ impl BackendRuntime {
             plan_time_constants: self.plan_time_constants,
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
+            omega_runtime: self.omega_runtime.as_ref(),
         };
         let decode_shaped = shape.0 == 1;
         let budget = self.resident_prefill_plan_bytes;
@@ -3791,6 +3816,7 @@ impl BackendRuntime {
                 outputs,
                 resident_names,
                 input_placements,
+                output_placements,
                 &numerics,
             )
         };
@@ -3931,19 +3957,33 @@ impl BackendRuntime {
         outputs: &[NodeId],
         resident_names: &BTreeSet<&str>,
         input_placements: &[(NodeId, &PlacedBuffer, usize)],
-        numerics: &PlanNumerics,
+        output_placements: &[(NodeId, &PlacedBuffer, usize)],
+        numerics: &PlanNumerics<'_>,
     ) -> Result<omega::metal::Plan, InteropError> {
         let placed_input_nodes: Vec<NodeId> =
             input_placements.iter().map(|(node, _, _)| *node).collect();
-        let mut plan = plan_named_with_placed_inputs(
-            program,
-            symbols,
-            named,
-            outputs,
-            numerics.numeric_policy,
-            &placed_input_nodes,
-            numerics.fuse_cached_attention,
-        )?;
+        let mut plan = if let Some(config) = numerics.omega_runtime {
+            omega::metal::plan_named_with_config_and_placed_inputs(
+                program,
+                symbols,
+                named,
+                outputs,
+                config,
+                &placed_input_nodes,
+                !output_placements.is_empty(),
+                numerics.fuse_cached_attention,
+            )?
+        } else {
+            plan_named_with_placed_inputs(
+                program,
+                symbols,
+                named,
+                outputs,
+                numerics.numeric_policy,
+                &placed_input_nodes,
+                numerics.fuse_cached_attention,
+            )?
+        };
         plan.mark_resident(resident_names);
         if numerics.plan_time_constants {
             plan.mark_plan_time_constants_resident();
@@ -3995,13 +4035,17 @@ impl BackendRuntime {
         input_placements: &[(NodeId, &PlacedBuffer, usize)],
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
     ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
+        reject_bounded_placed_execution(
+            self.omega_runtime.as_ref(),
+            input_placements,
+            output_placements,
+        )?;
         let shape = (
             symbols[0] as usize,
             symbols[1] as usize,
             outputs.to_vec(),
             self.numeric_policy.epilogue_sources,
         );
-        reject_configured_placements(self.omega_runtime.as_ref())?;
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -4011,6 +4055,7 @@ impl BackendRuntime {
             plan_time_constants: self.plan_time_constants,
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
+            omega_runtime: self.omega_runtime.as_ref(),
         };
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
@@ -4025,6 +4070,7 @@ impl BackendRuntime {
                     outputs,
                     resident_names,
                     input_placements,
+                    output_placements,
                     &numerics,
                 )
             },
@@ -4076,13 +4122,17 @@ impl BackendRuntime {
         input_placements: &[(NodeId, &PlacedBuffer, usize)],
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
     ) -> Result<omega::metal::DispatchTimedOutcome, InteropError> {
+        reject_bounded_placed_execution(
+            self.omega_runtime.as_ref(),
+            input_placements,
+            output_placements,
+        )?;
         let shape = (
             symbols[0] as usize,
             symbols[1] as usize,
             outputs.to_vec(),
             self.numeric_policy.epilogue_sources,
         );
-        reject_configured_placements(self.omega_runtime.as_ref())?;
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -4092,6 +4142,7 @@ impl BackendRuntime {
             plan_time_constants: self.plan_time_constants,
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
+            omega_runtime: self.omega_runtime.as_ref(),
         };
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
@@ -4106,6 +4157,7 @@ impl BackendRuntime {
                     outputs,
                     resident_names,
                     input_placements,
+                    output_placements,
                     &numerics,
                 )
             },

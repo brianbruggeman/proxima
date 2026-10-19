@@ -37,25 +37,54 @@ projection site executed once per logical layer visit accounts for
 sites and attention work are additional; this count is not the whole-model
 FLOP total.
 
-## Omega lowering recorded in source and capture
+## Omega lowering: original behavior and configured BF16 path
 
-The current classifier rejects F16/BF16 dense operands when
-`omega_dense_float_storage` is absent (`omega/src/msl/emit_and_classify.rs`,
-lines 4407–4412). The checked-in runtime sizing config sets that build option
-to zero (`omega/omega-runtime.toml`, lines 680–684). The rejected operation
-continues through the cooperative-reduction renderer.
+The original classifier rejected F16/BF16 dense operands when
+`omega_dense_float_storage` was absent. That gate has been removed from dense
+float operand admission. `RuntimeConfig::dense_mma_input_layout` now has
+`auto`, `f32`, and `bf16` choices. `auto` selects BF16 fragments per bound
+operation when it reads a BF16 operand, otherwise F32. A BF16 projection does
+not narrow unrelated F32 dense operations in the same plan. Explicit `f32`
+with a BF16 block is refused during plan construction so a BF16 weight cannot
+silently widen into F32 MMA. The selected layout flows through `resolve_step`,
+MSL emission, and pipeline identity.
 
-The recorded gate-off dispatch for this shape used the generic reduce entry
-`omega_reduce_r3_o2_n2_multiply_add_zero`. The gate-on dispatch rendered a
-simdgroup matrix body, but still used `float` staging, 4-byte tile elements,
-and `simdgroup_float8x8` (`omega/src/msl/tiled_gemm_cooperative_scan.rs`,
-lines 1458–1467). Its BF16 accessor calls `bf16_element`, which produces
-`float` (`omega/src/msl/signature_tokens_prelude.rs`, lines 1111–1116).
-Therefore the existing gate has two distinct effects to measure:
+Rounding an F32 activation to BF16 is a separate numerical rewrite from FMA
+contraction and reduction reassociation. `NumericRewrite::Bf16InputRounding`
+requires its own `NumericPolicy::bf16_input_rounding` permission. The configured
+planner derives that permission from `auto`/`bf16` fragment selection and
+passes it through the common `admit` check; direct emitters without that
+permission decline the BF16 dense tile. The permission is part of numeric
+kernel identity.
 
-1. Off: BF16 dense GEMM is refused and falls through to cooperative reduction.
-2. On: dense GEMM is tiled, but stored BF16 weights are decoded and staged as
-   F32; F32 activations remain F32.
+For BF16 selection, the dense tiled body stages `bfloat` values,
+`simdgroup_bfloat8x8` fragments, and an F32 accumulator. BF16 bytes are
+reassembled from the `uchar*` buffer ABI directly into a BF16 value. F32
+activations are rounded to BF16 at the staging boundary. This implements the
+following operation:
+
+```text
+A_bf16[b,k] = round_to_bf16(X_f32[b,k])
+W_bf16[n,k] = decode_bf16(stored_weight_bytes[n,k])
+Y_f32[b,n]  = f32_accumulate Σ(k=0..K-1) A_bf16[b,k] · W_bf16[n,k]
+```
+
+Worked boundary example: `X=1.00390625` is exactly halfway between BF16 `1.0`
+and the next BF16 value `1.0078125`; round-to-nearest-even selects `1.0`.
+With stored BF16 `W=2.0`, the device multiplies `1.0 × 2.0` and the F32
+accumulator receives `2.0`. The old F32-fragment path instead multiplies
+`1.00390625 × 2.0 = 2.0078125`. This difference is expected and must be
+covered by an output bound that includes activation rounding.
+
+The fragment format is included in dense kernel identity, so a pipeline built
+for F32 fragments cannot satisfy a BF16 plan. The old F32-fragment path remains
+available for plans whose input layout resolves to F32 and whose operands do
+not violate the BF16 no-widen contract.
+
+The BF16 device primitive passed a standalone MSL compile and M1 Max dispatch
+before this source change. That established native `bfloat` fragment support,
+not correctness or performance of Omega's generated kernel. The configured
+Omega device integration fixture is the first check of this lowering.
 
 With the configured tile sizes `M=64`, `N=32`, `K=32`, a 256 by 5632 output
 requires `ceil(5632/64) × ceil(256/32) = 704` output threadgroups per K
@@ -94,25 +123,60 @@ the tensor path is established as the kernel used for that timing.
 
 The symbolic `BoundOp` expresses the same contraction as the Llama matrix
 operation: one feature row of `W` dotted with each token row of `X`, producing
-`Y[b,n]`. The concrete gap visible in current Omega source is lowering policy
-and fragment/storage treatment: a default-off admission gate, followed when
-enabled by F32 fragments rather than the BF16 fragment specialization present
-in llama.cpp source. The algebra itself does not require a new Ouro-specific
-operation.
+`Y[b,n]`. The concrete gap in the earlier Omega lowering was fragment/storage
+treatment: a default-off admission gate, followed when enabled by F32 fragments
+rather than the BF16 fragment specialization present in llama.cpp source. The
+gate has now been removed and the generic tiled lowering emits native BF16
+fragments for matching bound operands. The algebra itself does not require a
+new Ouro-specific operation.
 
-This derivation does not assign the end-to-end TTFT gap to either difference.
-First capture Llama's `has_simdgroup_mm`, `has_bfloat`, `has_tensor`, the two
-disable-environment values, and selected `get_pipeline_mul_mm` kernel for the
-timed graph. Then compare three Omega cells over one current-main captured
-BoundOp and identical stored operands:
+This derivation does not assign the end-to-end TTFT gap to the BF16 lowering.
+The Metal integration test
+`programmable_tiled_bf16_weight_matches_f32_within_derived_bound` compiled and
+dispatched Omega's emitted BF16 kernel and passed its derived numerical bound.
+That establishes this fixture's numerical condition, not an E2E output or
+performance result. Paired TTFT runs should compare the saved baseline with
+the generic BF16-fragment path while retaining a generic F32-fragment control.
+The existing saved Llama result is
+not re-established here, and its selected pipeline is still unknown; no
+end-to-end TTFT gain is claimed from the math or kernel-source change.
 
-1. Current cooperative-reduction fallback.
-2. Existing dense tile with F32 fragments.
-3. Dense tile with BF16 weight and activation fragments, F32 accumulation.
+## October 18 configured-placement fast fail
 
-Compare literal output coordinates against an F64 reference computed from the
-actual stored BF16 weight bytes and the exact activation bytes. Cell 1 versus
-2 isolates tiled lowering. Cell 2 versus 3 measures the combined BF16-fragment
-change, including F32 activation rounding. Keep TTFT measurements separate
-from the replay used for output comparison, and capture the actual selected
-Llama pipeline before attributing its timing to the source specialization.
+The first release probe exposed a runtime integration refusal before request
+timing: configured Omega plans rejected external input placements. The
+configured planner now shares its input resolution, numeric policy and layout
+selection with the placed-input path. Plans that request resource ceilings
+still refuse caller-owned placements because those bytes are not included in
+the current physical census. Each placed input now checks its planned shape,
+dtype width, offset and buffer capacity before encoding.
+
+The release fast probe used `/private/tmp/ouro-llama-converted-v1/ouro-bf16.gguf`
+with observed GGUF SHA-256
+`d3cdf276005d768c5def9cfb6679eb5600a424c5cd23b45157e65204708ae478`,
+configured `relaxed-metal.toml`, Metal, `gpu-profile`, one generated token and
+the frozen `ball24` case. It completed one warmup and five measured requests.
+The five callback TTFT observations were 2326.682, 2325.099, 2324.346,
+2331.868 and 2323.741 ms; mean 2326.347 ms, sample CoV 0.141%. The saved
+per-request records are `/tmp/ouro-bf16-probe-after/cached.jsonl`. This prompt
+has 24 tokens, below `DENSE_TILED_MIN_TOKENS=160`, so it is a placement-path
+smoke observation and does not exercise the long-prompt tiled path.
+
+The frozen `repeated-ball256` release attempt used the same model/config and
+one-token budget. Its warmup callback recorded TTFT 15593.180 ms and wall time
+15698.681 ms. The five-sample run was interrupted before a measured sample to
+keep the cycle below one minute; `/tmp/ouro-bf16-probe-256/cached.jsonl`
+contains setup, diagnostic and warmup records only. This value is not a
+measured-cohort statistic. Captured MSL includes both BF16 and F32 matrix
+fragment kernels, including `omega_reduce_r4_o3_n2_multiply_add_zero` and
+`omega_reduce_r5_o4_n2_multiply_add_zero`; the source files are under
+`/tmp/ouro-bf16-probe-sources/`. A per-request dispatch-to-source manifest is
+still needed to attribute the TTFT to each emitted specialization.
+
+The new `--cached-probe --samples 1` mode skips the separate logits diagnostic
+and warmup, records one production callback observation, and avoids turning a
+fast-fail check into a five-request cohort. Its single sample has no variance
+estimate; use the existing five-sample mode for cohort summaries. Neither run
+provides an equivalent pre-change TTFT: the previous configured placement path
+refused before execution. These observations therefore do not establish a
+before/after speedup or explain the remaining long-prompt latency.
