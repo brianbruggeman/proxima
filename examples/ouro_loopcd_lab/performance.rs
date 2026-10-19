@@ -118,31 +118,62 @@ pub(super) fn cached(arguments: &Arguments) -> io::Result<()> {
         "timing_condition":if arguments.gpu_profile {"instrumentation-on; symmetric production arms"} else {"instrumentation-off"},
         "load_ms":setup_started.elapsed().as_secs_f64()*1000.0,"settings":format!("{config:?}"),
         "execution_owner":"LoadedModel::generate_from_ids","panel":panel,
-        "build_dense_float_storage":omega::sized::DENSE_FLOAT_STORAGE_ENABLED,
+        "dense_mma_input_layout":format!("{:?}", config.omega_runtime.as_ref().map(|runtime| runtime.dense_mma_input_layout)),
         "build_tiled_min_tokens":omega::sized::DENSE_TILED_MIN_TOKENS}),
     )?;
     let mut request_count = 0;
-    for case in panel["cases"]
+    let panel_cases = panel["cases"]
         .as_array()
-        .ok_or_else(|| io::Error::other("cached cases absent"))?
-    {
+        .ok_or_else(|| io::Error::other("cached cases absent"))?;
+    let selected_cases: Vec<&Value> = if arguments.cached_probe {
+        let requested = arguments
+            .panel_cases
+            .as_ref()
+            .and_then(|cases| cases.first())
+            .ok_or_else(|| io::Error::other("cached probe case is required"))?;
+        panel_cases
+            .iter()
+            .filter(|case| case["id"].as_str() == Some(requested.as_str()))
+            .collect()
+    } else {
+        panel_cases.iter().collect()
+    };
+    if arguments.cached_probe && selected_cases.len() != 1 {
+        return Err(io::Error::other(
+            "cached probe case is not in the frozen panel",
+        ));
+    }
+    let selected_case_count = selected_cases.len();
+    let measured_samples: usize = if arguments.cached_probe {
+        arguments.samples
+    } else {
+        RUN_COUNT
+    };
+    for case in selected_cases {
         let prefix: Vec<u32> =
             serde_json::from_value(case["prefix_ids"].clone()).map_err(io::Error::other)?;
         let root = loaded.logits_root();
-        let diagnostic = loaded
-            .forward_node_values_from_ids(&prefix, &[root], &config)
-            .map_err(io::Error::other)?;
-        record(
-            &mut records,
-            &json!({"kind":"cached_diagnostic","case_id":case["id"],"prefix_ids":prefix,
-            "requested_nodes":[root.0],"logits":diagnostic,"diagnostic_only":true}),
-        )?;
+        if !arguments.cached_probe {
+            let diagnostic = loaded
+                .forward_node_values_from_ids(&prefix, &[root], &config)
+                .map_err(io::Error::other)?;
+            record(
+                &mut records,
+                &json!({"kind":"cached_diagnostic","case_id":case["id"],"prefix_ids":prefix,
+                "requested_nodes":[root.0],"logits":diagnostic,"diagnostic_only":true}),
+            )?;
+        }
         let mut walls = Vec::new();
         let mut first_tokens = Vec::new();
         let mut decode_latencies = Vec::new();
-        for repetition in 0..=RUN_COUNT {
+        let repetitions = if arguments.cached_probe {
+            1..=measured_samples
+        } else {
+            0..=measured_samples
+        };
+        for repetition in repetitions {
             let profile_fields = json!({"case_id":case["id"],"repetition":repetition,
-                "warmup":repetition==0,"prefix_ids":prefix,"batch_size":config.batch_size,"ubatch_size":config.ubatch_size});
+                "warmup":!arguments.cached_probe && repetition==0,"prefix_ids":prefix,"batch_size":config.batch_size,"ubatch_size":config.ubatch_size});
             let profile_begin = profile
                 .as_ref()
                 .map(|profile| profile.marker("ouro_gpu_profile_begin", profile_fields.clone()))
@@ -202,7 +233,7 @@ pub(super) fn cached(arguments: &Arguments) -> io::Result<()> {
             )?;
             records.flush()?;
             request_count += 1;
-            if repetition != 0 {
+            if arguments.cached_probe || repetition != 0 {
                 walls.push(wall_ms);
                 if let Some(first) = latencies.first() {
                     first_tokens.push(*first);
@@ -222,12 +253,16 @@ pub(super) fn cached(arguments: &Arguments) -> io::Result<()> {
             "cov_convention":"sample standard deviation with N-1 denominator","error_count":0}),
         )?;
     }
-    if request_count != 12 {
-        return Err(io::Error::other("cached cohort requires twelve requests"));
+    let warmups_per_case = usize::from(!arguments.cached_probe);
+    let expected_request_count = selected_case_count * (measured_samples + warmups_per_case);
+    if request_count != expected_request_count {
+        return Err(io::Error::other(format!(
+            "cached cohort expected {expected_request_count} requests, observed {request_count}"
+        )));
     }
     record(
         &mut records,
-        &json!({"kind":"cached_complete","request_count":request_count,"case_count":2,"measured_samples":10,"warmups":2,"error_count":0}),
+        &json!({"kind":"cached_complete","request_count":request_count,"case_count":selected_case_count,"measured_samples":measured_samples * selected_case_count,"warmups":if arguments.cached_probe {0} else {selected_case_count},"probe":arguments.cached_probe,"probe_mode":if arguments.cached_probe {"single-pass-fast-fail"} else {"cohort"},"error_count":0}),
     )?;
     records.flush()
 }
@@ -1003,7 +1038,7 @@ pub(super) fn microbench(arguments: &Arguments) -> io::Result<()> {
                 "weight_absolute_byte_range":[entry.start,entry.end],
                 "weight_codec":"BFloat16", "activation_codec":"Float32",
                 "requested_output_nodes":[root.0],
-                "build_dense_float_storage":omega::sized::DENSE_FLOAT_STORAGE_ENABLED,
+                "dense_mma_input_layout":format!("{:?}", config.dense_mma_input_layout),
                 "build_tiled_min_tokens":omega::sized::DENSE_TILED_MIN_TOKENS,
                 "config":config, "planning":executor.planning_records,
                 "cold_plan_ms":setup_started.elapsed().as_secs_f64()*1000.0,

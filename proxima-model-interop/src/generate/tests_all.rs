@@ -2400,6 +2400,7 @@ pub(super) mod placed_plan_mode_tests {
             &[identity_node],
             &resident_names,
             &[],
+            &[],
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Safe,
                 numeric_policy: proxima_tensor::NumericPolicy::bit_exact(),
@@ -2409,6 +2410,7 @@ pub(super) mod placed_plan_mode_tests {
                 plan_time_constants: false,
                 command_buffer_chunks: 1,
                 fuse_cached_attention: true,
+                omega_runtime: None,
             },
         )
         .expect("plans the identity program under an explicit non-default mode");
@@ -2456,6 +2458,7 @@ pub(super) mod placed_plan_mode_tests {
             &[identity_node],
             &resident_names,
             &[],
+            &[],
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Safe,
                 numeric_policy: proxima_tensor::NumericPolicy::llama_relaxed(),
@@ -2465,6 +2468,7 @@ pub(super) mod placed_plan_mode_tests {
                 plan_time_constants: false,
                 command_buffer_chunks: 1,
                 fuse_cached_attention: true,
+                omega_runtime: None,
             },
         )
         .expect("Safe never needs a permission llama_relaxed() withholds, so narrowing succeeds");
@@ -2495,6 +2499,7 @@ pub(super) mod placed_plan_mode_tests {
             &[identity_node],
             &resident_names,
             &[],
+            &[],
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Fast,
                 numeric_policy: proxima_tensor::NumericPolicy::bit_exact(),
@@ -2504,6 +2509,7 @@ pub(super) mod placed_plan_mode_tests {
                 plan_time_constants: false,
                 command_buffer_chunks: 1,
                 fuse_cached_attention: true,
+                omega_runtime: None,
             },
         ) {
             Ok(_) => panic!(

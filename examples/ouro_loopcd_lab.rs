@@ -84,6 +84,7 @@ mod runner {
         paper_controls: bool,
         performance: bool,
         cached_performance: bool,
+        pub(super) cached_probe: bool,
         pub(super) gpu_profile: bool,
         pub(super) omega_config: Option<RuntimeConfig>,
         pub(super) microbench: bool,
@@ -91,7 +92,8 @@ mod runner {
 
     pub fn arguments() -> io::Result<Arguments> {
         let mut output = None;
-        let mut directory = PathBuf::from("/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/models/ouro-1.4b");
+        let mut directory =
+            PathBuf::from("/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/models/ouro-1.4b");
         let mut backend = String::from("cpu");
         let mut prefix = vec![19556, 905, 30];
         let mut samples = 20;
@@ -100,7 +102,7 @@ mod runner {
         let mut controls_only = false;
         let mut compare_cpu = None;
         let mut panel = None;
-        let mut panel_cases = None;
+        let mut panel_cases: Option<Vec<String>> = None;
         let mut explicit_prefix = false;
         let mut method = None;
         let mut depth = 4;
@@ -109,6 +111,7 @@ mod runner {
         let mut paper_controls = false;
         let mut performance = false;
         let mut cached_performance = false;
+        let mut cached_probe = false;
         let mut gpu_profile = false;
         let mut omega_config_path = None;
         let mut microbench = false;
@@ -137,6 +140,10 @@ mod runner {
             }
             if argument == "--cached-performance" {
                 cached_performance = true;
+                continue;
+            }
+            if argument == "--cached-probe" {
+                cached_probe = true;
                 continue;
             }
             if argument == "--microbench" {
@@ -206,6 +213,29 @@ mod runner {
                 "cached performance requires Metal, five samples, 64-token budget and exclusive mode",
             ));
         }
+        if cached_probe
+            && (cached_performance
+                || performance
+                || backend != "metal"
+                || samples == 0
+                || samples > 5
+                || max_new_tokens != 1
+                || omega_config_path.is_none()
+                || panel.is_some()
+                || panel_cases.as_ref().is_none_or(|cases| cases.len() != 1)
+                || explicit_prefix
+                || method.is_some()
+                || controls_only
+                || inventory_only
+                || paper_controls
+                || compare_cpu.is_some()
+                || microbench
+                || metal_copy_weights)
+        {
+            return Err(io::Error::other(
+                "cached probe requires Metal, one named case, one to five samples, one generated token and an Omega config",
+            ));
+        }
         if performance {
             if backend != "metal"
                 || samples != 5
@@ -224,7 +254,7 @@ mod runner {
                     "performance mode requires Metal, exactly five samples, and no other mode or per-run overrides",
                 ));
             }
-        } else if gpu_profile && !cached_performance {
+        } else if gpu_profile && !cached_performance && !cached_probe {
             return Err(io::Error::other(
                 "--gpu-profile requires a performance mode",
             ));
@@ -234,7 +264,7 @@ mod runner {
                 "require positive depth and finite nonnegative strength",
             ));
         }
-        if omega_config_path.is_some() && !performance && !cached_performance {
+        if omega_config_path.is_some() && !performance && !cached_performance && !cached_probe {
             return Err(io::Error::other(
                 "--omega-config requires --performance in this experiment runner",
             ));
@@ -266,7 +296,7 @@ mod runner {
                 || compare_cpu.is_some())
             || paper_controls
                 && (panel.is_some() || inventory_only || controls_only || compare_cpu.is_some())
-            || explicit_method_options && guidance.is_none() && !cached_performance
+            || explicit_method_options && guidance.is_none() && !cached_performance && !cached_probe
         {
             return Err(io::Error::other(
                 "selected methods and paper controls require an exclusive mode; depth, strength and token budget require --method",
@@ -274,10 +304,10 @@ mod runner {
         }
         if panel.is_some()
             && (inventory_only || controls_only || compare_cpu.is_some() || explicit_prefix)
-            || panel.is_none() && panel_cases.is_some()
+            || panel.is_none() && panel_cases.is_some() && !cached_probe
         {
             return Err(io::Error::other(
-                "panel mode cannot combine with original prefix, controls, inventory or backend comparison modes; --panel-cases requires --panel",
+                "panel mode cannot combine with original prefix, controls, inventory or backend comparison modes; --panel-cases requires --panel or --cached-probe",
             ));
         }
         if panel.is_some() && samples < 2 {
@@ -291,6 +321,7 @@ mod runner {
                 && !paper_controls
                 && !performance
                 && !cached_performance
+                && !cached_probe
                 && samples != 0
                 && samples < 20
         {
@@ -316,6 +347,7 @@ mod runner {
             paper_controls,
             performance,
             cached_performance,
+            cached_probe,
             gpu_profile,
             omega_config,
             microbench,
@@ -422,7 +454,7 @@ mod runner {
     }
 
     pub fn run(arguments: &Arguments) -> io::Result<()> {
-        if arguments.cached_performance {
+        if arguments.cached_performance || arguments.cached_probe {
             return super::performance::cached(arguments);
         }
         if arguments.performance {
