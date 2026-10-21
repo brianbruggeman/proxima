@@ -6,6 +6,7 @@ use std::process;
 use proxima_model_interop::cold_artifact::{
     ColdScaleMode, compare_checkpoint, convert_checkpoint_with_scale,
 };
+use proxima_primitives::float_layout::FloatLayout;
 
 const REPOSITORY: &str = "ibm-granite/granite-4.0-micro-base";
 const REVISION: &str = "98e1d641451818f6c8e6b17c1c359b5b4ac495d0";
@@ -48,7 +49,7 @@ fn run() -> Result<(), String> {
     }
     let source_dir = PathBuf::from(first_argument);
     let output_dir = arguments.next().map(PathBuf::from).ok_or_else(usage)?;
-    let format_name = arguments.next().ok_or_else(usage)?;
+    let layout_input = arguments.next().ok_or_else(usage)?;
     let chunk_elements = arguments
         .next()
         .ok_or_else(usage)?
@@ -58,14 +59,15 @@ fn run() -> Result<(), String> {
         return Err(usage());
     }
 
-    let (format_name, scale_mode) = match format_name.strip_suffix("-tensor-scaled") {
-        Some(format_name) => (format_name, ColdScaleMode::TensorMaximum),
-        None => (format_name.as_str(), ColdScaleMode::None),
+    let (layout_input, scale_mode) = match layout_input.strip_suffix("-tensor-scaled") {
+        Some(layout_input) => (layout_input, ColdScaleMode::TensorMaximum),
+        None => (layout_input.as_str(), ColdScaleMode::None),
     };
+    let layout = parse_layout(layout_input)?;
     let manifest = convert_checkpoint_with_scale(
         &source_dir,
         &output_dir,
-        format_name,
+        layout,
         REPOSITORY,
         REVISION,
         chunk_elements,
@@ -89,8 +91,19 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
+fn parse_layout(input: &str) -> Result<FloatLayout, String> {
+    match input {
+        "e5m2" => Ok(FloatLayout::E5M2_SATURATING),
+        "e3m2" => Ok(FloatLayout::E3M2),
+        "e2m2" => Ok(FloatLayout::E2M2),
+        _ => serde_json::from_str(input).map_err(|error| {
+            format!("layout must be a known alias or FloatLayout object: {error}")
+        }),
+    }
+}
+
 fn usage() -> String {
     String::from(
-        "usage: granite-cold-quantize <checkpoint-dir> <new-output-dir> <e5m2|e3m2|e2m2|e5m2-tensor-scaled|e3m2-tensor-scaled|e2m2-tensor-scaled> <chunk-elements-multiple-of-8> | granite-cold-quantize compare <checkpoint-dir> <artifact-dir> <new-report.json>",
+        "usage: granite-cold-quantize <checkpoint-dir> <new-output-dir> <layout-alias|layout-json> <chunk-elements-multiple-of-8> | granite-cold-quantize compare <checkpoint-dir> <artifact-dir> <new-report.json>",
     )
 }

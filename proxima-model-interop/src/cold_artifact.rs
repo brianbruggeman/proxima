@@ -6,7 +6,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::mem;
 use std::path::{Component, Path, PathBuf};
 
-use proxima_gguf::quant::cold_float::ColdFloatFormat;
+use proxima_primitives::float_layout::FloatLayout;
 use proxima_primitives::pipe::sans_io::Outcome;
 use proxima_safetensors::{
     MAX_HEADER_BYTES, Manifest, SafetensorsParser, TensorEntry, parse_sharded_index,
@@ -77,6 +77,7 @@ pub struct ColdArtifactManifest {
     pub repository: String,
     pub revision: String,
     pub format: &'static str,
+    pub layout: FloatLayout,
     pub scale_mode: &'static str,
     pub chunk_elements: usize,
     pub source_artifacts: BTreeMap<String, String>,
@@ -94,6 +95,7 @@ pub struct ColdTensorRecord {
     pub source_shape: Vec<u64>,
     pub source_dtype: &'static str,
     pub format: &'static str,
+    pub layout: FloatLayout,
     pub scale: Option<f32>,
     pub source_sha256: String,
     pub output_sha256: String,
@@ -145,6 +147,8 @@ struct ColdArtifactInputManifest {
     repository: String,
     revision: String,
     format: String,
+    #[serde(default)]
+    layout: Option<FloatLayout>,
     #[serde(default = "default_scale_mode")]
     scale_mode: String,
     chunk_elements: usize,
@@ -191,7 +195,12 @@ pub fn compare_checkpoint(
     if manifest.schema != "proxima.cold-weights.v1" {
         return Err(ColdArtifactError::InvalidArtifactManifest);
     }
-    let format = parse_format(&manifest.format)?;
+    let layout = manifest
+        .layout
+        .or_else(|| parse_format(&manifest.format).ok())
+        .ok_or_else(|| ColdArtifactError::UnsupportedFormat {
+            format: manifest.format.clone(),
+        })?;
     let tensor_scaled = match manifest.scale_mode.as_str() {
         "none" => false,
         "tensor_maximum" => true,
@@ -209,11 +218,7 @@ pub fn compare_checkpoint(
     let mut sum_squared_error = 0.0_f64;
     let mut saturated_values = 0_u64;
     let mut zeroed_nonzero_values = 0_u64;
-    let format_maximum = match format {
-        ColdFloatFormat::E5M2 => 57_344.0,
-        ColdFloatFormat::E3M2 => 28.0,
-        ColdFloatFormat::E2M2 => 7.0,
-    };
+    let format_maximum = layout.max_normal();
     let mut tensors = Vec::with_capacity(manifest.tensors.len());
     let chunk_elements = manifest.chunk_elements;
     let mut input_buffer = vec![0_u8; chunk_elements.saturating_mul(4)];
@@ -294,11 +299,11 @@ pub fn compare_checkpoint(
                     *value = f32::from_le_bytes(*bytes);
                 }
             }
-            let packed_bytes = elements * format.bits_per_element() / 8
-                + usize::from(!(elements * format.bits_per_element()).is_multiple_of(8));
+            let packed_bits = elements * layout.width() as usize;
+            let packed_bytes = packed_bits.div_ceil(8);
             packed_file.read_exact(&mut packed_buffer[..packed_bytes])?;
             proxima_gguf::quant::cold_float::dequantize(
-                format,
+                layout,
                 &packed_buffer[..packed_bytes],
                 &mut decoded_cold[..elements],
             )?;
@@ -372,7 +377,7 @@ pub fn compare_checkpoint(
 pub fn convert_checkpoint(
     source_dir: &Path,
     output_dir: &Path,
-    format_name: &str,
+    layout: FloatLayout,
     repository: &str,
     revision: &str,
     chunk_elements: usize,
@@ -380,7 +385,7 @@ pub fn convert_checkpoint(
     convert_checkpoint_with_scale(
         source_dir,
         output_dir,
-        format_name,
+        layout,
         repository,
         revision,
         chunk_elements,
@@ -391,13 +396,12 @@ pub fn convert_checkpoint(
 pub fn convert_checkpoint_with_scale(
     source_dir: &Path,
     output_dir: &Path,
-    format_name: &str,
+    layout: FloatLayout,
     repository: &str,
     revision: &str,
     chunk_elements: usize,
     scale_mode: ColdScaleMode,
 ) -> Result<ColdArtifactManifest, ColdArtifactError> {
-    let format = parse_format(format_name)?;
     if chunk_elements == 0 || !chunk_elements.is_multiple_of(8) {
         return Err(ColdArtifactError::InvalidChunkElements);
     }
@@ -467,7 +471,7 @@ pub fn convert_checkpoint_with_scale(
     let mut input_buffer = vec![0_u8; chunk_elements.saturating_mul(4)];
     let mut value_buffer = vec![0.0_f32; chunk_elements];
     let output_buffer_len = chunk_elements
-        .saturating_mul(format.bits_per_element())
+        .saturating_mul(layout.width() as usize)
         .div_ceil(8);
     let mut output_buffer = vec![0_u8; output_buffer_len];
 
@@ -538,7 +542,7 @@ pub fn convert_checkpoint_with_scale(
                     data_start,
                     &tensor,
                     source_element_bytes,
-                    format,
+                    layout,
                     &mut input_buffer,
                     &mut value_buffer,
                 )?
@@ -599,11 +603,11 @@ pub fn convert_checkpoint_with_scale(
                 }
 
                 let output_chunk_len = elements_this_chunk
-                    .saturating_mul(format.bits_per_element())
+                    .saturating_mul(layout.width() as usize)
                     .div_ceil(8);
                 let output_chunk = &mut output_buffer[..output_chunk_len];
                 proxima_gguf::quant::cold_float::quantize_f32(
-                    format,
+                    layout,
                     values_this_chunk,
                     output_chunk,
                 )?;
@@ -621,7 +625,8 @@ pub fn convert_checkpoint_with_scale(
                 output_file: output_file_name,
                 source_shape: tensor.shape,
                 source_dtype,
-                format: format.name(),
+                format: layout_name(layout),
+                layout,
                 scale: (scale_mode == ColdScaleMode::TensorMaximum).then_some(tensor_scale),
                 source_sha256: digest_hex(source_hasher.finalize()),
                 output_sha256: digest_hex(output_hasher.finalize()),
@@ -656,7 +661,8 @@ pub fn convert_checkpoint_with_scale(
         schema: "proxima.cold-weights.v1",
         repository: String::from(repository),
         revision: String::from(revision),
-        format: format.name(),
+        format: layout_name(layout),
+        layout,
         scale_mode: scale_mode.name(),
         chunk_elements,
         source_artifacts,
@@ -676,7 +682,7 @@ fn measure_tensor_scale(
     data_start: u64,
     tensor: &TensorEntry,
     source_element_bytes: usize,
-    format: ColdFloatFormat,
+    layout: FloatLayout,
     input_buffer: &mut [u8],
     value_buffer: &mut [f32],
 ) -> Result<f32, ColdArtifactError> {
@@ -719,17 +725,29 @@ fn measure_tensor_scale(
     if maximum_magnitude == 0.0 {
         return Ok(1.0);
     }
-    Ok(maximum_magnitude / format.layout().max_normal())
+    Ok(maximum_magnitude / layout.max_normal())
 }
 
-fn parse_format(format_name: &str) -> Result<ColdFloatFormat, ColdArtifactError> {
+fn parse_format(format_name: &str) -> Result<FloatLayout, ColdArtifactError> {
     match format_name {
-        "e5m2" => Ok(ColdFloatFormat::E5M2),
-        "e3m2" => Ok(ColdFloatFormat::E3M2),
-        "e2m2" => Ok(ColdFloatFormat::E2M2),
+        "e5m2" => Ok(FloatLayout::E5M2_SATURATING),
+        "e3m2" => Ok(FloatLayout::E3M2),
+        "e2m2" => Ok(FloatLayout::E2M2),
         _ => Err(ColdArtifactError::UnsupportedFormat {
             format: String::from(format_name),
         }),
+    }
+}
+
+fn layout_name(layout: FloatLayout) -> &'static str {
+    if layout.same_format(&FloatLayout::E5M2_SATURATING) {
+        "e5m2"
+    } else if layout.same_format(&FloatLayout::E3M2) {
+        "e3m2"
+    } else if layout.same_format(&FloatLayout::E2M2) {
+        "e2m2"
+    } else {
+        "custom"
     }
 }
 
@@ -846,7 +864,8 @@ mod tests {
         ColdArtifactError, ColdScaleMode, SOURCE_METADATA_FILES, compare_checkpoint,
         convert_checkpoint, convert_checkpoint_with_scale, parse_format, safe_shard_path,
     };
-    use proxima_gguf::quant::cold_float::{ColdFloatFormat, dequantize};
+    use proxima_gguf::quant::cold_float::dequantize;
+    use proxima_primitives::float_layout::FloatLayout;
     use proxima_safetensors::{SafetensorsModel, TensorPayload, write_complete};
     use proxima_tensor::DType;
     use std::collections::BTreeMap;
@@ -884,7 +903,7 @@ mod tests {
             convert_checkpoint(
                 source_dir.path(),
                 &source_dir.path().join("packed"),
-                "e3m2",
+                FloatLayout::E3M2,
                 "ibm-granite/granite-4.0-micro-base",
                 "98e1d641451818f6c8e6b17c1c359b5b4ac495d0",
                 8,
@@ -935,7 +954,7 @@ mod tests {
         let manifest = convert_checkpoint(
             source_dir.path(),
             &output_dir,
-            "e3m2",
+            FloatLayout::E3M2,
             "ibm-granite/granite-4.0-micro-base",
             "98e1d641451818f6c8e6b17c1c359b5b4ac495d0",
             8,
@@ -948,6 +967,14 @@ mod tests {
         assert_eq!(manifest.tensors[0].name, "layer.weight");
         assert_eq!(manifest.tensors[0].source_shape, [4]);
         assert_eq!(manifest.tensors[0].source_dtype, "BF16");
+        assert_eq!(manifest.layout, FloatLayout::E3M2);
+        assert_eq!(manifest.tensors[0].layout, FloatLayout::E3M2);
+        let manifest_value: serde_json::Value = serde_json::from_slice(
+            &fs::read(output_dir.join("manifest.json")).expect("read layout-bearing manifest"),
+        )
+        .expect("manifest stores its structural float layout");
+        assert_eq!(manifest_value["layout"]["exponent_bits"], 3);
+        assert_eq!(manifest_value["layout"]["mantissa_bits"], 2);
         assert_eq!(manifest.tensors[1].name, "layer.f32_weight");
         assert_eq!(manifest.tensors[1].source_shape, [2]);
         assert_eq!(manifest.tensors[1].source_dtype, "F32");
@@ -960,13 +987,12 @@ mod tests {
         let packed = fs::read(output_dir.join("tensor-000000.pxw"))
             .expect("read emitted packed tensor artifact");
         let mut decoded = [0.0_f32; 4];
-        dequantize(ColdFloatFormat::E3M2, &packed, &mut decoded)
-            .expect("decode emitted E3M2 tensor");
+        dequantize(FloatLayout::E3M2, &packed, &mut decoded).expect("decode emitted E3M2 tensor");
         assert_eq!(decoded, [1.0, -2.0, 0.125, 0.375]);
         let packed_f32 = fs::read(output_dir.join("tensor-000001.pxw"))
             .expect("read emitted F32-derived packed artifact");
         let mut decoded_f32 = [0.0_f32; 2];
-        dequantize(ColdFloatFormat::E3M2, &packed_f32, &mut decoded_f32)
+        dequantize(FloatLayout::E3M2, &packed_f32, &mut decoded_f32)
             .expect("decode emitted F32-derived E3M2 tensor");
         assert_eq!(decoded_f32, [1.5, -3.0]);
         let comparison = compare_checkpoint(source_dir.path(), &output_dir)
@@ -989,7 +1015,7 @@ mod tests {
         convert_checkpoint_with_scale(
             source_dir.path(),
             &scaled_output,
-            "e3m2",
+            FloatLayout::E3M2,
             "ibm-granite/granite-4.0-micro-base",
             "98e1d641451818f6c8e6b17c1c359b5b4ac495d0",
             8,
