@@ -1,12 +1,14 @@
 use std::io::Write;
 
 use moe_test_json as serde_json;
+use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
 use proxima_tensor::NumericPolicy;
 use tempfile::NamedTempFile;
 
 use super::{
-    BatchingStrategy, DecodeKernelStrategy, FusionStrategy, ResidencyStrategy, ResourceConstraints,
-    RuntimeConfig, SelectionConfig, SelectionMode, SpeculationStrategy, WeightConversionStrategy,
+    BatchingStrategy, DecodeKernelStrategy, DenseMmaInputLayout, FusionStrategy, ResidencyStrategy,
+    ResourceConstraints, RuntimeConfig, SelectionConfig, SelectionMode, SpeculationStrategy,
+    WeightConversionStrategy,
 };
 
 const CLEAN_ENVIRONMENT: [(&str, Option<&str>); 31] = [
@@ -81,6 +83,7 @@ fn runtime_config_difference_count(left: &RuntimeConfig, right: &RuntimeConfig) 
         left.weight_conversion != right.weight_conversion,
         left.moe_grouping != right.moe_grouping,
         left.numeric != right.numeric,
+        left.dense_mma_input_layout != right.dense_mma_input_layout,
         left.constraints != right.constraints,
         left.selection != right.selection,
     ]
@@ -106,6 +109,8 @@ struct RuntimeConfigFixture {
     speculation: SpeculationStrategy,
     weight_conversion: WeightConversionStrategy,
     moe_grouping: String,
+    #[serde(default)]
+    dense_mma_input_layout: DenseMmaInputLayout,
 }
 
 fn runtime_config_fixture_difference_count(
@@ -128,6 +133,7 @@ fn runtime_config_fixture_difference_count(
         actual.speculation != expected.speculation,
         actual.weight_conversion != expected.weight_conversion,
         (actual.moe_grouping != (expected.moe_grouping == "enabled")),
+        (actual.dense_mma_input_layout != expected.dense_mma_input_layout),
     ]
     .into_iter()
     .filter(|differs| *differs)
@@ -151,7 +157,7 @@ fn runtime_config_defaults_preserve_legacy_values() {
     assert!(!config.numeric.bf16_input_rounding);
     assert_eq!(
         config.dense_mma_input_layout,
-        super::DenseMmaInputLayout::Auto
+        DenseMmaInputLayout::derived()
     );
     assert_eq!(config.constraints.max_host_tensor_bytes, None);
     assert_eq!(config.constraints.max_device_buffer_bytes, None);
@@ -175,6 +181,43 @@ fn runtime_config_legacy_toml_deserializes() {
     assert_eq!(config.numeric, NumericPolicy::bit_exact());
     assert_eq!(config.constraints, ResourceConstraints::default());
     assert_eq!(config.selection, SelectionConfig::default());
+}
+
+#[test]
+fn dense_mma_layout_accepts_structured_settings_and_legacy_aliases() {
+    let structured: RuntimeConfig = toml::from_str(
+        "[dense_mma_input_layout]\nlayout = { exponent_bits = 8, mantissa_bits = 7, specials = 'InfinityOnOverflow', bias_override = 127, sign = 'Magnitude' }\n",
+    )
+    .expect("the float layout is configured as data");
+    let alias: RuntimeConfig = toml::from_str("dense_mma_input_layout = 'bf16'\n")
+        .expect("the previous short config spelling remains readable");
+
+    assert_eq!(
+        structured.dense_mma_input_layout,
+        DenseMmaInputLayout::explicit(FloatLayout {
+            exponent_bits: 8,
+            mantissa_bits: 7,
+            specials: Specials::InfinityOnOverflow,
+            bias_override: Some(127),
+            sign: SignEncoding::Magnitude,
+        })
+    );
+    assert_eq!(
+        alias.dense_mma_input_layout,
+        DenseMmaInputLayout::explicit(FloatLayout::BF16)
+    );
+}
+
+#[test]
+fn dense_mma_layout_rejects_a_valid_float_format_the_lowerer_does_not_support() {
+    let error = validation_text(
+        RuntimeConfig::builder()
+            .with_dense_mma_input_layout(DenseMmaInputLayout::explicit(FloatLayout::E3M2))
+            .build(),
+    );
+
+    assert!(error.contains("dense_mma_input_layout.layout"));
+    assert!(error.contains("only binary32 and bfloat16"));
 }
 
 #[test]
@@ -622,7 +665,7 @@ fn unified_runtime_config_sized_defaults_seed_runtime_defaults() {
 
 #[test]
 fn unified_runtime_config_serde_builder_round_trip_preserves_full_policy() {
-    let source = "cpu_workers = 4\nindependent_ops = 2\nparallel_sequences = 3\nmax_in_flight = 2\noverlap_transfer_compute = true\nmax_device_bytes = 64\ndecode_kernel = 'fused_projection'\nfusion = 'required'\nresidency = 'exact_resident_first'\nbatching = 'compatible_rows'\nspeculation = 'disabled'\nweight_conversion = 'disabled'\nmoe_grouping = false\n[numeric]\nreassociation = false\n";
+    let source = "cpu_workers = 4\nindependent_ops = 2\nparallel_sequences = 3\nmax_in_flight = 2\noverlap_transfer_compute = true\nmax_device_bytes = 64\ndecode_kernel = 'fused_projection'\nfusion = 'required'\nresidency = 'exact_resident_first'\nbatching = 'compatible_rows'\nspeculation = 'disabled'\nweight_conversion = 'disabled'\nmoe_grouping = false\n[numeric]\nreassociation = false\n[dense_mma_input_layout]\nderive_from_operands = false\nlayout = { exponent_bits = 8, mantissa_bits = 7, specials = 'InfinityOnOverflow', bias_override = 127, sign = 'Magnitude' }\n";
     let from_serde: RuntimeConfig = toml::from_str(source).expect("policy TOML deserializes");
     let from_builder = RuntimeConfig::builder()
         .with_cpu_workers(4)
@@ -638,6 +681,13 @@ fn unified_runtime_config_serde_builder_round_trip_preserves_full_policy() {
         .with_speculation(SpeculationStrategy::Disabled)
         .with_weight_conversion(WeightConversionStrategy::Disabled)
         .with_moe_grouping(false)
+        .with_dense_mma_input_layout(DenseMmaInputLayout::explicit(FloatLayout {
+            exponent_bits: 8,
+            mantissa_bits: 7,
+            specials: Specials::InfinityOnOverflow,
+            bias_override: Some(127),
+            sign: SignEncoding::Magnitude,
+        }))
         .build()
         .expect("fluent policy validates");
     assert_eq!(

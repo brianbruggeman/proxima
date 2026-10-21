@@ -1,5 +1,6 @@
 use super::*;
 use conflaguration::Validate;
+use proxima_primitives::float_layout::FloatLayout;
 
 /// prepares the existing [`Plan`] using explicit [`RuntimeConfig`] policy.
 ///
@@ -55,11 +56,10 @@ pub fn plan_named_with_config_and_placed_inputs(
             reason: "configured placement plans require a physical census of caller-owned buffers",
         });
     }
-    let numeric_policy = match config.dense_mma_input_layout {
-        crate::config::DenseMmaInputLayout::Auto | crate::config::DenseMmaInputLayout::BF16 => {
-            config.numeric.with_bf16_input_rounding(true)
-        }
-        crate::config::DenseMmaInputLayout::F32 => config.numeric,
+    let numeric_policy = if config.dense_mma_input_layout.uses_bf16_input_rounding() {
+        config.numeric.with_bf16_input_rounding(true)
+    } else {
+        config.numeric
     };
     let prepared = prepare_with_options(
         program,
@@ -73,7 +73,11 @@ pub fn plan_named_with_config_and_placed_inputs(
     let has_dense_bf16_candidate = plan.prepared.resolved.iter().any(|bound| {
         crate::msl::has_dense_bf16_mma_candidate(bound, &plan.packed_operands, plan.numeric_policy)
     });
-    if config.dense_mma_input_layout == crate::config::DenseMmaInputLayout::F32
+    if !config.dense_mma_input_layout.derive_from_operands
+        && config
+            .dense_mma_input_layout
+            .layout
+            .same_format(&FloatLayout::BF32)
         && has_dense_bf16_candidate
     {
         return Err(MetalError::CompileFailed {
@@ -81,10 +85,8 @@ pub fn plan_named_with_config_and_placed_inputs(
                 .to_string(),
         });
     }
-    plan.dense_mma_input_layout = match config.dense_mma_input_layout {
-        crate::config::DenseMmaInputLayout::Auto => None,
-        selected => Some(selected.float_layout()),
-    };
+    plan.dense_mma_input_layout = (!config.dense_mma_input_layout.derive_from_operands)
+        .then_some(config.dense_mma_input_layout.layout);
     plan.configured_input_contract = blocks
         .iter()
         .map(input_contract)
