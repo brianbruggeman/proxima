@@ -956,7 +956,7 @@ impl App {
                             warn!(?error, %bind, "listener exited with error");
                             let _ = ready_tx_for_outcome.send(Err(error));
                         }
-                        drain_notify_for_factory.notify_waiters();
+                        Shutdown::signal_serve_exit(&drain_notify_for_factory);
                     })
                 }),
             )
@@ -1554,6 +1554,10 @@ impl Shutdown {
             let _ = tx.send(());
         }
         self.source_cancel.fire();
+    }
+
+    fn signal_serve_exit(drain_notify: &proxima_primitives::sync::Notify) {
+        drain_notify.notify_one();
     }
 
     /// Test-only constructor. Builds a `Shutdown` whose `stop()` fires
@@ -2212,5 +2216,21 @@ mod tests {
             expected,
             "destructor instrumentation must observe one drop per core",
         );
+    }
+
+    #[proxima::test]
+    async fn drain_completes_when_serve_exited_before_drain_was_polled() {
+        use futures::FutureExt;
+
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        let shutdown = Shutdown::for_test_with_tx(shutdown_tx);
+        Shutdown::signal_serve_exit(&shutdown.drain_notify);
+
+        let report = shutdown
+            .drain()
+            .now_or_never()
+            .expect("drain must observe a serve exit that happened before its first poll");
+
+        assert_eq!(report.cores_acked, 0, "no runtime installed, nothing to ack");
     }
 }
