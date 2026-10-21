@@ -56,7 +56,8 @@ pub fn plan_named_with_config_and_placed_inputs(
             reason: "configured placement plans require a physical census of caller-owned buffers",
         });
     }
-    let numeric_policy = if config.dense_mma_input_layout.uses_bf16_input_rounding() {
+    // Fragment selection is a Metal lowering permission, not a tensor-bind rewrite permission.
+    let plan_numeric_policy = if config.dense_mma_input_layout.uses_bf16_input_rounding() {
         config.numeric.with_bf16_input_rounding(true)
     } else {
         config.numeric
@@ -66,10 +67,10 @@ pub fn plan_named_with_config_and_placed_inputs(
         symbols,
         &blocks,
         outputs,
-        (numeric_policy, fuse_cached_attention, config.allow_fusion),
+        (config.numeric, fuse_cached_attention, config.allow_fusion),
         placed_input_nodes,
     )?;
-    let mut plan = plan_from_prepared(program, symbols, prepared, numeric_policy);
+    let mut plan = plan_from_prepared(program, symbols, prepared, plan_numeric_policy);
     let has_dense_bf16_candidate = plan.prepared.resolved.iter().any(|bound| {
         crate::msl::has_dense_bf16_mma_candidate(bound, &plan.packed_operands, plan.numeric_policy)
     });

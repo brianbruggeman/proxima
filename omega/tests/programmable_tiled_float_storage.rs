@@ -15,8 +15,9 @@
 
 use half::{bf16, f16};
 use omega::backend::{execute_plan_named, plan_named_with_config};
-use omega::config::RuntimeConfig;
+use omega::config::{DenseMmaInputLayout, RuntimeConfig};
 use proxima_primitives::Codec;
+use proxima_primitives::float_layout::FloatLayout;
 use proxima_tensor::spec::{elementwise, input_leaf, reduce};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
@@ -153,6 +154,14 @@ fn block<'data>(
 }
 
 fn run(policy: NumericPolicy, codecs: [Option<Codec>; 2]) -> (Vec<f32>, Vec<String>) {
+    run_with_layout(policy, codecs, DenseMmaInputLayout::derived())
+}
+
+fn run_with_layout(
+    policy: NumericPolicy,
+    codecs: [Option<Codec>; 2],
+    dense_mma_input_layout: DenseMmaInputLayout,
+) -> (Vec<f32>, Vec<String>) {
     let (program, output) = weight_first_program();
     let weight = values(11, (FEATURES * REDUCTION) as usize);
     let activation = values(29, (TOKENS * REDUCTION) as usize);
@@ -170,6 +179,7 @@ fn run(policy: NumericPolicy, codecs: [Option<Codec>; 2]) -> (Vec<f32>, Vec<Stri
         gpu_driver: "metal".into(),
         allow_fusion: true,
         numeric: policy,
+        dense_mma_input_layout,
         ..RuntimeConfig::default()
     };
     let (mut plan, records) = plan_named_with_config(&config, &program, &[], &bindings, &[output])
@@ -269,5 +279,71 @@ fn programmable_tiled_bit_exact_policy_declines_the_tiled_kernel() {
     assert!(
         ratio <= 1.0,
         "fallback error exceeded the derived bound: {ratio}"
+    );
+}
+
+#[test]
+fn configured_bf16_layout_emits_bf16_fragments_without_widening() {
+    let codecs = [Some(Codec::BFloat16), None];
+    let (actual, identities) = run_with_layout(
+        NumericPolicy::llama_relaxed(),
+        codecs,
+        DenseMmaInputLayout::explicit(FloatLayout::BF16),
+    );
+    let bf16_kernel = identities
+        .iter()
+        .find(|identity| identity.contains("_dbg") && identity.contains("_mma_bf16"));
+    assert!(
+        bf16_kernel.is_some(),
+        "explicit BF16 layout must select native BF16 fragments: {identities:?}"
+    );
+    assert!(
+        !identities
+            .iter()
+            .any(|identity| identity.contains("_mma_f32")),
+        "BF16 storage must not be widened into f32 fragments: {identities:?}"
+    );
+
+    let weight = values(11, (FEATURES * REDUCTION) as usize);
+    let activation = values(29, (TOKENS * REDUCTION) as usize);
+    let ratio = worst_ratio(
+        &actual,
+        &reference(&weight, &activation),
+        &error_bound(&weight, &activation, [Some(Codec::BFloat16); 2]),
+    );
+    assert!(
+        ratio <= 1.0,
+        "BF16 layout exceeded its derived bound: {ratio}"
+    );
+}
+
+#[test]
+fn configured_f32_layout_refuses_bf16_operand_widening() {
+    let (program, output) = weight_first_program();
+    let weight = values(11, (FEATURES * REDUCTION) as usize);
+    let activation = values(29, (TOKENS * REDUCTION) as usize);
+    let weight_bytes = pack(&weight, Codec::BFloat16);
+    let bindings = [
+        (
+            "weight",
+            QuantizedBlock::Packed {
+                codec: Codec::BFloat16,
+                bytes: &weight_bytes,
+            },
+        ),
+        ("activation", QuantizedBlock::Float32(&activation)),
+    ];
+    let config = RuntimeConfig {
+        engine: "gpu".into(),
+        gpu_driver: "metal".into(),
+        allow_fusion: true,
+        numeric: NumericPolicy::llama_relaxed(),
+        dense_mma_input_layout: DenseMmaInputLayout::explicit(FloatLayout::BF32),
+        ..RuntimeConfig::default()
+    };
+    let result = plan_named_with_config(&config, &program, &[], &bindings, &[output]);
+    assert!(
+        result.is_err(),
+        "explicit BF32 layout must reject BF16 operands instead of widening them"
     );
 }
