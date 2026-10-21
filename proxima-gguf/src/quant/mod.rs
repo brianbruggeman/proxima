@@ -82,6 +82,13 @@ pub enum QuantError {
         found: u32,
         expected: u32,
     },
+    #[error("{codec} layout width {found} bits is outside {min}..={max}")]
+    FieldWidthOutOfRange {
+        codec: &'static str,
+        found: u32,
+        min: u32,
+        max: u32,
+    },
 }
 
 /// Real-tensor fixture shared by every codec's `#[cfg(test)]` module (P9:
