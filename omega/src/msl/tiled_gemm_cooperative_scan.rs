@@ -1457,7 +1457,9 @@ pub(super) fn push_dense_batched_gemm_body(
         source.push_str("    long col_half = sgitg >> 1;\n");
     }
     // see `push_tiled_gemm_body`'s own doc for why this aliasing is safe.
-    let bf16_mma = metal.dense_mma_input_layout == Some(FloatLayout::BF16);
+    let bf16_mma = metal
+        .dense_mma_input_layout
+        .is_some_and(|layout| layout.same_format(&FloatLayout::BF16));
     let dense_element_type = if bf16_mma { "bfloat" } else { "float" };
     let dense_value_cast = if bf16_mma { "bfloat(" } else { "" };
     let dense_value_cast_close = if bf16_mma { ")" } else { "" };

@@ -2707,7 +2707,7 @@ fn programmable_tiled_float_storage_codec_pairs_admit_with_both_rewrites() {
         classify_dense_batched_gemm(
             &single_token,
             &[None, Some(Codec::BFloat16)],
-            NumericPolicy::llama_relaxed(),
+            NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
             reduce_op,
             init,
             output_axes,
@@ -2806,7 +2806,7 @@ fn programmable_tiled_ragged_k_and_feature_tail_keep_bounds_masks() {
     .expect("ragged float-storage dense emits");
 
     assert!(kernel.source.contains("simdgroup_bfloat8x8"));
-    assert!(!kernel.source.contains("bf16_element"));
+    assert!(!kernel.source.contains("bf16_element(in"));
     assert!(kernel.source.contains("k0 + w_k < u.reduction_total"));
     assert!(kernel.source.contains("a_k_global < u.reduction_total"));
     assert!(kernel.source.contains("if (w_feat < feature_extent)"));
@@ -2923,30 +2923,26 @@ fn programmable_tiled_grid_emit_and_cache_follow_one_admission() {
         (bound.operands()[1].0, Codec::Float16),
     ]);
 
-    let admitted = emit(
-        &bound,
-        &packed,
-        NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
-    )
-    .expect("admitted emits");
+    let admitted_policy = NumericPolicy::llama_relaxed().with_bf16_input_rounding(true);
+    let admitted = emit(&bound, &packed, admitted_policy).expect("admitted emits");
     assert!(admitted.source.contains("simdgroup_bfloat8x8"));
     assert!(admitted.source.contains("as_type<bfloat>"));
-    assert!(!admitted.source.contains("bf16_element"));
+    assert!(!admitted.source.contains("bf16_element(in"));
     assert_eq!(admitted.grid.depth, 2);
     let admitted_extras = metal_specialization(
         &bound,
         &packed,
-        NumericPolicy::llama_relaxed(),
+        admitted_policy,
         &admitted.grid,
         FloatLayout::BF16,
     );
     assert!(admitted_extras.dense_batched_gemm_axes.is_some());
-    let admitted_key = kernel_cache_key(&bound, &packed, NumericPolicy::llama_relaxed())
+    let admitted_key = kernel_cache_key(&bound, &packed, admitted_policy)
         .expect("admitted identity resolves");
     let f32_layout_key = kernel_cache_key_for_grid_with_layout(
         &bound,
         &packed,
-        NumericPolicy::llama_relaxed(),
+        admitted_policy,
         &admitted.grid,
         FloatLayout::BF32,
     )
@@ -3066,10 +3062,23 @@ fn programmable_tiled_cache_key_role_suffix_separates_operand_order() {
             signature_tokens_prelude::operand_read(index, offset, codec)
         };
         let weight_offset = "(row_base + (long)w_k * w_stride)";
-        assert!(original_kernel.source.contains(&read(0, weight_offset)));
-        assert!(original_kernel.source.contains(&read(1, "aoff")));
-        assert!(reversed_kernel.source.contains(&read(1, weight_offset)));
-        assert!(reversed_kernel.source.contains(&read(0, "aoff")));
+        if same_codecs {
+            assert!(original_kernel
+                .source
+                .contains("as_type<bfloat>(ushort((ushort)in0["));
+            assert!(original_kernel.source.contains("in1[aoff * 2]"));
+            assert!(reversed_kernel
+                .source
+                .contains("as_type<bfloat>(ushort((ushort)in1["));
+            assert!(reversed_kernel.source.contains("in0[aoff * 2]"));
+            assert!(!original_kernel.source.contains("bf16_element(in"));
+            assert!(!reversed_kernel.source.contains("bf16_element(in"));
+        } else {
+            assert!(original_kernel.source.contains(&read(0, weight_offset)));
+            assert!(original_kernel.source.contains(&read(1, "aoff")));
+            assert!(reversed_kernel.source.contains(&read(1, weight_offset)));
+            assert!(reversed_kernel.source.contains(&read(0, "aoff")));
+        }
     }
 }
 
@@ -3086,12 +3095,7 @@ fn programmable_tiled_float_storage_does_not_depend_on_build_gate() {
     else {
         panic!("dense fixture reduces")
     };
-    for codecs in [
-        [Some(Codec::BFloat16), None],
-        [Some(Codec::Float16), None],
-        [None, Some(Codec::BFloat16)],
-        [None, Some(Codec::Float16)],
-    ] {
+    for codecs in [[Some(Codec::Float16), None], [None, Some(Codec::Float16)]] {
         assert!(
             classify_dense_batched_gemm(
                 &bound,
@@ -3103,6 +3107,21 @@ fn programmable_tiled_float_storage_does_not_depend_on_build_gate() {
             )
             .is_ok()
         );
+    }
+    for codecs in [[Some(Codec::BFloat16), None], [None, Some(Codec::BFloat16)]] {
+        assert!(matches!(
+            classify_dense_batched_gemm(
+                &bound,
+                &codecs,
+                NumericPolicy::llama_relaxed(),
+                reduce_op,
+                init,
+                output_axes,
+            ),
+            Err(DenseBatchedGemmRejection::NumericPolicyDenied(
+                NumericRewrite::Bf16InputRounding
+            ))
+        ));
     }
     assert!(
         classify_dense_batched_gemm(

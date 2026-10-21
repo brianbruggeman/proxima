@@ -5,9 +5,10 @@
 //! and has no environment or file access.
 
 use conflaguration::{FromEnvStr, Settings, Validate, ValidationMessage};
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_primitives::float_layout::{FloatLayout, SignEncoding};
 use proxima_tensor::NumericPolicy;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::error::Error as StdError;
 use std::fmt;
 use std::num::ParseIntError;
@@ -86,7 +87,7 @@ pub struct RuntimeConfig {
     /// Existing numeric permissions shared with binding and emission, such as contraction for an MMA path.
     #[setting(nested)]
     pub numeric: NumericPolicy,
-    /// Dense matrix fragment layout; `auto` follows stored operands and grants BF16 input rounding through NumericPolicy.
+    /// Dense matrix fragment layout settings; `auto` derives the plan layout from stored operands.
     #[setting(default)]
     pub dense_mma_input_layout: DenseMmaInputLayout,
     /// Hard byte ceilings enforced by payload allocation owners, such as a 4 KiB device-buffer cap.
@@ -128,22 +129,93 @@ impl Default for RuntimeConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DenseMmaInputLayout {
-    #[default]
-    Auto,
-    F32,
-    BF16,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DenseMmaInputLayout {
+    /// Numeric field layout for explicit selection, such as `FloatLayout::BF16`.
+    pub layout: FloatLayout,
+    /// Whether plan construction derives the effective layout from its bound operands.
+    pub derive_from_operands: bool,
 }
 
 impl DenseMmaInputLayout {
     #[must_use]
-    pub const fn float_layout(self) -> FloatLayout {
-        match self {
-            Self::Auto | Self::F32 => FloatLayout::BF32,
-            Self::BF16 => FloatLayout::BF16,
+    pub const fn derived() -> Self {
+        Self {
+            layout: FloatLayout::BF32,
+            derive_from_operands: true,
         }
+    }
+
+    #[must_use]
+    pub const fn explicit(layout: FloatLayout) -> Self {
+        Self {
+            layout,
+            derive_from_operands: false,
+        }
+    }
+
+    #[must_use]
+    pub fn uses_bf16_input_rounding(self) -> bool {
+        self.derive_from_operands || self.layout.same_format(&FloatLayout::BF16)
+    }
+}
+
+impl Default for DenseMmaInputLayout {
+    fn default() -> Self {
+        Self::derived()
+    }
+}
+
+impl<'de> Deserialize<'de> for DenseMmaInputLayout {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct DenseMmaInputLayoutVisitor;
+
+        impl<'de> Visitor<'de> for DenseMmaInputLayoutVisitor {
+            type Value = DenseMmaInputLayout;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a dense MMA layout alias or layout settings object")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                DenseMmaInputLayout::from_env_str(value).map_err(E::custom)
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut layout = None;
+                let mut derive_from_operands = None;
+                while let Some(field) = map.next_key::<String>()? {
+                    match field.as_str() {
+                        "layout" => layout = Some(map.next_value::<FloatLayout>()?),
+                        "derive_from_operands" => {
+                            derive_from_operands = Some(map.next_value::<bool>()?);
+                        }
+                        _ => {
+                            return Err(de::Error::unknown_field(
+                                &field,
+                                &["layout", "derive_from_operands"],
+                            ));
+                        }
+                    }
+                }
+                let derive_from_operands = derive_from_operands.unwrap_or(layout.is_none());
+                Ok(DenseMmaInputLayout {
+                    layout: layout.unwrap_or(FloatLayout::BF32),
+                    derive_from_operands,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(DenseMmaInputLayoutVisitor)
     }
 }
 
@@ -152,9 +224,9 @@ impl FromEnvStr for DenseMmaInputLayout {
 
     fn from_env_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "auto" => Ok(Self::Auto),
-            "f32" => Ok(Self::F32),
-            "bf16" => Ok(Self::BF16),
+            "auto" => Ok(Self::derived()),
+            "f32" => Ok(Self::explicit(FloatLayout::BF32)),
+            "bf16" => Ok(Self::explicit(FloatLayout::BF16)),
             _ => Err(DenseMmaInputLayoutParseError(value.to_owned())),
         }
     }
@@ -213,6 +285,32 @@ impl Validate for RuntimeConfig {
             errors.push(ValidationMessage::new(
                 "max_device_bytes",
                 "must be greater than zero",
+            ));
+        }
+
+        let layout = self.dense_mma_input_layout.layout;
+        let sign_bits = match layout.sign {
+            SignEncoding::Absent => 0,
+            SignEncoding::Magnitude | SignEncoding::TwosComplement => 1,
+        };
+        let layout_width =
+            u16::from(layout.exponent_bits) + u16::from(layout.mantissa_bits) + sign_bits;
+        if layout_width == 0
+            || layout_width > 32
+            || layout.exponent_bits > 8
+            || layout.mantissa_bits > 23
+        {
+            errors.push(ValidationMessage::new(
+                "dense_mma_input_layout.layout",
+                "field widths must describe a valid float layout no wider than 32 bits",
+            ));
+        } else if !self.dense_mma_input_layout.derive_from_operands
+            && !layout.same_format(&FloatLayout::BF32)
+            && !layout.same_format(&FloatLayout::BF16)
+        {
+            errors.push(ValidationMessage::new(
+                "dense_mma_input_layout.layout",
+                "the current dense MMA lowerer accepts only binary32 and bfloat16 input layouts",
             ));
         }
 
@@ -679,6 +777,13 @@ impl RuntimeConfigBuilder {
         self
     }
 
+    /// Set the structural dense MMA input layout or derive it from operands.
+    #[must_use]
+    pub fn with_dense_mma_input_layout(mut self, value: DenseMmaInputLayout) -> Self {
+        self.inner.dense_mma_input_layout = value;
+        self
+    }
+
     /// Set the backend family.
     #[must_use]
     pub fn with_engine(mut self, value: impl Into<String>) -> Self {
@@ -830,10 +935,9 @@ mod tests {
         let loaded = temp_env::with_vars(variables, RuntimeConfig::from_env)
             .expect("the dense MMA input layout must parse");
 
-        assert_eq!(loaded.dense_mma_input_layout, DenseMmaInputLayout::BF16);
         assert_eq!(
-            loaded.dense_mma_input_layout.float_layout(),
-            FloatLayout::BF16
+            loaded.dense_mma_input_layout,
+            DenseMmaInputLayout::explicit(FloatLayout::BF16)
         );
     }
 }
