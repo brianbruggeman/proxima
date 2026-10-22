@@ -928,19 +928,15 @@ fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
 #[cfg(feature = "float-layout-dtype")]
 fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
     match dtype {
-        DType::Layout(layout) => Ok(match crate::msl::layout_render::hardware_type(&layout) {
-            Some("half") => "__half",
-            Some("bfloat") => "__nv_bfloat16",
-            _ => "float",
-        }),
-        DType::Bool | DType::INT8 | DType::UINT8 | DType::INT32 | DType::UINT32 => Ok("float"),
-        DType::INT16
-        | DType::UINT16
-        | DType::INT64
-        | DType::UINT64
-        | DType::INT128
-        | DType::UINT128
-        | DType::FLOAT64 => Err(EmitError::UnsupportedDType { node, dtype }),
+        DType::Layout(layout) if layout.width() <= 32 => {
+            Ok(match crate::msl::layout_render::hardware_type(&layout) {
+                Some("half") => "__half",
+                Some("bfloat") => "__nv_bfloat16",
+                _ => "float",
+            })
+        }
+        DType::Bool => Ok("float"),
+        DType::Layout(_) => Err(EmitError::UnsupportedDType { node, dtype }),
     }
 }
 

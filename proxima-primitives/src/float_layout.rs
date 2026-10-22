@@ -1,6 +1,5 @@
 //! A float layout is a tuple of exponent width, mantissa width and special-value policy; the
-//! scalar codecs `proxima-gguf/src/quant/bf8_e5m2.rs` and `bf4_e2m1.rs` will instantiate it
-//! instead of each hand-coding the same arithmetic.
+//! shared scalar codec instantiates formats such as E5M2, E4M3FN and E2M1 without per-format math.
 
 /// How a layout treats the all-ones exponent and finite overflow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -13,6 +12,9 @@ pub enum Specials {
     SaturateOnOverflow,
     /// IEEE inf and nan encodings are reserved; overflow rounds to inf (binary32, BF16).
     InfinityOnOverflow,
+    /// The top mantissa code under the all-ones exponent is NaN; other codes under that exponent
+    /// remain finite (OCP E4M3FN), and overflow saturates to the largest finite value.
+    NanOnly,
 }
 
 /// How the sign of a stored number is encoded.
@@ -59,6 +61,8 @@ const fn pow2(exponent: i32) -> f32 {
 
 impl FloatLayout {
     pub const E5M2: Self = Self::ieee_like(5, 2, Specials::InfinityOnOverflow);
+    /// OCP E4M3FN: bias 7, one NaN code per sign, no infinities, max finite 448.
+    pub const E4M3FN: Self = Self::ieee_like(4, 3, Specials::NanOnly);
     /// E5M2 widths with saturation: the GGUF bf8 storage policy, which keeps infinities out of stored weights.
     pub const E5M2_SATURATING: Self = Self::ieee_like(5, 2, Specials::SaturateOnOverflow);
     /// IEEE 754 binary16: bias 15, inf and nan reserved, max normal 65504.0.
@@ -169,10 +173,13 @@ impl FloatLayout {
     pub const fn max_normal(&self) -> f32 {
         let exponent_codes = (1i32 << self.exponent_bits) - 1;
         let top_code = match self.specials {
-            Specials::None => exponent_codes,
+            Specials::None | Specials::NanOnly => exponent_codes,
             Specials::SaturateOnOverflow | Specials::InfinityOnOverflow => exponent_codes - 1,
         };
-        let significand = 2.0 - pow2(-(self.mantissa_bits as i32));
+        let significand = match self.specials {
+            Specials::NanOnly => 2.0 - 2.0 * pow2(-(self.mantissa_bits as i32)),
+            _ => 2.0 - pow2(-(self.mantissa_bits as i32)),
+        };
         significand * pow2(top_code - self.bias() as i32)
     }
 
@@ -193,7 +200,7 @@ impl FloatLayout {
 mod tests {
     use super::*;
 
-    const CASES: [(FloatLayout, i16, u8, f32, f32, f32); 6] = [
+    const CASES: [(FloatLayout, i16, u8, f32, f32, f32); 7] = [
         (
             FloatLayout::E5M2,
             15,
@@ -205,6 +212,7 @@ mod tests {
         (FloatLayout::E2M1, 1, 4, 6.0, 1.0, 0.5),
         (FloatLayout::E3M2, 3, 6, 28.0, 0.25, 0.0625),
         (FloatLayout::E2M3, 1, 6, 7.5, 1.0, 0.125),
+        (FloatLayout::E4M3FN, 7, 8, 448.0, 0.015625, 0.001953125),
         (
             FloatLayout::BF16,
             127,
@@ -310,6 +318,7 @@ mod tests {
             FloatLayout::BF32,
             FloatLayout::E3M2,
             FloatLayout::E2M3,
+            FloatLayout::E4M3FN,
             FloatLayout::E2M1,
             FloatLayout::BF4,
         ]
@@ -325,6 +334,7 @@ mod tests {
             (infinity, 32),
             (Specials::None, 6),
             (Specials::None, 6),
+            (Specials::NanOnly, 8),
             (Specials::None, 4),
             (Specials::None, 4),
         ];

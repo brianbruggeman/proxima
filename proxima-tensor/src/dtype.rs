@@ -6,7 +6,7 @@ use crate::dtype_spelling::DTypeSpelling;
 /// Element encoding carried by a tensor operation.
 ///
 /// Every numeric type is the shared structural [`FloatLayout`]. The descriptor supports
-/// 8–128-bit integer and 16–64-bit floating formats; generic codecs may support a narrower range.
+/// 8–128-bit integer and 4–64-bit floating formats; generic codecs may support a narrower range.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(
     feature = "config",
@@ -43,6 +43,8 @@ impl DType {
     pub const UINT128: Self = Self::Layout(FloatLayout::UINT128);
     pub const BFLOAT16: Self = Self::Layout(FloatLayout::BF16);
     pub const BFLOAT8: Self = Self::Layout(FloatLayout::E5M2_SATURATING);
+    pub const FLOAT8_E4M3FN: Self = Self::Layout(FloatLayout::E4M3FN);
+    pub const FLOAT8_E5M2: Self = Self::Layout(FloatLayout::E5M2);
     pub const FP6_E3_M2: Self = Self::Layout(FloatLayout::E3M2);
     pub const FLOAT16: Self = Self::Layout(FloatLayout::F16);
     pub const FLOAT32: Self = Self::Layout(FloatLayout::BF32);
@@ -159,6 +161,8 @@ mod tests {
             (DType::INT128, FloatLayout::INT128),
             (DType::UINT128, FloatLayout::UINT128),
             (DType::FLOAT16, FloatLayout::F16),
+            (DType::FLOAT8_E4M3FN, FloatLayout::E4M3FN),
+            (DType::FLOAT8_E5M2, FloatLayout::E5M2),
             (DType::BFLOAT16, FloatLayout::BF16),
             (DType::FLOAT32, FloatLayout::BF32),
             (DType::FLOAT64, FloatLayout::F64),
@@ -203,6 +207,8 @@ mod tests {
         assert!(DType::FLOAT64.accumulates_in_place());
         assert!(!DType::BFLOAT8.accumulates_in_place());
         assert!(!DType::FP6_E3_M2.accumulates_in_place());
+        assert!(DType::FLOAT8_E4M3FN.is_float());
+        assert_eq!(DType::FLOAT8_E4M3FN.bits(), 8);
     }
 
     #[test]
@@ -222,11 +228,13 @@ mod tests {
             DType::INT64,
             DType::UINT128,
             DType::BFLOAT16,
+            DType::FLOAT8_E4M3FN,
+            DType::FLOAT8_E5M2,
             DType::FLOAT64,
             DType::Layout(FloatLayout {
                 exponent_bits: 4,
                 mantissa_bits: 3,
-                specials: proxima_primitives::float_layout::Specials::None,
+                specials: proxima_primitives::float_layout::Specials::NanOnly,
                 bias_override: Some(7),
                 sign: proxima_primitives::float_layout::SignEncoding::Magnitude,
             }),

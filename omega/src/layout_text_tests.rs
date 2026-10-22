@@ -13,7 +13,7 @@ use crate::wgsl_layout::{layout_load_wgsl, layout_store_wgsl};
 const E4M3_FROM_FIELDS: FloatLayout = FloatLayout {
     exponent_bits: 4,
     mantissa_bits: 3,
-    specials: Specials::None,
+    specials: Specials::NanOnly,
     bias_override: None,
     sign: SignEncoding::Magnitude,
 };
@@ -77,6 +77,41 @@ fn wgsl_source(layout: FloatLayout) -> String {
     emit_wgsl(&negate_bound(layout), caps, &BTreeMap::new())
         .expect("a float layout emits WGSL without a typed rejection")
         .source
+}
+
+#[test]
+fn e4m3fn_lowerers_reserve_only_the_top_nan_code() {
+    let msl_load = crate::msl::layout_render::layout_load_msl(FloatLayout::E4M3FN, "load");
+    let msl_store = crate::msl::layout_render::layout_store_msl(FloatLayout::E4M3FN, "store");
+    let wgsl_load = layout_load_wgsl(FloatLayout::E4M3FN, "load");
+    let wgsl_store = layout_store_wgsl(FloatLayout::E4M3FN, "store");
+
+    assert!(
+        msl_load.contains("exponent == 0xfu && mantissa == 0x7u"),
+        "{msl_load}"
+    );
+    assert!(
+        wgsl_load.contains("exponent == 0xfu && mantissa == 0x7u"),
+        "{wgsl_load}"
+    );
+    assert!(msl_load.contains("mantissa << 20u"), "{msl_load}");
+    assert!(wgsl_load.contains("mantissa << 20u"), "{wgsl_load}");
+    assert!(
+        msl_store.contains("return sign | 0x78u | 0x7u"),
+        "{msl_store}"
+    );
+    assert!(
+        wgsl_store.contains("return sign | 0x78u | 0x7u"),
+        "{wgsl_store}"
+    );
+}
+
+#[test]
+fn cuda_and_wgsl_refuse_layouts_wider_than_the_generic_codec() {
+    let wide = negate_bound(FloatLayout::F64);
+
+    assert!(emit_cuda(&wide, &BTreeMap::new()).is_err());
+    assert!(emit_wgsl(&wide, WgslCaps::default(), &BTreeMap::new()).is_err());
 }
 
 fn assert_wgsl_validates(load: &str, store: &str) {

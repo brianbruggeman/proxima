@@ -12,7 +12,7 @@ use crate::msl::emit;
 const E4M3_FROM_FIELDS: FloatLayout = FloatLayout {
     exponent_bits: 4,
     mantissa_bits: 3,
-    specials: Specials::None,
+    specials: Specials::NanOnly,
     bias_override: None,
     sign: SignEncoding::Magnitude,
 };

@@ -18,7 +18,7 @@ const LAYOUT_NAMES: [&str; 12] = [
 const E4M3_FROM_FIELDS: FloatLayout = FloatLayout {
     exponent_bits: 4,
     mantissa_bits: 3,
-    specials: Specials::None,
+    specials: Specials::NanOnly,
     bias_override: None,
     sign: SignEncoding::Magnitude,
 };

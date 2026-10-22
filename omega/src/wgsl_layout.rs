@@ -8,7 +8,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use proxima_primitives::float_layout::{FloatLayout, SignEncoding};
+use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
 
 use crate::msl::layout_render::{
     F32_ABS_MASK, F32_FRACTION_BITS, F32_INFINITY_BITS, F32_QUIET_BIT, exponent_ones,
@@ -86,6 +86,14 @@ pub fn layout_load_wgsl(layout: FloatLayout, name: &str) -> String {
 }
 
 fn field_load_reserved(layout: &FloatLayout) -> String {
+    if layout.specials == Specials::NanOnly {
+        return format!(
+            "    if (exponent == {:#x}u && mantissa == {:#x}u) {{\n        return bitcast<f32>(sign | {F32_INFINITY_BITS:#010x}u | {F32_QUIET_BIT:#x}u | (mantissa << {fraction_shift}u));\n    }}\n",
+            exponent_ones(layout),
+            mantissa_mask(layout),
+            fraction_shift = F32_FRACTION_BITS - u32::from(layout.mantissa_bits)
+        );
+    }
     if !reserves_all_ones(layout) {
         return String::new();
     }
@@ -163,6 +171,13 @@ pub fn layout_store_wgsl(layout: FloatLayout, name: &str) -> String {
 }
 
 fn field_store_nan(layout: &FloatLayout) -> String {
+    if layout.specials == Specials::NanOnly {
+        return format!(
+            "        return sign | {:#x}u | {:#x}u;\n",
+            infinity_code(layout),
+            mantissa_mask(layout)
+        );
+    }
     if !reserves_all_ones(layout) {
         return format!(
             "        return {:#x}u;\n",
