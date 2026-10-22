@@ -1,6 +1,6 @@
 //! The one MSL emitter over a [`FloatLayout`]: load (decode) and store (encode) from the fields.
 //!
-//! Teaching pointer: `proxima_gguf::quant::float_layout::{decode, encode}` is the CPU algorithm
+//! Teaching pointer: `proxima_primitives::float_layout_codec::{decode, encode}` is the CPU algorithm
 //! and this module renders the same integer steps as MSL, so the two agree code for code. A layout
 //! whose fields equal a Metal hardware type (`float`, `half`, `bfloat`) renders through that type's
 //! conversion; every other layout renders as field arithmetic whose only inputs are the numeric
@@ -59,18 +59,24 @@ pub(crate) const fn infinity_code(layout: &FloatLayout) -> u32 {
 
 pub(crate) const fn max_normal_code(layout: &FloatLayout) -> u32 {
     let top = match layout.specials {
-        Specials::None => infinity_code(layout),
+        Specials::None | Specials::NanOnly => infinity_code(layout),
         Specials::SaturateOnOverflow | Specials::InfinityOnOverflow => {
             infinity_code(layout) - (1u32 << layout.mantissa_bits)
         }
     };
-    top | mantissa_mask(layout)
+    let mantissa = match layout.specials {
+        Specials::NanOnly => mantissa_mask(layout) - 1,
+        _ => mantissa_mask(layout),
+    };
+    top | mantissa
 }
 
 pub(crate) const fn overflow_code(layout: &FloatLayout) -> u32 {
     match layout.specials {
         Specials::InfinityOnOverflow => infinity_code(layout),
-        Specials::None | Specials::SaturateOnOverflow => max_normal_code(layout),
+        Specials::None | Specials::NanOnly | Specials::SaturateOnOverflow => {
+            max_normal_code(layout)
+        }
     }
 }
 
@@ -79,7 +85,10 @@ pub(crate) const fn quiet_bit(layout: &FloatLayout) -> u32 {
 }
 
 pub(crate) const fn reserves_all_ones(layout: &FloatLayout) -> bool {
-    !matches!(layout.specials, Specials::None)
+    matches!(
+        layout.specials,
+        Specials::SaturateOnOverflow | Specials::InfinityOnOverflow
+    )
 }
 
 fn integer_scale(layout: &FloatLayout) -> f32 {
@@ -201,6 +210,13 @@ fn field_load_reserved_msl(
     exponent_ones: u32,
     fraction_shift: u32,
 ) -> String {
+    if layout.specials == Specials::NanOnly {
+        return format!(
+            "    if (exponent == {exponent_ones:#x}u && mantissa == {:#x}u) {{\n        return as_type<float>(sign | {F32_INFINITY_BITS:#010x}u | {F32_QUIET_BIT:#x}u | (mantissa << {fraction_shift}u));\n    }}\n",
+            mantissa_mask(layout),
+            fraction_shift = F32_FRACTION_BITS - u32::from(layout.mantissa_bits)
+        );
+    }
     if !reserves_all_ones(layout) {
         return String::new();
     }
@@ -231,6 +247,13 @@ pub fn layout_store_msl(layout: FloatLayout, name: &str) -> String {
 }
 
 fn field_store_nan_msl(layout: &FloatLayout) -> String {
+    if layout.specials == Specials::NanOnly {
+        return format!(
+            "        return sign | {:#x}u | {:#x}u;\n",
+            infinity_code(layout),
+            mantissa_mask(layout)
+        );
+    }
     if !reserves_all_ones(layout) {
         return format!("        return {:#x}u;\n", max_normal_code(layout));
     }

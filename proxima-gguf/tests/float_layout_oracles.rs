@@ -30,6 +30,11 @@ fn float_layout_midpoint_ties_to_even_e5m2() {
 }
 
 #[test]
+fn float_layout_midpoint_ties_to_even_e4m3fn() {
+    assert_midpoints_tie_to_even_code(FloatLayout::E4M3FN);
+}
+
+#[test]
 fn float_layout_midpoint_ties_to_even_e2m1() {
     assert_midpoints_tie_to_even_code(FloatLayout::E2M1);
 }
@@ -57,6 +62,18 @@ fn float_layout_range_saturates_infinity_e5m2_saturating() {
         encode(f32::NEG_INFINITY, FloatLayout::E5M2_SATURATING),
         0xfb
     );
+}
+
+#[test]
+fn float_layout_e4m3fn_reserves_only_the_top_nan_code() {
+    assert_eq!(FloatLayout::E4M3FN.max_normal(), 448.0);
+    assert_eq!(decode(0x7e, FloatLayout::E4M3FN), 448.0);
+    assert!(decode(0x7f, FloatLayout::E4M3FN).is_nan());
+    assert_eq!(decode(0x7f, FloatLayout::E4M3FN).to_bits(), 0x7ff0_0000);
+    assert_eq!(decode(0xff, FloatLayout::E4M3FN).to_bits(), 0xfff0_0000);
+    assert_eq!(decode(0x78, FloatLayout::E4M3FN), 256.0);
+    assert_eq!(encode(f32::INFINITY, FloatLayout::E4M3FN), 0x7e);
+    assert_eq!(encode(f32::NAN, FloatLayout::E4M3FN), 0x7f);
 }
 
 #[test]

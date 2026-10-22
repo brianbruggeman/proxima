@@ -8,15 +8,16 @@
 //! widened on `a0f5f97` to add `Int16, UInt16, Int64, UInt64, Int128,
 //! UInt128, Float64`, so `I16, U16, I64, U64, F64` now have counterparts
 //! and are mapped below. `C64` (complex) and the sub-byte / 8-bit float
-//! family (`F4, F6_E2M3, F6_E3M2, F8_E5M2, F8_E4M3, F8_E8M0, F8_E4M3FNUZ,
-//! F8_E5M2FNUZ`) still have no `DType` counterpart — there is no
-//! fixed-width machine scalar to represent them — so those still return
+//! family (`F4, F6_E2M3, F6_E3M2, F8_E8M0, F8_E4M3FNUZ, F8_E5M2FNUZ`)
+//! still has no `DType` counterpart — there is no matching scalar layout — so those return
 //! [`SafetensorsError::UnsupportedDtype`] rather than guessing a lossy
 //! substitute.
 
 use alloc::vec;
 use alloc::vec::Vec;
 
+use proxima_primitives::float_layout::FloatLayout;
+use proxima_primitives::float_layout_codec::decode;
 use proxima_tensor::DType;
 
 use crate::error::SafetensorsError;
@@ -39,14 +40,14 @@ pub fn map_dtype(tensor: &str, dtype: &str) -> Result<DType, SafetensorsError> {
         "F16" => Ok(DType::FLOAT16),
         "F32" => Ok(DType::FLOAT32),
         "F64" => Ok(DType::FLOAT64),
-        // still no DType counterpart: complex, and the sub-byte / 8-bit
-        // micro-float family — none of these is a fixed-width machine
-        // scalar `DType` can represent.
-        "F4" | "F6_E2M3" | "F6_E3M2" | "F8_E5M2" | "F8_E4M3" | "F8_E8M0" | "F8_E4M3FNUZ"
-        | "F8_E5M2FNUZ" | "C64" => Err(SafetensorsError::UnsupportedDtype {
-            tensor: tensor.into(),
-            dtype: dtype.into(),
-        }),
+        "F8_E4M3" => Ok(DType::FLOAT8_E4M3FN),
+        "F8_E5M2" => Ok(DType::FLOAT8_E5M2),
+        "F4" | "F6_E2M3" | "F6_E3M2" | "F8_E8M0" | "F8_E4M3FNUZ" | "F8_E5M2FNUZ" | "C64" => {
+            Err(SafetensorsError::UnsupportedDtype {
+                tensor: tensor.into(),
+                dtype: dtype.into(),
+            })
+        }
         _ => Err(SafetensorsError::UnsupportedDtype {
             tensor: tensor.into(),
             dtype: dtype.into(),
@@ -73,43 +74,19 @@ pub fn dtype_to_wire(dtype: DType) -> Option<&'static str> {
         DType::FLOAT16 => Some("F16"),
         DType::FLOAT32 => Some("F32"),
         DType::FLOAT64 => Some("F64"),
+        DType::FLOAT8_E4M3FN => Some("F8_E4M3"),
+        DType::FLOAT8_E5M2 => Some("F8_E5M2"),
         _ => None,
     }
 }
 
 /// Decodes one `F8_E4M3` (OCP E4M3FN: 1 sign, 4 exponent bias-7, 3
-/// mantissa, no infinities, `S.1111.111` reserved for NaN) byte to `f32`.
-/// `DType` has no fixed-width counterpart for this format (see the module
-/// doc), so this bypasses `DType` entirely and decodes straight from the
-/// raw byte — the same reason [`f8_block_dequant`] takes raw bytes rather
-/// than a `DType`-typed buffer.
+/// mantissa, no infinities, `S.1111.111` reserved for NaN) byte through the
+/// shared [`FloatLayout`] codec. Block scaling remains a separate tensor
+/// transform in [`f8_block_dequant`].
 #[must_use]
 pub fn f8_e4m3_to_f32(byte: u8) -> f32 {
-    let sign = if byte & 0x80 == 0 { 1.0_f32 } else { -1.0_f32 };
-    let exponent = (byte >> 3) & 0x0F;
-    let mantissa = byte & 0x07;
-
-    if exponent == 0x0F && mantissa == 0x07 {
-        return f32::NAN;
-    }
-    if exponent == 0 {
-        // subnormal: 2^(1-bias) * (mantissa / 8)
-        return sign * libm_ldexp(f32::from(mantissa) / 8.0, -6);
-    }
-    // normal: 2^(exponent-bias) * (1 + mantissa/8)
-    let significand = 1.0 + f32::from(mantissa) / 8.0;
-    sign * libm_ldexp(significand, i32::from(exponent) - 7)
-}
-
-/// `f32 * 2^exponent` without pulling in `libm`/`std::f32::exp2` — `no_std`
-/// safe, exact for the small integer exponents E4M3 ever produces
-/// (`-6..=8`).
-fn libm_ldexp(value: f32, exponent: i32) -> f32 {
-    if exponent >= 0 {
-        value * f32::from_bits(((127 + exponent) as u32) << 23)
-    } else {
-        value / f32::from_bits(((127 - exponent) as u32) << 23)
-    }
+    decode(u32::from(byte), FloatLayout::E4M3FN)
 }
 
 /// Dequantizes a block-wise-scaled `F8_E4M3` tensor to `f32`.
@@ -199,6 +176,8 @@ mod tests {
     #[case::bfloat16("BF16", DType::BFLOAT16)]
     #[case::float16("F16", DType::FLOAT16)]
     #[case::float32("F32", DType::FLOAT32)]
+    #[case::fp8_e4m3("F8_E4M3", DType::FLOAT8_E4M3FN)]
+    #[case::fp8_e5m2("F8_E5M2", DType::FLOAT8_E5M2)]
     async fn known_dtype_strings_map(#[case] wire: &str, #[case] expected: DType) {
         assert_eq!(map_dtype("t", wire), Ok(expected));
     }
@@ -224,8 +203,6 @@ mod tests {
     #[case::complex("C64")]
     #[case::fp6_e2m3("F6_E2M3")]
     #[case::fp6_e3m2("F6_E3M2")]
-    #[case::fp8_e4m3("F8_E4M3")]
-    #[case::fp8_e5m2("F8_E5M2")]
     #[case::fp8_e8m0("F8_E8M0")]
     #[case::fp8_e4m3fnuz("F8_E4M3FNUZ")]
     #[case::fp8_e5m2fnuz("F8_E5M2FNUZ")]
@@ -249,6 +226,8 @@ mod tests {
     #[case::bfloat16(DType::BFLOAT16)]
     #[case::float16(DType::FLOAT16)]
     #[case::float32(DType::FLOAT32)]
+    #[case::fp8_e4m3(DType::FLOAT8_E4M3FN)]
+    #[case::fp8_e5m2(DType::FLOAT8_E5M2)]
     #[case::float64(DType::FLOAT64)]
     async fn dtype_to_wire_round_trips_through_map_dtype(#[case] dtype: DType) {
         let wire = dtype_to_wire(dtype).expect("dtype has a wire representation");

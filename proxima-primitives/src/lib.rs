@@ -25,10 +25,10 @@
 //!   [`pipe`].
 //! - [`driver`] -- [`block_on`], the no-runtime way to drive one future to
 //!   completion.
-//! - [`codec`], [`block_layout`], [`float_layout`] -- data descriptions of
-//!   packed numeric storage: [`Codec`] names a packed byte layout,
-//!   `BlockLayout` describes a block of stored numbers, `FloatLayout` one
-//!   stored float.
+//! - [`codec`], [`block_layout`], [`float_layout`], [`float_layout_codec`] --
+//!   data and scalar math for numeric storage: [`Codec`] names a packed byte
+//!   layout, `BlockLayout` describes block packing, and `FloatLayout` plus
+//!   `float_layout_codec` describe and convert one stored number.
 //!
 //! The crate is `no_std` unless the default `std` feature is on. `pipe`
 //! splits further: the pipe forms compile with no allocator, most of the
@@ -49,6 +49,7 @@ pub mod block_layout;
 pub mod codec;
 pub mod driver;
 pub mod float_layout;
+pub mod float_layout_codec;
 pub mod pipe;
 pub mod stream;
 pub mod sync;

@@ -12,13 +12,7 @@ const LAYOUT_F16: FloatLayout = FloatLayout {
     bias_override: None,
     sign: SignEncoding::Magnitude,
 };
-const LAYOUT_E4M3: FloatLayout = FloatLayout {
-    exponent_bits: 4,
-    mantissa_bits: 3,
-    specials: Specials::None,
-    bias_override: None,
-    sign: SignEncoding::Magnitude,
-};
+const LAYOUT_E4M3: FloatLayout = FloatLayout::E4M3FN;
 
 fn power_of_two(exponent: i32) -> f64 {
     f64::from_bits(((exponent + 1023) as u64) << 52)
@@ -58,9 +52,18 @@ fn grid_value(code: u64, layout: FloatLayout) -> f64 {
 fn reference_decode(code: u64, layout: FloatLayout) -> f64 {
     let negative = (code >> sign_shift(layout)) & 1 == 1;
     let magnitude_code = code & ((1u64 << sign_shift(layout)) - 1);
-    let reserved = layout.specials != Specials::None
-        && (magnitude_code >> layout.mantissa_bits) == exponent_all_ones(layout);
-    let magnitude = match (reserved, magnitude_code & mantissa_ones(layout)) {
+    let exponent = magnitude_code >> layout.mantissa_bits;
+    let mantissa = magnitude_code & mantissa_ones(layout);
+    let reserved = match layout.specials {
+        Specials::None => false,
+        Specials::NanOnly => {
+            exponent == exponent_all_ones(layout) && mantissa == mantissa_ones(layout)
+        }
+        Specials::SaturateOnOverflow | Specials::InfinityOnOverflow => {
+            exponent == exponent_all_ones(layout)
+        }
+    };
+    let magnitude = match (reserved, mantissa) {
         (true, 0) => f64::INFINITY,
         (true, _) => f64::NAN,
         (false, _) => grid_value(magnitude_code, layout),
@@ -72,6 +75,7 @@ fn top_code(layout: FloatLayout) -> u64 {
     let ones = exponent_all_ones(layout);
     match layout.specials {
         Specials::None => (ones << layout.mantissa_bits) | mantissa_ones(layout),
+        Specials::NanOnly => (ones << layout.mantissa_bits) | (mantissa_ones(layout) - 1),
         Specials::SaturateOnOverflow => {
             ((ones - 1) << layout.mantissa_bits) | mantissa_ones(layout)
         }
