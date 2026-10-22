@@ -6,9 +6,12 @@ use objc2_foundation::NSString;
 use objc2_metal::{
     MTLCompileOptions, MTLCreateSystemDefaultDevice, MTLDevice, MTLLanguageVersion, MTLLibrary,
 };
+use proxima_primitives::block_layout::BlockLayout;
 use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
 
-use super::layout_render::{hardware_type, layout_load_msl, layout_store_msl, layout_unpack_msl};
+use super::layout_render::{
+    block_unpack_msl, hardware_type, layout_load_msl, layout_store_msl, layout_unpack_msl,
+};
 
 const EMITTER_SOURCE: &str = include_str!("layout_render.rs");
 const LAYOUT_NAMES: [&str; 12] = [
@@ -73,6 +76,20 @@ fn float_layout_msl_hardware_type_chosen_by_fields_not_names() {
     assert_eq!(hardware_type(&bfloat_without_infinity), None);
     assert_eq!(hardware_type(&E4M3_FROM_FIELDS), None);
     assert_eq!(hardware_type(&FloatLayout::E3M2), None);
+}
+
+#[test]
+fn ternary_block_layouts_render_from_structural_value_and_scale_fields() {
+    let tq1_source = block_unpack_msl(&BlockLayout::TQ1_0, "tq1");
+    let tq2_source = block_unpack_msl(&BlockLayout::TQ2_0, "tq2");
+
+    assert!(tq1_source.contains("index >= 0u && index < 160u"));
+    assert!(tq1_source.contains("index >= 160u && index < 240u"));
+    assert!(tq1_source.contains("index >= 240u && index < 256u"));
+    assert!(tq1_source.contains("factor *= 3u"));
+    assert!(tq1_source.contains("block[52u]"));
+    assert!(tq2_source.contains("block[64u]"));
+    assert!(tq2_source.contains("raw_low_rest /= 32u"));
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]

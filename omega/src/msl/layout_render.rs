@@ -12,7 +12,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_primitives::block_layout::{BlockLayout, Coded, Field, Plane};
+use proxima_primitives::block_layout::{BlockLayout, CodeRegion, Coded, Field, Plane};
 use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
 
 pub(crate) const F32_FRACTION_BITS: u32 = 23;
@@ -362,6 +362,28 @@ fn plane_expression(plane: &Plane, index: &str, binding: &str) -> String {
 }
 
 fn coded_expression(coded: &Coded, index: &str, binding: &str, helper: &str) -> String {
+    if coded.packed_radix > 1 && coded.region_count > 0 {
+        let code_name = format!("{binding}_code");
+        let mut text = format!("    uint {code_name} = 0u;\n");
+        for (region_index, region) in coded
+            .regions
+            .iter()
+            .take(usize::from(coded.region_count))
+            .enumerate()
+        {
+            text.push_str(&radix_region_expression(
+                region,
+                coded.packed_radix,
+                index,
+                &code_name,
+                region_index,
+                if region_index == 0 { "if" } else { "else if" },
+            ));
+        }
+        text.push_str(&format!("    float {binding} = {helper}({code_name});\n"));
+        return text;
+    }
+
     let mut text = plane_expression(&coded.low, index, &format!("{binding}_low"));
     let mut code = format!("{binding}_low");
     if let Some(high) = &coded.high {
@@ -370,6 +392,34 @@ fn coded_expression(coded: &Coded, index: &str, binding: &str, helper: &str) -> 
     }
     text.push_str(&format!("    float {binding} = {helper}({code});\n"));
     text
+}
+
+fn radix_region_expression(
+    region: &CodeRegion,
+    radix: u8,
+    index: &str,
+    binding: &str,
+    region_index: usize,
+    condition: &str,
+) -> String {
+    let start = u32::from(region.start);
+    let end = start + u32::from(region.elements);
+    let local = format!("{binding}_region_{region_index}_index");
+    let packed = format!("{binding}_region_{region_index}_packed");
+    let address_map = plane_expression(&region.source, &local, &packed);
+    let axis = usize::from(region.digit_axis);
+    let divisor = region
+        .source
+        .digits
+        .iter()
+        .take(axis)
+        .fold(1u32, |product, digit| product * u32::from(digit.radix));
+    let lane_radix = u32::from(region.source.digits[axis].radix);
+    let storage_bits = u32::from(region.source.bits);
+    let storage_mask = (1u32 << storage_bits) - 1;
+    format!(
+        "    {condition} ({index} >= {start}u && {index} < {end}u) {{\n        uint {local} = {index} - {start}u;\n{address_map}        uint {binding}_region_{region_index}_lane = ({local} / {divisor}u) % {lane_radix}u;\n        uint {binding}_region_{region_index}_factor = 1u;\n        for (uint power = 0u; power < {binding}_region_{region_index}_lane; ++power) {{ {binding}_region_{region_index}_factor *= {radix}u; }}\n        uint {binding}_region_{region_index}_residue = ({packed} * {binding}_region_{region_index}_factor) & {storage_mask:#x}u;\n        {binding} = ({binding}_region_{region_index}_residue * {radix}u) >> {storage_bits}u;\n    }}\n"
+    )
 }
 
 fn field_expression(field: &Field, binding: &str, helper: &str) -> String {

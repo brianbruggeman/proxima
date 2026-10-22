@@ -25,6 +25,39 @@ fn bits_at(plane: &Plane, address: usize, block: &[u8]) -> u32 {
 }
 
 fn code_value(coded: &Coded, index: usize, block: &[u8]) -> f32 {
+    if coded.packed_radix > 1 {
+        let mut region_index = 0;
+        while region_index < usize::from(coded.region_count) {
+            let region = &coded.regions[region_index];
+            let start = usize::from(region.start);
+            let end = start + usize::from(region.elements);
+            if (start..end).contains(&index) {
+                let local_index = index - start;
+                let packed = bits_at(&region.source, region.source.address(local_index), block);
+                let mut lane = local_index;
+                for digit in region
+                    .source
+                    .digits
+                    .iter()
+                    .take(usize::from(region.digit_axis))
+                {
+                    lane /= usize::from(digit.radix);
+                }
+                lane %= usize::from(region.source.digits[usize::from(region.digit_axis)].radix);
+                let mut factor = 1u32;
+                for _ in 0..lane {
+                    factor *= u32::from(coded.packed_radix);
+                }
+                let storage_bits = u32::from(region.source.bits);
+                let storage_mask = (1u32 << storage_bits) - 1;
+                let residue = packed.wrapping_mul(factor) & storage_mask;
+                let code = (residue * u32::from(coded.packed_radix)) >> storage_bits;
+                return decode(code, coded.code);
+            }
+            region_index += 1;
+        }
+        return 0.0;
+    }
     let low = bits_at(&coded.low, coded.low.address(index), block);
     let raw = coded.high.map_or(low, |high| {
         low | (bits_at(&high, high.address(index), block) << coded.low.bits)
@@ -81,14 +114,19 @@ pub fn dequantize_block(layout: &BlockLayout, block: &[u8], output: &mut [f32]) 
     let (multiplier, bias) = (f32::from(layout.multiplier), f32::from(element.bias));
     let min_multiplier = f32::from(layout.min_multiplier);
     for (index, out) in output.iter_mut().enumerate() {
-        let mut raw = bits_at(&element.low, low.address(), block);
-        low.advance();
-        if let Some((plane, cursor)) = high.as_mut() {
-            raw |= bits_at(plane, cursor.address(), block) << element.low.bits;
-            cursor.advance();
-        }
+        let code = if element.packed_radix > 1 {
+            code_value(element, index, block)
+        } else {
+            let mut raw = bits_at(&element.low, low.address(), block);
+            low.advance();
+            if let Some((plane, cursor)) = high.as_mut() {
+                raw |= bits_at(plane, cursor.address(), block) << element.low.bits;
+                cursor.advance();
+            }
+            decode(raw, element.code)
+        };
         let sub_block = index / span;
-        let value = (decode(raw, element.code) * multiplier - bias) * terms.scales[sub_block];
+        let value = (code * multiplier - bias) * terms.scales[sub_block];
         *out = if min.is_some() {
             value + min_multiplier * terms.mins[sub_block]
         } else {
