@@ -115,7 +115,7 @@ fn expected_token(layout: &FloatLayout) -> &'static str {
 #[case::e2m3(FloatLayout::E2M3)]
 #[case::e4m3_from_fields(E4M3_FROM_FIELDS)]
 async fn float_layout_admit_planner_accepts_layout_operand_and_output(#[case] layout: FloatLayout) {
-    let program = negate_program(DType::Float(layout));
+    let program = negate_program(DType::Layout(layout));
 
     reject_unsupported_gpu_dtype(&program, &BTreeSet::new())
         .expect("a float layout is admitted as operand and output");
@@ -134,7 +134,7 @@ async fn float_layout_admit_planner_accepts_layout_operand_and_output(#[case] la
 
 #[test]
 fn float_layout_admit_rejects_float64() {
-    let program = negate_program(DType::Float64);
+    let program = negate_program(DType::FLOAT64);
 
     let rejection = reject_unsupported_gpu_dtype(&program, &BTreeSet::new());
 
@@ -146,7 +146,7 @@ fn float_layout_admit_rejects_float64() {
 
 #[test]
 fn float_layout_admit_rejects_int128_operand() {
-    let program = negate_program(DType::Int128);
+    let program = negate_program(DType::INT128);
 
     let rejection = reject_unsupported_gpu_dtype(&program, &BTreeSet::new());
 
@@ -158,12 +158,12 @@ fn float_layout_admit_rejects_int128_operand() {
 
 #[test]
 fn float_layout_admit_keeps_gather_index_exemption() {
-    let program = gathered_program(DType::Float(E4M3_FROM_FIELDS), DType::Int32);
+    let program = gathered_program(DType::Layout(E4M3_FROM_FIELDS), DType::INT32);
 
     reject_unsupported_gpu_dtype(&program, &BTreeSet::new())
         .expect("a gather's Int32 indices stay exempt");
 
-    let not_an_index = negate_program(DType::Int32);
+    let not_an_index = negate_program(DType::INT32);
     assert!(
         reject_unsupported_gpu_dtype(&not_an_index, &BTreeSet::new()).is_err(),
         "Int32 as a non-index operand stays rejected"
@@ -180,13 +180,13 @@ fn float_layout_admit_buffer_bytes_derive_from_layout_fields() {
         sign: SignEncoding::Magnitude,
     };
     let cases = [
-        (DType::Float(FloatLayout::BF32), 4),
-        (DType::Float(FloatLayout::F16), 2),
-        (DType::Float(binary16_by_fields), 2),
-        (DType::Float(FloatLayout::BF16), 4),
-        (DType::Float(FloatLayout::E5M2_SATURATING), 4),
-        (DType::Float(FloatLayout::E2M1), 4),
-        (DType::Float(E4M3_FROM_FIELDS), 4),
+        (DType::Layout(FloatLayout::BF32), 4),
+        (DType::Layout(FloatLayout::F16), 2),
+        (DType::Layout(binary16_by_fields), 2),
+        (DType::Layout(FloatLayout::BF16), 4),
+        (DType::Layout(FloatLayout::E5M2_SATURATING), 4),
+        (DType::Layout(FloatLayout::E2M1), 4),
+        (DType::Layout(E4M3_FROM_FIELDS), 4),
     ];
 
     let observed = cases.map(|(dtype, _)| device_element_bytes(dtype));

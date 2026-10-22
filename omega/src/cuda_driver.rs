@@ -1341,7 +1341,7 @@ fn reject_unsupported_kinds(
 
 fn validate_cuda_dtype(bound: &BoundOp) -> Result<(), CudaDriverError> {
     // integer dtypes are carried as integer-valued f32 on device, exactly as the cpu interpreter's f32 pipeline holds them
-    if bound.dtype == DType::Float32 || cuda_integer_dtype(bound.dtype) {
+    if bound.dtype == DType::FLOAT32 || cuda_integer_dtype(bound.dtype) {
         return Ok(());
     }
     Err(CudaDriverError::UnsupportedDtype {
@@ -1353,7 +1353,7 @@ fn validate_cuda_dtype(bound: &BoundOp) -> Result<(), CudaDriverError> {
 fn cuda_integer_dtype(dtype: DType) -> bool {
     matches!(
         dtype,
-        DType::Bool | DType::Int8 | DType::UInt8 | DType::Int32 | DType::UInt32
+        DType::Bool | DType::INT8 | DType::UINT8 | DType::INT32 | DType::UINT32
     )
 }
 
@@ -1725,7 +1725,7 @@ impl CudaPlan {
             .iter()
             .any(|block| !matches!(block, QuantizedBlock::Float32(_)))
             || self.resolved.iter().any(|bound| {
-                bound.dtype != DType::Float32
+                bound.dtype != DType::FLOAT32
                     || gather_count(bound) != 0
                     || !matches!(
                         bound.kind,
@@ -2465,7 +2465,7 @@ mod tests {
     fn non_f32_bound_op_reports_node_and_dtype() {
         let bound = BoundOp {
             node: NodeId(157),
-            dtype: DType::Float16,
+            dtype: DType::FLOAT16,
             extents: vec![1],
             kind: BoundOpKind::Constant { value: 0.0 },
         };
@@ -2475,7 +2475,7 @@ mod tests {
                 validate_cuda_dtype(&bound),
                 Err(CudaDriverError::UnsupportedDtype {
                     node: NodeId(157),
-                    dtype: DType::Float16,
+                    dtype: DType::FLOAT16,
                 })
             ),
             "half output must be rejected"
@@ -2486,10 +2486,10 @@ mod tests {
     fn integer_bound_ops_are_accepted_as_integer_valued_f32() {
         for dtype in [
             DType::Bool,
-            DType::Int8,
-            DType::UInt8,
-            DType::Int32,
-            DType::UInt32,
+            DType::INT8,
+            DType::UINT8,
+            DType::INT32,
+            DType::UINT32,
         ] {
             let bound = BoundOp {
                 node: NodeId(109),

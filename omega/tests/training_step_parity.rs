@@ -56,7 +56,7 @@ fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
     append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape,
             name: Some(name.into()),
         },
@@ -67,7 +67,7 @@ fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, Ind
     append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands,
             name: None,
@@ -84,7 +84,7 @@ fn reduce_add(
     append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand,
@@ -166,9 +166,9 @@ fn build_training_step() -> TrainingStep {
     let b2 = leaf(&mut program, "b2", vec![Extent::Static(OUT_DIM as u32)]);
 
     let h_pre = dense(&mut program, x, w1, b1);
-    let h = relu(&mut program, DType::Float32, h_pre, 1);
+    let h = relu(&mut program, DType::FLOAT32, h_pre, 1);
     let out_pre = dense(&mut program, h, w2, b2);
-    let loss = softmax_cross_entropy(&mut program, DType::Float32, out_pre, y, 1, 0);
+    let loss = softmax_cross_entropy(&mut program, DType::FLOAT32, out_pre, y, 1, 0);
 
     let differentiated = differentiate(&program, loss).expect("scalar loss differentiates");
     let grad_w1 = differentiated
@@ -495,7 +495,7 @@ fn a_graph_past_the_adapter_storage_buffer_limit_is_a_named_error_on_wgpu() {
 
     let device_limit = {
         let probe_program = vec![Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1)],
             name: Some("probe".into()),
         }];

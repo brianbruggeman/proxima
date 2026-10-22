@@ -173,13 +173,13 @@ pub fn run_with_config(backend_name: &str, config: Option<&RuntimeConfig>) -> io
     let mut program = Vec::new();
     let activation = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(1), Extent::Static(2)],
         "activation",
     );
     let weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(2), Extent::Static(3)],
         "weight",
     );
@@ -233,19 +233,19 @@ pub fn run_with_config(backend_name: &str, config: Option<&RuntimeConfig>) -> io
     let mut program = Vec::new();
     let source = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(1), Extent::Static(1), Extent::Static(4)],
         "source",
     );
     let cosine_node = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(1), Extent::Static(2)],
         "cosine",
     );
     let sine_node = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(1), Extent::Static(2)],
         "sine",
     );

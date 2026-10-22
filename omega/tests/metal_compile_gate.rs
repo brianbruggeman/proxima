@@ -31,7 +31,7 @@ fn elementwise_tanh_kernel() -> omega::Kernel {
     let source = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(64)],
             name: None,
         },
@@ -39,7 +39,7 @@ fn elementwise_tanh_kernel() -> omega::Kernel {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Tanh,
             operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
             name: None,
@@ -70,7 +70,7 @@ fn elementwise_erf_kernel() -> omega::Kernel {
     let source = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(64)],
             name: None,
         },
@@ -78,7 +78,7 @@ fn elementwise_erf_kernel() -> omega::Kernel {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Erf,
             operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
             name: None,
@@ -105,7 +105,7 @@ fn fused_matmul_kernel() -> omega::Kernel {
     let lhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4), Extent::Static(3)],
             name: None,
         },
@@ -113,7 +113,7 @@ fn fused_matmul_kernel() -> omega::Kernel {
     let rhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(3), Extent::Static(5)],
             name: None,
         },
@@ -121,7 +121,7 @@ fn fused_matmul_kernel() -> omega::Kernel {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -133,7 +133,7 @@ fn fused_matmul_kernel() -> omega::Kernel {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -169,7 +169,7 @@ fn tiled_gemm_q4k_kernel() -> omega::Kernel {
     let lhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4), Extent::Static(256)],
             name: None,
         },
@@ -177,7 +177,7 @@ fn tiled_gemm_q4k_kernel() -> omega::Kernel {
     let rhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![
                 Extent::Static(256),
                 Extent::Static(omega::sized::TILED_GEMM_MIN_TOKENS as u32),
@@ -188,7 +188,7 @@ fn tiled_gemm_q4k_kernel() -> omega::Kernel {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -200,7 +200,7 @@ fn tiled_gemm_q4k_kernel() -> omega::Kernel {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -240,7 +240,7 @@ fn cumsum_kernel() -> omega::Kernel {
     let source = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(16)],
             name: None,
         },
@@ -248,7 +248,7 @@ fn cumsum_kernel() -> omega::Kernel {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: source,
@@ -280,7 +280,7 @@ fn embedding_lookup_kernel() -> omega::Kernel {
     let table = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1000), Extent::Static(8)],
             name: None,
         },
@@ -288,7 +288,7 @@ fn embedding_lookup_kernel() -> omega::Kernel {
     let ids = append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(4)],
             name: None,
         },
@@ -312,7 +312,7 @@ fn embedding_lookup_kernel() -> omega::Kernel {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(table, gathered_map)],
             name: None,
@@ -340,7 +340,7 @@ fn embedding_matmul_kernel() -> omega::Kernel {
     let table = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1000), Extent::Static(6)],
             name: None,
         },
@@ -348,7 +348,7 @@ fn embedding_matmul_kernel() -> omega::Kernel {
     let ids = append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(4)],
             name: None,
         },
@@ -356,7 +356,7 @@ fn embedding_matmul_kernel() -> omega::Kernel {
     let weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(6), Extent::Static(3)],
             name: None,
         },
@@ -381,7 +381,7 @@ fn embedding_matmul_kernel() -> omega::Kernel {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(table, gather_map), (weight, weight_map)],
             name: None,
@@ -390,7 +390,7 @@ fn embedding_matmul_kernel() -> omega::Kernel {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -425,7 +425,7 @@ fn iota_kernel() -> omega::Kernel {
     append(
         &mut program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(16),
         },
     );
@@ -461,7 +461,7 @@ fn cached_attention_kernel() -> omega::Kernel {
         .collect();
     let bound = BoundOp {
         node: NodeId(8),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![1, 1, 1, 4],
         kind: BoundOpKind::CachedAttention {
             operands,

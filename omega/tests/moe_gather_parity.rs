@@ -78,10 +78,10 @@ fn gathered_expert_program(
         ],
         "weight",
     );
-    let route = input(&mut program, DType::Int32, &[Extent::Static(seq)], "route");
+    let route = input(&mut program, DType::INT32, &[Extent::Static(seq)], "route");
     let activation = input(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         &[Extent::Static(seq), Extent::Static(k)],
         "activation",
     );
@@ -112,7 +112,7 @@ fn gathered_expert_program(
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(weight, gather_map), (activation, activation_map)],
             name: None,
@@ -121,7 +121,7 @@ fn gathered_expert_program(
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -161,7 +161,7 @@ fn activation_f32() -> Vec<f32> {
 /// than a tolerance band.
 #[test]
 fn moe_gather_parity_f32_bit_exact_on_metal() {
-    let (program, sum) = gathered_expert_program(DType::Float32, N_EXPERTS, ROWS, K, SEQ);
+    let (program, sum) = gathered_expert_program(DType::FLOAT32, N_EXPERTS, ROWS, K, SEQ);
     let stacked_weight: Vec<f32> = (0..N_EXPERTS as usize)
         .flat_map(|expert| expert_weight_f32(expert, EXPERT_SCALES[expert]))
         .collect();
@@ -246,7 +246,7 @@ fn moe_gather_parity_f32_bit_exact_on_metal() {
 fn moe_gather_parity_q8_0_within_measured_tolerance_on_metal() {
     use proxima_gguf::quant::q8_0::{BLOCK_BYTES, quantize};
 
-    let (program, sum) = gathered_expert_program(DType::UInt8, N_EXPERTS, ROWS, K, SEQ);
+    let (program, sum) = gathered_expert_program(DType::UINT8, N_EXPERTS, ROWS, K, SEQ);
     let mut stacked_weight: Vec<u8> = Vec::new();
     for (expert, &scale) in EXPERT_SCALES.iter().enumerate().take(N_EXPERTS as usize) {
         let weight_f32 = expert_weight_f32(expert, scale);
@@ -405,7 +405,7 @@ fn kquant_gather_parity<Q>(
     Q: Fn(&[f32], &mut [u8]),
 {
     let (program, sum) = gathered_expert_program(
-        DType::UInt8,
+        DType::UINT8,
         KQUANT_N_EXPERTS,
         KQUANT_ROWS,
         KQUANT_K,

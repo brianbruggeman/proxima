@@ -168,7 +168,7 @@ mod tests {
             .zip(buffers)
             .map(|(name, data)| TensorPayload {
                 name: name.clone(),
-                dtype: DType::BFloat16,
+                dtype: DType::BFLOAT16,
                 shape: alloc::vec![HIDDEN, HIDDEN],
                 data,
             })

@@ -14,7 +14,7 @@ fn single_weight_squared_error() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let input = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: input_shape.clone(),
             name: Some("x".into()),
         },
@@ -22,7 +22,7 @@ fn single_weight_squared_error() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let weight = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: input_shape.clone(),
             name: Some("w".into()),
         },
@@ -30,7 +30,7 @@ fn single_weight_squared_error() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let target = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: input_shape.clone(),
             name: Some("target".into()),
         },
@@ -39,7 +39,7 @@ fn single_weight_squared_error() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let product = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(input, vector_map.clone()), (weight, vector_map.clone())],
             name: None,
@@ -48,7 +48,7 @@ fn single_weight_squared_error() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let difference = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Subtract,
             operands: vec![(product, vector_map.clone()), (target, vector_map.clone())],
             name: None,
@@ -57,7 +57,7 @@ fn single_weight_squared_error() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let squared = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (difference, vector_map.clone()),
@@ -69,7 +69,7 @@ fn single_weight_squared_error() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let half = op::append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 0.5,
         },
@@ -78,7 +78,7 @@ fn single_weight_squared_error() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let scaled = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(squared, vector_map.clone()), (half, half_map)],
             name: None,
@@ -87,7 +87,7 @@ fn single_weight_squared_error() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let loss = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: scaled,
@@ -111,7 +111,7 @@ fn low_precision_weight_gradient_matches_f32_reference() {
     let master = op::append(
         &mut differentiated.program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1)],
             name: Some("master".into()),
         },
@@ -119,7 +119,7 @@ fn low_precision_weight_gradient_matches_f32_reference() {
     let moment_one = op::append(
         &mut differentiated.program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1)],
             name: Some("moment_one".into()),
         },
@@ -127,7 +127,7 @@ fn low_precision_weight_gradient_matches_f32_reference() {
     let moment_two = op::append(
         &mut differentiated.program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1)],
             name: Some("moment_two".into()),
         },
@@ -148,7 +148,7 @@ fn low_precision_weight_gradient_matches_f32_reference() {
     for operation in &differentiated.program {
         assert_eq!(
             operation.dtype(),
-            DType::Float32,
+            DType::FLOAT32,
             "all forward, backward, and Adam nodes use FP32"
         );
     }

@@ -66,13 +66,13 @@ use crate::expr;
 /// let mut program = Vec::new();
 /// let x = op::append(
 ///     &mut program,
-///     Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: Some("x".into()) },
+///     Op::Input { dtype: DType::FLOAT32, shape: vec![Extent::Static(4)], name: Some("x".into()) },
 /// );
 /// let mask = op::append(
 ///     &mut program,
-///     Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: Some("mask".into()) },
+///     Op::Input { dtype: DType::FLOAT32, shape: vec![Extent::Static(4)], name: Some("mask".into()) },
 /// );
-/// let out = dropout(&mut program, DType::Float32, x, mask, 1, 0.5);
+/// let out = dropout(&mut program, DType::FLOAT32, x, mask, 1, 0.5);
 ///
 /// let x_values = [1.0f32, 2.0, 3.0, 4.0];
 /// let mask_values = [1.0f32, 0.0, 1.0, 0.0];
@@ -430,7 +430,7 @@ mod tests {
         proxima_tensor::op::append(
             program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape,
                 name: Some(name.into()),
             },
@@ -442,7 +442,7 @@ mod tests {
         let mut program = Vec::new();
         let x = leaf(&mut program, "x", vec![Extent::Static(4)]);
         let mask = leaf(&mut program, "mask", vec![Extent::Static(4)]);
-        let out = dropout(&mut program, DType::Float32, x, mask, 1, 0.5);
+        let out = dropout(&mut program, DType::FLOAT32, x, mask, 1, 0.5);
 
         let x_values = [1.0f32, 2.0, 3.0, 4.0];
         let mask_values = [1.0f32, 0.0, 1.0, 0.0];
@@ -464,7 +464,7 @@ mod tests {
         let mut program = Vec::new();
         let x = leaf(&mut program, "x", vec![Extent::Static(3)]);
         let mask = leaf(&mut program, "mask", vec![Extent::Static(3)]);
-        let out = dropout(&mut program, DType::Float32, x, mask, 1, 1.0);
+        let out = dropout(&mut program, DType::FLOAT32, x, mask, 1, 1.0);
 
         let x_values = [1.0f32, -2.5, 3.0];
         let mask_values = [1.0f32, 1.0, 1.0];
@@ -486,7 +486,7 @@ mod tests {
         let mut program = Vec::new();
         let x = leaf(&mut program, "x", vec![Extent::Static(4)]);
         let mask = leaf(&mut program, "mask", vec![Extent::Static(3)]);
-        let out = dropout(&mut program, DType::Float32, x, mask, 1, 0.5);
+        let out = dropout(&mut program, DType::FLOAT32, x, mask, 1, 0.5);
 
         let x_values = [1.0f32, 2.0, 3.0, 4.0];
         let mask_values = [1.0f32, 0.0, 1.0];
@@ -520,7 +520,7 @@ mod tests {
         let gamma = leaf(&mut program, "gamma", vec![Extent::Static(2)]);
         let beta = leaf(&mut program, "beta", vec![Extent::Static(2)]);
         let (output, batch_mean, batch_variance) =
-            batchnorm2d_train(&mut program, DType::Float32, x, gamma, beta, 4, 2, 1e-5);
+            batchnorm2d_train(&mut program, DType::FLOAT32, x, gamma, beta, 4, 2, 1e-5);
         (program, x, gamma, beta, output, batch_mean, batch_variance)
     }
 
@@ -589,7 +589,7 @@ mod tests {
         let gamma = leaf(&mut program, "gamma", vec![Extent::Static(2)]);
         let beta = leaf(&mut program, "beta", vec![Extent::Static(2)]);
         let (output, _batch_mean, batch_variance) =
-            batchnorm2d_train(&mut program, DType::Float32, x, gamma, beta, 4, 1, 1e-5);
+            batchnorm2d_train(&mut program, DType::FLOAT32, x, gamma, beta, 4, 1, 1e-5);
 
         let x_values = [5.0f32, -3.0];
         let gamma_values = [1.0f32, 1.0];
@@ -640,7 +640,7 @@ mod tests {
         let running_variance = leaf(&mut program, "running_variance", vec![Extent::Static(2)]);
         let output = batchnorm2d_eval(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             x,
             gamma,
             beta,
@@ -693,7 +693,7 @@ mod tests {
         let mut program = Vec::new();
         let running = leaf(&mut program, "running", vec![Extent::Static(2)]);
         let batch = leaf(&mut program, "batch", vec![Extent::Static(2)]);
-        let out = update_running_stats(&mut program, DType::Float32, running, batch, 0.9);
+        let out = update_running_stats(&mut program, DType::FLOAT32, running, batch, 0.9);
 
         let running_values = [0.0f32, 10.0];
         let batch_values = [2.0f32, 5.0];
@@ -760,7 +760,7 @@ mod tests {
         // `pseudo_random` doc for the matching input-side precaution).
         let squared_output = expr::binary(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             (output, expr::identity(4)),
             (output, expr::identity(4)),
@@ -768,7 +768,7 @@ mod tests {
         let loss = proxima_tensor::op::append(
             &mut program,
             Op::Reduce(proxima_tensor::op::Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: squared_output,
@@ -904,7 +904,7 @@ mod tests {
         let gamma = leaf(program, "gamma", vec![Extent::Static(2)]);
         let beta = leaf(program, "beta", vec![Extent::Static(2)]);
         let (output, _batch_mean, _batch_variance) =
-            batchnorm2d_train(program, DType::Float32, x, gamma, beta, 4, 4, 1e-5);
+            batchnorm2d_train(program, DType::FLOAT32, x, gamma, beta, 4, 4, 1e-5);
         (x, gamma, beta, output)
     }
 

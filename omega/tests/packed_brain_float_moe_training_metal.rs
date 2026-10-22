@@ -119,7 +119,7 @@ fn build_fixture() -> Fixture {
     let expert_stack = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(3), Extent::Static(2), Extent::Static(2)],
             name: Some("expert_stack".into()),
         },
@@ -127,7 +127,7 @@ fn build_fixture() -> Fixture {
     let route = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(3)],
             name: Some("route".into()),
         },
@@ -135,7 +135,7 @@ fn build_fixture() -> Fixture {
     let activation = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(3), Extent::Static(2)],
             name: Some("activation".into()),
         },
@@ -143,7 +143,7 @@ fn build_fixture() -> Fixture {
     let target = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(3), Extent::Static(2)],
             name: Some("target".into()),
         },
@@ -152,7 +152,7 @@ fn build_fixture() -> Fixture {
     let predictions = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -166,7 +166,7 @@ fn build_fixture() -> Fixture {
     let difference = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Subtract,
             operands: vec![
                 (predictions, matrix_map.clone()),
@@ -178,7 +178,7 @@ fn build_fixture() -> Fixture {
     let squared = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (difference, matrix_map.clone()),
@@ -190,7 +190,7 @@ fn build_fixture() -> Fixture {
     let half = op::append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 0.5,
         },
@@ -198,7 +198,7 @@ fn build_fixture() -> Fixture {
     let scaled = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (squared, matrix_map),
@@ -210,7 +210,7 @@ fn build_fixture() -> Fixture {
     let loss = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: scaled,
@@ -504,7 +504,7 @@ fn append_vector_input(program: &mut Vec<Op>, name: &str) -> NodeId {
     op::append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: Some(name.into()),
         },
@@ -964,7 +964,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let expert_stack = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(2), Extent::Static(4), Extent::Static(4)],
             name: Some("experts".into()),
         },
@@ -972,7 +972,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let routes = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(8)],
             name: Some("expert_ids".into()),
         },
@@ -980,7 +980,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let activations = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(8), Extent::Static(4)],
             name: Some("inputs".into()),
         },
@@ -988,7 +988,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let targets = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(8), Extent::Static(4)],
             name: Some("targets".into()),
         },
@@ -1017,7 +1017,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let packed_gather = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(expert_stack, gathered_map)],
             name: Some("selected_pilot_expert".into()),
@@ -1026,7 +1026,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let product = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (activations, IndexMap::Affine(map::projection(3, &[0, 1]))),
@@ -1041,7 +1041,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let logits = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -1057,7 +1057,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let maximum = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Maximum,
             init: ReduceInit::NegativeInfinity,
             operand: logits,
@@ -1070,7 +1070,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let centered = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Subtract,
             operands: vec![(logits, row_map.clone()), (maximum, vector_map.clone())],
             name: None,
@@ -1079,7 +1079,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let exponentials = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Exponential,
             operands: vec![(centered, row_map.clone())],
             name: None,
@@ -1088,7 +1088,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let exp_sum = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: exponentials,
@@ -1101,7 +1101,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let log_sum = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Logarithm,
             operands: vec![(exp_sum, vector_one_map.clone())],
             name: None,
@@ -1110,7 +1110,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let log_normalizer = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![
                 (maximum, vector_one_map.clone()),
@@ -1122,7 +1122,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let target_product = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(logits, row_map.clone()), (targets, row_map.clone())],
             name: None,
@@ -1131,7 +1131,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let target_logits = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: target_product,
@@ -1144,7 +1144,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let token_losses = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Subtract,
             operands: vec![
                 (log_normalizer, vector_one_map.clone()),
@@ -1156,7 +1156,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let mean_scale = op::append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 0.125,
         },
@@ -1164,7 +1164,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let mean_scaled = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (token_losses, IndexMap::Affine(map::projection(1, &[0]))),
@@ -1176,7 +1176,7 @@ fn build_pilot_batch_fixture() -> PilotBatchFixture {
     let mean_loss = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: mean_scaled,

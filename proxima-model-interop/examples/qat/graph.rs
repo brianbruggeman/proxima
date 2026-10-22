@@ -166,12 +166,12 @@ fn append_loss(program: &mut Vec<Op>, logits: NodeId, rows: u32, vocab: u32) -> 
     let one_hot = append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(rows), Extent::Static(vocab)],
             name: Some("targets_one_hot".into()),
         },
     );
-    softmax_cross_entropy(program, DType::Float32, logits, one_hot, 2, 1)
+    softmax_cross_entropy(program, DType::FLOAT32, logits, one_hot, 2, 1)
 }
 
 fn fix_extent(extent: &Extent, symbols: &[u64]) -> Result<Extent, QatError> {

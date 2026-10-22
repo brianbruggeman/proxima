@@ -137,7 +137,7 @@ fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(k), Extent::Static(1)],
             name: None,
         },
@@ -145,7 +145,7 @@ fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -157,7 +157,7 @@ fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -201,7 +201,7 @@ fn metal_matmul_on_real_ffn_gate_inp_f16_bytes_matches_the_dequantized_f32_cpu_p
         .expect("blk.0.ffn_gate_inp.weight decodes as a whole run of f16 elements");
 
     let (packed_program, packed_sum) =
-        matmul_program(out_dim as u32, in_dim as u32, DType::Float16);
+        matmul_program(out_dim as u32, in_dim as u32, DType::FLOAT16);
     let metal = omega::execute(
         &packed_program,
         &[],
@@ -217,7 +217,7 @@ fn metal_matmul_on_real_ffn_gate_inp_f16_bytes_matches_the_dequantized_f32_cpu_p
     )
     .expect("metal executes an f16 matmul on real blk.0.ffn_gate_inp.weight bytes");
 
-    let (f32_program, f32_sum) = matmul_program(out_dim as u32, in_dim as u32, DType::Float32);
+    let (f32_program, f32_sum) = matmul_program(out_dim as u32, in_dim as u32, DType::FLOAT32);
     let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum])
         .expect("dequantized f32 cpu matmul evaluates");
 

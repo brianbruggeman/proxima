@@ -85,7 +85,7 @@ fn dense_safetensors() -> Vec<u8> {
         .iter()
         .map(|(name, bytes)| proxima_safetensors::TensorPayload {
             name: (*name).into(),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![(bytes.len() / 4) as u64],
             data: bytes,
         })

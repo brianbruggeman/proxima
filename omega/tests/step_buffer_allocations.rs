@@ -27,7 +27,7 @@ mod lookup {
         let table = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(vocab), Extent::Static(dim)],
                 name: Some(String::from("table")),
             },
@@ -35,7 +35,7 @@ mod lookup {
         let ids = append(
             &mut program,
             Op::Input {
-                dtype: DType::Int32,
+                dtype: DType::INT32,
                 shape: vec![Extent::Static(seq)],
                 name: Some(String::from("ids")),
             },
@@ -59,7 +59,7 @@ mod lookup {
         let lookup = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Identity,
                 operands: vec![(table, gathered_map)],
                 name: None,
@@ -162,7 +162,7 @@ mod routed_moe {
         let mut leaf = |shape: Vec<u32>, name: &str| {
             input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 shape.into_iter().map(Extent::Static).collect(),
                 name,
             )

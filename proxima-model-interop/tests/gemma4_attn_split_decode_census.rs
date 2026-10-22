@@ -122,7 +122,7 @@ async fn gemma4_e2b_decode_binds_35_cached_attention_ops_and_no_softmax_weights_
             };
             assert_eq!(
                 bound.dtype,
-                DType::Float32,
+                DType::FLOAT32,
                 "bucket {bucket} node {}: the K and V planes the kernel streams are f32, which is the byte count the split kernel moves",
                 bound.node.0
             );

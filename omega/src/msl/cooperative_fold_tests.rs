@@ -13,7 +13,7 @@ fn sum_of_squares_op(width: u32) -> BoundOp {
     let row = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1), Extent::Static(width)],
             name: None,
         },
@@ -21,7 +21,7 @@ fn sum_of_squares_op(width: u32) -> BoundOp {
     let squared = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (row, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -33,7 +33,7 @@ fn sum_of_squares_op(width: u32) -> BoundOp {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: squared,
@@ -131,7 +131,7 @@ pub(super) mod normalization_rows {
             append(
                 program,
                 Op::Input {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape,
                     name: Some(name.into()),
                 },
@@ -150,7 +150,7 @@ pub(super) mod normalization_rows {
                 append(
                     program,
                     Op::Elementwise {
-                        dtype: DType::Float32,
+                        dtype: DType::FLOAT32,
                         body,
                         operands,
                         name: None,
@@ -165,7 +165,7 @@ pub(super) mod normalization_rows {
         let sum_squares = append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: squared,

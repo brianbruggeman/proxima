@@ -116,7 +116,7 @@ fn leaf(program: &mut Vec<Op>, name: &str, extent: usize) -> NodeId {
     op::append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(extent as u32)],
             name: Some(name.into()),
         },
@@ -127,7 +127,7 @@ fn leaf_shaped(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId 
     op::append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape,
             name: Some(name.into()),
         },
@@ -138,7 +138,7 @@ fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, Ind
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands,
             name: None,
@@ -166,7 +166,7 @@ fn reduce_node(
     op::append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             init,
             operand,

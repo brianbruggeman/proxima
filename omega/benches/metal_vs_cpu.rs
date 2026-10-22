@@ -77,7 +77,7 @@ fn matmul_rhs_transposed_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let lhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(m), Extent::Static(k)],
             name: None,
         },
@@ -85,7 +85,7 @@ fn matmul_rhs_transposed_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let rhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(n), Extent::Static(k)],
             name: None,
         },
@@ -93,7 +93,7 @@ fn matmul_rhs_transposed_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -105,7 +105,7 @@ fn matmul_rhs_transposed_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -129,7 +129,7 @@ fn matvec_program(out_dim: u32, in_dim: u32) -> (Vec<Op>, NodeId) {
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(in_dim)],
             name: None,
         },
@@ -137,7 +137,7 @@ fn matvec_program(out_dim: u32, in_dim: u32) -> (Vec<Op>, NodeId) {
     let weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(out_dim), Extent::Static(in_dim)],
             name: None,
         },
@@ -145,7 +145,7 @@ fn matvec_program(out_dim: u32, in_dim: u32) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -157,7 +157,7 @@ fn matvec_program(out_dim: u32, in_dim: u32) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,

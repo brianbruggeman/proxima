@@ -150,7 +150,7 @@ fn matmul_program(
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(tokens), Extent::Static(in_dim)],
             name: None,
         },
@@ -160,7 +160,7 @@ fn matmul_program(
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(projection(3, &[1, 2]))),
@@ -172,7 +172,7 @@ fn matmul_program(
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -273,7 +273,7 @@ fn check_real_tensor_at_token_count(tensor_name: &str, tokens: usize) {
     }
 
     let (packed_program, packed_sum) =
-        matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::UInt8);
+        matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::UINT8);
     let blocks = [
         QuantizedBlock::Packed {
             codec: Codec::Q4_0,
@@ -303,7 +303,7 @@ fn check_real_tensor_at_token_count(tensor_name: &str, tokens: usize) {
     .expect("metal executes the new batched-q4_0_run8 tiled matmul (default on, unset)");
 
     let (f32_program, f32_sum) =
-        matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::Float32);
+        matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::FLOAT32);
     let oracle = evaluate(
         &f32_program,
         &[],
@@ -443,8 +443,8 @@ fn check_real_tensor_epilogue_at_token_count(tensor_name: &str, tokens: usize) {
     };
 
     let (mut packed_program, packed_sum) =
-        matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::UInt8);
-    let packed_epilogue = append_epilogue(&mut packed_program, packed_sum, DType::Float32);
+        matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::UINT8);
+    let packed_epilogue = append_epilogue(&mut packed_program, packed_sum, DType::FLOAT32);
     let blocks = [
         QuantizedBlock::Packed {
             codec: Codec::Q4_0,
@@ -478,8 +478,8 @@ fn check_real_tensor_epilogue_at_token_count(tensor_name: &str, tokens: usize) {
     );
 
     let (mut f32_program, f32_sum) =
-        matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::Float32);
-    let f32_epilogue = append_epilogue(&mut f32_program, f32_sum, DType::Float32);
+        matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::FLOAT32);
+    let f32_epilogue = append_epilogue(&mut f32_program, f32_sum, DType::FLOAT32);
     let oracle = evaluate(
         &f32_program,
         &[],

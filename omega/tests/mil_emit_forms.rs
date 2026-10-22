@@ -66,17 +66,17 @@ fn mil_emit_embedding_lookup_is_one_gather_of_int32_rows_from_a_blob_table() {
         .collect();
     let weights = [WeightView {
         name: "table",
-        dtype: SourceDType::Float32,
+        dtype: SourceDType::FLOAT32,
         bytes: &table,
     }];
     let mut program = vec![
-        input(DType::Float32, &[5, 3], "table"),
-        input(DType::Int32, &[4], "rows"),
+        input(DType::FLOAT32, &[5, 3], "table"),
+        input(DType::INT32, &[4], "rows"),
     ];
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(
                 NodeId(0),
@@ -98,11 +98,11 @@ fn mil_emit_embedding_lookup_is_one_gather_of_int32_rows_from_a_blob_table() {
 
 #[test]
 fn mil_emit_integer_identity_over_a_float_operand_is_a_cast_not_an_identity() {
-    let mut program = vec![input(DType::Float32, &[4], "values")];
+    let mut program = vec![input(DType::FLOAT32, &[4], "values")];
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             body: ScalarOp::Identity,
             operands: vec![(NodeId(0), IndexMap::Affine(projection(1, &[0])))],
             name: None,
@@ -138,7 +138,7 @@ fn mil_emit_bge_small_pinned_batch1_seq16_has_96_matmul_39_gather_and_12_head_me
         .iter()
         .map(|(name, bytes)| WeightView {
             name,
-            dtype: SourceDType::Float32,
+            dtype: SourceDType::FLOAT32,
             bytes,
         })
         .collect();
@@ -158,13 +158,13 @@ fn mil_emit_bge_small_pinned_batch1_seq16_has_96_matmul_39_gather_and_12_head_me
 
 fn add_of_broadcast_operand(operand_rows: u32) -> Vec<Op> {
     let mut program = vec![
-        input(DType::Float32, &[3, 4], "left"),
-        input(DType::Float32, &[operand_rows, 4], "right"),
+        input(DType::FLOAT32, &[3, 4], "left"),
+        input(DType::FLOAT32, &[operand_rows, 4], "right"),
     ];
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![
                 (NodeId(0), IndexMap::Affine(projection(2, &[0, 1]))),

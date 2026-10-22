@@ -126,7 +126,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
         });
     };
     validate_attention_split_limit(resolved.node, crate::sized::ATTENTION_SPLIT_MAX)?;
-    if resolved.dtype != DType::Float32 {
+    if resolved.dtype != DType::FLOAT32 {
         return Err(EmitError::UnsupportedDType {
             node: resolved.node,
             dtype: resolved.dtype,

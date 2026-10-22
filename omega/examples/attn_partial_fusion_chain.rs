@@ -580,7 +580,7 @@ mod imp {
 
         let bound_op = BoundOp {
             node: NodeId(order[8]),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: vec![cached_key_rows as u64, attention_rows as u64],
             kind: BoundOpKind::CachedSoftmaxWeights {
                 operands: vec![
@@ -1425,7 +1425,7 @@ kernel void k_softmax_fused(
         let library_softmax = use_library_softmax.then(|| {
             let bound_op = BoundOp {
                 node: NodeId(order[8]),
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 extents: vec![key_count as u64, group_count as u64],
                 kind: BoundOpKind::CachedSoftmaxWeights {
                     operands: vec![

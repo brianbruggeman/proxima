@@ -70,7 +70,7 @@ fn program_for(weight: &str, norm: &str, alias: &str, token: &str) -> (Vec<Op>, 
     let activations = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1), Extent::Static(3)],
             name: Some(token.into()),
         },
@@ -78,7 +78,7 @@ fn program_for(weight: &str, norm: &str, alias: &str, token: &str) -> (Vec<Op>, 
     let weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(3), Extent::Static(2)],
             name: Some(weight.into()),
         },
@@ -86,7 +86,7 @@ fn program_for(weight: &str, norm: &str, alias: &str, token: &str) -> (Vec<Op>, 
     append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(2)],
             name: Some(norm.into()),
         },
@@ -94,7 +94,7 @@ fn program_for(weight: &str, norm: &str, alias: &str, token: &str) -> (Vec<Op>, 
     append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(2)],
             name: Some(alias.into()),
         },
@@ -102,7 +102,7 @@ fn program_for(weight: &str, norm: &str, alias: &str, token: &str) -> (Vec<Op>, 
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (activations, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -114,7 +114,7 @@ fn program_for(weight: &str, norm: &str, alias: &str, token: &str) -> (Vec<Op>, 
     let output = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -132,20 +132,20 @@ fn safetensors_fixture() -> Vec<u8> {
         let tensors = [
             (
                 "matrix.f32",
-                DType::Float32,
+                DType::FLOAT32,
                 vec![2, 3],
                 f32_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
             ),
             (
                 "alignment.pad",
-                DType::UInt8,
+                DType::UINT8,
                 vec![padding_length],
                 vec![0; padding_length as usize],
             ),
-            ("norm.f32", DType::Float32, vec![2], f32_bytes(&[1.0, 2.0])),
+            ("norm.f32", DType::FLOAT32, vec![2], f32_bytes(&[1.0, 2.0])),
             (
                 "matrix.f16",
-                DType::Float16,
+                DType::FLOAT16,
                 vec![2, 3],
                 [0x3c00u16, 0x4000, 0x4200, 0x4400, 0x4500, 0x4600]
                     .into_iter()
@@ -154,7 +154,7 @@ fn safetensors_fixture() -> Vec<u8> {
             ),
             (
                 "norm.f16",
-                DType::Float16,
+                DType::FLOAT16,
                 vec![2],
                 [0x3c00u16, 0x4000]
                     .into_iter()
@@ -163,7 +163,7 @@ fn safetensors_fixture() -> Vec<u8> {
             ),
             (
                 "matrix.bf16",
-                DType::BFloat16,
+                DType::BFLOAT16,
                 vec![2, 3],
                 [0x3f80u16, 0x4000, 0x4040, 0x4080, 0x40a0, 0x40c0]
                     .into_iter()
@@ -172,7 +172,7 @@ fn safetensors_fixture() -> Vec<u8> {
             ),
             (
                 "norm.bf16",
-                DType::BFloat16,
+                DType::BFLOAT16,
                 vec![2],
                 [0x3f80u16, 0x4000]
                     .into_iter()
@@ -181,7 +181,7 @@ fn safetensors_fixture() -> Vec<u8> {
             ),
             (
                 "extra.weight",
-                DType::Float32,
+                DType::FLOAT32,
                 vec![2],
                 f32_bytes(&[7.0, 8.0]),
             ),
@@ -263,9 +263,9 @@ fn architecture_matrix_safetensors_program_leaves() {
     let mut join_alias_rejected = 0;
 
     for (suffix, matrix_dtype) in [
-        ("f32", DType::Float32),
-        ("f16", DType::Float16),
-        ("bf16", DType::BFloat16),
+        ("f32", DType::FLOAT32),
+        ("f16", DType::FLOAT16),
+        ("bf16", DType::BFLOAT16),
     ] {
         let matrix_name = format!("matrix.{suffix}");
         let norm_name = format!("norm.{suffix}");
@@ -317,7 +317,7 @@ fn architecture_matrix_safetensors_program_leaves() {
             "renamed leaf uses its configured source bytes"
         );
         alias_match_count += 1;
-        if matrix_dtype != DType::Float32 {
+        if matrix_dtype != DType::FLOAT32 {
             let matrix_block = weights
                 .packed()
                 .iter()
@@ -327,8 +327,8 @@ fn architecture_matrix_safetensors_program_leaves() {
                 panic!("low-precision matrix should be a borrowed packed block");
             };
             let expected_codec = match matrix_dtype {
-                DType::Float16 => Codec::Float16,
-                DType::BFloat16 => Codec::BFloat16,
+                DType::FLOAT16 => Codec::Float16,
+                DType::BFLOAT16 => Codec::BFloat16,
                 _ => panic!("fixture low-precision matrix has a supported dtype"),
             };
             assert_eq!(codec, expected_codec);
@@ -448,7 +448,7 @@ fn architecture_matrix_safetensors_program_leaves() {
     let mut misaligned_bytes = file_bytes.clone();
     misaligned_bytes.insert(absolute_start, 0);
     let misaligned_program = vec![Op::Input {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         shape: vec![Extent::Static(2)],
         name: Some("norm.f32".into()),
     }];
@@ -593,12 +593,12 @@ fn architecture_matrix_safetensors_program_leaves() {
     let short_payload_rejected = 1;
 
     let alias_program = vec![Op::Input {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         shape: vec![Extent::Static(2)],
         name: Some("part.weight".into()),
     }];
     let symbolic_program = vec![Op::Input {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         shape: vec![Extent::Symbolic(1)],
         name: Some("norm.f32".into()),
     }];
@@ -652,7 +652,7 @@ fn architecture_matrix_safetensors_program_leaves() {
     }
 
     let mut gathered_program = vec![Op::Input {
-        dtype: DType::Int32,
+        dtype: DType::INT32,
         shape: vec![Extent::Static(1)],
         name: Some("expert.index".into()),
     }];
@@ -660,7 +660,7 @@ fn architecture_matrix_safetensors_program_leaves() {
     let gathered_leaf = append(
         &mut gathered_program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(2), Extent::Static(3), Extent::Static(2)],
             name: Some("gather.weight".into()),
         },
@@ -668,7 +668,7 @@ fn architecture_matrix_safetensors_program_leaves() {
     let gather_activations = append(
         &mut gathered_program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1), Extent::Static(3)],
             name: Some("activation".into()),
         },
@@ -676,7 +676,7 @@ fn architecture_matrix_safetensors_program_leaves() {
     append(
         &mut gathered_program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (
@@ -701,7 +701,7 @@ fn architecture_matrix_safetensors_program_leaves() {
         .tensors
         .push(proxima_safetensors::TensorEntry {
             name: "gather.weight".into(),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![2, 3, 2],
             data_offsets: (0, 48),
         });

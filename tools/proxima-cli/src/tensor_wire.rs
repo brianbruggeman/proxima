@@ -51,7 +51,7 @@ fn write_f32_model(
         .iter()
         .map(|(name, shape, data)| TensorPayload {
             name: (*name).to_string(),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: shape.to_vec(),
             data,
         })
@@ -102,7 +102,7 @@ fn data_region(bytes: &[u8]) -> Result<&[u8], ProximaError> {
 }
 
 fn read_f32_entry(entry: &TensorEntry, data: &[u8]) -> Result<TensorRecord, ProximaError> {
-    if entry.dtype != DType::Float32 {
+    if entry.dtype != DType::FLOAT32 {
         let wire = dtype_to_wire(entry.dtype).unwrap_or("unsupported");
         return Err(ProximaError::Config(format!(
             "tensor `{}` has dtype {wire}; the tensor wire carries only F32",
@@ -247,7 +247,7 @@ mod tests {
         let bytes = write_complete(&SafetensorsModel {
             tensors: vec![TensorPayload {
                 name: "x".to_string(),
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: shape.to_vec(),
                 data: &data,
             }],
@@ -287,7 +287,7 @@ mod tests {
         let bytes = write_complete(&SafetensorsModel {
             tensors: vec![TensorPayload {
                 name: "x".to_string(),
-                dtype: DType::Int32,
+                dtype: DType::INT32,
                 shape: vec![2],
                 data: &data,
             }],

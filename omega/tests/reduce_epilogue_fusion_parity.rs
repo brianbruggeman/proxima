@@ -190,7 +190,7 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
     let x = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(SEQ), Extent::Static(DIM)],
             name: Some("x".into()),
         },
@@ -198,7 +198,7 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
     let gamma = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(DIM)],
             name: Some("gamma".into()),
         },
@@ -206,7 +206,7 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
     let inv_dim = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             name: Some("inv_dim".into()),
         },
@@ -214,7 +214,7 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
     let eps = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             name: Some("eps".into()),
         },
@@ -222,7 +222,7 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
     let squared = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(x, full()), (x, full())],
             name: None,
@@ -231,7 +231,7 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
     let sum_squares = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: squared,
@@ -244,7 +244,7 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
     let mean_square = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(sum_squares, keep_seq()), (inv_dim, broadcast_scalar_seq())],
             name: None,
@@ -253,7 +253,7 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
     let mean_square_eps = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![(mean_square, keep_seq()), (eps, broadcast_scalar_seq())],
             name: None,
@@ -262,7 +262,7 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
     let rms = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::SquareRoot,
             operands: vec![(mean_square_eps, keep_seq())],
             name: None,
@@ -271,7 +271,7 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
     let inv_rms = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Reciprocal,
             operands: vec![(rms, keep_seq())],
             name: None,
@@ -280,7 +280,7 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
     let normed = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(x, full()), (inv_rms, broadcast_seq_over_dim())],
             name: None,
@@ -289,7 +289,7 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
     let scaled = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(normed, full()), (gamma, broadcast_dim_over_seq())],
             name: None,
@@ -372,7 +372,7 @@ fn assert_broadcast_fold_rows(width: u32, input: Vec<f32>, expected: Vec<f32>) {
     let rows = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(2), Extent::Static(width)],
             name: Some("rows".into()),
         },
@@ -380,7 +380,7 @@ fn assert_broadcast_fold_rows(width: u32, input: Vec<f32>, expected: Vec<f32>) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: rows,
@@ -393,7 +393,7 @@ fn assert_broadcast_fold_rows(width: u32, input: Vec<f32>, expected: Vec<f32>) {
     let normalized = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Divide,
             operands: vec![
                 (rows, IndexMap::Affine(projection(2, &[0, 1]))),

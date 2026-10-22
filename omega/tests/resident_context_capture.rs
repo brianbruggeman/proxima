@@ -20,7 +20,7 @@ fn resident_context_keeps_real_dispatch_captures_with_their_owner() {
             let input = append(
                 &mut program,
                 Op::Input {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: vec![Extent::Static(2)],
                     name: None,
                 },
@@ -28,7 +28,7 @@ fn resident_context_keeps_real_dispatch_captures_with_their_owner() {
             let output = append(
                 &mut program,
                 Op::Elementwise {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     body: ScalarOp::Reciprocal,
                     operands: vec![(input, IndexMap::Affine(projection(1, &[0])))],
                     name: None,

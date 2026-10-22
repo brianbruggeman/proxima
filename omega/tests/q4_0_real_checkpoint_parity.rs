@@ -141,7 +141,7 @@ fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(k), Extent::Static(1)],
             name: None,
         },
@@ -149,7 +149,7 @@ fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -161,7 +161,7 @@ fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -225,7 +225,7 @@ fn metal_matmul_on_real_attn_k_q4_0_bytes_matches_the_dequantized_f32_cpu_path()
         q4_0::dequantize(row_blocks, row_f32).expect("a whole number of q4_0 blocks per row");
     }
 
-    let (packed_program, packed_sum) = matmul_program(rows as u32, in_dim as u32, DType::UInt8);
+    let (packed_program, packed_sum) = matmul_program(rows as u32, in_dim as u32, DType::UINT8);
     let metal = omega::execute(
         &packed_program,
         &[],
@@ -241,7 +241,7 @@ fn metal_matmul_on_real_attn_k_q4_0_bytes_matches_the_dequantized_f32_cpu_path()
     )
     .expect("metal executes a packed q4_0 matmul on real blk.0.attn_k.weight bytes");
 
-    let (f32_program, f32_sum) = matmul_program(rows as u32, in_dim as u32, DType::Float32);
+    let (f32_program, f32_sum) = matmul_program(rows as u32, in_dim as u32, DType::FLOAT32);
     let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum])
         .expect("dequantized f32 cpu matmul evaluates");
 
@@ -293,7 +293,7 @@ fn matmul_program_multi_token(
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(tokens), Extent::Static(k)],
             name: None,
         },
@@ -301,7 +301,7 @@ fn matmul_program_multi_token(
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(map::projection(3, &[1, 2]))),
@@ -313,7 +313,7 @@ fn matmul_program_multi_token(
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -377,7 +377,7 @@ fn real_attn_k_multi_token_case(tokens: usize) {
     }
 
     let (packed_program, packed_sum) =
-        matmul_program_multi_token(tokens as u32, in_dim as u32, out_dim as u32, DType::UInt8);
+        matmul_program_multi_token(tokens as u32, in_dim as u32, out_dim as u32, DType::UINT8);
     // `tokens` here (27, 600) clears `TILED_GEMM_MIN_TOKENS` (8), and
     // `PROXIMA_TILED_GEMM_Q4_0` defaults ON as of `docs/model-interop/
     // discipline.md` ROW C4.6 -- force it explicitly off so this test keeps
@@ -404,7 +404,7 @@ fn real_attn_k_multi_token_case(tokens: usize) {
     });
 
     let (f32_program, f32_sum) =
-        matmul_program_multi_token(tokens as u32, in_dim as u32, out_dim as u32, DType::Float32);
+        matmul_program_multi_token(tokens as u32, in_dim as u32, out_dim as u32, DType::FLOAT32);
     let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum])
         .expect("dequantized f32 cpu multi-token matmul evaluates");
 

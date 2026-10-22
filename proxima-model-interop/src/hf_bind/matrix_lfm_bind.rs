@@ -103,7 +103,7 @@ fn architecture_matrix_lfm_global_leaves() {
         let entry = pinned_manifest
             .tensor(name)
             .expect("pinned LFM header contains each graph-global source");
-        assert_eq!(entry.dtype, DType::BFloat16);
+        assert_eq!(entry.dtype, DType::BFLOAT16);
         assert_eq!(entry.shape, shape);
     }
 
@@ -122,13 +122,13 @@ fn architecture_matrix_lfm_global_leaves() {
         tensors: vec![
             proxima_safetensors::TensorEntry {
                 name: "model.embed_tokens.weight".into(),
-                dtype: DType::BFloat16,
+                dtype: DType::BFLOAT16,
                 shape: vec![4, 2],
                 data_offsets: (0, 16),
             },
             proxima_safetensors::TensorEntry {
                 name: "model.embedding_norm.weight".into(),
-                dtype: DType::BFloat16,
+                dtype: DType::BFLOAT16,
                 shape: vec![2],
                 data_offsets: (16, 20),
             },
@@ -140,7 +140,7 @@ fn architecture_matrix_lfm_global_leaves() {
     let token_ids = append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(1)],
             name: Some("ids".into()),
         },
@@ -148,7 +148,7 @@ fn architecture_matrix_lfm_global_leaves() {
     let embedding = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4), Extent::Static(2)],
             name: Some("token_embd.weight".into()),
         },
@@ -157,7 +157,7 @@ fn architecture_matrix_lfm_global_leaves() {
     let output_norm = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(2)],
             name: Some("output_norm.weight".into()),
         },
@@ -165,7 +165,7 @@ fn architecture_matrix_lfm_global_leaves() {
     let inverse_width = append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 0.5,
         },
@@ -173,7 +173,7 @@ fn architecture_matrix_lfm_global_leaves() {
     let epsilon = append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 0.0,
         },
@@ -184,7 +184,7 @@ fn architecture_matrix_lfm_global_leaves() {
     let output_weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(2), Extent::Static(4)],
             name: Some("output.weight".into()),
         },
@@ -192,7 +192,7 @@ fn architecture_matrix_lfm_global_leaves() {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (normed, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -204,7 +204,7 @@ fn architecture_matrix_lfm_global_leaves() {
     let logits = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -319,7 +319,7 @@ fn append_matrix_leaf(
     let activation = append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1), Extent::Static(input_width)],
             name: Some(runtime_name.clone()),
         },
@@ -328,7 +328,7 @@ fn append_matrix_leaf(
     let weight = append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(input_width), Extent::Static(output_width)],
             name: Some(leaf.into()),
         },
@@ -336,7 +336,7 @@ fn append_matrix_leaf(
     let product = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (activation, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -348,7 +348,7 @@ fn append_matrix_leaf(
     append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -419,7 +419,7 @@ fn architecture_matrix_lfm_layer_bind() {
             append(
                 &mut program,
                 Op::Input {
-                    dtype: DType::BFloat16,
+                    dtype: DType::BFLOAT16,
                     shape: shape
                         .iter()
                         .map(|axis| {
@@ -452,7 +452,7 @@ fn architecture_matrix_lfm_layer_bind() {
         assert_eq!(&view.leaf, leaf);
         assert_eq!(view.name, source);
         assert_eq!(view.shape, *shape);
-        assert_eq!(view.dtype, DType::BFloat16);
+        assert_eq!(view.dtype, DType::BFLOAT16);
         assert_eq!(view.bytes.len(), end - start);
         assert_eq!(view.bytes.as_ptr(), file_bytes[start..end].as_ptr());
         if shape.len() == 2 && !leaf.contains(".shortconv.") {

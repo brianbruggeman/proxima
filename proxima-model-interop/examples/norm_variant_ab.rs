@@ -139,7 +139,7 @@ fn granite_dispatch_manifest(
 ) -> Result<AttentionDispatchManifest, String> {
     let operation = BoundOp {
         node: NodeId(9),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![1000, 8, 2, 64],
         kind: BoundOpKind::CachedAttention {
             operands: (0..9)
@@ -314,7 +314,7 @@ mod attention_variant_tests {
         assert_eq!(selected_manifest.cache_codec, Some(omega::Codec::BFloat16));
         assert_eq!(
             selected_manifest.accumulator,
-            proxima_tensor::DType::Float32
+            proxima_tensor::DType::FLOAT32
         );
         assert_ne!(
             selected_manifest.dispatch_identity,

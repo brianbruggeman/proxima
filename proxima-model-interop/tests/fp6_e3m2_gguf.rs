@@ -97,7 +97,7 @@ fn fp6_e3m2_gguf_round_trip_bytes_identical() {
 
 #[test]
 fn fp6_e3m2_gguf_export_rejected_dtype_to_ggml_is_none() {
-    assert_eq!(dtype_to_ggml(DType::Fp6E3M2), None);
+    assert_eq!(dtype_to_ggml(DType::FP6_E3_M2), None);
 }
 
 #[test]
@@ -106,7 +106,7 @@ fn fp6_e3m2_gguf_export_rejected_transform_returns_unrepresentable_dtype() {
     let model = SafetensorsModel {
         tensors: vec![SafetensorsPayload {
             name: TENSOR_NAME.into(),
-            dtype: DType::Fp6E3M2,
+            dtype: DType::FP6_E3_M2,
             shape: vec![BLOCK_ELEMENTS as u64],
             data: &block,
         }],
@@ -117,6 +117,6 @@ fn fp6_e3m2_gguf_export_rejected_transform_returns_unrepresentable_dtype() {
 
     assert!(matches!(
         outcome,
-        Err(InteropError::UnrepresentableDType { dtype: DType::Fp6E3M2, ref tensor }) if tensor == TENSOR_NAME
+        Err(InteropError::UnrepresentableDType { dtype: DType::FP6_E3_M2, ref tensor }) if tensor == TENSOR_NAME
     ));
 }

@@ -270,7 +270,7 @@ impl Plan {
                     reason: "bounded Metal uploads currently require Float32 payloads",
                 });
             };
-            if *dtype != DType::Float32 {
+            if *dtype != DType::FLOAT32 {
                 return Err(MetalError::UnsupportedConstraint {
                     field: "max_host_tensor_bytes",
                     reason: "converted uploads have no bounded host workspace contract",
@@ -298,7 +298,7 @@ impl Plan {
             );
         }
         for bound in &self.prepared.resolved {
-            if bound.dtype != DType::Float32
+            if bound.dtype != DType::FLOAT32
                 || gather_count(bound) != 0
                 || !matches!(
                     &bound.kind,
@@ -319,7 +319,7 @@ impl Plan {
                 .iter()
                 .try_fold(1_u64, |total, extent| checked_bytes(total, *extent))?;
             checked_bytes(elements.max(1), 4)?;
-            let output = allocation_capacity(bound_output_len(bound), DType::Float32)? as u64;
+            let output = allocation_capacity(bound_output_len(bound), DType::FLOAT32)? as u64;
             let uniform = pack_uniforms_byte_len(bound, self.numeric_policy).max(1) as u64;
             for physical in [output, uniform] {
                 check_limit("max_buffer_length", physical, Some(hardware_limit))?;
@@ -369,7 +369,7 @@ fn prospective_input_capacity(
     byte_length: usize,
 ) -> Result<(Option<(usize, usize)>, u64), MetalError> {
     if byte_length == 0 {
-        return Ok((None, allocation_capacity(0, DType::Float32)? as u64));
+        return Ok((None, allocation_capacity(0, DType::FLOAT32)? as u64));
     }
     if expert_mapping_identity().is_some() {
         return Err(MetalError::UnsupportedConstraint {

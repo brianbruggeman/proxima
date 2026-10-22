@@ -167,7 +167,7 @@ mod tests {
         let bytes = gguf_of_family("llama");
         let parsed = parse_complete(&bytes).expect("parses the gguf just written");
 
-        let refusal = mlx_directory_files(&parsed, &bytes, None, DType::BFloat16).unwrap_err();
+        let refusal = mlx_directory_files(&parsed, &bytes, None, DType::BFLOAT16).unwrap_err();
 
         assert!(
             matches!(refusal, InteropError::UnknownFamilyConfig { family } if family == "llama")
@@ -180,7 +180,7 @@ mod tests {
         let missing = scratch.path().join("absent.gguf");
 
         let refusal =
-            export_mlx_directory(&missing, &scratch.path().join("out"), None, DType::BFloat16)
+            export_mlx_directory(&missing, &scratch.path().join("out"), None, DType::BFLOAT16)
                 .unwrap_err();
 
         assert!(matches!(refusal, InteropError::MlxDirectoryIo { path, .. } if path == missing));
@@ -193,7 +193,7 @@ mod tests {
         std::fs::write(&source, gguf_of_family("llama")).expect("write the gguf");
         let out = scratch.path().join("out");
 
-        let refusal = export_mlx_directory(&source, &out, None, DType::BFloat16).unwrap_err();
+        let refusal = export_mlx_directory(&source, &out, None, DType::BFLOAT16).unwrap_err();
 
         assert!(matches!(refusal, InteropError::UnknownFamilyConfig { .. }));
         assert!(!out.exists());

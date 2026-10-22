@@ -205,7 +205,7 @@ fn reduce_over_last_axis(program: &mut Vec<Op>, product: NodeId, name: &str) -> 
     append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -225,17 +225,17 @@ struct DenseShape {
 
 fn dense_program(shape: &DenseShape) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
-    let weight = input(&mut program, DType::UInt8, &[shape.rows, shape.k], "weight");
+    let weight = input(&mut program, DType::UINT8, &[shape.rows, shape.k], "weight");
     let activation = input(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         &[shape.tokens, shape.k],
         "activation",
     );
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(map::projection(3, &[1, 2]))),
@@ -283,21 +283,21 @@ fn grouped_program(shape: &GroupedShape) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = input(
         &mut program,
-        DType::UInt8,
+        DType::UINT8,
         &[shape.experts, shape.rows, shape.k],
         "weight",
     );
-    let route = input(&mut program, DType::Int32, &[shape.tokens], "route");
+    let route = input(&mut program, DType::INT32, &[shape.tokens], "route");
     let activation = input(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         &[shape.tokens, shape.k],
         "activation",
     );
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, expert_gather_map(route)),

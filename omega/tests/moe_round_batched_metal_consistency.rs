@@ -60,7 +60,7 @@ fn stack_leaf(
 ) -> NodeId {
     input_leaf(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(expert_count),
             Extent::Static(rows),
@@ -82,7 +82,7 @@ fn routing_rounds(
     let expert_index = append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(expert_count),
         },
     );
@@ -95,7 +95,7 @@ fn routing_rounds(
     for round in 0..top_k {
         let max_selection = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Maximum,
             ReduceInit::NegativeInfinity,
             selection_scores,
@@ -105,21 +105,21 @@ fn routing_rounds(
         .expect("max selection reduce");
         let mask = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Equal,
             &[(selection_scores, "se->se"), (max_selection, "s->se")],
         )
         .expect("selection mask");
         let candidate = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(mask, "se->se"), (expert_index, "e->se")],
         )
         .expect("candidate index");
         let route = reduce(
             program,
-            DType::Int32,
+            DType::INT32,
             ScalarOp::Maximum,
             ReduceInit::Zero,
             candidate,
@@ -130,14 +130,14 @@ fn routing_rounds(
         let anchor = *first_max.get_or_insert(max_selection);
         let shifted = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Subtract,
             &[(max_selection, "s->s"), (anchor, "s->s")],
         )
         .expect("shifted score");
         let weight = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Exponential,
             &[(shifted, "s->s")],
         )
@@ -147,7 +147,7 @@ fn routing_rounds(
         weight_total = Some(match weight_total {
             Some(running) => elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 &[(running, "s->s"), (weight, "s->s")],
             )
@@ -157,7 +157,7 @@ fn routing_rounds(
         if round + 1 < top_k {
             selection_scores = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Select,
                 &[
                     (mask, "se->se"),
@@ -175,7 +175,7 @@ fn projection_round(program: &mut Vec<Op>, stack: NodeId, route: NodeId, x: Node
     let product = gathered_expert_product(program, stack, route, x);
     reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         product,
@@ -189,13 +189,13 @@ fn routes_first_program(expert_count: u32, top_k: u32) -> RoutesFirstProgram {
     let mut program = Vec::new();
     let x = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(1), Extent::Static(EMBEDDING)],
         "x",
     );
     let logits = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(1), Extent::Static(expert_count)],
         "logits",
     );
@@ -362,7 +362,7 @@ fn host_routes_program(expert_count: u32, top_k: u32) -> RoutesFirstProgram {
     let mut program = Vec::new();
     let x = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(1), Extent::Static(EMBEDDING)],
         "x",
     );
@@ -383,7 +383,7 @@ fn host_routes_program(expert_count: u32, top_k: u32) -> RoutesFirstProgram {
     let route_names = &ROUTE_NAMES[..top_k as usize];
     let routes: Vec<NodeId> = route_names
         .iter()
-        .map(|name| input_leaf(&mut program, DType::Int32, vec![Extent::Static(1)], name))
+        .map(|name| input_leaf(&mut program, DType::INT32, vec![Extent::Static(1)], name))
         .collect();
     let mut outputs: Vec<NodeId> = routes
         .iter()

@@ -24,7 +24,7 @@ fn matmul_program_unbatched(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let lhs = append(
         &mut program,
         Op::Input {
-            dtype: proxima_tensor::DType::Float32,
+            dtype: proxima_tensor::DType::FLOAT32,
             shape: vec![Extent::Static(m), Extent::Static(k)],
             name: None,
         },
@@ -32,7 +32,7 @@ fn matmul_program_unbatched(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let rhs = append(
         &mut program,
         Op::Input {
-            dtype: proxima_tensor::DType::Float32,
+            dtype: proxima_tensor::DType::FLOAT32,
             shape: vec![Extent::Static(k), Extent::Static(n)],
             name: None,
         },
@@ -40,7 +40,7 @@ fn matmul_program_unbatched(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: proxima_tensor::DType::Float32,
+            dtype: proxima_tensor::DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -52,7 +52,7 @@ fn matmul_program_unbatched(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(proxima_tensor::Reduce {
-            dtype: proxima_tensor::DType::Float32,
+            dtype: proxima_tensor::DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -74,7 +74,7 @@ fn matmul_program_batched(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let lhs = append(
         &mut program,
         Op::Input {
-            dtype: proxima_tensor::DType::Float32,
+            dtype: proxima_tensor::DType::FLOAT32,
             shape: vec![Extent::Static(1), Extent::Static(m), Extent::Static(k)],
             name: None,
         },
@@ -82,7 +82,7 @@ fn matmul_program_batched(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let rhs = append(
         &mut program,
         Op::Input {
-            dtype: proxima_tensor::DType::Float32,
+            dtype: proxima_tensor::DType::FLOAT32,
             shape: vec![Extent::Static(k), Extent::Static(n)],
             name: None,
         },
@@ -90,7 +90,7 @@ fn matmul_program_batched(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: proxima_tensor::DType::Float32,
+            dtype: proxima_tensor::DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(map::projection(4, &[0, 1, 3]))),
@@ -102,7 +102,7 @@ fn matmul_program_batched(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(proxima_tensor::Reduce {
-            dtype: proxima_tensor::DType::Float32,
+            dtype: proxima_tensor::DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,

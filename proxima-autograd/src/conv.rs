@@ -259,36 +259,36 @@ fn window_mask(
     let source_position = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(source_extent as u32),
         },
     );
     let out_position = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(out_extent as u32),
         },
     );
     let kernel_position = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(kernel_extent as u32),
         },
     );
 
-    let stride_const = expr::constant(program, DType::Float32, stride as f32);
+    let stride_const = expr::constant(program, DType::FLOAT32, stride as f32);
     let scaled_out = expr::binary(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         (out_position, expr::identity(1)),
         (stride_const, expr::broadcast(1)),
     );
     let combined = expr::binary(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         (scaled_out, IndexMap::Affine(map::projection(2, &[0]))),
         (kernel_position, IndexMap::Affine(map::projection(2, &[1]))),
@@ -296,7 +296,7 @@ fn window_mask(
 
     expr::binary(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Equal,
         (source_position, IndexMap::Affine(map::projection(3, &[0]))),
         (combined, IndexMap::Affine(map::projection(3, &[1, 2]))),
@@ -316,7 +316,7 @@ mod tests {
         op::append(
             program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape,
                 name: Some(name.into()),
             },
@@ -365,7 +365,7 @@ mod tests {
         );
         let out = conv2d(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             image,
             (1, 1, 4, 4),
             weight,
@@ -444,7 +444,7 @@ mod tests {
         );
         let out = conv2d(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             image,
             (1, 1, 5, 5),
             weight,
@@ -577,7 +577,7 @@ mod tests {
 
         let hidden = conv2d(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             image,
             (
                 batch as u64,
@@ -616,7 +616,7 @@ mod tests {
         .expect("mid shape");
         let out = conv2d(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             hidden,
             (batch as u64, mid_channels as u64, mid_h, mid_w),
             weight2,
@@ -731,7 +731,7 @@ mod tests {
 
         let hidden = conv2d(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             image,
             (
                 batch as u64,
@@ -770,7 +770,7 @@ mod tests {
         .expect("mid shape");
         let out = conv2d(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             hidden,
             (batch as u64, mid_channels as u64, mid_h, mid_w),
             weight2,
@@ -907,7 +907,7 @@ mod tests {
 
         let hidden_pre = conv2d(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             image,
             (
                 batch as u64,
@@ -927,7 +927,7 @@ mod tests {
             stride as u64,
         )
         .expect("3x3 kernel fits a 28x28 image at stride 2");
-        let hidden = crate::activation::relu(&mut program, DType::Float32, hidden_pre, 4);
+        let hidden = crate::activation::relu(&mut program, DType::FLOAT32, hidden_pre, 4);
         let (_, _, mid_h, mid_w) = conv2d_output_shape(
             (
                 batch as u64,
@@ -947,7 +947,7 @@ mod tests {
         .expect("mid shape");
         let out_pre = conv2d(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             hidden,
             (batch as u64, mid_channels as u64, mid_h, mid_w),
             weight2,
@@ -962,7 +962,7 @@ mod tests {
             stride as u64,
         )
         .expect("3x3 kernel fits the first layer's output at stride 2");
-        let out = crate::activation::relu(&mut program, DType::Float32, out_pre, 4);
+        let out = crate::activation::relu(&mut program, DType::FLOAT32, out_pre, 4);
 
         let evaluated = proxima_tensor::cpu::evaluate_named(
             &program,
@@ -1106,7 +1106,7 @@ mod tests {
 
         let out = conv2d(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             image,
             (
                 batch as u64,
@@ -1239,7 +1239,7 @@ mod tests {
         let bias = leaf(&mut program, "bias", vec![Extent::Static(3)]);
         let out = conv2d(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             image,
             (1, 2, 5, 5),
             weight,
@@ -1251,7 +1251,7 @@ mod tests {
         .expect("3x3 kernel fits a 5x5 image at stride 2");
         let loss = crate::expr::reduce(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             out,
@@ -1418,7 +1418,7 @@ mod tests {
 
         let hidden = conv2d(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             image,
             (1, 1, 6, 6),
             weight1,
@@ -1430,7 +1430,7 @@ mod tests {
         .expect("3x3 kernel fits a 6x6 image at stride 1");
         let out = conv2d(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             hidden,
             (1, 2, 4, 4),
             weight2,
@@ -1442,7 +1442,7 @@ mod tests {
         .expect("2x2 kernel fits a 4x4 image at stride 1");
         let loss = crate::expr::reduce(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             out,
@@ -1569,7 +1569,7 @@ mod tests {
 
         let hidden = conv2d(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             image,
             (1, 1, 9, 9),
             weight1,
@@ -1581,7 +1581,7 @@ mod tests {
         .expect("3x3 kernel fits a 9x9 image at stride 2");
         let out = conv2d(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             hidden,
             (1, 2, 4, 4),
             weight2,
@@ -1593,7 +1593,7 @@ mod tests {
         .expect("2x2 kernel fits a 4x4 image at stride 2");
         let loss = crate::expr::reduce(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             out,

@@ -27,18 +27,18 @@ use crate::error::SafetensorsError;
 pub fn map_dtype(tensor: &str, dtype: &str) -> Result<DType, SafetensorsError> {
     match dtype {
         "BOOL" => Ok(DType::Bool),
-        "I8" => Ok(DType::Int8),
-        "U8" => Ok(DType::UInt8),
-        "I16" => Ok(DType::Int16),
-        "U16" => Ok(DType::UInt16),
-        "I32" => Ok(DType::Int32),
-        "U32" => Ok(DType::UInt32),
-        "I64" => Ok(DType::Int64),
-        "U64" => Ok(DType::UInt64),
-        "BF16" => Ok(DType::BFloat16),
-        "F16" => Ok(DType::Float16),
-        "F32" => Ok(DType::Float32),
-        "F64" => Ok(DType::Float64),
+        "I8" => Ok(DType::INT8),
+        "U8" => Ok(DType::UINT8),
+        "I16" => Ok(DType::INT16),
+        "U16" => Ok(DType::UINT16),
+        "I32" => Ok(DType::INT32),
+        "U32" => Ok(DType::UINT32),
+        "I64" => Ok(DType::INT64),
+        "U64" => Ok(DType::UINT64),
+        "BF16" => Ok(DType::BFLOAT16),
+        "F16" => Ok(DType::FLOAT16),
+        "F32" => Ok(DType::FLOAT32),
+        "F64" => Ok(DType::FLOAT64),
         // still no DType counterpart: complex, and the sub-byte / 8-bit
         // micro-float family — none of these is a fixed-width machine
         // scalar `DType` can represent.
@@ -61,18 +61,18 @@ pub fn map_dtype(tensor: &str, dtype: &str) -> Result<DType, SafetensorsError> {
 pub fn dtype_to_wire(dtype: DType) -> Option<&'static str> {
     match dtype {
         DType::Bool => Some("BOOL"),
-        DType::Int8 => Some("I8"),
-        DType::UInt8 => Some("U8"),
-        DType::Int16 => Some("I16"),
-        DType::UInt16 => Some("U16"),
-        DType::Int32 => Some("I32"),
-        DType::UInt32 => Some("U32"),
-        DType::Int64 => Some("I64"),
-        DType::UInt64 => Some("U64"),
-        DType::BFloat16 => Some("BF16"),
-        DType::Float16 => Some("F16"),
-        DType::Float32 => Some("F32"),
-        DType::Float64 => Some("F64"),
+        DType::INT8 => Some("I8"),
+        DType::UINT8 => Some("U8"),
+        DType::INT16 => Some("I16"),
+        DType::UINT16 => Some("U16"),
+        DType::INT32 => Some("I32"),
+        DType::UINT32 => Some("U32"),
+        DType::INT64 => Some("I64"),
+        DType::UINT64 => Some("U64"),
+        DType::BFLOAT16 => Some("BF16"),
+        DType::FLOAT16 => Some("F16"),
+        DType::FLOAT32 => Some("F32"),
+        DType::FLOAT64 => Some("F64"),
         _ => None,
     }
 }
@@ -192,13 +192,13 @@ mod tests {
 
     #[proxima::test]
     #[case::bool_dtype("BOOL", DType::Bool)]
-    #[case::int8("I8", DType::Int8)]
-    #[case::uint8("U8", DType::UInt8)]
-    #[case::int32("I32", DType::Int32)]
-    #[case::uint32("U32", DType::UInt32)]
-    #[case::bfloat16("BF16", DType::BFloat16)]
-    #[case::float16("F16", DType::Float16)]
-    #[case::float32("F32", DType::Float32)]
+    #[case::int8("I8", DType::INT8)]
+    #[case::uint8("U8", DType::UINT8)]
+    #[case::int32("I32", DType::INT32)]
+    #[case::uint32("U32", DType::UINT32)]
+    #[case::bfloat16("BF16", DType::BFLOAT16)]
+    #[case::float16("F16", DType::FLOAT16)]
+    #[case::float32("F32", DType::FLOAT32)]
     async fn known_dtype_strings_map(#[case] wire: &str, #[case] expected: DType) {
         assert_eq!(map_dtype("t", wire), Ok(expected));
     }
@@ -207,11 +207,11 @@ mod tests {
     /// UInt64, Float64` to `proxima_tensor::DType`, so these five wire
     /// strings — previously `UnsupportedDtype` — now map to real variants.
     #[proxima::test]
-    #[case::int16("I16", DType::Int16)]
-    #[case::uint16("U16", DType::UInt16)]
-    #[case::int64("I64", DType::Int64)]
-    #[case::uint64("U64", DType::UInt64)]
-    #[case::float64("F64", DType::Float64)]
+    #[case::int16("I16", DType::INT16)]
+    #[case::uint16("U16", DType::UINT16)]
+    #[case::int64("I64", DType::INT64)]
+    #[case::uint64("U64", DType::UINT64)]
+    #[case::float64("F64", DType::FLOAT64)]
     async fn widened_dtype_strings_now_map(#[case] wire: &str, #[case] expected: DType) {
         assert_eq!(map_dtype("t", wire), Ok(expected));
     }
@@ -238,26 +238,26 @@ mod tests {
 
     #[proxima::test]
     #[case::bool_dtype(DType::Bool)]
-    #[case::int8(DType::Int8)]
-    #[case::uint8(DType::UInt8)]
-    #[case::int16(DType::Int16)]
-    #[case::uint16(DType::UInt16)]
-    #[case::int32(DType::Int32)]
-    #[case::uint32(DType::UInt32)]
-    #[case::int64(DType::Int64)]
-    #[case::uint64(DType::UInt64)]
-    #[case::bfloat16(DType::BFloat16)]
-    #[case::float16(DType::Float16)]
-    #[case::float32(DType::Float32)]
-    #[case::float64(DType::Float64)]
+    #[case::int8(DType::INT8)]
+    #[case::uint8(DType::UINT8)]
+    #[case::int16(DType::INT16)]
+    #[case::uint16(DType::UINT16)]
+    #[case::int32(DType::INT32)]
+    #[case::uint32(DType::UINT32)]
+    #[case::int64(DType::INT64)]
+    #[case::uint64(DType::UINT64)]
+    #[case::bfloat16(DType::BFLOAT16)]
+    #[case::float16(DType::FLOAT16)]
+    #[case::float32(DType::FLOAT32)]
+    #[case::float64(DType::FLOAT64)]
     async fn dtype_to_wire_round_trips_through_map_dtype(#[case] dtype: DType) {
         let wire = dtype_to_wire(dtype).expect("dtype has a wire representation");
         assert_eq!(map_dtype("t", wire), Ok(dtype));
     }
 
     #[proxima::test]
-    #[case::int128(DType::Int128)]
-    #[case::uint128(DType::UInt128)]
+    #[case::int128(DType::INT128)]
+    #[case::uint128(DType::UINT128)]
     async fn dtype_to_wire_returns_none_for_dtypes_safetensors_cannot_represent(
         #[case] dtype: DType,
     ) {

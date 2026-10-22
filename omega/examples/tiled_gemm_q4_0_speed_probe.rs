@@ -83,7 +83,7 @@ fn program(tokens: usize, rows: usize, k: usize) -> (Vec<Op>, NodeId) {
     let weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::UInt8,
+            dtype: DType::UINT8,
             shape: vec![Extent::Static(k as u32), Extent::Static(rows as u32)],
             name: Some("weight".into()),
         },
@@ -91,7 +91,7 @@ fn program(tokens: usize, rows: usize, k: usize) -> (Vec<Op>, NodeId) {
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(tokens as u32), Extent::Static(k as u32)],
             name: Some("activation".into()),
         },
@@ -99,7 +99,7 @@ fn program(tokens: usize, rows: usize, k: usize) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(projection(3, &[1, 2]))),
@@ -111,7 +111,7 @@ fn program(tokens: usize, rows: usize, k: usize) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,

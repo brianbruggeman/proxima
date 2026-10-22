@@ -101,7 +101,7 @@ pub fn step_input(program: &mut Vec<Op>, name: &str) -> NodeId {
     proxima_tensor::op::append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             name: Some(String::from(name)),
         },
@@ -145,7 +145,7 @@ pub fn adam_step(
     } = operands;
     let full = expr::identity(rank);
     let scalar = expr::broadcast(rank);
-    let dtype = DType::Float32;
+    let dtype = DType::FLOAT32;
 
     let beta1 = expr::constant(program, dtype, config.beta1);
     let one_minus_beta1 = expr::constant(program, dtype, 1.0 - config.beta1);
@@ -282,7 +282,7 @@ pub fn adam_step(
 /// since `beta` is a compile-time [`AdamConfig`] field, never a graph
 /// value.
 fn bias_correction(program: &mut Vec<Op>, step: NodeId, ln_beta: f32) -> NodeId {
-    let dtype = DType::Float32;
+    let dtype = DType::FLOAT32;
     let zeroth = expr::identity(0);
     let ln_beta_constant = expr::constant(program, dtype, ln_beta);
     let exponent = expr::binary(
@@ -409,7 +409,7 @@ pub fn sgd_step(
 ) -> NodeId {
     let full = expr::identity(rank);
     let scalar = expr::broadcast(rank);
-    let dtype = DType::Float32;
+    let dtype = DType::FLOAT32;
 
     let learning_rate = expr::constant(program, dtype, config.learning_rate);
     let scaled_grad = expr::binary(
@@ -520,7 +520,7 @@ pub fn rmsprop_step(
 ) -> (NodeId, NodeId) {
     let full = expr::identity(rank);
     let scalar = expr::broadcast(rank);
-    let dtype = DType::Float32;
+    let dtype = DType::FLOAT32;
 
     let decay = expr::constant(program, dtype, config.decay);
     let one_minus_decay = expr::constant(program, dtype, 1.0 - config.decay);
@@ -706,7 +706,7 @@ pub fn adamw_step(
     } = operands;
     let full = expr::identity(rank);
     let scalar = expr::broadcast(rank);
-    let dtype = DType::Float32;
+    let dtype = DType::FLOAT32;
 
     let beta1 = expr::constant(program, dtype, config.beta1);
     let one_minus_beta1 = expr::constant(program, dtype, 1.0 - config.beta1);
@@ -915,7 +915,7 @@ mod tests {
         proxima_tensor::op::append(
             program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(extent)],
                 name: Some(String::from(name)),
             },

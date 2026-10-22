@@ -107,11 +107,11 @@ fn input(dtype: DType, shape: &[u32]) -> Op {
 }
 
 fn reduce_program(body: ScalarOp, init: ReduceInit, keep: Keep) -> Vec<Op> {
-    let mut program = vec![input(DType::Float32, &[2, 3])];
+    let mut program = vec![input(DType::FLOAT32, &[2, 3])];
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             init,
             operand: NodeId(0),
@@ -182,11 +182,11 @@ fn mil_census_scalar_table_identity_fixture_against_itself_passes() -> Result<()
 #[test]
 fn mil_census_negate_is_composed_from_mul_by_minus_one() -> Result<()> {
     let probe = fixture("mil_ops_probe.txt")?;
-    let mut program = vec![input(DType::Float32, &[4])];
+    let mut program = vec![input(DType::FLOAT32, &[4])];
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Negate,
             operands: vec![(NodeId(0), IndexMap::Affine(projection(1, &[0])))],
             name: None,
@@ -329,11 +329,11 @@ fn mil_census_scan_multiply_refused_naming_cumprod() -> Result<()> {
 
 #[test]
 fn mil_census_data_dependent_out_map_refused_naming_scatter() -> Result<()> {
-    let mut program = vec![input(DType::Float32, &[4]), input(DType::Int32, &[4])];
+    let mut program = vec![input(DType::FLOAT32, &[4]), input(DType::INT32, &[4])];
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: NodeId(0),
@@ -365,11 +365,11 @@ fn mil_census_data_dependent_out_map_refused_naming_scatter() -> Result<()> {
 
 #[test]
 fn mil_census_computed_pattern_operand_maps_to_gather() -> Result<()> {
-    let mut program = vec![input(DType::Float32, &[5, 3]), input(DType::Int32, &[4])];
+    let mut program = vec![input(DType::FLOAT32, &[5, 3]), input(DType::INT32, &[4])];
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(
                 NodeId(0),
@@ -402,13 +402,13 @@ fn mil_census_computed_pattern_operand_maps_to_gather() -> Result<()> {
 #[test]
 fn mil_census_contraction_classifies_two_operand_multiply_add_reduce_as_matmul() -> Result<()> {
     let mut program = vec![
-        input(DType::Float32, &[2, 3]),
-        input(DType::Float32, &[3, 4]),
+        input(DType::FLOAT32, &[2, 3]),
+        input(DType::FLOAT32, &[3, 4]),
     ];
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (NodeId(0), IndexMap::Affine(projection(3, &[0, 2]))),
@@ -420,7 +420,7 @@ fn mil_census_contraction_classifies_two_operand_multiply_add_reduce_as_matmul()
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -535,11 +535,11 @@ fn mil_census_mnist_mapped_plus_refused_equals_nodes() -> Result<()> {
 }
 
 fn sum_of_squares_program() -> Vec<Op> {
-    let mut program = vec![input(DType::Float32, &[2, 3])];
+    let mut program = vec![input(DType::FLOAT32, &[2, 3])];
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (NodeId(0), IndexMap::Affine(projection(2, &[0, 1]))),
@@ -551,7 +551,7 @@ fn sum_of_squares_program() -> Vec<Op> {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,

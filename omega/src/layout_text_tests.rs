@@ -35,7 +35,7 @@ const BRAIN16_BY_FIELDS: FloatLayout = FloatLayout {
 };
 
 fn negate_bound(layout: FloatLayout) -> BoundOp {
-    let dtype = DType::Float(layout);
+    let dtype = DType::Layout(layout);
     let mut program = Vec::new();
     let source = append(
         &mut program,

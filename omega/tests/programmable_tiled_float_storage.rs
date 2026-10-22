@@ -32,26 +32,26 @@ fn weight_first_program() -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(FEATURES), Extent::Static(REDUCTION)],
         "weight",
     );
     let activation = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(TOKENS), Extent::Static(REDUCTION)],
         "activation",
     );
     let product = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(weight, "fi->tfi"), (activation, "ti->tfi")],
     )
     .expect("weight-first product has compatible axes");
     let output = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         product,

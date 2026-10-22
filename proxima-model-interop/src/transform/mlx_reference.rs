@@ -287,7 +287,7 @@ mod tests {
         let columns = usize::try_from(*tensor.shape.last()?).unwrap();
         let values = f32_values(tensor);
         let rows = values.len() / columns;
-        let exported = export_affine(&values, [rows, columns], params, DType::BFloat16).unwrap();
+        let exported = export_affine(&values, [rows, columns], params, DType::BFLOAT16).unwrap();
         let AffineExport::Packed(packed) = exported else {
             return None;
         };
@@ -299,7 +299,7 @@ mod tests {
             PlainTensor {
                 name: format!("{base}.weight"),
                 shape: shaped(packed.weight_shape[1]),
-                dtype: DType::UInt32,
+                dtype: DType::UINT32,
                 bytes: words.collect(),
             },
             PlainTensor {
@@ -323,7 +323,7 @@ mod tests {
         params_for: &dyn Fn(&str) -> AffineParams,
     ) -> Vec<PlainTensor> {
         let floats: BTreeMap<String, PlainTensor> =
-            hf_tensors(case, source, DType::Float32, case.quantized)
+            hf_tensors(case, source, DType::FLOAT32, case.quantized)
                 .into_iter()
                 .map(|tensor| (tensor.name.clone(), tensor))
                 .collect();

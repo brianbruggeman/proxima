@@ -638,7 +638,7 @@ mod tests {
         append(
             program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: extents.iter().map(|width| Extent::Static(*width)).collect(),
                 name: Some(name.into()),
             },
@@ -655,7 +655,7 @@ mod tests {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (activations, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -667,7 +667,7 @@ mod tests {
         append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -852,7 +852,7 @@ mod tests {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (activations, IndexMap::Affine(map::projection(4, &[0, 2]))),
@@ -864,7 +864,7 @@ mod tests {
         append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -1064,7 +1064,7 @@ mod tests {
             let product = append(
                 &mut program,
                 Op::Elementwise {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     body: ScalarOp::Multiply,
                     operands: vec![
                         (activations, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -1076,7 +1076,7 @@ mod tests {
             append(
                 &mut program,
                 Op::Reduce(Reduce {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     body: ScalarOp::Add,
                     init: ReduceInit::Zero,
                     operand: product,

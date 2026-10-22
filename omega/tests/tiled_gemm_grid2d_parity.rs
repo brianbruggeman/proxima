@@ -151,7 +151,7 @@ fn matmul_program(
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(tokens), Extent::Static(in_dim)],
             name: None,
         },
@@ -159,7 +159,7 @@ fn matmul_program(
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(projection(3, &[1, 2]))),
@@ -171,7 +171,7 @@ fn matmul_program(
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -231,7 +231,7 @@ fn run_grid2d_byte_identity(
         .collect();
 
     let (packed_program, packed_sum) =
-        matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::UInt8);
+        matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::UINT8);
     let blocks = [
         QuantizedBlock::Packed {
             codec,
@@ -482,7 +482,7 @@ fn dense_batched_feature_fastest_program(
     let weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![
                 Extent::Static(feature),
                 Extent::Static(batch),
@@ -494,7 +494,7 @@ fn dense_batched_feature_fastest_program(
     let other = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![
                 Extent::Static(token),
                 Extent::Static(batch),
@@ -506,7 +506,7 @@ fn dense_batched_feature_fastest_program(
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(projection(4, &[3, 2, 1]))),
@@ -518,7 +518,7 @@ fn dense_batched_feature_fastest_program(
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -544,7 +544,7 @@ fn dense_batched_batch_innermost_program(
     let weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![
                 Extent::Static(feature),
                 Extent::Static(batch),
@@ -556,7 +556,7 @@ fn dense_batched_batch_innermost_program(
     let other = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![
                 Extent::Static(token),
                 Extent::Static(batch),
@@ -568,7 +568,7 @@ fn dense_batched_batch_innermost_program(
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(projection(4, &[2, 3, 1]))),
@@ -580,7 +580,7 @@ fn dense_batched_batch_innermost_program(
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,

@@ -165,7 +165,7 @@ mod tests {
     fn identity_op(node: u32, source: u32) -> BoundOp {
         BoundOp {
             node: NodeId(node),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: alloc::vec![4],
             kind: BoundOpKind::Elementwise {
                 body: ComposedBody::leaf(ScalarOp::Identity),
@@ -184,7 +184,7 @@ mod tests {
     fn consumer_op(node: u32, reads: u32, other: u32) -> BoundOp {
         BoundOp {
             node: NodeId(node),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: alloc::vec![4],
             kind: BoundOpKind::Elementwise {
                 body: ComposedBody::leaf(ScalarOp::Add),

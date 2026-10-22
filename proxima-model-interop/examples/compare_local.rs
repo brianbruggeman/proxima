@@ -335,14 +335,14 @@ fn replay_reciprocal(backend: &str, requested_roots: &[NodeId], gpu_layers: &[Ve
     let input = &gpu_layers[input_index];
     let original = &gpu_layers[output_index];
     let mut program = vec![Op::Input {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         shape: vec![Extent::Static(input.len() as u32)],
         name: Some("reciprocal_input".to_string()),
     }];
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Reciprocal,
             operands: vec![(input_node, IndexMap::Affine(projection(1, &[0])))],
             name: None,
@@ -415,14 +415,14 @@ fn replay_square_root(backend: &str, requested_roots: &[NodeId], gpu_layers: &[V
     let input = &gpu_layers[input_index];
     let original = &gpu_layers[output_index];
     let mut program = vec![Op::Input {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         shape: vec![Extent::Static(input.len() as u32)],
         name: Some("square_root_input".to_string()),
     }];
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::SquareRoot,
             operands: vec![(input_node, IndexMap::Affine(projection(1, &[0])))],
             name: None,
@@ -502,14 +502,14 @@ fn replay_epsilon_add(
     let original = &gpu_layers[output_index];
     let epsilon_values = vec![epsilon; input.len()];
     let mut program = vec![Op::Input {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         shape: vec![Extent::Static(input.len() as u32)],
         name: Some("epsilon_input".to_string()),
     }];
     append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(input.len() as u32)],
             name: Some("epsilon_value".to_string()),
         },
@@ -517,7 +517,7 @@ fn replay_epsilon_add(
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![
                 (input_node, IndexMap::Affine(projection(1, &[0]))),
@@ -605,14 +605,14 @@ fn replay_mean_square(backend: &str, requested_roots: &[NodeId], gpu_layers: &[V
     let constant = gpu_layers[constant_index][0];
     let original = &gpu_layers[output_index];
     let mut program = vec![Op::Input {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         shape: vec![Extent::Static(input.len() as u32)],
         name: Some("mean_square_input".to_string()),
     }];
     append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: constant,
         },
@@ -620,7 +620,7 @@ fn replay_mean_square(backend: &str, requested_roots: &[NodeId], gpu_layers: &[V
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (input_node, IndexMap::Affine(projection(1, &[0]))),
@@ -701,7 +701,7 @@ fn replay_sum_squares(backend: &str, requested_roots: &[NodeId], gpu_layers: &[V
         .checked_div(row_count)
         .expect("sum-squares rows divide input length");
     let mut program = vec![Op::Input {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         shape: vec![
             Extent::Static(row_count as u32),
             Extent::Static(column_count as u32),
@@ -711,7 +711,7 @@ fn replay_sum_squares(backend: &str, requested_roots: &[NodeId], gpu_layers: &[V
     append(
         &mut program,
         Op::Reduce(proxima_tensor::Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: proxima_tensor::ReduceInit::Zero,
             operand: input_node,
@@ -804,14 +804,14 @@ fn replay_residual_add(backend: &str, requested_roots: &[NodeId], gpu_layers: &[
     assert_eq!(left.len(), right.len());
     let original = &gpu_layers[output_index];
     let mut program = vec![Op::Input {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         shape: vec![Extent::Static(left.len() as u32)],
         name: Some("residual_add_left".to_string()),
     }];
     append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(right.len() as u32)],
             name: Some("residual_add_right".to_string()),
         },
@@ -819,7 +819,7 @@ fn replay_residual_add(backend: &str, requested_roots: &[NodeId], gpu_layers: &[
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![
                 (left_node, IndexMap::Affine(projection(1, &[0]))),
@@ -911,7 +911,7 @@ fn replay_node70_reduce(backend: &str, requested_roots: &[NodeId], cpu_layers: &
         .checked_div(row_count)
         .expect("node-70 rows divide input length");
     let mut program = vec![Op::Input {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         shape: vec![
             Extent::Static(row_count as u32),
             Extent::Static(1),
@@ -924,7 +924,7 @@ fn replay_node70_reduce(backend: &str, requested_roots: &[NodeId], cpu_layers: &
     append(
         &mut program,
         Op::Reduce(proxima_tensor::Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: proxima_tensor::ReduceInit::Zero,
             operand: input_node,

@@ -108,7 +108,7 @@ fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
     op::append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape,
             name: Some(name.into()),
         },
@@ -127,7 +127,7 @@ fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, Ind
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands,
             name: None,
@@ -144,7 +144,7 @@ fn reduce_add(
     op::append(
         program,
         Op::Reduce(op::Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand,
@@ -222,14 +222,14 @@ fn build_network() -> Network {
     );
 
     let h_pre = batched_dense(&mut program, x, w1, b1);
-    let h = relu(&mut program, DType::Float32, h_pre, 2);
+    let h = relu(&mut program, DType::FLOAT32, h_pre, 2);
     let logits = batched_dense(&mut program, h, w2, b2);
-    let summed_loss = softmax_cross_entropy(&mut program, DType::Float32, logits, y, 2, 1);
+    let summed_loss = softmax_cross_entropy(&mut program, DType::FLOAT32, logits, y, 2, 1);
 
     let inverse_batch = op::append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 1.0 / BATCH as f32,
         },
@@ -328,7 +328,7 @@ fn evaluate_accuracy(
         alloc::vec![Extent::Static(OUT_DIM as u32)],
     );
     let eval_h_pre = batched_dense(&mut eval_program, eval_x, eval_w1, eval_b1);
-    let eval_h = relu(&mut eval_program, DType::Float32, eval_h_pre, 2);
+    let eval_h = relu(&mut eval_program, DType::FLOAT32, eval_h_pre, 2);
     let eval_logits = batched_dense(&mut eval_program, eval_h, eval_w2, eval_b2);
 
     let eval_named: Vec<(&str, &[f32])> = alloc::vec![
@@ -782,7 +782,7 @@ fn trained_mlp_survives_a_save_load_round_trip_at_identical_accuracy() {
             .unwrap_or_else(|| panic!("{name} present in the parsed manifest"));
         assert_eq!(
             entry.dtype,
-            proxima_tensor::DType::Float32,
+            proxima_tensor::DType::FLOAT32,
             "{name} dtype must round-trip as Float32"
         );
         assert_eq!(entry.shape, shape, "{name} shape must round-trip exactly");

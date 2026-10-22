@@ -47,6 +47,6 @@ mod tests {
         let manifest = parse_complete(&wire).expect("parses via free function");
 
         assert_eq!(manifest.tensors.len(), 1);
-        assert_eq!(manifest.tensors[0].dtype, proxima_tensor::DType::Float32);
+        assert_eq!(manifest.tensors[0].dtype, proxima_tensor::DType::FLOAT32);
     }
 }

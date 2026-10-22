@@ -136,7 +136,7 @@ fn raw_packed_f32_matmul_weight_matches_an_independent_hand_computed_matmul() {
     let activation_node = proxima_tensor::op::append(
         &mut program,
         proxima_tensor::op::Op::Input {
-            dtype: proxima_tensor::dtype::DType::Float32,
+            dtype: proxima_tensor::dtype::DType::FLOAT32,
             shape: alloc::vec![proxima_tensor::op::Extent::Static(in_dim as u32)],
             name: Some("activation".to_string()),
         },
@@ -144,7 +144,7 @@ fn raw_packed_f32_matmul_weight_matches_an_independent_hand_computed_matmul() {
     let weight_node = proxima_tensor::op::append(
         &mut program,
         proxima_tensor::op::Op::Input {
-            dtype: proxima_tensor::dtype::DType::Float32,
+            dtype: proxima_tensor::dtype::DType::FLOAT32,
             shape: alloc::vec![
                 proxima_tensor::op::Extent::Static(in_dim as u32),
                 proxima_tensor::op::Extent::Static(out_dim as u32)
@@ -155,7 +155,7 @@ fn raw_packed_f32_matmul_weight_matches_an_independent_hand_computed_matmul() {
     let product = proxima_tensor::op::append(
         &mut program,
         proxima_tensor::op::Op::Elementwise {
-            dtype: proxima_tensor::dtype::DType::Float32,
+            dtype: proxima_tensor::dtype::DType::FLOAT32,
             body: proxima_tensor::op::ScalarOp::Multiply,
             operands: alloc::vec![
                 (
@@ -176,7 +176,7 @@ fn raw_packed_f32_matmul_weight_matches_an_independent_hand_computed_matmul() {
     let logits = proxima_tensor::op::append(
         &mut program,
         proxima_tensor::op::Op::Reduce(proxima_tensor::op::Reduce {
-            dtype: proxima_tensor::dtype::DType::Float32,
+            dtype: proxima_tensor::dtype::DType::FLOAT32,
             body: proxima_tensor::op::ScalarOp::Add,
             init: proxima_tensor::op::ReduceInit::Zero,
             operand: product,
@@ -264,7 +264,7 @@ fn q8_0_matmul_program() -> (Vec<proxima_tensor::op::Op>, proxima_tensor::op::No
     let weight_node = proxima_tensor::op::append(
         &mut program,
         proxima_tensor::op::Op::Input {
-            dtype: proxima_tensor::dtype::DType::UInt8,
+            dtype: proxima_tensor::dtype::DType::UINT8,
             shape: alloc::vec![
                 proxima_tensor::op::Extent::Static(Q8_0_TEST_ROWS as u32),
                 proxima_tensor::op::Extent::Static(Q8_0_TEST_K as u32)
@@ -275,7 +275,7 @@ fn q8_0_matmul_program() -> (Vec<proxima_tensor::op::Op>, proxima_tensor::op::No
     let activation_node = proxima_tensor::op::append(
         &mut program,
         proxima_tensor::op::Op::Input {
-            dtype: proxima_tensor::dtype::DType::Float32,
+            dtype: proxima_tensor::dtype::DType::FLOAT32,
             shape: alloc::vec![
                 proxima_tensor::op::Extent::Static(Q8_0_TEST_K as u32),
                 proxima_tensor::op::Extent::Static(1)
@@ -286,7 +286,7 @@ fn q8_0_matmul_program() -> (Vec<proxima_tensor::op::Op>, proxima_tensor::op::No
     let product = proxima_tensor::op::append(
         &mut program,
         proxima_tensor::op::Op::Elementwise {
-            dtype: proxima_tensor::dtype::DType::Float32,
+            dtype: proxima_tensor::dtype::DType::FLOAT32,
             body: proxima_tensor::op::ScalarOp::Multiply,
             operands: alloc::vec![
                 (
@@ -310,7 +310,7 @@ fn q8_0_matmul_program() -> (Vec<proxima_tensor::op::Op>, proxima_tensor::op::No
     let sum = proxima_tensor::op::append(
         &mut program,
         proxima_tensor::op::Op::Reduce(proxima_tensor::op::Reduce {
-            dtype: proxima_tensor::dtype::DType::Float32,
+            dtype: proxima_tensor::dtype::DType::FLOAT32,
             body: proxima_tensor::op::ScalarOp::Add,
             init: proxima_tensor::op::ReduceInit::Zero,
             operand: product,

@@ -142,7 +142,7 @@ pub(crate) fn append_embedding_scale(
     let multiplier = scalar_constant(program, scale.multiplier(embedding));
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, "sd->sd"), (multiplier, "->sd")],
     )
@@ -185,31 +185,31 @@ pub(super) fn append_activation(
         Activation::Silu => {
             let neg_x = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Negate,
                 &[(x, &same_axes)],
             )?;
             let exp_neg_x = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Exponential,
                 &[(neg_x, &same_axes)],
             )?;
             let one_plus_exp = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 &[(exp_neg_x, &same_axes), (ones, &broadcast_axes)],
             )?;
             let sigmoid_x = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Reciprocal,
                 &[(one_plus_exp, &same_axes)],
             )?;
             elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(x, &same_axes), (sigmoid_x, &same_axes)],
             )
@@ -221,55 +221,55 @@ pub(super) fn append_activation(
 
             let x_squared = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(x, &same_axes), (x, &same_axes)],
             )?;
             let x_cubed = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(x_squared, &same_axes), (x, &same_axes)],
             )?;
             let cubic_term = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(x_cubed, &same_axes), (cubic_coeff, &broadcast_axes)],
             )?;
             let inner = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 &[(x, &same_axes), (cubic_term, &same_axes)],
             )?;
             let scaled_inner = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(inner, &same_axes), (sqrt_two_over_pi, &broadcast_axes)],
             )?;
             let tanh_term = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Tanh,
                 &[(scaled_inner, &same_axes)],
             )?;
             let one_plus_tanh = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 &[(tanh_term, &same_axes), (ones, &broadcast_axes)],
             )?;
             let half_x = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(x, &same_axes), (half, &broadcast_axes)],
             )?;
             elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(half_x, &same_axes), (one_plus_tanh, &same_axes)],
             )
@@ -617,7 +617,7 @@ pub(super) fn gather_last_row(
     if last_row_only {
         let lm_head_row = input_leaf(
             program,
-            DType::Int32,
+            DType::INT32,
             alloc::vec![Extent::Static(1)],
             "lm_head_row",
         );
@@ -684,13 +684,13 @@ pub fn append_attention_mixer(
 
     let q_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->shdi"), (wq, "ihd->shdi")],
     )?;
     let q_raw = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         q_product,
@@ -714,13 +714,13 @@ pub fn append_attention_mixer(
         KeySource::Projected { wk, k_norm_weight } => {
             let k_product = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(normed, "si->sudi"), (wk, "iud->sudi")],
             )?;
             let k_raw = reduce(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 ReduceInit::Zero,
                 k_product,
@@ -745,13 +745,13 @@ pub fn append_attention_mixer(
         ValueSource::Projected(wv) => {
             let v_product = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(normed, "si->sudi"), (wv, "iud->sudi")],
             )?;
             reduce(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 ReduceInit::Zero,
                 v_product,
@@ -782,7 +782,7 @@ pub fn append_attention_mixer(
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (rotated_q_even, group_map.as_str()),
@@ -791,7 +791,7 @@ pub fn append_attention_mixer(
     )?;
     let q_odd_grouped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (rotated_q_odd, group_map.as_str()),
@@ -801,7 +801,7 @@ pub fn append_attention_mixer(
 
     let score_even_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (q_even_grouped, "sugi->stugi"),
@@ -810,7 +810,7 @@ pub fn append_attention_mixer(
     )?;
     let score_even = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_even_product,
@@ -819,7 +819,7 @@ pub fn append_attention_mixer(
     )?;
     let score_odd_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (q_odd_grouped, "sugi->stugi"),
@@ -828,7 +828,7 @@ pub fn append_attention_mixer(
     )?;
     let score_odd = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_odd_product,
@@ -837,21 +837,21 @@ pub fn append_attention_mixer(
     )?;
     let scores = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(score_even, "stug->stug"), (score_odd, "stug->stug")],
     )?;
 
     let scores_scaled = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(scores, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
     )?;
 
     let scores_masked = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[
             (is_future, "st->stug"),
@@ -862,7 +862,7 @@ pub fn append_attention_mixer(
 
     let score_max = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         scores_masked,
@@ -871,19 +871,19 @@ pub fn append_attention_mixer(
     )?;
     let shifted = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(scores_masked, "stug->stug"), (score_max, "sug->stug")],
     )?;
     let weights = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(shifted, "stug->stug")],
     )?;
     let weight_sum = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         weights,
@@ -892,26 +892,26 @@ pub fn append_attention_mixer(
     )?;
     let inv_weight_sum = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(weight_sum, "sug->sug")],
     )?;
     let probabilities = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(weights, "stug->stug"), (inv_weight_sum, "sug->stug")],
     )?;
 
     let attended_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(probabilities, "stug->stugd"), (v, "tud->stugd")],
     )?;
     let attended = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         attended_product,
@@ -921,13 +921,13 @@ pub fn append_attention_mixer(
 
     let wo_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
     )?;
     let attn_out = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         wo_product,
@@ -942,7 +942,7 @@ pub fn append_attention_mixer(
 
     let residual = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
     )?;
@@ -972,31 +972,31 @@ pub(crate) fn append_dense_swiglu_ffn(
 ) -> Result<NodeId, TensorError> {
     let w_gate = input_leaf(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
         &alloc::format!("blk.{layer}.ffn_gate.weight"),
     );
     let w_up = input_leaf(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
         &alloc::format!("blk.{layer}.ffn_up.weight"),
     );
     let w_down = input_leaf(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
         &alloc::format!("blk.{layer}.ffn_down.weight"),
     );
     let gate_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "sd->sdg"), (w_gate, "dg->sdg")],
     )?;
     let gate = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         gate_product,
@@ -1005,13 +1005,13 @@ pub(crate) fn append_dense_swiglu_ffn(
     )?;
     let up_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "sd->sdg"), (w_up, "dg->sdg")],
     )?;
     let up = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         up_product,
@@ -1022,20 +1022,20 @@ pub(crate) fn append_dense_swiglu_ffn(
     let activated_gate = append_activation(program, gate, ones, activation, "sg")?;
     let ffn_hidden = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(activated_gate, "sg->sg"), (up, "sg->sg")],
     )?;
 
     let down_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
     )?;
     reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         down_product,
@@ -1089,7 +1089,7 @@ pub(crate) fn append_routed_expert_ffn(
 ) -> Result<NodeId, TensorError> {
     let gate_inp = input_leaf(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding), Extent::Static(expert_count)],
         &alloc::format!("blk.{layer}.ffn_gate_inp.weight"),
     );
@@ -1099,7 +1099,7 @@ pub(crate) fn append_routed_expert_ffn(
     let scaled_router_input = if router_scale {
         let router_scale_weight = input_leaf(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.ffn_gate_inp.scale"),
         );
@@ -1110,7 +1110,7 @@ pub(crate) fn append_routed_expert_ffn(
         let inv_sqrt_embedding = scalar_constant(program, 1.0 / libm::sqrtf(embedding as f32));
         let rooted_router_scale_weight = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(router_scale_weight, "d->d"), (inv_sqrt_embedding, "->d")],
         )?;
@@ -1127,7 +1127,7 @@ pub(crate) fn append_routed_expert_ffn(
     let expert_scale = if expert_output_scale {
         Some(input_leaf(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(expert_count)],
             &alloc::format!("blk.{layer}.ffn_down_exps.scale"),
         ))
@@ -1136,7 +1136,7 @@ pub(crate) fn append_routed_expert_ffn(
     };
     let expert_w_gate = input_leaf(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![
             Extent::Static(expert_count),
             Extent::Static(embedding),
@@ -1146,7 +1146,7 @@ pub(crate) fn append_routed_expert_ffn(
     );
     let expert_w_up = input_leaf(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![
             Extent::Static(expert_count),
             Extent::Static(embedding),
@@ -1156,7 +1156,7 @@ pub(crate) fn append_routed_expert_ffn(
     );
     let expert_w_down = input_leaf(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![
             Extent::Static(expert_count),
             Extent::Static(expert_feed_forward),
@@ -1167,7 +1167,7 @@ pub(crate) fn append_routed_expert_ffn(
     let expert_bias = if use_expert_bias {
         Some(input_leaf(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(expert_count)],
             &alloc::format!("blk.{layer}.exp_probs_b.bias"),
         ))
@@ -1176,13 +1176,13 @@ pub(crate) fn append_routed_expert_ffn(
     };
     let gate_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(scaled_router_input, "sd->sde"), (gate_inp, "de->sde")],
     )?;
     let router_logits = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         gate_product,
@@ -1268,7 +1268,7 @@ pub(crate) fn append_layer_ffn(
                 if ffn_config.exclusive_dense_post_norm {
                     let gamma = input_leaf(
                         program,
-                        DType::Float32,
+                        DType::FLOAT32,
                         alloc::vec![Extent::Static(embedding)],
                         &alloc::format!("blk.{layer}.post_ffw_norm.weight"),
                     );
@@ -1317,7 +1317,7 @@ pub(crate) fn append_layer_ffn(
             let dense_out = if parallel_config.dense_post_norm {
                 let gamma = input_leaf(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(embedding)],
                     &alloc::format!("blk.{layer}.post_ffw_norm_1.weight"),
                 );
@@ -1329,7 +1329,7 @@ pub(crate) fn append_layer_ffn(
             let routed_input = if parallel_config.routed_pre_norm {
                 let gamma = input_leaf(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(embedding)],
                     &alloc::format!("blk.{layer}.pre_ffw_norm_2.weight"),
                 );
@@ -1371,7 +1371,7 @@ pub(crate) fn append_layer_ffn(
             let routed_out = if parallel_config.routed_post_norm {
                 let gamma = input_leaf(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(embedding)],
                     &alloc::format!("blk.{layer}.post_ffw_norm_2.weight"),
                 );
@@ -1382,14 +1382,14 @@ pub(crate) fn append_layer_ffn(
 
             let combined = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 &[(dense_out, "sd->sd"), (routed_out, "sd->sd")],
             )?;
             if parallel_config.combined_post_norm {
                 let gamma = input_leaf(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(embedding)],
                     &alloc::format!("blk.{layer}.post_ffw_norm.weight"),
                 );
@@ -1402,7 +1402,7 @@ pub(crate) fn append_layer_ffn(
 
     let mut x = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(ffn_out, "sd->sd"), (post_mixer, "sd->sd")],
     )?;
@@ -1410,19 +1410,19 @@ pub(crate) fn append_layer_ffn(
     if let (true, Some(ple_input)) = (ffn_config.ple, ple_input) {
         let inp_gate = input_leaf(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding), Extent::Static(ple_dim)],
             &alloc::format!("blk.{layer}.inp_gate.weight"),
         );
         let gate_product = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(x, "sd->sdo"), (inp_gate, "do->sdo")],
         )?;
         let gate_raw = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             gate_product,
@@ -1432,26 +1432,26 @@ pub(crate) fn append_layer_ffn(
         let gate_act = append_activation(program, gate_raw, ones, Activation::GeluTanh, "sg")?;
         let gated = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(gate_act, "so->so"), (ple_input, "so->so")],
         )?;
 
         let proj = input_leaf(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(ple_dim), Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.proj.weight"),
         );
         let projected_product = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(gated, "so->sod"), (proj, "od->sod")],
         )?;
         let projected_raw = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             projected_product,
@@ -1460,14 +1460,14 @@ pub(crate) fn append_layer_ffn(
         )?;
         let post_norm_weight = input_leaf(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.post_norm.weight"),
         );
         let projected_normed = rmsnorm(program, projected_raw, post_norm_weight, inv_dim, eps)?;
         x = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             &[(x, "sd->sd"), (projected_normed, "sd->sd")],
         )?;
@@ -1476,13 +1476,13 @@ pub(crate) fn append_layer_ffn(
     if ffn_config.output_scale {
         let output_scale = input_leaf(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             Vec::new(),
             &alloc::format!("blk.{layer}.layer_output_scale.weight"),
         );
         x = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(x, "sd->sd"), (output_scale, "->sd")],
         )?;
@@ -1553,13 +1553,13 @@ where
                 let pairs = config.head_dim / 2;
                 let cos = input_leaf(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
                     &config.rope_table.cos_name,
                 );
                 let sin = input_leaf(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
                     &config.rope_table.sin_name,
                 );
@@ -1571,7 +1571,7 @@ where
             op::append(
                 program,
                 Op::Constant {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: alloc::vec![Extent::Static(config.kv_heads), Extent::Static(group)],
                     value: 1.0,
                 },
@@ -1677,7 +1677,7 @@ pub(crate) fn append_ple_flat_projections(
 ) -> Result<PleFlatProjections, TensorError> {
     let emb_table = input_leaf(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(vocab), Extent::Static(ple_total)],
         "per_layer_token_embd.weight",
     );
@@ -1685,26 +1685,26 @@ pub(crate) fn append_ple_flat_projections(
     let emb_scale = scalar_constant(program, libm::sqrtf(ple_dim as f32));
     let emb_flat = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(emb_gathered, "sd->sd"), (emb_scale, "->sd")],
     )?;
 
     let proj_table = input_leaf(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding), Extent::Static(ple_total)],
         "per_layer_model_proj.weight",
     );
     let proj_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(h0, "sd->sdo"), (proj_table, "do->sdo")],
     )?;
     let proj_raw = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         proj_product,
@@ -1714,14 +1714,14 @@ pub(crate) fn append_ple_flat_projections(
     let proj_scale = scalar_constant(program, 1.0 / libm::sqrtf(embedding as f32));
     let proj_flat = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(proj_raw, "so->so"), (proj_scale, "->so")],
     )?;
 
     let proj_norm_weight = input_leaf(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(ple_dim)],
         "per_layer_proj_norm.weight",
     );
@@ -1746,13 +1746,13 @@ pub(crate) fn append_ple_combined(
     let split_view = alloc::format!("s,{ple_dim}*l+d@{ple_dim}->sld");
     let proj_view = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Identity,
         &[(flat.proj_flat, split_view.as_str())],
     )?;
     let emb_view = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Identity,
         &[(flat.emb_flat, split_view.as_str())],
     )?;
@@ -1766,14 +1766,14 @@ pub(crate) fn append_ple_combined(
     )?;
     let summed = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(proj_normed, "sld->sld"), (emb_view, "sld->sld")],
     )?;
     let combine_scale = scalar_constant(program, core::f32::consts::FRAC_1_SQRT_2);
     let combined = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(summed, "sld->sld"), (combine_scale, "->sld")],
     )?;
@@ -1793,7 +1793,7 @@ pub(crate) fn ple_layer_input(
     let slice = alloc::format!("s,{layer},d->sd");
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Identity,
         &[(shared.combined, slice.as_str())],
     )
@@ -1915,13 +1915,13 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
 
     let ids = input_leaf(
         &mut program,
-        DType::Int32,
+        DType::INT32,
         alloc::vec![Extent::Symbolic(0)],
         "ids",
     );
     let table = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
         "token_embd.weight",
     );
@@ -1931,7 +1931,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
     }
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
-    let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+    let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
 
     // Stage A preamble (the reference Go source, lines 1276-1301): `x` here is still `h0`, the
@@ -1976,20 +1976,20 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
         let ffn_config = &entry.ffn;
         let attn_norm_weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.attn_norm.weight"),
         );
         let ffn_norm_weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.ffn_norm.weight"),
         );
         let post_attention_norm_weight = if ffn_config.post_attention_norm {
             Some(input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(embedding)],
                 &alloc::format!("blk.{layer}.post_attention_norm.weight"),
             ))
@@ -2020,7 +2020,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
 
                 let wq = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Static(embedding),
                         Extent::Static(query_heads),
@@ -2032,7 +2032,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                     KeySourceKind::ProjectedK => {
                         let wk = input_leaf(
                             &mut program,
-                            DType::Float32,
+                            DType::FLOAT32,
                             alloc::vec![
                                 Extent::Static(embedding),
                                 Extent::Static(kv_heads),
@@ -2043,7 +2043,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                         let k_norm_weight = config.qk_norm.then(|| {
                             input_leaf(
                                 &mut program,
-                                DType::Float32,
+                                DType::FLOAT32,
                                 alloc::vec![Extent::Static(head_dim)],
                                 &alloc::format!("blk.{layer}.attn_k_norm.weight"),
                             )
@@ -2067,7 +2067,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                     ValueSourceKind::ProjectedV => {
                         let wv = input_leaf(
                             &mut program,
-                            DType::Float32,
+                            DType::FLOAT32,
                             alloc::vec![
                                 Extent::Static(embedding),
                                 Extent::Static(kv_heads),
@@ -2090,7 +2090,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                 };
                 let wo = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Static(kv_heads),
                         Extent::Static(group),
@@ -2102,7 +2102,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                 let q_norm_weight = config.qk_norm.then(|| {
                     input_leaf(
                         &mut program,
-                        DType::Float32,
+                        DType::FLOAT32,
                         alloc::vec![Extent::Static(head_dim)],
                         &alloc::format!("blk.{layer}.attn_q_norm.weight"),
                     )
@@ -2140,7 +2140,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
             LayerKind::ShortConv => {
                 let in_proj = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(embedding * 3), Extent::Static(embedding)],
                     &alloc::format!("blk.{layer}.shortconv.in_proj.weight"),
                 );
@@ -2153,13 +2153,13 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                 // shape axis the fastest one.
                 let conv_weight = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(embedding), Extent::Static(l_cache)],
                     &alloc::format!("blk.{layer}.shortconv.conv.weight"),
                 );
                 let out_proj = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(embedding), Extent::Static(embedding)],
                     &alloc::format!("blk.{layer}.shortconv.out_proj.weight"),
                 );
@@ -2208,7 +2208,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
 
     let output_norm_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding)],
         "output_norm.weight",
     );
@@ -2218,7 +2218,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
 
     let lm_head = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
         "output.weight",
     );
@@ -2234,13 +2234,13 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
     let append_head = |program: &mut Vec<Op>| -> Result<NodeId, TensorError> {
         let logits_product = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
         )?;
         let logits = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             logits_product,
@@ -2252,19 +2252,19 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                 let cap_node = scalar_constant(program, cap);
                 let scaled = elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Divide,
                     &[(logits, "sv->sv"), (cap_node, "->sv")],
                 )?;
                 let tanh = elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Tanh,
                     &[(scaled, "sv->sv")],
                 )?;
                 elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Multiply,
                     &[(tanh, "sv->sv"), (cap_node, "->sv")],
                 )
@@ -2573,13 +2573,13 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
 
     let ids = input_leaf(
         &mut program,
-        DType::Int32,
+        DType::INT32,
         alloc::vec![Extent::Symbolic(0)],
         "ids",
     );
     let table = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
         "token_embd.weight",
     );
@@ -2589,7 +2589,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
     }
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
-    let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+    let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let inv_sqrt_head_dim = scalar_constant(&mut program, score_scale.multiplier());
     // only materialized when a layer actually consumes it (`qk_norm`), so a
@@ -2599,20 +2599,20 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
     let residual_scale = residual_scale.map(|scale| scalar_constant(&mut program, scale));
     let cos_new = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
         "rope_cos",
     );
     let sin_new = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
         "rope_sin",
     );
     let group_ones = op::append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
             value: 1.0,
         },
@@ -2628,7 +2628,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
         let head_shape_ones = op::append(
             &mut program,
             Op::Constant {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: alloc::vec![Extent::Static(query_heads), Extent::Static(head_dim)],
                 value: 1.0,
             },
@@ -2636,7 +2636,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
         let kv_head_shape_ones = op::append(
             &mut program,
             Op::Constant {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(head_dim)],
                 value: 1.0,
             },
@@ -2666,7 +2666,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
     // the bucket's own zero-padding is excluded by that bound, never by a
     // mask node in this graph (`BoundOpKind::CachedAttention`'s own doc on
     // the `cached_key_rows != 0` discriminator).
-    let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+    let cached_len = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "cached_len");
     // A windowed layer masks the cached block too (the fused attention's
     // `cached_len` bound cannot express a window), and a ring layer counts its
     // rows from the sliding slot's own length input. A schedule with no window
@@ -2674,7 +2674,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
     let ring_len = (sliding_kv_ring && !windows.is_empty()).then(|| {
         input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             Vec::new(),
             SLIDING_CACHED_LEN_INPUT,
         )
@@ -2723,13 +2723,13 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
         };
         let attn_norm_weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.attn_norm.weight"),
         );
         let ffn_norm_weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.ffn_norm.weight"),
         );
@@ -2737,7 +2737,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
             let rows = (query_heads + 2 * kv_heads) * head_dim;
             let w_qkv = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(rows), Extent::Static(embedding)],
                 &alloc::format!("blk.{layer}.attn_qkv.weight"),
             );
@@ -2745,7 +2745,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
         } else {
             let wq = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Static(embedding),
                     Extent::Static(query_heads),
@@ -2755,7 +2755,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
             );
             let wk = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Static(embedding),
                     Extent::Static(kv_heads),
@@ -2765,7 +2765,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
             );
             let wv = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Static(embedding),
                     Extent::Static(kv_heads),
@@ -2778,7 +2778,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
         let q_bias = qkv_biases.then(|| {
             input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(query_heads), Extent::Static(head_dim)],
                 &alloc::format!("blk.{layer}.attn_q.bias"),
             )
@@ -2786,7 +2786,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
         let k_bias = qkv_biases.then(|| {
             input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(kv_heads), Extent::Static(head_dim)],
                 &alloc::format!("blk.{layer}.attn_k.bias"),
             )
@@ -2794,14 +2794,14 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
         let v_bias = qkv_biases.then(|| {
             input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(kv_heads), Extent::Static(head_dim)],
                 &alloc::format!("blk.{layer}.attn_v.bias"),
             )
         });
         let wo = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(kv_heads),
                 Extent::Static(group),
@@ -2812,19 +2812,19 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
         );
         let k_even_cache = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![cache_bound, Extent::Static(kv_heads), Extent::Static(pairs)],
             &alloc::format!("kv_cache.{layer}.k_even"),
         );
         let k_odd_cache = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![cache_bound, Extent::Static(kv_heads), Extent::Static(pairs)],
             &alloc::format!("kv_cache.{layer}.k_odd"),
         );
         let v_cache = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 cache_bound,
                 Extent::Static(kv_heads),
@@ -2837,7 +2837,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
             let (w_gate, w_up) = if paired_gate_up_reduce {
                 let w_gate_up = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Static(2),
                         Extent::Static(feed_forward),
@@ -2849,13 +2849,13 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
             } else {
                 let w_gate = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
                     &alloc::format!("blk.{layer}.ffn_gate.weight"),
                 );
                 let w_up = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
                     &alloc::format!("blk.{layer}.ffn_up.weight"),
                 );
@@ -2863,20 +2863,20 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
             };
             let w_down = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
                 &alloc::format!("blk.{layer}.ffn_down.weight"),
             );
             let qk_norm_weights = inv_head_dim.map(|inv_head_dim| {
                 let q_norm_weight = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(head_dim)],
                     &alloc::format!("blk.{layer}.attn_q_norm.weight"),
                 );
                 let k_norm_weight = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(head_dim)],
                     &alloc::format!("blk.{layer}.attn_k_norm.weight"),
                 );
@@ -2923,13 +2923,13 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
         } else {
             let gate_inp = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(embedding), Extent::Static(expert_count)],
                 &alloc::format!("blk.{layer}.ffn_gate_inp.weight"),
             );
             let expert_w_gate = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Static(expert_count),
                     Extent::Static(embedding),
@@ -2939,7 +2939,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
             );
             let expert_w_up = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Static(expert_count),
                     Extent::Static(embedding),
@@ -2949,7 +2949,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
             );
             let expert_w_down = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Static(expert_count),
                     Extent::Static(feed_forward),
@@ -2960,13 +2960,13 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
             let qk_norm_weights = inv_head_dim.map(|inv_head_dim| {
                 let q_norm_weight = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(head_dim)],
                     &alloc::format!("blk.{layer}.attn_q_norm.weight"),
                 );
                 let k_norm_weight = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(head_dim)],
                     &alloc::format!("blk.{layer}.attn_k_norm.weight"),
                 );
@@ -3016,7 +3016,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
 
     let output_norm_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding)],
         "output_norm.weight",
     );
@@ -3026,19 +3026,19 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
 
     let lm_head = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
         "output.weight",
     );
     let logits_product = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
     )?;
     let logits = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         logits_product,
@@ -3050,7 +3050,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
             let inverse = scalar_constant(&mut program, 1.0 / scale);
             elementwise(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(logits, "sv->sv"), (inverse, "->sv")],
             )?
@@ -3307,7 +3307,7 @@ mod activation_tests {
         let mut program = Vec::new();
         let x = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(1), Extent::Static(VALUES.len() as u32)],
             "x",
         );
@@ -3406,17 +3406,17 @@ mod ple_stage_a_tests {
         let mut program = Vec::new();
         let ids = input_leaf(
             &mut program,
-            DType::Int32,
+            DType::INT32,
             alloc::vec![Extent::Symbolic(0)],
             "ids",
         );
         let h0 = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Symbolic(0), Extent::Static(H0.len() as u32)],
             "h0",
         );
-        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+        let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
         let shared = append_ple_shared_projections(
             &mut program,
             ids,
@@ -3529,17 +3529,17 @@ mod ple_stage_b_tests {
         let mut program = Vec::new();
         let ids = input_leaf(
             &mut program,
-            DType::Int32,
+            DType::INT32,
             alloc::vec![Extent::Symbolic(0)],
             "ids",
         );
         let h0 = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Symbolic(0), Extent::Static(embedding)],
             "h0",
         );
-        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+        let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
         let shared = append_ple_shared_projections(
             &mut program,
             ids,
@@ -3555,13 +3555,13 @@ mod ple_stage_b_tests {
 
         let ffn_norm_weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             "blk.0.ffn_norm.weight",
         );
         let post_mixer = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Symbolic(0), Extent::Static(embedding)],
             "post_mixer",
         );
@@ -3680,14 +3680,14 @@ mod ple_single_reduce_parity_tests {
         let window = alloc::format!("s,d+{}@{PLE_DIM}->sd", layer * PLE_DIM);
         let proj_slice = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Identity,
             &[(flat.proj_flat, window.as_str())],
         )
         .expect("window slice of the projection lowers");
         let emb_slice = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Identity,
             &[(flat.emb_flat, window.as_str())],
         )
@@ -3702,7 +3702,7 @@ mod ple_single_reduce_parity_tests {
         .expect("per-layer rmsnorm lowers");
         let summed = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             &[(normed, "sd->sd"), (emb_slice, "sd->sd")],
         )
@@ -3710,7 +3710,7 @@ mod ple_single_reduce_parity_tests {
         let combine_scale = scalar_constant(program, core::f32::consts::FRAC_1_SQRT_2);
         elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(summed, "sd->sd"), (combine_scale, "->sd")],
         )
@@ -3722,17 +3722,17 @@ mod ple_single_reduce_parity_tests {
         let mut program = Vec::new();
         let ids = input_leaf(
             &mut program,
-            DType::Int32,
+            DType::INT32,
             alloc::vec![Extent::Symbolic(0)],
             "ids",
         );
         let h0 = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING)],
             "h0",
         );
-        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+        let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
         let flat = append_ple_flat_projections(
             &mut program,
             ids,
@@ -3885,17 +3885,17 @@ mod exclusive_dense_post_norm_tests {
         let mut program = Vec::new();
         let post_mixer = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING)],
             "post_mixer",
         );
         let ffn_norm_weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(EMBEDDING)],
             "blk.0.ffn_norm.weight",
         );
-        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+        let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
         let ones = scalar_constant(&mut program, 1.0);
         let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
 

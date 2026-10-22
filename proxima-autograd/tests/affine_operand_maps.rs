@@ -93,7 +93,7 @@ fn input(program: &mut Vec<Op>, name: &str, shape: &[u32]) -> NodeId {
     op::append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: shape.iter().map(|&extent| Extent::Static(extent)).collect(),
             name: Some(name.into()),
         },
@@ -104,7 +104,7 @@ fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, Ind
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands,
             name: None,
@@ -120,7 +120,7 @@ fn sum_to_scalar(program: &mut Vec<Op>, operand: NodeId, rank: u16) -> NodeId {
     op::append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand,
@@ -430,7 +430,7 @@ async fn a_gather_with_a_non_projection_index_map_is_still_refused() {
     let ids = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(6)],
             name: Some("ids".into()),
         },
@@ -520,7 +520,7 @@ fn squared_reduce_loss(reduce_case: &ReduceCase) -> (Vec<Op>, NodeId) {
     let reduced = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: reduce_case.body,
             init: reduce_case.init,
             operand,
@@ -672,7 +672,7 @@ async fn a_reduce_over_a_projection_in_map_adds_no_mask() {
     let summed = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand,
@@ -711,7 +711,7 @@ async fn a_reduce_over_a_gather_in_map_is_still_refused() {
     let ids = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(6)],
             name: Some("ids".into()),
         },
@@ -725,7 +725,7 @@ async fn a_reduce_over_a_gather_in_map_is_still_refused() {
     let summed = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: table,
@@ -754,7 +754,7 @@ async fn adjoint_affine_map_reduce_scatter_with_a_strided_diagonal_in_map_equals
     let destination = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(3), Extent::Static(2)],
             name: Some("idx".into()),
         },
@@ -762,7 +762,7 @@ async fn adjoint_affine_map_reduce_scatter_with_a_strided_diagonal_in_map_equals
     let scattered = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand,
@@ -851,7 +851,7 @@ async fn a_reduce_over_a_tiled_in_map_differentiates_to_a_program_that_infers() 
     let windowed = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand,

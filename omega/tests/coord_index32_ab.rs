@@ -33,7 +33,7 @@ fn weighted_sum_program(dims: &[u32], reduce_axis: u16) -> (Vec<Op>, NodeId) {
     let weights = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: shape.clone(),
             name: None,
         },
@@ -41,7 +41,7 @@ fn weighted_sum_program(dims: &[u32], reduce_axis: u16) -> (Vec<Op>, NodeId) {
     let values = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape,
             name: None,
         },
@@ -50,7 +50,7 @@ fn weighted_sum_program(dims: &[u32], reduce_axis: u16) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weights, IndexMap::Affine(projection(rank, &identity_axes))),
@@ -63,7 +63,7 @@ fn weighted_sum_program(dims: &[u32], reduce_axis: u16) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,

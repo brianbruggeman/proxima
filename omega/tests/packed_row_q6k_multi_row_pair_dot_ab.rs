@@ -37,7 +37,7 @@ fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32, stride: i32) -> (Vec<O
     let weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::UInt8,
+            dtype: DType::UINT8,
             shape: vec![Extent::Static(out_dim), Extent::Static(in_dim)],
             name: None,
         },
@@ -45,7 +45,7 @@ fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32, stride: i32) -> (Vec<O
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![
                 Extent::Static(tokens),
                 Extent::Static(in_dim * stride as u32),
@@ -56,7 +56,7 @@ fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32, stride: i32) -> (Vec<O
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(projection(3, &[1, 2]))),
@@ -77,7 +77,7 @@ fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32, stride: i32) -> (Vec<O
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,

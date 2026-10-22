@@ -81,9 +81,9 @@ use proxima_tensor::{DType, IndexMap, QuantizedBlock};
 /// `omega::execute`.
 fn quantized_matmul_program(rows: u32, k: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
-    // `DType::Float32`, not `UInt8` -- every real weight leaf
+    // `DType::FLOAT32`, not `UInt8` -- every real weight leaf
     // `scheduled_forward_program_with_experts`/`append_attention_mixer` declares
-    // (`attention_forward.rs`'s own `input_leaf(..., DType::Float32, ...)`
+    // (`attention_forward.rs`'s own `input_leaf(..., DType::FLOAT32, ...)`
     // calls for `wq`/`wk`/`wv`/`ffn_down.weight`/etc) uses `Float32` as the
     // graph-level marker regardless of which `QuantizedBlock` variant binds
     // it at evaluation time -- `UInt8` is only `proxima_tensor::cpu::
@@ -94,7 +94,7 @@ fn quantized_matmul_program(rows: u32, k: u32) -> (Vec<Op>, NodeId) {
     let weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc_vec(&[rows, k]),
             name: None,
         },
@@ -102,7 +102,7 @@ fn quantized_matmul_program(rows: u32, k: u32) -> (Vec<Op>, NodeId) {
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc_vec(&[k, 1]),
             name: None,
         },
@@ -110,7 +110,7 @@ fn quantized_matmul_program(rows: u32, k: u32) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(projection(3, &[0, 2]))),
@@ -122,7 +122,7 @@ fn quantized_matmul_program(rows: u32, k: u32) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,

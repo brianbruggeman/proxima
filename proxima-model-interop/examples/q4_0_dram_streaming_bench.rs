@@ -230,7 +230,7 @@ fn append_packed_row_matvec(
     let product = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -242,7 +242,7 @@ fn append_packed_row_matvec(
     append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -266,7 +266,7 @@ fn append_copy_dispatch(
     append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![
                 (data, IndexMap::Affine(map::projection(1, &[0]))),
@@ -339,7 +339,7 @@ fn build_matvec_arm<'a>(
         let weight_node = append(
             &mut program,
             Op::Input {
-                dtype: DType::UInt8,
+                dtype: DType::UINT8,
                 shape: vec![Extent::Static(tensor.rows), Extent::Static(k_used)],
                 name: Some(weight_name.clone()),
             },
@@ -357,7 +357,7 @@ fn build_matvec_arm<'a>(
         let activation_node = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(k_used), Extent::Static(1)],
                 name: Some(activation_name.clone()),
             },
@@ -418,7 +418,7 @@ fn build_copy_arm<'a>(
     let zero_node = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             name: Some("zero".to_string()),
         },
@@ -434,7 +434,7 @@ fn build_copy_arm<'a>(
         let data_node = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(elems)],
                 name: Some(data_name.clone()),
             },

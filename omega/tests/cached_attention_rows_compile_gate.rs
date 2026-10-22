@@ -32,7 +32,7 @@ fn row_tiled_attention(
 ) -> BoundOp {
     BoundOp {
         node: NodeId(9),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![rows, kv_heads, query_groups, head_dim],
         kind: BoundOpKind::CachedAttention {
             operands: (0..9)
@@ -55,7 +55,7 @@ fn row_tiled_attention(
 fn k_row_softmax_weights(rows: u64, cached_key_rows: u64) -> BoundOp {
     BoundOp {
         node: NodeId(10),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![rows, cached_key_rows, 1, 8],
         kind: BoundOpKind::CachedSoftmaxWeights {
             operands: vec![

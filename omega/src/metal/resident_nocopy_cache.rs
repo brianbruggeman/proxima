@@ -981,7 +981,7 @@ pub(super) fn upload_block_as_half(
     data: &[f32],
 ) -> Result<MetalBuffer, MetalError> {
     if data.is_empty() {
-        return allocate_buffer(device, 0, DType::Float16);
+        return allocate_buffer(device, 0, DType::FLOAT16);
     }
     let narrowed: Vec<f16> = data.iter().map(|value| f16::from_f32(*value)).collect();
     let byte_length = size_of_val(narrowed.as_slice());

@@ -985,10 +985,10 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
                     // `indices` leaf (see `onnx_dtype_to_op_dtype`'s own doc);
                     // this crate stores every buffer as f32 regardless, so
                     // round-tripping it through `float_tensor_bytes` here
-                    // would re-parse back to `DType::Float32` and trip
+                    // would re-parse back to `DType::FLOAT32` and trip
                     // `shape::infer`'s `check_indices_dtype` -- an int64
                     // tensor is the faithful ONNX encoding that survives.
-                    if *dtype == DType::Float32 {
+                    if *dtype == DType::FLOAT32 {
                         initializers.push(float_tensor_bytes(&dims, &bound_name, data));
                     } else {
                         // an integer-tagged `Op::Input` carries an exact-integer
@@ -1304,7 +1304,7 @@ fn eval_scalar_op(body: ScalarOp, operands: &[f32]) -> Option<f32> {
 /// [`crate::lower::concat_pair`]'s `lhs_index`/`rhs_index` chains build. This
 /// crate stores every buffer as f32 regardless of logical dtype (this
 /// module's own doc), so re-lowering the *unfolded* chain (plain ONNX
-/// `Sub`/`Max`/`Min` nodes) would lose the `DType::Int32` tag
+/// `Sub`/`Max`/`Min` nodes) would lose the `DType::INT32` tag
 /// `shape::infer`'s `check_indices_dtype` requires on a `Computed`'s
 /// `indices` -- folding to a concrete int64 initializer at lift time sides
 /// that requirement rather than needing a `Cast` op this crate does not lift.
@@ -1675,7 +1675,7 @@ mod tests {
         let x = append(
             &mut program,
             Op::Input {
-                dtype: proxima_tensor::DType::Float32,
+                dtype: proxima_tensor::DType::FLOAT32,
                 shape: vec![Extent::Static(2), Extent::Static(3), Extent::Static(4)],
                 name: Some("x".to_string()),
             },
@@ -1718,7 +1718,7 @@ mod tests {
         let reduced = append(
             &mut program,
             Op::Reduce(proxima_tensor::Reduce {
-                dtype: proxima_tensor::DType::Float32,
+                dtype: proxima_tensor::DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: x,
@@ -1781,7 +1781,7 @@ mod tests {
         let x = append(
             &mut Vec::new(),
             Op::Input {
-                dtype: proxima_tensor::DType::Float32,
+                dtype: proxima_tensor::DType::FLOAT32,
                 shape: vec![],
                 name: None,
             },
@@ -1908,7 +1908,7 @@ mod tests {
         let x = append(
             &mut program,
             Op::Input {
-                dtype: proxima_tensor::DType::Float32,
+                dtype: proxima_tensor::DType::FLOAT32,
                 shape: vec![Extent::Static(4)],
                 name: Some("x".to_string()),
             },
@@ -1924,7 +1924,7 @@ mod tests {
         let scanned = append(
             &mut program,
             Op::Reduce(proxima_tensor::Reduce {
-                dtype: proxima_tensor::DType::Float32,
+                dtype: proxima_tensor::DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 init: ReduceInit::One,
                 operand: x,

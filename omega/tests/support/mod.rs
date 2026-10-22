@@ -349,14 +349,14 @@ pub fn qwen35_partial_rotary_forward_fixture(
     let mut program = Vec::new();
     let x = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Symbolic(0), Extent::Static(EMBEDDING)],
         "x",
     );
     let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
     let eps = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Symbolic(0)],
         "eps",
     );
@@ -364,36 +364,36 @@ pub fn qwen35_partial_rotary_forward_fixture(
     let inv_sqrt_attn_head_dim = scalar_constant(&mut program, 1.0 / (ATTN_HEAD_DIM as f32).sqrt());
     let inv_attn_head_dim = scalar_constant(&mut program, 1.0 / ATTN_HEAD_DIM as f32);
     let rotary_shape = vec![Extent::Symbolic(0), Extent::Static(PAIR_DIM)];
-    let cos_new = input_leaf(&mut program, DType::Float32, rotary_shape.clone(), "cos");
-    let sin_new = input_leaf(&mut program, DType::Float32, rotary_shape, "sin");
+    let cos_new = input_leaf(&mut program, DType::FLOAT32, rotary_shape.clone(), "cos");
+    let sin_new = input_leaf(&mut program, DType::FLOAT32, rotary_shape, "sin");
     let group_ones = proxima_tensor::append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(KV_HEADS), Extent::Static(GROUP)],
             value: 1.0,
         },
     );
     let (is_future, _neg_infinity) = causal_mask(&mut program).expect("causal mask lowers");
-    let cached_len_node = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+    let cached_len_node = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "cached_len");
 
     let attn_norm_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(EMBEDDING)],
         "attn_norm_weight",
     );
     let norm_shape = vec![Extent::Static(ATTN_HEAD_DIM)];
     let q_norm_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         norm_shape.clone(),
         "q_norm_weight",
     );
-    let k_norm_weight = input_leaf(&mut program, DType::Float32, norm_shape, "k_norm_weight");
+    let k_norm_weight = input_leaf(&mut program, DType::FLOAT32, norm_shape, "k_norm_weight");
     let wq_gate = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(EMBEDDING),
             Extent::Static(KV_HEADS * GROUP),
@@ -406,11 +406,11 @@ pub fn qwen35_partial_rotary_forward_fixture(
         Extent::Static(KV_HEADS),
         Extent::Static(ATTN_HEAD_DIM),
     ];
-    let wk = input_leaf(&mut program, DType::Float32, wk_wv_shape.clone(), "wk");
-    let wv = input_leaf(&mut program, DType::Float32, wk_wv_shape, "wv");
+    let wk = input_leaf(&mut program, DType::FLOAT32, wk_wv_shape.clone(), "wk");
+    let wv = input_leaf(&mut program, DType::FLOAT32, wk_wv_shape, "wv");
     let wo = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(KV_HEADS),
             Extent::Static(GROUP),
@@ -436,23 +436,23 @@ pub fn qwen35_partial_rotary_forward_fixture(
     ];
     let k_first_cache = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         cache_rotary_shape.clone(),
         "k_first_cache",
     );
     let k_second_cache = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         cache_rotary_shape,
         "k_second_cache",
     );
     let k_pass_cache = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         cache_pass_shape,
         "k_pass_cache",
     );
-    let v_cache = input_leaf(&mut program, DType::Float32, cache_v_shape, "v_cache");
+    let v_cache = input_leaf(&mut program, DType::FLOAT32, cache_v_shape, "v_cache");
 
     let (residual1, taps) = append_gated_attention_only_with_taps(
         &mut program,

@@ -81,7 +81,7 @@ fn rms_norm_sum_program(cols: u32) -> (Vec<Op>, NodeId) {
     let input = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1), Extent::Static(cols)],
             name: None,
         },
@@ -89,7 +89,7 @@ fn rms_norm_sum_program(cols: u32) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: input,
@@ -113,7 +113,7 @@ fn attention_softmax_max_program(cols: u32) -> (Vec<Op>, NodeId) {
     let scores = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1), Extent::Static(cols)],
             name: None,
         },
@@ -121,7 +121,7 @@ fn attention_softmax_max_program(cols: u32) -> (Vec<Op>, NodeId) {
     let max = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Maximum,
             init: ReduceInit::NegativeInfinity,
             operand: scores,

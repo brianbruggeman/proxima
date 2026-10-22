@@ -387,7 +387,7 @@ fn float_layout_parity_control_int32_operand_still_rejected() {
     let source = append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(8)],
             name: None,
         },
@@ -395,7 +395,7 @@ fn float_layout_parity_control_int32_operand_still_rejected() {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Negate,
             operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
             name: None,

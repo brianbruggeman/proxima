@@ -126,7 +126,7 @@ fn run() {
         let corpus = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(rows), Extent::Static(k)],
                 name: None,
             },
@@ -134,7 +134,7 @@ fn run() {
         let query = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(k), Extent::Static(1)],
                 name: None,
             },
@@ -142,7 +142,7 @@ fn run() {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (corpus, IndexMap::Affine(projection(3, &[0, 2]))),
@@ -154,7 +154,7 @@ fn run() {
         let sum = append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,

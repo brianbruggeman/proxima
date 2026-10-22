@@ -187,7 +187,7 @@ fn accumulate(
         let weight_node = op::append(
             program,
             Op::Constant {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: alloc::vec::Vec::new(),
                 value: weight,
             },
@@ -195,7 +195,7 @@ fn accumulate(
         let term = op::append(
             program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![(source, scalar_map()), (weight_node, scalar_map())],
                 name: None,
@@ -206,7 +206,7 @@ fn accumulate(
             Some(previous) => op::append(
                 program,
                 Op::Elementwise {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     body: ScalarOp::Add,
                     operands: alloc::vec![(previous, scalar_map()), (term, scalar_map())],
                     name: None,
@@ -218,7 +218,7 @@ fn accumulate(
         op::append(
             program,
             Op::Constant {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: alloc::vec::Vec::new(),
                 value: 0.0,
             },
@@ -241,7 +241,7 @@ fn derive_program(spec: &Spec) -> Result<Derived, SpecError> {
             let node = op::append(
                 &mut program,
                 Op::Input {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: alloc::vec::Vec::new(),
                     name: Some(id.clone()),
                 },
@@ -256,7 +256,7 @@ fn derive_program(spec: &Spec) -> Result<Derived, SpecError> {
         .map(|unit_index| {
             let pre_activation =
                 accumulate(&mut program, HIDDEN_LAYER_TAG, unit_index, &input_node_ids);
-            activation::relu(&mut program, DType::Float32, pre_activation, 0)
+            activation::relu(&mut program, DType::FLOAT32, pre_activation, 0)
         })
         .collect();
 
@@ -272,7 +272,7 @@ fn derive_program(spec: &Spec) -> Result<Derived, SpecError> {
             let named = op::append(
                 &mut program,
                 Op::Elementwise {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     body: ScalarOp::Identity,
                     operands: alloc::vec![(logit, scalar_map())],
                     name: Some(output.id.clone()),

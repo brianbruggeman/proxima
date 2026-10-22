@@ -24,7 +24,7 @@ fn decode_attention(head_dim: u64, cached_key_rows: u64, lower: i64) -> BoundOp 
     };
     BoundOp {
         node: NodeId(9),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![1, 1, 8, head_dim],
         kind: BoundOpKind::CachedAttention {
             operands: (0..9)

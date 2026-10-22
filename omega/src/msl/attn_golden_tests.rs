@@ -31,7 +31,7 @@ pub(super) fn attention_op(
 ) -> BoundOp {
     BoundOp {
         node: NodeId(operand_count),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![1, 1, groups, head_dim],
         kind: BoundOpKind::CachedAttention {
             operands: (0..operand_count)
@@ -250,7 +250,7 @@ pub(super) fn softmax_weights_op(cached_key_rows: u64) -> BoundOp {
     };
     BoundOp {
         node: NodeId(10),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![1, cached_key_rows, 1, 8],
         kind: BoundOpKind::CachedSoftmaxWeights {
             operands: vec![

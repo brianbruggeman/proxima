@@ -144,17 +144,17 @@ pub(super) fn hybrid_dense_forward(
 
     let mut program = Vec::new();
 
-    let ids = input_leaf(&mut program, DType::Int32, alloc::vec![x_extent], "ids");
+    let ids = input_leaf(&mut program, DType::INT32, alloc::vec![x_extent], "ids");
     let table = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
         "token_embd.weight",
     );
     let mut x = embedding_lookup(&mut program, table, ids);
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
-    let eps = input_leaf(&mut program, DType::Float32, alloc::vec![x_extent], "eps");
+    let eps = input_leaf(&mut program, DType::FLOAT32, alloc::vec![x_extent], "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let one = ones;
     // `head_dim` here is `rope.dimension_count` -- this checkpoint's
@@ -170,20 +170,20 @@ pub(super) fn hybrid_dense_forward(
     let inv_head_v_dim = scalar_constant(&mut program, 1.0 / head_v_dim as f32);
     let cos_new = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![x_extent, Extent::Static(pairs)],
         "rope_cos",
     );
     let sin_new = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![x_extent, Extent::Static(pairs)],
         "rope_sin",
     );
     let group_ones = op::append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
             value: 1.0,
         },
@@ -191,7 +191,7 @@ pub(super) fn hybrid_dense_forward(
     let head_eps = op::append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(ssm_n_group), Extent::Static(ssm_group)],
             value: rms_eps,
         },
@@ -205,14 +205,14 @@ pub(super) fn hybrid_dense_forward(
     // node is ALSO threaded directly into every
     // [`append_gated_attention_layer`] call below to mask its own
     // padded cached range (that function's own doc).
-    let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+    let cached_len = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "cached_len");
 
     let mut layer_roots: Vec<LayerCacheRoots> = Vec::with_capacity(block_count as usize);
 
     for layer in 0..block_count {
         let attn_norm_weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.attn_norm.weight"),
         );
@@ -224,7 +224,7 @@ pub(super) fn hybrid_dense_forward(
         // exists anywhere), on both layer kinds.
         let ffn_norm_weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.post_attention_norm.weight"),
         );
@@ -240,7 +240,7 @@ pub(super) fn hybrid_dense_forward(
             // caller-side doc.
             let wq_flat = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Static(embedding),
                     Extent::Static(query_heads * attn_head_dim * 2)
@@ -261,7 +261,7 @@ pub(super) fn hybrid_dense_forward(
             let qg_head_ones = op::append(
                 &mut program,
                 Op::Constant {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: alloc::vec![
                         Extent::Static(query_heads),
                         Extent::Static(attn_head_dim * 2)
@@ -271,7 +271,7 @@ pub(super) fn hybrid_dense_forward(
             );
             let wq_gate = elementwise(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[
                     (
@@ -283,7 +283,7 @@ pub(super) fn hybrid_dense_forward(
             )?;
             let wk_flat = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Static(embedding),
                     Extent::Static(kv_heads * attn_head_dim)
@@ -298,14 +298,14 @@ pub(super) fn hybrid_dense_forward(
             let k_head_ones = op::append(
                 &mut program,
                 Op::Constant {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(attn_head_dim)],
                     value: 1.0,
                 },
             );
             let wk = elementwise(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[
                     (
@@ -318,7 +318,7 @@ pub(super) fn hybrid_dense_forward(
             let v_head_ones = op::append(
                 &mut program,
                 Op::Constant {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(attn_head_dim)],
                     value: 1.0,
                 },
@@ -326,7 +326,7 @@ pub(super) fn hybrid_dense_forward(
             let o_head_ones = op::append(
                 &mut program,
                 Op::Constant {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: alloc::vec![
                         Extent::Static(kv_heads),
                         Extent::Static(group),
@@ -337,7 +337,7 @@ pub(super) fn hybrid_dense_forward(
             );
             let wv_flat = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Static(embedding),
                     Extent::Static(kv_heads * attn_head_dim)
@@ -346,7 +346,7 @@ pub(super) fn hybrid_dense_forward(
             );
             let wv = elementwise(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[
                     (
@@ -358,7 +358,7 @@ pub(super) fn hybrid_dense_forward(
             )?;
             let wo_flat = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Static(query_heads * attn_head_dim),
                     Extent::Static(embedding)
@@ -367,7 +367,7 @@ pub(super) fn hybrid_dense_forward(
             );
             let wo = elementwise(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[
                     (
@@ -380,38 +380,38 @@ pub(super) fn hybrid_dense_forward(
             )?;
             let w_gate = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
                 &alloc::format!("blk.{layer}.ffn_gate.weight"),
             );
             let w_up = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
                 &alloc::format!("blk.{layer}.ffn_up.weight"),
             );
             let w_down = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
                 &alloc::format!("blk.{layer}.ffn_down.weight"),
             );
             let q_norm_weight = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(attn_head_dim)],
                 &alloc::format!("blk.{layer}.attn_q_norm.weight"),
             );
             let k_norm_weight = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(attn_head_dim)],
                 &alloc::format!("blk.{layer}.attn_k_norm.weight"),
             );
             let pass_dim = attn_head_dim - head_dim;
             let k_first_cache = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Symbolic(1),
                     Extent::Static(kv_heads),
@@ -421,7 +421,7 @@ pub(super) fn hybrid_dense_forward(
             );
             let k_second_cache = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Symbolic(1),
                     Extent::Static(kv_heads),
@@ -431,7 +431,7 @@ pub(super) fn hybrid_dense_forward(
             );
             let k_pass_cache = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Symbolic(1),
                     Extent::Static(kv_heads),
@@ -441,7 +441,7 @@ pub(super) fn hybrid_dense_forward(
             );
             let v_cache = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Symbolic(1),
                     Extent::Static(kv_heads),
@@ -490,67 +490,67 @@ pub(super) fn hybrid_dense_forward(
             let qkv_dim = 2 * ssm_key_dim + ssm_d_inner;
             let wqkv = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(embedding), Extent::Static(qkv_dim)],
                 &alloc::format!("blk.{layer}.ssm_in.weight"),
             );
             let wqkv_gate = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(embedding), Extent::Static(ssm_d_inner)],
                 &alloc::format!("blk.{layer}.ssm_gate.weight"),
             );
             let conv_weight = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(qkv_dim), Extent::Static(ssm_d_conv)],
                 &alloc::format!("blk.{layer}.ssm_conv1d.weight"),
             );
             let conv_history_in = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(ssm_d_conv - 1), Extent::Static(qkv_dim)],
                 &alloc::format!("ssm_cache.{layer}.conv_history"),
             );
             let ssm_beta = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(embedding), Extent::Static(ssm_dt_rank)],
                 &alloc::format!("blk.{layer}.ssm_beta.weight"),
             );
             let ssm_alpha = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(embedding), Extent::Static(ssm_dt_rank)],
                 &alloc::format!("blk.{layer}.ssm_alpha.weight"),
             );
             let ssm_dt_bias = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(ssm_dt_rank)],
                 &alloc::format!("blk.{layer}.ssm_dt.bias"),
             );
             let ssm_a = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(ssm_dt_rank)],
                 &alloc::format!("blk.{layer}.ssm_a"),
             );
             let ssm_norm_weight = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(head_v_dim)],
                 &alloc::format!("blk.{layer}.ssm_norm.weight"),
             );
             let ssm_out = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(ssm_d_inner), Extent::Static(embedding)],
                 &alloc::format!("blk.{layer}.ssm_out.weight"),
             );
             let state_in = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Static(ssm_d_state),
                     Extent::Static(head_v_dim),
@@ -601,31 +601,31 @@ pub(super) fn hybrid_dense_forward(
             let normed2 = rmsnorm(&mut program, mixer_out, ffn_norm_weight, inv_dim, eps)?;
             let w_gate = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
                 &alloc::format!("blk.{layer}.ffn_gate.weight"),
             );
             let w_up = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
                 &alloc::format!("blk.{layer}.ffn_up.weight"),
             );
             let w_down = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
                 &alloc::format!("blk.{layer}.ffn_down.weight"),
             );
             let gate_product = elementwise(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
             )?;
             let gate = reduce(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 ReduceInit::Zero,
                 gate_product,
@@ -634,13 +634,13 @@ pub(super) fn hybrid_dense_forward(
             )?;
             let up_product = elementwise(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
             )?;
             let up = reduce(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 ReduceInit::Zero,
                 up_product,
@@ -650,19 +650,19 @@ pub(super) fn hybrid_dense_forward(
             let silu_gate = silu(&mut program, gate, one, "sg->sg")?;
             let ffn_hidden = elementwise(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(silu_gate, "sg->sg"), (up, "sg->sg")],
             )?;
             let down_product = elementwise(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
             )?;
             let ffn_out = reduce(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 ReduceInit::Zero,
                 down_product,
@@ -671,7 +671,7 @@ pub(super) fn hybrid_dense_forward(
             )?;
             let x_after_ffn = elementwise(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 &[(ffn_out, "sd->sd"), (mixer_out, "sd->sd")],
             )?;
@@ -692,7 +692,7 @@ pub(super) fn hybrid_dense_forward(
 
     let output_norm_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding)],
         "output_norm.weight",
     );
@@ -701,19 +701,19 @@ pub(super) fn hybrid_dense_forward(
     let normed_last = gather_last_row(&mut program, normed_final, last_row_only);
     let lm_head = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
         "output.weight",
     );
     let logits_product = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
     )?;
     let logits = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         logits_product,
@@ -755,13 +755,13 @@ pub fn append_sigmoid_gated_shared_expert(
 ) -> Result<NodeId, TensorError> {
     let gate_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, "sd->sdf"), (gate_shexp, "df->sdf")],
     )?;
     let gate_proj = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         gate_product,
@@ -772,13 +772,13 @@ pub fn append_sigmoid_gated_shared_expert(
 
     let up_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, "sd->sdf"), (up_shexp, "df->sdf")],
     )?;
     let up_proj = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         up_product,
@@ -788,20 +788,20 @@ pub fn append_sigmoid_gated_shared_expert(
 
     let hidden = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(gate_silu, "sf->sf"), (up_proj, "sf->sf")],
     )?;
 
     let down_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(hidden, "sf->sfd"), (down_shexp, "fd->sfd")],
     )?;
     let ffn_shexp = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         down_product,
@@ -811,13 +811,13 @@ pub fn append_sigmoid_gated_shared_expert(
 
     let gate_logit_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, "sd->sd"), (gate_inp_shexp, "d->sd")],
     )?;
     let gate_logit = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         gate_logit_product,
@@ -828,7 +828,7 @@ pub fn append_sigmoid_gated_shared_expert(
 
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(ffn_shexp, "sd->sd"), (shared_gate, "s->sd")],
     )
@@ -845,13 +845,13 @@ fn append_shared_expert_router(
     let normed = rmsnorm(program, mixer_out, post_attention_norm_weight, inv_dim, eps)?;
     let gate_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "sd->sde"), (gate_inp, "de->sde")],
     )?;
     let router_logits = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         gate_product,
@@ -923,13 +923,13 @@ fn append_shared_expert_moe_ffn(
 
     let ffn_out = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(routed_out, "sd->sd"), (shared_out, "sd->sd")],
     )?;
     let residual = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(ffn_out, "sd->sd"), (mixer_out, "sd->sd")],
     )?;
@@ -1043,17 +1043,17 @@ pub(super) fn hybrid_routed_forward(
 
     let mut program = Vec::new();
 
-    let ids = input_leaf(&mut program, DType::Int32, alloc::vec![x_extent], "ids");
+    let ids = input_leaf(&mut program, DType::INT32, alloc::vec![x_extent], "ids");
     let table = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(descriptor.vocab), Extent::Static(embedding),],
         "token_embd.weight",
     );
     let mut x = embedding_lookup(&mut program, table, ids);
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
-    let eps = input_leaf(&mut program, DType::Float32, alloc::vec![x_extent], "eps");
+    let eps = input_leaf(&mut program, DType::FLOAT32, alloc::vec![x_extent], "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let one = ones;
 
@@ -1061,13 +1061,13 @@ pub(super) fn hybrid_routed_forward(
     let inv_attn_head_dim = scalar_constant(&mut program, 1.0 / attn_head_dim as f32);
     let cos_new = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![x_extent, Extent::Static(pairs)],
         "rope_cos",
     );
     let sin_new = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![x_extent, Extent::Static(pairs)],
         "rope_sin",
     );
@@ -1083,7 +1083,7 @@ pub(super) fn hybrid_routed_forward(
     let head_eps = op::append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![
                 Extent::Static(descriptor.ssm_group_count),
                 Extent::Static(ssm_group),
@@ -1093,7 +1093,7 @@ pub(super) fn hybrid_routed_forward(
     );
 
     let (is_future, _neg_infinity) = causal_mask(&mut program)?;
-    let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+    let cached_len = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "cached_len");
 
     let mut layer_roots: Vec<LayerCacheRoots> = Vec::with_capacity(descriptor.layers.len());
     let mut moe_sites: Vec<MoeSite> = Vec::with_capacity(descriptor.layers.len());
@@ -1107,19 +1107,19 @@ pub(super) fn hybrid_routed_forward(
 
         let attn_norm_weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.attn_norm.weight"),
         );
         let post_attention_norm_weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.post_attention_norm.weight"),
         );
         let gate_inp = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(embedding),
                 Extent::Static(descriptor.expert_count),
@@ -1134,7 +1134,7 @@ pub(super) fn hybrid_routed_forward(
                 let group_ones = op::append(
                     &mut program,
                     Op::Constant {
-                        dtype: DType::Float32,
+                        dtype: DType::FLOAT32,
                         shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
                         value: 1.0,
                     },
@@ -1156,7 +1156,7 @@ pub(super) fn hybrid_routed_forward(
                 // `per_head_channel_range`.
                 let wq_flat = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Static(embedding),
                         Extent::Static(descriptor.query_heads * attn_head_dim * 2),
@@ -1166,7 +1166,7 @@ pub(super) fn hybrid_routed_forward(
                 let qg_head_ones = op::append(
                     &mut program,
                     Op::Constant {
-                        dtype: DType::Float32,
+                        dtype: DType::FLOAT32,
                         shape: alloc::vec![
                             Extent::Static(descriptor.query_heads),
                             Extent::Static(attn_head_dim * 2),
@@ -1176,7 +1176,7 @@ pub(super) fn hybrid_routed_forward(
                 );
                 let wq_gate = elementwise(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Multiply,
                     &[
                         (
@@ -1201,7 +1201,7 @@ pub(super) fn hybrid_routed_forward(
                 // those bytes under the wrong axis order.
                 let wk_flat = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Static(embedding),
                         Extent::Static(kv_heads * attn_head_dim),
@@ -1211,14 +1211,14 @@ pub(super) fn hybrid_routed_forward(
                 let k_head_ones = op::append(
                     &mut program,
                     Op::Constant {
-                        dtype: DType::Float32,
+                        dtype: DType::FLOAT32,
                         shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(attn_head_dim)],
                         value: 1.0,
                     },
                 );
                 let wk = elementwise(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Multiply,
                     &[
                         (
@@ -1231,7 +1231,7 @@ pub(super) fn hybrid_routed_forward(
 
                 let wv_flat = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Static(embedding),
                         Extent::Static(kv_heads * attn_head_dim),
@@ -1241,14 +1241,14 @@ pub(super) fn hybrid_routed_forward(
                 let v_head_ones = op::append(
                     &mut program,
                     Op::Constant {
-                        dtype: DType::Float32,
+                        dtype: DType::FLOAT32,
                         shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(attn_head_dim)],
                         value: 1.0,
                     },
                 );
                 let wv = elementwise(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Multiply,
                     &[
                         (
@@ -1261,7 +1261,7 @@ pub(super) fn hybrid_routed_forward(
 
                 let wo_flat = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Static(descriptor.query_heads * attn_head_dim),
                         Extent::Static(embedding),
@@ -1271,7 +1271,7 @@ pub(super) fn hybrid_routed_forward(
                 let o_head_ones = op::append(
                     &mut program,
                     Op::Constant {
-                        dtype: DType::Float32,
+                        dtype: DType::FLOAT32,
                         shape: alloc::vec![
                             Extent::Static(kv_heads),
                             Extent::Static(group),
@@ -1282,7 +1282,7 @@ pub(super) fn hybrid_routed_forward(
                 );
                 let wo = elementwise(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Multiply,
                     &[
                         (
@@ -1299,20 +1299,20 @@ pub(super) fn hybrid_routed_forward(
 
                 let q_norm_weight = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(attn_head_dim)],
                     &alloc::format!("blk.{layer}.attn_q_norm.weight"),
                 );
                 let k_norm_weight = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(attn_head_dim)],
                     &alloc::format!("blk.{layer}.attn_k_norm.weight"),
                 );
 
                 let k_first_cache = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Symbolic(1),
                         Extent::Static(kv_heads),
@@ -1322,7 +1322,7 @@ pub(super) fn hybrid_routed_forward(
                 );
                 let k_second_cache = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Symbolic(1),
                         Extent::Static(kv_heads),
@@ -1332,7 +1332,7 @@ pub(super) fn hybrid_routed_forward(
                 );
                 let k_pass_cache = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Symbolic(1),
                         Extent::Static(kv_heads),
@@ -1342,7 +1342,7 @@ pub(super) fn hybrid_routed_forward(
                 );
                 let v_cache = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Symbolic(1),
                         Extent::Static(kv_heads),
@@ -1403,13 +1403,13 @@ pub(super) fn hybrid_routed_forward(
                 let qkv_dim = 2 * ssm_key_dim + descriptor.ssm_inner_size;
                 let wqkv = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(embedding), Extent::Static(qkv_dim)],
                     &alloc::format!("blk.{layer}.attn_qkv.weight"),
                 );
                 let wqkv_gate = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Static(embedding),
                         Extent::Static(descriptor.ssm_inner_size),
@@ -1418,7 +1418,7 @@ pub(super) fn hybrid_routed_forward(
                 );
                 let conv_weight = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Static(qkv_dim),
                         Extent::Static(descriptor.ssm_conv_kernel),
@@ -1427,7 +1427,7 @@ pub(super) fn hybrid_routed_forward(
                 );
                 let conv_history_in = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Static(descriptor.ssm_conv_kernel.saturating_sub(1)),
                         Extent::Static(qkv_dim),
@@ -1436,7 +1436,7 @@ pub(super) fn hybrid_routed_forward(
                 );
                 let ssm_beta = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Static(embedding),
                         Extent::Static(descriptor.ssm_time_step_rank),
@@ -1445,7 +1445,7 @@ pub(super) fn hybrid_routed_forward(
                 );
                 let ssm_alpha = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Static(embedding),
                         Extent::Static(descriptor.ssm_time_step_rank),
@@ -1454,25 +1454,25 @@ pub(super) fn hybrid_routed_forward(
                 );
                 let ssm_dt_bias = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(descriptor.ssm_time_step_rank)],
                     &alloc::format!("blk.{layer}.ssm_dt"),
                 );
                 let ssm_a = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(descriptor.ssm_time_step_rank)],
                     &alloc::format!("blk.{layer}.ssm_a"),
                 );
                 let ssm_norm_weight = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(head_v_dim)],
                     &alloc::format!("blk.{layer}.ssm_norm.weight"),
                 );
                 let ssm_out = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Static(descriptor.ssm_inner_size),
                         Extent::Static(embedding),
@@ -1481,7 +1481,7 @@ pub(super) fn hybrid_routed_forward(
                 );
                 let state_in = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Static(descriptor.ssm_state_size),
                         Extent::Static(head_v_dim),
@@ -1538,7 +1538,7 @@ pub(super) fn hybrid_routed_forward(
 
         let expert_w_gate = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(descriptor.expert_count),
                 Extent::Static(embedding),
@@ -1548,7 +1548,7 @@ pub(super) fn hybrid_routed_forward(
         );
         let expert_w_up = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(descriptor.expert_count),
                 Extent::Static(embedding),
@@ -1558,7 +1558,7 @@ pub(super) fn hybrid_routed_forward(
         );
         let expert_w_down = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(descriptor.expert_count),
                 Extent::Static(descriptor.expert_feed_forward),
@@ -1568,13 +1568,13 @@ pub(super) fn hybrid_routed_forward(
         );
         let gate_inp_shexp = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.ffn_gate_inp_shexp.weight"),
         );
         let gate_shexp = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(embedding),
                 Extent::Static(descriptor.expert_shared_feed_forward),
@@ -1583,7 +1583,7 @@ pub(super) fn hybrid_routed_forward(
         );
         let up_shexp = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(embedding),
                 Extent::Static(descriptor.expert_shared_feed_forward),
@@ -1592,7 +1592,7 @@ pub(super) fn hybrid_routed_forward(
         );
         let down_shexp = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(descriptor.expert_shared_feed_forward),
                 Extent::Static(embedding),
@@ -1644,7 +1644,7 @@ pub(super) fn hybrid_routed_forward(
 
     let output_norm_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding)],
         "output_norm.weight",
     );
@@ -1654,19 +1654,19 @@ pub(super) fn hybrid_routed_forward(
 
     let lm_head = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding), Extent::Static(descriptor.vocab),],
         "output.weight",
     );
     let logits_product = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
     )?;
     let logits = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         logits_product,

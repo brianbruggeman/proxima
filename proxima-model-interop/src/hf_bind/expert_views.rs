@@ -129,7 +129,7 @@ fn expert_rows(values: &[f32], expert: usize) -> &[f32] {
 
 #[test]
 fn hf_expert_stack_gate_and_up_are_row_parts_of_each_expert_in_out_in_order() {
-    let checkpoint = checkpoint(DType::BFloat16, bf16_bytes);
+    let checkpoint = checkpoint(DType::BFLOAT16, bf16_bytes);
 
     let gate = bind(&checkpoint, "blk.0.ffn_gate_exps.weight", OUTPUT);
     let up = bind(&checkpoint, "blk.0.ffn_up_exps.weight", OUTPUT);
@@ -158,7 +158,7 @@ fn hf_expert_stack_gate_and_up_are_row_parts_of_each_expert_in_out_in_order() {
 
 #[test]
 fn hf_expert_stack_is_not_the_transposed_in_out_layout() {
-    let checkpoint = checkpoint(DType::BFloat16, bf16_bytes);
+    let checkpoint = checkpoint(DType::BFLOAT16, bf16_bytes);
 
     let gate = bind(&checkpoint, "blk.0.ffn_gate_exps.weight", OUTPUT);
     let gate_values = part_values(&gate, "blk.0.ffn_gate_exps.weight");
@@ -169,7 +169,7 @@ fn hf_expert_stack_is_not_the_transposed_in_out_layout() {
 
 #[test]
 fn hf_expert_stack_down_borrows_the_mapped_bytes_without_a_copy() {
-    let checkpoint = checkpoint(DType::BFloat16, bf16_bytes);
+    let checkpoint = checkpoint(DType::BFLOAT16, bf16_bytes);
 
     let down = bind(&checkpoint, "blk.0.ffn_down_exps.weight", INPUT);
 
@@ -189,7 +189,7 @@ fn hf_expert_stack_down_borrows_the_mapped_bytes_without_a_copy() {
 
 #[test]
 fn hf_expert_stack_f32_checkpoint_keeps_the_in_out_transposed_decode() {
-    let checkpoint = checkpoint(DType::Float32, f32_bytes);
+    let checkpoint = checkpoint(DType::FLOAT32, f32_bytes);
 
     let gate = bind(&checkpoint, "blk.0.ffn_gate_exps.weight", OUTPUT);
 
@@ -203,7 +203,7 @@ fn hf_expert_stack_f32_checkpoint_keeps_the_in_out_transposed_decode() {
 
 #[test]
 fn hf_expert_stack_fused_parts_borrow_the_mapped_bytes_without_a_copy() {
-    let checkpoint = checkpoint(DType::BFloat16, bf16_bytes);
+    let checkpoint = checkpoint(DType::BFLOAT16, bf16_bytes);
 
     let up = bind(&checkpoint, "blk.0.ffn_up_exps.weight", OUTPUT);
 
@@ -220,7 +220,7 @@ fn hf_expert_stack_fused_parts_borrow_the_mapped_bytes_without_a_copy() {
 
 #[test]
 fn hf_expert_stack_fused_parts_fill_the_expert_slab_in_place() {
-    let checkpoint = checkpoint(DType::BFloat16, bf16_bytes);
+    let checkpoint = checkpoint(DType::BFLOAT16, bf16_bytes);
     let gate = bind(&checkpoint, "blk.0.ffn_gate_exps.weight", OUTPUT);
     let ranges = part_ranges(&gate, "blk.0.ffn_gate_exps.weight");
     let mut slab = ExpertSlab::new();

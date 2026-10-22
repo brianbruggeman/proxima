@@ -75,7 +75,7 @@ fn tanh_chain_program(extent: u32, depth: usize) -> Vec<Op> {
     let mut current = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(extent)],
             name: None,
         },
@@ -84,7 +84,7 @@ fn tanh_chain_program(extent: u32, depth: usize) -> Vec<Op> {
         current = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Tanh,
                 operands: vec![(current, IndexMap::Affine(projection(1, &[0])))],
                 name: None,
@@ -100,7 +100,7 @@ fn reciprocal_program(extent: u32) -> Vec<Op> {
     let source = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(extent)],
             name: None,
         },
@@ -108,7 +108,7 @@ fn reciprocal_program(extent: u32) -> Vec<Op> {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Reciprocal,
             operands: vec![(source, IndexMap::Affine(projection(1, &[0])))],
             name: None,
@@ -122,7 +122,7 @@ fn square_root_program(extent: u32) -> Vec<Op> {
     let source = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(extent)],
             name: None,
         },
@@ -130,7 +130,7 @@ fn square_root_program(extent: u32) -> Vec<Op> {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::SquareRoot,
             operands: vec![(source, IndexMap::Affine(projection(1, &[0])))],
             name: None,
@@ -151,7 +151,7 @@ fn multiply_sqrt_reciprocal_chain_program() -> Vec<Op> {
     let a = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: None,
         },
@@ -159,7 +159,7 @@ fn multiply_sqrt_reciprocal_chain_program() -> Vec<Op> {
     let scale = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: None,
         },
@@ -167,7 +167,7 @@ fn multiply_sqrt_reciprocal_chain_program() -> Vec<Op> {
     let squared = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(a, identity()), (scale, identity())],
             name: None,
@@ -176,7 +176,7 @@ fn multiply_sqrt_reciprocal_chain_program() -> Vec<Op> {
     let rooted = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::SquareRoot,
             operands: vec![(squared, identity())],
             name: None,
@@ -185,7 +185,7 @@ fn multiply_sqrt_reciprocal_chain_program() -> Vec<Op> {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Reciprocal,
             operands: vec![(rooted, identity())],
             name: None,
@@ -204,7 +204,7 @@ fn matmul_program(m: u32, k: u32, n: u32, symbolic: bool) -> (Vec<Op>, NodeId) {
     let lhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: lhs_shape,
             name: None,
         },
@@ -212,7 +212,7 @@ fn matmul_program(m: u32, k: u32, n: u32, symbolic: bool) -> (Vec<Op>, NodeId) {
     let rhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(k), Extent::Static(n)],
             name: None,
         },
@@ -220,7 +220,7 @@ fn matmul_program(m: u32, k: u32, n: u32, symbolic: bool) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(projection(3, &[0, 2]))),
@@ -232,7 +232,7 @@ fn matmul_program(m: u32, k: u32, n: u32, symbolic: bool) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -250,7 +250,7 @@ fn softmax_program(n: u32, d: u32) -> Vec<Op> {
     let input = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(n), Extent::Static(d)],
             name: None,
         },
@@ -261,7 +261,7 @@ fn softmax_program(n: u32, d: u32) -> Vec<Op> {
     let max = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Maximum,
             init: ReduceInit::NegativeInfinity,
             operand: input,
@@ -274,7 +274,7 @@ fn softmax_program(n: u32, d: u32) -> Vec<Op> {
     let shifted = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Subtract,
             operands: vec![(input, row_map.clone()), (max, broadcast_map.clone())],
             name: None,
@@ -283,7 +283,7 @@ fn softmax_program(n: u32, d: u32) -> Vec<Op> {
     let exponentiated = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Exponential,
             operands: vec![(shifted, row_map.clone())],
             name: None,
@@ -292,7 +292,7 @@ fn softmax_program(n: u32, d: u32) -> Vec<Op> {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: exponentiated,
@@ -305,7 +305,7 @@ fn softmax_program(n: u32, d: u32) -> Vec<Op> {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Divide,
             operands: vec![(exponentiated, row_map), (sum, broadcast_map)],
             name: None,
@@ -319,7 +319,7 @@ fn cumsum_program(extent: u32) -> Vec<Op> {
     let source = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(extent)],
             name: None,
         },
@@ -327,7 +327,7 @@ fn cumsum_program(extent: u32) -> Vec<Op> {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: source,
@@ -348,7 +348,7 @@ fn conv_window_program(taps: u32, width: u32, signal_len: u32) -> Vec<Op> {
     let kernel = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(taps), Extent::Static(width)],
             name: None,
         },
@@ -356,7 +356,7 @@ fn conv_window_program(taps: u32, width: u32, signal_len: u32) -> Vec<Op> {
     let signal = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(signal_len)],
             name: None,
         },
@@ -368,7 +368,7 @@ fn conv_window_program(taps: u32, width: u32, signal_len: u32) -> Vec<Op> {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (kernel, IndexMap::Affine(projection(2, &[0, 1]))),
@@ -380,7 +380,7 @@ fn conv_window_program(taps: u32, width: u32, signal_len: u32) -> Vec<Op> {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -400,7 +400,7 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Op> {
     let table = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(vocab), Extent::Static(dim)],
             name: None,
         },
@@ -408,7 +408,7 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Op> {
     let ids = append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(seq)],
             name: None,
         },
@@ -432,7 +432,7 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Op> {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(table, gathered_map)],
             name: None,
@@ -449,7 +449,7 @@ fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) 
     let table = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(vocab), Extent::Static(embed_dim)],
             name: None,
         },
@@ -457,7 +457,7 @@ fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) 
     let ids = append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(seq)],
             name: None,
         },
@@ -465,7 +465,7 @@ fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) 
     let weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(embed_dim), Extent::Static(out_dim)],
             name: None,
         },
@@ -492,7 +492,7 @@ fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) 
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(table, gather_map), (weight, weight_map)],
             name: None,
@@ -501,7 +501,7 @@ fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) 
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -545,7 +545,7 @@ fn cached_dense_kernel_does_not_override_reordered_head_split_layout() {
     let dense_left = append(
         &mut dense_program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(2), Extent::Static(3), Extent::Static(2)],
             name: None,
         },
@@ -553,14 +553,14 @@ fn cached_dense_kernel_does_not_override_reordered_head_split_layout() {
     let dense_right = append(
         &mut dense_program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(2), Extent::Static(3), Extent::Static(2)],
             name: None,
         },
     );
     elementwise(
         &mut dense_program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(dense_left, "sug->sug"), (dense_right, "sug->sug")],
     )
@@ -585,7 +585,7 @@ fn cached_dense_kernel_does_not_override_reordered_head_split_layout() {
     let flat = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(2), Extent::Static(6)],
             name: None,
         },
@@ -593,14 +593,14 @@ fn cached_dense_kernel_does_not_override_reordered_head_split_layout() {
     let ones = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(3), Extent::Static(2)],
             name: None,
         },
     );
     elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(flat, "s,3*g+u->sug"), (ones, "ug->sug")],
     )
@@ -777,7 +777,7 @@ fn axis_reduce_program(rows: u32, cols: u32, body: ScalarOp, init: ReduceInit) -
     let input = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(rows), Extent::Static(cols)],
             name: None,
         },
@@ -785,7 +785,7 @@ fn axis_reduce_program(rows: u32, cols: u32, body: ScalarOp, init: ReduceInit) -
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             init,
             operand: input,
@@ -855,7 +855,7 @@ fn a_multi_operand_elementwise_fusion_chain_matches_cpu_on_a_real_device() {
     let a = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: None,
         },
@@ -863,7 +863,7 @@ fn a_multi_operand_elementwise_fusion_chain_matches_cpu_on_a_real_device() {
     let scale = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: None,
         },
@@ -871,7 +871,7 @@ fn a_multi_operand_elementwise_fusion_chain_matches_cpu_on_a_real_device() {
     let bias = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: None,
         },
@@ -879,7 +879,7 @@ fn a_multi_operand_elementwise_fusion_chain_matches_cpu_on_a_real_device() {
     let b = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(a, identity()), (scale, identity())],
             name: None,
@@ -888,7 +888,7 @@ fn a_multi_operand_elementwise_fusion_chain_matches_cpu_on_a_real_device() {
     let c = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![(b, identity()), (bias, identity())],
             name: None,
@@ -897,7 +897,7 @@ fn a_multi_operand_elementwise_fusion_chain_matches_cpu_on_a_real_device() {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(c, identity()), (c, identity())],
             name: None,
@@ -1104,7 +1104,7 @@ fn multi_output_parity_covers_both_an_intermediate_and_the_root() {
     let source = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: None,
         },
@@ -1115,7 +1115,7 @@ fn multi_output_parity_covers_both_an_intermediate_and_the_root() {
         current = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Tanh,
                 operands: vec![(current, IndexMap::Affine(projection(1, &[0])))],
                 name: None,
@@ -1176,7 +1176,7 @@ fn block_count_mismatch_produces_the_same_tensor_error_as_cpu() {
     append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: None,
         },
@@ -1198,7 +1198,7 @@ fn block_size_mismatch_produces_the_same_tensor_error_as_cpu() {
     append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: None,
         },
@@ -1440,8 +1440,8 @@ fn matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle() {
     const ABSOLUTE_EPSILON: f32 = 4e-3;
 
     let (m, k, n) = (17usize, 23usize, 13usize);
-    let (f32_program, _) = matmul_program_with_dtype(m as u32, k as u32, n as u32, DType::Float32);
-    let (f16_program, _) = matmul_program_with_dtype(m as u32, k as u32, n as u32, DType::Float16);
+    let (f32_program, _) = matmul_program_with_dtype(m as u32, k as u32, n as u32, DType::FLOAT32);
+    let (f16_program, _) = matmul_program_with_dtype(m as u32, k as u32, n as u32, DType::FLOAT16);
 
     let lhs = random_vec(11, m * k);
     let rhs = random_vec(12, k * n);
@@ -1506,7 +1506,7 @@ fn page_aligned_input_takes_the_no_copy_metal_upload_path() {
     let input = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(page_elements)],
             name: None,
         },
@@ -1514,7 +1514,7 @@ fn page_aligned_input_takes_the_no_copy_metal_upload_path() {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Tanh,
             operands: vec![(input, IndexMap::Affine(projection(1, &[0])))],
             name: None,
@@ -1637,7 +1637,7 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path() {
         dequantize(row_blocks, row_f32).expect("a whole number of q4_k super-blocks");
     }
 
-    let (packed_program, packed_sum) = q4k_matmul_program(rows, k, DType::UInt8);
+    let (packed_program, packed_sum) = q4k_matmul_program(rows, k, DType::UINT8);
     let metal = omega::execute(
         &packed_program,
         &[],
@@ -1653,7 +1653,7 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path() {
     )
     .expect("metal executes a packed q4_k matmul on a real device");
 
-    let (f32_program, f32_sum) = q4k_matmul_program(rows, k, DType::Float32);
+    let (f32_program, f32_sum) = q4k_matmul_program(rows, k, DType::FLOAT32);
     let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum])
         .expect("dequantized f32 cpu matmul evaluates");
 
@@ -1753,7 +1753,7 @@ fn metal_matmul_on_one_q4k_super_block_matches_a_hand_rolled_dequantize_then_dot
         expected[row_index] = sum;
     }
 
-    let (packed_program, packed_sum) = q4k_matmul_program(rows, k, DType::UInt8);
+    let (packed_program, packed_sum) = q4k_matmul_program(rows, k, DType::UINT8);
     let metal = omega::execute(
         &packed_program,
         &[],
@@ -1850,7 +1850,7 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_ti
         dequantize(row_blocks, row_f32).expect("a whole number of q4_k super-blocks");
     }
 
-    let (packed_program, packed_sum) = q4k_tiled_gemm_program(rows, k, tokens, DType::UInt8);
+    let (packed_program, packed_sum) = q4k_tiled_gemm_program(rows, k, tokens, DType::UINT8);
     let metal = omega::execute(
         &packed_program,
         &[],
@@ -1866,7 +1866,7 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_ti
     )
     .expect("metal executes a tiled packed q4_k gemm on a real device");
 
-    let (f32_program, f32_sum) = q4k_tiled_gemm_program(rows, k, tokens, DType::Float32);
+    let (f32_program, f32_sum) = q4k_tiled_gemm_program(rows, k, tokens, DType::FLOAT32);
     let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum])
         .expect("dequantized f32 cpu gemm evaluates");
 
@@ -1933,7 +1933,7 @@ fn q4k_tiled_gemm_program(
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(k), Extent::Static(tokens)],
             name: None,
         },
@@ -1941,7 +1941,7 @@ fn q4k_tiled_gemm_program(
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(projection(3, &[0, 2]))),
@@ -1953,7 +1953,7 @@ fn q4k_tiled_gemm_program(
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -2011,7 +2011,7 @@ fn metal_matmul_on_packed_q6k_weights_matches_the_dequantized_f32_cpu_path() {
         dequantize(row_blocks, row_f32).expect("a whole number of q6_k super-blocks");
     }
 
-    let (packed_program, packed_sum) = q4k_matmul_program(rows, k, DType::UInt8);
+    let (packed_program, packed_sum) = q4k_matmul_program(rows, k, DType::UINT8);
     let metal = omega::execute(
         &packed_program,
         &[],
@@ -2027,7 +2027,7 @@ fn metal_matmul_on_packed_q6k_weights_matches_the_dequantized_f32_cpu_path() {
     )
     .expect("metal executes a packed q6_k matmul on a real device");
 
-    let (f32_program, f32_sum) = q4k_matmul_program(rows, k, DType::Float32);
+    let (f32_program, f32_sum) = q4k_matmul_program(rows, k, DType::FLOAT32);
     let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum])
         .expect("dequantized f32 cpu matmul evaluates");
 
@@ -2100,7 +2100,7 @@ fn metal_matmul_on_packed_q5k_weights_matches_the_dequantized_f32_cpu_path() {
         dequantize(row_blocks, row_f32).expect("a whole number of q5_k super-blocks");
     }
 
-    let (packed_program, packed_sum) = q4k_matmul_program(rows, k, DType::UInt8);
+    let (packed_program, packed_sum) = q4k_matmul_program(rows, k, DType::UINT8);
     let metal = omega::execute(
         &packed_program,
         &[],
@@ -2116,7 +2116,7 @@ fn metal_matmul_on_packed_q5k_weights_matches_the_dequantized_f32_cpu_path() {
     )
     .expect("metal executes a packed q5_k matmul on a real device");
 
-    let (f32_program, f32_sum) = q4k_matmul_program(rows, k, DType::Float32);
+    let (f32_program, f32_sum) = q4k_matmul_program(rows, k, DType::FLOAT32);
     let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum])
         .expect("dequantized f32 cpu matmul evaluates");
 
@@ -2166,7 +2166,7 @@ fn q4k_matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeI
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(k), Extent::Static(1)],
             name: None,
         },
@@ -2174,7 +2174,7 @@ fn q4k_matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeI
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(projection(3, &[0, 2]))),
@@ -2186,7 +2186,7 @@ fn q4k_matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeI
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -2203,9 +2203,9 @@ fn q4k_matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeI
 /// builds, but with the compute dtype (activation, the elementwise product,
 /// and the reduce) as its own axis independent of the weight operand's
 /// declared dtype -- `weight_dtype` stays the packed-bytes marker
-/// (`DType::UInt8`) for every packed codec regardless of `compute_dtype`,
+/// (`DType::UINT8`) for every packed codec regardless of `compute_dtype`,
 /// the same way `reject_unsupported_gpu_dtype` treats it, and is
-/// `DType::Float32` only for the plain (unpacked) `float32` cell.
+/// `DType::FLOAT32` only for the plain (unpacked) `float32` cell.
 fn codec_matmul_program(
     rows: u32,
     k: u32,
@@ -2278,18 +2278,18 @@ fn codec_matmul_program(
 /// `~1.6e-3` worst case over a 23-term dot product — this test's dot
 /// product is deeper (768 terms), so its `Float16` epsilon is looser still.
 #[proxima::test(runtime = "tokio")]
-#[case::float32_at_float32("float32", DType::Float32, 1e-5)]
-#[case::float32_at_float16("float32", DType::Float16, 1e-2)]
-#[case::q4k_at_float32("q4_k", DType::Float32, 1e-5)]
-#[case::q4k_at_float16("q4_k", DType::Float16, 1e-2)]
-#[case::q5k_at_float32("q5_k", DType::Float32, 1e-5)]
-#[case::q5k_at_float16("q5_k", DType::Float16, 1e-2)]
-#[case::q6k_at_float32("q6_k", DType::Float32, 1e-5)]
-#[case::q6k_at_float16("q6_k", DType::Float16, 1e-2)]
-#[case::q8_0_at_float32("q8_0", DType::Float32, 1e-5)]
-#[case::q8_0_at_float16("q8_0", DType::Float16, 1e-2)]
-#[case::q4_0_at_float32("q4_0", DType::Float32, 1e-5)]
-#[case::q4_0_at_float16("q4_0", DType::Float16, 1e-2)]
+#[case::float32_at_float32("float32", DType::FLOAT32, 1e-5)]
+#[case::float32_at_float16("float32", DType::FLOAT16, 1e-2)]
+#[case::q4k_at_float32("q4_k", DType::FLOAT32, 1e-5)]
+#[case::q4k_at_float16("q4_k", DType::FLOAT16, 1e-2)]
+#[case::q5k_at_float32("q5_k", DType::FLOAT32, 1e-5)]
+#[case::q5k_at_float16("q5_k", DType::FLOAT16, 1e-2)]
+#[case::q6k_at_float32("q6_k", DType::FLOAT32, 1e-5)]
+#[case::q6k_at_float16("q6_k", DType::FLOAT16, 1e-2)]
+#[case::q8_0_at_float32("q8_0", DType::FLOAT32, 1e-5)]
+#[case::q8_0_at_float16("q8_0", DType::FLOAT16, 1e-2)]
+#[case::q4_0_at_float32("q4_0", DType::FLOAT32, 1e-5)]
+#[case::q4_0_at_float16("q4_0", DType::FLOAT16, 1e-2)]
 async fn metal_matmul_parity_across_codec_and_dtype(
     #[case] codec: &str,
     #[case] compute_dtype: DType,
@@ -2388,9 +2388,9 @@ async fn metal_matmul_parity_across_codec_and_dtype(
     };
 
     let weight_dtype = if packed_weight_blocks.is_some() {
-        DType::UInt8
+        DType::UINT8
     } else {
-        DType::Float32
+        DType::FLOAT32
     };
     let (program, sum) = codec_matmul_program(rows, k, weight_dtype, compute_dtype);
     let weight_block = match (&packed_weight_blocks, codec) {
@@ -2484,7 +2484,7 @@ async fn metal_matmul_parity_across_codec_and_dtype(
         }
         (Some(_), other) => panic!("unhandled codec case in this matrix: {other}"),
     };
-    let (f32_program, f32_sum) = codec_matmul_program(rows, k, DType::Float32, DType::Float32);
+    let (f32_program, f32_sum) = codec_matmul_program(rows, k, DType::FLOAT32, DType::FLOAT32);
     let cpu = evaluate(&f32_program, &[], &[&cpu_weight, &activation], &[f32_sum])
         .expect("f32 cpu oracle evaluates");
 

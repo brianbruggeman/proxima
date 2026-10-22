@@ -65,7 +65,7 @@ fn named_family_program(family_counts: &[(&'static str, u32)]) -> FamilyProgram 
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(IN_DIM)],
             name: None,
         },
@@ -78,7 +78,7 @@ fn named_family_program(family_counts: &[(&'static str, u32)]) -> FamilyProgram 
             let weight = append(
                 &mut program,
                 Op::Input {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: vec![Extent::Static(OUT_DIM), Extent::Static(IN_DIM)],
                     name: Some(format!("blk.{layer}.{family}.weight")),
                 },
@@ -88,7 +88,7 @@ fn named_family_program(family_counts: &[(&'static str, u32)]) -> FamilyProgram 
             let product = append(
                 &mut program,
                 Op::Elementwise {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     body: ScalarOp::Multiply,
                     operands: vec![
                         (weight, IndexMap::Affine(projection(2, &[0, 1]))),
@@ -100,7 +100,7 @@ fn named_family_program(family_counts: &[(&'static str, u32)]) -> FamilyProgram 
             let sum = append(
                 &mut program,
                 Op::Reduce(Reduce {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     body: ScalarOp::Add,
                     init: ReduceInit::Zero,
                     operand: product,

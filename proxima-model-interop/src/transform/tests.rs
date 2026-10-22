@@ -65,7 +65,7 @@ fn round_trip_preserves_every_tensor_byte_and_documents_metadata_loss() {
         .iter()
         .find(|t| t.name == "token_embd.weight")
         .expect("embedding present");
-    assert_eq!(embedding.dtype, DType::Float32);
+    assert_eq!(embedding.dtype, DType::FLOAT32);
     assert_eq!(embedding.shape, alloc::vec![4, 4]);
     assert_eq!(embedding.data, embedding_data.as_slice());
 

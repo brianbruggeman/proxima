@@ -1522,7 +1522,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         let lhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(m), Extent::Static(k)],
                 name: None,
             },
@@ -1530,7 +1530,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         let rhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(k), Extent::Static(n)],
                 name: None,
             },
@@ -1538,7 +1538,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -1550,7 +1550,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: reduce_op,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -1661,7 +1661,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         let weight = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(rows), Extent::Static(k)],
                 name: None,
             },
@@ -1669,7 +1669,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         let activation = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(tokens), Extent::Static(k)],
                 name: None,
             },
@@ -1677,7 +1677,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (weight, IndexMap::Affine(map::projection(3, &[1, 2]))),
@@ -1689,7 +1689,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -1779,7 +1779,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         append(
             program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![(stack, gathered_map), (x, x_map)],
                 name: None,
@@ -1822,19 +1822,19 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         let mut program = Vec::new();
         let x_node = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
             "x",
         );
         let routes_node = input_leaf(
             &mut program,
-            DType::Int32,
+            DType::INT32,
             vec![Extent::Symbolic(0), Extent::Static(EXPERT_USED_COUNT)],
             "routes",
         );
         let expert_w_gate_node = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![
                 Extent::Static(EXPERT_COUNT),
                 Extent::Static(EMBEDDING as u32),
@@ -1844,7 +1844,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         );
         let expert_w_up_node = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![
                 Extent::Static(EXPERT_COUNT),
                 Extent::Static(EMBEDDING as u32),
@@ -1854,7 +1854,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         );
         let expert_w_down_node = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![
                 Extent::Static(EXPERT_COUNT),
                 Extent::Static(FEED_FORWARD as u32),
@@ -1867,7 +1867,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
             grouped_gathered_expert_product(&mut program, expert_w_gate_node, routes_node, x_node);
         let grouped_gate = spec_reduce(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             gate_product,
@@ -1879,7 +1879,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
             grouped_gathered_expert_product(&mut program, expert_w_up_node, routes_node, x_node);
         let grouped_up = spec_reduce(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             up_product,
@@ -1896,14 +1896,14 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         // round at a time; nothing here is round-scoped any more).
         let neg_gate = elementwise(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Negate,
             &[(grouped_gate, "sko->sko")],
         )
         .expect("negate lowers");
         let exp_neg_gate = elementwise(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Exponential,
             &[(neg_gate, "sko->sko")],
         )
@@ -1911,28 +1911,28 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         let one = scalar_constant(&mut program, 1.0);
         let one_plus_exp = elementwise(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             &[(exp_neg_gate, "sko->sko"), (one, "->sko")],
         )
         .expect("add lowers");
         let sigmoid_gate = elementwise(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Reciprocal,
             &[(one_plus_exp, "sko->sko")],
         )
         .expect("reciprocal lowers");
         let silu_gate = elementwise(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(grouped_gate, "sko->sko"), (sigmoid_gate, "sko->sko")],
         )
         .expect("silu lowers");
         let hidden = elementwise(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(silu_gate, "sko->sko"), (grouped_up, "sko->sko")],
         )
@@ -1947,7 +1947,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         );
         let root = spec_reduce(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             down_product,
@@ -2046,20 +2046,20 @@ pub(super) mod classify_kind_packed_row_marker_tests {
             let mut program = Vec::new();
             let x_node = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 vec![Extent::Symbolic(0), Extent::Static(EMBEDDING)],
                 "x",
             );
             let logits_node = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 vec![Extent::Symbolic(0), Extent::Static(EXPERT_COUNT)],
                 "logits",
             );
             let mut stack = |rows: u32, columns: u32, name: &str| {
                 input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     vec![
                         Extent::Static(EXPERT_COUNT),
                         Extent::Static(rows),
@@ -2159,13 +2159,13 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         let mut program = Vec::new();
         let x_node = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
             "x",
         );
         let gate_inp_node = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![
                 Extent::Static(EMBEDDING as u32),
                 Extent::Static(EXPERT_COUNT),
@@ -2174,7 +2174,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         );
         let expert_w_gate_node = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![
                 Extent::Static(EXPERT_COUNT),
                 Extent::Static(EMBEDDING as u32),
@@ -2184,7 +2184,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         );
         let expert_w_up_node = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![
                 Extent::Static(EXPERT_COUNT),
                 Extent::Static(EMBEDDING as u32),
@@ -2194,7 +2194,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         );
         let expert_w_down_node = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![
                 Extent::Static(EXPERT_COUNT),
                 Extent::Static(FEED_FORWARD as u32),

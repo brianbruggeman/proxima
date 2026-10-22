@@ -27,7 +27,7 @@ pub(super) fn group_queries(
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (rotated_q_even, group_map.as_str()),
@@ -36,7 +36,7 @@ pub(super) fn group_queries(
     )?;
     let q_odd_grouped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (rotated_q_odd, group_map.as_str()),
@@ -60,7 +60,7 @@ pub(super) fn append_cached_block_scores(
 ) -> Result<NodeId, TensorError> {
     let score_cached_even_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (q_even_grouped, "sugi->stugi"),
@@ -69,7 +69,7 @@ pub(super) fn append_cached_block_scores(
     )?;
     let score_cached_even = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_cached_even_product,
@@ -78,13 +78,13 @@ pub(super) fn append_cached_block_scores(
     )?;
     let score_cached_odd_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(q_odd_grouped, "sugi->stugi"), (k_odd_cache, "tui->stugi")],
     )?;
     let score_cached_odd = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_cached_odd_product,
@@ -93,7 +93,7 @@ pub(super) fn append_cached_block_scores(
     )?;
     let score_cached = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[
             (score_cached_even, "stug->stug"),
@@ -102,14 +102,14 @@ pub(super) fn append_cached_block_scores(
     )?;
     let score_cached_scaled = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(score_cached, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
     )?;
     match cache_mask {
         Some((is_masked, neg_infinity_cached)) => elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Select,
             &[
                 (is_masked, "st->stug"),
@@ -148,7 +148,7 @@ pub(super) fn append_local_block_and_combine(
 ) -> Result<(NodeId, NodeId), TensorError> {
     let score_new_even_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (q_even_grouped, "sugi->swugi"),
@@ -157,7 +157,7 @@ pub(super) fn append_local_block_and_combine(
     )?;
     let score_new_even = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_new_even_product,
@@ -166,7 +166,7 @@ pub(super) fn append_local_block_and_combine(
     )?;
     let score_new_odd_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (q_odd_grouped, "sugi->swugi"),
@@ -175,7 +175,7 @@ pub(super) fn append_local_block_and_combine(
     )?;
     let score_new_odd = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_new_odd_product,
@@ -184,7 +184,7 @@ pub(super) fn append_local_block_and_combine(
     )?;
     let score_new = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[
             (score_new_even, "swug->swug"),
@@ -193,7 +193,7 @@ pub(super) fn append_local_block_and_combine(
     )?;
     let score_new_scaled = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(score_new, "swug->swug"), (inv_sqrt_head_dim, "->swug")],
     )?;
@@ -203,7 +203,7 @@ pub(super) fn append_local_block_and_combine(
     };
     let score_new_masked = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[
             (is_future_local, "sw->swug"),
@@ -214,7 +214,7 @@ pub(super) fn append_local_block_and_combine(
 
     let score_max_cached = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         score_cached_scaled,
@@ -223,7 +223,7 @@ pub(super) fn append_local_block_and_combine(
     )?;
     let score_max_new = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         score_new_masked,
@@ -232,14 +232,14 @@ pub(super) fn append_local_block_and_combine(
     )?;
     let global_max = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         &[(score_max_cached, "sug->sug"), (score_max_new, "sug->sug")],
     )?;
 
     let shifted_cached = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[
             (score_cached_scaled, "stug->stug"),
@@ -248,26 +248,26 @@ pub(super) fn append_local_block_and_combine(
     )?;
     let weights_cached = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(shifted_cached, "stug->stug")],
     )?;
     let shifted_new = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(score_new_masked, "swug->swug"), (global_max, "sug->swug")],
     )?;
     let weights_new = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(shifted_new, "swug->swug")],
     )?;
 
     let sum_cached = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         weights_cached,
@@ -276,7 +276,7 @@ pub(super) fn append_local_block_and_combine(
     )?;
     let sum_new = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         weights_new,
@@ -285,26 +285,26 @@ pub(super) fn append_local_block_and_combine(
     )?;
     let weight_sum = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(sum_cached, "sug->sug"), (sum_new, "sug->sug")],
     )?;
     let inv_weight_sum = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(weight_sum, "sug->sug")],
     )?;
 
     let attended_cached_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(weights_cached, "stug->stugd"), (v_cache, "tud->stugd")],
     )?;
     let attended_cached = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         attended_cached_product,
@@ -313,13 +313,13 @@ pub(super) fn append_local_block_and_combine(
     )?;
     let attended_new_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(weights_new, "swug->swugd"), (v_new, "wud->swugd")],
     )?;
     let attended_new = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         attended_new_product,
@@ -328,7 +328,7 @@ pub(super) fn append_local_block_and_combine(
     )?;
     let attended_sum = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[
             (attended_cached, "sugd->sugd"),
@@ -337,7 +337,7 @@ pub(super) fn append_local_block_and_combine(
     )?;
     let attended = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(attended_sum, "sugd->sugd"), (inv_weight_sum, "sug->sugd")],
     )?;

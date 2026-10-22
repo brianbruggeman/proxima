@@ -40,17 +40,17 @@ fn external_crate_composes_a_one_layer_forward_program() {
 
     let mut program = Vec::new();
 
-    let ids = input_leaf(&mut program, DType::Int32, vec![Extent::Symbolic(0)], "ids");
+    let ids = input_leaf(&mut program, DType::INT32, vec![Extent::Symbolic(0)], "ids");
     let table = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(vocab), Extent::Static(embedding)],
         "token_embd.weight",
     );
     let embedded = embedding_lookup(&mut program, table, ids);
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
-    let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+    let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
     let one = scalar_constant(&mut program, 1.0);
 
     // A tiny single-head self-attention: q/k/v from the embedding directly
@@ -62,14 +62,14 @@ fn external_crate_composes_a_one_layer_forward_program() {
 
     let scores_product = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(embedded, "sd->std"), (embedded, "td->std")],
     )
     .expect("qk product lowers");
     let scores = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         scores_product,
@@ -79,7 +79,7 @@ fn external_crate_composes_a_one_layer_forward_program() {
     .expect("qk reduce lowers");
     let scores_masked = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[
             (is_future, "st->st"),
@@ -90,7 +90,7 @@ fn external_crate_composes_a_one_layer_forward_program() {
     .expect("causal select lowers");
     let score_max = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         scores_masked,
@@ -100,21 +100,21 @@ fn external_crate_composes_a_one_layer_forward_program() {
     .expect("score max lowers");
     let shifted = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(scores_masked, "st->st"), (score_max, "s->st")],
     )
     .expect("shift lowers");
     let weights = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(shifted, "st->st")],
     )
     .expect("exponential lowers");
     let weight_sum = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         weights,
@@ -124,28 +124,28 @@ fn external_crate_composes_a_one_layer_forward_program() {
     .expect("weight sum lowers");
     let inv_weight_sum = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(weight_sum, "s->s")],
     )
     .expect("reciprocal lowers");
     let probabilities = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(weights, "st->st"), (inv_weight_sum, "s->st")],
     )
     .expect("probability normalization lowers");
     let context_product = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(probabilities, "st->std"), (embedded, "td->std")],
     )
     .expect("context product lowers");
     let context = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         context_product,
@@ -160,21 +160,21 @@ fn external_crate_composes_a_one_layer_forward_program() {
     let hc_ones = proxima_tensor::append(
         &mut program,
         proxima_tensor::Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(hc)],
             value: 1.0,
         },
     );
     let streamed = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(context, "sd->shd"), (hc_ones, "h->shd")],
     )
     .expect("hyper-connection stream broadcast lowers");
     let hidden = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         streamed,
@@ -187,13 +187,13 @@ fn external_crate_composes_a_one_layer_forward_program() {
     // program calls per layer.
     let gate_inp = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(embedding), Extent::Static(expert_count)],
         "gate_inp",
     );
     let expert_w_gate = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(expert_count),
             Extent::Static(embedding),
@@ -203,7 +203,7 @@ fn external_crate_composes_a_one_layer_forward_program() {
     );
     let expert_w_up = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(expert_count),
             Extent::Static(embedding),
@@ -213,7 +213,7 @@ fn external_crate_composes_a_one_layer_forward_program() {
     );
     let expert_w_down = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(expert_count),
             Extent::Static(expert_hidden),
@@ -243,33 +243,33 @@ fn external_crate_composes_a_one_layer_forward_program() {
     // express outside this crate.
     let shared_w_up = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(embedding), Extent::Static(shared_hidden)],
         "shared_w_up",
     );
     let shared_w_down = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(shared_hidden), Extent::Static(embedding)],
         "shared_w_down",
     );
     let shared_gate_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(embedding)],
         "shared_gate_weight",
     );
 
     let shared_up_product = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(hidden, "sd->sdf"), (shared_w_up, "df->sdf")],
     )
     .expect("shared ffn up product lowers");
     let shared_hidden_node = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         shared_up_product,
@@ -279,14 +279,14 @@ fn external_crate_composes_a_one_layer_forward_program() {
     .expect("shared ffn up reduce lowers");
     let shared_down_product = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(shared_hidden_node, "sf->sfd"), (shared_w_down, "fd->sfd")],
     )
     .expect("shared ffn down product lowers");
     let shared_out = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         shared_down_product,
@@ -297,14 +297,14 @@ fn external_crate_composes_a_one_layer_forward_program() {
 
     let gate_logit_product = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(hidden, "sd->sd"), (shared_gate_weight, "d->sd")],
     )
     .expect("shared gate logit product lowers");
     let gate_logit = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         gate_logit_product,
@@ -315,7 +315,7 @@ fn external_crate_composes_a_one_layer_forward_program() {
     let shared_gate = sigmoid(&mut program, gate_logit, one, "s->s").expect("sigmoid gate lowers");
     let shared_scaled = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(shared_out, "sd->sd"), (shared_gate, "s->sd")],
     )
@@ -323,7 +323,7 @@ fn external_crate_composes_a_one_layer_forward_program() {
 
     let ffn_out = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(routed_out, "sd->sd"), (shared_scaled, "sd->sd")],
     )
@@ -333,7 +333,7 @@ fn external_crate_composes_a_one_layer_forward_program() {
     // forward-program builder in this crate ends with.
     let output_norm_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(embedding)],
         "output_norm.weight",
     );
@@ -341,20 +341,20 @@ fn external_crate_composes_a_one_layer_forward_program() {
         .expect("final rmsnorm lowers");
     let lm_head_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(embedding), Extent::Static(vocab)],
         "output.weight",
     );
     let logits_product = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed_final, "sd->sdv"), (lm_head_weight, "dv->sdv")],
     )
     .expect("lm_head product lowers");
     let logits = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         logits_product,

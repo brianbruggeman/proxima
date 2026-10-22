@@ -153,13 +153,13 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
 
     let q_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->shdi"), (wq, "ihd->shdi")],
     )?;
     let q_raw = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         q_product,
@@ -169,13 +169,13 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
 
     let k_new_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->sudi"), (wk, "iud->sudi")],
     )?;
     let k_new_raw = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         k_new_product,
@@ -185,13 +185,13 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
 
     let v_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->sudi"), (wv, "iud->sudi")],
     )?;
     let v_new = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         v_product,
@@ -203,19 +203,19 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
         Some((q_bias, k_bias, v_bias)) => (
             elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 &[(q_raw, "shd->shd"), (q_bias, "hd->shd")],
             )?,
             elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 &[(k_new_raw, "sud->sud"), (k_bias, "ud->sud")],
             )?,
             elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 &[(v_new, "sud->sud"), (v_bias, "ud->sud")],
             )?,
@@ -286,7 +286,7 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (rotated_q_even, group_map.as_str()),
@@ -295,7 +295,7 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
     )?;
     let q_odd_grouped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (rotated_q_odd, group_map.as_str()),
@@ -308,7 +308,7 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
     // every position this query may attend -- no second source, no combine.
     let score_even_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (q_even_grouped, "sugi->stugi"),
@@ -317,7 +317,7 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
     )?;
     let score_even = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_even_product,
@@ -326,13 +326,13 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
     )?;
     let score_odd_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(q_odd_grouped, "sugi->stugi"), (k_odd_cache, "tui->stugi")],
     )?;
     let score_odd = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_odd_product,
@@ -341,20 +341,20 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
     )?;
     let scores = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(score_even, "stug->stug"), (score_odd, "stug->stug")],
     )?;
     let scores_scaled = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(scores, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
     )?;
     let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
     let scores_masked = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[
             (is_future, "st->stug"),
@@ -365,7 +365,7 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
 
     let score_max = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         scores_masked,
@@ -374,19 +374,19 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
     )?;
     let shifted = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(scores_masked, "stug->stug"), (score_max, "sug->stug")],
     )?;
     let weights = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(shifted, "stug->stug")],
     )?;
     let weight_sum = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         weights,
@@ -395,26 +395,26 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
     )?;
     let inv_weight_sum = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(weight_sum, "sug->sug")],
     )?;
     let probabilities = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(weights, "stug->stug"), (inv_weight_sum, "sug->stug")],
     )?;
 
     let attended_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(probabilities, "stug->stugd"), (v_cache, "tud->stugd")],
     )?;
     let attended = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         attended_product,
@@ -424,13 +424,13 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
 
     let wo_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
     )?;
     let attn_out = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         wo_product,
@@ -440,7 +440,7 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
 
     let residual1 = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
     )?;
@@ -450,13 +450,13 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
     let append_gate = |program: &mut Vec<Op>| -> Result<NodeId, TensorError> {
         let gate_product = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
         )?;
         reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             gate_product,
@@ -467,13 +467,13 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
     let append_up = |program: &mut Vec<Op>| -> Result<NodeId, TensorError> {
         let up_product = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
         )?;
         reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             up_product,
@@ -497,50 +497,50 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
 
     let neg_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Negate,
         &[(gate, "sg->sg")],
     )?;
     let exp_neg_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(neg_gate, "sg->sg")],
     )?;
     let one_plus_exp = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(exp_neg_gate, "sg->sg"), (ones, "->sg")],
     )?;
     let sigmoid_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(one_plus_exp, "sg->sg")],
     )?;
     let silu_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")],
     )?;
     let ffn_hidden = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(silu_gate, "sg->sg"), (up, "sg->sg")],
     )?;
 
     let down_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
     )?;
     let ffn_out = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         down_product,
@@ -550,7 +550,7 @@ pub fn append_gqa_single_range_cached_layer_with_biases(
 
     let x_next = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(ffn_out, "sd->sd"), (residual1, "sd->sd")],
     )?;
@@ -660,13 +660,13 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
 
     let ids = input_leaf(
         &mut program,
-        DType::Int32,
+        DType::INT32,
         alloc::vec![Extent::Symbolic(0)],
         "ids",
     );
     let table = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
         "token_embd.weight",
     );
@@ -687,7 +687,7 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
     let duplicate_head_scratch_before = if duplicate_head == DuplicateHeadPosition::Before {
         let lm_head_before = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
             "output.weight",
         );
@@ -697,7 +697,7 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
     };
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
-    let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+    let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / libm::sqrtf(head_dim as f32));
     // only materialized when a layer actually consumes it (`qk_norm`), same
@@ -706,25 +706,25 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
     let inv_head_dim = qk_norm.then(|| scalar_constant(&mut program, 1.0 / head_dim as f32));
     let cos_new = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
         "rope_cos",
     );
     let sin_new = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
         "rope_sin",
     );
     let group_ones = op::append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
             value: 1.0,
         },
     );
-    let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+    let cached_len = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "cached_len");
     let is_future = causal_mask_merged(&mut program, cached_len)?;
 
     let mut cache_roots: Vec<CachedLayerRoots> = Vec::with_capacity(block_count as usize);
@@ -732,19 +732,19 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
     for layer in 0..block_count {
         let attn_norm_weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.attn_norm.weight"),
         );
         let ffn_norm_weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.ffn_norm.weight"),
         );
         let wq = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(embedding),
                 Extent::Static(query_heads),
@@ -754,7 +754,7 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
         );
         let wk = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(embedding),
                 Extent::Static(kv_heads),
@@ -764,7 +764,7 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
         );
         let wv = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(embedding),
                 Extent::Static(kv_heads),
@@ -774,7 +774,7 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
         );
         let wo = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(kv_heads),
                 Extent::Static(group),
@@ -785,7 +785,7 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
         );
         let k_even_cache = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Symbolic(1),
                 Extent::Static(kv_heads),
@@ -795,7 +795,7 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
         );
         let k_odd_cache = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Symbolic(1),
                 Extent::Static(kv_heads),
@@ -805,7 +805,7 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
         );
         let v_cache = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Symbolic(1),
                 Extent::Static(kv_heads),
@@ -815,32 +815,32 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
         );
         let w_gate = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
             &alloc::format!("blk.{layer}.ffn_gate.weight"),
         );
         let w_up = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
             &alloc::format!("blk.{layer}.ffn_up.weight"),
         );
         let w_down = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.ffn_down.weight"),
         );
         let qk_norm_weights = inv_head_dim.map(|inv_head_dim| {
             let q_norm_weight = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(head_dim)],
                 &alloc::format!("blk.{layer}.attn_q_norm.weight"),
             );
             let k_norm_weight = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(head_dim)],
                 &alloc::format!("blk.{layer}.attn_k_norm.weight"),
             );
@@ -849,19 +849,19 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
         let qkv_bias_weights = qkv_biases.then(|| {
             let q_bias = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(query_heads), Extent::Static(head_dim)],
                 &alloc::format!("blk.{layer}.attn_q.bias"),
             );
             let k_bias = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(kv_heads), Extent::Static(head_dim)],
                 &alloc::format!("blk.{layer}.attn_k.bias"),
             );
             let v_bias = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(kv_heads), Extent::Static(head_dim)],
                 &alloc::format!("blk.{layer}.attn_v.bias"),
             );
@@ -903,7 +903,7 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
 
     let output_norm_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding)],
         "output_norm.weight",
     );
@@ -918,7 +918,7 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
     let normed_last = if last_row_only {
         let lm_head_row = input_leaf(
             &mut program,
-            DType::Int32,
+            DType::INT32,
             alloc::vec![Extent::Static(1)],
             "lm_head_row",
         );
@@ -929,7 +929,7 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
 
     let lm_head = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
         "output.weight",
     );
@@ -959,13 +959,13 @@ pub fn duplicate_head_reduce(
 ) -> Result<NodeId, TensorError> {
     let product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(activation, "sd->sdv"), (lm_head, "dv->sdv")],
     )?;
     reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         product,
@@ -982,7 +982,7 @@ fn scale_residual(
     match scale {
         Some(scale) => elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(branch, "sd->sd"), (scale, "->sd")],
         ),
@@ -1042,13 +1042,13 @@ pub fn append_gqa_cached_routed_layer(
 
     let q_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->shdi"), (wq, "ihd->shdi")],
     )?;
     let q_raw = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         q_product,
@@ -1058,13 +1058,13 @@ pub fn append_gqa_cached_routed_layer(
 
     let k_new_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->sudi"), (wk, "iud->sudi")],
     )?;
     let k_new_raw = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         k_new_product,
@@ -1084,13 +1084,13 @@ pub fn append_gqa_cached_routed_layer(
 
     let v_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->sudi"), (wv, "iud->sudi")],
     )?;
     let v_new = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         v_product,
@@ -1177,13 +1177,13 @@ pub fn append_gqa_cached_routed_layer(
 
     let wo_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
     )?;
     let attn_out = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         wo_product,
@@ -1194,7 +1194,7 @@ pub fn append_gqa_cached_routed_layer(
 
     let residual1 = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
     )?;
@@ -1220,7 +1220,7 @@ pub fn append_gqa_cached_routed_layer(
 
     let x_next = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(ffn_out, "sd->sd"), (residual1, "sd->sd")],
     )?;

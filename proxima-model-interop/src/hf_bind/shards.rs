@@ -165,7 +165,7 @@ mod tests {
         let file = write_complete(&SafetensorsModel {
             tensors: vec![TensorPayload {
                 name: name.into(),
-                dtype: DType::BFloat16,
+                dtype: DType::BFLOAT16,
                 shape: shape.to_vec(),
                 data,
             }],
@@ -184,7 +184,7 @@ mod tests {
 
     fn leaf(program: &mut Vec<Op>, name: &str, shape: &[u32]) {
         program.push(Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: shape.iter().map(|axis| Extent::Static(*axis)).collect(),
             name: Some(name.into()),
         });

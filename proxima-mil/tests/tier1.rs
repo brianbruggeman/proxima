@@ -143,14 +143,14 @@ struct AddProgram {
 fn add_x_to_itself() -> AddProgram {
     let identity = || IndexMap::Affine(projection(1, &[0]));
     let mut program = vec![Op::Input {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         shape: vec![Extent::Static(4)],
         name: Some("x".into()),
     }];
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![(NodeId(0), identity()), (NodeId(0), identity())],
             name: None,

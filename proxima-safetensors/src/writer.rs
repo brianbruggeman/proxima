@@ -229,7 +229,7 @@ mod tests {
         let model = SafetensorsModel {
             tensors: vec![TensorPayload {
                 name: "bad".to_string(),
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![4], // implies 16 bytes, data is only 4
                 data: &data,
             }],
@@ -249,13 +249,13 @@ mod tests {
             tensors: vec![
                 TensorPayload {
                     name: "dup".to_string(),
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: vec![1],
                     data: &data,
                 },
                 TensorPayload {
                     name: "dup".to_string(),
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: vec![1],
                     data: &data,
                 },
@@ -275,7 +275,7 @@ mod tests {
         let model = SafetensorsModel {
             tensors: vec![TensorPayload {
                 name: "__metadata__".to_string(),
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![1],
                 data: &data,
             }],
@@ -294,7 +294,7 @@ mod tests {
         let model = SafetensorsModel {
             tensors: vec![TensorPayload {
                 name: "t".to_string(),
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![1],
                 data: &data,
             }],
@@ -328,7 +328,7 @@ mod tests {
         let model = SafetensorsModel {
             tensors: vec![TensorPayload {
                 name: "t".to_string(),
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![1],
                 data: &data,
             }],

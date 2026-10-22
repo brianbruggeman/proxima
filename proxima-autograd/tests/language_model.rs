@@ -128,7 +128,7 @@ fn leaf(program: &mut Vec<Op>, name: &str, shape: alloc::vec::Vec<Extent>) -> No
     op::append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape,
             name: Some(name.into()),
         },
@@ -139,7 +139,7 @@ fn int_leaf(program: &mut Vec<Op>, name: &str, extent: u32) -> NodeId {
     op::append(
         program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: alloc::vec![Extent::Static(extent)],
             name: Some(name.into()),
         },
@@ -150,7 +150,7 @@ fn constant(program: &mut Vec<Op>, value: f32) -> NodeId {
     op::append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec::Vec::new(),
             value,
         },
@@ -161,7 +161,7 @@ fn iota(program: &mut Vec<Op>, extent: u32) -> NodeId {
     op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(extent),
         },
     )
@@ -175,7 +175,7 @@ fn elementwise(
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands,
             name: None,
@@ -192,7 +192,7 @@ fn reduce_add(
     op::append(
         program,
         Op::Reduce(proxima_tensor::op::Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand,
@@ -427,7 +427,7 @@ fn build_language_model(vocab_size: usize) -> Network {
     // softmax over the key axis (axis 1 of (s,t,h)) -- the masked-routing
     // Reduce(Maximum) adjoint, not a broadcast; this is the rule the task
     // names as the one to deliberately break and confirm the checker catches.
-    let probabilities = softmax(&mut program, DType::Float32, masked, 3, 1);
+    let probabilities = softmax(&mut program, DType::FLOAT32, masked, 3, 1);
 
     // attended[s,h,d] = sum_t probabilities[s,t,h] * v[t,h,d].
     let attended_product = elementwise(
@@ -474,7 +474,7 @@ fn build_language_model(vocab_size: usize) -> Network {
         ScalarOp::Add,
         alloc::vec![(gate, identity(2)), (params.b1, proj(2, &[1]))],
     );
-    let hidden = relu(&mut program, DType::Float32, gate_biased, 2);
+    let hidden = relu(&mut program, DType::FLOAT32, gate_biased, 2);
 
     let down_product = elementwise(
         &mut program,
@@ -508,7 +508,7 @@ fn build_language_model(vocab_size: usize) -> Network {
     );
     let logits = reduce_add(&mut program, logits_product, identity(3), proj(3, &[0, 2]));
 
-    let probabilities_lm = softmax(&mut program, DType::Float32, logits, 2, 1);
+    let probabilities_lm = softmax(&mut program, DType::FLOAT32, logits, 2, 1);
     // `+ epsilon` before the log: as training overfits, non-target
     // probabilities underflow to exactly 0.0 in f32, and `0.0 *
     // log(0.0) == 0.0 * -inf == NaN` in IEEE 754 -- observed live in

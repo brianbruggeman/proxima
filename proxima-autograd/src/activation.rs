@@ -33,9 +33,9 @@ use crate::expr;
 /// let mut program = Vec::new();
 /// let x = op::append(
 ///     &mut program,
-///     Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: Some("x".into()) },
+///     Op::Input { dtype: DType::FLOAT32, shape: vec![Extent::Static(4)], name: Some("x".into()) },
 /// );
-/// let out = relu(&mut program, DType::Float32, x, 1);
+/// let out = relu(&mut program, DType::FLOAT32, x, 1);
 ///
 /// let values = [-2.0f32, -0.0, 0.5, 3.0];
 /// let evaluated = proxima_tensor::cpu::evaluate(&program, &[], &[&values], &[out])
@@ -227,12 +227,12 @@ mod tests {
         let x = proxima_tensor::op::append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(4)],
                 name: Some("x".into()),
             },
         );
-        let out = relu(&mut program, DType::Float32, x, 1);
+        let out = relu(&mut program, DType::FLOAT32, x, 1);
 
         let values = [-2.0f32, -0.0, 0.5, 3.0];
         let evaluated = proxima_tensor::cpu::evaluate(&program, &[], &[&values], &[out])
@@ -246,12 +246,12 @@ mod tests {
         let x = proxima_tensor::op::append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(3)],
                 name: Some("x".into()),
             },
         );
-        let out = softmax(&mut program, DType::Float32, x, 1, 0);
+        let out = softmax(&mut program, DType::FLOAT32, x, 1, 0);
 
         let values = [1.0f32, 2.0, 3.0];
         let evaluated = proxima_tensor::cpu::evaluate(&program, &[], &[&values], &[out])
@@ -280,12 +280,12 @@ mod tests {
         let x = proxima_tensor::op::append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(3)],
                 name: Some("x".into()),
             },
         );
-        let out = sigmoid(&mut program, DType::Float32, x, 1);
+        let out = sigmoid(&mut program, DType::FLOAT32, x, 1);
 
         let values = [-1.0f32, 0.0, 1.0];
         let evaluated = proxima_tensor::cpu::evaluate(&program, &[], &[&values], &[out])
@@ -302,12 +302,12 @@ mod tests {
         let x = proxima_tensor::op::append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(3)],
                 name: Some("x".into()),
             },
         );
-        let out = silu(&mut program, DType::Float32, x, 1);
+        let out = silu(&mut program, DType::FLOAT32, x, 1);
 
         let values = [-1.0f32, 0.0, 1.0];
         let evaluated = proxima_tensor::cpu::evaluate(&program, &[], &[&values], &[out])
@@ -324,12 +324,12 @@ mod tests {
         let x = proxima_tensor::op::append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(3)],
                 name: Some("x".into()),
             },
         );
-        let out = gelu(&mut program, DType::Float32, x, 1);
+        let out = gelu(&mut program, DType::FLOAT32, x, 1);
 
         let values = [-1.0f32, 0.0, 1.0];
         let evaluated = proxima_tensor::cpu::evaluate(&program, &[], &[&values], &[out])
@@ -352,16 +352,16 @@ mod tests {
         let x = proxima_tensor::op::append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(x_values.len() as u32)],
                 name: Some("x".into()),
             },
         );
-        let activated = activation(&mut program, DType::Float32, x, 1);
+        let activated = activation(&mut program, DType::FLOAT32, x, 1);
         let loss = proxima_tensor::op::append(
             &mut program,
             Op::Reduce(proxima_tensor::op::Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: proxima_tensor::op::ReduceInit::Zero,
                 operand: activated,

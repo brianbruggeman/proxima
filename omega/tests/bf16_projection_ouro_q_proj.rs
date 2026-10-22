@@ -80,26 +80,26 @@ fn projection_program(reduction: u32, columns: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let activation = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(1), Extent::Static(reduction)],
         "activation",
     );
     let weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(reduction), Extent::Static(columns)],
         "weight",
     );
     let product = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(activation, "si->sio"), (weight, "io->sio")],
     )
     .expect("projection product has compatible axes");
     let output = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         product,

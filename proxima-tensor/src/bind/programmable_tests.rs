@@ -8,7 +8,7 @@ fn input(program: &mut Vec<Op>, name: &str, extents: &[u32]) -> NodeId {
     append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: extents
                 .iter()
                 .map(|extent| Extent::Static(*extent))
@@ -26,7 +26,7 @@ fn chain() -> (Vec<Op>, NodeId, NodeId) {
     let summed = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![
                 (source, IndexMap::Affine(map::projection(1, &[0]))),
@@ -38,7 +38,7 @@ fn chain() -> (Vec<Op>, NodeId, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (summed, IndexMap::Affine(map::projection(1, &[0]))),
@@ -186,7 +186,7 @@ fn programmable_binding_unfused_projection() {
     let packed_product = append(
         &mut packed_program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (activation, IndexMap::Affine(map::projection(3, &[0, 1]))),
@@ -198,7 +198,7 @@ fn programmable_binding_unfused_projection() {
     let packed_output = append(
         &mut packed_program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: packed_product,
@@ -268,7 +268,7 @@ fn programmable_binding_unfused_projection() {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (source, IndexMap::Affine(map::projection(2, &[1]))),
@@ -280,7 +280,7 @@ fn programmable_binding_unfused_projection() {
     let output = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -352,7 +352,7 @@ fn programmable_binding_unreachable_branch() {
     let unused = append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(2)],
             value: 99.0,
         },
@@ -379,7 +379,7 @@ fn programmable_binding_signed_zero_permission() {
     let zero = append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1)],
             value: 0.0,
         },
@@ -387,7 +387,7 @@ fn programmable_binding_signed_zero_permission() {
     let output = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![
                 (source, IndexMap::Affine(map::projection(1, &[0]))),

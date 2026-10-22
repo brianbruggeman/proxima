@@ -1287,7 +1287,7 @@ fn multi_tensor_matmul_program(
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(k), Extent::Static(1)],
             name: Some(activation_name.to_string()),
         },
@@ -1297,7 +1297,7 @@ fn multi_tensor_matmul_program(
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -1309,7 +1309,7 @@ fn multi_tensor_matmul_program(
         let sum = append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -1611,7 +1611,7 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         &weight_names,
         ROWS as u32,
         IN_DIM as u32,
-        DType::UInt8,
+        DType::UINT8,
         "activation",
     );
     let weight_slices: Vec<&[u8]> = ffn_tensors
@@ -2037,7 +2037,7 @@ fn run_shape_arm(
         &weight_names,
         rows as u32,
         k as u32,
-        DType::UInt8,
+        DType::UINT8,
         &activation_name,
     );
     let weight_slices: Vec<&[u8]> = weight_bytes.chunks_exact(rows * row_bytes).collect();
@@ -2981,7 +2981,7 @@ fn production_head_program(
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1), Extent::Static(k)],
             name: Some("activation".into()),
         },
@@ -2991,7 +2991,7 @@ fn production_head_program(
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (activation, IndexMap::Affine(map::projection(3, &[0, 1]))),
@@ -3003,7 +3003,7 @@ fn production_head_program(
         let sum = append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -3110,7 +3110,7 @@ fn run_head_arm(
         .map(|_| activation_lcg.next_unit() * 4.0 - 2.0)
         .collect();
 
-    let (program, sums) = head_program(op_shape, &weight_names, rows, k, DType::UInt8);
+    let (program, sums) = head_program(op_shape, &weight_names, rows, k, DType::UINT8);
     let blocks_weights: Vec<QuantizedBlock<'_>> = match (buffer_kind, &synth_bytes) {
         (HeadBufferKind::Synthesized, Some(bytes)) => bytes
             .chunks_exact(rows as usize * row_bytes)
@@ -3562,7 +3562,7 @@ fn production_reduce_kernel(
     rows: u32,
     k: u32,
 ) -> ProductionKernel {
-    let (program, sums) = production_head_program(&["weight".to_string()], rows, k, DType::UInt8);
+    let (program, sums) = production_head_program(&["weight".to_string()], rows, k, DType::UINT8);
     // `production_head_program` declares the weight node(s) before
     // `activation` (its own doc), so with exactly one weight name the input
     // nodes are `NodeId(0)` (weight) then `NodeId(1)` (activation) --

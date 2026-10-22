@@ -39,7 +39,7 @@ fn contraction_program(
     let lhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(size), Extent::Static(size)],
             name: None,
         },
@@ -47,7 +47,7 @@ fn contraction_program(
     let rhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(size), Extent::Static(size)],
             name: None,
         },
@@ -55,7 +55,7 @@ fn contraction_program(
     let combined = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands: vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -67,7 +67,7 @@ fn contraction_program(
     let folded = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: reduce,
             init,
             operand: combined,

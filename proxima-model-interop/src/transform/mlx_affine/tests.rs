@@ -22,7 +22,7 @@ type PackedFixture = (Vec<f32>, Vec<u32>, Vec<f32>, Vec<f32>);
 const ROWS: usize = 4;
 const COLUMNS: usize = 128;
 const EXPORT_BITS: [u8; 6] = [2, 3, 4, 5, 6, 8];
-const FLOAT_DTYPES: [DType; 3] = [DType::BFloat16, DType::Float16, DType::Float32];
+const FLOAT_DTYPES: [DType; 3] = [DType::BFLOAT16, DType::FLOAT16, DType::FLOAT32];
 
 fn weights(rows: usize, columns: usize) -> Vec<f32> {
     (0..rows * columns)
@@ -226,7 +226,7 @@ fn mlx_affine_reversed_element_order_does_not_unpack() -> Outcome {
 #[test]
 fn mlx_affine_weight_shape_is_out_by_in_times_bits_over_32() -> Outcome {
     for bits in EXPORT_BITS {
-        let tensor = export_packed(bits, DType::Float32)?;
+        let tensor = export_packed(bits, DType::FLOAT32)?;
         let expected = [ROWS, COLUMNS * usize::from(bits) / 32];
         assert_eq!(tensor.weight_shape, expected, "bits {bits}");
         assert_eq!(
@@ -240,7 +240,7 @@ fn mlx_affine_weight_shape_is_out_by_in_times_bits_over_32() -> Outcome {
 
 #[test]
 fn mlx_affine_scales_shape_is_out_by_in_over_group_size() -> Outcome {
-    let tensor = export_packed(4, DType::Float32)?;
+    let tensor = export_packed(4, DType::FLOAT32)?;
     assert_eq!(tensor.scales_shape, [ROWS, COLUMNS / 64]);
     assert_eq!(tensor.scales.len(), ROWS * (COLUMNS / 64) * 4);
     Ok(())
@@ -248,7 +248,7 @@ fn mlx_affine_scales_shape_is_out_by_in_over_group_size() -> Outcome {
 
 #[test]
 fn mlx_affine_biases_shape_is_out_by_in_over_group_size() -> Outcome {
-    let tensor = export_packed(4, DType::Float32)?;
+    let tensor = export_packed(4, DType::FLOAT32)?;
     assert_eq!(
         tensor.biases.len(),
         tensor.scales_shape[0] * tensor.scales_shape[1] * 4
@@ -337,7 +337,7 @@ fn mlx_affine_accepts_all_eighteen_bits_and_group_size_pairs() -> Outcome {
         .flat_map(|bits| [32, 64, 128].map(|group| (*bits, group)))
     {
         let params = AffineParams::new(bits, group_size)?;
-        let exported = export_affine(&values, [2, COLUMNS], params, DType::BFloat16)?;
+        let exported = export_affine(&values, [2, COLUMNS], params, DType::BFLOAT16)?;
         assert!(
             matches!(exported, AffineExport::Packed(_)),
             "bits {bits} group {group_size}"
@@ -377,7 +377,7 @@ fn mlx_affine_last_dim_not_a_group_multiple_stays_float() -> Outcome {
         &values,
         [ROWS, 100],
         AffineParams::default(),
-        DType::BFloat16,
+        DType::BFLOAT16,
     )?;
     assert_eq!(exported, AffineExport::Float);
     Ok(())
@@ -390,7 +390,7 @@ fn mlx_affine_last_dim_of_one_group_multiple_is_quantized_control() -> Outcome {
         &values,
         [ROWS, 128],
         AffineParams::default(),
-        DType::BFloat16,
+        DType::BFLOAT16,
     )?;
     assert!(matches!(exported, AffineExport::Packed(_)));
     Ok(())

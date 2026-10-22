@@ -60,7 +60,7 @@ pub(crate) fn render_cached_attention_cuda(
     else {
         return Err(kind_mismatch(resolved));
     };
-    if resolved.dtype != DType::Float32 {
+    if resolved.dtype != DType::FLOAT32 {
         return Err(EmitError::CudaUnsupportedOpKind {
             node: resolved.node,
             kind: "cached_attention_non_f32",

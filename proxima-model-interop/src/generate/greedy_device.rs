@@ -93,7 +93,7 @@ mod tests {
         let mut program = Vec::new();
         let logits = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 proxima_tensor::Extent::Symbolic(0),
                 proxima_tensor::Extent::Static(VOCAB as u32)

@@ -109,7 +109,7 @@ mod tests {
         append(
             program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: alloc::vec![Extent::Static(4)],
                 name: None,
             },
@@ -124,7 +124,7 @@ mod tests {
         let consumer = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Negate,
                 operands: alloc::vec![(source, map)],
                 name: None,
@@ -143,7 +143,7 @@ mod tests {
         let consumer = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Negate,
                 operands: alloc::vec![(source, map)],
                 name: None,
@@ -173,7 +173,7 @@ mod tests {
         let reduced = append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: source,
@@ -196,7 +196,7 @@ mod tests {
         let first = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Negate,
                 operands: alloc::vec![(shared, map.clone())],
                 name: None,
@@ -205,7 +205,7 @@ mod tests {
         let second = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Negate,
                 operands: alloc::vec![(shared, map)],
                 name: None,

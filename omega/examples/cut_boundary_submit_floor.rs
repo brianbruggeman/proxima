@@ -57,7 +57,7 @@ fn run() {
         let lhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(elements)],
                 name: Some("a".into()),
             },
@@ -65,7 +65,7 @@ fn run() {
         let rhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(elements)],
                 name: Some("b".into()),
             },
@@ -73,7 +73,7 @@ fn run() {
         let sum = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 operands: vec![
                     (lhs, IndexMap::Affine(map::projection(1, &[0]))),

@@ -20,12 +20,12 @@ fn required_driver() -> CudaDriver {
 fn negate_program() -> Vec<Op> {
     vec![
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Symbolic(0)],
             name: Some(String::from("values")),
         },
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Negate,
             operands: vec![(NodeId(0), IndexMap::Affine(map::projection(1, &[0])))],
             name: Some(String::from("negated")),

@@ -173,7 +173,7 @@ fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
     op::append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape,
             name: Some(name.into()),
         },
@@ -184,7 +184,7 @@ fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, Ind
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands,
             name: None,
@@ -201,7 +201,7 @@ fn reduce_add(
     op::append(
         program,
         Op::Reduce(op::Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand,
@@ -308,7 +308,7 @@ fn build_network(batch: usize) -> Network {
     .expect("conv1 kernel fits a 28x28 image at stride 2");
     let conv1_pre = conv2d(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         x,
         (batch as u64, 1, IMAGE_SIDE as u64, IMAGE_SIDE as u64),
         conv1_weight,
@@ -333,7 +333,7 @@ fn build_network(batch: usize) -> Network {
     let elements_per_channel1 = batch as u64 * conv1_out_h * conv1_out_w;
     let (bn1_out, batch_mean1, batch_var1) = batchnorm2d_train(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         conv1_pre,
         bn1_gamma,
         bn1_beta,
@@ -341,7 +341,7 @@ fn build_network(batch: usize) -> Network {
         elements_per_channel1,
         BN_EPS,
     );
-    let conv1_out = relu(&mut program, DType::Float32, bn1_out, 4);
+    let conv1_out = relu(&mut program, DType::FLOAT32, bn1_out, 4);
 
     let running_mean1 = leaf(
         &mut program,
@@ -383,7 +383,7 @@ fn build_network(batch: usize) -> Network {
     .expect("conv2 kernel fits conv1's output at stride 2");
     let conv2_pre = conv2d(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         conv1_out,
         conv1_out_shape,
         conv2_weight,
@@ -398,7 +398,7 @@ fn build_network(batch: usize) -> Network {
         STRIDE,
     )
     .expect("conv2 lowers");
-    let conv2_relu = relu(&mut program, DType::Float32, conv2_pre, 4);
+    let conv2_relu = relu(&mut program, DType::FLOAT32, conv2_pre, 4);
 
     let (_, out_channels, out_h, out_w) = conv2_out_shape;
     let mask = leaf(
@@ -413,7 +413,7 @@ fn build_network(batch: usize) -> Network {
     );
     let conv2_out = dropout(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         conv2_relu,
         mask,
         4,
@@ -437,11 +437,11 @@ fn build_network(batch: usize) -> Network {
     );
     let logits = fc_layer(&mut program, conv2_out, fc_weight, fc_bias);
 
-    let summed_loss = softmax_cross_entropy(&mut program, DType::Float32, logits, y, 2, 1);
+    let summed_loss = softmax_cross_entropy(&mut program, DType::FLOAT32, logits, y, 2, 1);
     let inverse_batch = op::append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 1.0 / batch as f32,
         },
@@ -511,7 +511,7 @@ fn build_eval_network(test_count: usize) -> (Vec<Op>, NodeId, NodeId) {
     .expect("conv1 shape");
     let conv1_pre = conv2d(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         x,
         (test_count as u64, 1, IMAGE_SIDE as u64, IMAGE_SIDE as u64),
         conv1_weight,
@@ -545,7 +545,7 @@ fn build_eval_network(test_count: usize) -> (Vec<Op>, NodeId, NodeId) {
     );
     let bn1_out = batchnorm2d_eval(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         conv1_pre,
         bn1_gamma,
         bn1_beta,
@@ -554,7 +554,7 @@ fn build_eval_network(test_count: usize) -> (Vec<Op>, NodeId, NodeId) {
         4,
         BN_EPS,
     );
-    let conv1_out = relu(&mut program, DType::Float32, bn1_out, 4);
+    let conv1_out = relu(&mut program, DType::FLOAT32, bn1_out, 4);
 
     let conv2_weight = leaf(
         &mut program,
@@ -585,7 +585,7 @@ fn build_eval_network(test_count: usize) -> (Vec<Op>, NodeId, NodeId) {
     .expect("conv2 shape");
     let conv2_pre = conv2d(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         conv1_out,
         conv1_out_shape,
         conv2_weight,
@@ -600,7 +600,7 @@ fn build_eval_network(test_count: usize) -> (Vec<Op>, NodeId, NodeId) {
         STRIDE,
     )
     .expect("conv2 lowers");
-    let conv2_out = relu(&mut program, DType::Float32, conv2_pre, 4);
+    let conv2_out = relu(&mut program, DType::FLOAT32, conv2_pre, 4);
 
     let (_, out_channels, out_h, out_w) = conv2_out_shape;
     let fc_weight = leaf(
@@ -709,14 +709,14 @@ fn real_mnist_conv_norm_trains_and_classifies() {
     // named `Op::Input`s, no separate host-side loop.
     let new_running_mean1 = update_running_stats(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         network.running_mean1,
         network.batch_mean1,
         BN_MOMENTUM,
     );
     let new_running_var1 = update_running_stats(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         network.running_var1,
         network.batch_var1,
         BN_MOMENTUM,

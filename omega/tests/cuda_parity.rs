@@ -56,7 +56,7 @@ fn append_matmul(
     let product = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -68,7 +68,7 @@ fn append_matmul(
     append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -85,7 +85,7 @@ fn elementwise_tanh_program(extent: u32) -> Vec<Op> {
     let source = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(extent)],
             name: Some("x".into()),
         },
@@ -93,7 +93,7 @@ fn elementwise_tanh_program(extent: u32) -> Vec<Op> {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Tanh,
             operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
             name: None,
@@ -154,7 +154,7 @@ fn sum_reduce_program(rows: u32, cols: u32) -> Vec<Op> {
     let source = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(rows), Extent::Static(cols)],
             name: Some("x".into()),
         },
@@ -162,7 +162,7 @@ fn sum_reduce_program(rows: u32, cols: u32) -> Vec<Op> {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: source,
@@ -229,7 +229,7 @@ fn cumsum_program(rows: u32, cols: u32) -> Vec<Op> {
     let source = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(rows), Extent::Static(cols)],
             name: Some("x".into()),
         },
@@ -237,7 +237,7 @@ fn cumsum_program(rows: u32, cols: u32) -> Vec<Op> {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: source,
@@ -307,7 +307,7 @@ fn two_layer_mlp_fixture() -> (Vec<Op>, NodeId) {
     let x = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(BATCH), Extent::Static(IN_FEATURES)],
             name: Some("x".into()),
         },
@@ -315,7 +315,7 @@ fn two_layer_mlp_fixture() -> (Vec<Op>, NodeId) {
     let w1 = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(IN_FEATURES), Extent::Static(HIDDEN)],
             name: Some("w1".into()),
         },
@@ -324,7 +324,7 @@ fn two_layer_mlp_fixture() -> (Vec<Op>, NodeId) {
     let hidden_act = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Erf,
             operands: vec![(hidden, IndexMap::Affine(map::projection(2, &[0, 1])))],
             name: None,
@@ -333,7 +333,7 @@ fn two_layer_mlp_fixture() -> (Vec<Op>, NodeId) {
     let w2 = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(HIDDEN), Extent::Static(OUT_FEATURES)],
             name: Some("w2".into()),
         },
@@ -342,7 +342,7 @@ fn two_layer_mlp_fixture() -> (Vec<Op>, NodeId) {
     let output_act = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Tanh,
             operands: vec![(output, IndexMap::Affine(map::projection(2, &[0, 1])))],
             name: None,
@@ -351,7 +351,7 @@ fn two_layer_mlp_fixture() -> (Vec<Op>, NodeId) {
     let cumsum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: output_act,
@@ -445,7 +445,7 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Op> {
     let table = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(vocab), Extent::Static(dim)],
             name: Some("table".into()),
         },
@@ -453,7 +453,7 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Op> {
     let ids = append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(seq)],
             name: Some("ids".into()),
         },
@@ -477,7 +477,7 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Op> {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(table, gathered_map)],
             name: None,
@@ -595,7 +595,7 @@ fn append_embedding_gather(program: &mut Vec<Op>, table: NodeId, ids: NodeId) ->
     append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(table, gathered_map)],
             name: None,
@@ -620,19 +620,19 @@ fn two_gather_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Op>, NodeId, NodeI
     let mut program = Vec::new();
     let table = append_input(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(vocab), Extent::Static(dim)],
         "table",
     );
     let ids_a = append_input(
         &mut program,
-        DType::Int32,
+        DType::INT32,
         vec![Extent::Static(seq)],
         "ids_a",
     );
     let ids_b = append_input(
         &mut program,
-        DType::Int32,
+        DType::INT32,
         vec![Extent::Static(seq)],
         "ids_b",
     );
@@ -643,7 +643,7 @@ fn two_gather_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Op>, NodeId, NodeI
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![
                 (first, IndexMap::Affine(map::projection(1, &[0]))),
@@ -659,7 +659,7 @@ fn append_row_sum(program: &mut Vec<Op>, gathered: NodeId) -> NodeId {
     append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: gathered,
@@ -732,13 +732,13 @@ fn a_single_gather_fault_names_the_gather_node() {
     let mut program = Vec::new();
     let table = append_input(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(vocab as u32), Extent::Static(dim as u32)],
         "table",
     );
     let ids = append_input(
         &mut program,
-        DType::Int32,
+        DType::INT32,
         vec![Extent::Static(seq as u32)],
         "ids",
     );
@@ -786,7 +786,7 @@ fn packed_matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, No
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(k), Extent::Static(1)],
             name: Some("activation".into()),
         },
@@ -794,7 +794,7 @@ fn packed_matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, No
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(projection(3, &[0, 2]))),
@@ -806,7 +806,7 @@ fn packed_matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, No
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -865,7 +865,7 @@ fn assert_packed_codec_parity(
         dequantize(row_blocks, row_f32).expect("a whole number of packed blocks");
     }
 
-    let (packed_program, packed_sum) = packed_matmul_program(rows, k, DType::UInt8);
+    let (packed_program, packed_sum) = packed_matmul_program(rows, k, DType::UINT8);
     let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
         ("weight", to_block(&weight_blocks)),
         ("activation", QuantizedBlock::Float32(&activation)),
@@ -883,7 +883,7 @@ fn assert_packed_codec_parity(
     let cuda = execute_plan_named(&mut cuda_plan, &named)
         .expect("omega::backend runs the packed matmul on a real cuda device");
 
-    let (f32_program, f32_sum) = packed_matmul_program(rows, k, DType::Float32);
+    let (f32_program, f32_sum) = packed_matmul_program(rows, k, DType::FLOAT32);
     let f32_named: Vec<(&str, QuantizedBlock<'_>)> = vec![
         ("weight", QuantizedBlock::Float32(&dequantized)),
         ("activation", QuantizedBlock::Float32(&activation)),
@@ -1073,7 +1073,7 @@ fn packed_q4_0_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
 }
 
 /// `cuda.rs`'s `kernel_signature` declares the OUTPUT pointer itself as
-/// `__half*` for a `DType::Float16` op (unlike `crate::wgsl`, which always
+/// `__half*` for a `DType::FLOAT16` op (unlike `crate::wgsl`, which always
 /// casts an f16 compute result back to an `array<f32>` storage write) -- see
 /// `omega::cuda_driver`'s module doc. v1 does not allocate/read back that
 /// narrower buffer, so this proves the documented rejection actually fires
@@ -1083,7 +1083,7 @@ fn f16_dtype_reduce_program(m: u32, k: u32, n: u32) -> Vec<Op> {
     let lhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(m), Extent::Static(k)],
             name: Some("lhs".into()),
         },
@@ -1091,7 +1091,7 @@ fn f16_dtype_reduce_program(m: u32, k: u32, n: u32) -> Vec<Op> {
     let rhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(k), Extent::Static(n)],
             name: Some("rhs".into()),
         },
@@ -1099,7 +1099,7 @@ fn f16_dtype_reduce_program(m: u32, k: u32, n: u32) -> Vec<Op> {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float16,
+            dtype: DType::FLOAT16,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -1111,7 +1111,7 @@ fn f16_dtype_reduce_program(m: u32, k: u32, n: u32) -> Vec<Op> {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float16,
+            dtype: DType::FLOAT16,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -1150,7 +1150,7 @@ fn a_float16_dtyped_op_names_its_rejection_on_cuda_instead_of_misreading_a_half_
         matches!(
             error,
             BackendError::Cuda(omega::CudaDriverError::UnsupportedDtype {
-                dtype: DType::Float16,
+                dtype: DType::FLOAT16,
                 ..
             })
         ),
@@ -1754,7 +1754,7 @@ fn int32_route_gather_program(vocab: u32, dim: u32, seq: u32, candidates: u32) -
     let table = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(vocab), Extent::Static(dim)],
             name: Some("table".into()),
         },
@@ -1762,7 +1762,7 @@ fn int32_route_gather_program(vocab: u32, dim: u32, seq: u32, candidates: u32) -
     let scored = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(seq), Extent::Static(candidates)],
             name: Some("candidates".into()),
         },
@@ -1770,7 +1770,7 @@ fn int32_route_gather_program(vocab: u32, dim: u32, seq: u32, candidates: u32) -
     let route = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             body: ScalarOp::Maximum,
             init: ReduceInit::NegativeInfinity,
             operand: scored,
@@ -1799,7 +1799,7 @@ fn int32_route_gather_program(vocab: u32, dim: u32, seq: u32, candidates: u32) -
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(table, gathered_map)],
             name: None,
@@ -1863,7 +1863,7 @@ fn gathered_matvec_reduce_program(experts: u32, rows: u32, width: u32, tokens: u
     let table = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![
                 Extent::Static(experts),
                 Extent::Static(rows),
@@ -1875,7 +1875,7 @@ fn gathered_matvec_reduce_program(experts: u32, rows: u32, width: u32, tokens: u
     let route = append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(tokens)],
             name: Some("route".into()),
         },
@@ -1883,7 +1883,7 @@ fn gathered_matvec_reduce_program(experts: u32, rows: u32, width: u32, tokens: u
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(tokens), Extent::Static(width)],
             name: Some("activation".into()),
         },
@@ -1912,7 +1912,7 @@ fn gathered_matvec_reduce_program(experts: u32, rows: u32, width: u32, tokens: u
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (table, gathered_map),
@@ -1924,7 +1924,7 @@ fn gathered_matvec_reduce_program(experts: u32, rows: u32, width: u32, tokens: u
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -2092,20 +2092,20 @@ mod moe_topk {
         let mut program = Vec::new();
         let x = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![Extent::Static(seq), Extent::Static(embedding)],
             "x",
         );
         let router_logits = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![Extent::Static(seq), Extent::Static(expert_count)],
             "router_logits",
         );
         let slab = |program: &mut Vec<Op>, name: &str, rows: u32, cols: u32| {
             input_leaf(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 vec![
                     Extent::Static(expert_count),
                     Extent::Static(rows),
@@ -2355,7 +2355,7 @@ mod resident_weights {
     }
 
     fn fresh_resident_plan(driver: &CudaDriver, weight: &[u8], activation: &[f32]) -> CudaPlan {
-        let (program, sum) = packed_matmul_program(ROWS, K as u32, DType::UInt8);
+        let (program, sum) = packed_matmul_program(ROWS, K as u32, DType::UINT8);
         let named = named_inputs(weight, activation);
         let mut plan = driver
             .plan(&program, &[], &[sum], NumericPolicy::default(), &named)

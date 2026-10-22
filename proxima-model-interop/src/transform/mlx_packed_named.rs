@@ -212,7 +212,7 @@ fn quantize_or_cast(
     if !quantizable {
         return Ok(vec![read(dtype)?]);
     }
-    match pack_tensor(&read(DType::Float32)?, params, dtype)? {
+    match pack_tensor(&read(DType::FLOAT32)?, params, dtype)? {
         Some(triple) => Ok(triple.into()),
         None => Ok(vec![read(dtype)?]),
     }
@@ -249,7 +249,7 @@ fn pack_tensor(
         PlainTensor {
             name: format!("{base}.weight"),
             shape: shaped(packed.weight_shape[1]),
-            dtype: DType::UInt32,
+            dtype: DType::UINT32,
             bytes: words.collect(),
         },
         PlainTensor {
@@ -356,29 +356,29 @@ mod tests {
 
     #[test]
     fn affine_named_matrix_becomes_a_weight_scales_biases_triple_and_the_norm_stays_bf16() {
-        let tensors = export_with(32, DType::BFloat16, &matrix_and_norm()).unwrap();
+        let tensors = export_with(32, DType::BFLOAT16, &matrix_and_norm()).unwrap();
 
         assert_eq!(
             shapes_by_name(&tensors),
             vec![
                 (
                     "model.layers.0.mlp.down_proj.weight",
-                    DType::UInt32,
+                    DType::UINT32,
                     &[2, 4][..]
                 ),
                 (
                     "model.layers.0.mlp.down_proj.scales",
-                    DType::BFloat16,
+                    DType::BFLOAT16,
                     &[2, 1][..]
                 ),
                 (
                     "model.layers.0.mlp.down_proj.biases",
-                    DType::BFloat16,
+                    DType::BFLOAT16,
                     &[2, 1][..]
                 ),
                 (
                     "model.layers.0.input_layernorm.weight",
-                    DType::BFloat16,
+                    DType::BFLOAT16,
                     &[32][..]
                 ),
             ]
@@ -387,11 +387,11 @@ mod tests {
 
     #[test]
     fn affine_named_triple_bytes_equal_export_affine_of_the_hand_derived_q8_0_values() {
-        let tensors = export_with(32, DType::BFloat16, &matrix_and_norm()).unwrap();
+        let tensors = export_with(32, DType::BFLOAT16, &matrix_and_norm()).unwrap();
 
         let params = AffineParams::new(4, 32).unwrap();
         let direct =
-            export_affine(&q8_0_matrix_values(), [2, 32], params, DType::BFloat16).unwrap();
+            export_affine(&q8_0_matrix_values(), [2, 32], params, DType::BFLOAT16).unwrap();
         let AffineExport::Packed(packed) = direct else {
             panic!("32 columns at group 32 quantize");
         };
@@ -411,21 +411,21 @@ mod tests {
         altered[2] ^= 0x7F;
         let changed = gguf_of(&[(MATRIX, &[32, 2], GgmlType::Q8_0, &altered)]);
 
-        let original = export_with(32, DType::BFloat16, &matrix_and_norm()).unwrap();
-        let tensors = export_with(32, DType::BFloat16, &changed).unwrap();
+        let original = export_with(32, DType::BFLOAT16, &matrix_and_norm()).unwrap();
+        let tensors = export_with(32, DType::BFLOAT16, &changed).unwrap();
 
         assert_ne!(tensors[0].bytes, original[0].bytes);
     }
 
     #[test]
     fn affine_named_matrix_narrower_than_the_group_stays_a_bf16_matrix() {
-        let tensors = export_with(64, DType::BFloat16, &matrix_and_norm()).unwrap();
+        let tensors = export_with(64, DType::BFLOAT16, &matrix_and_norm()).unwrap();
 
         assert_eq!(
             shapes_by_name(&tensors)[0],
             (
                 "model.layers.0.mlp.down_proj.weight",
-                DType::BFloat16,
+                DType::BFLOAT16,
                 &[2, 32][..]
             )
         );
@@ -434,12 +434,12 @@ mod tests {
 
     #[test]
     fn affine_named_refuses_an_integer_scale_dtype() {
-        let refusal = export_with(32, DType::UInt32, &matrix_and_norm()).unwrap_err();
+        let refusal = export_with(32, DType::UINT32, &matrix_and_norm()).unwrap_err();
 
         assert!(matches!(
             refusal,
             InteropError::AffineDTypeUnsupported {
-                dtype: DType::UInt32
+                dtype: DType::UINT32
             }
         ));
     }
@@ -488,7 +488,7 @@ mod tests {
                 &bytes,
                 &names,
                 params,
-                DType::BFloat16,
+                DType::BFLOAT16,
                 conventions,
                 workers,
             )

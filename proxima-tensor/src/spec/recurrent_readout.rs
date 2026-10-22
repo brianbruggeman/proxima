@@ -45,19 +45,19 @@ pub(super) fn append_loopcd_contrast_node(
     let pattern = alloc::format!("{axes}->{axes}");
     let delta = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(terminal, &pattern), (reference, &pattern)],
     )?;
     let scaled = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(delta, &pattern), (strength, strength_pattern)],
     )?;
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(terminal, &pattern), (scaled, &pattern)],
     )
@@ -75,7 +75,7 @@ pub(super) fn append_adaptive_loopcd_strength(
 ) -> Result<NodeId, TensorError> {
     let maximum = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         terminal,
@@ -84,19 +84,19 @@ pub(super) fn append_adaptive_loopcd_strength(
     )?;
     let shifted = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(terminal, "sv->sv"), (maximum, "s->sv")],
     )?;
     let exponentials = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(shifted, "sv->sv")],
     )?;
     let denominator = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         exponentials,
@@ -105,13 +105,13 @@ pub(super) fn append_adaptive_loopcd_strength(
     )?;
     let probabilities = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Divide,
         &[(exponentials, "sv->sv"), (denominator, "s->sv")],
     )?;
     let first = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         probabilities,
@@ -120,13 +120,13 @@ pub(super) fn append_adaptive_loopcd_strength(
     )?;
     let is_first = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Equal,
         &[(probabilities, "sv->sv"), (first, "s->sv")],
     )?;
     let first_count = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         is_first,
@@ -136,7 +136,7 @@ pub(super) fn append_adaptive_loopcd_strength(
     let zero = scalar_constant(program, 0.0);
     let below_first = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[
             (is_first, "sv->sv"),
@@ -146,7 +146,7 @@ pub(super) fn append_adaptive_loopcd_strength(
     )?;
     let distinct_second = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         ReduceInit::Zero,
         below_first,
@@ -156,32 +156,32 @@ pub(super) fn append_adaptive_loopcd_strength(
     let one = scalar_constant(program, 1.0);
     let tied = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[(first_count, "s->s"), (one, "->s")],
     )?;
     let second = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[(tied, "s->s"), (first, "s->s"), (distinct_second, "s->s")],
     )?;
     let margin = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(first, "s->s"), (second, "s->s")],
     )?;
     let uncertainty = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(one, "->s"), (margin, "s->s")],
     )?;
     let ceiling = scalar_constant(program, max_strength);
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(uncertainty, "s->s"), (ceiling, "->s")],
     )

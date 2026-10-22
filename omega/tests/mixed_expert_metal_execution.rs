@@ -39,7 +39,7 @@ fn gathered_expert_program_for(experts: usize, sequence: usize) -> (Vec<Op>, Nod
     let weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::UInt8,
+            dtype: DType::UINT8,
             shape: vec![
                 Extent::Static(experts as u32),
                 Extent::Static(ROWS as u32),
@@ -51,7 +51,7 @@ fn gathered_expert_program_for(experts: usize, sequence: usize) -> (Vec<Op>, Nod
     let route = append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(sequence as u32)],
             name: Some("route".into()),
         },
@@ -59,7 +59,7 @@ fn gathered_expert_program_for(experts: usize, sequence: usize) -> (Vec<Op>, Nod
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![
                 Extent::Static(sequence as u32),
                 Extent::Static(WIDTH as u32),
@@ -91,7 +91,7 @@ fn gathered_expert_program_for(experts: usize, sequence: usize) -> (Vec<Op>, Nod
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, gather),
@@ -103,7 +103,7 @@ fn gathered_expert_program_for(experts: usize, sequence: usize) -> (Vec<Op>, Nod
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -146,7 +146,7 @@ fn append_gathered_reduce(
     let product = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, gather),
@@ -158,7 +158,7 @@ fn append_gathered_reduce(
     append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -175,7 +175,7 @@ fn two_route_program() -> (Vec<Op>, NodeId, NodeId) {
     let first_weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::UInt8,
+            dtype: DType::UINT8,
             shape: vec![
                 Extent::Static(EXPERTS as u32),
                 Extent::Static(ROWS as u32),
@@ -187,7 +187,7 @@ fn two_route_program() -> (Vec<Op>, NodeId, NodeId) {
     let second_weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::UInt8,
+            dtype: DType::UINT8,
             shape: vec![
                 Extent::Static(EXPERTS as u32),
                 Extent::Static(ROWS as u32),
@@ -199,7 +199,7 @@ fn two_route_program() -> (Vec<Op>, NodeId, NodeId) {
     let first_route = append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(1)],
             name: Some("first_route".into()),
         },
@@ -207,7 +207,7 @@ fn two_route_program() -> (Vec<Op>, NodeId, NodeId) {
     let second_route = append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(1)],
             name: Some("second_route".into()),
         },
@@ -215,7 +215,7 @@ fn two_route_program() -> (Vec<Op>, NodeId, NodeId) {
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1), Extent::Static(WIDTH as u32)],
             name: Some("activation".into()),
         },
@@ -422,7 +422,7 @@ fn mixed_expert_source_and_recurrent_state_placement_share_one_execution() {
     let state_input = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(STATE_ELEMENTS as u32)],
             name: Some("state".into()),
         },
@@ -430,7 +430,7 @@ fn mixed_expert_source_and_recurrent_state_placement_share_one_execution() {
     let state_output = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(state_input, IndexMap::Affine(map::projection(1, &[0])))],
             name: Some("state_out".into()),
@@ -509,7 +509,7 @@ fn mixed_expert_source_and_recurrent_state_placement_share_one_execution() {
         let seed_input = append(
             &mut seed_program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(STATE_ELEMENTS as u32)],
                 name: None,
             },
@@ -517,7 +517,7 @@ fn mixed_expert_source_and_recurrent_state_placement_share_one_execution() {
         let seed_output = append(
             &mut seed_program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Identity,
                 operands: vec![(seed_input, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,

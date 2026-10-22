@@ -12,7 +12,7 @@ fn one_token_sparse_moe() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let expert_weights = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(2), Extent::Static(1)],
             name: Some("experts".into()),
         },
@@ -20,7 +20,7 @@ fn one_token_sparse_moe() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let route_ids = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1)],
             name: Some("expert_ids".into()),
         },
@@ -28,7 +28,7 @@ fn one_token_sparse_moe() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let inputs = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1), Extent::Static(1)],
             name: Some("x".into()),
         },
@@ -36,7 +36,7 @@ fn one_token_sparse_moe() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let targets = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1), Extent::Static(1)],
             name: Some("target".into()),
         },
@@ -60,7 +60,7 @@ fn one_token_sparse_moe() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let selected_weights = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(expert_weights, gather_map)],
             name: None,
@@ -70,7 +70,7 @@ fn one_token_sparse_moe() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let predictions = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (inputs, identity_map.clone()),
@@ -82,7 +82,7 @@ fn one_token_sparse_moe() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let differences = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Subtract,
             operands: vec![
                 (predictions, identity_map.clone()),
@@ -94,7 +94,7 @@ fn one_token_sparse_moe() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let squared = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (differences, identity_map.clone()),
@@ -106,7 +106,7 @@ fn one_token_sparse_moe() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let half = op::append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 0.5,
         },
@@ -114,7 +114,7 @@ fn one_token_sparse_moe() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let scaled_loss = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (squared, identity_map),
@@ -126,7 +126,7 @@ fn one_token_sparse_moe() -> (Vec<Op>, proxima_tensor::op::NodeId) {
     let loss = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: scaled_loss,

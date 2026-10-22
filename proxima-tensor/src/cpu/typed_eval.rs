@@ -224,20 +224,20 @@ macro_rules! impl_element_unsigned_integer {
     };
 }
 
-impl_element_signed_integer!(i8, DType::Int8, Int8);
-impl_element_signed_integer!(i16, DType::Int16, Int16);
-impl_element_signed_integer!(i32, DType::Int32, Int32);
-impl_element_signed_integer!(i64, DType::Int64, Int64);
-impl_element_signed_integer!(i128, DType::Int128, Int128);
+impl_element_signed_integer!(i8, DType::INT8, Int8);
+impl_element_signed_integer!(i16, DType::INT16, Int16);
+impl_element_signed_integer!(i32, DType::INT32, Int32);
+impl_element_signed_integer!(i64, DType::INT64, Int64);
+impl_element_signed_integer!(i128, DType::INT128, Int128);
 
-impl_element_unsigned_integer!(u8, DType::UInt8, UInt8);
-impl_element_unsigned_integer!(u16, DType::UInt16, UInt16);
-impl_element_unsigned_integer!(u32, DType::UInt32, UInt32);
-impl_element_unsigned_integer!(u64, DType::UInt64, UInt64);
-impl_element_unsigned_integer!(u128, DType::UInt128, UInt128);
+impl_element_unsigned_integer!(u8, DType::UINT8, UInt8);
+impl_element_unsigned_integer!(u16, DType::UINT16, UInt16);
+impl_element_unsigned_integer!(u32, DType::UINT32, UInt32);
+impl_element_unsigned_integer!(u64, DType::UINT64, UInt64);
+impl_element_unsigned_integer!(u128, DType::UINT128, UInt128);
 
 impl Element for f32 {
-    const DTYPE: DType = DType::Float32;
+    const DTYPE: DType = DType::FLOAT32;
 
     fn unwrap_block(buffer: &TypedBuffer) -> Option<&[Self]> {
         match buffer {
@@ -264,7 +264,7 @@ impl Element for f32 {
 }
 
 impl Element for f64 {
-    const DTYPE: DType = DType::Float64;
+    const DTYPE: DType = DType::FLOAT64;
 
     fn unwrap_block(buffer: &TypedBuffer) -> Option<&[Self]> {
         match buffer {
@@ -360,9 +360,9 @@ macro_rules! impl_element_narrow_float {
     };
 }
 
-impl_element_narrow_float!(f16, DType::Float16, Float16);
-impl_element_narrow_float!(bf16, DType::BFloat16, BFloat16);
-impl_element_narrow_float!(BFloat8, DType::BFloat8, BFloat8);
+impl_element_narrow_float!(f16, DType::FLOAT16, Float16);
+impl_element_narrow_float!(bf16, DType::BFLOAT16, BFloat16);
+impl_element_narrow_float!(BFloat8, DType::BFLOAT8, BFloat8);
 
 /// One contiguous typed buffer, tagged by which native type backs it — the
 /// storage half of [`evaluate_typed`]'s runtime dispatch. Every variant is a
@@ -396,21 +396,21 @@ impl TypedBuffer {
     #[must_use]
     pub const fn dtype(&self) -> DType {
         match self {
-            Self::Int8(_) => DType::Int8,
-            Self::UInt8(_) => DType::UInt8,
-            Self::Int16(_) => DType::Int16,
-            Self::UInt16(_) => DType::UInt16,
-            Self::Int32(_) => DType::Int32,
-            Self::UInt32(_) => DType::UInt32,
-            Self::Int64(_) => DType::Int64,
-            Self::UInt64(_) => DType::UInt64,
-            Self::Int128(_) => DType::Int128,
-            Self::UInt128(_) => DType::UInt128,
-            Self::Float16(_) => DType::Float16,
-            Self::BFloat16(_) => DType::BFloat16,
-            Self::BFloat8(_) => DType::BFloat8,
-            Self::Float32(_) => DType::Float32,
-            Self::Float64(_) => DType::Float64,
+            Self::Int8(_) => DType::INT8,
+            Self::UInt8(_) => DType::UINT8,
+            Self::Int16(_) => DType::INT16,
+            Self::UInt16(_) => DType::UINT16,
+            Self::Int32(_) => DType::INT32,
+            Self::UInt32(_) => DType::UINT32,
+            Self::Int64(_) => DType::INT64,
+            Self::UInt64(_) => DType::UINT64,
+            Self::Int128(_) => DType::INT128,
+            Self::UInt128(_) => DType::UINT128,
+            Self::Float16(_) => DType::FLOAT16,
+            Self::BFloat16(_) => DType::BFLOAT16,
+            Self::BFloat8(_) => DType::BFLOAT8,
+            Self::Float32(_) => DType::FLOAT32,
+            Self::Float64(_) => DType::FLOAT64,
         }
     }
 
@@ -524,13 +524,13 @@ pub(super) fn typed_program_plan(program: &[Op]) -> Result<TypedPlan, TensorErro
                 reason: "the typed evaluator does not support Bool yet",
             });
         }
-        if dtype == DType::Fp6E3M2 {
+        if dtype == DType::FP6_E3_M2 {
             return Err(TensorError::NotLowerable {
                 node,
                 reason: "fp6 e3m2 is a block codec and has no typed scalar element",
             });
         }
-        if dtype == DType::BFloat8 && matches!(expr, Op::Reduce(_)) {
+        if dtype == DType::BFLOAT8 && matches!(expr, Op::Reduce(_)) {
             return Err(TensorError::NotLowerable {
                 node,
                 reason: "bfloat8 reductions require an f32 accumulator",
@@ -576,7 +576,7 @@ pub(super) type TypedRow<Data> = (NodeId, Vec<u64>, Data);
 /// non-f32 (or f64) dtype — the full-width counterpart of [`evaluate`] for
 /// the programs `reject_non_float32` used to reject outright. See
 /// `typed_program_plan` for exactly which programs qualify, and for the
-/// uniform case, `DType::Float32` dispatches `run_typed_program` the same as
+/// uniform case, `DType::FLOAT32` dispatches `run_typed_program` the same as
 /// every other width, but that function's own [`Op::Reduce`] handling
 /// specializes straight back to the existing NEON `run_reduce`/`run_scan`
 /// for `T = f32` — see `run_reduce_typed`'s doc. A `TypedPlan::Widened`
@@ -616,30 +616,30 @@ pub(super) fn evaluate_uniform_typed(
                 .collect()
         }};
     }
-    if dtype == DType::Float16 {
+    if dtype == DType::FLOAT16 {
         return Ok(dispatch!(f16, Float16));
     }
-    if dtype == DType::BFloat16 {
+    if dtype == DType::BFLOAT16 {
         return Ok(dispatch!(bf16, BFloat16));
     }
-    if dtype == DType::Float32 {
+    if dtype == DType::FLOAT32 {
         return Ok(dispatch!(f32, Float32));
     }
-    if dtype == DType::BFloat8 {
+    if dtype == DType::BFLOAT8 {
         return Ok(dispatch!(BFloat8, BFloat8));
     }
     Ok(match dtype {
-        DType::Int8 => dispatch!(i8, Int8),
-        DType::UInt8 => dispatch!(u8, UInt8),
-        DType::Int16 => dispatch!(i16, Int16),
-        DType::UInt16 => dispatch!(u16, UInt16),
-        DType::Int32 => dispatch!(i32, Int32),
-        DType::UInt32 => dispatch!(u32, UInt32),
-        DType::Int64 => dispatch!(i64, Int64),
-        DType::UInt64 => dispatch!(u64, UInt64),
-        DType::Int128 => dispatch!(i128, Int128),
-        DType::UInt128 => dispatch!(u128, UInt128),
-        DType::Float64 => dispatch!(f64, Float64),
+        DType::INT8 => dispatch!(i8, Int8),
+        DType::UINT8 => dispatch!(u8, UInt8),
+        DType::INT16 => dispatch!(i16, Int16),
+        DType::UINT16 => dispatch!(u16, UInt16),
+        DType::INT32 => dispatch!(i32, Int32),
+        DType::UINT32 => dispatch!(u32, UInt32),
+        DType::INT64 => dispatch!(i64, Int64),
+        DType::UINT64 => dispatch!(u64, UInt64),
+        DType::INT128 => dispatch!(i128, Int128),
+        DType::UINT128 => dispatch!(u128, UInt128),
+        DType::FLOAT64 => dispatch!(f64, Float64),
         _ => {
             let position = program
                 .iter()
@@ -672,37 +672,37 @@ pub(super) fn evaluate_widened_typed(
     outputs: &[NodeId],
 ) -> Result<Vec<TypedRow<TypedBuffer>>, TensorError> {
     match (operand, accumulator) {
-        (DType::Int8, DType::Int32) => Ok(run_widened_program::<i8, i32>(
+        (DType::INT8, DType::INT32) => Ok(run_widened_program::<i8, i32>(
             program, symbols, blocks, outputs,
         )?
         .into_iter()
         .map(|(node, shape, data)| (node, shape, TypedBuffer::Int32(data)))
         .collect()),
-        (DType::Int16, DType::Int64) => Ok(run_widened_program::<i16, i64>(
+        (DType::INT16, DType::INT64) => Ok(run_widened_program::<i16, i64>(
             program, symbols, blocks, outputs,
         )?
         .into_iter()
         .map(|(node, shape, data)| (node, shape, TypedBuffer::Int64(data)))
         .collect()),
-        (DType::UInt8, DType::UInt32) => Ok(run_widened_program::<u8, u32>(
+        (DType::UINT8, DType::UINT32) => Ok(run_widened_program::<u8, u32>(
             program, symbols, blocks, outputs,
         )?
         .into_iter()
         .map(|(node, shape, data)| (node, shape, TypedBuffer::UInt32(data)))
         .collect()),
-        _ if operand == DType::Float16 && accumulator == DType::Float32 => Ok(
+        _ if operand == DType::FLOAT16 && accumulator == DType::FLOAT32 => Ok(
             run_widened_program::<f16, f32>(program, symbols, blocks, outputs)?
                 .into_iter()
                 .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))
                 .collect(),
         ),
-        _ if operand == DType::BFloat16 && accumulator == DType::Float32 => Ok(
+        _ if operand == DType::BFLOAT16 && accumulator == DType::FLOAT32 => Ok(
             run_widened_program::<bf16, f32>(program, symbols, blocks, outputs)?
                 .into_iter()
                 .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))
                 .collect(),
         ),
-        _ if operand == DType::BFloat8 && accumulator == DType::Float32 => Ok(
+        _ if operand == DType::BFLOAT8 && accumulator == DType::FLOAT32 => Ok(
             run_widened_program::<BFloat8, f32>(program, symbols, blocks, outputs)?
                 .into_iter()
                 .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))

@@ -36,7 +36,7 @@ fn sequence_position(
     let iteration = format!("s{rest_letters}");
     let sliced = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Identity,
         &[(
             node,
@@ -46,7 +46,7 @@ fn sequence_position(
     .expect("affine s-offset slice lowers");
     reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         sliced,
@@ -65,7 +65,7 @@ fn build_fixture(positions: &[u32]) -> SliceFixture {
     let mut program = Vec::new();
     let x = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(SEQUENCE_LEN),
             Extent::Static(HEAD_DIM),

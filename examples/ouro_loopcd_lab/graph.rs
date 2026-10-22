@@ -39,13 +39,13 @@ pub struct Shape {
 }
 
 fn apply(program: &mut Vec<Op>, body: ScalarOp, operands: &[(NodeId, &str)]) -> io::Result<NodeId> {
-    elementwise(program, DType::Float32, body, operands).map_err(io::Error::other)
+    elementwise(program, DType::FLOAT32, body, operands).map_err(io::Error::other)
 }
 
 fn sum(program: &mut Vec<Op>, operand: NodeId, input: &str, output: &str) -> io::Result<NodeId> {
     reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         operand,
@@ -58,7 +58,7 @@ fn sum(program: &mut Vec<Op>, operand: NodeId, input: &str, output: &str) -> io:
 fn leaf(program: &mut Vec<Op>, name: &str, dimensions: &[u32]) -> NodeId {
     input_leaf(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         dimensions.iter().copied().map(Extent::Static).collect(),
         name,
     )
@@ -67,7 +67,7 @@ fn leaf(program: &mut Vec<Op>, name: &str, dimensions: &[u32]) -> NodeId {
 fn state(program: &mut Vec<Op>, hidden: u32, name: &str) -> NodeId {
     input_leaf(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Symbolic(0), Extent::Static(hidden)],
         name,
     )
@@ -97,7 +97,7 @@ pub fn layer(shape: Shape) -> io::Result<Graph> {
     let hidden = state(&mut program, shape.hidden, "hidden");
     let epsilon = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Symbolic(0)],
         "epsilon",
     );
@@ -132,13 +132,13 @@ pub fn layer(shape: Shape) -> io::Result<Graph> {
     let down_weight = leaf(&mut program, "down", &[shape.intermediate, shape.hidden]);
     let cosine = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Symbolic(0), Extent::Static(shape.head_width / 2)],
         "cosine",
     );
     let sine = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Symbolic(0), Extent::Static(shape.head_width / 2)],
         "sine",
     );
@@ -193,7 +193,7 @@ pub fn layer(shape: Shape) -> io::Result<Graph> {
     )?;
     let maximum = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         masked,
@@ -301,7 +301,7 @@ pub fn normalization(hidden_size: u32) -> io::Result<Graph> {
     let scale = leaf(&mut program, "scale", &[hidden_size]);
     let epsilon = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Symbolic(0)],
         "epsilon",
     );

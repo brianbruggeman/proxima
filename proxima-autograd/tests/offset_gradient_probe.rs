@@ -40,7 +40,7 @@ fn leaf(program: &mut Vec<Op>, name: &str, shape: alloc::vec::Vec<Extent>) -> No
     op::append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape,
             name: Some(name.into()),
         },
@@ -68,7 +68,7 @@ async fn an_offset_only_axis_with_no_anchor_is_rejected_by_shape_inference() {
     let sliced = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: alloc::vec![(w, slice_map)],
             name: None,
@@ -77,7 +77,7 @@ async fn an_offset_only_axis_with_no_anchor_is_rejected_by_shape_inference() {
     let loss = op::append(
         &mut program,
         Op::Reduce(proxima_tensor::op::Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: sliced,
@@ -109,7 +109,7 @@ fn build_anchored_slice_program() -> (Vec<Op>, NodeId) {
     let anchor = op::append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(2)],
             value: 0.0,
         },
@@ -126,7 +126,7 @@ fn build_anchored_slice_program() -> (Vec<Op>, NodeId) {
     let sliced = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: alloc::vec![(w, slice_map), (anchor, anchor_map)],
             name: None,
@@ -135,7 +135,7 @@ fn build_anchored_slice_program() -> (Vec<Op>, NodeId) {
     let loss = op::append(
         &mut program,
         Op::Reduce(proxima_tensor::op::Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: sliced,

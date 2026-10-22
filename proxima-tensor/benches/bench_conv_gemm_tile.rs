@@ -91,7 +91,7 @@ fn input(program: &mut Vec<Op>, shape: &[u32]) -> NodeId {
     append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: shape.iter().map(|&extent| Extent::Static(extent)).collect(),
             name: None,
         },
@@ -123,7 +123,7 @@ fn conv_program(shape: &ConvShape, extra_step: bool) -> (Vec<Op>, NodeId, NodeId
     let mut product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (windowed, IndexMap::Affine(windowed_pattern)),
@@ -137,7 +137,7 @@ fn conv_program(shape: &ConvShape, extra_step: bool) -> (Vec<Op>, NodeId, NodeId
         let ones = append(
             &mut program,
             Op::Constant {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![
                     Extent::Static(1),
                     Extent::Static(shape.co),
@@ -153,7 +153,7 @@ fn conv_program(shape: &ConvShape, extra_step: bool) -> (Vec<Op>, NodeId, NodeId
         product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (
@@ -173,7 +173,7 @@ fn conv_program(shape: &ConvShape, extra_step: bool) -> (Vec<Op>, NodeId, NodeId
     let reduced = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,

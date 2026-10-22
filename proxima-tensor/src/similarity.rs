@@ -33,7 +33,7 @@ fn row_dot_products(query: &[f32], matrix: &[f32], dim: usize) -> Result<Vec<f32
     let query_node = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(dim as u32)],
             name: None,
         },
@@ -41,7 +41,7 @@ fn row_dot_products(query: &[f32], matrix: &[f32], dim: usize) -> Result<Vec<f32
     let matrix_node = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(row_count as u32), Extent::Static(dim as u32)],
             name: None,
         },
@@ -52,7 +52,7 @@ fn row_dot_products(query: &[f32], matrix: &[f32], dim: usize) -> Result<Vec<f32
     let product = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (query_node, IndexMap::Affine(map::projection(2, &[1]))),
@@ -65,7 +65,7 @@ fn row_dot_products(query: &[f32], matrix: &[f32], dim: usize) -> Result<Vec<f32
     let dots = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,

@@ -299,7 +299,7 @@ pub fn fused_rope_pair(
 
     let same_cos = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (source, same_pattern.as_str()),
@@ -308,7 +308,7 @@ pub fn fused_rope_pair(
     )?;
     let partner_sin = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (source, partner_pattern.as_str()),
@@ -317,7 +317,7 @@ pub fn fused_rope_pair(
     )?;
     let rotated_same = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[
             (same_cos, out_identity.as_str()),
@@ -327,7 +327,7 @@ pub fn fused_rope_pair(
 
     let partner_cos = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (source, partner_pattern.as_str()),
@@ -336,7 +336,7 @@ pub fn fused_rope_pair(
     )?;
     let same_sin = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (source, same_pattern.as_str()),
@@ -345,7 +345,7 @@ pub fn fused_rope_pair(
     )?;
     let rotated_partner = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[
             (partner_cos, out_identity.as_str()),
@@ -394,7 +394,7 @@ pub fn scalar_constant(program: &mut Vec<Op>, value: f32) -> NodeId {
     op::append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value,
         },
@@ -427,7 +427,7 @@ pub fn embedding_lookup(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> No
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: alloc::vec![(table, gathered_map)],
             name: None,
@@ -507,7 +507,7 @@ pub fn gather_head_permutation(
     indices: NodeId,
     head_dim: u32,
 ) -> NodeId {
-    gather_axis_permutation(program, source, indices, DType::Float32, head_dim)
+    gather_axis_permutation(program, source, indices, DType::FLOAT32, head_dim)
 }
 
 /// `specs/mistral_layer.toml`'s `attn_norm`/`ffn_norm` node run, node for
@@ -523,13 +523,13 @@ pub fn rmsnorm(
 ) -> Result<NodeId, TensorError> {
     let squared = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, "sd->sd"), (x, "sd->sd")],
     )?;
     let sum_squares = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         squared,
@@ -538,37 +538,37 @@ pub fn rmsnorm(
     )?;
     let mean_square = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(sum_squares, "s->s"), (inv_dim, "->s")],
     )?;
     let mean_square_eps = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(mean_square, "s->s"), (eps, "->s")],
     )?;
     let rms = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::SquareRoot,
         &[(mean_square_eps, "s->s")],
     )?;
     let inv_rms = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(rms, "s->s")],
     )?;
     let normed = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, "sd->sd"), (inv_rms, "s->sd")],
     )?;
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "sd->sd"), (gamma, "d->sd")],
     )
@@ -605,14 +605,14 @@ pub fn greedy_argmax(
     let unit = op::append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(blocks), Extent::Static(width)],
             value: 1.0,
         },
     );
     let grid = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (logits, &alloc::format!("s,{width}*g+w->sgw")),
@@ -627,7 +627,7 @@ pub fn greedy_argmax(
     )?;
     let at_peak = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Equal,
         &[(grid, "sgw->sgw"), (peak, "s->sgw")],
     )?;
@@ -635,7 +635,7 @@ pub fn greedy_argmax(
     let past_the_end = scalar_constant(program, vocab as f32);
     let index_or_end = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[
             (at_peak, "sgw->sgw"),
@@ -653,19 +653,19 @@ pub fn greedy_argmax(
     let ceiling = scalar_constant(program, f32::MAX);
     let above_floor = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[(grid, "sgw->sgw"), (floor, "->sgw")],
     )?;
     let below_ceiling = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[(ceiling, "->sgw"), (grid, "sgw->sgw")],
     )?;
     let in_range = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(above_floor, "sgw->sgw"), (below_ceiling, "sgw->sgw")],
     )?;
@@ -695,7 +695,7 @@ fn reduce_blocked(
 ) -> Result<NodeId, TensorError> {
     let partial = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         body,
         init,
         grid,
@@ -704,7 +704,7 @@ fn reduce_blocked(
     )?;
     reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         body,
         init,
         partial,
@@ -719,27 +719,27 @@ fn block_index(program: &mut Vec<Op>, blocks: u32, width: u32) -> Result<NodeId,
     let block = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(blocks),
         },
     );
     let lane = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(width),
         },
     );
     let stride = scalar_constant(program, width as f32);
     let block_start = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(block, "g->g"), (stride, "->g")],
     )?;
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(block_start, "g->gw"), (lane, "w->gw")],
     )
@@ -779,13 +779,13 @@ pub fn rmsnorm_per_head(
 
     let squared = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, full.as_str()), (x, full.as_str())],
     )?;
     let sum_squares = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         squared,
@@ -794,7 +794,7 @@ pub fn rmsnorm_per_head(
     )?;
     let mean_square = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (sum_squares, identity.as_str()),
@@ -803,31 +803,31 @@ pub fn rmsnorm_per_head(
     )?;
     let mean_square_eps = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(mean_square, identity.as_str()), (eps, eps_map.as_str())],
     )?;
     let rms = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::SquareRoot,
         &[(mean_square_eps, identity.as_str())],
     )?;
     let inv_rms = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(rms, identity.as_str())],
     )?;
     let normed = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, full.as_str()), (inv_rms, broadcast_over_d.as_str())],
     )?;
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, full.as_str()), (gamma, gamma_map.as_str())],
     )
@@ -856,13 +856,13 @@ pub fn rmsnorm_per_head_no_scale(
 
     let squared = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, full.as_str()), (x, full.as_str())],
     )?;
     let sum_squares = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         squared,
@@ -871,7 +871,7 @@ pub fn rmsnorm_per_head_no_scale(
     )?;
     let mean_square = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (sum_squares, identity.as_str()),
@@ -880,25 +880,25 @@ pub fn rmsnorm_per_head_no_scale(
     )?;
     let mean_square_eps = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(mean_square, identity.as_str()), (eps, eps_map.as_str())],
     )?;
     let rms = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::SquareRoot,
         &[(mean_square_eps, identity.as_str())],
     )?;
     let inv_rms = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(rms, identity.as_str())],
     )?;
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, full.as_str()), (inv_rms, broadcast_over_d.as_str())],
     )
@@ -920,7 +920,7 @@ pub fn causal_mask(program: &mut Vec<Op>) -> Result<(NodeId, NodeId), TensorErro
     let (query_index, key_index) = causal_index_pair(program);
     let is_future = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[(key_index, "t->st"), (query_index, "s->st")],
     )?;
@@ -937,14 +937,14 @@ fn causal_index_pair(program: &mut Vec<Op>) -> (NodeId, NodeId) {
     let query_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Symbolic(0),
         },
     );
     let key_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Symbolic(0),
         },
     );
@@ -974,26 +974,26 @@ pub fn causal_mask_windowed(
     let (query_index, key_index) = causal_index_pair(program);
     let is_future = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[(key_index, "t->st"), (query_index, "s->st")],
     )?;
     let distance = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(query_index, "s->st"), (key_index, "t->st")],
     )?;
     let window_ceiling = scalar_constant(program, window as f32 - 1.0);
     let too_old = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[(distance, "st->st"), (window_ceiling, "->st")],
     )?;
     let is_masked = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         &[(is_future, "st->st"), (too_old, "st->st")],
     )?;
@@ -1019,26 +1019,26 @@ pub fn causal_mask_merged(
     let query_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Symbolic(0),
         },
     );
     let key_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Symbolic(1),
         },
     );
     let query_absolute = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(query_index, "s->s"), (cached_len, "->s")],
     )?;
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[(key_index, "t->st"), (query_absolute, "s->st")],
     )
@@ -1075,45 +1075,45 @@ pub fn causal_mask_merged_windowed(
     let query_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Symbolic(0),
         },
     );
     let key_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Symbolic(1),
         },
     );
     let query_absolute = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(query_index, "s->s"), (cached_len, "->s")],
     )?;
     let is_future = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[(key_index, "t->st"), (query_absolute, "s->st")],
     )?;
     let distance = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(query_absolute, "s->st"), (key_index, "t->st")],
     )?;
     let window_ceiling = scalar_constant(program, window as f32 - 1.0);
     let too_old = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[(distance, "st->st"), (window_ceiling, "->st")],
     )?;
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         &[(is_future, "st->st"), (too_old, "st->st")],
     )
@@ -1139,43 +1139,43 @@ pub fn top_fraction_mask(
     let iota = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Symbolic(0),
         },
     );
     let greater = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[(scores, "j->ij"), (scores, "i->ij")],
     )?;
     let equal = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Equal,
         &[(scores, "j->ij"), (scores, "i->ij")],
     )?;
     let lower = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[(iota, "i->ij"), (iota, "j->ij")],
     )?;
     let tie = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(equal, "ij->ij"), (lower, "ij->ij")],
     )?;
     let hit = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(greater, "ij->ij"), (tie, "ij->ij")],
     )?;
     let rank = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         hit,
@@ -1184,14 +1184,14 @@ pub fn top_fraction_mask(
     )?;
     let selected = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[(keep_count, "->i"), (rank, "i->i")],
     )?;
     match keep_rows {
         Some(keep) => elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Maximum,
             &[(selected, "i->i"), (keep, "i->i")],
         ),

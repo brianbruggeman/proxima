@@ -473,7 +473,7 @@ pub(super) fn lower_expand(
     let ones = append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: out_shape
                 .iter()
                 .map(|&extent| Extent::Static(extent as u32))

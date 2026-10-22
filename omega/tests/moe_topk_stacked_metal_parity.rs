@@ -33,20 +33,20 @@ fn build(strategy: MoeProjectionStrategy, token_count: u32) -> Fixture {
     let mut program = Vec::new();
     let x = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(token_count), Extent::Static(EMBEDDING)],
         "x",
     );
     let logits = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(token_count), Extent::Static(EXPERT_COUNT)],
         "logits",
     );
     let stack = |program: &mut Vec<Op>, rows: u32, columns: u32, name: &str| {
         input_leaf(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![
                 Extent::Static(EXPERT_COUNT),
                 Extent::Static(rows),

@@ -66,7 +66,7 @@ fn projection_program(rows: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let activations = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(rows), Extent::Static(REDUCTION_LEN)],
             name: None,
         },
@@ -74,7 +74,7 @@ fn projection_program(rows: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weights, IndexMap::Affine(projection(3, &[1, 2]))),
@@ -86,7 +86,7 @@ fn projection_program(rows: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -108,7 +108,7 @@ fn run_on_metal(
     weight_bytes: &[u8],
     disabled_tiled: Option<&str>,
 ) -> Vec<f32> {
-    let (program, sum) = projection_program(rows, DType::Float16);
+    let (program, sum) = projection_program(rows, DType::FLOAT16);
     let blocks = [
         QuantizedBlock::Packed {
             codec: Codec::Float16,
@@ -131,7 +131,7 @@ fn run_on_metal(
 }
 
 fn run_on_cpu(rows: u32, activations: &[f32], dequantized_weights: &[f32]) -> Vec<f32> {
-    let (program, sum) = projection_program(rows, DType::Float32);
+    let (program, sum) = projection_program(rows, DType::FLOAT32);
     proxima_tensor::evaluate(&program, &[], &[dequantized_weights, activations], &[sum])
         .expect("cpu oracle evaluates the per-layer projection")
         .root()

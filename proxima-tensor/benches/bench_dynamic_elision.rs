@@ -108,7 +108,7 @@ fn block_sparse_program(shape: &BlockShape) -> BlockProgram {
         let x = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(shape.block_in)],
                 name: Some(x_name.clone()),
             },
@@ -116,7 +116,7 @@ fn block_sparse_program(shape: &BlockShape) -> BlockProgram {
         let weight = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![
                     Extent::Static(shape.block_out),
                     Extent::Static(shape.block_in),
@@ -127,7 +127,7 @@ fn block_sparse_program(shape: &BlockShape) -> BlockProgram {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (weight, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -139,7 +139,7 @@ fn block_sparse_program(shape: &BlockShape) -> BlockProgram {
         let reduced = append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,

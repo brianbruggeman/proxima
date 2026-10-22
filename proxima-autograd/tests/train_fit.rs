@@ -26,7 +26,7 @@ fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
     op::append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape,
             name: Some(name.into()),
         },
@@ -37,7 +37,7 @@ fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, Ind
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands,
             name: None,
@@ -54,7 +54,7 @@ fn reduce_add(
     op::append(
         program,
         Op::Reduce(op::Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand,
@@ -125,9 +125,9 @@ fn build_network() -> Network {
     let b2 = leaf(&mut program, "b2", vec![Extent::Static(OUT_DIM as u32)]);
 
     let h_pre = dense(&mut program, x, w1, b1);
-    let h = relu(&mut program, DType::Float32, h_pre, 1);
+    let h = relu(&mut program, DType::FLOAT32, h_pre, 1);
     let out_pre = dense(&mut program, h, w2, b2);
-    let loss = softmax_cross_entropy(&mut program, DType::Float32, out_pre, y, 1, 0);
+    let loss = softmax_cross_entropy(&mut program, DType::FLOAT32, out_pre, y, 1, 0);
 
     Network {
         program,

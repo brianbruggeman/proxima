@@ -82,21 +82,21 @@ fn program(shape: &Shape, fuse_gate: bool) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = input(
         &mut program,
-        DType::UInt8,
+        DType::UINT8,
         &[shape.experts, shape.rows, shape.k],
         "weight",
     );
-    let route = input(&mut program, DType::Int32, &[shape.tokens], "route");
+    let route = input(&mut program, DType::INT32, &[shape.tokens], "route");
     let activation = input(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         &[shape.tokens, shape.k],
         "activation",
     );
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, expert_gather_map(route)),
@@ -108,7 +108,7 @@ fn program(shape: &Shape, fuse_gate: bool) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -123,14 +123,14 @@ fn program(shape: &Shape, fuse_gate: bool) -> (Vec<Op>, NodeId) {
     }
     let gate = input(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         &[shape.tokens, shape.rows],
         "gate",
     );
     let gated = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (sum, IndexMap::Affine(map::projection(2, &[0, 1]))),

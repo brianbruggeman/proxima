@@ -89,7 +89,7 @@ fn write_complete_round_trips_a_real_tensors_real_bytes_byte_identical() {
     };
     assert_eq!(
         entry.dtype,
-        DType::BFloat16,
+        DType::BFLOAT16,
         "{TARGET_TENSOR} must be the real bf16 tensor this test targets"
     );
     assert_eq!(

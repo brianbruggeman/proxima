@@ -54,7 +54,7 @@ fn quantized_matmul_program(rows: u32, k: u32) -> (Vec<Op>, NodeId) {
     let weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc_vec(&[rows, k]),
             name: None,
         },
@@ -62,7 +62,7 @@ fn quantized_matmul_program(rows: u32, k: u32) -> (Vec<Op>, NodeId) {
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc_vec(&[k, 1]),
             name: None,
         },
@@ -70,7 +70,7 @@ fn quantized_matmul_program(rows: u32, k: u32) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(projection(3, &[0, 2]))),
@@ -82,7 +82,7 @@ fn quantized_matmul_program(rows: u32, k: u32) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,

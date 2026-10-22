@@ -146,7 +146,7 @@ fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(k), Extent::Static(1)],
             name: None,
         },
@@ -154,7 +154,7 @@ fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -166,7 +166,7 @@ fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -230,7 +230,7 @@ fn metal_matmul_on_real_attn_k_q8_0_bytes_matches_the_dequantized_f32_cpu_path()
         q8_0::dequantize(row_blocks, row_f32).expect("a whole number of q8_0 blocks per row");
     }
 
-    let (packed_program, packed_sum) = matmul_program(rows as u32, in_dim as u32, DType::UInt8);
+    let (packed_program, packed_sum) = matmul_program(rows as u32, in_dim as u32, DType::UINT8);
     let metal = omega::execute(
         &packed_program,
         &[],
@@ -246,7 +246,7 @@ fn metal_matmul_on_real_attn_k_q8_0_bytes_matches_the_dequantized_f32_cpu_path()
     )
     .expect("metal executes a packed q8_0 matmul on real blk.0.attn_k.weight bytes");
 
-    let (f32_program, f32_sum) = matmul_program(rows as u32, in_dim as u32, DType::Float32);
+    let (f32_program, f32_sum) = matmul_program(rows as u32, in_dim as u32, DType::FLOAT32);
     let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum])
         .expect("dequantized f32 cpu matmul evaluates");
 

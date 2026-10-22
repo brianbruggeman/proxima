@@ -209,13 +209,13 @@ fn run() -> anyhow::Result<()> {
         };
         let weight = input(
             &mut program,
-            DType::UInt8,
+            DType::UINT8,
             &[EXPERTS, shape.rows, shape.k],
             "weight",
         );
         let route_node = input(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             &[shape.tokens, shape.selected],
             "route",
         );
@@ -223,7 +223,7 @@ fn run() -> anyhow::Result<()> {
             (
                 input(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     &[shape.tokens, shape.selected, shape.k],
                     "activation",
                 ),
@@ -233,7 +233,7 @@ fn run() -> anyhow::Result<()> {
             (
                 input(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     &[shape.tokens, shape.k],
                     "activation",
                 ),
@@ -264,7 +264,7 @@ fn run() -> anyhow::Result<()> {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (weight, gather),
@@ -276,7 +276,7 @@ fn run() -> anyhow::Result<()> {
         let sum = append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -309,14 +309,14 @@ fn run() -> anyhow::Result<()> {
         };
         let weight = input(
             &mut program,
-            DType::UInt8,
+            DType::UINT8,
             &[EXPERTS, shape.rows, shape.k],
             "weight",
         );
-        let route_node = input(&mut program, DType::Int32, &[shape.tokens], "route");
+        let route_node = input(&mut program, DType::INT32, &[shape.tokens], "route");
         let activation = input(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             &[shape.tokens, shape.k],
             "activation",
         );
@@ -344,7 +344,7 @@ fn run() -> anyhow::Result<()> {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (weight, gather),
@@ -356,7 +356,7 @@ fn run() -> anyhow::Result<()> {
         let sum = append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,

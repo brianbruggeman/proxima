@@ -18,7 +18,7 @@ fn rope_ops(head_dim: u32, pairing: RopePairing) -> (Vec<BoundOp>, Vec<Op>) {
     let mut program = Vec::new();
     let source = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(SEQUENCE),
             Extent::Static(HEADS),
@@ -27,8 +27,8 @@ fn rope_ops(head_dim: u32, pairing: RopePairing) -> (Vec<BoundOp>, Vec<Op>) {
         "x",
     );
     let trig = || vec![Extent::Static(SEQUENCE), Extent::Static(PAIRS)];
-    let cosine = input_leaf(&mut program, DType::Float32, trig(), "cos");
-    let sine = input_leaf(&mut program, DType::Float32, trig(), "sin");
+    let cosine = input_leaf(&mut program, DType::FLOAT32, trig(), "cos");
+    let sine = input_leaf(&mut program, DType::FLOAT32, trig(), "sin");
     let (first, second) = fused_rope_pair(&mut program, source, 'h', cosine, sine, pairing)
         .expect("rope pair builds");
     let shapes = infer(&program, &[]).expect("rope program infers");

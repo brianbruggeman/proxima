@@ -149,15 +149,15 @@ mod tests {
         );
 
         let scalar = manifest.tensor("scalar").expect("scalar present");
-        assert_eq!(scalar.dtype, DType::Float32);
+        assert_eq!(scalar.dtype, DType::FLOAT32);
         assert_eq!(scalar.shape, Vec::<u64>::new());
 
         let vector = manifest.tensor("vector").expect("vector present");
-        assert_eq!(vector.dtype, DType::Int8);
+        assert_eq!(vector.dtype, DType::INT8);
         assert_eq!(vector.shape, vec![8]);
 
         let matrix = manifest.tensor("matrix").expect("matrix present");
-        assert_eq!(matrix.dtype, DType::BFloat16);
+        assert_eq!(matrix.dtype, DType::BFLOAT16);
         assert_eq!(matrix.shape, vec![2, 3]);
 
         let cube = manifest.tensor("cube").expect("cube present");

@@ -204,7 +204,7 @@ pub(super) mod tests {
             (NodeId(3), NodeId(30)),
         ]);
         let computed = Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 0.0,
         };
@@ -216,22 +216,22 @@ pub(super) mod tests {
         ];
         let gather_program = vec![
             Op::Constant {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: Vec::new(),
                 value: 0.0,
             },
             Op::Constant {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: Vec::new(),
                 value: 0.0,
             },
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: Vec::new(),
                 name: Some(String::from("__cut_20")),
             },
             Op::Constant {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: Vec::new(),
                 value: 0.0,
             },
@@ -283,12 +283,12 @@ pub(super) mod tests {
     #[test]
     fn qwen35moe_expert_source_mapping_rejects_a_missing_segment_node() {
         let source_program = [Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1)],
             name: Some(String::from("blk.0.ffn_gate_exps.weight")),
         }];
         let segment_program = [Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1)],
             name: Some(String::from("activation")),
         }];
@@ -682,7 +682,7 @@ pub(super) mod tests {
         let mut runtime = BackendRuntime::new(&config);
         let router = NodeId(0);
         let program = [Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1), Extent::Static(4)],
             name: Some(String::from("router_logits")),
         }];
@@ -2369,7 +2369,7 @@ pub(super) mod placed_plan_mode_tests {
         let source = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: alloc::vec![Extent::Static(4)],
                 name: Some(String::from("x")),
             },
@@ -2377,7 +2377,7 @@ pub(super) mod placed_plan_mode_tests {
         let identity = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Identity,
                 operands: alloc::vec![(source, IndexMap::Affine(projection(1, &[0])))],
                 name: None,

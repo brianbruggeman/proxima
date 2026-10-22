@@ -85,20 +85,20 @@ fn build_fixture(positions: u32) -> RealDimsFixture {
     let mut program = Vec::new();
     let x = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(positions), Extent::Static(EMBEDDING)],
         "x",
     );
     let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
     let eps = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(positions)],
         "eps",
     );
     let head_eps = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(KV_HEADS), Extent::Static(GROUP)],
         "head_eps",
     );
@@ -107,73 +107,73 @@ fn build_fixture(positions: u32) -> RealDimsFixture {
     let inv_head_v_dim = scalar_constant(&mut program, 1.0 / head_v_dim as f32);
     let attn_norm_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(EMBEDDING)],
         "attn_norm_weight",
     );
     let wqkv = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(EMBEDDING), Extent::Static(qkv_dim)],
         "wqkv",
     );
     let wqkv_gate = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(EMBEDDING), Extent::Static(VALUE_DIM)],
         "wqkv_gate",
     );
     let conv_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(qkv_dim), Extent::Static(L_CACHE)],
         "conv_weight",
     );
     let conv_history_in = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(L_CACHE - 1), Extent::Static(qkv_dim)],
         "conv_history_in",
     );
     let ssm_beta = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(EMBEDDING), Extent::Static(num_v_heads)],
         "ssm_beta",
     );
     let ssm_alpha = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(EMBEDDING), Extent::Static(num_v_heads)],
         "ssm_alpha",
     );
     let ssm_dt_bias = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(num_v_heads)],
         "ssm_dt_bias",
     );
     let ssm_a = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(num_v_heads)],
         "ssm_a",
     );
     let ssm_norm_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(head_v_dim)],
         "ssm_norm_weight",
     );
     let ssm_out = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(VALUE_DIM), Extent::Static(EMBEDDING)],
         "ssm_out",
     );
     let state_in = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(head_k_dim),
             Extent::Static(head_v_dim),

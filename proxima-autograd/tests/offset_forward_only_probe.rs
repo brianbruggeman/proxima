@@ -18,7 +18,7 @@ fn leaf(
     op::append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape,
             name: Some(name.into()),
         },
@@ -36,7 +36,7 @@ async fn forward_only_anchored_offset_read_evaluates_the_right_slice() {
     let anchor = op::append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(2)],
             value: 0.0,
         },
@@ -53,7 +53,7 @@ async fn forward_only_anchored_offset_read_evaluates_the_right_slice() {
     let sliced = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: alloc::vec![(w, slice_map), (anchor, anchor_map)],
             name: None,
