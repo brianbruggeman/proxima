@@ -82,17 +82,17 @@ fn program(shape: &Shape, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     } = *shape;
     let mut program = Vec::new();
     let weight = input(&mut program, weight_dtype, &[experts, rows, k], "weight");
-    let route = input(&mut program, DType::Float32, &[sequence, selected], "route");
+    let route = input(&mut program, DType::FLOAT32, &[sequence, selected], "route");
     let activation = input(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         &[sequence, selected, k],
         "activation",
     );
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, expert_gather_map(route)),
@@ -104,7 +104,7 @@ fn program(shape: &Shape, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let folded = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -219,7 +219,7 @@ fn run(shape: &Shape, route: &[f32]) -> Outputs {
     let activation = unit_values(2000, shape.sequence * shape.selected * shape.k, -1.0, 1.0);
     let definition = definition_of_the_fold(shape, &slab, route, &activation);
 
-    let (reference_program, reference_output) = program(shape, DType::Float32);
+    let (reference_program, reference_output) = program(shape, DType::FLOAT32);
     let reference_named = named(QuantizedBlock::Float32(&slab), route, &activation);
     let mut free_buffers = Vec::new();
     let mut validated = None;
@@ -233,7 +233,7 @@ fn run(shape: &Shape, route: &[f32]) -> Outputs {
     )
     .expect("cpu evaluates the selection fold over the dequantized slab");
 
-    let (program, output) = program(shape, DType::UInt8);
+    let (program, output) = program(shape, DType::UINT8);
     let named = named(
         QuantizedBlock::Packed {
             codec: Codec::Q8_0,
@@ -402,7 +402,7 @@ fn an_expert_index_past_the_slab_raises_the_same_error_as_cpu() {
     dequantize(&stack, &mut slab).expect("the stack is whole q8_0 blocks");
     let activation = unit_values(2000, shape.sequence * shape.selected * shape.k, -1.0, 1.0);
 
-    let (reference_program, reference_output) = program(&shape, DType::Float32);
+    let (reference_program, reference_output) = program(&shape, DType::FLOAT32);
     let reference_named = named(QuantizedBlock::Float32(&slab), &route, &activation);
     let mut free_buffers = Vec::new();
     let mut validated = None;
@@ -422,7 +422,7 @@ fn an_expert_index_past_the_slab_raises_the_same_error_as_cpu() {
         panic!("cpu raised {cpu_error} instead of GatherIndexOutOfRange");
     };
 
-    let (program, output) = program(&shape, DType::UInt8);
+    let (program, output) = program(&shape, DType::UINT8);
     let named = named(
         QuantizedBlock::Packed {
             codec: Codec::Q8_0,

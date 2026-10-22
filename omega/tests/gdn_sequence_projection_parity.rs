@@ -21,13 +21,13 @@ fn qwen35_sequence_tail_projection_matches_cpu_on_packed_weight() {
     let mut program: Vec<Op> = Vec::new();
     let x = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(POSITIONS), Extent::Static(EMBED)],
         "x",
     );
     let delta = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(POSITIONS),
             Extent::Static(HEAD_DIM),
@@ -38,7 +38,7 @@ fn qwen35_sequence_tail_projection_matches_cpu_on_packed_weight() {
     );
     let z = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(POSITIONS),
             Extent::Static(KV_HEADS),
@@ -49,20 +49,20 @@ fn qwen35_sequence_tail_projection_matches_cpu_on_packed_weight() {
     );
     let head_eps = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(KV_HEADS), Extent::Static(GROUP)],
         "head_eps",
     );
     let inv_head_v_dim = scalar_constant(&mut program, 1.0 / HEAD_DIM as f32);
     let norm_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(HEAD_DIM)],
         "norm_weight",
     );
     let out_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(CONTRACTION as u32), Extent::Static(EMBED)],
         "out_weight",
     );

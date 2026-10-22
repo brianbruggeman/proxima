@@ -231,7 +231,7 @@ mod tests {
         proxima_tensor::op::append(
             program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(extent)],
                 name: Some(name.into()),
             },
@@ -249,7 +249,7 @@ mod tests {
         let diff = proxima_tensor::op::append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: proxima_tensor::op::ScalarOp::Subtract,
                 operands: vec![
                     (x, crate::expr::identity(1)),
@@ -261,7 +261,7 @@ mod tests {
         let squared = proxima_tensor::op::append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: proxima_tensor::op::ScalarOp::Multiply,
                 operands: vec![
                     (diff, crate::expr::identity(1)),
@@ -273,7 +273,7 @@ mod tests {
         let loss = proxima_tensor::op::append(
             &mut program,
             Op::Reduce(proxima_tensor::op::Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: proxima_tensor::op::ScalarOp::Add,
                 init: proxima_tensor::op::ReduceInit::Zero,
                 operand: squared,
@@ -323,7 +323,7 @@ mod tests {
         let diff = proxima_tensor::op::append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: proxima_tensor::op::ScalarOp::Subtract,
                 operands: vec![
                     (x, crate::expr::identity(1)),
@@ -335,7 +335,7 @@ mod tests {
         let squared = proxima_tensor::op::append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: proxima_tensor::op::ScalarOp::Multiply,
                 operands: vec![
                     (diff, crate::expr::identity(1)),
@@ -347,7 +347,7 @@ mod tests {
         let loss = proxima_tensor::op::append(
             &mut program,
             Op::Reduce(proxima_tensor::op::Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: proxima_tensor::op::ScalarOp::Add,
                 init: proxima_tensor::op::ReduceInit::Zero,
                 operand: squared,

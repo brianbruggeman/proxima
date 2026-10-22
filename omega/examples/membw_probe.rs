@@ -143,7 +143,7 @@ fn run_metal_arm() {
         let source = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(elements)],
                 name: None,
             },
@@ -151,7 +151,7 @@ fn run_metal_arm() {
         let copy = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Negate,
                 operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,

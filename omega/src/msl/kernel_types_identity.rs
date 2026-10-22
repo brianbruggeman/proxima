@@ -335,7 +335,7 @@ pub struct Grid2DSpec {
 /// let source = append(
 ///     &mut program,
 ///     Op::Input {
-///         dtype: DType::Float32,
+///         dtype: DType::FLOAT32,
 ///         shape: vec![Extent::Static(4)],
 ///         name: None,
 ///     },
@@ -343,7 +343,7 @@ pub struct Grid2DSpec {
 /// let activated = append(
 ///     &mut program,
 ///     Op::Elementwise {
-///         dtype: DType::Float32,
+///         dtype: DType::FLOAT32,
 ///         body: ScalarOp::Tanh,
 ///         operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
 ///         name: None,

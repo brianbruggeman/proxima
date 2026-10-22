@@ -146,7 +146,7 @@ pub(super) mod hyper_connection_tests {
         let mut program = Vec::new();
         let x = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Symbolic(0),
                 Extent::Static(hc as u32),
@@ -156,13 +156,13 @@ pub(super) mod hyper_connection_tests {
         );
         let w_norm = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(hc as u32), Extent::Static(embedding as u32)],
             "w_norm",
         );
         let w_down = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(hc as u32),
                 Extent::Static(embedding as u32),
@@ -172,7 +172,7 @@ pub(super) mod hyper_connection_tests {
         );
         let w_up = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(low_rank as u32),
                 Extent::Static(hc as u32),
@@ -183,7 +183,7 @@ pub(super) mod hyper_connection_tests {
         let w_inject = with_inject.then(|| {
             input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Static(hc as u32),
                     Extent::Static(embedding as u32),
@@ -193,7 +193,7 @@ pub(super) mod hyper_connection_tests {
             )
         });
         let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
-        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+        let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
         let inv_hc = scalar_constant(&mut program, 1.0 / hc as f32);
         let one = scalar_constant(&mut program, 1.0);
 
@@ -298,7 +298,7 @@ pub(super) mod hyper_connection_tests {
         let mut program = Vec::new();
         let residual = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Symbolic(0),
                 Extent::Static(hc as u32),
@@ -308,13 +308,13 @@ pub(super) mod hyper_connection_tests {
         );
         let block_out = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Symbolic(0), Extent::Static(embedding as u32)],
             "block_out",
         );
         let inject = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Symbolic(0), Extent::Static(hc as u32)],
             "inject",
         );
@@ -629,13 +629,13 @@ pub fn append_gated_attention_only_with_taps(
     // dense float32 activations just below.
     let qg_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->shci"), (wq_gate, "ihc->shci")],
     )?;
     let qg_raw = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         qg_product,
@@ -654,13 +654,13 @@ pub fn append_gated_attention_only_with_taps(
 
     let k_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->sudi"), (wk, "iud->sudi")],
     )?;
     let k_raw = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         k_product,
@@ -670,13 +670,13 @@ pub fn append_gated_attention_only_with_taps(
 
     let v_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->sudi"), (wv, "iud->sudi")],
     )?;
     let v_new = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         v_product,
@@ -706,7 +706,7 @@ pub fn append_gated_attention_only_with_taps(
     let group_map_i = alloc::format!("s,{group}*u+g,i->sugi");
     let q_first_grouped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (rotated_q_first, group_map_i.as_str()),
@@ -715,7 +715,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let q_second_grouped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (rotated_q_second, group_map_i.as_str()),
@@ -725,14 +725,14 @@ pub fn append_gated_attention_only_with_taps(
     let group_map_p = alloc::format!("s,{group}*u+g,p->sugp");
     let q_pass_grouped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(q_pass, group_map_p.as_str()), (group_ones, "ug->sugp")],
     )?;
 
     let score_cached_first_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (q_first_grouped, "sugi->stugi"),
@@ -741,7 +741,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_cached_first = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_cached_first_product,
@@ -750,7 +750,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_cached_second_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (q_second_grouped, "sugi->stugi"),
@@ -759,7 +759,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_cached_second = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_cached_second_product,
@@ -768,7 +768,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_cached_pass_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (q_pass_grouped, "sugp->stugp"),
@@ -777,7 +777,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_cached_pass = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_cached_pass_product,
@@ -786,7 +786,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_cached_rotated = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[
             (score_cached_first, "stug->stug"),
@@ -795,7 +795,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_cached = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[
             (score_cached_rotated, "stug->stug"),
@@ -804,7 +804,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_cached_scaled = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (score_cached, "stug->stug"),
@@ -825,19 +825,19 @@ pub fn append_gated_attention_only_with_taps(
     let cached_key_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Symbolic(1),
         },
     );
     let cached_len_exclusive_bound = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(cached_len, "->"), (ones, "->")],
     )?;
     let is_cached_padding = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[
             (cached_key_index, "t->t"),
@@ -846,7 +846,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_cached_scaled = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[
             (is_cached_padding, "t->stug"),
@@ -857,7 +857,7 @@ pub fn append_gated_attention_only_with_taps(
 
     let score_new_first_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (q_first_grouped, "sugi->swugi"),
@@ -866,7 +866,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_new_first = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_new_first_product,
@@ -875,7 +875,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_new_second_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (q_second_grouped, "sugi->swugi"),
@@ -884,7 +884,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_new_second = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_new_second_product,
@@ -893,13 +893,13 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_new_pass_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(q_pass_grouped, "sugp->swugp"), (k_pass, "wup->swugp")],
     )?;
     let score_new_pass = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_new_pass_product,
@@ -908,7 +908,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_new_rotated = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[
             (score_new_first, "swug->swug"),
@@ -917,7 +917,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_new = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[
             (score_new_rotated, "swug->swug"),
@@ -926,7 +926,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_new_scaled = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (score_new, "swug->swug"),
@@ -936,7 +936,7 @@ pub fn append_gated_attention_only_with_taps(
     let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
     let score_new_masked = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[
             (is_future, "sw->swug"),
@@ -947,7 +947,7 @@ pub fn append_gated_attention_only_with_taps(
 
     let score_max_cached = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         score_cached_scaled,
@@ -956,7 +956,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let score_max_new = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         score_new_masked,
@@ -965,14 +965,14 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let global_max = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         &[(score_max_cached, "sug->sug"), (score_max_new, "sug->sug")],
     )?;
 
     let shifted_cached = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[
             (score_cached_scaled, "stug->stug"),
@@ -981,26 +981,26 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let weights_cached = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(shifted_cached, "stug->stug")],
     )?;
     let shifted_new = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(score_new_masked, "swug->swug"), (global_max, "sug->swug")],
     )?;
     let weights_new = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(shifted_new, "swug->swug")],
     )?;
 
     let sum_cached = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         weights_cached,
@@ -1009,7 +1009,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let sum_new = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         weights_new,
@@ -1018,26 +1018,26 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let weight_sum = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(sum_cached, "sug->sug"), (sum_new, "sug->sug")],
     )?;
     let inv_weight_sum = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(weight_sum, "sug->sug")],
     )?;
 
     let attended_cached_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(weights_cached, "stug->stugd"), (v_cache, "tud->stugd")],
     )?;
     let attended_cached = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         attended_cached_product,
@@ -1046,13 +1046,13 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let attended_new_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(weights_new, "swug->swugd"), (v_new, "wud->swugd")],
     )?;
     let attended_new = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         attended_new_product,
@@ -1061,7 +1061,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let attended_sum = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[
             (attended_cached, "sugd->sugd"),
@@ -1070,7 +1070,7 @@ pub fn append_gated_attention_only_with_taps(
     )?;
     let attended = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(attended_sum, "sugd->sugd"), (inv_weight_sum, "sug->sugd")],
     )?;
@@ -1080,50 +1080,50 @@ pub fn append_gated_attention_only_with_taps(
     let group_map_d = alloc::format!("s,{group}*u+g,d->sugd");
     let gate_grouped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(gate_raw, group_map_d.as_str()), (group_ones, "ug->sugd")],
     )?;
     let neg_attn_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Negate,
         &[(gate_grouped, "sugd->sugd")],
     )?;
     let exp_neg_attn_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(neg_attn_gate, "sugd->sugd")],
     )?;
     let one_plus_exp_attn_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(exp_neg_attn_gate, "sugd->sugd"), (ones, "->sugd")],
     )?;
     let sigmoid_attn_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(one_plus_exp_attn_gate, "sugd->sugd")],
     )?;
     let gated_attended = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(attended, "sugd->sugd"), (sigmoid_attn_gate, "sugd->sugd")],
     )?;
 
     let wo_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(gated_attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
     )?;
     let attn_out = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         wo_product,
@@ -1133,7 +1133,7 @@ pub fn append_gated_attention_only_with_taps(
 
     let residual1 = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
     )?;
@@ -1234,13 +1234,13 @@ pub fn append_gated_attention_layer(
 
     let gate_product2 = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
     )?;
     let ffn_gate = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         gate_product2,
@@ -1249,13 +1249,13 @@ pub fn append_gated_attention_layer(
     )?;
     let up_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
     )?;
     let up = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         up_product,
@@ -1265,50 +1265,50 @@ pub fn append_gated_attention_layer(
 
     let neg_ffn_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Negate,
         &[(ffn_gate, "sg->sg")],
     )?;
     let exp_neg_ffn_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(neg_ffn_gate, "sg->sg")],
     )?;
     let one_plus_exp_ffn_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(exp_neg_ffn_gate, "sg->sg"), (ones, "->sg")],
     )?;
     let sigmoid_ffn_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(one_plus_exp_ffn_gate, "sg->sg")],
     )?;
     let silu_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(ffn_gate, "sg->sg"), (sigmoid_ffn_gate, "sg->sg")],
     )?;
     let ffn_hidden = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(silu_gate, "sg->sg"), (up, "sg->sg")],
     )?;
 
     let down_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
     )?;
     let ffn_out = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         down_product,
@@ -1318,7 +1318,7 @@ pub fn append_gated_attention_layer(
 
     let x_next = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(ffn_out, "sd->sd"), (residual1, "sd->sd")],
     )?;

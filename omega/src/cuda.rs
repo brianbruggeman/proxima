@@ -167,7 +167,7 @@ impl CudaGridSpec {
 /// let source = append(
 ///     &mut program,
 ///     Op::Input {
-///         dtype: DType::Float32,
+///         dtype: DType::FLOAT32,
 ///         shape: vec![Extent::Static(4)],
 ///         name: None,
 ///     },
@@ -175,7 +175,7 @@ impl CudaGridSpec {
 /// let activated = append(
 ///     &mut program,
 ///     Op::Elementwise {
-///         dtype: DType::Float32,
+///         dtype: DType::FLOAT32,
 ///         body: ScalarOp::Tanh,
 ///         operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
 ///         name: None,
@@ -902,23 +902,23 @@ pub(crate) fn cuda_float_literal(value: f32) -> String {
 #[cfg(not(feature = "float-layout-dtype"))]
 fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
     match dtype {
-        DType::Float16 => Ok("__half"),
-        DType::Float32
-        | DType::BFloat16
+        DType::FLOAT16 => Ok("__half"),
+        DType::FLOAT32
+        | DType::BFLOAT16
         | DType::Bool
-        | DType::Int8
-        | DType::UInt8
-        | DType::Int32
-        | DType::UInt32 => Ok("float"),
-        DType::Int16
-        | DType::UInt16
-        | DType::Int64
-        | DType::UInt64
-        | DType::Int128
-        | DType::UInt128
-        | DType::Float64
-        | DType::BFloat8
-        | DType::Fp6E3M2 => Err(EmitError::UnsupportedDType { node, dtype }),
+        | DType::INT8
+        | DType::UINT8
+        | DType::INT32
+        | DType::UINT32 => Ok("float"),
+        DType::INT16
+        | DType::UINT16
+        | DType::INT64
+        | DType::UINT64
+        | DType::INT128
+        | DType::UINT128
+        | DType::FLOAT64
+        | DType::BFLOAT8
+        | DType::FP6_E3_M2 => Err(EmitError::UnsupportedDType { node, dtype }),
     }
 }
 
@@ -928,19 +928,19 @@ fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
 #[cfg(feature = "float-layout-dtype")]
 fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
     match dtype {
-        DType::Float(layout) => Ok(match crate::msl::layout_render::hardware_type(&layout) {
+        DType::Layout(layout) => Ok(match crate::msl::layout_render::hardware_type(&layout) {
             Some("half") => "__half",
             Some("bfloat") => "__nv_bfloat16",
             _ => "float",
         }),
-        DType::Bool | DType::Int8 | DType::UInt8 | DType::Int32 | DType::UInt32 => Ok("float"),
-        DType::Int16
-        | DType::UInt16
-        | DType::Int64
-        | DType::UInt64
-        | DType::Int128
-        | DType::UInt128
-        | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }),
+        DType::Bool | DType::INT8 | DType::UINT8 | DType::INT32 | DType::UINT32 => Ok("float"),
+        DType::INT16
+        | DType::UINT16
+        | DType::INT64
+        | DType::UINT64
+        | DType::INT128
+        | DType::UINT128
+        | DType::FLOAT64 => Err(EmitError::UnsupportedDType { node, dtype }),
     }
 }
 
@@ -3106,7 +3106,7 @@ mod tests {
     fn attention_op_with(kind: BoundOpKind) -> BoundOp {
         BoundOp {
             node: NodeId(9),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: vec![1, 1, 8, 256],
             kind,
         }
@@ -3203,7 +3203,7 @@ mod tests {
         let source = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(extent)],
                 name: None,
             },
@@ -3211,7 +3211,7 @@ mod tests {
         append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Tanh,
                 operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
@@ -3243,11 +3243,11 @@ mod tests {
     fn leaf_iota_and_constant_emit_a_uniform_fill_kernel() {
         for leaf in [
             Op::Iota {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 extent: Extent::Static(8),
             },
             Op::Constant {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(8)],
                 value: 0.25,
             },
@@ -3281,7 +3281,7 @@ mod tests {
         };
         BoundOp {
             node: NodeId(100),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: vec![5],
             kind: BoundOpKind::MoeTopK {
                 operands: vec![(
@@ -3416,7 +3416,7 @@ mod tests {
         let lhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(rows), Extent::Static(cols)],
                 name: None,
             },
@@ -3424,7 +3424,7 @@ mod tests {
         append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: reduce_op,
                 init: ReduceInit::Zero,
                 operand: lhs,
@@ -3452,7 +3452,7 @@ mod tests {
         let weight = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(rows), Extent::Static(k)],
                 name: None,
             },
@@ -3460,7 +3460,7 @@ mod tests {
         let activation = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(k)],
                 name: None,
             },
@@ -3475,7 +3475,7 @@ mod tests {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands,
                 name: None,
@@ -3484,7 +3484,7 @@ mod tests {
         append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -3712,7 +3712,7 @@ mod tests {
         let source = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(extent)],
                 name: None,
             },
@@ -3720,7 +3720,7 @@ mod tests {
         append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: source,
@@ -3756,7 +3756,7 @@ mod tests {
         let table = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(vocab), Extent::Static(dim)],
                 name: None,
             },
@@ -3764,7 +3764,7 @@ mod tests {
         let ids = append(
             &mut program,
             Op::Input {
-                dtype: DType::Int32,
+                dtype: DType::INT32,
                 shape: vec![Extent::Static(seq)],
                 name: None,
             },
@@ -3788,7 +3788,7 @@ mod tests {
         append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Identity,
                 operands: vec![(table, gathered_map)],
                 name: None,
@@ -3856,7 +3856,7 @@ mod tests {
         let weight = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(block_elements as u32)],
                 name: None,
             },
@@ -3864,7 +3864,7 @@ mod tests {
         append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Identity,
                 operands: vec![(weight, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
@@ -3902,7 +3902,7 @@ mod tests {
         let table = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(vocab), Extent::Static(width)],
                 name: None,
             },
@@ -3918,7 +3918,7 @@ mod tests {
         let ids = append(
             &mut program,
             Op::Input {
-                dtype: DType::Int32,
+                dtype: DType::INT32,
                 shape: index_shape,
                 name: None,
             },
@@ -3942,7 +3942,7 @@ mod tests {
         let activation = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(seq), Extent::Static(width)],
                 name: None,
             },
@@ -3950,7 +3950,7 @@ mod tests {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (table, gathered_map),
@@ -3962,7 +3962,7 @@ mod tests {
         append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -4166,7 +4166,7 @@ mod tests {
         let source = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float16,
+                dtype: DType::FLOAT16,
                 shape: vec![Extent::Static(4)],
                 name: None,
             },
@@ -4174,7 +4174,7 @@ mod tests {
         append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float16,
+                dtype: DType::FLOAT16,
                 body: ScalarOp::Tanh,
                 operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
@@ -4200,7 +4200,7 @@ mod tests {
         let source = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float64,
+                dtype: DType::FLOAT64,
                 shape: vec![Extent::Static(4)],
                 name: None,
             },
@@ -4208,7 +4208,7 @@ mod tests {
         append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float64,
+                dtype: DType::FLOAT64,
                 body: ScalarOp::Tanh,
                 operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
@@ -4315,7 +4315,7 @@ mod tests {
         let lhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(rows), Extent::Static(cols)],
                 name: None,
             },
@@ -4323,7 +4323,7 @@ mod tests {
         let reduce = append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: lhs,
@@ -4336,7 +4336,7 @@ mod tests {
         let bias = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(rows)],
                 name: None,
             },
@@ -4344,7 +4344,7 @@ mod tests {
         let consumer = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 operands: vec![
                     (reduce, IndexMap::Affine(map::projection(1, &[0]))),

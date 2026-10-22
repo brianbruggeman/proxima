@@ -337,7 +337,7 @@ pub fn lower_graph_pinned_decoded(
         let dtype = if graph_input_feeds_gather_indices(graph, input.name) {
             value_info_dtype(input)
         } else {
-            DType::Float32
+            DType::FLOAT32
         };
         let node = append(
             &mut program,
@@ -410,7 +410,7 @@ pub fn lower_graph_pinned_decoded(
                 let id = append(
                     &mut program,
                     Op::Input {
-                        dtype: DType::Float32,
+                        dtype: DType::FLOAT32,
                         shape: shape
                             .iter()
                             .map(|&extent| Extent::Static(extent as u32))
@@ -699,7 +699,7 @@ fn constant_scalar(program: &mut Vec<Op>, value: f32) -> NodeId {
     append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value,
         },
@@ -714,7 +714,7 @@ fn build_elementwise(
     append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands,
             name: None,
@@ -734,7 +734,7 @@ fn build_reduce(
     append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             init,
             operand,
@@ -1410,7 +1410,7 @@ fn materialize_reshape_split(
         let position = append(
             program,
             Op::Iota {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 extent: Extent::Static(extent as u32),
             },
         );
@@ -1457,7 +1457,7 @@ fn materialize_reshape_split(
     }
     let combined = build_elementwise_dtype(
         program,
-        DType::Int32,
+        DType::INT32,
         ScalarOp::Identity,
         alloc::vec![(
             combined,
@@ -2102,13 +2102,13 @@ fn lower_gather(
     let indices_dtype = program
         .get(indices.node.0 as usize)
         .map(proxima_tensor::Op::dtype)
-        .unwrap_or(DType::Float32);
-    let indices_node = if indices_dtype == DType::Int32 {
+        .unwrap_or(DType::FLOAT32);
+    let indices_node = if indices_dtype == DType::INT32 {
         indices.node
     } else {
         build_elementwise_dtype(
             program,
-            DType::Int32,
+            DType::INT32,
             ScalarOp::Identity,
             alloc::vec![(
                 indices.node,
@@ -2126,7 +2126,7 @@ fn lower_gather(
     let id = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: alloc::vec![(data.node, gathered_map)],
             name: None,
@@ -2280,7 +2280,7 @@ fn lower_constant(
     let id = append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: shape
                 .iter()
                 .map(|&extent| Extent::Static(extent as u32))
@@ -3027,7 +3027,7 @@ fn lower_pow(
             append(
                 program,
                 Op::Constant {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: base
                         .shape
                         .iter()
@@ -3103,8 +3103,8 @@ fn lower_cast(
         reason: "Cast node has no \"to\" attribute".to_string(),
     })?;
     let dtype = match to {
-        1 => DType::Float32,
-        6 | 7 => DType::Int32,
+        1 => DType::FLOAT32,
+        6 | 7 => DType::INT32,
         other => {
             return Err(LowerError::UnsupportedShape {
                 name: node.name.to_string(),
@@ -3338,7 +3338,7 @@ fn lower_slice(
         let id = append(
             program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: out_shape
                     .iter()
                     .map(|&extent| Extent::Static(extent as u32))
@@ -3849,7 +3849,7 @@ fn concat_pair(
     let position = append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(out_extent as u32),
         },
     );
@@ -3860,7 +3860,7 @@ fn concat_pair(
 
     let lhs_index = build_elementwise_dtype(
         program,
-        DType::Int32,
+        DType::INT32,
         ScalarOp::Minimum,
         alloc::vec![
             (position, IndexMap::Affine(identity_pattern(1))),
@@ -3891,7 +3891,7 @@ fn concat_pair(
     );
     let rhs_index = build_elementwise_dtype(
         program,
-        DType::Int32,
+        DType::INT32,
         ScalarOp::Minimum,
         alloc::vec![
             (
@@ -3928,7 +3928,7 @@ fn concat_pair(
     let lhs_gathered = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: alloc::vec![(lhs.node, lhs_gathered_map)],
             name: None,
@@ -3944,7 +3944,7 @@ fn concat_pair(
     let rhs_gathered = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: alloc::vec![(rhs.node, rhs_gathered_map)],
             name: None,
@@ -4034,7 +4034,7 @@ fn pad_axis(
     let position = append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(out_extent as u32),
         },
     );
@@ -4062,7 +4062,7 @@ fn pad_axis(
     );
     let clamped_index = build_elementwise_dtype(
         program,
-        DType::Int32,
+        DType::INT32,
         ScalarOp::Minimum,
         alloc::vec![
             (clamped_low, IndexMap::Affine(identity_pattern(1))),
@@ -4165,7 +4165,7 @@ fn slice_axis_range(
     let position = append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(length as u32),
         },
     );
@@ -4180,7 +4180,7 @@ fn slice_axis_range(
     );
     let index = build_elementwise_dtype(
         program,
-        DType::Int32,
+        DType::INT32,
         ScalarOp::Identity,
         alloc::vec![(shifted, IndexMap::Affine(identity_pattern(1)))],
     );
@@ -4249,7 +4249,7 @@ fn reverse_axis(program: &mut Vec<Op>, value: &Value, axis: usize) -> Value {
     let position = append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(extent as u32),
         },
     );
@@ -4267,7 +4267,7 @@ fn reverse_axis(program: &mut Vec<Op>, value: &Value, axis: usize) -> Value {
     );
     let index = build_elementwise_dtype(
         program,
-        DType::Int32,
+        DType::INT32,
         ScalarOp::Identity,
         alloc::vec![(reversed, IndexMap::Affine(identity_pattern(1)))],
     );
@@ -4597,21 +4597,21 @@ fn scatter_mask_axis(
     let out_pos = append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(out_extent as u32),
         },
     );
     let in_pos = append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(in_extent as u32),
         },
     );
     let kernel_pos = append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(kernel_extent as u32),
         },
     );
@@ -4918,7 +4918,7 @@ fn window_materialize(program: &mut Vec<Op>, image: &Value, spec: WindowSpec) ->
     let stamp = append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![spec.out_h, spec.out_w, spec.kernel_h, spec.kernel_w]
                 .iter()
                 .map(|&extent| Extent::Static(extent as u32))
@@ -4987,7 +4987,7 @@ fn window_materialize1d(
     let stamp = append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![out_w, kernel_w]
                 .iter()
                 .map(|&extent| Extent::Static(extent as u32))
@@ -5058,7 +5058,7 @@ fn window_materialize3d(
     let stamp = append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![out_d, out_h, out_w, kernel_d, kernel_h, kernel_w]
                 .iter()
                 .map(|&extent| Extent::Static(extent as u32))
@@ -6436,7 +6436,7 @@ fn coordinate_image(program: &mut Vec<Op>, shape: &[u64], axis: u16) -> Value {
     let ones = append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: shape
                 .iter()
                 .map(|&value| Extent::Static(value as u32))
@@ -6447,7 +6447,7 @@ fn coordinate_image(program: &mut Vec<Op>, shape: &[u64], axis: u16) -> Value {
     let iota = append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(extent as u32),
         },
     );
@@ -6527,7 +6527,7 @@ fn maxpool_indices(
     let full_stamp = append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![
                 n,
                 channels,
@@ -6545,7 +6545,7 @@ fn maxpool_indices(
     let n_iota = append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(n as u32),
         },
     );
@@ -6560,7 +6560,7 @@ fn maxpool_indices(
     let c_iota = append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(channels as u32),
         },
     );
@@ -6752,7 +6752,7 @@ fn valid_window_count(
     let ones = append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: image_shape
                 .iter()
                 .map(|&extent| Extent::Static(extent as u32))
@@ -7091,7 +7091,7 @@ fn valid_window_count3d(
     let ones = append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: image_shape
                 .iter()
                 .map(|&extent| Extent::Static(extent as u32))
@@ -7210,17 +7210,17 @@ fn tensor_shape(tensor: &TensorProto<'_>) -> Vec<u64> {
 
 /// This crate's `Op::Input::dtype` for a wire `TensorProto.DataType`/
 /// `TypeProto.Tensor.elem_type` value -- `Int32`/`Int64` become
-/// [`DType::Int32`] (the dtype [`crate::map::IndexMap::Computed`]'s own doc
+/// [`DType::INT32`] (the dtype [`crate::map::IndexMap::Computed`]'s own doc
 /// requires for a gather's `indices` operand), everything this pass
-/// understands numerically otherwise becomes [`DType::Float32`]: every
+/// understands numerically otherwise becomes [`DType::FLOAT32`]: every
 /// backend this crate's evaluator ships carries every buffer as f32
 /// regardless of logical dtype (see [`decode_numeric_tensor`]), so `dtype`
 /// here is purely the shape-inference-time integer/float distinction, never
 /// a storage format choice.
 fn onnx_dtype_to_op_dtype(data_type: i32) -> DType {
     match data_type {
-        6 | 7 => DType::Int32,
-        _ => DType::Float32,
+        6 | 7 => DType::INT32,
+        _ => DType::FLOAT32,
     }
 }
 
@@ -7289,16 +7289,16 @@ fn decode_numeric_tensor(tensor: &TensorProto<'_>) -> Result<Vec<f32>, LowerErro
 }
 
 /// A graph input's declared dtype, via [`onnx_dtype_to_op_dtype`] --
-/// defaults to [`DType::Float32`] if the type is missing or not a plain
+/// defaults to [`DType::FLOAT32`] if the type is missing or not a plain
 /// tensor, matching [`value_info_shape`]'s own error path shape (a caller
 /// that needs the strict form gets [`LowerError::UnsupportedShape`] from
 /// that function regardless).
 fn value_info_dtype(value_info: &ValueInfoProto<'_>) -> DType {
     let Some(type_proto) = value_info.r#type.as_ref() else {
-        return DType::Float32;
+        return DType::FLOAT32;
     };
     let Some(TypeValue::Tensor(tensor_type)) = type_proto.value.as_ref() else {
-        return DType::Float32;
+        return DType::FLOAT32;
     };
     onnx_dtype_to_op_dtype(tensor_type.elem_type)
 }

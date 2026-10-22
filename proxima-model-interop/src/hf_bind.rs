@@ -11,7 +11,7 @@
 //! and a declared dtype -- the only genuinely new work here is (a) mapping
 //! HF's per-tensor names (`model.layers.0.self_attn.q_proj.weight`) to the
 //! same weight slots GGUF's `blk.0.attn_q.weight` fills, and (b) decoding
-//! [`DType::Float16`]/[`DType::BFloat16`] (safetensors' own on-disk element
+//! [`DType::FLOAT16`]/[`DType::BFLOAT16`] (safetensors' own on-disk element
 //! types for an unquantized bf16/fp16 checkpoint), which `bind.rs`'s GGUF
 //! path has never needed since no GGUF checkpoint this crate has evaluated
 //! stores `F16`/`Bf16` weights.
@@ -369,8 +369,8 @@ fn expert_row_part<T: Copy>(
 #[cfg(not(feature = "float-layout-dtype"))]
 fn expert_stack_codec(dtype: DType) -> Option<Codec> {
     match dtype {
-        DType::BFloat16 => Some(Codec::BFloat16),
-        DType::Float16 => Some(Codec::Float16),
+        DType::BFLOAT16 => Some(Codec::BFloat16),
+        DType::FLOAT16 => Some(Codec::Float16),
         _ => None,
     }
 }
@@ -379,7 +379,7 @@ fn expert_stack_codec(dtype: DType) -> Option<Codec> {
 /// gathered kernel serves; every other layout keeps the dequantize-and-transpose path.
 #[cfg(feature = "float-layout-dtype")]
 fn expert_stack_codec(dtype: DType) -> Option<Codec> {
-    let DType::Float(layout) = dtype else {
+    let DType::Layout(layout) = dtype else {
         return None;
     };
     [Codec::BFloat16, Codec::Float16].into_iter().find(|codec| {
@@ -689,7 +689,7 @@ fn bind_safetensors_leaf<'file>(
         };
         weights.resident_bytes += output.len() * core::mem::size_of::<f32>();
         weights.owned.push((leaf.into(), output));
-    } else if role == Role::InOut && dtype == DType::Float32 {
+    } else if role == Role::InOut && dtype == DType::FLOAT32 {
         let decoded = reinterpret_f32(bytes);
         let output = transpose_out_in_to_in_out(
             &decoded,
@@ -709,7 +709,7 @@ fn bind_safetensors_leaf<'file>(
             });
         }
         weights.packed.push((leaf.into(), packed));
-    } else if dtype == DType::Float32 {
+    } else if dtype == DType::FLOAT32 {
         if let Some(view) = aligned_f32_view(bytes) {
             weights.resident_bytes += core::mem::size_of_val(view);
             weights
@@ -730,9 +730,9 @@ fn bind_safetensors_leaf<'file>(
 
 /// Zero-copy counterpart to [`safetensors_tensor_as_f32`], mirroring
 /// [`crate::bind::gguf_tensor_as_packed_block`]: borrows `name`'s raw bytes
-/// straight out of `file_bytes` for [`DType::Float32`] (alignment-checked,
-/// same reasoning as the GGUF path), [`DType::Float16`], or
-/// [`DType::BFloat16`] -- safetensors never block-quantizes, so every
+/// straight out of `file_bytes` for [`DType::FLOAT32`] (alignment-checked,
+/// same reasoning as the GGUF path), [`DType::FLOAT16`], or
+/// [`DType::BFLOAT16`] -- safetensors never block-quantizes, so every
 /// mapped dtype here is a flat per-element scalar array with no sub-block
 /// scale to unpack, unlike GGUF's `Q4_K`/`Q5_K`/`Q6_K`.
 ///
@@ -750,18 +750,18 @@ pub(crate) fn safetensors_tensor_as_packed_block<'file>(
 ) -> Result<QuantizedBlock<'file>, InteropError> {
     let entry = find_entry(manifest, name)?;
     let bytes = tensor_bytes(file_bytes, data_start, entry)?;
-    if entry.dtype == DType::Float32 {
+    if entry.dtype == DType::FLOAT32 {
         aligned_f32_view(bytes)
             .map(QuantizedBlock::Float32)
             .ok_or_else(|| InteropError::MisalignedFloat32Tensor {
                 tensor: entry.name.clone(),
             })
-    } else if entry.dtype == DType::Float16 {
+    } else if entry.dtype == DType::FLOAT16 {
         Ok(QuantizedBlock::Packed {
             codec: Codec::Float16,
             bytes,
         })
-    } else if entry.dtype == DType::BFloat16 {
+    } else if entry.dtype == DType::BFLOAT16 {
         Ok(QuantizedBlock::Packed {
             codec: Codec::BFloat16,
             bytes,
@@ -795,11 +795,11 @@ pub(crate) fn safetensors_tensor_as_f32(
     let entry = find_entry(manifest, name)?;
     let bytes = tensor_bytes(file_bytes, data_start, entry)?;
     let element_count = entry.shape.iter().product::<u64>() as usize;
-    if entry.dtype == DType::Float32 {
+    if entry.dtype == DType::FLOAT32 {
         Ok(reinterpret_f32(bytes))
-    } else if entry.dtype == DType::Float16 {
+    } else if entry.dtype == DType::FLOAT16 {
         dequantize(bytes, element_count, proxima_gguf::quant::f16::dequantize)
-    } else if entry.dtype == DType::BFloat16 {
+    } else if entry.dtype == DType::BFLOAT16 {
         dequantize(bytes, element_count, proxima_gguf::quant::bf16::dequantize)
     } else {
         Err(InteropError::UndecodableSafetensorsDType {
@@ -1543,16 +1543,16 @@ mod tests {
         };
 
         assert_eq!(
-            expert_stack_codec(DType::Float(binary16_by_fields)),
+            expert_stack_codec(DType::Layout(binary16_by_fields)),
             Some(Codec::Float16)
         );
         assert_eq!(
-            expert_stack_codec(DType::Float(brain16_by_fields)),
+            expert_stack_codec(DType::Layout(brain16_by_fields)),
             Some(Codec::BFloat16)
         );
-        assert_eq!(expert_stack_codec(DType::Float(FloatLayout::BF32)), None);
-        assert_eq!(expert_stack_codec(DType::Float(unnamed)), None);
-        assert_eq!(expert_stack_codec(DType::Int32), None);
+        assert_eq!(expert_stack_codec(DType::Layout(FloatLayout::BF32)), None);
+        assert_eq!(expert_stack_codec(DType::Layout(unnamed)), None);
+        assert_eq!(expert_stack_codec(DType::INT32), None);
     }
 
     fn f32_bytes(values: &[f32]) -> Vec<u8> {
@@ -1635,7 +1635,7 @@ mod tests {
                 let elements = bytes.len() / 4;
                 TensorPayload {
                     name: name.clone(),
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: vec![elements as u64],
                     data: bytes.as_slice(),
                 }
@@ -1890,7 +1890,7 @@ mod tests {
                 let elements = bytes.len() / 4;
                 TensorPayload {
                     name: name.clone(),
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: vec![elements as u64],
                     data: bytes.as_slice(),
                 }
@@ -1928,7 +1928,7 @@ mod tests {
             .collect();
         let tensors = vec![TensorPayload {
             name: names::embed_tokens(),
-            dtype: DType::BFloat16,
+            dtype: DType::BFLOAT16,
             shape: vec![vocab as u64, embedding as u64],
             data: bytes.as_slice(),
         }];
@@ -2013,7 +2013,7 @@ mod tests {
             .iter()
             .map(|(name, bytes)| TensorPayload {
                 name: name.clone(),
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![(bytes.len() / 4) as u64],
                 data: bytes.as_slice(),
             })
@@ -2080,13 +2080,13 @@ mod tests {
             let tensors = vec![
                 TensorPayload {
                     name: "dummy_padding".into(),
-                    dtype: DType::Int8,
+                    dtype: DType::INT8,
                     shape: vec![padding],
                     data: dummy_bytes.as_slice(),
                 },
                 TensorPayload {
                     name: names::q_proj(0),
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: vec![(embedding * embedding - 1) as u64],
                     data: bad_q_proj.as_slice(),
                 },
@@ -2189,13 +2189,13 @@ mod tests {
                 let tensors = vec![
                     TensorPayload {
                         name: "dummy_padding".into(),
-                        dtype: DType::Int8,
+                        dtype: DType::INT8,
                         shape: vec![padding],
                         data: dummy_bytes.as_slice(),
                     },
                     TensorPayload {
                         name: "model.layers.0.mlp.gate_proj.weight".into(),
-                        dtype: DType::Float32,
+                        dtype: DType::FLOAT32,
                         shape: vec![out_dim as u64, in_dim as u64],
                         data: bytes.as_slice(),
                     },
@@ -2254,7 +2254,7 @@ mod tests {
         let activation_node = proxima_tensor::op::append(
             &mut program,
             proxima_tensor::op::Op::Input {
-                dtype: proxima_tensor::dtype::DType::Float32,
+                dtype: proxima_tensor::dtype::DType::FLOAT32,
                 shape: alloc::vec![proxima_tensor::op::Extent::Static(in_dim as u32)],
                 name: Some("activation".into()),
             },
@@ -2262,7 +2262,7 @@ mod tests {
         let weight_node = proxima_tensor::op::append(
             &mut program,
             proxima_tensor::op::Op::Input {
-                dtype: proxima_tensor::dtype::DType::Float32,
+                dtype: proxima_tensor::dtype::DType::FLOAT32,
                 shape: alloc::vec![
                     proxima_tensor::op::Extent::Static(in_dim as u32),
                     proxima_tensor::op::Extent::Static(out_dim as u32)
@@ -2273,7 +2273,7 @@ mod tests {
         let product = proxima_tensor::op::append(
             &mut program,
             proxima_tensor::op::Op::Elementwise {
-                dtype: proxima_tensor::dtype::DType::Float32,
+                dtype: proxima_tensor::dtype::DType::FLOAT32,
                 body: proxima_tensor::op::ScalarOp::Multiply,
                 operands: alloc::vec![
                     (
@@ -2297,7 +2297,7 @@ mod tests {
         let logits = proxima_tensor::op::append(
             &mut program,
             proxima_tensor::op::Op::Reduce(proxima_tensor::op::Reduce {
-                dtype: proxima_tensor::dtype::DType::Float32,
+                dtype: proxima_tensor::dtype::DType::FLOAT32,
                 body: proxima_tensor::op::ScalarOp::Add,
                 init: proxima_tensor::op::ReduceInit::Zero,
                 operand: product,

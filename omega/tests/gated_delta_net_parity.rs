@@ -46,7 +46,7 @@ fn leaf(program: &mut Vec<Op>, shape: &[usize]) -> NodeId {
     append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: shape
                 .iter()
                 .map(|extent| Extent::Static(*extent as u32))
@@ -65,14 +65,14 @@ fn broadcast_kv_heads(program: &mut Vec<Op>, x: NodeId, kv_heads: u32, group: u3
     let donor = append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(kv_heads), Extent::Static(group)],
             value: 1.0,
         },
     );
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, "ui->iug"), (donor, "ug->iug")],
     )
@@ -109,7 +109,7 @@ fn synthetic_gated_delta_net_gqa_program(
     let inv_sqrt_key_dim = append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 1.0 / (head_k_dim as f32).sqrt(),
         },

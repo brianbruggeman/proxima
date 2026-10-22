@@ -175,7 +175,7 @@ mod tests {
         proxima_tensor::op::append(
             program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(extent)],
                 name: Some(name.into()),
             },
@@ -187,7 +187,7 @@ mod tests {
         let mut program = Vec::new();
         let pred = leaf(&mut program, "pred", 3);
         let target = leaf(&mut program, "target", 3);
-        let out = mse(&mut program, DType::Float32, pred, target, 1, 3);
+        let out = mse(&mut program, DType::FLOAT32, pred, target, 1, 3);
 
         let pred_values = [1.0f32, 2.0, 3.0];
         let target_values = [1.5f32, 2.5, 2.0];
@@ -209,7 +209,7 @@ mod tests {
         let mut program = Vec::new();
         let probs = leaf(&mut program, "probs", 3);
         let one_hot = leaf(&mut program, "one_hot", 3);
-        let out = cross_entropy(&mut program, DType::Float32, probs, one_hot, 1);
+        let out = cross_entropy(&mut program, DType::FLOAT32, probs, one_hot, 1);
 
         let probs_values = [0.2f32, 0.5, 0.3];
         let one_hot_values = [0.0f32, 1.0, 0.0];
@@ -233,7 +233,7 @@ mod tests {
         let logits = leaf(&mut logits_program, "logits", 3);
         let one_hot = leaf(&mut logits_program, "one_hot", 3);
         let fused =
-            softmax_cross_entropy(&mut logits_program, DType::Float32, logits, one_hot, 1, 0);
+            softmax_cross_entropy(&mut logits_program, DType::FLOAT32, logits, one_hot, 1, 0);
 
         let logits_values = [1.0f32, 2.0, 3.0];
         let one_hot_values = [0.0f32, 0.0, 1.0];
@@ -248,9 +248,9 @@ mod tests {
 
         let mut split_program = Vec::new();
         let split_logits = leaf(&mut split_program, "logits", 3);
-        let probs = activation::softmax(&mut split_program, DType::Float32, split_logits, 1, 0);
+        let probs = activation::softmax(&mut split_program, DType::FLOAT32, split_logits, 1, 0);
         let split_one_hot = leaf(&mut split_program, "one_hot", 3);
-        let split_loss = cross_entropy(&mut split_program, DType::Float32, probs, split_one_hot, 1);
+        let split_loss = cross_entropy(&mut split_program, DType::FLOAT32, probs, split_one_hot, 1);
         let split_evaluated = proxima_tensor::cpu::evaluate_named(
             &split_program,
             &[],
@@ -277,7 +277,7 @@ mod tests {
         let mut program = Vec::new();
         let pred = leaf(&mut program, "pred", 3);
         let target = leaf(&mut program, "target", 3);
-        let loss = mse(&mut program, DType::Float32, pred, target, 1, 3);
+        let loss = mse(&mut program, DType::FLOAT32, pred, target, 1, 3);
 
         let differentiated =
             crate::adjoint::differentiate(&program, loss).expect("scalar loss differentiates");
@@ -335,7 +335,7 @@ mod tests {
         let mut program = Vec::new();
         let logits = leaf(&mut program, "logits", 3);
         let one_hot = leaf(&mut program, "one_hot", 3);
-        let loss = softmax_cross_entropy(&mut program, DType::Float32, logits, one_hot, 1, 0);
+        let loss = softmax_cross_entropy(&mut program, DType::FLOAT32, logits, one_hot, 1, 0);
 
         let differentiated =
             crate::adjoint::differentiate(&program, loss).expect("scalar loss differentiates");
@@ -404,7 +404,7 @@ mod tests {
         let mut program = Vec::new();
         let logits = leaf(&mut program, "logits", 3);
         let one_hot = leaf(&mut program, "one_hot", 3);
-        let loss = softmax_cross_entropy(&mut program, DType::Float32, logits, one_hot, 1, 0);
+        let loss = softmax_cross_entropy(&mut program, DType::FLOAT32, logits, one_hot, 1, 0);
 
         let differentiated =
             crate::adjoint::differentiate(&program, loss).expect("scalar loss differentiates");

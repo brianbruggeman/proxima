@@ -54,14 +54,14 @@ pub(super) fn causal_conv1d_with_history(
     let sequence_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Symbolic(0),
         },
     );
     let tap_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(l_cache),
         },
     );
@@ -69,13 +69,13 @@ pub(super) fn causal_conv1d_with_history(
 
     let sequence_plus_tap = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(sequence_index, "s->sl"), (tap_index, "l->sl")],
     )?;
     let raw_position = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(sequence_plus_tap, "sl->sl"), (window_offset, "->sl")],
     )?;
@@ -99,7 +99,7 @@ pub(super) fn causal_conv1d_with_history(
     let candidate_axis = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(2),
         },
     );
@@ -116,20 +116,20 @@ pub(super) fn causal_conv1d_with_history(
     let zero_wide = op::append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Symbolic(0), Extent::Static(l_cache)],
             value: 0.0,
         },
     );
     let is_raw_slot = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Equal,
         &[(candidate_axis, "c->slc"), (zero_wide, "sl->slc")],
     )?;
     let candidate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[
             (is_raw_slot, "slc->slc"),
@@ -139,7 +139,7 @@ pub(super) fn causal_conv1d_with_history(
     )?;
     let clamped_position = reduce(
         program,
-        DType::Int32,
+        DType::INT32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         candidate,
@@ -150,7 +150,7 @@ pub(super) fn causal_conv1d_with_history(
     let negative_one = scalar_constant(program, -1.0);
     let is_valid = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[(raw_position, "sl->sl"), (negative_one, "->sl")],
     )?;
@@ -174,7 +174,7 @@ pub(super) fn causal_conv1d_with_history(
     let windowed = op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: alloc::vec![(x, gathered_map.clone())],
             name: None,
@@ -186,7 +186,7 @@ pub(super) fn causal_conv1d_with_history(
         // the other taps gather row zero so both select operands stay in bounds.
         let history_position = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Select,
             &[
                 (is_valid, "sl->sl"),
@@ -196,7 +196,7 @@ pub(super) fn causal_conv1d_with_history(
         )?;
         let history_position = reduce(
             program,
-            DType::Int32,
+            DType::INT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             history_position,
@@ -210,7 +210,7 @@ pub(super) fn causal_conv1d_with_history(
         let history_window = op::append(
             program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Identity,
                 operands: alloc::vec![(history, history_map)],
                 name: None,
@@ -218,7 +218,7 @@ pub(super) fn causal_conv1d_with_history(
         );
         elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(history_window, "sld->sld"), (weight, "dl->sld")],
         )?
@@ -241,13 +241,13 @@ pub(super) fn causal_conv1d_with_history(
     // `Op::Input` shape the same way.
     let tap_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(windowed, "sld->sld"), (weight, "dl->sld")],
     )?;
     let masked_tap = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[
             (is_valid, "sl->sld"),
@@ -257,7 +257,7 @@ pub(super) fn causal_conv1d_with_history(
     )?;
     reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         masked_tap,
@@ -295,13 +295,13 @@ pub fn causal_conv1d_step(
     let last_slot = scalar_constant(program, (l_cache - 1) as f32);
     let lower_clamped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         &[(cache_position, "->"), (zero, "->")],
     )?;
     let write_slot = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Minimum,
         &[(lower_clamped, "->"), (last_slot, "->")],
     )?;
@@ -323,43 +323,43 @@ pub fn causal_conv1d_step(
             ],
         },
         1,
-        DType::Float32,
+        DType::FLOAT32,
     );
 
     let tap_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(l_cache),
         },
     );
     let true_mask = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Equal,
         &[(zero, "->"), (zero, "->")],
     )?;
     let zero_wide = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[(true_mask, "->dl"), (zero, "->dl"), (state_in, "dl->dl")],
     )?;
     let tap_index_wide = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(tap_index, "l->dl"), (zero_wide, "dl->dl")],
     )?;
     let is_write_slot = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Equal,
         &[(tap_index_wide, "dl->dl"), (write_slot, "->dl")],
     )?;
     let state_out = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[
             (is_write_slot, "dl->dl"),
@@ -369,13 +369,13 @@ pub fn causal_conv1d_step(
     )?;
     let tap_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(state_out, "dl->dl"), (weight, "dl->dl")],
     )?;
     let mut conv_out = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         tap_product,
@@ -385,7 +385,7 @@ pub fn causal_conv1d_step(
     if let Some(bias_node) = bias {
         conv_out = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             &[(conv_out, "d->d"), (bias_node, "d->d")],
         )?;
@@ -411,14 +411,14 @@ pub fn causal_conv1d_prefill_state(
     let sequence_position = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(l_cache),
         },
     );
     let start_position = scalar_constant(program, prefill_len.get() as f32 - l_cache as f32);
     let raw_position = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(sequence_position, "l->l"), (start_position, "->l")],
     )?;
@@ -426,7 +426,7 @@ pub fn causal_conv1d_prefill_state(
     let candidate_position = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(2),
         },
     );
@@ -434,20 +434,20 @@ pub fn causal_conv1d_prefill_state(
     let zero_candidates = op::append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(l_cache), Extent::Static(2)],
             value: 0.0,
         },
     );
     let is_raw_candidate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Equal,
         &[(candidate_position, "c->lc"), (zero_candidates, "lc->lc")],
     )?;
     let candidate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[
             (is_raw_candidate, "lc->lc"),
@@ -457,7 +457,7 @@ pub fn causal_conv1d_prefill_state(
     )?;
     let gather_position = reduce(
         program,
-        DType::Int32,
+        DType::INT32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         candidate,
@@ -468,7 +468,7 @@ pub fn causal_conv1d_prefill_state(
     let negative_one = scalar_constant(program, -1.0);
     let has_prefill_value = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[(raw_position, "l->l"), (negative_one, "->l")],
     )?;
@@ -489,12 +489,12 @@ pub fn causal_conv1d_prefill_state(
             ],
         },
         0,
-        DType::Float32,
+        DType::FLOAT32,
     );
 
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[
             (has_prefill_value, "l->dl"),
@@ -645,13 +645,13 @@ fn append_short_conv_mixer_with_gated_input(
 
     let branch_b_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "sd->sdg"), (b_proj, "dg->sdg")],
     )?;
     let branch_b = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         branch_b_product,
@@ -661,13 +661,13 @@ fn append_short_conv_mixer_with_gated_input(
 
     let branch_x_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "sd->sdg"), (x_proj, "dg->sdg")],
     )?;
     let branch_x = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         branch_x_product,
@@ -677,13 +677,13 @@ fn append_short_conv_mixer_with_gated_input(
 
     let branch_c_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "sd->sdg"), (c_proj, "dg->sdg")],
     )?;
     let branch_c = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         branch_c_product,
@@ -693,27 +693,27 @@ fn append_short_conv_mixer_with_gated_input(
 
     let gated_input = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(branch_b, "sg->sg"), (branch_x, "sg->sg")],
     )?;
     let convolved = causal_conv1d(program, gated_input, conv_weight, l_cache)?;
     let gated_output = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(convolved, "sg->sg"), (branch_c, "sg->sg")],
     )?;
 
     let out_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(gated_output, "sd->sdo"), (out_proj, "do->sdo")],
     )?;
     let mixer_out = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         out_product,
@@ -723,7 +723,7 @@ fn append_short_conv_mixer_with_gated_input(
 
     let residual = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(mixer_out, "sd->sd"), (x, "sd->sd")],
     )?;
@@ -767,7 +767,7 @@ pub fn append_short_conv_cached_mixer_step(
     let branch_x = project_short_conv_branch(program, normed, x_proj)?;
     let branch_b = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         branch_b,
@@ -776,7 +776,7 @@ pub fn append_short_conv_cached_mixer_step(
     )?;
     let branch_c = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         branch_c,
@@ -785,7 +785,7 @@ pub fn append_short_conv_cached_mixer_step(
     )?;
     let branch_x = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         branch_x,
@@ -794,7 +794,7 @@ pub fn append_short_conv_cached_mixer_step(
     )?;
     let gated_input = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(branch_b, "g->g"), (branch_x, "g->g")],
     )?;
@@ -810,19 +810,19 @@ pub fn append_short_conv_cached_mixer_step(
     )?;
     let gated_output = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(convolved, "g->g"), (branch_c, "g->g")],
     )?;
     let out_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(gated_output, "g->gd"), (out_proj, "gd->gd")],
     )?;
     let mixer_out = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         out_product,
@@ -831,7 +831,7 @@ pub fn append_short_conv_cached_mixer_step(
     )?;
     let post_mixer = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(mixer_out, "d->sd"), (x, "sd->sd")],
     )?;
@@ -846,13 +846,13 @@ fn project_short_conv_branch(
 ) -> Result<NodeId, TensorError> {
     let product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "sd->sdg"), (projection, "dg->sdg")],
     )?;
     reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         product,
@@ -883,7 +883,7 @@ pub(super) fn fused_short_conv_projections(
         let map = alloc::format!("g+{offset}@{embedding},d->dg");
         elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Identity,
             &[(in_proj, map.as_str())],
         )
@@ -957,7 +957,7 @@ pub fn append_delta_net_step(
 
     let query_scaled = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (query, i_head.as_str()),
@@ -966,13 +966,13 @@ pub fn append_delta_net_step(
     )?;
     let decay = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(gate, head_head.as_str())],
     )?;
     let state_decayed = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (state_in, ij_head.as_str()),
@@ -985,7 +985,7 @@ pub fn append_delta_net_step(
     // 2 MiB state update instead of materializing and rereading that buffer.
     let state_decayed_for_update = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (state_in, ij_head.as_str()),
@@ -995,7 +995,7 @@ pub fn append_delta_net_step(
 
     let value_pred_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (state_decayed, ij_head.as_str()),
@@ -1004,7 +1004,7 @@ pub fn append_delta_net_step(
     )?;
     let value_pred = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         value_pred_product,
@@ -1014,20 +1014,20 @@ pub fn append_delta_net_step(
 
     let residual = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(value, j_head.as_str()), (value_pred, j_head.as_str())],
     )?;
     let delta = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(residual, j_head.as_str()), (beta, head_to_j_head.as_str())],
     )?;
 
     let update = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (key, i_head_to_ij_head.as_str()),
@@ -1036,7 +1036,7 @@ pub fn append_delta_net_step(
     )?;
     let state_out = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[
             (state_decayed_for_update, ij_head.as_str()),
@@ -1046,7 +1046,7 @@ pub fn append_delta_net_step(
 
     let out_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (state_out, ij_head.as_str()),
@@ -1055,7 +1055,7 @@ pub fn append_delta_net_step(
     )?;
     let out = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         out_product,
@@ -1081,16 +1081,16 @@ pub fn softplus(
 ) -> Result<NodeId, TensorError> {
     let target = map.rsplit("->").next().unwrap_or(map);
     let one_map = alloc::format!("->{target}");
-    let exp_x = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(x, map)])?;
+    let exp_x = elementwise(program, DType::FLOAT32, ScalarOp::Exponential, &[(x, map)])?;
     let one_plus_exp = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(exp_x, map), (one, one_map.as_str())],
     )?;
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Logarithm,
         &[(one_plus_exp, map)],
     )
@@ -1127,13 +1127,13 @@ pub(super) fn l2norm_with_eps_map(
     let reduced_map = alloc::format!("{reduced}->{reduced}");
     let squared = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, map), (x, map)],
     )?;
     let sum_squares = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         squared,
@@ -1142,25 +1142,25 @@ pub(super) fn l2norm_with_eps_map(
     )?;
     let sum_squares_eps = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(sum_squares, reduced_map.as_str()), (eps, eps_map)],
     )?;
     let norm = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::SquareRoot,
         &[(sum_squares_eps, reduced_map.as_str())],
     )?;
     let inv_norm = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(norm, reduced_map.as_str())],
     )?;
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, map), (inv_norm, sum_map)],
     )
@@ -1181,28 +1181,28 @@ pub fn silu(
 ) -> Result<NodeId, TensorError> {
     let target = map.rsplit("->").next().unwrap_or(map);
     let one_map = alloc::format!("->{target}");
-    let neg_x = elementwise(program, DType::Float32, ScalarOp::Negate, &[(x, map)])?;
+    let neg_x = elementwise(program, DType::FLOAT32, ScalarOp::Negate, &[(x, map)])?;
     let exp_neg_x = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(neg_x, map)],
     )?;
     let one_plus_exp = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(exp_neg_x, map), (one, one_map.as_str())],
     )?;
     let gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(one_plus_exp, map)],
     )?;
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, map), (gate, map)],
     )
@@ -1236,7 +1236,7 @@ pub fn channel_slice(
     let _ = total_channels;
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Identity,
         &[(x, alloc::format!("s,w+{offset}@{width}->sw").as_str())],
     )
@@ -1265,21 +1265,21 @@ pub fn per_head_channel_slice(
     let channel_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(heads * total_channels),
         },
     );
     let within_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(width),
         },
     );
     let head_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(heads),
         },
     );
@@ -1287,37 +1287,37 @@ pub fn per_head_channel_slice(
     let offset_const = scalar_constant(program, offset as f32);
     let head_base = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(head_index, "h->h"), (period_const, "->h")],
     )?;
     let head_start = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(head_base, "h->h"), (offset_const, "->h")],
     )?;
     let target = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(head_start, "h->hw"), (within_index, "w->hw")],
     )?;
     let mask = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Equal,
         &[(channel_index, "d->dhw"), (target, "hw->dhw")],
     )?;
     let selected = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, "sd->sdhw"), (mask, "dhw->sdhw")],
     )?;
     reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         selected,
@@ -1350,27 +1350,27 @@ pub fn per_head_channel_range(
     let channel_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(total_channels),
         },
     );
     let within_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(width),
         },
     );
     let offset_const = scalar_constant(program, offset as f32);
     let target = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(within_index, "w->w"), (offset_const, "->w")],
     )?;
     let mask = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Equal,
         &[(channel_index, "d->dw"), (target, "w->dw")],
     )?;
@@ -1378,7 +1378,7 @@ pub fn per_head_channel_range(
     let mask_map = alloc::format!("dw->s{head}dw");
     let selected = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, x_map.as_str()), (mask, mask_map.as_str())],
     )?;
@@ -1386,7 +1386,7 @@ pub fn per_head_channel_range(
     let out_map = alloc::format!("s{head}w->s{head}dw");
     reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         selected,
@@ -1497,14 +1497,14 @@ pub fn repeat_kv_heads(
     let group_ones = op::append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
             value: 1.0,
         },
     );
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, "sud->sugd"), (group_ones, "ug->sugd")],
     )
@@ -1523,22 +1523,22 @@ pub fn sigmoid(
 ) -> Result<NodeId, TensorError> {
     let target = map.rsplit("->").next().unwrap_or(map);
     let one_map = alloc::format!("->{target}");
-    let neg_x = elementwise(program, DType::Float32, ScalarOp::Negate, &[(x, map)])?;
+    let neg_x = elementwise(program, DType::FLOAT32, ScalarOp::Negate, &[(x, map)])?;
     let exp_neg_x = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(neg_x, map)],
     )?;
     let one_plus_exp = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(exp_neg_x, map), (one, one_map.as_str())],
     )?;
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(one_plus_exp, map)],
     )
@@ -1714,7 +1714,7 @@ pub fn append_delta_net_sequence_tail_with_taps(
 ) -> Result<GdnSequenceTailTaps, TensorError> {
     let squared = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (tail.delta_out, "sjug->sjug"),
@@ -1723,7 +1723,7 @@ pub fn append_delta_net_sequence_tail_with_taps(
     )?;
     let sum_squares = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         squared,
@@ -1732,43 +1732,43 @@ pub fn append_delta_net_sequence_tail_with_taps(
     )?;
     let mean_square = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(sum_squares, "sug->sug"), (tail.inv_head_v_dim, "->sug")],
     )?;
     let mean_square_eps = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(mean_square, "sug->sug"), (tail.head_eps, "ug->sug")],
     )?;
     let rms = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::SquareRoot,
         &[(mean_square_eps, "sug->sug")],
     )?;
     let inv_rms = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(rms, "sug->sug")],
     )?;
     let normed = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(tail.delta_out, "sjug->sjug"), (inv_rms, "sug->sjug")],
     )?;
     let normed_gamma = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "sjug->sjug"), (tail.norm_weight, "j->sjug")],
     )?;
     let gated = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed_gamma, "sjug->sguj"), (tail.z, "sugj->sguj")],
     )?;
@@ -1780,7 +1780,7 @@ pub fn append_delta_net_sequence_tail_with_taps(
     let value_head_ones = op::append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![
                 Extent::Static(tail.kv_heads),
                 Extent::Static(tail.group),
@@ -1791,7 +1791,7 @@ pub fn append_delta_net_sequence_tail_with_taps(
     );
     let out_weight_split = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (tail.out_weight, out_weight_map.as_str()),
@@ -1800,13 +1800,13 @@ pub fn append_delta_net_sequence_tail_with_taps(
     )?;
     let product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(gated, "sguj->sgujd"), (out_weight_split, "ugjd->sgujd")],
     )?;
     let projected = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         product,
@@ -1815,7 +1815,7 @@ pub fn append_delta_net_sequence_tail_with_taps(
     )?;
     let output = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(tail.x, "sd->sd"), (projected, "sd->sd")],
     )?;
@@ -1985,7 +1985,7 @@ pub(super) fn delta_net_sequence_position(
     let iteration = alloc::format!("s{rest_letters}");
     let sliced = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Identity,
         &[(
             node,
@@ -1994,7 +1994,7 @@ pub(super) fn delta_net_sequence_position(
     )?;
     reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         sliced,
@@ -2079,20 +2079,20 @@ pub(super) fn delta_net_place_position(
     let position_value = op::append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec::Vec::new(),
             value: position as f32,
         },
     );
     let position_mask = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Equal,
         &[(position_axis, "s->s"), (position_value, "->s")],
     )?;
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (delta_out_at_position, "jug->sjug"),
@@ -2169,13 +2169,13 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
 
     let qkv_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->siq"), (wqkv, "iq->siq")],
     )?;
     let qkv_mixed = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         qkv_product,
@@ -2185,13 +2185,13 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
 
     let z_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->siz"), (wqkv_gate, "iz->siz")],
     )?;
     let z = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         z_product,
@@ -2205,13 +2205,13 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
 
     let beta_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->sin"), (ssm_beta, "in->sin")],
     )?;
     let beta_flat = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         beta_product,
@@ -2222,13 +2222,13 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
 
     let alpha_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->sin"), (ssm_alpha, "in->sin")],
     )?;
     let alpha_flat = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         alpha_product,
@@ -2237,14 +2237,14 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     )?;
     let alpha_biased = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(alpha_flat, "sn->sn"), (ssm_dt_bias, "n->sn")],
     )?;
     let alpha_softplus = softplus(program, alpha_biased, one, "sn->sn")?;
     let gate_flat = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(alpha_softplus, "sn->sn"), (ssm_a, "n->sn")],
     )?;
@@ -2257,7 +2257,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     let weight_new_wide = channel_slice(program, conv_weight, l_cache, l_cache - 1, 1)?;
     let weight_new = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         weight_new_wide,
@@ -2267,13 +2267,13 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
 
     let history_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(conv_history_in, "wq->wq"), (weight_history, "qw->wq")],
     )?;
     let history_term = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         history_product,
@@ -2283,13 +2283,13 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
 
     let new_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(qkv_mixed, "sq->sq"), (weight_new, "q->sq")],
     )?;
     let conv_raw = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(new_product, "sq->sq"), (history_term, "q->sq")],
     )?;
@@ -2309,7 +2309,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     let key_head_ones = op::append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(head_k_dim)],
             value: 1.0,
         },
@@ -2317,13 +2317,13 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     let q_split_map = alloc::format!("s,{head_k_dim}*u+i->sui");
     let q_split_raw = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(q_raw, q_split_map.as_str()), (key_head_ones, "ui->sui")],
     )?;
     let k_split_raw = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(k_raw, q_split_map.as_str()), (key_head_ones, "ui->sui")],
     )?;
@@ -2336,7 +2336,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     let value_head_ones = op::append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![
                 Extent::Static(kv_heads),
                 Extent::Static(group),
@@ -2352,7 +2352,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     };
     let v_split = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (v_conv, v_split_map.as_str()),
@@ -2363,7 +2363,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     let group_ones = op::append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
             value: 1.0,
         },
@@ -2375,7 +2375,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     };
     let beta_split = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (beta_sigmoid, head_split_map.as_str()),
@@ -2384,7 +2384,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     )?;
     let gate_split = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (gate_flat, head_split_map.as_str()),
@@ -2393,7 +2393,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     )?;
     let z_split = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (z_gated, v_split_map.as_str()),
@@ -2415,7 +2415,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     )?;
     let query_prefill_split = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (query_prefill_raw, q_split_map.as_str()),
@@ -2424,7 +2424,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     )?;
     let key_prefill_split = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (key_prefill_raw, q_split_map.as_str()),
@@ -2451,7 +2451,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     let key_prefill_repeated = repeat_kv_heads(program, key_prefill, kv_heads, group)?;
     let value_prefill_split = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (value_prefill, v_split_map.as_str()),
@@ -2460,7 +2460,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     )?;
     let query_sequence = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         query_prefill_repeated,
@@ -2469,7 +2469,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     )?;
     let key_sequence = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         key_prefill_repeated,
@@ -2478,7 +2478,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     )?;
     let value_sequence = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         value_prefill_split,
@@ -2500,7 +2500,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         let position_axis = op::append(
             program,
             Op::Iota {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 extent: Extent::Static(width),
             },
         );
@@ -2538,7 +2538,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
                 delta_net_place_position(program, step.delta_out, position_axis, position)?;
             delta_out_stacked = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 &[(delta_out_stacked, "sjug->sjug"), (placed, "sjug->sjug")],
             )?;
@@ -2603,7 +2603,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         // `i{head}`/`j{head}` maps expect.
         let query = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             q_repeated,
@@ -2612,7 +2612,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         )?;
         let key = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             k_repeated,
@@ -2621,7 +2621,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         )?;
         let value = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             v_split,
@@ -2630,7 +2630,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         )?;
         let beta = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             beta_split,
@@ -2639,7 +2639,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         )?;
         let gate = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             gate_split,
@@ -2648,7 +2648,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         )?;
         let z_head = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             z_split,
@@ -2675,13 +2675,13 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         // qwen4exp, reference: PR 27742 line 2896-2899).
         let squared = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(delta_out, "jug->jug"), (delta_out, "jug->jug")],
         )?;
         let sum_squares = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             squared,
@@ -2690,37 +2690,37 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         )?;
         let mean_square = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(sum_squares, "ug->ug"), (inv_head_v_dim, "->ug")],
         )?;
         let mean_square_eps = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             &[(mean_square, "ug->ug"), (head_eps, "ug->ug")],
         )?;
         let rms = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::SquareRoot,
             &[(mean_square_eps, "ug->ug")],
         )?;
         let inv_rms = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Reciprocal,
             &[(rms, "ug->ug")],
         )?;
         let normed_out = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(delta_out, "jug->jug"), (inv_rms, "ug->jug")],
         )?;
         let normed_out_gamma = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(normed_out, "jug->jug"), (ssm_norm_weight, "j->jug")],
         )?;
@@ -2741,7 +2741,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         };
         let gated_out = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(normed_out_gamma, gated_out_map), (z_head, gated_gate_map)],
         )?;
@@ -2763,7 +2763,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         let out_weight_split_map = alloc::format!("{}*j+{group}*u+g,d->ugjd", kv_heads * group);
         let ssm_out_split = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[
                 (ssm_out, out_weight_split_map.as_str()),
@@ -2772,7 +2772,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         )?;
         let cur_product = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[
                 (gated_out, gated_product_map),
@@ -2781,7 +2781,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         )?;
         let cur = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             cur_product,
@@ -2791,7 +2791,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
 
         let mixer_out = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             &[(x, "sd->sd"), (cur, "d->sd")],
         )?;

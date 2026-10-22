@@ -60,7 +60,7 @@ mod tests {
             &values,
             case.shape,
             AffineParams::default(),
-            DType::BFloat16,
+            DType::BFLOAT16,
         );
         match export {
             Ok(AffineExport::Packed(packed)) => packed,

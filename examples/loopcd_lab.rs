@@ -164,7 +164,7 @@ mod lab {
             inputs.push(append(
                 &mut program,
                 Op::Input {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: pair
                         .shape
                         .iter()
@@ -182,7 +182,7 @@ mod lab {
         let difference = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Subtract,
                 operands: vec![(first, identity.clone()), (second, identity.clone())],
                 name: Some(String::from("contrast_difference")),
@@ -191,7 +191,7 @@ mod lab {
         let scaled = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (difference, identity.clone()),
@@ -203,7 +203,7 @@ mod lab {
         let guided = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 operands: vec![(inputs[1], identity.clone()), (scaled, identity)],
                 name: Some(String::from("guided_state")),

@@ -19,7 +19,7 @@ fn width_four_projection() -> (Vec<u8>, Manifest, u64) {
     let bytes = write_complete(&SafetensorsModel {
         tensors: vec![TensorPayload {
             name: "q".into(),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![4, 4],
             data: &source,
         }],

@@ -65,13 +65,13 @@ pub fn append_single_range_cached_attention(
 
     let q_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->shdi"), (wq, "ihd->shdi")],
     )?;
     let q_raw = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         q_product,
@@ -85,13 +85,13 @@ pub fn append_single_range_cached_attention(
 
     let k_new_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->sudi"), (wk, "iud->sudi")],
     )?;
     let k_new_raw = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         k_new_product,
@@ -107,13 +107,13 @@ pub fn append_single_range_cached_attention(
         ValueSource::Projected(wv) => {
             let v_product = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(normed, "si->sudi"), (wv, "iud->sudi")],
             )?;
             reduce(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 ReduceInit::Zero,
                 v_product,
@@ -140,7 +140,7 @@ pub fn append_single_range_cached_attention(
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (rotated_q_even, group_map.as_str()),
@@ -149,7 +149,7 @@ pub fn append_single_range_cached_attention(
     )?;
     let q_odd_grouped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (rotated_q_odd, group_map.as_str()),
@@ -165,7 +165,7 @@ pub fn append_single_range_cached_attention(
     // score (a query never attends a key that does not exist yet).
     let score_even_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (q_even_grouped, "sugi->stugi"),
@@ -174,7 +174,7 @@ pub fn append_single_range_cached_attention(
     )?;
     let score_even = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_even_product,
@@ -183,13 +183,13 @@ pub fn append_single_range_cached_attention(
     )?;
     let score_odd_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(q_odd_grouped, "sugi->stugi"), (k_odd_cache, "tui->stugi")],
     )?;
     let score_odd = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_odd_product,
@@ -198,19 +198,19 @@ pub fn append_single_range_cached_attention(
     )?;
     let scores = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(score_even, "stug->stug"), (score_odd, "stug->stug")],
     )?;
     let scores_scaled = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(scores, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
     )?;
     let scores_masked = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[
             (is_future, "st->stug"),
@@ -221,7 +221,7 @@ pub fn append_single_range_cached_attention(
 
     let score_max = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         scores_masked,
@@ -230,19 +230,19 @@ pub fn append_single_range_cached_attention(
     )?;
     let shifted = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(scores_masked, "stug->stug"), (score_max, "sug->stug")],
     )?;
     let weights = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(shifted, "stug->stug")],
     )?;
     let weight_sum = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         weights,
@@ -251,26 +251,26 @@ pub fn append_single_range_cached_attention(
     )?;
     let inv_weight_sum = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(weight_sum, "sug->sug")],
     )?;
     let probabilities = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(weights, "stug->stug"), (inv_weight_sum, "sug->stug")],
     )?;
 
     let attended_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(probabilities, "stug->stugd"), (v_cache, "tud->stugd")],
     )?;
     let attended = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         attended_product,
@@ -280,13 +280,13 @@ pub fn append_single_range_cached_attention(
 
     let wo_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
     )?;
     let attn_out = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         wo_product,
@@ -301,7 +301,7 @@ pub fn append_single_range_cached_attention(
 
     let post_mixer = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
     )?;
@@ -350,39 +350,39 @@ pub(super) fn causal_mask_cached_windowed(
     let query_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Symbolic(0),
         },
     );
     let key_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: key_extent,
         },
     );
     let query_absolute = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(query_index, "s->s"), (cached_len, "->s")],
     )?;
     let cached_len_row = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(query_absolute, "s->s"), (query_index, "s->s")],
     )?;
     let one = scalar_constant(program, 1.0);
     let cached_len_ceiling_row = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(cached_len_row, "s->s"), (one, "->s")],
     )?;
     let is_padding = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[(key_index, "t->st"), (cached_len_ceiling_row, "s->st")],
     )?;
@@ -392,20 +392,20 @@ pub(super) fn causal_mask_cached_windowed(
     };
     let distance = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(query_absolute, "s->st"), (key_index, "t->st")],
     )?;
     let window_ceiling = scalar_constant(program, window as f32 - 1.0);
     let too_old = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Greater,
         &[(distance, "st->st"), (window_ceiling, "->st")],
     )?;
     let is_invalid = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         &[(is_padding, "st->st"), (too_old, "st->st")],
     )?;
@@ -467,13 +467,13 @@ pub fn append_two_range_cached_attention(
 
     let q_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->shdi"), (wq, "ihd->shdi")],
     )?;
     let q_raw = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         q_product,
@@ -498,13 +498,13 @@ pub fn append_two_range_cached_attention(
         KeySource::Projected { wk, k_norm_weight } => {
             let k_new_product = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(normed, "si->sudi"), (wk, "iud->sudi")],
             )?;
             let k_new_raw = reduce(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 ReduceInit::Zero,
                 k_new_product,
@@ -529,13 +529,13 @@ pub fn append_two_range_cached_attention(
         ValueSource::Projected(wv) => {
             let v_product = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(normed, "si->sudi"), (wv, "iud->sudi")],
             )?;
             reduce(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 ReduceInit::Zero,
                 v_product,
@@ -584,13 +584,13 @@ pub fn append_two_range_cached_attention(
 
     let wo_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
     )?;
     let attn_out = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         wo_product,
@@ -605,7 +605,7 @@ pub fn append_two_range_cached_attention(
 
     let post_mixer = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
     )?;
@@ -667,13 +667,13 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
 
     let ids = input_leaf(
         &mut program,
-        DType::Int32,
+        DType::INT32,
         alloc::vec![Extent::Symbolic(0)],
         "ids",
     );
     let table = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
         "token_embd.weight",
     );
@@ -683,9 +683,9 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
     }
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
-    let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+    let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
-    let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+    let cached_len = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "cached_len");
 
     let attention_resources =
         build_attention_layer_resources(&mut program, schedule, query_heads, |program, window| {
@@ -710,20 +710,20 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
 
         let attn_norm_weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.attn_norm.weight"),
         );
         let ffn_norm_weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.ffn_norm.weight"),
         );
         let post_attention_norm_weight = if ffn_config.post_attention_norm {
             Some(input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(embedding)],
                 &alloc::format!("blk.{layer}.post_attention_norm.weight"),
             ))
@@ -733,7 +733,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
 
         let wq = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(embedding),
                 Extent::Static(query_heads),
@@ -743,7 +743,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
         );
         let wk = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(embedding),
                 Extent::Static(kv_heads),
@@ -755,7 +755,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
             ValueSourceKind::ProjectedV => {
                 let wv = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Static(embedding),
                         Extent::Static(kv_heads),
@@ -775,7 +775,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
         };
         let wo = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(kv_heads),
                 Extent::Static(group),
@@ -787,7 +787,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
         let q_norm_weight = config.qk_norm.then(|| {
             input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(head_dim)],
                 &alloc::format!("blk.{layer}.attn_q_norm.weight"),
             )
@@ -795,7 +795,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
         let k_norm_weight = config.qk_norm.then(|| {
             input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(head_dim)],
                 &alloc::format!("blk.{layer}.attn_k_norm.weight"),
             )
@@ -803,7 +803,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
 
         let k_even_cache = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Symbolic(1),
                 Extent::Static(kv_heads),
@@ -813,7 +813,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
         );
         let k_odd_cache = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Symbolic(1),
                 Extent::Static(kv_heads),
@@ -823,7 +823,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
         );
         let v_cache = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Symbolic(1),
                 Extent::Static(kv_heads),
@@ -889,7 +889,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
 
     let output_norm_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding)],
         "output_norm.weight",
     );
@@ -903,7 +903,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
     let normed_last = if last_row_only {
         let lm_head_row = input_leaf(
             &mut program,
-            DType::Int32,
+            DType::INT32,
             alloc::vec![Extent::Static(1)],
             "lm_head_row",
         );
@@ -914,19 +914,19 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
 
     let lm_head = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
         "output.weight",
     );
     let logits_product = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
     )?;
     let logits = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         logits_product,
@@ -939,19 +939,19 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
             let cap_node = scalar_constant(&mut program, cap);
             let scaled = elementwise(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Divide,
                 &[(logits, "sv->sv"), (cap_node, "->sv")],
             )?;
             let tanh = elementwise(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Tanh,
                 &[(scaled, "sv->sv")],
             )?;
             elementwise(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(tanh, "sv->sv"), (cap_node, "->sv")],
             )?
@@ -1201,13 +1201,13 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
 
     let ids = input_leaf(
         &mut program,
-        DType::Int32,
+        DType::INT32,
         alloc::vec![Extent::Symbolic(0)],
         "ids",
     );
     let table = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
         "token_embd.weight",
     );
@@ -1217,9 +1217,9 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
     }
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
-    let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+    let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
-    let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+    let cached_len = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "cached_len");
 
     // Stage A preamble (`scheduled_forward_program_with_experts`'s own doc on
     // `ple_shared`/`ple_layer_inputs`, mirrored verbatim here): `x` is still
@@ -1256,7 +1256,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
     let sliding_cached_len = sliding_kv_ring.then(|| {
         input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             Vec::new(),
             SLIDING_CACHED_LEN_INPUT,
         )
@@ -1326,20 +1326,20 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
 
         let attn_norm_weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.attn_norm.weight"),
         );
         let ffn_norm_weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.ffn_norm.weight"),
         );
         let post_attention_norm_weight = if ffn_config.post_attention_norm {
             Some(input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(embedding)],
                 &alloc::format!("blk.{layer}.post_attention_norm.weight"),
             ))
@@ -1353,7 +1353,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
         if entry.kind == LayerKind::ShortConv {
             let in_proj = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(embedding * 3), Extent::Static(embedding)],
                 &alloc::format!("blk.{layer}.shortconv.in_proj.weight"),
             );
@@ -1361,7 +1361,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                 fused_short_conv_projections(&mut program, in_proj, embedding)?;
             let conv_weight = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Static(embedding),
                     Extent::Static(short_conv_cache_len)
@@ -1370,13 +1370,13 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             );
             let out_proj = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(embedding), Extent::Static(embedding)],
                 &alloc::format!("blk.{layer}.shortconv.out_proj.weight"),
             );
             let state_in = input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![
                     Extent::Static(embedding),
                     Extent::Static(short_conv_cache_len)
@@ -1385,7 +1385,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             );
             let roll_indices = input_leaf(
                 &mut program,
-                DType::Int32,
+                DType::INT32,
                 alloc::vec![Extent::Static(short_conv_cache_len)],
                 &alloc::format!("shortconv_cache.{layer}.roll_indices"),
             );
@@ -1436,7 +1436,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
 
         let wq = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(embedding),
                 Extent::Static(query_heads),
@@ -1501,7 +1501,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             None => {
                 let wk = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         Extent::Static(embedding),
                         Extent::Static(kv_heads),
@@ -1512,7 +1512,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                 let k_norm_weight = config.qk_norm.then(|| {
                     input_leaf(
                         &mut program,
-                        DType::Float32,
+                        DType::FLOAT32,
                         alloc::vec![Extent::Static(head_dim)],
                         &alloc::format!("blk.{layer}.attn_k_norm.weight"),
                     )
@@ -1521,7 +1521,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                     ValueSourceKind::ProjectedV => {
                         let wv = input_leaf(
                             &mut program,
-                            DType::Float32,
+                            DType::FLOAT32,
                             alloc::vec![
                                 Extent::Static(embedding),
                                 Extent::Static(kv_heads),
@@ -1541,19 +1541,19 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                 };
                 let k_even_cache = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![cache_bound, Extent::Static(kv_heads), Extent::Static(pairs)],
                     &alloc::format!("kv_cache.{logical}.k_even"),
                 );
                 let k_odd_cache = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![cache_bound, Extent::Static(kv_heads), Extent::Static(pairs)],
                     &alloc::format!("kv_cache.{logical}.k_odd"),
                 );
                 let v_cache = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![
                         cache_bound,
                         Extent::Static(kv_heads),
@@ -1573,7 +1573,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
 
         let wo = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             alloc::vec![
                 Extent::Static(kv_heads),
                 Extent::Static(group),
@@ -1585,7 +1585,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
         let q_norm_weight = config.qk_norm.then(|| {
             input_leaf(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 alloc::vec![Extent::Static(head_dim)],
                 &alloc::format!("blk.{layer}.attn_q_norm.weight"),
             )
@@ -1699,7 +1699,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             {
                 let gamma = input_leaf(
                     &mut program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     alloc::vec![Extent::Static(embedding)],
                     "output_norm.weight",
                 );
@@ -1716,7 +1716,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
 
     let output_norm_weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding)],
         "output_norm.weight",
     );
@@ -1732,7 +1732,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
 
     let lm_head = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
         "output.weight",
     );
@@ -1747,13 +1747,13 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
     let append_head = |program: &mut Vec<Op>, hidden: NodeId| -> Result<NodeId, TensorError> {
         let logits_product = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(hidden, "sd->sdv"), (lm_head, "dv->sdv")],
         )?;
         let logits = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             logits_product,
@@ -1765,19 +1765,19 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                 let cap_node = scalar_constant(program, cap);
                 let scaled = elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Divide,
                     &[(logits, "sv->sv"), (cap_node, "->sv")],
                 )?;
                 let tanh = elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Tanh,
                     &[(scaled, "sv->sv")],
                 )?;
                 elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Multiply,
                     &[(tanh, "sv->sv"), (cap_node, "->sv")],
                 )

@@ -190,7 +190,7 @@ fn matmul_program(program: &mut Vec<Op>, m: u32, k: u32, n: u32) -> (NodeId, Nod
     let lhs = append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(m), Extent::Static(k)],
             name: None,
         },
@@ -198,7 +198,7 @@ fn matmul_program(program: &mut Vec<Op>, m: u32, k: u32, n: u32) -> (NodeId, Nod
     let rhs_t = append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(n), Extent::Static(k)],
             name: None,
         },
@@ -206,7 +206,7 @@ fn matmul_program(program: &mut Vec<Op>, m: u32, k: u32, n: u32) -> (NodeId, Nod
     let product = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -218,7 +218,7 @@ fn matmul_program(program: &mut Vec<Op>, m: u32, k: u32, n: u32) -> (NodeId, Nod
     let sum = append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -235,7 +235,7 @@ fn f32_input(program: &mut Vec<Op>, shape: &[Extent]) -> NodeId {
     append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: shape.to_vec(),
             name: None,
         },
@@ -257,7 +257,7 @@ fn unary(program: &mut Vec<Op>, body: ScalarOp, operand: NodeId, rank: u16) -> N
     append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands: vec![(operand, IndexMap::Affine(map::projection(rank, &axes)))],
             name: None,
@@ -270,7 +270,7 @@ fn binary(program: &mut Vec<Op>, body: ScalarOp, left: NodeId, right: NodeId, ra
     append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands: vec![
                 (left, IndexMap::Affine(map::projection(rank, &axes))),
@@ -292,7 +292,7 @@ fn binary_broadcast_const(
     append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands: vec![
                 (left, IndexMap::Affine(map::projection(rank, &axes))),
@@ -477,7 +477,7 @@ fn row_c_gather_fused_reduce(c: &mut Criterion) {
     let ids = append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(seq)],
             name: None,
         },
@@ -509,7 +509,7 @@ fn row_c_gather_fused_reduce(c: &mut Criterion) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(table, gather_map), (weight, weight_map)],
             name: None,
@@ -518,7 +518,7 @@ fn row_c_gather_fused_reduce(c: &mut Criterion) {
     let reduced = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -648,7 +648,7 @@ fn row_d_deep_chain(c: &mut Criterion) {
     let g = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![
                 (f, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -664,7 +664,7 @@ fn row_d_deep_chain(c: &mut Criterion) {
     let reduced = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: j,
@@ -788,7 +788,7 @@ fn row_e_locally_connected_window(c: &mut Criterion) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (kernel, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -800,7 +800,7 @@ fn row_e_locally_connected_window(c: &mut Criterion) {
     let reduced = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -1008,7 +1008,7 @@ fn row_g_mlp_chain(c: &mut Criterion) {
     let sumsq = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: sq,
@@ -1024,7 +1024,7 @@ fn row_g_mlp_chain(c: &mut Criterion) {
     let normed = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Divide,
             operands: vec![
                 (x, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -1041,7 +1041,7 @@ fn row_g_mlp_chain(c: &mut Criterion) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (normed, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -1053,7 +1053,7 @@ fn row_g_mlp_chain(c: &mut Criterion) {
     let hidden = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,

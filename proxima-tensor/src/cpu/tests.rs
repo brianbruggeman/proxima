@@ -27,7 +27,7 @@ fn wo_shaped_program(seq: u32) -> (Vec<Op>, NodeId) {
     let attended = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![
                 Extent::Static(seq),
                 Extent::Static(kv_heads),
@@ -40,7 +40,7 @@ fn wo_shaped_program(seq: u32) -> (Vec<Op>, NodeId) {
     let sigmoid_gate = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![
                 Extent::Static(seq),
                 Extent::Static(kv_heads),
@@ -52,7 +52,7 @@ fn wo_shaped_program(seq: u32) -> (Vec<Op>, NodeId) {
     );
     let gated = crate::spec::elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(attended, "sugd->sugd"), (sigmoid_gate, "sugd->sugd")],
     )
@@ -60,7 +60,7 @@ fn wo_shaped_program(seq: u32) -> (Vec<Op>, NodeId) {
     let wo_flat = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![
                 Extent::Static(kv_heads * group * head_dim),
                 Extent::Static(embedding),
@@ -71,7 +71,7 @@ fn wo_shaped_program(seq: u32) -> (Vec<Op>, NodeId) {
     let ones = append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![
                 Extent::Static(kv_heads),
                 Extent::Static(group),
@@ -82,7 +82,7 @@ fn wo_shaped_program(seq: u32) -> (Vec<Op>, NodeId) {
     );
     let wo = crate::spec::elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (
@@ -95,14 +95,14 @@ fn wo_shaped_program(seq: u32) -> (Vec<Op>, NodeId) {
     .expect("wo elementwise builds");
     let wo_product = crate::spec::elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(gated, "sugd->sugde"), (wo, "ugde->sugde")],
     )
     .expect("wo_product elementwise builds");
     let attn_out = crate::spec::reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         wo_product,
@@ -209,7 +209,7 @@ fn run_reduce_quantized_rejects_a_composed_body_wider_than_a_bare_weight_activat
 
     let resolved = BoundOp {
         node: NodeId(3),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: alloc::vec![rows as u64, k as u64],
         kind: BoundOpKind::Reduce {
             element_body: ComposedBody {
@@ -279,7 +279,7 @@ fn elementwise_chain_program() -> (Vec<Op>, NodeId, NodeId) {
     let a = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: None,
         },
@@ -287,7 +287,7 @@ fn elementwise_chain_program() -> (Vec<Op>, NodeId, NodeId) {
     let scale = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: None,
         },
@@ -295,7 +295,7 @@ fn elementwise_chain_program() -> (Vec<Op>, NodeId, NodeId) {
     let bias = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: None,
         },
@@ -304,7 +304,7 @@ fn elementwise_chain_program() -> (Vec<Op>, NodeId, NodeId) {
     let b = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(a, identity()), (scale, identity())],
             name: None,
@@ -313,7 +313,7 @@ fn elementwise_chain_program() -> (Vec<Op>, NodeId, NodeId) {
     let c = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![(b, identity()), (bias, identity())],
             name: None,
@@ -322,7 +322,7 @@ fn elementwise_chain_program() -> (Vec<Op>, NodeId, NodeId) {
     let d = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(c, identity()), (c, identity())],
             name: None,
@@ -382,7 +382,7 @@ fn reduce_with_sigmoid_epilogue_program() -> (Vec<Op>, NodeId, NodeId) {
     let x = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(8), Extent::Static(2)],
             name: Some("x".to_string()),
         },
@@ -390,7 +390,7 @@ fn reduce_with_sigmoid_epilogue_program() -> (Vec<Op>, NodeId, NodeId) {
     let w = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(2), Extent::Static(16)],
             name: Some("w".to_string()),
         },
@@ -398,7 +398,7 @@ fn reduce_with_sigmoid_epilogue_program() -> (Vec<Op>, NodeId, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (x, IndexMap::Affine(map::projection(3, &[0, 1]))),
@@ -410,7 +410,7 @@ fn reduce_with_sigmoid_epilogue_program() -> (Vec<Op>, NodeId, NodeId) {
     let z = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -424,7 +424,7 @@ fn reduce_with_sigmoid_epilogue_program() -> (Vec<Op>, NodeId, NodeId) {
     let negated = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Negate,
             operands: vec![(z, identity_2d())],
             name: None,
@@ -433,7 +433,7 @@ fn reduce_with_sigmoid_epilogue_program() -> (Vec<Op>, NodeId, NodeId) {
     let exponentiated = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Exponential,
             operands: vec![(negated, identity_2d())],
             name: None,
@@ -442,7 +442,7 @@ fn reduce_with_sigmoid_epilogue_program() -> (Vec<Op>, NodeId, NodeId) {
     let one = append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(8), Extent::Static(16)],
             value: 1.0,
         },
@@ -450,7 +450,7 @@ fn reduce_with_sigmoid_epilogue_program() -> (Vec<Op>, NodeId, NodeId) {
     let one_plus = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![(exponentiated, identity_2d()), (one, identity_2d())],
             name: None,
@@ -459,7 +459,7 @@ fn reduce_with_sigmoid_epilogue_program() -> (Vec<Op>, NodeId, NodeId) {
     let g = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Reciprocal,
             operands: vec![(one_plus, identity_2d())],
             name: None,
@@ -520,7 +520,7 @@ fn dense_bias_divide_program() -> (Vec<Op>, NodeId) {
         append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape,
                 name: Some(name.to_string()),
             },
@@ -534,7 +534,7 @@ fn dense_bias_divide_program() -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (x, IndexMap::Affine(map::projection(4, &[0, 1, 2]))),
@@ -546,7 +546,7 @@ fn dense_bias_divide_program() -> (Vec<Op>, NodeId) {
     let folded = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -559,7 +559,7 @@ fn dense_bias_divide_program() -> (Vec<Op>, NodeId) {
     let biased = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![
                 (bias, IndexMap::Affine(map::projection(3, &[2]))),
@@ -571,7 +571,7 @@ fn dense_bias_divide_program() -> (Vec<Op>, NodeId) {
     let two = append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 2.0,
         },
@@ -579,7 +579,7 @@ fn dense_bias_divide_program() -> (Vec<Op>, NodeId) {
     let halved = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Divide,
             operands: vec![
                 (biased, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
@@ -591,7 +591,7 @@ fn dense_bias_divide_program() -> (Vec<Op>, NodeId) {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (biased, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
@@ -1002,7 +1002,7 @@ fn commutative_operand_order_is_canonical_regardless_of_authored_order() {
         let a_times_b = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![(a, identity()), (b, identity())],
                 name: None,
@@ -1016,7 +1016,7 @@ fn commutative_operand_order_is_canonical_regardless_of_authored_order() {
         let root = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 operands,
                 name: None,
@@ -1064,7 +1064,7 @@ fn commutative_operand_order_preserves_bit_exact_output() {
         let a_times_b = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![(a, identity()), (b, identity())],
                 name: None,
@@ -1078,7 +1078,7 @@ fn commutative_operand_order_preserves_bit_exact_output() {
         append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 operands,
                 name: None,
@@ -1486,7 +1486,7 @@ fn step(op: ScalarOp, args: &[StepArg]) -> BodyStep {
 fn bound_f32_identity(lookup: Option<bind::Lookup>) -> BoundOp {
     BoundOp {
         node: NodeId(1),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![3],
         kind: BoundOpKind::Elementwise {
             body: ComposedBody::leaf(ScalarOp::Identity),
@@ -1740,7 +1740,7 @@ fn reduce_dot_binary_stride_two_matches_a_scalar_reference() {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (
@@ -1755,7 +1755,7 @@ fn reduce_dot_binary_stride_two_matches_a_scalar_reference() {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -1821,7 +1821,7 @@ fn cached_attention_bound_step_runs_online_softmax() {
         .collect();
     let resolved = BoundOp {
         node: NodeId(8),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![1, 1, 1, 2],
         kind: BoundOpKind::CachedAttention {
             operands,
@@ -1877,7 +1877,7 @@ fn cached_attention_window_bounds_the_new_range_too() {
         .collect();
     let attention = |cached_lower_inclusive: i64| BoundOp {
         node: NodeId(8),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![3, 1, 1, 2],
         kind: BoundOpKind::CachedAttention {
             operands: operands.clone(),
@@ -1988,7 +1988,7 @@ fn cached_softmax_weights_bound_step_matches_hand_computed_softmax() {
     ];
     let resolved = BoundOp {
         node: NodeId(3),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![2, 2],
         kind: BoundOpKind::CachedSoftmaxWeights {
             operands,
@@ -2097,7 +2097,7 @@ fn cached_softmax_weights_group_max_folds_in_new_scores_when_larger() {
     ];
     let resolved = BoundOp {
         node: NodeId(3),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![1, 1],
         kind: BoundOpKind::CachedSoftmaxWeights {
             operands,
@@ -2133,7 +2133,7 @@ fn two_row_cached_softmax_weights_op() -> BoundOp {
     let attention_rows = 2u64;
     BoundOp {
         node: NodeId(3),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![2, 2],
         kind: BoundOpKind::CachedSoftmaxWeights {
             operands: vec![
@@ -2289,7 +2289,7 @@ fn cached_attention_bound_step_scores_the_partial_rotary_pass_plane() {
         .collect();
     let resolved = BoundOp {
         node: NodeId(10),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![1, 1, 1, 4],
         kind: BoundOpKind::CachedAttention {
             operands,
@@ -2328,7 +2328,7 @@ fn scan_width_unary_stride_two_matches_a_running_sum_reference() {
 
     let resolved = BoundOp {
         node: NodeId(1),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: alloc::vec![k as u64],
         kind: BoundOpKind::Reduce {
             element_body: ComposedBody {
@@ -2417,7 +2417,7 @@ fn bound_op_for_gate(
         .collect();
     BoundOp {
         node: NodeId(strides.len() as u32),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![32],
         kind: BoundOpKind::Elementwise { body, operands },
     }
@@ -3434,12 +3434,12 @@ fn matmul_q6k_q8k_f32_threaded_pool_dispatch_matches_the_sequential_per_row_kern
 #[test]
 fn reject_non_float32_exempts_a_quantized_weight_in_matmul_position() {
     let mut program = Vec::new();
-    let weight = block(&mut program, DType::UInt8, &[Extent::Static(4)]);
+    let weight = block(&mut program, DType::UINT8, &[Extent::Static(4)]);
     let activation = f32_block(&mut program, &[Extent::Static(4)]);
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(map::projection(1, &[0]))),
@@ -3451,7 +3451,7 @@ fn reject_non_float32_exempts_a_quantized_weight_in_matmul_position() {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -3481,11 +3481,11 @@ fn reject_non_float32_exempts_a_quantized_weight_in_matmul_position() {
 #[test]
 fn reject_non_float32_still_rejects_a_quantized_node_outside_matmul_shape() {
     let mut program = Vec::new();
-    let weight = block(&mut program, DType::UInt8, &[Extent::Static(4)]);
+    let weight = block(&mut program, DType::UINT8, &[Extent::Static(4)]);
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: weight,
@@ -3527,18 +3527,18 @@ fn reject_non_float32_still_rejects_a_quantized_node_outside_matmul_shape() {
 #[test]
 fn reject_non_float32_rejects_a_quantized_weight_selected_by_a_synthetic_iota_mask() {
     let mut program = Vec::new();
-    let weight = block(&mut program, DType::UInt8, &[Extent::Static(4)]);
+    let weight = block(&mut program, DType::UINT8, &[Extent::Static(4)]);
     let channel_index = append(
         &mut program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(4),
         },
     );
     let target = append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 1.0,
         },
@@ -3546,7 +3546,7 @@ fn reject_non_float32_rejects_a_quantized_weight_selected_by_a_synthetic_iota_ma
     let mask = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Equal,
             operands: vec![
                 (channel_index, IndexMap::Affine(map::projection(1, &[0]))),
@@ -3558,7 +3558,7 @@ fn reject_non_float32_rejects_a_quantized_weight_selected_by_a_synthetic_iota_ma
     let selected = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(map::projection(1, &[0]))),
@@ -3570,7 +3570,7 @@ fn reject_non_float32_rejects_a_quantized_weight_selected_by_a_synthetic_iota_ma
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: selected,
@@ -3603,7 +3603,7 @@ fn reject_non_float32_exempts_an_unreferenced_non_float32_input() {
     let _dead_shape_leaf = append(
         &mut program,
         Op::Input {
-            dtype: DType::Int64,
+            dtype: DType::INT64,
             shape: vec![Extent::Static(2)],
             name: Some(String::from("reshape_shape")),
         },
@@ -3611,7 +3611,7 @@ fn reject_non_float32_exempts_an_unreferenced_non_float32_input() {
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: Some(String::from("activation")),
         },
@@ -3653,12 +3653,12 @@ fn reject_non_float32_exempts_an_unreferenced_non_float32_input() {
 #[test]
 fn reject_non_float32_still_rejects_a_referenced_non_float32_input() {
     let mut program = Vec::new();
-    let stray_int_leaf = block(&mut program, DType::Int64, &[Extent::Static(4)]);
+    let stray_int_leaf = block(&mut program, DType::INT64, &[Extent::Static(4)]);
     let activation = f32_block(&mut program, &[Extent::Static(4)]);
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![
                 (stray_int_leaf, IndexMap::Affine(map::projection(1, &[0]))),
@@ -3686,7 +3686,7 @@ fn named_add_program() -> (Vec<Op>, NodeId) {
     let a = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: Some(String::from("a")),
         },
@@ -3694,7 +3694,7 @@ fn named_add_program() -> (Vec<Op>, NodeId) {
     let b = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: Some(String::from("b")),
         },
@@ -3702,7 +3702,7 @@ fn named_add_program() -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![
                 (a, IndexMap::Affine(map::projection(1, &[0]))),
@@ -3819,7 +3819,7 @@ fn named_matmul_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let lhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(m), Extent::Static(k)],
             name: Some(String::from("x")),
         },
@@ -3827,7 +3827,7 @@ fn named_matmul_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let rhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(k), Extent::Static(n)],
             name: Some(String::from("w")),
         },
@@ -3835,7 +3835,7 @@ fn named_matmul_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -3847,7 +3847,7 @@ fn named_matmul_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -4011,7 +4011,7 @@ fn dead_node_program() -> (Vec<Op>, NodeId, NodeId) {
     let a = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: Some(String::from("a")),
         },
@@ -4019,7 +4019,7 @@ fn dead_node_program() -> (Vec<Op>, NodeId, NodeId) {
     let b = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: Some(String::from("b")),
         },
@@ -4027,7 +4027,7 @@ fn dead_node_program() -> (Vec<Op>, NodeId, NodeId) {
     let dead = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (a, IndexMap::Affine(map::projection(1, &[0]))),
@@ -4039,7 +4039,7 @@ fn dead_node_program() -> (Vec<Op>, NodeId, NodeId) {
     let live = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![
                 (a, IndexMap::Affine(map::projection(1, &[0]))),
@@ -4131,7 +4131,7 @@ fn constant_feeds_live_program() -> (Vec<Op>, NodeId, NodeId, NodeId) {
     let a = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: Some(String::from("a")),
         },
@@ -4139,7 +4139,7 @@ fn constant_feeds_live_program() -> (Vec<Op>, NodeId, NodeId, NodeId) {
     let constant = append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             value: 5.0,
         },
@@ -4147,7 +4147,7 @@ fn constant_feeds_live_program() -> (Vec<Op>, NodeId, NodeId, NodeId) {
     let live = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![
                 (a, IndexMap::Affine(map::projection(1, &[0]))),
@@ -4234,7 +4234,7 @@ fn a_dead_constant_is_marked_dead_not_static() {
     let dead_constant = append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             value: 42.0,
         },
@@ -4293,12 +4293,12 @@ fn evaluate_named_with_arena_reports_a_shape_mismatched_rebind_by_name() {
 #[test]
 fn reject_non_float32_exempts_many_independent_quantized_weights() {
     let mut program = Vec::new();
-    let weight_a = block(&mut program, DType::UInt8, &[Extent::Static(4)]);
+    let weight_a = block(&mut program, DType::UINT8, &[Extent::Static(4)]);
     let activation_a = f32_block(&mut program, &[Extent::Static(4)]);
     let product_a = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight_a, IndexMap::Affine(map::projection(1, &[0]))),
@@ -4310,7 +4310,7 @@ fn reject_non_float32_exempts_many_independent_quantized_weights() {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product_a,
@@ -4321,12 +4321,12 @@ fn reject_non_float32_exempts_many_independent_quantized_weights() {
         }),
     );
 
-    let weight_b = block(&mut program, DType::UInt8, &[Extent::Static(4)]);
+    let weight_b = block(&mut program, DType::UINT8, &[Extent::Static(4)]);
     let activation_b = f32_block(&mut program, &[Extent::Static(4)]);
     let product_b = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight_b, IndexMap::Affine(map::projection(1, &[0]))),
@@ -4338,7 +4338,7 @@ fn reject_non_float32_exempts_many_independent_quantized_weights() {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product_b,
@@ -4403,7 +4403,7 @@ fn block(program: &mut Vec<Op>, dtype: DType, shape: &[Extent]) -> NodeId {
 }
 
 fn f32_block(program: &mut Vec<Op>, shape: &[Extent]) -> NodeId {
-    block(program, DType::Float32, shape)
+    block(program, DType::FLOAT32, shape)
 }
 
 /// The last node `program` builds -- what a fixture that appends its
@@ -4428,7 +4428,7 @@ fn an_iota_evaluates_to_its_own_position() {
     let iota = append(
         &mut program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(6),
         },
     );
@@ -4449,7 +4449,7 @@ fn a_constant_evaluates_to_its_literal_at_every_position() {
     append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(4)],
             value: 0.088_388_35,
         },
@@ -4468,7 +4468,7 @@ fn a_rank_zero_constant_broadcasts_into_a_higher_rank_consumer() {
     let scale = append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 3.0,
         },
@@ -4476,14 +4476,14 @@ fn a_rank_zero_constant_broadcasts_into_a_higher_rank_consumer() {
     let iota = append(
         &mut program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(4),
         },
     );
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (iota, IndexMap::Affine(crate::map::projection(1, &[0]))),
@@ -4506,7 +4506,7 @@ fn a_constant_carries_negative_infinity_verbatim() {
     append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(2)],
             value: f32::NEG_INFINITY,
         },
@@ -4569,7 +4569,7 @@ fn matmul_program(m: u32, k: u32, n: u32, symbolic: bool) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -4581,7 +4581,7 @@ fn matmul_program(m: u32, k: u32, n: u32, symbolic: bool) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -4606,7 +4606,7 @@ fn matmul_program_rhs_transposed(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -4618,7 +4618,7 @@ fn matmul_program_rhs_transposed(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -4659,7 +4659,7 @@ fn batched_matmul_program_with_per_row_weight(
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[1]))),
@@ -4671,7 +4671,7 @@ fn batched_matmul_program_with_per_row_weight(
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -4716,7 +4716,7 @@ fn batched_matmul_program_with_per_row_weight_composed_reduction(
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (lhs, IndexMap::Affine(map::projection(4, &[1, 2]))),
@@ -4728,7 +4728,7 @@ fn batched_matmul_program_with_per_row_weight_composed_reduction(
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -4774,7 +4774,7 @@ fn two_leading_axes_shared_weight_matmul_program(
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (lhs, IndexMap::Affine(map::projection(4, &[0, 1, 2]))),
@@ -4786,7 +4786,7 @@ fn two_leading_axes_shared_weight_matmul_program(
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -4832,7 +4832,7 @@ fn three_leading_axes_matmul_program(
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (lhs, IndexMap::Affine(map::projection(5, &[0, 1, 2, 3]))),
@@ -4844,7 +4844,7 @@ fn three_leading_axes_matmul_program(
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -4897,7 +4897,7 @@ fn three_leading_axes_batched_matmul_program(
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (lhs, IndexMap::Affine(map::projection(5, &[0, 1, 2, 3]))),
@@ -4909,7 +4909,7 @@ fn three_leading_axes_batched_matmul_program(
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -4927,7 +4927,7 @@ fn three_leading_axes_batched_matmul_program(
 fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let table = f32_block(&mut program, &[Extent::Static(vocab), Extent::Static(dim)]);
-    let ids = block(&mut program, DType::Int32, &[Extent::Static(seq)]);
+    let ids = block(&mut program, DType::INT32, &[Extent::Static(seq)]);
     let gathered_map = IndexMap::Computed {
         indices: ids,
         index_map: map::projection(2, &[0]),
@@ -4947,7 +4947,7 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Op>, NodeId)
     let gathered = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: alloc::vec![(table, gathered_map)],
             name: None,
@@ -4965,7 +4965,7 @@ fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) 
         &mut program,
         &[Extent::Static(vocab), Extent::Static(embed_dim)],
     );
-    let ids = block(&mut program, DType::Int32, &[Extent::Static(seq)]);
+    let ids = block(&mut program, DType::INT32, &[Extent::Static(seq)]);
     let weight = f32_block(
         &mut program,
         &[Extent::Static(embed_dim), Extent::Static(out_dim)],
@@ -4992,7 +4992,7 @@ fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) 
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![(table, gather_map), (weight, weight_map)],
             name: None,
@@ -5001,7 +5001,7 @@ fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) 
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -5705,7 +5705,7 @@ fn bias_add_via_broadcast() {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: alloc::vec![
                 (matrix, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -5729,7 +5729,7 @@ fn transpose_via_permuted_map() {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: alloc::vec![(matrix, IndexMap::Affine(map::projection(2, &[1, 0])))],
             name: None,
@@ -5757,7 +5757,7 @@ fn one_dimensional_convolution_via_a_two_term_window_map() {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (kernel, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -5769,7 +5769,7 @@ fn one_dimensional_convolution_via_a_two_term_window_map() {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -5809,7 +5809,7 @@ fn softmax_end_to_end_matches_a_reference_within_epsilon() {
     let max = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Maximum,
             init: ReduceInit::NegativeInfinity,
             operand: input,
@@ -5822,7 +5822,7 @@ fn softmax_end_to_end_matches_a_reference_within_epsilon() {
     let shifted = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Subtract,
             operands: alloc::vec![(input, row_map.clone()), (max, broadcast_map.clone())],
             name: None,
@@ -5831,7 +5831,7 @@ fn softmax_end_to_end_matches_a_reference_within_epsilon() {
     let exponentiated = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Exponential,
             operands: alloc::vec![(shifted, row_map.clone())],
             name: None,
@@ -5840,7 +5840,7 @@ fn softmax_end_to_end_matches_a_reference_within_epsilon() {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: exponentiated,
@@ -5853,7 +5853,7 @@ fn softmax_end_to_end_matches_a_reference_within_epsilon() {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Divide,
             operands: alloc::vec![(exponentiated, row_map), (sum, broadcast_map)],
             name: None,
@@ -5886,7 +5886,7 @@ fn cumsum_matches_a_running_sum_reference() {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: source,
@@ -5919,7 +5919,7 @@ fn a_chain_of_unary_zips_keeps_peak_live_buffers_small() {
         current = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Tanh,
                 operands: alloc::vec![(current, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
@@ -5957,7 +5957,7 @@ fn a_chain_of_8_unary_ops_binds_to_one_bound_op_and_the_result_is_unchanged() {
         current = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Tanh,
                 operands: alloc::vec![(current, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
@@ -6006,7 +6006,7 @@ fn a_chain_of_elementwise_ops_binds_to_one_bound_op_and_matches_a_hand_reference
     let b = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![(a, identity()), (scale, identity())],
             name: None,
@@ -6015,7 +6015,7 @@ fn a_chain_of_elementwise_ops_binds_to_one_bound_op_and_matches_a_hand_reference
     let c = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: alloc::vec![(b, identity()), (bias, identity())],
             name: None,
@@ -6024,7 +6024,7 @@ fn a_chain_of_elementwise_ops_binds_to_one_bound_op_and_matches_a_hand_reference
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![(c, identity()), (c, identity())],
             name: None,
@@ -6076,7 +6076,7 @@ fn an_elementwise_intermediate_consumed_by_two_ops_still_evaluates_correctly() {
     let b = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Tanh,
             operands: alloc::vec![(a, identity())],
             name: None,
@@ -6085,7 +6085,7 @@ fn an_elementwise_intermediate_consumed_by_two_ops_still_evaluates_correctly() {
     let c1 = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Negate,
             operands: alloc::vec![(b, identity())],
             name: None,
@@ -6094,7 +6094,7 @@ fn an_elementwise_intermediate_consumed_by_two_ops_still_evaluates_correctly() {
     let c2 = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Reciprocal,
             operands: alloc::vec![(b, identity())],
             name: None,
@@ -6103,7 +6103,7 @@ fn an_elementwise_intermediate_consumed_by_two_ops_still_evaluates_correctly() {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: alloc::vec![(c1, identity()), (c2, identity())],
             name: None,
@@ -6149,7 +6149,7 @@ fn a_requested_elementwise_intermediate_stays_readable_and_correct() {
     let b = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Tanh,
             operands: alloc::vec![(a, identity())],
             name: None,
@@ -6158,7 +6158,7 @@ fn a_requested_elementwise_intermediate_stays_readable_and_correct() {
     let c = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Negate,
             operands: alloc::vec![(b, identity())],
             name: None,
@@ -6197,7 +6197,7 @@ fn a_requested_intermediate_survives_alongside_the_root() {
         current = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Tanh,
                 operands: alloc::vec![(current, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
@@ -6265,7 +6265,7 @@ fn wrong_block_size_is_rejected() {
 #[test]
 fn a_non_float32_program_is_rejected() {
     let mut program = Vec::new();
-    block(&mut program, DType::Int32, &[Extent::Static(4)]);
+    block(&mut program, DType::INT32, &[Extent::Static(4)]);
 
     let data = [1i32; 0]; // never read: rejected before blocks are consulted
     let _ = data;
@@ -6282,12 +6282,12 @@ fn a_non_float32_program_is_rejected() {
 fn scatter_add_program(dest_extent: u32) -> (Vec<Op>, NodeId, NodeId, NodeId) {
     let mut program = Vec::new();
     let source = f32_block(&mut program, &[Extent::Static(4)]);
-    let ids = block(&mut program, DType::Int32, &[Extent::Static(4)]);
+    let ids = block(&mut program, DType::INT32, &[Extent::Static(4)]);
     let out_map = IndexMap::scatter(ids, map::projection(1, &[0]), 1, &[], 0, dest_extent);
     let scattered = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: source,
@@ -6426,7 +6426,7 @@ fn splitting_an_elementwise_node_and_running_its_chunks_matches_the_unsplit_resu
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Tanh,
             operands: alloc::vec![(source, IndexMap::Affine(map::projection(2, &[0, 1])))],
             name: None,
@@ -6563,7 +6563,7 @@ async fn evaluate_quantized_matches_evaluate_for_a_large_elementwise_chain(#[cas
         current = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Tanh,
                 operands: alloc::vec![(current, IndexMap::Affine(map::projection(2, &[0, 1])))],
                 name: None,
@@ -6614,7 +6614,7 @@ async fn evaluate_parallel_matches_evaluate_for_a_tanh_chain(#[case] workers: us
         current = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Tanh,
                 operands: alloc::vec![(current, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
@@ -6646,7 +6646,7 @@ async fn evaluate_parallel_matches_evaluate_for_softmax(#[case] workers: usize) 
     let max = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Maximum,
             init: ReduceInit::NegativeInfinity,
             operand: input,
@@ -6659,7 +6659,7 @@ async fn evaluate_parallel_matches_evaluate_for_softmax(#[case] workers: usize) 
     let shifted = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Subtract,
             operands: alloc::vec![(input, row_map.clone()), (max, broadcast_map.clone())],
             name: None,
@@ -6668,7 +6668,7 @@ async fn evaluate_parallel_matches_evaluate_for_softmax(#[case] workers: usize) 
     let exponentiated = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Exponential,
             operands: alloc::vec![(shifted, row_map.clone())],
             name: None,
@@ -6677,7 +6677,7 @@ async fn evaluate_parallel_matches_evaluate_for_softmax(#[case] workers: usize) 
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: exponentiated,
@@ -6690,7 +6690,7 @@ async fn evaluate_parallel_matches_evaluate_for_softmax(#[case] workers: usize) 
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Divide,
             operands: alloc::vec![(exponentiated, row_map), (sum, broadcast_map)],
             name: None,
@@ -6712,7 +6712,7 @@ async fn evaluate_parallel_matches_evaluate_for_cumsum(#[case] workers: usize) {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: source,
@@ -6741,7 +6741,7 @@ async fn evaluate_parallel_matches_evaluate_for_multiple_requested_outputs(#[cas
         current = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Tanh,
                 operands: alloc::vec![(current, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
@@ -6808,7 +6808,7 @@ fn evaluate_parallel_raises_the_same_errors_as_evaluate_on_every_existing_sad_pa
     assert_eq!(sequential_error, parallel_error);
 
     let mut dtype_program = Vec::new();
-    block(&mut dtype_program, DType::Int32, &[Extent::Static(4)]);
+    block(&mut dtype_program, DType::INT32, &[Extent::Static(4)]);
     let sequential_error = evaluate(&dtype_program, &[], &[], &[]).expect_err("int32 is not f32");
     let parallel_error =
         evaluate_parallel(&dtype_program, &[], &[], &[], workers).expect_err("int32 is not f32");
@@ -6823,14 +6823,14 @@ fn evaluate_parallel_raises_the_same_errors_as_evaluate_on_every_existing_sad_pa
     let source = f32_block(&mut scatter_scan_program, &[Extent::Static(4)]);
     let ids = block(
         &mut scatter_scan_program,
-        DType::Int32,
+        DType::INT32,
         &[Extent::Static(4)],
     );
     let out_map = IndexMap::scatter(ids, map::projection(1, &[0]), 1, &[], 0, 3);
     append(
         &mut scatter_scan_program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: source,
@@ -6886,7 +6886,7 @@ fn peak_live_buffers_on_a_tanh_chain_stays_small_under_evaluate_parallel() {
         current = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Tanh,
                 operands: alloc::vec![(current, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
@@ -6992,17 +6992,17 @@ fn typed_add_program(dtype: DType, len: u32) -> (Vec<Op>, NodeId, NodeId, NodeId
 }
 
 #[proxima::test]
-#[case::int8(DType::Int8, TypedBuffer::Int8(alloc::vec![1, 2, 3]), TypedBuffer::Int8(alloc::vec![10, 20, 30]), TypedBuffer::Int8(alloc::vec![11, 22, 33]))]
-#[case::uint8(DType::UInt8, TypedBuffer::UInt8(alloc::vec![1, 2, 3]), TypedBuffer::UInt8(alloc::vec![10, 20, 30]), TypedBuffer::UInt8(alloc::vec![11, 22, 33]))]
-#[case::int16(DType::Int16, TypedBuffer::Int16(alloc::vec![1, 2, 3]), TypedBuffer::Int16(alloc::vec![10, 20, 30]), TypedBuffer::Int16(alloc::vec![11, 22, 33]))]
-#[case::uint16(DType::UInt16, TypedBuffer::UInt16(alloc::vec![1, 2, 3]), TypedBuffer::UInt16(alloc::vec![10, 20, 30]), TypedBuffer::UInt16(alloc::vec![11, 22, 33]))]
-#[case::int32(DType::Int32, TypedBuffer::Int32(alloc::vec![1, 2, 3]), TypedBuffer::Int32(alloc::vec![10, 20, 30]), TypedBuffer::Int32(alloc::vec![11, 22, 33]))]
-#[case::uint32(DType::UInt32, TypedBuffer::UInt32(alloc::vec![1, 2, 3]), TypedBuffer::UInt32(alloc::vec![10, 20, 30]), TypedBuffer::UInt32(alloc::vec![11, 22, 33]))]
-#[case::int64(DType::Int64, TypedBuffer::Int64(alloc::vec![1, 2, 3]), TypedBuffer::Int64(alloc::vec![10, 20, 30]), TypedBuffer::Int64(alloc::vec![11, 22, 33]))]
-#[case::uint64(DType::UInt64, TypedBuffer::UInt64(alloc::vec![1, 2, 3]), TypedBuffer::UInt64(alloc::vec![10, 20, 30]), TypedBuffer::UInt64(alloc::vec![11, 22, 33]))]
-#[case::int128(DType::Int128, TypedBuffer::Int128(alloc::vec![1, 2, 3]), TypedBuffer::Int128(alloc::vec![10, 20, 30]), TypedBuffer::Int128(alloc::vec![11, 22, 33]))]
-#[case::uint128(DType::UInt128, TypedBuffer::UInt128(alloc::vec![1, 2, 3]), TypedBuffer::UInt128(alloc::vec![10, 20, 30]), TypedBuffer::UInt128(alloc::vec![11, 22, 33]))]
-#[case::float64(DType::Float64, TypedBuffer::Float64(alloc::vec![1.5, 2.5, 3.5]), TypedBuffer::Float64(alloc::vec![10.0, 20.0, 30.0]), TypedBuffer::Float64(alloc::vec![11.5, 22.5, 33.5]))]
+#[case::int8(DType::INT8, TypedBuffer::Int8(alloc::vec![1, 2, 3]), TypedBuffer::Int8(alloc::vec![10, 20, 30]), TypedBuffer::Int8(alloc::vec![11, 22, 33]))]
+#[case::uint8(DType::UINT8, TypedBuffer::UInt8(alloc::vec![1, 2, 3]), TypedBuffer::UInt8(alloc::vec![10, 20, 30]), TypedBuffer::UInt8(alloc::vec![11, 22, 33]))]
+#[case::int16(DType::INT16, TypedBuffer::Int16(alloc::vec![1, 2, 3]), TypedBuffer::Int16(alloc::vec![10, 20, 30]), TypedBuffer::Int16(alloc::vec![11, 22, 33]))]
+#[case::uint16(DType::UINT16, TypedBuffer::UInt16(alloc::vec![1, 2, 3]), TypedBuffer::UInt16(alloc::vec![10, 20, 30]), TypedBuffer::UInt16(alloc::vec![11, 22, 33]))]
+#[case::int32(DType::INT32, TypedBuffer::Int32(alloc::vec![1, 2, 3]), TypedBuffer::Int32(alloc::vec![10, 20, 30]), TypedBuffer::Int32(alloc::vec![11, 22, 33]))]
+#[case::uint32(DType::UINT32, TypedBuffer::UInt32(alloc::vec![1, 2, 3]), TypedBuffer::UInt32(alloc::vec![10, 20, 30]), TypedBuffer::UInt32(alloc::vec![11, 22, 33]))]
+#[case::int64(DType::INT64, TypedBuffer::Int64(alloc::vec![1, 2, 3]), TypedBuffer::Int64(alloc::vec![10, 20, 30]), TypedBuffer::Int64(alloc::vec![11, 22, 33]))]
+#[case::uint64(DType::UINT64, TypedBuffer::UInt64(alloc::vec![1, 2, 3]), TypedBuffer::UInt64(alloc::vec![10, 20, 30]), TypedBuffer::UInt64(alloc::vec![11, 22, 33]))]
+#[case::int128(DType::INT128, TypedBuffer::Int128(alloc::vec![1, 2, 3]), TypedBuffer::Int128(alloc::vec![10, 20, 30]), TypedBuffer::Int128(alloc::vec![11, 22, 33]))]
+#[case::uint128(DType::UINT128, TypedBuffer::UInt128(alloc::vec![1, 2, 3]), TypedBuffer::UInt128(alloc::vec![10, 20, 30]), TypedBuffer::UInt128(alloc::vec![11, 22, 33]))]
+#[case::float64(DType::FLOAT64, TypedBuffer::Float64(alloc::vec![1.5, 2.5, 3.5]), TypedBuffer::Float64(alloc::vec![10.0, 20.0, 30.0]), TypedBuffer::Float64(alloc::vec![11.5, 22.5, 33.5]))]
 async fn evaluate_typed_adds_across_every_extended_width(
     #[case] dtype: DType,
     #[case] lhs: TypedBuffer,
@@ -7022,7 +7022,7 @@ async fn evaluate_typed_adds_across_every_extended_width(
 
 #[test]
 fn evaluate_typed_wraps_signed_narrow_overflow_instead_of_panicking() {
-    let (program, _, _, _) = typed_add_program(DType::Int8, 1);
+    let (program, _, _, _) = typed_add_program(DType::INT8, 1);
     let lhs = TypedBuffer::Int8(alloc::vec![127]);
     let rhs = TypedBuffer::Int8(alloc::vec![1]);
     let results = evaluate_typed(&program, &[], &[lhs, rhs], &[])
@@ -7033,11 +7033,11 @@ fn evaluate_typed_wraps_signed_narrow_overflow_instead_of_panicking() {
 #[test]
 fn evaluate_typed_rejects_negate_on_an_unsigned_dtype() {
     let mut program = Vec::new();
-    let operand = block(&mut program, DType::UInt32, &[Extent::Static(2)]);
+    let operand = block(&mut program, DType::UINT32, &[Extent::Static(2)]);
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::UInt32,
+            dtype: DType::UINT32,
             body: ScalarOp::Negate,
             operands: alloc::vec![(operand, typed_identity())],
             name: None,
@@ -7051,7 +7051,7 @@ fn evaluate_typed_rejects_negate_on_an_unsigned_dtype() {
             error,
             TensorError::UnsupportedScalarOp {
                 op: ScalarOp::Negate,
-                dtype: DType::UInt32,
+                dtype: DType::UINT32,
                 ..
             }
         ),
@@ -7062,11 +7062,11 @@ fn evaluate_typed_rejects_negate_on_an_unsigned_dtype() {
 #[test]
 fn evaluate_typed_rejects_a_transcendental_on_an_integer_dtype() {
     let mut program = Vec::new();
-    let operand = block(&mut program, DType::Int32, &[Extent::Static(2)]);
+    let operand = block(&mut program, DType::INT32, &[Extent::Static(2)]);
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             body: ScalarOp::SquareRoot,
             operands: alloc::vec![(operand, typed_identity())],
             name: None,
@@ -7080,7 +7080,7 @@ fn evaluate_typed_rejects_a_transcendental_on_an_integer_dtype() {
             error,
             TensorError::UnsupportedScalarOp {
                 op: ScalarOp::SquareRoot,
-                dtype: DType::Int32,
+                dtype: DType::INT32,
                 ..
             }
         ),
@@ -7091,12 +7091,12 @@ fn evaluate_typed_rejects_a_transcendental_on_an_integer_dtype() {
 #[test]
 fn evaluate_typed_reports_integer_divide_by_zero_instead_of_panicking() {
     let mut program = Vec::new();
-    let lhs = block(&mut program, DType::Int32, &[Extent::Static(1)]);
-    let rhs = block(&mut program, DType::Int32, &[Extent::Static(1)]);
+    let lhs = block(&mut program, DType::INT32, &[Extent::Static(1)]);
+    let rhs = block(&mut program, DType::INT32, &[Extent::Static(1)]);
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             body: ScalarOp::Divide,
             operands: alloc::vec![(lhs, typed_identity()), (rhs, typed_identity())],
             name: None,
@@ -7117,11 +7117,11 @@ fn evaluate_typed_reports_integer_divide_by_zero_instead_of_panicking() {
 #[test]
 fn evaluate_typed_computes_float64_transcendentals() {
     let mut program = Vec::new();
-    let operand = block(&mut program, DType::Float64, &[Extent::Static(3)]);
+    let operand = block(&mut program, DType::FLOAT64, &[Extent::Static(3)]);
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float64,
+            dtype: DType::FLOAT64,
             body: ScalarOp::SquareRoot,
             operands: alloc::vec![(operand, typed_identity())],
             name: None,
@@ -7138,12 +7138,12 @@ fn evaluate_typed_computes_float64_transcendentals() {
 #[test]
 fn evaluate_typed_rejects_a_program_mixing_dtypes() {
     let mut program = Vec::new();
-    let lhs = block(&mut program, DType::Int32, &[Extent::Static(2)]);
-    let rhs = block(&mut program, DType::Int8, &[Extent::Static(2)]);
+    let lhs = block(&mut program, DType::INT32, &[Extent::Static(2)]);
+    let rhs = block(&mut program, DType::INT8, &[Extent::Static(2)]);
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             body: ScalarOp::Add,
             operands: alloc::vec![(lhs, typed_identity()), (rhs, typed_identity())],
             name: None,
@@ -7164,11 +7164,11 @@ fn an_i8_operand_i32_accumulator_reduce_evaluates() {
     // fit in i8 (max 127) -- wrapping i8 arithmetic would land on -106
     // (150 - 256). an i32 accumulator is the only way to observe 150.
     let mut program = Vec::new();
-    let operand = block(&mut program, DType::Int8, &[Extent::Static(5)]);
+    let operand = block(&mut program, DType::INT8, &[Extent::Static(5)]);
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand,
@@ -7190,7 +7190,7 @@ fn an_i8_operand_i32_accumulator_reduce_evaluates() {
 
 #[test]
 fn f32_typed_path_is_unchanged() {
-    let (program, _) = typed_reduce_vector_to_scalar_program(DType::Float32, 4);
+    let (program, _) = typed_reduce_vector_to_scalar_program(DType::FLOAT32, 4);
     let operand = TypedBuffer::Float32(alloc::vec![1.5, 2.5, 3.0, 4.0]);
     let results = evaluate_typed(&program, &[], &[operand], &[])
         .expect("a uniform f32 typed program still evaluates via the unchanged NEON-backed path");
@@ -7200,11 +7200,11 @@ fn f32_typed_path_is_unchanged() {
 #[test]
 fn an_unshipped_widened_pair_is_rejected_not_silently_wrong() {
     let mut program = Vec::new();
-    let operand = block(&mut program, DType::UInt16, &[Extent::Static(3)]);
+    let operand = block(&mut program, DType::UINT16, &[Extent::Static(3)]);
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::UInt64,
+            dtype: DType::UINT64,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand,
@@ -7252,8 +7252,8 @@ fn typed_widened_reduce_program(
 }
 
 #[proxima::test]
-#[case::f16_add(DType::Float16, TypedBuffer::Float16(alloc::vec![f16::from_f32(1.5), f16::from_f32(2.25), f16::from_f32(-3.0)]), TypedBuffer::Float16(alloc::vec![f16::from_f32(10.0), f16::from_f32(20.0), f16::from_f32(30.0)]))]
-#[case::bf16_add(DType::BFloat16, TypedBuffer::BFloat16(alloc::vec![bf16::from_f32(1.5), bf16::from_f32(2.25), bf16::from_f32(-3.0)]), TypedBuffer::BFloat16(alloc::vec![bf16::from_f32(10.0), bf16::from_f32(20.0), bf16::from_f32(30.0)]))]
+#[case::f16_add(DType::FLOAT16, TypedBuffer::Float16(alloc::vec![f16::from_f32(1.5), f16::from_f32(2.25), f16::from_f32(-3.0)]), TypedBuffer::Float16(alloc::vec![f16::from_f32(10.0), f16::from_f32(20.0), f16::from_f32(30.0)]))]
+#[case::bf16_add(DType::BFLOAT16, TypedBuffer::BFloat16(alloc::vec![bf16::from_f32(1.5), bf16::from_f32(2.25), bf16::from_f32(-3.0)]), TypedBuffer::BFloat16(alloc::vec![bf16::from_f32(10.0), bf16::from_f32(20.0), bf16::from_f32(30.0)]))]
 async fn half_precision_uniform_elementwise_matches_f32_reference(
     #[case] dtype: DType,
     #[case] lhs: TypedBuffer,
@@ -7292,17 +7292,17 @@ async fn half_precision_uniform_elementwise_matches_f32_reference(
 }
 
 #[proxima::test]
-#[case::f16_sum(DType::Float16)]
-#[case::bf16_sum(DType::BFloat16)]
+#[case::f16_sum(DType::FLOAT16)]
+#[case::bf16_sum(DType::BFLOAT16)]
 async fn half_precision_uniform_reduce_matches_f32_reference(#[case] dtype: DType) {
     let values = [1.5f32, 2.5, -0.5, 4.0];
     let (program, _) = typed_reduce_vector_to_scalar_program(dtype, values.len() as u32);
     let expected_f32: f32 = values.iter().sum();
     let operand = match dtype {
-        DType::Float16 => {
+        DType::FLOAT16 => {
             TypedBuffer::Float16(values.iter().map(|value| f16::from_f32(*value)).collect())
         }
-        DType::BFloat16 => {
+        DType::BFLOAT16 => {
             TypedBuffer::BFloat16(values.iter().map(|value| bf16::from_f32(*value)).collect())
         }
         other => panic!("unexpected dtype in case table: {other:?}"),
@@ -7327,7 +7327,7 @@ fn f16_reduce_widens_into_an_f32_accumulator_where_f16_alone_overflows() {
     // fits an f32 accumulator exactly -- the same "widening changes the
     // observable result" shape as the i8/i32 test above, at floating
     // widths instead of integer ones.
-    let (program, _) = typed_widened_reduce_program(DType::Float16, DType::Float32, 2);
+    let (program, _) = typed_widened_reduce_program(DType::FLOAT16, DType::FLOAT32, 2);
     let operand = TypedBuffer::Float16(alloc::vec![f16::from_f32(40000.0), f16::from_f32(40000.0)]);
     let results = evaluate_typed(&program, &[], &[operand], &[])
         .expect("an f16-operand, f32-accumulator reduce evaluates");
@@ -7342,7 +7342,7 @@ fn f16_reduce_widens_into_an_f32_accumulator_where_f16_alone_overflows() {
 
 #[test]
 fn bf16_reduce_widens_into_an_f32_accumulator_exactly() {
-    let (program, _) = typed_widened_reduce_program(DType::BFloat16, DType::Float32, 3);
+    let (program, _) = typed_widened_reduce_program(DType::BFLOAT16, DType::FLOAT32, 3);
     let operand = TypedBuffer::BFloat16(alloc::vec![
         bf16::from_f32(1.0),
         bf16::from_f32(2.0),
@@ -7355,7 +7355,7 @@ fn bf16_reduce_widens_into_an_f32_accumulator_exactly() {
 
 #[test]
 fn card_03_bf8_element_rounds_each_elementwise_result_by_contract() {
-    let (program, _, _, _) = typed_add_program(DType::BFloat8, 1);
+    let (program, _, _, _) = typed_add_program(DType::BFLOAT8, 1);
     let lhs = TypedBuffer::BFloat8(alloc::vec![BFloat8::from_bits(0x3c)]);
     let rhs = TypedBuffer::BFloat8(alloc::vec![BFloat8::from_bits(0x30)]);
     let results = evaluate_typed(&program, &[], &[lhs, rhs], &[])
@@ -7366,7 +7366,7 @@ fn card_03_bf8_element_rounds_each_elementwise_result_by_contract() {
         TypedBuffer::BFloat8(alloc::vec![BFloat8::from_bits(0x3c)]),
         "1.0 + 0.125 is an RNE tie that rounds to the even 1.0 encoding"
     );
-    assert_eq!(results[0].2.dtype(), DType::BFloat8);
+    assert_eq!(results[0].2.dtype(), DType::BFLOAT8);
     assert_eq!(results[0].2.len(), 1);
 }
 
@@ -7375,7 +7375,7 @@ fn card_03_bf8_element_widens_reduce_and_rejects_bf8_accumulation() {
     let values = [1.0f32, 0.125, 0.125, 0.125];
     let operand = TypedBuffer::BFloat8(values.map(BFloat8::from_f32).to_vec());
     let (widened_program, _) =
-        typed_widened_reduce_program(DType::BFloat8, DType::Float32, values.len() as u32);
+        typed_widened_reduce_program(DType::BFLOAT8, DType::FLOAT32, values.len() as u32);
     let widened = evaluate_typed(&widened_program, &[], core::slice::from_ref(&operand), &[])
         .expect("BF8 inputs reduce into the explicitly selected F32 accumulator");
     assert_eq!(widened[0].2, TypedBuffer::Float32(alloc::vec![1.375]));
@@ -7391,7 +7391,7 @@ fn card_03_bf8_element_widens_reduce_and_rejects_bf8_accumulation() {
     );
 
     let (narrow_program, _) =
-        typed_reduce_vector_to_scalar_program(DType::BFloat8, values.len() as u32);
+        typed_reduce_vector_to_scalar_program(DType::BFLOAT8, values.len() as u32);
     let error = evaluate_typed(&narrow_program, &[], &[operand], &[])
         .expect_err("BF8 reduction without an explicit wider accumulator is declined");
     assert!(
@@ -7402,7 +7402,7 @@ fn card_03_bf8_element_widens_reduce_and_rejects_bf8_accumulation() {
 
 #[test]
 fn typed_program_plan_no_longer_rejects_float16_or_bfloat16_but_still_rejects_bool() {
-    let (float16_program, _, _, _) = typed_add_program(DType::Float16, 2);
+    let (float16_program, _, _, _) = typed_add_program(DType::FLOAT16, 2);
     let float16_blocks = [
         TypedBuffer::Float16(alloc::vec![f16::from_f32(1.0), f16::from_f32(2.0)]),
         TypedBuffer::Float16(alloc::vec![f16::from_f32(10.0), f16::from_f32(20.0)]),
@@ -7474,10 +7474,10 @@ fn typed_gather_program(compute_dtype: DType, index_dtype: DType) -> Vec<Op> {
 /// proven all the way through `evaluate_typed` against the f32 pipeline
 /// as oracle.
 #[proxima::test]
-#[case::i32_index_over_f32_compute(DType::Float32, DType::Int32)]
-#[case::u32_index_over_f32_compute(DType::Float32, DType::UInt32)]
-#[case::i32_index_over_f16_compute(DType::Float16, DType::Int32)]
-#[case::u32_index_over_f16_compute(DType::Float16, DType::UInt32)]
+#[case::i32_index_over_f32_compute(DType::FLOAT32, DType::INT32)]
+#[case::u32_index_over_f32_compute(DType::FLOAT32, DType::UINT32)]
+#[case::i32_index_over_f16_compute(DType::FLOAT16, DType::INT32)]
+#[case::u32_index_over_f16_compute(DType::FLOAT16, DType::UINT32)]
 async fn typed_program_plan_permits_an_integer_gather_index_distinct_from_compute_dtype(
     #[case] compute_dtype: DType,
     #[case] index_dtype: DType,
@@ -7498,7 +7498,7 @@ async fn typed_program_plan_permits_an_integer_gather_index_distinct_from_comput
 /// alongside the new integer exemption.
 #[test]
 fn typed_program_plan_rejects_a_float_gather_index_dtype() {
-    let program = typed_gather_program(DType::Float32, DType::Float64);
+    let program = typed_gather_program(DType::FLOAT32, DType::FLOAT64);
     let error = typed_program_plan(&program)
         .expect_err("a float-dtype gather index must be rejected, never silently accepted");
     assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
@@ -7640,8 +7640,8 @@ fn typed_widened_gather_reduce_program(
 /// Covers a repeated index (row 3 selected twice) and both boundary
 /// indices (`0` and `vocab - 1`).
 #[proxima::test]
-#[case::i32_index(DType::Int32)]
-#[case::u32_index(DType::UInt32)]
+#[case::i32_index(DType::INT32)]
+#[case::u32_index(DType::UINT32)]
 async fn typed_gather_matches_f32_oracle_element_for_element(#[case] index_dtype: DType) {
     let (vocab, dim, seq) = (50usize, 6usize, 5usize);
     let (f32_program, _) = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
@@ -7654,15 +7654,15 @@ async fn typed_gather_matches_f32_oracle_element_for_element(#[case] index_dtype
         evaluate(&f32_program, &[], &[&table_data, &ids_f32], &[]).expect("f32 oracle evaluates");
 
     let (typed_program, _) = typed_embedding_lookup_program(
-        DType::Float32,
+        DType::FLOAT32,
         index_dtype,
         vocab as u32,
         dim as u32,
         seq as u32,
     );
     let ids_block = match index_dtype {
-        DType::Int32 => TypedBuffer::Int32(ids_f32.iter().map(|&value| value as i32).collect()),
-        DType::UInt32 => TypedBuffer::UInt32(ids_f32.iter().map(|&value| value as u32).collect()),
+        DType::INT32 => TypedBuffer::Int32(ids_f32.iter().map(|&value| value as i32).collect()),
+        DType::UINT32 => TypedBuffer::UInt32(ids_f32.iter().map(|&value| value as u32).collect()),
         other => panic!("unexpected index dtype in case table: {other:?}"),
     };
     let blocks = [TypedBuffer::Float32(table_data.clone()), ids_block];
@@ -7696,8 +7696,8 @@ fn typed_gather_f16_compute_matches_f32_oracle_within_half_precision() {
         evaluate(&f32_program, &[], &[&table_f32, &ids_f32], &[]).expect("f32 oracle evaluates");
 
     let (typed_program, _) = typed_embedding_lookup_program(
-        DType::Float16,
-        DType::Int32,
+        DType::FLOAT16,
+        DType::INT32,
         vocab as u32,
         dim as u32,
         seq as u32,
@@ -7731,8 +7731,8 @@ fn typed_gather_f16_compute_matches_f32_oracle_within_half_precision() {
 fn typed_gather_dim1_matches_f32_oracle() {
     let (dim, vocab, seq) = (5usize, 20usize, 4usize);
     let (f32_program, _) = typed_gather_dim_program(
-        DType::Float32,
-        DType::Int32,
+        DType::FLOAT32,
+        DType::INT32,
         [dim as u32, vocab as u32],
         seq as u32,
         1,
@@ -7745,8 +7745,8 @@ fn typed_gather_dim1_matches_f32_oracle() {
         evaluate(&f32_program, &[], &[&table_data, &ids_f32], &[]).expect("f32 oracle evaluates");
 
     let (typed_program, _) = typed_gather_dim_program(
-        DType::Float32,
-        DType::UInt32,
+        DType::FLOAT32,
+        DType::UINT32,
         [dim as u32, vocab as u32],
         seq as u32,
         1,
@@ -7791,9 +7791,9 @@ fn widened_reduce_over_a_gathered_f16_operand_matches_a_hand_written_reference()
     }
 
     let (program, _) = typed_widened_gather_reduce_program(
-        DType::Float16,
-        DType::Float32,
-        DType::UInt32,
+        DType::FLOAT16,
+        DType::FLOAT32,
+        DType::UINT32,
         vocab as u32,
         dim as u32,
         seq as u32,
@@ -7826,7 +7826,7 @@ fn widened_reduce_over_a_gathered_f16_operand_matches_a_hand_written_reference()
 /// the plan level alone.
 #[test]
 fn evaluate_typed_rejects_a_float_gather_index_dtype_at_execution() {
-    let program = typed_gather_program(DType::Float32, DType::Float64);
+    let program = typed_gather_program(DType::FLOAT32, DType::FLOAT64);
     let error = evaluate_typed(&program, &[], &[], &[]).expect_err(
         "a float-dtype gather index must be rejected at execution, never silently accepted",
     );
@@ -7860,8 +7860,8 @@ async fn typed_gather_out_of_range_index_matches_f32_oracle_error_shape(#[case] 
     };
 
     let (typed_program, _) = typed_embedding_lookup_program(
-        DType::Float32,
-        DType::Int32,
+        DType::FLOAT32,
+        DType::INT32,
         vocab as u32,
         dim as u32,
         seq as u32,
@@ -7896,13 +7896,13 @@ fn evaluate_typed_names_a_computed_gather_index_node_as_not_yet_supported() {
     let mut program = Vec::new();
     let table = block(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         &[Extent::Static(4), Extent::Static(2)],
     );
     let ids = append(
         &mut program,
         Op::Iota {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             extent: Extent::Static(3),
         },
     );
@@ -7925,7 +7925,7 @@ fn evaluate_typed_names_a_computed_gather_index_node_as_not_yet_supported() {
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: alloc::vec![(table, gathered_map)],
             name: None,
@@ -7943,7 +7943,7 @@ fn i16_operand_i64_accumulator_reduce_survives_i16_overflow() {
     // does not fit in i16 (max 32767) -- wrapping i16 arithmetic would
     // land on -5536 (60000 - 65536). an i64 accumulator is the only way
     // to observe 60000.
-    let (program, _) = typed_widened_reduce_program(DType::Int16, DType::Int64, 3);
+    let (program, _) = typed_widened_reduce_program(DType::INT16, DType::INT64, 3);
     let operand = TypedBuffer::Int16(alloc::vec![20000, 20000, 20000]);
     let results = evaluate_typed(&program, &[], &[operand], &[])
         .expect("an i16-operand, i64-accumulator reduce evaluates");
@@ -7959,7 +7959,7 @@ fn u8_operand_u32_accumulator_reduce_survives_u8_overflow() {
     // three u8 elements of 200 each: the true sum is 600, which does
     // not fit in u8 (max 255) -- wrapping u8 arithmetic would land on
     // 88 (600 - 512). a u32 accumulator is the only way to observe 600.
-    let (program, _) = typed_widened_reduce_program(DType::UInt8, DType::UInt32, 3);
+    let (program, _) = typed_widened_reduce_program(DType::UINT8, DType::UINT32, 3);
     let operand = TypedBuffer::UInt8(alloc::vec![200, 200, 200]);
     let results = evaluate_typed(&program, &[], &[operand], &[])
         .expect("a u8-operand, u32-accumulator reduce evaluates");
@@ -7990,9 +7990,9 @@ fn typed_reduce_vector_to_scalar_program(dtype: DType, len: u32) -> (Vec<Op>, No
 }
 
 #[proxima::test]
-#[case::int32(DType::Int32, TypedBuffer::Int32(alloc::vec![1, 2, 3, 4]), TypedBuffer::Int32(alloc::vec![10]))]
-#[case::uint64(DType::UInt64, TypedBuffer::UInt64(alloc::vec![1, 2, 3, 4]), TypedBuffer::UInt64(alloc::vec![10]))]
-#[case::float64(DType::Float64, TypedBuffer::Float64(alloc::vec![1.5, 2.5, 3.0, 4.0]), TypedBuffer::Float64(alloc::vec![11.0]))]
+#[case::int32(DType::INT32, TypedBuffer::Int32(alloc::vec![1, 2, 3, 4]), TypedBuffer::Int32(alloc::vec![10]))]
+#[case::uint64(DType::UINT64, TypedBuffer::UInt64(alloc::vec![1, 2, 3, 4]), TypedBuffer::UInt64(alloc::vec![10]))]
+#[case::float64(DType::FLOAT64, TypedBuffer::Float64(alloc::vec![1.5, 2.5, 3.0, 4.0]), TypedBuffer::Float64(alloc::vec![11.0]))]
 async fn evaluate_typed_reduces_a_vector_to_a_scalar_across_widths(
     #[case] dtype: DType,
     #[case] operand: TypedBuffer,
@@ -8007,11 +8007,11 @@ async fn evaluate_typed_reduces_a_vector_to_a_scalar_across_widths(
 #[test]
 fn evaluate_typed_scans_an_integer_vector_producing_a_running_sum() {
     let mut program = Vec::new();
-    let source = block(&mut program, DType::Int32, &[Extent::Static(5)]);
+    let source = block(&mut program, DType::INT32, &[Extent::Static(5)]);
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: source,
@@ -8067,7 +8067,7 @@ fn typed_matmul_program(dtype: DType, m: u32, k: u32, n: u32) -> (Vec<Op>, NodeI
 #[test]
 fn evaluate_typed_matmul_shaped_reduce_matches_a_naive_reference_at_int32() {
     let (m, k, n) = (3usize, 4usize, 2usize);
-    let (program, _, _, _) = typed_matmul_program(DType::Int32, m as u32, k as u32, n as u32);
+    let (program, _, _, _) = typed_matmul_program(DType::INT32, m as u32, k as u32, n as u32);
     let lhs: Vec<i32> = (0..(m * k) as i32).collect();
     let rhs: Vec<i32> = (0..(k * n) as i32).collect();
     let blocks = [
@@ -8092,7 +8092,7 @@ fn evaluate_typed_matmul_shaped_reduce_matches_a_naive_reference_at_int32() {
 #[test]
 fn evaluate_typed_matmul_shaped_reduce_matches_a_naive_reference_at_float64() {
     let (m, k, n) = (3usize, 4usize, 2usize);
-    let (program, _, _, _) = typed_matmul_program(DType::Float64, m as u32, k as u32, n as u32);
+    let (program, _, _, _) = typed_matmul_program(DType::FLOAT64, m as u32, k as u32, n as u32);
     let lhs: Vec<f64> = (0..m * k).map(|value| value as f64 * 0.5).collect();
     let rhs: Vec<f64> = (0..k * n).map(|value| value as f64 * 0.25).collect();
     let blocks = [
@@ -8130,7 +8130,7 @@ fn evaluate_typed_matmul_shaped_reduce_matches_a_naive_reference_at_float64() {
 #[test]
 fn evaluate_typed_float32_matmul_shaped_reduce_matches_evaluate_bit_for_bit() {
     let (m, k, n) = (6usize, 32usize, 8usize);
-    let (program, _, _, _) = typed_matmul_program(DType::Float32, m as u32, k as u32, n as u32);
+    let (program, _, _, _) = typed_matmul_program(DType::FLOAT32, m as u32, k as u32, n as u32);
     let lhs: Vec<f32> = (0..m * k)
         .map(|value| (value as f32 * 0.0137).sin())
         .collect();
@@ -8207,18 +8207,18 @@ fn evaluate_typed_float32_matmul_shaped_reduce_fires_the_neon_tile() {
     let mut program = Vec::new();
     let lhs = block(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         &[Extent::Static(m as u32), Extent::Static(k as u32)],
     );
     let rhs = block(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         &[Extent::Static(n as u32), Extent::Static(k as u32)],
     );
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -8230,7 +8230,7 @@ fn evaluate_typed_float32_matmul_shaped_reduce_fires_the_neon_tile() {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -8267,7 +8267,7 @@ fn evaluate_typed_float32_matmul_shaped_reduce_fires_the_neon_tile() {
 
 #[test]
 fn evaluate_typed_rejects_a_block_whose_dtype_does_not_match_the_program() {
-    let (program, _, _, _) = typed_add_program(DType::Int32, 2);
+    let (program, _, _, _) = typed_add_program(DType::INT32, 2);
     let blocks = [
         TypedBuffer::Int32(alloc::vec![1, 2]),
         TypedBuffer::Int8(alloc::vec![1, 2]),
@@ -8515,7 +8515,7 @@ fn erf_evaluates_through_a_real_elementwise_program() {
     let input = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(4)],
             name: None,
         },
@@ -8523,7 +8523,7 @@ fn erf_evaluates_through_a_real_elementwise_program() {
     let output = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Erf,
             operands: alloc::vec![(input, IndexMap::Affine(map::projection(1, &[0])))],
             name: None,
@@ -9553,14 +9553,14 @@ fn quantized_matmul_program(rows: u32, k: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = block(
         &mut program,
-        DType::UInt8,
+        DType::UINT8,
         &[Extent::Static(rows), Extent::Static(k)],
     );
     let activation = f32_block(&mut program, &[Extent::Static(k), Extent::Static(1)]);
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -9572,7 +9572,7 @@ fn quantized_matmul_program(rows: u32, k: u32) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -9736,7 +9736,7 @@ fn evaluate_quantized_threads_a_fused_elementwise_step_ahead_of_the_matmul_multi
     let mut program = Vec::new();
     let weight = block(
         &mut program,
-        DType::UInt8,
+        DType::UINT8,
         &[Extent::Static(rows), Extent::Static(k)],
     );
     let raw = f32_block(&mut program, &[Extent::Static(k), Extent::Static(1)]);
@@ -9744,7 +9744,7 @@ fn evaluate_quantized_threads_a_fused_elementwise_step_ahead_of_the_matmul_multi
     let real_activation = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: alloc::vec![
                 (raw, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -9756,7 +9756,7 @@ fn evaluate_quantized_threads_a_fused_elementwise_step_ahead_of_the_matmul_multi
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -9771,7 +9771,7 @@ fn evaluate_quantized_threads_a_fused_elementwise_step_ahead_of_the_matmul_multi
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -9890,7 +9890,7 @@ fn evaluate_quantized_applies_the_full_composed_gate_not_just_its_first_leaf() {
     let mut program = Vec::new();
     let weight = block(
         &mut program,
-        DType::UInt8,
+        DType::UINT8,
         &[Extent::Static(rows), Extent::Static(k)],
     );
     let attended_node = f32_block(&mut program, &[Extent::Static(k), Extent::Static(1)]);
@@ -9899,7 +9899,7 @@ fn evaluate_quantized_applies_the_full_composed_gate_not_just_its_first_leaf() {
     let negated_gate = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Negate,
             operands: alloc::vec![(gate_node, IndexMap::Affine(map::projection(2, &[0, 1])))],
             name: None,
@@ -9908,7 +9908,7 @@ fn evaluate_quantized_applies_the_full_composed_gate_not_just_its_first_leaf() {
     let exp_neg_gate = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Exponential,
             operands: alloc::vec![(negated_gate, IndexMap::Affine(map::projection(2, &[0, 1])))],
             name: None,
@@ -9917,7 +9917,7 @@ fn evaluate_quantized_applies_the_full_composed_gate_not_just_its_first_leaf() {
     let one_plus_exp_gate = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: alloc::vec![
                 (exp_neg_gate, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -9929,7 +9929,7 @@ fn evaluate_quantized_applies_the_full_composed_gate_not_just_its_first_leaf() {
     let sigmoid_gate = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Reciprocal,
             operands: alloc::vec![(
                 one_plus_exp_gate,
@@ -9941,7 +9941,7 @@ fn evaluate_quantized_applies_the_full_composed_gate_not_just_its_first_leaf() {
     let gated = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (attended_node, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -9953,7 +9953,7 @@ fn evaluate_quantized_applies_the_full_composed_gate_not_just_its_first_leaf() {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -9965,7 +9965,7 @@ fn evaluate_quantized_applies_the_full_composed_gate_not_just_its_first_leaf() {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -10093,7 +10093,7 @@ fn evaluate_quantized_applies_the_composed_gate_over_a_multi_axis_packed_contrac
     // row-major layout); iteration axes here are (u=0, g=1, d=2, e=3).
     let weight = block(
         &mut program,
-        DType::UInt8,
+        DType::UINT8,
         &[Extent::Static(EMBED as u32), Extent::Static(IN_DIM as u32)],
     );
     let attended_node = f32_block(
@@ -10116,7 +10116,7 @@ fn evaluate_quantized_applies_the_composed_gate_over_a_multi_axis_packed_contrac
     let negated_gate = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Negate,
             operands: alloc::vec![(gate_node, IndexMap::Affine(map::projection(3, &[0, 1, 2])))],
             name: None,
@@ -10125,7 +10125,7 @@ fn evaluate_quantized_applies_the_composed_gate_over_a_multi_axis_packed_contrac
     let exp_neg_gate = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Exponential,
             operands: alloc::vec![(
                 negated_gate,
@@ -10137,7 +10137,7 @@ fn evaluate_quantized_applies_the_composed_gate_over_a_multi_axis_packed_contrac
     let one_plus_exp_gate = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: alloc::vec![
                 (
@@ -10152,7 +10152,7 @@ fn evaluate_quantized_applies_the_composed_gate_over_a_multi_axis_packed_contrac
     let sigmoid_gate = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Reciprocal,
             operands: alloc::vec![(
                 one_plus_exp_gate,
@@ -10164,7 +10164,7 @@ fn evaluate_quantized_applies_the_composed_gate_over_a_multi_axis_packed_contrac
     let gated = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (
@@ -10196,7 +10196,7 @@ fn evaluate_quantized_applies_the_composed_gate_over_a_multi_axis_packed_contrac
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (weight, weight_map),
@@ -10208,7 +10208,7 @@ fn evaluate_quantized_applies_the_composed_gate_over_a_multi_axis_packed_contrac
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -10306,7 +10306,7 @@ fn qwen35_batched_packed_ssm_projection_matches_repeated_rows() {
         let mut program = Vec::new();
         let weight = block(
             &mut program,
-            DType::UInt8,
+            DType::UINT8,
             &[Extent::Static(EMBED), Extent::Static(CONTRACTION)],
         );
         let activation = f32_block(
@@ -10330,7 +10330,7 @@ fn qwen35_batched_packed_ssm_projection_matches_repeated_rows() {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![
                     (weight, weight_map),
@@ -10345,7 +10345,7 @@ fn qwen35_batched_packed_ssm_projection_matches_repeated_rows() {
         let sum = append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -10493,14 +10493,14 @@ fn gathered_quantized_matmul_program(
     let mut program = Vec::new();
     let weight = block(
         &mut program,
-        DType::UInt8,
+        DType::UINT8,
         &[
             Extent::Static(n_experts),
             Extent::Static(rows),
             Extent::Static(k),
         ],
     );
-    let route = block(&mut program, DType::Int32, &[Extent::Static(seq)]);
+    let route = block(&mut program, DType::INT32, &[Extent::Static(seq)]);
     let activation = f32_block(&mut program, &[Extent::Static(seq), Extent::Static(k)]);
 
     let gather_map = IndexMap::Computed {
@@ -10529,7 +10529,7 @@ fn gathered_quantized_matmul_program(
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![(weight, gather_map), (activation, activation_map)],
             name: None,
@@ -10538,7 +10538,7 @@ fn gathered_quantized_matmul_program(
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -11420,14 +11420,14 @@ fn evaluate_quantized_two_layers_does_not_underflow_live_now() {
     fn append_layer(program: &mut Vec<Op>, rows: u32, k: u32) -> NodeId {
         let weight = block(
             program,
-            DType::UInt8,
+            DType::UINT8,
             &[Extent::Static(rows), Extent::Static(k)],
         );
         let activation = f32_block(program, &[Extent::Static(k), Extent::Static(1)]);
         let product = append(
             program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![
                     (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -11439,7 +11439,7 @@ fn evaluate_quantized_two_layers_does_not_underflow_live_now() {
         append(
             program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -11457,7 +11457,7 @@ fn evaluate_quantized_two_layers_does_not_underflow_live_now() {
     let total = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: alloc::vec![
                 (sum1, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -11531,7 +11531,7 @@ fn reduce_epilogue_only_quantized_weight_is_materialized_before_evaluation() {
 
     let mut program = Vec::new();
     let x_node = f32_block(&mut program, &[Extent::Static(rows), Extent::Static(k)]);
-    let gate_node = block(&mut program, DType::UInt8, &[Extent::Static(rows)]);
+    let gate_node = block(&mut program, DType::UINT8, &[Extent::Static(rows)]);
     let shapes = shape::infer(&program, &[]).expect("the two-input shape program infers");
 
     let x_data: Vec<f32> = random_vec(551, rows as usize * k as usize)
@@ -11549,7 +11549,7 @@ fn reduce_epilogue_only_quantized_weight_is_materialized_before_evaluation() {
 
     let resolved = BoundOp {
         node: NodeId(2),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: alloc::vec![rows as u64, k as u64],
         kind: BoundOpKind::Reduce {
             element_body: ComposedBody {
@@ -11705,7 +11705,7 @@ fn a_reduce_where_activation_and_packed_weight_share_a_kept_output_axis_is_rejec
     let mut program = Vec::new();
     let weight = block(
         &mut program,
-        DType::UInt8,
+        DType::UINT8,
         &[
             Extent::Static(cached_len),
             Extent::Static(kv_heads),
@@ -11723,7 +11723,7 @@ fn a_reduce_where_activation_and_packed_weight_share_a_kept_output_axis_is_rejec
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (weight, IndexMap::Affine(map::projection(4, &[1, 2, 3]))),
@@ -11735,7 +11735,7 @@ fn a_reduce_where_activation_and_packed_weight_share_a_kept_output_axis_is_rejec
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -11965,14 +11965,14 @@ async fn evaluate_quantized_executes_a_half_precision_weight_end_to_end(
     let mut program = Vec::new();
     let weight = block(
         &mut program,
-        DType::UInt8,
+        DType::UINT8,
         &[Extent::Static(ROWS), Extent::Static(K)],
     );
     let activation_node = f32_block(&mut program, &[Extent::Static(K)]);
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (weight, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -11984,7 +11984,7 @@ async fn evaluate_quantized_executes_a_half_precision_weight_end_to_end(
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -13177,7 +13177,7 @@ fn a_static_block_sparse_matmul_needs_no_data_dependent_map() {
         let product = append(
             program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![
                     (weight, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -13189,7 +13189,7 @@ fn a_static_block_sparse_matmul_needs_no_data_dependent_map() {
         append(
             program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -13243,7 +13243,7 @@ fn a_static_block_sparse_matmul_catches_a_transposed_block_weight() {
         let product = append(
             program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![
                     (weight, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -13255,7 +13255,7 @@ fn a_static_block_sparse_matmul_catches_a_transposed_block_weight() {
         append(
             program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -13313,7 +13313,7 @@ fn scatter_add_into_a_known_destination_via_mask_composition() {
     let destination_positions = append(
         &mut program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(3),
         },
     );
@@ -13323,7 +13323,7 @@ fn scatter_add_into_a_known_destination_via_mask_composition() {
     let mask = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Equal,
             operands: alloc::vec![
                 (
@@ -13338,7 +13338,7 @@ fn scatter_add_into_a_known_destination_via_mask_composition() {
     let masked_source = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (mask, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -13350,7 +13350,7 @@ fn scatter_add_into_a_known_destination_via_mask_composition() {
     let scattered = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: masked_source,
@@ -13449,8 +13449,8 @@ fn round_batched_reduce_matches_k_sequential_reduces() {
         &[Extent::Static(n_experts), Extent::Static(width)],
     );
     let x = f32_block(&mut program, &[Extent::Static(width)]);
-    let route0 = block(&mut program, DType::Int32, &[Extent::Static(1)]);
-    let route1 = block(&mut program, DType::Int32, &[Extent::Static(1)]);
+    let route0 = block(&mut program, DType::INT32, &[Extent::Static(1)]);
+    let route1 = block(&mut program, DType::INT32, &[Extent::Static(1)]);
 
     let gather_map = |route: NodeId| IndexMap::Computed {
         indices: route,
@@ -13474,7 +13474,7 @@ fn round_batched_reduce_matches_k_sequential_reduces() {
         let product = append(
             program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![(table, gather_map(route)), (x, x_map.clone())],
                 name: None,
@@ -13483,7 +13483,7 @@ fn round_batched_reduce_matches_k_sequential_reduces() {
         append(
             program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -13659,8 +13659,8 @@ fn bind_collapses_structurally_uniform_round_group_into_round_batched_reduce() {
         &[Extent::Static(n_experts), Extent::Static(width)],
     );
     let x = f32_block(&mut program, &[Extent::Static(width)]);
-    let route0 = block(&mut program, DType::Int32, &[Extent::Static(1)]);
-    let route1 = block(&mut program, DType::Int32, &[Extent::Static(1)]);
+    let route0 = block(&mut program, DType::INT32, &[Extent::Static(1)]);
+    let route1 = block(&mut program, DType::INT32, &[Extent::Static(1)]);
 
     let gather_map = |route: NodeId| IndexMap::Computed {
         indices: route,
@@ -13684,7 +13684,7 @@ fn bind_collapses_structurally_uniform_round_group_into_round_batched_reduce() {
         let product = append(
             program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![(table, gather_map(route)), (x, x_map.clone())],
                 name: None,
@@ -13693,7 +13693,7 @@ fn bind_collapses_structurally_uniform_round_group_into_round_batched_reduce() {
         append(
             program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -13756,7 +13756,7 @@ fn round_group_program(rounds: u32) -> (Vec<Op>, Vec<NodeId>) {
     let table = f32_block(&mut program, &[Extent::Static(3), Extent::Static(4)]);
     let x = f32_block(&mut program, &[Extent::Static(4)]);
     let routes: Vec<NodeId> = (0..rounds)
-        .map(|_| block(&mut program, DType::Int32, &[Extent::Static(1)]))
+        .map(|_| block(&mut program, DType::INT32, &[Extent::Static(1)]))
         .collect();
     let gather_map = |route: NodeId| IndexMap::Computed {
         indices: route,
@@ -13780,7 +13780,7 @@ fn round_group_program(rounds: u32) -> (Vec<Op>, Vec<NodeId>) {
             let product = append(
                 &mut program,
                 Op::Elementwise {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     body: ScalarOp::Multiply,
                     operands: alloc::vec![
                         (table, gather_map(route)),
@@ -13792,7 +13792,7 @@ fn round_group_program(rounds: u32) -> (Vec<Op>, Vec<NodeId>) {
             append(
                 &mut program,
                 Op::Reduce(Reduce {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     body: ScalarOp::Add,
                     init: ReduceInit::Zero,
                     operand: product,
@@ -13839,14 +13839,14 @@ fn packed_gather_hand_program(count: u32, dtype: DType) -> (Vec<Op>, [NodeId; 4]
     let scalar = append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![],
             value: 3.0,
         },
     );
     let scaled = append_elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(gathered, "sd->sd"), (scalar, "->sd")],
     )
@@ -13859,7 +13859,7 @@ fn packed_gather_hand_program(count: u32, dtype: DType) -> (Vec<Op>, [NodeId; 4]
 #[case::two_rows(2)]
 async fn packed_gather_preserves_scaled_rows(#[case] count: u32) {
     let (program, [table, indices, gathered, scaled]) =
-        packed_gather_hand_program(count, DType::UInt8);
+        packed_gather_hand_program(count, DType::UINT8);
     let bytes = packed_gather_hand_bytes();
     let packed = QuantizedBlock::Packed {
         codec: Codec::Q8_0,
@@ -13939,7 +13939,7 @@ async fn packed_gather_preserves_scaled_rows(#[case] count: u32) {
 
 #[test]
 fn packed_gather_preserves_nonpacked_control() {
-    let (program, [_, _, _, scaled]) = packed_gather_hand_program(2, DType::Float32);
+    let (program, [_, _, _, scaled]) = packed_gather_hand_program(2, DType::FLOAT32);
     assert_eq!(
         quantized_gather_planning_outputs(&program, &BTreeMap::new(), &[scaled]),
         [scaled]
@@ -13968,11 +13968,11 @@ fn packed_gather_preserves_nonpacked_control() {
 
 #[test]
 fn packed_gather_preserves_unreachable_invalid_lookup() {
-    let (mut program, [table, _, _, _]) = packed_gather_hand_program(1, DType::UInt8);
+    let (mut program, [table, _, _, _]) = packed_gather_hand_program(1, DType::UINT8);
     let output = append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![],
             value: 7.0,
         },
@@ -14004,7 +14004,7 @@ fn packed_gather_preserves_unreachable_invalid_lookup() {
 
 #[test]
 fn packed_gather_preserves_requested_raw_table() {
-    let (program, [table, _, _, _]) = packed_gather_hand_program(1, DType::UInt8);
+    let (program, [table, _, _, _]) = packed_gather_hand_program(1, DType::UINT8);
     let bytes = packed_gather_hand_bytes();
     let result = evaluate_quantized(
         &program,
@@ -14027,7 +14027,7 @@ fn packed_gather_preserves_requested_raw_table() {
 
 #[test]
 fn packed_gather_preserves_noncanonical_layout_fallback() {
-    let (program, [table, _, gathered, _]) = packed_gather_hand_program(1, DType::UInt8);
+    let (program, [table, _, gathered, _]) = packed_gather_hand_program(1, DType::UINT8);
     let shapes = shape::infer(&program, &[]).expect("the hand graph infers");
     let resolved = bind::bind(&program, &shapes, &[gathered], NumericPolicy::bit_exact())
         .expect("the identity gather binds");
@@ -14076,7 +14076,7 @@ fn packed_gather_preserves_noncanonical_layout_fallback() {
 
 #[test]
 fn packed_gather_preserves_unaligned_row_fallback() {
-    let (mut program, [table, _, _, scaled]) = packed_gather_hand_program(1, DType::UInt8);
+    let (mut program, [table, _, _, scaled]) = packed_gather_hand_program(1, DType::UINT8);
     if let Op::Input { shape, .. } = &mut program[table.0 as usize] {
         *shape = vec![Extent::Static(4), Extent::Static(16)];
     }
@@ -14129,7 +14129,7 @@ fn expert_slab_gather_program(experts: u32, out_dim: u32, in_dim: u32) -> (Vec<O
     let mut program = Vec::new();
     let stack = block(
         &mut program,
-        DType::UInt8,
+        DType::UINT8,
         &[
             Extent::Static(experts),
             Extent::Static(out_dim),
@@ -14154,7 +14154,7 @@ fn expert_slab_gather_program(experts: u32, out_dim: u32, in_dim: u32) -> (Vec<O
     let selected = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: alloc::vec![(stack, gather_map)],
             name: None,
@@ -14301,20 +14301,20 @@ fn arena_materializes_a_transposed_packed_operand_by_row_shape() {
     let mut program = Vec::new();
     let weight = block(
         &mut program,
-        DType::UInt8,
+        DType::UINT8,
         &[Extent::Static(K as u32), Extent::Static(N as u32)],
     );
     let activation = f32_block(&mut program, &[Extent::Static(K as u32)]);
     let product = append_elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(weight, "kn->kn"), (activation, "k->kn")],
     )
     .expect("the transposed product builds");
     let sum = crate::spec::reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         product,

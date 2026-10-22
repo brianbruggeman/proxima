@@ -103,7 +103,7 @@ fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
     op::append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape,
             name: Some(name.into()),
         },
@@ -114,7 +114,7 @@ fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, Ind
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands,
             name: None,
@@ -131,7 +131,7 @@ fn reduce_add(
     op::append(
         program,
         Op::Reduce(proxima_tensor::op::Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand,
@@ -190,7 +190,7 @@ fn build_layer(n: usize, d: usize, q_count: usize, eta: f32, transpose_pred_x_ma
     let scale = op::append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: -eta / n as f32,
         },

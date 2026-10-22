@@ -91,7 +91,7 @@ fn append_rmsnorm_chain(
     let squared = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(x, full()), (x, full())],
             name: None,
@@ -100,7 +100,7 @@ fn append_rmsnorm_chain(
     let sum_squares = append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: squared,
@@ -113,7 +113,7 @@ fn append_rmsnorm_chain(
     let mean_square = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(sum_squares, keep_seq()), (inv_dim, broadcast_scalar_seq())],
             name: None,
@@ -122,7 +122,7 @@ fn append_rmsnorm_chain(
     let mean_square_eps = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![(mean_square, keep_seq()), (eps, broadcast_scalar_seq())],
             name: None,
@@ -131,7 +131,7 @@ fn append_rmsnorm_chain(
     let rms = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::SquareRoot,
             operands: vec![(mean_square_eps, keep_seq())],
             name: None,
@@ -140,7 +140,7 @@ fn append_rmsnorm_chain(
     let inv_rms = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Reciprocal,
             operands: vec![(rms, keep_seq())],
             name: None,
@@ -149,7 +149,7 @@ fn append_rmsnorm_chain(
     let normed = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(x, full()), (inv_rms, broadcast_seq_over_dim())],
             name: None,
@@ -158,7 +158,7 @@ fn append_rmsnorm_chain(
     let scaled = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(normed, full()), (gamma, broadcast_dim_over_seq())],
             name: None,
@@ -186,7 +186,7 @@ fn build_batch(seq: u32, dim: u32, fused: bool) -> RmsnormBatch {
     let x = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(seq), Extent::Static(dim)],
             name: Some("x".into()),
         },
@@ -194,7 +194,7 @@ fn build_batch(seq: u32, dim: u32, fused: bool) -> RmsnormBatch {
     let gamma = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(dim)],
             name: Some("gamma".into()),
         },
@@ -202,7 +202,7 @@ fn build_batch(seq: u32, dim: u32, fused: bool) -> RmsnormBatch {
     let inv_dim = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             name: Some("inv_dim".into()),
         },
@@ -210,7 +210,7 @@ fn build_batch(seq: u32, dim: u32, fused: bool) -> RmsnormBatch {
     let eps = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             name: Some("eps".into()),
         },

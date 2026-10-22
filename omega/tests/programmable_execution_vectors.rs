@@ -14,26 +14,26 @@ fn matrix_program(rows: u32, reduction: u32, columns: u32) -> (Vec<Op>, NodeId) 
     let mut program = Vec::new();
     let activation = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(rows), Extent::Static(reduction)],
         "activation",
     );
     let weight = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(reduction), Extent::Static(columns)],
         "weight",
     );
     let product = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(activation, "si->sio"), (weight, "io->sio")],
     )
     .expect("matrix fixture product must have compatible axes");
     let output = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         product,

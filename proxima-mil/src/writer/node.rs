@@ -45,9 +45,9 @@ pub fn emit_node(
 
 pub(super) fn kind_of(node: NodeId, dtype: DType) -> Result<Kind, MilError> {
     match dtype {
-        DType::Float16 | DType::Float32 | DType::BFloat16 => Ok(Kind::Float16),
+        DType::FLOAT16 | DType::FLOAT32 | DType::BFLOAT16 => Ok(Kind::Float16),
         DType::Bool => Ok(Kind::Bool),
-        DType::Int8 | DType::Int16 | DType::Int32 | DType::UInt8 | DType::UInt16 => Ok(Kind::Int32),
+        DType::INT8 | DType::INT16 | DType::INT32 | DType::UINT8 | DType::UINT16 => Ok(Kind::Int32),
         other => Err(MilError::UnsupportedDType { node, dtype: other }),
     }
 }

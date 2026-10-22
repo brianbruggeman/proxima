@@ -1653,7 +1653,7 @@ pub(super) fn cached_attention_candidates(
 
             let softmax_op = BoundOp {
                 node: cached_weights,
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 extents: softmax_node.extents.clone(),
                 kind: BoundOpKind::CachedSoftmaxWeights {
                     operands: vec![
@@ -1707,7 +1707,7 @@ pub(super) fn cached_attention_candidates(
             };
             let combine_op = BoundOp {
                 node: output,
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 extents: cached_av_node.extents.clone(),
                 kind: BoundOpKind::Reduce {
                     element_body: av_element_body.clone(),
@@ -1899,7 +1899,7 @@ pub(super) fn cached_attention_candidates(
         // dense, prefill, non-unity-scale sliding-pattern).
         let fused = BoundOp {
             node: output,
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: shapes.of(output).to_vec(),
             kind: BoundOpKind::CachedAttention {
                 operands,
@@ -2198,7 +2198,7 @@ pub(super) fn cached_attention_single_range_candidates(
         operands.push(cached_len_operand);
         let fused = BoundOp {
             node: output,
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: shapes.of(output).to_vec(),
             kind: BoundOpKind::CachedAttention {
                 operands,

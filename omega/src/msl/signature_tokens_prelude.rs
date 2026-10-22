@@ -317,23 +317,24 @@ pub(super) fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, Emi
 #[cfg(not(feature = "float-layout-dtype"))]
 pub(crate) fn device_scalar_token(dtype: DType) -> Option<&'static str> {
     match dtype {
-        DType::Float16 => Some("half"),
-        DType::Float32
-        | DType::BFloat16
+        DType::FLOAT16 => Some("half"),
+        DType::FLOAT32
+        | DType::BFLOAT16
         | DType::Bool
-        | DType::Int8
-        | DType::UInt8
-        | DType::Int32
-        | DType::UInt32 => Some("float"),
-        DType::Int16
-        | DType::UInt16
-        | DType::Int64
-        | DType::UInt64
-        | DType::Int128
-        | DType::UInt128
-        | DType::BFloat8
-        | DType::Fp6E3M2
-        | DType::Float64 => None,
+        | DType::INT8
+        | DType::UINT8
+        | DType::INT32
+        | DType::UINT32 => Some("float"),
+        DType::INT16
+        | DType::UINT16
+        | DType::INT64
+        | DType::UINT64
+        | DType::INT128
+        | DType::UINT128
+        | DType::BFLOAT8
+        | DType::FP6_E3_M2
+        | DType::FLOAT64 => None,
+        DType::Layout(_) => None,
     }
 }
 
@@ -344,18 +345,11 @@ pub(crate) fn device_scalar_token(dtype: DType) -> Option<&'static str> {
 #[cfg(feature = "float-layout-dtype")]
 pub(crate) fn device_scalar_token(dtype: DType) -> Option<&'static str> {
     match dtype {
-        DType::Float(layout) => match layout_render::hardware_type(&layout) {
+        DType::Layout(layout) => match layout_render::hardware_type(&layout) {
             Some("half") => Some("half"),
             _ => Some("float"),
         },
-        DType::Bool | DType::Int8 | DType::UInt8 | DType::Int32 | DType::UInt32 => Some("float"),
-        DType::Int16
-        | DType::UInt16
-        | DType::Int64
-        | DType::UInt64
-        | DType::Int128
-        | DType::UInt128
-        | DType::Float64 => None,
+        DType::Bool => Some("float"),
     }
 }
 

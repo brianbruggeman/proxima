@@ -623,14 +623,14 @@ fn the_decode_split_baseline_bakes_the_new_key_count() {
 #[test]
 fn the_row_tiled_kernel_declines_a_half_precision_op() {
     let mut op = sliding_op(512, 5);
-    op.dtype = DType::Float16;
+    op.dtype = DType::FLOAT16;
     let error = emit(&op, &PackedOperands::new(), NumericPolicy::llama_relaxed())
         .expect_err("the MMA fragments are f32");
     assert_eq!(
         error,
         EmitError::UnsupportedDType {
             node: op.node,
-            dtype: DType::Float16
+            dtype: DType::FLOAT16
         }
     );
 }
@@ -806,7 +806,7 @@ fn softmax_weights_rows_op(rows: u64, cached_key_rows: u64) -> BoundOp {
     };
     BoundOp {
         node: NodeId(10),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![rows, cached_key_rows, 1, 8],
         kind: BoundOpKind::CachedSoftmaxWeights {
             operands: vec![
@@ -2220,7 +2220,7 @@ fn card_20_dispatch_matrix_exposes_legacy_and_eight_one_factor_flips() {
         cached_attention_form(&operation.kind, policy).expect("form classified")
     );
     assert_eq!(legacy.cache_codec, None);
-    assert_eq!(legacy.accumulator, DType::Float32);
+    assert_eq!(legacy.accumulator, DType::FLOAT32);
     assert!(legacy.matches_selector(AttentionVariant::default()));
     assert!(!legacy.matches_selector(AttentionVariant {
         prefetch: AttentionPrefetch::NextBlock,
@@ -2299,7 +2299,7 @@ fn card_20_dispatch_matrix_exposes_legacy_and_eight_one_factor_flips() {
             + usize::from(selected.prefetch != matrix_base.variant.prefetch);
         assert_eq!(changed_axes, 1, "selector must flip exactly one typed axis");
         assert_eq!(manifest.variant, selected);
-        assert_eq!(manifest.accumulator, DType::Float32);
+        assert_eq!(manifest.accumulator, DType::FLOAT32);
         assert_ne!(manifest.dispatch_identity, matrix_base.dispatch_identity);
         if selected.kv_storage == AttentionKvStorage::Bf16 {
             assert_eq!(manifest.cache_codec, Some(Codec::BFloat16));
@@ -2358,7 +2358,7 @@ fn card_21_cross_axis_admits_the_selected_granite_composition() {
 
     assert_eq!(manifest.variant, selected);
     assert_eq!(manifest.cache_codec, Some(Codec::BFloat16));
-    assert_eq!(manifest.accumulator, DType::Float32);
+    assert_eq!(manifest.accumulator, DType::FLOAT32);
     assert_eq!(manifest.kernel.grid.threads, 64_000);
     assert_eq!(manifest.kernel.grid.threadgroup_width, Some(64));
     assert_eq!(manifest.kernel.grid.depth, 1);

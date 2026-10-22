@@ -7,7 +7,6 @@
 //! `GgmlType` counterpart since ggml never defined them.
 
 use proxima_gguf::GgmlType;
-#[cfg(feature = "float-layout-dtype")]
 use proxima_primitives::float_layout::FloatLayout;
 use proxima_tensor::DType;
 
@@ -18,69 +17,36 @@ use proxima_tensor::DType;
 #[must_use]
 pub fn ggml_to_dtype(ggml_type: GgmlType) -> Option<DType> {
     match ggml_type {
-        GgmlType::F32 => Some(DType::Float32),
-        GgmlType::F16 => Some(DType::Float16),
-        GgmlType::Bf16 => Some(DType::BFloat16),
-        GgmlType::I8 => Some(DType::Int8),
-        GgmlType::I16 => Some(DType::Int16),
-        GgmlType::I32 => Some(DType::Int32),
-        GgmlType::I64 => Some(DType::Int64),
-        GgmlType::F64 => Some(DType::Float64),
+        GgmlType::F32 => Some(DType::FLOAT32),
+        GgmlType::F16 => Some(DType::FLOAT16),
+        GgmlType::Bf16 => Some(DType::BFLOAT16),
+        GgmlType::I8 => Some(DType::INT8),
+        GgmlType::I16 => Some(DType::INT16),
+        GgmlType::I32 => Some(DType::INT32),
+        GgmlType::I64 => Some(DType::INT64),
+        GgmlType::F64 => Some(DType::FLOAT64),
         _ => None,
     }
 }
 
-/// `None` for `Bool` and the unsigned-integer/128-bit `DType`s — ggml has
-/// no wire type for any of them.
-#[cfg(not(feature = "float-layout-dtype"))]
-#[must_use]
-pub fn dtype_to_ggml(dtype: DType) -> Option<GgmlType> {
-    match dtype {
-        DType::Float32 => Some(GgmlType::F32),
-        DType::Float16 => Some(GgmlType::F16),
-        DType::BFloat16 => Some(GgmlType::Bf16),
-        DType::Int8 => Some(GgmlType::I8),
-        DType::Int16 => Some(GgmlType::I16),
-        DType::Int32 => Some(GgmlType::I32),
-        DType::Int64 => Some(GgmlType::I64),
-        DType::Float64 => Some(GgmlType::F64),
-        DType::Bool
-        | DType::BFloat8
-        | DType::Fp6E3M2
-        | DType::UInt8
-        | DType::UInt16
-        | DType::UInt32
-        | DType::UInt64
-        | DType::Int128
-        | DType::UInt128 => None,
-    }
-}
-
-/// The wire type of a float layout is the ggml scalar whose fields equal it; any other layout
+/// The wire type of a layout is the ggml scalar whose fields equal it; any other layout
 /// (bf8, bf4, fp6, a layout nobody named) has no ggml scalar and travels as a proxima codec.
-#[cfg(feature = "float-layout-dtype")]
 #[must_use]
 pub fn dtype_to_ggml(dtype: DType) -> Option<GgmlType> {
     match dtype {
-        DType::Float(layout) => [
+        DType::Layout(layout) => [
             (FloatLayout::BF32, GgmlType::F32),
             (FloatLayout::F16, GgmlType::F16),
             (FloatLayout::BF16, GgmlType::Bf16),
+            (FloatLayout::INT8, GgmlType::I8),
+            (FloatLayout::INT16, GgmlType::I16),
+            (FloatLayout::INT32, GgmlType::I32),
+            (FloatLayout::INT64, GgmlType::I64),
+            (FloatLayout::F64, GgmlType::F64),
         ]
         .into_iter()
-        .find_map(|(scalar, wire)| (scalar == layout).then_some(wire)),
-        DType::Int8 => Some(GgmlType::I8),
-        DType::Int16 => Some(GgmlType::I16),
-        DType::Int32 => Some(GgmlType::I32),
-        DType::Int64 => Some(GgmlType::I64),
-        DType::Float64 => Some(GgmlType::F64),
-        DType::Bool
-        | DType::UInt8
-        | DType::UInt16
-        | DType::UInt32
-        | DType::UInt64
-        | DType::Int128
-        | DType::UInt128 => None,
+        .find_map(|(scalar, wire)| scalar.same_format(&layout).then_some(wire)),
+        DType::Bool => None,
     }
 }
 
@@ -127,10 +93,10 @@ mod tests {
     fn safetensors_only_dtypes_have_no_ggml_counterpart() {
         for dtype in [
             DType::Bool,
-            DType::BFloat8,
-            DType::UInt8,
-            DType::UInt32,
-            DType::Int128,
+            DType::BFLOAT8,
+            DType::UINT8,
+            DType::UINT32,
+            DType::INT128,
         ] {
             assert_eq!(dtype_to_ggml(dtype), None, "{dtype:?}");
         }

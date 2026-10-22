@@ -146,7 +146,7 @@ fn elementwise_case(seed: u64, integers: bool) -> Case {
     Case {
         op: BoundOp {
             node: NodeId(operand_count as u32),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents,
             kind: BoundOpKind::Elementwise { body, operands },
         },
@@ -222,7 +222,7 @@ fn reduce_case_with(seed: u64, integers: bool, generic: Option<bool>) -> Case {
     Case {
         op: BoundOp {
             node: NodeId(operand_count as u32),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents,
             kind: BoundOpKind::Reduce {
                 element_body: body,
@@ -427,7 +427,7 @@ fn plain_elementwise(extents: Vec<u64>, strides: &[&[i64]]) -> BoundOp {
         .collect();
     BoundOp {
         node: NodeId(strides.len() as u32),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents,
         kind: BoundOpKind::Elementwise {
             body: multiply_body(),
@@ -529,7 +529,7 @@ fn mnk_matmul_fold(m: u64, n: u64, k: u64) -> BoundOp {
     let (k_i, n_i) = (k as i64, n as i64);
     BoundOp {
         node: NodeId(2),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![m, n, k],
         kind: BoundOpKind::Reduce {
             element_body: multiply_body(),
@@ -622,7 +622,7 @@ fn delta_net_state_fold() -> BoundOp {
     let gate = layout(0, &[0, 0, 2, 1]);
     BoundOp {
         node: NodeId(3),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![4, 4, 8, 2],
         kind: BoundOpKind::Reduce {
             element_body: generic_body(),
@@ -747,7 +747,7 @@ fn contiguous_generic_reduce(reduce_op: ScalarOp, init: ReduceInit) -> Case {
     ];
     let op = BoundOp {
         node: NodeId(3),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![6, 32],
         kind: BoundOpKind::Reduce {
             element_body: generic_body(),

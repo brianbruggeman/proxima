@@ -56,7 +56,7 @@ fn training_graph() -> TrainingGraph {
     let expert_stack = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(3), Extent::Static(2), Extent::Static(2)],
             name: Some("expert_stack".into()),
         },
@@ -64,7 +64,7 @@ fn training_graph() -> TrainingGraph {
     let route = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(3)],
             name: Some("route".into()),
         },
@@ -72,7 +72,7 @@ fn training_graph() -> TrainingGraph {
     let activation = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(3), Extent::Static(2)],
             name: Some("activation".into()),
         },
@@ -80,7 +80,7 @@ fn training_graph() -> TrainingGraph {
     let target = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(3), Extent::Static(2)],
             name: Some("target".into()),
         },
@@ -89,7 +89,7 @@ fn training_graph() -> TrainingGraph {
     let predictions = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -103,7 +103,7 @@ fn training_graph() -> TrainingGraph {
     let difference = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Subtract,
             operands: vec![
                 (predictions, matrix_map.clone()),
@@ -115,7 +115,7 @@ fn training_graph() -> TrainingGraph {
     let squared = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (difference, matrix_map.clone()),
@@ -127,7 +127,7 @@ fn training_graph() -> TrainingGraph {
     let half = op::append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 0.5,
         },
@@ -135,7 +135,7 @@ fn training_graph() -> TrainingGraph {
     let scaled = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (squared, matrix_map),
@@ -147,7 +147,7 @@ fn training_graph() -> TrainingGraph {
     let loss = op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: scaled,
@@ -215,7 +215,7 @@ fn run_adam_row(
     let parameter = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: Some("parameter".into()),
         },
@@ -223,7 +223,7 @@ fn run_adam_row(
     let gradient = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: Some("gradient".into()),
         },
@@ -231,7 +231,7 @@ fn run_adam_row(
     let moment_one = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: Some("moment_one".into()),
         },
@@ -239,7 +239,7 @@ fn run_adam_row(
     let moment_two = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: Some("moment_two".into()),
         },

@@ -86,7 +86,7 @@ fn matmul_bf16_f32_on_real_mlp_gate_biases_bytes_matches_an_independent_bf16_dec
     };
     assert_eq!(
         entry.dtype,
-        DType::BFloat16,
+        DType::BFLOAT16,
         "{TARGET_TENSOR} must be the real bf16 tensor this test targets"
     );
     assert_eq!(

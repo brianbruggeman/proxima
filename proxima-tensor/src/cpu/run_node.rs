@@ -2454,7 +2454,7 @@ mod rank_select_tests {
     fn rank_select_runner_reads_scores_then_keep_count() {
         let select = BoundOp {
             node: NodeId(9),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: vec![12],
             kind: BoundOpKind::TopFractionSelect {
                 operands: vec![

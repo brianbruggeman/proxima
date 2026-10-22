@@ -290,7 +290,7 @@ fn append_elementwise(
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands,
             name: None,
@@ -309,7 +309,7 @@ fn append_reduce(
     op::append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             init,
             operand,
@@ -326,7 +326,7 @@ pub fn build_model() -> Result<Model, Box<dyn Error>> {
     let expert_weights = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(2), Extent::Static(4), Extent::Static(4)],
             name: Some("experts".into()),
         },
@@ -334,7 +334,7 @@ pub fn build_model() -> Result<Model, Box<dyn Error>> {
     let expert_ids = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1)],
             name: Some("expert_ids".into()),
         },
@@ -342,7 +342,7 @@ pub fn build_model() -> Result<Model, Box<dyn Error>> {
     let inputs = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1), Extent::Static(4)],
             name: Some("inputs".into()),
         },
@@ -350,7 +350,7 @@ pub fn build_model() -> Result<Model, Box<dyn Error>> {
     let targets = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1), Extent::Static(4)],
             name: Some("targets".into()),
         },
@@ -736,7 +736,7 @@ pub fn optimizer_program() -> (Vec<Op>, NodeId, NodeId, NodeId) {
     let parameters = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(32)],
             name: Some("parameters".into()),
         },
@@ -744,7 +744,7 @@ pub fn optimizer_program() -> (Vec<Op>, NodeId, NodeId, NodeId) {
     let gradients = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(32)],
             name: Some("gradients".into()),
         },
@@ -752,7 +752,7 @@ pub fn optimizer_program() -> (Vec<Op>, NodeId, NodeId, NodeId) {
     let first_moment = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(32)],
             name: Some("first_moment".into()),
         },
@@ -760,7 +760,7 @@ pub fn optimizer_program() -> (Vec<Op>, NodeId, NodeId, NodeId) {
     let second_moment = op::append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(32)],
             name: Some("second_moment".into()),
         },

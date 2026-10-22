@@ -74,7 +74,7 @@ fn iota(program: &mut Vec<Op>, extent: u64) -> Option<NodeId> {
     Some(op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: static_extent(extent)?,
         },
     ))
@@ -100,10 +100,10 @@ fn axis_value(
             1 => positions,
             _ => {
                 let scale =
-                    expr::constant(program, DType::Float32, i32::try_from(*coeff).ok()? as f32);
+                    expr::constant(program, DType::FLOAT32, i32::try_from(*coeff).ok()? as f32);
                 expr::binary(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Multiply,
                     (positions, expr::identity(1)),
                     (scale, expr::broadcast(1)),
@@ -115,7 +115,7 @@ fn axis_value(
             None => term,
             Some(prior) => expr::binary(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 (
                     prior,
@@ -128,14 +128,14 @@ fn axis_value(
     if offset == 0 && value.is_some() {
         return value;
     }
-    let shift = expr::constant(program, DType::Float32, offset as f32);
+    let shift = expr::constant(program, DType::FLOAT32, offset as f32);
     Some(match value {
         None => shift,
         Some(prior) => {
             let rank = u16::try_from(terms.len()).ok()?;
             expr::binary(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 (prior, expr::identity(rank)),
                 (shift, expr::broadcast(rank)),
@@ -158,7 +158,7 @@ fn axis_mask(
     let rank = u16::try_from(terms.len() + 1).ok()?;
     let mask = expr::binary(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Equal,
         (
             position,
@@ -281,7 +281,7 @@ mod tests {
         op::append(
             program,
             Op::Constant {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(3), Extent::Static(4)],
                 value: 1.0,
             },
@@ -295,7 +295,7 @@ mod tests {
 
         let lowered = scatter_add_along_map(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             node,
             &rope_odd_pattern(),
             &[3, 4],
@@ -312,7 +312,7 @@ mod tests {
 
         let lowered = scatter_add_along_map(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             node,
             &rope_odd_pattern(),
             &[3, 4],
@@ -329,7 +329,7 @@ mod tests {
 
         let lowered = scatter_add_along_map(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             node,
             &rope_odd_pattern(),
             &[3, 4],
@@ -346,7 +346,7 @@ mod tests {
         let stray = map::affine(2, &[(&[AxisTerm::scaled(5, 2)], 0)]);
 
         let lowered =
-            scatter_add_along_map(&mut program, DType::Float32, node, &stray, &[3, 4], &[8]);
+            scatter_add_along_map(&mut program, DType::FLOAT32, node, &stray, &[3, 4], &[8]);
 
         assert!(lowered.is_none());
     }

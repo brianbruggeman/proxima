@@ -90,7 +90,7 @@ fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(k), Extent::Static(1)],
             name: None,
         },
@@ -98,7 +98,7 @@ fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -110,7 +110,7 @@ fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -136,7 +136,7 @@ fn metal_matmul_on_real_mlp_gate_biases_bf16_bytes_matches_the_dequantized_f32_c
     };
     assert_eq!(
         entry.dtype,
-        DType::BFloat16,
+        DType::BFLOAT16,
         "{TARGET_TENSOR} must be the real bf16 tensor this test targets"
     );
     assert_eq!(
@@ -172,7 +172,7 @@ fn metal_matmul_on_real_mlp_gate_biases_bf16_bytes_matches_the_dequantized_f32_c
         .map(|pair| half::bf16::from_le_bytes(*pair).to_f32())
         .collect();
 
-    let (packed_program, packed_sum) = matmul_program(rows as u32, k as u32, DType::BFloat16);
+    let (packed_program, packed_sum) = matmul_program(rows as u32, k as u32, DType::BFLOAT16);
     let metal = omega::execute(
         &packed_program,
         &[],
@@ -188,7 +188,7 @@ fn metal_matmul_on_real_mlp_gate_biases_bf16_bytes_matches_the_dequantized_f32_c
     )
     .expect("metal executes a bf16 matmul on real mlp.gate.biases bytes");
 
-    let (f32_program, f32_sum) = matmul_program(rows as u32, k as u32, DType::Float32);
+    let (f32_program, f32_sum) = matmul_program(rows as u32, k as u32, DType::FLOAT32);
     let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum])
         .expect("dequantized f32 cpu matmul evaluates");
 

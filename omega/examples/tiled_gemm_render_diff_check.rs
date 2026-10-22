@@ -40,7 +40,7 @@ fn run() -> anyhow::Result<()> {
         let weight = append(
             &mut program,
             Op::Input {
-                dtype: DType::UInt8,
+                dtype: DType::UINT8,
                 shape: vec![Extent::Static(1536), Extent::Static(256)],
                 name: None,
             },
@@ -48,7 +48,7 @@ fn run() -> anyhow::Result<()> {
         let activation = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(971), Extent::Static(1536)],
                 name: None,
             },
@@ -56,7 +56,7 @@ fn run() -> anyhow::Result<()> {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (weight, IndexMap::Affine(projection(3, &[1, 2]))),
@@ -68,7 +68,7 @@ fn run() -> anyhow::Result<()> {
         let gate = append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -91,7 +91,7 @@ fn run() -> anyhow::Result<()> {
         let weight = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(512), Extent::Static(8), Extent::Static(128)],
                 name: None,
             },
@@ -99,7 +99,7 @@ fn run() -> anyhow::Result<()> {
         let other = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(510), Extent::Static(8), Extent::Static(128)],
                 name: None,
             },
@@ -107,7 +107,7 @@ fn run() -> anyhow::Result<()> {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (weight, IndexMap::Affine(projection(4, &[3, 2, 1]))),
@@ -119,7 +119,7 @@ fn run() -> anyhow::Result<()> {
         let sum = append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,

@@ -112,7 +112,7 @@ fn leaf(program: &mut Vec<Op>, name: &str, shape: alloc::vec::Vec<Extent>) -> No
     op::append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape,
             name: Some(name.into()),
         },
@@ -123,7 +123,7 @@ fn int_leaf(program: &mut Vec<Op>, name: &str, extent: u32) -> NodeId {
     op::append(
         program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: alloc::vec![Extent::Static(extent)],
             name: Some(name.into()),
         },
@@ -134,7 +134,7 @@ fn constant(program: &mut Vec<Op>, value: f32) -> NodeId {
     op::append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec::Vec::new(),
             value,
         },
@@ -145,7 +145,7 @@ fn iota(program: &mut Vec<Op>, extent: u32) -> NodeId {
     op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(extent),
         },
     )
@@ -159,7 +159,7 @@ fn elementwise(
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands,
             name: None,
@@ -176,7 +176,7 @@ fn reduce_add(
     op::append(
         program,
         Op::Reduce(proxima_tensor::op::Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand,
@@ -356,7 +356,7 @@ fn build_attention(program: &mut Vec<Op>, params: &AttnParams, ids: NodeId) -> (
         ],
     );
 
-    let probabilities = softmax(program, DType::Float32, masked, 3, 1);
+    let probabilities = softmax(program, DType::FLOAT32, masked, 3, 1);
     let attended_product = elementwise(
         program,
         ScalarOp::Multiply,
@@ -398,7 +398,7 @@ fn build_head_and_loss(
     );
     let logits = reduce_add(program, logits_product, identity(3), proj(3, &[0, 2]));
 
-    let probabilities_lm = softmax(program, DType::Float32, logits, 2, 1);
+    let probabilities_lm = softmax(program, DType::FLOAT32, logits, 2, 1);
     let log_epsilon = constant(program, 1e-7);
     let probabilities_lm_stabilized = elementwise(
         program,
@@ -477,7 +477,7 @@ fn build_dense_ffn(program: &mut Vec<Op>, residual1: NodeId, ffn: &DenseFfnParam
         ScalarOp::Add,
         alloc::vec![(gate, identity(2)), (ffn.b1, proj(2, &[1]))],
     );
-    let hidden = relu(program, DType::Float32, gate_biased, 2);
+    let hidden = relu(program, DType::FLOAT32, gate_biased, 2);
 
     let down_product = elementwise(
         program,
@@ -562,7 +562,7 @@ fn build_sparse_ffn(program: &mut Vec<Op>, residual1: NodeId, sparse: &SparseFfn
             ScalarOp::Add,
             alloc::vec![(gate, identity(2)), (b1_band, proj(2, &[1]))],
         );
-        let hidden_band = relu(program, DType::Float32, gate_biased, 2);
+        let hidden_band = relu(program, DType::FLOAT32, gate_biased, 2);
 
         let down_product = elementwise(
             program,

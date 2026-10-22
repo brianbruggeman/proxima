@@ -110,7 +110,7 @@ fn zero_blocks<'zeros>(
 fn float_leaf(op: &Op) -> Op {
     match op {
         Op::Input { shape, name, .. } => Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: shape.clone(),
             name: name.clone(),
         },
@@ -166,7 +166,7 @@ pub fn fused_verdicts(graph: &StepGraph) -> Result<Vec<(NodeId, &'static str, Ve
 
 pub fn control_int32_input() -> Result<(usize, usize, usize), QatError> {
     let program = vec![Op::Input {
-        dtype: DType::Int32,
+        dtype: DType::INT32,
         shape: vec![Extent::Static(1)],
         name: Some("control_input".to_owned()),
     }];

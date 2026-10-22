@@ -21,7 +21,7 @@ fn a_named_placed_input_does_not_allocate_a_tensor_sized_placeholder() {
     let state_input = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(STATE_ELEMENTS as u32)],
             name: Some(String::from("state")),
         },
@@ -29,7 +29,7 @@ fn a_named_placed_input_does_not_allocate_a_tensor_sized_placeholder() {
     let state_sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: state_input,

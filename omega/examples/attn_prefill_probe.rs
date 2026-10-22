@@ -102,7 +102,7 @@ mod imp {
             };
             BoundOp {
                 node: NodeId(9),
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 extents: vec![
                     self.rows as u64,
                     self.kv_heads as u64,

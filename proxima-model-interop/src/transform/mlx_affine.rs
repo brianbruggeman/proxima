@@ -250,17 +250,17 @@ pub fn pack_affine(
 }
 
 fn float_bytes(values: &[f32], dtype: DType) -> Result<Vec<u8>, InteropError> {
-    if dtype == DType::BFloat16 {
+    if dtype == DType::BFLOAT16 {
         Ok(values
             .iter()
             .flat_map(|value| bf16::from_f32(*value).to_le_bytes())
             .collect())
-    } else if dtype == DType::Float16 {
+    } else if dtype == DType::FLOAT16 {
         Ok(values
             .iter()
             .flat_map(|value| f16::from_f32(*value).to_le_bytes())
             .collect())
-    } else if dtype == DType::Float32 {
+    } else if dtype == DType::FLOAT32 {
         Ok(values
             .iter()
             .flat_map(|value| value.to_le_bytes())

@@ -169,7 +169,7 @@ pub(super) fn tiny_ouro_safetensors() -> Vec<u8> {
         .iter()
         .map(|(name, shape, bytes)| proxima_safetensors::TensorPayload {
             name: (*name).into(),
-            dtype: proxima_tensor::DType::Float32,
+            dtype: proxima_tensor::DType::FLOAT32,
             shape: shape.clone(),
             data: bytes,
         })

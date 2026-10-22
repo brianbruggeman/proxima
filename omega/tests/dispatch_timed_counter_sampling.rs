@@ -34,7 +34,7 @@ fn chained_unary_program(extent: u32, bodies: &[ScalarOp]) -> (Vec<Op>, proxima_
     let mut current = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(extent)],
             name: None,
         },
@@ -43,7 +43,7 @@ fn chained_unary_program(extent: u32, bodies: &[ScalarOp]) -> (Vec<Op>, proxima_
         current = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: *body,
                 operands: vec![(current, IndexMap::Affine(projection(1, &[0])))],
                 name: None,

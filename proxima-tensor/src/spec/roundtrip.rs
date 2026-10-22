@@ -28,20 +28,20 @@ fn matmul_program() -> Vec<Op> {
     let mut program = Vec::new();
     let lhs = leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Symbolic(0), Extent::Static(768)],
         "lhs",
     );
     let rhs = leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(768), Extent::Static(3072)],
         "rhs",
     );
     let product = op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -53,7 +53,7 @@ fn matmul_program() -> Vec<Op> {
     op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -69,11 +69,11 @@ fn matmul_program() -> Vec<Op> {
 fn embedding_gather(program: &mut Vec<Op>) {
     let table = leaf(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(50000), Extent::Static(8)],
         "table",
     );
-    let ids = leaf(program, DType::Int32, alloc::vec![Extent::Static(4)], "ids");
+    let ids = leaf(program, DType::INT32, alloc::vec![Extent::Static(4)], "ids");
     let gathered = IndexMap::Computed {
         indices: ids,
         index_map: map::projection(2, &[0]),
@@ -93,7 +93,7 @@ fn embedding_gather(program: &mut Vec<Op>) {
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: alloc::vec![(table, gathered)],
             name: None,
@@ -115,14 +115,14 @@ fn program_spec_round_trips_elementwise_projections_and_gathers() {
     embedding_gather(&mut program);
     let table_t = leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(2), Extent::Static(3)],
         "grid",
     );
     op::append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: alloc::vec![(table_t, IndexMap::Affine(map::projection(2, &[1, 0])))],
             name: Some("transpose".into()),
@@ -145,11 +145,11 @@ fn program_spec_round_trips_reduce_contraction() {
 fn program_spec_round_trips_iota_leaves() {
     let program = alloc::vec![
         Op::Iota {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             extent: Extent::Symbolic(0),
         },
         Op::Iota {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             extent: Extent::Static(4),
         },
     ];
@@ -160,12 +160,12 @@ fn program_spec_round_trips_iota_leaves() {
 fn program_spec_round_trips_constant_leaves() {
     let program = alloc::vec![
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 1e-5,
         },
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(2), Extent::Static(4)],
             value: -0.5,
         },
@@ -178,13 +178,13 @@ fn program_spec_rejects_data_dependent_reduce_with_named_error() {
     let mut program = Vec::new();
     let values = leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         alloc::vec![Extent::Static(4)],
         "values",
     );
     let indices = leaf(
         &mut program,
-        DType::Int32,
+        DType::INT32,
         alloc::vec![Extent::Static(4)],
         "indices",
     );
@@ -192,7 +192,7 @@ fn program_spec_rejects_data_dependent_reduce_with_named_error() {
     op::append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             init: ReduceInit::Zero,
             operand: values,
@@ -221,7 +221,7 @@ const MATMUL_SILU_SOFTMAX_TOML: &str = include_str!("fixtures/matmul_silu_softma
 fn spec_input(id: &str, name: &str, shape: &[u32]) -> NodeSpec {
     NodeSpec::Input {
         id: id.into(),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         shape: shape.iter().copied().map(ExtentSpec::Static).collect(),
         name: Some(name.into()),
     }
@@ -235,7 +235,7 @@ fn spec_elementwise(
 ) -> NodeSpec {
     NodeSpec::Elementwise {
         id: id.into(),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         body,
         inputs: operands.iter().map(|(node, _)| (*node).into()).collect(),
         maps: operands
@@ -256,7 +256,7 @@ fn spec_reduce(
 ) -> NodeSpec {
     NodeSpec::Reduce {
         id: id.into(),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         body,
         init,
         input: input.into(),
@@ -279,7 +279,7 @@ fn matmul_silu_softmax_builder_spec() -> ProgramSpec {
         ),
         NodeSpec::Reduce {
             id: "n3".into(),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             input: "n2".into(),
@@ -294,7 +294,7 @@ fn matmul_silu_softmax_builder_spec() -> ProgramSpec {
         spec_elementwise("n5", ScalarOp::Exponential, &[("n4", "ab->ab")], None),
         NodeSpec::Constant {
             id: "n6".into(),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 1.0,
         },

@@ -840,10 +840,10 @@ mod gated {
 
         // `type_token`'s own "half"/"float" (or "f16"/"f32", "__half"/"float")
         // split -- every dtype every renderer accepts collapses to one of these
-        // two declarations, and only `DType::Float16` ever takes the narrow one
+        // two declarations, and only `DType::FLOAT16` ever takes the narrow one
         // (each renderer's own `type_token` match, byte-for-byte the same
         // partition).
-        identity.push_str(if resolved.dtype == DType::Float16 {
+        identity.push_str(if resolved.dtype == DType::FLOAT16 {
             "_half"
         } else {
             "_wide"

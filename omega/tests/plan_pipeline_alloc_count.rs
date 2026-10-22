@@ -27,7 +27,7 @@ fn two_step_identity_chain(extent: u32) -> (Vec<Op>, proxima_tensor::NodeId) {
     let source = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(extent)],
             name: None,
         },
@@ -35,7 +35,7 @@ fn two_step_identity_chain(extent: u32) -> (Vec<Op>, proxima_tensor::NodeId) {
     let first = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(source, IndexMap::Affine(projection(1, &[0])))],
             name: None,
@@ -44,7 +44,7 @@ fn two_step_identity_chain(extent: u32) -> (Vec<Op>, proxima_tensor::NodeId) {
     let second = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(first, IndexMap::Affine(projection(1, &[0])))],
             name: None,
@@ -143,7 +143,7 @@ fn a_warm_call_s_allocation_count_does_not_grow_with_extra_steps() {
     let source = append(
         &mut one_op_program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(EXTENT)],
             name: None,
         },
@@ -151,7 +151,7 @@ fn a_warm_call_s_allocation_count_does_not_grow_with_extra_steps() {
     append(
         &mut one_op_program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(source, IndexMap::Affine(projection(1, &[0])))],
             name: None,
@@ -342,7 +342,7 @@ fn a_warm_plan_hit_reuses_a_resident_block_s_device_buffer() {
     let source = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(EXTENT)],
             name: Some("weight".into()),
         },
@@ -350,7 +350,7 @@ fn a_warm_plan_hit_reuses_a_resident_block_s_device_buffer() {
     let identity = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(source, IndexMap::Affine(projection(1, &[0])))],
             name: None,

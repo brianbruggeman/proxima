@@ -31,7 +31,7 @@ fn lowered_mlp() -> Lowered {
 
 fn input(extent: Extent) -> Op {
     Op::Input {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         shape: vec![extent, Extent::Static(3)],
         name: Some("x".to_owned()),
     }
@@ -39,7 +39,7 @@ fn input(extent: Extent) -> Op {
 
 fn scan(body: ScalarOp, init: ReduceInit) -> Op {
     Op::Reduce(Reduce {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         body,
         init,
         operand: NodeId(0),
@@ -84,7 +84,7 @@ fn mil_sink_package_equals_the_bytes_of_calling_the_writer_directly() {
         .zip(&encoded)
         .map(|((name, _), bytes)| WeightView {
             name,
-            dtype: SourceDType::Float32,
+            dtype: SourceDType::FLOAT32,
             bytes,
         })
         .collect();

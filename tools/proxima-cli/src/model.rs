@@ -52,9 +52,9 @@ pub enum FloatDtype {
 impl FloatDtype {
     const fn dtype(self) -> DType {
         match self {
-            Self::Bf16 => DType::BFloat16,
-            Self::F16 => DType::Float16,
-            Self::F32 => DType::Float32,
+            Self::Bf16 => DType::BFLOAT16,
+            Self::F16 => DType::FLOAT16,
+            Self::F32 => DType::FLOAT32,
         }
     }
 }
@@ -138,6 +138,6 @@ mod tests {
     #[test]
     fn dtype_names_map_to_the_export_dtypes() {
         let mapped = [FloatDtype::Bf16, FloatDtype::F16, FloatDtype::F32].map(FloatDtype::dtype);
-        assert_eq!(mapped, [DType::BFloat16, DType::Float16, DType::Float32]);
+        assert_eq!(mapped, [DType::BFLOAT16, DType::FLOAT16, DType::FLOAT32]);
     }
 }

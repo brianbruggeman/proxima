@@ -1583,7 +1583,7 @@ mod tests {
     fn leaf_nodes_resolve_by_declared_name_in_one_pass() {
         use proxima_tensor::DType;
         let input = |name: &str| Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             name: Some(String::from(name)),
         };

@@ -516,7 +516,7 @@ mod tests {
         let left = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(4)],
                 name: Some(String::from("left")),
             },
@@ -524,7 +524,7 @@ mod tests {
         let right = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(4)],
                 name: Some(String::from("right")),
             },
@@ -533,7 +533,7 @@ mod tests {
         let sum = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 operands: alloc::vec![(left, identity_map.clone()), (right, identity_map.clone())],
                 name: None,
@@ -542,7 +542,7 @@ mod tests {
         append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Negate,
                 operands: alloc::vec![(sum, identity_map)],
                 name: None,
@@ -577,7 +577,7 @@ mod tests {
         let input = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(1)],
                 name: Some(String::from("input")),
             },
@@ -585,7 +585,7 @@ mod tests {
         let live = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Negate,
                 operands: vec![(input, identity_map.clone())],
                 name: Some(String::from("live")),
@@ -594,7 +594,7 @@ mod tests {
         let _dead = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(1)],
                 name: Some(String::from("dead_future_expert")),
             },
@@ -602,7 +602,7 @@ mod tests {
         let output = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Negate,
                 operands: vec![(live, identity_map)],
                 name: Some(String::from("output")),

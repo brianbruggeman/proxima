@@ -61,7 +61,7 @@ fn sibling_ops_program(extent: u32) -> (Vec<Op>, Vec<NodeId>) {
     let input = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(extent)],
             name: None,
         },
@@ -72,7 +72,7 @@ fn sibling_ops_program(extent: u32) -> (Vec<Op>, Vec<NodeId>) {
             append(
                 &mut program,
                 Op::Elementwise {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     body: *body,
                     operands: vec![(input, IndexMap::Affine(projection(1, &[0])))],
                     name: None,

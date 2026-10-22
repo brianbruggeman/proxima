@@ -1275,7 +1275,7 @@ fn cpu_tensor_envelope(
                 reason: "host tensor budget has no accelerated gemm workspace bound",
             });
         }
-        if bound.dtype != DType::Float32
+        if bound.dtype != DType::FLOAT32
             || bound
                 .operands()
                 .iter()
@@ -2469,7 +2469,7 @@ pub(super) fn reject_non_float32(
         // node that IS unconditionally evaluated, so it stays rejected.
         let is_unreferenced_input =
             matches!(expr, Op::Input { .. }) && !referenced_nodes.contains(&node);
-        if expr.dtype() != DType::Float32
+        if expr.dtype() != DType::FLOAT32
             && !index_nodes.contains(&node)
             && !is_quantized_weight
             && !is_unreferenced_input
@@ -2511,7 +2511,7 @@ pub(super) fn reject_non_float32_outputs(
         let is_quantized_weight = quantized_weights.contains(&node)
             && (is_quantized_matmul_operand(program, node)
                 || is_quantized_gather_operand(program, node));
-        if expr.dtype() != DType::Float32 && !index_nodes.contains(&node) && !is_quantized_weight {
+        if expr.dtype() != DType::FLOAT32 && !index_nodes.contains(&node) && !is_quantized_weight {
             return Err(TensorError::NotLowerable {
                 node,
                 reason: "this pipeline's buffers and SIMD kernels are f32-only; route a \
@@ -2589,7 +2589,7 @@ pub(super) fn is_quantized_matmul_operand(program: &[Op], node: NodeId) -> bool 
                 }
                 let other_operand_is_real_activation = operands.iter().any(|(source, _)| {
                     *source != node
-                        && program[source.0 as usize].dtype() == DType::Float32
+                        && program[source.0 as usize].dtype() == DType::FLOAT32
                         && operand_traces_to_a_real_input(program, *source)
                 });
                 if *body != ScalarOp::Multiply

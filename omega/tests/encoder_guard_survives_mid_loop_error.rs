@@ -46,7 +46,7 @@ fn execute_plan_survives_an_error_encoded_after_the_first_op() {
     let small_input = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: None,
         },
@@ -54,7 +54,7 @@ fn execute_plan_survives_an_error_encoded_after_the_first_op() {
     let small_output = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(small_input, IndexMap::Affine(map::projection(1, &[0])))],
             name: None,
@@ -63,21 +63,21 @@ fn execute_plan_survives_an_error_encoded_after_the_first_op() {
     let axis_a = append(
         &mut program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(EACH_AXIS_ELEMENTS),
         },
     );
     let axis_b = append(
         &mut program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(EACH_AXIS_ELEMENTS),
         },
     );
     let impossible_output = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (axis_a, IndexMap::Affine(map::projection(2, &[0]))),

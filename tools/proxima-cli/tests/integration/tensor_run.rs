@@ -110,13 +110,13 @@ fn write_inputs(path: &Path, x: &[f32], w: &[f32]) {
         tensors: vec![
             TensorPayload {
                 name: "x".to_string(),
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![2, 4],
                 data: &x_bytes,
             },
             TensorPayload {
                 name: "w".to_string(),
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![4, 3],
                 data: &w_bytes,
             },

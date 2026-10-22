@@ -514,9 +514,9 @@ pub fn convert_checkpoint_with_scale(
                 &mut source_bytes_processed,
             )?;
             data_cursor = tensor.data_offsets.0;
-            let (source_element_bytes, source_dtype) = if tensor.dtype == DType::BFloat16 {
+            let (source_element_bytes, source_dtype) = if tensor.dtype == DType::BFLOAT16 {
                 (2_usize, "BF16")
-            } else if tensor.dtype == DType::Float32 {
+            } else if tensor.dtype == DType::FLOAT32 {
                 (4_usize, "F32")
             } else {
                 return Err(ColdArtifactError::UnsupportedDtype {
@@ -579,9 +579,9 @@ pub fn convert_checkpoint_with_scale(
                 tensor_source_bytes += bytes_this_chunk as u64;
 
                 let values_this_chunk = &mut value_buffer[..elements_this_chunk];
-                if tensor.dtype == DType::BFloat16 {
+                if tensor.dtype == DType::BFLOAT16 {
                     proxima_gguf::quant::bf16::dequantize(input_chunk, values_this_chunk)?;
-                } else if tensor.dtype == DType::Float32 {
+                } else if tensor.dtype == DType::FLOAT32 {
                     for (chunk, value) in input_chunk
                         .as_chunks::<4>()
                         .0
@@ -700,9 +700,9 @@ fn measure_tensor_scale(
         let input_chunk = &mut input_buffer[..source_bytes];
         shard_file.read_exact(input_chunk)?;
         let values = &mut value_buffer[..elements];
-        if tensor.dtype == DType::BFloat16 {
+        if tensor.dtype == DType::BFLOAT16 {
             proxima_gguf::quant::bf16::dequantize(input_chunk, values)?;
-        } else if tensor.dtype == DType::Float32 {
+        } else if tensor.dtype == DType::FLOAT32 {
             for (bytes, value) in input_chunk.as_chunks::<4>().0.iter().zip(values.iter_mut()) {
                 *value = f32::from_le_bytes(*bytes);
             }
@@ -933,13 +933,13 @@ mod tests {
             tensors: vec![
                 TensorPayload {
                     name: String::from("layer.weight"),
-                    dtype: DType::BFloat16,
+                    dtype: DType::BFLOAT16,
                     shape: vec![4],
                     data: &source_values,
                 },
                 TensorPayload {
                     name: String::from("layer.f32_weight"),
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: vec![2],
                     data: &extra_input,
                 },

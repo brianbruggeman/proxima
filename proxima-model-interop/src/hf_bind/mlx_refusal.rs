@@ -20,7 +20,7 @@ const WEIGHT_SUFFIX: &str = ".weight";
 
 fn packed_weight(entry: &TensorEntry) -> Option<&str> {
     match entry.dtype {
-        DType::UInt32 => entry.name.strip_suffix(WEIGHT_SUFFIX),
+        DType::UINT32 => entry.name.strip_suffix(WEIGHT_SUFFIX),
         _ => None,
     }
 }
@@ -117,19 +117,19 @@ mod tests {
         let tensors = std::vec![
             TensorPayload {
                 name: format!("{name}.weight"),
-                dtype: DType::UInt32,
+                dtype: DType::UINT32,
                 shape: packed_shape.to_vec(),
                 data: &packed
             },
             TensorPayload {
                 name: format!("{name}.scales"),
-                dtype: DType::BFloat16,
+                dtype: DType::BFLOAT16,
                 shape: group_shape.to_vec(),
                 data: &groups
             },
             TensorPayload {
                 name: format!("{name}.biases"),
-                dtype: DType::BFloat16,
+                dtype: DType::BFLOAT16,
                 shape: group_shape.to_vec(),
                 data: &groups
             },

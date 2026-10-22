@@ -48,7 +48,7 @@ fn reduce(
     append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             init: ReduceInit::Zero,
             operand,
@@ -98,7 +98,7 @@ fn emit_flat(
 fn position_only(kind: BoundOpKind) -> BoundOp {
     BoundOp {
         node: NodeId(0),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![70_000, 70_000],
         kind,
     }
@@ -121,11 +121,11 @@ fn layouts(count: u32) -> Vec<(NodeId, Layout, Option<proxima_tensor::Lookup>)> 
 
 fn elementwise_tanh_2d() -> BoundOp {
     let mut program = Vec::new();
-    let source = input(&mut program, DType::Float32, &[70_000, 70_000]);
+    let source = input(&mut program, DType::FLOAT32, &[70_000, 70_000]);
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Tanh,
             operands: vec![(source, IndexMap::Affine(map::projection(2, &[0, 1])))],
             name: None,
@@ -139,12 +139,12 @@ fn elementwise_tanh_2d() -> BoundOp {
 /// keeps it off the tiled GEMM with `PROXIMA_TILED_GEMM_DISABLE=f16`.
 fn per_layer_projection() -> (BoundOp, BTreeMap<NodeId, Codec>) {
     let mut program = Vec::new();
-    let weights = input(&mut program, DType::Float16, &[8960, 1536]);
-    let activations = input(&mut program, DType::Float32, &[1873, 1536]);
+    let weights = input(&mut program, DType::FLOAT16, &[8960, 1536]);
+    let activations = input(&mut program, DType::FLOAT32, &[1873, 1536]);
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weights, IndexMap::Affine(map::projection(3, &[1, 2]))),
@@ -168,7 +168,7 @@ fn per_layer_projection() -> (BoundOp, BTreeMap<NodeId, Codec>) {
 
 fn serial_maximum_over_a_pair() -> BoundOp {
     let mut program = Vec::new();
-    let source = input(&mut program, DType::Float32, &[70_000, 70_000, 2]);
+    let source = input(&mut program, DType::FLOAT32, &[70_000, 70_000, 2]);
     reduce(
         &mut program,
         ScalarOp::Maximum,
@@ -182,7 +182,7 @@ fn serial_maximum_over_a_pair() -> BoundOp {
 
 fn scan_over_lines() -> BoundOp {
     let mut program = Vec::new();
-    let source = input(&mut program, DType::Float32, &[70_000, 70_000, 4]);
+    let source = input(&mut program, DType::FLOAT32, &[70_000, 70_000, 4]);
     reduce(
         &mut program,
         ScalarOp::Add,
@@ -196,12 +196,12 @@ fn scan_over_lines() -> BoundOp {
 
 fn tiled_q4k_gemm() -> (BoundOp, BTreeMap<NodeId, Codec>) {
     let mut program = Vec::new();
-    let lhs = input(&mut program, DType::Float32, &[300_000, 256]);
-    let rhs = input(&mut program, DType::Float32, &[256, 4_000_000]);
+    let lhs = input(&mut program, DType::FLOAT32, &[300_000, 256]);
+    let rhs = input(&mut program, DType::FLOAT32, &[256, 4_000_000]);
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -225,12 +225,12 @@ fn tiled_q4k_gemm() -> (BoundOp, BTreeMap<NodeId, Codec>) {
 
 fn packed_row_q4k_matvec(rows: u32) -> (BoundOp, BTreeMap<NodeId, Codec>) {
     let mut program = Vec::new();
-    let weights = input(&mut program, DType::Float32, &[rows, 256]);
-    let activation = input(&mut program, DType::Float32, &[1, 256]);
+    let weights = input(&mut program, DType::FLOAT32, &[rows, 256]);
+    let activation = input(&mut program, DType::FLOAT32, &[1, 256]);
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weights, IndexMap::Affine(map::projection(3, &[1, 2]))),
@@ -254,12 +254,12 @@ fn packed_row_q4k_matvec(rows: u32) -> (BoundOp, BTreeMap<NodeId, Codec>) {
 
 fn dense_batched_scores() -> BoundOp {
     let mut program = Vec::new();
-    let weight = input(&mut program, DType::Float32, &[2_000_000, 8, 128]);
-    let other = input(&mut program, DType::Float32, &[2_000_000, 8, 128]);
+    let weight = input(&mut program, DType::FLOAT32, &[2_000_000, 8, 128]);
+    let other = input(&mut program, DType::FLOAT32, &[2_000_000, 8, 128]);
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(map::projection(4, &[3, 2, 1]))),
@@ -282,7 +282,7 @@ fn dense_batched_scores() -> BoundOp {
 fn gated_delta_net() -> BoundOp {
     BoundOp {
         node: NodeId(6),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![1, 1 << 25, 128],
         kind: BoundOpKind::GatedDeltaNet {
             operands: layouts(6),
@@ -323,7 +323,7 @@ fn cached_softmax_weights() -> BoundOp {
         .collect();
     BoundOp {
         node: NodeId(3),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![1024, attention_rows],
         kind: BoundOpKind::CachedSoftmaxWeights {
             operands,
@@ -342,7 +342,7 @@ fn cached_softmax_weights() -> BoundOp {
 fn cached_attention(query_groups: u64, new_key_rows: u64) -> BoundOp {
     BoundOp {
         node: NodeId(9),
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         extents: vec![300_000_000, 1, 1, 4],
         kind: BoundOpKind::CachedAttention {
             operands: layouts(9),
@@ -363,13 +363,13 @@ fn cached_attention(query_groups: u64, new_key_rows: u64) -> BoundOp {
 #[cfg(feature = "metal-moe-mul-mat-id")]
 fn round_batched_gathered_matmul(round_count: u32) -> BoundOp {
     let mut program = Vec::new();
-    let weight = input(&mut program, DType::Float32, &[8, 16, 256]);
-    let route = input(&mut program, DType::Int32, &[4]);
-    let activation = input(&mut program, DType::Float32, &[4, 256]);
+    let weight = input(&mut program, DType::FLOAT32, &[8, 16, 256]);
+    let route = input(&mut program, DType::INT32, &[4]);
+    let activation = input(&mut program, DType::FLOAT32, &[4, 256]);
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (

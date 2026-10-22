@@ -34,7 +34,7 @@ fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
     op::append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape,
             name: Some(name.into()),
         },
@@ -51,7 +51,7 @@ fn int_leaf(program: &mut Vec<Op>, name: &str, extent: u32) -> NodeId {
     op::append(
         program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: alloc::vec![Extent::Static(extent)],
             name: Some(name.into()),
         },
@@ -62,7 +62,7 @@ fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, Ind
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands,
             name: None,
@@ -80,7 +80,7 @@ fn reduce_add(
     op::append(
         program,
         Op::Reduce(proxima_tensor::op::Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand,
@@ -198,9 +198,9 @@ fn build_network() -> Network {
     );
 
     let h_pre = dense(&mut program, x, w1, b1);
-    let h = relu(&mut program, DType::Float32, h_pre, 1);
+    let h = relu(&mut program, DType::FLOAT32, h_pre, 1);
     let out_pre = dense(&mut program, h, w2, b2);
-    let probabilities = softmax(&mut program, DType::Float32, out_pre, 1, 0);
+    let probabilities = softmax(&mut program, DType::FLOAT32, out_pre, 1, 0);
 
     let log_probabilities = elementwise(
         &mut program,
@@ -763,7 +763,7 @@ fn reduce_op_max(program: &mut Vec<Op>, operand: NodeId) -> NodeId {
     op::append(
         program,
         Op::Reduce(proxima_tensor::op::Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Maximum,
             init: ReduceInit::NegativeInfinity,
             operand,

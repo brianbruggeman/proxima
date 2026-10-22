@@ -19,7 +19,7 @@
 //! [`route_node_ids`] finds [`proxima_tensor::spec::append_moe_ffn`]'s own
 //! per-round `route` [`NodeId`]s by scanning the built program for their
 //! exact, structurally unique shape (`Op::Reduce` with
-//! `dtype: DType::Int32, body: ScalarOp::Maximum, init: ReduceInit::Zero` --
+//! `dtype: DType::INT32, body: ScalarOp::Maximum, init: ReduceInit::Zero` --
 //! the ONLY node in this whole program built with that dtype/body/init
 //! triple; `spec.rs`'s own doc on `append_moe_ffn` names this) rather than
 //! by threading a new parameter through the public
@@ -122,7 +122,7 @@ fn route_node_ids(program: &[Op], layer_start: u32, layer_end: u32) -> Vec<NodeI
             continue;
         }
         if let Op::Reduce(reduce) = op
-            && reduce.dtype == DType::Int32
+            && reduce.dtype == DType::INT32
             && reduce.body == ScalarOp::Maximum
             && reduce.init == ReduceInit::Zero
         {

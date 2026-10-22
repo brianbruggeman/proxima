@@ -992,7 +992,7 @@ pub(super) fn microbench(arguments: &Arguments) -> io::Result<()> {
         let mut program = Vec::new();
         let activation = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![
                 Extent::Static(u32::try_from(rows).map_err(io::Error::other)?),
                 Extent::Static(u32::try_from(reduction).map_err(io::Error::other)?),
@@ -1001,7 +1001,7 @@ pub(super) fn microbench(arguments: &Arguments) -> io::Result<()> {
         );
         let weight = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![
                 Extent::Static(u32::try_from(reduction).map_err(io::Error::other)?),
                 Extent::Static(u32::try_from(columns).map_err(io::Error::other)?),

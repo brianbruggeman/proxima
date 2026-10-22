@@ -192,7 +192,7 @@ fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
     op::append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape,
             name: Some(name.into()),
         },
@@ -211,7 +211,7 @@ fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, Ind
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands,
             name: None,
@@ -228,7 +228,7 @@ fn reduce_add(
     op::append(
         program,
         Op::Reduce(op::Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand,
@@ -332,7 +332,7 @@ fn build_feature_program(batch: usize, k: usize) -> (Vec<Op>, NodeId, NodeId, No
         ScalarOp::Add,
         vec![(h_pre, identity(2)), (b, axes(2, &[1]))],
     );
-    let h = relu(&mut program, DType::Float32, h_biased, 2);
+    let h = relu(&mut program, DType::FLOAT32, h_biased, 2);
     (program, x, w, b, h)
 }
 

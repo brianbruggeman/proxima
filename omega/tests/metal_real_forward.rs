@@ -269,7 +269,7 @@ fn growing_matmul_program(k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let lhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Symbolic(0), Extent::Static(k)],
             name: None,
         },
@@ -277,7 +277,7 @@ fn growing_matmul_program(k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let rhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(k), Extent::Static(n)],
             name: None,
         },
@@ -285,7 +285,7 @@ fn growing_matmul_program(k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(projection(3, &[0, 2]))),
@@ -297,7 +297,7 @@ fn growing_matmul_program(k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,

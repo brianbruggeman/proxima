@@ -77,12 +77,12 @@ mod configured_runtime_tests {
         validate_omega_runtime_config(&config).expect("coherent runtime configuration");
         let program = vec![
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(2)],
                 name: Some(String::from("values")),
             },
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Negate,
                 operands: vec![(NodeId(0), IndexMap::Affine(map::projection(1, &[0])))],
                 name: Some(String::from("negated")),
@@ -4794,12 +4794,12 @@ mod omega_async_serving_tests {
     fn program() -> Vec<Op> {
         vec![
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Symbolic(0)],
                 name: Some(String::from("values")),
             },
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Negate,
                 operands: vec![(NodeId(0), IndexMap::Affine(map::projection(1, &[0])))],
                 name: Some(String::from("negated")),

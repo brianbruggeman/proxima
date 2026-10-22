@@ -85,7 +85,7 @@ impl Program {
             .iter()
             .map(|(name, bytes)| WeightView {
                 name,
-                dtype: SourceDType::Float32,
+                dtype: SourceDType::FLOAT32,
                 bytes,
             })
             .collect()
@@ -252,12 +252,12 @@ fn embedding_lookup_program() -> Program {
         .flat_map(|value| f32::from(value).to_le_bytes())
         .collect();
     let rows = Op::Input {
-        dtype: DType::Int32,
+        dtype: DType::INT32,
         shape: vec![Extent::Static(4)],
         name: Some("rows".to_owned()),
     };
     let weight = Op::Input {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         shape: vec![Extent::Static(5), Extent::Static(3)],
         name: Some("table".to_owned()),
     };
@@ -265,7 +265,7 @@ fn embedding_lookup_program() -> Program {
     append(
         &mut ops,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(
                 NodeId(0),
@@ -336,7 +336,7 @@ fn mil_alloc_write_weight_100k_iterations_zero_allocations() {
         (0..ITERATIONS)
             .filter(|_| {
                 let mut blob = BlobWriter::new(&mut blob_bytes);
-                blob.write_weight(&source, SourceDType::Float32).is_ok() && blob.finish().is_ok()
+                blob.write_weight(&source, SourceDType::FLOAT32).is_ok() && blob.finish().is_ok()
             })
             .count()
     });

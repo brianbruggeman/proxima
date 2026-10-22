@@ -145,7 +145,7 @@ pub(super) fn push_packed_row_blocked_body(
         // have run the scale/minimum float algebra below on integer data.
         let plain_product = !expert_source_mode
             && codec_supports_pair_dot(codec)
-            && resolved.dtype == DType::Float32
+            && resolved.dtype == DType::FLOAT32
             && is_plain_product_reduce(resolved, reduce_op, weight, other);
         // `metal-q4k-single-fetch` (default-off): eliminates the redundant
         // paired-lane load the default `Q4_K` lane assignment below makes --
@@ -210,7 +210,7 @@ pub(super) fn push_packed_row_blocked_body(
         // fetch`: this body owns its own complete `ib` loop with no
         // `sgitg`/`split` stride of its own.
         let use_q4_0_native = matches!(codec, Codec::Q4_0)
-            && resolved.dtype == DType::Float32
+            && resolved.dtype == DType::FLOAT32
             && is_plain_product_reduce(resolved, reduce_op, weight, other)
             && cfg!(feature = "metal-q4_0-native")
             && !cfg!(feature = "metal-q4k-split-k");
@@ -579,7 +579,7 @@ pub(super) fn push_packed_row_blocked_body(
                 }
                 Codec::Q8_0
                     if is_plain_product_reduce(resolved, reduce_op, weight, other)
-                        && resolved.dtype == DType::Float32 =>
+                        && resolved.dtype == DType::FLOAT32 =>
                 {
                     // BATCHED ARM, mirroring the K-quant codecs' own
                     // scale-deferred `is_plain_product_reduce` arms
@@ -592,7 +592,7 @@ pub(super) fn push_packed_row_blocked_body(
                     // replaces `q8_0_super_element`'s per-element re-decode
                     // instead of extending `push_q4k_plain_product_y4_
                     // address`'s `yl`/`yh` pairing (`Q8_0` has no nibble
-                    // packing to pair across). The `DType::Float32` guard
+                    // packing to pair across). The `DType::FLOAT32` guard
                     // mirrors `plain_product`'s own gate above (line ~146):
                     // `acts` is declared `{element_type} acts[sub]`, and
                     // `q8_0_pair_dot`'s MSL signature is fixed to `float
@@ -636,7 +636,7 @@ pub(super) fn push_packed_row_blocked_body(
                 }
                 Codec::Q4_0
                     if is_plain_product_reduce(resolved, reduce_op, weight, other)
-                        && resolved.dtype == DType::Float32 =>
+                        && resolved.dtype == DType::FLOAT32 =>
                 {
                     // BATCHED ARM -- the #1 GPU-time bucket in the E2B checkpoint
                     // decode (`reduce-packed-row-blocked`, 39.6%, 275
@@ -649,7 +649,7 @@ pub(super) fn push_packed_row_blocked_body(
                     // `acts[sub]` gather one-for-one, so `q4_0_pair_dot`
                     // decodes that block's one `d` scale ONCE and walks its
                     // 16 packed-nibble bytes against `acts` directly -- see
-                    // [`Q4_0_PAIR_DOT_MSL`]'s own doc. The `DType::Float32`
+                    // [`Q4_0_PAIR_DOT_MSL`]'s own doc. The `DType::FLOAT32`
                     // guard mirrors `plain_product`'s own gate above (line
                     // ~146): `acts` is declared `{element_type} acts[sub]`,
                     // and `q4_0_pair_dot`'s MSL signature is fixed to `float
@@ -694,7 +694,7 @@ pub(super) fn push_packed_row_blocked_body(
                 }
                 Codec::Fp6E3M2
                     if is_plain_product_reduce(resolved, reduce_op, weight, other)
-                        && resolved.dtype == DType::Float32 =>
+                        && resolved.dtype == DType::FLOAT32 =>
                 {
                     source.push_str(
                         "            sumf[q] = sumf[q] + scaled_e3m2_quad_dot(blk, slot, acts);\n",

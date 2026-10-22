@@ -64,7 +64,7 @@ fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
     op::append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape,
             name: Some(name.into()),
         },
@@ -79,7 +79,7 @@ fn constant(program: &mut Vec<Op>, value: f32) -> NodeId {
     op::append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value,
         },
@@ -90,7 +90,7 @@ fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, Ind
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands,
             name: None,
@@ -107,7 +107,7 @@ fn reduce_add(
     op::append(
         program,
         Op::Reduce(proxima_tensor::op::Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand,
@@ -224,7 +224,7 @@ fn build_actor_critic() -> ActorCritic {
     );
     let b2v = leaf(&mut program, "b2v", alloc::vec![Extent::Static(1)]);
     let hidden_v_pre = dense(&mut program, state, w1v, b1v);
-    let hidden_v = relu(&mut program, DType::Float32, hidden_v_pre, 1);
+    let hidden_v = relu(&mut program, DType::FLOAT32, hidden_v_pre, 1);
     let value_vec = dense(&mut program, hidden_v, w2v, b2v);
     let value = reduce_add(
         &mut program,
@@ -272,9 +272,9 @@ fn build_actor_critic() -> ActorCritic {
         alloc::vec![Extent::Static(ACTION_DIM as u32)],
     );
     let hidden_p_pre = dense(&mut program, state, w1p, b1p);
-    let hidden_p = relu(&mut program, DType::Float32, hidden_p_pre, 1);
+    let hidden_p = relu(&mut program, DType::FLOAT32, hidden_p_pre, 1);
     let logits = dense(&mut program, hidden_p, w2p, b2p);
-    let probabilities = softmax(&mut program, DType::Float32, logits, 1, 0);
+    let probabilities = softmax(&mut program, DType::FLOAT32, logits, 1, 0);
 
     let action_one_hot = leaf(
         &mut program,

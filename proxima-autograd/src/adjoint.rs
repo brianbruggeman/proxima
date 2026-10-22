@@ -311,7 +311,7 @@ fn differentiate_core(
     let mut new_program: Vec<Op> = program[..=loss_index].to_vec();
     let mut grad_of: Vec<Option<NodeId>> = vec![None; loss_index + 1];
     let mut gathered_of: Vec<Vec<GatheredContribution>> = vec![Vec::new(); loss_index + 1];
-    grad_of[loss_index] = Some(expr::constant(&mut new_program, DType::Float32, 1.0));
+    grad_of[loss_index] = Some(expr::constant(&mut new_program, DType::FLOAT32, 1.0));
 
     for index in (0..=loss_index).rev() {
         let Some(gradient) = grad_of[index] else {
@@ -1326,7 +1326,7 @@ mod pipe_tests {
         let x = proxima_tensor::op::append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(3)],
                 name: Some("x".into()),
             },
@@ -1334,7 +1334,7 @@ mod pipe_tests {
         let loss = proxima_tensor::op::append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: x,
@@ -1370,7 +1370,7 @@ mod differentiate_wanted_tests {
         proxima_tensor::op::append(
             program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape,
                 name: Some(name.into()),
             },
@@ -1413,7 +1413,7 @@ mod differentiate_wanted_tests {
         let product = proxima_tensor::op::append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![(w, axes(3, &[1, 2])), (x, axes(3, &[0, 1]))],
                 name: None,
@@ -1421,7 +1421,7 @@ mod differentiate_wanted_tests {
         );
         let matmul = expr::reduce(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             product,
@@ -1430,7 +1430,7 @@ mod differentiate_wanted_tests {
         );
         let loss = expr::reduce(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             matmul,
@@ -1581,7 +1581,7 @@ mod select_broadcast_condition_tests {
         proxima_tensor::op::append(
             program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape,
                 name: Some(name.into()),
             },
@@ -1596,7 +1596,7 @@ mod select_broadcast_condition_tests {
         proxima_tensor::op::append(
             program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body,
                 operands,
                 name: None,
@@ -1661,7 +1661,7 @@ mod select_broadcast_condition_tests {
         let loss = proxima_tensor::op::append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: selected,
@@ -1769,7 +1769,7 @@ mod reduce_multiply_tests {
         proxima_tensor::op::append(
             program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(extent as u32)],
                 name: Some(name.into()),
             },
@@ -1790,7 +1790,7 @@ mod reduce_multiply_tests {
         let loss = proxima_tensor::op::append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 init: ReduceInit::One,
                 operand: x,
@@ -1857,7 +1857,7 @@ mod reduce_multiply_tests {
         let loss = proxima_tensor::op::append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 init: ReduceInit::One,
                 operand: x,
@@ -1901,7 +1901,7 @@ mod scatter_tests {
         proxima_tensor::op::append(
             program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(extent as u32)],
                 name: Some(name.into()),
             },
@@ -1912,7 +1912,7 @@ mod scatter_tests {
         proxima_tensor::op::append(
             program,
             Op::Input {
-                dtype: DType::Int32,
+                dtype: DType::INT32,
                 shape: vec![Extent::Static(extent as u32)],
                 name: Some(name.into()),
             },
@@ -1931,7 +1931,7 @@ mod scatter_tests {
         let scattered = proxima_tensor::op::append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: x,
@@ -1944,7 +1944,7 @@ mod scatter_tests {
         let loss = proxima_tensor::op::append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: scattered,
@@ -2061,7 +2061,7 @@ mod scatter_tests {
         let scattered_maximum = proxima_tensor::op::append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Maximum,
                 init: ReduceInit::NegativeInfinity,
                 operand: x,
@@ -2074,7 +2074,7 @@ mod scatter_tests {
         let loss = proxima_tensor::op::append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: scattered_maximum,
@@ -2114,7 +2114,7 @@ mod scan_add_tests {
         proxima_tensor::op::append(
             program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(extent as u32)],
                 name: Some(name.into()),
             },
@@ -2152,7 +2152,7 @@ mod scan_add_tests {
         let cumsum = proxima_tensor::op::append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: x,
@@ -2165,7 +2165,7 @@ mod scan_add_tests {
         let product = proxima_tensor::op::append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![(cumsum, expr::identity(1)), (w, expr::identity(1))],
                 name: None,
@@ -2173,7 +2173,7 @@ mod scan_add_tests {
         );
         let loss = expr::reduce(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             product,
@@ -2278,7 +2278,7 @@ mod scan_add_tests {
         let running_max = proxima_tensor::op::append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Maximum,
                 init: ReduceInit::NegativeInfinity,
                 operand: x,
@@ -2290,7 +2290,7 @@ mod scan_add_tests {
         );
         let loss = expr::reduce(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             running_max,

@@ -12,11 +12,11 @@ fn bound_lists(rows: u64) -> (Vec<BoundOp>, Vec<BoundOp>) {
     let mut program = Vec::new();
     let scores = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Symbolic(0)],
         "scores",
     );
-    let keep_count = input_leaf(&mut program, DType::Float32, Vec::new(), "keep_count");
+    let keep_count = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "keep_count");
     let mask = top_fraction_mask(&mut program, scores, keep_count, None).expect("mask lowers");
     let shapes = infer(&program, &[rows]).expect("program infers");
     let policy = NumericPolicy::default();

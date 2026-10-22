@@ -32,7 +32,7 @@ fn rope_fixture(head_dim: u32, pairing: RopePairing) -> RopeFixture {
     let mut program = Vec::new();
     let source = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(SEQUENCE),
             Extent::Static(HEADS),
@@ -41,8 +41,8 @@ fn rope_fixture(head_dim: u32, pairing: RopePairing) -> RopeFixture {
         "x",
     );
     let trig_shape = || vec![Extent::Static(SEQUENCE), Extent::Static(PAIRS)];
-    let cosine = input_leaf(&mut program, DType::Float32, trig_shape(), "cos");
-    let sine = input_leaf(&mut program, DType::Float32, trig_shape(), "sin");
+    let cosine = input_leaf(&mut program, DType::FLOAT32, trig_shape(), "cos");
+    let sine = input_leaf(&mut program, DType::FLOAT32, trig_shape(), "sin");
     let (first, second) = fused_rope_pair(&mut program, source, 'h', cosine, sine, pairing)
         .expect("rope pair builds over a [seq, heads, head_dim] source");
     let inputs = vec![

@@ -1351,7 +1351,7 @@ pub(super) fn upload_block_as_float(
     resident_name: Option<&str>,
 ) -> Result<(MetalBuffer, usize), MetalError> {
     if data.is_empty() {
-        return allocate_buffer(device, 0, DType::Float32).map(|buffer| (buffer, 0));
+        return allocate_buffer(device, 0, DType::FLOAT32).map(|buffer| (buffer, 0));
     }
     let byte_length = size_of_val(data);
     let pointer = data.as_ptr().cast::<c_void>();
@@ -1417,7 +1417,7 @@ pub(super) fn upload_packed_bytes(
         );
     }
     if bytes.is_empty() {
-        return allocate_buffer(device, 0, DType::Float32).map(|buffer| (buffer, 0));
+        return allocate_buffer(device, 0, DType::FLOAT32).map(|buffer| (buffer, 0));
     }
     let byte_length = bytes.len();
     let pointer = bytes.as_ptr().cast::<c_void>();

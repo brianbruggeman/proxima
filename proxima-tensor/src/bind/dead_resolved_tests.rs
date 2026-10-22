@@ -7,7 +7,7 @@ fn input(program: &mut Vec<Op>, name: &str, shape: &[u32]) -> NodeId {
     append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: shape.iter().map(|extent| Extent::Static(*extent)).collect(),
             name: Some(String::from(name)),
         },
@@ -22,7 +22,7 @@ fn two_independent_chains() -> (Vec<Op>, [NodeId; 2], [NodeId; 2]) {
     let orphaned_input = input(&mut program, "orphaned", &[3, 4]);
     let kept_rows = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         kept_input,
@@ -32,7 +32,7 @@ fn two_independent_chains() -> (Vec<Op>, [NodeId; 2], [NodeId; 2]) {
     .expect("kept row fold builds");
     let kept_total = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         kept_rows,
@@ -42,7 +42,7 @@ fn two_independent_chains() -> (Vec<Op>, [NodeId; 2], [NodeId; 2]) {
     .expect("kept total fold builds");
     let orphaned_rows = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         orphaned_input,
@@ -52,7 +52,7 @@ fn two_independent_chains() -> (Vec<Op>, [NodeId; 2], [NodeId; 2]) {
     .expect("orphaned row fold builds");
     let orphaned_total = reduce(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         orphaned_rows,
@@ -194,13 +194,13 @@ fn an_op_stays_live_while_only_its_second_output_is_requested() {
     let mut program = Vec::new();
     let source = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(3), Extent::Static(2), Extent::Static(8)],
         "x",
     );
     let trig = || vec![Extent::Static(3), Extent::Static(4)];
-    let cosine = input_leaf(&mut program, DType::Float32, trig(), "cos");
-    let sine = input_leaf(&mut program, DType::Float32, trig(), "sin");
+    let cosine = input_leaf(&mut program, DType::FLOAT32, trig(), "cos");
+    let sine = input_leaf(&mut program, DType::FLOAT32, trig(), "sin");
     let (first, second) = fused_rope_pair(
         &mut program,
         source,

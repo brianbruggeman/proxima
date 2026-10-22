@@ -5037,7 +5037,7 @@ mod real_openchat_file {
         let weight_node = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: alloc::vec![Extent::Static(q4_k::QK_K as u32)],
                 name: Some("weight".into()),
             },
@@ -5045,7 +5045,7 @@ mod real_openchat_file {
         let activation_node = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: alloc::vec![Extent::Static(q4_k::QK_K as u32)],
                 name: Some("activation".into()),
             },
@@ -5054,7 +5054,7 @@ mod real_openchat_file {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![
                     (weight_node, identity_map.clone()),
@@ -5066,7 +5066,7 @@ mod real_openchat_file {
         let dot = append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,

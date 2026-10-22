@@ -28,7 +28,8 @@ pub enum SignEncoding {
     TwosComplement,
 }
 
-/// A sign encoding, `exponent_bits`, `mantissa_bits`; at most 32 bits wide. An integer is the
+/// A sign encoding, `exponent_bits`, `mantissa_bits`; numeric layout metadata can describe up to
+/// 128-bit scalars, while the current generic scalar codecs execute widths up to 32 bits. An integer is the
 /// layout with `exponent_bits` 0 and a `bias_override` of `1 - mantissa_bits`, which makes its
 /// scale exactly 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -78,6 +79,11 @@ impl FloatLayout {
     pub const UINT16: Self = Self::integer(16, SignEncoding::Absent);
     pub const INT32: Self = Self::integer(32, SignEncoding::TwosComplement);
     pub const UINT32: Self = Self::integer(32, SignEncoding::Absent);
+    pub const INT64: Self = Self::integer(64, SignEncoding::TwosComplement);
+    pub const UINT64: Self = Self::integer(64, SignEncoding::Absent);
+    pub const INT128: Self = Self::integer(128, SignEncoding::TwosComplement);
+    pub const UINT128: Self = Self::integer(128, SignEncoding::Absent);
+    pub const F64: Self = Self::ieee_like(11, 52, Specials::InfinityOnOverflow);
     pub const UINT1: Self = Self::integer(1, SignEncoding::Absent);
     pub const UINT2: Self = Self::integer(2, SignEncoding::Absent);
     pub const UINT3: Self = Self::integer(3, SignEncoding::Absent);
@@ -157,6 +163,8 @@ impl FloatLayout {
         (element_bits + scale_bits).div_ceil(8)
     }
 
+    /// Binary32 projection of the maximum normal float; not an exact range for wider formats or
+    /// an integer bound.
     #[must_use]
     pub const fn max_normal(&self) -> f32 {
         let exponent_codes = (1i32 << self.exponent_bits) - 1;
@@ -168,11 +176,13 @@ impl FloatLayout {
         significand * pow2(top_code - self.bias() as i32)
     }
 
+    /// Binary32 projection of the minimum normal float; wider formats can underflow to zero.
     #[must_use]
     pub const fn min_normal(&self) -> f32 {
         pow2(1 - self.bias() as i32)
     }
 
+    /// Binary32 projection of the minimum subnormal float; wider formats can underflow to zero.
     #[must_use]
     pub const fn min_subnormal(&self) -> f32 {
         pow2(1 - self.bias() as i32 - self.mantissa_bits as i32)

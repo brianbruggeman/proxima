@@ -131,7 +131,7 @@
 //! let lhs = append(
 //!     &mut program,
 //!     Op::Input {
-//!         dtype: DType::Float32,
+//!         dtype: DType::FLOAT32,
 //!         shape: vec![Extent::Symbolic(0), Extent::Static(768)],
 //!         name: None,
 //!     },
@@ -139,7 +139,7 @@
 //! let rhs = append(
 //!     &mut program,
 //!     Op::Input {
-//!         dtype: DType::Float32,
+//!         dtype: DType::FLOAT32,
 //!         shape: vec![Extent::Static(768), Extent::Static(3072)],
 //!         name: None,
 //!     },
@@ -149,7 +149,7 @@
 //! let product = append(
 //!     &mut program,
 //!     Op::Elementwise {
-//!         dtype: DType::Float32,
+//!         dtype: DType::FLOAT32,
 //!         body: ScalarOp::Multiply,
 //!         operands: vec![
 //!             (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -162,7 +162,7 @@
 //! let sum = append(
 //!     &mut program,
 //!     Op::Reduce(Reduce {
-//!         dtype: DType::Float32,
+//!         dtype: DType::FLOAT32,
 //!         body: ScalarOp::Add,
 //!         init: ReduceInit::Zero,
 //!         operand: product,
@@ -205,7 +205,7 @@ pub mod convert;
 #[cfg(feature = "std")]
 pub mod cpu;
 pub mod dtype;
-#[cfg(all(feature = "float-layout-dtype", feature = "config"))]
+#[cfg(feature = "config")]
 mod dtype_spelling;
 #[cfg(feature = "std")]
 pub mod gdn;

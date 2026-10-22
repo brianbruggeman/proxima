@@ -44,7 +44,7 @@ fn single_row_reduce_program(cols: u32) -> Vec<Op> {
     let input = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(1), Extent::Static(cols)],
             name: None,
         },
@@ -52,7 +52,7 @@ fn single_row_reduce_program(cols: u32) -> Vec<Op> {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: input,

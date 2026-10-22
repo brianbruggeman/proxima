@@ -13,7 +13,7 @@ fn rebuilt_expression(
     let scores = *program.get(first + 1)?.dependencies().first()?;
     let mut reference = alloc::vec![
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: 0.0,
         };
@@ -96,7 +96,7 @@ pub fn top_fraction_candidates(
         };
         let fused = BoundOp {
             node: NodeId(root as u32),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: alloc::vec![rows],
             kind,
         };

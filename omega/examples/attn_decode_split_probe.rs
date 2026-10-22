@@ -102,7 +102,7 @@ mod imp {
             };
             BoundOp {
                 node: NodeId(9),
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 extents: vec![1, 1, HEADS as u64, self.head_dim as u64],
                 kind: BoundOpKind::CachedAttention {
                     operands: (0..9)

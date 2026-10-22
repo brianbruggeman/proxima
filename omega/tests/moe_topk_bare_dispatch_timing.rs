@@ -33,19 +33,19 @@ fn moe_topk_bare_dispatch_median_of_seven() {
     let mut program = Vec::new();
     let x = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(1), Extent::Static(EMBEDDING)],
         "x",
     );
     let logits = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(1), Extent::Static(EXPERT_COUNT)],
         "logits",
     );
     let expert_w_gate = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(EXPERT_COUNT),
             Extent::Static(EMBEDDING),
@@ -55,7 +55,7 @@ fn moe_topk_bare_dispatch_median_of_seven() {
     );
     let expert_w_up = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(EXPERT_COUNT),
             Extent::Static(EMBEDDING),
@@ -65,7 +65,7 @@ fn moe_topk_bare_dispatch_median_of_seven() {
     );
     let expert_w_down = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(EXPERT_COUNT),
             Extent::Static(FEED_FORWARD),

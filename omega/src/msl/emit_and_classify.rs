@@ -135,7 +135,7 @@ pub fn inspect_attention_variant(
         variant: effective_variant,
         form,
         cache_codec,
-        accumulator: DType::Float32,
+        accumulator: DType::FLOAT32,
         dispatch_identity,
         kernel,
     })
@@ -1608,7 +1608,7 @@ pub(super) fn fast_q6k_active(
         && !expert_source_mode
         && gather_slots(resolved)[block.weight].is_none()
         && block.codec == Codec::Q6K
-        && resolved.dtype == DType::Float32
+        && resolved.dtype == DType::FLOAT32
         && quantized[block.weight] == Some(Codec::Q6K)
         && quantized[block.other].is_none()
         && is_plain_product_reduce(resolved, reduce_op, block.weight, block.other)

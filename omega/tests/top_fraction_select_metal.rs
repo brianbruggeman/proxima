@@ -20,15 +20,15 @@ fn fixture(with_keep_rows: bool) -> Fixture {
     let mut program = Vec::new();
     let scores = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Symbolic(0)],
         "scores",
     );
-    let keep_count = input_leaf(&mut program, DType::Float32, Vec::new(), "keep_count");
+    let keep_count = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "keep_count");
     let keep_rows = with_keep_rows.then(|| {
         input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![Extent::Symbolic(0)],
             "keep_rows",
         )

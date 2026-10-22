@@ -27,7 +27,7 @@ fn checkpoint(stored_shape: [u64; 2]) -> (Vec<u8>, Manifest, u64) {
     let file = write_complete(&SafetensorsModel {
         tensors: vec![TensorPayload {
             name: Q_PROJ.into(),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: stored_shape.to_vec(),
             data: &data,
         }],

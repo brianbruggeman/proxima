@@ -149,7 +149,7 @@ pub struct WgslKernel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WgslCaps {
     /// Whether the acquired `wgpu::Device` requested `wgpu::Features::SHADER_F16`
-    /// — gates `DType::Float16` rendering through WGSL's `enable f16;`
+    /// — gates `DType::FLOAT16` rendering through WGSL's `enable f16;`
     /// extension. `false` (the [`Default`]) rejects every `Float16` node with
     /// [`EmitError::UnsupportedDType`], the same posture v1 already took
     /// before this capability existed.
@@ -402,8 +402,8 @@ fn cooperative_identity_token(node: NodeId, op: ScalarOp) -> Result<&'static str
 #[cfg(not(feature = "float-layout-dtype"))]
 fn type_token(node: NodeId, dtype: DType, caps: WgslCaps) -> Result<&'static str, EmitError> {
     match dtype {
-        DType::Float32 | DType::BFloat16 => Ok("f32"),
-        DType::Float16 if caps.shader_f16 => Ok("f16"),
+        DType::FLOAT32 | DType::BFLOAT16 => Ok("f32"),
+        DType::FLOAT16 if caps.shader_f16 => Ok("f16"),
         other => Err(EmitError::UnsupportedDType { node, dtype: other }),
     }
 }
@@ -413,7 +413,7 @@ fn type_token(node: NodeId, dtype: DType, caps: WgslCaps) -> Result<&'static str
 #[cfg(feature = "float-layout-dtype")]
 fn type_token(node: NodeId, dtype: DType, caps: WgslCaps) -> Result<&'static str, EmitError> {
     match dtype {
-        DType::Float(layout) => match crate::msl::layout_render::hardware_type(&layout) {
+        DType::Layout(layout) => match crate::msl::layout_render::hardware_type(&layout) {
             Some("half") if caps.shader_f16 => Ok("f16"),
             Some("half") => Err(EmitError::UnsupportedDType { node, dtype }),
             _ => Ok("f32"),
@@ -2133,7 +2133,7 @@ mod tests {
         let source = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(extent)],
                 name: None,
             },
@@ -2141,7 +2141,7 @@ mod tests {
         append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Tanh,
                 operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
@@ -2193,7 +2193,7 @@ mod tests {
         let source = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(4)],
                 name: None,
             },
@@ -2201,7 +2201,7 @@ mod tests {
         append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Erf,
                 operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
@@ -2228,7 +2228,7 @@ mod tests {
         let source = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float16,
+                dtype: DType::FLOAT16,
                 shape: vec![Extent::Static(4)],
                 name: None,
             },
@@ -2236,7 +2236,7 @@ mod tests {
         append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float16,
+                dtype: DType::FLOAT16,
                 body: ScalarOp::Tanh,
                 operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
@@ -2262,7 +2262,7 @@ mod tests {
         let source = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float16,
+                dtype: DType::FLOAT16,
                 shape: vec![Extent::Static(4)],
                 name: None,
             },
@@ -2270,7 +2270,7 @@ mod tests {
         append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float16,
+                dtype: DType::FLOAT16,
                 body: ScalarOp::Tanh,
                 operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
@@ -2309,7 +2309,7 @@ mod tests {
         let source = append(
             &mut program,
             Op::Input {
-                dtype: DType::BFloat16,
+                dtype: DType::BFLOAT16,
                 shape: vec![Extent::Static(4)],
                 name: None,
             },
@@ -2317,7 +2317,7 @@ mod tests {
         append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::BFloat16,
+                dtype: DType::BFLOAT16,
                 body: ScalarOp::Tanh,
                 operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
@@ -2347,7 +2347,7 @@ mod tests {
         let lhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(m), Extent::Static(k)],
                 name: None,
             },
@@ -2355,7 +2355,7 @@ mod tests {
         let rhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(k), Extent::Static(n)],
                 name: None,
             },
@@ -2363,7 +2363,7 @@ mod tests {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -2375,7 +2375,7 @@ mod tests {
         append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -2490,7 +2490,7 @@ mod tests {
         append(
             &mut program,
             Op::Iota {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 extent: Extent::Static(6),
             },
         );
@@ -2520,7 +2520,7 @@ mod tests {
         append(
             &mut program,
             Op::Constant {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(4)],
                 value: -1.0e9,
             },
@@ -2667,7 +2667,7 @@ mod tests {
     fn a_thread_count_that_wraps_u64_is_rejected_instead_of_truncated() {
         let bound = BoundOp {
             node: NodeId(0),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: vec![u64::from(u32::MAX), u64::from(u32::MAX), 8],
             kind: BoundOpKind::Iota,
         };

@@ -456,8 +456,8 @@ impl CandidateMeasurement {
 /// use proxima_tensor::{DType, Extent, NodeId, Op, QuantizedBlock, ScalarOp};
 /// use proxima_tensor::map::{self, IndexMap};
 /// let program = vec![
-///     Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(2)], name: Some("input".into()) },
-///     Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Negate,
+///     Op::Input { dtype: DType::FLOAT32, shape: vec![Extent::Static(2)], name: Some("input".into()) },
+///     Op::Elementwise { dtype: DType::FLOAT32, body: ScalarOp::Negate,
 ///         operands: vec![(NodeId(0), IndexMap::Affine(map::projection(1, &[0])))], name: None },
 /// ];
 /// let input = [1.0, 2.0];
@@ -1957,7 +1957,7 @@ mod tests {
         let input = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(1)],
                 name: Some("input".into()),
             },
@@ -1965,7 +1965,7 @@ mod tests {
         let output = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Identity,
                 operands: vec![(input, IndexMap::Affine(projection(1, &[0])))],
                 name: None,

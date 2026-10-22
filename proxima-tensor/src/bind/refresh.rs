@@ -562,7 +562,7 @@ mod tests {
         let lhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: alloc::vec![Extent::Symbolic(0), Extent::Static(8)],
                 name: None,
             },
@@ -570,7 +570,7 @@ mod tests {
         let rhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: alloc::vec![Extent::Static(8), Extent::Static(4)],
                 name: None,
             },
@@ -578,7 +578,7 @@ mod tests {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![
                     (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -590,7 +590,7 @@ mod tests {
         let sum = append(
             &mut program,
             Op::Reduce(crate::op::Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,

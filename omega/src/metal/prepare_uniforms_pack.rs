@@ -479,14 +479,14 @@ pub(super) fn gpu_dtype(
     node: NodeId,
 ) -> DType {
     if index_nodes.contains(&node) {
-        DType::Float32
+        DType::FLOAT32
     } else if let Some(op) = program.get(node.0 as usize) {
         op.dtype()
     } else {
         resolved
             .iter()
             .find(|bound| bound.node == node)
-            .map_or(DType::Float32, |bound| bound.dtype)
+            .map_or(DType::FLOAT32, |bound| bound.dtype)
     }
 }
 
@@ -1128,7 +1128,7 @@ pub(super) mod numeric_policy_construction_tests {
         let source = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(4)],
                 name: None,
             },
@@ -1136,7 +1136,7 @@ pub(super) mod numeric_policy_construction_tests {
         let identity = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: proxima_tensor::ScalarOp::Identity,
                 operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
@@ -1327,7 +1327,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
     fn decode_split_uniforms_carry_the_bind_time_counts_and_match_the_byte_len() {
         let bound = BoundOp {
             node: NodeId(9),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: vec![1, 1, 8, 256],
             kind: BoundOpKind::CachedAttention {
                 operands: (0..9)
@@ -1379,7 +1379,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
     fn row_tiled_uniforms_carry_the_row_head_count_and_the_split_count_and_match_the_byte_len() {
         let mut bound = BoundOp {
             node: NodeId(9),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: vec![5, 1, 8, 256],
             kind: BoundOpKind::CachedAttention {
                 operands: (0..9)
@@ -1447,7 +1447,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
         let lhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(extent_a), Extent::Static(extent_b)],
                 name: None,
             },
@@ -1455,7 +1455,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
         let rhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(extent_a), Extent::Static(extent_b)],
                 name: None,
             },
@@ -1463,7 +1463,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
         append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 operands: vec![
                     (lhs, IndexMap::Affine(map::projection(2, &[0, 1]))),
@@ -1490,7 +1490,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
         let lhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(m), Extent::Static(k)],
                 name: None,
             },
@@ -1498,7 +1498,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
         let rhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(k), Extent::Static(n)],
                 name: None,
             },
@@ -1506,7 +1506,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -1518,7 +1518,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
         append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -1955,10 +1955,10 @@ pub(super) fn device_element_bytes(dtype: DType) -> usize {
 
 #[cfg(not(feature = "float-layout-dtype"))]
 fn is_gpu_float(dtype: DType) -> bool {
-    matches!(dtype, DType::Float32 | DType::Float16)
+    matches!(dtype, DType::FLOAT32 | DType::FLOAT16)
 }
 
 #[cfg(feature = "float-layout-dtype")]
 fn is_gpu_float(dtype: DType) -> bool {
-    matches!(dtype, DType::Float(_))
+    matches!(dtype, DType::Layout(_))
 }

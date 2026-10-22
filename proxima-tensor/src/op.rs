@@ -379,7 +379,7 @@ mod tests {
         let first = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: alloc::vec![Extent::Static(4)],
                 name: None,
             },
@@ -387,7 +387,7 @@ mod tests {
         let second = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: alloc::vec![Extent::Static(4)],
                 name: None,
             },
@@ -403,15 +403,15 @@ mod tests {
     #[test]
     fn dtype_and_name_read_through_every_variant() {
         let leaf = Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: alloc::vec![Extent::Static(4)],
             name: Some("x".into()),
         };
-        assert_eq!(leaf.dtype(), DType::Float32);
+        assert_eq!(leaf.dtype(), DType::FLOAT32);
         assert_eq!(leaf.name(), Some("x"));
 
         let reduce = Op::Reduce(Reduce {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: NodeId(0),
@@ -420,14 +420,14 @@ mod tests {
             keep: Keep::Reduce,
             name: None,
         });
-        assert_eq!(reduce.dtype(), DType::Int32);
+        assert_eq!(reduce.dtype(), DType::INT32);
         assert_eq!(reduce.name(), None);
 
         let iota = Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(4),
         };
-        assert_eq!(iota.dtype(), DType::Float32);
+        assert_eq!(iota.dtype(), DType::FLOAT32);
         assert_eq!(
             iota.name(),
             None,

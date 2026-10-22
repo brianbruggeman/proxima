@@ -81,7 +81,7 @@ fn lowered_mlp() -> Lowered {
 
 fn scan_program(bodies: &[(ScalarOp, ReduceInit)]) -> Lowered {
     let mut program = vec![Op::Input {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         shape: vec![Extent::Static(2), Extent::Static(3)],
         name: Some("x".to_owned()),
     }];
@@ -98,7 +98,7 @@ fn scan_program(bodies: &[(ScalarOp, ReduceInit)]) -> Lowered {
 
 fn scan(body: ScalarOp, init: ReduceInit) -> Op {
     Op::Reduce(Reduce {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         body,
         init,
         operand: NodeId(0),
@@ -112,17 +112,17 @@ fn scan(body: ScalarOp, init: ReduceInit) -> Op {
 fn scatter_program() -> Lowered {
     let program = vec![
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: Some("x".to_owned()),
         },
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(4)],
             name: Some("slots".to_owned()),
         },
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: NodeId(0),

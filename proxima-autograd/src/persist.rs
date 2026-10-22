@@ -129,7 +129,7 @@ pub fn save_state(program: &[Op], state: &State, path: &Path) -> Result<(), Pers
         .iter()
         .map(|(name, shape, bytes)| TensorPayload {
             name: name.clone(),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: shape.clone(),
             data: bytes.as_slice(),
         })
@@ -248,7 +248,7 @@ mod tests {
         op::append(
             program,
             Op::Input {
-                dtype: TensorDType::Float32,
+                dtype: TensorDType::FLOAT32,
                 shape,
                 name: Some(name.into()),
             },
@@ -360,11 +360,11 @@ mod tests {
             .expect("manifest parses");
 
         let w_entry = manifest.tensor("w").expect("w present in the manifest");
-        assert_eq!(w_entry.dtype, proxima_tensor::DType::Float32);
+        assert_eq!(w_entry.dtype, proxima_tensor::DType::FLOAT32);
         assert_eq!(w_entry.shape, vec![2, 3]);
 
         let b_entry = manifest.tensor("b").expect("b present in the manifest");
-        assert_eq!(b_entry.dtype, proxima_tensor::DType::Float32);
+        assert_eq!(b_entry.dtype, proxima_tensor::DType::FLOAT32);
         assert_eq!(b_entry.shape, vec![3]);
     }
 

@@ -30,7 +30,7 @@ where
     Owner: Future<Output = Result<(), ProximaError>> + Send,
 {
     let graph = [Op::Input {
-        dtype: DType::Float32,
+        dtype: DType::FLOAT32,
         shape: vec![Extent::Static(2)],
         name: Some(String::from("values")),
     }];

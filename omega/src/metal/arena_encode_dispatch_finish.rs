@@ -343,7 +343,7 @@ pub(super) fn build_buffer_arena(
             "plan",
             device,
             bytes.div_ceil(4),
-            DType::Float32,
+            DType::FLOAT32,
         )?);
     }
     debug!(
@@ -768,7 +768,7 @@ fn shared_attention_scratch(
             "plan",
             device,
             elements as usize,
-            DType::Float32,
+            DType::FLOAT32,
         )
     })
     .transpose()
@@ -833,7 +833,7 @@ pub(super) fn attention_scratch_buffer(
                     "plan",
                     &device,
                     elements as usize,
-                    DType::Float32,
+                    DType::FLOAT32,
                 )?),
                 None => None,
             };
@@ -3834,7 +3834,7 @@ pub(super) fn encode_op(
                 attention_row_schedule,
             )
             .unwrap_or(0) as usize,
-            DType::Float32,
+            DType::FLOAT32,
         )?)
     } else {
         None
@@ -4217,7 +4217,7 @@ fn encode_route_prepass(
         "call",
         device,
         prepass.words,
-        DType::Float32,
+        DType::FLOAT32,
     )?;
     // SAFETY: shared-storage buffer of at least one 4-byte word, idle until the encoded work runs.
     unsafe { compaction.contents().as_ptr().cast::<u32>().write(0) };
@@ -4658,7 +4658,7 @@ pub(super) mod operand_tensor_bytes_tests {
     /// module keeps private.
     fn single_input_shapes(elements: u32) -> (Vec<Op>, proxima_tensor::Shapes) {
         let program = vec![Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(elements)],
             name: Some(String::from("w")),
         }];
@@ -4734,12 +4734,12 @@ pub(super) mod operand_tensor_bytes_tests {
 
         let mut program = vec![
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(EXPERT_COUNT), Extent::Static(ROW_ELEMENTS)],
                 name: Some(String::from("expert_w")),
             },
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(SELECTED)],
                 name: Some(String::from("routes")),
             },
@@ -5008,7 +5008,7 @@ pub(super) mod arena_tests {
         let input_a = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(extent_a)],
                 name: None,
             },
@@ -5016,7 +5016,7 @@ pub(super) mod arena_tests {
         let stage_zero = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Identity,
                 operands: vec![(input_a, IndexMap::Affine(projection(1, &[0])))],
                 name: None,
@@ -5025,7 +5025,7 @@ pub(super) mod arena_tests {
         let stage_one = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Identity,
                 operands: vec![(stage_zero, IndexMap::Affine(projection(1, &[0])))],
                 name: None,
@@ -5034,7 +5034,7 @@ pub(super) mod arena_tests {
         let input_b = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(extent_b)],
                 name: None,
             },
@@ -5042,7 +5042,7 @@ pub(super) mod arena_tests {
         let stage_two = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Identity,
                 operands: vec![(input_b, IndexMap::Affine(projection(1, &[0])))],
                 name: None,
@@ -5063,7 +5063,7 @@ pub(super) mod arena_tests {
         let mut previous = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(extent)],
                 name: None,
             },
@@ -5073,7 +5073,7 @@ pub(super) mod arena_tests {
             previous = append(
                 &mut program,
                 Op::Elementwise {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     body: ScalarOp::Identity,
                     operands: vec![(previous, IndexMap::Affine(projection(1, &[0])))],
                     name: None,
@@ -5100,7 +5100,7 @@ pub(super) mod arena_tests {
         let input = append(
             program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(extent)],
                 name: None,
             },
@@ -5108,7 +5108,7 @@ pub(super) mod arena_tests {
         let shared = append(
             program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Negate,
                 operands: vec![(input, IndexMap::Affine(projection(1, &[0])))],
                 name: None,
@@ -5117,7 +5117,7 @@ pub(super) mod arena_tests {
         let consumer_a = append(
             program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Identity,
                 operands: vec![(shared, IndexMap::Affine(projection(1, &[0])))],
                 name: None,
@@ -5126,7 +5126,7 @@ pub(super) mod arena_tests {
         let consumer_b = append(
             program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Negate,
                 operands: vec![(shared, IndexMap::Affine(projection(1, &[0])))],
                 name: None,
@@ -5712,7 +5712,7 @@ pub(super) mod block_node_attribution_tests {
         let activation = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(tokens), Extent::Static(in_dim)],
                 name: None,
             },
@@ -5720,7 +5720,7 @@ pub(super) mod block_node_attribution_tests {
         let weight = append(
             &mut program,
             Op::Input {
-                dtype: DType::UInt8,
+                dtype: DType::UINT8,
                 shape: vec![Extent::Static(out_dim), Extent::Static(in_dim)],
                 name: None,
             },
@@ -5728,7 +5728,7 @@ pub(super) mod block_node_attribution_tests {
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (weight, IndexMap::Affine(projection(3, &[1, 2]))),
@@ -5740,7 +5740,7 @@ pub(super) mod block_node_attribution_tests {
         append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -6134,7 +6134,7 @@ pub(super) mod hazard_tracker_tests {
         let raw = append(
             &mut program,
             Op::Input {
-                dtype: super::DType::Float32,
+                dtype: super::DType::FLOAT32,
                 shape: alloc::vec![Extent::Static(4)],
                 name: None,
             },
@@ -6143,7 +6143,7 @@ pub(super) mod hazard_tracker_tests {
         let y = append(
             &mut program,
             Op::Elementwise {
-                dtype: super::DType::Float32,
+                dtype: super::DType::FLOAT32,
                 body: ScalarOp::Identity,
                 operands: alloc::vec![(raw, identity())],
                 name: None,
@@ -6152,7 +6152,7 @@ pub(super) mod hazard_tracker_tests {
         let weights = append(
             &mut program,
             Op::Input {
-                dtype: super::DType::Float32,
+                dtype: super::DType::FLOAT32,
                 shape: alloc::vec![Extent::Static(8), Extent::Static(4)],
                 name: None,
             },
@@ -6160,7 +6160,7 @@ pub(super) mod hazard_tracker_tests {
         let reduced = append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: super::DType::Float32,
+                dtype: super::DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: weights,
@@ -6173,7 +6173,7 @@ pub(super) mod hazard_tracker_tests {
         let consumer = append(
             &mut program,
             Op::Elementwise {
-                dtype: super::DType::Float32,
+                dtype: super::DType::FLOAT32,
                 body: ScalarOp::Add,
                 operands: alloc::vec![(reduced, identity()), (y, identity())],
                 name: None,
@@ -6190,7 +6190,7 @@ pub(super) mod hazard_tracker_tests {
         let extra_y_use = append(
             &mut program,
             Op::Elementwise {
-                dtype: super::DType::Float32,
+                dtype: super::DType::FLOAT32,
                 body: ScalarOp::Negate,
                 operands: alloc::vec![(y, identity())],
                 name: None,
@@ -6539,7 +6539,7 @@ pub(super) mod attention_scratch_len_tests {
             .collect();
         BoundOp {
             node: NodeId(8),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: vec![query_rows, KV_HEADS, QUERY_GROUPS, HEAD_DIM],
             kind: BoundOpKind::CachedAttention {
                 operands,
@@ -6674,7 +6674,7 @@ pub(super) mod attention_scratch_len_tests {
             .collect();
         BoundOp {
             node: NodeId(9),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: vec![rows, 1, GROUPS, head_dim],
             kind: BoundOpKind::CachedAttention {
                 operands,
@@ -7001,7 +7001,7 @@ pub(super) mod plan_query_rows_tests {
         const EXPERT_COUNT: u64 = 128;
         let stacked_expert_weight = BoundOp {
             node: NodeId(0),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: vec![EXPERT_COUNT, 4096, 1536],
             kind: BoundOpKind::Elementwise {
                 body: proxima_tensor::ComposedBody::leaf(proxima_tensor::ScalarOp::Identity),
@@ -7062,7 +7062,7 @@ pub(super) mod expert_payload_descriptor_tests {
     fn live_input_mask_filters_dead_expert_blocks_and_keeps_requested_roots() {
         let resolved = [BoundOp {
             node: NodeId(43),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: vec![16],
             kind: BoundOpKind::Elementwise {
                 body: ComposedBody::leaf(ScalarOp::Identity),
@@ -7405,7 +7405,7 @@ pub(super) mod expert_payload_descriptor_tests {
             &[NodeId(41), NodeId(42)],
             &[true, true],
             &blocks,
-            &[DType::UInt8, DType::Float32],
+            &[DType::UINT8, DType::FLOAT32],
             |node| node == NodeId(41),
         )
         .collect::<Vec<_>>();
@@ -7602,13 +7602,13 @@ mod extra_output_slot_tests {
         let mut program = Vec::new();
         let source = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![Extent::Static(3), Extent::Static(2), Extent::Static(8)],
             "x",
         );
         let trig = || vec![Extent::Static(3), Extent::Static(4)];
-        let cosine = input_leaf(&mut program, DType::Float32, trig(), "cos");
-        let sine = input_leaf(&mut program, DType::Float32, trig(), "sin");
+        let cosine = input_leaf(&mut program, DType::FLOAT32, trig(), "cos");
+        let sine = input_leaf(&mut program, DType::FLOAT32, trig(), "sin");
         let (first, second) = fused_rope_pair(
             &mut program,
             source,
@@ -7639,7 +7639,7 @@ mod extra_output_slot_tests {
         };
         BoundOp {
             node: NodeId(100),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: vec![1],
             kind: BoundOpKind::MoeTopK {
                 operands: vec![(
@@ -7795,7 +7795,7 @@ mod route_fault_decode_tests {
         assert_eq!(fault_slots(&buffer, 1), &[word]);
         let bound = BoundOp {
             node: NodeId(7),
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: vec![1],
             kind: BoundOpKind::Iota,
         };

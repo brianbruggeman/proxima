@@ -92,12 +92,12 @@ fn program(case: &Case, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     } = case.shape;
     let mut program = Vec::new();
     let weight = input(&mut program, weight_dtype, &[experts, rows, k], "weight");
-    let route = input(&mut program, DType::Float32, &[sequence, selected], "route");
+    let route = input(&mut program, DType::FLOAT32, &[sequence, selected], "route");
     let (activation, activation_map) = if case.activation_per_selected {
         (
             input(
                 &mut program,
-                DType::Float32,
+                DType::FLOAT32,
                 &[sequence, selected, k],
                 "activation",
             ),
@@ -105,14 +105,14 @@ fn program(case: &Case, weight_dtype: DType) -> (Vec<Op>, NodeId) {
         )
     } else {
         (
-            input(&mut program, DType::Float32, &[sequence, k], "activation"),
+            input(&mut program, DType::FLOAT32, &[sequence, k], "activation"),
             map::projection(4, &[0, 3]),
         )
     };
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, expert_gather_map(route)),
@@ -124,7 +124,7 @@ fn program(case: &Case, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -139,14 +139,14 @@ fn program(case: &Case, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     }
     let gate = input(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         &[sequence, selected, rows],
         "gate",
     );
     let gated = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (sum, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
@@ -267,7 +267,7 @@ fn run(case: &Case) -> Outputs {
     let reference_stack = dequantized(&case.shape, &stack);
     let activation = unit_values(2000, activation_len(case), -1.0, 1.0);
     let gate = unit_values(3000, sequence * selected * rows, 0.5, 1.5);
-    let (reference_program, reference_output) = program(case, DType::Float32);
+    let (reference_program, reference_output) = program(case, DType::FLOAT32);
     let reference_named = named_blocks(
         case,
         QuantizedBlock::Float32(&reference_stack),
@@ -285,7 +285,7 @@ fn run(case: &Case) -> Outputs {
         &mut validated,
     )
     .expect("cpu evaluates the stacked expert product over the dequantized stack");
-    let (program, output) = program(case, DType::UInt8);
+    let (program, output) = program(case, DType::UINT8);
     let named = named_blocks(
         case,
         QuantizedBlock::Packed {
@@ -508,7 +508,7 @@ fn an_expert_index_past_the_slab_raises_the_same_error_as_cpu() {
     let stack = quantized_expert_stack(&case.shape);
     let reference_stack = dequantized(&case.shape, &stack);
     let activation = unit_values(2000, activation_len(&case), -1.0, 1.0);
-    let (reference_program, reference_output) = program(&case, DType::Float32);
+    let (reference_program, reference_output) = program(&case, DType::FLOAT32);
     let reference_named = named_blocks(
         &case,
         QuantizedBlock::Float32(&reference_stack),
@@ -526,7 +526,7 @@ fn an_expert_index_past_the_slab_raises_the_same_error_as_cpu() {
         &mut validated,
     )
     .expect_err("cpu rejects the out-of-range expert");
-    let (program, output) = program(&case, DType::UInt8);
+    let (program, output) = program(&case, DType::UINT8);
     let named = named_blocks(
         &case,
         QuantizedBlock::Packed {

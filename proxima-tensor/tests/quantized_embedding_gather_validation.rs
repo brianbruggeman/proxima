@@ -41,10 +41,10 @@ fn assert_quantized_gather_matches_reference(
     let tokens = 2usize;
 
     let mut program = Vec::new();
-    let ids = input_leaf(&mut program, DType::Int32, vec![Extent::Symbolic(0)], "ids");
+    let ids = input_leaf(&mut program, DType::INT32, vec![Extent::Symbolic(0)], "ids");
     let table = input_leaf(
         &mut program,
-        DType::UInt8,
+        DType::UINT8,
         vec![Extent::Static(vocab), Extent::Static(embedding)],
         "token_embd.weight",
     );

@@ -104,7 +104,7 @@ fn append_matmul(program: &mut Vec<Op>, weight: NodeId, activation: NodeId) -> N
     let product = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(projection(3, &[1, 2]))),
@@ -116,7 +116,7 @@ fn append_matmul(program: &mut Vec<Op>, weight: NodeId, activation: NodeId) -> N
     append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -139,63 +139,63 @@ fn append_gelu_tanh(program: &mut Vec<Op>, x: NodeId, ones: NodeId) -> NodeId {
     let sqrt_two_over_pi = scalar_constant(program, 0.797_884_6);
     let x_squared = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, "sg->sg"), (x, "sg->sg")],
     )
     .unwrap();
     let x_cubed = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x_squared, "sg->sg"), (x, "sg->sg")],
     )
     .unwrap();
     let cubic_term = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x_cubed, "sg->sg"), (cubic_coeff, "->sg")],
     )
     .unwrap();
     let inner = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(x, "sg->sg"), (cubic_term, "sg->sg")],
     )
     .unwrap();
     let scaled_inner = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(inner, "sg->sg"), (sqrt_two_over_pi, "->sg")],
     )
     .unwrap();
     let tanh_term = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Tanh,
         &[(scaled_inner, "sg->sg")],
     )
     .unwrap();
     let one_plus_tanh = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(tanh_term, "sg->sg"), (ones, "->sg")],
     )
     .unwrap();
     let half_x = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(x, "sg->sg"), (half, "->sg")],
     )
     .unwrap();
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(half_x, "sg->sg"), (one_plus_tanh, "sg->sg")],
     )
@@ -208,7 +208,7 @@ fn gate_program() -> (Vec<Op>, NodeId) {
     let weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::UInt8,
+            dtype: DType::UINT8,
             shape: vec![Extent::Static(FEED_FORWARD), Extent::Static(EMBEDDING)],
             name: None,
         },
@@ -216,7 +216,7 @@ fn gate_program() -> (Vec<Op>, NodeId) {
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(TOKENS), Extent::Static(EMBEDDING)],
             name: None,
         },
@@ -234,7 +234,7 @@ fn up_geglu_program() -> (Vec<Op>, NodeId) {
     let weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::UInt8,
+            dtype: DType::UINT8,
             shape: vec![Extent::Static(FEED_FORWARD), Extent::Static(EMBEDDING)],
             name: None,
         },
@@ -242,7 +242,7 @@ fn up_geglu_program() -> (Vec<Op>, NodeId) {
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(TOKENS), Extent::Static(EMBEDDING)],
             name: None,
         },
@@ -250,7 +250,7 @@ fn up_geglu_program() -> (Vec<Op>, NodeId) {
     let gate = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(TOKENS), Extent::Static(FEED_FORWARD)],
             name: None,
         },
@@ -260,7 +260,7 @@ fn up_geglu_program() -> (Vec<Op>, NodeId) {
     let activated_gate = append_gelu_tanh(&mut program, gate, ones);
     let ffn_hidden = elementwise(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(activated_gate, "sg->sg"), (up, "sg->sg")],
     )

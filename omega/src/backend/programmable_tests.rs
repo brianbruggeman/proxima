@@ -416,17 +416,17 @@ fn config_selection_rejections_are_retained_and_empty_set_errors() {
 fn fixture() -> (Vec<Op>, [NodeId; 2]) {
     let program = vec![
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: Some("input".into()),
         },
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(4)],
             name: Some("bias".into()),
         },
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![
                 (NodeId(0), IndexMap::Affine(map::projection(1, &[0]))),
@@ -435,7 +435,7 @@ fn fixture() -> (Vec<Op>, [NodeId; 2]) {
             name: Some("sum".into()),
         },
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Negate,
             operands: vec![(NodeId(2), IndexMap::Affine(map::projection(1, &[0])))],
             name: Some("negated".into()),
@@ -685,17 +685,17 @@ fn mismatch_positions(expected: &[f32], observed: &[f32]) -> Vec<usize> {
 fn matrix_fixture() -> (Vec<Op>, NodeId) {
     let program = vec![
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(2), Extent::Static(3)],
             name: Some("left".into()),
         },
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(3), Extent::Static(2)],
             name: Some("right".into()),
         },
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (NodeId(0), IndexMap::Affine(map::projection(3, &[0, 1]))),
@@ -704,7 +704,7 @@ fn matrix_fixture() -> (Vec<Op>, NodeId) {
             name: None,
         },
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: NodeId(2),

@@ -727,7 +727,7 @@ pub(super) fn gated_delta_net_candidates(
         };
         let fused = BoundOp {
             node: output,
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extents: shapes.of(output).to_vec(),
             kind: BoundOpKind::GatedDeltaNet {
                 operands,
@@ -851,7 +851,7 @@ pub(super) fn moe_match_round(
             moe_reduce_operand(
                 program,
                 *candidate,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Maximum,
                 ReduceInit::NegativeInfinity,
             ) == Some(selection_scores)
@@ -999,7 +999,7 @@ pub(super) fn match_moe_topk(
     consumers: &BTreeMap<NodeId, Vec<NodeId>>,
 ) -> Option<MoeTopKMatch> {
     let route_dtype = program.get(route0.0 as usize)?.dtype();
-    if route_dtype != DType::Int32 && route_dtype != DType::Float32 {
+    if route_dtype != DType::INT32 && route_dtype != DType::FLOAT32 {
         return None;
     }
     let candidate0 = moe_reduce_operand(
@@ -1017,7 +1017,7 @@ pub(super) fn match_moe_topk(
     if moe_reduce_operand(
         program,
         max_selection0,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
     ) != Some(scores)

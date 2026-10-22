@@ -29,7 +29,7 @@ fn product_fold_op(extents: &[u32], reduce_axes: &[u16]) -> BoundOp {
     let lhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: shape.clone(),
             name: None,
         },
@@ -37,7 +37,7 @@ fn product_fold_op(extents: &[u32], reduce_axes: &[u16]) -> BoundOp {
     let rhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape,
             name: None,
         },
@@ -45,7 +45,7 @@ fn product_fold_op(extents: &[u32], reduce_axes: &[u16]) -> BoundOp {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(map::projection(rank, &all_axes))),
@@ -57,7 +57,7 @@ fn product_fold_op(extents: &[u32], reduce_axes: &[u16]) -> BoundOp {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,

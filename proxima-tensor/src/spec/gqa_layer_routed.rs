@@ -35,13 +35,13 @@ pub fn append_gqa_layer(
 
     let q_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->shdi"), (wq, "ihd->shdi")],
     )?;
     let q = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         q_product,
@@ -51,13 +51,13 @@ pub fn append_gqa_layer(
 
     let k_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->sudi"), (wk, "iud->sudi")],
     )?;
     let k = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         k_product,
@@ -67,13 +67,13 @@ pub fn append_gqa_layer(
 
     let v_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->sudi"), (wv, "iud->sudi")],
     )?;
     let v = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         v_product,
@@ -90,7 +90,7 @@ pub fn append_gqa_layer(
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (rotated_q_even, group_map.as_str()),
@@ -99,7 +99,7 @@ pub fn append_gqa_layer(
     )?;
     let q_odd_grouped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (rotated_q_odd, group_map.as_str()),
@@ -109,7 +109,7 @@ pub fn append_gqa_layer(
 
     let score_even_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (q_even_grouped, "sugi->stugi"),
@@ -118,7 +118,7 @@ pub fn append_gqa_layer(
     )?;
     let score_even = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_even_product,
@@ -127,7 +127,7 @@ pub fn append_gqa_layer(
     )?;
     let score_odd_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (q_odd_grouped, "sugi->stugi"),
@@ -136,7 +136,7 @@ pub fn append_gqa_layer(
     )?;
     let score_odd = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_odd_product,
@@ -145,7 +145,7 @@ pub fn append_gqa_layer(
     )?;
     let scores = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(score_even, "stug->stug"), (score_odd, "stug->stug")],
     )?;
@@ -156,14 +156,14 @@ pub fn append_gqa_layer(
     // an empty operand side, the same way `neg_infinity` does.
     let scores_scaled = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(scores, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
     )?;
 
     let scores_masked = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[
             (is_future, "st->stug"),
@@ -174,7 +174,7 @@ pub fn append_gqa_layer(
 
     let score_max = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         scores_masked,
@@ -183,19 +183,19 @@ pub fn append_gqa_layer(
     )?;
     let shifted = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(scores_masked, "stug->stug"), (score_max, "sug->stug")],
     )?;
     let weights = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(shifted, "stug->stug")],
     )?;
     let weight_sum = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         weights,
@@ -204,26 +204,26 @@ pub fn append_gqa_layer(
     )?;
     let inv_weight_sum = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(weight_sum, "sug->sug")],
     )?;
     let probabilities = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(weights, "stug->stug"), (inv_weight_sum, "sug->stug")],
     )?;
 
     let attended_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(probabilities, "stug->stugd"), (v, "tud->stugd")],
     )?;
     let attended = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         attended_product,
@@ -233,13 +233,13 @@ pub fn append_gqa_layer(
 
     let wo_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
     )?;
     let attn_out = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         wo_product,
@@ -249,7 +249,7 @@ pub fn append_gqa_layer(
 
     let residual1 = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
     )?;
@@ -258,13 +258,13 @@ pub fn append_gqa_layer(
 
     let gate_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
     )?;
     let gate = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         gate_product,
@@ -273,13 +273,13 @@ pub fn append_gqa_layer(
     )?;
     let up_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
     )?;
     let up = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         up_product,
@@ -289,50 +289,50 @@ pub fn append_gqa_layer(
 
     let neg_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Negate,
         &[(gate, "sg->sg")],
     )?;
     let exp_neg_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(neg_gate, "sg->sg")],
     )?;
     let one_plus_exp = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(exp_neg_gate, "sg->sg"), (ones, "->sg")],
     )?;
     let sigmoid_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(one_plus_exp, "sg->sg")],
     )?;
     let silu_gate = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")],
     )?;
     let ffn_hidden = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(silu_gate, "sg->sg"), (up, "sg->sg")],
     )?;
 
     let down_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
     )?;
     let ffn_out = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         down_product,
@@ -342,7 +342,7 @@ pub fn append_gqa_layer(
 
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(ffn_out, "sd->sd"), (residual1, "sd->sd")],
     )
@@ -385,7 +385,7 @@ pub fn gathered_expert_product(
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![(stack, gathered_map), (x, x_map)],
             name: None,
@@ -431,7 +431,7 @@ pub fn grouped_gathered_expert_product(
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![(stack, gathered_map), (x, x_map)],
             name: None,
@@ -478,7 +478,7 @@ pub fn slotwise_gathered_expert_product(
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![(stack, gathered_map), (x, x_map)],
             name: None,
@@ -512,7 +512,7 @@ pub fn stack_selected_routes(
     let selected_axis = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(selected_count),
         },
     );
@@ -523,7 +523,7 @@ pub fn stack_selected_routes(
             masked_selected_route(program, selected_axis, round as u32 + 1, route)?;
         stacked = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             &[(stacked, "sk->sk"), (selected_route, "sk->sk")],
         )?;
@@ -543,20 +543,20 @@ fn masked_selected_route(
     let round_value = op::append(
         program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             value: round as f32,
         },
     );
     let round_mask = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Equal,
         &[(selected_axis, "k->k"), (round_value, "->k")],
     )?;
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(route, "s->sk"), (round_mask, "k->sk")],
     )
@@ -628,7 +628,7 @@ fn gather_expert_scale(
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: alloc::vec![(scale, gathered_map)],
             name: None,
@@ -785,13 +785,13 @@ pub fn append_moe_ffn(
         MoeRouter::GateInput(gate_inp) => {
             let gate_product = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Multiply,
                 &[(x, "sd->sde"), (gate_inp, "de->sde")],
             )?;
             reduce(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 ReduceInit::Zero,
                 gate_product,
@@ -881,7 +881,7 @@ fn stacked_slot_weights(
     let gathered_scale = gather_expert_scale(program, scale, routes, 2);
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(stacked_weights, "sk->sk"), (gathered_scale, "sk->sk")],
     )
@@ -901,14 +901,14 @@ pub(super) fn append_moe_round_output(
     let activated_gate = append_activation(program, gate, ones, activation, "sg")?;
     let hidden = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(activated_gate, "sg->sg"), (up, "sg->sg")],
     )?;
     let down_product = gathered_expert_product(program, expert_w_down, route, hidden);
     let round_output = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         down_product,
@@ -917,7 +917,7 @@ pub(super) fn append_moe_round_output(
     )?;
     elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(round_output, "sd->sd"), (weight, "s->sd")],
     )
@@ -953,25 +953,25 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         ExpertGatingFunc::Sigmoid => {
             let neg_logits = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Negate,
                 &[(logits, "se->se")],
             )?;
             let exp_neg_logits = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Exponential,
                 &[(neg_logits, "se->se")],
             )?;
             let one_plus_exp = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 &[(exp_neg_logits, "se->se"), (ones, "->se")],
             )?;
             elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Reciprocal,
                 &[(one_plus_exp, "se->se")],
             )?
@@ -980,7 +980,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
     let mut selection_scores = match expert_bias {
         Some(bias) => elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             &[(scores, "se->se"), (bias, "e->se")],
         )?,
@@ -994,7 +994,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
     let expert_index = op::append(
         program,
         Op::Iota {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             extent: Extent::Static(expert_count),
         },
     );
@@ -1002,9 +1002,9 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
     // a stacked route only ever feeds the float elementwise stack, never a gather index
     // directly, so an `Int32` tag would put it outside the f32 evaluator's index-node allowance
     let route_dtype = if projection_strategy.stacks_routes() {
-        DType::Float32
+        DType::FLOAT32
     } else {
-        DType::Int32
+        DType::INT32
     };
 
     let mut max_selection_0: Option<NodeId> = None;
@@ -1017,7 +1017,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
     for round in 0..expert_used_count {
         let max_selection = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Maximum,
             ReduceInit::NegativeInfinity,
             selection_scores,
@@ -1026,13 +1026,13 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         )?;
         let mask = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Equal,
             &[(selection_scores, "se->se"), (max_selection, "s->se")],
         )?;
         let candidate = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(mask, "se->se"), (expert_index, "e->se")],
         )?;
@@ -1051,13 +1051,13 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
                 let first_max = *max_selection_0.get_or_insert(max_selection);
                 let shifted = elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Subtract,
                     &[(max_selection, "s->s"), (first_max, "s->s")],
                 )?;
                 elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Exponential,
                     &[(shifted, "s->s")],
                 )?
@@ -1067,13 +1067,13 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
                 // `max_selection` itself -- that would be the biased score.
                 let masked_scores = elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Multiply,
                     &[(mask, "se->se"), (scores, "se->se")],
                 )?;
                 reduce(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Add,
                     ReduceInit::Zero,
                     masked_scores,
@@ -1095,7 +1095,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
                 let gathered_scale = gather_expert_scale(program, scale, route, 1);
                 elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Multiply,
                     &[(weight, "s->s"), (gathered_scale, "s->s")],
                 )?
@@ -1108,7 +1108,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
             let gate_product = gathered_expert_product(program, expert_w_gate, route, x);
             let gate = reduce(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 ReduceInit::Zero,
                 gate_product,
@@ -1118,7 +1118,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
             let up_product = gathered_expert_product(program, expert_w_up, route, x);
             let up = reduce(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Add,
                 ReduceInit::Zero,
                 up_product,
@@ -1138,7 +1138,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
             weighted_sum = Some(match weighted_sum {
                 Some(accumulated) => elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Add,
                     &[(accumulated, "sd->sd"), (weighted_round, "sd->sd")],
                 )?,
@@ -1147,7 +1147,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
             weight_total = Some(match weight_total {
                 Some(accumulated) => elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Add,
                     &[(accumulated, "s->s"), (weight, "s->s")],
                 )?,
@@ -1158,7 +1158,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         if round + 1 < expert_used_count {
             selection_scores = elementwise(
                 program,
-                DType::Float32,
+                DType::FLOAT32,
                 ScalarOp::Select,
                 &[
                     (mask, "se->se"),
@@ -1174,7 +1174,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         let gate_product = grouped_gathered_expert_product(program, expert_w_gate, routes, x);
         let grouped_gate = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             gate_product,
@@ -1184,7 +1184,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         let up_product = grouped_gathered_expert_product(program, expert_w_up, routes, x);
         let grouped_up = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             up_product,
@@ -1204,8 +1204,8 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
             // times -- `round` never exceeds a value that already fit a
             // `u32`, so this cast cannot truncate.
             let round = round as u32;
-            let gate = select_grouped_round(program, grouped_gate, round, DType::Float32);
-            let up = select_grouped_round(program, grouped_up, round, DType::Float32);
+            let gate = select_grouped_round(program, grouped_gate, round, DType::FLOAT32);
+            let up = select_grouped_round(program, grouped_up, round, DType::FLOAT32);
             let weighted_round = append_moe_round_output(
                 program,
                 gate,
@@ -1219,7 +1219,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
             weighted_sum = Some(match weighted_sum {
                 Some(accumulated) => elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Add,
                     &[(accumulated, "sd->sd"), (weighted_round, "sd->sd")],
                 )?,
@@ -1228,7 +1228,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
             weight_total = Some(match weight_total {
                 Some(accumulated) => elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Add,
                     &[(accumulated, "s->s"), (weight, "s->s")],
                 )?,
@@ -1243,7 +1243,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         let gate_product = grouped_gathered_expert_product(program, expert_w_gate, routes, x);
         let gate = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             gate_product,
@@ -1253,7 +1253,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         let up_product = grouped_gathered_expert_product(program, expert_w_up, routes, x);
         let up = reduce(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             up_product,
@@ -1263,7 +1263,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         let activated_gate = append_activation(program, gate, ones, activation, "sko")?;
         let hidden = elementwise(
             program,
-            DType::Float32,
+            DType::FLOAT32,
             ScalarOp::Multiply,
             &[(activated_gate, "sko->sko"), (up, "sko->sko")],
         )?;
@@ -1273,7 +1273,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
                     stacked_slot_weights(program, expert_scale, routes, stacked_weights)?;
                 let weighted_hidden = elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Multiply,
                     &[(hidden, "sko->sko"), (slot_weights, "sk->sko")],
                 )?;
@@ -1285,7 +1285,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
                 );
                 reduce(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Add,
                     ReduceInit::Zero,
                     down_product,
@@ -1297,7 +1297,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
                     slotwise_gathered_expert_product(program, expert_w_down, routes, hidden);
                 let down = reduce(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Add,
                     ReduceInit::Zero,
                     down_product,
@@ -1308,13 +1308,13 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
                     stacked_slot_weights(program, expert_scale, routes, stacked_weights)?;
                 let weighted = elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Multiply,
                     &[(down, "sko->sko"), (slot_weights, "sk->sko")],
                 )?;
                 reduce(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Add,
                     ReduceInit::Zero,
                     weighted,
@@ -1327,7 +1327,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
             weight_total = Some(match weight_total {
                 Some(accumulated) => elementwise(
                     program,
-                    DType::Float32,
+                    DType::FLOAT32,
                     ScalarOp::Add,
                     &[(accumulated, "s->s"), (weight, "s->s")],
                 )?,
@@ -1346,13 +1346,13 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
     })?;
     let inv_weight_total = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(weight_total, "s->s")],
     )?;
     let output = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(weighted_sum, "sd->sd"), (inv_weight_total, "s->sd")],
     )?;
@@ -1404,13 +1404,13 @@ pub fn append_gqa_routed_layer(
 
     let q_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->shdi"), (wq, "ihd->shdi")],
     )?;
     let q = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         q_product,
@@ -1420,13 +1420,13 @@ pub fn append_gqa_routed_layer(
 
     let k_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->sudi"), (wk, "iud->sudi")],
     )?;
     let k = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         k_product,
@@ -1436,13 +1436,13 @@ pub fn append_gqa_routed_layer(
 
     let v_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(normed, "si->sudi"), (wv, "iud->sudi")],
     )?;
     let v = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         v_product,
@@ -1459,7 +1459,7 @@ pub fn append_gqa_routed_layer(
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (rotated_q_even, group_map.as_str()),
@@ -1468,7 +1468,7 @@ pub fn append_gqa_routed_layer(
     )?;
     let q_odd_grouped = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (rotated_q_odd, group_map.as_str()),
@@ -1478,7 +1478,7 @@ pub fn append_gqa_routed_layer(
 
     let score_even_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (q_even_grouped, "sugi->stugi"),
@@ -1487,7 +1487,7 @@ pub fn append_gqa_routed_layer(
     )?;
     let score_even = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_even_product,
@@ -1496,7 +1496,7 @@ pub fn append_gqa_routed_layer(
     )?;
     let score_odd_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[
             (q_odd_grouped, "sugi->stugi"),
@@ -1505,7 +1505,7 @@ pub fn append_gqa_routed_layer(
     )?;
     let score_odd = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_odd_product,
@@ -1514,21 +1514,21 @@ pub fn append_gqa_routed_layer(
     )?;
     let scores = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(score_even, "stug->stug"), (score_odd, "stug->stug")],
     )?;
 
     let scores_scaled = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(scores, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
     )?;
 
     let scores_masked = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Select,
         &[
             (is_future, "st->stug"),
@@ -1539,7 +1539,7 @@ pub fn append_gqa_routed_layer(
 
     let score_max = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         scores_masked,
@@ -1548,19 +1548,19 @@ pub fn append_gqa_routed_layer(
     )?;
     let shifted = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Subtract,
         &[(scores_masked, "stug->stug"), (score_max, "sug->stug")],
     )?;
     let weights = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Exponential,
         &[(shifted, "stug->stug")],
     )?;
     let weight_sum = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         weights,
@@ -1569,26 +1569,26 @@ pub fn append_gqa_routed_layer(
     )?;
     let inv_weight_sum = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Reciprocal,
         &[(weight_sum, "sug->sug")],
     )?;
     let probabilities = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(weights, "stug->stug"), (inv_weight_sum, "sug->stug")],
     )?;
 
     let attended_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(probabilities, "stug->stugd"), (v, "tud->stugd")],
     )?;
     let attended = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         attended_product,
@@ -1598,13 +1598,13 @@ pub fn append_gqa_routed_layer(
 
     let wo_product = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Multiply,
         &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
     )?;
     let attn_out = reduce(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         wo_product,
@@ -1614,7 +1614,7 @@ pub fn append_gqa_routed_layer(
 
     let residual1 = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
     )?;
@@ -1639,7 +1639,7 @@ pub fn append_gqa_routed_layer(
 
     let output = elementwise(
         program,
-        DType::Float32,
+        DType::FLOAT32,
         ScalarOp::Add,
         &[(ffn_out, "sd->sd"), (residual1, "sd->sd")],
     )?;

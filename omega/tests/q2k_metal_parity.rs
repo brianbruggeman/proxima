@@ -21,7 +21,7 @@ fn matmul_program(rows: u32, width: u32, weight_dtype: DType) -> Vec<Op> {
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(width), Extent::Static(1)],
             name: None,
         },
@@ -29,7 +29,7 @@ fn matmul_program(rows: u32, width: u32, weight_dtype: DType) -> Vec<Op> {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -41,7 +41,7 @@ fn matmul_program(rows: u32, width: u32, weight_dtype: DType) -> Vec<Op> {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -70,7 +70,7 @@ fn q2k_metal_matmul_matches_dequantized_cpu() {
     let mut dequantized = vec![0.0f32; weights.len()];
     q2_k::dequantize(&packed, &mut dequantized).expect("dequantizes the Q2_K device fixture");
 
-    let packed_program = matmul_program(ROWS as u32, WIDTH as u32, DType::UInt8);
+    let packed_program = matmul_program(ROWS as u32, WIDTH as u32, DType::UINT8);
     let packed_root = proxima_tensor::NodeId((packed_program.len() - 1) as u32);
     let metal = omega::execute(
         &packed_program,
@@ -87,7 +87,7 @@ fn q2k_metal_matmul_matches_dequantized_cpu() {
     )
     .expect("Metal executes the Q2_K matmul");
 
-    let f32_program = matmul_program(ROWS as u32, WIDTH as u32, DType::Float32);
+    let f32_program = matmul_program(ROWS as u32, WIDTH as u32, DType::FLOAT32);
     let f32_root = proxima_tensor::NodeId((f32_program.len() - 1) as u32);
     let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_root])
         .expect("CPU evaluates the dequantized reference");

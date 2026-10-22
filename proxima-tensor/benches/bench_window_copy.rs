@@ -97,7 +97,7 @@ fn input(program: &mut Vec<Op>, shape: &[u32]) -> NodeId {
     append(
         program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: shape.iter().map(|&extent| Extent::Static(extent)).collect(),
             name: None,
         },
@@ -146,7 +146,7 @@ fn window_copy_program(shape: &WindowShape, extra_step: bool) -> (Vec<Op>, NodeI
     let stamp = append(
         &mut program,
         Op::Constant {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: [shape.out_h, shape.out_w, shape.kernel_h, shape.kernel_w]
                 .iter()
                 .map(|&extent| Extent::Static(extent))
@@ -158,7 +158,7 @@ fn window_copy_program(shape: &WindowShape, extra_step: bool) -> (Vec<Op>, NodeI
     let mut windowed = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (image, IndexMap::Affine(image_pattern)),
@@ -172,7 +172,7 @@ fn window_copy_program(shape: &WindowShape, extra_step: bool) -> (Vec<Op>, NodeI
         let zero = append(
             &mut program,
             Op::Constant {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![
                     Extent::Static(1),
                     Extent::Static(shape.channels),
@@ -187,7 +187,7 @@ fn window_copy_program(shape: &WindowShape, extra_step: bool) -> (Vec<Op>, NodeI
         windowed = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 operands: vec![
                     (

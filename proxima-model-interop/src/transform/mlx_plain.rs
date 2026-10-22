@@ -24,7 +24,7 @@ use proxima_tensor::DType;
 use crate::error::InteropError;
 
 /// The dtype mlx-community's plain conversions store.
-pub const DEFAULT_PLAIN_DTYPE: DType = DType::BFloat16;
+pub const DEFAULT_PLAIN_DTYPE: DType = DType::BFLOAT16;
 
 /// One exported float tensor. `shape` is row-major (GGUF `dims` reversed),
 /// so the last entry is the contiguous axis the GGUF stores first.
@@ -121,15 +121,15 @@ fn decode_row(kind: GgmlType, row: &[u8], scratch: &mut [f32]) -> Result<(), Int
 }
 
 fn cast_row(dtype: DType, values: &[f32], out: &mut Vec<u8>) -> Option<()> {
-    if dtype == DType::BFloat16 {
+    if dtype == DType::BFLOAT16 {
         values
             .iter()
             .for_each(|&value| out.extend_from_slice(&bf16::from_f32(value).to_le_bytes()));
-    } else if dtype == DType::Float16 {
+    } else if dtype == DType::FLOAT16 {
         values
             .iter()
             .for_each(|&value| out.extend_from_slice(&f16::from_f32(value).to_le_bytes()));
-    } else if dtype == DType::Float32 {
+    } else if dtype == DType::FLOAT32 {
         values
             .iter()
             .for_each(|&value| out.extend_from_slice(&value.to_le_bytes()));
@@ -277,7 +277,7 @@ mod tests {
     fn mlx_plain_bf16_default_bytes_equal_hand_derived_and_half_bits_on_granite() {
         let exported = sample_f32_tensor(DEFAULT_PLAIN_DTYPE);
 
-        assert_eq!(exported.dtype, DType::BFloat16);
+        assert_eq!(exported.dtype, DType::BFLOAT16);
         assert_eq!(exported.shape, vec![2, 3]);
         assert_eq!(exported.bytes, le_bytes(&SAMPLE_BF16_BITS));
         first_granite_f32_tensor(|tensor, data| {
@@ -302,12 +302,12 @@ mod tests {
 
     #[test]
     fn mlx_plain_f16_option_bytes_equal_hand_derived_and_half_bits_on_granite() {
-        let exported = sample_f32_tensor(DType::Float16);
+        let exported = sample_f32_tensor(DType::FLOAT16);
 
-        assert_eq!(exported.dtype, DType::Float16);
+        assert_eq!(exported.dtype, DType::FLOAT16);
         assert_eq!(exported.bytes, le_bytes(&SAMPLE_F16_BITS));
         first_granite_f32_tensor(|tensor, data| {
-            let real = export_plain_tensor(tensor, data, DType::Float16).unwrap();
+            let real = export_plain_tensor(tensor, data, DType::FLOAT16).unwrap();
             let expected: Vec<u8> = real_values(data)
                 .iter()
                 .flat_map(|value| f16::from_f32(*value).to_le_bytes())
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn mlx_plain_f16_control_altered_expected_byte_differs() {
-        let exported = sample_f32_tensor(DType::Float16);
+        let exported = sample_f32_tensor(DType::FLOAT16);
 
         assert_ne!(
             exported.bytes,
@@ -328,23 +328,23 @@ mod tests {
 
     #[test]
     fn mlx_plain_f32_option_bytes_equal_source_bits_and_granite_bytes() {
-        let exported = sample_f32_tensor(DType::Float32);
+        let exported = sample_f32_tensor(DType::FLOAT32);
         let expected: Vec<u8> = SAMPLE_F32_BITS
             .iter()
             .flat_map(|bits| bits.to_le_bytes())
             .collect();
 
-        assert_eq!(exported.dtype, DType::Float32);
+        assert_eq!(exported.dtype, DType::FLOAT32);
         assert_eq!(exported.bytes, expected);
         first_granite_f32_tensor(|tensor, data| {
-            let real = export_plain_tensor(tensor, data, DType::Float32).unwrap();
+            let real = export_plain_tensor(tensor, data, DType::FLOAT32).unwrap();
             assert_eq!(real.bytes, data);
         });
     }
 
     #[test]
     fn mlx_plain_f32_control_altered_expected_byte_differs() {
-        let exported = sample_f32_tensor(DType::Float32);
+        let exported = sample_f32_tensor(DType::FLOAT32);
         let expected: Vec<u8> = SAMPLE_F32_BITS
             .iter()
             .flat_map(|bits| bits.to_le_bytes())
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn mlx_plain_q8_0_block_equals_hand_derived_ggml_layout_values() {
-        let exported = export_single(&q8_0_gguf(), DType::Float32);
+        let exported = export_single(&q8_0_gguf(), DType::FLOAT32);
 
         assert_eq!(exported.shape, vec![2, 32]);
         assert_eq!(exported.bytes, f32_bytes(&q8_0_expected()));
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn mlx_plain_q8_0_control_altered_expected_byte_differs() {
-        let exported = export_single(&q8_0_gguf(), DType::Float32);
+        let exported = export_single(&q8_0_gguf(), DType::FLOAT32);
 
         assert_ne!(
             exported.bytes,
@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn mlx_plain_q4_0_block_equals_hand_derived_ggml_layout_values() {
-        let exported = export_single(&q4_0_gguf(), DType::Float32);
+        let exported = export_single(&q4_0_gguf(), DType::FLOAT32);
 
         assert_eq!(exported.shape, vec![2, 32]);
         assert_eq!(exported.bytes, f32_bytes(&q4_0_expected()));
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn mlx_plain_q4_0_control_altered_expected_byte_differs() {
-        let exported = export_single(&q4_0_gguf(), DType::Float32);
+        let exported = export_single(&q4_0_gguf(), DType::FLOAT32);
 
         assert_ne!(
             exported.bytes,

@@ -27,7 +27,7 @@ fn identity_program(extent: u32) -> (Vec<Op>, proxima_tensor::NodeId) {
     let source = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(extent)],
             name: None,
         },
@@ -35,7 +35,7 @@ fn identity_program(extent: u32) -> (Vec<Op>, proxima_tensor::NodeId) {
     let identity = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(source, IndexMap::Affine(projection(1, &[0])))],
             name: None,
@@ -236,7 +236,7 @@ fn a_program_reads_a_placed_write_from_a_later_op_in_the_same_call() {
     let row_in = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(ROW_LEN)],
             name: None,
         },
@@ -244,7 +244,7 @@ fn a_program_reads_a_placed_write_from_a_later_op_in_the_same_call() {
     let row_out = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(row_in, IndexMap::Affine(projection(1, &[0])))],
             name: None,
@@ -253,7 +253,7 @@ fn a_program_reads_a_placed_write_from_a_later_op_in_the_same_call() {
     let cache_in = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(TOTAL_LEN)],
             name: None,
         },
@@ -261,7 +261,7 @@ fn a_program_reads_a_placed_write_from_a_later_op_in_the_same_call() {
     let cache_out = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(cache_in, IndexMap::Affine(projection(1, &[0])))],
             name: None,
@@ -340,7 +340,7 @@ fn a_four_dimensional_state_round_trips_through_placement() {
     let state_input = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![
                 Extent::Static(2),
                 Extent::Static(3),
@@ -353,7 +353,7 @@ fn a_four_dimensional_state_round_trips_through_placement() {
     let state_output = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(state_input, IndexMap::Affine(projection(4, &[0, 1, 2, 3])))],
             name: None,

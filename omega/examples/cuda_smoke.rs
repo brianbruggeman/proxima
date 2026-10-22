@@ -26,7 +26,7 @@ fn main() {
             let input = append(
                 &mut program,
                 Op::Input {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: vec![Extent::Static(4)],
                     name: Some("x".into()),
                 },
@@ -34,7 +34,7 @@ fn main() {
             let one = append(
                 &mut program,
                 Op::Constant {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     shape: vec![Extent::Static(4)],
                     value: 1.0,
                 },
@@ -42,7 +42,7 @@ fn main() {
             let output_node = append(
                 &mut program,
                 Op::Elementwise {
-                    dtype: DType::Float32,
+                    dtype: DType::FLOAT32,
                     body: ScalarOp::Add,
                     operands: vec![
                         (input, IndexMap::Affine(map::projection(1, &[0]))),

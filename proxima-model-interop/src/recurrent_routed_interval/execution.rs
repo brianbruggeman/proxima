@@ -490,12 +490,12 @@ mod tests {
     fn linked_final_gather_keeps_routes_sources_and_logits_bit_exact() {
         let identity = IndexMap::Affine(map::projection(1, &[0]));
         let input = |name: &str| Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(2)],
             name: Some(name.into()),
         };
         let binary = |name: &str, body, first, second| Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body,
             operands: vec![(first, identity.clone()), (second, identity.clone())],
             name: Some(name.into()),
@@ -676,7 +676,7 @@ mod tests {
         let activation = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(2)],
                 name: Some("activation".into()),
             },
@@ -684,7 +684,7 @@ mod tests {
         let router = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 operands: vec![
                     (activation, identity.clone()),
@@ -696,7 +696,7 @@ mod tests {
         let scale = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(2)],
                 name: Some("scale".into()),
             },
@@ -704,7 +704,7 @@ mod tests {
         let gather = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![(router, identity.clone()), (scale, identity.clone())],
                 name: Some("gather".into()),
@@ -792,7 +792,7 @@ mod tests {
         let activation = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(2)],
                 name: Some("activation".into()),
             },
@@ -800,7 +800,7 @@ mod tests {
         let router = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 operands: vec![
                     (activation, identity.clone()),
@@ -812,7 +812,7 @@ mod tests {
         let gather = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![(router, identity.clone()), (activation, identity)],
                 name: Some("gather".into()),
@@ -838,7 +838,7 @@ mod tests {
         let activation = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(2)],
                 name: Some("activation".into()),
             },
@@ -846,7 +846,7 @@ mod tests {
         let router = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 operands: vec![
                     (activation, identity.clone()),
@@ -858,7 +858,7 @@ mod tests {
         let block_output = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![(router, identity.clone()), (activation, identity.clone())],
                 name: Some("block0".into()),
@@ -867,7 +867,7 @@ mod tests {
         let _dead_future_expert = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(2)],
                 name: Some("blk.1.ffn_gate_exps.weight".into()),
             },
@@ -875,7 +875,7 @@ mod tests {
         let next_router = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 body: ScalarOp::Add,
                 operands: vec![(block_output, identity.clone()), (activation, identity)],
                 name: Some("router1".into()),

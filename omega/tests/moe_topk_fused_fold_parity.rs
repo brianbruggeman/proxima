@@ -54,19 +54,19 @@ fn build_fixture(seq: u32, expert_count: u32, expert_used_count: u32) -> MoeFixt
     let mut program = Vec::new();
     let x = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(seq), Extent::Static(embedding)],
         "x",
     );
     let gate_inp = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(embedding), Extent::Static(expert_count)],
         "gate_inp",
     );
     let expert_w_gate = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(expert_count),
             Extent::Static(embedding),
@@ -76,7 +76,7 @@ fn build_fixture(seq: u32, expert_count: u32, expert_used_count: u32) -> MoeFixt
     );
     let expert_w_up = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(expert_count),
             Extent::Static(embedding),
@@ -86,7 +86,7 @@ fn build_fixture(seq: u32, expert_count: u32, expert_used_count: u32) -> MoeFixt
     );
     let expert_w_down = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![
             Extent::Static(expert_count),
             Extent::Static(expert_hidden),

@@ -23,14 +23,14 @@ fn computed_gather_program() -> (Vec<Op>, NodeId, NodeId) {
     let mut program = Vec::new();
     let stack = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(2), Extent::Static(3), Extent::Static(2)],
         "expert_stack",
     );
-    let route = input_leaf(&mut program, DType::Int32, vec![Extent::Static(1)], "route");
+    let route = input_leaf(&mut program, DType::INT32, vec![Extent::Static(1)], "route");
     let activation = input_leaf(
         &mut program,
-        DType::Float32,
+        DType::FLOAT32,
         vec![Extent::Static(1), Extent::Static(3)],
         "activation",
     );
@@ -38,7 +38,7 @@ fn computed_gather_program() -> (Vec<Op>, NodeId, NodeId) {
     let output = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,

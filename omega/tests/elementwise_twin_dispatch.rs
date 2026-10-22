@@ -43,7 +43,7 @@ impl RopeCase {
         let mut program = Vec::new();
         let source = input_leaf(
             &mut program,
-            DType::Float32,
+            DType::FLOAT32,
             vec![
                 Extent::Static(sequence),
                 Extent::Static(heads),
@@ -52,8 +52,8 @@ impl RopeCase {
             "x",
         );
         let trig = || vec![Extent::Static(sequence), Extent::Static(pairs)];
-        let cosine = input_leaf(&mut program, DType::Float32, trig(), "cos");
-        let sine = input_leaf(&mut program, DType::Float32, trig(), "sin");
+        let cosine = input_leaf(&mut program, DType::FLOAT32, trig(), "cos");
+        let sine = input_leaf(&mut program, DType::FLOAT32, trig(), "sin");
         let (first, second) = fused_rope_pair(&mut program, source, 'h', cosine, sine, pairing)
             .expect("rope pair builds over a [seq, heads, head_dim] source");
         Self {

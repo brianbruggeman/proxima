@@ -1298,12 +1298,12 @@ mod tests {
         let service = CudaGpuService::start_fake().expect("fake owner should start");
         let program = [
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Symbolic(0)],
                 name: Some(String::from("changed")),
             },
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Symbolic(0)],
                 name: Some(String::from("retained")),
             },

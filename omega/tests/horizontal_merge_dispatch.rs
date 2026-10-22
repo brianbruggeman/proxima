@@ -46,7 +46,7 @@ fn append_matvec(program: &mut Vec<Op>, weight: NodeId, activation: NodeId) -> N
     let product = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(projection(2, &[1, 0]))),
@@ -58,7 +58,7 @@ fn append_matvec(program: &mut Vec<Op>, weight: NodeId, activation: NodeId) -> N
     append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -145,7 +145,7 @@ fn build_fixture() -> Fixture {
             append(
                 &mut program,
                 Op::Input {
-                    dtype: DType::UInt8,
+                    dtype: DType::UINT8,
                     shape: vec![
                         Extent::Static(IN_DIM as u32),
                         Extent::Static(OUT_DIM as u32),
@@ -158,7 +158,7 @@ fn build_fixture() -> Fixture {
     let activation_node = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(IN_DIM as u32)],
             name: Some("activation".into()),
         },
@@ -506,7 +506,7 @@ fn raw_split_member_forces_its_own_dispatch() {
             append(
                 &mut program,
                 Op::Input {
-                    dtype: DType::UInt8,
+                    dtype: DType::UINT8,
                     shape: vec![
                         Extent::Static(RAW_SPLIT_SIZE as u32),
                         Extent::Static(RAW_SPLIT_SIZE as u32),
@@ -519,7 +519,7 @@ fn raw_split_member_forces_its_own_dispatch() {
     let activation_node = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(RAW_SPLIT_SIZE as u32)],
             name: Some("activation".into()),
         },
@@ -758,7 +758,7 @@ fn lazy_activation_and_output_exercise_the_fresh_allocation_path() {
             append(
                 &mut program,
                 Op::Input {
-                    dtype: DType::UInt8,
+                    dtype: DType::UINT8,
                     shape: vec![
                         Extent::Static(LAZY_SIZE as u32),
                         Extent::Static(LAZY_SIZE as u32),
@@ -771,7 +771,7 @@ fn lazy_activation_and_output_exercise_the_fresh_allocation_path() {
     let raw_activation_node = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(LAZY_SIZE as u32)],
             name: Some("raw_activation".into()),
         },
@@ -782,7 +782,7 @@ fn lazy_activation_and_output_exercise_the_fresh_allocation_path() {
     let activation_node = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![
                 (raw_activation_node, IndexMap::Affine(projection(1, &[0]))),

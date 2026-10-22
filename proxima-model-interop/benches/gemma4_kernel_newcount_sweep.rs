@@ -213,7 +213,7 @@ fn matmul_rhs_transposed_program(m: u32, k: u32, n: u32, name: &str) -> (Vec<Op>
     let lhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(m), Extent::Static(k)],
             name: None,
         },
@@ -221,7 +221,7 @@ fn matmul_rhs_transposed_program(m: u32, k: u32, n: u32, name: &str) -> (Vec<Op>
     let rhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(n), Extent::Static(k)],
             name: None,
         },
@@ -229,7 +229,7 @@ fn matmul_rhs_transposed_program(m: u32, k: u32, n: u32, name: &str) -> (Vec<Op>
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -241,7 +241,7 @@ fn matmul_rhs_transposed_program(m: u32, k: u32, n: u32, name: &str) -> (Vec<Op>
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -265,7 +265,7 @@ fn packed_row_q4_0_program(rows: u32, k: u32, new_count: u32) -> (Vec<Op>, NodeI
     let weight = append(
         &mut program,
         Op::Input {
-            dtype: DType::UInt8,
+            dtype: DType::UINT8,
             shape: vec![Extent::Static(rows), Extent::Static(k)],
             name: None,
         },
@@ -273,7 +273,7 @@ fn packed_row_q4_0_program(rows: u32, k: u32, new_count: u32) -> (Vec<Op>, NodeI
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(k), Extent::Static(new_count)],
             name: None,
         },
@@ -281,7 +281,7 @@ fn packed_row_q4_0_program(rows: u32, k: u32, new_count: u32) -> (Vec<Op>, NodeI
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -293,7 +293,7 @@ fn packed_row_q4_0_program(rows: u32, k: u32, new_count: u32) -> (Vec<Op>, NodeI
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -326,7 +326,7 @@ fn rmsnorm_broadcast_epilogue_program(seq: u32, dim: u32) -> (Vec<Op>, NodeId) {
     let x = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(seq), Extent::Static(dim)],
             name: Some("x".into()),
         },
@@ -334,7 +334,7 @@ fn rmsnorm_broadcast_epilogue_program(seq: u32, dim: u32) -> (Vec<Op>, NodeId) {
     let inv_dim = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             name: Some("inv_dim".into()),
         },
@@ -342,7 +342,7 @@ fn rmsnorm_broadcast_epilogue_program(seq: u32, dim: u32) -> (Vec<Op>, NodeId) {
     let eps = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: Vec::new(),
             name: Some("eps".into()),
         },
@@ -350,7 +350,7 @@ fn rmsnorm_broadcast_epilogue_program(seq: u32, dim: u32) -> (Vec<Op>, NodeId) {
     let squared = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(x, full()), (x, full())],
             name: None,
@@ -359,7 +359,7 @@ fn rmsnorm_broadcast_epilogue_program(seq: u32, dim: u32) -> (Vec<Op>, NodeId) {
     let sum_squares = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: squared,
@@ -372,7 +372,7 @@ fn rmsnorm_broadcast_epilogue_program(seq: u32, dim: u32) -> (Vec<Op>, NodeId) {
     let mean_square = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(sum_squares, keep_seq()), (inv_dim, broadcast_scalar_seq())],
             name: None,
@@ -381,7 +381,7 @@ fn rmsnorm_broadcast_epilogue_program(seq: u32, dim: u32) -> (Vec<Op>, NodeId) {
     let mean_square_eps = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             operands: vec![(mean_square, keep_seq()), (eps, broadcast_scalar_seq())],
             name: None,
@@ -390,7 +390,7 @@ fn rmsnorm_broadcast_epilogue_program(seq: u32, dim: u32) -> (Vec<Op>, NodeId) {
     let rms = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::SquareRoot,
             operands: vec![(mean_square_eps, keep_seq())],
             name: None,
@@ -399,7 +399,7 @@ fn rmsnorm_broadcast_epilogue_program(seq: u32, dim: u32) -> (Vec<Op>, NodeId) {
     let inv_rms = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Reciprocal,
             operands: vec![(rms, keep_seq())],
             name: None,
@@ -408,7 +408,7 @@ fn rmsnorm_broadcast_epilogue_program(seq: u32, dim: u32) -> (Vec<Op>, NodeId) {
     let normed = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![(x, full()), (inv_rms, broadcast_seq_over_dim())],
             name: Some("rmsnorm_broadcast_epilogue".into()),

@@ -69,7 +69,7 @@ fn append_matmul(
     let product = append(
         program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -81,7 +81,7 @@ fn append_matmul(
     append(
         program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -100,7 +100,7 @@ fn two_layer_mlp_fixture() -> (Vec<Op>, NodeId) {
     let x = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(BATCH), Extent::Static(IN_FEATURES)],
             name: Some("x".into()),
         },
@@ -108,7 +108,7 @@ fn two_layer_mlp_fixture() -> (Vec<Op>, NodeId) {
     let w1 = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(IN_FEATURES), Extent::Static(HIDDEN)],
             name: Some("w1".into()),
         },
@@ -117,7 +117,7 @@ fn two_layer_mlp_fixture() -> (Vec<Op>, NodeId) {
     let hidden_act = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Erf,
             operands: vec![(hidden, IndexMap::Affine(map::projection(2, &[0, 1])))],
             name: None,
@@ -126,7 +126,7 @@ fn two_layer_mlp_fixture() -> (Vec<Op>, NodeId) {
     let w2 = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(HIDDEN), Extent::Static(OUT_FEATURES)],
             name: Some("w2".into()),
         },
@@ -135,7 +135,7 @@ fn two_layer_mlp_fixture() -> (Vec<Op>, NodeId) {
     let output_act = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Tanh,
             operands: vec![(output, IndexMap::Affine(map::projection(2, &[0, 1])))],
             name: None,
@@ -144,7 +144,7 @@ fn two_layer_mlp_fixture() -> (Vec<Op>, NodeId) {
     let cumsum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: output_act,
@@ -255,7 +255,7 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32, table_dtype: DType) 
     let ids = append(
         &mut program,
         Op::Input {
-            dtype: DType::Int32,
+            dtype: DType::INT32,
             shape: vec![Extent::Static(seq)],
             name: Some("ids".into()),
         },
@@ -279,7 +279,7 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32, table_dtype: DType) 
     append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Identity,
             operands: vec![(table, gathered_map)],
             name: None,
@@ -291,7 +291,7 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32, table_dtype: DType) 
 #[test]
 fn embedding_lookup_runs_on_wgpu_at_cpu_parity_for_integer_valued_inputs() {
     let (vocab, dim, seq) = (256usize, 8usize, 4usize);
-    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32, DType::Float32);
+    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32, DType::FLOAT32);
     let table_data: Vec<f32> = (0..vocab * dim).map(|value| (value % 97) as f32).collect();
     let ids_data = [3.0f32, 255.0, 12.0, 0.0];
     let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
@@ -345,7 +345,7 @@ fn packed_q4k_embedding_lookup_runs_on_wgpu_at_cpu_parity() {
     use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
 
     let (vocab, dim, seq) = (256usize, QK_K, 4usize);
-    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32, DType::UInt8);
+    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32, DType::UINT8);
     let mut packed = vec![0u8; vocab * BLOCK_BYTES];
     for (row, bytes) in (0..vocab).zip(packed.as_chunks_mut::<BLOCK_BYTES>().0) {
         let values: Vec<f32> = (0..dim)
@@ -401,7 +401,7 @@ fn packed_q4k_embedding_lookup_runs_on_wgpu_at_cpu_parity() {
 #[test]
 fn an_out_of_range_gather_index_faults_on_wgpu_the_same_way_it_faults_on_cpu() {
     let (vocab, dim, seq) = (16usize, 4usize, 2usize);
-    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32, DType::Float32);
+    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32, DType::FLOAT32);
     let table_data: Vec<f32> = (0..vocab * dim).map(|value| value as f32).collect();
     let ids_data = [0.0f32, 999.0];
     let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
@@ -429,7 +429,7 @@ fn an_out_of_range_gather_index_faults_on_wgpu_the_same_way_it_faults_on_cpu() {
     );
 }
 
-/// `matmul(lhs, rhs)` at `DType::Float16` — mirrors
+/// `matmul(lhs, rhs)` at `DType::FLOAT16` — mirrors
 /// `omega/tests/metal_parity.rs::matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle`'s
 /// program shape, now exercising [`crate::wgsl`]'s `enable f16;` compute
 /// path (or its named rejection) through the portable wgpu driver.
@@ -438,7 +438,7 @@ fn f16_matmul_program(m: u32, k: u32, n: u32) -> Vec<Op> {
     let lhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(m), Extent::Static(k)],
             name: Some("lhs".into()),
         },
@@ -446,7 +446,7 @@ fn f16_matmul_program(m: u32, k: u32, n: u32) -> Vec<Op> {
     let rhs = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(k), Extent::Static(n)],
             name: Some("rhs".into()),
         },
@@ -454,7 +454,7 @@ fn f16_matmul_program(m: u32, k: u32, n: u32) -> Vec<Op> {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float16,
+            dtype: DType::FLOAT16,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -466,7 +466,7 @@ fn f16_matmul_program(m: u32, k: u32, n: u32) -> Vec<Op> {
     append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float16,
+            dtype: DType::FLOAT16,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -502,7 +502,7 @@ fn f16_matmul_runs_on_wgpu_within_the_metal_parity_f16_epsilon_or_names_its_reje
         let lhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(m as u32), Extent::Static(k as u32)],
                 name: Some("lhs".into()),
             },
@@ -510,7 +510,7 @@ fn f16_matmul_runs_on_wgpu_within_the_metal_parity_f16_epsilon_or_names_its_reje
         let rhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(k as u32), Extent::Static(n as u32)],
                 name: Some("rhs".into()),
             },
@@ -603,8 +603,8 @@ fn f16_matmul_runs_on_wgpu_within_the_metal_parity_f16_epsilon_or_names_its_reje
 /// shape `omega/tests/metal_parity.rs::q4k_matmul_program` runs against a
 /// packed Metal weight, now exercising [`crate::wgsl`]'s packed-operand
 /// codec table through the portable wgpu driver. `weight_dtype` is
-/// `DType::UInt8` for the packed arm (an opaque byte stream `crate::wgsl`
-/// never itself interprets as a float) and `DType::Float32` for the
+/// `DType::UINT8` for the packed arm (an opaque byte stream `crate::wgsl`
+/// never itself interprets as a float) and `DType::FLOAT32` for the
 /// dequantized CPU oracle.
 fn packed_matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
@@ -619,7 +619,7 @@ fn packed_matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, No
     let activation = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             shape: vec![Extent::Static(k), Extent::Static(1)],
             name: Some("activation".into()),
         },
@@ -627,7 +627,7 @@ fn packed_matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, No
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, IndexMap::Affine(projection(3, &[0, 2]))),
@@ -639,7 +639,7 @@ fn packed_matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, No
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::Float32,
+            dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
@@ -698,7 +698,7 @@ fn assert_packed_codec_parity(
         dequantize(row_blocks, row_f32).expect("a whole number of packed blocks");
     }
 
-    let (packed_program, packed_sum) = packed_matmul_program(rows, k, DType::UInt8);
+    let (packed_program, packed_sum) = packed_matmul_program(rows, k, DType::UINT8);
     let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
         ("weight", to_block(&weight_blocks)),
         ("activation", QuantizedBlock::Float32(&activation)),
@@ -716,7 +716,7 @@ fn assert_packed_codec_parity(
     let wgpu = execute_plan_named(&mut wgpu_plan, &named)
         .expect("omega::backend runs the packed matmul on a real device");
 
-    let (f32_program, f32_sum) = packed_matmul_program(rows, k, DType::Float32);
+    let (f32_program, f32_sum) = packed_matmul_program(rows, k, DType::FLOAT32);
     let f32_named: Vec<(&str, QuantizedBlock<'_>)> = vec![
         ("weight", QuantizedBlock::Float32(&dequantized)),
         ("activation", QuantizedBlock::Float32(&activation)),
@@ -866,7 +866,7 @@ fn matmul_runs_on_wgpu_at_cpu_parity_whichever_reduce_path_the_adapter_takes() {
         let lhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(m as u32), Extent::Static(k as u32)],
                 name: Some("lhs".into()),
             },
@@ -874,7 +874,7 @@ fn matmul_runs_on_wgpu_at_cpu_parity_whichever_reduce_path_the_adapter_takes() {
         let rhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(k as u32), Extent::Static(n as u32)],
                 name: Some("rhs".into()),
             },
@@ -971,7 +971,7 @@ fn matmul_output_above_the_workgroup_dimension_limit_still_matches_cpu() {
         let lhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(m as u32), Extent::Static(k as u32)],
                 name: Some("lhs".into()),
             },
@@ -979,7 +979,7 @@ fn matmul_output_above_the_workgroup_dimension_limit_still_matches_cpu() {
         let rhs = append(
             &mut program,
             Op::Input {
-                dtype: DType::Float32,
+                dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(k as u32), Extent::Static(n as u32)],
                 name: Some("rhs".into()),
             },
