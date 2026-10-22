@@ -9,7 +9,8 @@
 use proxima_primitives::block_layout::BlockLayout;
 
 use super::{
-    QuantError, bf16, block_layout, f16, iq2_xs, iq3_xxs, iq4_nl, q2_k, q3_k, q4_k, q5_k, q6_k, q8_k,
+    QuantError, bf16, block_layout, f16, iq2_xs, iq3_xxs, iq4_nl, q2_k, q3_k, q4_k, q5_k, q6_k,
+    q8_k,
 };
 use crate::types::GgmlType;
 
@@ -21,6 +22,8 @@ pub fn dequantize(kind: GgmlType, data: &[u8], output: &mut [f32]) -> Result<(),
         GgmlType::Q2_K => q2_k::dequantize(data, output),
         GgmlType::Q1_0 => block_layout::dequantize(&BlockLayout::Q1_0, data, output),
         GgmlType::Q2_0 => block_layout::dequantize(&BlockLayout::Q2_0, data, output),
+        GgmlType::Tq10 => block_layout::dequantize(&BlockLayout::TQ1_0, data, output),
+        GgmlType::Tq20 => block_layout::dequantize(&BlockLayout::TQ2_0, data, output),
         GgmlType::Q3_K => q3_k::dequantize(data, output),
         GgmlType::Q4_0 => block_layout::dequantize(&BlockLayout::Q4_0, data, output),
         GgmlType::Q4_1 => block_layout::dequantize(&BlockLayout::Q4_1, data, output),

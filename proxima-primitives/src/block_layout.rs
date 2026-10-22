@@ -23,6 +23,9 @@ pub struct Digit {
 /// The most digits a plane's address map uses (Q3_K needs four).
 pub const MAX_DIGITS: usize = 4;
 
+/// Maximum disjoint element ranges needed by current packed block layouts.
+pub const MAX_CODE_REGIONS: usize = 3;
+
 /// One bit plane of a code: `bits` wide, at the bit address
 /// `base_bits + sum(digit_value * stride_bits)`, with the index split least significant digit
 /// first. Unused digits have radix 1.
@@ -60,6 +63,22 @@ pub struct Coded {
     pub high: Option<Plane>,
     /// Subtracted from the multiplied code.
     pub bias: i16,
+    /// Zero uses the low/high bit planes directly; a value above one extracts a mixed-radix
+    /// digit from each region's packed word before applying the shared code layout.
+    pub packed_radix: u8,
+    /// Source maps for code ranges whose packed word stores multiple radix digits.
+    pub regions: [CodeRegion; MAX_CODE_REGIONS],
+    /// Number of active source maps in `regions`.
+    pub region_count: u8,
+}
+
+/// A logical element range that reads one packed word and selects one mixed-radix digit from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct CodeRegion {
+    pub start: u16,
+    pub elements: u16,
+    pub source: Plane,
+    pub digit_axis: u8,
 }
 
 /// A scale or min stored once per block: its layout and byte offset.
@@ -110,6 +129,14 @@ const NO_DIGIT: Digit = Digit {
     stride_bits: 0,
 };
 
+const EMPTY_PLANE: Plane = plane(1, 0, [NO_DIGIT; MAX_DIGITS]);
+const EMPTY_CODE_REGION: CodeRegion = CodeRegion {
+    start: 0,
+    elements: 0,
+    source: EMPTY_PLANE,
+    digit_axis: 0,
+};
+
 const fn digit(radix: u16, stride_bits: u16) -> Digit {
     Digit { radix, stride_bits }
 }
@@ -128,6 +155,36 @@ const fn coded(code: FloatLayout, low: Plane, high: Option<Plane>, bias: i16) ->
         low,
         high,
         bias,
+        packed_radix: 0,
+        regions: [EMPTY_CODE_REGION; MAX_CODE_REGIONS],
+        region_count: 0,
+    }
+}
+
+const fn radix_coded(
+    code: FloatLayout,
+    radix: u8,
+    regions: [CodeRegion; MAX_CODE_REGIONS],
+    region_count: u8,
+    bias: i16,
+) -> Coded {
+    Coded {
+        code,
+        low: EMPTY_PLANE,
+        high: None,
+        bias,
+        packed_radix: radix,
+        regions,
+        region_count,
+    }
+}
+
+const fn code_region(start: u16, elements: u16, source: Plane, digit_axis: u8) -> CodeRegion {
+    CodeRegion {
+        start,
+        elements,
+        source,
+        digit_axis,
     }
 }
 
@@ -268,6 +325,56 @@ impl BlockLayout {
         1,
         None,
     );
+    pub const TQ2_0: Self = Self {
+        elements: 256,
+        block_bytes: 66,
+        element: coded(
+            FloatLayout::UINT2,
+            plane(2, 0, [digit(32, 8), digit(4, 2), digit(2, 256), NO_DIGIT]),
+            None,
+            1,
+        ),
+        multiplier: 1,
+        scale: field_at(FloatLayout::F16, 64),
+        min: None,
+        min_multiplier: 1,
+        sub: None,
+    };
+    pub const TQ1_0: Self = Self {
+        elements: 256,
+        block_bytes: 54,
+        element: radix_coded(
+            FloatLayout::UINT2,
+            3,
+            [
+                code_region(
+                    0,
+                    160,
+                    plane(8, 0, [digit(32, 8), digit(5, 0), NO_DIGIT, NO_DIGIT]),
+                    1,
+                ),
+                code_region(
+                    160,
+                    80,
+                    plane(8, 256, [digit(16, 8), digit(5, 0), NO_DIGIT, NO_DIGIT]),
+                    1,
+                ),
+                code_region(
+                    240,
+                    16,
+                    plane(8, 384, [digit(4, 8), digit(4, 0), NO_DIGIT, NO_DIGIT]),
+                    1,
+                ),
+            ],
+            3,
+            1,
+        ),
+        multiplier: 1,
+        scale: field_at(FloatLayout::F16, 52),
+        min: None,
+        min_multiplier: 1,
+        sub: None,
+    };
 
     pub const Q2_K: Self = Self {
         elements: 256,
