@@ -16,11 +16,9 @@
 //!
 //! # Scope (v1)
 //!
-//! One QUIC connection per `call` — the same v1 shape
-//! [`crate::http2::H2ClientUpstream`] documents ("connection-reuse + stream
-//! multiplexing are a later layer"). Connection reuse + request
-//! multiplexing land as a follow-on component so the bench against the
-//! incumbent stays apples-to-apples (both per-call-connect).
+//! One cached QUIC connection carries serialized request/response exchanges.
+//! A failed reused connection permits one reconnect for an idempotent request.
+//! Ambiguous non-idempotent failures clear the connection and return the error.
 
 use std::future::poll_fn;
 use std::net::SocketAddr;
@@ -58,9 +56,9 @@ const LOCAL_CID_LEN: usize = 8;
 
 /// Outbound HTTP/3 upstream over the native sans-IO QUIC + H3 stack.
 ///
-/// Holds the dial target + the rustls client config; each `call` dials a
-/// fresh QUIC connection, runs the H3 request/response cycle, and tears
-/// it down. Construct via [`Self::new`] (webpki roots) or
+/// Holds the dial target, rustls client config and a lazily cached QUIC connection.
+/// Calls serialize their H3 request/response cycles on the existing async gate.
+/// Construct via [`Self::new`] (webpki roots) or
 /// [`Self::with_client_config`] (custom roots / mTLS / dev self-signed).
 pub struct H3NativeUpstream {
     server_addr: SocketAddr,
@@ -205,10 +203,8 @@ impl SendPipe for H3NativeUpstream {
         async move {
             let header_bufs = request_header_bufs(&server_name, &request);
             let body = request.payload.clone();
-            // Reuse the persistent connection; if a REUSED one fails
-            // (likely idle-closed), drop it and re-establish once. A freshly
-            // established connection that fails is a real error, not a
-            // staleness retry.
+            // a lost response does not prove non-processing; only idempotent
+            // methods permit recovery after ambiguous reused-connection failure.
             let mut last_err: Option<ProximaError> = None;
             for _ in 0..2 {
                 let mut guard = conn.lock().await;
@@ -239,7 +235,7 @@ impl SendPipe for H3NativeUpstream {
                     Ok(response) => return Ok(response),
                     Err(err) => {
                         *guard = None;
-                        if !was_reused {
+                        if !was_reused || !request.method.is_idempotent() {
                             return Err(err);
                         }
                         last_err = Some(err);
@@ -1039,3 +1035,6 @@ mod tests {
         assert_eq!(status, None);
     }
 }
+
+#[cfg(test)]
+mod http3_replay_safety;
