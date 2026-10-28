@@ -482,7 +482,7 @@ impl Replayable for Request<Bytes> {
 
 impl Idempotent for Request<Bytes> {
     fn is_idempotent(&self) -> bool {
-        is_idempotent_method(&self.method)
+        self.method.is_idempotent()
     }
 }
 
@@ -776,14 +776,6 @@ fn build_request(
         stream: Some(crate::pipe::body::RequestStream::from_chunk_stream(body)),
         context: context.clone(),
     }
-}
-
-fn is_idempotent_method(method: &crate::pipe::method::Method) -> bool {
-    use crate::pipe::method::Method;
-    matches!(
-        method,
-        Method::Get | Method::Head | Method::Put | Method::Delete | Method::Options
-    )
 }
 
 // `#[proxima::test]` pulls in the `proxima` dev-dependency, which the
