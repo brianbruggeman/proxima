@@ -108,6 +108,21 @@ impl Method {
         core::str::from_utf8(self.as_bytes()).ok()
     }
 
+    /// Whether repeating this method has an idempotent intended effect (RFC 9110 §9.2.2).
+    #[must_use]
+    pub fn is_idempotent(&self) -> bool {
+        !matches!(self, Self::Other(_)) && Self::is_idempotent_token(self.as_bytes())
+    }
+
+    /// Classify a borrowed, case-sensitive method token without constructing `Other`.
+    #[must_use]
+    pub fn is_idempotent_token(token: &[u8]) -> bool {
+        matches!(
+            token,
+            b"GET" | b"HEAD" | b"OPTIONS" | b"TRACE" | b"PUT" | b"DELETE"
+        )
+    }
+
     /// Whether this is a safe + idempotent read method (GET/HEAD).
     #[must_use]
     pub fn is_read(&self) -> bool {
