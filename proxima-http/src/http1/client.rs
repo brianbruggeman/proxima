@@ -124,10 +124,10 @@ use proxima_telemetry::{debug, warn};
 use serde::{Deserialize, Serialize};
 
 use proxima_core::ProximaError;
-use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::body::ResponseStream;
 use proxima_primitives::pipe::primitives::Pipe;
 use proxima_primitives::pipe::request::{Request, Response};
+use proxima_primitives::pipe::{Method, SendPipe};
 use proxima_primitives::stream::{StreamConnection, StreamUpstream, StreamUpstreamExt};
 use proxima_protocols::http1_codec::h1_body::{BodyDecoder, Status as BodyStatus};
 use proxima_protocols::http1_codec::h1_client::{
@@ -1033,7 +1033,7 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
         let first = Self::write_and_read_head(&mut state, response_mode.headers).await;
         let outcome = match first {
             Ok(value) => Ok(value),
-            Err(error) if reused => {
+            Err(error) if reused && request.method.is_idempotent() => {
                 warn!(label = %self.label, error = %error, "reused h1 connection failed; reconnecting and retrying once");
                 state.conn = None;
                 let conn = self
@@ -1176,7 +1176,13 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
         let first = Self::write_raw_read_status(&mut state, request_bytes).await;
         let (status, framing, body_offset) = match first {
             Ok(value) => value,
-            Err(_) if reused => {
+            Err(_)
+                if reused
+                    && request_bytes
+                        .iter()
+                        .position(|byte| *byte == b' ')
+                        .is_some_and(|end| Method::is_idempotent_token(&request_bytes[..end])) =>
+            {
                 state.conn = None;
                 let conn = self
                     .upstream
@@ -2162,3 +2168,6 @@ mod prime_transport_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod http_replay_safety;
