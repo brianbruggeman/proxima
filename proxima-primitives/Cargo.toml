@@ -19,6 +19,11 @@ default = ["std"]
 # carries only its tier-agnostic BindAddr/PeerInfo re-export and TcpBindOptions.
 # proxima-transport's Replay/GenericStream are also irreducibly std (std Mutex/Vec).
 alloc = [
+    "futures/alloc",
+    "serde/alloc",
+    "dep:bytes",
+    "dep:serde_json",
+    "dep:crossbeam-queue",
     "proxima-core/alloc",
     "proxima-core/time-alloc",
     "dep:proxima-runtime",
@@ -123,10 +128,10 @@ atomic-permits = []
 [dependencies]
 proxima-core    = { workspace = true, default-features = false }
 arc-swap        = { workspace = true, optional = true }
-bytes           = { workspace = true, default-features = false }
-futures         = { workspace = true, default-features = false, features = ["alloc", "async-await"] }
-serde           = { workspace = true, features = ["derive", "alloc"] }
-serde_json      = { workspace = true }
+bytes = { workspace = true, default-features = false, optional = true }
+futures         = { workspace = true, default-features = false, features = ["async-await"] }
+serde           = { workspace = true, features = ["derive"] }
+serde_json      = { workspace = true, optional = true }
 thiserror       = { workspace = true }
 tracing         = { workspace = true, optional = true }
 # direct, not workspace-inherited: the workspace entry locks default-features
@@ -149,7 +154,7 @@ atomic-wait = { workspace = true, optional = true }
 # ring buffer needs it unconditionally under `std` (mirrors the former
 # proxima-transport's own non-optional dependency); sync's async-mutex
 # feature above rides the same always-present crate.
-crossbeam-queue = { workspace = true }
+crossbeam-queue = { workspace = true, optional = true }
 event-listener = { workspace = true, optional = true }
 lock_api = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }

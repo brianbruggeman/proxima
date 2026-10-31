@@ -46,6 +46,7 @@ pub mod bounded;
 #[cfg(feature = "std")]
 pub mod bucket_table;
 pub mod capabilities;
+#[cfg(feature = "alloc")]
 pub mod capture_surface;
 #[cfg(feature = "alloc")]
 pub mod chaos;
@@ -89,6 +90,7 @@ pub mod isolate;
 pub mod keyed_live_filter;
 #[cfg(feature = "alloc")]
 pub mod labeled;
+#[cfg(feature = "alloc")]
 pub mod stream_bridge;
 // `not(loom)`: `ProducerLifecycle` wraps a real `tokio::task::JoinSet`
 // directly (predates the pipe/sync primitives merge); the loom build keeps
@@ -119,7 +121,9 @@ pub mod sink_front;
 // production `Clock` for `Retry`, backed by proxima-time.
 #[cfg(feature = "alloc")]
 pub mod clock;
+#[cfg(feature = "alloc")]
 pub mod header_name;
+#[cfg(feature = "alloc")]
 pub mod method;
 #[cfg(feature = "part-source")]
 pub mod part;
@@ -164,6 +168,7 @@ pub use handler::{
 };
 #[cfg(feature = "alloc")]
 pub use header_list::HeaderList;
+#[cfg(feature = "alloc")]
 pub use header_name::HeaderName;
 #[cfg(feature = "std")]
 pub use interval_pipe::{
@@ -172,6 +177,7 @@ pub use interval_pipe::{
 };
 #[cfg(all(feature = "std", not(loom)))]
 pub use lifecycle::{ProducerLifecycle, ShutdownReport};
+#[cfg(feature = "alloc")]
 pub use method::Method;
 #[cfg(feature = "part-source")]
 pub use part::{Part, PartSink, PartSource};
@@ -231,6 +237,7 @@ pub use resilience::{
 pub use retry_rules::RetryRules;
 #[cfg(feature = "std")]
 pub use signal_source::SignalSource;
+#[cfg(feature = "alloc")]
 pub use stream_bridge::{AsSink, AsSinkError, AsStream, DrainSinkExt, PollSourceExt};
 #[cfg(feature = "io-bridge")]
 pub use stream_bridge::{IntoReader, IntoWriter};

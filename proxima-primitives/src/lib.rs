@@ -37,6 +37,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(feature = "alloc")]
 extern crate alloc;
 
 // the test harness always links std; a no_std crate must name it explicitly

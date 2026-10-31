@@ -25,7 +25,7 @@ std = [
     "time-std",
     "time-driver-std-thread",
 ]
-alloc = ["time-alloc"]
+alloc = ["time-alloc", "futures/alloc"]
 # time (folded from the former proxima-time crate) tiers — namespaced so they
 # compose under this crate's own std/alloc without clobbering them. A default
 # `std` build here still gets the runtime-agnostic timer's std-thread driver
@@ -85,7 +85,7 @@ crossbeam-queue = { workspace = true, optional = true }
 # unconditional (matching the former proxima-time crate's own always-on
 # dependency spec) so `time` compiles at every tier, including bare
 # no_std + no-alloc — see the `time-*` feature block above.
-futures = { workspace = true, default-features = false, features = ["alloc", "async-await"] }
+futures = { workspace = true, default-features = false, features = ["async-await"] }
 pin-project-lite = { workspace = true }
 futures-timer = { workspace = true, optional = true }
 smallvec.workspace = true
