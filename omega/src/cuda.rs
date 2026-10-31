@@ -1471,6 +1471,10 @@ pub(crate) fn preamble(source: &mut String, element_type: &str) {
     source.push('\n');
     source.push_str(Q5_0_UNPACK_CUDA);
     source.push('\n');
+    source.push_str(Q1_0_UNPACK_CUDA);
+    source.push('\n');
+    source.push_str(Q2_0_UNPACK_CUDA);
+    source.push('\n');
     source.push_str(BF16_UNPACK_CUDA);
     source.push('\n');
 }
@@ -1723,6 +1727,15 @@ fn operand_read(
         Some(Codec::Q5_0) => Ok(format!(
             "q5_0_element(in{index} + ({offset} / {Q5_0_BLOCK_ELEMENTS}) * {Q5_0_BLOCK_BYTES}, (unsigned int)({offset} % {Q5_0_BLOCK_ELEMENTS}))"
         )),
+        Some(Codec::Q1_0) => Ok(format!(
+            "q1_0_element(in{index} + ({offset} / {Q1_0_BLOCK_ELEMENTS}) * {Q1_0_BLOCK_BYTES}, (unsigned int)({offset} % {Q1_0_BLOCK_ELEMENTS}))"
+        )),
+        Some(Codec::Q2_0) => Ok(format!(
+            "q2_0_element(in{index} + ({offset} / {Q2_0_BLOCK_ELEMENTS}) * {Q2_0_BLOCK_BYTES}, (unsigned int)({offset} % {Q2_0_BLOCK_ELEMENTS}))"
+        )),
+        Some(Codec::Pq2_0) => Ok(format!(
+            "q2_0_element(in{index} + ({offset} / {PQ2_0_BLOCK_ELEMENTS}) * {PQ2_0_BLOCK_BYTES}, (unsigned int)({offset} % {PQ2_0_BLOCK_ELEMENTS}))"
+        )),
         // `__half` converts implicitly to `float` in CUDA C++, the same
         // "already a valid narrow-float buffer" shape MSL's `half` takes.
         Some(Codec::Float16) => Ok(format!("in{index}[{offset}]")),
@@ -1748,9 +1761,6 @@ fn operand_read(
             | Codec::Tq20
             | Codec::Mxfp4
             | Codec::Nvfp4
-            | Codec::Q1_0
-            | Codec::Q2_0
-            | Codec::Pq2_0
             | Codec::BFloat8
             | Codec::Bf8E5M2
             | Codec::Bf4E2M1
@@ -2971,6 +2981,39 @@ __device__ __forceinline__ float q5_0_element(const unsigned char *block, unsign
 
 pub const Q5_0_BLOCK_BYTES: usize = proxima_gguf::quant::q5_0::BLOCK_BYTES;
 pub const Q5_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_0::QK5_0;
+
+/// CUDA C source for unpacking one element of a `Q1_0` block (PrismML `dequantize_row_q1_0`):
+/// 18-byte block, `d` f16 at 0, one sign bit per element from byte 2 (LSB first),
+/// `value = bit ? d : -d`.
+pub const Q1_0_UNPACK_CUDA: &str = "\
+__device__ __forceinline__ float q1_0_element(const unsigned char *block, unsigned int index) {
+    unsigned short d_bits = (unsigned short)((unsigned int)block[0] | ((unsigned int)block[1] << 8));
+    float d = __half2float(__ushort_as_half(d_bits));
+    unsigned int bit = ((unsigned int)block[2u + (index >> 3u)] >> (index & 7u)) & 1u;
+    return bit ? d : -d;
+}
+";
+
+pub const Q1_0_BLOCK_BYTES: usize = proxima_gguf::quant::q1_0::BLOCK_BYTES;
+pub const Q1_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q1_0::QK_Q1_0;
+
+/// CUDA C source for unpacking one element of a `Q2_0` or `PQ2_0` block (PrismML
+/// `dequantize_row_q2_0` / `dequantize_row_pq2_0`): `d` f16 at 0, two bits per element from
+/// byte 2 (LSB first), `value = (code - 1) * d`. The two codecs share this body and differ
+/// only in the block stride the caller applies.
+pub const Q2_0_UNPACK_CUDA: &str = "\
+__device__ __forceinline__ float q2_0_element(const unsigned char *block, unsigned int index) {
+    unsigned short d_bits = (unsigned short)((unsigned int)block[0] | ((unsigned int)block[1] << 8));
+    float d = __half2float(__ushort_as_half(d_bits));
+    unsigned int code = ((unsigned int)block[2u + (index >> 2u)] >> ((index & 3u) * 2u)) & 3u;
+    return ((float)code - 1.0f) * d;
+}
+";
+
+pub const Q2_0_BLOCK_BYTES: usize = proxima_gguf::quant::q2_0::BLOCK_BYTES;
+pub const Q2_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q2_0::QK_Q2_0;
+pub const PQ2_0_BLOCK_BYTES: usize = proxima_gguf::quant::pq2_0::BLOCK_BYTES;
+pub const PQ2_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::pq2_0::QK_PQ2_0;
 
 pub const FLOAT16_BLOCK_BYTES: usize = proxima_gguf::quant::f16::BLOCK_BYTES;
 pub const FLOAT16_BLOCK_ELEMENTS: usize = proxima_gguf::quant::f16::QK_F16;
