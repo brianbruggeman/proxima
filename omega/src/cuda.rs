@@ -71,7 +71,9 @@ use crate::grid::checked_product;
 use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
 use crate::msl::{Binding, Codec, PackedOperands};
 
+mod mma_gemm;
 mod row_tile;
+use mma_gemm::{GEMM_THREADS, MMA_GEMM_HELPERS, mma_gemm_plan, mma_gemm_threads, push_mma_gemm_body};
 use row_tile::{ROW_TILE, push_row_tiled_cooperative_body, row_tile_axis};
 
 /// Appended to a Q4_0 matvec's CUDA entry name only when
@@ -289,11 +291,18 @@ fn extent_fields(
 ) -> Result<(CudaGridSpec, Vec<(NodeId, usize)>), EmitError> {
     let cooperative = reduce_is_cooperative(resolved, quantized, numeric_policy);
     let row_tile = row_tile_axis(resolved, quantized, numeric_policy);
-    let grid = CudaGridSpec {
-        threads: grid_threads(resolved, cooperative, row_tile)?,
-        block_width: match &resolved.kind {
-            BoundOpKind::MoeTopK { expert_count, .. } => Some(moe_block_width(*expert_count)),
-            _ => cooperative.then_some(WARP_SIZE),
+    let gemm = mma_gemm_plan(resolved, quantized, numeric_policy);
+    let grid = match gemm {
+        Some(plan) => CudaGridSpec {
+            threads: mma_gemm_threads(resolved, &plan),
+            block_width: Some(GEMM_THREADS),
+        },
+        None => CudaGridSpec {
+            threads: grid_threads(resolved, cooperative, row_tile)?,
+            block_width: match &resolved.kind {
+                BoundOpKind::MoeTopK { expert_count, .. } => Some(moe_block_width(*expert_count)),
+                _ => cooperative.then_some(WARP_SIZE),
+            },
         },
     };
     if grid.blocks() > MAX_GRID_BLOCKS {
@@ -1236,12 +1245,14 @@ fn entry_name(
     } else {
         ""
     };
-    let row_tile_token = if row_tile_axis(resolved, quantized, numeric_policy).is_some() {
-        format!("_rt{ROW_TILE}")
+    let revision = if mma_gemm_plan(resolved, quantized, numeric_policy).is_some() {
+        String::from("_mma16x8x8_gid64c9")
+    } else if row_tile_axis(resolved, quantized, numeric_policy).is_some() {
+        format!("_rt{ROW_TILE}_gid64c9")
     } else {
-        String::new()
+        String::from("_gid64c8")
     };
-    format!("{identity}{activation_token}{row_tile_token}_gid64c9")
+    format!("{identity}{activation_token}{revision}")
 }
 
 /// The `(weight, activation)` operand slots of a Q4_0-weight matvec that the
@@ -2548,8 +2559,12 @@ fn render_reduce(
     let element_type = type_token(resolved.node, resolved.dtype)?;
     let epilogue_operand_count = epilogue_operands.len();
 
+    let gemm = mma_gemm_plan(resolved, quantized, numeric_policy);
     let mut source = String::new();
     preamble(&mut source, element_type);
+    if gemm.is_some() {
+        source.push_str(MMA_GEMM_HELPERS);
+    }
 
     source.push_str("struct Uniforms {\n");
     source.push_str("    long output_total;\n");
@@ -2585,7 +2600,9 @@ fn render_reduce(
         element_type,
     );
 
-    if let Some(tile_index) = row_tile_axis(resolved, quantized, numeric_policy) {
+    if let Some(plan) = gemm {
+        push_mma_gemm_body(&mut source, resolved, &plan, element_type)?;
+    } else if let Some(tile_index) = row_tile_axis(resolved, quantized, numeric_policy) {
         push_row_tiled_cooperative_body(&mut source, resolved, quantized, element_type, tile_index)?;
     } else if reduce_is_cooperative(resolved, quantized, numeric_policy) {
         push_cooperative_reduce_body(

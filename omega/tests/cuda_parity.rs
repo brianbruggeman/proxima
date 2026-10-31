@@ -1299,9 +1299,10 @@ fn assert_batched_prefill_parity(
             Some(tokens),
         );
         let identities = identities.expect("cuda plan exposes its kernels");
-        assert!(
-            identities.iter().any(|identity| identity.contains("_rt8")),
-            "degenerate gate: {codec_name} prefill at {tokens} tokens did not take the row-tiled kernel: {identities:?}"
+        assert_eq!(
+            identities.iter().any(|identity| identity.contains("_mma") || identity.contains("_rt8")),
+            tokens > 1,
+            "{codec_name} at {tokens} tokens: kernel choice is wrong: {identities:?}"
         );
         let (reference, _) = run_batched_program(
             Engine::Cpu,
@@ -1348,16 +1349,24 @@ fn assert_batched_prefill_parity(
             assert!(
                 matvec_identities
                     .iter()
-                    .all(|identity| !identity.contains("_rt8")),
+                    .all(|identity| !identity.contains("_mma") && !identity.contains("_rt8")),
                 "degenerate control: the matvec took the row-tiled kernel: {matvec_identities:?}"
             );
             for row in 0..rows as usize {
-                let tiled_bits = tiled[row * tokens as usize + column as usize].to_bits();
-                assert_eq!(
-                    tiled_bits,
-                    matvec[row].to_bits(),
-                    "{codec_name}: row {row} token {column} of {tokens} differs from the single-row kernel"
-                );
+                let got = tiled[row * tokens as usize + column as usize];
+                if tokens == 1 {
+                    assert_eq!(
+                        got.to_bits(),
+                        matvec[row].to_bits(),
+                        "{codec_name}: row {row} of a single-token prefill differs from the matvec kernel"
+                    );
+                } else {
+                    assert!(
+                        (got - matvec[row]).abs() <= 2e-5 * max_magnitude,
+                        "{codec_name}: row {row} token {column} of {tokens} is {got}, single-row kernel gives {}",
+                        matvec[row]
+                    );
+                }
             }
         }
     }
