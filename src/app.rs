@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -561,7 +562,9 @@ impl App {
         spec: impl Into<Spec>,
     ) -> Result<PipeHandle, ProximaError> {
         let name = name.into();
-        let mut resolved = spec.into().resolve(&self.load_context.config_formats)?;
+        let spec = spec.into();
+        let load_context = self.load_context.with_config_dir(spec.config_dir()?);
+        let mut resolved = spec.resolve(&load_context.config_formats)?;
         if let Some(value) = resolved.as_value_mut()
             && let Value::Object(table) = value
             && !table.contains_key("name")
@@ -571,7 +574,7 @@ impl App {
         let (handle, spec_for_storage) = match resolved {
             ResolvedSpec::Handle(handle) => (handle, None),
             ResolvedSpec::Value(value) => {
-                let handle = load(value.clone(), &self.load_context).await?;
+                let handle = load(value.clone(), &load_context).await?;
                 (handle, Some(value))
             }
         };
@@ -638,7 +641,9 @@ impl App {
                 "no pipe registered as '{name}'; use App::pipe to register first"
             ))
         })?;
-        let mut resolved = spec.into().resolve(&self.load_context.config_formats)?;
+        let spec = spec.into();
+        let load_context = self.load_context.with_config_dir(spec.config_dir()?);
+        let mut resolved = spec.resolve(&load_context.config_formats)?;
         if let Some(value) = resolved.as_value_mut()
             && let Value::Object(table) = value
             && !table.contains_key("name")
@@ -648,7 +653,7 @@ impl App {
         let (handle, spec_for_storage) = match resolved {
             ResolvedSpec::Handle(handle) => (handle, None),
             ResolvedSpec::Value(value) => {
-                let handle = load(value.clone(), &self.load_context).await?;
+                let handle = load(value.clone(), &load_context).await?;
                 (handle, Some(value))
             }
         };
@@ -859,6 +864,10 @@ impl App {
         })
     }
 
+    pub fn set_config_dir(&mut self, config_dir: Option<PathBuf>) {
+        self.load_context = self.load_context.with_config_dir(config_dir);
+    }
+
     #[must_use]
     pub fn load_context(&self) -> &LoadContext {
         &self.load_context
@@ -1036,6 +1045,7 @@ impl App {
         &mut self,
         settings: &crate::settings::ProximaSettings,
     ) -> Result<(), ProximaError> {
+        self.set_config_dir(settings.config_dir.clone());
         // Step 1: register each upstream by name as a Pipe.
         // The RegistryEntry's `spec` field is the JSON the factory
         // dispatches on; we hand it through unchanged.
@@ -1143,7 +1153,9 @@ impl App {
         &mut self,
         spec: impl Into<Spec>,
     ) -> Result<Vec<ListenerHandle>, ProximaError> {
-        let resolved = spec.into().resolve(&self.load_context.config_formats)?;
+        let spec = spec.into();
+        let load_context = self.load_context.with_config_dir(spec.config_dir()?);
+        let resolved = spec.resolve(&load_context.config_formats)?;
         let value = match resolved {
             ResolvedSpec::Value(value) => value,
             ResolvedSpec::Handle(_) => {
@@ -1191,7 +1203,7 @@ impl App {
                     obj.remove("name");
                     obj.insert("name".into(), Value::String(name.clone()));
                 }
-                let handle = load(spec_value, &self.load_context).await?;
+                let handle = load(spec_value, &load_context).await?;
                 self.pipes.insert(name, handle);
             }
         }

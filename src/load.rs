@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -129,6 +129,9 @@ pub struct LoadContext {
     pub telemetry: TelemetryHandle,
     pub metrics: Option<Arc<Metrics>>,
     pub http_client: HttpClientHandle,
+    /// Absolute directory of the config file being loaded, e.g.
+    /// `/srv/lambda`; relative file paths in a pipe spec resolve against it.
+    pub config_dir: Option<PathBuf>,
 }
 
 #[cfg(feature = "http1")]
@@ -186,6 +189,7 @@ impl LoadContext {
             telemetry: metrics.clone(),
             metrics: Some(metrics),
             http_client,
+            config_dir: None,
         })
     }
 
@@ -233,7 +237,53 @@ impl LoadContext {
             telemetry: Arc::new(NoopTelemetry),
             metrics: None,
             http_client,
+            config_dir: None,
         })
+    }
+
+    /// A copy of this context whose relative file paths in pipe specs resolve
+    /// against `config_dir`; `None` keeps the directory already set.
+    #[must_use]
+    pub fn with_config_dir(&self, config_dir: Option<PathBuf>) -> Self {
+        let mut anchored = self.clone();
+        if config_dir.is_some() {
+            anchored.config_dir = config_dir;
+        }
+        anchored
+    }
+
+    fn anchor_spec(&self, spec: &Value, factory: &dyn crate::pipe_factory::PipeFactory) -> Value {
+        let mut anchored = self.anchor_paths(spec, factory.path_fields());
+        for field in factory.nested_fields() {
+            if let Some(nested) = spec.get(*field) {
+                anchored[*field] = self.anchor_nested(nested);
+            }
+        }
+        anchored
+    }
+
+    fn anchor_nested(&self, spec: &Value) -> Value {
+        spec.get("type")
+            .and_then(Value::as_str)
+            .and_then(|type_field| self.registry.get(type_field).ok())
+            .map_or_else(|| spec.clone(), |factory| self.anchor_spec(spec, factory.as_ref()))
+    }
+
+    fn anchor_paths(&self, spec: &Value, fields: &[&str]) -> Value {
+        let mut anchored = spec.clone();
+        let Some(config_dir) = &self.config_dir else {
+            return anchored;
+        };
+        for field in fields {
+            let Some(text) = spec.get(*field).and_then(Value::as_str) else {
+                continue;
+            };
+            if Path::new(text).is_relative() {
+                let joined = config_dir.join(text).to_string_lossy().into_owned();
+                anchored[*field] = Value::String(joined);
+            }
+        }
+        anchored
     }
 
     #[cfg(feature = "recording")]
@@ -392,8 +442,10 @@ pub async fn load(
     spec: impl Into<Spec>,
     context: &LoadContext,
 ) -> Result<PipeHandle, ProximaError> {
-    let resolved = spec.into().resolve(&context.config_formats)?;
-    let (handle, _) = build_pipe(&resolved, context).await?;
+    let spec = spec.into();
+    let context = context.with_config_dir(spec.config_dir()?);
+    let resolved = spec.resolve(&context.config_formats)?;
+    let (handle, _) = build_pipe(&resolved, &context).await?;
     Ok(handle)
 }
 
@@ -414,6 +466,15 @@ pub enum Spec {
 }
 
 impl Spec {
+    /// The absolute directory holding the config file, for a path spec.
+    pub fn config_dir(&self) -> Result<Option<PathBuf>, ProximaError> {
+        let Self::Path(path) = self else {
+            return Ok(None);
+        };
+        let absolute = std::path::absolute(path).map_err(ProximaError::Io)?;
+        Ok(absolute.parent().map(Path::to_path_buf))
+    }
+
     pub fn resolve(self, formats: &ConfigFormatRegistry) -> Result<ResolvedSpec, ProximaError> {
         match self {
             Self::Path(path) => Ok(ResolvedSpec::Value(load_value_from_path(&path, formats)?)),
@@ -603,7 +664,8 @@ fn build_pipe<'context>(
                 return Ok((handle, None));
             } else if let Some(type_field) = value.get("type").and_then(Value::as_str) {
                 let factory = context.registry.get(type_field)?;
-                (factory.build(value, None).await?, None)
+                let anchored = context.anchor_spec(value, factory.as_ref());
+                (factory.build(&anchored, None).await?, None)
             } else {
                 return Err(ProximaError::Config(
                     "spec must include `upstreams`, `http`, `kv`, or a `type` discriminator".into(),
@@ -780,7 +842,8 @@ async fn apply_middleware_stack(
                 ProximaError::Config("[[middleware]] entries require `type`".into())
             })?;
             let factory = context.registry.get(mw_type)?;
-            handle = factory.build(entry, Some(handle)).await?;
+            let anchored = context.anchor_spec(entry, factory.as_ref());
+            handle = factory.build(&anchored, Some(handle)).await?;
         }
     }
     Ok(handle)
@@ -1007,6 +1070,7 @@ mod tests {
             telemetry: Arc::new(NoopTelemetry),
             metrics: None,
             http_client: new_http_client_handle(),
+            config_dir: None,
         };
         let outcome = load(
             json!({"http": "https://127.0.0.1:4433", "transport": "quic"}),
