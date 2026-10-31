@@ -3,8 +3,9 @@ use std::path::PathBuf;
 
 const ELF_BINS: [&str; 1] = ["uppercase"];
 
-const FULL_BINS: [&str; 4] = [
+const FULL_BINS: [&str; 5] = [
     "proxima-vm-guest-lambda",
+    "proxima-vm-guest-lambda-netstack",
     "proxima-vm-guest-lambda-psci",
     "proxima-vm-guest-lambda-gic",
     "proxima-vm-guest-lambda-pl011",

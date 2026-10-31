@@ -135,7 +135,9 @@ goblin = "0.10.7"
 object = "0.40.0"
 proptest.workspace = true
 proxima = { package = "proxima-lib", path = "../..", features = ["test-support"] }
+smoltcp = { version = "0.13.1", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-icmp"] }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 kvm-bindings = { version = "0.14.2", optional = true }

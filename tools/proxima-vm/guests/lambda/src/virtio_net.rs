@@ -28,35 +28,26 @@
 /// real guest RAM (`GUEST_MEMORY_SIZE = 64 MiB`, `dispatch.rs`).
 const MMIO_BASE: u64 = 0x1000001000;
 
-const REG_STATUS: u64 = 0x070;
-const REG_DEVICE_FEATURES: u64 = 0x010;
-const REG_DEVICE_FEATURES_SEL: u64 = 0x014;
-const REG_DRIVER_FEATURES: u64 = 0x020;
-const REG_DRIVER_FEATURES_SEL: u64 = 0x024;
-const REG_QUEUE_SEL: u64 = 0x030;
-const REG_QUEUE_NUM: u64 = 0x038;
-const REG_QUEUE_READY: u64 = 0x044;
-const REG_QUEUE_NOTIFY: u64 = 0x050;
-const REG_QUEUE_DESC_LOW: u64 = 0x080;
-const REG_QUEUE_DESC_HIGH: u64 = 0x084;
-const REG_QUEUE_DRIVER_LOW: u64 = 0x090;
-const REG_QUEUE_DRIVER_HIGH: u64 = 0x094;
-const REG_QUEUE_DEVICE_LOW: u64 = 0x0a0;
-const REG_QUEUE_DEVICE_HIGH: u64 = 0x0a4;
+use proxima_protocols::virtio::mmio::{
+    REG_DEVICE_FEATURES, REG_DEVICE_FEATURES_SEL, REG_DRIVER_FEATURES, REG_DRIVER_FEATURES_SEL,
+    REG_QUEUE_DESC_HIGH, REG_QUEUE_DESC_LOW, REG_QUEUE_DEVICE_HIGH, REG_QUEUE_DEVICE_LOW,
+    REG_QUEUE_DRIVER_HIGH, REG_QUEUE_DRIVER_LOW, REG_QUEUE_NOTIFY, REG_QUEUE_NUM,
+    REG_QUEUE_READY, REG_QUEUE_SEL, REG_STATUS,
+};
+use proxima_protocols::virtio::status as shared_status;
+use proxima_protocols::virtio::FEATURE_NET_MAC;
 
-const STATUS_ACKNOWLEDGE: u32 = 1;
-const STATUS_DRIVER: u32 = 2;
-const STATUS_DRIVER_OK: u32 = 4;
-const STATUS_FEATURES_OK: u32 = 8;
+const STATUS_ACKNOWLEDGE: u32 = shared_status::STATUS_ACKNOWLEDGE as u32;
+const STATUS_DRIVER: u32 = shared_status::STATUS_DRIVER as u32;
+const STATUS_DRIVER_OK: u32 = shared_status::STATUS_DRIVER_OK as u32;
+const STATUS_FEATURES_OK: u32 = shared_status::STATUS_FEATURES_OK as u32;
 
-/// `VIRTIO_NET_F_MAC` (spec §5.1.3, bit 5) — the only device-specific
-/// feature this driver acks, matching
-/// `proxima_protocols::virtio::net::FEATURE_NET_MAC` exactly.
-const DRIVER_FEATURES_LOW_ACK_NET_MAC: u32 = 1 << 5;
+/// `VIRTIO_NET_F_MAC` is the only device-specific feature this one-shot
+/// driver acks.
+const DRIVER_FEATURES_LOW_ACK_NET_MAC: u32 = FEATURE_NET_MAC as u32;
 
-/// Bit 0 of the feature word's high 32 bits — `VIRTIO_F_VERSION_1`, same
-/// ack `virtio_console.rs` already performs.
-const DRIVER_FEATURES_HIGH_ACK_VERSION_1: u32 = 1;
+/// The high 32 bits of the feature word carry `VIRTIO_F_VERSION_1` (bit 32).
+const DRIVER_FEATURES_HIGH_ACK_VERSION_1: u32 = (shared_status::FEATURE_VERSION_1 >> 32) as u32;
 
 /// transmitq1 (spec §5.1.2) — the only queue this driver stands up.
 const TX_QUEUE: u32 = 1;
