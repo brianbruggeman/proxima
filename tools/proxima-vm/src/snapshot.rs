@@ -102,11 +102,11 @@ pub fn pattern_byte(offset: usize, seed: u64) -> u8 {
 /// `backend_macos.c`) — [`dirty_probe_guest_code`]'s emitted loop halts by
 /// loading this value into `x0` and trapping via `hvc #0`, the identical
 /// convention [`capture`]'s own guest uses.
+#[cfg(target_arch = "aarch64")]
 const DIRTY_PROBE_TERMINAL: u16 = 256;
 
-/// Word count of [`dirty_probe_guest_code`]'s emitted program — also the
-/// minimum legal `data_offset` a caller may pass it, since the code itself
-/// occupies `DIRTY_PROBE_CODE_WORDS * 4` bytes starting at guest address 0.
+/// Word count of [`dirty_probe_guest_code`]'s emitted program.
+#[cfg(target_arch = "aarch64")]
 const DIRTY_PROBE_CODE_WORDS: usize = 13;
 
 /// aarch64 `MOVZ <reg>, #imm16, LSL #(16*shift_word)` (64-bit form) —
@@ -114,6 +114,7 @@ const DIRTY_PROBE_CODE_WORDS: usize = 13;
 /// against `backend_macos.c`'s own hand-encoded `code[0] = 0xd2800541u; /*
 /// movz x1, #0x2a */`: `movz(1, 0x2a, 0) == 0xd280_0541`, this module's own
 /// `dirty_probe_guest_code_matches_hand_encoded_movz_reference` test.
+#[cfg(target_arch = "aarch64")]
 fn movz(reg: u8, imm16: u16, shift_word: u8) -> u32 {
     0xD280_0000_u32 | (u32::from(shift_word) << 21) | (u32::from(imm16) << 5) | u32::from(reg)
 }
@@ -122,6 +123,7 @@ fn movz(reg: u8, imm16: u16, shift_word: u8) -> u32 {
 /// same opcode family as [`movz`] with `opc` widened from `10` to `11`
 /// (ARM DDI 0487's own encoding table), which is exactly the `1 << 29` bit
 /// difference between `0xD280_0000` and `0xF280_0000` below.
+#[cfg(target_arch = "aarch64")]
 fn movk(reg: u8, imm16: u16, shift_word: u8) -> u32 {
     0xF280_0000_u32 | (u32::from(shift_word) << 21) | (u32::from(imm16) << 5) | u32::from(reg)
 }
@@ -129,16 +131,19 @@ fn movk(reg: u8, imm16: u16, shift_word: u8) -> u32 {
 /// aarch64 `MOVZ <32-bit reg>, #imm16` — [`movz`]'s 32-bit sibling (`sf = 0`
 /// instead of `1`, ARM DDI 0487), used once to load the dirty-probe write
 /// byte into `w0`.
+#[cfg(target_arch = "aarch64")]
 fn movz32(reg: u8, imm16: u16) -> u32 {
     0x5280_0000_u32 | (u32::from(imm16) << 5) | u32::from(reg)
 }
 
 /// aarch64 `STRB <Wt>, [<Xn>]` (unsigned immediate offset, `imm12 = 0`).
+#[cfg(target_arch = "aarch64")]
 fn strb_unsigned_offset(transfer_reg: u8, base_reg: u8) -> u32 {
     0x3900_0000_u32 | (u32::from(base_reg) << 5) | u32::from(transfer_reg)
 }
 
 /// aarch64 `ADD <Xd>, <Xn>, <Xm>` (shifted register, no shift).
+#[cfg(target_arch = "aarch64")]
 fn add_register(dest_reg: u8, base_reg: u8, offset_reg: u8) -> u32 {
     0x8B00_0000_u32
         | (u32::from(offset_reg) << 16)
@@ -148,6 +153,7 @@ fn add_register(dest_reg: u8, base_reg: u8, offset_reg: u8) -> u32 {
 
 /// aarch64 `SUBS <Xd>, <Xn>, #imm12` (sets flags — [`dirty_probe_guest_code`]'s
 /// loop counter decrement, feeding the `CBNZ` [`cbnz`] emits next).
+#[cfg(target_arch = "aarch64")]
 fn subs_immediate(dest_reg: u8, base_reg: u8, imm12: u16) -> u32 {
     0xF100_0000_u32 | (u32::from(imm12) << 10) | (u32::from(base_reg) << 5) | u32::from(dest_reg)
 }
@@ -155,6 +161,7 @@ fn subs_immediate(dest_reg: u8, base_reg: u8, imm12: u16) -> u32 {
 /// aarch64 `CBNZ <Xt>, #<word_offset>` — `word_offset` is signed, relative
 /// to this instruction's own address, in units of one instruction (4
 /// bytes), matching the architected `imm19` field exactly.
+#[cfg(target_arch = "aarch64")]
 fn cbnz(transfer_reg: u8, word_offset: i32) -> u32 {
     let encoded = (word_offset & 0x0007_ffff) as u32;
     0xB500_0000_u32 | (encoded << 5) | u32::from(transfer_reg)
@@ -181,6 +188,7 @@ fn cbnz(transfer_reg: u8, word_offset: i32) -> u32 {
 /// the code page (never recorded dirty, yet mutated). Embedding the program
 /// as ordinary snapshot bytes means [`WarmVm::restore`]/[`WarmVm::restore_dirty`]
 /// carry it exactly the same way they carry every other guest-memory byte.
+#[cfg(target_arch = "aarch64")]
 fn dirty_probe_guest_code(
     data_offset: u64,
     stride: u16,
@@ -202,6 +210,53 @@ fn dirty_probe_guest_code(
         movz(0, DIRTY_PROBE_TERMINAL, 0),
         0xD400_0002_u32, // hvc #0
     ]
+}
+
+#[cfg(target_arch = "aarch64")]
+fn dirty_probe_code(data_offset: u64, stride: u16, page_count: u16, byte_value: u8) -> Vec<u8> {
+    dirty_probe_guest_code(data_offset, stride, page_count, byte_value)
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect()
+}
+
+/// The KVM lane's program: 32-bit flat protected mode (`start_flat_mode` in
+/// `crate::kvm::Vcpu::start_flat`), so every address the guest touches fits one `imm32`.
+///
+/// ```text
+///   mov ebx, data_offset      ; address accumulator
+///   mov edx, stride
+///   mov ecx, page_count       ; remaining count
+///   mov al,  byte_value
+/// loop:
+///   mov [ebx], al             ; the store that faults on a read-only page
+///   add ebx, edx
+///   dec ecx
+///   jnz loop
+///   hlt                       ; KVM_EXIT_HLT: the lane's halting trap
+/// ```
+#[cfg(target_arch = "x86_64")]
+fn dirty_probe_code(data_offset: u64, stride: u16, page_count: u16, byte_value: u8) -> Vec<u8> {
+    let offset_bytes = data_offset.to_le_bytes();
+    assert!(
+        offset_bytes[4..].iter().all(|byte| *byte == 0),
+        "data_offset {data_offset} does not fit the protected-mode probe's 32-bit address register"
+    );
+    let mut code = Vec::with_capacity(25);
+    code.push(0xbb);
+    code.extend_from_slice(&offset_bytes[..4]);
+    code.push(0xba);
+    code.extend_from_slice(&u32::from(stride).to_le_bytes());
+    code.push(0xb9);
+    code.extend_from_slice(&u32::from(page_count).to_le_bytes());
+    code.extend_from_slice(&[0xb0, byte_value]);
+    code.extend_from_slice(&[0x88, 0x03, 0x01, 0xd3, 0x49, 0x75, 0xf9, 0xf4]);
+    code
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+fn dirty_probe_code(_data_offset: u64, _stride: u16, _page_count: u16, _byte_value: u8) -> Vec<u8> {
+    Vec::new()
 }
 
 /// Builds a [`VmSnapshot`] whose `guest_memory` is `dirty_probe_guest_code`'s
@@ -234,7 +289,8 @@ pub fn dirty_probe_snapshot(
     byte_value: u8,
     seed: u64,
 ) -> VmSnapshot {
-    let code_bytes = DIRTY_PROBE_CODE_WORDS * 4;
+    let code = dirty_probe_code(data_offset as u64, stride, page_count, byte_value);
+    let code_bytes = code.len();
     assert!(
         data_offset >= code_bytes,
         "data_offset {data_offset} overlaps the {code_bytes}-byte dirty-probe guest code"
@@ -247,10 +303,7 @@ pub fn dirty_probe_snapshot(
     );
 
     let mut guest_memory = vec![0_u8; target_size];
-    let code = dirty_probe_guest_code(data_offset as u64, stride, page_count, byte_value);
-    for (index, word) in code.iter().enumerate() {
-        guest_memory[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
-    }
+    guest_memory[..code_bytes].copy_from_slice(&code);
     for (offset, byte) in guest_memory.iter_mut().enumerate().skip(data_offset) {
         *byte = pattern_byte(offset, seed);
     }
@@ -601,6 +654,9 @@ pub struct WarmRestoreReport {
     pub restore_wall_nanos: u64,
     /// Wall time for the `page_size`-strided memory copy alone.
     pub touch_all_pages_nanos: u64,
+    /// Bytes the backend's memory copy moved, counted per chunk as it copied
+    /// — the work a size-bound restore must show as constant per snapshot size.
+    pub bytes_copied: u64,
     /// Count of data-abort/`KVM_EXIT_MMIO` exits observed during the one
     /// resumed step.
     pub fault_count: u64,
@@ -843,6 +899,240 @@ impl WarmVm {
     }
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod platform {
+    use proxima_core::ProximaError;
+
+    use super::{
+        DirtyRunReport, LayeredAdoptReport, LayeredBase, LayeredBaseView, LayeredRestoreReport,
+        RawVcpuRegisters, RestorePhases, RestoreReport, VcpuRegisters, VmSnapshot,
+        WarmRestorePhases, WarmRestoreReport,
+    };
+    use crate::kvm::KvmError;
+    use crate::kvm::layered::LayeredMachine;
+    use crate::kvm::memory::{GuestRam, page_size};
+    use crate::kvm::scratch::{
+        GuestRegisters, RestoreTimings, ResumeObservation, WarmMachine, capture_scratch, restore_scratch,
+    };
+
+    fn upstream(error: KvmError) -> ProximaError {
+        ProximaError::Upstream(error.to_string())
+    }
+
+    fn guest_registers(raw: &RawVcpuRegisters) -> GuestRegisters {
+        let mut gpr = [0_u64; 16];
+        gpr.copy_from_slice(&raw.gpr[..16]);
+        GuestRegisters { gpr, pc: raw.pc, flags: raw.flags }
+    }
+
+    fn raw_registers(registers: &GuestRegisters) -> RawVcpuRegisters {
+        let mut raw = RawVcpuRegisters::default();
+        raw.gpr[..16].copy_from_slice(&registers.gpr);
+        raw.pc = registers.pc;
+        raw.flags = registers.flags;
+        raw
+    }
+
+    pub(super) fn capture(message: &[u8]) -> Result<VmSnapshot, ProximaError> {
+        let capture = capture_scratch(message).map_err(upstream)?;
+        Ok(VmSnapshot {
+            registers: VcpuRegisters { raw: raw_registers(&capture.registers) },
+            guest_memory: capture.memory,
+            emitted: capture.output,
+        })
+    }
+
+    pub(super) fn restore(snapshot: &VmSnapshot, page_size: usize) -> Result<RestoreReport, ProximaError> {
+        let registers = guest_registers(&snapshot.registers.raw);
+        let (timings, observation) =
+            restore_scratch(&registers, &snapshot.guest_memory, page_size).map_err(upstream)?;
+        Ok(RestoreReport {
+            restore_wall_nanos: timings.restore_wall_nanos,
+            touch_all_pages_nanos: timings.touch_all_pages_nanos,
+            fault_count: observation.fault_count,
+            resumed_x0: observation.resumed_x0,
+            resumed_matched_trap: observation.resumed_ok,
+            phases: RestorePhases {
+                region_create_nanos: timings.region_create_nanos,
+                vm_create_nanos: timings.vm_create_nanos,
+                vm_map_nanos: timings.vm_map_nanos,
+                vcpu_create_nanos: timings.vcpu_create_nanos,
+                register_restore_nanos: timings.register_restore_nanos,
+                first_retrap_nanos: observation.first_retrap_nanos,
+            },
+        })
+    }
+
+    fn warm_report(timings: RestoreTimings, observation: ResumeObservation) -> WarmRestoreReport {
+        WarmRestoreReport {
+            restore_wall_nanos: timings.restore_wall_nanos,
+            touch_all_pages_nanos: timings.touch_all_pages_nanos,
+            bytes_copied: timings.bytes_copied,
+            fault_count: observation.fault_count,
+            resumed_x0: observation.resumed_x0,
+            resumed_matched_trap: observation.resumed_ok,
+            phases: WarmRestorePhases {
+                register_restore_nanos: timings.register_restore_nanos,
+                first_retrap_nanos: observation.first_retrap_nanos,
+            },
+        }
+    }
+
+    pub(super) struct WarmVmHandle {
+        machine: WarmMachine,
+        capacity: usize,
+    }
+
+    impl WarmVmHandle {
+        pub(super) fn new(guest_memory_capacity: usize) -> Result<Self, ProximaError> {
+            let machine = WarmMachine::create(guest_memory_capacity).map_err(upstream)?;
+            Ok(Self { machine, capacity: guest_memory_capacity })
+        }
+
+        pub(super) fn restore(
+            &mut self,
+            snapshot: &VmSnapshot,
+            page_size: usize,
+        ) -> Result<WarmRestoreReport, ProximaError> {
+            let registers = guest_registers(&snapshot.registers.raw);
+            let (timings, observation) =
+                self.machine.restore(&registers, &snapshot.guest_memory, page_size).map_err(upstream)?;
+            Ok(warm_report(timings, observation))
+        }
+
+        pub(super) fn sample_guest_memory(&self, offset: usize, length: usize) -> Vec<u8> {
+            assert!(
+                offset.saturating_add(length) <= self.capacity,
+                "sample range [{offset}, {}) exceeds mapped capacity {}",
+                offset + length,
+                self.capacity
+            );
+            self.machine.sample(offset, length)
+        }
+    }
+
+    enum BaseStorage {
+        Owned(LayeredBase),
+        Shared(LayeredBaseView),
+    }
+
+    impl BaseStorage {
+        fn ram(&mut self) -> GuestRam {
+            let (address, length) = match self {
+                Self::Owned(base) => {
+                    let region = base.region.primary_slice_mut();
+                    (region.as_mut_ptr(), region.len())
+                }
+                Self::Shared(view) => {
+                    let region = view.view.as_slice_mut();
+                    (region.as_mut_ptr(), region.len())
+                }
+            };
+            // SAFETY: the storage outlives the machine built over it (same owner, dropped after).
+            unsafe { GuestRam::from_parts(address, length) }
+        }
+
+        fn as_slice(&self) -> &[u8] {
+            match self {
+                Self::Owned(base) => base.region.primary_slice(),
+                Self::Shared(view) => view.view.as_slice(),
+            }
+        }
+    }
+
+    pub(super) struct LayeredHandle {
+        machine: LayeredMachine,
+        base: BaseStorage,
+        delta: crate::named_memory::GuestMemoryRegion,
+    }
+
+    impl LayeredHandle {
+        fn construct(mut base: BaseStorage, delta_capacity: usize, ipa_base: u64) -> Result<Self, ProximaError> {
+            let mut delta = crate::named_memory::GuestMemoryRegion::create(delta_capacity)?;
+            let base_ram = base.ram();
+            let delta_slice = delta.primary_slice_mut();
+            // SAFETY: the delta region is owned by the handle and outlives the machine.
+            let delta_ram = unsafe { GuestRam::from_parts(delta_slice.as_mut_ptr(), delta_slice.len()) };
+            // SAFETY: base and delta are owned by the handle, which drops the machine first.
+            let machine = unsafe { LayeredMachine::create(base_ram, delta_ram, ipa_base) }.map_err(upstream)?;
+            Ok(Self { machine, base, delta })
+        }
+
+        pub(super) fn new_owned(base: LayeredBase, delta_capacity: usize, ipa_base: u64) -> Result<Self, ProximaError> {
+            Self::construct(BaseStorage::Owned(base), delta_capacity, ipa_base)
+        }
+
+        pub(super) fn new_shared(
+            base_view: LayeredBaseView,
+            delta_capacity: usize,
+            ipa_base: u64,
+        ) -> Result<Self, ProximaError> {
+            Self::construct(BaseStorage::Shared(base_view), delta_capacity, ipa_base)
+        }
+
+        pub(super) fn write_base_and_adopt(&mut self, guest_memory: &[u8]) -> Result<LayeredAdoptReport, ProximaError> {
+            match &mut self.base {
+                BaseStorage::Owned(base) => {
+                    base.region.primary_slice_mut()[..guest_memory.len()].copy_from_slice(guest_memory);
+                }
+                BaseStorage::Shared(_) => {
+                    return Err(ProximaError::Config(
+                        "a WarmVm sharing another WarmVm's layered base cannot write it -- use adopt_shared_base"
+                            .into(),
+                    ));
+                }
+            }
+            self.adopt()
+        }
+
+        pub(super) fn adopt(&mut self) -> Result<LayeredAdoptReport, ProximaError> {
+            let timings = self.machine.adopt_base().map_err(upstream)?;
+            Ok(LayeredAdoptReport { map_nanos: timings.map_nanos, register_reset_nanos: timings.register_reset_nanos })
+        }
+
+        pub(super) fn run(&mut self, expected_page_count: u64) -> Result<DirtyRunReport, ProximaError> {
+            let report = self.machine.run(expected_page_count).map_err(upstream)?;
+            Ok(DirtyRunReport {
+                run_wall_nanos: report.run_wall_nanos,
+                fault_count: report.fault_count,
+                newly_dirty_page_count: report.newly_dirty_page_count,
+                halted_ok: report.halted_ok,
+            })
+        }
+
+        pub(super) fn restore(&mut self) -> Result<LayeredRestoreReport, ProximaError> {
+            let report = self.machine.restore().map_err(upstream)?;
+            Ok(LayeredRestoreReport {
+                restore_wall_nanos: report.restore_wall_nanos,
+                remap_nanos: report.remap_nanos,
+                register_reset_nanos: report.register_reset_nanos,
+                remapped_page_count: report.remapped_page_count,
+            })
+        }
+
+        pub(super) fn share_base(&self) -> Result<LayeredBaseView, ProximaError> {
+            match &self.base {
+                BaseStorage::Owned(base) => base.share(),
+                BaseStorage::Shared(_) => Err(ProximaError::Config(
+                    "a WarmVm that already shares its layered base cannot re-share it".into(),
+                )),
+            }
+        }
+
+        pub(super) fn base_bytes(&self, offset: usize, length: usize) -> Vec<u8> {
+            self.base.as_slice()[offset..offset + length].to_vec()
+        }
+
+        pub(super) fn delta_bytes(&self, offset: usize, length: usize) -> Vec<u8> {
+            self.delta.primary_slice()[offset..offset + length].to_vec()
+        }
+    }
+
+    pub(super) fn host_page_size() -> usize {
+        page_size()
+    }
+}
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod platform {
     use std::ffi::CStr;
@@ -952,6 +1242,7 @@ mod platform {
             page_size: usize,
             restore_wall_nanos_out: *mut u64,
             touch_all_pages_nanos_out: *mut u64,
+            bytes_copied_out: *mut u64,
             fault_count_out: *mut u64,
             resumed_x0_out: *mut u64,
             resumed_ok_out: *mut i32,
@@ -1147,6 +1438,7 @@ mod platform {
         ) -> Result<WarmRestoreReport, ProximaError> {
             let mut restore_wall_nanos: u64 = 0;
             let mut touch_all_pages_nanos: u64 = 0;
+            let mut bytes_copied: u64 = 0;
             let mut fault_count: u64 = 0;
             let mut resumed_x0: u64 = 0;
             let mut resumed_ok: i32 = 0;
@@ -1163,6 +1455,7 @@ mod platform {
                     page_size,
                     &raw mut restore_wall_nanos,
                     &raw mut touch_all_pages_nanos,
+                    &raw mut bytes_copied,
                     &raw mut fault_count,
                     &raw mut resumed_x0,
                     &raw mut resumed_ok,
@@ -1178,6 +1471,7 @@ mod platform {
             Ok(WarmRestoreReport {
                 restore_wall_nanos,
                 touch_all_pages_nanos,
+                bytes_copied,
                 fault_count,
                 resumed_x0,
                 resumed_matched_trap: resumed_ok != 0,
@@ -1484,7 +1778,10 @@ mod platform {
     }
 }
 
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(not(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+)))]
 mod platform {
     use proxima_core::ProximaError;
 

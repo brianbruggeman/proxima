@@ -20,7 +20,7 @@
 //!
 //! It does not read vCPU registers — recovering `verb`/`pointer`/`length`
 //! from `HV_EXIT_REASON_EXCEPTION` (`src/backend_macos.c:118-137`) or
-//! `KVM_EXIT_IO` (`src/backend_linux.c:154-164`) is a tier-2 driver leaf
+//! `KVM_EXIT_IO` (`src/kvm/exit_source.rs`) is a tier-2 driver leaf
 //! that does not exist yet (`tools/proxima-vm/ROADMAP.md` M1's dispatch
 //! component). It does not decode the payload bytes into a `ChildRequest` —
 //! that is the dispatch layer, which owns postcard decoding and routing by

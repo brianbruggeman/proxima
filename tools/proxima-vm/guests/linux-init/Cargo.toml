@@ -1,0 +1,58 @@
+# excluded from the host workspace (`Cargo.toml`'s `workspace.exclude`) since
+# it targets x86_64-unknown-linux-musl; the empty table below makes this its
+# own workspace root, as cargo itself suggests for an excluded path.
+[workspace]
+
+[package]
+name = "proxima-vm-guest-linux-init"
+description = "static musl functions the Linux guest boots as the initramfs /init: read a length-prefixed request on COM2, write a length-prefixed reply, restart"
+# this crate is its own workspace root, so it cannot inherit
+# `workspace.package`; these mirror the host root's values and must be kept in
+# sync by hand.
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/brianbruggeman/proxima"
+homepage = "https://github.com/brianbruggeman/proxima"
+publish = false
+
+[lib]
+name = "linux_guest"
+path = "src/lib.rs"
+
+[[bin]]
+name = "uppercase-init"
+path = "src/bin/uppercase.rs"
+
+# never powers off: the watchdog's fixture
+[[bin]]
+name = "spin-init"
+path = "src/bin/spin.rs"
+
+# declares more output bytes than it sends: the frame-truncation fixture
+[[bin]]
+name = "truncated-init"
+path = "src/bin/truncated.rs"
+
+# sends more bytes than any sane output budget: the overflow fixture
+[[bin]]
+name = "flood-init"
+path = "src/bin/flood.rs"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[dependencies]
+libc = "0.2.191"

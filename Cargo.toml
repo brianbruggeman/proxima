@@ -68,7 +68,7 @@ resolver = "3"
 # on this box -- see fuzz/README.md). Own `[workspace]` table, same
 # precedent as scripts/burn_reference; excluded so `cargo check --workspace`
 # never builds it and its dev-only deps never enter the main lockfile.
-exclude = ["tools/proxima-vm/guests/lambda", "scripts/burn_reference", "fuzz"]
+exclude = ["tools/proxima-vm/guests/lambda", "tools/proxima-vm/guests/linux-init", "scripts/burn_reference", "fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -2149,7 +2149,7 @@ name = "console_logging_regression"
 [[test]]
 name = "vm_registry"
 harness = false
-required-features = ["vm"]
+required-features = ["vm", "http1-native"]
 
 # proxima::sync vs tokio::sync — primitive-level shootout (Phase E.0/E.2/E.5)
 # and home-turf retrofits (Phase E.HT). All require the sync-wrappers feature

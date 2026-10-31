@@ -38,25 +38,54 @@ extern crate alloc;
 use core::future::Future;
 
 #[cfg(feature = "std")]
+use futures::FutureExt;
+
+#[cfg(feature = "std")]
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use bytes::Bytes;
 #[cfg(feature = "std")]
+use core::cell::{Cell, RefCell};
+#[cfg(feature = "std")]
 use core::ffi::c_void;
+#[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+use crate::kvm::devices::Transport as KvmTransport;
+#[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+use crate::kvm::{Capacities, ElfRun, GuestSegment, Transports, run_elf};
 use proxima_core::ProximaError;
 #[cfg(feature = "std")]
-use proxima_primitives::pipe::SendPipe;
+use proxima_primitives::pipe::{Pipe, SendPipe};
 #[cfg(feature = "std")]
 use proxima_process::framing::{FrameDecoder, FrameEncoder};
 use proxima_protocols::process::{ChildRequest, ChildResponse};
+#[cfg(feature = "std")]
+use proxima_protocols::process::{ReadResponse, WriteResponse};
 
-/// The lambda guest's linker script (`guests/lambda/link.ld`) reserves the
-/// entire 64 MiB `RAM` region for `__stack_top`; `run_dispatch_loop` must
-/// map at least that much guest memory or the guest's own stack pointer
-/// lands outside the mapped region. Module-level (not local to
-/// `run_dispatch_loop`) so [`crate::dtb`]'s own RAM-ceiling test can assert
-/// the uart window sits above it without duplicating the literal.
+/// The M1/M6 lambda guest's linker script (`guests/lambda/link.ld`) places
+/// `__stack_top` at the end of a 64 MiB `RAM` region, so that guest needs this
+/// much guest memory. An elf guest declares its own stack as an ELF segment
+/// (`guests/lambda/link-elf.ld`) and runs in whatever
+/// `guest_memory_size` covers its segments. Module-level so
+/// [`crate::dtb`]'s own RAM-ceiling test can assert the uart window sits
+/// above it without duplicating the literal.
 pub const GUEST_MEMORY_SIZE: u64 = 64 * 1024 * 1024;
+
+/// Handle the invocation input (the HTTP request body) is served under.
+pub const INPUT_HANDLE: i32 = 0;
+
+/// Handle the invocation output (the HTTP response body) is written to.
+pub const OUTPUT_HANDLE: i32 = 1;
+
+#[cfg(feature = "std")]
+const DISPATCH_FAILED_PREFIX: &str = "hypercall dispatch failed";
+#[cfg(feature = "std")]
+const ERRNO_ENOENT: i32 = 2;
+#[cfg(feature = "std")]
+const ERRNO_EBADF: i32 = 9;
+#[cfg(feature = "std")]
+const ERRNO_ENOSPC: i32 = 28;
+#[cfg(feature = "std")]
+const INPUT_MODE: u32 = 0o444;
 
 /// VM-side parity handler — the proxima-vm equivalent of the
 /// dispatch chain the libc-shim talks to. Implementations
@@ -84,45 +113,55 @@ pub trait VmDispatchHandler {
 /// [`proxima_vm_dispatch_hypercall`]. `extern "C"` functions cannot be
 /// generic, so this one Rust type exists purely to give the C ABI's
 /// `void *dispatcher` argument something concrete to cast back to on the
-/// Rust side. It answers every request with one configured
-/// [`ChildResponse`] and records call order.
+/// Rust side. It serves one invocation, stdio-shaped over the fd-keyed
+/// [`ChildRequest`] protocol: [`INPUT_HANDLE`] reads the request body
+/// (offset-addressed, so no cursor state), [`OUTPUT_HANDLE`] appends to the
+/// response body, and it records call order.
 ///
 /// This is `pub(crate)`, not library API: only this module's own
-/// `#[cfg(test)]` tests and `run_dispatch_loop` construct one — the real
-/// M1 driver, which passes a live `&FfiRecordingDispatcher` across the FFI
-/// boundary into the C exit loop
-/// (`src/backend_macos.c`'s / `src/backend_linux.c`'s
+/// `#[cfg(test)]` tests, `crate::boot` and `run_dispatch_loop` construct
+/// one — the real driver passes a live `&FfiRecordingDispatcher` across the
+/// FFI boundary into the C exit loop
+/// (`src/backend_macos.c`'s / `src/kvm`'s
 /// `proxima_vm_run_dispatch_loop`), which calls back into
-/// [`proxima_vm_dispatch_hypercall`] per capability hypercall. NOT a
-/// general-purpose production dispatcher — it answers every request
-/// variant with the same configured response rather than routing by
-/// variant, which is sufficient to prove request-side and response-side
-/// bidirectionality (`tools/proxima-vm/ROADMAP.md`'s M1 exit criterion) but
-/// not a real syscall router.
+/// [`proxima_vm_dispatch_hypercall`] per capability hypercall.
 #[cfg(feature = "std")]
 #[derive(Debug)]
 pub(crate) struct FfiRecordingDispatcher {
-    configured_response: ChildResponse,
-    // held only across the synchronous body of `call`, never across an
-    // `.await` — same discipline as `src/upstreams/record.rs`'s `rng` field.
-    recorded_requests: std::sync::Mutex<Vec<ChildRequest>>,
+    input: Vec<u8>,
+    output_capacity: usize,
+    recorded_requests: RefCell<Vec<ChildRequest>>,
+    output: RefCell<Vec<u8>>,
+    output_overflowed: Cell<bool>,
+    last_failure: Cell<i64>,
 }
 
 #[cfg(feature = "std")]
 impl FfiRecordingDispatcher {
-    /// Build a dispatcher that answers every request with `configured_response`.
-    /// Constructed by this module's own `#[cfg(test)]` tests directly, and
-    /// by `run_dispatch_loop` as the one dispatcher a real VM-exit run
-    /// drives.
-    #[cfg(any(
-        test,
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "macos", target_arch = "aarch64")
-    ))]
-    pub(crate) fn new(configured_response: ChildResponse) -> Self {
+    /// Replaces the loop's bare `hypercall dispatch failed with sentinel N`
+    /// with the sentinel's name, so both lanes surface the same cause text.
+    pub(crate) fn name_failure(&self, message: String) -> String {
+        match self.last_failure.get() {
+            0 => message,
+            sentinel if message.starts_with(DISPATCH_FAILED_PREFIX) => alloc::format!(
+                "{DISPATCH_FAILED_PREFIX}: {} (sentinel {sentinel})",
+                sentinel_text(sentinel)
+            ),
+            _ => message,
+        }
+    }
+
+    /// Build a dispatcher serving `input` as the invocation body and
+    /// accepting at most `output_capacity` bytes of response body. Built by
+    /// [`run_dispatch_loop`] as the one dispatcher a real VM-exit run drives.
+    pub(crate) fn new(input: &[u8], output_capacity: usize) -> Self {
         Self {
-            configured_response,
-            recorded_requests: std::sync::Mutex::new(Vec::new()),
+            input: input.to_vec(),
+            output_capacity,
+            recorded_requests: RefCell::new(Vec::new()),
+            output: RefCell::new(Vec::new()),
+            output_overflowed: Cell::new(false),
+            last_failure: Cell::new(0),
         }
     }
 
@@ -133,15 +172,84 @@ impl FfiRecordingDispatcher {
         all(target_os = "macos", target_arch = "aarch64")
     ))]
     pub(crate) fn requests(&self) -> Vec<ChildRequest> {
-        self.recorded_requests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.recorded_requests.borrow().clone()
+    }
+
+    /// Every byte the guest wrote to [`OUTPUT_HANDLE`], in write order.
+    pub(crate) fn output(&self) -> Vec<u8> {
+        self.output.borrow().clone()
+    }
+
+    /// Whether any `Write` was refused for exceeding the output capacity.
+    pub(crate) fn output_overflowed(&self) -> bool {
+        self.output_overflowed.get()
+    }
+
+    pub(crate) fn note_failure(&self, sentinel: i64) {
+        self.last_failure.set(sentinel);
+    }
+
+    fn read(&self, max_bytes: u32, offset: u64) -> ChildResponse {
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(self.input.len());
+        let end = start
+            .saturating_add(max_bytes as usize)
+            .min(self.input.len());
+        ChildResponse::Read(ReadResponse {
+            bytes: self.input[start..end].to_vec(),
+            eof: end == self.input.len(),
+        })
+    }
+
+    fn write(&self, bytes: &[u8]) -> ChildResponse {
+        let mut output = self.output.borrow_mut();
+        if output.len().saturating_add(bytes.len()) > self.output_capacity {
+            self.output_overflowed.set(true);
+            return ChildResponse::Error {
+                errno: ERRNO_ENOSPC,
+            };
+        }
+        output.extend_from_slice(bytes);
+        ChildResponse::Write(WriteResponse {
+            bytes_written: bytes.len() as u32,
+        })
+    }
+
+    fn serve(&self, request: &ChildRequest) -> ChildResponse {
+        match request {
+            ChildRequest::Read {
+                handle: INPUT_HANDLE,
+                max_bytes,
+                offset,
+            } => self.read(*max_bytes, *offset),
+            ChildRequest::Write {
+                handle: OUTPUT_HANDLE,
+                bytes,
+            } => self.write(bytes),
+            ChildRequest::Stat {
+                handle: INPUT_HANDLE,
+            } => ChildResponse::Stat {
+                size: self.input.len() as u64,
+                mode: INPUT_MODE,
+                is_directory: false,
+            },
+            ChildRequest::Close {
+                handle: INPUT_HANDLE | OUTPUT_HANDLE,
+            } => ChildResponse::Close,
+            ChildRequest::Open { .. } => ChildResponse::Error {
+                errno: ERRNO_ENOENT,
+            },
+            ChildRequest::Read { .. }
+            | ChildRequest::Write { .. }
+            | ChildRequest::Close { .. }
+            | ChildRequest::Stat { .. } => ChildResponse::Error { errno: ERRNO_EBADF },
+        }
     }
 }
 
 #[cfg(feature = "std")]
-impl SendPipe for FfiRecordingDispatcher {
+impl Pipe for FfiRecordingDispatcher {
     type In = ChildRequest;
     type Out = ChildResponse;
     type Err = ProximaError;
@@ -149,12 +257,9 @@ impl SendPipe for FfiRecordingDispatcher {
     fn call(
         &self,
         request: ChildRequest,
-    ) -> impl Future<Output = Result<ChildResponse, ProximaError>> + Send {
-        self.recorded_requests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(request);
-        let response = self.configured_response.clone();
+    ) -> impl Future<Output = Result<ChildResponse, ProximaError>> {
+        let response = self.serve(&request);
+        self.recorded_requests.borrow_mut().push(request);
         async move { Ok(response) }
     }
 }
@@ -198,7 +303,13 @@ impl SendPipe for FfiRecordingDispatcher {
 /// exists for forward compatibility if that contract ever changes), -3 the
 /// dispatcher call failed, -4 `FrameEncoder` reported an encode failure
 /// (unreachable for well-formed `ChildResponse`s, same as `FrameEncoder`'s
-/// own doc), -5 the encoded response exceeds `response_out`'s length.
+/// own doc), -5 the encoded response exceeds `response_out`'s length, -6 a
+/// stage's future was not ready on first poll. Stages are driven with
+/// `now_or_never`, never `futures::executor::block_on`: this runs inside the
+/// C exit loop, which a caller may itself be driving from inside a
+/// `block_on` (proxima's `Offload` does), and a nested `block_on` panics
+/// across the `extern "C"` boundary. Every stage today is an immediately
+/// ready future.
 #[cfg(feature = "std")]
 fn dispatch_hypercall_bytes<D>(
     dispatcher: &D,
@@ -209,37 +320,111 @@ fn dispatch_hypercall_bytes<D>(
     response_out: &mut [u8],
 ) -> i64
 where
-    D: SendPipe<In = ChildRequest, Out = ChildResponse, Err = ProximaError>,
+    D: Pipe<In = ChildRequest, Out = ChildResponse, Err = ProximaError>,
 {
     let view = match crate::abi::decode_hypercall(verb, pointer, length, guest_memory) {
         Ok(view) => view,
         Err(_) => return -1,
     };
     let payload = Bytes::copy_from_slice(view.payload());
-    let request = match futures::executor::block_on(SendPipe::call(&FrameDecoder::new(), payload)) {
-        Ok(request) => request,
-        Err(_) => return -2,
+    let request = match SendPipe::call(&FrameDecoder::new(), payload).now_or_never() {
+        Some(Ok(request)) => request,
+        Some(Err(_)) => return -2,
+        None => return -6,
     };
-    let response = match futures::executor::block_on(SendPipe::call(dispatcher, request)) {
-        Ok(response) => response,
-        Err(_) => return -3,
+    let response = match Pipe::call(dispatcher, request).now_or_never() {
+        Some(Ok(response)) => response,
+        Some(Err(_)) => return -3,
+        None => return -6,
     };
-    let encoded = match futures::executor::block_on(SendPipe::call(&FrameEncoder::new(), response))
-    {
+    let encoded = match encode_fitting(response, response_out.len()) {
         Ok(bytes) => bytes,
-        Err(_) => return -4,
+        Err(sentinel) => return sentinel,
     };
-    if encoded.len() > response_out.len() {
-        return -5;
-    }
     response_out[..encoded.len()].copy_from_slice(&encoded);
     encoded.len() as i64
+}
+
+/// [`dispatch_hypercall_bytes`] for an exit whose payload was already read out
+/// of guest memory (`payload` is the bytes at `[pointer, pointer + length)`),
+/// or could not be (`None`: the range left guest memory).
+#[cfg(feature = "std")]
+pub(crate) fn dispatch_captured<D>(
+    dispatcher: &D,
+    verb: u16,
+    pointer: u64,
+    length: u64,
+    payload: Option<&[u8]>,
+    response_out: &mut [u8],
+) -> i64
+where
+    D: Pipe<In = ChildRequest, Out = ChildResponse, Err = ProximaError>,
+{
+    match payload {
+        Some(bytes) => dispatch_hypercall_bytes(dispatcher, bytes, verb, 0, length, response_out),
+        None => dispatch_hypercall_bytes(dispatcher, &[], verb, pointer, length, response_out),
+    }
+}
+
+#[cfg(feature = "std")]
+fn encode_fitting(mut response: ChildResponse, fit: usize) -> Result<Bytes, i64> {
+    loop {
+        let encoded = match SendPipe::call(&FrameEncoder::new(), response.clone()).now_or_never() {
+            Some(Ok(bytes)) => bytes,
+            Some(Err(_)) => return Err(-4),
+            None => return Err(-6),
+        };
+        let excess = encoded.len().saturating_sub(fit);
+        if excess == 0 {
+            return Ok(encoded);
+        }
+        match &mut response {
+            ChildResponse::Read(read) if read.bytes.len() > excess => {
+                read.bytes.truncate(read.bytes.len() - excess);
+                read.eof = false;
+            }
+            _ => return Err(-5),
+        }
+    }
+}
+
+/// Drains what the KVM lane's teardown worker failed to release (a `close` or
+/// `munmap` that returned an error), one line per failure. Empty on lanes that
+/// release inline and report through the run's own error.
+#[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+#[must_use]
+pub fn take_teardown_failures() -> Vec<String> {
+    crate::kvm::take_teardown_failures()
+}
+
+#[cfg(all(
+    feature = "std",
+    not(all(target_os = "linux", target_arch = "x86_64"))
+))]
+#[must_use]
+pub fn take_teardown_failures() -> Vec<String> {
+    Vec::new()
+}
+
+/// Names the negative sentinels [`dispatch_hypercall_bytes`] returns, so a
+/// failed run reads as a cause instead of a bare number.
+#[cfg(feature = "std")]
+pub(crate) fn sentinel_text(sentinel: i64) -> &'static str {
+    match sentinel {
+        -1 => "payload pointer or length lies outside guest memory",
+        -2 => "payload did not decode as a ChildRequest",
+        -3 => "the dispatcher failed to serve the request",
+        -4 => "the response did not encode",
+        -5 => "the encoded response does not fit the host response buffer",
+        -6 => "a dispatch stage was not ready on its first poll",
+        _ => "unrecognized dispatch sentinel",
+    }
 }
 
 /// The `extern "C"` trampoline entry the C-side hypercall exit loop
 /// (`src/dispatch_trampoline.h`) calls back into once a real hypercall
 /// exit recovers `verb`/`pointer`/`length` from the vCPU
-/// (`src/backend_macos.c`'s and `src/backend_linux.c`'s
+/// (`src/backend_macos.c`'s and `src/kvm`'s
 /// `proxima_vm_run_dispatch_loop`, which `run_dispatch_loop` drives).
 /// `#[unsafe(no_mangle)]` is load-bearing: without it the C loop's
 /// `proxima_vm_dispatch_hypercall(...)` call sees no matching symbol at
@@ -275,47 +460,166 @@ pub unsafe extern "C" fn proxima_vm_dispatch_hypercall(
     // SAFETY: forwarded verbatim from this function's own safety contract.
     let response_out = unsafe { core::slice::from_raw_parts_mut(response_out, response_capacity) };
 
-    dispatch_hypercall_bytes(
+    let dispatched = dispatch_hypercall_bytes(
         dispatcher,
         guest_memory,
         verb,
         pointer,
         length,
         response_out,
+    );
+    if dispatched < 0 {
+        dispatcher.note_failure(dispatched);
+    }
+    dispatched
+}
+
+/// Everything one [`run_dispatch_loop`] run observed, one named field per
+/// observable.
+#[cfg(all(
+    feature = "std",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
     )
+))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchLoopOutput {
+    /// Every request the guest issued over the capability channel, in order.
+    pub requests: Vec<ChildRequest>,
+    /// Bytes the guest emitted via the dedicated emit verb (M1 exit proof).
+    pub emitted: Vec<u8>,
+    /// The invocation output: every byte written to [`OUTPUT_HANDLE`].
+    pub output: Vec<u8>,
+    /// Bytes drained from the virtio-console queue notify (M6).
+    pub mmio_emitted: Vec<u8>,
+    /// Bytes drained from the virtio-net queue notify (M6).
+    pub net_emitted: Vec<u8>,
+    /// Bytes drained from the virtio-blk queue notify (M6).
+    pub blk_emitted: Vec<u8>,
+    /// Bytes the guest wrote to the pl011 `UARTDR` window (M5b).
+    pub pl011_emitted: Vec<u8>,
+    /// Wall nanoseconds from the run's entry to the first vCPU exit (M3).
+    pub create_to_first_exit_nanos: u64,
+    /// Wall nanoseconds to first-touch every page of the mapped guest memory
+    /// (M3).
+    pub touch_all_pages_nanos: u64,
+    /// MMIO-trap exits serviced during the run — NOT a stage-2 RAM-fault
+    /// count; see `dispatch_trampoline.h` for why HVF has no per-page
+    /// stage-2 fault index to report instead.
+    pub mmio_trap_count: u64,
+}
+
+/// Where the stack segment starts: the end of the image's last segment,
+/// rounded up to a page. Both host mapping APIs (`hv_vm_map`,
+/// `KVM_SET_USER_MEMORY_REGION`) only accept page-aligned ranges, so the stack
+/// begins clear of the last segment's tail page and its window-merge never
+/// folds the writable stack into an executable segment's page.
+#[cfg(all(
+    feature = "std",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    )
+))]
+fn stack_start_for(
+    segments: &[crate::elf::Segment<'_>],
+    guest_memory_size: u64,
+) -> Result<u64, ProximaError> {
+    const GUEST_PAGE_SIZE: u64 = 4096;
+
+    let extent = segments
+        .iter()
+        .map(|segment| segment.virtual_address() + segment.memory_size())
+        .max()
+        .unwrap_or(0);
+    let stack_start = extent.div_ceil(GUEST_PAGE_SIZE) * GUEST_PAGE_SIZE;
+    match guest_memory_size < stack_start {
+        true => Err(ProximaError::Upstream(alloc::format!(
+            "guest_memory_size {guest_memory_size} is too small: the image's segments and \
+             stack need {stack_start} bytes"
+        ))),
+        false => Ok(stack_start),
+    }
+}
+
+/// An ELF image's segments plus one writable stack segment up to
+/// `guest_memory_size`, in the marshaled form the C exit loop takes.
+#[cfg(all(feature = "std", target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn guest_raw_segments(
+    segments: &[crate::elf::Segment<'_>],
+    guest_memory_size: u64,
+) -> Result<Vec<crate::loader::RawSegment>, ProximaError> {
+    use crate::loader::RawSegment;
+
+    let stack_start = stack_start_for(segments, guest_memory_size)?;
+    let mut raw_segments: Vec<RawSegment> = segments.iter().map(RawSegment::from_segment).collect();
+    let stack_size = guest_memory_size.saturating_sub(stack_start);
+    if stack_size > 0 {
+        raw_segments.push(RawSegment::stack(stack_start, stack_size));
+    }
+    Ok(raw_segments)
+}
+
+/// The KVM lane's form of [`guest_raw_segments`]: the same segments, borrowed
+/// rather than marshaled for C.
+#[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+pub(crate) fn guest_kvm_segments<'image>(
+    segments: &'image [crate::elf::Segment<'image>],
+    guest_memory_size: u64,
+) -> Result<Vec<GuestSegment<'image>>, ProximaError> {
+    let stack_start = stack_start_for(segments, guest_memory_size)?;
+    let mut guest_segments: Vec<GuestSegment<'image>> = segments
+        .iter()
+        .map(|segment| GuestSegment {
+            guest_address: segment.virtual_address(),
+            data: segment.data(),
+            memory_size: segment.memory_size(),
+            writable: segment.is_writable(),
+        })
+        .collect();
+    let stack_size = guest_memory_size.saturating_sub(stack_start);
+    if stack_size > 0 {
+        guest_segments.push(GuestSegment {
+            guest_address: stack_start,
+            data: &[],
+            memory_size: stack_size,
+            writable: true,
+        });
+    }
+    Ok(guest_segments)
 }
 
 /// The M1 production path: loads `segments` (already validated by
 /// [`crate::elf::parse_elf`]) into a real hypervisor guest address space at
 /// address 0, sets `PC = entry`, and drives every `hvc #0` / `out dx, al`
 /// trap through `dispatcher` via a real VM exit
-/// (`src/backend_macos.c`'s / `src/backend_linux.c`'s
+/// (`src/backend_macos.c`'s / `src/kvm`'s
 /// `proxima_vm_run_dispatch_loop`, calling back into
 /// [`proxima_vm_dispatch_hypercall`] per capability hypercall) — as opposed
 /// to `dispatch_hypercall_direct_for_tests`, which never boots a guest at
 /// all.
 ///
-/// `configured_response` is the one [`ChildResponse`] every capability
-/// hypercall this run receives is answered with (the same
-/// canned-per-instance shape `FfiRecordingDispatcher` already carries);
-/// two runs with two different `configured_response` values, driven against
-/// the same guest, are what prove the host's response — not a value the
-/// guest compiled in — decides the bytes the guest emits.
+/// `input` is the invocation body the guest reads over handle
+/// [`INPUT_HANDLE`]; whatever it writes to [`OUTPUT_HANDLE`] comes back as
+/// [`DispatchLoopOutput::output`], capped at `output_capacity` bytes (a
+/// `Write` past the cap is refused and the run fails with a named error,
+/// never truncated). Two runs of the same guest with two different `input`s
+/// producing two different outputs are what prove the host's response — not
+/// a value the guest compiled in — decides what the guest emits.
 ///
 /// Returns every [`ChildRequest`] the guest issued, in call order; every
-/// byte the guest emitted via its dedicated emit verb — the M1 exit proof's
-/// two observables (`tools/proxima-vm/ROADMAP.md`'s M1 section: "the guest
-/// issues ≥2 distinct `ChildRequest` verbs, and the host's responses change
-/// the bytes the guest emits"); every byte a virtio-console/net/blk queue
-/// notify drained from real guest memory (M6's exit criterion); every byte
-/// the guest wrote to the pl011 `UARTDR` window (M5b's exit criterion); and
-/// the M3 fault-count instrument's wall-clock/trap-count triple
-/// (`create_to_first_exit_nanos`, `touch_all_pages_nanos`,
-/// `mmio_trap_count` — see [`DispatchLoopOutput`]'s own doc for the field
-/// order).
+/// byte the guest emitted via its dedicated emit verb; every byte a
+/// virtio-console/net/blk queue notify drained from real guest memory (M6's
+/// exit criterion); every byte the guest wrote to the pl011 `UARTDR` window
+/// (M5b's exit criterion); and the M3 fault-count instrument's
+/// wall-clock/trap-count triple — see [`DispatchLoopOutput`].
 ///
 /// `max_hypercalls` bounds the exit loop so a guest that never issues the
-/// halt verb cannot hang the host.
+/// halt verb cannot hang the host. `guest_memory_size` must cover the
+/// image's segments; a guest whose linker script puts `__stack_top` past the
+/// segments (the M1/M6 guest: [`GUEST_MEMORY_SIZE`]) additionally needs that
+/// stack inside the mapped memory.
 ///
 /// Every `segment` is mapped at its own real permissions
 /// (`crate::loader::RawSegment::from_segment` — the exact marshaling
@@ -331,7 +635,7 @@ pub unsafe extern "C" fn proxima_vm_dispatch_hypercall(
 ///
 /// This ELF-guest path drives the same device-model C exit loop
 /// `crate::boot` drives (`proxima_vm_run_device_dispatch_loop`,
-/// `backend_macos.c`/`backend_linux.c`), always at guest-physical base 0,
+/// `backend_macos.c`), always at guest-physical base 0,
 /// boot register `x0 == 0`, and this loop's own default CPSR (EL1h) — never
 /// `crate::boot`'s `guest_memory_base`/`boot_x0`/`boot_cpsr` triple, which
 /// only a real kernel/firmware boot needs.
@@ -339,36 +643,9 @@ pub unsafe extern "C" fn proxima_vm_dispatch_hypercall(
 /// # Errors
 ///
 /// Returns [`ProximaError::Upstream`] naming the failing hypervisor call,
-/// an exceeded hypercall budget, or a hypercall dispatch failure.
-#[cfg(all(
-    feature = "std",
-    any(
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "macos", target_arch = "aarch64")
-    )
-))]
-/// The M1 four `Vec` fields plus the pl011 slice's fifth (unchanged, see
-/// this function's own doc) plus the M3 fault-count instrument's three
-/// numbers, in the order `tools/proxima-vm/ROADMAP.md`'s M3 section names
-/// them: wall nanoseconds from this call's own entry to the first vCPU exit
-/// (`create_to_first_exit_nanos`), wall nanoseconds to first-touch every
-/// `page_size` stride of the freshly mapped guest memory
-/// (`touch_all_pages_nanos`), and the count of MMIO-trap exits serviced
-/// during the run (`mmio_trap_count` — an auxiliary number, NOT a stage-2
-/// RAM-fault count; see `backend_macos.c`'s `dispatch_trampoline.h` doc for
-/// why HVF has no per-page stage-2 fault index to report instead).
-pub type DispatchLoopOutput = (
-    Vec<ChildRequest>,
-    Vec<u8>,
-    Vec<u8>,
-    Vec<u8>,
-    Vec<u8>,
-    Vec<u8>,
-    u64,
-    u64,
-    u64,
-);
-
+/// an exceeded hypercall budget, a hypercall dispatch failure, a guest
+/// output past `output_capacity`, or a `guest_memory_size` too small for the
+/// image.
 #[cfg(all(feature = "std", target_os = "macos", target_arch = "aarch64"))]
 #[allow(
     clippy::too_many_arguments,
@@ -379,7 +656,8 @@ pub type DispatchLoopOutput = (
 pub fn run_dispatch_loop(
     entry: u64,
     segments: &[crate::elf::Segment<'_>],
-    configured_response: ChildResponse,
+    input: &[u8],
+    output_capacity: usize,
     max_hypercalls: usize,
     emitted_capacity: usize,
     mmio_emitted_capacity: usize,
@@ -397,7 +675,6 @@ pub fn run_dispatch_loop(
     use crate::virtio_net::NetTransport;
 
     const ERROR_CAPACITY: usize = 512;
-    let raw_segments = lambda_guest_segments(segments, guest_memory_size)?;
 
     unsafe extern "C" {
         fn proxima_vm_run_device_dispatch_loop(
@@ -451,7 +728,9 @@ pub fn run_dispatch_loop(
         ) -> i32;
     }
 
-    let dispatcher = FfiRecordingDispatcher::new(configured_response);
+    let raw_segments = guest_raw_segments(segments, guest_memory_size)?;
+
+    let dispatcher = FfiRecordingDispatcher::new(input, output_capacity);
     // offers only VIRTIO_F_VERSION_1: the M1 guest never touches the mmio
     // window, so this transport sits idle whenever a guest issues only
     // `ChildRequest` hypercalls; the lambda guest's mmio bring-up sequence
@@ -581,20 +860,30 @@ pub fn run_dispatch_loop(
             error_buffer.len(),
         )
     };
+    if dispatcher.output_overflowed() {
+        return Err(ProximaError::Upstream(alloc::format!(
+            "guest output exceeds output_capacity of {output_capacity} bytes"
+        )));
+    }
+    emitted.truncate(emitted_length);
     if status != 0 {
         let message = unsafe { CStr::from_ptr(error_buffer.as_ptr()) }
             .to_string_lossy()
             .into_owned();
-        return Err(ProximaError::Upstream(message));
+        let message = dispatcher.name_failure(message);
+        return Err(ProximaError::Upstream(match emitted.is_empty() {
+            true => message,
+            false => alloc::format!("{message} (guest emitted {emitted:02x?} before failing)"),
+        }));
     }
-    emitted.truncate(emitted_length);
     mmio_emitted.truncate(mmio_emitted_length);
     net_emitted.truncate(net_emitted_length);
     blk_emitted.truncate(blk_emitted_length);
     pl011_emitted.truncate(pl011_emitted_length);
-    Ok((
-        dispatcher.requests(),
+    Ok(DispatchLoopOutput {
+        requests: dispatcher.requests(),
         emitted,
+        output: dispatcher.output(),
         mmio_emitted,
         net_emitted,
         blk_emitted,
@@ -602,140 +891,94 @@ pub fn run_dispatch_loop(
         create_to_first_exit_nanos,
         touch_all_pages_nanos,
         mmio_trap_count,
-    ))
+    })
 }
 
-/// Both host mapping APIs this crate drives (`hv_vm_map`,
-/// `KVM_SET_USER_MEMORY_REGION`) only accept page-aligned ranges — the
-/// base page size on both `aarch64` and `x86_64` (hugepages aside).
-/// Starting the stack region on a page boundary keeps it out of
-/// whichever page the last real ELF segment's tail shares, so the C
-/// side's window-merge (`build_mapped_windows` in each backend) never
-/// has to fold the writable stack into the same page as an executable
-/// segment.
-#[cfg(all(
-    feature = "std",
-    any(
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "macos", target_arch = "aarch64")
-    )
-))]
-fn lambda_guest_segments(
-    segments: &[crate::elf::Segment<'_>],
-    guest_memory_size: u64,
-) -> Result<Vec<crate::loader::RawSegment>, ProximaError> {
-    use crate::loader::RawSegment;
-
-    const GUEST_PAGE_SIZE: u64 = 4096;
-    if guest_memory_size < GUEST_MEMORY_SIZE {
-        return Err(ProximaError::Upstream(alloc::format!(
-            "guest_memory_size must cover the lambda guest's full stack reservation \
-             ({GUEST_MEMORY_SIZE} bytes); got {guest_memory_size}"
-        )));
-    }
-    let extent = segments
-        .iter()
-        .map(|segment| segment.virtual_address() + segment.memory_size())
-        .max()
-        .unwrap_or(0);
-    let stack_start = extent.div_ceil(GUEST_PAGE_SIZE) * GUEST_PAGE_SIZE;
-    let mut raw_segments: Vec<RawSegment> = segments.iter().map(RawSegment::from_segment).collect();
-    let stack_size = guest_memory_size.saturating_sub(stack_start);
-    if stack_size > 0 {
-        raw_segments.push(RawSegment::stack(stack_start, stack_size));
-    }
-    Ok(raw_segments)
-}
-
-/// The KVM lane of [`run_dispatch_loop`]: `src/backend_linux.c`'s
-/// `proxima_vm_run_dispatch_loop` drives `out dx, al` hypercalls through
-/// [`proxima_vm_dispatch_hypercall`]. The device-model exit loop
-/// (virtio/GIC/pl011) is aarch64-only, so every device channel and trap
-/// counter in the returned [`DispatchLoopOutput`] is empty or zero here.
-///
-/// # Errors
-///
-/// Returns [`ProximaError::Upstream`] naming the failing KVM call, an
-/// exceeded hypercall budget, or a hypercall dispatch failure.
+/// The KVM lane of [`run_dispatch_loop`]: the same contract as the
+/// Hypervisor.framework lane, driven by the pipes in [`crate::kvm`] instead of
+/// a native exit loop. x86 has no PL011, so `pl011_emitted` is always empty and
+/// its capacity unused.
 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
 #[allow(
     clippy::too_many_arguments,
-    reason = "same public signature as the hypervisor.framework lane, whose per-device \
-              emitted-byte capacities have no KVM counterpart but must keep the call site portable"
+    reason = "each argument is a distinct device's own emitted-byte capacity (console/net/blk/pl011); \
+              bundling them into a config struct would be a relocation, not a capability, for this \
+              still-growing per-device parameter list"
 )]
 pub fn run_dispatch_loop(
     entry: u64,
     segments: &[crate::elf::Segment<'_>],
-    configured_response: ChildResponse,
+    input: &[u8],
+    output_capacity: usize,
     max_hypercalls: usize,
     emitted_capacity: usize,
-    _mmio_emitted_capacity: usize,
-    _net_emitted_capacity: usize,
-    _blk_emitted_capacity: usize,
+    mmio_emitted_capacity: usize,
+    net_emitted_capacity: usize,
+    blk_emitted_capacity: usize,
     _pl011_emitted_capacity: usize,
     guest_memory_size: u64,
 ) -> Result<DispatchLoopOutput, ProximaError> {
-    use std::ffi::CStr;
-    use std::os::raw::c_char;
+    const HOST_NET_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+    const HOST_BLK_CAPACITY_SECTORS: u64 = 16;
 
-    use crate::loader::RawSegment;
-
-    const ERROR_CAPACITY: usize = 512;
-    let raw_segments = lambda_guest_segments(segments, guest_memory_size)?;
-
-    unsafe extern "C" {
-        fn proxima_vm_run_dispatch_loop(
-            segments: *const RawSegment,
-            segment_count: usize,
-            guest_memory_size: u64,
-            entry: u64,
-            dispatcher: *const c_void,
-            max_hypercalls: usize,
-            emitted_out: *mut u8,
-            emitted_capacity: usize,
-            emitted_length_out: *mut usize,
-            error_buffer: *mut c_char,
-            error_capacity: usize,
-        ) -> i32;
+    let guest_segments = guest_kvm_segments(segments, guest_memory_size)?;
+    let dispatcher = FfiRecordingDispatcher::new(input, output_capacity);
+    let mut blk_transport = crate::virtio_blk::BlkTransport::new(HOST_BLK_CAPACITY_SECTORS);
+    let seed_pattern: Vec<u8> = (0..crate::virtio_blk::SECTOR_LEN)
+        .map(|index| (index % 256) as u8)
+        .collect();
+    blk_transport.seed_sector(0, &seed_pattern);
+    let outcome = run_elf(ElfRun {
+        segments: &guest_segments,
+        memory_size: guest_memory_size,
+        entry,
+        boot_argument: 0,
+        dispatcher: &dispatcher,
+        transports: Transports {
+            console: Some(KvmTransport::Console(crate::virtio_console::ConsoleTransport::new(
+                proxima_protocols::virtio::FEATURE_VERSION_1,
+            ))),
+            net: Some(KvmTransport::Net(crate::virtio_net::NetTransport::new(HOST_NET_MAC))),
+            blk: Some(KvmTransport::Blk(blk_transport)),
+        },
+        max_hypercalls,
+        watchdog_millis: 0,
+        capacities: Capacities {
+            emitted: emitted_capacity,
+            console: mmio_emitted_capacity,
+            net: net_emitted_capacity,
+            blk: blk_emitted_capacity,
+        },
+    });
+    if dispatcher.output_overflowed() {
+        return Err(ProximaError::Upstream(alloc::format!(
+            "guest output exceeds output_capacity of {output_capacity} bytes"
+        )));
     }
-
-    let dispatcher = FfiRecordingDispatcher::new(configured_response);
-    let mut emitted = alloc::vec![0_u8; emitted_capacity];
-    let mut emitted_length: usize = 0;
-    let mut error_buffer = [0_i8; ERROR_CAPACITY];
-    let status = unsafe {
-        proxima_vm_run_dispatch_loop(
-            raw_segments.as_ptr(),
-            raw_segments.len(),
-            guest_memory_size,
-            entry,
-            (&raw const dispatcher).cast(),
-            max_hypercalls,
-            emitted.as_mut_ptr(),
-            emitted.len(),
-            &raw mut emitted_length,
-            error_buffer.as_mut_ptr(),
-            error_buffer.len(),
-        )
-    };
-    if status != 0 {
-        let message = unsafe { CStr::from_ptr(error_buffer.as_ptr()) }
-            .to_string_lossy()
-            .into_owned();
-        return Err(ProximaError::Upstream(message));
+    let report = outcome.report;
+    dispatcher.note_failure(report.dispatch_sentinel);
+    if let Some(message) = outcome.failure {
+        let message = dispatcher.name_failure(message);
+        return Err(ProximaError::Upstream(match report.emitted.is_empty() {
+            true => message,
+            false => alloc::format!(
+                "{message} (guest emitted {:02x?} before failing)",
+                report.emitted
+            ),
+        }));
     }
-    emitted.truncate(emitted_length);
-    Ok((
-        dispatcher.requests(),
-        emitted,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        0,
-        0,
-        0,
-    ))
+    Ok(DispatchLoopOutput {
+        requests: dispatcher.requests(),
+        emitted: report.emitted,
+        output: dispatcher.output(),
+        mmio_emitted: report.console,
+        net_emitted: report.net,
+        blk_emitted: report.blk,
+        pl011_emitted: Vec::new(),
+        create_to_first_exit_nanos: report.create_to_first_exit_nanos,
+        touch_all_pages_nanos: report.touch_all_pages_nanos,
+        mmio_trap_count: report.mmio_trap_count,
+    })
 }
 
 #[cfg(test)]
@@ -861,18 +1104,17 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn two_distinct_child_request_verbs_are_recorded_in_call_order() {
-        let configured = ChildResponse::Read(ReadResponse {
-            bytes: b"canned-response".to_vec(),
-            eof: true,
-        });
-        let dispatcher = FfiRecordingDispatcher::new(configured.clone());
+        let input = b"hello, lambda";
+        let dispatcher = FfiRecordingDispatcher::new(input, 64);
 
         let read_request = ChildRequest::Read {
-            handle: 0,
+            handle: INPUT_HANDLE,
             max_bytes: 256,
             offset: 0,
         };
-        let close_request = ChildRequest::Close { handle: 0 };
+        let close_request = ChildRequest::Close {
+            handle: INPUT_HANDLE,
+        };
         let read_wire_bytes =
             postcard::to_allocvec(&read_request).expect("postcard encode read request");
         let close_wire_bytes =
@@ -886,49 +1128,398 @@ mod tests {
             vec![read_request, close_request],
             "the dispatcher must record exactly the two distinct requests it decoded, in call order"
         );
-
-        let expected_bytes =
-            postcard::to_allocvec(&configured).expect("postcard encode configured response");
-        assert_eq!(read_response, expected_bytes);
-        assert_eq!(close_response, expected_bytes);
+        assert_eq!(
+            read_response,
+            postcard::to_allocvec(&ChildResponse::Read(ReadResponse {
+                bytes: input.to_vec(),
+                eof: true,
+            }))
+            .expect("postcard encode read response")
+        );
+        assert_eq!(
+            close_response,
+            postcard::to_allocvec(&ChildResponse::Close).expect("postcard encode close response")
+        );
     }
 
     #[cfg(feature = "std")]
     #[test]
-    fn two_differently_canned_responses_produce_different_emitted_bytes_for_the_same_request() {
+    fn two_different_inputs_produce_different_bytes_for_the_same_request() {
         let read_request = ChildRequest::Read {
-            handle: 0,
+            handle: INPUT_HANDLE,
             max_bytes: 256,
             offset: 0,
         };
         let read_wire_bytes =
             postcard::to_allocvec(&read_request).expect("postcard encode read request");
 
-        let response_alpha = ChildResponse::Read(ReadResponse {
-            bytes: b"alpha-canned-response".to_vec(),
-            eof: true,
-        });
-        let dispatcher_alpha = FfiRecordingDispatcher::new(response_alpha.clone());
+        let dispatcher_alpha = FfiRecordingDispatcher::new(b"alpha-invocation-body", 64);
         let bytes_alpha = dispatch_one(&dispatcher_alpha, READ_VERB, &read_wire_bytes);
-
-        let response_beta = ChildResponse::Close;
-        let dispatcher_beta = FfiRecordingDispatcher::new(response_beta.clone());
+        let dispatcher_beta = FfiRecordingDispatcher::new(b"beta", 64);
         let bytes_beta = dispatch_one(&dispatcher_beta, READ_VERB, &read_wire_bytes);
 
         assert_eq!(dispatcher_alpha.requests(), vec![read_request.clone()]);
         assert_eq!(dispatcher_beta.requests(), vec![read_request]);
-
         assert_eq!(
             bytes_alpha,
-            postcard::to_allocvec(&response_alpha).expect("postcard encode response_alpha")
+            postcard::to_allocvec(&ChildResponse::Read(ReadResponse {
+                bytes: b"alpha-invocation-body".to_vec(),
+                eof: true,
+            }))
+            .expect("postcard encode alpha response")
         );
         assert_eq!(
             bytes_beta,
-            postcard::to_allocvec(&response_beta).expect("postcard encode response_beta")
+            postcard::to_allocvec(&ChildResponse::Read(ReadResponse {
+                bytes: b"beta".to_vec(),
+                eof: true,
+            }))
+            .expect("postcard encode beta response")
         );
         assert_ne!(
             bytes_alpha, bytes_beta,
-            "the same request driven through two differently-configured dispatchers must not replay the same bytes"
+            "the same request driven through two dispatchers serving different inputs must not replay the same bytes"
+        );
+    }
+
+    fn raw_dispatch(
+        dispatcher: &FfiRecordingDispatcher,
+        verb: u16,
+        pointer: u64,
+        payload: &[u8],
+        response_capacity: usize,
+    ) -> i64 {
+        let mut guest_memory = payload.to_vec();
+        let mut response_out = alloc::vec![0_u8; response_capacity];
+        // SAFETY: live, non-aliasing buffers sized by the lengths passed.
+        unsafe {
+            proxima_vm_dispatch_hypercall(
+                (dispatcher as *const FfiRecordingDispatcher).cast(),
+                guest_memory.as_mut_ptr(),
+                guest_memory.len(),
+                verb,
+                pointer,
+                payload.len() as u64,
+                response_out.as_mut_ptr(),
+                response_out.len(),
+            )
+        }
+    }
+
+    #[test]
+    fn a_read_larger_than_the_response_buffer_is_clamped_to_a_short_read() {
+        let input: Vec<u8> = (0..2000_u32).map(|index| (index % 251) as u8).collect();
+        let dispatcher = FfiRecordingDispatcher::new(&input, 0);
+        let read_request = |offset: u64| {
+            postcard::to_allocvec(&ChildRequest::Read {
+                handle: INPUT_HANDLE,
+                max_bytes: 4096,
+                offset,
+            })
+            .expect("postcard encode read request")
+        };
+
+        let mut reassembled = Vec::new();
+        let mut reads = 0;
+        loop {
+            let wire = dispatch_one(&dispatcher, READ_VERB, &read_request(reassembled.len() as u64));
+            let ChildResponse::Read(read) =
+                postcard::from_bytes::<ChildResponse>(&wire).expect("postcard decode read response")
+            else {
+                panic!("expected a Read response");
+            };
+            assert!(wire.len() <= FFI_RESPONSE_CAPACITY, "response of {} bytes overran the buffer", wire.len());
+            reassembled.extend_from_slice(&read.bytes);
+            reads += 1;
+            if read.eof {
+                break;
+            }
+            assert!(!read.bytes.is_empty(), "a clamped read must still make progress");
+        }
+
+        assert_eq!(reassembled, input, "short reads must reassemble the whole input in order");
+        assert!(reads > 1, "2000 bytes cannot fit one {FFI_RESPONSE_CAPACITY}-byte response");
+    }
+
+    #[test]
+    fn a_clamped_read_is_not_flagged_eof() {
+        let input = alloc::vec![7_u8; 1000];
+        let dispatcher = FfiRecordingDispatcher::new(&input, 0);
+        let wire = postcard::to_allocvec(&ChildRequest::Read {
+            handle: INPUT_HANDLE,
+            max_bytes: 1000,
+            offset: 0,
+        })
+        .expect("postcard encode read request");
+
+        let response = dispatch_one(&dispatcher, READ_VERB, &wire);
+
+        let ChildResponse::Read(read) =
+            postcard::from_bytes::<ChildResponse>(&response).expect("postcard decode read response")
+        else {
+            panic!("expected a Read response");
+        };
+        assert!(read.bytes.len() < input.len());
+        assert!(!read.eof, "bytes remain after a clamped read, so eof must be false");
+    }
+
+    #[test]
+    fn a_response_that_cannot_shrink_reports_sentinel_five() {
+        let dispatcher = FfiRecordingDispatcher::new(b"x", 0);
+        let wire = postcard::to_allocvec(&ChildRequest::Close { handle: INPUT_HANDLE })
+            .expect("postcard encode close request");
+
+        assert_eq!(raw_dispatch(&dispatcher, CLOSE_VERB, 0, &wire, 0), -5);
+    }
+
+    #[test]
+    fn an_out_of_range_payload_reports_sentinel_one() {
+        let dispatcher = FfiRecordingDispatcher::new(b"x", 0);
+
+        assert_eq!(raw_dispatch(&dispatcher, READ_VERB, 4096, &[0_u8; 8], 64), -1);
+    }
+
+    #[test]
+    fn every_dispatch_sentinel_has_its_own_named_text() {
+        let texts: Vec<&str> = (-6..=-1).map(sentinel_text).collect();
+
+        for (index, text) in texts.iter().enumerate() {
+            assert_ne!(*text, sentinel_text(0), "sentinel {} fell through to the generic text", -6 + index as i64);
+            assert_eq!(texts.iter().filter(|other| *other == text).count(), 1, "{text} is not unique");
+        }
+    }
+
+    #[test]
+    fn a_failed_run_message_carries_the_sentinel_cause() {
+        let dispatcher = FfiRecordingDispatcher::new(b"x", 0);
+        let wire = postcard::to_allocvec(&ChildRequest::Close { handle: INPUT_HANDLE })
+            .expect("postcard encode close request");
+        raw_dispatch(&dispatcher, CLOSE_VERB, 0, &wire, 0);
+
+        let message =
+            dispatcher.name_failure("hypercall dispatch failed with sentinel -5".to_owned());
+
+        assert_eq!(
+            message,
+            "hypercall dispatch failed: the encoded response does not fit the host response buffer (sentinel -5)"
+        );
+    }
+
+    #[test]
+    fn unrelated_loop_errors_are_left_untouched() {
+        let dispatcher = FfiRecordingDispatcher::new(b"x", 0);
+        raw_dispatch(&dispatcher, READ_VERB, 4096, &[0_u8; 8], 64);
+
+        assert_eq!(
+            dispatcher.name_failure("watchdog expired".to_owned()),
+            "watchdog expired"
+        );
+    }
+
+    fn serve(dispatcher: &FfiRecordingDispatcher, request: ChildRequest) -> ChildResponse {
+        futures::executor::block_on(Pipe::call(dispatcher, request)).expect("dispatcher call")
+    }
+
+    fn read_input(dispatcher: &FfiRecordingDispatcher, max_bytes: u32, offset: u64) -> (Vec<u8>, bool) {
+        match serve(
+            dispatcher,
+            ChildRequest::Read {
+                handle: INPUT_HANDLE,
+                max_bytes,
+                offset,
+            },
+        ) {
+            ChildResponse::Read(read) => (read.bytes, read.eof),
+            other => panic!("expected a Read response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reads_are_offset_addressed_and_flag_eof_on_the_last_byte() {
+        let dispatcher = FfiRecordingDispatcher::new(b"hello, lambda", 0);
+
+        assert_eq!(read_input(&dispatcher, 5, 0), (b"hello".to_vec(), false));
+        assert_eq!(read_input(&dispatcher, 5, 7), (b"lambd".to_vec(), false));
+        assert_eq!(read_input(&dispatcher, 5, 12), (b"a".to_vec(), true));
+        assert_eq!(read_input(&dispatcher, 5, 13), (Vec::new(), true));
+        assert_eq!(read_input(&dispatcher, 5, u64::MAX), (Vec::new(), true));
+        assert_eq!(read_input(&dispatcher, 5, 7), (b"lambd".to_vec(), false));
+    }
+
+    #[test]
+    fn empty_input_reads_as_immediate_eof() {
+        let dispatcher = FfiRecordingDispatcher::new(b"", 0);
+
+        assert_eq!(read_input(&dispatcher, 256, 0), (Vec::new(), true));
+        assert_eq!(
+            serve(
+                &dispatcher,
+                ChildRequest::Stat {
+                    handle: INPUT_HANDLE
+                }
+            ),
+            ChildResponse::Stat {
+                size: 0,
+                mode: INPUT_MODE,
+                is_directory: false,
+            }
+        );
+    }
+
+    #[test]
+    fn stat_of_the_input_handle_reports_the_input_length() {
+        let dispatcher = FfiRecordingDispatcher::new(b"hello, lambda", 0);
+
+        assert_eq!(
+            serve(
+                &dispatcher,
+                ChildRequest::Stat {
+                    handle: INPUT_HANDLE
+                }
+            ),
+            ChildResponse::Stat {
+                size: 13,
+                mode: INPUT_MODE,
+                is_directory: false,
+            }
+        );
+    }
+
+    #[test]
+    fn writes_append_to_the_output_in_order() {
+        let dispatcher = FfiRecordingDispatcher::new(b"", 16);
+
+        let first = serve(
+            &dispatcher,
+            ChildRequest::Write {
+                handle: OUTPUT_HANDLE,
+                bytes: b"HELLO".to_vec(),
+            },
+        );
+        let second = serve(
+            &dispatcher,
+            ChildRequest::Write {
+                handle: OUTPUT_HANDLE,
+                bytes: b", LAMBDA".to_vec(),
+            },
+        );
+
+        assert_eq!(first, ChildResponse::Write(WriteResponse { bytes_written: 5 }));
+        assert_eq!(second, ChildResponse::Write(WriteResponse { bytes_written: 8 }));
+        assert_eq!(dispatcher.output(), b"HELLO, LAMBDA");
+        assert!(!dispatcher.output_overflowed());
+    }
+
+    #[test]
+    fn a_write_past_the_output_capacity_is_refused_whole_and_flagged() {
+        let dispatcher = FfiRecordingDispatcher::new(b"", 8);
+        serve(
+            &dispatcher,
+            ChildRequest::Write {
+                handle: OUTPUT_HANDLE,
+                bytes: b"ABCDE".to_vec(),
+            },
+        );
+
+        let refused = serve(
+            &dispatcher,
+            ChildRequest::Write {
+                handle: OUTPUT_HANDLE,
+                bytes: b"FGHI".to_vec(),
+            },
+        );
+
+        assert_eq!(
+            refused,
+            ChildResponse::Error {
+                errno: ERRNO_ENOSPC
+            }
+        );
+        assert_eq!(dispatcher.output(), b"ABCDE", "no partial write");
+        assert!(dispatcher.output_overflowed());
+    }
+
+    #[test]
+    fn a_write_exactly_filling_the_output_capacity_is_accepted() {
+        let dispatcher = FfiRecordingDispatcher::new(b"", 5);
+
+        let response = serve(
+            &dispatcher,
+            ChildRequest::Write {
+                handle: OUTPUT_HANDLE,
+                bytes: b"ABCDE".to_vec(),
+            },
+        );
+
+        assert_eq!(response, ChildResponse::Write(WriteResponse { bytes_written: 5 }));
+        assert!(!dispatcher.output_overflowed());
+    }
+
+    #[test]
+    fn closing_either_invocation_handle_acknowledges() {
+        let dispatcher = FfiRecordingDispatcher::new(b"", 0);
+
+        for handle in [INPUT_HANDLE, OUTPUT_HANDLE] {
+            assert_eq!(
+                serve(&dispatcher, ChildRequest::Close { handle }),
+                ChildResponse::Close
+            );
+        }
+    }
+
+    #[test]
+    fn every_other_handle_and_wrong_direction_is_ebadf() {
+        let dispatcher = FfiRecordingDispatcher::new(b"data", 8);
+        let ebadf = ChildResponse::Error { errno: ERRNO_EBADF };
+
+        let requests = [
+            ChildRequest::Read {
+                handle: 2,
+                max_bytes: 4,
+                offset: 0,
+            },
+            ChildRequest::Read {
+                handle: OUTPUT_HANDLE,
+                max_bytes: 4,
+                offset: 0,
+            },
+            ChildRequest::Write {
+                handle: INPUT_HANDLE,
+                bytes: b"x".to_vec(),
+            },
+            ChildRequest::Write {
+                handle: -1,
+                bytes: b"x".to_vec(),
+            },
+            ChildRequest::Stat {
+                handle: OUTPUT_HANDLE,
+            },
+            ChildRequest::Close { handle: 7 },
+        ];
+
+        for request in requests {
+            assert_eq!(serve(&dispatcher, request.clone()), ebadf, "{request:?}");
+        }
+        assert!(dispatcher.output().is_empty());
+    }
+
+    #[test]
+    fn open_is_enoent_because_an_invocation_has_no_named_resources() {
+        let dispatcher = FfiRecordingDispatcher::new(b"data", 8);
+
+        let response = serve(
+            &dispatcher,
+            ChildRequest::Open {
+                path: "/etc/hostname".into(),
+                flags: 0,
+            },
+        );
+
+        assert_eq!(
+            response,
+            ChildResponse::Error {
+                errno: ERRNO_ENOENT
+            }
         );
     }
 }

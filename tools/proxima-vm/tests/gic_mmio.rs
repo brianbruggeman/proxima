@@ -118,10 +118,11 @@ impl SignedGicProbe {
     }
 }
 
-/// The GIC is this VM's ARM-specific M5b track — the KVM/x86_64 lane's
-/// `backend_linux.c` does not yet decode `KVM_EXIT_MMIO` at all (its own
-/// module doc names this), so unlike some of this crate's other gates this
-/// one has no KVM-lane arm.
+/// The GICv3 is an ARM interrupt controller and this guest is the aarch64
+/// `gic_probe` ELF — x86_64 has no GIC, so the KVM lane decodes
+/// `KVM_EXIT_MMIO` only for the three virtio windows and accepts the
+/// `gicd_transport`/`gicr_transport` arguments unused. Unlike
+/// `tests/virtio_*_mmio.rs`, this gate therefore has no KVM-lane arm.
 #[proxima::test]
 async fn guest_reads_gicd_pidr2_and_gicr_typer_through_real_vm_exits() {
     if !HYPERVISOR_LANE {

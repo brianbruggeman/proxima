@@ -53,7 +53,7 @@ typedef struct {
  * `gpr[0..31)` is `x0..x30` on the HVF/aarch64 lane
  * (`hv_vcpu_get_reg(vcpu, HV_REG_X0 + i, ...)`, the same `X0 + offset`
  * indexing `backend_macos.c`'s own mmio-transfer-register decode already
- * uses) and `rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8..r15` (in that
+ * uses) and `rax, rbx, rcx, rdx, rsi, rdi, rsp, rbp, r8..r15` (in that
  * `struct kvm_regs` field order, zero-padded to 31 slots) on the KVM/x86_64
  * lane -- the two architectures' register files do not correspond 1:1, so
  * this struct carries whichever one the running lane captured; a snapshot

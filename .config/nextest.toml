@@ -101,3 +101,9 @@ test-group = 'real-checkpoint'
 # tests run once at the end of the run with the default profile. built with `--cargo-profile gate`.
 [profile.slice-gate]
 default-filter = 'not test(/lfm2/) and not test(/^(generic_binder|generic_verify_llama_parity|llama_parity|kv_in_caller_memory)_(gemma4_26b|openchat|qwen2|qwen3|qwen35|qwen35moe)$/)'
+
+# vm_upstream_latency_table times fresh-VM-per-call p50/p99; any test running
+# beside it lands in its samples. Claim every test thread so it runs alone.
+[[profile.default.overrides]]
+filter = 'package(proxima-lib) and binary(vm_registry) and test(vm_upstream_latency_table)'
+threads-required = "num-cpus"

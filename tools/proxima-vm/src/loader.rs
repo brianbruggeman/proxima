@@ -37,15 +37,9 @@ use crate::elf::Segment;
 #[derive(Debug)]
 struct MappedSegment {
     guest_address: u64,
-    #[cfg(any(
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "macos", target_arch = "aarch64")
-    ))]
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     host_address: *mut core::ffi::c_void,
-    #[cfg(any(
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "macos", target_arch = "aarch64")
-    ))]
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     mapped_size: usize,
 }
 
@@ -57,7 +51,7 @@ struct MappedSegment {
 ///
 /// Wraps `hv_vm_map`/`hv_vm_create` (macOS) or
 /// `KVM_SET_USER_MEMORY_REGION`/`KVM_CREATE_VM` (Linux) in
-/// `backend_macos.c`/`backend_linux.c`, extending the same driver-leaf
+/// `backend_macos.c`/`src/kvm`, extending the same driver-leaf
 /// pattern [`crate::ScratchVm`] already proves for a single code blob to N
 /// permissioned segments.
 #[derive(Debug)]
@@ -109,16 +103,10 @@ impl<const MAX_SEGMENTS: usize> Drop for GuestMemory<MAX_SEGMENTS> {
     }
 }
 
-#[cfg(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
-))]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use platform::RawSegment;
 
-#[cfg(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
-))]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod platform {
     use std::ffi::CStr;
     use std::os::raw::c_char;
@@ -256,49 +244,13 @@ mod platform {
         }
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    mod ffi {
-        use std::os::raw::c_char;
-
-        use super::{RawMappedSegment, RawSegment};
-
-        unsafe extern "C" {
-            pub fn proxima_vm_map_guest_memory(
-                segments: *const RawSegment,
-                segment_count: usize,
-                mapped_out: *mut RawMappedSegment,
-                kvm_fd_out: *mut i32,
-                vm_fd_out: *mut i32,
-                error_buffer: *mut c_char,
-                error_capacity: usize,
-            ) -> i32;
-
-            pub fn proxima_vm_unmap_guest_memory(
-                mapped: *const RawMappedSegment,
-                mapped_count: usize,
-                kvm_fd: i32,
-                vm_fd: i32,
-            );
-        }
-    }
-
     /// The hypervisor resources [`GuestMemory`](super::GuestMemory) must
     /// release on `Drop`, beyond the per-segment host mappings themselves.
     /// macOS's `hv_vm_create`/`hv_vm_destroy` pair is process-global and
-    /// carries no handle; the KVM lane's VM is a file descriptor pair that
-    /// must be closed explicitly.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    /// carries no handle.
     #[derive(Debug)]
     pub struct Handle;
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    #[derive(Debug)]
-    pub struct Handle {
-        kvm_fd: i32,
-        vm_fd: i32,
-    }
-
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     pub fn map<const MAX_SEGMENTS: usize>(
         segments: &[Segment<'_>],
     ) -> Result<(ArrayVec<MappedSegment, MAX_SEGMENTS>, Handle), ProximaError> {
@@ -331,44 +283,6 @@ mod platform {
         Ok((mapped, Handle))
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    pub fn map<const MAX_SEGMENTS: usize>(
-        segments: &[Segment<'_>],
-    ) -> Result<(ArrayVec<MappedSegment, MAX_SEGMENTS>, Handle), ProximaError> {
-        let raw_segments: ArrayVec<RawSegment, MAX_SEGMENTS> =
-            segments.iter().map(RawSegment::from_segment).collect();
-        let mut mapped_out = [RawMappedSegment::default(); MAX_SEGMENTS];
-        let mut error_buffer = [0_i8; ERROR_CAPACITY];
-        let mut kvm_fd: i32 = -1;
-        let mut vm_fd: i32 = -1;
-
-        let status = unsafe {
-            ffi::proxima_vm_map_guest_memory(
-                raw_segments.as_ptr(),
-                raw_segments.len(),
-                mapped_out.as_mut_ptr(),
-                &raw mut kvm_fd,
-                &raw mut vm_fd,
-                error_buffer.as_mut_ptr(),
-                error_buffer.len(),
-            )
-        };
-        if status != 0 {
-            return Err(ProximaError::Upstream(read_error(&error_buffer)));
-        }
-
-        let mapped = mapped_out[..raw_segments.len()]
-            .iter()
-            .map(|raw| MappedSegment {
-                guest_address: raw.guest_address,
-                host_address: raw.host_address,
-                mapped_size: raw.mapped_size,
-            })
-            .collect();
-        Ok((mapped, Handle { kvm_fd, vm_fd }))
-    }
-
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     pub fn unmap<const MAX_SEGMENTS: usize>(
         mapped: &ArrayVec<MappedSegment, MAX_SEGMENTS>,
         _handle: &Handle,
@@ -386,27 +300,64 @@ mod platform {
         }
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    pub fn unmap<const MAX_SEGMENTS: usize>(
-        mapped: &ArrayVec<MappedSegment, MAX_SEGMENTS>,
-        handle: &Handle,
-    ) {
-        let raw: ArrayVec<RawMappedSegment, MAX_SEGMENTS> = mapped
-            .iter()
-            .map(|segment| RawMappedSegment {
-                guest_address: segment.guest_address,
-                host_address: segment.host_address,
-                mapped_size: segment.mapped_size,
-            })
-            .collect();
-        unsafe {
-            ffi::proxima_vm_unmap_guest_memory(
-                raw.as_ptr(),
-                raw.len(),
-                handle.kvm_fd,
-                handle.vm_fd,
-            );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod platform {
+    use core::fmt;
+
+    use arrayvec::ArrayVec;
+    use proxima_core::ProximaError;
+
+    use super::MappedSegment;
+    use crate::elf::Segment;
+    use crate::kvm::memory::{HostMapping, round_up_to_page};
+    use crate::kvm::session::Session;
+    use crate::kvm::slots::{SlotOp, SlotRegion};
+
+    /// The KVM VM and every segment mapping, released together when the
+    /// [`GuestMemory`](super::GuestMemory) drops.
+    pub struct Handle {
+        _session: Session,
+    }
+
+    impl fmt::Debug for Handle {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("Handle { session: kvm }")
         }
+    }
+
+    fn upstream(error: crate::kvm::KvmError) -> ProximaError {
+        ProximaError::Upstream(error.to_string())
+    }
+
+    pub fn map<const MAX_SEGMENTS: usize>(
+        segments: &[Segment<'_>],
+    ) -> Result<(ArrayVec<MappedSegment, MAX_SEGMENTS>, Handle), ProximaError> {
+        let mut session = Session::open().map_err(upstream)?;
+        let mut mapped = ArrayVec::new();
+        for (index, segment) in segments.iter().enumerate() {
+            let size = round_up_to_page(usize::try_from(segment.memory_size()).unwrap_or(usize::MAX).max(1));
+            let mut mapping = HostMapping::anonymous(size, true).map_err(upstream)?;
+            mapping.bytes_mut()[..segment.data().len()].copy_from_slice(segment.data());
+            let slot = SlotOp::Submit(SlotRegion {
+                slot: index as u32,
+                flags: 0,
+                guest_address: segment.virtual_address(),
+                size: size as u64,
+                host: mapping.as_ptr() as u64,
+            });
+            session.machine().apply(&[slot], "KVM_SET_USER_MEMORY_REGION").map_err(upstream)?;
+            mapped.push(MappedSegment { guest_address: segment.virtual_address() });
+            session.attach_mapping(mapping);
+        }
+        Ok((mapped, Handle { _session: session }))
+    }
+
+    pub fn unmap<const MAX_SEGMENTS: usize>(
+        _mapped: &ArrayVec<MappedSegment, MAX_SEGMENTS>,
+        _handle: &Handle,
+    ) {
     }
 }
 
@@ -463,6 +414,27 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "config: guest has 2 segments, capacity is 1"
+        );
+    }
+
+    /// KVM needs no entitlement, so the mapper's real `KVM_CREATE_VM` +
+    /// `KVM_SET_USER_MEMORY_REGION` path is reachable from a plain unit test.
+    /// Every segment must come back at the guest address its ELF header named.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn map_registers_each_segment_at_its_own_guest_address_on_the_kvm_lane() {
+        let image = crate::elf::test_support::build_two_segment_elf();
+        let (_entry, segments) = parse_elf::<4>(&image).expect("valid ELF parses");
+
+        let memory = GuestMemory::<4>::map(&segments).expect("kvm maps both segments");
+
+        assert_eq!(memory.segment_count(), 2);
+        assert_eq!(
+            memory.guest_addresses().collect::<Vec<_>>(),
+            segments
+                .iter()
+                .map(Segment::virtual_address)
+                .collect::<Vec<_>>()
         );
     }
 }

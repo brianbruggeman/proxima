@@ -37,22 +37,28 @@
 //!
 //! # Tier
 //!
-//! `std` (tier 2), macos/aarch64 only (the device-model exit loop is
-//! `backend_macos.c`'s): this module drives a real hypervisor VM exit loop through
-//! FFI, exactly like [`crate::dispatch::run_dispatch_loop`].
+//! `std` (tier 2): the arm64 boots are macos/aarch64 only (the device-model
+//! exit loop is `backend_macos.c`'s) and drive a real hypervisor VM exit loop
+//! through FFI, exactly like `crate::dispatch::run_dispatch_loop`; every other
+//! host gets named unsupported-lane errors.
 
-#![cfg(all(feature = "std", target_os = "macos", target_arch = "aarch64"))]
+#![cfg(feature = "std")]
+
 extern crate alloc;
 
 use alloc::vec::Vec;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::ffi::CStr;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::os::raw::c_char;
 
 use proxima_core::ProximaError;
-use proxima_protocols::process::ChildResponse;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use crate::dispatch::FfiRecordingDispatcher;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use crate::dtb::{BootParams, QemuVirtLayout};
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use crate::loader::RawSegment;
 
 /// QEMU virt's own RAM base (`crate::dtb`'s module doc, `hw/arm/virt.c`) —
@@ -81,7 +87,11 @@ pub const DTB_OFFSET: u64 = 240 * 1024 * 1024;
 /// find it, exactly the way it reads `bootargs` from the same node.
 pub const INITRD_OFFSET: u64 = 200 * 1024 * 1024;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const ERROR_CAPACITY: usize = 512;
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+const UNSUPPORTED: &str = "booting an arm64 guest needs macos/aarch64 Hypervisor.framework";
 
 /// One serviced boot's instrumentation: wall nanoseconds from this call's
 /// own entry to the first vCPU exit, wall nanoseconds to first-touch every
@@ -169,6 +179,7 @@ pub type BootOutcome = (Vec<u8>, BootTrapStatistics, Result<(), ProximaError>);
 /// `Result` — [`ProximaError::Upstream`] there names the failing hypervisor
 /// call or an exceeded hypercall/exit budget, alongside whatever bytes were
 /// captured before that point.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[allow(
     clippy::too_many_arguments,
     reason = "mirrors crate::dispatch::run_dispatch_loop's own per-channel-capacity \
@@ -317,7 +328,7 @@ pub fn boot_linux_kernel(
     // the dispatcher exists only to satisfy the C loop's signature, exactly
     // like `run_dispatch_loop`'s own instance -- a real kernel never issues
     // our `hvc`-encoded verbs, so it is never actually invoked.
-    let dispatcher = FfiRecordingDispatcher::new(ChildResponse::Close);
+    let dispatcher = FfiRecordingDispatcher::new(&[], 0);
     let mut console_transport =
         crate::virtio_console::ConsoleTransport::new(proxima_protocols::virtio::FEATURE_VERSION_1);
     let mut net_transport = crate::virtio_net::NetTransport::new([0_u8; 6]);
@@ -447,6 +458,7 @@ pub fn boot_linux_kernel(
         let message = unsafe { CStr::from_ptr(error_buffer.as_ptr()) }
             .to_string_lossy()
             .into_owned();
+        let message = dispatcher.name_failure(message);
         Err(ProximaError::Upstream(alloc::format!(
             "{message} (create_to_first_exit_nanos={create_to_first_exit_nanos} \
              touch_all_pages_nanos={touch_all_pages_nanos} mmio_trap_count={mmio_trap_count} \
@@ -542,6 +554,7 @@ pub const EDK2_WATCHDOG_MILLIS: u64 = 15_000;
 /// exceeds [`FLASH_CODE_MAX_SIZE`] or the DTB build fails before any vCPU
 /// runs — see [`boot_linux_kernel`]'s own doc for why the loop's own
 /// outcome travels in the returned tuple's inner `Result` instead.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub fn boot_edk2_firmware(
     firmware: &[u8],
     max_hypercalls: usize,
@@ -657,7 +670,7 @@ pub fn boot_edk2_firmware(
 
     // this boot's guest speaks no `ChildRequest` hypercall protocol at all --
     // same reasoning as `boot_linux_kernel`'s own identical local.
-    let dispatcher = FfiRecordingDispatcher::new(ChildResponse::Close);
+    let dispatcher = FfiRecordingDispatcher::new(&[], 0);
     let mut console_transport =
         crate::virtio_console::ConsoleTransport::new(proxima_protocols::virtio::FEATURE_VERSION_1);
     let mut net_transport = crate::virtio_net::NetTransport::new([0_u8; 6]);
@@ -780,6 +793,7 @@ pub fn boot_edk2_firmware(
         let message = unsafe { CStr::from_ptr(error_buffer.as_ptr()) }
             .to_string_lossy()
             .into_owned();
+        let message = dispatcher.name_failure(message);
         Err(ProximaError::Upstream(alloc::format!(
             "{message} (create_to_first_exit_nanos={create_to_first_exit_nanos} \
              touch_all_pages_nanos={touch_all_pages_nanos} mmio_trap_count={mmio_trap_count} \
@@ -793,12 +807,41 @@ pub fn boot_edk2_firmware(
     Ok((pl011_emitted, stats, loop_outcome))
 }
 
+/// This host has no arm64 hypervisor lane: the KVM lane runs x86_64 guests
+/// ([`crate::linux`]), so an arm64 `Image` is refused by name.
+///
+/// # Errors
+///
+/// Always [`ProximaError::Config`].
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+pub fn boot_linux_kernel(
+    _image: &[u8],
+    _bootargs: &str,
+    _initramfs: Option<&[u8]>,
+    _max_hypercalls: usize,
+    _pl011_capacity: usize,
+) -> Result<BootOutcome, ProximaError> {
+    Err(ProximaError::Config(UNSUPPORTED.into()))
+}
+
+/// See [`boot_linux_kernel`]: firmware for arm64 has no lane on this host.
+///
+/// # Errors
+///
+/// Always [`ProximaError::Config`].
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+pub fn boot_edk2_firmware(
+    _firmware: &[u8],
+    _max_hypercalls: usize,
+    _pl011_capacity: usize,
+) -> Result<BootOutcome, ProximaError> {
+    Err(ProximaError::Config(UNSUPPORTED.into()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        DTB_OFFSET, FLASH_BASE, FLASH_CODE_MAX_SIZE, INITRD_OFFSET, QemuVirtLayout, RAM_BASE,
-        RAM_SIZE,
-    };
+    use super::{DTB_OFFSET, FLASH_BASE, FLASH_CODE_MAX_SIZE, INITRD_OFFSET, RAM_BASE, RAM_SIZE};
+    use crate::dtb::QemuVirtLayout;
 
     /// [`FLASH_CODE_MAX_SIZE`]'s own doc names this check: the edk2 CODE
     /// flash window this module maps at [`FLASH_BASE`] must end at or
