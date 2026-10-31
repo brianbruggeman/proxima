@@ -1966,6 +1966,57 @@ pub fn matmul_pq2_0_f32(
     )
 }
 
+/// [`dot_linear_layout_f32`]'s fold for `PTQ1_0`, decoding each block with the scalar
+/// [`proxima_gguf::quant::ptq1_0::dequantize_block`] because the generic layout walker's
+/// per-element radix lookup costs a region scan per weight.
+fn dot_ptq1_0_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+    let (blocks, remainder) = weight_row.as_chunks::<{ ptq1_0::BLOCK_BYTES }>();
+    if !remainder.is_empty() {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the codec block size",
+        });
+    }
+    if activation.len() != blocks.len() * ptq1_0::QK_PTQ1_0 {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the weight row's decoded element count",
+        });
+    }
+    let mut decoded = [0.0f32; ptq1_0::QK_PTQ1_0];
+    let mut acc = 0.0f32;
+    for (block, activation_chunk) in blocks.iter().zip(activation.chunks_exact(ptq1_0::QK_PTQ1_0)) {
+        ptq1_0::dequantize_block(block, &mut decoded);
+        acc = dot_fold_fused_multiply_add(
+            &decoded,
+            activation_chunk,
+            DotFold {
+                len: ptq1_0::QK_PTQ1_0,
+                init: acc,
+                seeded: true,
+            },
+        );
+    }
+    Ok(acc)
+}
+
+/// A full `PTQ1_0` (group 128 ternary) weight matrix times one `f32` activation vector.
+///
+/// # Errors
+/// As [`matmul_q1_0_f32`].
+pub fn matmul_ptq1_0_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_ptq1_0_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        |row, activation_row| dot_ptq1_0_f32(row, activation_row),
+    )
+}
+
 /// Packed bytes per `IQ4_NL` block -- byte-identical to
 /// [`Q4_0_BLOCK_BYTES`], kept as its own named constant rather than reused
 /// since the two codecs decode differently (fixed recenter vs codebook
