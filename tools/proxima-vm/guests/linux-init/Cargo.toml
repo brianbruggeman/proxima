@@ -40,6 +40,16 @@ path = "src/bin/truncated.rs"
 name = "flood-init"
 path = "src/bin/flood.rs"
 
+# execs the OCI image entrypoint from /.proxima/run.json, supervises it for the linger the host sends, reports its fate
+[[bin]]
+name = "oci-init"
+path = "src/bin/oci.rs"
+
+# prints what the OCI image config handed it: the entrypoint-semantics fixture
+[[bin]]
+name = "entry-probe"
+path = "src/bin/entry_probe.rs"
+
 [profile.release]
 opt-level = "s"
 lto = true
@@ -56,3 +66,5 @@ expect_used = "deny"
 
 [dependencies]
 libc = "0.2.191"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"

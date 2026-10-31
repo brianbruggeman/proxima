@@ -10,6 +10,7 @@ const MAX_REQUEST: u64 = 64 << 20;
 
 const MARKER_INIT_STARTED: u8 = 1;
 const MARKER_INVOCATION_READY: u8 = 2;
+const MARKER_ENTRYPOINT: u8 = 3;
 
 fn mark(value: u8) -> io::Result<()> {
     if unsafe { libc::syscall(libc::SYS_iopl, 3) } != 0 {
@@ -20,6 +21,12 @@ fn mark(value: u8) -> io::Result<()> {
         core::arch::asm!("out dx, al", in("dx") MARKER_PORT, in("al") value, options(nomem, nostack));
     }
     Ok(())
+}
+
+pub fn mark_entrypoint() {
+    if let Err(error) = mark(MARKER_ENTRYPOINT) {
+        eprintln!("linux guest: entrypoint marker unavailable: {error}");
+    }
 }
 
 pub fn mark_init_started() {

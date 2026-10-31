@@ -14,7 +14,7 @@ include = ["src/**", "build.rs", "Cargo.toml", "README.md", "LICENSE*"]
 default = ["std"]
 # proxima-primitives::pipe alloc tier drags in proxima-primitives::transport
 # -> parking_lot (no no_std path)
-std = ["alloc", "futures/executor", "dep:proxima-primitives", "proxima-primitives/std", "dep:proxima-process", "dep:cpio", "thiserror/std", "dep:kvm-ioctls", "dep:kvm-bindings", "dep:libc", "dep:proxima-listen", "dep:proxima-runtime", "dep:proxima-telemetry"]
+std = ["alloc", "futures/executor", "dep:proxima-primitives", "proxima-primitives/std", "dep:proxima-process", "dep:cpio", "thiserror/std", "dep:kvm-ioctls", "dep:kvm-bindings", "dep:libc", "dep:proxima-listen", "dep:proxima-runtime", "dep:proxima-telemetry", "dep:tar", "dep:flate2", "dep:sha2", "dep:http", "dep:prime", "dep:proxima-http", "dep:serde_json"]
 # `dtb::builder` needs `Vec<u8>` (vm-fdt's writer); the parser half
 # (`fdt` crate) is genuinely tier-3 and would build without this, but the
 # module is one file so it shares the alloc gate.
@@ -34,6 +34,8 @@ restore-probe-demo = ["std", "proxima-onnx", "proxima-tensor"]
 # Opt-in real-VM boot tests (kernel_boot, kernel_boot_userspace, edk2_boot):
 # with it on, an unset asset env var is a hard failure, never a silent pass.
 kernel-boot = ["std"]
+# Opt-in tests that reach docker hub: the default suite never touches the network.
+oci-network = ["std"]
 
 [dependencies]
 arrayvec.workspace = true
@@ -41,9 +43,13 @@ bytes.workspace = true
 cpio = { version = "0.4.1", optional = true }
 crossbeam-queue.workspace = true
 fdt = "0.1.5"
+flate2 = { version = "1.1.10", optional = true }
 futures.workspace = true
+http = { workspace = true, optional = true }
 postcard = { workspace = true, features = ["alloc"] }
+prime = { workspace = true, optional = true }
 proxima-core = { workspace = true, features = ["alloc"] }
+proxima-http = { workspace = true, features = ["http1-stream-client"], optional = true }
 proxima-listen = { workspace = true, optional = true }
 proxima-net = { version = "0.1.0", path = "../../proxima-net", default-features = false, features = ["alloc"] }
 proxima-onnx = { version = "0.1.0", path = "../../proxima-onnx", default-features = false, features = ["std"], optional = true }
@@ -54,6 +60,9 @@ proxima-runtime = { workspace = true, optional = true }
 proxima-telemetry = { workspace = true, features = ["emit"], optional = true }
 proxima-tensor = { version = "0.1.0", path = "../../proxima-tensor", default-features = false, features = ["std"], optional = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tar = { version = "0.4.46", optional = true }
 thiserror.workspace = true
 vm-fdt = { version = "0.3.0", default-features = false, features = ["alloc"], optional = true }
 
@@ -117,6 +126,10 @@ required-features = ["std", "kernel-boot"]
 [[test]]
 name = "edk2_boot"
 required-features = ["std", "kernel-boot"]
+
+[[test]]
+name = "oci_network"
+required-features = ["std", "oci-network"]
 
 [[bench]]
 name = "bench_elf"
