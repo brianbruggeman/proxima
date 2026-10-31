@@ -226,8 +226,8 @@ mod granite_header {
     use serde_json::Value;
 
     use super::*;
+    use crate::test_support::granite_moe_gguf_path;
 
-    const GRANITE_GGUF: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
     const HEADER_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/mlx-reference/granite-3.1-1b-a400m-moe/plain/header.json"
@@ -246,11 +246,12 @@ mod granite_header {
     }
 
     fn granite_attn_k_dims() -> Vec<u64> {
+        let path = granite_moe_gguf_path();
         assert!(
-            Path::new(GRANITE_GGUF).exists(),
-            "host-local gguf blob missing at {GRANITE_GGUF}"
+            Path::new(&path).exists(),
+            "host-local gguf blob missing at {path}"
         );
-        let file = File::open(GRANITE_GGUF).expect("opens granite blob");
+        let file = File::open(&path).expect("opens granite blob");
         let mapping = unsafe { memmap2::Mmap::map(&file) }.expect("maps granite blob");
         let parsed = parse_complete(&mapping).expect("parses granite blob");
         let tensor = parsed

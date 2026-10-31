@@ -25,6 +25,7 @@ mod tests {
     use crate::bind::{ModelHparams, architecture_from_metadata};
     use crate::profiles::binding_profile;
     use crate::sliding_pattern::hparams::from_metadata as sliding_from_metadata;
+    use crate::test_support::{gemma4_e2b_arch_gguf_path, granite_moe_gguf_path};
     use crate::transform::mlx::{MLX_MAX_SHARD_BYTES, MlxExport};
     use crate::transform::mlx_config::GRANITE_QUANTIZED;
     use crate::transform::mlx_names::FusedName;
@@ -34,14 +35,12 @@ mod tests {
         export_plain, hf_config_bytes, sliding_pattern_hparams,
     };
 
-    const E2B_GGUF: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
-    const GRANITE_GGUF: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
     const REDUCE_ABOVE_ELEMENTS: u64 = 1 << 20;
     const REDUCED_ROWS: u64 = 4;
 
     struct Case {
         model: &'static str,
-        gguf: &'static str,
+        gguf: fn() -> String,
         family: &'static str,
         layout: Layout,
         prefix: &'static str,
@@ -50,7 +49,7 @@ mod tests {
 
     const GRANITE: Case = Case {
         model: "granite-3.1-1b-a400m-moe",
-        gguf: GRANITE_GGUF,
+        gguf: granite_moe_gguf_path,
         family: "granitemoe",
         layout: STANDARD_LAYOUT,
         prefix: "model.",
@@ -59,7 +58,7 @@ mod tests {
 
     const E2B: Case = Case {
         model: "gemma4-e2b",
-        gguf: E2B_GGUF,
+        gguf: gemma4_e2b_arch_gguf_path,
         family: "gemma4",
         layout: SANDWICH_NORM_LAYOUT,
         prefix: "language_model.model.",
@@ -166,7 +165,7 @@ mod tests {
     }
 
     fn source(case: &Case) -> Source {
-        let (mapping, parsed) = open(case.gguf);
+        let (mapping, parsed) = open(&(case.gguf)());
         let (reduced, rows) = reduce(&parsed);
         Source {
             mapping,
@@ -513,7 +512,7 @@ mod tests {
         flavor: &str,
         quantization: Option<(u8, u32)>,
     ) -> (Vec<String>, Vec<String>) {
-        let (_, parsed) = open(case.gguf);
+        let (_, parsed) = open(&(case.gguf)());
         let bytes = hf_config_bytes(&hparams_of(case, &parsed), &parsed, quantization).unwrap();
         let written = key_paths(&serde_json::from_slice(&bytes).unwrap());
         let vendored = key_paths(&reference_config(case.model, flavor));

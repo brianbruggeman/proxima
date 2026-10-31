@@ -149,8 +149,7 @@ mod tests {
     use proxima_gguf::{GgufModel, TensorPayload, parse_complete, write_complete};
 
     use super::*;
-
-    const GRANITE_GGUF: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
+    use crate::test_support::granite_moe_gguf_path;
 
     const SAMPLE_F32_BITS: [u32; 6] = [
         0x3F80_0000,
@@ -207,11 +206,12 @@ mod tests {
     }
 
     fn first_granite_f32_tensor(run: impl FnOnce(&TensorInfo, &[u8])) {
+        let path = granite_moe_gguf_path();
         assert!(
-            Path::new(GRANITE_GGUF).exists(),
-            "host-local gguf blob missing at {GRANITE_GGUF}"
+            Path::new(&path).exists(),
+            "host-local gguf blob missing at {path}"
         );
-        let file = File::open(GRANITE_GGUF).unwrap();
+        let file = File::open(&path).unwrap();
         let mapping = unsafe { memmap2::Mmap::map(&file) }.unwrap();
         let parsed = parse_complete(&mapping).unwrap();
         let tensor = parsed

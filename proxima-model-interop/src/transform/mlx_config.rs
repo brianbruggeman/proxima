@@ -371,9 +371,8 @@ mod tests {
     use crate::bind::architecture_from_metadata;
     use crate::hf_config::{architecture_from_hf_config, parse_hf_config};
     use crate::sliding_pattern::hparams::from_metadata as sliding_from_metadata;
+    use crate::test_support::{gemma4_e2b_arch_gguf_path, granite_moe_gguf_path};
 
-    const E2B_GGUF: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
-    const GRANITE_GGUF: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
     const SPEC_KEYS: [&str; 10] = [
         "architectures",
         "model_type",
@@ -427,7 +426,7 @@ mod tests {
     }
 
     fn granite() -> (ModelHparams, ParsedGguf) {
-        let parsed = open(GRANITE_GGUF);
+        let parsed = open(&granite_moe_gguf_path());
         (
             with_directory_tie(
                 architecture_from_metadata(&parsed).expect("granite metadata reads"),
@@ -438,7 +437,7 @@ mod tests {
     }
 
     fn e2b() -> (ModelHparams, ParsedGguf) {
-        let parsed = open(E2B_GGUF);
+        let parsed = open(&gemma4_e2b_arch_gguf_path());
         let hparams =
             sliding_pattern_hparams(&sliding_from_metadata(&parsed).expect("e2b metadata reads"));
         (with_directory_tie(hparams, &parsed), parsed)
