@@ -795,7 +795,7 @@ async fn run_serve(
     addr: SocketAddr,
     mount_path: String,
 ) -> Result<(), ProximaError> {
-    let (raw_text, format_hint) = match (spec_arg, config) {
+    let (raw_text, format_hint, config_dir) = match (spec_arg, config) {
         (Some(_), Some(_)) => {
             return Err(ProximaError::Config(
                 "provide either positional <spec> or --config <path>, not both".into(),
@@ -821,29 +821,32 @@ async fn run_serve(
 
     if has_listen_block {
         preflight_full_listener_binds(&parsed)?;
-        run_serve_full(Spec::Inline(parsed)).await
+        run_serve_full(Spec::Inline(parsed), config_dir).await
     } else {
-        run_serve_single(Spec::Inline(parsed), addr, mount_path).await
+        run_serve_single(Spec::Inline(parsed), config_dir, addr, mount_path).await
     }
 }
 
-fn classify_positional_spec(arg: String) -> Result<(String, Option<String>), ProximaError> {
+type ConfigSource = (String, Option<String>, Option<PathBuf>);
+
+fn classify_positional_spec(arg: String) -> Result<ConfigSource, ProximaError> {
     let trimmed = arg.trim_start();
     let looks_like_content = trimmed.starts_with(['{', '[', '<']) || arg.contains('\n');
     if looks_like_content {
-        Ok((arg, None))
+        Ok((arg, None, None))
     } else {
         read_config_path(PathBuf::from(&arg))
     }
 }
 
-fn read_config_path(path: PathBuf) -> Result<(String, Option<String>), ProximaError> {
+fn read_config_path(path: PathBuf) -> Result<ConfigSource, ProximaError> {
     let text = std::fs::read_to_string(&path).map_err(ProximaError::Io)?;
     let hint = path
         .extension()
         .and_then(|ext| ext.to_str())
         .map(str::to_string);
-    Ok((text, hint))
+    let absolute = std::path::absolute(&path).map_err(ProximaError::Io)?;
+    Ok((text, hint, absolute.parent().map(Path::to_path_buf)))
 }
 
 fn preflight_full_listener_binds(parsed: &Value) -> Result<(), ProximaError> {
@@ -888,10 +891,12 @@ fn preflight_full_listener_binds(parsed: &Value) -> Result<(), ProximaError> {
 
 async fn run_serve_single(
     spec: Spec,
+    config_dir: Option<PathBuf>,
     addr: SocketAddr,
     mount_path: String,
 ) -> Result<(), ProximaError> {
     let mut app = App::new()?;
+    app.set_config_dir(config_dir);
     let handle = app.pipe("__served__", spec).await?;
     app.mount(&mount_path, MountTarget::Handle(handle))?;
 
@@ -925,8 +930,9 @@ fn resolve_bind_addr(addr: SocketAddr) -> Result<SocketAddr, ProximaError> {
     Ok(resolved)
 }
 
-async fn run_serve_full(spec: Spec) -> Result<(), ProximaError> {
+async fn run_serve_full(spec: Spec, config_dir: Option<PathBuf>) -> Result<(), ProximaError> {
     let mut app = App::new()?;
+    app.set_config_dir(config_dir);
     let handles = app.load_full(spec).await?;
     if handles.is_empty() {
         return Err(ProximaError::Config(

@@ -14,6 +14,20 @@ use proxima_core::factory::Named;
 pub trait PipeFactory: Send + Sync + 'static {
     fn name(&self) -> &str;
 
+    /// Spec keys whose string values name files. The loader resolves a
+    /// relative value against the directory of the config file that declared
+    /// the pipe, so the factory only ever sees a path that is already anchored.
+    fn path_fields(&self) -> &[&'static str] {
+        &[]
+    }
+
+    /// Spec keys whose values are themselves pipe specs the factory builds
+    /// through the registry (`record.inner`). The loader anchors those
+    /// nested specs' `path_fields` the same way it anchors this spec's own.
+    fn nested_fields(&self) -> &[&'static str] {
+        &[]
+    }
+
     /// Build a Pipe from a config spec. `inner` carries the next
     /// stage in the chain for wrapping pipes (auth, retry, validate,
     /// transform, …); terminal pipes (synth, http, kv, …) ignore it.

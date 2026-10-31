@@ -415,6 +415,7 @@ impl AppBuilder {
             telemetry,
             metrics,
             http_client,
+            config_dir: None,
         };
         let listen_registry = Arc::new(self.listen_registry);
         let cores_override = self

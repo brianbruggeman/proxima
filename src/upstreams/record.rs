@@ -944,6 +944,10 @@ impl PipeFactory for RecordPipeFactory {
         "record"
     }
 
+    fn nested_fields(&self) -> &[&'static str] {
+        &["inner"]
+    }
+
     fn build(
         &self,
         spec: &Value,

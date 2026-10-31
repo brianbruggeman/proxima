@@ -23,7 +23,7 @@ pub mod middleware;
 pub mod tuning;
 pub mod upstream;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config_format::default_config_format_registry;
 use crate::error::ProximaError;
@@ -128,6 +128,13 @@ pub struct ProximaSettings {
     #[serde(default)]
     #[builder(default)]
     pub buffer_pool: BufferPoolTuning,
+
+    /// Absolute directory of the file these settings were read from, e.g.
+    /// `/srv/lambda`; relative file paths in upstream specs resolve against
+    /// it. `None` for settings not read from a file.
+    #[setting(skip)]
+    #[serde(skip)]
+    pub config_dir: Option<PathBuf>,
 }
 
 impl ProximaSettings {
@@ -143,8 +150,11 @@ impl ProximaSettings {
             .map(str::to_string);
         let registry = default_config_format_registry()?;
         let value = registry.parse_with_hint(&raw, hint.as_deref())?;
-        serde_json::from_value(value)
-            .map_err(|err| ProximaError::Config(format!("decode ProximaSettings: {err}")))
+        let mut settings: Self = serde_json::from_value(value)
+            .map_err(|err| ProximaError::Config(format!("decode ProximaSettings: {err}")))?;
+        let absolute = std::path::absolute(path).map_err(ProximaError::Io)?;
+        settings.config_dir = absolute.parent().map(Path::to_path_buf);
+        Ok(settings)
     }
 }
 
