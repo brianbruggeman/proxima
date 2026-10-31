@@ -278,6 +278,7 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
                     | Codec::Q1_0
                     | Codec::Q2_0
                     | Codec::Pq2_0
+                    | Codec::Ptq1_0
                     | Codec::BFloat8
                     | Codec::Bf8E5M2
                     | Codec::Bf4E2M1
