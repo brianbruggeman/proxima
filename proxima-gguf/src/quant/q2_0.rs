@@ -71,12 +71,14 @@ pub(super) fn quantize_groups<const GROUP: usize, const BYTES: usize>(
         .iter()
         .zip(output.as_chunks_mut::<BYTES>().0)
     {
-        let scale = chunk.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+        let scale = chunk
+            .iter()
+            .fold(0.0f32, |peak, value| peak.max(value.abs()));
         let inverse = if scale > 0.0 { 1.0 / scale } else { 0.0 };
         block[..2].copy_from_slice(&half::f16::from_f32(scale).to_le_bytes());
         block[2..].fill(0);
         for (index, value) in chunk.iter().enumerate() {
-            let code = ((value * inverse).round() as i32 + 1).clamp(0, 3) as u8;
+            let code = (libm::roundf(value * inverse) as i32 + 1).clamp(0, 3) as u8;
             block[2 + index / 4] |= code << (2 * (index % 4));
         }
     }
