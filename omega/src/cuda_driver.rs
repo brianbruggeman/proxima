@@ -2225,6 +2225,9 @@ fn packed_codec(block: &QuantizedBlock<'_>) -> Option<Codec> {
         | Codec::Q8_0
         | Codec::Q4_0
         | Codec::Q5_0
+        | Codec::Q1_0
+        | Codec::Q2_0
+        | Codec::Pq2_0
         | Codec::Float16
         | Codec::BFloat16 => Some(*codec),
         Codec::Q5_1
@@ -2244,9 +2247,6 @@ fn packed_codec(block: &QuantizedBlock<'_>) -> Option<Codec> {
         | Codec::Tq20
         | Codec::Mxfp4
         | Codec::Nvfp4
-        | Codec::Q1_0
-        | Codec::Q2_0
-        | Codec::Pq2_0
         | Codec::BFloat8
         | Codec::Bf8E5M2
         | Codec::Bf4E2M1
@@ -2373,7 +2373,7 @@ mod tests {
 
     const KERNEL_CACHE_DIR_VAR: &str = "PROXIMA_CUDA_KERNEL_CACHE_DIR";
 
-    const CUDA_UNPACKABLE: [Codec; 19] = [
+    const CUDA_UNPACKABLE: [Codec; 17] = [
         Codec::Q5_1,
         Codec::Q4_1,
         Codec::Q8_1,
@@ -2391,11 +2391,9 @@ mod tests {
         Codec::Tq20,
         Codec::Mxfp4,
         Codec::Nvfp4,
-        Codec::Q1_0,
-        Codec::Q2_0,
     ];
 
-    const CODECS_WITH_CUDA_KERNEL: [Codec; 10] = [
+    const CODECS_WITH_CUDA_KERNEL: [Codec; 13] = [
         Codec::Q2K,
         Codec::Q3K,
         Codec::Q4K,
@@ -2404,6 +2402,9 @@ mod tests {
         Codec::Q8_0,
         Codec::Q4_0,
         Codec::Q5_0,
+        Codec::Q1_0,
+        Codec::Q2_0,
+        Codec::Pq2_0,
         Codec::Float16,
         Codec::BFloat16,
     ];

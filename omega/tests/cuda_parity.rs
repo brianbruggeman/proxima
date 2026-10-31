@@ -1092,6 +1092,66 @@ fn packed_q5_0_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
     );
 }
 
+#[test]
+fn packed_q1_0_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
+    use proxima_gguf::quant::q1_0::{BLOCK_BYTES, QK_Q1_0, dequantize, quantize};
+    assert_packed_codec_parity(
+        "q1_0",
+        BLOCK_BYTES,
+        QK_Q1_0,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Packed {
+            codec: Codec::Q1_0,
+            bytes,
+        },
+        3,
+        2,
+        NumericPolicy::default(),
+        1e-5,
+    );
+}
+
+#[test]
+fn packed_q2_0_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
+    use proxima_gguf::quant::q2_0::{BLOCK_BYTES, QK_Q2_0, dequantize, quantize};
+    assert_packed_codec_parity(
+        "q2_0",
+        BLOCK_BYTES,
+        QK_Q2_0,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Packed {
+            codec: Codec::Q2_0,
+            bytes,
+        },
+        3,
+        4,
+        NumericPolicy::default(),
+        1e-5,
+    );
+}
+
+#[test]
+fn packed_pq2_0_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
+    use proxima_gguf::quant::pq2_0::{BLOCK_BYTES, QK_PQ2_0, dequantize, quantize};
+    assert_packed_codec_parity(
+        "pq2_0",
+        BLOCK_BYTES,
+        QK_PQ2_0,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Packed {
+            codec: Codec::Pq2_0,
+            bytes,
+        },
+        3,
+        2,
+        NumericPolicy::default(),
+        1e-5,
+    );
+}
+
 /// `cuda.rs`'s `kernel_signature` declares the OUTPUT pointer itself as
 /// `__half*` for a `DType::FLOAT16` op (unlike `crate::wgsl`, which always
 /// casts an f16 compute result back to an `array<f32>` storage write) -- see
