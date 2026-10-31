@@ -259,6 +259,11 @@ pub struct ModelDescriptor {
     /// (`<family>.ssm.v_head_reordered`).
     #[serde(default)]
     pub v_head_reordered: bool,
+    /// Whether `ssm_out` reads its input as llama.cpp does: value dim innermost, heads
+    /// tiled as `g * kv_heads + u`. Independent of [`Self::v_head_reordered`] because
+    /// checkpoints that reorder the V heads without the key nest `ssm_out` differently.
+    #[serde(default)]
+    pub ssm_out_head_major: bool,
     /// Width of the shared expert a [`FfnCombination::RoutedWithSharedExpert`]
     /// layer runs next to its routed experts
     /// (`<family>.expert_shared_feed_forward_length`); `0` when no layer has one.
@@ -705,6 +710,7 @@ pub fn gqa_descriptor_from_shape(
         ssm_inner_size: 0,
         ssm_epsilon: 0.0,
         v_head_reordered: false,
+        ssm_out_head_major: false,
         expert_shared_feed_forward: 0,
         prefill_width: None,
         gated_attention: false,

@@ -1959,6 +1959,7 @@ pub fn append_delta_net_mixer_with_taps(
         l_cache,
         output_gate,
         false,
+        false,
         prefill_width,
     )
 }
@@ -2131,6 +2132,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     l_cache: u32,
     output_gate: GdnOutputGate,
     v_head_reordered: bool,
+    ssm_out_head_major: bool,
     prefill_width: Option<u32>,
 ) -> Result<(NodeId, SsmMixerTaps), TensorError> {
     // `prefill_width` is the caller's own already-known leading (`s`) extent
@@ -2760,7 +2762,16 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         // (u,g,j)-role permutation scoring `>=1.2`) -- this weight was saved
         // with a different head/value nesting than the value/`z`/qkv weights,
         // not the same convention reused.
-        let out_weight_split_map = alloc::format!("{}*j+{group}*u+g,d->ugjd", kv_heads * group);
+        // `ssm_out_head_major` is llama.cpp's own graph order: the projection reads
+        // `[head_v_dim, n_v_heads]` flattened, value dim innermost, heads tiled as
+        // `g * kv_heads + u` -- the order a checkpoint converted with its V heads
+        // reordered carries, proven on Bonsai-27B by the " Paris" completion of
+        // "The capital of France is".
+        let out_weight_split_map = if ssm_out_head_major {
+            alloc::format!("{}*g+{head_v_dim}*u+j,d->ugjd", kv_heads * head_v_dim)
+        } else {
+            alloc::format!("{}*j+{group}*u+g,d->ugjd", kv_heads * group)
+        };
         let ssm_out_split = elementwise(
             program,
             DType::FLOAT32,

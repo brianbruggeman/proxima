@@ -3280,6 +3280,7 @@ pub fn recurrent_interval_forward_program_with_last_row(
         ssm_inner_size: ssm_d_inner,
         ssm_epsilon: rms_eps,
         v_head_reordered: false,
+        ssm_out_head_major: false,
         expert_shared_feed_forward: 0,
         prefill_width: None,
         gated_attention: true,

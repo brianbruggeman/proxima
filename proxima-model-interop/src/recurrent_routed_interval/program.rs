@@ -124,6 +124,7 @@ pub fn descriptor_from_architecture(
         ssm_inner_size: architecture.ssm_inner_size,
         ssm_epsilon: architecture.rms_epsilon,
         v_head_reordered: architecture.v_head_reordered,
+        ssm_out_head_major: false,
         expert_shared_feed_forward: architecture.expert_shared_feed_forward,
         prefill_width: width,
         gated_attention: true,
