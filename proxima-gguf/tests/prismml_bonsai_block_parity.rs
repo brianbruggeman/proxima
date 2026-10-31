@@ -15,6 +15,8 @@
 //! - `Ternary-Bonsai-1.7B-Q2_0_g64.gguf` (sha256 6d0ecb3d...5c91), data at 5945280, tensor at +87369536.
 //! - `Ternary-Bonsai-1.7B-PQ2_0.gguf` (sha256 de68ba48...ae50), data at 5945280, tensor at +82516128.
 
+#![allow(clippy::expect_used)]
+
 use proxima_gguf::quant::QuantError;
 use proxima_gguf::quant::dispatch::dequantize;
 use proxima_gguf::types::GgmlType;
@@ -156,6 +158,51 @@ fn truncated_pq2_0_block_is_a_typed_error_not_a_misread() {
         QuantError::InputNotBlockMultiple {
             found: 33,
             block_bytes: 34,
+            ..
+        }
+    ));
+}
+
+fn proxima_encode(quantize: QuantizeFn, values: &[f32], block_bytes: usize) -> Vec<u8> {
+    let mut output = vec![0u8; values.len() / 128 * block_bytes];
+    quantize(values, &mut output).expect("whole blocks quantize");
+    output
+}
+
+type QuantizeFn = fn(&[f32], &mut [u8]) -> Result<(), QuantError>;
+
+#[test]
+fn quantizing_the_decoded_real_pq2_0_block_reproduces_its_bytes() {
+    let decoded = proxima_decode(GgmlType::Pq2_0, &PQ2_0_BLOCK, 128);
+    let encoded = proxima_encode(proxima_gguf::quant::pq2_0::quantize, &decoded, 34);
+    assert_eq!(encoded, PQ2_0_BLOCK);
+}
+
+#[test]
+fn quantizing_the_decoded_real_q2_0_blocks_reproduces_their_bytes() {
+    let decoded = proxima_decode(GgmlType::Q2_0, &Q2_0_BLOCKS, 128);
+    let mut encoded = vec![0u8; 36];
+    proxima_gguf::quant::q2_0::quantize(&decoded, &mut encoded).expect("two whole blocks");
+    assert_eq!(encoded, Q2_0_BLOCKS);
+}
+
+#[test]
+fn quantizing_the_decoded_real_q1_0_block_reproduces_its_bytes() {
+    let decoded = proxima_decode(GgmlType::Q1_0, &Q1_0_BLOCK, 128);
+    let encoded = proxima_encode(proxima_gguf::quant::q1_0::quantize, &decoded, 18);
+    assert_eq!(encoded, Q1_0_BLOCK);
+}
+
+#[test]
+fn quantizing_a_ragged_run_is_a_typed_error() {
+    let mut output = vec![0u8; 34];
+    let error = proxima_gguf::quant::pq2_0::quantize(&[0.5; 100], &mut output)
+        .expect_err("100 elements is not a whole 128-element block");
+    assert!(matches!(
+        error,
+        QuantError::InputNotElementMultiple {
+            found: 100,
+            block_elements: 128,
             ..
         }
     ));
