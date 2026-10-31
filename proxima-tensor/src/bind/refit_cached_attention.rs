@@ -58,6 +58,48 @@ pub fn refit_cached_attention_rows(
     Some(patches)
 }
 
+/// The nodes whose resolved shape differs between `previous` and `next`.
+#[must_use]
+pub fn changed_nodes(program: &[Op], previous: &Shapes, next: &Shapes) -> Vec<NodeId> {
+    (0..program.len())
+        .map(|position| NodeId(position as u32))
+        .filter(|node| previous.of(*node) != next.of(*node))
+        .collect()
+}
+
+/// The positions in `resolved` a shape diff over `changed` touches; the result
+/// depends only on `changed` and the bound ops' structure, so a caller that
+/// sees the same `changed` set again can reuse it.
+#[must_use]
+pub fn touched_positions(
+    resolved: &[BoundOp],
+    program: &[Op],
+    changed: &[NodeId],
+) -> Vec<usize> {
+    let changed: BTreeSet<NodeId> = changed.iter().copied().collect();
+    resolved
+        .iter()
+        .enumerate()
+        .filter(|(_, bound)| touches_changed(bound, program, &changed))
+        .map(|(position, _)| position)
+        .collect()
+}
+
+/// [`refit_cached_attention_rows`] restricted to `positions`: the replacement
+/// ops for exactly those positions, or `None` when any of them is not a
+/// refittable cached-attention op at `next`.
+#[must_use]
+pub fn refit_cached_attention_at(
+    resolved: &[BoundOp],
+    positions: &[usize],
+    next: &Shapes,
+) -> Option<Vec<(usize, BoundOp)>> {
+    positions
+        .iter()
+        .map(|position| Some((*position, refit_one(resolved.get(*position)?, next)?)))
+        .collect()
+}
+
 /// exposed so a caller can measure which ops a shape diff touches before refreshing them.
 pub fn touches_changed(bound: &BoundOp, program: &[Op], changed: &BTreeSet<NodeId>) -> bool {
     let reads = read_nodes(bound);

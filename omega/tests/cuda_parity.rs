@@ -2950,15 +2950,15 @@ fn refit_symbols_increments_refit_calls_once_per_call() {
 
     let after = omega::backend::cuda_refit_counters(&cuda_plan)
         .expect("a cuda plan exposes its refit counters");
-    let op_count = after[3];
+    let op_count = after[2];
     assert!(
         op_count > 0,
-        "a refit repacks at least one resolved op, got {op_count}"
+        "a refit keeps at least one resolved op, got {op_count}"
     );
     assert_eq!(
         after,
-        [1, 0, op_count, op_count],
-        "unchanged symbols re-emit nothing: every op is reused and repacked once"
+        [1, 0, op_count, 0],
+        "unchanged symbols re-emit and repack nothing: every op is reused as it stands"
     );
 }
 

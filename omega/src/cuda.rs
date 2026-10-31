@@ -434,6 +434,30 @@ pub fn emit_cuda_reusing(
     Ok((kernels, reused))
 }
 
+/// Moves one kernel from `old` to `new` in place: the text is kept when the two
+/// ops emit the same CUDA C, and the grid always follows `new`'s extents.
+/// Returns whether the text was kept.
+///
+/// # Errors
+/// The emit error of `new` when the text has to be regenerated.
+pub fn refit_kernel(
+    old: &BoundOp,
+    new: &BoundOp,
+    kernel: &mut CudaKernel,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+) -> Result<bool, EmitError> {
+    if !same_emitted_text(old, new, packed_operands) {
+        *kernel = emit_cuda_with_policy(new, packed_operands, numeric_policy)?;
+        return Ok(false);
+    }
+    let quantized = operand_codecs(new, packed_operands);
+    let (grid, extra_outputs) = extent_fields(new, &quantized, numeric_policy)?;
+    kernel.grid = grid;
+    kernel.extra_outputs = extra_outputs;
+    Ok(true)
+}
+
 /// Whether two ops emit the same CUDA C text. Layout stride and base values go
 /// to uniforms, so only each stride's zero pattern reaches the text. Extents
 /// reach the text only through packed-operand addressing, so an op that reads
@@ -4758,11 +4782,12 @@ mod tests {
         );
     }
 
-    /// A single-row broadcast reduce keeps the one-warp-per-output-element
-    /// grid, so a decode step's launch shape is unchanged.
+    /// A broadcast-epilogue reduce over one row (the decode-shaped RMSNorm) is
+    /// latency-bound on a single warp, so it takes a whole block and combines
+    /// the warps' partials through shared memory.
     #[test]
-    fn a_single_row_broadcast_reduce_keeps_the_per_element_grid() {
-        let mut bound = matmul_reduce_op(1, 8, ScalarOp::Add);
+    fn a_single_row_broadcast_reduce_takes_a_whole_block() {
+        let mut bound = matmul_reduce_op(1, 1024, ScalarOp::Add);
         let BoundOpKind::Reduce {
             epilogue_broadcast_axes,
             ..
@@ -4774,7 +4799,58 @@ mod tests {
 
         let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
             .expect("broadcast kernel emits");
-        assert_eq!(kernel.grid.threads, 8 * WARP_SIZE);
+
+        assert_eq!(kernel.grid.block_width, Some(BLOCK_REDUCE_WIDTH));
+        assert_eq!(kernel.grid.threads, BLOCK_REDUCE_WIDTH);
+        assert!(kernel.source.contains("__shared__ float warp_partials[32];"));
+        assert!(kernel.source.contains("long output_index = (long)blockIdx.x;"));
+    }
+
+    #[test]
+    fn a_multi_row_broadcast_reduce_keeps_one_warp_per_row() {
+        let mut bound = matmul_reduce_op(5, 1024, ScalarOp::Add);
+        let BoundOpKind::Reduce {
+            epilogue_broadcast_axes,
+            ..
+        } = &mut bound.kind
+        else {
+            panic!("matmul_reduce_op always builds a Keep::Reduce fold")
+        };
+        epilogue_broadcast_axes.push(1);
+
+        let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
+            .expect("broadcast kernel emits");
+
+        assert_eq!(kernel.grid.block_width, Some(WARP_SIZE));
+        assert_eq!(kernel.grid.threads, 5 * WARP_SIZE);
+    }
+
+    #[test]
+    fn a_rank_one_packed_reduce_hoists_row_bases_and_decodes_unrolled_chunks() {
+        for (codec, name) in [
+            (Codec::Q8_0, "q8_0"),
+            (Codec::Q4K, "q4k"),
+            (Codec::Q1_0, "q1_0"),
+            (Codec::Q2_0, "q2_0"),
+            (Codec::Pq2_0, "q2_0"),
+        ] {
+            let bound = matmul_reduce_op(4, 256, ScalarOp::Add);
+            let mut packed = BTreeMap::new();
+            packed.insert(bound.operands()[0].0, codec);
+
+            let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
+                .expect("emit succeeds");
+
+            assert!(kernel.source.contains("const long row0 ="), "{name} row base");
+            assert!(
+                kernel.source.contains(&format!("{name}_chunk8(in0 + (off0_3 /")),
+                "{name} unrolled chunk decode"
+            );
+            assert!(
+                !kernel.source.contains("remaining_r"),
+                "{name} rank-1 reduction needs no coordinate decomposition"
+            );
+        }
     }
 
     #[test]
