@@ -41,7 +41,7 @@ fn report(path: &str, parsed: &proxima_gguf::pipe::ParsedGguf) -> Result<(), Box
     for tensor in &parsed.tensors {
         let layout = tensor.ggml_type.block_layout();
         println!(
-            "tensor name={} type={:?} wire={} dims={:?} elements={} nbytes={:?} block_elements={} block_bytes={}",
+            "tensor name={} type={:?} wire={} dims={:?} elements={} nbytes={:?} block_elements={} block_bytes={} offset={}",
             tensor.name,
             tensor.ggml_type,
             tensor.ggml_type.to_wire(),
@@ -50,6 +50,7 @@ fn report(path: &str, parsed: &proxima_gguf::pipe::ParsedGguf) -> Result<(), Box
             tensor.nbytes(),
             layout.block_elements,
             layout.block_bytes,
+            tensor.offset,
         );
     }
     Ok(())
