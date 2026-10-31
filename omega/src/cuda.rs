@@ -899,33 +899,9 @@ pub(crate) fn cuda_float_literal(value: f32) -> String {
     }
 }
 
-#[cfg(not(feature = "float-layout-dtype"))]
-fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
-    match dtype {
-        DType::FLOAT16 => Ok("__half"),
-        DType::FLOAT32
-        | DType::BFLOAT16
-        | DType::Bool
-        | DType::INT8
-        | DType::UINT8
-        | DType::INT32
-        | DType::UINT32 => Ok("float"),
-        DType::INT16
-        | DType::UINT16
-        | DType::INT64
-        | DType::UINT64
-        | DType::INT128
-        | DType::UINT128
-        | DType::FLOAT64
-        | DType::BFLOAT8
-        | DType::FP6_E3_M2 => Err(EmitError::UnsupportedDType { node, dtype }),
-    }
-}
-
 /// `__half` and `__nv_bfloat16` where the layout's fields equal binary16's and bfloat16's, `float`
 /// for every other layout (the kernel computes in binary32 and the host narrows through the
 /// layout codec at the buffer boundary, as on Metal).
-#[cfg(feature = "float-layout-dtype")]
 fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
     match dtype {
         DType::Layout(layout) if layout.width() <= 32 => {
