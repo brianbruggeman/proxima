@@ -16,6 +16,7 @@
 mod support;
 use support::{
     as_named_blocks, qwen3_gqa_qk_norm_forward_fixture, qwen3_gqa_qk_norm_padded_cache_fixture,
+    qwen35_partial_rotary_forward_fixture,
     real_forward_fixture,
 };
 
@@ -3150,4 +3151,72 @@ fn prefill_matmul_timing_at_8b_gate_shape_reports_ms_per_call() {
         per_call[2] < per_call[0] * 66.0,
         "66 tokens must cost less than 66 single-row executes: {per_call:?}"
     );
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+fn partial_rotary_relative_error(cached_extent: u64, cached_len: u64) -> (f32, Vec<String>) {
+    let (program, symbols, roots, owned) =
+        qwen35_partial_rotary_forward_fixture(1, cached_extent, cached_len);
+    let named = as_named_blocks(&owned);
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the partial-rotary fixture on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named)
+        .expect("omega::backend runs the partial-rotary fixture on cpu");
+
+    let mut cuda_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::bit_exact().with_reassociation(true),
+    )
+    .expect("omega::backend plans the partial-rotary fixture on cuda");
+    let identities = cuda_kernel_identities(&cuda_plan).expect("cuda plan exposes its kernels");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend runs the partial-rotary fixture on a real cuda device");
+
+    let expected = cpu.root();
+    let actual = cuda.root();
+    assert_eq!(actual.len(), expected.len());
+    let max_diff = expected
+        .iter()
+        .zip(actual.iter())
+        .map(|(want, got)| (want - got).abs())
+        .fold(0.0f32, f32::max);
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
+    (max_diff / max_magnitude.max(f32::MIN_POSITIVE), identities)
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+#[test]
+fn cuda_partial_rotary_cached_attention_matches_cpu_with_padded_rows() {
+    for (cached_extent, cached_len) in [(40_u64, 37_u64), (512, 512)] {
+        let (relative, identities) = partial_rotary_relative_error(cached_extent, cached_len);
+        eprintln!(
+            "partial_rotary cached_extent={cached_extent} cached_len={cached_len} relative={relative}"
+        );
+        assert!(
+            identities
+                .iter()
+                .any(|identity| identity.contains("omega_cuda_cached_attention_") && identity.contains("_r64")),
+            "partial-rotary fused attention absent from the cuda plan: {identities:?}"
+        );
+        assert!(
+            relative < 1e-4,
+            "cached_extent={cached_extent} cached_len={cached_len}: cuda vs cpu relative={relative}, tolerance 1e-4"
+        );
+    }
 }
