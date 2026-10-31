@@ -55,8 +55,9 @@ Generated from `src/capability.rs`'s own tables by `examples/generate_compatibil
 | TQ2_0 | unsupported |
 | MXFP4 | unsupported |
 | NVFP4 | unsupported |
-| Q1_0 | unsupported |
-| Q2_0 | unsupported |
+| Q1_0 | supported |
+| Q2_0 | supported |
+| PQ2_0 | supported |
 | BF8 | unsupported |
 | BF8_E5M2 | supported |
 | BF4_E2M1 | supported |
