@@ -47,14 +47,15 @@ Ruled out on the alloc-free path (principle 3 verbatim list applies): `std::io::
 | --- | --- |
 | guest boots and emits bytes on Apple silicon | `cargo nextest run -p proxima-vm` → 9 tests, boot emits 22 bytes |
 | HVF lane: synthesized aarch64, `hvc #0` per byte | `src/backend_macos.c:69-74` |
-| KVM lane: 16-bit x86, `KVM_EXIT_IO` per byte | `src/backend_linux.c:141-155` |
+| KVM lane: 16-bit x86, `KVM_EXIT_IO` per byte | `src/kvm/scratch.rs` |
 | the virtqueue seam already exists | `proxima-storage/src/nvme/backend.rs:12` — `QueueBackend`, 4 methods |
 | sans-IO submission/completion rings, `Pipe + SendPipe` | `proxima-storage/src/nvme/engine.rs:6` |
 | DMA/BAR/pagemap pinning proven vs real NVMe + QEMU 1.4 | `proxima-storage/src/nvme/uio.rs:1-17` |
 | shared-memory producer/consumer rings | `proxima-net/src/xdp/ring.rs`, `umem.rs` |
 | sans-IO TCP for a virtio-net backend | `proxima-net/src/tcp_stack.rs` (686 lines) |
 | bare-metal tier is real and gated | `prime`, `proxima-net`, `proxima-storage`, `proxima-protocols`, `examples/no-std` |
-| `virtio` / `vhost-user` / `memfd` / `userfaultfd` / `page_table` | **0 hits in the tree** |
+| `virtio` / `memfd` / `page_table` | 2026-08-12 read 0 hits; re-measured with `git grep -il` on 2026-10-31: `virtio` 41 files, `memfd` 3 files, `page_table` 6 files (M4/M6/M11 landed) |
+| `vhost-user` / `userfaultfd` | 0 files on 2026-10-31 |
 | `target_os = "windows"` | 0 hits; reactor is kqueue/epoll/io_uring, no IOCP |
 | KVM host (versailles, 192.168.1.78) | offline as of 2026-08-12 |
 
@@ -330,6 +331,13 @@ boot on the KVM lane, serial console only, no BIOS, no PCI.
   on kernel-emitted bytes and the count is asserted nonzero
 - M5b: the same on HVF, which needs GIC + PSCI + a DTB — that is Track B work
   arriving early, and it is where the two tracks first touch
+- KVM lane, landed 2026-10-31 (the Linux guest, served through `type = "vm"`
+  beside the elf guest): the host's bzImage
+  (`/boot/vmlinuz-linux`, 7.2.11-arch1-1) boots through the 64-bit boot protocol
+  (`src/x86_boot.rs`, sans-IO; `run_linux` in `src/kvm/linux_lane.rs`) and
+  runs a musl `/init` as a per-invocation function over COM2
+  (`src/linux.rs`, `guests/linux-init`, `tests/linux_guest.rs`). Console bytes and
+  the kernel's own banner are asserted; numbers are in BENCH_LOG.md
 
 ### M6 — virtio as a sans-IO codec, next to nvme · ~1-2 weeks
 
@@ -453,6 +461,148 @@ Close the loop: run one device codec against (a) the interpreter, (b) KVM, and
 (c) the real device, and diff the register-access traces.
 
 - exit: three traces, one diff, divergence count per pair reported as a number
+
+---
+
+# Track C — proxima as a pipe-shaped OS
+
+Not a kernel with subsystems. Every OS piece is an instantiation of the one
+`Pipe` trait (`proxima-primitives/src/pipe/primitives.rs:91`): a device's RX
+queue is a source pipe (`In = ()`), its TX queue a sink pipe (`Out = ()`), the
+wire codec is sans-IO, the syscall surface is the existing
+`SendPipe<In = ChildRequest, Out = ChildResponse>` seam, policy is a transform
+in front. Every IO is wrapped in a pipe, so nothing in the device model may
+assume the peer is in-process: an in-process test peer, a recorder, and a proxy
+hop to another host are the same wiring with a different pipe plugged in. C
+holds only the raw ioctl/syscall leaf a pipe wraps; device state machines live
+in Rust sans-IO codecs. The seed is `guests/lambda`.
+
+### OS-1 — the device plane, both directions, against an independent peer · DONE 2026-10-31
+
+What exists: `proxima-protocols/src/virtio/driver.rs` (`DriverQueue<SIZE>`,
+tier 3 in the module — caller-owned table/avail/used memory, const-generic
+size, free list threaded through descriptor `next`; layouts and `DESC_F_*`
+come from the device side's own modules). The host device model
+`src/virtio_net.rs` is `NetTransport<Ingress, Egress>`: ingress is
+`Pipe<In = (), Out = Vec<u8>>`, egress `Pipe<In = Vec<u8>, Out = ()>`, and it
+knows nothing else about the peer. `src/frame_pipe.rs` holds the only queue
+(`frame_channel`), exposed as one sink end and one source end. The guest
+`guests/lambda/src/bin/netstack` is a receive source pipe and a transmit sink
+pipe over `DriverQueue`, feeding `proxima_net::stack::handle_frame`. The peer in
+`tests/net_os.rs` is smoltcp (independent implementation) behind a
+`smoltcp::phy::Device` whose two ends are plain pipes.
+
+Measured on this box, 2026-10-31, one run each (`cargo nextest run -p proxima-vm
+--test net_os --no-capture`; load average and raw lines are in the OS-1 report,
+not asserted by the tests):
+
+| arm | result |
+| --- | --- |
+| direct: ARP + 100 ICMP echo, payload bytes and ident/seq asserted per reply | 100/100, p50 29.5 us, p99 39.8 us, max 25.4 ms; guest rx_delivered = tx_forwarded = 101 |
+| relayed: an observe pipe records both directions between device and peer, neither edited | 100/100, p50 28.9 us, p99 42.3 us; recorder saw 100 IPv4 + 1 ARP each way, totals equal the device's counters |
+| control: guest stack disabled (frames received, dropped) | ping times out at 500 ms; rx_delivered >= 1, tx_forwarded = 0 |
+
+Findings recorded rather than hidden:
+
+- `proxima-protocols`, `proxima-primitives`, `proxima-core` and `proxima-net`
+  no longer link `alloc` with default features off: the `extern crate alloc`
+  and the alloc-pulling dependencies (futures/serde/bytes/serde_json/
+  crossbeam-queue) sit behind the crates' alloc features, and every guest links
+  with no global allocator. `tests/no_alloc_link.rs` proves it on both bare
+  targets by building each guest and scanning the ELF for allocator symbols.
+- `Pipe` has no queue-backed implementation anywhere: `proxima-core::ring` and
+  `SinkFront` expose `push`/`pop`/`emit`/`drain_one` only. `FrameSink` and
+  `FrameSource` exist solely because the orphan rule needs a local type to
+  carry each `Pipe` impl over `crossbeam_queue::ArrayQueue`; the defect is the
+  missing impl in the library, not a need for these types.
+- RX injection works with no interrupt only because the idle guest kicks
+  receiveq1 each poll iteration, turning every poll into a net-window exit
+  (`VirtioWindow` in `src/kvm/devices.rs` routes it to `NetTransport::fill_rx`).
+  Interrupt delivery would need a vCPU interrupt injection on the KVM lane's
+  resume pipe: that is OS-2's work, not grown here.
+
+### OS-2 — event source, idle, and clock
+
+Open design question, not decided here. The guest needs something to wait on
+that is not a spin. Two options:
+
+1. a paravirtual wait verb on the existing `ChildRequest` seam: the guest
+   issues a blocking call that returns when any registered source is ready or a
+   deadline passes. Pro: no interrupt controller, the same hypercall path that
+   already works on both lanes, sans-IO on the guest. Con: every event source
+   routes through one verb, and the host must multiplex.
+2. interrupts: the host injects a vector (KVM IRQ line, HVF pending interrupt)
+   when a device completes, the guest idles in `hlt`/`wfi`. Pro: standard, the
+   guest event loop looks like a kernel's. Con: needs an interrupt controller
+   model and an injection step on the KVM lane's resume pipe
+   (`src/kvm/pipes.rs`).
+
+Design section for the guest event loop (to build in OS-2, recorded now). The
+owner frames fan-out as a queue and fan-in as the execution-queue consumer, and
+wants control over how work is queued. Three controls, each with its anchor:
+
+- lane selection (which queue an item enters). It sees the item, so it is a
+  pipe. Anchor: the `KeyOf` seam (`proxima-primitives/src/pipe/capabilities.rs:106`).
+  `FanOut`/`KeyedFanOut` are broadcast and `Router` is HTTP-shaped; whether a
+  generic partition-into-`lane[i]` pipe already exists is UNVERIFIED (a
+  `git grep -in partition` over `proxima-primitives/src/pipe` found only a doc
+  mention in `batch_source.rs:11`, which is not proof of absence).
+- full-lane policy. Anchor: `FailMode { DropOldest, DropNewest, FailClosed }`
+  (`proxima-core/src/ring/bounded.rs:98`) on `BoundedQueue`, available on both
+  tiers (`StaticBoundedQueue`, `HeapBoundedQueue`). There is no async
+  wait-for-room mode. Checked: `DropOldest` destroys the evicted item
+  (`let _oldest = self.queue.dequeue();` at `bounded.rs:189`) and `DropNewest`
+  destroys the new one; only `try_enqueue` (`bounded.rs:205`) hands the item
+  back, so a lane that must not lose events uses `FailClosed` or `try_enqueue`.
+- drain order (how the consumer picks a lane). Anchor: `FanInStrategy`
+  (`proxima-primitives/src/pipe/fan_in.rs:97`, `fn index(&self, step, start, n)`).
+  Strict priority is `Select::Fifo` over lanes ordered by priority; weighted or
+  aging policies need per-source feedback the `index()` signature does not
+  carry.
+
+The guest event loop is the first consumer; lanes = timer / nic rx / console /
+hypercall.
+
+- exit (numeric, whichever option is chosen): an idle guest with no traffic for
+  1 s costs <= 1% of the OS-1 poll loop's exits per second (OS-1 baseline:
+  measure with the same harness before the change); a 10 ms guest timer fires
+  with p99 error <= 1 ms over 100 trials against the host monotonic clock; the
+  OS-1 ping arm still passes 100/100 with p50 <= 2x the OS-1 figure above.
+
+### OS-3 — allocator decision for tier 1
+
+Connections scale with guest behavior, so tier 1 (no_std + alloc) needs a
+decided allocator, not a refusing one. Candidates: static arena sized from the
+`sized` TOML (principle 12), bump with epoch reset per connection batch, and a
+size-class free list. The decision is made from measurement, not preference.
+
+- exit: a connect/transfer/close cycle repeated 10,000 times shows allocator
+  live bytes returning to the pre-run value (zero leak), peak guest memory for
+  1,000 concurrent connections reported per candidate, and the chosen candidate
+  stays <= 64 MiB at that load; the refusing allocator remains the default for
+  tier 3 guests.
+
+### OS-4 — TCP over the inet glue
+
+`proxima-net/src/tcp_stack.rs` and `proxima-protocols/src/inet/` become the
+guest's TCP, driven by the OS-1 receive source and transmit sink, still with
+smoltcp as the independent peer.
+
+- exit: 100 sequential connections through handshake, 1 MiB transferred each
+  direction byte-exact (digest compared), both sides reach closed; retransmit
+  count and time to first byte reported per connection; control: a guest that
+  drops SYNs makes the smoltcp connect time out (asserted).
+
+### OS-5 — an h1 server as the guest OS
+
+A proxima HTTP/1 server (`proxima_protocols::http1_codec`) is the guest's
+entire userland, reached over OS-4. The host test plugs a pipe that bridges a
+loopback listener to the frame pipes so the real `curl` binary talks to it.
+
+- exit: `curl` exits 0 for 1,000 sequential GETs with the response body digest
+  equal to the served bytes each time, status 200 on all, p50/p99 per request
+  reported; control: a request for a path the guest does not serve returns 404
+  from the guest, not from the bridge.
 
 ---
 
@@ -591,9 +741,14 @@ the owner reviews the diff and rules. What ran:
    lambda guest issues `Read` then `Close` as genuine `hvc #0` traps, host
    responses provably change guest-emitted bytes (`00 00` vs `03 03` from the
    identical binary), request counts asserted, both sad paths named errors.
-   The KVM lane compiles under cross-toolchain but has never executed —
-   `/dev/kvm` absent on this host; RIP auto-advance after `out` is an
-   inherited, unverified assumption.
+   The KVM lane first executed 2026-10-31 (`BENCH_LOG.md`, "KVM lane first
+   execution"): the same guest, built for `x86_64-unknown-none`, runs in
+   64-bit long mode and issues the same hypercalls and virtio-mmio accesses
+   through what was then the C exit loop (`proxima_vm_run_device_dispatch_loop`,
+   since replaced by the pipes in `src/kvm`); RIP advances past `out dx,
+   al` (the second hypercall executing is the proof). The aarch64-only
+   device tests (GIC, PL011, PSCI, arm64 kernel and edk2 boot) have no x86
+   counterpart.
 5. M2 is next per its section above.
 
 Full gate at close: nextest 43/43, clippy `--all-targets` clean,
