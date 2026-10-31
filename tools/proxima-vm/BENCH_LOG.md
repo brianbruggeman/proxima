@@ -13,7 +13,7 @@ is a **wall-clock note, not a pinned-core guarantee** — see Notes below.
 
 ## C1 — elf.rs (`parse_elf`, `Cursor`/`Step` FSM, `Segment`, `LoaderError`)
 
-| Build+Tiers | Tests (N) | Lint | Micro | Compare | E2E | Opt | SIMD/SM/no-dyn | O(1) | Cfg/API | Home-turf | Audit | Consts | Re-prove | Δ | Notes |
+| Build+Tiers | Tests (N) | Lint | Linux | Compare | E2E | Opt | SIMD/SM/no-dyn | O(1) | Cfg/API | Home-turf | Audit | Consts | Re-prove | Δ | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | DONE (see below) | DONE (24) | DONE | DONE | DONE | N/A | PARTIAL | DONE | DONE | N/A | DONE | DONE | N/A | DONE | initial landing | see below |
 
@@ -1758,3 +1758,244 @@ CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-vm --all-targets
   restore cost at large `K` between the sort, the coalescing walk, and the
   `hv_vm_unmap`/`hv_vm_map` syscall pair themselves; the end-to-end numbers
   above are the only measurement this slice took.
+
+## KVM lane first execution (2026-10-31, linux/x86_64, `/dev/kvm`)
+
+**Host:** Intel i7-9700K, Linux 7.2.11-zen1, `/dev/kvm` crw-rw-rw-, debug
+build, `/proc/loadavg` 3.99-5.36 during the runs (other agents live on the
+box; every number below is a single run, not a distribution, and carries that
+load). Every row before this one in this file was HVF-only; the KVM lane had
+only ever been cross-compiled.
+
+**What executed:** the x86_64 lambda guest (`x86_64-unknown-none`, linked at
+0, stack at 64 MiB) entered in 64-bit long mode through `KVM_SET_SREGS`
+(2 MiB identity map in its own memslot above RAM), issuing `out dx, al`
+hypercalls and virtio-mmio accesses. `nextest -p proxima-vm`: the run
+recorded in the landing commit message.
+
+**RIP advance after `out` (ROADMAP's flagged assumption), measured:** the
+guest issues `Read`, `EMIT`, `Close`, `EMIT`, then `HALT`; the dispatcher
+recorded `[Read { handle: 0, max_bytes: 256, offset: 0 }, Close { handle: 0 }]`
+and the emitted bytes were `00 00`. A guest whose RIP had not advanced would
+have re-issued the first `out` forever and tripped the hypercall budget.
+KVM retires the port write on the next `KVM_RUN`; `KVM_SET_REGS` between the
+exit and the re-entry (to write `rax`) leaves `rip` untouched, so the skip
+still happens.
+
+**M3 instrument, one `dispatch_probe` run, 64 MiB guest:**
+`create_to_first_exit_nanos=25189575`, `touch_all_pages_nanos=22960108`,
+`mmio_trap_count=67`. The touch is a first-touch write per 4 KiB page of a
+`memfd`-backed region, so it is page-cache allocation, not EPT population.
+Per-page stage-2 fault indices (`clear_refs`/`pagemap`) are NOT collected: the
+ROADMAP M3 text asks for them and this row only has wall time and the MMIO
+count.
+
+**Write to a read-only memslot, `cow_primitives_probe write_protect_exit`:**
+the second store exits as `KVM_EXIT_MMIO` (exit reason 6), `is_write=1`, and
+the data byte stays `0x2a`: the write does not land, and KVM has already
+emulated the instruction, so the host must perform the store itself. This is
+the one place the layered design differs from HVF, where the store retries.
+
+**Layered restore, `layered_restore_cost_scales_with_dirty_page_count_not_region_size`
+(37.5 s wall, 50 iterations per row):**
+
+| size | K | restore p50 (ns) | restore p99 (ns) | run p50 (ns) | unprotected-run p50 (ns) |
+|---|---|---|---|---|---|
+| 16MiB | 16 | 267629 | 386007 | 1490901 | 20681 |
+| 16MiB | 256 | 3222981 | 7113906 | 24111318 | 275582 |
+| 256MiB | 16 | 391696 | 3559428 | 2060749 | 29969 |
+| 256MiB | 256 | 3178078 | 9445171 | 24375076 | 275236 |
+| 256MiB | 4096 | 56254077 | 68508652 | 406907673 | 4788735 |
+
+Restore at K=4096 is 56 ms against the HVF row's ~175 us. DERIVED from the
+table: restore time per dirty page is 16.7 us (K=16), 12.6 us (K=256), 13.7 us
+(K=4096), and run time per fault is 93-99 us, flat in size and K. Restore
+cost tracks K and not region size (K=16: 267 us at 16 MiB, 392 us at 256 MiB
+p50), the design's claim. The mechanism, read from `backend_linux.c`: KVM can
+change a memslot's flags in place but not its size or backing, so re-pointing
+one page splits a run into up to three memslots (`slot_table_retarget`), and
+restore retires all 2K+1 of them (`slot_table_clear`) and installs one base
+slot. That is two memslot ioctls per dirty page, and 12.6-16.7 us per page is
+consistent with roughly 6-8 us per ioctl; the per-ioctl cost itself was not
+profiled, so that attribution is a hypothesis.
+
+## Elf guest through `type = "vm"` (2026-10-31, linux/x86_64, `/dev/kvm`)
+
+**What ran:** `tests/vm_registry.rs::vm_upstream_latency_table`, one nextest
+run with `threads-required = "num-cpus"` (`.config/nextest.toml`) so no other
+test shares the box from this suite. The guest is the `uppercase` bin
+(`guests/lambda/link-elf.ld`: 2 MiB `RAM`, stack as a 64 KiB ELF segment; image
+extent 0x52000 = 335872 bytes). Body `"hello, lambda"` (13 bytes) in, `HELLO,
+LAMBDA` out, asserted byte-exact on every call. A fresh VM per call, no warm-up
+discarded, so the cold path is in every sample. N=200 per row. Host i7-9700K,
+Linux 7.2.11-zen1, 8 CPUs. Other agents share the box; `/proc/loadavg` at the
+start of each run is in the header line of the output.
+
+**Runs recorded** (`cargo nextest run [--release] -p proxima --features vm
+--test vm_registry --no-capture -E 'test(vm_upstream_latency_table)'`):
+
+| run | profile (host crates; C backend and guest are built by `cc`/`--release` guest crate) | loadavg 1/5/15 at start |
+|---|---|---|
+| A | dev | 0.71 2.41 2.81 |
+| B | release | 2.32 2.79 2.92 |
+
+**Table, run B (release), verbatim from the test's stdout:**
+
+```
+vm request->response, 2097152 B, offload     p50=    22.0ms p99=    34.1ms min=    11.9ms max=    34.9ms n=200
+vm request->response, 2097152 B, inline      p50=    21.1ms p99=    31.0ms min=     9.9ms max=    33.0ms n=200
+  run_dispatch_loop total, 2097152 B         p50=    21.0ms p99=    32.0ms min=    10.0ms max=    37.9ms n=200
+  create_to_first_exit, 2097152 B            p50=     6.6ms p99=     7.6ms min=     1.3ms max=    10.3ms n=200
+  touch_all_pages, 2097152 B                 p50=     3.7ms p99=     3.9ms min=   640.1µs max=     3.9ms n=200
+vm request->response, 67108864 B, offload    p50=    44.1ms p99=    88.5ms min=    34.8ms max=    88.7ms n=200
+vm request->response, 67108864 B, inline     p50=    41.9ms p99=    70.1ms min=    34.1ms max=    70.2ms n=200
+  run_dispatch_loop total, 67108864 B        p50=    41.1ms p99=    68.9ms min=    34.8ms max=    69.9ms n=200
+  create_to_first_exit, 67108864 B           p50=    23.2ms p99=    43.6ms min=    22.9ms max=    43.8ms n=200
+  touch_all_pages, 67108864 B                p50=    22.1ms p99=    41.7ms min=    21.9ms max=    42.7ms n=200
+warm process_rpc `stdbuf -oL tr a-z A-Z`     p50=    39.8µs p99=    79.3µs min=    35.7µs max=   100.0µs n=200
+```
+
+Run A (dev) rows differ from B by at most 1-2 ms at p50 on the VM rows
+(2 MiB offload p50 21.0 ms / p99 28.9 ms; 64 MiB offload p50 44.2 ms / p99
+85.7 ms; baseline p50 44.3 us / p99 108.5 us); the dev-versus-release delta is
+inside the run-to-run spread. No same-code control repeat beyond A and B was
+run, so differences of a millisecond or two between rows are not resolved.
+
+**Baseline is `process_rpc`, not `process`.** `ProcessUpstream::call` returns
+`"process `{label}` is alive"` and never reads the request
+(`src/upstreams/process.rs:232-243`), so it cannot run `tr` on a body.
+`ProcessRpcUpstream` (`src/upstreams/process_rpc.rs:111-146`) writes the body to
+a long-lived child's stdin and returns the stdout line. `stdbuf -oL` is needed
+because `tr` block-buffers a pipe. 10 warm-up calls are discarded for it.
+
+**The 14 ms between first exit and return is `close(vm_fd)`, traced.**
+Measured: `run_dispatch_loop total` p50 21.0 ms against `create_to_first_exit`
+p50 6.6 ms leaves about 14 ms after the first exit. `strace -f -tt -T` of one
+instrument run (2 MiB) shows the three `KVM_RUN` ioctls (the first exit's, then two
+more) taking 59 us, 8 us, 7 us and then `close(4) = 0 <0.013797>`, fd 4 being the
+`KVM_CREATE_VM` fd (`KVM_CREATE_VM` itself 0.167 ms, `KVM_CREATE_VCPU` 0.241
+ms). So VM-fd teardown is about 13.8 ms of that run and the guest's own
+execution is not the cost. Why `close` of a VM fd takes that long (the kernel's
+VM destruction path) was not traced; that is a hypothesis, not a result. The
+cost is paid on the calling thread of `run_dispatch_loop`.
+
+**`touch_all_pages` is bimodal at 2 MiB, cause not traced.** Twelve
+consecutive samples in one process: 1.14, 1.09, 3.80, 3.20, 0.70, 0.81, 3.70,
+3.83, 3.72, 3.69, 3.68, 3.75 ms. Fresh one-shot `dispatch_probe` runs earlier
+gave 0.695 and 0.731 ms. The p50 of 3.7 ms over 512 pages is 7.2 us per page;
+the fast mode is about 1.3-2.1 us per page. Whether this is THP versus base
+pages on the `memfd` mapping was not measured
+(`/sys/kernel/mm/transparent_hugepage/shmem_enabled` reads `advise`); treat
+that as a hypothesis. At 64 MiB the per-page cost is 22.1 ms / 16384 = 1.35 us
+and the distribution is not bimodal (min 21.9, p50 22.1).
+
+**Reading the 2 MiB versus 64 MiB rows:** request->response p50 is 21.0-22.0 ms
+against 41.9-44.1 ms, and p99 is 31.0-34.1 ms against 70.1-88.5 ms. The
+64 MiB row carries 18.4 ms more `touch_all_pages` (22.1 - 3.7) and 16.6 ms more
+`create_to_first_exit` (23.2 - 6.6) at p50; the touch is contained in the
+create-to-first-exit span, so these do not add. Teardown was traced only at
+2 MiB.
+
+**Offload versus inline** (installed prime runtime, factory wraps the pipe in
+`proxima_listen::Offload`; versus no installed runtime, VM runs on the polling
+thread): 22.0 vs 21.1 ms at 2 MiB, 44.1 vs 41.9 ms at 64 MiB. Differences of
+this size are inside the spread between runs A and B and are not resolved.
+
+**Guest memory is a real parameter (`guest_memory_size`), measured effect is
+the 2 MiB vs 64 MiB rows above.** Config validation requires a non-zero
+multiple of 4096. `run_dispatch_loop` rejects a size below the image's segment
+extent: `guest_memory_size 65536 is too small: the image's segments and stack
+need 335872 bytes` (asserted in `tests/vm_registry.rs` and
+`tools/proxima-vm/tests/dispatch_hypercall.rs`).
+
+## Linux guest: a real Linux bzImage under KVM runs a function per invocation (2026-10-31, linux/x86_64)
+
+**Host:** Intel i7-9700K (8 threads), Linux 7.2.11-zen1, `/dev/kvm`, kernel under test `/boot/vmlinuz-linux` (7.2.11-arch1-1, bzImage protocol 2.15, 17244672 bytes), 128 MiB guest, initramfs of ~380 KB (static musl `/init`). Profile: debug test binary + C leaf built by `cc` (no explicit -O), release-built guest. N=20 per row, one process, boots back to back. p99 at N=20 is the maximum (rank ceil(0.99*20)=20). Other agents were live on the box; `/proc/loadavg` is printed with each run.
+
+**cmdline:** `console=ttyS0 reboot=t panic=-1 nomodules i8042.noaux loglevel=6`. Each flag against the failure observed without it: `loglevel=6` because with the kernel default (and with `loglevel=5`) the `Linux version` banner never reached COM1 (console held only the 4 warning lines); `reboot=t` because `reboot=k` spends 65553 reads of port 0x64 (65536 + the 17 boot-time probe reads) in the kernel keyboard-controller wait, measured at +406 ms p50 (`init exec->total` 1.3 ms vs 406.0 ms below); `panic=-1` so a kernel panic restarts instead of hanging; `console=ttyS0` is the console; `nomodules` and `i8042.noaux` are carried from the brief, neither has a measured failure behind it (the kernel logs `nomodules` as an unknown parameter passed to user space). `quiet` was dropped: it hides the banner the exit proof asserts.
+
+**Failures found and fixed while bringing it up (each from a payload record, not a guess):**
+
+| symptom | record | fix |
+|---|---|---|
+| guest read a mangled length prefix (`00 00 00 00 h e l l`) | init error text `request of 7810763477953282048 bytes` | the 8250 driver drains the RX FIFO while probing and opening ttyS1; host now holds COM2 RX until init writes marker 2 to port 0xe9 after setting the tty raw |
+| boot to init 2.619 s | 40000 writes to 0x70 and 40000 reads of 0x71, console `PM: Unable to read current time from RTC` at 1.224 s | CMOS RTC model (`src/linux_rtc.h`); init exec then 0.31 s in the next run (RTC fix and `reboot=t` landed in one step; init exec precedes the reboot, so `reboot=t` cannot account for it) |
+| `[Firmware Bug]: CPU 0: APIC ID mismatch. CPUID: 0x000e APIC: 0x0000` | console line | CPUID leaf 1 EBX[31:24] and leaves 0xb/0x1f EDX set to APIC id 0 (`assign_apic_id_zero`); the line is gone in the next console |
+
+**Run A, `reboot=t`, loadavg 1.89 at start (the quietest run):**
+
+```
+create->first KVM_RUN (setup) p50=    3.945ms p99=    9.669ms min=    3.554ms max=    9.669ms
+create->first exit           p50=  103.305ms p99=  130.852ms min=  100.462ms max=  130.852ms
+create->init exec            p50=  298.929ms p99=  490.733ms min=  291.404ms max=  490.733ms
+init exec->total             p50=    1.295ms p99=    1.506ms min=    1.254ms max=    1.506ms
+total (C-side)               p50=  300.373ms p99=  492.089ms min=  292.715ms max=  492.089ms
+invocation wall (incl. prep) p50=  316.914ms p99=  504.702ms min=  304.859ms max=  504.702ms
+console bytes: min=1605 max=1605
+exits: min=3882 max=3882
+```
+
+**Run B, both cmdlines back to back, loadavg 7.30 (reboot=t) and 7.05 (reboot=k):**
+
+```
+== reboot=t
+create->first KVM_RUN (setup) p50=    4.022ms p99=    8.789ms
+create->first exit           p50=  102.872ms p99=  133.870ms
+create->init exec            p50=  300.341ms p99=  327.298ms
+init exec->total             p50=    1.291ms p99=    1.640ms
+total (C-side)               p50=  301.608ms p99=  328.633ms
+invocation wall (incl. prep) p50=  317.288ms p99=  373.753ms
+console bytes: 1605 (all 20)   exits: 3882 (all 20)
+== reboot=k
+create->first KVM_RUN (setup) p50=    4.267ms p99=    6.725ms
+create->first exit           p50=  110.036ms p99=  121.441ms
+create->init exec            p50=  307.918ms p99=  354.537ms
+init exec->total             p50=  406.020ms p99=  418.085ms
+total (C-side)               p50=  713.149ms p99=  764.877ms
+invocation wall (incl. prep) p50=  730.841ms p99=  803.867ms
+console bytes: 1605 (all 20)   exits: 69418 (all 20)
+```
+
+**Run C (contaminated, loadavg 5.8 then 6.2, same code), reported because it disagrees:** `create->first KVM_RUN` p50 16.046 ms (p99 22.924), `create->first exit` p50 168.240 ms, `create->init exec` p50 387.274 ms (p99 633.222), `total` p50 388.966 ms; `reboot=k` `init exec->total` p50 449.844 ms. Run B had loadavg above 7 and did not show this inflation, so loadavg alone does not predict it; the cause of Run C is not traced.
+
+**Unhandled port accesses (identical across all 20 boots in every run; reads returned 0xff, writes dropped):**
+
+| port | reads | writes | likely owner (hypothesis, not traced) |
+|---|---|---|---|
+| 0x002e / 0x002f | 0 / 8 | 40 / 0 | super-I/O config probe |
+| 0x004e / 0x004f | 0 / 8 | 40 / 0 | super-I/O config probe |
+| 0x0060 | 16 | 0 | i8042 flush at probe |
+| 0x0064 | 17 | 0 | i8042 flush at probe (65553 with `reboot=k`) |
+| 0x0087 | 1 | 0 | DMA page register |
+| 0x02e9 / 0x03e9 | 3 / 3 | 3 / 3 | 8250 probe of COM4/COM3 |
+| 0x0cf8 | 3 | 69 | PCI config address |
+| 0x0cfa / 0x0cfb | 0 | 1 / 2 | PCI config address (sub-dword writes) |
+| 0x0cfc | 34 | 0 | PCI config data |
+| 0x0cfe | 32 | 0 | PCI config data (upper half) |
+
+KVM MMIO exits to userspace: 0.
+
+**What the numbers do and do not say.** Measured: host setup before the first `KVM_RUN` is ~4 ms (p50 3.9-4.3 ms across A and B); the first port exit arrives ~103 ms after create, so ~99 ms is spent in the guest before any port access; the invocation itself (init marker to the reset/triple-fault exit) is 1.29 ms p50 under `reboot=t`. Hypothesis, untraced: the ~99 ms is the boot-stub decompression of the 17 MB bzImage (the running zen kernel is `CONFIG_KERNEL_ZSTD=y` per `/proc/config.gz`; the arch bzImage under test was not inspected for its compressor), and the remaining ~195 ms from first exit to init exec is kernel init. Neither was decomposed. `invocation wall` minus `total` (~16 ms p50, A and B) is Rust-side work per call (header parse, initramfs build, two 1 MiB buffer allocations, the 17 MB kernel copy into guest RAM happens inside the C setup, not here); not decomposed further.
+
+## Elf guest: teardown moved off the response path (2026-10-31, linux/x86_64, `/dev/kvm`)
+
+**Hypothesis (from the strace in "Elf guest through `type = "vm"`"):** returning the output before `close(vm_fd)` removes the ~13.8 ms close from request latency. **What changed:** `backend_linux.c` `session_close` hands the finished session (fds and mappings) to a process-wide pool of 4 detached workers behind a 16-slot queue; a full queue releases inline. Every `close`/`munmap` return is checked and failures are drained by `dispatch::take_teardown_failures` and logged by the `vm` upstream with `warn!`. Test `tests/kvm_exit_loop.rs::teardown_off_the_return_path_releases_every_descriptor` runs 64 halting guests (more than the queue holds) and asserts `/proc/self/fd` returns to its baseline; with the `vm_fd` release deleted it fails (`left: 70, right: 6`), so it can fail.
+
+**Command (every row):** `cargo nextest run --release -p proxima --features vm --test vm_registry --no-capture -E 'test(vm_upstream_latency_table)'`, 2 MiB guest, n=200, release host profile. The 64 MiB rows moved only from create-to-first-exit (they carry no teardown after the change).
+
+| run | code | loadavg 1/5/15 at start | 2 MiB offload p50 / p99 | 2 MiB inline p50 / p99 | `run_dispatch_loop` p50 / p99 | 64 MiB offload p50 / p99 |
+|---|---|---|---|---|---|---|
+| before | inline `close` | 1.09 1.68 2.31 | 21.1 / 31.0 ms | 21.1 / 33.0 ms | 20.8 / 29.9 ms | 41.1 / 67.8 ms |
+| after 1 | 1 worker, 16 queue | 1.17 1.30 1.98 | 6.5 / 30.2 ms | 6.1 / 30.4 ms | 5.9 / 28.5 ms | 23.6 / 27.9 ms |
+| after 2 (control, same code) | 1 worker, 16 queue | 1.18 1.30 1.96 | 6.7 / 29.2 ms | 6.2 / 29.6 ms | 6.2 / 33.3 ms | 23.6 / 30.6 ms |
+| counterfactual | 1 worker, 1024 queue | 1.10 1.27 1.89 | 2.0 / 7.2 ms | 1.1 / 8.2 ms | 3.4 / 10.7 ms | 23.5 / 27.5 ms |
+| final 1 | 4 workers, 16 queue | 1.29 1.30 1.84 | 3.5 / 20.3 ms | 3.3 / 24.1 ms | 3.1 / 19.0 ms | 23.5 / 26.8 ms |
+| final 2 (control, same code) | 4 workers, 16 queue | 1.47 1.35 1.84 | 3.3 / 17.4 ms | 3.3 / 17.6 ms | 3.2 / 23.2 ms | 23.4 / 27.1 ms |
+
+**What the rows say.** The hypothesis holds for p50: 21.1 ms to 6.5 ms (one worker) and to 3.3-3.5 ms (four workers); the same-code controls agree within 0.2 ms at p50. p99 did not move with one worker (31.0 to 30.2 ms). The 1024-slot counterfactual drops p99 to 7.2 ms, which fits this mechanism: the bench issues calls back to back, each producing a teardown of ~13.8 ms faster than the pool retires them, the queue fills, and the calls that find it full pay the old inline cost. The count of inline fallbacks was not instrumented, so the saturation account rests on that counterfactual and is not a traced result. Four workers raise the sustained retire rate and p99 falls to 17.4-20.3 ms; whether kernel VM destruction scales with worker count past 4 was not measured. Not measured: any run on a quiet box (loadavg was 1.1-1.5, other agents live).
+
+**Cost of the change.** A queued session keeps its guest RAM mapped until a worker releases it: at most (16 + 4) x `guest_memory_size`, i.e. 40 MiB at 2 MiB and 1.25 GiB at 64 MiB.
+
+## Merged elf + linux tree: test counts (2026-10-31)
+
+`cargo nextest run -p proxima-vm --no-fail-fast`: 272 passed. The shared base is 207; the elf branch alone was 233 (207 + 26) and the linux branch alone 238 (207 + 10 `x86_boot` + 6 `linux` unit + 15 `linux_guest` integration). The union is 207 + 26 + 31 = 264; the 7 `dispatch::tests` for the read clamp and the named sentinels (measured as 271 on that commit) and the 1 `kvm_exit_loop` teardown test bring it to 272. `cargo test -p proxima-vm --doc`: 1 passed (`linux::frame`).
