@@ -30,7 +30,7 @@ use crate::cuda_kernel_cache::{CacheKey, decode_entry, encode_entry};
 use crate::kernel_cache_config::KernelCacheConfig;
 use crate::cuda_ptx_store::PtxStore;
 use crate::msl::{Binding, Codec, PackedOperands, gather_count};
-use proxima_tensor::bind::{RefreshRefusal, refresh_bound_ops, touches_changed};
+use proxima_tensor::bind::{RefreshRefusal, refresh_bound_ops, refit_cached_attention_rows, touches_changed};
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, Keep, NodeId, NumericPolicy, Op, QuantizedBlock,
     Shapes, bind_unfused, bind_with_fusion, block_node_ids, correct_packed_matmul_layouts, infer,
@@ -1300,6 +1300,15 @@ fn refresh_bound_resolved(
     Ok((refreshed, touched))
 }
 
+fn apply_patches(previous: &[BoundOp], patches: Vec<(usize, BoundOp)>) -> (Vec<BoundOp>, usize) {
+    let touched = patches.len();
+    let mut patched = previous.to_vec();
+    for (position, bound) in patches {
+        patched[position] = bound;
+    }
+    (patched, touched)
+}
+
 fn cuda_supports_kind(kind: &BoundOpKind, numeric_policy: NumericPolicy) -> bool {
     match kind {
         BoundOpKind::CachedAttention { .. } => {
@@ -1509,7 +1518,13 @@ impl CudaPlan {
         let same_policy = numeric_policy == self.numeric_policy;
         let previous_bound = std::mem::take(&mut self.resolved);
         let refresh_started = Instant::now();
-        let refresh = if same_policy {
+        let refresh = if !same_policy {
+            Err("numeric policy changed")
+        } else if let Some(patches) =
+            refit_cached_attention_rows(&previous_bound, &self.program, &self.shapes, &shapes)
+        {
+            Ok(apply_patches(&previous_bound, patches))
+        } else {
             refresh_bound_resolved(
                 &previous_bound,
                 &self.shapes,
@@ -1520,8 +1535,6 @@ impl CudaPlan {
                 numeric_policy,
             )
             .map_err(refresh_refusal_name)
-        } else {
-            Err("numeric policy changed")
         };
         let (bind_path, touched, refused, resolved, kernels, uniforms, micros) = match refresh {
             Ok((resolved, touched)) => {
