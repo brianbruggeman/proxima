@@ -84,9 +84,8 @@ mod tests {
     use proxima_tokenizer::hf::{bos_eos_policy_from_tokenizer_config, vocab_from_tokenizer_json};
 
     use super::*;
+    use crate::test_support::{gemma4_e2b_arch_gguf_path, granite_moe_gguf_path};
 
-    const E2B_GGUF: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
-    const GRANITE_GGUF: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
     const GRANITE: &str = "granite-3.1-1b-a400m-moe";
     const E2B: &str = "gemma4-e2b";
     const PROMPT: &str = "The capital of France is";
@@ -239,14 +238,14 @@ mod tests {
 
     #[test]
     fn mlx_tokenizer_granite_written_from_gguf_equals_vendored_with_added_tokens_in_model_vocab() {
-        let differing = differing_fields(&written(GRANITE_GGUF), &vendored(GRANITE));
+        let differing = differing_fields(&written(&granite_moe_gguf_path()), &vendored(GRANITE));
 
         assert_eq!(differing, Vec::<&str>::new());
     }
 
     #[test]
     fn mlx_tokenizer_e2b_written_from_gguf_equals_vendored_except_gguf_only_facts() {
-        let differing = differing_fields(&written(E2B_GGUF), &vendored(E2B));
+        let differing = differing_fields(&written(&gemma4_e2b_arch_gguf_path()), &vendored(E2B));
 
         assert_eq!(differing, vec!["added_tokens.flags", "add_bos_token"]);
     }
@@ -278,14 +277,14 @@ mod tests {
 
     #[test]
     fn mlx_tokenizer_granite_written_encodes_the_fixture_prompt_to_the_llama_ids() {
-        let ids = encode_prompt(&written(GRANITE_GGUF));
+        let ids = encode_prompt(&written(&granite_moe_gguf_path()));
 
         assert_eq!(ids, recorded_prompt_ids("granite_moe"));
     }
 
     #[test]
     fn mlx_tokenizer_e2b_written_encodes_the_fixture_prompt_to_the_llama_ids() {
-        let ids = encode_prompt(&written(E2B_GGUF));
+        let ids = encode_prompt(&written(&gemma4_e2b_arch_gguf_path()));
 
         assert_eq!(ids, recorded_prompt_ids("gemma4_e2b"));
     }

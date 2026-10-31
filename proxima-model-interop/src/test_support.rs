@@ -66,6 +66,21 @@ pub(crate) fn gemma4_e2b_gguf_path() -> String {
     })
 }
 
+const GRANITE_MOE_BLOB: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
+const GEMMA4_E2B_BLOB: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
+
+/// `PROXIMA_ARCH_GRANITE_MOE_GGUF` names the granite-3.1-1b-a400m-moe checkpoint
+/// (sha256 cd60b3e8...df80); unset keeps the ollama blob on the author's host.
+pub(crate) fn granite_moe_gguf_path() -> String {
+    std::env::var("PROXIMA_ARCH_GRANITE_MOE_GGUF").unwrap_or_else(|_| GRANITE_MOE_BLOB.to_string())
+}
+
+/// `PROXIMA_ARCH_GEMMA4_E2B_GGUF` names the gemma4 e2b checkpoint (sha256
+/// 3646b4c1...e6fd); unset keeps the ollama blob on the author's host.
+pub(crate) fn gemma4_e2b_arch_gguf_path() -> String {
+    std::env::var("PROXIMA_ARCH_GEMMA4_E2B_GGUF").unwrap_or_else(|_| GEMMA4_E2B_BLOB.to_string())
+}
+
 #[cfg(unix)]
 pub(crate) fn openchat_gguf_path() -> String {
     std::env::var("PROXIMA_OPENCHAT_GGUF").unwrap_or_else(|_| {

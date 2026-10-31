@@ -247,9 +247,8 @@ mod tests {
     use super::*;
     use crate::hf_bind::names;
     use crate::profiles::binding_profile;
+    use crate::test_support::{gemma4_e2b_arch_gguf_path, granite_moe_gguf_path};
 
-    const E2B_GGUF: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
-    const GRANITE_GGUF: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
     const E2B_PREFIX: &str = "language_model.model.";
     const GRANITE_PREFIX: &str = "model.";
 
@@ -338,7 +337,12 @@ mod tests {
 
     #[test]
     fn mlx_names_dense_e2b_leaves_match_plain_header_with_zero_unmapped() {
-        let (named, directory) = name_dense(E2B_GGUF, "gemma4", SANDWICH_NORM_LAYOUT, E2B_PREFIX);
+        let (named, directory) = name_dense(
+            &gemma4_e2b_arch_gguf_path(),
+            "gemma4",
+            SANDWICH_NORM_LAYOUT,
+            E2B_PREFIX,
+        );
         let header = header_names("gemma4-e2b");
 
         let missing: Vec<&str> = named
@@ -362,7 +366,12 @@ mod tests {
 
     #[test]
     fn mlx_names_dense_granite_leaves_match_plain_header_with_zero_unmapped() {
-        let (named, _) = name_dense(GRANITE_GGUF, "granitemoe", STANDARD_LAYOUT, GRANITE_PREFIX);
+        let (named, _) = name_dense(
+            &granite_moe_gguf_path(),
+            "granitemoe",
+            STANDARD_LAYOUT,
+            GRANITE_PREFIX,
+        );
         let header = header_names("granite-3.1-1b-a400m-moe");
 
         let missing: Vec<&str> = named
@@ -387,7 +396,12 @@ mod tests {
 
     #[test]
     fn mlx_names_dense_identity_control_reference_names_compare_equal_to_themselves() {
-        let (named, _) = name_dense(GRANITE_GGUF, "granitemoe", STANDARD_LAYOUT, GRANITE_PREFIX);
+        let (named, _) = name_dense(
+            &granite_moe_gguf_path(),
+            "granitemoe",
+            STANDARD_LAYOUT,
+            GRANITE_PREFIX,
+        );
         let reference: Vec<String> = named.mapped.iter().map(|(_, hf)| hf.clone()).collect();
 
         let compared: Vec<(&String, &String)> = reference
@@ -401,7 +415,12 @@ mod tests {
 
     #[test]
     fn mlx_names_dense_degenerate_control_one_altered_name_is_detected() {
-        let (named, _) = name_dense(GRANITE_GGUF, "granitemoe", STANDARD_LAYOUT, GRANITE_PREFIX);
+        let (named, _) = name_dense(
+            &granite_moe_gguf_path(),
+            "granitemoe",
+            STANDARD_LAYOUT,
+            GRANITE_PREFIX,
+        );
         let header = header_names("granite-3.1-1b-a400m-moe");
         let mut altered: Vec<String> = named.mapped.iter().map(|(_, hf)| hf.clone()).collect();
         altered[3] = altered[3].replace("layers", "layer");
@@ -467,8 +486,13 @@ mod tests {
 
     #[test]
     fn mlx_names_moe_leaves_match_plain_header_names_shapes_and_fused_parts() {
-        let (named, _) = name_dense(GRANITE_GGUF, "granitemoe", STANDARD_LAYOUT, GRANITE_PREFIX);
-        let infos = gguf_infos(GRANITE_GGUF);
+        let (named, _) = name_dense(
+            &granite_moe_gguf_path(),
+            "granitemoe",
+            STANDARD_LAYOUT,
+            GRANITE_PREFIX,
+        );
+        let infos = gguf_infos(&granite_moe_gguf_path());
         let header = header_shapes("granite-3.1-1b-a400m-moe");
 
         let whole_mismatch: Vec<&str> = named
@@ -514,8 +538,12 @@ mod tests {
 
     #[test]
     fn mlx_names_moe_every_routed_leaf_is_named_and_unmapped_is_empty() {
-        let (named, directory) =
-            name_dense(GRANITE_GGUF, "granitemoe", STANDARD_LAYOUT, GRANITE_PREFIX);
+        let (named, directory) = name_dense(
+            &granite_moe_gguf_path(),
+            "granitemoe",
+            STANDARD_LAYOUT,
+            GRANITE_PREFIX,
+        );
         let routed_leaves = directory.iter().filter(|name| routed(name)).count();
 
         let routed_named =
@@ -528,7 +556,12 @@ mod tests {
 
     #[test]
     fn mlx_names_moe_identity_control_reference_names_compare_equal_to_themselves() {
-        let (named, _) = name_dense(GRANITE_GGUF, "granitemoe", STANDARD_LAYOUT, GRANITE_PREFIX);
+        let (named, _) = name_dense(
+            &granite_moe_gguf_path(),
+            "granitemoe",
+            STANDARD_LAYOUT,
+            GRANITE_PREFIX,
+        );
         let reference = moe_header_names(&named);
 
         let differing = reference
@@ -542,7 +575,12 @@ mod tests {
 
     #[test]
     fn mlx_names_moe_degenerate_control_one_altered_name_is_detected() {
-        let (named, _) = name_dense(GRANITE_GGUF, "granitemoe", STANDARD_LAYOUT, GRANITE_PREFIX);
+        let (named, _) = name_dense(
+            &granite_moe_gguf_path(),
+            "granitemoe",
+            STANDARD_LAYOUT,
+            GRANITE_PREFIX,
+        );
         let header = header_names("granite-3.1-1b-a400m-moe");
         let mut altered = moe_header_names(&named);
         altered[3] = altered[3].replace("block_sparse_moe", "sparse_moe");
