@@ -3069,3 +3069,59 @@ fn cuda_cached_attention_diverges_when_cached_len_is_wrong() {
         "a wrong cached_len must diverge beyond the tolerance, relative={relative}"
     );
 }
+
+/// Wall time of one planned prefill matmul per call at the shapes a 8B
+/// ternary checkpoint runs: asserts the tensor-core kernel agrees with the
+/// f32 oracle and prints the mean over `iterations` executes.
+fn time_packed_prefill(rows: u32, k: u32, tokens: u32, iterations: u32) -> f64 {
+    use proxima_gguf::quant::pq2_0::{BLOCK_BYTES, QK_PQ2_0};
+    let blocks_per_row = k as usize / QK_PQ2_0;
+    let mut lcg = Lcg(53);
+    let mut weight_blocks: Vec<u8> = (0..rows as usize * blocks_per_row * BLOCK_BYTES)
+        .map(|_| (lcg.next_unit() * 255.0) as u8)
+        .collect();
+    for block in weight_blocks.chunks_exact_mut(BLOCK_BYTES) {
+        block[0] = 0x00;
+        block[1] = 0x3C;
+    }
+    let activation = random_vec(59, (k * tokens) as usize);
+    let (program, root) = packed_batched_program(rows, k, Some(tokens), DType::UINT8);
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        (
+            "weight",
+            QuantizedBlock::Packed {
+                codec: Codec::Pq2_0,
+                bytes: &weight_blocks,
+            },
+        ),
+        ("activation", QuantizedBlock::Float32(&activation)),
+    ];
+    let mut plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[root],
+        NumericPolicy::bit_exact().with_reassociation(true),
+    )
+    .expect("omega::backend plans the timed matmul");
+    execute_plan_named(&mut plan, &named).expect("warm-up execute");
+    let started = std::time::Instant::now();
+    for _ in 0..iterations {
+        let output = execute_plan_named(&mut plan, &named).expect("timed execute");
+        assert!(output.root().iter().all(|value| value.is_finite()));
+    }
+    started.elapsed().as_secs_f64() * 1_000.0 / f64::from(iterations)
+}
+
+#[test]
+fn prefill_matmul_timing_at_8b_gate_shape_reports_ms_per_call() {
+    let mut report = String::new();
+    for tokens in [5u32, 22, 66] {
+        let millis = time_packed_prefill(12288, 4096, tokens, 20);
+        assert!(millis > 0.0);
+        report.push_str(&format!("tokens={tokens} ms_per_call={millis:.3}; "));
+    }
+    panic!("TIMING {report}");
+}
