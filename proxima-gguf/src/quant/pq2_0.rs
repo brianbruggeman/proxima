@@ -43,3 +43,8 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
 const _: () = {
     assert!(GgmlType::Pq2_0.block_layout().block_bytes as usize == BLOCK_BYTES);
 };
+
+/// Quantizes whole 128-element runs of `f32` into `PQ2_0` blocks.
+pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
+    crate::quant::q2_0::quantize_groups::<QK_PQ2_0, BLOCK_BYTES>(CODEC, input, output)
+}
