@@ -65,6 +65,8 @@ pub struct LinuxGuestTimings {
     pub setup: Duration,
     pub first_exit: Duration,
     pub init_exec: Option<Duration>,
+    /// When `oci-init` was about to spawn the image entrypoint; `None` for guests that never write marker 3.
+    pub entrypoint: Option<Duration>,
     pub total: Duration,
 }
 
@@ -264,6 +266,7 @@ fn collect(
         setup: Duration::from_nanos(report.setup_nanos),
         first_exit: Duration::from_nanos(report.first_exit_nanos),
         init_exec: (report.init_marker_nanos != 0).then(|| Duration::from_nanos(report.init_marker_nanos)),
+        entrypoint: (report.entrypoint_marker_nanos != 0).then(|| Duration::from_nanos(report.entrypoint_marker_nanos)),
         total: Duration::from_nanos(report.total_nanos),
     };
     let unhandled_ports = report
