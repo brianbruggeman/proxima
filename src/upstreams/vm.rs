@@ -8,7 +8,9 @@
 //! COM2 channel for a Linux guest), the bytes it produces are the response
 //! body. The guest files are read and validated once, when the factory builds
 //! the pipe: an ELF image (`guest_image_path`), or a Linux bzImage plus the
-//! initramfs archived around its `/init` (`kernel_path` + `init_path`).
+//! initramfs archived around its `/init` (`kernel_path` + `init_path`), or the
+//! same bzImage with an OCI image pulled, digest-verified and flattened into the
+//! initramfs (`kernel_path` + `image` + `oci_init_path`; `proxima_vm::oci`).
 //!
 //! Mirrors [`crate::upstreams::process::ProcessConfig`] exactly: one config
 //! struct deriving `Builder + Deserialize + Serialize + Settings + Validate`,
@@ -49,6 +51,7 @@ use proxima_telemetry::warn;
 use proxima_vm::dispatch;
 use proxima_vm::elf;
 use proxima_vm::linux::{self, LinuxGuestLimits};
+use proxima_vm::oci;
 use proxima_vm::x86_boot::SetupHeader;
 
 use crate::error::ProximaError;
@@ -103,6 +106,10 @@ fn default_cmdline() -> String {
     DEFAULT_LINUX_CMDLINE.to_string()
 }
 
+fn default_image_cache_dir() -> PathBuf {
+    std::env::temp_dir().join("proxima-oci-cache")
+}
+
 fn default_ram_mib() -> u32 {
     LinuxGuestLimits::default().ram_mib
 }
@@ -111,15 +118,29 @@ fn default_watchdog_millis() -> u64 {
     LinuxGuestLimits::default().watchdog_millis
 }
 
+/// What fills the Linux flavor's initramfs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinuxRoot {
+    /// One static executable archived as `/init`.
+    Init { init_path: PathBuf },
+    /// An OCI image reference pulled into `cache_dir`, flattened to a rootfs, with the
+    /// static `oci-init` supervisor at `init_path` as `/init`.
+    Image {
+        reference: String,
+        init_path: PathBuf,
+        cache_dir: PathBuf,
+    },
+}
+
 /// Which guest a [`VmSpec`] boots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestSpec {
     /// A bare no_std ELF driven over the fd-keyed `ChildRequest` channel.
     Elf { image_path: PathBuf },
-    /// A real bzImage under KVM whose initramfs `/init` is `init_path`.
+    /// A real bzImage under KVM whose initramfs is built from `root`.
     Linux {
         kernel_path: PathBuf,
-        init_path: PathBuf,
+        root: LinuxRoot,
         cmdline: String,
         ram_mib: u32,
         watchdog_millis: u64,
@@ -164,6 +185,27 @@ pub struct VmConfig {
     #[setting(default)]
     #[serde(default)]
     pub init_path: Option<String>,
+
+    /// OCI image the Linux guest runs, e.g. `traefik/whoami@sha256:1474...`; pulled,
+    /// digest-verified and flattened into the initramfs at build. Mutually exclusive
+    /// with `init_path`; requires `kernel_path` and `oci_init_path`. A call's body is
+    /// the milliseconds the entrypoint is left running; the reply is `running`,
+    /// `exited:<code>` or `signal:<number>`.
+    #[setting(default)]
+    #[serde(default)]
+    pub image: Option<String>,
+
+    /// Path to the static `oci-init` supervisor (`guests/linux-init`) that becomes `/init`
+    /// beside the image; required with `image`.
+    #[setting(default)]
+    #[serde(default)]
+    pub oci_init_path: Option<String>,
+
+    /// Directory of the content-addressed blob cache an image is pulled into; defaults to
+    /// `proxima-oci-cache` under the system temp directory. Only valid with `image`.
+    #[setting(default)]
+    #[serde(default)]
+    pub image_cache_dir: Option<String>,
 
     /// Linux guest kernel command line.
     #[setting(default = "console=ttyS0 reboot=t panic=-1 nomodules i8042.noaux loglevel=6")]
@@ -222,30 +264,47 @@ impl Validate for VmConfig {
             ("guest_image_path", &self.guest_image_path),
             ("kernel_path", &self.kernel_path),
             ("init_path", &self.init_path),
+            ("image", &self.image),
+            ("oci_init_path", &self.oci_init_path),
+            ("image_cache_dir", &self.image_cache_dir),
         ] {
             if value.as_deref().is_some_and(str::is_empty) {
                 errors.push(ValidationMessage::new(field, "must not be empty"));
             }
         }
-        match (&self.guest_image_path, &self.kernel_path, &self.init_path) {
-            (Some(_), Some(_), _) => errors.push(ValidationMessage::new(
+        match (
+            &self.guest_image_path,
+            &self.kernel_path,
+            &self.init_path,
+            &self.image,
+        ) {
+            (Some(_), Some(_), _, _) => errors.push(ValidationMessage::new(
                 "guest_image_path",
                 "names an elf guest and kernel_path names a Linux guest; set exactly one",
             )),
-            (None, None, _) => errors.push(ValidationMessage::new(
+            (None, None, _, _) => errors.push(ValidationMessage::new(
                 "guest_image_path",
                 "neither guest_image_path (elf) nor kernel_path (linux) is set",
             )),
-            (Some(_), None, Some(_)) => errors.push(ValidationMessage::new(
+            (Some(_), None, Some(_), _) => errors.push(ValidationMessage::new(
                 "init_path",
                 "only a Linux guest (kernel_path) takes an init_path",
             )),
-            (None, Some(_), None) => errors.push(ValidationMessage::new(
+            (Some(_), None, None, Some(_)) => errors.push(ValidationMessage::new(
+                "image",
+                "only a Linux guest (kernel_path) takes an image",
+            )),
+            (None, Some(_), Some(_), Some(_)) => errors.push(ValidationMessage::new(
+                "image",
+                "names an OCI image and init_path names a bare init; set exactly one",
+            )),
+            (None, Some(_), None, None) => errors.push(ValidationMessage::new(
                 "init_path",
                 "required with kernel_path",
             )),
             _ => {}
         }
+        self.validate_image(&mut errors);
         if self.ram_mib == 0 {
             errors.push(ValidationMessage::new("ram_mib", "must be greater than zero"));
         }
@@ -285,21 +344,71 @@ impl Validate for VmConfig {
 }
 
 impl VmConfig {
+    fn validate_image(&self, errors: &mut Vec<ValidationMessage>) {
+        match (&self.image, &self.oci_init_path, &self.image_cache_dir) {
+            (Some(reference), oci_init_path, _) => {
+                if let Err(error) = proxima_vm::oci::ImageRef::parse(reference) {
+                    errors.push(ValidationMessage::new("image", format!("{error}")));
+                }
+                if oci_init_path.is_none() {
+                    errors.push(ValidationMessage::new(
+                        "oci_init_path",
+                        "required with image",
+                    ));
+                }
+            }
+            (None, Some(_), _) => errors.push(ValidationMessage::new(
+                "oci_init_path",
+                "only valid with image",
+            )),
+            (None, None, Some(_)) => errors.push(ValidationMessage::new(
+                "image_cache_dir",
+                "only valid with image",
+            )),
+            (None, None, None) => {}
+        }
+    }
+
     /// Lower the wire config to the runtime [`VmSpec`].
     pub fn into_spec(self) -> Result<VmSpec, ProximaError> {
         self.validate()
             .map_err(|err| ProximaError::Config(format!("{err}")))?;
-        let guest = match (self.guest_image_path, self.kernel_path, self.init_path) {
-            (Some(image_path), None, None) => GuestSpec::Elf {
+        let guest = match (
+            self.guest_image_path,
+            self.kernel_path,
+            self.init_path,
+            self.image,
+        ) {
+            (Some(image_path), None, None, None) => GuestSpec::Elf {
                 image_path: PathBuf::from(image_path),
             },
-            (None, Some(kernel_path), Some(init_path)) => GuestSpec::Linux {
+            (None, Some(kernel_path), Some(init_path), None) => GuestSpec::Linux {
                 kernel_path: PathBuf::from(kernel_path),
-                init_path: PathBuf::from(init_path),
+                root: LinuxRoot::Init {
+                    init_path: PathBuf::from(init_path),
+                },
                 cmdline: self.cmdline,
                 ram_mib: self.ram_mib,
                 watchdog_millis: self.watchdog_millis,
             },
+            (None, Some(kernel_path), None, Some(reference)) => {
+                let init_path = self.oci_init_path.ok_or_else(|| {
+                    ProximaError::Config("vm config names an image without oci_init_path".into())
+                })?;
+                GuestSpec::Linux {
+                    kernel_path: PathBuf::from(kernel_path),
+                    root: LinuxRoot::Image {
+                        reference,
+                        init_path: PathBuf::from(init_path),
+                        cache_dir: self
+                            .image_cache_dir
+                            .map_or_else(default_image_cache_dir, PathBuf::from),
+                    },
+                    cmdline: self.cmdline,
+                    ram_mib: self.ram_mib,
+                    watchdog_millis: self.watchdog_millis,
+                }
+            }
             _ => {
                 return Err(ProximaError::Config(
                     "vm config names neither or both guests".into(),
@@ -356,10 +465,25 @@ fn load_elf(label: &str, image_path: &Path) -> Result<LoadedGuest, ProximaError>
     })
 }
 
+fn initramfs_from_image(
+    label: &str,
+    reference: &str,
+    init_path: &Path,
+    cache_dir: &Path,
+) -> Result<Vec<u8>, ProximaError> {
+    let context = |error: &dyn std::fmt::Display| {
+        ProximaError::Upstream(format!("vm `{label}`: image `{reference}`: {error}"))
+    };
+    let image = oci::ImageRef::parse(reference).map_err(|error| context(&error))?;
+    let init = read_guest_file(label, "oci init", init_path)?;
+    let pulled = oci::pull_blocking(cache_dir, &image).map_err(|error| context(&error))?;
+    oci::initramfs_for(&pulled, &init).map_err(|error| context(&error))
+}
+
 fn load_linux(
     label: &str,
     kernel_path: &Path,
-    init_path: &Path,
+    root: &LinuxRoot,
 ) -> Result<LoadedGuest, ProximaError> {
     let kernel = read_guest_file(label, "kernel", kernel_path)?;
     SetupHeader::parse(&kernel).map_err(|error| {
@@ -368,13 +492,22 @@ fn load_linux(
             kernel_path.display()
         ))
     })?;
-    let init = read_guest_file(label, "init", init_path)?;
-    let initramfs = linux::initramfs_from_init(&init).map_err(|error| {
-        ProximaError::Upstream(format!(
-            "vm `{label}`: archive init `{}`: {error}",
-            init_path.display()
-        ))
-    })?;
+    let initramfs = match root {
+        LinuxRoot::Init { init_path } => {
+            let init = read_guest_file(label, "init", init_path)?;
+            linux::initramfs_from_init(&init).map_err(|error| {
+                ProximaError::Upstream(format!(
+                    "vm `{label}`: archive init `{}`: {error}",
+                    init_path.display()
+                ))
+            })?
+        }
+        LinuxRoot::Image {
+            reference,
+            init_path,
+            cache_dir,
+        } => initramfs_from_image(label, reference, init_path, cache_dir)?,
+    };
     Ok(LoadedGuest::Linux {
         kernel: Bytes::from(kernel),
         initramfs: Bytes::from(initramfs),
@@ -396,10 +529,8 @@ impl VmUpstream {
         let guest = match &spec.guest {
             GuestSpec::Elf { image_path } => load_elf(&label, image_path)?,
             GuestSpec::Linux {
-                kernel_path,
-                init_path,
-                ..
-            } => load_linux(&label, kernel_path, init_path)?,
+                kernel_path, root, ..
+            } => load_linux(&label, kernel_path, root)?,
         };
         Ok(Self { label, spec, guest })
     }
@@ -504,7 +635,13 @@ impl PipeFactory for VmPipeFactory {
     }
 
     fn path_fields(&self) -> &[&'static str] {
-        &["guest_image_path", "kernel_path", "init_path"]
+        &[
+            "guest_image_path",
+            "kernel_path",
+            "init_path",
+            "oci_init_path",
+            "image_cache_dir",
+        ]
     }
 
     fn build(
@@ -827,6 +964,111 @@ mod tests {
 
         assert!(matches!(kernel_only, Err(ProximaError::Config(message)) if message.contains("required with kernel_path")));
         assert!(matches!(elf_with_init, Err(ProximaError::Config(message)) if message.contains("only a Linux guest")));
+    }
+
+    const WHOAMI_IMAGE: &str =
+        "traefik/whoami@sha256:1474027c316661cdec87df2623e13a41e7e1ce0ba99c24917631de8f300b5420";
+
+    #[test]
+    fn image_env_loader_value_and_builder_yield_identical_state() {
+        let from_env: VmConfig = temp_env::with_vars(
+            [
+                ("PROXIMA_VM_KERNEL_PATH", Some("/boot/vmlinuz-linux")),
+                ("PROXIMA_VM_IMAGE", Some(WHOAMI_IMAGE)),
+                ("PROXIMA_VM_OCI_INIT_PATH", Some("/opt/oci-init")),
+                ("PROXIMA_VM_IMAGE_CACHE_DIR", Some("/var/cache/oci")),
+            ],
+            || VmConfig::from_env().expect("VmConfig::from_env"),
+        );
+        let from_value: VmConfig = serde_json::from_value(json!({
+            "kernel_path": "/boot/vmlinuz-linux",
+            "image": WHOAMI_IMAGE,
+            "oci_init_path": "/opt/oci-init",
+            "image_cache_dir": "/var/cache/oci",
+        }))
+        .expect("from_value");
+        let from_builder = VmConfig::builder()
+            .kernel_path("/boot/vmlinuz-linux")
+            .image(WHOAMI_IMAGE)
+            .oci_init_path("/opt/oci-init")
+            .image_cache_dir("/var/cache/oci")
+            .build();
+
+        assert_eq!(from_env, from_value, "env loader and value diverged");
+        assert_eq!(from_value, from_builder, "value and builder diverged");
+        let GuestSpec::Linux { root, .. } = from_builder.into_spec().expect("image spec").guest
+        else {
+            panic!("an image config lowers to the linux flavor");
+        };
+        assert_eq!(
+            root,
+            LinuxRoot::Image {
+                reference: WHOAMI_IMAGE.to_string(),
+                init_path: PathBuf::from("/opt/oci-init"),
+                cache_dir: PathBuf::from("/var/cache/oci"),
+            }
+        );
+    }
+
+    #[test]
+    fn an_image_without_a_cache_dir_uses_the_temp_dir_default() {
+        let spec = VmConfig::builder()
+            .kernel_path("/boot/vmlinuz-linux")
+            .image(WHOAMI_IMAGE)
+            .oci_init_path("/opt/oci-init")
+            .build()
+            .into_spec()
+            .expect("image spec");
+
+        let GuestSpec::Linux {
+            root: LinuxRoot::Image { cache_dir, .. },
+            ..
+        } = spec.guest
+        else {
+            panic!("an image config lowers to the linux image root");
+        };
+        assert_eq!(cache_dir, std::env::temp_dir().join("proxima-oci-cache"));
+    }
+
+    #[proxima::test]
+    #[case::image_and_init_path_together(
+        VmConfig::builder().kernel_path("/k").init_path("/i").image(WHOAMI_IMAGE).oci_init_path("/o").build(),
+        "set exactly one"
+    )]
+    #[case::image_without_oci_init(
+        VmConfig::builder().kernel_path("/k").image(WHOAMI_IMAGE).build(),
+        "oci_init_path: required with image"
+    )]
+    #[case::oci_init_without_image(
+        VmConfig::builder().kernel_path("/k").init_path("/i").oci_init_path("/o").build(),
+        "oci_init_path: only valid with image"
+    )]
+    #[case::cache_dir_without_image(
+        VmConfig::builder().kernel_path("/k").init_path("/i").image_cache_dir("/c").build(),
+        "image_cache_dir: only valid with image"
+    )]
+    #[case::image_on_an_elf_guest(
+        VmConfig::builder().guest_image_path("/g.elf").image(WHOAMI_IMAGE).oci_init_path("/o").build(),
+        "only a Linux guest (kernel_path) takes an image"
+    )]
+    #[case::malformed_reference(
+        VmConfig::builder().kernel_path("/k").image("traefik//whoami").oci_init_path("/o").build(),
+        "empty component"
+    )]
+    #[case::empty_image(
+        VmConfig::builder().kernel_path("/k").image("").oci_init_path("/o").build(),
+        "must not be empty"
+    )]
+    async fn invalid_image_configs_are_rejected_with_the_field_named(
+        #[case] config: VmConfig,
+        #[case] expected: &str,
+    ) {
+        let outcome = config.into_spec();
+
+        assert!(
+            matches!(&outcome, Err(ProximaError::Config(message)) if message.contains(expected)),
+            "expected a config error containing {expected:?}, got {outcome:?}"
+        );
     }
 
     async fn load_vm_config(directory: &Path, toml: &str) -> ProximaError {

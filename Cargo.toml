@@ -508,6 +508,8 @@ libtest-mimic = "0.8.2"
 proxima-tensor = { workspace = true, features = ["std"] }
 proxima-safetensors = { path = "proxima-safetensors" }
 serde_json = { version = "1.0.151", default-features = false, features = ["alloc", "float_roundtrip"] }
+tar = "0.4.46"
+flate2 = "1.1.10"
 
 [lints]
 workspace = true
