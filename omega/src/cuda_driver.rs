@@ -2207,7 +2207,7 @@ impl CudaPlan {
     }
 }
 
-// `Q5_1`/`Q5_0` are excluded here the same way `Iq4Nl`/`Iq2Xs`/`Iq3Xxs` are --
+// `Q5_1` is excluded here the same way `Iq4Nl`/`Iq2Xs`/`Iq3Xxs` are --
 // no CUDA unpack kernel exists for any of them yet, so all stay routed through
 // `None`. Every unsupported codec is named so a new `Codec` variant forces a
 // decision here instead of slipping through a wildcard.
@@ -2224,10 +2224,10 @@ fn packed_codec(block: &QuantizedBlock<'_>) -> Option<Codec> {
         | Codec::Q6K
         | Codec::Q8_0
         | Codec::Q4_0
+        | Codec::Q5_0
         | Codec::Float16
         | Codec::BFloat16 => Some(*codec),
         Codec::Q5_1
-        | Codec::Q5_0
         | Codec::Q4_1
         | Codec::Q8_1
         | Codec::Q8K
@@ -2372,9 +2372,8 @@ mod tests {
 
     const KERNEL_CACHE_DIR_VAR: &str = "PROXIMA_CUDA_KERNEL_CACHE_DIR";
 
-    const CUDA_UNPACKABLE: [Codec; 20] = [
+    const CUDA_UNPACKABLE: [Codec; 19] = [
         Codec::Q5_1,
-        Codec::Q5_0,
         Codec::Q4_1,
         Codec::Q8_1,
         Codec::Q8K,
@@ -2395,7 +2394,7 @@ mod tests {
         Codec::Q2_0,
     ];
 
-    const CODECS_WITH_CUDA_KERNEL: [Codec; 9] = [
+    const CODECS_WITH_CUDA_KERNEL: [Codec; 10] = [
         Codec::Q2K,
         Codec::Q3K,
         Codec::Q4K,
@@ -2403,6 +2402,7 @@ mod tests {
         Codec::Q6K,
         Codec::Q8_0,
         Codec::Q4_0,
+        Codec::Q5_0,
         Codec::Float16,
         Codec::BFloat16,
     ];
