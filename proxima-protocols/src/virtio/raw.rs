@@ -28,6 +28,16 @@ pub fn read_u64(bytes: &[u8], at: usize) -> u64 {
 }
 
 #[inline]
+pub fn write_u16(bytes: &mut [u8], at: usize, value: u16) {
+    bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+#[inline]
+pub fn write_u64(bytes: &mut [u8], at: usize, value: u64) {
+    bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+#[inline]
 pub fn write_u32(bytes: &mut [u8], at: usize, value: u32) {
     bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
