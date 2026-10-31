@@ -1996,8 +1996,38 @@ fn push_packed_matmul_offset(
         }
     }
     source.push_str(&format!(
-        "{indent}long off{index} = u.operand_base[{index}] + packed_row{index} * u.reduction_total + r;\n"
+        "{indent}long off{index} = u.operand_base[{index}] + packed_row{index} * u.reduction_total + {};\n",
+        packed_reduction_term(index, layout, output_axes, resolved)
     ));
+}
+
+/// The packed row's in-row element offset. A weight whose reduction axes nest in the
+/// iteration order reads the flat reduction index `r`; one whose checkpoint nests them
+/// differently (`ssm_out`'s head axes) reads through its native strides, which
+/// `correct_packed_matmul_layouts` derived from the declared layout.
+fn packed_reduction_term(
+    index: usize,
+    layout: &Layout,
+    output_axes: &[u16],
+    resolved: &BoundOp,
+) -> String {
+    let reduction_axes: Vec<usize> = (0..resolved.extents.len())
+        .filter(|axis| !output_axes.contains(&(*axis as u16)) && layout.stride(*axis as u16) != 0)
+        .collect();
+    let mut expected = 1i64;
+    let iteration_order = reduction_axes.iter().rev().all(|axis| {
+        let matches = layout.stride(*axis as u16) == expected;
+        expected *= resolved.extents[*axis] as i64;
+        matches
+    });
+    if iteration_order {
+        return String::from("r");
+    }
+    reduction_axes
+        .iter()
+        .map(|axis| format!("full_coord[{axis}] * u.operand_strides[{index}][{axis}]"))
+        .collect::<Vec<String>>()
+        .join(" + ")
 }
 
 // mirrors `crate::msl::elementwise_reduce_core::push_serial_reduce_body`'s

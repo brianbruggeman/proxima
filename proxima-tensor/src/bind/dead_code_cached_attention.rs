@@ -23,7 +23,7 @@ use super::*;
 /// still one flat `embedding x (heads*head_dim)` buffer underneath).
 /// `output_axes` on a bound reduce already names which of `extents`'s
 /// iteration axes are the "out" side; the complement is "in". Within each
-/// side, relative axis order is preserved from the declared shape -- only
+/// side, axes nest in the order the declared layout strides them -- only
 /// which side sits inside (contiguous) and which sits outside flips.
 ///
 /// A no-op for any operand not in `packed_operands`, and for any `BoundOp`
@@ -114,35 +114,39 @@ pub(super) fn native_packed_layout(
     let mut strides = SmallVec::<[i64; MAX_INLINE_RANK]>::from_elem(0, rank);
     let broadcasts = |axis: u16| declared.stride(axis) == 0;
 
-    // an axis the operand never varies along (a sequence batch, or the
-    // selected-expert axis of a gathered fold, whose expert comes from the
-    // route) holds no bytes of the weight, so it widens no row.
-    let mut in_dim = 1i64;
-    for axis in 0..rank as u16 {
-        if !output_axes.contains(&axis) && !broadcasts(axis) {
-            in_dim *= extents[axis as usize] as i64;
-        }
-    }
+    let outermost_first = |mut axes: Vec<u16>| {
+        axes.sort_by_key(|&axis| core::cmp::Reverse(declared.stride(axis)));
+        axes
+    };
+    let reduction_axes = outermost_first(
+        (0..rank as u16)
+            .filter(|axis| !output_axes.contains(axis) && !broadcasts(*axis))
+            .collect(),
+    );
+    let row_axes = outermost_first(
+        output_axes
+            .iter()
+            .copied()
+            .filter(|axis| !broadcasts(*axis))
+            .collect(),
+    );
 
-    // the reduction ("in") axes: innermost group, relative order preserved,
-    // the LAST one contiguous -- exactly `row_major_strides` restricted to
-    // this axis subset.
+    // the reduction ("in") axes: innermost group, nested in the order the declared layout
+    // strides them (a checkpoint may nest them differently from the iteration order, as
+    // `ssm_out`'s head axes do), the LAST one contiguous. An axis the operand never varies
+    // along (a sequence batch, or the selected-expert axis of a gathered fold, whose expert
+    // comes from the route) holds no bytes of the weight, so it widens no row.
     let mut accumulator = 1i64;
-    for axis in (0..rank as u16).rev() {
-        if output_axes.contains(&axis) || broadcasts(axis) {
-            continue;
-        }
-        strides[axis as usize] = accumulator;
-        accumulator *= extents[axis as usize] as i64;
+    for axis in reduction_axes.iter().rev() {
+        strides[*axis as usize] = accumulator;
+        accumulator *= extents[*axis as usize] as i64;
     }
+    let in_dim = accumulator;
 
-    // the output axes: outermost group, relative order preserved, scaled by
-    // the whole reduction group's flat width since it sits inside them.
+    // the output axes: outermost group, scaled by the whole reduction group's flat width
+    // since it sits inside them.
     let mut accumulator = in_dim;
-    for axis in output_axes.iter().rev() {
-        if broadcasts(*axis) {
-            continue;
-        }
+    for axis in row_axes.iter().rev() {
         strides[*axis as usize] = accumulator;
         accumulator *= extents[*axis as usize] as i64;
     }
