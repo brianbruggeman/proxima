@@ -1461,6 +1461,7 @@ pub(super) const fn codec_to_decodable_ggml_type(codec: Codec) -> Option<proxima
         Codec::Q1_0 => Some(proxima_gguf::GgmlType::Q1_0),
         Codec::Q2_0 => Some(proxima_gguf::GgmlType::Q2_0),
         Codec::Pq2_0 => Some(proxima_gguf::GgmlType::Pq2_0),
+        Codec::Ptq1_0 => Some(proxima_gguf::GgmlType::Ptq1_0),
         Codec::Iq4Nl => Some(proxima_gguf::GgmlType::Iq4Nl),
         Codec::Iq2Xs => Some(proxima_gguf::GgmlType::Iq2Xs),
         Codec::Iq3Xxs => Some(proxima_gguf::GgmlType::Iq3Xxs),
@@ -1511,6 +1512,7 @@ pub(super) const fn codec_matmul_f32_kernel(
         Codec::Q1_0 => Some(matmul_q1_0_f32),
         Codec::Q2_0 => Some(matmul_q2_0_f32),
         Codec::Pq2_0 => Some(matmul_pq2_0_f32),
+        Codec::Ptq1_0 => Some(matmul_ptq1_0_f32),
         Codec::Iq4Nl => Some(matmul_iq4_nl_f32),
         Codec::Iq2Xs => Some(matmul_iq2_xs_f32),
         Codec::Iq3Xxs => Some(matmul_iq3_xxs_f32),
@@ -1566,6 +1568,7 @@ pub(super) const fn codec_dequantize_fn(
         Codec::Q1_0 => Some(q1_0::dequantize),
         Codec::Q2_0 => Some(q2_0::dequantize),
         Codec::Pq2_0 => Some(pq2_0::dequantize),
+        Codec::Ptq1_0 => Some(ptq1_0::dequantize),
         Codec::Iq2Xs => Some(iq2_xs::dequantize),
         Codec::Iq3Xxs => Some(iq3_xxs::dequantize),
         Codec::Float16 => Some(gguf_f16::dequantize),
@@ -2146,6 +2149,12 @@ impl<'a> QuantizedBlock<'a> {
                     pq2_0::BLOCK_BYTES,
                     whole_blocks(bytes.len(), pq2_0::BLOCK_BYTES, pq2_0::QK_PQ2_0),
                 ),
+                Codec::Ptq1_0 => (
+                    "ptq1_0",
+                    bytes.len(),
+                    ptq1_0::BLOCK_BYTES,
+                    whole_blocks(bytes.len(), ptq1_0::BLOCK_BYTES, ptq1_0::QK_PTQ1_0),
+                ),
                 Codec::BFloat8 => ("bfloat8", bytes.len(), 1, Some(bytes.len())),
                 Codec::Bf8E5M2 => ("bf8_e5m2", bytes.len(), 1, Some(bytes.len())),
                 Codec::Bf4E2M1 => ("bf4_e2m1", bytes.len(), 1, Some(bytes.len() * 2)),
@@ -2216,5 +2225,6 @@ const fn codec_name_for_error(codec: Codec) -> &'static str {
         Codec::Q1_0 => "q1_0",
         Codec::Q2_0 => "q2_0",
         Codec::Pq2_0 => "pq2_0",
+        Codec::Ptq1_0 => "ptq1_0",
     }
 }

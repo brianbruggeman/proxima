@@ -40,7 +40,7 @@ fn check_decode_shapes(data: &[u8], output: &[f32]) -> Result<(), QuantError> {
     Ok(())
 }
 
-fn dequantize_block(block: &[u8; BLOCK_BYTES], output: &mut [f32; QK_PTQ1_0]) {
+pub fn dequantize_block(block: &[u8; BLOCK_BYTES], output: &mut [f32; QK_PTQ1_0]) {
     let scale = half::f16::from_le_bytes([block[SCALE_OFFSET], block[SCALE_OFFSET + 1]]).to_f32();
     let mut written = 0;
     let mut consumed = 0;
