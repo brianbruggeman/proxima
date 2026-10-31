@@ -78,7 +78,7 @@ pub fn dequantize(layout: FloatLayout, input: &[u8], output: &mut [f32]) -> Resu
     }
     for (index, value) in output.iter_mut().enumerate() {
         let encoded = read_bits(input, index * width, width);
-        *value = float_layout::decode(encoded.into(), layout);
+        *value = float_layout::decode(encoded, layout);
     }
     Ok(())
 }
