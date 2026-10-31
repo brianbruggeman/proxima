@@ -77,6 +77,7 @@ const LINUX_GUEST_MANIFEST_DIR: &str = concat!(
 const LINUX_TARGET: &str = "x86_64-unknown-linux-musl";
 const LINUX_GUEST: &str = "uppercase-init";
 const LINUX_PIPE: &str = "shout-linux";
+const IMAGE_PIPE: &str = "probe-image";
 const DEFAULT_KERNEL: &str = "/boot/vmlinuz-linux";
 
 const MAX_SEGMENTS: usize = 8;
@@ -115,6 +116,14 @@ fn main() {
             trial(
                 "relative_linux_init_path_boots_from_a_different_working_directory",
                 relative_linux_init_path_boots_from_a_different_working_directory,
+            ),
+            trial(
+                "config_only_linux_vm_upstream_runs_an_oci_image",
+                config_only_linux_vm_upstream_runs_an_oci_image,
+            ),
+            trial(
+                "a_tampered_cached_layer_fails_the_image_upstream_build_before_boot",
+                a_tampered_cached_layer_fails_the_image_upstream_build_before_boot,
             ),
             trial(
                 "missing_kernel_fails_when_the_config_is_applied",
@@ -674,6 +683,10 @@ fn host_kernel() -> String {
 /// static `uppercase-init` executable, the same build
 /// `tools/proxima-vm/tests/linux_guest.rs` drives.
 fn build_linux_init(target_dir: &Path) -> PathBuf {
+    build_linux_bin(target_dir, LINUX_GUEST)
+}
+
+fn build_linux_bin(target_dir: &Path, bin: &str) -> PathBuf {
     let status = Command::new("cargo")
         .args([
             "build",
@@ -683,13 +696,13 @@ fn build_linux_init(target_dir: &Path) -> PathBuf {
             "--manifest-path",
             &format!("{LINUX_GUEST_MANIFEST_DIR}/Cargo.toml"),
             "--bin",
-            LINUX_GUEST,
+            bin,
         ])
         .env("CARGO_TARGET_DIR", target_dir)
         .status()
         .expect("run cargo build for the Linux guest");
     assert!(status.success(), "linux guest build failed");
-    target_dir.join(LINUX_TARGET).join("release").join(LINUX_GUEST)
+    target_dir.join(LINUX_TARGET).join("release").join(bin)
 }
 
 fn write_linux_upstream_config(directory: &Path, kernel: &str, init: &Path) -> PathBuf {
@@ -1020,4 +1033,105 @@ fn vm_upstream_latency_table() {
     ));
 
     println!("{}", report.join("\n"));
+}
+
+/// A one-layer docker-format image holding `program` as `/bin/entry-probe`, written into
+/// `cache_dir` the way `proxima_vm::oci::cache` lays blobs out; returns the manifest digest
+/// a config can pin. The pull then finds every blob locally and never dials a registry.
+fn seed_probe_image(cache_dir: &Path, program: &[u8]) -> String {
+    use proxima_vm::oci::cache;
+    use proxima_vm::oci::digest::Digest;
+
+    let mut builder = tar::Builder::new(Vec::new());
+    for (kind, mode, path, contents) in [
+        (tar::EntryType::Directory, 0o755, "bin/", &[][..]),
+        (tar::EntryType::Regular, 0o755, "bin/entry-probe", program),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(kind);
+        header.set_mode(mode);
+        header.set_size(contents.len() as u64);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        builder.append_data(&mut header, path, contents).expect("append tar entry");
+    }
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&builder.into_inner().expect("finish tar")).expect("gzip layer");
+    let layer = encoder.finish().expect("finish gzip");
+    let config = br#"{"config":{"Entrypoint":["/bin/entry-probe"],"Cmd":["--serve"],"Env":["OCI_PROBE=via-registry"],"WorkingDir":"/"}}"#;
+    let (layer_digest, config_digest) = (Digest::of(&layer), Digest::of(config));
+    let manifest = format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{{"mediaType":"application/vnd.docker.container.image.v1+json","digest":"{config_digest}","size":{}}},"layers":[{{"mediaType":"application/vnd.docker.image.rootfs.diff.tar.gzip","digest":"{layer_digest}","size":{}}}]}}"#,
+        config.len(),
+        layer.len()
+    );
+    let manifest_digest = Digest::of(manifest.as_bytes());
+    for (digest, bytes) in [
+        (&layer_digest, layer.as_slice()),
+        (&config_digest, config.as_slice()),
+        (&manifest_digest, manifest.as_bytes()),
+    ] {
+        cache::write(cache_dir, digest, bytes).expect("seed the blob cache");
+    }
+    manifest_digest.to_string()
+}
+
+fn write_image_upstream_config(directory: &Path, kernel: &str, oci_init: &Path, cache_dir: &Path, manifest_digest: &str) -> PathBuf {
+    let config_path = directory.join("proxima-image.toml");
+    let toml = format!(
+        "[upstreams.{IMAGE_PIPE}]\ntype = \"vm\"\nkernel_path = \"{kernel}\"\nimage = \"probe/app@{manifest_digest}\"\noci_init_path = \"{}\"\nimage_cache_dir = \"{}\"\nwatchdog_millis = 15000\n",
+        oci_init.display(),
+        cache_dir.display()
+    );
+    std::fs::write(&config_path, toml).expect("write image TOML config");
+    config_path
+}
+
+/// An OCI image through `type = "vm"` with zero new Rust: `image` + `oci_init_path` in TOML pull
+/// (here from a pre-seeded content-addressed cache), flatten, boot, and the call returns the
+/// fate `oci-init` observed for the image's entrypoint.
+fn config_only_linux_vm_upstream_runs_an_oci_image() {
+    let directory = tempfile::tempdir().expect("create tempdir for the guest build");
+    let target = directory.path().join("linux-target");
+    let oci_init = build_linux_bin(&target, "oci-init");
+    let probe = build_linux_bin(&target, "entry-probe");
+    let cache_dir = directory.path().join("oci-cache");
+    let manifest_digest = seed_probe_image(&cache_dir, &std::fs::read(&probe).expect("read entry-probe"));
+    let config = write_image_upstream_config(directory.path(), &host_kernel(), &oci_init, &cache_dir, &manifest_digest);
+    let signed_self = SignedSelf::prepare();
+
+    let response = signed_self
+        .run(&[PROBE_FLAG, &config.to_string_lossy(), IMAGE_PIPE], b"300")
+        .expect("config-registered image upstream runs end to end");
+
+    assert_eq!(response, b"exited:0");
+}
+
+/// Sad path: a layer altered in the cache fails the build of the upstream with both digests,
+/// so nothing boots.
+fn a_tampered_cached_layer_fails_the_image_upstream_build_before_boot() {
+    let directory = tempfile::tempdir().expect("create tempdir for the guest build");
+    let target = directory.path().join("linux-target");
+    let oci_init = build_linux_bin(&target, "oci-init");
+    let cache_dir = directory.path().join("oci-cache");
+    let manifest_digest = seed_probe_image(&cache_dir, b"\x7fELF-not-really");
+    let blobs = cache_dir.join("blobs").join("sha256");
+    let layer = std::fs::read_dir(&blobs)
+        .expect("list cached blobs")
+        .map(|entry| entry.expect("blob entry").path())
+        .find(|path| std::fs::read(path).is_ok_and(|bytes| bytes.starts_with(&[0x1f, 0x8b])))
+        .expect("the gzip layer is in the cache");
+    std::fs::write(&layer, b"tampered").expect("tamper with the cached layer");
+    let config = write_image_upstream_config(directory.path(), &host_kernel(), &oci_init, &cache_dir, &manifest_digest);
+    let signed_self = SignedSelf::prepare();
+
+    let error = signed_self
+        .run(&[PROBE_FLAG, &config.to_string_lossy(), IMAGE_PIPE], b"300")
+        .expect_err("a tampered layer must fail the build");
+
+    assert!(
+        error.contains("failed its digest check: expected sha256:") && error.contains("actual sha256:"),
+        "the failure must carry both digests: {error}"
+    );
 }
