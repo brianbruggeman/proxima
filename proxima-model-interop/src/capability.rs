@@ -270,7 +270,7 @@ pub fn supported_dense_cpu_codecs() -> Vec<GgmlType> {
 /// gaining a 30th codec fails this crate's own build before it can silently
 /// fail to appear here.
 ///
-/// `Codec` carries 34 variants; 20 have a CPU decode/matmul path: the 17 that
+/// `Codec` carries 35 variants; 21 have a CPU decode/matmul path: the 18 that
 /// `proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type` maps to
 /// `Some`, plus `Bf8E5M2`, `Bf4E2M1` and `Fp6E3M2`, which
 /// `QuantizedBlock::block_layout`, `codec_matmul_f32_kernel` and
@@ -330,11 +330,12 @@ pub mod quant_format {
             Codec::Q1_0 => "Q1_0",
             Codec::Q2_0 => "Q2_0",
             Codec::Pq2_0 => "PQ2_0",
+            Codec::Ptq1_0 => "PTQ1_0",
         }
     }
 
-    /// `true` for exactly the 20 [`Codec`] variants with a CPU decode path:
-    /// the 17 `proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type`
+    /// `true` for exactly the 21 [`Codec`] variants with a CPU decode path:
+    /// the 18 `proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type`
     /// maps to `Some`, plus `Bf8E5M2`, `Bf4E2M1` and `Fp6E3M2`, which
     /// `codec_matmul_f32_kernel` dispatches to dedicated kernels. `false` for
     /// the other 14 -- no construction site in this crate or `proxima_tensor`
@@ -357,6 +358,7 @@ pub mod quant_format {
                 | Codec::Q1_0
                 | Codec::Q2_0
                 | Codec::Pq2_0
+                | Codec::Ptq1_0
                 | Codec::Float16
                 | Codec::BFloat16
                 | Codec::Bf8E5M2
@@ -402,6 +404,7 @@ pub mod quant_format {
         Codec::Q1_0,
         Codec::Q2_0,
         Codec::Pq2_0,
+        Codec::Ptq1_0,
         Codec::BFloat8,
         Codec::Bf8E5M2,
         Codec::Bf4E2M1,
@@ -497,8 +500,8 @@ mod quant_format_tests {
     fn all_codecs_covers_every_codec_variant_exactly_once() {
         assert_eq!(
             ALL_CODECS.len(),
-            34,
-            "proxima_primitives::Codec carries 34 variants today"
+            35,
+            "proxima_primitives::Codec carries 35 variants today"
         );
     }
 

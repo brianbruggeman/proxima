@@ -264,6 +264,10 @@ pub fn gguf_tensor_as_packed_block<'a>(
             codec: Codec::Pq2_0,
             bytes,
         }),
+        GgmlType::Ptq1_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Ptq1_0,
+            bytes,
+        }),
         GgmlType::Fp6E3M2 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
             codec: Codec::Fp6E3M2,
             bytes,
@@ -1159,6 +1163,7 @@ pub(crate) fn as_block(
         | Codec::Q1_0
         | Codec::Q2_0
         | Codec::Pq2_0
+        | Codec::Ptq1_0
         | Codec::Fp6E3M2 => Some(proxima_tensor::cpu::QuantizedBlock::Packed { codec, bytes }),
         Codec::Q4_1
         | Codec::Q8_1
@@ -1230,6 +1235,7 @@ pub(crate) fn codec_from_ggml_type(ggml_type: GgmlType) -> Option<Codec> {
         GgmlType::Q1_0 => Some(Codec::Q1_0),
         GgmlType::Q2_0 => Some(Codec::Q2_0),
         GgmlType::Pq2_0 => Some(Codec::Pq2_0),
+        GgmlType::Ptq1_0 => Some(Codec::Ptq1_0),
         GgmlType::Fp6E3M2 => Some(Codec::Fp6E3M2),
         // `F32`/the integer types/`F64` have no `Codec` counterpart.
         // `GgmlType` is `#[non_exhaustive]` (a foreign, still-growing wire
@@ -1284,6 +1290,7 @@ fn codec_name_suffix(codec: Codec) -> &'static str {
         Codec::Q1_0 => "q1_0",
         Codec::Q2_0 => "q2_0",
         Codec::Pq2_0 => "pq2_0",
+        Codec::Ptq1_0 => "ptq1_0",
     }
 }
 
@@ -1326,6 +1333,7 @@ pub(crate) fn codec_to_ggml_type(codec: Codec) -> Result<GgmlType, InteropError>
         Codec::Q1_0 => GgmlType::Q1_0,
         Codec::Q2_0 => GgmlType::Q2_0,
         Codec::Pq2_0 => GgmlType::Pq2_0,
+        Codec::Ptq1_0 => GgmlType::Ptq1_0,
         Codec::Fp6E3M2 => GgmlType::Fp6E3M2,
         Codec::BFloat8 | Codec::Bf8E5M2 | Codec::Bf4E2M1 => {
             return Err(InteropError::UnsupportedCodec { codec });
@@ -1497,6 +1505,10 @@ fn bind_dense_with<'file>(
             }
             | proxima_tensor::cpu::QuantizedBlock::Packed {
                 codec: Codec::Pq2_0,
+                bytes,
+            }
+            | proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Ptq1_0,
                 bytes,
             }),
         ) => {
@@ -1875,6 +1887,7 @@ pub(crate) fn quantize_to_kind(
         Codec::Q1_0 => Err(QuantError::UnsupportedCodec { codec: "q1_0" }),
         Codec::Q2_0 => Err(QuantError::UnsupportedCodec { codec: "q2_0" }),
         Codec::Pq2_0 => Err(QuantError::UnsupportedCodec { codec: "pq2_0" }),
+        Codec::Ptq1_0 => Err(QuantError::UnsupportedCodec { codec: "ptq1_0" }),
         Codec::BFloat8 => Err(QuantError::UnsupportedCodec { codec: "bf8" }),
         Codec::Bf8E5M2 => Err(QuantError::UnsupportedCodec { codec: "bf8_e5m2" }),
         Codec::Bf4E2M1 => Err(QuantError::UnsupportedCodec { codec: "bf4_e2m1" }),
@@ -1961,6 +1974,10 @@ pub(crate) fn bind_matmul_weight_paired<'file>(
             },
             GgmlType::Pq2_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
                 codec: Codec::Pq2_0,
+                bytes,
+            },
+            GgmlType::Ptq1_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Ptq1_0,
                 bytes,
             },
             other => {
@@ -2068,6 +2085,10 @@ pub(crate) fn bind_matmul_weight_triple<'file>(
             },
             GgmlType::Pq2_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
                 codec: Codec::Pq2_0,
+                bytes,
+            },
+            GgmlType::Ptq1_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Ptq1_0,
                 bytes,
             },
             other => {

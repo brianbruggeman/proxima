@@ -58,6 +58,7 @@ Generated from `src/capability.rs`'s own tables by `examples/generate_compatibil
 | Q1_0 | supported |
 | Q2_0 | supported |
 | PQ2_0 | supported |
+| PTQ1_0 | supported |
 | BF8 | unsupported |
 | BF8_E5M2 | supported |
 | BF4_E2M1 | supported |
