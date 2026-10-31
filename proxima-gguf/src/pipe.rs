@@ -98,6 +98,18 @@ const DIRECTORY_CHUNK_BYTES: usize = 1 << 20;
 /// whole file, because [`ParsedGguf::tensor_data_range`] validates offsets
 /// against `input.len()`.
 ///
+/// ```
+/// let mut bytes = b"GGUF".to_vec();
+/// bytes.extend_from_slice(&3u32.to_le_bytes());
+/// bytes.extend_from_slice(&0i64.to_le_bytes());
+/// bytes.extend_from_slice(&0i64.to_le_bytes());
+///
+/// let parsed = proxima_gguf::parse_complete(&bytes).expect("an empty v3 directory parses");
+///
+/// assert_eq!(parsed.version, 3);
+/// assert!(parsed.tensors.is_empty());
+/// ```
+///
 /// # Errors
 ///
 /// Any [`GgufError`] the underlying [`GgufParser`] surfaces, plus
