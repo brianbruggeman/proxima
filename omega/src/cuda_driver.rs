@@ -17,7 +17,7 @@ use std::time::Instant;
 use conflaguration::Settings;
 use cudarc::driver::sys as cuda_sys;
 use cudarc::driver::{
-    CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DriverError, LaunchConfig,
+    CudaContext, CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, DriverError, LaunchConfig,
     PushKernelArg,
 };
 use cudarc::nvrtc::sys as nvrtc_sys;
@@ -184,6 +184,7 @@ struct CachedCudaModule {
 pub struct CudaF32Arena {
     buffers: BTreeMap<NodeId, CudaGraphBuffer>,
     uniforms: BTreeMap<NodeId, CudaSlice<u8>>,
+    uniform_host: BTreeMap<NodeId, Vec<u8>>,
     resident_sources: BTreeMap<NodeId, (usize, usize)>,
     allocations: u64,
 }
@@ -704,12 +705,17 @@ impl CudaDriver {
         if let Some(buffer) = arena.uniforms.get_mut(&node)
             && buffer.len() == values.len()
         {
+            if arena.uniform_host.get(&node).is_some_and(|held| held == values) {
+                return Ok(());
+            }
             self.stream.memcpy_htod(values, buffer)?;
             self.graph_uploads.fetch_add(1, Ordering::Relaxed);
+            arena.uniform_host.insert(node, values.to_vec());
             return Ok(());
         }
         let buffer = self.stream.clone_htod(values)?;
         self.graph_uploads.fetch_add(1, Ordering::Relaxed);
+        arena.uniform_host.insert(node, values.to_vec());
         arena.uniforms.insert(node, buffer);
         arena.allocations += 1;
         Ok(())
@@ -1137,6 +1143,14 @@ impl CudaDriver {
         }
     }
 
+    fn record_event(&self, stream: &CudaStream) -> Result<CudaEvent, CudaDriverError> {
+        let event = stream
+            .context()
+            .new_event(Some(cuda_sys::CUevent_flags::CU_EVENT_DEFAULT))?;
+        event.record(stream)?;
+        Ok(event)
+    }
+
     /// Copies one persistent node back to the host for an explicit oracle or
     /// final-result readback.
     pub fn read_f32(
@@ -1253,6 +1267,35 @@ fn emit_and_pack(
         .collect::<Result<Vec<_>, _>>()?;
     micros.pack = pack_started.elapsed().as_micros() as u64;
     Ok((kernels, uniforms))
+}
+
+fn report_event_timing(
+    origin: &CudaEvent,
+    rows: &[(NodeId, String, usize, CudaEvent)],
+) -> Result<(), CudaDriverError> {
+    let mut previous = origin;
+    let mut by_kernel: BTreeMap<&str, (f64, usize, usize)> = BTreeMap::new();
+    let mut total_ms = 0.0f64;
+    for (_, label, output_len, event) in rows {
+        let millis = f64::from(previous.elapsed_ms(event)?);
+        let entry = by_kernel
+            .entry(label.as_str())
+            .or_insert((0.0, 0, *output_len));
+        entry.0 += millis;
+        entry.1 += 1;
+        total_ms += millis;
+        previous = event;
+    }
+    let mut ranked: Vec<_> = by_kernel.into_iter().collect();
+    ranked.sort_by(|left, right| right.1.0.total_cmp(&left.1.0));
+    eprintln!("cuda_event_timing: nodes={} gpu_ms={total_ms:.3}", rows.len());
+    for (label, (millis, count, output_len)) in ranked.iter().take(24) {
+        eprintln!(
+            "cuda_event_timing_kernel gpu_ms={millis:.3} count={count} each_us={:.1} output_len={output_len} {label}",
+            millis * 1000.0 / *count as f64
+        );
+    }
+    Ok(())
 }
 
 fn refresh_refusal_name(refusal: RefreshRefusal) -> &'static str {
@@ -2011,6 +2054,11 @@ impl CudaPlan {
         let fault_array = (fault_total > 0)
             .then(|| self.driver.stream.alloc_zeros::<u32>(fault_total))
             .transpose()?;
+        let event_timing = std::env::var_os("PROXIMA_CUDA_EVENT_TIMING").is_some();
+        let mut event_rows: Vec<(NodeId, String, usize, CudaEvent)> = Vec::new();
+        let event_origin = event_timing
+            .then(|| self.driver.record_event(&self.driver.stream))
+            .transpose()?;
         let dispatch_started = host_timing.then(std::time::Instant::now);
         for (bound, (kernel, uniforms)) in self
             .resolved
@@ -2119,6 +2167,10 @@ impl CudaPlan {
                 if let Some(started) = node_started {
                     timing_rows.push((bound.node, started.elapsed().as_micros(), output_len));
                 }
+                if event_timing {
+                    let event = self.driver.record_event(&self.driver.stream)?;
+                    event_rows.push((bound.node, format!("{}:{}", bound.kind.name(), kernel.entry), output_len, event));
+                }
             }
             if trace_outputs && self.outputs.contains(&bound.node) {
                 let values = self.driver.read_f32(&self.arena, bound.node)?;
@@ -2161,6 +2213,9 @@ impl CudaPlan {
                     });
                 }
             }
+        }
+        if let Some(origin) = event_origin {
+            report_event_timing(&origin, &event_rows)?;
         }
         if let Some(started) = sync_started {
             eprintln!(
