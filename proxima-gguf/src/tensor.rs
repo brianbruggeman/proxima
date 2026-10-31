@@ -38,7 +38,14 @@ impl TensorInfo {
     /// `None` on overflow (pathological dimensions from a corrupt file).
     #[must_use]
     pub fn nbytes(&self) -> Option<u64> {
-        let layout = self.ggml_type.block_layout();
+        self.nbytes_as(self.ggml_type)
+    }
+
+    /// Byte footprint if this tensor's elements were packed as `ggml_type`
+    /// instead of its declared type.
+    #[must_use]
+    pub fn nbytes_as(&self, ggml_type: GgmlType) -> Option<u64> {
+        let layout = ggml_type.block_layout();
         let elements = self.element_count();
         let blocks = elements.checked_div(layout.block_elements)?;
         blocks.checked_mul(layout.block_bytes)

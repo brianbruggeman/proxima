@@ -104,7 +104,7 @@ const DIRECTORY_CHUNK_BYTES: usize = 1 << 20;
 /// [`GgufError::TruncatedInput`] if `input` ends before the tensor
 /// directory is fully parsed.
 pub fn parse_complete(input: &[u8]) -> Result<ParsedGguf, GgufError> {
-    let mut parser = GgufParser::new();
+    let mut parser = GgufParser::new().with_file_len(input.len() as u64);
     let mut events = Vec::new();
     let mut offset = 0usize;
 

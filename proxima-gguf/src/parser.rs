@@ -18,6 +18,7 @@
 //! accumulation buffer, draining every event a chunk unlocks before handing
 //! the parser back.
 
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -62,6 +63,7 @@ enum Phase {
     KvCount { tensor_count: u64 },
     Kv { tensor_count: u64, remaining: u64 },
     Tensor { remaining: u64, index: u64 },
+    Flush,
     Done,
 }
 
@@ -80,6 +82,11 @@ pub struct GgufParser {
     seen_tensor_names: Vec<String>,
     resolved_alignment: Option<u32>,
     tensor_size_total: u64,
+    group128_size_total: u64,
+    group64_consistent: bool,
+    group128_consistent: bool,
+    pending_tensors: VecDeque<TensorInfo>,
+    file_len: Option<u64>,
     max_supported_version: u32,
     default_alignment: u32,
 }
@@ -134,9 +141,23 @@ impl GgufParser {
             seen_tensor_names: Vec::new(),
             resolved_alignment: None,
             tensor_size_total: 0,
+            group128_size_total: 0,
+            group64_consistent: true,
+            group128_consistent: true,
+            pending_tensors: VecDeque::new(),
+            file_len: None,
             max_supported_version: crate::sized::MAX_SUPPORTED_VERSION,
             default_alignment: crate::sized::DEFAULT_ALIGNMENT,
         }
+    }
+
+    /// Total stream length when the caller has it all in hand. Only used to
+    /// size a trailing type-42 tensor that no later tensor offset can
+    /// discriminate.
+    #[must_use]
+    pub fn with_file_len(mut self, file_len: u64) -> Self {
+        self.file_len = Some(file_len);
+        self
     }
 
     /// Construct a parser using [`crate::config::GgufParserConfig`]'s
@@ -209,6 +230,7 @@ impl GgufParser {
                 remaining,
             } => self.poll_kv(tensor_count, remaining),
             Phase::Tensor { remaining, index } => self.poll_tensor(remaining, index),
+            Phase::Flush => Ok(Some(self.flush_next())),
             Phase::Done => Ok(None),
         }
     }
@@ -381,20 +403,40 @@ impl GgufParser {
         Ok(Some(GgufEvent::Metadata { key, value }))
     }
 
-    fn poll_tensor(&mut self, remaining: u64, index: u64) -> Result<Option<GgufEvent>, GgufError> {
-        if remaining == 0 {
-            let alignment = self.resolved_alignment.unwrap_or(self.default_alignment);
-            let data_offset = pad_to_alignment(self.stream_pos, alignment);
-            self.phase = Phase::Done;
-            return Ok(Some(GgufEvent::Complete {
-                data_offset,
-                alignment,
-            }));
+    fn poll_tensor(
+        &mut self,
+        mut remaining: u64,
+        mut index: u64,
+    ) -> Result<Option<GgufEvent>, GgufError> {
+        while remaining > 0 {
+            if !self.read_tensor(remaining, index)? {
+                return Ok(None);
+            }
+            remaining -= 1;
+            index += 1;
         }
+        self.resolve_q2_0_layout()?;
+        self.phase = Phase::Flush;
+        Ok(Some(self.flush_next()))
+    }
 
+    fn flush_next(&mut self) -> GgufEvent {
+        if let Some(tensor) = self.pending_tensors.pop_front() {
+            return GgufEvent::Tensor(tensor);
+        }
+        let alignment = self.resolved_alignment.unwrap_or(self.default_alignment);
+        let data_offset = pad_to_alignment(self.stream_pos, alignment);
+        self.phase = Phase::Done;
+        GgufEvent::Complete {
+            data_offset,
+            alignment,
+        }
+    }
+
+    fn read_tensor(&mut self, remaining: u64, index: u64) -> Result<bool, GgufError> {
         let mut reader = Reader::new(self.available());
         let Some(name_result) = reader.string() else {
-            return Ok(None);
+            return Ok(false);
         };
         let name = name_result.map_err(string_error_into_gguf)?;
         if name.len() > MAX_NAME_LEN {
@@ -405,7 +447,7 @@ impl GgufParser {
         }
 
         let Some(n_dims) = reader.u32() else {
-            return Ok(None);
+            return Ok(false);
         };
         if n_dims as usize > MAX_DIMS {
             return Err(GgufError::TooManyDimensions {
@@ -417,14 +459,14 @@ impl GgufParser {
         let mut dims: ArrayVec<u64, MAX_DIMS> = ArrayVec::new();
         for _ in 0..n_dims {
             let Some(dim) = reader.u64() else {
-                return Ok(None);
+                return Ok(false);
             };
             // never fails: n_dims <= MAX_DIMS was checked above.
             let _ = dims.try_push(dim);
         }
 
         let Some(raw_type) = reader.i32() else {
-            return Ok(None);
+            return Ok(false);
         };
         let ggml_type =
             GgmlType::from_wire(raw_type).ok_or_else(|| GgufError::InvalidGgmlType {
@@ -433,7 +475,7 @@ impl GgufParser {
             })?;
 
         let Some(offset) = reader.u64() else {
-            return Ok(None);
+            return Ok(false);
         };
 
         let block_size = ggml_type.block_layout().block_elements;
@@ -449,15 +491,13 @@ impl GgufParser {
         if self.seen_tensor_names.contains(&name) {
             return Err(GgufError::DuplicateTensorName { name });
         }
-        if offset != self.tensor_size_total {
-            return Err(GgufError::TensorOffsetMismatch {
-                tensor: name,
-                expected: self.tensor_size_total,
-                found: offset,
-            });
+        let consumed = reader.consumed();
+        self.group64_consistent &= offset == self.tensor_size_total;
+        self.group128_consistent &= offset == self.group128_size_total;
+        if !self.group64_consistent && !self.group128_consistent {
+            return Err(self.offset_error(name, offset));
         }
 
-        let consumed = reader.consumed();
         self.commit(consumed);
 
         let tensor = TensorInfo {
@@ -466,23 +506,126 @@ impl GgufParser {
             ggml_type,
             offset,
         };
-        let nbytes = tensor.nbytes().ok_or(GgufError::Overflow {
-            context: "tensor byte size",
-        })?;
         let alignment = self.resolved_alignment.unwrap_or(self.default_alignment);
-        self.tensor_size_total = self
-            .tensor_size_total
-            .checked_add(pad_to_alignment(nbytes, alignment))
-            .ok_or(GgufError::Overflow {
-                context: "tensor directory total size",
-            })?;
+        self.tensor_size_total =
+            Self::advance_total(self.tensor_size_total, tensor.nbytes(), alignment)?;
+        self.group128_size_total = Self::advance_total(
+            self.group128_size_total,
+            tensor.nbytes_as(group128_type(ggml_type)),
+            alignment,
+        )?;
         self.seen_tensor_names.push(name);
+        self.pending_tensors.push_back(tensor);
 
         self.phase = Phase::Tensor {
             remaining: remaining - 1,
             index: index + 1,
         };
-        Ok(Some(GgufEvent::Tensor(tensor)))
+        Ok(true)
+    }
+
+    fn advance_total(total: u64, nbytes: Option<u64>, alignment: u32) -> Result<u64, GgufError> {
+        let nbytes = nbytes.ok_or(GgufError::Overflow {
+            context: "tensor byte size",
+        })?;
+        total
+            .checked_add(pad_to_alignment(nbytes, alignment))
+            .ok_or(GgufError::Overflow {
+                context: "tensor directory total size",
+            })
+    }
+
+    fn offset_error(&self, tensor: String, found: u64) -> GgufError {
+        if self.tensor_size_total == self.group128_size_total {
+            return GgufError::TensorOffsetMismatch {
+                tensor,
+                expected: self.tensor_size_total,
+                found,
+            };
+        }
+        GgufError::Q2_0LayoutUnresolved {
+            tensor,
+            group64_expected: self.tensor_size_total,
+            group128_expected: self.group128_size_total,
+            found,
+        }
+    }
+
+    fn resolve_q2_0_layout(&mut self) -> Result<(), GgufError> {
+        let group128 = match (self.group64_consistent, self.group128_consistent) {
+            (false, true) => true,
+            (true, true) => self.trailing_tensor_is_group128()?,
+            _ => false,
+        };
+        if group128 {
+            self.reinterpret_as_pq2_0()?;
+        }
+        Ok(())
+    }
+
+    fn trailing_tensor_is_group128(&self) -> Result<bool, GgufError> {
+        let (Some(file_len), Some(last)) = (self.file_len, self.pending_tensors.back()) else {
+            return Ok(false);
+        };
+        if self.tensor_size_total == self.group128_size_total {
+            return Ok(false);
+        }
+        let alignment = self.resolved_alignment.unwrap_or(self.default_alignment);
+        let data_offset = pad_to_alignment(self.stream_pos, alignment);
+        let span = file_len.saturating_sub(data_offset.saturating_add(last.offset));
+        let group64 = last.nbytes().unwrap_or(0);
+        let group128 = last.nbytes_as(group128_type(last.ggml_type)).unwrap_or(0);
+        let matches =
+            |expected: u64| span == expected || span == pad_to_alignment(expected, alignment);
+        match (matches(group64), matches(group128)) {
+            (false, true) => Ok(true),
+            (true, false) => Ok(false),
+            _ => Err(GgufError::Q2_0LayoutUnresolved {
+                tensor: last.name.clone(),
+                group64_expected: group64,
+                group128_expected: group128,
+                found: span,
+            }),
+        }
+    }
+
+    fn reinterpret_as_pq2_0(&mut self) -> Result<(), GgufError> {
+        for tensor in self
+            .pending_tensors
+            .iter_mut()
+            .filter(|tensor| tensor.ggml_type == GgmlType::Q2_0)
+        {
+            let block_size = GgmlType::Pq2_0.block_layout().block_elements;
+            let row_len = tensor.dims.first().copied().unwrap_or(1);
+            if row_len % block_size != 0 {
+                return Err(GgufError::RowSizeNotBlockMultiple {
+                    tensor: tensor.name.clone(),
+                    ne0: row_len,
+                    block_size,
+                });
+            }
+            tensor.ggml_type = GgmlType::Pq2_0;
+        }
+        #[cfg(feature = "std")]
+        {
+            let reinterpreted = self
+                .pending_tensors
+                .iter()
+                .filter(|tensor| tensor.ggml_type == GgmlType::Pq2_0)
+                .count();
+            proxima_telemetry::warn!(
+                reinterpreted,
+                "type 42 tensors span group-128 blocks, reading them as pq2_0"
+            );
+        }
+        Ok(())
+    }
+}
+
+fn group128_type(ggml_type: GgmlType) -> GgmlType {
+    match ggml_type {
+        GgmlType::Q2_0 => GgmlType::Pq2_0,
+        other => other,
     }
 }
 
