@@ -2606,6 +2606,11 @@ fn render_reduce(
     );
 
     if let Some(plan) = gemm {
+        source = source.replacen(
+            "__global__ void ",
+            &format!("__global__ void __launch_bounds__({GEMM_THREADS}, 2) "),
+            1,
+        );
         push_mma_gemm_body(&mut source, resolved, &plan, element_type)?;
     } else if let Some(tile_index) = row_tile_axis(resolved, quantized, numeric_policy) {
         push_row_tiled_cooperative_body(&mut source, resolved, quantized, element_type, tile_index)?;
