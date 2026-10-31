@@ -2119,7 +2119,7 @@ mod tests {
                         Ok::<String, String>(String::from_utf8_lossy(&response).into_owned())
                     };
                     let (served, response) = futures::future::join(serve, client).await;
-                    let _ = result_tx.send(served.map_err(|err| format!("serve: {err}")).and_then(|()| response));
+                    let _ = result_tx.send(served.map_err(|err| format!("serve: {err}")).and(response));
                 }) as Pin<Box<dyn Future<Output = ()> + 'static>>
             }))
             .expect("dispatch_factory");
