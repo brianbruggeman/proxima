@@ -62,6 +62,16 @@ pub enum GgufError {
         found: u64,
     },
 
+    #[error(
+        "type 42 layout unresolved at tensor '{tensor}': found {found}, group-64 q2_0 expects {group64_expected}, group-128 pq2_0 expects {group128_expected}"
+    )]
+    Q2_0LayoutUnresolved {
+        tensor: String,
+        group64_expected: u64,
+        group128_expected: u64,
+        found: u64,
+    },
+
     #[error("tensor '{tensor}' data range [{start}, {end}) exceeds file length {file_len}")]
     TensorDataOutOfRange {
         tensor: String,

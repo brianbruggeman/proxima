@@ -16,7 +16,7 @@ float-layout-dtype = []
 # runtime config surface ([`config::GgufParserConfig`]): conflaguration is
 # std-only (Settings/env/file), so it rides in only here -- the
 # no_std+alloc floor never sees it and always uses `crate::sized` directly.
-std = ["alloc", "thiserror/std", "dep:bon", "dep:conflaguration", "dep:serde"]
+std = ["alloc", "thiserror/std", "dep:bon", "dep:conflaguration", "dep:serde", "dep:proxima-telemetry"]
 
 [dependencies]
 arrayvec.workspace = true
@@ -27,6 +27,7 @@ thiserror.workspace = true
 bon = { workspace = true, optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
+proxima-telemetry = { workspace = true, features = ["emit", "std"], optional = true }
 
 [lints]
 workspace = true
