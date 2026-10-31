@@ -56,7 +56,7 @@ pub(super) fn row_tile_axis(
             .zip(operands)
             .filter(|(codec, _)| codec.is_none())
             .any(|(_, (_, layout, _))| layout.stride(axis) != 0);
-        packed_ignores && unpacked_varies
+        packed_ignores && unpacked_varies && resolved.extents[axis as usize] > 1
     })
 }
 
