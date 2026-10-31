@@ -1,0 +1,12 @@
+captured 2026-10-31 by the oci_network test pulling traefik/whoami:v1.10.2 from registry-1.docker.io
+(auth.docker.io anonymous bearer, blobs via production.cloudfront.docker.com); linux/amd64.
+blobs/sha256/<hex> is the content-addressed cache layout of proxima_vm::oci::cache.
+index     sha256:1474027c316661cdec87df2623e13a41e7e1ce0ba99c24917631de8f300b5420
+manifest  sha256:7000846753fcc36eb2a1a3a21fe897da09c71e1d3b5381f912ea6e6e1c8871b6
+config    sha256:ab0ca2603e47e42f7d45e094b6f4cecc5d5b7b0ef6ca89170ce1a771ed1a0066
+layer 0   sha256:1b5c60a1be3bf9cb17566bdad4cb1f36387367e56798bc307d394169f1e5d72d  usr/share/zoneinfo, with hard links
+layer 1   sha256:1d12c9005bc5cd6824edcfe37f412c35922508f76cb4b854beb52f85c12a929b  etc/ssl/certs/ca-certificates.crt
+layer 2   sha256:0abc37d8af53c11b5d94e3b54eca06ac582fec2a9b56f7d3070bb54247aa8595  /whoami, 2.4 MB, not vendored
+layers 0 and 1 are stored as <hex>.hex (lowercase hex text of the gzip bytes): the repository content gate flags
+incidental byte runs in raw compressed data, and hex text carries the identical bytes without tripping it.
+tests/oci_linux.rs decodes them and verifies the result against the digest in the file name.

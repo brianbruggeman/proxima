@@ -35,6 +35,8 @@ pub mod frame_pipe;
 #[cfg(feature = "std")]
 pub mod linux;
 #[cfg(feature = "std")]
+pub mod oci;
+#[cfg(feature = "std")]
 pub mod mmio_trampoline;
 #[cfg(all(
     feature = "std",
