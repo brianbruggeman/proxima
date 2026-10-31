@@ -10,6 +10,7 @@ use std::io::Read;
 
 use proxima_gguf::pipe::parse_complete;
 
+const METADATA_VALUE_CHARS: usize = 400;
 const HEADER_CAPS: [usize; 4] = [4 << 20, 16 << 20, 64 << 20, 256 << 20];
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -32,8 +33,10 @@ fn report(path: &str, parsed: &proxima_gguf::pipe::ParsedGguf) -> Result<(), Box
         "file={path} version={} tensors={} data_offset={}",
         parsed.version, parsed.tensor_count, parsed.data_offset
     );
-    for key in ["general.architecture", "general.name", "general.file_type"] {
-        println!("{key}={:?}", parsed.metadata_value(key));
+    for (key, value) in &parsed.metadata {
+        let rendered = format!("{value:?}");
+        let shown: String = rendered.chars().take(METADATA_VALUE_CHARS).collect();
+        println!("{key}={shown}");
     }
     for tensor in &parsed.tensors {
         let layout = tensor.ggml_type.block_layout();

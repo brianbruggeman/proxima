@@ -383,6 +383,42 @@ impl BlockLayout {
         sub: None,
     };
 
+    pub const PTQ1_0: Self = Self {
+        elements: 128,
+        block_bytes: 28,
+        element: radix_coded(
+            FloatLayout::UINT2,
+            3,
+            [
+                code_region(
+                    0,
+                    80,
+                    plane(8, 0, [digit(16, 8), digit(5, 0), NO_DIGIT, NO_DIGIT]),
+                    1,
+                ),
+                code_region(
+                    80,
+                    40,
+                    plane(8, 128, [digit(8, 8), digit(5, 0), NO_DIGIT, NO_DIGIT]),
+                    1,
+                ),
+                code_region(
+                    120,
+                    8,
+                    plane(8, 192, [digit(2, 8), digit(4, 0), NO_DIGIT, NO_DIGIT]),
+                    1,
+                ),
+            ],
+            3,
+            1,
+        ),
+        multiplier: 1,
+        scale: field_at(FloatLayout::F16, 26),
+        min: None,
+        min_multiplier: 1,
+        sub: None,
+    };
+
     pub const Q2_K: Self = Self {
         elements: 256,
         block_bytes: 84,
