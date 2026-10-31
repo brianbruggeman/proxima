@@ -28,7 +28,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn report(path: &str, parsed: &proxima_gguf::pipe::ParsedGguf) -> Result<(), Box<dyn Error>> {
-    println!("file={path} version={} tensors={}", parsed.version, parsed.tensor_count);
+    println!(
+        "file={path} version={} tensors={} data_offset={}",
+        parsed.version, parsed.tensor_count, parsed.data_offset
+    );
     for key in ["general.architecture", "general.name", "general.file_type"] {
         println!("{key}={:?}", parsed.metadata_value(key));
     }
