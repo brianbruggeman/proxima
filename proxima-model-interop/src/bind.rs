@@ -1486,6 +1486,18 @@ fn bind_dense_with<'file>(
             | proxima_tensor::cpu::QuantizedBlock::Packed {
                 codec: Codec::Q8_0,
                 bytes,
+            }
+            | proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q1_0,
+                bytes,
+            }
+            | proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q2_0,
+                bytes,
+            }
+            | proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Pq2_0,
+                bytes,
             }),
         ) => {
             state.resident_bytes += bytes.len();
