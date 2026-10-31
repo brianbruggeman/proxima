@@ -184,6 +184,7 @@ pub fn sliding_pattern_descriptor_from_gguf(
         ssm_inner_size: 0,
         ssm_epsilon: 0.0,
         v_head_reordered: false,
+        ssm_out_head_major: false,
         expert_shared_feed_forward: 0,
         prefill_width: None,
         gated_attention: false,

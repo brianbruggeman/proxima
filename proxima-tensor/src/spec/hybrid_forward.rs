@@ -588,6 +588,7 @@ pub(super) fn hybrid_dense_forward(
                 ssm_d_conv,
                 GdnOutputGate::Silu,
                 descriptor.v_head_reordered,
+                descriptor.ssm_out_head_major,
                 descriptor.prefill_width,
             )?;
 
@@ -1524,6 +1525,7 @@ pub(super) fn hybrid_routed_forward(
                     descriptor.ssm_conv_kernel,
                     GdnOutputGate::Silu,
                     descriptor.v_head_reordered,
+                    descriptor.ssm_out_head_major,
                     descriptor.prefill_width,
                 )?;
                 layer_roots.push(LayerCacheRoots::Ssm {

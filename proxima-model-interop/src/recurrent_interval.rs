@@ -98,6 +98,10 @@ pub struct RecurrentIntervalHparams {
     pub ssm_group_count: u32,
     pub ssm_time_step_rank: u32,
     pub ssm_inner_size: u32,
+    /// Whether the checkpoint carries llama.cpp's tiled V-head order: `{family}.ssm.v_head_reordered`
+    /// when the file states it, otherwise true for the dense `qwen35` family, whose converter
+    /// reorders the heads without writing the key.
+    pub v_head_reordered: bool,
     pub layer_kinds: Vec<IntervalLayerKind>,
 }
 
@@ -148,6 +152,11 @@ pub fn recurrent_interval_architecture_from_metadata(
     let ssm_time_step_rank = metadata_u32(parsed, &format!("{architecture}.ssm.time_step_rank"))?;
     let ssm_inner_size = metadata_u32(parsed, &format!("{architecture}.ssm.inner_size"))?;
 
+    let v_head_reordered = match parsed.metadata_value(&format!("{architecture}.ssm.v_head_reordered")) {
+        Some(MetadataValue::Bool(value)) => *value,
+        _ => architecture == "qwen35",
+    };
+
     let layer_kinds = (0..block_count)
         .map(|layer| IntervalLayerKind::from_interval(layer, full_attention_interval))
         .collect();
@@ -170,6 +179,7 @@ pub fn recurrent_interval_architecture_from_metadata(
         ssm_group_count,
         ssm_time_step_rank,
         ssm_inner_size,
+        v_head_reordered,
         layer_kinds,
     })
 }
@@ -411,7 +421,8 @@ pub fn descriptor_from_architecture(
         ssm_time_step_rank: architecture.ssm_time_step_rank,
         ssm_inner_size: architecture.ssm_inner_size,
         ssm_epsilon: architecture.rms_epsilon,
-        v_head_reordered: false,
+        v_head_reordered: architecture.v_head_reordered,
+        ssm_out_head_major: architecture.v_head_reordered,
         expert_shared_feed_forward: 0,
         prefill_width: None,
         gated_attention: true,
