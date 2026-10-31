@@ -150,6 +150,9 @@ pub enum GgmlType {
     /// the same 2-bit code as [`Self::Q2_0`], 34 bytes per block. Not in [`Self::CURRENT`]:
     /// it is a fork id outside upstream ggml.
     Pq2_0,
+    /// PrismML's group-128 ternary (`GGML_TYPE_PTQ1_0`, id 143): TQ1_0's base-3 trit packing with one
+    /// f16 scale per 128 weights, 28 bytes per block. Not in [`Self::CURRENT`]: a fork id.
+    Ptq1_0,
     /// Proxima-own: 32 weights as one f16 absmax scale plus 32 six-bit E3M2 codes,
     /// 26 bytes per block. Its wire id sits outside ggml's enum range, so a ggml
     /// consumer rejects the file instead of misreading the blocks; it is not in
@@ -165,6 +168,9 @@ const FP6_E3M2_WIRE: i32 = PROXIMA_OWN_WIRE_BASE + 32;
 
 /// `GGML_TYPE_PQ2_0` in PrismML-Eng/llama.cpp (`ggml.h`, branch `prism`).
 const PQ2_0_WIRE: i32 = 142;
+
+/// `GGML_TYPE_PTQ1_0` in PrismML-Eng/llama.cpp (`ggml.h`, branch `prism`).
+const PTQ1_0_WIRE: i32 = 143;
 
 /// Per-type block shape: `block_elements` values are packed into
 /// `block_bytes` bytes. Contiguous (non-quantized) types have
@@ -280,6 +286,7 @@ impl GgmlType {
             Self::Q1_0 => "q1_0",
             Self::Q2_0 => "q2_0",
             Self::Pq2_0 => "pq2_0",
+            Self::Ptq1_0 => "ptq1_0",
             Self::Fp6E3M2 => "fp6_e3m2",
         }
     }
@@ -327,6 +334,7 @@ impl GgmlType {
             41 => Self::Q1_0,
             42 => Self::Q2_0,
             PQ2_0_WIRE => Self::Pq2_0,
+            PTQ1_0_WIRE => Self::Ptq1_0,
             FP6_E3M2_WIRE => Self::Fp6E3M2,
             _ => return None,
         };
@@ -376,6 +384,7 @@ impl GgmlType {
             Self::Q1_0 => 41,
             Self::Q2_0 => 42,
             Self::Pq2_0 => PQ2_0_WIRE,
+            Self::Ptq1_0 => PTQ1_0_WIRE,
             Self::Fp6E3M2 => FP6_E3M2_WIRE,
         }
     }
@@ -426,6 +435,7 @@ impl GgmlType {
             Self::Q1_0 => layout(128, 18),
             Self::Q2_0 => layout(64, 18),
             Self::Pq2_0 => layout(128, 34),
+            Self::Ptq1_0 => layout(128, 28),
             Self::Fp6E3M2 => layout(32, 26),
         }
     }
