@@ -281,6 +281,8 @@ pub use bind::{
     correct_packed_matmul_layouts, dead_resolved_nodes, fuse_twin_elementwise, index_node_ids,
     node_last_reader, node_retirement, prune_dead, refit_cached_attention_rows, touches_changed,
 };
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub use bind::{changed_nodes, refit_cached_attention_at, touched_positions};
 #[cfg(feature = "instrument")]
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use bind::{RepeatNodeRefusal, apply_repeat_nodes};

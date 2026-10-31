@@ -30,7 +30,10 @@ use crate::cuda_kernel_cache::{CacheKey, decode_entry, encode_entry};
 use crate::kernel_cache_config::KernelCacheConfig;
 use crate::cuda_ptx_store::PtxStore;
 use crate::msl::{Binding, Codec, PackedOperands, gather_count};
-use proxima_tensor::bind::{RefreshRefusal, refresh_bound_ops, refit_cached_attention_rows, touches_changed};
+use proxima_tensor::bind::{
+    RefreshRefusal, changed_nodes, refit_cached_attention_at, refresh_bound_ops, touched_positions,
+    touches_changed,
+};
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, Keep, NodeId, NumericPolicy, Op, QuantizedBlock,
     Shapes, bind_unfused, bind_with_fusion, block_node_ids, correct_packed_matmul_layouts, infer,
@@ -220,6 +223,7 @@ pub struct CudaPlan {
     resident_nodes: Box<[NodeId]>,
     // cumulative per-plan totals; read by the decode path's per-step telemetry, never printed per dispatch.
     refit_calls: u64,
+    patch_memo: Option<(Vec<NodeId>, Vec<usize>)>,
     emit_calls: u64,
     emit_reused: u64,
     pack_calls: u64,
@@ -631,6 +635,7 @@ impl CudaDriver {
             exact_activations,
             resident_nodes: Box::default(),
             refit_calls: 0,
+            patch_memo: None,
             emit_calls: 0,
             emit_reused: 0,
             pack_calls: 0,
@@ -1343,15 +1348,6 @@ fn refresh_bound_resolved(
     Ok((refreshed, touched))
 }
 
-fn apply_patches(previous: &[BoundOp], patches: Vec<(usize, BoundOp)>) -> (Vec<BoundOp>, usize) {
-    let touched = patches.len();
-    let mut patched = previous.to_vec();
-    for (position, bound) in patches {
-        patched[position] = bound;
-    }
-    (patched, touched)
-}
-
 fn cuda_supports_kind(kind: &BoundOpKind, numeric_policy: NumericPolicy) -> bool {
     match kind {
         BoundOpKind::CachedAttention { .. } => {
@@ -1559,14 +1555,32 @@ impl CudaPlan {
             })?;
         let infer_micros = infer_started.elapsed().as_micros() as u64;
         let same_policy = numeric_policy == self.numeric_policy;
+        if same_policy {
+            let patch_started = Instant::now();
+            if let Some(touched) = self.patch_cached_attention(&shapes, numeric_policy)? {
+                let op_count = self.resolved.len();
+                self.refit_calls += 1;
+                self.emit_reused += op_count.saturating_sub(touched) as u64;
+                self.emit_calls += touched as u64;
+                self.pack_calls += touched as u64;
+                self.shapes = shapes;
+                proxima_telemetry::debug!(
+                    infer_us = infer_micros,
+                    patch_us = elapsed_micros(patch_started),
+                    op_count = op_count,
+                    bind_path = "patch",
+                    bind_touched = touched as u64,
+                    refit_total = self.refit_calls,
+                    "cuda plan refit phases"
+                );
+                return Ok(true);
+            }
+        }
         let previous_bound = std::mem::take(&mut self.resolved);
         let refresh_started = Instant::now();
+        self.patch_memo = None;
         let refresh = if !same_policy {
             Err("numeric policy changed")
-        } else if let Some(patches) =
-            refit_cached_attention_rows(&previous_bound, &self.program, &self.shapes, &shapes)
-        {
-            Ok(apply_patches(&previous_bound, patches))
         } else {
             refresh_bound_resolved(
                 &previous_bound,
@@ -1643,6 +1657,49 @@ impl CudaPlan {
             "cuda plan refit phases"
         );
         Ok(true)
+    }
+
+    /// Moves the plan to `shapes` by patching only the cached-attention ops
+    /// whose key range moved, leaving every other bound op, kernel and uniform
+    /// block untouched. `Ok(None)` when the move reaches anything else, so the
+    /// caller falls back to a full re-bind. The touched positions are a function
+    /// of the changed-node set alone, so a repeat of the same set skips the walk.
+    fn patch_cached_attention(
+        &mut self,
+        shapes: &Shapes,
+        numeric_policy: NumericPolicy,
+    ) -> Result<Option<usize>, CudaDriverError> {
+        let changed = changed_nodes(&self.program, &self.shapes, shapes);
+        let known = self.patch_memo.take().filter(|(seen, _)| *seen == changed);
+        let (changed, positions) = known.unwrap_or_else(|| {
+            let positions = touched_positions(&self.resolved, &self.program, &changed);
+            (changed, positions)
+        });
+        let Some(patches) = refit_cached_attention_at(&self.resolved, &positions, shapes) else {
+            return Ok(None);
+        };
+        let touched = patches.len();
+        for (position, bound) in patches {
+            let previous = std::mem::replace(&mut self.resolved[position], bound);
+            crate::cuda::refit_kernel(
+                &previous,
+                &self.resolved[position],
+                &mut self.kernels[position],
+                &self.packed_operands,
+                numeric_policy,
+            )
+            .map_err(|error| CudaDriverError::Emit {
+                node: previous.node,
+                error: error.to_string(),
+            })?;
+            self.uniforms[position] = crate::cuda::pack_cuda_uniforms(&self.resolved[position])
+                .map_err(|error| CudaDriverError::Emit {
+                    node: previous.node,
+                    error: error.to_string(),
+                })?;
+        }
+        self.patch_memo = Some((changed, positions));
+        Ok(Some(touched))
     }
 
     /// Cumulative `[refit calls, ops re-emitted, ops reused, ops repacked]` since this plan was built.
