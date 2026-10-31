@@ -2138,6 +2138,10 @@ fn push_reduction_coord_decompose(
     indent: &str,
 ) {
     source.push_str(&format!("{indent}long reduction_coord[{reduce_rank_len}];\n"));
+    if reduce_rank == 1 {
+        source.push_str(&format!("{indent}reduction_coord[0] = {from};\n"));
+        return;
+    }
     source.push_str(&format!("{indent}long remaining_r = {from};\n"));
     for index in (0..reduce_rank).rev() {
         source.push_str(&format!(
@@ -2159,62 +2163,98 @@ fn push_reduction_coord_carry(source: &mut String, reduce_rank: usize) {
     }
 }
 
-fn codec_slots(quantized: &[Option<Codec>], codec: Codec) -> Vec<usize> {
+/// A packed codec whose device helpers decode eight consecutive elements at
+/// once (`<name>_chunk8`), bit-identical to eight `<name>_element` calls.
+#[derive(Debug, Clone, Copy)]
+struct ChunkCodec {
+    name: &'static str,
+    block_elements: usize,
+    block_bytes: usize,
+}
+
+fn chunk_codec(codec: Codec) -> Option<ChunkCodec> {
+    let (name, block_elements, block_bytes) = match codec {
+        Codec::Q4_0 => ("q4_0", Q4_0_BLOCK_ELEMENTS, Q4_0_BLOCK_BYTES),
+        Codec::Q8_0 => ("q8_0", Q8_0_BLOCK_ELEMENTS, Q8_0_BLOCK_BYTES),
+        Codec::Q6K => ("q6k", Q4K_BLOCK_ELEMENTS, Q6K_BLOCK_BYTES),
+        Codec::Q4K => ("q4k", Q4K_BLOCK_ELEMENTS, Q4K_BLOCK_BYTES),
+        Codec::Q1_0 => ("q1_0", Q1_0_BLOCK_ELEMENTS, Q1_0_BLOCK_BYTES),
+        Codec::Q2_0 => ("q2_0", Q2_0_BLOCK_ELEMENTS, Q2_0_BLOCK_BYTES),
+        Codec::Pq2_0 => ("q2_0", PQ2_0_BLOCK_ELEMENTS, PQ2_0_BLOCK_BYTES),
+        _ => return None,
+    };
+    Some(ChunkCodec {
+        name,
+        block_elements,
+        block_bytes,
+    })
+}
+
+fn chunk_slots(quantized: &[Option<Codec>]) -> Vec<(usize, ChunkCodec)> {
     quantized
         .iter()
         .enumerate()
-        .filter(|(_, slot_codec)| **slot_codec == Some(codec))
-        .map(|(index, _)| index)
+        .filter_map(|(index, codec)| Some((index, chunk_codec((*codec)?)?)))
         .collect()
 }
 
-fn push_q4_0_chunk_decode(source: &mut String, index: usize) {
-    source.push_str(&format!("        float q4_0_chunk{index}[8];\n"));
+fn push_chunk_decode(source: &mut String, index: usize, spec: ChunkCodec) {
+    let ChunkCodec {
+        name,
+        block_elements,
+        block_bytes,
+    } = spec;
+    source.push_str(&format!("        float {name}_chunk{index}[8];\n"));
     source.push_str(&format!(
         "        if ((off{index} & 7) == 0 && chunk + 8 <= u.reduction_total) {{\n\
-         \x20           q4_0_chunk8(in{index} + (off{index} / {Q4_0_BLOCK_ELEMENTS}) * {Q4_0_BLOCK_BYTES}, \
-         (unsigned int)(off{index} % {Q4_0_BLOCK_ELEMENTS}), q4_0_chunk{index});\n\
+         \x20           {name}_chunk8(in{index} + (off{index} / {block_elements}) * {block_bytes}, \
+         (unsigned int)(off{index} % {block_elements}), {name}_chunk{index});\n\
          \x20       }} else {{\n\
          \x20           for (int slot = 0; slot < 8 && chunk + slot < u.reduction_total; slot++) {{\n\
          \x20               long element = off{index} + slot;\n\
-         \x20               q4_0_chunk{index}[slot] = q4_0_element(in{index} + (element / {Q4_0_BLOCK_ELEMENTS}) * {Q4_0_BLOCK_BYTES}, \
-         (unsigned int)(element % {Q4_0_BLOCK_ELEMENTS}));\n\
+         \x20               {name}_chunk{index}[slot] = {name}_element(in{index} + (element / {block_elements}) * {block_bytes}, \
+         (unsigned int)(element % {block_elements}));\n\
          \x20           }}\n\
          \x20       }}\n"
     ));
 }
 
-fn push_q6k_chunk_decode(source: &mut String, index: usize) {
-    source.push_str(&format!("        float q6k_chunk{index}[8];\n"));
+fn push_packed_row_base(
+    source: &mut String,
+    index: usize,
+    layout: &Layout,
+    output_axes: &[u16],
+    resolved: &BoundOp,
+) {
+    source.push_str(&format!("    long packed_row{index} = 0;\n"));
+    for axis in output_axes {
+        let axis_usize = *axis as usize;
+        if layout.stride(*axis) != 0 {
+            source.push_str(&format!(
+                "    packed_row{index} = packed_row{index} * {} + full_coord[{axis_usize}];\n",
+                resolved.extents[axis_usize]
+            ));
+        }
+    }
     source.push_str(&format!(
-        "        if ((off{index} & 7) == 0 && chunk + 8 <= u.reduction_total) {{\n\
-         \x20           q6k_chunk8(in{index} + (off{index} / {Q4K_BLOCK_ELEMENTS}) * {Q6K_BLOCK_BYTES}, \
-         (unsigned int)(off{index} % {Q4K_BLOCK_ELEMENTS}), q6k_chunk{index});\n\
-         \x20       }} else {{\n\
-         \x20           for (int slot = 0; slot < 8 && chunk + slot < u.reduction_total; slot++) {{\n\
-         \x20               long element = off{index} + slot;\n\
-         \x20               q6k_chunk{index}[slot] = q6k_element(in{index} + (element / {Q4K_BLOCK_ELEMENTS}) * {Q6K_BLOCK_BYTES}, \
-         (unsigned int)(element % {Q4K_BLOCK_ELEMENTS}));\n\
-         \x20           }}\n\
-         \x20       }}\n"
+        "    const long row{index} = u.operand_base[{index}] + packed_row{index} * u.reduction_total;\n"
     ));
 }
 
-fn push_q8_0_chunk_decode(source: &mut String, index: usize) {
-    source.push_str(&format!("        float q8_0_chunk{index}[8];\n"));
+fn push_plain_row_base(source: &mut String, index: usize, rank: usize, reduce_dim: u16) {
     source.push_str(&format!(
-        "        if ((off{index} & 7) == 0 && chunk + 8 <= u.reduction_total) {{\n\
-         \x20           q8_0_chunk8(in{index} + (off{index} / {Q8_0_BLOCK_ELEMENTS}) * {Q8_0_BLOCK_BYTES}, \
-         (unsigned int)(off{index} % {Q8_0_BLOCK_ELEMENTS}), q8_0_chunk{index});\n\
-         \x20       }} else {{\n\
-         \x20           for (int slot = 0; slot < 8 && chunk + slot < u.reduction_total; slot++) {{\n\
-         \x20               long element = off{index} + slot;\n\
-         \x20               q8_0_chunk{index}[slot] = q8_0_element(in{index} + (element / {Q8_0_BLOCK_ELEMENTS}) * {Q8_0_BLOCK_BYTES}, \
-         (unsigned int)(element % {Q8_0_BLOCK_ELEMENTS}));\n\
-         \x20           }}\n\
-         \x20       }}\n"
+        "    long lane_base{index} = u.operand_base[{index}];\n"
+    ));
+    for dim in 0..rank {
+        source.push_str(&format!(
+            "    lane_base{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+        ));
+    }
+    source.push_str(&format!(
+        "    const long lane_step{index} = u.operand_strides[{index}][{reduce_dim}];\n"
     ));
 }
+
 
 /// The warp-shuffle cooperative fold — the CUDA counterpart of
 /// `crate::msl::push_cooperative_reduce_body`'s non-tiled, non-row-blocked
@@ -2300,68 +2340,65 @@ fn push_cooperative_reduce_body(
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
 
-    let chunk_hoisted = packed_chunked && !logical_packed_address();
-    let q4_0_slots = if chunk_hoisted {
-        codec_slots(quantized, Codec::Q4_0)
+    let chunk_slots = if packed_chunked && !logical_packed_address() {
+        chunk_slots(quantized)
     } else {
         Vec::new()
     };
-    let q8_0_slots = if chunk_hoisted {
-        codec_slots(quantized, Codec::Q8_0)
-    } else {
-        Vec::new()
+    let chunk_spec = |index: usize| {
+        chunk_slots
+            .iter()
+            .find(|(slot, _)| *slot == index)
+            .map(|(_, spec)| *spec)
     };
-    let q6k_slots = if chunk_hoisted {
-        codec_slots(quantized, Codec::Q6K)
-    } else {
-        Vec::new()
-    };
-    let chunk_hoisted_index = |index: usize| {
-        q4_0_slots.contains(&index) || q8_0_slots.contains(&index) || q6k_slots.contains(&index)
-    };
+    let lean = packed_chunked
+        && reduce_rank == 1
+        && !logical_packed_address()
+        && gather_count(resolved) == 0;
+
+    if lean {
+        for (index, &codec) in quantized.iter().enumerate() {
+            if codec.is_some() {
+                let (_, layout, _) = &resolved.operands()[index];
+                push_packed_row_base(source, index, layout, output_axes, resolved);
+            } else {
+                push_plain_row_base(source, index, rank, reduce_dims[0]);
+            }
+        }
+    }
 
     if packed_chunked {
         source.push_str(&format!(
             "    for (long chunk = (long)lane * 8; chunk < u.reduction_total; chunk += {} * 8) {{\n",
             WARP_SIZE
         ));
-        if reduce_rank > 0 {
+        if reduce_rank > 0 && !lean {
             push_reduction_coord_decompose(source, "chunk", reduce_rank, reduce_rank_len, "        ");
         }
-        if chunk_hoisted {
-            if !q4_0_slots.is_empty() || !q8_0_slots.is_empty() || !q6k_slots.is_empty() {
-                source.push_str("        long r = chunk;\n");
-            }
-            for &index in &q4_0_slots {
+        if !chunk_slots.is_empty() {
+            source.push_str("        long r = chunk;\n");
+        }
+        for &(index, spec) in &chunk_slots {
+            if lean {
+                source.push_str(&format!("        long off{index} = row{index} + r;\n"));
+            } else {
                 let (_, layout, _) = &resolved.operands()[index];
                 push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
                 push_gather_base_add(source, resolved, index, "        ");
-                push_q4_0_chunk_decode(source, index);
             }
-            for &index in &q8_0_slots {
-                let (_, layout, _) = &resolved.operands()[index];
-                push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
-                push_gather_base_add(source, resolved, index, "        ");
-                push_q8_0_chunk_decode(source, index);
-            }
-            for &index in &q6k_slots {
-                let (_, layout, _) = &resolved.operands()[index];
-                push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
-                push_gather_base_add(source, resolved, index, "        ");
-                push_q6k_chunk_decode(source, index);
-            }
+            push_chunk_decode(source, index, spec);
         }
         source.push_str("        for (long inner = 0; inner < 8 && chunk + inner < u.reduction_total; inner++) {\n");
         source.push_str("            long r = chunk + inner;\n");
     } else {
         source.push_str(&format!(
-            "    for (long r = (long)lane; r < u.reduction_total; r += {WARP_SIZE}) {{\n"
+            "    #pragma unroll 8\n    for (long r = (long)lane; r < u.reduction_total; r += {WARP_SIZE}) {{\n"
         ));
     }
     if reduce_rank > 0 && !packed_chunked {
         push_reduction_coord_decompose(source, "r", reduce_rank, reduce_rank_len, "        ");
     }
-    if reduce_rank > 0 {
+    if reduce_rank > 0 && !lean {
         for (index, dim) in reduce_dims.iter().enumerate() {
             source.push_str(&format!(
                 "        full_coord[{dim}] = reduction_coord[{index}];\n"
@@ -2370,10 +2407,16 @@ fn push_cooperative_reduce_body(
     }
 
     for (index, &codec) in quantized.iter().enumerate() {
-        if chunk_hoisted_index(index) {
+        if chunk_spec(index).is_some() {
             continue;
         }
-        if codec.is_some() {
+        if lean && codec.is_some() {
+            source.push_str(&format!("        long off{index} = row{index} + r;\n"));
+        } else if lean {
+            source.push_str(&format!(
+                "        long off{index} = lane_base{index} + r * lane_step{index};\n"
+            ));
+        } else if codec.is_some() {
             let (_, layout, _) = &resolved.operands()[index];
             push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
         } else {
@@ -2386,23 +2429,20 @@ fn push_cooperative_reduce_body(
                 ));
             }
         }
-        push_gather_base_add(source, resolved, index, "        ");
+        if !lean {
+            push_gather_base_add(source, resolved, index, "        ");
+        }
     }
     source.push_str(&format!(
         "        {element_type} scratch[{}];\n",
         operand_count.max(1)
     ));
     for (index, &codec) in quantized.iter().enumerate() {
-        if q4_0_slots.contains(&index) {
-            source.push_str(&format!("        scratch[{index}] = q4_0_chunk{index}[inner];\n"));
-            continue;
-        }
-        if q8_0_slots.contains(&index) {
-            source.push_str(&format!("        scratch[{index}] = q8_0_chunk{index}[inner];\n"));
-            continue;
-        }
-        if q6k_slots.contains(&index) {
-            source.push_str(&format!("        scratch[{index}] = q6k_chunk{index}[inner];\n"));
+        if let Some(spec) = chunk_spec(index) {
+            source.push_str(&format!(
+                "        scratch[{index}] = {}_chunk{index}[inner];\n",
+                spec.name
+            ));
             continue;
         }
         source.push_str(&format!(
@@ -2417,7 +2457,7 @@ fn push_cooperative_reduce_body(
         "        accumulator = seeded ? {combine_expr} : value;\n"
     ));
     source.push_str("        seeded = true;\n");
-    if packed_chunked && reduce_rank > 0 {
+    if packed_chunked && reduce_rank > 0 && !lean {
         push_reduction_coord_carry(source, reduce_rank);
     }
     source.push_str("    }\n");
@@ -2453,17 +2493,21 @@ fn push_cooperative_reduce_body(
             source.push_str(&format!("    full_coord[{dim}] = output_coord[{index}];\n"));
         }
         source.push_str(&format!(
-            "    for (long r = (long)lane; r < u.reduction_total; r += {WARP_SIZE}) {{\n"
+            "    #pragma unroll 8\n    for (long r = (long)lane; r < u.reduction_total; r += {WARP_SIZE}) {{\n"
         ));
         if reduce_rank > 0 {
             source.push_str(&format!(
                 "        long broadcast_reduce_coord[{reduce_rank_len}];\n"
             ));
-            source.push_str("        long broadcast_remaining = r;\n");
-            for index in (0..reduce_rank).rev() {
-                source.push_str(&format!(
-                    "        broadcast_reduce_coord[{index}] = broadcast_remaining % u.reduction_extents[{index}]; broadcast_remaining /= u.reduction_extents[{index}];\n"
-                ));
+            if reduce_rank == 1 {
+                source.push_str("        broadcast_reduce_coord[0] = r;\n");
+            } else {
+                source.push_str("        long broadcast_remaining = r;\n");
+                for index in (0..reduce_rank).rev() {
+                    source.push_str(&format!(
+                        "        broadcast_reduce_coord[{index}] = broadcast_remaining % u.reduction_extents[{index}]; broadcast_remaining /= u.reduction_extents[{index}];\n"
+                    ));
+                }
             }
             source.push_str(&format!("        long broadcast_full_coord[{rank_len}];\n"));
             for dim in 0..rank {
@@ -2852,6 +2896,31 @@ __device__ __forceinline__ float q4k_element(const unsigned char *block, unsigne
     unsigned char nibble = low_nibble ? (qs[byte_index] & 0x0Fu) : (qs[byte_index] >> 4u);
     return scale * (float)nibble - minimum;
 }
+
+__device__ __forceinline__ void q4k_chunk8(const unsigned char *block, unsigned int index, float *out) {
+    unsigned short d_bits = (unsigned short)((unsigned int)block[0] | ((unsigned int)block[1] << 8));
+    unsigned short dmin_bits = (unsigned short)((unsigned int)block[2] | ((unsigned int)block[3] << 8));
+    float d = __half2float(__ushort_as_half(d_bits));
+    float dmin = __half2float(__ushort_as_half(dmin_bits));
+
+    const unsigned char *scales = block + 4;
+    unsigned int group = index / 64u;
+    unsigned int within = index % 64u;
+    int low_nibble = within < 32u;
+    unsigned int sub_block = 2u * group + (low_nibble ? 0u : 1u);
+    unsigned int byte_index = group * 32u + (within % 32u);
+
+    float scale = d * (float)q4k_scale(scales, sub_block);
+    float minimum = dmin * (float)q4k_min(scales, sub_block);
+    uint2 packed = *(const uint2 *)(block + 16u + byte_index);
+    #pragma unroll
+    for (int slot = 0; slot < 8; slot++) {
+        unsigned int word = slot < 4 ? packed.x : packed.y;
+        unsigned int byte = (word >> (8u * (slot & 3))) & 0xFFu;
+        unsigned int nibble = low_nibble ? (byte & 0x0Fu) : (byte >> 4u);
+        out[slot] = scale * (float)nibble - minimum;
+    }
+}
 ";
 
 pub const Q4K_BLOCK_BYTES: usize = proxima_gguf::quant::q4_k::BLOCK_BYTES;
@@ -2964,9 +3033,12 @@ __device__ __forceinline__ float q8_0_element(const unsigned char *block, unsign
 __device__ __forceinline__ void q8_0_chunk8(const unsigned char *block, unsigned int index, float *out) {
     unsigned short d_bits = (unsigned short)((unsigned int)block[0] | ((unsigned int)block[1] << 8));
     float d = __half2float(__ushort_as_half(d_bits));
+    const unsigned short *pairs = (const unsigned short *)(block + 2u + index);
     #pragma unroll
-    for (int slot = 0; slot < 8; slot++) {
-        out[slot] = (float)((signed char)block[2u + index + slot]) * d;
+    for (int pair = 0; pair < 4; pair++) {
+        unsigned int word = (unsigned int)pairs[pair];
+        out[2 * pair] = (float)((signed char)(word & 0xFFu)) * d;
+        out[2 * pair + 1] = (float)((signed char)(word >> 8u)) * d;
     }
 }
 ";
@@ -3039,6 +3111,15 @@ __device__ __forceinline__ float q1_0_element(const unsigned char *block, unsign
     unsigned int bit = ((unsigned int)block[2u + (index >> 3u)] >> (index & 7u)) & 1u;
     return bit ? d : -d;
 }
+__device__ __forceinline__ void q1_0_chunk8(const unsigned char *block, unsigned int index, float *out) {
+    unsigned short d_bits = (unsigned short)((unsigned int)block[0] | ((unsigned int)block[1] << 8));
+    float d = __half2float(__ushort_as_half(d_bits));
+    unsigned int bits = (unsigned int)block[2u + (index >> 3u)];
+    #pragma unroll
+    for (int slot = 0; slot < 8; slot++) {
+        out[slot] = ((bits >> slot) & 1u) ? d : -d;
+    }
+}
 ";
 
 pub const Q1_0_BLOCK_BYTES: usize = proxima_gguf::quant::q1_0::BLOCK_BYTES;
@@ -3054,6 +3135,15 @@ __device__ __forceinline__ float q2_0_element(const unsigned char *block, unsign
     float d = __half2float(__ushort_as_half(d_bits));
     unsigned int code = ((unsigned int)block[2u + (index >> 2u)] >> ((index & 3u) * 2u)) & 3u;
     return ((float)code - 1.0f) * d;
+}
+__device__ __forceinline__ void q2_0_chunk8(const unsigned char *block, unsigned int index, float *out) {
+    unsigned short d_bits = (unsigned short)((unsigned int)block[0] | ((unsigned int)block[1] << 8));
+    float d = __half2float(__ushort_as_half(d_bits));
+    unsigned int bits = (unsigned int)*(const unsigned short *)(block + 2u + (index >> 2u));
+    #pragma unroll
+    for (int slot = 0; slot < 8; slot++) {
+        out[slot] = ((float)((bits >> (2u * slot)) & 3u) - 1.0f) * d;
+    }
 }
 ";
 
