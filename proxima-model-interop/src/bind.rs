@@ -252,6 +252,18 @@ pub fn gguf_tensor_as_packed_block<'a>(
             codec: Codec::BFloat16,
             bytes,
         }),
+        GgmlType::Q1_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q1_0,
+            bytes,
+        }),
+        GgmlType::Q2_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q2_0,
+            bytes,
+        }),
+        GgmlType::Pq2_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Pq2_0,
+            bytes,
+        }),
         GgmlType::Fp6E3M2 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
             codec: Codec::Fp6E3M2,
             bytes,
@@ -1927,6 +1939,18 @@ pub(crate) fn bind_matmul_weight_paired<'file>(
                 codec: Codec::Q8_0,
                 bytes,
             },
+            GgmlType::Q1_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q1_0,
+                bytes,
+            },
+            GgmlType::Q2_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q2_0,
+                bytes,
+            },
+            GgmlType::Pq2_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Pq2_0,
+                bytes,
+            },
             other => {
                 return Err(InteropError::UnrepresentableGgmlType {
                     tensor: gate_name.into(),
@@ -2020,6 +2044,18 @@ pub(crate) fn bind_matmul_weight_triple<'file>(
             },
             GgmlType::Q8_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
                 codec: Codec::Q8_0,
+                bytes,
+            },
+            GgmlType::Q1_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q1_0,
+                bytes,
+            },
+            GgmlType::Q2_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Q2_0,
+                bytes,
+            },
+            GgmlType::Pq2_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
+                codec: Codec::Pq2_0,
                 bytes,
             },
             other => {
